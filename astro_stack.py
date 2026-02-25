@@ -73,16 +73,26 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
     files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(('.fit', '.fits'))]
     frames = {'light': [], 'dark': [], 'flat': [], 'bias': []}
     for p in sorted(files):
+        hdr = {}
         try:
             with fits.open(p, memmap=True) as hd:
                 hdr = dict(hd[0].header)
-        except (OSError, TypeError):
+        except Exception as e:
             # Retry without memmap for files with BZERO/BSCALE/BLANK keywords
-            try:
-                with fits.open(p, memmap=False) as hd:
-                    hdr = dict(hd[0].header)
-            except Exception:
-                hdr = {}
+            err_str = str(e).lower()
+            if 'memmap' in err_str or 'bzero' in err_str or 'bscale' in err_str or 'blank' in err_str:
+                try:
+                    with fits.open(p, memmap=False) as hd:
+                        hdr = dict(hd[0].header)
+                except Exception:
+                    hdr = {}
+            # If not a memmap issue, still try non-memmap as fallback
+            else:
+                try:
+                    with fits.open(p, memmap=False) as hd:
+                        hdr = dict(hd[0].header)
+                except Exception:
+                    hdr = {}
         ftype = classify_frame(p, hdr)
         frames[ftype].append(FrameInfo(path=p, type=ftype, header=hdr))
     return frames
@@ -105,9 +115,10 @@ def load_fits(path: str) -> Tuple[np.ndarray, dict]:
         with fits.open(path, memmap=True) as hd:
             data = hd[0].data.astype(np.float32)
             hdr = dict(hd[0].header)
-    except (OSError, TypeError) as e:
-        # Retry without memmap for files with BZERO/BSCALE/BLANK keywords
-        if 'memmap' in str(e).lower() or 'bzero' in str(e).lower() or 'bscale' in str(e).lower():
+    except Exception as e:
+        # Retry without memmap for files with BZERO/BSCALE/BLANK keywords or any memmap issue
+        err_str = str(e).lower()
+        if 'memmap' in err_str or 'bzero' in err_str or 'bscale' in err_str or 'blank' in err_str:
             with fits.open(path, memmap=False) as hd:
                 data = hd[0].data.astype(np.float32)
                 hdr = dict(hd[0].header)
