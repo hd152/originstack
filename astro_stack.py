@@ -364,8 +364,9 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
         img_norm = (img - np.mean(img)) / (np.std(img) + 1e-12)
         
-        # Compute correlation - use smaller version for speed
-        scale = max(1, ref.shape[0] // 64)
+        # Use less aggressive downscaling - // 8 instead of // 64
+        # This preserves small shifts while still being computationally tractable
+        scale = max(1, ref.shape[0] // 256)  # Target ~256 pixel size, was // 64
         ref_small = ref_norm[::scale, ::scale]
         img_small = img_norm[::scale, ::scale]
         
@@ -374,19 +375,24 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         center = np.array(corr.shape) // 2
         shift_pixels = (peak - center) * scale
         
-        # Check if peak correlation is strong enough (sanity check)
-        peak_value = corr[peak] if len(corr.shape) > 0 else 0
-        mean_corr = np.mean(np.abs(corr))
-        
-        if peak_value > mean_corr * 2:  # Peak should be significantly above average
-            if np.isfinite(shift_pixels).all() and np.abs(shift_pixels).max() < max(ref.shape) * 0.5:
-                if verbose:
-                    print(f"      [xcorr fallback: shift=({shift_pixels[1]:.1f}, {shift_pixels[0]:.1f})]")
-                return float(shift_pixels[0]), float(shift_pixels[1])
-            else:
-                debug_info.append(f"xcorr rejected: bad result {shift_pixels}")
+        # Reject if peak is at image corner (degenerate case)
+        # Corners are: (0,0), (height-1,0), (0,width-1), (height-1,width-1)
+        if peak[0] < 2 or peak[0] >= corr.shape[0] - 2 or peak[1] < 2 or peak[1] >= corr.shape[1] - 2:
+            debug_info.append(f"xcorr rejected: degenerate peak at corner {peak}")
         else:
-            debug_info.append(f"xcorr: weak peak (peak={peak_value:.1f}, mean={mean_corr:.1f}) - correlation is degenerate")
+            # Check if peak correlation is strong enough (sanity check)
+            peak_value = corr[peak] if len(corr.shape) > 0 else 0
+            mean_corr = np.mean(np.abs(corr))
+            
+            if peak_value > mean_corr * 2 and peak_value > 0:  # Peak should be significantly above average
+                if np.isfinite(shift_pixels).all() and np.abs(shift_pixels).max() < max(ref.shape) * 0.5:
+                    if verbose:
+                        print(f"      [xcorr fallback: shift=({shift_pixels[1]:.1f}, {shift_pixels[0]:.1f})]")
+                    return float(shift_pixels[0]), float(shift_pixels[1])
+                else:
+                    debug_info.append(f"xcorr rejected: bad result {shift_pixels}")
+            else:
+                debug_info.append(f"xcorr: weak peak (peak={peak_value:.1f}, mean={mean_corr:.1f})")
     except Exception as e:
         debug_info.append(f"xcorr error: {type(e).__name__}")
     
@@ -655,13 +661,26 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         aligned_shapes.append(aligned.shape[:2])
         idx += 1
     
-    # Check for suspicious all-zero shifts (possible algorithm failure)
+    # Check for suspicious shift patterns (possible algorithm failure)
+    shift_set = set(f.shift for f in final)
     zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
+    
     if zero_shifts > len(final) * 0.8 and len(final) > 2:
         print(f'\n[WARNING] {zero_shifts}/{len(final)} frames have zero shift - this is suspicious!')
         print(f'[SUGGESTION] Try running with --skip-phase-correlation to test fallback methods:')
         print(f'  python astro_stack.py --skip-phase-correlation ...')
         print()
+    
+    # Check for identical shifts across all frames (impossible in real data with tracking)
+    if len(shift_set) == 1 and zero_shifts == 0 and len(final) > 2:
+        unique_shift = list(shift_set)[0]
+        if unique_shift != (0.0, 0.0):
+            print(f'\n[WARNING] All {len(final)} frames have IDENTICAL shift {unique_shift} - this is impossible!')
+            print(f'[DIAGNOSIS] Registration algorithm is not distinguishing between frames.')
+            print(f'[SUGGESTION] This indicates a fundamental issue with the correlation method.')
+            print(f'[SUGGESTION] Try: python astro_stack.py --skip-phase-correlation --debug-registration ...')
+            print(f'[SUGGESTION] Then check PNG images in _registration_debug/ folder.')
+            print()
     
     # Phase 3: crop to common valid region
     top, bottom, left, right = calc_common_crop([f.shift for f in final], (H, W))
