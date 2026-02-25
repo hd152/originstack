@@ -306,7 +306,28 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     return {'brightness': brightness, 'contrast': contrast, 'star_count': star_count, 'score': score, 'snr': snr}
 
 
-def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10) -> Tuple[float, float]:
+def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "") -> Tuple[float, float]:
+    debug_info = []
+    
+    # Debug mode: save diagnostic images
+    if debug and frame_name:
+        try:
+            os.makedirs('_registration_debug', exist_ok=True)
+            # Save normalized versions
+            ref_norm = (ref - np.min(ref)) / (np.max(ref) - np.min(ref) + 1e-12) * 255
+            img_norm = (img - np.min(img)) / (np.max(img) - np.min(img) + 1e-12) * 255
+            
+            if Image is not None:
+                Image.fromarray(ref_norm.astype(np.uint8)).save(f'_registration_debug/{frame_name}_ref.png')
+                Image.fromarray(img_norm.astype(np.uint8)).save(f'_registration_debug/{frame_name}_img.png')
+            
+            # Save statistics
+            with open(f'_registration_debug/{frame_name}_stats.txt', 'w') as f:
+                f.write(f"Reference:\n  min={np.min(ref):.2f}, max={np.max(ref):.2f}, mean={np.mean(ref):.2f}, std={np.std(ref):.2f}\n")
+                f.write(f"Image:\n  min={np.min(img):.2f}, max={np.max(img):.2f}, mean={np.mean(img):.2f}, std={np.std(img):.2f}\n")
+        except Exception as e:
+            pass
+    
     # Use phase cross correlation for subpixel shifts when available
     if phase_cross_correlation is not None:
         try:
@@ -315,24 +336,68 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10) -> Tup
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 shift, error, diffphase = phase_cross_correlation(ref, img, upsample_factor=upsample)
+            debug_info.append(f"phase_cc: shift={shift}, error={error:.4f}")
             # Validate shift magnitude (sanity check)
             if np.isfinite(shift).all() and np.abs(shift).max() < max(ref.shape) * 0.5:
+                if verbose:
+                    print(f"      [phase_correlation succeeded: {shift}]")
                 return float(shift[0]), float(shift[1])
-        except Exception:
-            pass
+            else:
+                debug_info.append(f"phase_cc rejected: nan/inf or too large ({np.abs(shift).max():.1f} > {max(ref.shape) * 0.5:.1f})")
+        except Exception as e:
+            debug_info.append(f"phase_cc error: {type(e).__name__}")
+    
+    # Try normalized cross-correlation as alternative fallback
+    try:
+        from scipy.signal import correlate2d
+        # Normalize images
+        ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
+        img_norm = (img - np.mean(img)) / (np.std(img) + 1e-12)
+        
+        # Compute correlation - use smaller version for speed
+        scale = max(1, ref.shape[0] // 64)
+        ref_small = ref_norm[::scale, ::scale]
+        img_small = img_norm[::scale, ::scale]
+        
+        corr = correlate2d(img_small, ref_small, mode='same')
+        peak = np.unravel_index(np.argmax(corr), corr.shape)
+        center = np.array(corr.shape) // 2
+        shift_pixels = (peak - center) * scale
+        
+        if np.isfinite(shift_pixels).all() and np.abs(shift_pixels).max() < max(ref.shape) * 0.5:
+            if verbose:
+                print(f"      [xcorr fallback: shift=({shift_pixels[1]:.1f}, {shift_pixels[0]:.1f})]")
+            return float(shift_pixels[0]), float(shift_pixels[1])
+        else:
+            debug_info.append(f"xcorr rejected: bad result {shift_pixels}")
+    except Exception as e:
+        debug_info.append(f"xcorr error: {type(e).__name__}")
+    
     # Fallback to centroid difference (more stable)
     try:
         thresh_ref = np.percentile(ref, 90)
         thresh_img = np.percentile(img, 90)
         rmask = ref > thresh_ref
         imask = img > thresh_img
-        if rmask.sum() > 10 and imask.sum() > 10:
+        n_ref = rmask.sum()
+        n_img = imask.sum()
+        debug_info.append(f"centroid: ref_pixels={n_ref}, img_pixels={n_img}, thresh_ref={thresh_ref:.1f}, thresh_img={thresh_img:.1f}")
+        if n_ref > 10 and n_img > 10:
             cim = ndimage.center_of_mass(ref * rmask)
             cim2 = ndimage.center_of_mass(img * imask)
             if cim and cim2:
-                return float(cim2[0] - cim[0]), float(cim2[1] - cim[1])
-    except Exception:
-        pass
+                shift_y = float(cim2[0] - cim[0])
+                shift_x = float(cim2[1] - cim[1])
+                if verbose:
+                    print(f"      [centroid fallback: ({shift_x:.1f}, {shift_y:.1f})]")
+                return shift_y, shift_x
+        else:
+            debug_info.append(f"centroid rejected: insufficient bright pixels")
+    except Exception as e:
+        debug_info.append(f"centroid error: {type(e).__name__}")
+    
+    if verbose and debug_info:
+        print(f"      [CRITICAL: no registration method succeeded] " + " | ".join(debug_info))
     return 0.0, 0.0
 
 
@@ -506,8 +571,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         mem = np.memmap(memmap_path, dtype='float32', mode='w+', shape=(n, H, W, 3))
 
     idx = 0
+    ref_lum_std = np.std(ref_lum)  # Cache for diagnostics
     if args.verbose:
         print(f'  Registration: calculating shifts for {len(final)} frames (reference: {os.path.basename(ref_path)})')
+        # Diagnostic: show reference image statistics
+        ref_stats = {
+            'min': np.min(ref_lum),
+            'max': np.max(ref_lum),
+            'mean': np.mean(ref_lum),
+            'std': ref_lum_std,
+        }
+        print(f'    Reference luminance stats - min={ref_stats["min"]:.1f}, max={ref_stats["max"]:.1f}, mean={ref_stats["mean"]:.1f}, std={ref_stats["std"]:.1f}')
     for f in final:
         data, hdr = load_fits(f.path)
         if data.ndim == 2:
@@ -524,7 +598,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         # registration
         if not args.no_registration:
             lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-            sy, sx = calculate_shift(ref_lum, lum)
+            # Diagnostic: check image statistics
+            lum_std = np.std(lum)
+            if args.verbose and lum_std < ref_lum_std * 0.1:
+                lum_min, lum_max = np.min(lum), np.max(lum)
+                print(f'      [WARNING: very low contrast] min={lum_min:.1f}, max={lum_max:.1f}, std={lum_std:.1f} (ref_std={ref_lum_std:.1f})')
+            sy, sx = calculate_shift(ref_lum, lum, verbose=args.verbose, debug=args.debug_registration, frame_name=os.path.splitext(os.path.basename(f.path))[0])
             # gate unrealistic shifts
             if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
                 print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
@@ -663,6 +742,7 @@ def parse_args():
     p.add_argument('--quality-threshold', type=float, default=50.0)
     p.add_argument('--keep-intermediates', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true')
+    p.add_argument('--debug-registration', action='store_true', help='Detailed registration diagnostics (implies -v)')
     p.add_argument('--stack-method', choices=['mean', 'median'], default='mean')
     p.add_argument('--debayer-method', choices=['bilinear', 'malvar'], default='bilinear')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
@@ -673,6 +753,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # debug_registration implies verbose
+    if args.debug_registration:
+        args.verbose = True
     try:
         process_directory(args.directory, args.output, args)
     except Exception as e:

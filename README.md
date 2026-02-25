@@ -39,10 +39,17 @@ This will show:
 - Improved shift robustness with better fallback algorithm
 - Comprehensive diagnostic guides
 
+**Registration not working?** Use `--debug-registration` to visualize diagnostic data:
+```bash
+python astro_stack.py -d lights/ -o stacked.fits --debug-registration
+```
+This creates PNG images and statistics files in `_registration_debug/` folder.
+
 See documentation for detailed analysis:
 - [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - One-page quick start
 - [DIAGNOSTICS_IMPROVEMENTS.md](DIAGNOSTICS_IMPROVEMENTS.md) - Feature guide
 - [SHIFT_PATTERN_GUIDE.md](SHIFT_PATTERN_GUIDE.md) - Detailed shift pattern analysis
+- [REGISTRATION_DEBUG_GUIDE.md](REGISTRATION_DEBUG_GUIDE.md) - Fix registration issues
 
 ## Testing
 
