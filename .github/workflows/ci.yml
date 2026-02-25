@@ -44,8 +44,10 @@ jobs:
           python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits --quality-filter --debayer-method malvar --white-balance grayworld --stack-method median
 
       - name: Upload synthetic stack artifact
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ci_synthetic_stack
+          name: ci_synthetic_stack_py${{ matrix.python-version }}_${{ github.run_id }}
           path: ci_synthetic_stack.fits
+          if-no-files-found: warn
+          retention-days: 7
