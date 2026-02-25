@@ -1,0 +1,4 @@
+# Optional GPU requirements (install only on machines with compatible CUDA/toolkit)
+cython
+# Example CuPy wheel for CUDA 11.x - choose appropriate wheel for your CUDA version
+# cupy-cuda11x

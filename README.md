@@ -8,8 +8,8 @@ Install dependencies (recommended in virtualenv):
 
 ```bash
 pip install -r requirements.txt
-# optionally for star detection: pip install photutils
-# optionally for GPU acceleration: pip install -r requirements.txt --extra-index-url <cupy-wheel-index>
+# Optional GPU packages (only on machines with CUDA):
+pip install -r requirements-gpu.txt
 ```
 
 Run (single folder):
