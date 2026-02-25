@@ -1,0 +1,9 @@
+numpy>=1.20
+astropy>=5.0
+scipy>=1.7
+scikit-image>=0.21
+photutils>=1.5; extra == 'phot'
+tqdm>=4.65
+Pillow>=9.0
+cython; extra == 'gpu'
+cupy-cuda11x; extra == 'gpu'
