@@ -343,15 +343,17 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 shift, error, diffphase = phase_cross_correlation(ref_norm, img_norm, upsample_factor=upsample)
             debug_info.append(f"phase_cc: shift={shift}, error={error:.4f}")
             
-            # Check for degenerate case: all zeros might mean images are similar enough that it failed silently
-            if np.allclose(shift, 0.0) and error < 0.01:
-                debug_info.append(f"phase_cc: zero shift with very low error (images might be nearly identical)")
-            
             # Validate shift magnitude (sanity check)
             if np.isfinite(shift).all() and np.abs(shift).max() < max(ref.shape) * 0.5:
-                if verbose:
-                    print(f"      [phase_correlation succeeded: {shift}]")
-                return float(shift[0]), float(shift[1])
+                # Zero shift with low error is valid - images are well-aligned
+                if np.allclose(shift, 0.0) and error < 0.01:
+                    if verbose:
+                        print(f"      [phase_correlation: zero shift (error={error:.4f}, images well-aligned)]")
+                    return float(shift[0]), float(shift[1])
+                else:
+                    if verbose:
+                        print(f"      [phase_correlation succeeded: {shift}]")
+                    return float(shift[0]), float(shift[1])
             else:
                 debug_info.append(f"phase_cc rejected: nan/inf or too large ({np.abs(shift).max():.1f} > {max(ref.shape) * 0.5:.1f})")
         except Exception as e:
@@ -665,22 +667,31 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     shift_set = set(f.shift for f in final)
     zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
     
-    if zero_shifts > len(final) * 0.8 and len(final) > 2:
-        print(f'\n[WARNING] {zero_shifts}/{len(final)} frames have zero shift - this is suspicious!')
-        print(f'[SUGGESTION] Try running with --skip-phase-correlation to test fallback methods:')
-        print(f'  python astro_stack.py --skip-phase-correlation ...')
-        print()
-    
-    # Check for identical shifts across all frames (impossible in real data with tracking)
-    if len(shift_set) == 1 and zero_shifts == 0 and len(final) > 2:
+    # Only warn about identical shifts - all frames having zero shift might be correct
+    # if the images are naturally well-aligned
+    if len(shift_set) == 1 and len(final) > 2:
         unique_shift = list(shift_set)[0]
         if unique_shift != (0.0, 0.0):
+            # All non-zero identical shifts = impossible, algorithm failure
             print(f'\n[WARNING] All {len(final)} frames have IDENTICAL shift {unique_shift} - this is impossible!')
             print(f'[DIAGNOSIS] Registration algorithm is not distinguishing between frames.')
             print(f'[SUGGESTION] This indicates a fundamental issue with the correlation method.')
             print(f'[SUGGESTION] Try: python astro_stack.py --skip-phase-correlation --debug-registration ...')
             print(f'[SUGGESTION] Then check PNG images in _registration_debug/ folder.')
             print()
+        else:
+            # All frames have zero shift - this is valid if phase correlation succeeded with low error
+            # Only warn if we have very few frames (might be a real issue) or if quality is suspiciously uniform
+            if len(final) <= 3:
+                print(f'\n[INFO] All {len(final)} frames registered with zero shift - images appear to be well-aligned.')
+                print()
+    elif zero_shifts > len(final) * 0.8 and len(final) > 2:
+        # Majority (but not all) have zero shifts - this suggests inconsistency
+        print(f'\n[WARNING] {zero_shifts}/{len(final)} frames have zero shift - registration may have issues.')
+        print(f'[SUGGESTION] Try running with --debug-registration to visualize the registration:')
+        print(f'  python astro_stack.py --debug-registration ...')
+        print(f'[SUGGESTION] Check PNG images and statistics in _registration_debug/ folder.')
+        print()
     
     # Phase 3: crop to common valid region
     top, bottom, left, right = calc_common_crop([f.shift for f in final], (H, W))
