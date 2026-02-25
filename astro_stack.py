@@ -365,7 +365,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if not lights:
         print('No light frames found for target')
         return None
-    # Phase 1: quality analysis streaming
+    print(f'  Quality analysis: analyzing {len(lights)} light frames...')
     accepted = []
     rejected_reasons = {}
     for f in lights:
@@ -569,11 +569,16 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
 def process_directory(directory: str, output: str, args: argparse.Namespace):
     # Detect hierarchical mode
+    if not os.path.isdir(directory):
+        print(f'ERROR: Input directory {directory} does not exist', file=sys.stderr)
+        raise SystemExit(1)
+    print(f'Processing directory: {directory}')
     subdirs = [os.path.join(directory, d) for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
     targets = []
     if any(os.listdir(directory)) and any(f.lower().endswith(('.fit', '.fits')) for f in os.listdir(directory)):
         # single folder
         targets = [(directory, output)]
+        print(f'Detected single-folder mode')
     elif subdirs:
         # hierarchical: produce per-subfolder stacks then combine
         tmp_stacks = []
@@ -582,14 +587,19 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             outp = os.path.join(tempfile.gettempdir(), f'{name}_stack.fits')
             targets.append((d, outp))
             tmp_stacks.append(outp)
+        print(f'Detected hierarchical mode with {len(targets)} subfolders')
         # final combined output will be combined from tmp_stacks
     else:
+        print('ERROR: No FITS files found', file=sys.stderr)
         raise SystemExit('No FITS files found')
 
     # Process each target
     produced = []
     for d, outp in targets:
+        print(f'\nProcessing target: {os.path.basename(d) if d != directory else "root"}')
         frames = discover_frames(d)
+        nfiles = sum(len(v) for v in frames.values())
+        print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
         masters = {
             'bias': make_master(frames['bias'], method='median'),
             'dark': make_master(frames['dark'], method='median'),
@@ -642,7 +652,13 @@ def parse_args():
 
 def main():
     args = parse_args()
-    process_directory(args.directory, args.output, args)
+    try:
+        process_directory(args.directory, args.output, args)
+    except Exception as e:
+        print(f'ERROR: {str(e)}', file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':
