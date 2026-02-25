@@ -306,7 +306,7 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     return {'brightness': brightness, 'contrast': contrast, 'star_count': star_count, 'score': score, 'snr': snr}
 
 
-def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "") -> Tuple[float, float]:
+def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False) -> Tuple[float, float]:
     debug_info = []
     
     # Debug mode: save diagnostic images
@@ -329,14 +329,24 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             pass
     
     # Use phase cross correlation for subpixel shifts when available
-    if phase_cross_correlation is not None:
+    if not skip_phase_cc and phase_cross_correlation is not None:
         try:
+            # Normalize images for phase correlation (zero mean, unit variance)
+            # This is critical for good phase correlation performance
+            ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
+            img_norm = (img - np.mean(img)) / (np.std(img) + 1e-12)
+            
             # Suppress overflow warnings in phase correlation
             import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
-                shift, error, diffphase = phase_cross_correlation(ref, img, upsample_factor=upsample)
+                shift, error, diffphase = phase_cross_correlation(ref_norm, img_norm, upsample_factor=upsample)
             debug_info.append(f"phase_cc: shift={shift}, error={error:.4f}")
+            
+            # Check for degenerate case: all zeros might mean images are similar enough that it failed silently
+            if np.allclose(shift, 0.0) and error < 0.01:
+                debug_info.append(f"phase_cc: zero shift with very low error (images might be nearly identical)")
+            
             # Validate shift magnitude (sanity check)
             if np.isfinite(shift).all() and np.abs(shift).max() < max(ref.shape) * 0.5:
                 if verbose:
@@ -350,7 +360,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     # Try normalized cross-correlation as alternative fallback
     try:
         from scipy.signal import correlate2d
-        # Normalize images
+        # Normalize images - critical for correlation to work well
         ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
         img_norm = (img - np.mean(img)) / (np.std(img) + 1e-12)
         
@@ -364,37 +374,53 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         center = np.array(corr.shape) // 2
         shift_pixels = (peak - center) * scale
         
-        if np.isfinite(shift_pixels).all() and np.abs(shift_pixels).max() < max(ref.shape) * 0.5:
-            if verbose:
-                print(f"      [xcorr fallback: shift=({shift_pixels[1]:.1f}, {shift_pixels[0]:.1f})]")
-            return float(shift_pixels[0]), float(shift_pixels[1])
+        # Check if peak correlation is strong enough (sanity check)
+        peak_value = corr[peak] if len(corr.shape) > 0 else 0
+        mean_corr = np.mean(np.abs(corr))
+        
+        if peak_value > mean_corr * 2:  # Peak should be significantly above average
+            if np.isfinite(shift_pixels).all() and np.abs(shift_pixels).max() < max(ref.shape) * 0.5:
+                if verbose:
+                    print(f"      [xcorr fallback: shift=({shift_pixels[1]:.1f}, {shift_pixels[0]:.1f})]")
+                return float(shift_pixels[0]), float(shift_pixels[1])
+            else:
+                debug_info.append(f"xcorr rejected: bad result {shift_pixels}")
         else:
-            debug_info.append(f"xcorr rejected: bad result {shift_pixels}")
+            debug_info.append(f"xcorr: weak peak (peak={peak_value:.1f}, mean={mean_corr:.1f}) - correlation is degenerate")
     except Exception as e:
         debug_info.append(f"xcorr error: {type(e).__name__}")
     
-    # Fallback to centroid difference (more stable)
-    try:
-        thresh_ref = np.percentile(ref, 90)
-        thresh_img = np.percentile(img, 90)
-        rmask = ref > thresh_ref
-        imask = img > thresh_img
-        n_ref = rmask.sum()
-        n_img = imask.sum()
-        debug_info.append(f"centroid: ref_pixels={n_ref}, img_pixels={n_img}, thresh_ref={thresh_ref:.1f}, thresh_img={thresh_img:.1f}")
-        if n_ref > 10 and n_img > 10:
-            cim = ndimage.center_of_mass(ref * rmask)
-            cim2 = ndimage.center_of_mass(img * imask)
-            if cim and cim2:
-                shift_y = float(cim2[0] - cim[0])
-                shift_x = float(cim2[1] - cim[1])
-                if verbose:
-                    print(f"      [centroid fallback: ({shift_x:.1f}, {shift_y:.1f})]")
-                return shift_y, shift_x
-        else:
-            debug_info.append(f"centroid rejected: insufficient bright pixels")
-    except Exception as e:
-        debug_info.append(f"centroid error: {type(e).__name__}")
+    # Fallback to centroid difference - try multiple percentiles for robustness
+    best_shift = (0.0, 0.0)
+    best_score = float('inf')
+    
+    for percentile in [95, 90, 85, 80]:  # Try multiple thresholds
+        try:
+            thresh_ref = np.percentile(ref, percentile)
+            thresh_img = np.percentile(img, percentile)
+            rmask = ref > thresh_ref
+            imask = img > thresh_img
+            n_ref = rmask.sum()
+            n_img = imask.sum()
+            
+            if n_ref > 10 and n_img > 10:
+                cim = ndimage.center_of_mass(ref * rmask)
+                cim2 = ndimage.center_of_mass(img * imask)
+                if cim and cim2:
+                    shift_y = float(cim2[0] - cim[0])
+                    shift_x = float(cim2[1] - cim[1])
+                    shift_mag = np.sqrt(shift_x**2 + shift_y**2)
+                    
+                    # Prefer solution from lower percentile (more pixels = more stable)
+                    # But if shift is too large, use lower percentile threshold
+                    if shift_mag > 0.1 or n_ref > 50:  # Have a real shift or many pixels
+                        if verbose:
+                            print(f"      [centroid fallback (p{percentile}): ({shift_x:.1f}, {shift_y:.1f})]")
+                        return shift_y, shift_x
+            
+            debug_info.append(f"centroid(p{percentile}): n_ref={n_ref}, n_img={n_img}")
+        except Exception as e:
+            pass
     
     if verbose and debug_info:
         print(f"      [CRITICAL: no registration method succeeded] " + " | ".join(debug_info))
@@ -603,7 +629,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if args.verbose and lum_std < ref_lum_std * 0.1:
                 lum_min, lum_max = np.min(lum), np.max(lum)
                 print(f'      [WARNING: very low contrast] min={lum_min:.1f}, max={lum_max:.1f}, std={lum_std:.1f} (ref_std={ref_lum_std:.1f})')
-            sy, sx = calculate_shift(ref_lum, lum, verbose=args.verbose, debug=args.debug_registration, frame_name=os.path.splitext(os.path.basename(f.path))[0])
+            sy, sx = calculate_shift(ref_lum, lum, verbose=args.verbose, debug=args.debug_registration, frame_name=os.path.splitext(os.path.basename(f.path))[0], skip_phase_cc=args.skip_phase_correlation)
             # gate unrealistic shifts
             if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
                 print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
@@ -628,6 +654,15 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             tmp_files.append(aligned.astype(np.float32))
         aligned_shapes.append(aligned.shape[:2])
         idx += 1
+    
+    # Check for suspicious all-zero shifts (possible algorithm failure)
+    zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
+    if zero_shifts > len(final) * 0.8 and len(final) > 2:
+        print(f'\n[WARNING] {zero_shifts}/{len(final)} frames have zero shift - this is suspicious!')
+        print(f'[SUGGESTION] Try running with --skip-phase-correlation to test fallback methods:')
+        print(f'  python astro_stack.py --skip-phase-correlation ...')
+        print()
+    
     # Phase 3: crop to common valid region
     top, bottom, left, right = calc_common_crop([f.shift for f in final], (H, W))
     # Crop & combine
@@ -738,6 +773,7 @@ def parse_args():
     p.add_argument('-d', '--directory', required=True)
     p.add_argument('-o', '--output', required=True)
     p.add_argument('--no-registration', action='store_true')
+    p.add_argument('--skip-phase-correlation', action='store_true', help='Skip phase correlation, use only fallback methods (debug)')
     p.add_argument('--quality-filter', action='store_true')
     p.add_argument('--quality-threshold', type=float, default=50.0)
     p.add_argument('--keep-intermediates', action='store_true')
