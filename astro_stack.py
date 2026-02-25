@@ -76,8 +76,13 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
         try:
             with fits.open(p, memmap=True) as hd:
                 hdr = dict(hd[0].header)
-        except Exception:
-            hdr = {}
+        except (OSError, TypeError):
+            # Retry without memmap for files with BZERO/BSCALE/BLANK keywords
+            try:
+                with fits.open(p, memmap=False) as hd:
+                    hdr = dict(hd[0].header)
+            except Exception:
+                hdr = {}
         ftype = classify_frame(p, hdr)
         frames[ftype].append(FrameInfo(path=p, type=ftype, header=hdr))
     return frames
@@ -95,9 +100,19 @@ def classify_frame(path: str, header: dict) -> str:
 
 
 def load_fits(path: str) -> Tuple[np.ndarray, dict]:
-    with fits.open(path, memmap=True) as hd:
-        data = hd[0].data.astype(np.float32)
-        hdr = dict(hd[0].header)
+    """Load FITS file; retry without memmap if keyword compression is present."""
+    try:
+        with fits.open(path, memmap=True) as hd:
+            data = hd[0].data.astype(np.float32)
+            hdr = dict(hd[0].header)
+    except (OSError, TypeError) as e:
+        # Retry without memmap for files with BZERO/BSCALE/BLANK keywords
+        if 'memmap' in str(e).lower() or 'bzero' in str(e).lower() or 'bscale' in str(e).lower():
+            with fits.open(path, memmap=False) as hd:
+                data = hd[0].data.astype(np.float32)
+                hdr = dict(hd[0].header)
+        else:
+            raise
     return data, hdr
 
 
