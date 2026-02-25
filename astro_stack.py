@@ -337,16 +337,20 @@ def save_preview_rgb(rgb: np.ndarray, path: str):
 def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace, masters: Dict[str, Optional[np.ndarray]]):
     lights = [f for f in frames if f.type == 'light']
     if not lights:
-        print('No light frames for target', output_path)
+        print('No light frames found for target')
         return None
     # Phase 1: quality analysis streaming
     accepted = []
+    rejected_reasons = {}
     for f in lights:
         try:
             data, hdr = load_fits(f.path)
         except Exception as e:
             f.accepted = False
             f.metrics = {'error': str(e)}
+            rejected_reasons[f.path] = f'load error: {str(e)}'
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {str(e)}')
             continue
         # calibration
         if masters.get('bias') is not None:
@@ -362,7 +366,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         # debayer if 2D raw single channel and header indicates bayer or shape suggests
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
-            rgb = debayer_bilinear(data, pattern=bayer)
+            rgb = debayer_bilinear(data, pattern=bayer, method=args.debayer_method)
         else:
             # already multi-channel
             rgb = data
@@ -385,11 +389,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         scores = np.array([f.metrics['score'] for f in accepted])
         pct = np.percentile(scores, args.quality_threshold)
         for f in accepted:
-            f.accepted = f.metrics['score'] >= pct
+            if f.metrics['score'] >= pct:
+                f.accepted = True
+            else:
+                f.accepted = False
+                rejected_reasons[f.path] = f'quality score {f.metrics["score"]:.1f} below threshold {pct:.1f}'
+                if args.verbose:
+                    print(f'  REJECT {os.path.basename(f.path)}: score {f.metrics["score"]:.1f} < {pct:.1f}')
     # Build list of final accepted frames
     final = [f for f in lights if f.accepted]
     if not final:
-        print('All frames rejected for', output_path)
+        print(f'All {len(lights)} frames rejected')
+        if args.verbose and rejected_reasons:
+            print('Rejection reasons:')
+            for path, reason in rejected_reasons.items():
+                print(f'  {os.path.basename(path)}: {reason}')
         return None
     # Phase 2: registration - choose reference as highest score
     ref = None
