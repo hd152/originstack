@@ -286,12 +286,14 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     brightness = float(np.median(flat))
     contrast = float(np.std(flat))
     star_count = 0
+    snr = 0.0
     if DAOStarFinder is not None and sigma_clipped_stats is not None:
         try:
             mean, median, std = sigma_clipped_stats(flat)
             daof = DAOStarFinder(fwhm=3.0, threshold=5. * std)
             sources = daof(flat - median)
             star_count = 0 if sources is None else len(sources)
+            snr = (brightness - mean) / (std + 1e-12) if std > 0 else 0.0
         except Exception:
             star_count = 0
     else:
@@ -299,28 +301,36 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
         thresh = np.median(flat) + np.std(flat) * 3
         mask = flat > thresh
         star_count = int(np.sum(ndimage.maximum_filter(mask.astype(int), size=3) == 1))
+        snr = (brightness - np.mean(flat)) / (contrast + 1e-12)
     score = brightness * contrast
-    return {'brightness': brightness, 'contrast': contrast, 'star_count': star_count, 'score': score}
+    return {'brightness': brightness, 'contrast': contrast, 'star_count': star_count, 'score': score, 'snr': snr}
 
 
 def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10) -> Tuple[float, float]:
     # Use phase cross correlation for subpixel shifts when available
     if phase_cross_correlation is not None:
         try:
-            shift, error, diffphase = phase_cross_correlation(ref, img, upsample_factor=upsample)
-            return float(shift[0]), float(shift[1])
+            # Suppress overflow warnings in phase correlation
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                shift, error, diffphase = phase_cross_correlation(ref, img, upsample_factor=upsample)
+            # Validate shift magnitude (sanity check)
+            if np.isfinite(shift).all() and np.abs(shift).max() < max(ref.shape) * 0.5:
+                return float(shift[0]), float(shift[1])
         except Exception:
             pass
-    # Fallback to centroid difference
+    # Fallback to centroid difference (more stable)
     try:
-        thresh = np.percentile(ref, 95)
-        rmask = ref > thresh
-        cim = ndimage.center_of_mass(ref * rmask)
-        thresh2 = np.percentile(img, 95)
-        imask = img > thresh2
-        cim2 = ndimage.center_of_mass(img * imask)
-        if cim and cim2:
-            return float(cim2[0] - cim[0]), float(cim2[1] - cim[1])
+        thresh_ref = np.percentile(ref, 90)
+        thresh_img = np.percentile(img, 90)
+        rmask = ref > thresh_ref
+        imask = img > thresh_img
+        if rmask.sum() > 10 and imask.sum() > 10:
+            cim = ndimage.center_of_mass(ref * rmask)
+            cim2 = ndimage.center_of_mass(img * imask)
+            if cim and cim2:
+                return float(cim2[0] - cim[0]), float(cim2[1] - cim[1])
     except Exception:
         pass
     return 0.0, 0.0
@@ -442,8 +452,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         if args.quality_filter:
             # percentile threshold across all frames will be applied later; for streaming we mark all and filter after collecting metrics
             accepted.append(f)
+            if args.verbose:
+                print(f'    {os.path.basename(f.path)}: brightness={metrics["brightness"]:.1f}, contrast={metrics["contrast"]:.1f}, stars={metrics["star_count"]}, score={metrics["score"]:.1f}')
         else:
             f.accepted = True
+            if args.verbose:
+                print(f'    {os.path.basename(f.path)}: brightness={metrics["brightness"]:.1f}, contrast={metrics["contrast"]:.1f}, stars={metrics["star_count"]}')
     # If quality_filter, compute threshold
     if args.quality_filter and accepted:
         scores = np.array([f.metrics['score'] for f in accepted])
@@ -492,6 +506,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         mem = np.memmap(memmap_path, dtype='float32', mode='w+', shape=(n, H, W, 3))
 
     idx = 0
+    if args.verbose:
+        print(f'  Registration: calculating shifts for {len(final)} frames (reference: {os.path.basename(ref_path)})')
     for f in final:
         data, hdr = load_fits(f.path)
         if data.ndim == 2:
@@ -517,6 +533,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         else:
             f.shift = (0.0, 0.0)
         shifts.append(f.shift)
+        
+        # Report shift with diagnostics
+        shift_mag = np.sqrt(f.shift[0]**2 + f.shift[1]**2)
+        if args.verbose:
+            print(f'    {os.path.basename(f.path)}: shift=({f.shift[1]:+.1f}, {f.shift[0]:+.1f}) px, magnitude={shift_mag:.2f} px')
         # apply shift and write to memmap or accumulate
         aligned = np.zeros_like(rgb)
         for c in range(3):
