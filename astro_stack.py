@@ -378,6 +378,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if args.verbose:
                 print(f'  REJECT {os.path.basename(f.path)}: {str(e)}')
             continue
+        # Validate data is not empty
+        if data is None or data.size == 0:
+            f.accepted = False
+            f.metrics = {'error': 'empty data array'}
+            rejected_reasons[f.path] = 'empty data array'
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: empty data array')
+            continue
         # calibration
         if masters.get('bias') is not None:
             data = data - masters['bias']
@@ -390,20 +398,46 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 flat = flat / med
             data = data / (flat + 1e-12)
         # debayer if 2D raw single channel and header indicates bayer or shape suggests
-        if data.ndim == 2:
-            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
-            rgb = debayer_bilinear(data, pattern=bayer, method=args.debayer_method)
-        else:
-            # already multi-channel
-            rgb = data
+        try:
+            if data.ndim == 2:
+                bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
+                rgb = debayer_bilinear(data, pattern=bayer, method=args.debayer_method)
+            else:
+                # already multi-channel
+                rgb = data
+        except Exception as e:
+            f.accepted = False
+            f.metrics = {'error': f'debayering error: {str(e)}'}
+            rejected_reasons[f.path] = f'debayering error: {str(e)}'
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: debayering error: {str(e)}')
+            continue
         # hot pixel removal
-        for c in range(rgb.shape[2]):
-            rgb[:, :, c] = remove_hot_pixels(rgb[:, :, c])
+        try:
+            if rgb.ndim != 3 or rgb.shape[2] < 1:
+                raise ValueError(f'Invalid RGB shape: {rgb.shape}')
+            for c in range(rgb.shape[2]):
+                rgb[:, :, c] = remove_hot_pixels(rgb[:, :, c])
+        except Exception as e:
+            f.accepted = False
+            f.metrics = {'error': f'hot pixel removal error: {str(e)}'}
+            rejected_reasons[f.path] = f'hot pixel removal error: {str(e)}'
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {str(e)}')
+            continue
         # background subtraction
         # compute a gray metric from luminance
-        lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-        metrics = compute_quality_metrics(lum)
-        f.metrics = metrics
+        try:
+            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+            metrics = compute_quality_metrics(lum)
+            f.metrics = metrics
+        except Exception as e:
+            f.accepted = False
+            f.metrics = {'error': f'quality analysis error: {str(e)}'}
+            rejected_reasons[f.path] = f'quality analysis error: {str(e)}'
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {str(e)}')
+            continue
         # quality filter
         if args.quality_filter:
             # percentile threshold across all frames will be applied later; for streaming we mark all and filter after collecting metrics
