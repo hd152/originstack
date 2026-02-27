@@ -1,0 +1,71 @@
+# Test data directories
+orion-live/
+synthetic_data/
+
+# Claude Code directories
+.claude/
+**/claude/
+
+# Registration debug output
+_registration_debug/
+
+# Python bytecode
+*.pyc
+*.pyo
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# FITS and output files
+*.fits
+*.fit
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.dat
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.sublime-*
+.project
+.pydevproject
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Keep example files (if any)
+!example*.fits
+!example*.jpg

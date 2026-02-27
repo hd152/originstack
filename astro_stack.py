@@ -17,7 +17,9 @@ import argparse
 import os
 import sys
 import tempfile
-from dataclasses import dataclass
+import time
+import logging
+from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional
 
 import numpy as np
@@ -57,6 +59,39 @@ except Exception:
     cp = None
     HAS_CUPY = False
 
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except Exception:
+    # Fallback: create a pass-through wrapper
+    HAS_TQDM = False
+    def tqdm(iterable, **kwargs):
+        return iterable
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except Exception:
+    HAS_PSUTIL = False
+
+
+# Configuration constants
+class Config:
+    """Central configuration for magic numbers and thresholds."""
+    HOT_PIXEL_THRESHOLD = 10.0
+    WHITE_PATCH_PERCENTILE = 99.5
+    MAX_SHIFT_FRACTION = 0.1
+    STAR_DETECTION_SIGMA = 5.0
+    CROP_MARGIN = 2
+    XCORR_DOWNSCALE_TARGET = 256  # Target size for cross-correlation
+    CENTROID_PERCENTILES = [95, 90, 85, 80]
+    QUALITY_LOW_BRIGHTNESS = 10
+    QUALITY_LOW_CONTRAST = 1
+    LARGE_SHIFT_WARNING_PX = 20
+    MIN_RECOMMENDED_FRAMES = 10
+    PREVIEW_JPEG_QUALITY = 95
+    PREVIEW_STRETCH_PERCENTILES = (1, 99)
+
 
 @dataclass
 class FrameInfo:
@@ -66,6 +101,131 @@ class FrameInfo:
     accepted: bool = True
     metrics: Optional[Dict] = None
     shift: Tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass
+class ProcessingStats:
+    """Track timing and statistics during processing."""
+    start_time: float = field(default_factory=time.time)
+    discovery_time: float = 0.0
+    calibration_time: float = 0.0
+    quality_time: float = 0.0
+    registration_time: float = 0.0
+    stacking_time: float = 0.0
+    total_frames: int = 0
+    accepted_frames: int = 0
+    rejected_frames: int = 0
+    errors: List[Tuple[str, str]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    output_shape: Optional[Tuple[int, int]] = None
+    cropped_pixels: Optional[Tuple[int, int]] = None
+    peak_memory_mb: float = 0.0
+
+    def total_time(self) -> float:
+        return time.time() - self.start_time
+
+    def add_error(self, path: str, error: str):
+        self.errors.append((path, error))
+
+    def add_warning(self, warning: str):
+        self.warnings.append(warning)
+
+
+def safe_print(text: str):
+    """Print text with fallback for unicode characters on Windows."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        # Fallback: replace unicode symbols with ASCII
+        text = text.replace('✓', '[OK]')
+        text = text.replace('✗', '[X]')
+        text = text.replace('⚠', '[!]')
+        text = text.replace('ℹ', '[i]')
+        text = text.replace('─', '-')
+        text = text.replace('→', '->')
+        text = text.replace('×', 'x')
+        print(text)
+
+
+def print_header(text: str, char: str = "="):
+    """Print a formatted header."""
+    safe_print(f"\n{char * 70}")
+    safe_print(text)
+    safe_print(f"{char * 70}")
+
+
+def print_quality_table(frames: List[FrameInfo], show_all: bool = False):
+    """Print a formatted table of frame quality metrics."""
+    if not frames:
+        return
+
+    # Filter to only frames with metrics
+    frames_with_metrics = [f for f in frames if f.metrics and 'score' in f.metrics]
+    if not frames_with_metrics:
+        return
+
+    # Header
+    safe_print("\n  Frame Quality Details:")
+    safe_print("  " + "─" * 100)
+    safe_print(f"  {'Frame':<30} {'Bright':>8} {'Contr':>8} {'Stars':>6} {'Score':>10} {'Status':>8}")
+    safe_print("  " + "─" * 100)
+
+    # Show first 10, last 10, or all if show_all
+    if show_all or len(frames_with_metrics) <= 20:
+        frames_to_show = frames_with_metrics
+    else:
+        frames_to_show = frames_with_metrics[:10] + frames_with_metrics[-10:]
+        show_ellipsis = True
+
+    shown_count = 0
+    for i, f in enumerate(frames_with_metrics):
+        if not show_all and len(frames_with_metrics) > 20 and i == 10:
+            print(f"  {'...':<30} {'...':>8} {'...':>8} {'...':>6} {'...':>10} {'...':>8}")
+            continue
+        elif not show_all and len(frames_with_metrics) > 20 and 10 < i < len(frames_with_metrics) - 10:
+            continue
+
+        name = os.path.basename(f.path)
+        if len(name) > 30:
+            name = name[:27] + "..."
+
+        brightness = f.metrics.get('brightness', 0)
+        contrast = f.metrics.get('contrast', 0)
+        stars = f.metrics.get('star_count', 0)
+        score = f.metrics.get('score', 0)
+        status = "✓" if f.accepted else "✗"
+
+        safe_print(f"  {name:<30} {brightness:8.1f} {contrast:8.1f} {stars:6} {score:10.1f} {status:>8}")
+
+    safe_print("  " + "─" * 100)
+
+
+def print_phase(phase_num: int, title: str):
+    """Print a phase header."""
+    print(f"\n{'=' * 70}")
+    print(f"PHASE {phase_num}: {title.upper()}")
+    print(f"{'=' * 70}")
+
+
+def format_time(seconds: float) -> str:
+    """Format seconds as human-readable time."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = seconds % 60
+        return f"{mins}m {secs:.1f}s"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}h {mins}m"
+
+
+def get_memory_usage_mb() -> float:
+    """Get current process memory usage in MB."""
+    if HAS_PSUTIL:
+        return psutil.Process().memory_info().rss / 1024**2
+    return 0.0
 
 
 def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
@@ -213,7 +373,9 @@ def white_balance_grayworld(rgb: np.ndarray) -> np.ndarray:
     return np.clip(img * scale, 0, None)
 
 
-def white_balance_whitepatch(rgb: np.ndarray, pct: float = 99.5) -> np.ndarray:
+def white_balance_whitepatch(rgb: np.ndarray, pct: float = None) -> np.ndarray:
+    if pct is None:
+        pct = Config.WHITE_PATCH_PERCENTILE
     img = rgb.copy().astype(np.float32)
     scales = []
     for c in range(3):
@@ -223,7 +385,9 @@ def white_balance_whitepatch(rgb: np.ndarray, pct: float = 99.5) -> np.ndarray:
     return np.clip(img / scales[np.newaxis, np.newaxis, :], 0, None)
 
 
-def remove_hot_pixels(img: np.ndarray, threshold: float = 10.0) -> np.ndarray:
+def remove_hot_pixels(img: np.ndarray, threshold: float = None) -> np.ndarray:
+    if threshold is None:
+        threshold = Config.HOT_PIXEL_THRESHOLD
     # Hot pixel removal: compare to median and replace outliers by interpolated value
     med = ndimage.median_filter(img, size=3)
     diff = img - med
@@ -280,30 +444,134 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
     return (acc / weight).astype(np.float32)
 
 
+def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional[str]]:
+    """Validate image data for common issues. Returns (is_valid, error_message)."""
+
+    # Check for NaN or Inf
+    if not np.isfinite(img).all():
+        nan_count = np.isnan(img).sum()
+        inf_count = np.isinf(img).sum()
+        return False, f"contains {nan_count} NaN and {inf_count} Inf values"
+
+    # Check for completely flat/dead image
+    if np.std(img) < 0.1:
+        return False, f"flat image (std={np.std(img):.3f})"
+
+    # Check for saturated image (>95% of pixels at max value)
+    max_val = np.max(img)
+    if max_val > 0:
+        saturated_fraction = np.sum(img >= max_val * 0.999) / img.size
+        if saturated_fraction > 0.95:
+            return False, f"saturated ({saturated_fraction*100:.1f}% at max)"
+
+    # Check for mostly zeros (dead/corrupt)
+    zero_fraction = np.sum(img == 0) / img.size
+    if zero_fraction > 0.5:
+        return False, f"mostly zeros ({zero_fraction*100:.1f}%)"
+
+    # Check dynamic range
+    p01, p99 = np.percentile(img, [1, 99])
+    if p99 - p01 < 10:
+        return False, f"insufficient dynamic range ({p99-p01:.1f})"
+
+    return True, None
+
+
 def compute_quality_metrics(img: np.ndarray) -> Dict:
-    # brightness, contrast, star count
-    flat = img
-    brightness = float(np.median(flat))
-    contrast = float(np.std(flat))
-    star_count = 0
+    """Comprehensive quality analysis with multiple metrics."""
+
+    # Basic statistics
+    brightness = float(np.median(img))
+    mean = float(np.mean(img))
+    contrast = float(np.std(img))
+
+    # Percentiles for outlier detection
+    p01, p05, p25, p50, p75, p95, p99 = np.percentile(img, [1, 5, 25, 50, 75, 95, 99])
+
+    # Signal-to-noise estimation
+    # Use sigma-clipped statistics if available
     snr = 0.0
+    background = mean
+    noise = contrast
+
+    if sigma_clipped_stats is not None:
+        try:
+            bg_mean, bg_median, bg_std = sigma_clipped_stats(img, sigma=3.0, maxiters=5)
+            background = float(bg_median)
+            noise = float(bg_std)
+            snr = (p95 - background) / (noise + 1e-12) if noise > 0 else 0.0
+        except:
+            snr = (p95 - mean) / (contrast + 1e-12)
+    else:
+        snr = (p95 - mean) / (contrast + 1e-12)
+
+    # Star detection
+    star_count = 0
+    star_snr = 0.0
+
     if DAOStarFinder is not None and sigma_clipped_stats is not None:
         try:
-            mean, median, std = sigma_clipped_stats(flat)
-            daof = DAOStarFinder(fwhm=3.0, threshold=5. * std)
-            sources = daof(flat - median)
-            star_count = 0 if sources is None else len(sources)
-            snr = (brightness - mean) / (std + 1e-12) if std > 0 else 0.0
-        except Exception:
+            bg_mean, bg_median, bg_std = sigma_clipped_stats(img, sigma=3.0)
+            # Use more aggressive threshold for quality filtering
+            threshold = background + 5.0 * noise
+            daof = DAOStarFinder(fwhm=3.0, threshold=threshold)
+            sources = daof(img - bg_median)
+
+            if sources is not None and len(sources) > 0:
+                star_count = len(sources)
+                # Calculate median star SNR
+                star_peaks = sources['peak']
+                star_snr = float(np.median(star_peaks)) / (noise + 1e-12)
+        except Exception as e:
+            pass
+
+    # Fallback star detection using local maxima
+    if star_count == 0:
+        try:
+            # Find bright local maxima
+            threshold = background + 3.0 * noise
+            from scipy.ndimage import maximum_filter
+            local_max = maximum_filter(img, size=5)
+            detected_peaks = (img == local_max) & (img > threshold)
+            star_count = int(np.sum(detected_peaks))
+
+            if star_count > 0:
+                peak_values = img[detected_peaks]
+                star_snr = float(np.median(peak_values)) / (noise + 1e-12)
+        except:
             star_count = 0
-    else:
-        # fallback: count bright local maxima
-        thresh = np.median(flat) + np.std(flat) * 3
-        mask = flat > thresh
-        star_count = int(np.sum(ndimage.maximum_filter(mask.astype(int), size=3) == 1))
-        snr = (brightness - np.mean(flat)) / (contrast + 1e-12)
-    score = brightness * contrast
-    return {'brightness': brightness, 'contrast': contrast, 'star_count': star_count, 'score': score, 'snr': snr}
+
+    # Focus/sharpness metric using Laplacian variance
+    try:
+        from scipy.ndimage import laplace
+        laplacian = laplace(img.astype(np.float32))
+        sharpness = float(np.var(laplacian))
+    except:
+        sharpness = 0.0
+
+    # Composite quality score
+    # Penalize low star count heavily
+    star_factor = min(star_count / 50.0, 1.0) if star_count > 0 else 0.01
+    snr_factor = min(snr / 10.0, 1.0) if snr > 0 else 0.01
+    contrast_factor = min(contrast / 100.0, 1.0) if contrast > 0 else 0.01
+
+    score = brightness * contrast * star_factor * snr_factor * 100.0
+
+    return {
+        'brightness': brightness,
+        'mean': mean,
+        'contrast': contrast,
+        'snr': snr,
+        'star_count': star_count,
+        'star_snr': star_snr,
+        'sharpness': sharpness,
+        'background': background,
+        'noise': noise,
+        'score': score,
+        'p01': p01,
+        'p99': p99,
+        'dynamic_range': p99 - p01
+    }
 
 
 def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False) -> Tuple[float, float]:
@@ -345,15 +613,17 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             
             # Validate shift magnitude (sanity check)
             if np.isfinite(shift).all() and np.abs(shift).max() < max(ref.shape) * 0.5:
-                # Zero shift with low error is valid - images are well-aligned
-                if np.allclose(shift, 0.0) and error < 0.01:
+                # Check error threshold - phase correlation must have low error to be trusted
+                # error < 0.01 is excellent, error < 0.1 is acceptable, error >= 0.5 is failure
+                if error < 0.1:
                     if verbose:
-                        print(f"      [phase_correlation: zero shift (error={error:.4f}, images well-aligned)]")
+                        if np.allclose(shift, 0.0):
+                            print(f"      [phase_correlation: zero shift (error={error:.4f}, images well-aligned)]")
+                        else:
+                            print(f"      [phase_correlation succeeded: shift={shift}, error={error:.4f}]")
                     return float(shift[0]), float(shift[1])
                 else:
-                    if verbose:
-                        print(f"      [phase_correlation succeeded: {shift}]")
-                    return float(shift[0]), float(shift[1])
+                    debug_info.append(f"phase_cc rejected: high error ({error:.4f} >= 0.1)")
             else:
                 debug_info.append(f"phase_cc rejected: nan/inf or too large ({np.abs(shift).max():.1f} > {max(ref.shape) * 0.5:.1f})")
         except Exception as e:
@@ -368,13 +638,16 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         
         # Use less aggressive downscaling - // 8 instead of // 64
         # This preserves small shifts while still being computationally tractable
-        scale = max(1, ref.shape[0] // 256)  # Target ~256 pixel size, was // 64
+        scale = max(1, ref.shape[0] // Config.XCORR_DOWNSCALE_TARGET)
         ref_small = ref_norm[::scale, ::scale]
         img_small = img_norm[::scale, ::scale]
         
-        corr = correlate2d(img_small, ref_small, mode='same')
+        # correlate2d(ref, img) slides img over ref
+        # Peak at position p means img centered at p in ref gives best match
+        corr = correlate2d(ref_small, img_small, mode='same')
         peak = np.unravel_index(np.argmax(corr), corr.shape)
         center = np.array(corr.shape) // 2
+        # Shift needed to move img from center to peak position
         shift_pixels = (peak - center) * scale
         
         # Reject if peak is at image corner (degenerate case)
@@ -401,8 +674,8 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     # Fallback to centroid difference - try multiple percentiles for robustness
     best_shift = (0.0, 0.0)
     best_score = float('inf')
-    
-    for percentile in [95, 90, 85, 80]:  # Try multiple thresholds
+
+    for percentile in Config.CENTROID_PERCENTILES:
         try:
             thresh_ref = np.percentile(ref, percentile)
             thresh_img = np.percentile(img, percentile)
@@ -415,8 +688,11 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 cim = ndimage.center_of_mass(ref * rmask)
                 cim2 = ndimage.center_of_mass(img * imask)
                 if cim and cim2:
-                    shift_y = float(cim2[0] - cim[0])
-                    shift_x = float(cim2[1] - cim[1])
+                    # Shift needed to align img with ref: ref_center - img_center
+                    # If img is down by 5px, img_center.y = ref_center.y + 5
+                    # We need to shift img UP by -5, which is ref_center.y - img_center.y
+                    shift_y = float(cim[0] - cim2[0])
+                    shift_x = float(cim[1] - cim2[1])
                     shift_mag = np.sqrt(shift_x**2 + shift_y**2)
                     
                     # Prefer solution from lower percentile (more pixels = more stable)
@@ -448,10 +724,10 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int]) 
     max_left = int(max(0, np.ceil(max(xs))))
     max_right = int(max(0, np.ceil(-min(xs))))
     H, W = shape
-    top = max_up + 2
-    bottom = H - (max_down + 2)
-    left = max_left + 2
-    right = W - (max_right + 2)
+    top = max_up + Config.CROP_MARGIN
+    bottom = H - (max_down + Config.CROP_MARGIN)
+    left = max_left + Config.CROP_MARGIN
+    right = W - (max_right + Config.CROP_MARGIN)
     if top >= bottom or left >= right:
         return 0, H, 0, W
     return top, bottom, left, right
@@ -460,52 +736,110 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int]) 
 def save_preview_rgb(rgb: np.ndarray, path: str):
     if Image is None or exposure is None:
         return
-    # per-channel stretch 1-99
+    # per-channel stretch
     out = np.zeros_like(rgb)
     for c in range(3):
-        lo, hi = np.percentile(rgb[:, :, c], (1, 99))
+        lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
         out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
     out = np.clip(out * 255, 0, 255).astype(np.uint8)
-    Image.fromarray(out).save(path, quality=95)
+    Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
 
 
-def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace, masters: Dict[str, Optional[np.ndarray]]):
+def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace, masters: Dict[str, Optional[np.ndarray]], stats: ProcessingStats):
     lights = [f for f in frames if f.type == 'light']
     if not lights:
-        print('No light frames found for target')
+        print('  No light frames found for target')
         return None
-    print(f'  Quality analysis: analyzing {len(lights)} light frames...')
+
+    stats.total_frames = len(lights)
+
+    # Phase 1: Quality Analysis
+    print_phase(1, "Quality Analysis")
+    phase_start = time.time()
+    print(f"  Analyzing {len(lights)} light frames...")
+
     accepted = []
     rejected_reasons = {}
-    for f in lights:
+
+    # Create progress iterator
+    lights_iter = tqdm(lights, desc="  Analyzing", unit="frame", disable=args.verbose) if not args.verbose else lights
+
+    for f in lights_iter:
         try:
             data, hdr = load_fits(f.path)
         except Exception as e:
             f.accepted = False
-            f.metrics = {'error': str(e)}
-            rejected_reasons[f.path] = f'load error: {str(e)}'
+            error_msg = f'load error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
             if args.verbose:
-                print(f'  REJECT {os.path.basename(f.path)}: {str(e)}')
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
             continue
         # Validate data is not empty
         if data is None or data.size == 0:
             f.accepted = False
-            f.metrics = {'error': 'empty data array'}
-            rejected_reasons[f.path] = 'empty data array'
+            error_msg = 'empty data array'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
             if args.verbose:
-                print(f'  REJECT {os.path.basename(f.path)}: empty data array')
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
             continue
-        # calibration
-        if masters.get('bias') is not None:
-            data = data - masters['bias']
-        if masters.get('dark') is not None:
-            data = data - masters['dark']
-        if masters.get('flat') is not None:
-            flat = masters['flat'].copy()
-            med = np.median(flat)
-            if med != 0:
-                flat = flat / med
-            data = data / (flat + 1e-12)
+        # Calibration with validation
+        try:
+            # Apply bias subtraction
+            if masters.get('bias') is not None:
+                if masters['bias'].shape == data.shape:
+                    data = np.clip(data - masters['bias'], 0, None)
+                else:
+                    if args.verbose:
+                        print(f'    WARNING: bias shape mismatch for {os.path.basename(f.path)}, skipping bias')
+
+            # Apply dark subtraction
+            if masters.get('dark') is not None:
+                if masters['dark'].shape == data.shape:
+                    data = np.clip(data - masters['dark'], 0, None)
+                else:
+                    if args.verbose:
+                        print(f'    WARNING: dark shape mismatch for {os.path.basename(f.path)}, skipping dark')
+
+            # Apply flat division
+            if masters.get('flat') is not None:
+                if masters['flat'].shape == data.shape:
+                    flat = masters['flat'].copy()
+                    # Normalize flat to median
+                    med = np.median(flat)
+                    if med > 1e-6:  # Avoid division by zero
+                        flat_norm = flat / med
+                        # Avoid division by very small numbers
+                        flat_norm = np.clip(flat_norm, 0.1, 10.0)
+                        data = data / flat_norm
+                    else:
+                        if args.verbose:
+                            print(f'    WARNING: flat field median too low ({med:.6f}), skipping flat')
+                else:
+                    if args.verbose:
+                        print(f'    WARNING: flat shape mismatch for {os.path.basename(f.path)}, skipping flat')
+
+            # Check for calibration artifacts (negative or NaN values)
+            if not np.isfinite(data).all():
+                raise ValueError(f"calibration produced non-finite values")
+            if np.any(data < 0):
+                if args.verbose:
+                    neg_count = np.sum(data < 0)
+                    print(f'    WARNING: {neg_count} negative values after calibration, clipping to zero')
+                data = np.clip(data, 0, None)
+
+        except Exception as e:
+            f.accepted = False
+            error_msg = f'calibration error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
         # debayer if 2D raw single channel and header indicates bayer or shape suggests
         try:
             if data.ndim == 2:
@@ -516,10 +850,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 rgb = data
         except Exception as e:
             f.accepted = False
-            f.metrics = {'error': f'debayering error: {str(e)}'}
-            rejected_reasons[f.path] = f'debayering error: {str(e)}'
+            error_msg = f'debayering error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
             if args.verbose:
-                print(f'  REJECT {os.path.basename(f.path)}: debayering error: {str(e)}')
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
             continue
         # hot pixel removal
         try:
@@ -529,60 +865,185 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 rgb[:, :, c] = remove_hot_pixels(rgb[:, :, c])
         except Exception as e:
             f.accepted = False
-            f.metrics = {'error': f'hot pixel removal error: {str(e)}'}
-            rejected_reasons[f.path] = f'hot pixel removal error: {str(e)}'
+            error_msg = f'hot pixel removal error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
             if args.verbose:
-                print(f'  REJECT {os.path.basename(f.path)}: {str(e)}')
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
             continue
-        # background subtraction
-        # compute a gray metric from luminance
+        # Validate image data
         try:
             lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+            # First pass: validate image is usable
+            is_valid, validation_error = validate_image_data(lum, os.path.basename(f.path))
+            if not is_valid:
+                f.accepted = False
+                error_msg = f'validation failed: {validation_error}'
+                f.metrics = {'error': error_msg}
+                rejected_reasons[f.path] = error_msg
+                if args.verbose:
+                    print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+                continue
+
+            # Compute comprehensive quality metrics
             metrics = compute_quality_metrics(lum)
             f.metrics = metrics
-        except Exception as e:
-            f.accepted = False
-            f.metrics = {'error': f'quality analysis error: {str(e)}'}
-            rejected_reasons[f.path] = f'quality analysis error: {str(e)}'
-            if args.verbose:
-                print(f'  REJECT {os.path.basename(f.path)}: {str(e)}')
-            continue
-        # quality filter
-        if args.quality_filter:
-            # percentile threshold across all frames will be applied later; for streaming we mark all and filter after collecting metrics
+
+            # Hard quality gates (reject obviously bad frames immediately)
+            reject_reason = None
+
+            # Gate 1: Minimum star count (very lenient - just need SOME stars)
+            if metrics['star_count'] < 3:
+                reject_reason = f"insufficient stars ({metrics['star_count']} < 3)"
+
+            # Gate 2: Minimum SNR (relaxed threshold)
+            elif metrics['snr'] < 0.5:
+                reject_reason = f"extremely low SNR ({metrics['snr']:.2f} < 0.5)"
+
+            # Gate 3: Minimum contrast
+            elif metrics['contrast'] < 2.0:
+                reject_reason = f"extremely low contrast ({metrics['contrast']:.1f} < 2.0)"
+
+            # Gate 4: Minimum dynamic range
+            elif metrics['dynamic_range'] < 20:
+                reject_reason = f"extremely low dynamic range ({metrics['dynamic_range']:.1f} < 20)"
+
+            # Gate 5: Check for excessive noise (very lenient)
+            elif metrics['noise'] > metrics['brightness'] * 0.8:
+                reject_reason = f"excessive noise ({metrics['noise']:.1f} > {metrics['brightness']*0.8:.1f})"
+
+            if reject_reason:
+                f.accepted = False
+                rejected_reasons[f.path] = reject_reason
+                if args.verbose:
+                    print(f'  REJECT {os.path.basename(f.path)}: {reject_reason}')
+                continue
+
+            # Passed all hard gates - add to potential accepts
             accepted.append(f)
             if args.verbose:
-                print(f'    {os.path.basename(f.path)}: brightness={metrics["brightness"]:.1f}, contrast={metrics["contrast"]:.1f}, stars={metrics["star_count"]}, score={metrics["score"]:.1f}')
-        else:
-            f.accepted = True
+                print(f'    {os.path.basename(f.path)}: SNR={metrics["snr"]:.1f}, stars={metrics["star_count"]}, contrast={metrics["contrast"]:.1f}, score={metrics["score"]:.1f}')
+
+        except Exception as e:
+            f.accepted = False
+            error_msg = f'quality analysis error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
             if args.verbose:
-                print(f'    {os.path.basename(f.path)}: brightness={metrics["brightness"]:.1f}, contrast={metrics["contrast"]:.1f}, stars={metrics["star_count"]}')
-    # If quality_filter, compute threshold
-    if args.quality_filter and accepted:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
+
+    # Statistical outlier detection
+    if len(accepted) > 3:
+        # Collect metrics arrays
+        snrs = np.array([f.metrics['snr'] for f in accepted])
+        star_counts = np.array([f.metrics['star_count'] for f in accepted])
+        contrasts = np.array([f.metrics['contrast'] for f in accepted])
         scores = np.array([f.metrics['score'] for f in accepted])
-        pct = np.percentile(scores, args.quality_threshold)
-        for f in accepted:
-            if f.metrics['score'] >= pct:
-                f.accepted = True
-            else:
+
+        # Calculate z-scores for each metric
+        def reject_outliers(values, threshold=2.5):
+            """Return boolean mask of outliers (True = keep, False = reject)."""
+            if len(values) < 3:
+                return np.ones(len(values), dtype=bool)
+            mean = np.mean(values)
+            std = np.std(values)
+            if std < 1e-6:  # All values identical
+                return np.ones(len(values), dtype=bool)
+            z_scores = np.abs((values - mean) / std)
+            return z_scores < threshold
+
+        # Identify outliers
+        snr_ok = reject_outliers(snrs, threshold=2.5)
+        star_ok = reject_outliers(star_counts, threshold=2.5)
+        contrast_ok = reject_outliers(contrasts, threshold=2.5)
+
+        # Combined outlier detection (reject if outlier in 2+ metrics)
+        outlier_count = (~snr_ok).astype(int) + (~star_ok).astype(int) + (~contrast_ok).astype(int)
+
+        for i, f in enumerate(accepted):
+            if outlier_count[i] >= 2:
+                outlier_reasons = []
+                if not snr_ok[i]:
+                    outlier_reasons.append(f"SNR={f.metrics['snr']:.1f} (mean={np.mean(snrs):.1f})")
+                if not star_ok[i]:
+                    outlier_reasons.append(f"stars={f.metrics['star_count']} (mean={np.mean(star_counts):.0f})")
+                if not contrast_ok[i]:
+                    outlier_reasons.append(f"contrast={f.metrics['contrast']:.1f} (mean={np.mean(contrasts):.1f})")
+
+                reason = f"statistical outlier: " + ", ".join(outlier_reasons)
+                rejected_reasons[f.path] = reason
                 f.accepted = False
-                rejected_reasons[f.path] = f'quality score {f.metrics["score"]:.1f} below threshold {pct:.1f}'
                 if args.verbose:
-                    print(f'  REJECT {os.path.basename(f.path)}: score {f.metrics["score"]:.1f} < {pct:.1f}')
+                    print(f'  REJECT {os.path.basename(f.path)}: {reason}')
+            else:
+                f.accepted = True
+
+    # If quality_filter, apply additional percentile threshold
+    if args.quality_filter and accepted:
+        # Only consider non-rejected frames
+        valid_frames = [f for f in accepted if f.accepted]
+        if valid_frames:
+            scores = np.array([f.metrics['score'] for f in valid_frames])
+            pct = np.percentile(scores, args.quality_threshold)
+
+            for f in valid_frames:
+                if f.metrics['score'] < pct:
+                    f.accepted = False
+                    rejected_reasons[f.path] = f'quality score {f.metrics["score"]:.1f} below threshold {pct:.1f}'
+                    if args.verbose:
+                        print(f'  REJECT {os.path.basename(f.path)}: score {f.metrics["score"]:.1f} < {pct:.1f}')
     # Build list of final accepted frames
     final = [f for f in lights if f.accepted]
+    stats.accepted_frames = len(final)
+    stats.rejected_frames = len(lights) - len(final)
+    stats.quality_time = time.time() - phase_start
+
+    # Show detailed table in verbose mode
+    if args.verbose:
+        print_quality_table(lights, show_all=len(lights) <= 50)
+
+    # Summary of quality analysis
+    safe_print(f"  ✓ Accepted: {len(final)}/{len(lights)} ({len(final)/len(lights)*100:.1f}%)")
+    if stats.rejected_frames > 0:
+        # Categorize rejection reasons
+        reason_counts = {}
+        for reason in rejected_reasons.values():
+            # Extract category
+            if 'brightness' in reason or 'contrast' in reason:
+                category = 'Poor quality'
+            elif 'stars' in reason or 'star' in reason:
+                category = 'No stars detected'
+            elif 'load' in reason or 'empty' in reason:
+                category = 'Load/data errors'
+            else:
+                category = 'Other'
+            reason_counts[category] = reason_counts.get(category, 0) + 1
+
+        safe_print(f"  ✗ Rejected: {stats.rejected_frames} ({', '.join(f'{cat}: {cnt}' for cat, cnt in reason_counts.items())})")
+
     if not final:
-        print(f'All {len(lights)} frames rejected')
-        if args.verbose and rejected_reasons:
-            print('Rejection reasons:')
-            for path, reason in rejected_reasons.items():
-                print(f'  {os.path.basename(path)}: {reason}')
+        print(f'\n  ERROR: All {len(lights)} frames rejected!')
+        if rejected_reasons:
+            print('  Rejection reasons:')
+            for path, reason in list(rejected_reasons.items())[:10]:  # Show first 10
+                print(f'    • {os.path.basename(path)}: {reason}')
+            if len(rejected_reasons) > 10:
+                print(f'    ... and {len(rejected_reasons) - 10} more')
         return None
-    # Phase 2: registration - choose reference as highest score
+    # Phase 2: Registration
+    print_phase(2, "Registration")
+    phase_start = time.time()
+
     ref = None
     ref_path = None
     best = max(final, key=lambda x: x.metrics.get('score', 0))
     ref_path = best.path
+    print(f"  Reference frame: {os.path.basename(ref_path)} (score={best.metrics.get('score', 0):.1f})")
+
     ref_data, ref_hdr = load_fits(ref_path)
     if ref_data.ndim == 2:
         ref_rgb = debayer_bilinear(ref_data, pattern=best.header.get('BAYERPAT', 'RGGB'))
@@ -606,8 +1067,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     idx = 0
     ref_lum_std = np.std(ref_lum)  # Cache for diagnostics
+
     if args.verbose:
-        print(f'  Registration: calculating shifts for {len(final)} frames (reference: {os.path.basename(ref_path)})')
         # Diagnostic: show reference image statistics
         ref_stats = {
             'min': np.min(ref_lum),
@@ -615,8 +1076,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             'mean': np.mean(ref_lum),
             'std': ref_lum_std,
         }
-        print(f'    Reference luminance stats - min={ref_stats["min"]:.1f}, max={ref_stats["max"]:.1f}, mean={ref_stats["mean"]:.1f}, std={ref_stats["std"]:.1f}')
-    for f in final:
+        print(f'  Reference luminance: min={ref_stats["min"]:.1f}, max={ref_stats["max"]:.1f}, mean={ref_stats["mean"]:.1f}, std={ref_stats["std"]:.1f}')
+
+    # Create progress iterator
+    print(f"  Calculating shifts for {len(final)} frames...")
+    final_iter = tqdm(final, desc="  Registering", unit="frame", disable=args.verbose) if not args.verbose else final
+
+    for f in final_iter:
         data, hdr = load_fits(f.path)
         if data.ndim == 2:
             rgb = debayer_bilinear(data, pattern=hdr.get('BAYERPAT', 'RGGB'), method=args.debayer_method)
@@ -662,7 +1128,26 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             tmp_files.append(aligned.astype(np.float32))
         aligned_shapes.append(aligned.shape[:2])
         idx += 1
-    
+
+    stats.registration_time = time.time() - phase_start
+
+    # Calculate shift statistics
+    shift_x = [s[1] for s in shifts]
+    shift_y = [s[0] for s in shifts]
+    shift_mags = [np.sqrt(sx**2 + sy**2) for sx, sy in shifts]
+
+    if not args.no_registration:
+        print(f"  Shift statistics:")
+        print(f"    X: mean={np.mean(shift_x):+.1f}px, std={np.std(shift_x):.1f}px, range=[{np.min(shift_x):+.1f}, {np.max(shift_x):+.1f}]")
+        print(f"    Y: mean={np.mean(shift_y):+.1f}px, std={np.std(shift_y):.1f}px, range=[{np.min(shift_y):+.1f}, {np.max(shift_y):+.1f}]")
+        print(f"    Magnitude: mean={np.mean(shift_mags):.1f}px, max={np.max(shift_mags):.1f}px")
+
+        # Check for large shifts
+        if np.max(shift_mags) > Config.LARGE_SHIFT_WARNING_PX:
+            warning = f"Large shifts detected (max={np.max(shift_mags):.1f}px) - possible tracking issues"
+            stats.add_warning(warning)
+            safe_print(f"  ⚠ {warning}")
+
     # Check for suspicious shift patterns (possible algorithm failure)
     shift_set = set(f.shift for f in final)
     zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
@@ -673,28 +1158,37 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         unique_shift = list(shift_set)[0]
         if unique_shift != (0.0, 0.0):
             # All non-zero identical shifts = impossible, algorithm failure
-            print(f'\n[WARNING] All {len(final)} frames have IDENTICAL shift {unique_shift} - this is impossible!')
-            print(f'[DIAGNOSIS] Registration algorithm is not distinguishing between frames.')
-            print(f'[SUGGESTION] This indicates a fundamental issue with the correlation method.')
-            print(f'[SUGGESTION] Try: python astro_stack.py --skip-phase-correlation --debug-registration ...')
-            print(f'[SUGGESTION] Then check PNG images in _registration_debug/ folder.')
-            print()
+            warning = f'All {len(final)} frames have IDENTICAL shift {unique_shift} - registration algorithm failure!'
+            stats.add_warning(warning)
+            safe_print(f'\n  ⚠ WARNING: {warning}')
+            print(f'  DIAGNOSIS: Registration algorithm is not distinguishing between frames.')
+            print(f'  SUGGESTION: Try with --skip-phase-correlation --debug-registration')
+            print(f'  Then check PNG images in _registration_debug/ folder.')
         else:
             # All frames have zero shift - this is valid if phase correlation succeeded with low error
-            # Only warn if we have very few frames (might be a real issue) or if quality is suspiciously uniform
             if len(final) <= 3:
-                print(f'\n[INFO] All {len(final)} frames registered with zero shift - images appear to be well-aligned.')
-                print()
+                safe_print(f'\n  ℹ INFO: All {len(final)} frames registered with zero shift - images appear well-aligned.')
     elif zero_shifts > len(final) * 0.8 and len(final) > 2:
         # Majority (but not all) have zero shifts - this suggests inconsistency
-        print(f'\n[WARNING] {zero_shifts}/{len(final)} frames have zero shift - registration may have issues.')
-        print(f'[SUGGESTION] Try running with --debug-registration to visualize the registration:')
-        print(f'  python astro_stack.py --debug-registration ...')
-        print(f'[SUGGESTION] Check PNG images and statistics in _registration_debug/ folder.')
-        print()
+        warning = f'{zero_shifts}/{len(final)} frames have zero shift - registration may have issues'
+        stats.add_warning(warning)
+        safe_print(f'\n  ⚠ WARNING: {warning}')
+        print(f'  SUGGESTION: Try with --debug-registration to visualize registration')
+        print(f'  Check PNG images in _registration_debug/ folder.')
     
-    # Phase 3: crop to common valid region
+    # Phase 3: Stacking
+    print_phase(3, "Stacking")
+    phase_start = time.time()
+    print(f"  Method: {args.stack_method}")
+    print(f"  Combining {len(final)} frames...")
+
+    # Crop to common valid region
     top, bottom, left, right = calc_common_crop([f.shift for f in final], (H, W))
+    cropped_h = H - (top + (H - bottom))
+    cropped_w = W - (left + (W - right))
+    stats.output_shape = (bottom - top, right - left)
+    stats.cropped_pixels = (H - (bottom - top), W - (right - left))
+
     # Crop & combine
     if use_median:
         stacked = np.median(mem[:, top:bottom, left:right, :], axis=0)
@@ -715,6 +1209,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             acc += cropped.astype(np.float64)
             count += 1
         stacked = (acc / max(1, count)).astype(np.float32)
+    stats.stacking_time = time.time() - phase_start
+
+    # Update memory usage
+    if HAS_PSUTIL:
+        stats.peak_memory_mb = get_memory_usage_mb()
+
     # Save FITS (3,H,W)
     out_h, out_w, _ = stacked.shape
     hdu = fits.PrimaryHDU()
@@ -725,25 +1225,73 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     hdu.header['NREJECT'] = len(lights) - len(final)
     hdu.header['COMBINED'] = True
     hdu.writeto(output_path, overwrite=True)
+
     # preview
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     save_preview_rgb(stacked, preview_path)
-    print(f'Saved stacked FITS to {output_path} and preview to {preview_path}')
+
+    print(f"  Output size: {out_h}×{out_w} (cropped {stats.cropped_pixels[0]}×{stats.cropped_pixels[1]} pixels)")
+
+    # Print summary
+    print_header("SUMMARY", "=")
+    print(f"  Frames analyzed:  {stats.total_frames}")
+    print(f"  Frames stacked:   {stats.accepted_frames} ({stats.accepted_frames/stats.total_frames*100:.1f}%)")
+    if stats.rejected_frames > 0:
+        print(f"  Frames rejected:  {stats.rejected_frames}")
+    print(f"  Output:           {os.path.basename(output_path)} ({out_h}×{out_w}×3)")
+    print(f"  Preview:          {os.path.basename(preview_path)}")
+    print(f"  Processing time:  {format_time(stats.total_time())}")
+    print(f"    Quality:        {format_time(stats.quality_time)}")
+    print(f"    Registration:   {format_time(stats.registration_time)}")
+    print(f"    Stacking:       {format_time(stats.stacking_time)}")
+
+    if HAS_PSUTIL:
+        print(f"  Peak memory:      {stats.peak_memory_mb:.1f} MB")
+        frames_per_gb = (stats.accepted_frames / (stats.peak_memory_mb / 1024)) if stats.peak_memory_mb > 0 else 0
+        if frames_per_gb > 0:
+            print(f"  Memory efficiency: {frames_per_gb:.1f} frames/GB")
+
+    # Print warnings if any
+    if stats.warnings:
+        safe_print(f"\n  ⚠ Warnings:")
+        for warning in stats.warnings[:5]:  # Show first 5
+            safe_print(f"    • {warning}")
+        if len(stats.warnings) > 5:
+            safe_print(f"    ... and {len(stats.warnings) - 5} more")
+
+    # Print errors if any
+    if stats.errors:
+        safe_print(f"\n  ✗ Errors encountered: {len(stats.errors)}")
+        if args.verbose:
+            for path, error in stats.errors[:10]:
+                safe_print(f"    • {os.path.basename(path)}: {error}")
+            if len(stats.errors) > 10:
+                safe_print(f"    ... and {len(stats.errors) - 10} more")
+
+    safe_print(f"\n  ✓ Stack complete!")
     return output_path
 
 
 def process_directory(directory: str, output: str, args: argparse.Namespace):
+    # Print banner
+    print_header("Astrophotography FITS Stacker", "=")
+    print(f"Input:  {directory}")
+    print(f"Output: {output}")
+
     # Detect hierarchical mode
     if not os.path.isdir(directory):
-        print(f'ERROR: Input directory {directory} does not exist', file=sys.stderr)
+        print(f'\n  ERROR: Input directory {directory} does not exist', file=sys.stderr)
         raise SystemExit(1)
-    print(f'Processing directory: {directory}')
+
+    overall_start = time.time()
     subdirs = [os.path.join(directory, d) for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
     targets = []
+
+    print("\nDiscovering frames...")
     if any(os.listdir(directory)) and any(f.lower().endswith(('.fit', '.fits')) for f in os.listdir(directory)):
         # single folder
         targets = [(directory, output)]
-        print(f'Detected single-folder mode')
+        print(f"  Mode: Single folder")
     elif subdirs:
         # hierarchical: produce per-subfolder stacks then combine
         tmp_stacks = []
@@ -752,37 +1300,83 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             outp = os.path.join(tempfile.gettempdir(), f'{name}_stack.fits')
             targets.append((d, outp))
             tmp_stacks.append(outp)
-        print(f'Detected hierarchical mode with {len(targets)} subfolders')
+        print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
         # final combined output will be combined from tmp_stacks
     else:
-        print('ERROR: No FITS files found', file=sys.stderr)
+        print('  ERROR: No FITS files found', file=sys.stderr)
         raise SystemExit('No FITS files found')
 
     # Process each target
     produced = []
-    for d, outp in targets:
-        print(f'\nProcessing target: {os.path.basename(d) if d != directory else "root"}')
+    for target_idx, (d, outp) in enumerate(targets, 1):
+        if len(targets) > 1:
+            print(f'\n{"=" * 70}')
+            print(f'TARGET {target_idx}/{len(targets)}: {os.path.basename(d)}')
+            print(f'{"=" * 70}')
+        else:
+            print()
+
+        # Create stats object for this target
+        stats = ProcessingStats()
+
         frames = discover_frames(d)
         nfiles = sum(len(v) for v in frames.values())
         print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
-        masters = {
-            'bias': make_master(frames['bias'], method='median'),
-            'dark': make_master(frames['dark'], method='median'),
-            'flat': make_master(frames['flat'], method='median'),
-        }
-        res = stack_target([f for t in frames.values() for f in t], outp, args, masters)
+
+        # Create master calibration frames
+        if frames['dark'] or frames['flat'] or frames['bias']:
+            print("\nCreating master calibration frames...")
+            cal_start = time.time()
+
+        masters = {}
+        if frames['bias']:
+            masters['bias'] = make_master(frames['bias'], method='median')
+            if masters['bias'] is not None:
+                safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames → {masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
+        else:
+            masters['bias'] = None
+
+        if frames['dark']:
+            masters['dark'] = make_master(frames['dark'], method='median')
+            if masters['dark'] is not None:
+                safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames → {masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+        else:
+            masters['dark'] = None
+
+        if frames['flat']:
+            masters['flat'] = make_master(frames['flat'], method='median')
+            if masters['flat'] is not None:
+                safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames → {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+        else:
+            masters['flat'] = None
+
+        if frames['dark'] or frames['flat'] or frames['bias']:
+            stats.calibration_time = time.time() - cal_start
+
+        # Validation warnings
+        if len(frames['light']) < Config.MIN_RECOMMENDED_FRAMES:
+            warning = f"Only {len(frames['light'])} light frames found (recommended: {Config.MIN_RECOMMENDED_FRAMES}+)"
+            stats.add_warning(warning)
+            safe_print(f"\n  ⚠ WARNING: {warning}")
+
+        res = stack_target([f for t in frames.values() for f in t], outp, args, masters, stats)
         if res:
             produced.append(res)
     # If hierarchical combine
     if len(produced) > 1:
+        print_header("HIERARCHICAL COMBINING", "=")
+        print(f"  Combining {len(produced)} target stacks into final output...")
+
         # load all stacks, resize to minimum
         stacks = []
         shapes = [fits.open(p)[0].data.shape for p in produced]
         # shapes are (3,H,W)
         mins = np.min([[s[1], s[2]] for s in shapes], axis=0)
         Hm, Wm = int(mins[0]), int(mins[1])
+        print(f"  Resizing all to minimum dimensions: {Hm}×{Wm}")
+
         acc = None
-        for p in produced:
+        for p in tqdm(produced, desc="  Combining", unit="target", disable=args.verbose):
             with fits.open(p, memmap=True) as hd:
                 d = np.transpose(hd[0].data, (1, 2, 0)).astype(np.float32)
                 d = d[:Hm, :Wm, :]
@@ -794,8 +1388,20 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         out_hdu.data = np.transpose(combined, (2, 0, 1))
         out_hdu.header['NTARGETS'] = len(produced)
         out_hdu.writeto(output, overwrite=True)
-        save_preview_rgb(combined, os.path.splitext(output)[0] + '.jpg')
-        print('Saved hierarchical combined output to', output)
+        preview_path = os.path.splitext(output)[0] + '.jpg'
+        save_preview_rgb(combined, preview_path)
+
+        safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hm}×{Wm}×3)")
+        safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
+
+    # Overall summary
+    total_time = time.time() - overall_start
+    print_header("OVERALL SUMMARY", "=")
+    if len(produced) > 1:
+        print(f"  Targets processed: {len(produced)}")
+    print(f"  Total time: {format_time(total_time)}")
+    safe_print(f"\n  ✓ All processing complete!")
+    print(f"{'=' * 70}\n")
 
 
 def parse_args():

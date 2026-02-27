@@ -7,6 +7,7 @@ scikit-image>=0.21
 photutils>=1.5
 tqdm>=4.65
 Pillow>=9.0
+psutil>=5.9
 
 # Optional GPU dependencies are moved to `requirements-gpu.txt` to avoid
 # failing CI installs on runners without CUDA.
