@@ -7,6 +7,7 @@ Features:
 - Quality analysis (brightness, contrast, star count)
 - Registration (sub-pixel via phase correlation, fallback centroid)
 - Automatic cropping, hierarchical processing, preview generation
+- Intelligent background extraction (mesh-based sigma-clipped sky removal)
 - Several future features implemented in a basic form (white balance, hot pixel removal, gradient removal, optional GPU acceleration hooks)
 
 Usage: python astro_stack.py -d INPUT_DIR -o OUTPUT.fits [options]
@@ -413,6 +414,175 @@ def background_gradient_subtract(img: np.ndarray) -> np.ndarray:
     return img - blurred
 
 
+def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int = 3,
+                       clip_sigma: float = 3.0, clip_iters: int = 5) -> np.ndarray:
+    """Estimate smooth sky background using mesh-based sigma-clipped statistics.
+
+    Divides image into a grid, computes sigma-clipped median in each cell
+    (rejecting stars), rejects cells contaminated by extended bright objects
+    (nebulae), then interpolates the clean grid to a smooth background model.
+
+    Args:
+        img: 2D image array (single channel).
+        mesh_size: Size of each grid cell in pixels.
+        filter_size: Median filter size applied to the mesh grid to reject
+            anomalous cells (in grid units, must be odd).
+        clip_sigma: Sigma threshold for iterative clipping within each cell.
+        clip_iters: Maximum iterations for sigma clipping.
+
+    Returns:
+        2D background model array with same shape as input.
+    """
+    H, W = img.shape
+    ny = max(1, H // mesh_size)
+    nx = max(1, W // mesh_size)
+
+    cell_h = H / ny
+    cell_w = W / nx
+
+    bg_grid = np.zeros((ny, nx), dtype=np.float64)
+
+    for iy in range(ny):
+        y0 = int(round(iy * cell_h))
+        y1 = min(int(round((iy + 1) * cell_h)), H)
+        for ix in range(nx):
+            x0 = int(round(ix * cell_w))
+            x1 = min(int(round((ix + 1) * cell_w)), W)
+
+            cell = img[y0:y1, x0:x1].ravel()
+            if cell.size == 0:
+                bg_grid[iy, ix] = 0.0
+                continue
+
+            # Iterative sigma clipping to reject stars
+            if sigma_clipped_stats is not None:
+                try:
+                    _, median_val, _ = sigma_clipped_stats(
+                        cell, sigma=clip_sigma, maxiters=clip_iters)
+                    bg_grid[iy, ix] = float(median_val)
+                    continue
+                except Exception:
+                    pass
+
+            # Manual sigma-clipping fallback
+            clipped = cell.copy()
+            for _ in range(clip_iters):
+                med = np.median(clipped)
+                std = np.std(clipped)
+                if std < 1e-12:
+                    break
+                mask = np.abs(clipped - med) < clip_sigma * std
+                if not np.any(mask):
+                    break
+                clipped = clipped[mask]
+            bg_grid[iy, ix] = float(np.median(clipped))
+
+    # Reject grid cells contaminated by extended bright objects (nebulae).
+    # Cells whose value is well above the overall grid median are replaced
+    # with the grid median so the background model stays at the sky level.
+    grid_median = float(np.median(bg_grid))
+    grid_std = float(np.std(bg_grid))
+    if grid_std > 1e-6:
+        bright_thresh = grid_median + 2.0 * grid_std
+        bright_mask = bg_grid > bright_thresh
+        if np.any(bright_mask):
+            bg_grid[bright_mask] = grid_median
+
+    # Smooth the grid to reject remaining anomalous cells
+    if filter_size > 1 and min(ny, nx) >= filter_size:
+        bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
+
+    # Interpolate grid back to full image resolution
+    from scipy.interpolate import RectBivariateSpline
+
+    grid_y = np.array([(i + 0.5) * cell_h for i in range(ny)])
+    grid_x = np.array([(j + 0.5) * cell_w for j in range(nx)])
+
+    ky = min(3, ny - 1)
+    kx = min(3, nx - 1)
+
+    spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
+    background = spline(np.arange(H), np.arange(W)).astype(np.float32)
+
+    # Clamp to grid value range to prevent spline overshoot
+    np.clip(background, float(bg_grid.min()), float(bg_grid.max()),
+            out=background)
+
+    return background
+
+
+def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
+                                filter_size: int = 3, clip_sigma: float = 3.0,
+                                verbose: bool = False) -> np.ndarray:
+    """Apply intelligent background extraction to an RGB image.
+
+    Estimates the background shape from the luminance channel, then scales
+    that single spatial model to each RGB channel proportionally.  Using a
+    shared shape ensures colour-neutral subtraction so star and nebula
+    colours are preserved.
+
+    Extended bright objects (nebulae) are detected at the grid level and
+    excluded from the background estimate so they are not subtracted.
+
+    Args:
+        rgb: Image array with shape (H, W, 3).
+        mesh_size: Grid cell size for background estimation.
+        filter_size: Median filter size for grid smoothing.
+        clip_sigma: Sigma for iterative clipping in each cell.
+        verbose: Print per-channel statistics.
+
+    Returns:
+        Background-subtracted RGB image, clipped to >= 0.
+    """
+    # 1. Compute luminance and estimate a single background model from it
+    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    bg_lum = extract_background(lum, mesh_size=mesh_size,
+                                filter_size=filter_size,
+                                clip_sigma=clip_sigma)
+    lum_bg_median = float(np.median(bg_lum))
+
+    if verbose:
+        safe_print(f"    Luminance background: median={lum_bg_median:.1f}, "
+                   f"range={float(np.max(bg_lum) - np.min(bg_lum)):.1f}")
+
+    # 2. For each channel, scale the luminance model to that channel's
+    #    background level so the subtracted amount is proportional.
+    result = np.empty_like(rgb)
+    channel_names = ['Red', 'Green', 'Blue']
+
+    for c in range(rgb.shape[2]):
+        channel = rgb[:, :, c]
+
+        # Estimate this channel's sky level via sigma-clipped stats
+        if sigma_clipped_stats is not None:
+            try:
+                _, ch_bg_median, _ = sigma_clipped_stats(
+                    channel, sigma=clip_sigma, maxiters=5)
+                ch_bg_median = float(ch_bg_median)
+            except Exception:
+                ch_bg_median = float(np.median(channel))
+        else:
+            ch_bg_median = float(np.median(channel))
+
+        # Scale factor: map luminance model amplitude to this channel
+        if lum_bg_median > 1e-6:
+            scale = ch_bg_median / lum_bg_median
+        else:
+            scale = 1.0
+
+        bg_channel = bg_lum * scale
+        subtracted = channel - bg_channel
+        np.clip(subtracted, 0, None, out=subtracted)
+        result[:, :, c] = subtracted
+
+        if verbose:
+            safe_print(f"    {channel_names[c]}: bg_median={ch_bg_median:.1f}, "
+                       f"scale={scale:.3f}, "
+                       f"subtracted median={float(np.median(subtracted)):.1f}")
+
+    return result
+
+
 def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, float]], scale: int = 1) -> np.ndarray:
     """Simple integer-factor drizzle: upsample images by `scale` and place into accumulator using integer-shift*scale offsets.
     This is a simplified drizzle suitable for small scale factors.
@@ -769,7 +939,7 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
 
     # Processing software and version
     header['CREATOR'] = ('astro_stack.py', 'Software that created this file')
-    header['DATE'] = (datetime.utcnow().isoformat(), 'UTC date/time of file creation')
+    header['DATE'] = (datetime.now(datetime.timezone.utc).isoformat(), 'UTC date/time of file creation')
 
     # Calibration info
     header['BIASCAL'] = (masters.get('bias') is not None, 'Bias calibration applied')
@@ -817,6 +987,15 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
                 header['TOTEXP'] = (total_exp, 'Total integrated exposure time in seconds')
             except (ValueError, TypeError):
                 pass
+
+    # Background extraction info
+    if args.background_extraction:
+        header['BGEXTR'] = (True, 'Background extraction applied')
+        header['BGMESH'] = (args.bg_mesh_size, 'Background mesh cell size in pixels')
+        header['BGFILTR'] = (args.bg_filter_size, 'Background grid filter size')
+        header['BGCLIP'] = (args.bg_clip_sigma, 'Background sigma-clip threshold')
+    else:
+        header['BGEXTR'] = (False, 'No background extraction applied')
 
     # Add quality metrics if available
     if frames and frames[0].metrics:
@@ -1445,6 +1624,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stacked = (acc / max(1, count)).astype(np.float32)
     stats.stacking_time = time.time() - phase_start
 
+    # Post-stack background extraction
+    if args.background_extraction:
+        print(f"\n  Applying background extraction (mesh={args.bg_mesh_size}, "
+              f"sigma={args.bg_clip_sigma})...")
+        bg_start = time.time()
+        stacked = apply_background_extraction(
+            stacked,
+            mesh_size=args.bg_mesh_size,
+            filter_size=args.bg_filter_size,
+            clip_sigma=args.bg_clip_sigma,
+            verbose=args.verbose
+        )
+        bg_time = time.time() - bg_start
+        safe_print(f"  ✓ Background extraction complete ({format_time(bg_time)})")
+
     # Update memory usage
     if HAS_PSUTIL:
         stats.peak_memory_mb = get_memory_usage_mb()
@@ -1680,6 +1874,14 @@ def parse_args():
     p.add_argument('--drizzle-scale', type=int, default=1, help='Integer drizzle scale factor (1 = disabled)')
     p.add_argument('--use-gpu', action='store_true', help='Use CuPy for available operations (experimental)')
     p.add_argument('--skip-plate-solve', action='store_true', help='Skip plate solving (astrometry)')
+    p.add_argument('--background-extraction', action='store_true',
+                   help='Enable intelligent background removal for darker sky')
+    p.add_argument('--bg-mesh-size', type=int, default=256,
+                   help='Grid cell size in pixels for background estimation (default: 256)')
+    p.add_argument('--bg-filter-size', type=int, default=3,
+                   help='Median filter size for background grid smoothing (default: 3, must be odd)')
+    p.add_argument('--bg-clip-sigma', type=float, default=3.0,
+                   help='Sigma for star rejection in background estimation (default: 3.0)')
     return p.parse_args()
 
 
