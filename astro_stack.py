@@ -74,6 +74,12 @@ try:
 except Exception:
     HAS_PSUTIL = False
 
+try:
+    from astroquery.astrometry_net import AstrometryNet
+    HAS_ASTROMETRY_NET = True
+except Exception:
+    HAS_ASTROMETRY_NET = False
+
 
 # Configuration constants
 class Config:
@@ -745,6 +751,234 @@ def save_preview_rgb(rgb: np.ndarray, path: str):
     Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
 
 
+def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: ProcessingStats, args: argparse.Namespace, stacked_shape: Tuple[int, int, int], shifts: List[Tuple[float, float]], masters: Dict[str, Optional[np.ndarray]]) -> None:
+    """Populate FITS header with comprehensive metadata."""
+    from datetime import datetime
+
+    # Basic stacking info
+    header['NFRAMES'] = (len(frames), 'Number of stacked frames')
+    header['NREJECT'] = (stats.rejected_frames, 'Number of rejected frames')
+    header['COMBINED'] = (True, 'Image is a stacked combination')
+    header['STACKMTH'] = (args.stack_method.upper(), 'Stacking method (MEAN/MEDIAN)')
+
+    # Image dimensions
+    header['NAXIS'] = 3
+    header['NAXIS1'] = stacked_shape[1]  # Width
+    header['NAXIS2'] = stacked_shape[0]  # Height
+    header['NAXIS3'] = stacked_shape[2]  # Channels (3 for RGB)
+
+    # Processing software and version
+    header['CREATOR'] = ('astro_stack.py', 'Software that created this file')
+    header['DATE'] = (datetime.utcnow().isoformat(), 'UTC date/time of file creation')
+
+    # Calibration info
+    header['BIASCAL'] = (masters.get('bias') is not None, 'Bias calibration applied')
+    header['DARKCAL'] = (masters.get('dark') is not None, 'Dark calibration applied')
+    header['FLATCAL'] = (masters.get('flat') is not None, 'Flat calibration applied')
+
+    # Registration info
+    if not args.no_registration and len(shifts) > 0:
+        shifts_array = np.array(shifts)
+        header['REGISTER'] = (True, 'Image registration applied')
+        header['SHIFTX_M'] = (float(np.mean(shifts_array[:, 1])), 'Mean X shift in pixels')
+        header['SHIFTY_M'] = (float(np.mean(shifts_array[:, 0])), 'Mean Y shift in pixels')
+        header['SHIFTX_S'] = (float(np.std(shifts_array[:, 1])), 'Std dev of X shifts')
+        header['SHIFTY_S'] = (float(np.std(shifts_array[:, 0])), 'Std dev of Y shifts')
+        shift_mags = np.sqrt(shifts_array[:, 0]**2 + shifts_array[:, 1]**2)
+        header['SHIFTMAX'] = (float(np.max(shift_mags)), 'Maximum shift magnitude in pixels')
+    else:
+        header['REGISTER'] = (False, 'No image registration applied')
+
+    # Processing times
+    header['PROCTIME'] = (stats.total_time(), 'Total processing time in seconds')
+    header['QUALTIME'] = (stats.quality_time, 'Quality analysis time in seconds')
+    header['REGTIME'] = (stats.registration_time, 'Registration time in seconds')
+    header['STKTIME'] = (stats.stacking_time, 'Stacking time in seconds')
+
+    # Memory usage
+    if HAS_PSUTIL and stats.peak_memory_mb > 0:
+        header['PEAKMEM'] = (stats.peak_memory_mb, 'Peak memory usage in MB')
+
+    # Copy relevant metadata from first light frame
+    if frames:
+        first_header = frames[0].header
+        # Copy common FITS keywords if they exist
+        copy_keys = ['TELESCOP', 'INSTRUME', 'OBSERVER', 'OBJECT', 'DATE-OBS',
+                     'EXPTIME', 'CCD-TEMP', 'GAIN', 'OFFSET', 'XBINNING', 'YBINNING',
+                     'BAYERPAT', 'XPIXSZ', 'YPIXSZ', 'FOCALLEN', 'APTDIA']
+        for key in copy_keys:
+            if key in first_header:
+                header[key] = first_header[key]
+
+        # Calculate total exposure time
+        if 'EXPTIME' in first_header:
+            try:
+                total_exp = float(first_header['EXPTIME']) * len(frames)
+                header['TOTEXP'] = (total_exp, 'Total integrated exposure time in seconds')
+            except (ValueError, TypeError):
+                pass
+
+    # Add quality metrics if available
+    if frames and frames[0].metrics:
+        avg_metrics = {
+            'brightness': np.mean([f.metrics.get('brightness', 0) for f in frames if f.metrics]),
+            'contrast': np.mean([f.metrics.get('contrast', 0) for f in frames if f.metrics]),
+            'score': np.mean([f.metrics.get('score', 0) for f in frames if f.metrics]),
+        }
+        header['AVGBRITE'] = (float(avg_metrics['brightness']), 'Average frame brightness')
+        header['AVGCONTR'] = (float(avg_metrics['contrast']), 'Average frame contrast')
+        header['AVGSCORE'] = (float(avg_metrics['score']), 'Average quality score')
+
+
+def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str, verbose: bool = False) -> bool:
+    """
+    Attempt to plate-solve the stacked image and add WCS + object info to header.
+
+    Args:
+        image_data: Stacked image data (H, W, 3) or (3, H, W)
+        header: FITS header to update with WCS info
+        output_path: Path where FITS file is saved
+        verbose: Print detailed progress
+
+    Returns:
+        True if plate solving succeeded, False otherwise
+    """
+    if not HAS_ASTROMETRY_NET:
+        if verbose:
+            print("  [Plate solving] astroquery not available - skipping")
+        return False
+
+    try:
+        # Convert to grayscale luminance for plate solving
+        if image_data.ndim == 3:
+            if image_data.shape[0] == 3:
+                # (3, H, W) format
+                lum = 0.299 * image_data[0] + 0.587 * image_data[1] + 0.114 * image_data[2]
+            else:
+                # (H, W, 3) format
+                lum = 0.299 * image_data[:, :, 0] + 0.587 * image_data[:, :, 1] + 0.114 * image_data[:, :, 2]
+        else:
+            lum = image_data
+
+        # Create temporary FITS file with luminance for submission
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.fits', delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            # Save luminance to temporary file
+            tmp_hdu = fits.PrimaryHDU(lum.astype(np.float32))
+            # Copy relevant keywords that might help plate solving
+            for key in ['TELESCOP', 'INSTRUME', 'FOCALLEN', 'XPIXSZ', 'YPIXSZ', 'APTDIA']:
+                if key in header:
+                    tmp_hdu.header[key] = header[key]
+            tmp_hdu.writeto(tmp_path, overwrite=True)
+
+            if verbose:
+                print("  [Plate solving] Submitting to astrometry.net...")
+
+            # Initialize astrometry.net client
+            ast = AstrometryNet()
+
+            # Check for API key in environment or config
+            api_key = os.environ.get('ASTROMETRY_API_KEY')
+            if not api_key:
+                if verbose:
+                    print("  [Plate solving] No API key found. Set ASTROMETRY_API_KEY environment variable.")
+                    print("  [Plate solving] Get a key from: https://nova.astrometry.net/api_help")
+                return False
+
+            ast.api_key = api_key
+
+            # Estimate scale from header if available
+            scale_units = 'arcsecperpix'
+            scale_lower = None
+            scale_upper = None
+
+            if 'FOCALLEN' in header and 'XPIXSZ' in header:
+                try:
+                    focal_length_mm = float(header['FOCALLEN'])
+                    pixel_size_um = float(header['XPIXSZ'])
+                    # Calculate plate scale: pixel_size / focal_length * 206265 arcsec/radian
+                    plate_scale = (pixel_size_um / 1000.0) / focal_length_mm * 206265.0
+                    scale_lower = plate_scale * 0.9  # 10% tolerance
+                    scale_upper = plate_scale * 1.1
+                    if verbose:
+                        print(f"  [Plate solving] Estimated scale: {plate_scale:.2f} arcsec/pixel")
+                except (ValueError, ZeroDivisionError):
+                    pass
+
+            # Submit for solving
+            wcs_header = ast.solve_from_image(
+                tmp_path,
+                force_image_upload=True,
+                solve_timeout=300,  # 5 minute timeout
+                scale_units=scale_units,
+                scale_lower=scale_lower,
+                scale_upper=scale_upper,
+                publicly_visible='n'
+            )
+
+            if wcs_header:
+                if verbose:
+                    print("  [Plate solving] ✓ Success! Adding WCS to header...")
+
+                # Copy WCS keywords to main header
+                wcs_keywords = ['CTYPE1', 'CTYPE2', 'CRVAL1', 'CRVAL2', 'CRPIX1', 'CRPIX2',
+                               'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2', 'CROTA1', 'CROTA2',
+                               'EQUINOX', 'RADECSYS', 'CUNIT1', 'CUNIT2']
+                for key in wcs_keywords:
+                    if key in wcs_header:
+                        header[key] = wcs_header[key]
+
+                # Add plate solving success flag
+                header['PLTSOLVD'] = (True, 'Plate solving successful')
+
+                # Try to identify object using SIMBAD
+                if 'CRVAL1' in header and 'CRVAL2' in header:
+                    try:
+                        from astroquery.simbad import Simbad
+                        ra = float(header['CRVAL1'])
+                        dec = float(header['CRVAL2'])
+
+                        # Query SIMBAD for objects near the center
+                        custom_simbad = Simbad()
+                        custom_simbad.add_votable_fields('otype')
+                        result = custom_simbad.query_region(f"{ra} {dec}", radius='0d30m0s', frame='icrs')
+
+                        if result and len(result) > 0:
+                            # Get the brightest/most prominent object
+                            obj_name = result[0]['MAIN_ID']
+                            obj_type = result[0]['OTYPE']
+                            if verbose:
+                                print(f"  [Plate solving] Identified object: {obj_name} ({obj_type})")
+                            header['OBJECT'] = (str(obj_name), 'Object identified via SIMBAD')
+                            header['OBJTYPE'] = (str(obj_type), 'Object type from SIMBAD')
+                    except Exception as e:
+                        if verbose:
+                            print(f"  [Plate solving] Object identification failed: {e}")
+
+                return True
+            else:
+                if verbose:
+                    print("  [Plate solving] Failed to solve plate")
+                header['PLTSOLVD'] = (False, 'Plate solving attempted but failed')
+                return False
+
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+
+    except Exception as e:
+        if verbose:
+            print(f"  [Plate solving] Error: {e}")
+        header['PLTSOLVD'] = (False, f'Plate solving error: {str(e)[:50]}')
+        return False
+
+
 def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace, masters: Dict[str, Optional[np.ndarray]], stats: ProcessingStats):
     lights = [f for f in frames if f.type == 'light']
     if not lights:
@@ -1221,10 +1455,35 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # store as (3,H,W)
     data_out = np.transpose(stacked, (2, 0, 1)).astype(np.float32)
     hdu.data = data_out
-    hdu.header['NFRAMES'] = len(final)
-    hdu.header['NREJECT'] = len(lights) - len(final)
-    hdu.header['COMBINED'] = True
+
+    # Populate comprehensive FITS header
+    populate_fits_header(
+        header=hdu.header,
+        frames=final,
+        stats=stats,
+        args=args,
+        stacked_shape=stacked.shape,
+        shifts=shifts,
+        masters=masters
+    )
+
+    # Save FITS file
     hdu.writeto(output_path, overwrite=True)
+
+    # Attempt plate solving to add WCS and object identification
+    plate_solved = False
+    if not args.skip_plate_solve:
+        if args.verbose:
+            print("\n  Attempting plate solving...")
+        plate_solved = solve_plate(data_out, hdu.header, output_path, verbose=args.verbose)
+
+        # Re-save FITS with updated header if plate solving succeeded
+        if plate_solved:
+            hdu.writeto(output_path, overwrite=True)
+            if args.verbose:
+                print("  FITS header updated with WCS and object info")
+    elif args.verbose:
+        print("\n  Plate solving skipped (--skip-plate-solve)")
 
     # preview
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
@@ -1420,6 +1679,7 @@ def parse_args():
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     p.add_argument('--drizzle-scale', type=int, default=1, help='Integer drizzle scale factor (1 = disabled)')
     p.add_argument('--use-gpu', action='store_true', help='Use CuPy for available operations (experimental)')
+    p.add_argument('--skip-plate-solve', action='store_true', help='Skip plate solving (astrometry)')
     return p.parse_args()
 
 

@@ -60,10 +60,47 @@ pip install pytest
 pytest -q
 ```
 
+## FITS Header Metadata
+
+The stacker now populates comprehensive FITS headers with:
+- **Stacking metadata**: Number of frames, rejection count, stacking method
+- **Calibration info**: Which calibration frames were applied (bias/dark/flat)
+- **Registration statistics**: Mean/std of shifts, maximum shift magnitude
+- **Processing times**: Quality analysis, registration, and stacking times
+- **Quality metrics**: Average brightness, contrast, and quality scores
+- **Original metadata**: Copied from input frames (telescope, instrument, observer, exposure time, etc.)
+
+## Plate Solving (Astrometry)
+
+Automatic plate solving can be enabled to identify celestial objects and add WCS (World Coordinate System) information to the FITS header:
+
+**Requirements:**
+1. Install astroquery: `pip install astroquery`
+2. Get a free API key from [nova.astrometry.net](https://nova.astrometry.net/api_help)
+3. Set environment variable: `set ASTROMETRY_API_KEY=your_key_here` (Windows) or `export ASTROMETRY_API_KEY=your_key_here` (Linux/Mac)
+
+**Usage:**
+```bash
+# Plate solving is attempted by default (if astroquery is installed and API key is set)
+python astro_stack.py -d lights/ -o stacked.fits -v
+
+# Skip plate solving
+python astro_stack.py -d lights/ -o stacked.fits --skip-plate-solve
+```
+
+When plate solving succeeds:
+- WCS keywords are added (CRVAL1/2, CRPIX1/2, CD matrix, etc.)
+- Object name is identified via SIMBAD database (if available)
+- Field center coordinates (RA/DEC) are recorded
+
+This enables astronomical software (like DS9, PixInsight) to display coordinate grids and identify objects in your stacked image.
+
 New features included in this scaffold:
 - Malvar demosaicing (`--debayer-method malvar`)
 - White-balance options: `--white-balance grayworld|whitepatch|none`
 - Simple drizzle combining: `--drizzle-scale N`
 - Hot-pixel removal and gradient subtraction
 - Experimental CuPy hooks (`--use-gpu`) — requires CuPy installed and is best-effort
+- **NEW**: Comprehensive FITS header population with all metadata
+- **NEW**: Automatic plate solving and object identification
 

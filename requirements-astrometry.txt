@@ -1,0 +1,2 @@
+# Optional dependencies for plate solving (astrometry)
+astroquery>=0.4.6
