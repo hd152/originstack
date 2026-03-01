@@ -8,7 +8,8 @@ Features:
 - Registration (sub-pixel via phase correlation, fallback centroid)
 - Automatic cropping, hierarchical processing, preview generation
 - Intelligent background extraction (mesh-based sigma-clipped sky removal)
-- Several future features implemented in a basic form (white balance, hot pixel removal, gradient removal, optional GPU acceleration hooks)
+- GPU acceleration via CuPy (--use-gpu) with automatic CPU fallback
+- Several future features implemented in a basic form (white balance, hot pixel removal, gradient removal)
 
 Usage: python astro_stack.py -d INPUT_DIR -o OUTPUT.fits [options]
 """
@@ -80,6 +81,95 @@ try:
     HAS_ASTROMETRY_NET = True
 except Exception:
     HAS_ASTROMETRY_NET = False
+
+
+# ---------------------------------------------------------------------------
+# GPU / CPU abstraction layer
+# ---------------------------------------------------------------------------
+class GpuContext:
+    """Array-agnostic computation context.
+
+    Provides ``xp`` (numpy or cupy), ``xndimage`` and ``xsignal`` so that
+    every compute function can be written once and dispatched to GPU or CPU.
+    """
+
+    def __init__(self, use_gpu: bool = False):
+        self.active = False
+        self.xp = np
+        self.xndimage = ndimage
+        self.xsignal = None
+        self.device_name = "CPU"
+        self.vram_total_mb = 0.0
+        self.vram_free_mb = 0.0
+
+        if use_gpu and HAS_CUPY:
+            try:
+                cp.cuda.Device(0).compute_capability
+                self.xp = cp
+                import cupyx.scipy.ndimage as _cp_ndimage
+                self.xndimage = _cp_ndimage
+                try:
+                    import cupyx.scipy.signal as _cp_signal
+                    self.xsignal = _cp_signal
+                except ImportError:
+                    from scipy import signal as _signal
+                    self.xsignal = _signal
+                self.active = True
+                dev = cp.cuda.Device(0)
+                self.device_name = str(dev)
+                mem = dev.mem_info
+                self.vram_free_mb = mem[0] / 1024 ** 2
+                self.vram_total_mb = mem[1] / 1024 ** 2
+            except Exception as exc:
+                logging.warning("GPU init failed (%s), falling back to CPU.", exc)
+                self.xp = np
+                self.xndimage = ndimage
+                self.active = False
+
+        if self.xsignal is None:
+            from scipy import signal as _signal
+            self.xsignal = _signal
+
+    # --- transfer helpers ---------------------------------------------------
+    def to_device(self, arr: np.ndarray):
+        """Move *arr* to GPU.  No-op when running on CPU."""
+        if self.active:
+            return cp.asarray(arr)
+        return arr
+
+    def to_host(self, arr) -> np.ndarray:
+        """Move *arr* to CPU numpy.  No-op when already numpy."""
+        if self.active and hasattr(arr, 'get'):
+            return arr.get()
+        return np.asarray(arr)
+
+    def free_pool(self):
+        """Release CuPy's cached GPU memory."""
+        if self.active:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+
+    def available_vram_mb(self) -> float:
+        if self.active:
+            return cp.cuda.Device(0).mem_info[0] / 1024 ** 2
+        return 0.0
+
+    def print_status(self):
+        if self.active:
+            safe_print(f"  GPU: {self.device_name}")
+            safe_print(f"  VRAM: {self.vram_free_mb:.0f}/{self.vram_total_mb:.0f} MB free")
+        else:
+            safe_print(f"  Compute: CPU")
+
+
+_gpu: Optional[GpuContext] = None
+
+
+def get_gpu() -> GpuContext:
+    global _gpu
+    if _gpu is None:
+        _gpu = GpuContext(use_gpu=False)
+    return _gpu
 
 
 # Configuration constants
@@ -313,104 +403,91 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
     return stacked.astype(np.float32)
 
 
-def debayer_bilinear(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
-    # Expect raw shape (H, W) single channel
+def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
+    gpu = get_gpu()
+    xp = gpu.xp
+    raw = gpu.to_device(raw)
     H, W = raw.shape
-    out = np.zeros((H, W, 3), dtype=np.float32)
-    # patterns mapping
     pat = pattern.upper()
     if method == 'malvar':
         return debayer_malvar(raw, pattern=pat)
-    # simple assignment of RGGB layout
-    # row0 col0 = R for RGGB
-    if pat == 'RGGB':
-        r = raw[0::2, 0::2]
-        g1 = raw[0::2, 1::2]
-        g2 = raw[1::2, 0::2]
-        b = raw[1::2, 1::2]
-    else:
-        # fallback treat as RGGB
-        r = raw[0::2, 0::2]
-        g1 = raw[0::2, 1::2]
-        g2 = raw[1::2, 0::2]
-        b = raw[1::2, 1::2]
-    # Upsample each channel to full size with simple nearest-neighbor then blur (bilinear via convolution)
-    def upsample(ch, r_offset, c_offset):
-        outc = np.zeros_like(raw)
-        outc[r_offset::2, c_offset::2] = ch
-        # convolve with kernel to interpolate
-        kernel = np.array([[0.25, 0.5, 0.25], [0.5, 1.0, 0.5], [0.25, 0.5, 0.25]])
-        kernel = kernel / kernel.sum()
-        return ndimage.convolve(outc, kernel, mode='mirror')
+    r = raw[0::2, 0::2]
+    g1 = raw[0::2, 1::2]
+    g2 = raw[1::2, 0::2]
+    b = raw[1::2, 1::2]
 
+    def upsample(ch, r_offset, c_offset):
+        outc = xp.zeros_like(raw)
+        outc[r_offset::2, c_offset::2] = ch
+        kernel = xp.array([[0.25, 0.5, 0.25], [0.5, 1.0, 0.5], [0.25, 0.5, 0.25]],
+                          dtype=xp.float32)
+        kernel = kernel / kernel.sum()
+        return gpu.xndimage.convolve(outc, kernel, mode='mirror')
+
+    out = xp.zeros((H, W, 3), dtype=xp.float32)
     out[:, :, 0] = upsample(r, 0, 0)
     out[:, :, 1] = 0.5 * (upsample(g1, 0, 1) + upsample(g2, 1, 0))
     out[:, :, 2] = upsample(b, 1, 1)
     return out
 
 
-def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
-    """Malvar-He-Cutler demosaicing (simplified kernels).
-    This is a fast, approximate implementation suitable for most consumer cameras.
-    """
+def debayer_malvar(raw, pattern: str = 'RGGB'):
+    """Malvar-He-Cutler demosaicing (simplified kernels)."""
+    gpu = get_gpu()
+    xp = gpu.xp
+    raw = gpu.to_device(raw)
     H, W = raw.shape
-    out = np.zeros((H, W, 3), dtype=np.float32)
-    pat = pattern.upper()
-    # map Bayer to channel offsets (R,G/B layout assumed RGGB)
-    # We'll implement generic kernels by rotating base kernels depending on pattern
-    # Base kernels from Malvar et al. (simplified)
-    kG = np.array([[0, 0, -1, 0, 0], [0, 0, 2, 0, 0], [-1, 2, 4, 2, -1], [0, 0, 2, 0, 0], [0, 0, -1, 0, 0]])
-    kR = np.array([[0, 0, 1, 0, 0], [0, -2, 0, -2, 0], [1, 0, 4, 0, 1], [0, -2, 0, -2, 0], [0, 0, 1, 0, 0]])
+    kG = xp.array([[0, 0, -1, 0, 0], [0, 0, 2, 0, 0], [-1, 2, 4, 2, -1],
+                   [0, 0, 2, 0, 0], [0, 0, -1, 0, 0]], dtype=xp.float32) / 8.0
+    kR = xp.array([[0, 0, 1, 0, 0], [0, -2, 0, -2, 0], [1, 0, 4, 0, 1],
+                   [0, -2, 0, -2, 0], [0, 0, 1, 0, 0]], dtype=xp.float32) / 8.0
     kB = kR[::-1, ::-1]
-    kG = kG / 8.0
-    kR = kR / 8.0
-    kB = kB / 8.0
-    # apply kernels
-    out[:, :, 0] = ndimage.convolve(raw, kR, mode='mirror')
-    out[:, :, 1] = ndimage.convolve(raw, kG, mode='mirror')
-    out[:, :, 2] = ndimage.convolve(raw, kB, mode='mirror')
+    out = xp.zeros((H, W, 3), dtype=xp.float32)
+    out[:, :, 0] = gpu.xndimage.convolve(raw, kR, mode='mirror')
+    out[:, :, 1] = gpu.xndimage.convolve(raw, kG, mode='mirror')
+    out[:, :, 2] = gpu.xndimage.convolve(raw, kB, mode='mirror')
     return out
 
 
-def white_balance_grayworld(rgb: np.ndarray) -> np.ndarray:
-    # Simple gray-world white balance
-    img = rgb.copy().astype(np.float32)
+def white_balance_grayworld(rgb):
+    gpu = get_gpu()
+    xp = gpu.xp
+    img = xp.array(rgb, dtype=xp.float32, copy=True)
     mean = img.mean(axis=(0, 1))
     scale = mean.mean() / (mean + 1e-12)
-    return np.clip(img * scale, 0, None)
+    return xp.clip(img * scale, 0, None)
 
 
-def white_balance_whitepatch(rgb: np.ndarray, pct: float = None) -> np.ndarray:
+def white_balance_whitepatch(rgb, pct: float = None):
+    gpu = get_gpu()
+    xp = gpu.xp
     if pct is None:
         pct = Config.WHITE_PATCH_PERCENTILE
-    img = rgb.copy().astype(np.float32)
-    scales = []
-    for c in range(3):
-        scales.append(np.percentile(img[:, :, c], pct))
-    scales = np.array(scales)
+    img = xp.array(rgb, dtype=xp.float32, copy=True)
+    scales = xp.array([float(xp.percentile(img[:, :, c], pct)) for c in range(3)])
     scales = scales / (scales.mean() + 1e-12)
-    return np.clip(img / scales[np.newaxis, np.newaxis, :], 0, None)
+    return xp.clip(img / scales[None, None, :], 0, None)
 
 
-def remove_hot_pixels(img: np.ndarray, threshold: float = None) -> np.ndarray:
+def remove_hot_pixels(img, threshold: float = None):
+    gpu = get_gpu()
+    xp = gpu.xp
     if threshold is None:
         threshold = Config.HOT_PIXEL_THRESHOLD
-    # Hot pixel removal: compare to median and replace outliers by interpolated value
-    med = ndimage.median_filter(img, size=3)
+    med = gpu.xndimage.median_filter(img, size=3)
     diff = img - med
-    sigma = np.std(diff)
+    sigma = float(xp.std(diff))
     mask = diff > max(threshold, 5.0 * sigma)
-    if not np.any(mask):
+    if not bool(xp.any(mask)):
         return img
-    # replace using local median
-    img_fixed = img.copy()
+    img_fixed = xp.array(img, copy=True)
     img_fixed[mask] = med[mask]
     return img_fixed
 
 
-def background_gradient_subtract(img: np.ndarray) -> np.ndarray:
-    # Estimate background with a large Gaussian blur and subtract
-    blurred = ndimage.gaussian_filter(img, sigma=max(15, min(img.shape) // 20))
+def background_gradient_subtract(img):
+    gpu = get_gpu()
+    blurred = gpu.xndimage.gaussian_filter(img, sigma=max(15, min(img.shape) // 20))
     return img - blurred
 
 
@@ -909,6 +986,167 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int]) 
     return top, bottom, left, right
 
 
+def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
+                       verbose: bool = False) -> np.ndarray:
+    """Combine frames along axis 0 using iterative sigma-clipped mean.
+
+    For each output pixel the value from every frame is collected.  Values
+    more than *sigma* standard-deviations from the current mean are masked
+    and the mean is recomputed.  This effectively removes hot pixels,
+    cosmic rays, and satellite trails that appear in only a few frames —
+    the key benefit of dithered exposures.
+
+    Args:
+        data: Array of shape ``(N, H, W, C)`` (all aligned frames).
+        sigma: Rejection threshold in standard-deviations.
+        max_iters: Maximum clipping iterations.
+        verbose: Print per-iteration rejection statistics.
+
+    Returns:
+        Combined image of shape ``(H, W, C)``.
+    """
+    N = data.shape[0]
+    # Start with all pixels included
+    mask = np.ones(data.shape, dtype=bool)
+
+    for iteration in range(max_iters):
+        # Compute masked mean and std along frame axis
+        masked = np.where(mask, data, np.nan)
+        with np.errstate(all='ignore'):
+            mean = np.nanmean(masked, axis=0)
+            std = np.nanstd(masked, axis=0)
+
+        # Reject pixels farther than sigma * std from the mean
+        deviation = np.abs(data - mean[np.newaxis])
+        new_mask = mask & (deviation <= sigma * std[np.newaxis])
+
+        # Ensure at least 1 frame survives at every pixel
+        surviving = new_mask.sum(axis=0)
+        # Where all frames would be rejected, keep the original mask
+        all_rejected = surviving == 0
+        if np.any(all_rejected):
+            for frame_idx in range(N):
+                new_mask[frame_idx][all_rejected] = mask[frame_idx][all_rejected]
+
+        rejected_this_iter = int(mask.sum() - new_mask.sum())
+        mask = new_mask
+
+        if verbose:
+            total_pixels = mask.size
+            total_rejected = int((~mask).sum())
+            safe_print(f"    Iteration {iteration + 1}: rejected {rejected_this_iter} pixels "
+                       f"(total {total_rejected}/{total_pixels}, "
+                       f"{total_rejected / total_pixels * 100:.2f}%)")
+
+        if rejected_this_iter == 0:
+            break
+
+    # Final masked mean
+    masked = np.where(mask, data, np.nan)
+    with np.errstate(all='ignore'):
+        result = np.nanmean(masked, axis=0)
+
+    # Replace any remaining NaN with zero (shouldn't happen with the guard above)
+    np.nan_to_num(result, copy=False, nan=0.0)
+    return result.astype(np.float32)
+
+
+def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> Dict:
+    """Analyse registration shifts to detect dithering patterns.
+
+    Returns a dict with:
+      - ``is_dithered`` (bool)
+      - ``pattern`` (str): 'dithered', 'tracking_drift', or 'aligned'
+      - ``mean_magnitude`` (float): mean shift magnitude in pixels
+      - ``unique_positions`` (int): approx distinct integer pixel positions
+      - ``direction_spread_deg`` (float): std of shift angles in degrees
+      - ``autocorrelation`` (float): correlation between consecutive shift vectors
+    """
+    if len(shifts) < 3:
+        return {'is_dithered': False, 'pattern': 'aligned',
+                'mean_magnitude': 0.0, 'unique_positions': len(shifts),
+                'direction_spread_deg': 0.0, 'autocorrelation': 0.0}
+
+    sy = np.array([s[0] for s in shifts])
+    sx = np.array([s[1] for s in shifts])
+    mags = np.sqrt(sy ** 2 + sx ** 2)
+
+    mean_mag = float(np.mean(mags))
+
+    # Count approximately unique integer positions
+    int_positions = set((int(round(y)), int(round(x))) for y, x in shifts)
+    unique_positions = len(int_positions)
+
+    # Direction spread — std of angles (in degrees)
+    non_zero = mags > 0.5  # ignore near-zero shifts
+    if non_zero.sum() >= 3:
+        angles = np.degrees(np.arctan2(sy[non_zero], sx[non_zero]))
+        # Circular std: use the Mardia definition
+        sin_mean = np.mean(np.sin(np.radians(angles)))
+        cos_mean = np.mean(np.cos(np.radians(angles)))
+        R = np.sqrt(sin_mean ** 2 + cos_mean ** 2)
+        direction_spread = float(np.degrees(np.sqrt(-2.0 * np.log(max(R, 1e-12)))))
+    else:
+        direction_spread = 0.0
+
+    # Autocorrelation of consecutive shift vectors (low = random / dithered)
+    if len(shifts) >= 4:
+        dx = np.diff(sx)
+        dy = np.diff(sy)
+        if len(dx) >= 2:
+            autocorr_x = float(np.corrcoef(dx[:-1], dx[1:])[0, 1]) if np.std(dx) > 1e-6 else 0.0
+            autocorr_y = float(np.corrcoef(dy[:-1], dy[1:])[0, 1]) if np.std(dy) > 1e-6 else 0.0
+            autocorrelation = (autocorr_x + autocorr_y) / 2.0
+            if not np.isfinite(autocorrelation):
+                autocorrelation = 0.0
+        else:
+            autocorrelation = 0.0
+    else:
+        autocorrelation = 0.0
+
+    # Classification heuristics
+    all_near_zero = mean_mag < 1.0
+    is_random_direction = direction_spread > 40.0  # degrees
+    is_low_autocorr = abs(autocorrelation) < 0.5
+    has_many_positions = unique_positions >= len(shifts) * 0.5
+
+    if all_near_zero:
+        pattern = 'aligned'
+        is_dithered = False
+    elif is_random_direction and is_low_autocorr and has_many_positions:
+        pattern = 'dithered'
+        is_dithered = True
+    elif not is_random_direction or not is_low_autocorr:
+        pattern = 'tracking_drift'
+        is_dithered = False
+    else:
+        pattern = 'dithered'
+        is_dithered = True
+
+    result = {
+        'is_dithered': is_dithered,
+        'pattern': pattern,
+        'mean_magnitude': mean_mag,
+        'unique_positions': unique_positions,
+        'direction_spread_deg': direction_spread,
+        'autocorrelation': autocorrelation,
+    }
+
+    if verbose:
+        labels = {'dithered': 'Dithered (random offsets detected)',
+                  'tracking_drift': 'Tracking drift (systematic trend)',
+                  'aligned': 'Well-aligned (minimal offsets)'}
+        safe_print(f"\n  Dither analysis:")
+        safe_print(f"    Pattern: {labels.get(pattern, pattern)}")
+        safe_print(f"    Mean offset: {mean_mag:.1f} px")
+        safe_print(f"    Unique positions: {unique_positions}/{len(shifts)} frames")
+        if direction_spread > 0:
+            safe_print(f"    Direction spread: {direction_spread:.1f} deg")
+        safe_print(f"    Autocorrelation: {autocorrelation:.2f}")
+
+    return result
+
+
 def save_preview_rgb(rgb: np.ndarray, path: str):
     if Image is None or exposure is None:
         return
@@ -921,7 +1159,7 @@ def save_preview_rgb(rgb: np.ndarray, path: str):
     Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
 
 
-def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: ProcessingStats, args: argparse.Namespace, stacked_shape: Tuple[int, int, int], shifts: List[Tuple[float, float]], masters: Dict[str, Optional[np.ndarray]]) -> None:
+def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: ProcessingStats, args: argparse.Namespace, stacked_shape: Tuple[int, int, int], shifts: List[Tuple[float, float]], masters: Dict[str, Optional[np.ndarray]], dither_info: Optional[Dict] = None) -> None:
     """Populate FITS header with comprehensive metadata."""
     from datetime import datetime
 
@@ -929,7 +1167,10 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
     header['NFRAMES'] = (len(frames), 'Number of stacked frames')
     header['NREJECT'] = (stats.rejected_frames, 'Number of rejected frames')
     header['COMBINED'] = (True, 'Image is a stacked combination')
-    header['STACKMTH'] = (args.stack_method.upper(), 'Stacking method (MEAN/MEDIAN)')
+    header['STACKMTH'] = (args.stack_method.upper(), 'Stacking method (MEAN/MEDIAN/SIGMA_CLIP)')
+    if args.stack_method == 'sigma_clip':
+        header['REJSIGMA'] = (args.rejection_sigma, 'Sigma-clip rejection threshold')
+        header['REJITERS'] = (args.rejection_iters, 'Sigma-clip rejection iterations')
 
     # Image dimensions
     header['NAXIS'] = 3
@@ -996,6 +1237,13 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
         header['BGCLIP'] = (args.bg_clip_sigma, 'Background sigma-clip threshold')
     else:
         header['BGEXTR'] = (False, 'No background extraction applied')
+
+    # Dither analysis info
+    if dither_info is not None:
+        header['DITHERED'] = (dither_info['is_dithered'], 'Dithering detected in frame shifts')
+        header['DITHMAG'] = (round(dither_info['mean_magnitude'], 2), 'Mean dither magnitude in pixels')
+        header['DITHPOS'] = (dither_info['unique_positions'], 'Number of unique dither positions')
+        header['DITHPAT'] = (dither_info['pattern'], 'Detected shift pattern type')
 
     # Add quality metrics if available
     if frames and frames[0].metrics:
@@ -1467,14 +1715,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     shifts = []
     aligned_shapes = []
     tmp_files = []
-    # Prepare memmap for median stacking if requested
-    use_median = args.stack_method == 'median'
+    # Prepare memmap for median/sigma_clip stacking if requested
+    use_memmap = args.stack_method in ('median', 'sigma_clip')
     n = len(final)
     H, W = ref_lum.shape
-    # create temporary memmap if median
+    # create temporary memmap if median or sigma_clip
     memmap_path = None
     mem = None
-    if use_median:
+    if use_memmap:
         memmap_path = os.path.join(tempfile.gettempdir(), f'stack_{os.getpid()}.dat')
         mem = np.memmap(memmap_path, dtype='float32', mode='w+', shape=(n, H, W, 3))
 
@@ -1534,7 +1782,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         aligned = np.zeros_like(rgb)
         for c in range(3):
             aligned[:, :, c] = apply_shift(rgb[:, :, c], f.shift)
-        if use_median:
+        if use_memmap:
             mem[idx] = aligned
             mem.flush()
         else:
@@ -1589,6 +1837,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         print(f'  SUGGESTION: Try with --debug-registration to visualize registration')
         print(f'  Check PNG images in _registration_debug/ folder.')
     
+    # Dither analysis
+    dither_info = detect_dither(shifts, verbose=args.verbose)
+    if not args.no_registration and len(shifts) > 2:
+        print(f"\n  Dither analysis:")
+        print(f"    Pattern: {dither_info['pattern'].replace('_', ' ').title()}")
+        print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
+        print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
+        print(f"    Direction spread: {dither_info['direction_spread']:.1f}\u00b0")
+        if dither_info['is_dithered'] and args.stack_method == 'mean':
+            safe_print(f"    \u2139 Recommendation: Use --stack-method sigma_clip for best results with dithered data")
+
     # Phase 3: Stacking
     print_phase(3, "Stacking")
     phase_start = time.time()
@@ -1603,7 +1862,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
     # Crop & combine
-    if use_median:
+    if args.stack_method == 'sigma_clip':
+        cropped_data = mem[:, top:bottom, left:right, :]
+        print(f"  Sigma-clip rejection: sigma={args.rejection_sigma}, iters={args.rejection_iters}")
+        stacked = sigma_clip_combine(
+            cropped_data,
+            sigma=args.rejection_sigma,
+            max_iters=args.rejection_iters,
+            verbose=args.verbose
+        )
+        # cleanup memmap file
+        try:
+            del mem
+            os.remove(memmap_path)
+        except Exception:
+            pass
+    elif args.stack_method == 'median':
         stacked = np.median(mem[:, top:bottom, left:right, :], axis=0)
         # cleanup memmap file
         try:
@@ -1658,7 +1932,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         args=args,
         stacked_shape=stacked.shape,
         shifts=shifts,
-        masters=masters
+        masters=masters,
+        dither_info=dither_info
     )
 
     # Save FITS file
@@ -1730,6 +2005,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     print_header("Astrophotography FITS Stacker", "=")
     print(f"Input:  {directory}")
     print(f"Output: {output}")
+    get_gpu().print_status()
 
     # Detect hierarchical mode
     if not os.path.isdir(directory):
@@ -1868,7 +2144,11 @@ def parse_args():
     p.add_argument('--keep-intermediates', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true')
     p.add_argument('--debug-registration', action='store_true', help='Detailed registration diagnostics (implies -v)')
-    p.add_argument('--stack-method', choices=['mean', 'median'], default='mean')
+    p.add_argument('--stack-method', choices=['mean', 'median', 'sigma_clip'], default='mean')
+    p.add_argument('--rejection-sigma', type=float, default=3.0,
+                   help='Sigma threshold for pixel rejection in sigma_clip stacking (default: 3.0)')
+    p.add_argument('--rejection-iters', type=int, default=3,
+                   help='Number of clipping iterations for sigma_clip stacking (default: 3)')
     p.add_argument('--debayer-method', choices=['bilinear', 'malvar'], default='bilinear')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     p.add_argument('--drizzle-scale', type=int, default=1, help='Integer drizzle scale factor (1 = disabled)')
@@ -1890,6 +2170,9 @@ def main():
     # debug_registration implies verbose
     if args.debug_registration:
         args.verbose = True
+    # Initialise GPU context (module-level singleton)
+    global _gpu
+    _gpu = GpuContext(use_gpu=args.use_gpu)
     try:
         process_directory(args.directory, args.output, args)
     except Exception as e:
