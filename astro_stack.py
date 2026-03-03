@@ -181,12 +181,49 @@ class GpuContext:
             return cp.cuda.Device(0).mem_info[0] / 1024 ** 2
         return 0.0
 
+    def max_gpu_workers(self, per_worker_mb: float, reserve_mb: float = 512.0) -> int:
+        """Return max thread count that fits in VRAM, minimum 1."""
+        if not self.active:
+            return max(1, os.cpu_count() or 4)
+        avail = self.available_vram_mb() - reserve_mb
+        if avail <= 0 or per_worker_mb <= 0:
+            return 1
+        return max(1, int(avail / per_worker_mb))
+
+    def stream_context(self):
+        """Return a context manager that creates a per-thread CUDA stream."""
+        if self.active:
+            return _CudaStreamContext()
+        return _NullContext()
+
     def print_status(self):
         if self.active:
             safe_print(f"  GPU: {self.device_name}")
             safe_print(f"  VRAM: {self.vram_free_mb:.0f}/{self.vram_total_mb:.0f} MB free")
         else:
             safe_print(f"  Compute: CPU")
+
+
+class _CudaStreamContext:
+    """Context manager that creates a per-thread CUDA stream."""
+    def __enter__(self):
+        self._stream = cp.cuda.Stream(non_blocking=True)
+        self._stream.__enter__()
+        return self._stream
+
+    def __exit__(self, *exc):
+        self._stream.synchronize()
+        self._stream.__exit__(*exc)
+        return False
+
+
+class _NullContext:
+    """No-op context manager for CPU fallback."""
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
 
 
 _gpu: Optional[GpuContext] = None
@@ -203,6 +240,7 @@ def get_gpu() -> GpuContext:
 class Config:
     """Central configuration for magic numbers and thresholds."""
     HOT_PIXEL_THRESHOLD = 12.0
+    HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
     WHITE_PATCH_PERCENTILE = 99.5
     MAX_SHIFT_FRACTION = 0.1
     STAR_DETECTION_SIGMA = 5.0
@@ -222,6 +260,10 @@ class Config:
     STAR_MASK_MAX_STARS = 500  # Max stars for mask generation
     AFFINE_MAX_STARS = 80  # Max stars for affine matching
     AFFINE_MATCH_RADIUS = 10.0  # Max pixel distance for star matching
+    GPU_PHASE1_WORKER_MB = 250.0   # VRAM per thread for debayer+hotpix+wb
+    GPU_FFT_WORKER_MB = 800.0      # VRAM per thread for padded complex128 FFT
+    GPU_ALIGN_WORKER_MB = 250.0    # VRAM per thread for ndimage.shift on 3-ch image
+    GPU_VRAM_RESERVE_MB = 512.0    # Reserved for CuPy overhead / driver
 
 
 @dataclass
@@ -599,6 +641,74 @@ def remove_hot_pixels(img, threshold: float = None):
     return img_fixed
 
 
+def remove_hot_pixels_bayer(data: np.ndarray, threshold: float = None) -> np.ndarray:
+    """Detect and replace hot pixels on raw Bayer data per sub-channel.
+
+    Each 2x2 Bayer sub-channel (R, G1, G2, B) is processed independently,
+    so single-color hot pixels are detected at full strength — unlike
+    luminance-based detection which dilutes them by 70-89%.
+
+    Uses MAD-based sigma (robust to outliers) instead of std, preventing
+    hot pixels from inflating the noise estimate and hiding themselves.
+    """
+    if threshold is None:
+        threshold = Config.HOT_PIXEL_BAYER_THRESHOLD
+    if data.ndim != 2:
+        return data
+    result = data.astype(np.float32, copy=True)
+    for dy in range(2):
+        for dx in range(2):
+            sub = result[dy::2, dx::2]
+            med = ndimage.median_filter(sub, size=3)
+            diff = sub - med
+            mad = np.median(np.abs(diff))
+            sigma = mad * 1.4826  # MAD to Gaussian sigma
+            if sigma < 1e-6:
+                continue
+            mask = diff > threshold * sigma
+            if np.any(mask):
+                sub[mask] = med[mask]
+                result[dy::2, dx::2] = sub
+    return result
+
+
+def build_hot_pixel_map(dark: np.ndarray, sigma_threshold: float = 5.0) -> np.ndarray:
+    """Build a boolean hot pixel map from an unsmoothed dark frame.
+
+    Detects pixels with dark current significantly above the background.
+    Must be called BEFORE Gaussian smoothing of the master dark.
+    """
+    dark_f = dark.astype(np.float32)
+    med = np.median(dark_f)
+    # Use MAD-based sigma for robustness against the hot pixels themselves
+    mad = np.median(np.abs(dark_f - med))
+    sigma = mad * 1.4826  # MAD to Gaussian sigma conversion
+    if sigma < 1e-6:
+        sigma = float(np.std(dark_f))
+    return dark_f > (med + sigma_threshold * sigma)
+
+
+def apply_hot_pixel_map_bayer(data: np.ndarray, hot_map: np.ndarray) -> np.ndarray:
+    """Replace hot pixels in Bayer data using same-color median neighbors.
+
+    Processes each Bayer sub-channel (R, G1, G2, B) independently so the
+    3x3 median filter only uses same-color pixels (equivalent to 6x6 on
+    the full grid).  This preserves color accuracy.
+    """
+    if hot_map is None or not np.any(hot_map):
+        return data
+    result = data.astype(np.float32, copy=True)
+    for dy in range(2):
+        for dx in range(2):
+            sub = result[dy::2, dx::2]
+            mask = hot_map[dy::2, dx::2]
+            if np.any(mask):
+                med = ndimage.median_filter(sub, size=3)
+                sub[mask] = med[mask]
+                result[dy::2, dx::2] = sub
+    return result
+
+
 def background_gradient_subtract(img):
     gpu = get_gpu()
     blurred = gpu.xndimage.gaussian_filter(img, sigma=max(15, min(img.shape) // 20))
@@ -748,7 +858,7 @@ def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
     """Non-linear arcsinh stretch, ideal for astrophotography previews."""
     if factor is None:
         factor = Config.ARCSINH_STRETCH_FACTOR
-    lo = np.percentile(img, 0.5)
+    lo = max(np.percentile(img, 0.5), 0.0)
     hi = np.percentile(img, 99.5)
     norm = np.clip((img - lo) / (hi - lo + 1e-12), 0, 1)
     stretched = np.arcsinh(norm * factor) / np.arcsinh(factor)
@@ -809,24 +919,31 @@ def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
     Uses cubic spline interpolation (order=3) for subpixel accuracy.
     With accurate registration (full-resolution FFT cross-correlation),
     subpixel shifts preserve detail better than integer rounding.
+    Dispatches to GPU (cupyx.scipy.ndimage) when available.
     """
+    gpu = get_gpu()
+    xp = gpu.xp
+    _ndimage = gpu.xndimage
+    img_d = gpu.to_device(img)
     if transform is not None:
         matrix = transform.params
-        result = np.zeros_like(img)
-        for c in range(img.shape[2]):
-            result[:, :, c] = ndimage.affine_transform(
-                img[:, :, c], matrix[:2, :2], offset=matrix[:2, 2],
+        mat_d = xp.asarray(matrix[:2, :2]) if gpu.active else matrix[:2, :2]
+        off_d = xp.asarray(matrix[:2, 2]) if gpu.active else matrix[:2, 2]
+        result = xp.zeros_like(img_d)
+        for c in range(img_d.shape[2]):
+            result[:, :, c] = _ndimage.affine_transform(
+                img_d[:, :, c], mat_d, offset=off_d,
                 order=3, mode='constant', cval=0.0
             )
-        return result
+        return gpu.to_host(result)
     elif shift is not None:
-        result = np.zeros_like(img)
-        for c in range(img.shape[2]):
-            result[:, :, c] = ndimage.shift(
-                img[:, :, c], shift=shift, order=3,
+        result = xp.zeros_like(img_d)
+        for c in range(img_d.shape[2]):
+            result[:, :, c] = _ndimage.shift(
+                img_d[:, :, c], shift=shift, order=3,
                 mode='constant', cval=0.0, prefilter=True
             )
-        return result
+        return gpu.to_host(result)
     return img
 
 
@@ -980,7 +1097,6 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
         # Independent per-channel subtraction for chromatic gradients
         for c in range(3):
             subtracted = rgb[:, :, c] - bg_channels[c]
-            np.clip(subtracted, 0, None, out=subtracted)
             result[:, :, c] = subtracted
             if verbose:
                 safe_print(f"    {channel_names[c]}: bg_median="
@@ -1010,7 +1126,6 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
             scale = ch_bg_median / lum_bg_median if lum_bg_median > 1e-6 else 1.0
             bg_channel = bg_lum * scale
             subtracted = channel - bg_channel
-            np.clip(subtracted, 0, None, out=subtracted)
             result[:, :, c] = subtracted
             if verbose:
                 safe_print(f"    {channel_names[c]}: bg_median={ch_bg_median:.1f}, "
@@ -1256,34 +1371,41 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     # FFT cross-correlation at full resolution with zero-padding.
     # No downscaling or windowing — these cause multi-pixel registration
     # errors that broaden stars in the stacked result.
+    # Uses GPU (CuPy) when available for ~10x speedup on large images.
     try:
-        ref_norm = (ref - np.mean(ref)).astype(np.float64)
-        img_norm = (img - np.mean(img)).astype(np.float64)
+        gpu = get_gpu()
+        xp = gpu.xp
+
+        ref_norm = xp.asarray((ref - np.mean(ref)), dtype=xp.float64)
+        img_norm = xp.asarray((img - np.mean(img)), dtype=xp.float64)
 
         h, w = ref_norm.shape
         pad_h, pad_w = 2 * h, 2 * w
-        F_ref = np.fft.rfft2(ref_norm, s=(pad_h, pad_w))
-        F_img = np.fft.rfft2(img_norm, s=(pad_h, pad_w))
-        corr = np.fft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w))
+        F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
+        F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
+        corr = xp.fft.irfft2(F_ref * xp.conj(F_img), s=(pad_h, pad_w))
+        del F_ref, F_img, ref_norm, img_norm  # free VRAM immediately
 
-        peak = np.unravel_index(np.argmax(corr), corr.shape)
+        peak_flat = int(xp.argmax(corr))
+        peak = (peak_flat // corr.shape[1], peak_flat % corr.shape[1])
         dy = peak[0] if peak[0] < h else peak[0] - pad_h
         dx = peak[1] if peak[1] < w else peak[1] - pad_w
 
         # Parabolic subpixel refinement (wrap-safe)
         py, px = peak
         sub_y = sub_x = 0.0
-        vc = corr[py, px]
-        vm = corr[(py - 1) % pad_h, px]
-        vp = corr[(py + 1) % pad_h, px]
+        vc = float(corr[py, px])
+        vm = float(corr[(py - 1) % pad_h, px])
+        vp = float(corr[(py + 1) % pad_h, px])
         denom = 2.0 * (2.0 * vc - vm - vp)
         if abs(denom) > 1e-12:
             sub_y = max(-0.5, min(0.5, (vm - vp) / denom))
-        vm = corr[py, (px - 1) % pad_w]
-        vp = corr[py, (px + 1) % pad_w]
+        vm = float(corr[py, (px - 1) % pad_w])
+        vp = float(corr[py, (px + 1) % pad_w])
         denom = 2.0 * (2.0 * vc - vm - vp)
         if abs(denom) > 1e-12:
             sub_x = max(-0.5, min(0.5, (vm - vp) / denom))
+        del corr  # free VRAM
 
         shift_y = float(dy + sub_y)
         shift_x = float(dx + sub_x)
@@ -1598,6 +1720,7 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear'):
         out = np.zeros_like(rgb)
         for c in range(3):
             lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
+            lo = max(lo, 0.0)  # Don't let negative noise expand the display range
             out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
     Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
@@ -1901,6 +2024,15 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         if not np.isfinite(data).all():
             return {'error': 'calibration produced non-finite values'}
         data = np.clip(data, 0, None)
+        # Apply dark-derived hot pixel map on Bayer data (before debayering)
+        if data.ndim == 2 and masters.get('hot_pixel_map') is not None:
+            hot_map = masters['hot_pixel_map']
+            if hot_map.shape == data.shape:
+                data = apply_hot_pixel_map_bayer(data, hot_map)
+        # Per-sub-channel Bayer hot pixel detection (catches hot pixels
+        # not in the dark frame: intermittent defects, cosmic rays, etc.)
+        if data.ndim == 2:
+            data = remove_hot_pixels_bayer(data)
     except Exception as e:
         return {'error': f'calibration error: {e}'}
 
@@ -2067,8 +2199,56 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 os.remove(p)
             except Exception:
                 pass
+    elif n >= 2:
+        # --- Thread-parallel path (default for both CPU and GPU) ---
+        # ThreadPoolExecutor shares memory: no master serialization, no IPC
+        # overhead, and _star_sources are preserved for affine registration.
+        # GPU: VRAM-limited workers with per-thread CUDA streams.
+        gpu = get_gpu()
+        if gpu.active:
+            n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
+                                                Config.GPU_VRAM_RESERVE_MB), n)
+        else:
+            n_workers = min(os.cpu_count() or 4, n)
+        print(f"  Processing {n} frames with {n_workers} threads"
+              f"{' (GPU)' if gpu.active else ''}...")
+
+        def _thread_process_frame(i, f):
+            with gpu.stream_context():
+                result = _process_single_frame(
+                    f.path, f.header, masters, args.debayer_method, args.white_balance)
+            if result.get('error'):
+                return i, None, result['error']
+            mem_rgb[i] = result['rgb']
+            mem_lum[i] = result['lum']
+            return i, result['metrics'], None
+
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_thread_process_frame, i, f): i
+                       for i, f in enumerate(lights)}
+            for future in tqdm(as_completed(futures), total=n,
+                               desc="  Processing", unit="frame",
+                               disable=args.verbose):
+                i, metrics, error = future.result()
+                f = lights[i]
+                if error:
+                    f.accepted = False
+                    f.metrics = {'error': error}
+                    rejected_reasons[f.path] = error
+                    stats.add_error(f.path, error)
+                    if args.verbose:
+                        print(f'  REJECT {os.path.basename(f.path)}: {error}')
+                else:
+                    f.metrics = metrics
+                    if args.verbose:
+                        m = f.metrics
+                        print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
+                              f'stars={m["star_count"]}, FWHM={m.get("fwhm",0):.1f}, '
+                              f'score={m["score"]:.1f}')
+        mem_rgb.flush()
+        mem_lum.flush()
     else:
-        # --- Sequential path ---
+        # --- Sequential path (single frame) ---
         print(f"  Processing {n} frames sequentially...")
         frame_iter = tqdm(enumerate(lights), total=n,
                           desc="  Processing", unit="frame",
@@ -2234,32 +2414,38 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         if orig_idx == best_idx or args.no_registration:
             return j, (0.0, 0.0), None
 
-        lum = np.array(mem_lum[orig_idx])
+        with gpu.stream_context():
+            lum = np.array(mem_lum[orig_idx])
 
-        # Try affine registration first if enabled
-        affine_tf = None
-        if getattr(args, 'affine', False) and HAS_SKIMAGE_TRANSFORM:
-            img_stars = f.metrics.get('_star_sources')
-            sy, sx = calculate_shift(ref_lum, lum, verbose=False,
-                                     skip_phase_cc=args.skip_phase_correlation)
-            affine_tf = match_stars_affine(ref_stars, img_stars,
-                                           initial_shift=(sy, sx))
-            if affine_tf is not None:
-                tx = affine_tf.params[0, 2]
-                ty = affine_tf.params[1, 2]
-                return j, (ty, tx), affine_tf
+            # Try affine registration first if enabled
+            affine_tf = None
+            if getattr(args, 'affine', False) and HAS_SKIMAGE_TRANSFORM:
+                img_stars = f.metrics.get('_star_sources')
+                sy, sx = calculate_shift(ref_lum, lum, verbose=False,
+                                         skip_phase_cc=args.skip_phase_correlation)
+                affine_tf = match_stars_affine(ref_stars, img_stars,
+                                               initial_shift=(sy, sx))
+                if affine_tf is not None:
+                    tx = affine_tf.params[0, 2]
+                    ty = affine_tf.params[1, 2]
+                    return j, (ty, tx), affine_tf
 
-        # Translation-only registration
-        sy, sx = calculate_shift(
-            ref_lum, lum, verbose=args.verbose,
-            debug=args.debug_registration,
-            frame_name=os.path.splitext(os.path.basename(f.path))[0],
-            skip_phase_cc=args.skip_phase_correlation)
-        if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
-            sx, sy = 0.0, 0.0
-        return j, (sy, sx), None
+            # Translation-only registration
+            sy, sx = calculate_shift(
+                ref_lum, lum, verbose=args.verbose,
+                debug=args.debug_registration,
+                frame_name=os.path.splitext(os.path.basename(f.path))[0],
+                skip_phase_cc=args.skip_phase_correlation)
+            if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
+                sx, sy = 0.0, 0.0
+            return j, (sy, sx), None
 
-    n_reg_workers = min(os.cpu_count() or 4, len(final))
+    gpu = get_gpu()
+    if gpu.active:
+        n_reg_workers = min(gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB,
+                                                Config.GPU_VRAM_RESERVE_MB), len(final))
+    else:
+        n_reg_workers = min(os.cpu_count() or 4, len(final))
     with ThreadPoolExecutor(max_workers=n_reg_workers) as executor:
         futures = {
             executor.submit(_register_one_frame, j, f, orig_idx): j
@@ -2359,13 +2545,20 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         mem_aligned = np.memmap(mm_aligned_path, dtype='float32', mode='w+',
                                 shape=(n_final, crop_h, crop_w, C))
 
-        def _align_one_frame(j):
-            orig_idx = final_indices[j]
-            rgb = np.array(mem_rgb[orig_idx])
-            aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
-            mem_aligned[j] = aligned[top:bottom, left:right, :]
+        gpu = get_gpu()
 
-        n_align_workers = min(os.cpu_count() or 4, n_final)
+        def _align_one_frame(j):
+            with gpu.stream_context():
+                orig_idx = final_indices[j]
+                rgb = np.array(mem_rgb[orig_idx])
+                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
+                mem_aligned[j] = aligned[top:bottom, left:right, :]
+
+        if gpu.active:
+            n_align_workers = min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
+                                                      Config.GPU_VRAM_RESERVE_MB), n_final)
+        else:
+            n_align_workers = min(os.cpu_count() or 4, n_final)
         with ThreadPoolExecutor(max_workers=n_align_workers) as executor:
             futures = {executor.submit(_align_one_frame, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
@@ -2396,13 +2589,20 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
         total_weight = 0.0
 
-        def _align_and_crop(j):
-            orig_idx = final_indices[j]
-            rgb = np.array(mem_rgb[orig_idx])
-            aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
-            return j, aligned[top:bottom, left:right, :]
+        gpu = get_gpu()
 
-        n_mean_workers = min(os.cpu_count() or 4, n_final)
+        def _align_and_crop(j):
+            with gpu.stream_context():
+                orig_idx = final_indices[j]
+                rgb = np.array(mem_rgb[orig_idx])
+                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
+                return j, aligned[top:bottom, left:right, :]
+
+        if gpu.active:
+            n_mean_workers = min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
+                                                     Config.GPU_VRAM_RESERVE_MB), n_final)
+        else:
+            n_mean_workers = min(os.cpu_count() or 4, n_final)
         with ThreadPoolExecutor(max_workers=n_mean_workers) as executor:
             futures = {executor.submit(_align_and_crop, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
@@ -2613,6 +2813,17 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames → {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
         else:
             masters['flat'] = None
+
+        # Build hot pixel map from unsmoothed dark BEFORE smoothing.
+        # Dark smoothing destroys per-pixel hot pixel information, so we
+        # capture it first for Bayer-level correction in each light frame.
+        masters['hot_pixel_map'] = None
+        if masters.get('dark') is not None:
+            hot_map = build_hot_pixel_map(masters['dark'])
+            n_hot = int(np.sum(hot_map))
+            if n_hot > 0:
+                masters['hot_pixel_map'] = hot_map
+                safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
 
         # Smooth master calibration frames to reduce pixel-level noise.
         # With few calibration frames (especially 1), per-pixel noise is as high
