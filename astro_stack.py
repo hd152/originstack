@@ -25,7 +25,7 @@ import sys
 import tempfile
 import time
 import logging
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional
 
@@ -696,39 +696,46 @@ def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
         logging.warning("pywt not installed, skipping wavelet denoise")
         return img
     result = np.empty_like(img)
-    for c in range(img.shape[2]):
+    h, w = img.shape[0], img.shape[1]
+
+    def _denoise_channel(c):
         channel = img[:, :, c].astype(np.float64)
         max_level = pywt.dwt_max_level(min(channel.shape), pywt.Wavelet(wavelet).dec_len)
         use_levels = min(levels, max_level)
         if use_levels < 1:
-            result[:, :, c] = channel
-            continue
+            return c, channel
         coeffs = pywt.wavedec2(channel, wavelet, level=use_levels)
-        # Estimate noise from finest HH detail coefficients
         detail_hh = coeffs[-1][-1]
         sigma_noise = np.median(np.abs(detail_hh)) / 0.6745
         threshold = threshold_factor * sigma_noise
-        # Soft-threshold detail coefficients, keep approximation
         new_coeffs = [coeffs[0]]
         for detail_level in coeffs[1:]:
             new_coeffs.append(tuple(
                 pywt.threshold(d, threshold, mode='soft') for d in detail_level
             ))
         reconstructed = pywt.waverec2(new_coeffs, wavelet)
-        result[:, :, c] = reconstructed[:img.shape[0], :img.shape[1]]
+        return c, reconstructed[:h, :w]
+
+    with ThreadPoolExecutor(max_workers=img.shape[2]) as executor:
+        for c, ch_result in executor.map(_denoise_channel, range(img.shape[2])):
+            result[:, :, c] = ch_result
     return np.clip(result, 0, None).astype(np.float32)
 
 
 def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
     """Local normalization to remove flat-field residuals and vignetting."""
     result = np.empty_like(img)
-    for c in range(img.shape[2]):
+
+    def _normalize_channel(c):
         channel = img[:, :, c].astype(np.float64)
         local_mean = ndimage.gaussian_filter(channel, sigma=sigma)
         local_sq_mean = ndimage.gaussian_filter(channel ** 2, sigma=sigma)
         local_std = np.sqrt(np.maximum(local_sq_mean - local_mean ** 2, 0))
-        normalized = (channel - local_mean) / (local_std + 1e-12)
-        result[:, :, c] = normalized
+        return c, (channel - local_mean) / (local_std + 1e-12)
+
+    with ThreadPoolExecutor(max_workers=img.shape[2]) as executor:
+        for c, ch_result in executor.map(_normalize_channel, range(img.shape[2])):
+            result[:, :, c] = ch_result
     # Re-scale to original data range (positive values)
     result = result - result.min()
     orig_max = np.max(img)
@@ -939,13 +946,18 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
     """
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
-    # Estimate per-channel backgrounds (passing star mask for exclusion)
-    bg_channels = []
-    for c in range(3):
-        bg = extract_background(rgb[:, :, c], mesh_size=mesh_size,
-                                filter_size=filter_size, clip_sigma=clip_sigma,
-                                star_mask=star_mask)
-        bg_channels.append(bg)
+    # Estimate per-channel backgrounds in parallel (passing star mask for exclusion)
+    bg_channels = [None, None, None]
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(extract_background, rgb[:, :, c],
+                            mesh_size=mesh_size, filter_size=filter_size,
+                            clip_sigma=clip_sigma, star_mask=star_mask): c
+            for c in range(3)
+        }
+        for future in as_completed(futures):
+            c = futures[future]
+            bg_channels[c] = future.result()
 
     # Check for chromatic gradient by correlating channel backgrounds
     use_per_channel = False
@@ -1447,18 +1459,26 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
 
+    # Build list of tile coordinates, then process in parallel
+    tile_coords = []
     for ty_idx in range(n_tiles_y):
         ty = ty_idx * tile_size
         ty_end = min(ty + tile_size, H)
         for tx_idx in range(n_tiles_x):
             tx = tx_idx * tile_size
             tx_end = min(tx + tile_size, W)
+            tile_coords.append((ty, ty_end, tx, tx_end))
 
-            # Copy tile from (possibly memmap-backed) data into contiguous RAM
-            tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-            result[ty:ty_end, tx:tx_end, :] = _sigma_clip_tile(
-                tile, sigma, max_iters, weights, winsorize
-            )
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize)
+
+    n_tile_workers = min(os.cpu_count() or 4, len(tile_coords))
+    with ThreadPoolExecutor(max_workers=n_tile_workers) as executor:
+        for coords, tile_result in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
 
     if verbose:
         safe_print(f"    Tiled sigma-clip: {n_tiles_y * n_tiles_x} tiles of "
@@ -2205,70 +2225,66 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Get reference star positions for affine registration
     ref_stars = best.metrics.get('_star_sources')
 
-    shifts = []
-    transforms = []  # For affine mode
+    shifts = [None] * len(final)
+    transforms = [None] * len(final)  # For affine mode
     print(f"  Calculating shifts for {len(final)} frames...")
-    reg_iter = tqdm(zip(final, final_indices), total=len(final),
-                    desc="  Registering", unit="frame",
-                    disable=args.verbose)
 
-    for f, orig_idx in reg_iter:
-        if orig_idx == best_idx:
-            f.shift = (0.0, 0.0)
-            shifts.append(f.shift)
-            transforms.append(None)
-            continue
-
-        if args.no_registration:
-            f.shift = (0.0, 0.0)
-            shifts.append(f.shift)
-            transforms.append(None)
-            continue
+    def _register_one_frame(j, f, orig_idx):
+        """Compute registration for a single frame (thread-safe, reads only)."""
+        if orig_idx == best_idx or args.no_registration:
+            return j, (0.0, 0.0), None
 
         lum = np.array(mem_lum[orig_idx])
 
         # Try affine registration first if enabled
-        affine_transform = None
+        affine_tf = None
         if getattr(args, 'affine', False) and HAS_SKIMAGE_TRANSFORM:
             img_stars = f.metrics.get('_star_sources')
-            # Get initial translation estimate for better star matching
             sy, sx = calculate_shift(ref_lum, lum, verbose=False,
                                      skip_phase_cc=args.skip_phase_correlation)
-            affine_transform = match_stars_affine(ref_stars, img_stars,
-                                                  initial_shift=(sy, sx))
-            if affine_transform is not None:
-                # Extract translation component for shift stats
-                tx = affine_transform.params[0, 2]
-                ty = affine_transform.params[1, 2]
-                rot_deg = np.degrees(np.arctan2(affine_transform.params[1, 0],
-                                                affine_transform.params[0, 0]))
-                f.shift = (ty, tx)
-                if args.verbose:
+            affine_tf = match_stars_affine(ref_stars, img_stars,
+                                           initial_shift=(sy, sx))
+            if affine_tf is not None:
+                tx = affine_tf.params[0, 2]
+                ty = affine_tf.params[1, 2]
+                return j, (ty, tx), affine_tf
+
+        # Translation-only registration
+        sy, sx = calculate_shift(
+            ref_lum, lum, verbose=args.verbose,
+            debug=args.debug_registration,
+            frame_name=os.path.splitext(os.path.basename(f.path))[0],
+            skip_phase_cc=args.skip_phase_correlation)
+        if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
+            sx, sy = 0.0, 0.0
+        return j, (sy, sx), None
+
+    n_reg_workers = min(os.cpu_count() or 4, len(final))
+    with ThreadPoolExecutor(max_workers=n_reg_workers) as executor:
+        futures = {
+            executor.submit(_register_one_frame, j, f, orig_idx): j
+            for j, (f, orig_idx) in enumerate(zip(final, final_indices))
+        }
+        for future in tqdm(as_completed(futures), total=len(final),
+                           desc="  Registering", unit="frame",
+                           disable=args.verbose):
+            j, shift_val, transform_val = future.result()
+            shifts[j] = shift_val
+            transforms[j] = transform_val
+            final[j].shift = shift_val
+            if args.verbose:
+                f = final[j]
+                if transform_val is not None:
+                    tx, ty = shift_val[1], shift_val[0]
+                    rot_deg = np.degrees(np.arctan2(transform_val.params[1, 0],
+                                                    transform_val.params[0, 0]))
                     print(f'    {os.path.basename(f.path)}: affine shift=({tx:+.1f}, '
                           f'{ty:+.1f}) px, rotation={rot_deg:+.3f} deg')
-            else:
-                if args.verbose:
-                    print(f'    {os.path.basename(f.path)}: affine matching failed, '
-                          f'falling back to translation')
-
-        if affine_transform is None:
-            # Translation-only registration
-            sy, sx = calculate_shift(
-                ref_lum, lum, verbose=args.verbose,
-                debug=args.debug_registration,
-                frame_name=os.path.splitext(os.path.basename(f.path))[0],
-                skip_phase_cc=args.skip_phase_correlation)
-            if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
-                print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
-                sx, sy = 0.0, 0.0
-            f.shift = (sy, sx)
-            if args.verbose:
-                mag = np.sqrt(sy**2 + sx**2)
-                print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
-                      f'magnitude={mag:.2f} px')
-
-        shifts.append(f.shift)
-        transforms.append(affine_transform)
+                elif shift_val != (0.0, 0.0):
+                    sy, sx = shift_val
+                    mag = np.sqrt(sy**2 + sx**2)
+                    print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
+                          f'magnitude={mag:.2f} px')
 
     stats.registration_time = time.time() - phase_start
 
@@ -2343,13 +2359,19 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         mem_aligned = np.memmap(mm_aligned_path, dtype='float32', mode='w+',
                                 shape=(n_final, crop_h, crop_w, C))
 
-        align_iter = tqdm(range(n_final), desc="  Aligning", unit="frame",
-                          disable=args.verbose)
-        for j in align_iter:
+        def _align_one_frame(j):
             orig_idx = final_indices[j]
             rgb = np.array(mem_rgb[orig_idx])
             aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
             mem_aligned[j] = aligned[top:bottom, left:right, :]
+
+        n_align_workers = min(os.cpu_count() or 4, n_final)
+        with ThreadPoolExecutor(max_workers=n_align_workers) as executor:
+            futures = {executor.submit(_align_one_frame, j): j for j in range(n_final)}
+            for future in tqdm(as_completed(futures), total=n_final,
+                               desc="  Aligning", unit="frame",
+                               disable=args.verbose):
+                future.result()  # propagate exceptions
         mem_aligned.flush()
 
         if args.stack_method == 'sigma_clip':
@@ -2370,20 +2392,26 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         except Exception:
             pass
     else:
-        # Weighted mean combine — streaming, no aligned memmap needed
+        # Weighted mean combine — align in parallel, accumulate as results arrive
         acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
         total_weight = 0.0
 
-        mean_iter = tqdm(range(n_final), desc="  Stacking", unit="frame",
-                         disable=args.verbose)
-        for j in mean_iter:
+        def _align_and_crop(j):
             orig_idx = final_indices[j]
             rgb = np.array(mem_rgb[orig_idx])
             aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
-            cropped = aligned[top:bottom, left:right, :]
-            w = float(weights[j])
-            acc += cropped.astype(np.float64) * w
-            total_weight += w
+            return j, aligned[top:bottom, left:right, :]
+
+        n_mean_workers = min(os.cpu_count() or 4, n_final)
+        with ThreadPoolExecutor(max_workers=n_mean_workers) as executor:
+            futures = {executor.submit(_align_and_crop, j): j for j in range(n_final)}
+            for future in tqdm(as_completed(futures), total=n_final,
+                               desc="  Stacking", unit="frame",
+                               disable=args.verbose):
+                j, cropped = future.result()
+                w = float(weights[j])
+                acc += cropped.astype(np.float64) * w
+                total_weight += w
 
         stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
 
