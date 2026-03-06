@@ -927,8 +927,15 @@ def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
     img_d = gpu.to_device(img)
     if transform is not None:
         matrix = transform.params
-        mat_d = xp.asarray(matrix[:2, :2]) if gpu.active else matrix[:2, :2]
-        off_d = xp.asarray(matrix[:2, 2]) if gpu.active else matrix[:2, 2]
+        R = matrix[:2, :2]        # EuclideanTransform stores t in (x=col, y=row) space.
+        # scipy.ndimage.affine_transform operates in (row, col) space and applies the
+        # inverse mapping: input_coord = M @ output_coord + offset.
+        # Correct offset: -R @ [ty, tx]  (swap x/y to row/col, then negate for inverse).
+        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)=(x, y)
+        t_rowcol = np.array([t_xy[1], t_xy[0]])  # swap to (row, col)
+        offset = -R @ t_rowcol
+        mat_d = xp.asarray(R) if gpu.active else R
+        off_d = xp.asarray(offset) if gpu.active else offset
         result = xp.zeros_like(img_d)
         for c in range(img_d.shape[2]):
             result[:, :, c] = _ndimage.affine_transform(
@@ -1463,19 +1470,46 @@ def apply_shift(img: np.ndarray, shift: Tuple[float, float]) -> np.ndarray:
     return ndimage.shift(img, shift=shift, order=3, mode='constant', cval=0.0, prefilter=True)
 
 
-def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int]) -> Tuple[int, int, int, int]:
-    # compute maximal positive/negative shifts across frames and crop
-    ys = [s[0] for s in shifts]
-    xs = [s[1] for s in shifts]
-    max_up = int(max(0, np.ceil(max(ys))))
-    max_down = int(max(0, np.ceil(-min(ys))))
-    max_left = int(max(0, np.ceil(max(xs))))
-    max_right = int(max(0, np.ceil(-min(xs))))
+def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
+                     transforms=None) -> Tuple[int, int, int, int]:
+    """Compute the largest axis-aligned crop valid in all aligned frames.
+
+    For translation-only frames uses shift magnitudes.  For frames with a
+    rotation transform the four corners of the input are forward-mapped to
+    output space; the inner axis-aligned rectangle of the resulting rotated
+    quad is used as the per-frame valid region.
+    """
     H, W = shape
-    top = max_up + Config.CROP_MARGIN
-    bottom = H - (max_down + Config.CROP_MARGIN)
-    left = max_left + Config.CROP_MARGIN
-    right = W - (max_right + Config.CROP_MARGIN)
+    transforms = transforms or [None] * len(shifts)
+    top_vals, bottom_vals, left_vals, right_vals = [], [], [], []
+
+    for shift, transform in zip(shifts, transforms):
+        sy, sx = shift
+        if transform is not None:
+            matrix = transform.params
+            R = matrix[:2, :2]      # rotation in (col=x, row=y) space
+            t_xy = matrix[:2, 2]    # [tx, ty] in (col=x, row=y)
+            # 4 corners of input in (col=x, row=y): TL, TR, BL, BR
+            corners_xy = np.array([[0.0, 0.0], [W, 0.0], [0.0, H], [W, H]])
+            out_xy = (R @ corners_xy.T).T + t_xy  # forward map to output
+            cols_out = out_xy[:, 0]  # x = col
+            rows_out = out_xy[:, 1]  # y = row
+            # Inner axis-aligned rect that fits inside the rotated quad
+            # (valid for |rotation| < 45°, which always holds for field rotation)
+            top_vals.append(max(rows_out[0], rows_out[1]))   # max row of top edge
+            bottom_vals.append(min(rows_out[2], rows_out[3]))  # min row of bottom edge
+            left_vals.append(max(cols_out[0], cols_out[2]))  # max col of left edge
+            right_vals.append(min(cols_out[1], cols_out[3]))  # min col of right edge
+        else:
+            top_vals.append(max(0.0, sy))
+            bottom_vals.append(min(float(H), H + sy))
+            left_vals.append(max(0.0, sx))
+            right_vals.append(min(float(W), W + sx))
+
+    top = int(np.ceil(max(top_vals))) + Config.CROP_MARGIN
+    bottom = int(np.floor(min(bottom_vals))) - Config.CROP_MARGIN
+    left = int(np.ceil(max(left_vals))) + Config.CROP_MARGIN
+    right = int(np.floor(min(right_vals))) - Config.CROP_MARGIN
     if top >= bottom or left >= right:
         return 0, H, 0, W
     return top, bottom, left, right
@@ -1817,7 +1851,7 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
         header['WINSORIZ'] = (getattr(args, 'winsorize', False), 'Winsorized sigma-clip used')
 
     # Affine registration
-    header['AFFINE'] = (getattr(args, 'affine', False), 'Affine registration enabled')
+    header['AFFINE'] = (not getattr(args, 'no_affine', False), 'Affine registration enabled')
 
     # Post-processing flags
     header['DENOISE'] = (getattr(args, 'denoise', False), 'Wavelet denoising applied')
@@ -2417,9 +2451,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         with gpu.stream_context():
             lum = np.array(mem_lum[orig_idx])
 
-            # Try affine registration first if enabled
+            # Try affine (rotation+translation) registration when stars are available.
+            # Enabled by default when skimage is present; use --no-affine to disable.
             affine_tf = None
-            if getattr(args, 'affine', False) and HAS_SKIMAGE_TRANSFORM:
+            use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
+            if use_affine:
                 img_stars = f.metrics.get('_star_sources')
                 sy, sx = calculate_shift(ref_lum, lum, verbose=False,
                                          skip_phase_cc=args.skip_phase_correlation)
@@ -2531,7 +2567,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
           f"mean={weights.mean():.3f} (sqrt-compressed)")
 
     # Crop to common valid region
-    top, bottom, left, right = calc_common_crop(shifts, (H, W))
+    top, bottom, left, right = calc_common_crop(shifts, (H, W), transforms=transforms)
     stats.output_shape = (bottom - top, right - left)
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
@@ -2908,8 +2944,10 @@ def parse_args():
     p.add_argument('--no-registration', action='store_true')
     p.add_argument('--skip-phase-correlation', action='store_true',
                    help='Skip phase correlation, use only fallback methods (debug)')
+    p.add_argument('--no-affine', action='store_true',
+                   help='Disable affine (rotation+translation) registration; use translation-only')
     p.add_argument('--affine', action='store_true',
-                   help='Enable affine (rotation+translation) registration via star matching')
+                   help='(Legacy, now default) affine registration is on unless --no-affine is set')
     p.add_argument('--quality-filter', action='store_true')
     p.add_argument('--quality-threshold', type=float, default=50.0)
     p.add_argument('--keep-intermediates', action='store_true')

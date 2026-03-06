@@ -1,0 +1,34 @@
+{
+    "StackedInfo": {
+        "bayer": "rggb",
+        "captureParams": {
+            "autoExposure": true,
+            "binning": 1,
+            "exposure": 25.0,
+            "iso": 200,
+            "temperature": 25.2
+        },
+        "celestial": {
+            "first": 3.533882906662747,
+            "second": 0.8238514072801144
+        },
+        "dateTime": "2026-02-07T23:20:31-0800",
+        "filter": "Clear",
+        "fovX": 0.02189285686932017,
+        "fovY": 0.014671975601117918,
+        "gps": {
+            "altitude": 0.0,
+            "latitude": 33.829926899991456,
+            "longitude": -117.76679749997028
+        },
+        "imageHeight": 2048,
+        "imageWidth": 3056,
+        "objectName": "Whirlpool Galaxy",
+        "orientation": 0.10239314704500184,
+        "stackedDepth": 26,
+        "stretchBackground": 0.035,
+        "stretchStrength": 0.85,
+        "totalDurationMs": 650000.0,
+        "uuid": "8bd93fa3-13fa-400d-86c8-03e01472a7ae"
+    }
+}
