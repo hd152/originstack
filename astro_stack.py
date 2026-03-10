@@ -2525,7 +2525,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if stats.rejected_frames > 0:
         reason_counts = {}
         for reason in rejected_reasons.values():
-            if 'brightness' in reason or 'contrast' in reason:
+            if 'score' in reason:
+                cat = 'Below quality threshold'
+            elif 'outlier' in reason:
+                cat = 'Statistical outlier'
+            elif 'brightness' in reason or 'contrast' in reason or 'dynamic' in reason or 'noise' in reason:
                 cat = 'Poor quality'
             elif 'star' in reason:
                 cat = 'No stars detected'
@@ -2678,12 +2682,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stats.add_warning(warning)
         safe_print(f'\n  ⚠ WARNING: {warning}')
 
-    dither_info = detect_dither(shifts, verbose=args.verbose)
+    dither_info = detect_dither(shifts, verbose=False)
     if not args.no_registration and len(shifts) > 2:
+        labels = {'dithered': 'Dithered (random offsets)',
+                  'tracking_drift': 'Tracking drift (systematic trend)',
+                  'aligned': 'Well-aligned (minimal offsets)'}
         print(f"\n  Dither analysis:")
-        print(f"    Pattern: {dither_info['pattern'].replace('_', ' ').title()}")
+        print(f"    Pattern: {labels.get(dither_info['pattern'], dither_info['pattern'])}")
         print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
         print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
+        if dither_info.get('direction_spread_deg', 0) > 0:
+            print(f"    Direction spread: {dither_info['direction_spread_deg']:.1f} deg")
         if dither_info['is_dithered'] and args.stack_method is None:
             args.stack_method = 'sigma_clip'
             safe_print(f"    Auto-selected sigma_clip stacking (dithered data — rejects cosmic rays)")
@@ -3137,19 +3146,35 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             try:
                 if masters.get('bias') is not None:
                     b = masters['bias']
-                    safe_print(f"    Bias:  pedestal={np.median(b):.1f} ADU  "
-                               f"range={b.min():.1f}\u2013{b.max():.1f}")
+                    b_med = float(np.median(b))
+                    b_std = float(np.std(b))
+                    if b_std < 20:
+                        b_quality = "Good (low read noise)"
+                    elif b_std < 60:
+                        b_quality = "OK"
+                    else:
+                        b_quality = "Poor (noisy — stack more bias frames)"
+                    safe_print(f"    Bias:  pedestal={b_med:.1f} ADU  "
+                               f"noise={b_std:.1f} ADU  → {b_quality}")
                 if masters.get('dark') is not None:
                     d = masters['dark']
                     dark_med = float(np.median(d))
                     dark_peak = float(d.max())
                     dark_et = masters.get('dark_exptime')
                     if dark_et and dark_et > 0:
-                        rate_str = f"  ({dark_med / dark_et:.4f} ADU/s)"
+                        rate = dark_med / dark_et
+                        if rate < 0.02:
+                            d_quality = "Good (low thermal current)"
+                        elif rate < 0.1:
+                            d_quality = "OK (moderate thermal current)"
+                        else:
+                            d_quality = "Poor (warm sensor — cool camera or use shorter darks)"
+                        rate_str = f"  ({rate:.4f} ADU/s)"
                     else:
                         rate_str = ''
+                        d_quality = "OK" if dark_med < 500 else "High dark current"
                     safe_print(f"    Dark:  median={dark_med:.1f} ADU{rate_str}  "
-                               f"peak={dark_peak:.0f} ADU")
+                               f"peak={dark_peak:.0f} ADU  → {d_quality}")
                 if masters.get('flat') is not None:
                     flat = masters['flat']
                     flat_med = float(np.median(flat))
@@ -3172,7 +3197,15 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                             flat[:cs, :cs].ravel(), flat[:cs, -cs:].ravel(),
                             flat[-cs:, :cs].ravel(), flat[-cs:, -cs:].ravel()])))
                         vign = (1.0 - corner_med / center_med) * 100.0 if center_med > 0 else 0.0
-                        safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%")
+                        if vign < 20:
+                            f_quality = "Good (low vignetting)"
+                        elif vign < 40:
+                            f_quality = "OK (moderate vignetting)"
+                        elif vign < 60:
+                            f_quality = "Heavy vignetting — flat correction important"
+                        else:
+                            f_quality = "Severe vignetting — check flat exposure/optics"
+                        safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%  → {f_quality}")
             except Exception:
                 pass
 
@@ -3241,8 +3274,12 @@ def parse_args():
                    help='Disable affine (rotation+translation) registration; use translation-only')
     p.add_argument('--affine', action='store_true',
                    help='(Legacy, now default) affine registration is on unless --no-affine is set')
-    p.add_argument('--quality-filter', action='store_true')
-    p.add_argument('--quality-threshold', type=float, default=50.0)
+    p.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
+                   default=True,
+                   help='Disable automatic rejection of the lowest-quality frames')
+    p.add_argument('--quality-threshold', type=float, default=25.0,
+                   help='Reject frames below this quality percentile (default: 25 = '
+                        'keep the best 75%% of frames). Use --no-quality-filter to keep all.')
     p.add_argument('--keep-intermediates', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true')
     p.add_argument('--debug-registration', action='store_true',
