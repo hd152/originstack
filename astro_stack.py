@@ -878,10 +878,36 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
     lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
            + 0.114 * img[:, :, 2]).astype(np.float64)
 
-    # Sky statistics: median and std of the darker half of pixels
-    sky_med = float(np.median(lum))
-    dark_pixels = lum[lum <= sky_med]
-    sky_std = float(np.std(dark_pixels)) if dark_pixels.size > 0 else float(np.std(lum))
+    # Sky statistics: sigma-clipped to exclude stars, so protect ramp is
+    # correctly calibrated even when background extraction has clipped the
+    # sky to ≥0 (which makes lum[lum <= median] a list of exact zeros →
+    # std=0 → protect_range≈ε → every non-zero pixel treated as a star →
+    # chroma NR silently disabled for all sky pixels).
+    if sigma_clipped_stats is not None:
+        try:
+            _, sky_med, sky_std = sigma_clipped_stats(lum.ravel(), sigma=3.0, maxiters=5)
+            sky_med = float(sky_med)
+            sky_std = float(sky_std)
+        except Exception:
+            sky_med = float(np.median(lum))
+            sky_std = 0.0
+    else:
+        sky_med = float(np.median(lum))
+        sky_std = 0.0
+    # If std is still near zero (e.g., all sky is exactly 0), estimate from
+    # the non-zero pixels which represent the positive half of the noise dist.
+    # Their std ≈ 0.603σ_sky, so scale up to recover the true noise level.
+    if sky_std < 0.5:
+        pos = lum[lum > 0]
+        if pos.size > 100:
+            try:
+                if sigma_clipped_stats is not None:
+                    _, _, sky_std = sigma_clipped_stats(pos, sigma=3.0, maxiters=3)
+                else:
+                    sky_std = float(np.std(pos))
+                sky_std = float(sky_std) / 0.603  # half-normal correction
+            except Exception:
+                pass
 
     # protect = 0 → sky (smooth), protect = 1 → star (leave alone)
     # Ramp from sky_med to sky_med + 3*sky_std
@@ -1078,8 +1104,19 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
     # and evaluating it at the bright positions.  This correctly extrapolates
     # chromatic sky gradients into the masked region (unlike local-median inpainting,
     # which only propagates border values and cannot reconstruct steep gradients).
-    grid_median = float(np.median(bg_grid))
-    grid_std = float(np.std(bg_grid))
+    # Use sigma-clipped stats so that genuine LP-gradient variation doesn't
+    # inflate grid_std and prevent galaxy cells from being flagged as bright.
+    if sigma_clipped_stats is not None:
+        try:
+            _, _gm, _gs = sigma_clipped_stats(bg_grid.ravel(), sigma=3.0, maxiters=5)
+            grid_median = float(_gm)
+            grid_std = float(_gs)
+        except Exception:
+            grid_median = float(np.median(bg_grid))
+            grid_std = float(np.std(bg_grid))
+    else:
+        grid_median = float(np.median(bg_grid))
+        grid_std = float(np.std(bg_grid))
     if grid_std > 1e-6:
         bright_thresh = grid_median + 1.5 * grid_std
         bright_mask = bg_grid > bright_thresh
@@ -1162,11 +1199,13 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
         peak_y, peak_x = np.unravel_index(int(np.argmax(lum_smooth)), (H, W))
         peak_val = float(lum_smooth[peak_y, peak_x])
 
-        # Detect extended source: peak > 5-sigma above border sky
-        # AND the bright region (> sky + 3σ) covers > 1% of image
-        detect_thresh = sky_med + max(2.0 * max(sky_std, 1.0), 0.05 * (peak_val - sky_med))
+        # Detect extended source: peak must be > 5-sigma above border sky
+        # AND the bright region (> sky + 4σ) must cover > 0.5% of image.
+        # Using strict sigma guard prevents LP-gradient peaks and bright
+        # isolated stars from being falsely treated as extended sources.
+        detect_thresh = sky_med + 5.0 * max(sky_std, 1.0)
         frac_bright = float(np.mean(lum_smooth > detect_thresh))
-        if peak_val > detect_thresh and frac_bright > 0.001:
+        if peak_val > detect_thresh and frac_bright > 0.005:
             # Exclusion radius: 30% of shorter image dimension, centred on peak
             excl_radius = int(min(H, W) * 0.30)
             yy, xx = np.mgrid[:H, :W]
