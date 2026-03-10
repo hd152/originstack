@@ -427,12 +427,17 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
                 except Exception:
                     hdr = {}
         ftype = classify_frame(p, hdr)
+        if ftype == 'skip':
+            continue
         frames[ftype].append(FrameInfo(path=p, type=ftype, header=hdr))
     return frames
 
 
 def classify_frame(path: str, header: dict) -> str:
     name = os.path.basename(path).lower()
+    # Skip files produced by this pipeline (stacked outputs)
+    if header.get('COMBINED') or header.get('CREATOR', '').startswith('astro_stack'):
+        return 'skip'
     if 'dark' in name or header.get('IMAGETYP', '').lower() == 'dark':
         return 'dark'
     if 'flat' in name or header.get('IMAGETYP', '').lower() == 'flat':
@@ -854,6 +859,51 @@ def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
     return result.astype(np.float32)
 
 
+def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
+    """Remove chroma (color) noise from sky background using luminance-protected smoothing.
+
+    Stars and bright objects are masked out before the blur so their chroma
+    never bleeds into surrounding pixels (which caused the halos/streaks in the
+    naive approach).  Only dark background pixels contribute to, and receive,
+    the smoothed chroma.  Stars/objects get their original chroma back exactly.
+
+    Algorithm:
+      1. Compute luminance and sigma-clipped sky statistics.
+      2. Build a soft sky-mask (1 = background, 0 = star/bright object).
+      3. For each channel: blur (chroma * sky_mask) and normalise by
+         blurred(sky_mask) – this is a masked/weighted Gaussian that cannot
+         receive contamination from bright pixels.
+      4. Reconstruct: sky pixels use smooth chroma, bright pixels use original.
+    """
+    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
+           + 0.114 * img[:, :, 2]).astype(np.float64)
+
+    # Sky statistics: median and std of the darker half of pixels
+    sky_med = float(np.median(lum))
+    dark_pixels = lum[lum <= sky_med]
+    sky_std = float(np.std(dark_pixels)) if dark_pixels.size > 0 else float(np.std(lum))
+
+    # protect = 0 → sky (smooth), protect = 1 → star (leave alone)
+    # Ramp from sky_med to sky_med + 3*sky_std
+    protect_range = max(3.0 * sky_std, np.finfo(np.float64).eps)
+    protect = np.clip((lum - sky_med) / protect_range, 0.0, 1.0)
+    sky_mask = 1.0 - protect  # float [0,1]
+
+    result = np.empty_like(img, dtype=np.float64)
+    blurred_weight = ndimage.gaussian_filter(sky_mask, sigma=sigma)
+    safe_weight = np.maximum(blurred_weight, 1e-9)
+
+    for c in range(img.shape[2]):
+        chroma = img[:, :, c].astype(np.float64) - lum
+        # Weighted blur: star pixels contribute 0, background contributes 1
+        smooth_chroma = ndimage.gaussian_filter(chroma * sky_mask, sigma=sigma) / safe_weight
+        # Stars keep original chroma; background gets smoothed chroma
+        out_chroma = chroma * protect + smooth_chroma * sky_mask
+        result[:, :, c] = lum + out_chroma
+
+    return np.clip(result, 0, None).astype(np.float32)
+
+
 def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
     """Non-linear arcsinh stretch, ideal for astrophotography previews."""
     if factor is None:
@@ -1023,16 +1073,35 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
                 clipped = clipped[mask]
             bg_grid[iy, ix] = float(np.median(clipped))
 
-    # Reject grid cells contaminated by extended bright objects (nebulae).
-    # Cells whose value is well above the overall grid median are replaced
-    # with the grid median so the background model stays at the sky level.
+    # Reject grid cells contaminated by extended bright objects (nebulae/galaxies).
+    # Bright cells are replaced by fitting a 2D polynomial to the non-bright cells
+    # and evaluating it at the bright positions.  This correctly extrapolates
+    # chromatic sky gradients into the masked region (unlike local-median inpainting,
+    # which only propagates border values and cannot reconstruct steep gradients).
     grid_median = float(np.median(bg_grid))
     grid_std = float(np.std(bg_grid))
     if grid_std > 1e-6:
-        bright_thresh = grid_median + 2.0 * grid_std
+        bright_thresh = grid_median + 1.5 * grid_std
         bright_mask = bg_grid > bright_thresh
-        if np.any(bright_mask):
-            bg_grid[bright_mask] = grid_median
+        if np.any(bright_mask) and not np.all(bright_mask):
+            iy_good, ix_good = np.where(~bright_mask)
+            vals_good = bg_grid[iy_good, ix_good]
+            # Normalised coordinates for numerical stability
+            y_good = (iy_good.astype(float) + 0.5) / ny
+            x_good = (ix_good.astype(float) + 0.5) / nx
+            # Build degree-2 polynomial design matrix (6 terms)
+            def poly2_features(y, x):
+                return np.column_stack([
+                    np.ones(len(y)), y, x, y ** 2, y * x, x ** 2])
+            A_good = poly2_features(y_good, x_good)
+            try:
+                coeffs, _, _, _ = np.linalg.lstsq(A_good, vals_good, rcond=None)
+                iy_bad, ix_bad = np.where(bright_mask)
+                y_bad = (iy_bad.astype(float) + 0.5) / ny
+                x_bad = (ix_bad.astype(float) + 0.5) / nx
+                bg_grid[bright_mask] = poly2_features(y_bad, x_bad).dot(coeffs)
+            except Exception:
+                bg_grid[bright_mask] = grid_median
 
     # Smooth the grid to reject remaining anomalous cells
     if filter_size > 1 and min(ny, nx) >= filter_size:
@@ -1061,83 +1130,97 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
                                 filter_size: int = 3, clip_sigma: float = 3.0,
                                 verbose: bool = False,
                                 star_mask: Optional[np.ndarray] = None) -> np.ndarray:
-    """Apply intelligent background extraction with star-mask and chromatic gradient support.
+    """Apply per-channel background extraction with automatic extended-source masking.
 
-    First estimates per-channel backgrounds. If the channel backgrounds are
-    spatially correlated (>0.95), uses luminance-based colour-neutral subtraction.
-    Otherwise falls back to independent per-channel subtraction to handle
-    chromatic light-pollution gradients.
+    Detects any large extended source (galaxy/nebula) in the image by smoothing
+    strongly and finding the brightest region, then masks it out so the background
+    model is only fit to true sky pixels.  Per-channel subtraction is always used
+    so that chromatic sky gradients are fully removed.
     """
+    H, W = rgb.shape[:2]
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
-    # Estimate per-channel backgrounds in parallel (passing star mask for exclusion)
-    bg_channels = [None, None, None]
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {
-            executor.submit(extract_background, rgb[:, :, c],
-                            mesh_size=mesh_size, filter_size=filter_size,
-                            clip_sigma=clip_sigma, star_mask=star_mask): c
-            for c in range(3)
-        }
-        for future in as_completed(futures):
-            c = futures[future]
-            bg_channels[c] = future.result()
+    # --- Auto-detect extended source (galaxy/nebula) and build exclusion mask ---
+    combined_mask = star_mask.copy().astype(np.float32) if star_mask is not None else None
 
-    # Check for chromatic gradient by correlating channel backgrounds
-    use_per_channel = False
-    if len(bg_channels) == 3:
-        rg_flat = bg_channels[0].ravel()
-        bg_flat = bg_channels[2].ravel()
-        gg_flat = bg_channels[1].ravel()
-        corr_rg = np.corrcoef(rg_flat, gg_flat)[0, 1] if np.std(rg_flat) > 1e-6 else 1.0
-        corr_rb = np.corrcoef(rg_flat, bg_flat)[0, 1] if np.std(rg_flat) > 1e-6 else 1.0
-        if corr_rg < 0.95 or corr_rb < 0.95:
-            use_per_channel = True
-            if verbose:
-                safe_print(f"    Chromatic gradient detected (R-G corr={corr_rg:.3f}, "
-                           f"R-B corr={corr_rb:.3f}), using per-channel subtraction")
+    try:
+        # Moderate smoothing: removes stars (PSF ~3px) but preserves galaxy shape
+        smooth_sigma = max(20.0, min(H, W) / 50.0)
+        lum_smooth = ndimage.gaussian_filter(lum, sigma=smooth_sigma)
 
+        # Sky reference from the image border (avoids galaxy near centre)
+        border_frac = 0.12
+        by = max(10, int(H * border_frac))
+        bx = max(10, int(W * border_frac))
+        border_pix = np.concatenate([
+            lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
+            lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
+        ])
+        sky_med = float(np.median(border_pix))
+        sky_std = float(np.std(border_pix))
+
+        peak_y, peak_x = np.unravel_index(int(np.argmax(lum_smooth)), (H, W))
+        peak_val = float(lum_smooth[peak_y, peak_x])
+
+        # Detect extended source: peak > 5-sigma above border sky
+        # AND the bright region (> sky + 3σ) covers > 1% of image
+        detect_thresh = sky_med + max(2.0 * max(sky_std, 1.0), 0.05 * (peak_val - sky_med))
+        frac_bright = float(np.mean(lum_smooth > detect_thresh))
+        if peak_val > detect_thresh and frac_bright > 0.001:
+            # Exclusion radius: 30% of shorter image dimension, centred on peak
+            excl_radius = int(min(H, W) * 0.30)
+            yy, xx = np.mgrid[:H, :W]
+
+            # Detect up to 3 extended sources (handles galaxy pairs/groups like
+            # Markarian's Chain where multiple bright galaxies span the field).
+            remaining_lum = lum_smooth.copy()
+            n_sources = 0
+            for _ in range(3):
+                py, px = np.unravel_index(int(np.argmax(remaining_lum)), (H, W))
+                pv = float(remaining_lum[py, px])
+                if pv <= detect_thresh:
+                    break
+                dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
+                galaxy_mask = (dist < excl_radius).astype(np.float32)
+                if combined_mask is None:
+                    combined_mask = galaxy_mask
+                else:
+                    np.clip(combined_mask + galaxy_mask, 0, 1, out=combined_mask)
+                # Blank out this source so next iteration finds a different peak
+                remaining_lum[dist < excl_radius] = float(np.min(remaining_lum))
+                n_sources += 1
+                if verbose:
+                    n_masked = int(np.sum(galaxy_mask > 0.5))
+                    safe_print(f"    Galaxy mask #{n_sources}: centre=({px},{py}), "
+                               f"radius={excl_radius}px, "
+                               f"{100. * n_masked / H / W:.1f}% masked")
+    except Exception:
+        pass
+
+    # --- Per-channel background subtraction (handles chromatic gradients) ---
+    # Estimate all three channels in parallel — they are independent.
     result = np.empty_like(rgb)
     channel_names = ['Red', 'Green', 'Blue']
+    bg_channels = [None, None, None]
 
-    if use_per_channel:
-        # Independent per-channel subtraction for chromatic gradients
-        for c in range(3):
-            subtracted = rgb[:, :, c] - bg_channels[c]
-            result[:, :, c] = subtracted
-            if verbose:
-                safe_print(f"    {channel_names[c]}: bg_median="
-                           f"{float(np.median(bg_channels[c])):.1f}, "
-                           f"subtracted median={float(np.median(subtracted)):.1f}")
-    else:
-        # Colour-neutral: use luminance model scaled per channel
-        bg_lum = extract_background(lum, mesh_size=mesh_size,
-                                    filter_size=filter_size,
-                                    clip_sigma=clip_sigma, star_mask=star_mask)
-        lum_bg_median = float(np.median(bg_lum))
+    def _extract_bg_channel(c):
+        return c, extract_background(rgb[:, :, c], mesh_size=mesh_size,
+                                     filter_size=filter_size, clip_sigma=clip_sigma,
+                                     star_mask=combined_mask)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        for c, bg in executor.map(_extract_bg_channel, range(3)):
+            bg_channels[c] = bg
+
+    for c in range(3):
+        bg = bg_channels[c]
+        subtracted = rgb[:, :, c] - bg
+        np.clip(subtracted, 0, None, out=subtracted)
+        result[:, :, c] = subtracted
         if verbose:
-            safe_print(f"    Luminance background: median={lum_bg_median:.1f}, "
-                       f"range={float(np.max(bg_lum) - np.min(bg_lum)):.1f}")
-
-        for c in range(3):
-            channel = rgb[:, :, c]
-            if sigma_clipped_stats is not None:
-                try:
-                    _, ch_bg_median, _ = sigma_clipped_stats(
-                        channel, sigma=clip_sigma, maxiters=5)
-                    ch_bg_median = float(ch_bg_median)
-                except Exception:
-                    ch_bg_median = float(np.median(channel))
-            else:
-                ch_bg_median = float(np.median(channel))
-            scale = ch_bg_median / lum_bg_median if lum_bg_median > 1e-6 else 1.0
-            bg_channel = bg_lum * scale
-            subtracted = channel - bg_channel
-            result[:, :, c] = subtracted
-            if verbose:
-                safe_print(f"    {channel_names[c]}: bg_median={ch_bg_median:.1f}, "
-                           f"scale={scale:.3f}, "
-                           f"subtracted median={float(np.median(subtracted)):.1f}")
+            safe_print(f"    {channel_names[c]}: bg_median="
+                       f"{float(np.median(bg)):.1f}, "
+                       f"subtracted median={float(np.median(subtracted)):.1f}")
 
     return result
 
@@ -1615,15 +1698,12 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
 
-    # Build list of tile coordinates, then process in parallel
-    tile_coords = []
-    for ty_idx in range(n_tiles_y):
-        ty = ty_idx * tile_size
-        ty_end = min(ty + tile_size, H)
-        for tx_idx in range(n_tiles_x):
-            tx = tx_idx * tile_size
-            tx_end = min(tx + tile_size, W)
-            tile_coords.append((ty, ty_end, tx, tx_end))
+    tile_coords = [
+        (ty_idx * tile_size, min((ty_idx + 1) * tile_size, H),
+         tx_idx * tile_size, min((tx_idx + 1) * tile_size, W))
+        for ty_idx in range(n_tiles_y)
+        for tx_idx in range(n_tiles_x)
+    ]
 
     def _process_tile(coords):
         ty, ty_end, tx, tx_end = coords
@@ -2045,10 +2125,23 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # Calibration — preserve negative noise through bias/dark subtraction,
     # clip only once after all steps to avoid cumulative truncation of shadow detail
     try:
-        if masters.get('bias') is not None and masters['bias'].shape == data.shape:
-            data = data - masters['bias']
+        bias_arr = masters.get('bias') if (masters.get('bias') is not None
+                                           and masters['bias'].shape == data.shape) else None
+        if bias_arr is not None:
+            data = data - bias_arr
         if masters.get('dark') is not None and masters['dark'].shape == data.shape:
-            data = data - masters['dark']
+            # Correct dark subtraction: the master dark still contains its own bias
+            # pedestal, so subtract bias-corrected dark current only, scaled to the
+            # light frame's exposure time to avoid over/under-subtraction.
+            dark_arr = masters['dark']
+            dark_current = dark_arr - (bias_arr if bias_arr is not None else 0.0)
+            dark_exptime = masters.get('dark_exptime') or None
+            light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
+            if dark_exptime and light_exptime and dark_exptime > 0:
+                dark_scale = light_exptime / dark_exptime
+            else:
+                dark_scale = 1.0
+            data = data - dark_current * dark_scale
         if masters.get('flat') is not None and masters['flat'].shape == data.shape:
             flat = masters['flat']
             med = np.median(flat)
@@ -2186,12 +2279,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     mem_lum = np.memmap(mm_lum_path, dtype='float32', mode='w+', shape=lum_shape)
 
     rejected_reasons = {}
-    use_parallel = (getattr(args, 'parallel', 1) != 1
-                    and not get_gpu().active
-                    and n >= 4)
+    use_process_pool = (getattr(args, 'parallel', 1) != 1
+                        and not get_gpu().active
+                        and n >= 4)
 
-    if use_parallel:
-        # --- Parallel path: save masters to disk, use pool ---
+    if use_process_pool:
+        # --- ProcessPool path (-j N): separate processes, true parallelism,
+        #     master arrays serialised to disk for IPC. ---
         workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
         print(f"  Processing {n} frames in parallel ({workers} workers)...")
 
@@ -2233,6 +2327,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 os.remove(p)
             except Exception:
                 pass
+
     elif n >= 2:
         # --- Thread-parallel path (default for both CPU and GPU) ---
         # ThreadPoolExecutor shares memory: no master serialization, no IPC
@@ -2244,8 +2339,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                                 Config.GPU_VRAM_RESERVE_MB), n)
         else:
             n_workers = min(os.cpu_count() or 4, n)
-        print(f"  Processing {n} frames with {n_workers} threads"
-              f"{' (GPU)' if gpu.active else ''}...")
+        safe_print(f"  Processing {n} frames with {n_workers} threads"
+                   f"{' (GPU)' if gpu.active else ''}...")
 
         def _thread_process_frame(i, f):
             with gpu.stream_context():
@@ -2271,16 +2366,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     rejected_reasons[f.path] = error
                     stats.add_error(f.path, error)
                     if args.verbose:
-                        print(f'  REJECT {os.path.basename(f.path)}: {error}')
+                        safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
                 else:
                     f.metrics = metrics
                     if args.verbose:
                         m = f.metrics
-                        print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
-                              f'stars={m["star_count"]}, FWHM={m.get("fwhm",0):.1f}, '
-                              f'score={m["score"]:.1f}')
+                        safe_print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
+                                   f'stars={m["star_count"]}, FWHM={m.get("fwhm",0):.1f}, '
+                                   f'score={m["score"]:.1f}')
         mem_rgb.flush()
         mem_lum.flush()
+
     else:
         # --- Sequential path (single frame) ---
         print(f"  Processing {n} frames sequentially...")
@@ -2473,6 +2569,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 frame_name=os.path.splitext(os.path.basename(f.path))[0],
                 skip_phase_cc=args.skip_phase_correlation)
             if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
+                safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
                 sx, sy = 0.0, 0.0
             return j, (sy, sx), None
 
@@ -2500,13 +2597,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     tx, ty = shift_val[1], shift_val[0]
                     rot_deg = np.degrees(np.arctan2(transform_val.params[1, 0],
                                                     transform_val.params[0, 0]))
-                    print(f'    {os.path.basename(f.path)}: affine shift=({tx:+.1f}, '
-                          f'{ty:+.1f}) px, rotation={rot_deg:+.3f} deg')
+                    safe_print(f'    {os.path.basename(f.path)}: affine shift=({tx:+.1f}, '
+                               f'{ty:+.1f}) px, rotation={rot_deg:+.3f} deg')
                 elif shift_val != (0.0, 0.0):
                     sy, sx = shift_val
                     mag = np.sqrt(sy**2 + sx**2)
-                    print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
-                          f'magnitude={mag:.2f} px')
+                    safe_print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
+                               f'magnitude={mag:.2f} px')
 
     stats.registration_time = time.time() - phase_start
 
@@ -2548,8 +2645,15 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         print(f"    Pattern: {dither_info['pattern'].replace('_', ' ').title()}")
         print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
         print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
-        if dither_info['is_dithered'] and args.stack_method == 'mean':
-            safe_print(f"    Recommendation: Use --stack-method sigma_clip for dithered data")
+        if dither_info['is_dithered'] and args.stack_method is None:
+            args.stack_method = 'sigma_clip'
+            safe_print(f"    Auto-selected sigma_clip stacking (dithered data — rejects cosmic rays)")
+        elif dither_info['is_dithered'] and args.stack_method == 'mean':
+            safe_print(f"    Warning: mean stacking does not reject cosmic rays; "
+                       f"consider --stack-method sigma_clip")
+
+    if args.stack_method is None:
+        args.stack_method = 'mean'
 
     # ======================================================================
     # PHASE 3: Stacking (quality-weighted, with post-processing chain)
@@ -2691,9 +2795,95 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             clip_sigma=args.bg_clip_sigma,
             verbose=args.verbose,
             star_mask=star_mask)
+
         safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
 
-    # 2. Local normalization
+    # 2. Chroma noise reduction
+    if getattr(args, 'chroma_nr', True):
+        cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
+        print(f"\n  Applying chroma noise reduction (sigma={cnr_sigma})...")
+        cnr_start = time.time()
+        stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma)
+        safe_print(f"  ✓ Chroma noise reduction ({format_time(time.time() - cnr_start)})")
+
+    # Sky floor correction: subtract residual per-channel pedestal from background
+    # extraction + chroma NR.  Measured globally across all sky pixels (excluding
+    # galaxy and bright stars) so that the higher-sigma interior sky is captured,
+    # not just the lower-sigma border pixels (which have fewer dither frames).
+    if args.background_extraction:
+        try:
+            H_s, W_s = stacked.shape[:2]
+            lum_s = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                     + 0.114 * stacked[:, :, 2])
+
+            # Build sky mask: start with all pixels, then exclude galaxy/nebula
+            sky_mask = np.ones((H_s, W_s), dtype=bool)
+
+            # Auto-detect galaxy/nebula using the same method as apply_background_extraction
+            try:
+                smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
+                lum_smooth = ndimage.gaussian_filter(lum_s, sigma=smooth_sigma)
+                border_frac = 0.12
+                by = max(10, int(H_s * border_frac))
+                bx = max(10, int(W_s * border_frac))
+                border_pix = np.concatenate([
+                    lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
+                    lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
+                ])
+                sky_med_lum = float(np.median(border_pix))
+                sky_std_lum = float(np.std(border_pix))
+                peak_y, peak_x = np.unravel_index(int(np.argmax(lum_smooth)), (H_s, W_s))
+                peak_val = float(lum_smooth[peak_y, peak_x])
+                detect_thresh = sky_med_lum + max(
+                    2.0 * max(sky_std_lum, 1.0), 0.05 * (peak_val - sky_med_lum))
+                frac_bright = float(np.mean(lum_smooth > detect_thresh))
+                if peak_val > detect_thresh and frac_bright > 0.001:
+                    excl_radius = int(min(H_s, W_s) * 0.30)
+                    yy, xx = np.mgrid[:H_s, :W_s]
+                    # Detect multiple extended sources (handles galaxy pairs/groups)
+                    remaining_lum = lum_smooth.copy()
+                    for _ in range(3):
+                        py, px = np.unravel_index(
+                            int(np.argmax(remaining_lum)), (H_s, W_s))
+                        pv = float(remaining_lum[py, px])
+                        if pv <= detect_thresh:
+                            break
+                        dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
+                        sky_mask &= (dist >= excl_radius)
+                        remaining_lum[dist < excl_radius] = float(
+                            np.min(remaining_lum))
+            except Exception:
+                pass
+
+            # Exclude bright point sources (stars) using sigma-clipped luminance threshold
+            try:
+                if sigma_clipped_stats is not None:
+                    sample = lum_s[sky_mask].ravel() if sky_mask.any() else lum_s.ravel()
+                    _, lum_med, lum_std = sigma_clipped_stats(sample, sigma=3.0, maxiters=5)
+                    star_thresh = float(lum_med) + 3.0 * float(lum_std)
+                    sky_mask &= (lum_s < star_thresh)
+            except Exception:
+                pass
+
+            if sky_mask.sum() > 1000:
+                for c in range(3):
+                    col = stacked[:, :, c][sky_mask].ravel()
+                    if sigma_clipped_stats is not None:
+                        try:
+                            _, sky_floor, _ = sigma_clipped_stats(col, sigma=3.0, maxiters=5)
+                            sky_floor = float(sky_floor)
+                        except Exception:
+                            sky_floor = float(np.median(col))
+                    else:
+                        sky_floor = float(np.median(col))
+                    if sky_floor > 0:
+                        stacked[:, :, c] = np.clip(stacked[:, :, c] - sky_floor, 0, None)
+                        if args.verbose:
+                            safe_print(f"    Sky floor correction ch{c}: -{sky_floor:.2f}")
+        except Exception:
+            pass
+
+    # 3. Local normalization
     if getattr(args, 'local_normalize', False):
         ln_sigma = getattr(args, 'local_normalize_sigma', 50.0)
         print(f"\n  Applying local normalization (sigma={ln_sigma})...")
@@ -2701,7 +2891,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stacked = local_normalize(stacked, sigma=ln_sigma)
         safe_print(f"  ✓ Local normalization ({format_time(time.time() - ln_start)})")
 
-    # 3. Wavelet denoising
+    # 4. Wavelet denoising
     if getattr(args, 'denoise', False):
         strength = getattr(args, 'denoise_strength', 3.0)
         print(f"\n  Applying wavelet denoising (strength={strength})...")
@@ -2879,9 +3069,73 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
         if masters.get('flat') is not None:
             n_flat = len(frames['flat'])
-            # Flat has vignetting + dust donuts (>30px); preserve those
+            # Flat has vignetting + dust donuts (>30px); preserve those.
+            # CRITICAL: smooth each Bayer colour channel independently.
+            # A whole-image Gaussian with sigma > ~2 px averages adjacent R/G/B
+            # Bayer pixels together, making flat_norm identical for all channels
+            # (~0.888) and completely disabling per-channel QE correction.
+            # Per-channel smoothing keeps the correct flat_norm values
+            # (R≈0.39, G≈1.00, B≈1.16 for this camera) so the flat field
+            # simultaneously corrects vignetting AND camera spectral response.
             sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
-            masters['flat'] = ndimage.gaussian_filter(masters['flat'].astype(np.float32), sigma=sigma_f)
+            flat_raw = masters['flat'].astype(np.float32)
+            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                ch = flat_raw[r_off::2, c_off::2]
+                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
+            masters['flat'] = flat_raw
+
+        # Store dark exposure time so _process_single_frame can scale correctly
+        masters['dark_exptime'] = None
+        if frames.get('dark'):
+            try:
+                masters['dark_exptime'] = float(
+                    frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
+            except Exception:
+                pass
+
+        # --- Calibration frame analysis ---
+        if frames['dark'] or frames['flat'] or frames['bias']:
+            try:
+                if masters.get('bias') is not None:
+                    b = masters['bias']
+                    safe_print(f"    Bias:  pedestal={np.median(b):.1f} ADU  "
+                               f"range={b.min():.1f}\u2013{b.max():.1f}")
+                if masters.get('dark') is not None:
+                    d = masters['dark']
+                    dark_med = float(np.median(d))
+                    dark_peak = float(d.max())
+                    dark_et = masters.get('dark_exptime')
+                    if dark_et and dark_et > 0:
+                        rate_str = f"  ({dark_med / dark_et:.4f} ADU/s)"
+                    else:
+                        rate_str = ''
+                    safe_print(f"    Dark:  median={dark_med:.1f} ADU{rate_str}  "
+                               f"peak={dark_peak:.0f} ADU")
+                if masters.get('flat') is not None:
+                    flat = masters['flat']
+                    flat_med = float(np.median(flat))
+                    if flat_med > 0:
+                        bayer_labels = ['R', 'G1', 'G2', 'B']
+                        bayer_ratios = []
+                        for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                            ch_med = float(np.median(flat[r_off::2, c_off::2]))
+                            bayer_ratios.append(ch_med / flat_med)
+                        ratio_str = '/'.join(
+                            f'{lbl}={r:.3f}'
+                            for lbl, r in zip(bayer_labels, bayer_ratios))
+                        H_f, W_f = flat.shape
+                        qh, qw = H_f // 8, W_f // 8
+                        center_med = float(np.median(
+                            flat[H_f // 2 - qh:H_f // 2 + qh,
+                                 W_f // 2 - qw:W_f // 2 + qw]))
+                        cs = max(10, min(100, H_f // 12, W_f // 12))
+                        corner_med = float(np.median(np.concatenate([
+                            flat[:cs, :cs].ravel(), flat[:cs, -cs:].ravel(),
+                            flat[-cs:, :cs].ravel(), flat[-cs:, -cs:].ravel()])))
+                        vign = (1.0 - corner_med / center_med) * 100.0 if center_med > 0 else 0.0
+                        safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%")
+            except Exception:
+                pass
 
         if frames['dark'] or frames['flat'] or frames['bias']:
             stats.calibration_time = time.time() - cal_start
@@ -2954,7 +3208,8 @@ def parse_args():
     p.add_argument('-v', '--verbose', action='store_true')
     p.add_argument('--debug-registration', action='store_true',
                    help='Detailed registration diagnostics (implies -v)')
-    p.add_argument('--stack-method', choices=['mean', 'median', 'sigma_clip'], default='mean')
+    p.add_argument('--stack-method', choices=['mean', 'median', 'sigma_clip'], default=None,
+                   help='Stacking method (default: sigma_clip for dithered data, mean otherwise)')
     p.add_argument('--rejection-sigma', type=float, default=3.0,
                    help='Sigma threshold for pixel rejection in sigma_clip stacking (default: 3.0)')
     p.add_argument('--rejection-iters', type=int, default=3,
@@ -2975,8 +3230,8 @@ def parse_args():
     p.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
-    p.add_argument('--bg-mesh-size', type=int, default=256,
-                   help='Grid cell size in pixels for background estimation (default: 256)')
+    p.add_argument('--bg-mesh-size', type=int, default=128,
+                   help='Grid cell size in pixels for background estimation (default: 128)')
     p.add_argument('--bg-filter-size', type=int, default=3,
                    help='Median filter size for background grid smoothing (default: 3, must be odd)')
     p.add_argument('--bg-clip-sigma', type=float, default=3.0,
@@ -2989,6 +3244,12 @@ def parse_args():
                    help='Enable local normalization to remove vignetting residuals')
     p.add_argument('--local-normalize-sigma', type=float, default=50.0,
                    help='Gaussian sigma for local normalization (default: 50)')
+    p.add_argument('--chroma-nr', action='store_true', default=True,
+                   help='Enable chroma noise reduction to remove color speckle in sky background (default: on)')
+    p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
+                   help='Disable chroma noise reduction')
+    p.add_argument('--chroma-nr-sigma', type=float, default=2.0,
+                   help='Gaussian sigma for chroma smoothing in pixels (default: 2.0)')
     p.add_argument('--stretch', choices=['linear', 'arcsinh'], default='linear',
                    help='Preview image stretch method (default: linear)')
     p.add_argument('-j', '--parallel', type=int, default=1,
