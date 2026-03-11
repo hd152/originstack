@@ -2316,6 +2316,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     lum_shape = (n, H_rgb, W_rgb)
     mem_rgb = np.memmap(mm_rgb_path, dtype='float32', mode='w+', shape=rgb_shape)
     mem_lum = np.memmap(mm_lum_path, dtype='float32', mode='w+', shape=lum_shape)
+    # Cache lum arrays from Phase 1 so Phase 2 can register without re-reading memmap
+    cached_lums: list = [None] * n
 
     rejected_reasons = {}
     use_process_pool = (getattr(args, 'parallel', 1) != 1
@@ -2386,10 +2388,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 result = _process_single_frame(
                     f.path, f.header, masters, args.debayer_method, args.white_balance)
             if result.get('error'):
-                return i, None, result['error']
+                return i, None, result['error'], None
             mem_rgb[i] = result['rgb']
             mem_lum[i] = result['lum']
-            return i, result['metrics'], None
+            return i, result['metrics'], None, result['lum']
 
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_thread_process_frame, i, f): i
@@ -2397,7 +2399,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             for future in tqdm(as_completed(futures), total=n,
                                desc="  Processing", unit="frame",
                                disable=args.verbose):
-                i, metrics, error = future.result()
+                i, metrics, error, lum_arr = future.result()
                 f = lights[i]
                 if error:
                     f.accepted = False
@@ -2408,6 +2410,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                         safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
                 else:
                     f.metrics = metrics
+                    cached_lums[i] = lum_arr
                     if args.verbose:
                         m = f.metrics
                         safe_print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
@@ -2435,6 +2438,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             else:
                 mem_rgb[i] = result['rgb']
                 mem_lum[i] = result['lum']
+                cached_lums[i] = result['lum']
                 f.metrics = result['metrics']
                 if args.verbose:
                     m = f.metrics
@@ -2588,7 +2592,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             return j, (0.0, 0.0), None
 
         with gpu.stream_context():
-            lum = np.array(mem_lum[orig_idx])
+            lum = cached_lums[orig_idx] if cached_lums[orig_idx] is not None else np.array(mem_lum[orig_idx])
 
             # Try affine (rotation+translation) registration when stars are available.
             # Enabled by default when skimage is present; use --no-affine to disable.
@@ -2649,6 +2653,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                f'magnitude={mag:.2f} px')
 
     stats.registration_time = time.time() - phase_start
+    del cached_lums  # free in-memory lum cache now that registration is complete
 
     # Shift statistics
     shift_x = [s[1] for s in shifts]
@@ -3161,6 +3166,9 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     dark_med = float(np.median(d))
                     dark_peak = float(d.max())
                     dark_et = masters.get('dark_exptime')
+                    dark_hdr = frames['dark'][0].header if frames.get('dark') else {}
+                    dark_temp_c = dark_hdr.get('CCD-TEMP')
+                    dark_iso = dark_hdr.get('ISOSPEED') or dark_hdr.get('ISO') or dark_hdr.get('GAIN')
                     if dark_et and dark_et > 0:
                         rate = dark_med / dark_et
                         if rate < 0.02:
@@ -3173,8 +3181,26 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     else:
                         rate_str = ''
                         d_quality = "OK" if dark_med < 500 else "High dark current"
-                    safe_print(f"    Dark:  median={dark_med:.1f} ADU{rate_str}  "
-                               f"peak={dark_peak:.0f} ADU  → {d_quality}")
+                    temp_str = ''
+                    if dark_temp_c is not None:
+                        temp_f = dark_temp_c * 9.0 / 5.0 + 32.0
+                        temp_str = f"  temp={dark_temp_c:.1f}°C/{temp_f:.1f}°F"
+                    exp_str = f"  exp={dark_et:.1f}s" if dark_et else ''
+                    iso_str = f"  ISO={dark_iso}" if dark_iso is not None else ''
+                    safe_print(f"    Dark:  median={dark_med:.1f} ADU{rate_str}"
+                               f"{temp_str}{exp_str}{iso_str}  peak={dark_peak:.0f} ADU  → {d_quality}")
+                    # Warn if dark ISO doesn't match the majority of light frames
+                    if dark_iso is not None and frames.get('light'):
+                        light_isos = []
+                        for lf in frames['light']:
+                            liso = lf.header.get('ISOSPEED') or lf.header.get('ISO') or lf.header.get('GAIN')
+                            if liso is not None:
+                                light_isos.append(liso)
+                        if light_isos:
+                            majority_iso = max(set(light_isos), key=light_isos.count)
+                            if str(dark_iso) != str(majority_iso):
+                                safe_print(f"    ⚠ ISO mismatch: dark ISO={dark_iso}, "
+                                           f"lights ISO={majority_iso} — dark may not cancel sensor noise correctly")
                 if masters.get('flat') is not None:
                     flat = masters['flat']
                     flat_med = float(np.median(flat))
