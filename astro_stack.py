@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import logging
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional
@@ -108,6 +109,12 @@ try:
     HAS_CV2 = True
 except Exception:
     HAS_CV2 = False
+
+try:
+    from skimage.restoration import denoise_nl_means, estimate_sigma
+    HAS_SKIMAGE_RESTORATION = True
+except Exception:
+    HAS_SKIMAGE_RESTORATION = False
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +324,10 @@ def safe_print(text: str):
         text = text.replace('─', '-')
         text = text.replace('→', '->')
         text = text.replace('×', 'x')
+        text = text.replace('Δ', 'd')
+        text = text.replace('≠', '!=')
+        text = text.replace('–', '-')
+        text = text.replace('—', '--')
         print(text)
 
 
@@ -805,36 +816,288 @@ def measure_fwhm(img: np.ndarray, star_positions, cutout_radius: int = None) -> 
 
 
 def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
-                    levels: int = 4, threshold_factor: float = 3.0) -> np.ndarray:
-    """Multi-scale wavelet denoising (BayesShrink) per channel."""
+                    levels: int = 4, threshold_factor: float = 3.0,
+                    chroma_factor: float = 2.0,
+                    star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Multi-scale wavelet denoising with luma/chroma split and star protection.
+
+    Operates in YCbCr colour space so that chroma channels (Cb, Cr) can receive
+    a stronger threshold (chroma_factor × threshold_factor) while luminance is
+    handled conservatively.  This removes colour speckle in sky background more
+    aggressively without softening fine luminance structure in nebulae.
+
+    If star_mask is provided (float [0,1], 1=star core), the denoised result is
+    blended back with the original at star positions so that star cores are not
+    softened and their colours are preserved.
+    """
     if not HAS_PYWT:
         logging.warning("pywt not installed, skipping wavelet denoise")
         return img
-    result = np.empty_like(img)
-    h, w = img.shape[0], img.shape[1]
 
-    def _denoise_channel(c):
-        channel = img[:, :, c].astype(np.float64)
-        max_level = pywt.dwt_max_level(min(channel.shape), pywt.Wavelet(wavelet).dec_len)
+    h, w = img.shape[0], img.shape[1]
+    src = img.astype(np.float64)
+
+    # RGB → YCbCr (ITU-R BT.601 coefficients)
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    def _denoise_plane(plane, factor):
+        max_level = pywt.dwt_max_level(min(plane.shape), pywt.Wavelet(wavelet).dec_len)
         use_levels = min(levels, max_level)
         if use_levels < 1:
-            return c, channel
-        coeffs = pywt.wavedec2(channel, wavelet, level=use_levels)
+            return plane
+        coeffs = pywt.wavedec2(plane, wavelet, level=use_levels)
         detail_hh = coeffs[-1][-1]
         sigma_noise = np.median(np.abs(detail_hh)) / 0.6745
-        threshold = threshold_factor * sigma_noise
+        threshold = factor * sigma_noise
         new_coeffs = [coeffs[0]]
         for detail_level in coeffs[1:]:
             new_coeffs.append(tuple(
                 pywt.threshold(d, threshold, mode='soft') for d in detail_level
             ))
-        reconstructed = pywt.waverec2(new_coeffs, wavelet)
-        return c, reconstructed[:h, :w]
+        return pywt.waverec2(new_coeffs, wavelet)[:h, :w]
 
-    with ThreadPoolExecutor(max_workers=img.shape[2]) as executor:
-        for c, ch_result in executor.map(_denoise_channel, range(img.shape[2])):
-            result[:, :, c] = ch_result
-    return np.clip(result, 0, None).astype(np.float32)
+    chroma_thresh = threshold_factor * chroma_factor
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_Y  = executor.submit(_denoise_plane, Y,  threshold_factor)
+        f_Cb = executor.submit(_denoise_plane, Cb, chroma_thresh)
+        f_Cr = executor.submit(_denoise_plane, Cr, chroma_thresh)
+        Y_d, Cb_d, Cr_d = f_Y.result(), f_Cb.result(), f_Cr.result()
+
+    # YCbCr → RGB
+    R = Y_d + 1.40200 * Cr_d
+    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+    B = Y_d + 1.77200 * Cb_d
+    result = np.stack([R, G, B], axis=2)
+
+    # Star protection: blend back original at star core positions
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return result.astype(np.float32)
+
+
+def _estimate_sky_sigma(img: np.ndarray) -> float:
+    """Estimate per-pixel sky noise from adjacent-pixel diffs on sky-only pairs.
+
+    Uses the green channel, restricts to pixel pairs that are both positive
+    and below the 80th percentile (excludes stars, nebula, and the negative
+    half of the background).  Returns sigma in the same ADU units as img.
+    """
+    img_max = float(img.max())
+    G = img[:, :, 1].astype(np.float64)
+    pos_g = G[G > 0]
+    if pos_g.size < 100:
+        return max(img_max * 1e-4, 1.0)
+    p80 = float(np.percentile(pos_g, 80))
+    lft, rgt = G[:, :-1], G[:, 1:]
+    tp,  bot = G[:-1, :], G[1:, :]
+    msk_h = (lft > 0) & (rgt > 0) & (lft < p80) & (rgt < p80)
+    msk_v = (tp  > 0) & (bot > 0) & (tp  < p80) & (bot < p80)
+    diffs = np.concatenate([(rgt - lft)[msk_h], (bot - tp)[msk_v]])
+    if diffs.size < 1000:
+        return max(img_max * 1e-4, 1.0)
+    raw = float(np.median(np.abs(diffs))) / (0.6745 * np.sqrt(2))
+    return max(raw, img_max * 1e-5)
+
+
+def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
+                       filter_size: int = 3, clip_sigma: float = 3.0,
+                       star_mask: Optional[np.ndarray] = None,
+                       verbose: bool = False) -> np.ndarray:
+    """Remove smooth sky residuals revealed by denoising.
+
+    Background extraction leaves residuals of ~10-25 ADU at the mesh scale.
+    Before denoising, per-pixel noise masks these residuals.  After wavelet
+    or other denoising reduces noise by 10-50x, the residuals dominate and
+    appear as a mottled "leopard print" pattern in both FITS viewers and
+    stretched previews.
+
+    Unlike the primary background extraction, this function skips bright-cell
+    rejection (which would false-positive on sky cells with large residuals).
+    It computes sigma-clipped medians per grid cell, smooths with a median
+    filter, then interpolates with a bicubic spline and subtracts per channel.
+    """
+    from scipy.interpolate import RectBivariateSpline
+
+    H, W = img.shape[:2]
+    ny = max(1, H // mesh_size)
+    nx = max(1, W // mesh_size)
+    cell_h = H / ny
+    cell_w = W / nx
+
+    result = np.empty_like(img, dtype=np.float32)
+    channel_names = ['Red', 'Green', 'Blue']
+
+    for c in range(3):
+        ch = img[:, :, c].astype(np.float64)
+        bg_grid = np.zeros((ny, nx), dtype=np.float64)
+
+        for iy in range(ny):
+            y0 = int(round(iy * cell_h))
+            y1 = min(int(round((iy + 1) * cell_h)), H)
+            for ix in range(nx):
+                x0 = int(round(ix * cell_w))
+                x1 = min(int(round((ix + 1) * cell_w)), W)
+                cell = ch[y0:y1, x0:x1].ravel()
+
+                # Mask out star pixels
+                if star_mask is not None:
+                    sm = star_mask[y0:y1, x0:x1].ravel()
+                    bg_pixels = cell[sm < 0.5]
+                    if bg_pixels.size > 10:
+                        cell = bg_pixels
+
+                if sigma_clipped_stats is not None:
+                    try:
+                        _, med_val, _ = sigma_clipped_stats(
+                            cell, sigma=clip_sigma, maxiters=5)
+                        bg_grid[iy, ix] = float(med_val)
+                        continue
+                    except Exception:
+                        pass
+                bg_grid[iy, ix] = float(np.median(cell))
+
+        # Smooth grid to suppress star contamination between cells
+        if filter_size > 1 and min(ny, nx) >= filter_size:
+            bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
+
+        # Interpolate to full resolution
+        grid_y = np.array([(i + 0.5) * cell_h for i in range(ny)])
+        grid_x = np.array([(j + 0.5) * cell_w for j in range(nx)])
+        ky = min(3, ny - 1)
+        kx = min(3, nx - 1)
+        spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
+        background = spline(np.arange(H), np.arange(W)).astype(np.float64)
+        np.clip(background, float(bg_grid.min()), float(bg_grid.max()),
+                out=background)
+
+        result[:, :, c] = (ch - background).astype(np.float32)
+        if verbose:
+            safe_print(f"    {channel_names[c]}: residual median="
+                       f"{float(np.median(background)):.2f}, "
+                       f"range=[{float(background.min()):.1f}, "
+                       f"{float(background.max()):.1f}]")
+
+    return result
+
+
+def bilateral_denoise(img: np.ndarray, sigma_color: float = None,
+                      sigma_space: float = 3.0) -> np.ndarray:
+    """Edge-preserving bilateral filter denoising (second-pass after wavelet).
+
+    Each output pixel is a Gaussian-weighted average of neighbours that are
+    close in *both* space (sigma_space pixels) and value (sigma_color ADU).
+    Unlike NLM, the weight of each neighbour is determined independently, so
+    there is no "patch pool" whose size varies across the image.  The result
+    is spatially uniform: sky noise is reduced by the same factor everywhere
+    regardless of whether the pixel sits in open sky or in a gap between
+    nebula structures.
+
+    sigma_color:  Value similarity scale in ADU.  Pixels differing by more
+                  than ~2×sigma_color are not mixed.  If None (default) it
+                  is auto-estimated from the sky noise via adjacent-pixel diffs.
+                  A good manual range is 1–5× the stack sky noise.
+    sigma_space:  Spatial smoothing radius in pixels (default 3.0).  Larger
+                  values smooth over bigger areas but are slower.
+    """
+    if not HAS_CV2:
+        logging.warning("Bilateral denoising requires cv2; skipping")
+        return img
+
+    img_max = float(img.max())
+    if img_max < 1e-12:
+        return img
+
+    if sigma_color is None:
+        sigma_color = _estimate_sky_sigma(img)
+    sigma_color = float(sigma_color)
+
+    # cv2.bilateralFilter accepts float32 and operates in ADU space directly.
+    # d=-1 tells cv2 to derive the pixel neighbourhood diameter from sigma_space.
+    # We clamp d to avoid extreme runtimes on large sigma_space values.
+    d = min(int(round(6.0 * sigma_space + 1)) | 1, 21)  # odd, max 21 px
+
+    img_f32 = img.astype(np.float32)
+    result = cv2.bilateralFilter(img_f32, d=d,
+                                 sigmaColor=sigma_color,
+                                 sigmaSpace=float(sigma_space))
+    return result.astype(np.float32)
+
+
+def nlm_denoise(img: np.ndarray, h: float = 1.0,
+                patch_size: int = 5, patch_distance: int = 7,
+                blend: float = 0.5) -> np.ndarray:
+    """Non-local means denoising for faint extended nebulosity.
+
+    Searches for similar patches across the image and averages them, which
+    smooths large featureless sky and faint nebula regions while preserving
+    sharp edges like galaxy arms and star-forming filaments.
+
+    Uses skimage.restoration.denoise_nl_means (operates on float, no quantisation
+    loss) when available, with cv2.fastNlMeansDenoisingColored as fallback.
+
+    h:               Filter strength multiplier relative to auto-estimated noise
+                     sigma.  1.0 is conservative; 2–3 for heavy sky noise.
+    patch_size:      Patch half-size in pixels for similarity comparison (default 5).
+    patch_distance:  Search half-window in pixels for candidate patches (default 7).
+    blend:           Fraction of NLM result to mix with the original (0–1).
+                     blend=1.0 is pure NLM; blend=0.5 (default) mixes equally.
+                     Lower values prevent the NLM non-uniformity artifact: NLM
+                     over-smooths featureless sky (many matching patches) while
+                     under-smoothing sky islands near nebula structures (fewer
+                     patches).  With blend=α, output variance ≈ α²·σ²/N + (1-α)²·σ²,
+                     so the (1-α)²·σ² term dominates and the spatial variation in N
+                     becomes invisible.  blend=0.5 reduces noise by ≈30% while
+                     keeping uniformity within ~3%.
+    """
+    img_max = float(img.max())
+    if img_max < 1e-12:
+        return img
+
+    sky_sigma = _estimate_sky_sigma(img)
+    logging.debug("NLM: sky_sigma=%.4f, img_max=%.1f", sky_sigma, img_max)
+
+    # Pedestal trick: add 3·σ before NLM and remove it after.
+    # Without this, NLM patches that straddle exact-zero sky pixels anchor their
+    # weighted average toward zero, pulling positive-noise pixels down to 0 and
+    # creating the "leopard print" pattern (large black splotches).  Adding a
+    # pedestal converts the half-rectified distribution into a proper Gaussian so
+    # NLM can smooth it symmetrically.
+    pedestal = 3.0 * sky_sigma
+    img_ped = img.astype(np.float64) + pedestal
+    ped_max = float(img_ped.max())
+
+    blend = float(np.clip(blend, 0.0, 1.0))
+    img_f64 = img.astype(np.float64)
+
+    if HAS_SKIMAGE_RESTORATION:
+        img_norm = img_ped.astype(np.float32) / ped_max
+        h_norm = h * sky_sigma / ped_max
+        denoised = denoise_nl_means(
+            img_norm, h=h_norm, fast_mode=True,
+            patch_size=patch_size, patch_distance=patch_distance,
+            channel_axis=-1)
+        nlm_result = denoised.astype(np.float64) * ped_max - pedestal
+        result = blend * nlm_result + (1.0 - blend) * img_f64
+        return result.astype(np.float32)
+
+    if HAS_CV2:
+        img8 = np.clip(img_ped / ped_max * 255, 0, 255).astype(np.uint8)
+        bgr = cv2.cvtColor(img8, cv2.COLOR_RGB2BGR)
+        h_cv = max(1, int(round(h * sky_sigma / ped_max * 255)))
+        tw = patch_size * 2 + 1
+        sw = patch_distance * 2 + 1
+        denoised_bgr = cv2.fastNlMeansDenoisingColored(bgr, None, h_cv, h_cv, tw, sw)
+        denoised_rgb = cv2.cvtColor(denoised_bgr, cv2.COLOR_BGR2RGB)
+        nlm_result = denoised_rgb.astype(np.float64) / 255.0 * ped_max - pedestal
+        result = blend * nlm_result + (1.0 - blend) * img_f64
+        return result.astype(np.float32)
+
+    logging.warning("NLM denoising requires skimage.restoration or cv2; skipping")
+    return img
 
 
 def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
@@ -931,14 +1194,48 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
 
 
 def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
-    """Non-linear arcsinh stretch, ideal for astrophotography previews."""
+    """Non-linear arcsinh stretch with sigma-clipped sky background estimation.
+
+    Estimates the true sky background via iterative sigma-clipping, sets it as
+    the black point, then auto-tunes the arcsinh factor so the sky maps to a
+    target display level (~15 %).  This preserves faint nebulosity and avoids
+    the flat, grey-sky look produced by simple percentile clipping.
+    """
+    flat = img.ravel().astype(np.float64)
+    # Sigma-clipped sky estimate (3 iterations, 2.5-sigma)
+    med = np.median(flat)
+    for _ in range(3):
+        mad = np.median(np.abs(flat - med))
+        sig = 1.4826 * mad
+        flat = flat[np.abs(flat - med) < 2.5 * sig]
+        if len(flat) < 100:
+            break
+        med = np.median(flat)
+    bg = float(med)
+    bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
+
+    # Black point: just below the sky floor
+    black = max(bg - 1.0 * bg_sigma, 0.0)
+    # White point: bright stars / bright nebula cap
+    white = np.percentile(img, 99.8)
+    span = white - black
+    if span < 1e-12:
+        return np.zeros_like(img)
+
+    norm = np.clip((img - black) / span, 0.0, 1.0)
+
+    # Auto-tune arcsinh factor so sky maps to ~15 % of output range
     if factor is None:
+        target_bg = 0.15
+        bg_norm = float(np.clip((bg - black) / span, 1e-6, 1.0))
         factor = Config.ARCSINH_STRETCH_FACTOR
-    lo = max(np.percentile(img, 0.5), 0.0)
-    hi = np.percentile(img, 99.5)
-    norm = np.clip((img - lo) / (hi - lo + 1e-12), 0, 1)
+        for f in (3.0, 5.0, 10.0, 20.0, 50.0, 100.0):
+            if np.arcsinh(bg_norm * f) / np.arcsinh(f) >= target_bg:
+                factor = f
+                break
+
     stretched = np.arcsinh(norm * factor) / np.arcsinh(factor)
-    return np.clip(stretched, 0, 1)
+    return np.clip(stretched, 0.0, 1.0)
 
 
 def match_stars_affine(ref_positions, img_positions,
@@ -1254,7 +1551,11 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
     for c in range(3):
         bg = bg_channels[c]
         subtracted = rgb[:, :, c] - bg
-        np.clip(subtracted, 0, None, out=subtracted)
+        # Do NOT clip to 0 here.  Clipping converts the negative half of the
+        # Gaussian sky noise into exact zeros, creating large patches of
+        # identical zero-valued pixels (40–50 % of sky) that appear as
+        # "leopard print" in any linear FITS viewer.  Negative sky values are
+        # correct and are handled by PixInsight, Siril, DS9, etc.
         result[:, :, c] = subtracted
         if verbose:
             safe_print(f"    {channel_names[c]}: bg_median="
@@ -2822,32 +3123,35 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Post-processing chain
     # ======================================================================
 
-    # 1. Background extraction (with star mask for better exclusion)
+    # Detect stars once — reused by background extraction, wavelet, and NLM steps
+    pp_star_mask = None
+    if DAOStarFinder is not None and sigma_clipped_stats is not None:
+        try:
+            _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                       + 0.114 * stacked[:, :, 2])
+            _, _bg_med, _bg_std = sigma_clipped_stats(_pp_lum, sigma=3.0, maxiters=5)
+            _daof = DAOStarFinder(fwhm=3.0,
+                                  threshold=float(_bg_med) + 5.0 * float(_bg_std))
+            _pp_sources = _daof(_pp_lum - float(_bg_med))
+            if _pp_sources is not None and len(_pp_sources) > 0:
+                pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
+                if args.verbose:
+                    safe_print(f"    Post-processing star mask: {len(_pp_sources)} stars")
+        except Exception:
+            pass
+
+    # 1. Background extraction
     if args.background_extraction:
         print(f"\n  Applying background extraction (mesh={args.bg_mesh_size}, "
               f"sigma={args.bg_clip_sigma})...")
         bg_start = time.time()
-        # Generate star mask from stacked luminance for better bg estimation
-        star_mask = None
-        stacked_lum = 0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1] + 0.114 * stacked[:, :, 2]
-        if DAOStarFinder is not None and sigma_clipped_stats is not None:
-            try:
-                _, bg_med, bg_std = sigma_clipped_stats(stacked_lum, sigma=3.0, maxiters=5)
-                daof = DAOStarFinder(fwhm=3.0, threshold=float(bg_med) + 5.0 * float(bg_std))
-                stacked_sources = daof(stacked_lum - float(bg_med))
-                if stacked_sources is not None and len(stacked_sources) > 0:
-                    star_mask = generate_star_mask(stacked_lum.shape, stacked_sources, fwhm=4.0)
-                    if args.verbose:
-                        safe_print(f"    Star mask: {len(stacked_sources)} stars masked")
-            except Exception:
-                pass
 
         stacked = apply_background_extraction(
             stacked, mesh_size=args.bg_mesh_size,
             filter_size=args.bg_filter_size,
             clip_sigma=args.bg_clip_sigma,
             verbose=args.verbose,
-            star_mask=star_mask)
+            star_mask=pp_star_mask)
 
         safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
 
@@ -2930,7 +3234,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     else:
                         sky_floor = float(np.median(col))
                     if sky_floor > 0:
-                        stacked[:, :, c] = np.clip(stacked[:, :, c] - sky_floor, 0, None)
+                        stacked[:, :, c] -= sky_floor
                         if args.verbose:
                             safe_print(f"    Sky floor correction ch{c}: -{sky_floor:.2f}")
         except Exception:
@@ -2944,13 +3248,60 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stacked = local_normalize(stacked, sigma=ln_sigma)
         safe_print(f"  ✓ Local normalization ({format_time(time.time() - ln_start)})")
 
-    # 4. Wavelet denoising
+    # 4. Wavelet denoising (luma/chroma split, star-protected)
     if getattr(args, 'denoise', False):
         strength = getattr(args, 'denoise_strength', 3.0)
-        print(f"\n  Applying wavelet denoising (strength={strength})...")
+        chroma_boost = getattr(args, 'denoise_chroma_boost', 2.0)
+        print(f"\n  Applying wavelet denoising "
+              f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f})...")
         dn_start = time.time()
-        stacked = wavelet_denoise(stacked, threshold_factor=strength)
+        stacked = wavelet_denoise(stacked, threshold_factor=strength,
+                                  chroma_factor=chroma_boost,
+                                  star_mask=pp_star_mask)
         safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
+
+    # 4.5. Post-denoise sky residual correction
+    # Background extraction residuals (~10-25 ADU at mesh scale) are invisible
+    # when per-pixel noise is ~10 ADU but become the dominant signal after
+    # wavelet/NLM/bilateral reduce noise.  This removes the smooth residual
+    # so that edge-preserving denoisers don't enhance it into "leopard print"
+    # and FITS viewers/JPG stretch don't amplify it.
+    _any_denoise = (getattr(args, 'denoise', False)
+                    or getattr(args, 'denoise_nlm', False)
+                    or getattr(args, 'denoise_bilateral', False))
+    if _any_denoise and args.background_extraction:
+        _sr_mesh = max(32, args.bg_mesh_size // 2)
+        print(f"\n  Correcting post-denoise sky residuals (mesh={_sr_mesh})...")
+        _sr_start = time.time()
+        for _sr_pass in range(2):
+            stacked = remove_sky_residual(
+                stacked, mesh_size=_sr_mesh, filter_size=1,
+                clip_sigma=args.bg_clip_sigma,
+                star_mask=pp_star_mask, verbose=(args.verbose and _sr_pass == 0))
+        safe_print(f"  ✓ Sky residual correction "
+                   f"({format_time(time.time() - _sr_start)})")
+
+    # 5. Non-local means denoising (optional second pass for faint extended emission)
+    if getattr(args, 'denoise_nlm', False):
+        nlm_h = getattr(args, 'denoise_nlm_strength', 1.0)
+        nlm_blend = getattr(args, 'denoise_nlm_blend', 0.5)
+        print(f"\n  Applying NLM denoising (h={nlm_h:.1f}, blend={nlm_blend:.2f})...")
+        nlm_start = time.time()
+        stacked = nlm_denoise(stacked, h=nlm_h, blend=nlm_blend)
+        safe_print(f"  ✓ NLM denoise ({format_time(time.time() - nlm_start)})")
+
+    # 6. Bilateral filter denoising (spatially uniform alternative to NLM)
+    if getattr(args, 'denoise_bilateral', False):
+        bil_sigma_color = getattr(args, 'denoise_bilateral_sigma_color', None)
+        bil_sigma_space = getattr(args, 'denoise_bilateral_sigma_space', 3.0)
+        sc_str = f"{bil_sigma_color:.2f}" if bil_sigma_color is not None else "auto"
+        print(f"\n  Applying bilateral denoising "
+              f"(sigma_color={sc_str}, sigma_space={bil_sigma_space:.1f})...")
+        bil_start = time.time()
+        stacked = bilateral_denoise(stacked,
+                                    sigma_color=bil_sigma_color,
+                                    sigma_space=bil_sigma_space)
+        safe_print(f"  ✓ Bilateral denoise ({format_time(time.time() - bil_start)})")
 
     # Update memory usage
     if HAS_PSUTIL:
@@ -3014,6 +3365,187 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     return output_path
 
 
+def run_health_check(frames: dict, masters: dict, directory: str) -> None:
+    """Print a health-check report for light-frame consistency and calibration compatibility."""
+    lights = frames.get('light', [])
+    darks  = frames.get('dark',  [])
+    flats  = frames.get('flat',  [])
+    biases = frames.get('bias',  [])
+    warnings_hc: list = []
+
+    # ── Light Frames ──────────────────────────────────────────────────────────
+    print_header("LIGHT FRAMES", char='-')
+
+    if not lights:
+        safe_print("  ERROR: No light frames found.")
+        print_header("HEALTH CHECK RESULT", char='-')
+        safe_print("  STATUS: CANNOT STACK — no light frames found")
+        return
+
+    # Dimensions
+    dim_counter = Counter(
+        (f.header.get('NAXIS2'), f.header.get('NAXIS1')) for f in lights
+    )
+    if len(dim_counter) == 1:
+        (H, W), _ = dim_counter.most_common(1)[0]
+        safe_print(f"  Dimensions:    {H}×{W} px  (all {len(lights)} frames consistent)")
+    else:
+        safe_print(f"  Dimensions:    INCONSISTENT — {len(dim_counter)} different sizes:")
+        for (H, W), cnt in dim_counter.most_common():
+            safe_print(f"    {H}×{W}: {cnt} frame(s)")
+        warnings_hc.append("Light frames have mixed dimensions — cannot stack mixed sizes")
+    light_dims = dim_counter.most_common(1)[0][0]  # (H, W) of majority
+
+    # Exposure time
+    exptimes = [float(f.header['EXPTIME']) for f in lights if 'EXPTIME' in f.header]
+    if exptimes:
+        et_counter = Counter(round(e, 1) for e in exptimes)
+        if len(et_counter) == 1:
+            safe_print(f"  Exposure:      {list(et_counter)[0]:.1f}s  (all frames)")
+        else:
+            parts = ', '.join(f'{t:.1f}s ×{c}' for t, c in et_counter.most_common())
+            safe_print(f"  Exposure:      mixed — {parts}")
+            warnings_hc.append("Light frames have inconsistent exposure times")
+    light_et = Counter(round(e, 1) for e in exptimes).most_common(1)[0][0] if exptimes else None
+
+    # ISO / gain
+    isos = [f.header.get('ISOSPEED') or f.header.get('ISO') or f.header.get('GAIN')
+            for f in lights]
+    isos = [i for i in isos if i is not None]
+    if isos:
+        iso_counter = Counter(str(i) for i in isos)
+        if len(iso_counter) == 1:
+            safe_print(f"  ISO:           {list(iso_counter)[0]}  (all frames)")
+        else:
+            parts = ', '.join(f'ISO {k} ×{v}' for k, v in iso_counter.most_common())
+            safe_print(f"  ISO:           mixed — {parts}")
+            warnings_hc.append("Light frames have inconsistent ISO settings")
+    light_iso = Counter(str(i) for i in isos).most_common(1)[0][0] if isos else None
+
+    # Bayer pattern
+    bayerpats = [f.header.get('BAYERPAT') or f.header.get('COLORTYP') for f in lights]
+    bayerpats = [b for b in bayerpats if b is not None]
+    if bayerpats:
+        bp_counter = Counter(str(b) for b in bayerpats)
+        if len(bp_counter) == 1:
+            safe_print(f"  Bayer pattern: {list(bp_counter)[0]}  (all frames)")
+        else:
+            parts = ', '.join(f'{k} ×{v}' for k, v in bp_counter.most_common())
+            safe_print(f"  Bayer pattern: mixed — {parts}  ⚠")
+            warnings_hc.append("Light frames have mixed Bayer patterns")
+    else:
+        safe_print("  Bayer pattern: not recorded in headers (mono or unknown)")
+
+    # Binning
+    binnings = [(f.header.get('XBINNING', 1), f.header.get('YBINNING', 1)) for f in lights
+                if 'XBINNING' in f.header or 'YBINNING' in f.header]
+    if binnings:
+        bin_counter = Counter(binnings)
+        if len(bin_counter) == 1:
+            xb, yb = list(bin_counter)[0]
+            safe_print(f"  Binning:       {xb}×{yb}  (all frames)")
+        else:
+            parts = ', '.join(f'{xb}×{yb} ×{c}' for (xb, yb), c in bin_counter.most_common())
+            safe_print(f"  Binning:       mixed — {parts}  ⚠")
+            warnings_hc.append("Light frames have mixed binning settings")
+
+    # CCD temperature range
+    temps = [float(f.header['CCD-TEMP']) for f in lights if 'CCD-TEMP' in f.header]
+    if temps:
+        t_min, t_max = min(temps), max(temps)
+        tf_min = t_min * 9.0 / 5.0 + 32.0
+        tf_max = t_max * 9.0 / 5.0 + 32.0
+        safe_print(f"  CCD temp:      {t_min:.1f}–{t_max:.1f}°C  ({tf_min:.1f}–{tf_max:.1f}°F)")
+
+    # Date range
+    dates = sorted(f.header['DATE-OBS'] for f in lights if 'DATE-OBS' in f.header)
+    if dates:
+        safe_print(f"  Date range:    {dates[0][:19]}  →  {dates[-1][:19]}")
+
+    if len(lights) < Config.MIN_RECOMMENDED_FRAMES:
+        safe_print(f"  ⚠ Frame count: {len(lights)} (recommended: {Config.MIN_RECOMMENDED_FRAMES}+)")
+        warnings_hc.append(f"Only {len(lights)} light frame(s) — stack quality may be poor")
+
+    # ── Calibration compatibility ──────────────────────────────────────────────
+    print_header("CALIBRATION COMPATIBILITY", char='-')
+
+    # Dark
+    if darks:
+        dark_hdr    = darks[0].header
+        dark_et_val = masters.get('dark_exptime')
+        dark_iso_v  = dark_hdr.get('ISOSPEED') or dark_hdr.get('ISO') or dark_hdr.get('GAIN')
+        dark_temp_c = dark_hdr.get('CCD-TEMP')
+        dark_dims   = (dark_hdr.get('NAXIS2'), dark_hdr.get('NAXIS1'))
+        issues = []
+        if dark_et_val and light_et and abs(dark_et_val - light_et) > 0.5:
+            issues.append(f"exposure {dark_et_val:.1f}s ≠ lights {light_et:.1f}s")
+            warnings_hc.append(f"Dark exposure ({dark_et_val:.1f}s) differs from lights ({light_et:.1f}s)")
+        if dark_iso_v is not None and light_iso and str(dark_iso_v) != light_iso:
+            issues.append(f"ISO {dark_iso_v} ≠ lights ISO {light_iso}")
+            # ISO mismatch is already printed by the existing dark analysis
+        if None not in dark_dims and dark_dims != light_dims:
+            issues.append(f"size {dark_dims[1]}×{dark_dims[0]} ≠ lights {light_dims[1]}×{light_dims[0]}")
+            warnings_hc.append("Dark frame dimensions differ from lights")
+        temp_note = ''
+        if dark_temp_c is not None and temps:
+            delta = dark_temp_c - float(np.mean(temps))
+            temp_note = f"  (Δ{delta:+.1f}°C vs lights)"
+            if abs(delta) > 10:
+                issues.append(f"temp delta {delta:+.1f}°C")
+                warnings_hc.append(f"Dark sensor temp differs from lights by {abs(delta):.1f}°C — consider re-taking darks")
+        status = "ISSUES: " + "; ".join(issues) if issues else "OK"
+        safe_print(f"  Darks  ({len(darks)} frame(s)){temp_note}:  {status}")
+    else:
+        safe_print("  Darks:   none  ⚠")
+        warnings_hc.append("No dark frames — hot pixels and thermal noise will not be corrected")
+
+    # Flat
+    if flats:
+        flat_hdr  = flats[0].header
+        flat_dims = (flat_hdr.get('NAXIS2'), flat_hdr.get('NAXIS1'))
+        issues = []
+        if None not in flat_dims and flat_dims != light_dims:
+            issues.append(f"size {flat_dims[1]}×{flat_dims[0]} ≠ lights {light_dims[1]}×{light_dims[0]}")
+            warnings_hc.append("Flat frame dimensions differ from lights")
+        status = "ISSUES: " + "; ".join(issues) if issues else "OK"
+        safe_print(f"  Flats  ({len(flats)} frame(s)):  {status}")
+    else:
+        safe_print("  Flats:   none  ⚠")
+        warnings_hc.append("No flat frames — vignetting and per-channel response will not be corrected")
+
+    # Bias
+    if biases:
+        safe_print(f"  Bias   ({len(biases)} frame(s)):  OK")
+    elif darks:
+        safe_print("  Bias:   none  (dark frames correct the bias pedestal)")
+    else:
+        safe_print("  Bias:   none  ⚠")
+        warnings_hc.append("No bias or dark frames — bias pedestal will not be subtracted")
+
+    # ── Overall result ─────────────────────────────────────────────────────────
+    print_header("HEALTH CHECK RESULT", char='-')
+    if warnings_hc:
+        safe_print(f"  Warnings ({len(warnings_hc)}):")
+        for w in warnings_hc:
+            safe_print(f"    ⚠  {w}")
+        safe_print("")
+    critical = any(
+        keyword in w.lower()
+        for w in warnings_hc
+        for keyword in ("mixed dimensions", "cannot stack", "differ from lights")
+        if "dimensions" in w.lower()
+    )
+    if "Light frames have mixed dimensions" in warnings_hc or not lights:
+        safe_print("  STATUS: CANNOT STACK — critical issues must be resolved first")
+    elif len(warnings_hc) == 0:
+        safe_print("  STATUS: READY TO STACK")
+    elif len(warnings_hc) <= 2 and not any("differ" in w or "mismatch" in w.lower() for w in warnings_hc
+                                            if "dimension" in w.lower() or "exposure" in w.lower()):
+        safe_print("  STATUS: READY TO STACK (minor warnings — review above)")
+    else:
+        safe_print("  STATUS: PROCEED WITH CAUTION — review warnings above")
+
+
 def process_directory(directory: str, output: str, args: argparse.Namespace):
     # Print banner
     print_header("Astrophotography FITS Stacker", "=")
@@ -3065,6 +3597,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         frames = discover_frames(d)
         nfiles = sum(len(v) for v in frames.values())
         print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
+
+        if getattr(args, 'health_check', False):
+            print_header("HEALTH CHECK", "=")
+            safe_print(f"  Directory: {os.path.abspath(d)}")
 
         # Create master calibration frames
         if frames['dark'] or frames['flat'] or frames['bias']:
@@ -3238,6 +3774,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         if frames['dark'] or frames['flat'] or frames['bias']:
             stats.calibration_time = time.time() - cal_start
 
+        if getattr(args, 'health_check', False):
+            run_health_check(frames, masters, d)
+            continue  # skip stacking
+
         # Validation warnings
         if len(frames['light']) < Config.MIN_RECOMMENDED_FRAMES:
             warning = f"Only {len(frames['light'])} light frames found (recommended: {Config.MIN_RECOMMENDED_FRAMES}+)"
@@ -3292,7 +3832,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
 def parse_args():
     p = argparse.ArgumentParser(description='Streaming FITS stacker')
     p.add_argument('-d', '--directory', required=True)
-    p.add_argument('-o', '--output', required=True)
+    p.add_argument('-o', '--output', default=None,
+                   help='Output FITS path (required unless --health-check)')
+    p.add_argument('--health-check', action='store_true',
+                   help='Analyse input frames and calibration quality without stacking')
     p.add_argument('--no-registration', action='store_true')
     p.add_argument('--skip-phase-correlation', action='store_true',
                    help='Skip phase correlation, use only fallback methods (debug)')
@@ -3341,7 +3884,27 @@ def parse_args():
     p.add_argument('--denoise', action='store_true',
                    help='Enable wavelet denoising post-stack (requires pywt)')
     p.add_argument('--denoise-strength', type=float, default=3.0,
-                   help='Wavelet denoise threshold factor (default: 3.0)')
+                   help='Wavelet luma denoise threshold factor (default: 3.0)')
+    p.add_argument('--denoise-chroma-boost', type=float, default=2.0,
+                   help='Chroma threshold multiplier relative to luma (default: 2.0)')
+    p.add_argument('--denoise-nlm', action='store_true',
+                   help='Enable non-local means denoising after wavelet (requires skimage or cv2)')
+    p.add_argument('--denoise-nlm-strength', type=float, default=1.0,
+                   help='NLM filter strength multiplier relative to auto-estimated sigma (default: 1.0)')
+    p.add_argument('--denoise-nlm-blend', type=float, default=0.5,
+                   help='Blend fraction of NLM result with original (0=no NLM, 1=full NLM, default: 0.5). '
+                        'Lower values prevent the non-uniform smoothing ("leopard print") artifact by '
+                        'letting the original noise dominate. 0.5 reduces noise by ~30%% with <3%% '
+                        'spatial variation. Increase to 0.7–1.0 for heavier denoising if no pattern appears.')
+    p.add_argument('--denoise-bilateral', action='store_true',
+                   help='Enable bilateral filter denoising after wavelet (requires cv2). '
+                        'Spatially uniform by construction — no leopard-print artifact.')
+    p.add_argument('--denoise-bilateral-sigma-color', type=float, default=None,
+                   help='Bilateral value-similarity scale in ADU (default: auto from sky noise). '
+                        'Pixels differing by more than ~2× this value are not mixed. '
+                        'Try 1–5× the expected sky noise level.')
+    p.add_argument('--denoise-bilateral-sigma-space', type=float, default=3.0,
+                   help='Bilateral spatial smoothing radius in pixels (default: 3.0).')
     p.add_argument('--local-normalize', action='store_true',
                    help='Enable local normalization to remove vignetting residuals')
     p.add_argument('--local-normalize-sigma', type=float, default=50.0,
@@ -3352,8 +3915,8 @@ def parse_args():
                    help='Disable chroma noise reduction')
     p.add_argument('--chroma-nr-sigma', type=float, default=2.0,
                    help='Gaussian sigma for chroma smoothing in pixels (default: 2.0)')
-    p.add_argument('--stretch', choices=['linear', 'arcsinh'], default='linear',
-                   help='Preview image stretch method (default: linear)')
+    p.add_argument('--stretch', choices=['linear', 'arcsinh'], default='arcsinh',
+                   help='Preview image stretch method (default: arcsinh)')
     p.add_argument('-j', '--parallel', type=int, default=1,
                    help='Parallel workers for frame processing (0=auto, 1=sequential)')
     return p.parse_args()
@@ -3361,6 +3924,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if not args.health_check and not args.output:
+        print("ERROR: -o/--output is required unless --health-check is specified", file=sys.stderr)
+        raise SystemExit(1)
     # debug_registration implies verbose
     if args.debug_registration:
         args.verbose = True
