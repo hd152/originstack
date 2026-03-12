@@ -1,5 +1,14 @@
 {
     "chat.tools.terminal.autoApprove": {
         "git push": true
-    }
+    },
+    "python.testing.unittestArgs": [
+        "-v",
+        "-s",
+        "./tests",
+        "-p",
+        "test_*.py"
+    ],
+    "python.testing.pytestEnabled": false,
+    "python.testing.unittestEnabled": true
 }
