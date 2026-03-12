@@ -964,6 +964,10 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         if filter_size > 1 and min(ny, nx) >= filter_size:
             bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
 
+        # Gaussian smooth to eliminate cell-to-cell discontinuities
+        if min(ny, nx) >= 4:
+            bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
+
         # Interpolate to full resolution with edge-extended grid
         grid_y = np.array([(i + 0.5) * cell_h for i in range(ny)])
         grid_x = np.array([(j + 0.5) * cell_w for j in range(nx)])
@@ -992,6 +996,10 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             kx = min(3, nx - 1)
             spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
         background = spline(np.arange(H), np.arange(W)).astype(np.float64)
+
+        # Blur at half-mesh scale to suppress spline mesh-frequency ripple
+        blur_sigma = cell_h * 0.5
+        background = ndimage.gaussian_filter(background, sigma=blur_sigma)
 
         result[:, :, c] = (ch - background).astype(np.float32)
         if verbose:
@@ -1464,6 +1472,14 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
     if filter_size > 1 and min(ny, nx) >= max(filter_size, 12):
         bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
 
+    # Gaussian smooth the grid to eliminate abrupt cell-to-cell transitions.
+    # Without this, the cubic spline rings around sharp jumps between
+    # adjacent grid cells, producing visible wave-like artifacts at the mesh
+    # scale.  A sigma of 0.8 cells blends neighbours gently while preserving
+    # the large-scale gradient structure.
+    if min(ny, nx) >= 4:
+        bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
+
     # Interpolate grid back to full image resolution.
     # Extend grid by one cell on each side using linear extrapolation so the
     # spline only *interpolates* (never extrapolates) across the full image.
@@ -1508,6 +1524,13 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
         spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
 
     background = spline(np.arange(H), np.arange(W)).astype(np.float32)
+
+    # Final Gaussian blur at half-mesh scale suppresses any residual
+    # mesh-frequency ripple from spline interpolation.  This is the
+    # minimum spatial frequency the mesh can represent, so blurring at
+    # this scale cannot remove real sky structure — only grid artifacts.
+    blur_sigma = cell_h * 0.5
+    background = ndimage.gaussian_filter(background, sigma=blur_sigma)
 
     return background
 
@@ -3330,18 +3353,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                   star_mask=pp_star_mask)
         safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
 
-    # 4.5. Post-denoise sky residual correction
-    # Background extraction residuals (~10-25 ADU at mesh scale) are invisible
-    # when per-pixel noise is ~10 ADU but become the dominant signal after
-    # wavelet/NLM/bilateral reduce noise.  This removes the smooth residual
-    # so that edge-preserving denoisers don't enhance it into "leopard print"
-    # and FITS viewers/JPG stretch don't amplify it.
-    _any_denoise = (getattr(args, 'denoise', False)
-                    or getattr(args, 'denoise_nlm', False)
-                    or getattr(args, 'denoise_bilateral', False))
-    if _any_denoise and args.background_extraction:
+    # 4.5. Sky residual correction
+    # Background extraction leaves mesh-scale residuals that become visible
+    # when stretched in FITS viewers or after denoising amplifies them.
+    # Always run after background extraction to ensure a clean sky.
+    if args.background_extraction:
         _sr_mesh = max(32, args.bg_mesh_size // 2)
-        print(f"\n  Correcting post-denoise sky residuals (mesh={_sr_mesh})...")
+        print(f"\n  Correcting sky residuals (mesh={_sr_mesh})...")
         _sr_start = time.time()
         for _sr_pass in range(2):
             stacked = remove_sky_residual(
@@ -3945,8 +3963,8 @@ def parse_args():
     p.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
-    p.add_argument('--bg-mesh-size', type=int, default=128,
-                   help='Grid cell size in pixels for background estimation (default: 128)')
+    p.add_argument('--bg-mesh-size', type=int, default=64,
+                   help='Grid cell size in pixels for background estimation (default: 64)')
     p.add_argument('--bg-filter-size', type=int, default=3,
                    help='Median filter size for background grid smoothing (default: 3, must be odd)')
     p.add_argument('--bg-clip-sigma', type=float, default=3.0,
