@@ -189,6 +189,7 @@ try:
     import importlib.util
     _candidates = [
         Path(__file__).parent / "astro_stack.py",
+        Path(__file__).parent.parent / "astro_stack.py",
         Path("/mnt/user-data/uploads/astro_stack.py"),
     ]
     _src = next(p for p in _candidates if p.exists())
