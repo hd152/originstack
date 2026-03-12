@@ -964,15 +964,34 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         if filter_size > 1 and min(ny, nx) >= filter_size:
             bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
 
-        # Interpolate to full resolution
+        # Interpolate to full resolution with edge-extended grid
         grid_y = np.array([(i + 0.5) * cell_h for i in range(ny)])
         grid_x = np.array([(j + 0.5) * cell_w for j in range(nx)])
-        ky = min(3, ny - 1)
-        kx = min(3, nx - 1)
-        spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
+        if ny >= 2 and nx >= 2:
+            ext_grid = np.zeros((ny + 2, nx + 2), dtype=np.float64)
+            ext_grid[1:-1, 1:-1] = bg_grid
+            dy = grid_y[1] - grid_y[0]
+            ext_grid[0, 1:-1] = bg_grid[0, :] + (bg_grid[0, :] - bg_grid[1, :]) * (grid_y[0] / dy)
+            dy = grid_y[-1] - grid_y[-2]
+            ext_grid[-1, 1:-1] = bg_grid[-1, :] + (bg_grid[-1, :] - bg_grid[-2, :]) * ((H - 1 - grid_y[-1]) / dy)
+            dx = grid_x[1] - grid_x[0]
+            ext_grid[1:-1, 0] = bg_grid[:, 0] + (bg_grid[:, 0] - bg_grid[:, 1]) * (grid_x[0] / dx)
+            dx = grid_x[-1] - grid_x[-2]
+            ext_grid[1:-1, -1] = bg_grid[:, -1] + (bg_grid[:, -1] - bg_grid[:, -2]) * ((W - 1 - grid_x[-1]) / dx)
+            ext_grid[0, 0] = 0.5 * (ext_grid[0, 1] + ext_grid[1, 0])
+            ext_grid[0, -1] = 0.5 * (ext_grid[0, -2] + ext_grid[1, -1])
+            ext_grid[-1, 0] = 0.5 * (ext_grid[-1, 1] + ext_grid[-2, 0])
+            ext_grid[-1, -1] = 0.5 * (ext_grid[-1, -2] + ext_grid[-2, -1])
+            ext_y = np.concatenate([[0.0], grid_y, [float(H - 1)]])
+            ext_x = np.concatenate([[0.0], grid_x, [float(W - 1)]])
+            ky = min(3, ny + 1)
+            kx = min(3, nx + 1)
+            spline = RectBivariateSpline(ext_y, ext_x, ext_grid, kx=kx, ky=ky)
+        else:
+            ky = min(3, ny - 1)
+            kx = min(3, nx - 1)
+            spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
         background = spline(np.arange(H), np.arange(W)).astype(np.float64)
-        np.clip(background, float(bg_grid.min()), float(bg_grid.max()),
-                out=background)
 
         result[:, :, c] = (ch - background).astype(np.float32)
         if verbose:
@@ -1415,7 +1434,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
         grid_median = float(np.median(bg_grid))
         grid_std = float(np.std(bg_grid))
     if grid_std > 1e-6:
-        bright_thresh = grid_median + 1.5 * grid_std
+        bright_thresh = grid_median + 2.5 * grid_std
         bright_mask = bg_grid > bright_thresh
         if np.any(bright_mask) and not np.all(bright_mask):
             iy_good, ix_good = np.where(~bright_mask)
@@ -1437,25 +1456,58 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
             except Exception:
                 bg_grid[bright_mask] = grid_median
 
-    # Smooth the grid to reject remaining anomalous cells
-    if filter_size > 1 and min(ny, nx) >= filter_size:
+    # Smooth the grid to reject remaining anomalous cells.
+    # Skip for small grids (< 12 cells on shortest side): the 3x3 median
+    # filter with reflect-mode padding biases edge/corner cells toward
+    # interior values, systematically overestimating the background at
+    # image edges and creating mottled residuals after subtraction.
+    if filter_size > 1 and min(ny, nx) >= max(filter_size, 12):
         bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
 
-    # Interpolate grid back to full image resolution
+    # Interpolate grid back to full image resolution.
+    # Extend grid by one cell on each side using linear extrapolation so the
+    # spline only *interpolates* (never extrapolates) across the full image.
+    # Without this, cubic spline extrapolation at image edges overshoots,
+    # and the subsequent hard clamp creates flat patches → mottled background.
     from scipy.interpolate import RectBivariateSpline
 
     grid_y = np.array([(i + 0.5) * cell_h for i in range(ny)])
     grid_x = np.array([(j + 0.5) * cell_w for j in range(nx)])
 
-    ky = min(3, ny - 1)
-    kx = min(3, nx - 1)
+    if ny >= 2 and nx >= 2:
+        ext_grid = np.zeros((ny + 2, nx + 2), dtype=np.float64)
+        ext_grid[1:-1, 1:-1] = bg_grid
 
-    spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
+        # Linearly extrapolate top/bottom rows
+        dy = grid_y[1] - grid_y[0]
+        ext_grid[0, 1:-1] = bg_grid[0, :] + (bg_grid[0, :] - bg_grid[1, :]) * (grid_y[0] / dy)
+        dy = grid_y[-1] - grid_y[-2]
+        ext_grid[-1, 1:-1] = bg_grid[-1, :] + (bg_grid[-1, :] - bg_grid[-2, :]) * ((H - 1 - grid_y[-1]) / dy)
+
+        # Linearly extrapolate left/right columns
+        dx = grid_x[1] - grid_x[0]
+        ext_grid[1:-1, 0] = bg_grid[:, 0] + (bg_grid[:, 0] - bg_grid[:, 1]) * (grid_x[0] / dx)
+        dx = grid_x[-1] - grid_x[-2]
+        ext_grid[1:-1, -1] = bg_grid[:, -1] + (bg_grid[:, -1] - bg_grid[:, -2]) * ((W - 1 - grid_x[-1]) / dx)
+
+        # Corners: average of adjacent edge values
+        ext_grid[0, 0] = 0.5 * (ext_grid[0, 1] + ext_grid[1, 0])
+        ext_grid[0, -1] = 0.5 * (ext_grid[0, -2] + ext_grid[1, -1])
+        ext_grid[-1, 0] = 0.5 * (ext_grid[-1, 1] + ext_grid[-2, 0])
+        ext_grid[-1, -1] = 0.5 * (ext_grid[-1, -2] + ext_grid[-2, -1])
+
+        ext_y = np.concatenate([[0.0], grid_y, [float(H - 1)]])
+        ext_x = np.concatenate([[0.0], grid_x, [float(W - 1)]])
+
+        ky = min(3, ny + 1)
+        kx = min(3, nx + 1)
+        spline = RectBivariateSpline(ext_y, ext_x, ext_grid, kx=kx, ky=ky)
+    else:
+        ky = min(3, ny - 1)
+        kx = min(3, nx - 1)
+        spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
+
     background = spline(np.arange(H), np.arange(W)).astype(np.float32)
-
-    # Clamp to grid value range to prevent spline overshoot
-    np.clip(background, float(bg_grid.min()), float(bg_grid.max()),
-            out=background)
 
     return background
 
@@ -1509,13 +1561,23 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
 
             # Detect up to 3 extended sources (handles galaxy pairs/groups like
             # Markarian's Chain where multiple bright galaxies span the field).
+            # Additional sources must be nearly as bright as the primary to
+            # avoid false positives from light-pollution gradient peaks.
             remaining_lum = lum_smooth.copy()
             n_sources = 0
+            primary_peak = peak_val
             for _ in range(3):
                 py, px = np.unravel_index(int(np.argmax(remaining_lum)), (H, W))
                 pv = float(remaining_lum[py, px])
                 if pv <= detect_thresh:
                     break
+                # Secondary/tertiary sources must be at least 50% as bright
+                # (above sky) as the primary to avoid gradient false positives
+                if n_sources > 0:
+                    primary_excess = primary_peak - sky_med
+                    current_excess = pv - sky_med
+                    if primary_excess > 0 and current_excess < 0.5 * primary_excess:
+                        break
                 dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
                 galaxy_mask = (dist < excl_radius).astype(np.float32)
                 if combined_mask is None:
@@ -3197,14 +3259,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 if peak_val > detect_thresh and frac_bright > 0.001:
                     excl_radius = int(min(H_s, W_s) * 0.30)
                     yy, xx = np.mgrid[:H_s, :W_s]
-                    # Detect multiple extended sources (handles galaxy pairs/groups)
+                    # Detect multiple extended sources (handles galaxy pairs/groups).
+                    # Secondary sources must be at least 50% as bright (above
+                    # sky) as the primary to avoid gradient false positives.
                     remaining_lum = lum_smooth.copy()
-                    for _ in range(3):
+                    primary_peak = peak_val
+                    for _src_i in range(3):
                         py, px = np.unravel_index(
                             int(np.argmax(remaining_lum)), (H_s, W_s))
                         pv = float(remaining_lum[py, px])
                         if pv <= detect_thresh:
                             break
+                        if _src_i > 0:
+                            primary_excess = primary_peak - sky_med_lum
+                            current_excess = pv - sky_med_lum
+                            if primary_excess > 0 and current_excess < 0.5 * primary_excess:
+                                break
                         dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
                         sky_mask &= (dist >= excl_radius)
                         remaining_lum[dist < excl_radius] = float(
