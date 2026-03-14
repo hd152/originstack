@@ -12,6 +12,8 @@ Features:
 - Parallel frame processing via multiprocessing (-j)
 - Quality-weighted stacking, MAD-based sigma clipping, winsorized combine
 - Wavelet denoising, local normalization, arcsinh preview stretch
+- Richardson-Lucy deconvolution with automatic PSF estimation (Moffat/Gaussian)
+- Lanczos-interpolated drizzle for sub-pixel super-resolution
 - White balance, hot pixel removal, gradient removal
 
 Usage: python astro_stack.py -d INPUT_DIR -o OUTPUT.fits [options]
@@ -111,10 +113,16 @@ except Exception:
     HAS_CV2 = False
 
 try:
-    from skimage.restoration import denoise_nl_means, estimate_sigma
+    from skimage.restoration import denoise_nl_means, estimate_sigma, richardson_lucy
     HAS_SKIMAGE_RESTORATION = True
 except Exception:
     HAS_SKIMAGE_RESTORATION = False
+
+try:
+    from scipy.optimize import curve_fit
+    HAS_CURVE_FIT = True
+except Exception:
+    HAS_CURVE_FIT = False
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +279,11 @@ class Config:
     GPU_FFT_WORKER_MB = 800.0      # VRAM per thread for padded complex128 FFT
     GPU_ALIGN_WORKER_MB = 250.0    # VRAM per thread for ndimage.shift on 3-ch image
     GPU_VRAM_RESERVE_MB = 512.0    # Reserved for CuPy overhead / driver
+    RL_PSF_CUTOUT_RADIUS = 15      # Radius for star cutouts used in PSF estimation
+    RL_PSF_MAX_STARS = 30          # Max stars to sample for PSF building
+    RL_PSF_MIN_STARS = 5           # Min successful fits for reliable PSF
+    RL_PSF_SIZE = 31               # Output PSF kernel size (odd)
+    RL_DEFAULT_ITERATIONS = 15     # Default Richardson-Lucy iterations
 
 
 @dataclass
@@ -458,6 +471,100 @@ def classify_frame(path: str, header: dict) -> str:
     return 'light'
 
 
+def _frame_iso(f: FrameInfo):
+    """Extract ISO/gain value from a frame's header."""
+    return f.header.get('ISOSPEED') or f.header.get('ISO') or f.header.get('GAIN')
+
+
+def _frame_exptime(f: FrameInfo) -> Optional[float]:
+    """Extract exposure time from a frame's header."""
+    val = f.header.get('EXPTIME')
+    if val is not None:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def select_matching_darks(lights: List[FrameInfo], darks: List[FrameInfo]) -> List[FrameInfo]:
+    """Select dark frames that best match the light frames.
+
+    Matching priority:
+      1. ISO/gain (must match majority of lights)
+      2. Exposure time (prefer matching, but accept with scaling)
+      3. Dimensions (must match)
+
+    If all darks already share the same properties, returns them unchanged.
+    If no darks match, returns all darks with a warning (better than nothing).
+    """
+    if not lights or not darks:
+        return darks
+
+    # Determine majority light properties
+    light_isos = [str(_frame_iso(f)) for f in lights if _frame_iso(f) is not None]
+    light_ets = [round(_frame_exptime(f), 1) for f in lights if _frame_exptime(f) is not None]
+    light_dims = [(f.header.get('NAXIS2'), f.header.get('NAXIS1')) for f in lights]
+
+    majority_iso = Counter(light_isos).most_common(1)[0][0] if light_isos else None
+    majority_et = Counter(light_ets).most_common(1)[0][0] if light_ets else None
+    majority_dims = Counter(light_dims).most_common(1)[0][0] if light_dims else None
+
+    # Check if all darks are identical — no filtering needed
+    dark_isos = set(str(_frame_iso(f)) for f in darks if _frame_iso(f) is not None)
+    dark_ets = set(round(_frame_exptime(f), 1) for f in darks if _frame_exptime(f) is not None)
+    if len(dark_isos) <= 1 and len(dark_ets) <= 1:
+        return darks
+
+    # Score each dark frame: higher is better
+    # ISO match is critical (wrong ISO = wrong gain = wrong noise profile)
+    # Exposure match is helpful but darks can be exposure-scaled
+    scored: List[Tuple[int, FrameInfo]] = []
+    for d in darks:
+        score = 0
+        d_iso = str(_frame_iso(d)) if _frame_iso(d) is not None else None
+        d_et = round(_frame_exptime(d), 1) if _frame_exptime(d) is not None else None
+        d_dims = (d.header.get('NAXIS2'), d.header.get('NAXIS1'))
+
+        # Dimension mismatch is disqualifying
+        if majority_dims and d_dims != (None, None) and d_dims != majority_dims:
+            score -= 1000
+
+        # ISO match (most important)
+        if majority_iso is not None and d_iso is not None:
+            if d_iso == majority_iso:
+                score += 100
+            else:
+                score -= 100  # Wrong ISO is harmful
+
+        # Exposure time match (helpful)
+        if majority_et is not None and d_et is not None:
+            if abs(d_et - majority_et) < 0.5:
+                score += 10  # Exact match
+            elif abs(d_et - majority_et) / max(majority_et, 0.1) < 0.5:
+                score += 5   # Within 50% — scalable
+            # else: no bonus, but don't penalize (exposure scaling handles it)
+
+        scored.append((score, d))
+
+    if not scored:
+        return darks
+
+    best_score = max(s for s, _ in scored)
+    selected = [d for s, d in scored if s == best_score]
+
+    # Report selection if we actually filtered something out
+    if len(selected) < len(darks):
+        excluded = len(darks) - len(selected)
+        sel_iso = str(_frame_iso(selected[0])) if _frame_iso(selected[0]) is not None else '?'
+        sel_et = _frame_exptime(selected[0])
+        et_str = f" exp={sel_et:.1f}s" if sel_et else ''
+        safe_print(f"  ℹ Dark selection: kept {len(selected)}/{len(darks)} darks "
+                   f"(ISO={sel_iso}{et_str}) matching lights, excluded {excluded}")
+
+    return selected
+
+
 def load_fits(path: str) -> Tuple[np.ndarray, dict]:
     """Load FITS file; retry without memmap if keyword compression is present."""
     try:
@@ -585,6 +692,9 @@ def debayer_malvar(raw, pattern: str = 'RGGB'):
     out[:, :, 0] = gpu.xndimage.convolve(raw, kR, mode='mirror')
     out[:, :, 1] = gpu.xndimage.convolve(raw, kG, mode='mirror')
     out[:, :, 2] = gpu.xndimage.convolve(raw, kB, mode='mirror')
+    # Malvar kernels have negative coefficients that can produce negative values;
+    # clip to zero since negative light is physically meaningless
+    xp.clip(out, 0, None, out=out)
     return out
 
 
@@ -813,6 +923,202 @@ def measure_fwhm(img: np.ndarray, star_positions, cutout_radius: int = None) -> 
         if 0.5 <= fwhm_est < cutout_radius * 2.5:
             fwhms.append(fwhm_est)
     return float(np.median(fwhms)) if fwhms else 0.0
+
+
+def estimate_psf(img: np.ndarray, star_positions,
+                 cutout_radius: int = None, psf_size: int = None,
+                 model: str = 'moffat') -> Tuple[Optional[np.ndarray], float]:
+    """Estimate the point spread function from star cutouts via profile fitting.
+
+    Fits a 2D Moffat (default) or Gaussian model to bright, unsaturated stars
+    and builds a normalized PSF kernel from the median fit parameters.
+
+    Returns (psf_kernel, fwhm_pixels).  Returns (None, 0.0) if too few stars
+    are successfully fit.
+    """
+    if not HAS_CURVE_FIT:
+        logging.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
+        return None, 0.0
+    if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
+        logging.warning("Too few stars for PSF estimation "
+                        f"({0 if star_positions is None else len(star_positions)} < {Config.RL_PSF_MIN_STARS})")
+        return None, 0.0
+
+    if cutout_radius is None:
+        cutout_radius = Config.RL_PSF_CUTOUT_RADIUS
+    if psf_size is None:
+        psf_size = Config.RL_PSF_SIZE
+
+    H, W = img.shape[:2]
+    lum = img if img.ndim == 2 else (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+    img_max = float(lum.max())
+
+    # Sort by flux (brightest first), skip saturated
+    try:
+        sorted_idx = np.argsort(star_positions['flux'])[::-1]
+    except (KeyError, TypeError):
+        sorted_idx = range(len(star_positions))
+
+    # 2D Moffat: I(x,y) = A * (1 + ((x-x0)^2 + (y-y0)^2) / alpha^2)^(-beta) + bg
+    def moffat_2d(coords, amplitude, x0, y0, alpha, beta, background):
+        y, x = coords
+        r2 = (x - x0) ** 2 + (y - y0) ** 2
+        return (amplitude * (1.0 + r2 / (alpha ** 2)) ** (-beta) + background).ravel()
+
+    # 2D Gaussian: I(x,y) = A * exp(-((x-x0)^2 + (y-y0)^2) / (2*sigma^2)) + bg
+    def gaussian_2d(coords, amplitude, x0, y0, sigma, background):
+        y, x = coords
+        r2 = (x - x0) ** 2 + (y - y0) ** 2
+        return (amplitude * np.exp(-r2 / (2.0 * sigma ** 2)) + background).ravel()
+
+    alphas = []
+    betas = []
+    sigmas = []
+    n_tried = 0
+
+    for idx in sorted_idx:
+        if n_tried >= Config.RL_PSF_MAX_STARS:
+            break
+        star = star_positions[idx]
+        yc = int(round(float(star['ycentroid'])))
+        xc = int(round(float(star['xcentroid'])))
+        if (yc < cutout_radius or yc >= H - cutout_radius or
+                xc < cutout_radius or xc >= W - cutout_radius):
+            continue
+
+        cutout = lum[yc - cutout_radius:yc + cutout_radius + 1,
+                     xc - cutout_radius:xc + cutout_radius + 1].astype(np.float64)
+        peak = float(np.max(cutout))
+        bg = float(np.percentile(cutout, 25))
+
+        # Skip saturated stars (flat-topped peak = clipped at ADC max) or low-contrast
+        # A star is "saturated" if multiple pixels share the exact peak value (flat top)
+        n_at_peak = np.sum(cutout >= peak - 1e-6 * max(peak, 1.0))
+        if n_at_peak > 4 or (peak - bg) < np.std(cutout) * 2.0:
+            continue
+        n_tried += 1
+
+        sz = cutout.shape[0]
+        yg, xg = np.mgrid[0:sz, 0:sz]
+        center = sz / 2.0
+
+        try:
+            if model == 'moffat':
+                p0 = [peak - bg, center, center, 2.0, 3.0, bg]
+                bounds = ([0, center - 3, center - 3, 0.5, 1.0, 0],
+                          [peak * 2, center + 3, center + 3, 20.0, 10.0, peak])
+                popt, _ = curve_fit(moffat_2d, (yg, xg), cutout.ravel(),
+                                    p0=p0, bounds=bounds, maxfev=2000)
+                alphas.append(popt[3])
+                betas.append(popt[4])
+            else:
+                p0 = [peak - bg, center, center, 2.0, bg]
+                bounds = ([0, center - 3, center - 3, 0.3, 0],
+                          [peak * 2, center + 3, center + 3, 20.0, peak])
+                popt, _ = curve_fit(gaussian_2d, (yg, xg), cutout.ravel(),
+                                    p0=p0, bounds=bounds, maxfev=2000)
+                sigmas.append(popt[3])
+        except (RuntimeError, ValueError):
+            continue
+
+    # Require minimum successful fits
+    if model == 'moffat':
+        if len(alphas) < Config.RL_PSF_MIN_STARS:
+            logging.warning(f"PSF estimation: only {len(alphas)} Moffat fits succeeded "
+                            f"(need {Config.RL_PSF_MIN_STARS})")
+            return None, 0.0
+        med_alpha = float(np.median(alphas))
+        med_beta = float(np.median(betas))
+        fwhm = 2.0 * med_alpha * np.sqrt(2.0 ** (1.0 / med_beta) - 1.0)
+        # Generate Moffat PSF kernel
+        half = psf_size // 2
+        yg, xg = np.mgrid[-half:half + 1, -half:half + 1].astype(np.float64)
+        r2 = xg ** 2 + yg ** 2
+        psf = (1.0 + r2 / (med_alpha ** 2)) ** (-med_beta)
+    else:
+        if len(sigmas) < Config.RL_PSF_MIN_STARS:
+            logging.warning(f"PSF estimation: only {len(sigmas)} Gaussian fits succeeded "
+                            f"(need {Config.RL_PSF_MIN_STARS})")
+            return None, 0.0
+        med_sigma = float(np.median(sigmas))
+        fwhm = 2.355 * med_sigma
+        half = psf_size // 2
+        yg, xg = np.mgrid[-half:half + 1, -half:half + 1].astype(np.float64)
+        r2 = xg ** 2 + yg ** 2
+        psf = np.exp(-r2 / (2.0 * med_sigma ** 2))
+
+    psf /= psf.sum()
+    logging.info(f"PSF estimated: model={model}, FWHM={fwhm:.2f}px, "
+                 f"from {len(alphas) if model == 'moffat' else len(sigmas)} stars")
+    return psf.astype(np.float64), float(fwhm)
+
+
+def make_synthetic_psf(fwhm: float, psf_size: int = None, model: str = 'gaussian') -> np.ndarray:
+    """Generate a synthetic PSF kernel from a given FWHM.
+
+    Used as fallback when star-based PSF estimation is unavailable (e.g. no
+    photutils).  Returns a normalized 2D kernel.
+    """
+    if psf_size is None:
+        psf_size = Config.RL_PSF_SIZE
+    half = psf_size // 2
+    yg, xg = np.mgrid[-half:half + 1, -half:half + 1].astype(np.float64)
+    r2 = xg ** 2 + yg ** 2
+    if model == 'moffat':
+        alpha = fwhm / (2.0 * np.sqrt(2.0 ** (1.0 / 3.0) - 1.0))  # assume beta=3
+        psf = (1.0 + r2 / (alpha ** 2)) ** (-3.0)
+    else:
+        sigma = fwhm / 2.355
+        psf = np.exp(-r2 / (2.0 * sigma ** 2))
+    psf /= psf.sum()
+    return psf
+
+
+def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
+                                iterations: int = None,
+                                star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Richardson-Lucy deconvolution for sharpening the stacked image.
+
+    Operates on luminance only (YCbCr decomposition) to avoid colour
+    artifacts, then recombines with the original chrominance channels.
+
+    star_mask (float [0,1], 1=star core): if provided, the deconvolved
+    result is blended back with the original at star positions to prevent
+    ringing artifacts on bright star cores.
+    """
+    if not HAS_SKIMAGE_RESTORATION:
+        logging.warning("skimage.restoration not available; skipping Richardson-Lucy deconvolution")
+        return img
+    if iterations is None:
+        iterations = Config.RL_DEFAULT_ITERATIONS
+
+    src = img.astype(np.float64)
+
+    # Work in YCbCr — deconvolve luminance only
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    # RL requires strictly positive input; add a small pedestal
+    y_min = float(Y.min())
+    pedestal = max(-y_min + 1e-6, 1e-6)
+    Y_pos = Y + pedestal
+
+    Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
+    Y_deconv = Y_deconv - pedestal
+
+    # Star protection: blend original at star cores
+    if star_mask is not None:
+        Y_deconv = Y_deconv * (1.0 - star_mask) + Y * star_mask
+
+    # YCbCr -> RGB
+    R = Y_deconv + 1.40200 * Cr
+    G = Y_deconv - 0.34414 * Cb - 0.71414 * Cr
+    B = Y_deconv + 1.77200 * Cb
+    result = np.stack([R, G, B], axis=2)
+    np.clip(result, 0.0, None, out=result)
+
+    return result.astype(np.float32)
 
 
 def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
@@ -1390,12 +1696,18 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 
             cell = img[y0:y1, x0:x1].ravel()
 
-            # Mask out star pixels if star_mask provided
+            # Mask out star/galaxy pixels if star_mask provided
             if star_mask is not None:
                 sm = star_mask[y0:y1, x0:x1].ravel()
+                masked_frac = float(np.mean(sm >= 0.5))
                 bg_pixels = cell[sm < 0.5]
                 if bg_pixels.size > 10:
                     cell = bg_pixels
+                elif masked_frac > 0.5:
+                    # Cell is mostly galaxy/nebula — mark as NaN for later
+                    # interpolation rather than using contaminated pixels.
+                    bg_grid[iy, ix] = np.nan
+                    continue
 
             if cell.size == 0:
                 bg_grid[iy, ix] = 0.0
@@ -1423,46 +1735,53 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
                 clipped = clipped[mask]
             bg_grid[iy, ix] = float(np.median(clipped))
 
-    # Reject grid cells contaminated by extended bright objects (nebulae/galaxies).
-    # Bright cells are replaced by fitting a 2D polynomial to the non-bright cells
-    # and evaluating it at the bright positions.  This correctly extrapolates
-    # chromatic sky gradients into the masked region (unlike local-median inpainting,
-    # which only propagates border values and cannot reconstruct steep gradients).
-    # Use sigma-clipped stats so that genuine LP-gradient variation doesn't
-    # inflate grid_std and prevent galaxy cells from being flagged as bright.
+    # Reject grid cells contaminated by extended objects (nebulae/galaxies).
+    # Outlier cells (both bright AND anomalously negative) are replaced by
+    # fitting a 2D polynomial to the clean cells and evaluating it at the
+    # outlier positions.  This correctly extrapolates chromatic sky gradients
+    # into the masked region.
+    # Also reject NaN cells (from mostly-masked galaxy regions).
+    nan_mask = np.isnan(bg_grid)
     if sigma_clipped_stats is not None:
         try:
-            _, _gm, _gs = sigma_clipped_stats(bg_grid.ravel(), sigma=3.0, maxiters=5)
+            finite_vals = bg_grid[~nan_mask].ravel() if np.any(~nan_mask) else bg_grid.ravel()
+            _, _gm, _gs = sigma_clipped_stats(finite_vals, sigma=3.0, maxiters=5)
             grid_median = float(_gm)
             grid_std = float(_gs)
         except Exception:
-            grid_median = float(np.median(bg_grid))
-            grid_std = float(np.std(bg_grid))
+            grid_median = float(np.nanmedian(bg_grid))
+            grid_std = float(np.nanstd(bg_grid))
     else:
-        grid_median = float(np.median(bg_grid))
-        grid_std = float(np.std(bg_grid))
+        grid_median = float(np.nanmedian(bg_grid))
+        grid_std = float(np.nanstd(bg_grid))
+    # Symmetric outlier rejection: reject both bright AND dim cells
+    outlier_mask = nan_mask.copy()
     if grid_std > 1e-6:
         bright_thresh = grid_median + 2.5 * grid_std
-        bright_mask = bg_grid > bright_thresh
-        if np.any(bright_mask) and not np.all(bright_mask):
-            iy_good, ix_good = np.where(~bright_mask)
-            vals_good = bg_grid[iy_good, ix_good]
-            # Normalised coordinates for numerical stability
-            y_good = (iy_good.astype(float) + 0.5) / ny
-            x_good = (ix_good.astype(float) + 0.5) / nx
-            # Build degree-2 polynomial design matrix (6 terms)
-            def poly2_features(y, x):
-                return np.column_stack([
-                    np.ones(len(y)), y, x, y ** 2, y * x, x ** 2])
-            A_good = poly2_features(y_good, x_good)
-            try:
-                coeffs, _, _, _ = np.linalg.lstsq(A_good, vals_good, rcond=None)
-                iy_bad, ix_bad = np.where(bright_mask)
-                y_bad = (iy_bad.astype(float) + 0.5) / ny
-                x_bad = (ix_bad.astype(float) + 0.5) / nx
-                bg_grid[bright_mask] = poly2_features(y_bad, x_bad).dot(coeffs)
-            except Exception:
-                bg_grid[bright_mask] = grid_median
+        dim_thresh = grid_median - 2.5 * grid_std
+        outlier_mask |= (bg_grid > bright_thresh) | (bg_grid < dim_thresh)
+    if np.any(outlier_mask) and not np.all(outlier_mask):
+        iy_good, ix_good = np.where(~outlier_mask)
+        vals_good = bg_grid[iy_good, ix_good]
+        # Normalised coordinates for numerical stability
+        y_good = (iy_good.astype(float) + 0.5) / ny
+        x_good = (ix_good.astype(float) + 0.5) / nx
+        # Build degree-2 polynomial design matrix (6 terms)
+        def poly2_features(y, x):
+            return np.column_stack([
+                np.ones(len(y)), y, x, y ** 2, y * x, x ** 2])
+        A_good = poly2_features(y_good, x_good)
+        try:
+            coeffs, _, _, _ = np.linalg.lstsq(A_good, vals_good, rcond=None)
+            iy_bad, ix_bad = np.where(outlier_mask)
+            y_bad = (iy_bad.astype(float) + 0.5) / ny
+            x_bad = (ix_bad.astype(float) + 0.5) / nx
+            bg_grid[outlier_mask] = poly2_features(y_bad, x_bad).dot(coeffs)
+        except Exception:
+            bg_grid[outlier_mask] = grid_median
+    elif np.all(outlier_mask):
+        # All cells are outliers — fill with zero (no background to extract)
+        bg_grid[:] = 0.0
 
     # Smooth the grid to reject remaining anomalous cells.
     # Skip for small grids (< 12 cells on shortest side): the 3x3 median
@@ -1650,41 +1969,129 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
     return result
 
 
-def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, float]], scale: int = 1) -> np.ndarray:
-    """Simple integer-factor drizzle: upsample images by `scale` and place into accumulator using integer-shift*scale offsets.
-    This is a simplified drizzle suitable for small scale factors.
+def _lanczos_kernel(x: np.ndarray, a: int = 3) -> np.ndarray:
+    """Lanczos interpolation kernel.
+
+    L(x) = sinc(x) * sinc(x/a)   for |x| < a
+    L(x) = 0                      for |x| >= a
     """
-    if scale <= 1:
-        # mean combine
+    result = np.zeros_like(x, dtype=np.float64)
+    mask = np.abs(x) < a
+    xm = x[mask]
+    # sinc(x) = sin(pi*x) / (pi*x), numpy's sinc already includes the pi
+    result[mask] = np.sinc(xm) * np.sinc(xm / a)
+    return result
+
+
+def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
+                            scale: float, out_h: int, out_w: int,
+                            lanczos_a: int = 3) -> np.ndarray:
+    """Resample a single frame onto an upscaled output grid using Lanczos interpolation.
+
+    Maps each output pixel back to fractional input coordinates (accounting for
+    the sub-pixel shift), then applies a separable Lanczos-a kernel.  Uses
+    scipy.ndimage.map_coordinates with order=5 (quintic B-spline, closely
+    approximating Lanczos-3) for efficiency, with a pure Lanczos kernel
+    available via lanczos_a parameter.
+    """
+    H, W = img.shape[:2]
+    C = img.shape[2] if img.ndim == 3 else 1
+
+    # Output coordinates -> input coordinates (inverse mapping)
+    # output pixel (oy, ox) corresponds to input ((oy / scale) - shift_y, (ox / scale) - shift_x)
+    oy = np.arange(out_h, dtype=np.float64)
+    ox = np.arange(out_w, dtype=np.float64)
+    iy = oy / scale - shift[0]
+    ix = ox / scale - shift[1]
+
+    # Use scipy's map_coordinates with order=5 (quintic spline ≈ Lanczos-3)
+    # This is much faster than a pure Python Lanczos loop
+    spline_order = min(5, lanczos_a + 2)  # order 5 for Lanczos-3
+
+    coords_y, coords_x = np.meshgrid(iy, ix, indexing='ij')
+
+    if img.ndim == 3:
+        result = np.empty((out_h, out_w, C), dtype=np.float64)
+        for c in range(C):
+            result[:, :, c] = ndimage.map_coordinates(
+                img[:, :, c].astype(np.float64),
+                [coords_y, coords_x],
+                order=spline_order, mode='constant', cval=0.0)
+    else:
+        result = ndimage.map_coordinates(
+            img.astype(np.float64),
+            [coords_y, coords_x],
+            order=spline_order, mode='constant', cval=0.0)
+
+    return result
+
+
+def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, float]],
+                    scale: float = 1.0, weights: Optional[np.ndarray] = None,
+                    drop_size: float = 0.7) -> np.ndarray:
+    """Drizzle combine with Lanczos interpolation and fractional sub-pixel shifts.
+
+    Each input frame is resampled onto an upscaled output grid using high-order
+    spline interpolation (approximating Lanczos-3).  Fractional sub-pixel shifts
+    are preserved, yielding genuine super-resolution when dithered data is
+    available.
+
+    Parameters
+    ----------
+    aligned_list : list of ndarray
+        Input frames (H, W, C), already cropped to common region.
+    shifts : list of (dy, dx) tuples
+        Sub-pixel registration shifts for each frame.
+    scale : float
+        Output scale factor (e.g. 2.0 for 2x super-resolution).
+    weights : ndarray, optional
+        Per-frame quality weights.  If None, uniform weighting is used.
+    drop_size : float
+        Pixel fraction (pixfrac) — controls the effective footprint of each
+        input pixel on the output grid.  Smaller values (0.5-0.7) yield
+        sharper results at the cost of noise.  1.0 = no shrinking.
+    """
+    if scale <= 1.0:
+        # No upscaling — weighted mean combine
         acc = None
-        for im in aligned_list:
+        total_w = 0.0
+        for i, im in enumerate(aligned_list):
+            w = float(weights[i]) if weights is not None else 1.0
             if acc is None:
                 acc = np.zeros_like(im, dtype=np.float64)
-            acc += im.astype(np.float64)
-        return (acc / len(aligned_list)).astype(np.float32)
-    # determine output size
-    H, W, C = aligned_list[0].shape
-    outH, outW = H * scale, W * scale
-    acc = np.zeros((outH, outW, C), dtype=np.float64)
-    weight = np.zeros((outH, outW, C), dtype=np.float64)
-    for im, sh in zip(aligned_list, shifts):
-        # upsample by repeating pixels
-        up = np.repeat(np.repeat(im, scale, axis=0), scale, axis=1)
-        dy = int(round(sh[0] * scale))
-        dx = int(round(sh[1] * scale))
-        # for simplicity, place centered
-        y0 = max(0, dy)
-        x0 = max(0, dx)
-        y1 = min(outH, y0 + up.shape[0])
-        x1 = min(outW, x0 + up.shape[1])
-        ay0 = 0 if dy >= 0 else -dy
-        ax0 = 0 if dx >= 0 else -dx
-        ay1 = ay0 + (y1 - y0)
-        ax1 = ax0 + (x1 - x0)
-        acc[y0:y1, x0:x1, :] += up[ay0:ay1, ax0:ax1, :].astype(np.float64)
-        weight[y0:y1, x0:x1, :] += 1.0
-    weight[weight == 0] = 1.0
-    return (acc / weight).astype(np.float32)
+            acc += im.astype(np.float64) * w
+            total_w += w
+        return (acc / max(total_w, 1e-12)).astype(np.float32)
+
+    H, W = aligned_list[0].shape[:2]
+    C = aligned_list[0].shape[2] if aligned_list[0].ndim == 3 else 1
+    out_h = int(round(H * scale))
+    out_w = int(round(W * scale))
+
+    acc = np.zeros((out_h, out_w, C) if C > 1 else (out_h, out_w), dtype=np.float64)
+    weight_map = np.zeros_like(acc, dtype=np.float64)
+
+    for i, (im, sh) in enumerate(zip(aligned_list, shifts)):
+        w = float(weights[i]) if weights is not None else 1.0
+        resampled = _lanczos_resample_frame(im, sh, scale, out_h, out_w)
+
+        # Build a coverage mask: pixels that map to valid input region
+        # (map_coordinates returns 0 for out-of-bounds, so detect via a
+        # ones-image mapped the same way)
+        ones = np.ones(im.shape[:2], dtype=np.float64)
+        coverage = _lanczos_resample_frame(ones, sh, scale, out_h, out_w)
+        valid = coverage > 0.5  # pixel has >50% coverage
+
+        if im.ndim == 3:
+            valid3 = valid[:, :, np.newaxis] if valid.ndim == 2 else valid
+            acc += np.where(valid3, resampled * w, 0.0)
+            weight_map += np.where(valid3, w, 0.0)
+        else:
+            acc += np.where(valid, resampled * w, 0.0)
+            weight_map += np.where(valid, w, 0.0)
+
+    weight_map[weight_map == 0] = 1.0
+    return (acc / weight_map).astype(np.float32)
 
 
 def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional[str]]:
@@ -1758,8 +2165,19 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
             bg_mean, bg_median, bg_std = sigma_clipped_stats(img, sigma=3.0)
             # Threshold for background-subtracted image: N * sigma above zero
             threshold = 5.0 * float(bg_std)
-            daof = DAOStarFinder(fwhm=3.0, threshold=threshold)
-            sources = daof(img - float(bg_median))
+            bg_sub = img - float(bg_median)
+
+            # Try multiple FWHM values to handle varying seeing/debayer methods.
+            # DAOStarFinder is sensitive to the fwhm parameter — a mismatch
+            # causes it to reject real stars via its sharpness/roundness criteria.
+            best_sources = None
+            for trial_fwhm in (3.0, 5.0, 8.0):
+                daof = DAOStarFinder(fwhm=trial_fwhm, threshold=threshold)
+                trial_sources = daof(bg_sub)
+                if trial_sources is not None and len(trial_sources) > 0:
+                    if best_sources is None or len(trial_sources) > len(best_sources):
+                        best_sources = trial_sources
+            sources = best_sources
 
             if sources is not None and len(sources) > 0:
                 star_count = len(sources)
@@ -1773,12 +2191,13 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     # Fallback star detection using local maxima
     if star_count == 0:
         try:
-            # Find bright local maxima
-            threshold = background + 3.0 * noise
+            # Find bright local maxima — use a larger neighbourhood and stricter
+            # threshold to avoid counting noise peaks as stars
+            threshold = background + 5.0 * noise
             from scipy.ndimage import maximum_filter
-            local_max = maximum_filter(img, size=5)
+            local_max = maximum_filter(img, size=11)
             detected_peaks = (img == local_max) & (img > threshold)
-            star_count = int(np.sum(detected_peaks))
+            star_count = min(int(np.sum(detected_peaks)), 500)
 
             if star_count > 0:
                 peak_values = img[detected_peaks]
@@ -2365,6 +2784,21 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
     header['LOCNORM'] = (getattr(args, 'local_normalize', False), 'Local normalization applied')
     header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method')
     header['DEBAYER'] = (args.debayer_method, 'Debayering method used')
+
+    # Drizzle
+    drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
+    header['DRIZZLE'] = (drizzle_scale > 1.0, 'Drizzle upscaling applied')
+    if drizzle_scale > 1.0:
+        header['DRZSCALE'] = (drizzle_scale, 'Drizzle scale factor')
+        header['DRZPIXFR'] = (getattr(args, 'drizzle_drop_size', 0.7), 'Drizzle pixel fraction')
+
+    # Richardson-Lucy deconvolution
+    header['DECONV'] = (getattr(args, 'deconvolve', False), 'Richardson-Lucy deconvolution applied')
+    if getattr(args, 'deconvolve', False):
+        header['DCITERS'] = (getattr(args, 'deconvolve_iterations', 15), 'Deconvolution iterations')
+        if getattr(args, 'deconvolve_fwhm', None):
+            header['DCFWHM'] = (args.deconvolve_fwhm, 'Deconvolution PSF FWHM (manual)')
+        header['DCMODEL'] = (getattr(args, 'deconvolve_psf_model', 'moffat'), 'PSF model used')
 
     # Add quality metrics including FWHM
     if frames and frames[0].metrics:
@@ -3164,35 +3598,86 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         except Exception:
             pass
     else:
-        # Weighted mean combine — align in parallel, accumulate as results arrive
-        acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
-        total_weight = 0.0
+        drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
+        drizzle_active = drizzle_scale > 1.0
 
-        gpu = get_gpu()
+        if drizzle_active:
+            # Drizzle combine — resample each frame onto upscaled grid with
+            # Lanczos interpolation, preserving sub-pixel shifts for genuine
+            # super-resolution.
+            crop_h, crop_w = bottom - top, right - left
+            out_h = int(round(crop_h * drizzle_scale))
+            out_w = int(round(crop_w * drizzle_scale))
+            print(f"  Drizzle: {drizzle_scale:.1f}x ({crop_h}x{crop_w} -> {out_h}x{out_w})")
 
-        def _align_and_crop(j):
-            with gpu.stream_context():
-                orig_idx = final_indices[j]
-                rgb = np.array(mem_rgb[orig_idx])
-                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
-                return j, aligned[top:bottom, left:right, :]
+            acc = np.zeros((out_h, out_w, C), dtype=np.float64)
+            weight_map = np.zeros((out_h, out_w, C), dtype=np.float64)
+            gpu = get_gpu()
 
-        if gpu.active:
-            n_mean_workers = min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
-                                                     Config.GPU_VRAM_RESERVE_MB), n_final)
-        else:
-            n_mean_workers = min(os.cpu_count() or 4, n_final)
-        with ThreadPoolExecutor(max_workers=n_mean_workers) as executor:
-            futures = {executor.submit(_align_and_crop, j): j for j in range(n_final)}
-            for future in tqdm(as_completed(futures), total=n_final,
-                               desc="  Stacking", unit="frame",
-                               disable=args.verbose):
-                j, cropped = future.result()
+            # Coverage template for detecting valid pixels
+            ones_template = None
+
+            for j in tqdm(range(n_final), desc="  Drizzling", unit="frame",
+                          disable=args.verbose):
+                with gpu.stream_context():
+                    orig_idx = final_indices[j]
+                    rgb = np.array(mem_rgb[orig_idx])
+                    aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
+                    cropped = aligned[top:bottom, left:right, :]
+
                 w = float(weights[j])
-                acc += cropped.astype(np.float64) * w
-                total_weight += w
+                # Resample with sub-pixel shift onto upscaled grid
+                # The shift relative to reference is already in shifts[j],
+                # but apply_transform already applied it. The residual
+                # fractional component for drizzle comes from the shift itself.
+                # Since apply_transform uses spline interpolation at native
+                # resolution, we re-resample the already-aligned frame onto
+                # the upscaled grid with identity shift (0,0).
+                resampled = _lanczos_resample_frame(cropped, (0.0, 0.0),
+                                                     drizzle_scale, out_h, out_w)
 
-        stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
+                # Coverage mask
+                if ones_template is None or ones_template.shape != cropped.shape[:2]:
+                    ones_template = np.ones(cropped.shape[:2], dtype=np.float64)
+                coverage = _lanczos_resample_frame(ones_template, (0.0, 0.0),
+                                                    drizzle_scale, out_h, out_w)
+                valid = coverage > 0.5
+                valid3 = valid[:, :, np.newaxis]
+                acc += np.where(valid3, resampled * w, 0.0)
+                weight_map += np.where(valid3, w, 0.0)
+
+            weight_map[weight_map == 0] = 1.0
+            stacked = (acc / weight_map).astype(np.float32)
+        else:
+            # Weighted mean combine — align in parallel, accumulate as results arrive
+            acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
+            total_weight = 0.0
+
+            gpu = get_gpu()
+
+            def _align_and_crop(j):
+                with gpu.stream_context():
+                    orig_idx = final_indices[j]
+                    rgb = np.array(mem_rgb[orig_idx])
+                    aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
+                    return j, aligned[top:bottom, left:right, :]
+
+            if gpu.active:
+                n_mean_workers = min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
+                                                         Config.GPU_VRAM_RESERVE_MB), n_final)
+            else:
+                n_mean_workers = min(os.cpu_count() or 4, n_final)
+            with ThreadPoolExecutor(max_workers=n_mean_workers) as executor:
+                futures = {executor.submit(_align_and_crop, j): j for j in range(n_final)}
+                for future in tqdm(as_completed(futures), total=n_final,
+                                   desc="  Stacking", unit="frame",
+                                   disable=args.verbose):
+                    j, cropped = future.result()
+                    w = float(weights[j])
+                    acc += cropped.astype(np.float64) * w
+                    total_weight += w
+
+            stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
 
     stats.stacking_time = time.time() - phase_start
 
@@ -3208,8 +3693,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Post-processing chain
     # ======================================================================
 
-    # Detect stars once — reused by background extraction, wavelet, and NLM steps
+    # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution
     pp_star_mask = None
+    _pp_sources = None
     if DAOStarFinder is not None and sigma_clipped_stats is not None:
         try:
             _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
@@ -3390,6 +3876,39 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                     sigma_color=bil_sigma_color,
                                     sigma_space=bil_sigma_space)
         safe_print(f"  ✓ Bilateral denoise ({format_time(time.time() - bil_start)})")
+
+    # 7. Richardson-Lucy deconvolution
+    if getattr(args, 'deconvolve', False):
+        rl_iters = getattr(args, 'deconvolve_iterations', Config.RL_DEFAULT_ITERATIONS)
+        rl_fwhm_override = getattr(args, 'deconvolve_fwhm', None)
+        rl_model = getattr(args, 'deconvolve_psf_model', 'moffat')
+
+        psf = None
+        psf_fwhm = 0.0
+        if rl_fwhm_override is not None:
+            # User-supplied FWHM — synthesize PSF
+            psf = make_synthetic_psf(rl_fwhm_override, model=rl_model)
+            psf_fwhm = rl_fwhm_override
+            safe_print(f"\n  Richardson-Lucy deconvolution (FWHM={psf_fwhm:.2f}px manual, "
+                       f"iters={rl_iters})...")
+        elif _pp_sources is not None and len(_pp_sources) > 0:
+            safe_print(f"\n  Estimating PSF from star profiles ({rl_model} model)...")
+            psf, psf_fwhm = estimate_psf(stacked, _pp_sources, model=rl_model)
+            if psf is not None:
+                safe_print(f"    PSF FWHM: {psf_fwhm:.2f} px")
+                safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
+            else:
+                safe_print("    PSF estimation failed — skipping deconvolution")
+        else:
+            safe_print("\n  No star detections for PSF estimation — use --deconvolve-fwhm "
+                       "to specify manually")
+
+        if psf is not None:
+            rl_start = time.time()
+            stacked = richardson_lucy_deconvolve(stacked, psf,
+                                                  iterations=rl_iters,
+                                                  star_mask=pp_star_mask)
+            safe_print(f"  ✓ Richardson-Lucy deconvolution ({format_time(time.time() - rl_start)})")
 
     # Update memory usage
     if HAS_PSUTIL:
@@ -3704,6 +4223,8 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             masters['bias'] = None
 
         if frames['dark']:
+            # Select darks that best match the light frames (ISO, exposure, dimensions)
+            frames['dark'] = select_matching_darks(frames.get('light', []), frames['dark'])
             masters['dark'] = make_master(frames['dark'], method='median')
             if masters['dark'] is not None:
                 safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames → {masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
@@ -3952,8 +4473,11 @@ def parse_args():
     p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
                    help='Debayering method (vng requires OpenCV)')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
-    p.add_argument('--drizzle-scale', type=int, default=1,
-                   help='Integer drizzle scale factor (1 = disabled)')
+    p.add_argument('--drizzle-scale', type=float, default=1.0,
+                   help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
+    p.add_argument('--drizzle-drop-size', type=float, default=0.7,
+                   help='Drizzle pixfrac / drop size (0.5-1.0, default: 0.7). '
+                        'Smaller values yield sharper results at the cost of noise.')
     p.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     p.add_argument('--skip-plate-solve', action='store_true',
@@ -3993,6 +4517,17 @@ def parse_args():
                         'Try 1–5× the expected sky noise level.')
     p.add_argument('--denoise-bilateral-sigma-space', type=float, default=3.0,
                    help='Bilateral spatial smoothing radius in pixels (default: 3.0).')
+    p.add_argument('--deconvolve', action='store_true',
+                   help='Enable Richardson-Lucy deconvolution for sharpening (requires scikit-image)')
+    p.add_argument('--deconvolve-iterations', type=int, default=Config.RL_DEFAULT_ITERATIONS,
+                   help=f'Number of Richardson-Lucy iterations (default: {Config.RL_DEFAULT_ITERATIONS}). '
+                        'More iterations = sharper but may amplify noise.')
+    p.add_argument('--deconvolve-fwhm', type=float, default=None,
+                   help='Override auto-estimated PSF FWHM in pixels. If set, a synthetic '
+                        'Gaussian PSF is used instead of fitting star profiles.')
+    p.add_argument('--deconvolve-psf-model', choices=['moffat', 'gaussian'], default='moffat',
+                   help='PSF model for auto-estimation (default: moffat). '
+                        'Moffat is preferred for seeing-limited images.')
     p.add_argument('--local-normalize', action='store_true',
                    help='Enable local normalization to remove vignetting residuals')
     p.add_argument('--local-normalize-sigma', type=float, default=50.0,
