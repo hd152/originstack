@@ -1221,10 +1221,8 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     appear as a mottled "leopard print" pattern in both FITS viewers and
     stretched previews.
 
-    Unlike the primary background extraction, this function skips bright-cell
-    rejection (which would false-positive on sky cells with large residuals).
-    It computes sigma-clipped medians per grid cell, smooths with a median
-    filter, then interpolates with a bicubic spline and subtracts per channel.
+    Includes automatic extended-source detection so that nebula/galaxy
+    emission is not mistaken for a sky residual and subtracted.
     """
     from scipy.interpolate import RectBivariateSpline
 
@@ -1233,6 +1231,58 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     nx = max(1, W // mesh_size)
     cell_h = H / ny
     cell_w = W / nx
+
+    # --- Detect extended sources and build a cell-level exclusion mask ---
+    # This prevents nebula/galaxy emission from being treated as sky residual.
+    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
+           + 0.114 * img[:, :, 2])
+    cell_excluded = np.zeros((ny, nx), dtype=bool)
+    try:
+        smooth_sigma = max(20.0, min(H, W) / 50.0)
+        lum_smooth = ndimage.gaussian_filter(lum, sigma=smooth_sigma)
+        border_frac = 0.12
+        by = max(10, int(H * border_frac))
+        bx = max(10, int(W * border_frac))
+        border_pix = np.concatenate([
+            lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
+            lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
+        ])
+        sky_med = float(np.median(border_pix))
+        sky_std = float(np.std(border_pix))
+        detect_thresh = sky_med + 5.0 * max(sky_std, 1.0)
+        frac_bright = float(np.mean(lum_smooth > detect_thresh))
+        if frac_bright > 0.005:
+            peak_y, peak_x = np.unravel_index(
+                int(np.argmax(lum_smooth)), (H, W))
+            peak_val = float(lum_smooth[peak_y, peak_x])
+            if peak_val > detect_thresh:
+                excl_radius = int(min(H, W) * 0.30)
+                # Mark grid cells whose centres fall inside the exclusion zone
+                remaining_lum = lum_smooth.copy()
+                primary_peak = peak_val
+                for _src_i in range(3):
+                    py, px = np.unravel_index(
+                        int(np.argmax(remaining_lum)), (H, W))
+                    pv = float(remaining_lum[py, px])
+                    if pv <= detect_thresh:
+                        break
+                    if _src_i > 0:
+                        primary_excess = primary_peak - sky_med
+                        current_excess = pv - sky_med
+                        if primary_excess > 0 and current_excess < 0.5 * primary_excess:
+                            break
+                    for iy in range(ny):
+                        cy = (iy + 0.5) * cell_h
+                        for ix in range(nx):
+                            cx = (ix + 0.5) * cell_w
+                            if np.sqrt((cy - py) ** 2 + (cx - px) ** 2) < excl_radius:
+                                cell_excluded[iy, ix] = True
+                    remaining_lum[np.sqrt(
+                        (np.mgrid[:H, :W][0] - py) ** 2 +
+                        (np.mgrid[:H, :W][1] - px) ** 2) < excl_radius] = float(
+                        np.min(remaining_lum))
+    except Exception:
+        pass
 
     result = np.empty_like(img, dtype=np.float32)
     channel_names = ['Red', 'Green', 'Blue']
@@ -1247,6 +1297,13 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             for ix in range(nx):
                 x0 = int(round(ix * cell_w))
                 x1 = min(int(round((ix + 1) * cell_w)), W)
+
+                # Skip cells in the extended source exclusion zone —
+                # their emission must not be treated as sky residual.
+                if cell_excluded[iy, ix]:
+                    bg_grid[iy, ix] = 0.0
+                    continue
+
                 cell = ch[y0:y1, x0:x1].ravel()
 
                 # Mask out star pixels
@@ -1523,7 +1580,7 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
         out_chroma = chroma * protect + smooth_chroma * sky_mask
         result[:, :, c] = lum + out_chroma
 
-    return np.clip(result, 0, None).astype(np.float32)
+    return result.astype(np.float32)
 
 
 def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
@@ -3693,6 +3750,40 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Post-processing chain
     # ======================================================================
 
+    # Per-channel hot pixel removal.  The per-frame removal (remove_hot_pixels_rgb)
+    # detects on luminance, so single-channel hot pixels (especially red on Bayer
+    # sensors) are diluted by the other channels and survive.  Persistent hot pixels
+    # also survive sigma-clip stacking because they appear in every frame.
+    #
+    # Detection: a pixel is hot if ONE channel spikes well above its local
+    # median AND the other channels do NOT show a proportional spike.  This
+    # distinguishes sensor hot pixels (single-channel) from bright nebula
+    # features (all channels elevated together).
+    print("\n  Removing residual hot pixels (per-channel)...")
+    _hp_start = time.time()
+    _hp_fixed = 0
+    _hp_meds = [ndimage.median_filter(stacked[:, :, c], size=5) for c in range(3)]
+    _hp_diffs = [stacked[:, :, c] - _hp_meds[c] for c in range(3)]
+    _hp_sigmas = []
+    for c in range(3):
+        _mad = np.median(np.abs(_hp_diffs[c]))
+        _hp_sigmas.append(max(_mad * 1.4826, 1e-6))
+    for c in range(3):
+        others = [i for i in range(3) if i != c]
+        # This channel spikes > 12 sigma above local median
+        ch_spike = _hp_diffs[c] / _hp_sigmas[c]
+        # Other channels must NOT be similarly elevated (< 4 sigma each)
+        other_normal = np.ones(stacked.shape[:2], dtype=bool)
+        for o in others:
+            other_normal &= (_hp_diffs[o] / _hp_sigmas[o] < 4.0)
+        hot = (ch_spike > 12.0) & other_normal
+        n_hot = int(np.sum(hot))
+        if n_hot > 0:
+            stacked[:, :, c][hot] = _hp_meds[c][hot]
+            _hp_fixed += n_hot
+    safe_print(f"  ✓ Per-channel hot pixel removal: {_hp_fixed} pixels fixed "
+               f"({format_time(time.time() - _hp_start)})")
+
     # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution
     pp_star_mask = None
     _pp_sources = None
@@ -3734,10 +3825,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma)
         safe_print(f"  ✓ Chroma noise reduction ({format_time(time.time() - cnr_start)})")
 
-    # Sky floor correction: subtract residual per-channel pedestal from background
-    # extraction + chroma NR.  Measured globally across all sky pixels (excluding
-    # galaxy and bright stars) so that the higher-sigma interior sky is captured,
-    # not just the lower-sigma border pixels (which have fewer dither frames).
+    # Sky floor correction: subtract residual pedestal from background
+    # extraction.  Uses luminance to compute a single uniform offset for
+    # all channels — per-channel subtraction would introduce color casts
+    # (e.g. subtracting 0.3 from R but 0 from G creates magenta when
+    # stretched aggressively in FITS viewers).
     if args.background_extraction:
         try:
             H_s, W_s = stacked.shape[:2]
@@ -3746,8 +3838,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
             # Build sky mask: start with all pixels, then exclude galaxy/nebula
             sky_mask = np.ones((H_s, W_s), dtype=bool)
-
-            # Auto-detect galaxy/nebula using the same method as apply_background_extraction
             try:
                 smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
                 lum_smooth = ndimage.gaussian_filter(lum_s, sigma=smooth_sigma)
@@ -3768,9 +3858,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 if peak_val > detect_thresh and frac_bright > 0.001:
                     excl_radius = int(min(H_s, W_s) * 0.30)
                     yy, xx = np.mgrid[:H_s, :W_s]
-                    # Detect multiple extended sources (handles galaxy pairs/groups).
-                    # Secondary sources must be at least 50% as bright (above
-                    # sky) as the primary to avoid gradient false positives.
                     remaining_lum = lum_smooth.copy()
                     primary_peak = peak_val
                     for _src_i in range(3):
@@ -3791,7 +3878,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             except Exception:
                 pass
 
-            # Exclude bright point sources (stars) using sigma-clipped luminance threshold
+            # Exclude bright point sources (stars)
             try:
                 if sigma_clipped_stats is not None:
                     sample = lum_s[sky_mask].ravel() if sky_mask.any() else lum_s.ravel()
@@ -3801,21 +3888,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             except Exception:
                 pass
 
+            # Compute a single sky floor from luminance and subtract uniformly
             if sky_mask.sum() > 1000:
-                for c in range(3):
-                    col = stacked[:, :, c][sky_mask].ravel()
-                    if sigma_clipped_stats is not None:
-                        try:
-                            _, sky_floor, _ = sigma_clipped_stats(col, sigma=3.0, maxiters=5)
-                            sky_floor = float(sky_floor)
-                        except Exception:
-                            sky_floor = float(np.median(col))
-                    else:
-                        sky_floor = float(np.median(col))
-                    if sky_floor > 0:
+                sky_lum = lum_s[sky_mask].ravel()
+                if sigma_clipped_stats is not None:
+                    try:
+                        _, sky_floor, _ = sigma_clipped_stats(sky_lum, sigma=3.0, maxiters=5)
+                        sky_floor = float(sky_floor)
+                    except Exception:
+                        sky_floor = float(np.median(sky_lum))
+                else:
+                    sky_floor = float(np.median(sky_lum))
+                if sky_floor > 0:
+                    for c in range(3):
                         stacked[:, :, c] -= sky_floor
-                        if args.verbose:
-                            safe_print(f"    Sky floor correction ch{c}: -{sky_floor:.2f}")
+                    if args.verbose:
+                        safe_print(f"    Sky floor correction (uniform): -{sky_floor:.2f}")
         except Exception:
             pass
 
@@ -3913,6 +4001,47 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Update memory usage
     if HAS_PSUTIL:
         stats.peak_memory_mb = get_memory_usage_mb()
+
+    # After background extraction the sky noise is symmetric around zero,
+    # with ~48% of pixels negative.  FITS viewers clip negatives per-channel
+    # before stretching, and since each channel has independent noise, random
+    # combinations of clipped/unclipped channels produce rainbow pixel noise
+    # (white, magenta, cyan, green speckles).
+    #
+    # Fix: add a uniform positive pedestal so virtually all sky noise is
+    # above zero.  The pedestal must be a SINGLE value for all channels to
+    # preserve color balance.  It is sized to the noisiest channel (typically
+    # R due to Bayer filter) so even that channel stays positive.
+    if args.background_extraction:
+        try:
+            # Measure sky noise per channel, excluding bright objects
+            _ped_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                        + 0.114 * stacked[:, :, 2])
+            _ped_sky = np.ones(stacked.shape[:2], dtype=bool)
+            if sigma_clipped_stats is not None:
+                _, _ped_med, _ped_std = sigma_clipped_stats(
+                    _ped_lum.ravel(), sigma=3.0, maxiters=5)
+                _ped_sky &= (_ped_lum < float(_ped_med) + 3.0 * float(_ped_std))
+            # Find the largest pedestal needed across all channels:
+            # pedestal = 3.3*sigma - median  (keeps 99.95% of noise positive)
+            max_pedestal = 0.0
+            for c in range(3):
+                ch_sky = stacked[:, :, c][_ped_sky].ravel()
+                if sigma_clipped_stats is not None:
+                    _, _ch_med, _ch_std = sigma_clipped_stats(
+                        ch_sky, sigma=3.0, maxiters=5)
+                else:
+                    _ch_med = float(np.median(ch_sky))
+                    _ch_std = float(np.std(ch_sky))
+                needed = 3.3 * float(_ch_std) - float(_ch_med)
+                max_pedestal = max(max_pedestal, needed)
+            if max_pedestal > 0:
+                for c in range(3):
+                    stacked[:, :, c] += max_pedestal
+                if args.verbose:
+                    safe_print(f"    Sky pedestal (uniform): +{max_pedestal:.2f}")
+        except Exception:
+            pass
 
     # Save FITS (3,H,W)
     out_h, out_w, _ = stacked.shape
