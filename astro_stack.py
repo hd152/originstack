@@ -3,29 +3,24 @@
 Features:
 - Streaming processing (constant memory)
 - Calibration (bias/dark/flat)
-- Debayering (bilinear, Malvar, VNG via OpenCV)
-- Quality analysis (brightness, contrast, star count, FWHM)
-- Registration (sub-pixel phase correlation, FFT cross-correlation, affine/star-matching)
+- Debayering (bilinear + optional Malvar)
+- Quality analysis (brightness, contrast, star count)
+- Registration (sub-pixel via phase correlation, fallback centroid)
 - Automatic cropping, hierarchical processing, preview generation
-- Intelligent background extraction (mesh-based sigma-clipped sky removal with star masking)
+- Intelligent background extraction (mesh-based sigma-clipped sky removal)
 - GPU acceleration via CuPy (--use-gpu) with automatic CPU fallback
-- Parallel frame processing via multiprocessing (-j)
-- Quality-weighted stacking, MAD-based sigma clipping, winsorized combine
-- Wavelet denoising, local normalization, arcsinh preview stretch
-- White balance, hot pixel removal, gradient removal
+- Several future features implemented in a basic form (white balance, hot pixel removal, gradient removal)
 
 Usage: python astro_stack.py -d INPUT_DIR -o OUTPUT.fits [options]
 """
 from __future__ import annotations
 
 import argparse
-import multiprocessing
 import os
 import sys
 import tempfile
 import time
 import logging
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional
 
@@ -36,7 +31,6 @@ from astropy.io import fits
 try:
     from scipy import ndimage
     from scipy import fftpack
-    from scipy.signal import fftconvolve
 except Exception:
     print("scipy is required", file=sys.stderr)
     raise
@@ -49,19 +43,10 @@ except Exception:
     exposure = None
 
 try:
-    from skimage.transform import EuclideanTransform
-    from skimage.measure import ransac
-    HAS_SKIMAGE_TRANSFORM = True
-except Exception:
-    HAS_SKIMAGE_TRANSFORM = False
-
-try:
-    from photutils.detection import DAOStarFinder
-except Exception:
-    DAOStarFinder = None
-try:
+    from photutils import DAOStarFinder
     from astropy.stats import sigma_clipped_stats
 except Exception:
+    DAOStarFinder = None
     sigma_clipped_stats = None
 
 try:
@@ -96,18 +81,6 @@ try:
     HAS_ASTROMETRY_NET = True
 except Exception:
     HAS_ASTROMETRY_NET = False
-
-try:
-    import pywt
-    HAS_PYWT = True
-except Exception:
-    HAS_PYWT = False
-
-try:
-    import cv2
-    HAS_CV2 = True
-except Exception:
-    HAS_CV2 = False
 
 
 # ---------------------------------------------------------------------------
@@ -181,49 +154,12 @@ class GpuContext:
             return cp.cuda.Device(0).mem_info[0] / 1024 ** 2
         return 0.0
 
-    def max_gpu_workers(self, per_worker_mb: float, reserve_mb: float = 512.0) -> int:
-        """Return max thread count that fits in VRAM, minimum 1."""
-        if not self.active:
-            return max(1, os.cpu_count() or 4)
-        avail = self.available_vram_mb() - reserve_mb
-        if avail <= 0 or per_worker_mb <= 0:
-            return 1
-        return max(1, int(avail / per_worker_mb))
-
-    def stream_context(self):
-        """Return a context manager that creates a per-thread CUDA stream."""
-        if self.active:
-            return _CudaStreamContext()
-        return _NullContext()
-
     def print_status(self):
         if self.active:
             safe_print(f"  GPU: {self.device_name}")
             safe_print(f"  VRAM: {self.vram_free_mb:.0f}/{self.vram_total_mb:.0f} MB free")
         else:
             safe_print(f"  Compute: CPU")
-
-
-class _CudaStreamContext:
-    """Context manager that creates a per-thread CUDA stream."""
-    def __enter__(self):
-        self._stream = cp.cuda.Stream(non_blocking=True)
-        self._stream.__enter__()
-        return self._stream
-
-    def __exit__(self, *exc):
-        self._stream.synchronize()
-        self._stream.__exit__(*exc)
-        return False
-
-
-class _NullContext:
-    """No-op context manager for CPU fallback."""
-    def __enter__(self):
-        return None
-
-    def __exit__(self, *exc):
-        return False
 
 
 _gpu: Optional[GpuContext] = None
@@ -239,8 +175,7 @@ def get_gpu() -> GpuContext:
 # Configuration constants
 class Config:
     """Central configuration for magic numbers and thresholds."""
-    HOT_PIXEL_THRESHOLD = 12.0
-    HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
+    HOT_PIXEL_THRESHOLD = 10.0
     WHITE_PATCH_PERCENTILE = 99.5
     MAX_SHIFT_FRACTION = 0.1
     STAR_DETECTION_SIGMA = 5.0
@@ -253,17 +188,6 @@ class Config:
     MIN_RECOMMENDED_FRAMES = 10
     PREVIEW_JPEG_QUALITY = 95
     PREVIEW_STRETCH_PERCENTILES = (1, 99)
-    TILE_SIZE = 256  # Tile size for tiled sigma-clip (pixels)
-    FWHM_CUTOUT_RADIUS = 10  # Cutout radius for FWHM measurement
-    FWHM_MAX_STARS = 50  # Max stars to measure for FWHM
-    ARCSINH_STRETCH_FACTOR = 5.0  # Default arcsinh stretch factor
-    STAR_MASK_MAX_STARS = 500  # Max stars for mask generation
-    AFFINE_MAX_STARS = 80  # Max stars for affine matching
-    AFFINE_MATCH_RADIUS = 10.0  # Max pixel distance for star matching
-    GPU_PHASE1_WORKER_MB = 250.0   # VRAM per thread for debayer+hotpix+wb
-    GPU_FFT_WORKER_MB = 800.0      # VRAM per thread for padded complex128 FFT
-    GPU_ALIGN_WORKER_MB = 250.0    # VRAM per thread for ndimage.shift on 3-ch image
-    GPU_VRAM_RESERVE_MB = 512.0    # Reserved for CuPy overhead / driver
 
 
 @dataclass
@@ -427,17 +351,12 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
                 except Exception:
                     hdr = {}
         ftype = classify_frame(p, hdr)
-        if ftype == 'skip':
-            continue
         frames[ftype].append(FrameInfo(path=p, type=ftype, header=hdr))
     return frames
 
 
 def classify_frame(path: str, header: dict) -> str:
     name = os.path.basename(path).lower()
-    # Skip files produced by this pipeline (stacked outputs)
-    if header.get('COMBINED') or header.get('CREATOR', '').startswith('astro_stack'):
-        return 'skip'
     if 'dark' in name or header.get('IMAGETYP', '').lower() == 'dark':
         return 'dark'
     if 'flat' in name or header.get('IMAGETYP', '').lower() == 'flat':
@@ -466,71 +385,22 @@ def load_fits(path: str) -> Tuple[np.ndarray, dict]:
 
 
 def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.ndarray]:
-    """Create master calibration frame using streaming (mean) or memmap (median)."""
     if not frames:
         return None
-    # Probe first frame for shape
-    try:
-        first_data, _ = load_fits(frames[0].path)
-        shape = first_data.shape
-    except Exception:
-        return None
-
-    if method != 'median':
-        # Streaming mean — O(1) memory per frame
-        acc = np.zeros(shape, dtype=np.float64)
-        count = 0
-        for f in frames:
-            try:
-                data, _ = load_fits(f.path)
-                acc += data.astype(np.float64)
-                count += 1
-            except Exception:
-                continue
-        if count == 0:
-            return None
-        return (acc / count).astype(np.float32)
-
-    # Median — use memmap for large datasets to avoid OOM
-    n = len(frames)
-    estimated_bytes = n * int(np.prod(shape)) * 4
-    if estimated_bytes > 500_000_000:  # > 500 MB → memmap
-        mm_path = os.path.join(tempfile.gettempdir(), f'master_{os.getpid()}.dat')
-        mem = np.memmap(mm_path, dtype='float32', mode='w+', shape=(n, *shape))
-        count = 0
-        for i, f in enumerate(frames):
-            try:
-                data, _ = load_fits(f.path)
-                mem[count] = data.astype(np.float32)
-                count += 1
-            except Exception:
-                continue
-        if count == 0:
-            del mem
-            try:
-                os.remove(mm_path)
-            except Exception:
-                pass
-            return None
-        result = np.median(mem[:count], axis=0).astype(np.float32)
-        del mem
+    imgs = []
+    for f in frames:
         try:
-            os.remove(mm_path)
+            data, _ = load_fits(f.path)
+            imgs.append(data.astype(np.float32))
         except Exception:
-            pass
-        return result
+            continue
+    if not imgs:
+        return None
+    if method == 'median':
+        stacked = np.median(np.stack(imgs, axis=0), axis=0)
     else:
-        # Small enough for in-memory
-        imgs = []
-        for f in frames:
-            try:
-                data, _ = load_fits(f.path)
-                imgs.append(data.astype(np.float32))
-            except Exception:
-                continue
-        if not imgs:
-            return None
-        return np.median(np.stack(imgs, axis=0), axis=0).astype(np.float32)
+        stacked = np.mean(np.stack(imgs, axis=0), axis=0)
+    return stacked.astype(np.float32)
 
 
 def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
@@ -539,6 +409,8 @@ def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
     raw = gpu.to_device(raw)
     H, W = raw.shape
     pat = pattern.upper()
+    if method == 'malvar':
+        return debayer_malvar(raw, pattern=pat)
     r = raw[0::2, 0::2]
     g1 = raw[0::2, 1::2]
     g2 = raw[1::2, 0::2]
@@ -577,38 +449,6 @@ def debayer_malvar(raw, pattern: str = 'RGGB'):
     return out
 
 
-def debayer_vng(raw, pattern: str = 'RGGB'):
-    """VNG (Variable Number of Gradients) debayering via OpenCV."""
-    if not HAS_CV2:
-        return debayer_malvar(raw, pattern)
-    pat_map = {
-        'RGGB': cv2.COLOR_BAYER_RG2RGB_VNG,
-        'BGGR': cv2.COLOR_BAYER_BG2RGB_VNG,
-        'GRBG': cv2.COLOR_BAYER_GR2RGB_VNG,
-        'GBRG': cv2.COLOR_BAYER_GB2RGB_VNG,
-    }
-    code = pat_map.get(pattern.upper())
-    if code is None:
-        return debayer_malvar(raw, pattern)
-    raw_np = np.asarray(raw, dtype=np.float32)
-    max_val = raw_np.max()
-    if max_val <= 0:
-        return np.zeros((*raw_np.shape, 3), dtype=np.float32)
-    raw_u16 = np.clip(raw_np / max_val * 65535, 0, 65535).astype(np.uint16)
-    rgb = cv2.cvtColor(raw_u16, code)
-    return (rgb.astype(np.float32) / 65535.0 * max_val)
-
-
-def debayer(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
-    """Dispatch to the appropriate debayering method."""
-    if method == 'vng':
-        return debayer_vng(raw, pattern)
-    elif method == 'malvar':
-        return debayer_malvar(raw, pattern)
-    else:
-        return debayer_bilinear(raw, pattern, method)
-
-
 def white_balance_grayworld(rgb):
     gpu = get_gpu()
     xp = gpu.xp
@@ -637,81 +477,12 @@ def remove_hot_pixels(img, threshold: float = None):
     med = gpu.xndimage.median_filter(img, size=3)
     diff = img - med
     sigma = float(xp.std(diff))
-    # threshold is a sigma multiplier (e.g. 12.0 = 12-sigma detection)
-    mask = diff > threshold * sigma
+    mask = diff > max(threshold, 5.0 * sigma)
     if not bool(xp.any(mask)):
         return img
     img_fixed = xp.array(img, copy=True)
     img_fixed[mask] = med[mask]
     return img_fixed
-
-
-def remove_hot_pixels_bayer(data: np.ndarray, threshold: float = None) -> np.ndarray:
-    """Detect and replace hot pixels on raw Bayer data per sub-channel.
-
-    Each 2x2 Bayer sub-channel (R, G1, G2, B) is processed independently,
-    so single-color hot pixels are detected at full strength — unlike
-    luminance-based detection which dilutes them by 70-89%.
-
-    Uses MAD-based sigma (robust to outliers) instead of std, preventing
-    hot pixels from inflating the noise estimate and hiding themselves.
-    """
-    if threshold is None:
-        threshold = Config.HOT_PIXEL_BAYER_THRESHOLD
-    if data.ndim != 2:
-        return data
-    result = data.astype(np.float32, copy=True)
-    for dy in range(2):
-        for dx in range(2):
-            sub = result[dy::2, dx::2]
-            med = ndimage.median_filter(sub, size=3)
-            diff = sub - med
-            mad = np.median(np.abs(diff))
-            sigma = mad * 1.4826  # MAD to Gaussian sigma
-            if sigma < 1e-6:
-                continue
-            mask = diff > threshold * sigma
-            if np.any(mask):
-                sub[mask] = med[mask]
-                result[dy::2, dx::2] = sub
-    return result
-
-
-def build_hot_pixel_map(dark: np.ndarray, sigma_threshold: float = 5.0) -> np.ndarray:
-    """Build a boolean hot pixel map from an unsmoothed dark frame.
-
-    Detects pixels with dark current significantly above the background.
-    Must be called BEFORE Gaussian smoothing of the master dark.
-    """
-    dark_f = dark.astype(np.float32)
-    med = np.median(dark_f)
-    # Use MAD-based sigma for robustness against the hot pixels themselves
-    mad = np.median(np.abs(dark_f - med))
-    sigma = mad * 1.4826  # MAD to Gaussian sigma conversion
-    if sigma < 1e-6:
-        sigma = float(np.std(dark_f))
-    return dark_f > (med + sigma_threshold * sigma)
-
-
-def apply_hot_pixel_map_bayer(data: np.ndarray, hot_map: np.ndarray) -> np.ndarray:
-    """Replace hot pixels in Bayer data using same-color median neighbors.
-
-    Processes each Bayer sub-channel (R, G1, G2, B) independently so the
-    3x3 median filter only uses same-color pixels (equivalent to 6x6 on
-    the full grid).  This preserves color accuracy.
-    """
-    if hot_map is None or not np.any(hot_map):
-        return data
-    result = data.astype(np.float32, copy=True)
-    for dy in range(2):
-        for dx in range(2):
-            sub = result[dy::2, dx::2]
-            mask = hot_map[dy::2, dx::2]
-            if np.any(mask):
-                med = ndimage.median_filter(sub, size=3)
-                sub[mask] = med[mask]
-                result[dy::2, dx::2] = sub
-    return result
 
 
 def background_gradient_subtract(img):
@@ -720,307 +491,24 @@ def background_gradient_subtract(img):
     return img - blurred
 
 
-# ---------------------------------------------------------------------------
-# New utility functions
-# ---------------------------------------------------------------------------
-
-def remove_hot_pixels_rgb(rgb, threshold: float = None):
-    """Detect hot pixels on luminance (1 filter pass), fix all 3 channels."""
-    gpu = get_gpu()
-    xp = gpu.xp
-    if threshold is None:
-        threshold = Config.HOT_PIXEL_THRESHOLD
-    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-    med_lum = gpu.xndimage.median_filter(lum, size=3)
-    diff = lum - med_lum
-    sigma = float(xp.std(diff))
-    # threshold is a sigma multiplier (e.g. 12.0 = 12-sigma detection)
-    mask = diff > threshold * sigma
-    if not bool(xp.any(mask)):
-        return rgb
-    result = xp.array(rgb, copy=True)
-    for c in range(rgb.shape[2]):
-        ch_med = gpu.xndimage.median_filter(rgb[:, :, c], size=3)
-        result[:, :, c][mask] = ch_med[mask]
-    return result
-
-
-def generate_star_mask(shape: Tuple[int, int], star_positions, fwhm: float = 3.0) -> np.ndarray:
-    """Generate a float mask with Gaussian PSFs at detected star positions."""
-    mask = np.zeros(shape, dtype=np.float32)
-    if star_positions is None or len(star_positions) == 0:
-        return mask
-    sigma = fwhm / 2.355
-    radius = int(3 * sigma) + 1
-    H, W = shape
-    n_stars = min(len(star_positions), Config.STAR_MASK_MAX_STARS)
-    for i in range(n_stars):
-        star = star_positions[i]
-        y = int(round(float(star['ycentroid'])))
-        x = int(round(float(star['xcentroid'])))
-        y0, y1 = max(0, y - radius), min(H, y + radius + 1)
-        x0, x1 = max(0, x - radius), min(W, x + radius + 1)
-        if y1 <= y0 or x1 <= x0:
-            continue
-        yy, xx = np.mgrid[y0:y1, x0:x1]
-        gaussian = np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / (2 * sigma ** 2))
-        mask[y0:y1, x0:x1] = np.maximum(mask[y0:y1, x0:x1], gaussian)
-    return mask
-
-
-def measure_fwhm(img: np.ndarray, star_positions, cutout_radius: int = None) -> float:
-    """Measure median FWHM from star cutouts using half-max area method."""
-    if cutout_radius is None:
-        cutout_radius = Config.FWHM_CUTOUT_RADIUS
-    if star_positions is None or len(star_positions) == 0:
-        return 0.0
-    H, W = img.shape
-    fwhms = []
-    n_stars = min(len(star_positions), Config.FWHM_MAX_STARS)
-    # Sort by flux (brightest first) for more reliable measurements
-    try:
-        sorted_idx = np.argsort(star_positions['flux'])[::-1]
-    except (KeyError, TypeError):
-        sorted_idx = range(n_stars)
-    for idx in sorted_idx[:n_stars]:
-        star = star_positions[idx]
-        y = int(round(float(star['ycentroid'])))
-        x = int(round(float(star['xcentroid'])))
-        if (y < cutout_radius or y >= H - cutout_radius or
-                x < cutout_radius or x >= W - cutout_radius):
-            continue
-        cutout = img[y - cutout_radius:y + cutout_radius + 1,
-                     x - cutout_radius:x + cutout_radius + 1].astype(np.float64)
-        peak = np.max(cutout)
-        bg = np.percentile(cutout, 25)
-        # Skip if star has very low contrast relative to noise
-        if (peak - bg) < np.std(cutout) * 2.0:
-            continue
-        half_max = (peak + bg) / 2.0
-        above_half = np.sum(cutout > half_max)
-        fwhm_est = 2.0 * np.sqrt(above_half / np.pi)
-        if 0.5 <= fwhm_est < cutout_radius * 2.5:
-            fwhms.append(fwhm_est)
-    return float(np.median(fwhms)) if fwhms else 0.0
-
-
-def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
-                    levels: int = 4, threshold_factor: float = 3.0) -> np.ndarray:
-    """Multi-scale wavelet denoising (BayesShrink) per channel."""
-    if not HAS_PYWT:
-        logging.warning("pywt not installed, skipping wavelet denoise")
-        return img
-    result = np.empty_like(img)
-    h, w = img.shape[0], img.shape[1]
-
-    def _denoise_channel(c):
-        channel = img[:, :, c].astype(np.float64)
-        max_level = pywt.dwt_max_level(min(channel.shape), pywt.Wavelet(wavelet).dec_len)
-        use_levels = min(levels, max_level)
-        if use_levels < 1:
-            return c, channel
-        coeffs = pywt.wavedec2(channel, wavelet, level=use_levels)
-        detail_hh = coeffs[-1][-1]
-        sigma_noise = np.median(np.abs(detail_hh)) / 0.6745
-        threshold = threshold_factor * sigma_noise
-        new_coeffs = [coeffs[0]]
-        for detail_level in coeffs[1:]:
-            new_coeffs.append(tuple(
-                pywt.threshold(d, threshold, mode='soft') for d in detail_level
-            ))
-        reconstructed = pywt.waverec2(new_coeffs, wavelet)
-        return c, reconstructed[:h, :w]
-
-    with ThreadPoolExecutor(max_workers=img.shape[2]) as executor:
-        for c, ch_result in executor.map(_denoise_channel, range(img.shape[2])):
-            result[:, :, c] = ch_result
-    return np.clip(result, 0, None).astype(np.float32)
-
-
-def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
-    """Local normalization to remove flat-field residuals and vignetting."""
-    result = np.empty_like(img)
-
-    def _normalize_channel(c):
-        channel = img[:, :, c].astype(np.float64)
-        local_mean = ndimage.gaussian_filter(channel, sigma=sigma)
-        local_sq_mean = ndimage.gaussian_filter(channel ** 2, sigma=sigma)
-        local_std = np.sqrt(np.maximum(local_sq_mean - local_mean ** 2, 0))
-        return c, (channel - local_mean) / (local_std + 1e-12)
-
-    with ThreadPoolExecutor(max_workers=img.shape[2]) as executor:
-        for c, ch_result in executor.map(_normalize_channel, range(img.shape[2])):
-            result[:, :, c] = ch_result
-    # Re-scale to original data range (positive values)
-    result = result - result.min()
-    orig_max = np.max(img)
-    if result.max() > 0 and orig_max > 0:
-        result = result / result.max() * orig_max
-    return result.astype(np.float32)
-
-
-def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
-    """Remove chroma (color) noise from sky background using luminance-protected smoothing.
-
-    Stars and bright objects are masked out before the blur so their chroma
-    never bleeds into surrounding pixels (which caused the halos/streaks in the
-    naive approach).  Only dark background pixels contribute to, and receive,
-    the smoothed chroma.  Stars/objects get their original chroma back exactly.
-
-    Algorithm:
-      1. Compute luminance and sigma-clipped sky statistics.
-      2. Build a soft sky-mask (1 = background, 0 = star/bright object).
-      3. For each channel: blur (chroma * sky_mask) and normalise by
-         blurred(sky_mask) – this is a masked/weighted Gaussian that cannot
-         receive contamination from bright pixels.
-      4. Reconstruct: sky pixels use smooth chroma, bright pixels use original.
-    """
-    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
-           + 0.114 * img[:, :, 2]).astype(np.float64)
-
-    # Sky statistics: median and std of the darker half of pixels
-    sky_med = float(np.median(lum))
-    dark_pixels = lum[lum <= sky_med]
-    sky_std = float(np.std(dark_pixels)) if dark_pixels.size > 0 else float(np.std(lum))
-
-    # protect = 0 → sky (smooth), protect = 1 → star (leave alone)
-    # Ramp from sky_med to sky_med + 3*sky_std
-    protect_range = max(3.0 * sky_std, np.finfo(np.float64).eps)
-    protect = np.clip((lum - sky_med) / protect_range, 0.0, 1.0)
-    sky_mask = 1.0 - protect  # float [0,1]
-
-    result = np.empty_like(img, dtype=np.float64)
-    blurred_weight = ndimage.gaussian_filter(sky_mask, sigma=sigma)
-    safe_weight = np.maximum(blurred_weight, 1e-9)
-
-    for c in range(img.shape[2]):
-        chroma = img[:, :, c].astype(np.float64) - lum
-        # Weighted blur: star pixels contribute 0, background contributes 1
-        smooth_chroma = ndimage.gaussian_filter(chroma * sky_mask, sigma=sigma) / safe_weight
-        # Stars keep original chroma; background gets smoothed chroma
-        out_chroma = chroma * protect + smooth_chroma * sky_mask
-        result[:, :, c] = lum + out_chroma
-
-    return np.clip(result, 0, None).astype(np.float32)
-
-
-def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
-    """Non-linear arcsinh stretch, ideal for astrophotography previews."""
-    if factor is None:
-        factor = Config.ARCSINH_STRETCH_FACTOR
-    lo = max(np.percentile(img, 0.5), 0.0)
-    hi = np.percentile(img, 99.5)
-    norm = np.clip((img - lo) / (hi - lo + 1e-12), 0, 1)
-    stretched = np.arcsinh(norm * factor) / np.arcsinh(factor)
-    return np.clip(stretched, 0, 1)
-
-
-def match_stars_affine(ref_positions, img_positions,
-                       initial_shift: Tuple[float, float] = (0.0, 0.0)):
-    """Match star catalogs and compute a Euclidean (rotation+translation) transform.
-
-    Uses nearest-neighbor matching after applying an initial translation estimate,
-    then RANSAC-robust fitting. Returns None if matching fails.
-    """
-    if not HAS_SKIMAGE_TRANSFORM:
-        return None
-    from scipy.spatial import cKDTree
-
-    max_stars = Config.AFFINE_MAX_STARS
-    if ref_positions is None or img_positions is None:
-        return None
-    if len(ref_positions) < 3 or len(img_positions) < 3:
-        return None
-
-    ref_pts = np.array([(float(s['xcentroid']), float(s['ycentroid']))
-                        for s in ref_positions[:max_stars]])
-    img_pts = np.array([(float(s['xcentroid']), float(s['ycentroid']))
-                        for s in img_positions[:max_stars]])
-
-    # Shift img points by initial estimate for better matching
-    img_pts_shifted = img_pts + np.array([initial_shift[1], initial_shift[0]])
-
-    tree = cKDTree(ref_pts)
-    distances, indices = tree.query(img_pts_shifted, k=1)
-
-    good = distances < Config.AFFINE_MATCH_RADIUS
-    if good.sum() < 3:
-        return None
-
-    src = img_pts[good]
-    dst = ref_pts[indices[good]]
-
-    try:
-        model, inliers = ransac(
-            (src, dst), EuclideanTransform,
-            min_samples=3, residual_threshold=2.0, max_trials=1000
-        )
-        if inliers is not None and inliers.sum() >= 3:
-            return model
-    except Exception:
-        pass
-    return None
-
-
-def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
-                    transform=None) -> np.ndarray:
-    """Apply translation or affine transform to a multi-channel image.
-
-    Uses cubic spline interpolation (order=3) for subpixel accuracy.
-    With accurate registration (full-resolution FFT cross-correlation),
-    subpixel shifts preserve detail better than integer rounding.
-    Dispatches to GPU (cupyx.scipy.ndimage) when available.
-    """
-    gpu = get_gpu()
-    xp = gpu.xp
-    _ndimage = gpu.xndimage
-    img_d = gpu.to_device(img)
-    if transform is not None:
-        matrix = transform.params
-        R = matrix[:2, :2]        # EuclideanTransform stores t in (x=col, y=row) space.
-        # scipy.ndimage.affine_transform operates in (row, col) space and applies the
-        # inverse mapping: input_coord = M @ output_coord + offset.
-        # Correct offset: -R @ [ty, tx]  (swap x/y to row/col, then negate for inverse).
-        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)=(x, y)
-        t_rowcol = np.array([t_xy[1], t_xy[0]])  # swap to (row, col)
-        offset = -R @ t_rowcol
-        mat_d = xp.asarray(R) if gpu.active else R
-        off_d = xp.asarray(offset) if gpu.active else offset
-        result = xp.zeros_like(img_d)
-        for c in range(img_d.shape[2]):
-            result[:, :, c] = _ndimage.affine_transform(
-                img_d[:, :, c], mat_d, offset=off_d,
-                order=3, mode='constant', cval=0.0
-            )
-        return gpu.to_host(result)
-    elif shift is not None:
-        result = xp.zeros_like(img_d)
-        for c in range(img_d.shape[2]):
-            result[:, :, c] = _ndimage.shift(
-                img_d[:, :, c], shift=shift, order=3,
-                mode='constant', cval=0.0, prefilter=True
-            )
-        return gpu.to_host(result)
-    return img
-
-
 def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int = 3,
-                       clip_sigma: float = 3.0, clip_iters: int = 5,
-                       star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                       clip_sigma: float = 3.0, clip_iters: int = 5) -> np.ndarray:
     """Estimate smooth sky background using mesh-based sigma-clipped statistics.
 
     Divides image into a grid, computes sigma-clipped median in each cell
-    (rejecting stars via both sigma-clipping and optional star mask), rejects
-    cells contaminated by extended bright objects (nebulae), then interpolates
-    the clean grid to a smooth background model.
+    (rejecting stars), rejects cells contaminated by extended bright objects
+    (nebulae), then interpolates the clean grid to a smooth background model.
 
     Args:
         img: 2D image array (single channel).
         mesh_size: Size of each grid cell in pixels.
-        filter_size: Median filter size applied to the mesh grid.
+        filter_size: Median filter size applied to the mesh grid to reject
+            anomalous cells (in grid units, must be odd).
         clip_sigma: Sigma threshold for iterative clipping within each cell.
         clip_iters: Maximum iterations for sigma clipping.
-        star_mask: Optional float mask (0=bg, 1=star) to exclude star pixels.
+
+    Returns:
+        2D background model array with same shape as input.
     """
     H, W = img.shape
     ny = max(1, H // mesh_size)
@@ -1039,18 +527,11 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
             x1 = min(int(round((ix + 1) * cell_w)), W)
 
             cell = img[y0:y1, x0:x1].ravel()
-
-            # Mask out star pixels if star_mask provided
-            if star_mask is not None:
-                sm = star_mask[y0:y1, x0:x1].ravel()
-                bg_pixels = cell[sm < 0.5]
-                if bg_pixels.size > 10:
-                    cell = bg_pixels
-
             if cell.size == 0:
                 bg_grid[iy, ix] = 0.0
                 continue
 
+            # Iterative sigma clipping to reject stars
             if sigma_clipped_stats is not None:
                 try:
                     _, median_val, _ = sigma_clipped_stats(
@@ -1073,35 +554,16 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
                 clipped = clipped[mask]
             bg_grid[iy, ix] = float(np.median(clipped))
 
-    # Reject grid cells contaminated by extended bright objects (nebulae/galaxies).
-    # Bright cells are replaced by fitting a 2D polynomial to the non-bright cells
-    # and evaluating it at the bright positions.  This correctly extrapolates
-    # chromatic sky gradients into the masked region (unlike local-median inpainting,
-    # which only propagates border values and cannot reconstruct steep gradients).
+    # Reject grid cells contaminated by extended bright objects (nebulae).
+    # Cells whose value is well above the overall grid median are replaced
+    # with the grid median so the background model stays at the sky level.
     grid_median = float(np.median(bg_grid))
     grid_std = float(np.std(bg_grid))
     if grid_std > 1e-6:
-        bright_thresh = grid_median + 1.5 * grid_std
+        bright_thresh = grid_median + 2.0 * grid_std
         bright_mask = bg_grid > bright_thresh
-        if np.any(bright_mask) and not np.all(bright_mask):
-            iy_good, ix_good = np.where(~bright_mask)
-            vals_good = bg_grid[iy_good, ix_good]
-            # Normalised coordinates for numerical stability
-            y_good = (iy_good.astype(float) + 0.5) / ny
-            x_good = (ix_good.astype(float) + 0.5) / nx
-            # Build degree-2 polynomial design matrix (6 terms)
-            def poly2_features(y, x):
-                return np.column_stack([
-                    np.ones(len(y)), y, x, y ** 2, y * x, x ** 2])
-            A_good = poly2_features(y_good, x_good)
-            try:
-                coeffs, _, _, _ = np.linalg.lstsq(A_good, vals_good, rcond=None)
-                iy_bad, ix_bad = np.where(bright_mask)
-                y_bad = (iy_bad.astype(float) + 0.5) / ny
-                x_bad = (ix_bad.astype(float) + 0.5) / nx
-                bg_grid[bright_mask] = poly2_features(y_bad, x_bad).dot(coeffs)
-            except Exception:
-                bg_grid[bright_mask] = grid_median
+        if np.any(bright_mask):
+            bg_grid[bright_mask] = grid_median
 
     # Smooth the grid to reject remaining anomalous cells
     if filter_size > 1 and min(ny, nx) >= filter_size:
@@ -1128,98 +590,71 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 
 def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
                                 filter_size: int = 3, clip_sigma: float = 3.0,
-                                verbose: bool = False,
-                                star_mask: Optional[np.ndarray] = None) -> np.ndarray:
-    """Apply per-channel background extraction with automatic extended-source masking.
+                                verbose: bool = False) -> np.ndarray:
+    """Apply intelligent background extraction to an RGB image.
 
-    Detects any large extended source (galaxy/nebula) in the image by smoothing
-    strongly and finding the brightest region, then masks it out so the background
-    model is only fit to true sky pixels.  Per-channel subtraction is always used
-    so that chromatic sky gradients are fully removed.
+    Estimates the background shape from the luminance channel, then scales
+    that single spatial model to each RGB channel proportionally.  Using a
+    shared shape ensures colour-neutral subtraction so star and nebula
+    colours are preserved.
+
+    Extended bright objects (nebulae) are detected at the grid level and
+    excluded from the background estimate so they are not subtracted.
+
+    Args:
+        rgb: Image array with shape (H, W, 3).
+        mesh_size: Grid cell size for background estimation.
+        filter_size: Median filter size for grid smoothing.
+        clip_sigma: Sigma for iterative clipping in each cell.
+        verbose: Print per-channel statistics.
+
+    Returns:
+        Background-subtracted RGB image, clipped to >= 0.
     """
-    H, W = rgb.shape[:2]
+    # 1. Compute luminance and estimate a single background model from it
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    bg_lum = extract_background(lum, mesh_size=mesh_size,
+                                filter_size=filter_size,
+                                clip_sigma=clip_sigma)
+    lum_bg_median = float(np.median(bg_lum))
 
-    # --- Auto-detect extended source (galaxy/nebula) and build exclusion mask ---
-    combined_mask = star_mask.copy().astype(np.float32) if star_mask is not None else None
+    if verbose:
+        safe_print(f"    Luminance background: median={lum_bg_median:.1f}, "
+                   f"range={float(np.max(bg_lum) - np.min(bg_lum)):.1f}")
 
-    try:
-        # Moderate smoothing: removes stars (PSF ~3px) but preserves galaxy shape
-        smooth_sigma = max(20.0, min(H, W) / 50.0)
-        lum_smooth = ndimage.gaussian_filter(lum, sigma=smooth_sigma)
-
-        # Sky reference from the image border (avoids galaxy near centre)
-        border_frac = 0.12
-        by = max(10, int(H * border_frac))
-        bx = max(10, int(W * border_frac))
-        border_pix = np.concatenate([
-            lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
-            lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
-        ])
-        sky_med = float(np.median(border_pix))
-        sky_std = float(np.std(border_pix))
-
-        peak_y, peak_x = np.unravel_index(int(np.argmax(lum_smooth)), (H, W))
-        peak_val = float(lum_smooth[peak_y, peak_x])
-
-        # Detect extended source: peak > 5-sigma above border sky
-        # AND the bright region (> sky + 3σ) covers > 1% of image
-        detect_thresh = sky_med + max(2.0 * max(sky_std, 1.0), 0.05 * (peak_val - sky_med))
-        frac_bright = float(np.mean(lum_smooth > detect_thresh))
-        if peak_val > detect_thresh and frac_bright > 0.001:
-            # Exclusion radius: 30% of shorter image dimension, centred on peak
-            excl_radius = int(min(H, W) * 0.30)
-            yy, xx = np.mgrid[:H, :W]
-
-            # Detect up to 3 extended sources (handles galaxy pairs/groups like
-            # Markarian's Chain where multiple bright galaxies span the field).
-            remaining_lum = lum_smooth.copy()
-            n_sources = 0
-            for _ in range(3):
-                py, px = np.unravel_index(int(np.argmax(remaining_lum)), (H, W))
-                pv = float(remaining_lum[py, px])
-                if pv <= detect_thresh:
-                    break
-                dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
-                galaxy_mask = (dist < excl_radius).astype(np.float32)
-                if combined_mask is None:
-                    combined_mask = galaxy_mask
-                else:
-                    np.clip(combined_mask + galaxy_mask, 0, 1, out=combined_mask)
-                # Blank out this source so next iteration finds a different peak
-                remaining_lum[dist < excl_radius] = float(np.min(remaining_lum))
-                n_sources += 1
-                if verbose:
-                    n_masked = int(np.sum(galaxy_mask > 0.5))
-                    safe_print(f"    Galaxy mask #{n_sources}: centre=({px},{py}), "
-                               f"radius={excl_radius}px, "
-                               f"{100. * n_masked / H / W:.1f}% masked")
-    except Exception:
-        pass
-
-    # --- Per-channel background subtraction (handles chromatic gradients) ---
-    # Estimate all three channels in parallel — they are independent.
+    # 2. For each channel, scale the luminance model to that channel's
+    #    background level so the subtracted amount is proportional.
     result = np.empty_like(rgb)
     channel_names = ['Red', 'Green', 'Blue']
-    bg_channels = [None, None, None]
 
-    def _extract_bg_channel(c):
-        return c, extract_background(rgb[:, :, c], mesh_size=mesh_size,
-                                     filter_size=filter_size, clip_sigma=clip_sigma,
-                                     star_mask=combined_mask)
+    for c in range(rgb.shape[2]):
+        channel = rgb[:, :, c]
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        for c, bg in executor.map(_extract_bg_channel, range(3)):
-            bg_channels[c] = bg
+        # Estimate this channel's sky level via sigma-clipped stats
+        if sigma_clipped_stats is not None:
+            try:
+                _, ch_bg_median, _ = sigma_clipped_stats(
+                    channel, sigma=clip_sigma, maxiters=5)
+                ch_bg_median = float(ch_bg_median)
+            except Exception:
+                ch_bg_median = float(np.median(channel))
+        else:
+            ch_bg_median = float(np.median(channel))
 
-    for c in range(3):
-        bg = bg_channels[c]
-        subtracted = rgb[:, :, c] - bg
+        # Scale factor: map luminance model amplitude to this channel
+        if lum_bg_median > 1e-6:
+            scale = ch_bg_median / lum_bg_median
+        else:
+            scale = 1.0
+
+        bg_channel = bg_lum * scale
+        subtracted = channel - bg_channel
         np.clip(subtracted, 0, None, out=subtracted)
         result[:, :, c] = subtracted
+
         if verbose:
-            safe_print(f"    {channel_names[c]}: bg_median="
-                       f"{float(np.median(bg)):.1f}, "
+            safe_print(f"    {channel_names[c]}: bg_median={ch_bg_median:.1f}, "
+                       f"scale={scale:.3f}, "
                        f"subtracted median={float(np.median(subtracted)):.1f}")
 
     return result
@@ -1327,14 +762,13 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     star_count = 0
     star_snr = 0.0
 
-    sources = None
     if DAOStarFinder is not None and sigma_clipped_stats is not None:
         try:
             bg_mean, bg_median, bg_std = sigma_clipped_stats(img, sigma=3.0)
-            # Threshold for background-subtracted image: N * sigma above zero
-            threshold = 5.0 * float(bg_std)
+            # Use more aggressive threshold for quality filtering
+            threshold = background + 5.0 * noise
             daof = DAOStarFinder(fwhm=3.0, threshold=threshold)
-            sources = daof(img - float(bg_median))
+            sources = daof(img - bg_median)
 
             if sources is not None and len(sources) > 0:
                 star_count = len(sources)
@@ -1342,8 +776,7 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
                 star_peaks = sources['peak']
                 star_snr = float(np.median(star_peaks)) / (noise + 1e-12)
         except Exception as e:
-            logging.debug(f"DAOStarFinder failed: {type(e).__name__}: {e}")
-            sources = None
+            pass
 
     # Fallback star detection using local maxima
     if star_count == 0:
@@ -1369,20 +802,13 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     except:
         sharpness = 0.0
 
-    # FWHM measurement from detected stars
-    fwhm = 0.0
-    if star_count > 0 and sources is not None:
-        fwhm = measure_fwhm(img, sources)
-
     # Composite quality score
+    # Penalize low star count heavily
     star_factor = min(star_count / 50.0, 1.0) if star_count > 0 else 0.01
     snr_factor = min(snr / 10.0, 1.0) if snr > 0 else 0.01
-    # Penalize poor focus (high FWHM) — prefer tighter stars
-    fwhm_factor = 1.0
-    if fwhm > 0:
-        fwhm_factor = max(0.1, 1.0 / (1.0 + max(0, fwhm - 2.0) ** 2 * 0.1))
+    contrast_factor = min(contrast / 100.0, 1.0) if contrast > 0 else 0.01
 
-    score = brightness * contrast * star_factor * snr_factor * fwhm_factor * 100.0
+    score = brightness * contrast * star_factor * snr_factor * 100.0
 
     return {
         'brightness': brightness,
@@ -1392,14 +818,12 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
         'star_count': star_count,
         'star_snr': star_snr,
         'sharpness': sharpness,
-        'fwhm': fwhm,
         'background': background,
         'noise': noise,
         'score': score,
         'p01': p01,
         'p99': p99,
-        'dynamic_range': p99 - p01,
-        '_star_sources': sources,
+        'dynamic_range': p99 - p01
     }
 
 
@@ -1458,56 +882,47 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         except Exception as e:
             debug_info.append(f"phase_cc error: {type(e).__name__}")
     
-    # FFT cross-correlation at full resolution with zero-padding.
-    # No downscaling or windowing — these cause multi-pixel registration
-    # errors that broaden stars in the stacked result.
-    # Uses GPU (CuPy) when available for ~10x speedup on large images.
+    # Try normalized cross-correlation as alternative fallback
     try:
-        gpu = get_gpu()
-        xp = gpu.xp
-
-        ref_norm = xp.asarray((ref - np.mean(ref)), dtype=xp.float64)
-        img_norm = xp.asarray((img - np.mean(img)), dtype=xp.float64)
-
-        h, w = ref_norm.shape
-        pad_h, pad_w = 2 * h, 2 * w
-        F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
-        F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
-        corr = xp.fft.irfft2(F_ref * xp.conj(F_img), s=(pad_h, pad_w))
-        del F_ref, F_img, ref_norm, img_norm  # free VRAM immediately
-
-        peak_flat = int(xp.argmax(corr))
-        peak = (peak_flat // corr.shape[1], peak_flat % corr.shape[1])
-        dy = peak[0] if peak[0] < h else peak[0] - pad_h
-        dx = peak[1] if peak[1] < w else peak[1] - pad_w
-
-        # Parabolic subpixel refinement (wrap-safe)
-        py, px = peak
-        sub_y = sub_x = 0.0
-        vc = float(corr[py, px])
-        vm = float(corr[(py - 1) % pad_h, px])
-        vp = float(corr[(py + 1) % pad_h, px])
-        denom = 2.0 * (2.0 * vc - vm - vp)
-        if abs(denom) > 1e-12:
-            sub_y = max(-0.5, min(0.5, (vm - vp) / denom))
-        vm = float(corr[py, (px - 1) % pad_w])
-        vp = float(corr[py, (px + 1) % pad_w])
-        denom = 2.0 * (2.0 * vc - vm - vp)
-        if abs(denom) > 1e-12:
-            sub_x = max(-0.5, min(0.5, (vm - vp) / denom))
-        del corr  # free VRAM
-
-        shift_y = float(dy + sub_y)
-        shift_x = float(dx + sub_x)
-
-        if np.isfinite(shift_y) and np.isfinite(shift_x) and max(abs(shift_y), abs(shift_x)) < max(h, w) * 0.5:
-            if verbose:
-                print(f"      [fft_xcorr: shift=({shift_x:.1f}, {shift_y:.1f})]")
-            return shift_y, shift_x
+        from scipy.signal import correlate2d
+        # Normalize images - critical for correlation to work well
+        ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
+        img_norm = (img - np.mean(img)) / (np.std(img) + 1e-12)
+        
+        # Use less aggressive downscaling - // 8 instead of // 64
+        # This preserves small shifts while still being computationally tractable
+        scale = max(1, ref.shape[0] // Config.XCORR_DOWNSCALE_TARGET)
+        ref_small = ref_norm[::scale, ::scale]
+        img_small = img_norm[::scale, ::scale]
+        
+        # correlate2d(ref, img) slides img over ref
+        # Peak at position p means img centered at p in ref gives best match
+        corr = correlate2d(ref_small, img_small, mode='same')
+        peak = np.unravel_index(np.argmax(corr), corr.shape)
+        center = np.array(corr.shape) // 2
+        # Shift needed to move img from center to peak position
+        shift_pixels = (peak - center) * scale
+        
+        # Reject if peak is at image corner (degenerate case)
+        # Corners are: (0,0), (height-1,0), (0,width-1), (height-1,width-1)
+        if peak[0] < 2 or peak[0] >= corr.shape[0] - 2 or peak[1] < 2 or peak[1] >= corr.shape[1] - 2:
+            debug_info.append(f"xcorr rejected: degenerate peak at corner {peak}")
         else:
-            debug_info.append(f"fft_xcorr rejected: shift ({shift_y:.1f}, {shift_x:.1f}) too large")
+            # Check if peak correlation is strong enough (sanity check)
+            peak_value = corr[peak] if len(corr.shape) > 0 else 0
+            mean_corr = np.mean(np.abs(corr))
+            
+            if peak_value > mean_corr * 2 and peak_value > 0:  # Peak should be significantly above average
+                if np.isfinite(shift_pixels).all() and np.abs(shift_pixels).max() < max(ref.shape) * 0.5:
+                    if verbose:
+                        print(f"      [xcorr fallback: shift=({shift_pixels[1]:.1f}, {shift_pixels[0]:.1f})]")
+                    return float(shift_pixels[0]), float(shift_pixels[1])
+                else:
+                    debug_info.append(f"xcorr rejected: bad result {shift_pixels}")
+            else:
+                debug_info.append(f"xcorr: weak peak (peak={peak_value:.1f}, mean={mean_corr:.1f})")
     except Exception as e:
-        debug_info.append(f"fft_xcorr error: {type(e).__name__}")
+        debug_info.append(f"xcorr error: {type(e).__name__}")
     
     # Fallback to centroid difference - try multiple percentiles for robustness
     best_shift = (0.0, 0.0)
@@ -1553,173 +968,87 @@ def apply_shift(img: np.ndarray, shift: Tuple[float, float]) -> np.ndarray:
     return ndimage.shift(img, shift=shift, order=3, mode='constant', cval=0.0, prefilter=True)
 
 
-def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
-                     transforms=None) -> Tuple[int, int, int, int]:
-    """Compute the largest axis-aligned crop valid in all aligned frames.
-
-    For translation-only frames uses shift magnitudes.  For frames with a
-    rotation transform the four corners of the input are forward-mapped to
-    output space; the inner axis-aligned rectangle of the resulting rotated
-    quad is used as the per-frame valid region.
-    """
+def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int]) -> Tuple[int, int, int, int]:
+    # compute maximal positive/negative shifts across frames and crop
+    ys = [s[0] for s in shifts]
+    xs = [s[1] for s in shifts]
+    max_up = int(max(0, np.ceil(max(ys))))
+    max_down = int(max(0, np.ceil(-min(ys))))
+    max_left = int(max(0, np.ceil(max(xs))))
+    max_right = int(max(0, np.ceil(-min(xs))))
     H, W = shape
-    transforms = transforms or [None] * len(shifts)
-    top_vals, bottom_vals, left_vals, right_vals = [], [], [], []
-
-    for shift, transform in zip(shifts, transforms):
-        sy, sx = shift
-        if transform is not None:
-            matrix = transform.params
-            R = matrix[:2, :2]      # rotation in (col=x, row=y) space
-            t_xy = matrix[:2, 2]    # [tx, ty] in (col=x, row=y)
-            # 4 corners of input in (col=x, row=y): TL, TR, BL, BR
-            corners_xy = np.array([[0.0, 0.0], [W, 0.0], [0.0, H], [W, H]])
-            out_xy = (R @ corners_xy.T).T + t_xy  # forward map to output
-            cols_out = out_xy[:, 0]  # x = col
-            rows_out = out_xy[:, 1]  # y = row
-            # Inner axis-aligned rect that fits inside the rotated quad
-            # (valid for |rotation| < 45°, which always holds for field rotation)
-            top_vals.append(max(rows_out[0], rows_out[1]))   # max row of top edge
-            bottom_vals.append(min(rows_out[2], rows_out[3]))  # min row of bottom edge
-            left_vals.append(max(cols_out[0], cols_out[2]))  # max col of left edge
-            right_vals.append(min(cols_out[1], cols_out[3]))  # min col of right edge
-        else:
-            top_vals.append(max(0.0, sy))
-            bottom_vals.append(min(float(H), H + sy))
-            left_vals.append(max(0.0, sx))
-            right_vals.append(min(float(W), W + sx))
-
-    top = int(np.ceil(max(top_vals))) + Config.CROP_MARGIN
-    bottom = int(np.floor(min(bottom_vals))) - Config.CROP_MARGIN
-    left = int(np.ceil(max(left_vals))) + Config.CROP_MARGIN
-    right = int(np.floor(min(right_vals))) - Config.CROP_MARGIN
+    top = max_up + Config.CROP_MARGIN
+    bottom = H - (max_down + Config.CROP_MARGIN)
+    left = max_left + Config.CROP_MARGIN
+    right = W - (max_right + Config.CROP_MARGIN)
     if top >= bottom or left >= right:
         return 0, H, 0, W
     return top, bottom, left, right
 
 
-def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
-                     weights: Optional[np.ndarray], winsorize: bool) -> np.ndarray:
-    """Process a single spatial tile for sigma-clip combine.
+def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
+                       verbose: bool = False) -> np.ndarray:
+    """Combine frames along axis 0 using iterative sigma-clipped mean.
 
-    Uses MAD (Median Absolute Deviation) for robust spread estimation
-    instead of standard deviation, which is less sensitive to the very
-    outliers we are trying to reject.
+    For each output pixel the value from every frame is collected.  Values
+    more than *sigma* standard-deviations from the current mean are masked
+    and the mean is recomputed.  This effectively removes hot pixels,
+    cosmic rays, and satellite trails that appear in only a few frames —
+    the key benefit of dithered exposures.
+
+    Args:
+        data: Array of shape ``(N, H, W, C)`` (all aligned frames).
+        sigma: Rejection threshold in standard-deviations.
+        max_iters: Maximum clipping iterations.
+        verbose: Print per-iteration rejection statistics.
+
+    Returns:
+        Combined image of shape ``(H, W, C)``.
     """
-    N = tile.shape[0]
-    mask = np.ones(tile.shape, dtype=bool)
+    N = data.shape[0]
+    # Start with all pixels included
+    mask = np.ones(data.shape, dtype=bool)
 
     for iteration in range(max_iters):
-        masked = np.where(mask, tile, np.nan)
+        # Compute masked mean and std along frame axis
+        masked = np.where(mask, data, np.nan)
         with np.errstate(all='ignore'):
-            median = np.nanmedian(masked, axis=0)
-            # MAD * 1.4826 is a consistent estimator of std for normal data
-            mad = np.nanmedian(np.abs(masked - median[np.newaxis]), axis=0) * 1.4826
+            mean = np.nanmean(masked, axis=0)
+            std = np.nanstd(masked, axis=0)
 
-        # Fallback to std where MAD is zero (constant regions)
-        spread = mad.copy()
-        zero_mad = spread < 1e-12
-        if np.any(zero_mad):
-            with np.errstate(all='ignore'):
-                std_fallback = np.nanstd(masked, axis=0)
-            spread[zero_mad] = std_fallback[zero_mad]
-
-        deviation = np.abs(tile - median[np.newaxis])
-        new_mask = mask & (deviation <= sigma * spread[np.newaxis])
+        # Reject pixels farther than sigma * std from the mean
+        deviation = np.abs(data - mean[np.newaxis])
+        new_mask = mask & (deviation <= sigma * std[np.newaxis])
 
         # Ensure at least 1 frame survives at every pixel
         surviving = new_mask.sum(axis=0)
+        # Where all frames would be rejected, keep the original mask
         all_rejected = surviving == 0
         if np.any(all_rejected):
             for frame_idx in range(N):
                 new_mask[frame_idx][all_rejected] = mask[frame_idx][all_rejected]
 
-        rejected = int(mask.sum() - new_mask.sum())
+        rejected_this_iter = int(mask.sum() - new_mask.sum())
         mask = new_mask
-        if rejected == 0:
+
+        if verbose:
+            total_pixels = mask.size
+            total_rejected = int((~mask).sum())
+            safe_print(f"    Iteration {iteration + 1}: rejected {rejected_this_iter} pixels "
+                       f"(total {total_rejected}/{total_pixels}, "
+                       f"{total_rejected / total_pixels * 100:.2f}%)")
+
+        if rejected_this_iter == 0:
             break
 
-    if winsorize:
-        # Replace outliers with clip boundaries instead of masking to NaN
-        masked_final = np.where(mask, tile, np.nan)
-        with np.errstate(all='ignore'):
-            med_final = np.nanmedian(masked_final, axis=0)
-            mad_final = np.nanmedian(
-                np.abs(masked_final - med_final[np.newaxis]), axis=0) * 1.4826
-        mad_final = np.maximum(mad_final, 1e-12)
-        upper = med_final + sigma * mad_final
-        lower = med_final - sigma * mad_final
-        clipped = np.clip(tile, lower[np.newaxis], upper[np.newaxis])
-        if weights is not None:
-            w = weights[:, np.newaxis, np.newaxis, np.newaxis]
-            return (np.sum(clipped * w, axis=0) / np.sum(w)).astype(np.float32)
-        return np.mean(clipped, axis=0).astype(np.float32)
-    else:
-        masked_final = np.where(mask, tile, np.nan)
-        if weights is not None:
-            w = np.where(mask, weights[:, np.newaxis, np.newaxis, np.newaxis], 0.0)
-            with np.errstate(all='ignore'):
-                total_w = np.sum(w, axis=0)
-                total_w[total_w == 0] = 1.0
-                result = np.nansum(masked_final * w, axis=0) / total_w
-            np.nan_to_num(result, copy=False, nan=0.0)
-            return result.astype(np.float32)
-        with np.errstate(all='ignore'):
-            result = np.nanmean(masked_final, axis=0)
-        np.nan_to_num(result, copy=False, nan=0.0)
-        return result.astype(np.float32)
+    # Final masked mean
+    masked = np.where(mask, data, np.nan)
+    with np.errstate(all='ignore'):
+        result = np.nanmean(masked, axis=0)
 
-
-def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
-                       weights: Optional[np.ndarray] = None,
-                       winsorize: bool = False,
-                       verbose: bool = False) -> np.ndarray:
-    """Combine frames using tiled, MAD-based, optionally winsorized sigma-clip.
-
-    Processes the image in spatial tiles to keep peak memory low.  Uses
-    MAD (Median Absolute Deviation) instead of standard deviation for more
-    robust outlier detection.  Optionally supports quality-weighted
-    combination and winsorized clipping.
-
-    Args:
-        data: Array of shape ``(N, H, W, C)`` (all aligned frames).
-        sigma: Rejection threshold in MADs.
-        max_iters: Maximum clipping iterations.
-        weights: Optional 1-D array of length N with per-frame quality weights.
-        winsorize: If True, clip outliers to boundary instead of rejecting.
-        verbose: Print per-tile progress.
-    """
-    N, H, W, C = data.shape
-    tile_size = Config.TILE_SIZE
-    result = np.zeros((H, W, C), dtype=np.float32)
-    total_rejected = 0
-    total_pixels = 0
-
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-
-    tile_coords = [
-        (ty_idx * tile_size, min((ty_idx + 1) * tile_size, H),
-         tx_idx * tile_size, min((tx_idx + 1) * tile_size, W))
-        for ty_idx in range(n_tiles_y)
-        for tx_idx in range(n_tiles_x)
-    ]
-
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize)
-
-    n_tile_workers = min(os.cpu_count() or 4, len(tile_coords))
-    with ThreadPoolExecutor(max_workers=n_tile_workers) as executor:
-        for coords, tile_result in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
-
-    if verbose:
-        safe_print(f"    Tiled sigma-clip: {n_tiles_y * n_tiles_x} tiles of "
-                   f"{tile_size}x{tile_size}, mode={'winsorized' if winsorize else 'reject'}")
-    return result
+    # Replace any remaining NaN with zero (shouldn't happen with the guard above)
+    np.nan_to_num(result, copy=False, nan=0.0)
+    return result.astype(np.float32)
 
 
 def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> Dict:
@@ -1818,31 +1147,21 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> D
     return result
 
 
-def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear'):
-    if Image is None:
+def save_preview_rgb(rgb: np.ndarray, path: str):
+    if Image is None or exposure is None:
         return
-    if stretch == 'arcsinh':
-        # Arcsinh stretch — preserves faint nebulosity and bright stars
-        out = np.zeros_like(rgb)
-        for c in range(3):
-            out[:, :, c] = arcsinh_stretch(rgb[:, :, c])
-        out = np.clip(out * 255, 0, 255).astype(np.uint8)
-    else:
-        # Linear percentile stretch (original behaviour)
-        if exposure is None:
-            return
-        out = np.zeros_like(rgb)
-        for c in range(3):
-            lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
-            lo = max(lo, 0.0)  # Don't let negative noise expand the display range
-            out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
-        out = np.clip(out * 255, 0, 255).astype(np.uint8)
+    # per-channel stretch
+    out = np.zeros_like(rgb)
+    for c in range(3):
+        lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
+        out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
+    out = np.clip(out * 255, 0, 255).astype(np.uint8)
     Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
 
 
 def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: ProcessingStats, args: argparse.Namespace, stacked_shape: Tuple[int, int, int], shifts: List[Tuple[float, float]], masters: Dict[str, Optional[np.ndarray]], dither_info: Optional[Dict] = None) -> None:
     """Populate FITS header with comprehensive metadata."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Basic stacking info
     header['NFRAMES'] = (len(frames), 'Number of stacked frames')
@@ -1861,7 +1180,7 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
 
     # Processing software and version
     header['CREATOR'] = ('astro_stack.py', 'Software that created this file')
-    header['DATE'] = (datetime.now(timezone.utc).isoformat(), 'UTC date/time of file creation')
+    header['DATE'] = (datetime.now(datetime.timezone.utc).isoformat(), 'UTC date/time of file creation')
 
     # Calibration info
     header['BIASCAL'] = (masters.get('bias') is not None, 'Bias calibration applied')
@@ -1926,37 +1245,16 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo], stats: Pr
         header['DITHPOS'] = (dither_info['unique_positions'], 'Number of unique dither positions')
         header['DITHPAT'] = (dither_info['pattern'], 'Detected shift pattern type')
 
-    # Sigma-clip details
-    if args.stack_method == 'sigma_clip':
-        header['WINSORIZ'] = (getattr(args, 'winsorize', False), 'Winsorized sigma-clip used')
-
-    # Affine registration
-    header['AFFINE'] = (not getattr(args, 'no_affine', False), 'Affine registration enabled')
-
-    # Post-processing flags
-    header['DENOISE'] = (getattr(args, 'denoise', False), 'Wavelet denoising applied')
-    if getattr(args, 'denoise', False):
-        header['DNSTRNG'] = (getattr(args, 'denoise_strength', 3.0), 'Denoise threshold factor')
-    header['LOCNORM'] = (getattr(args, 'local_normalize', False), 'Local normalization applied')
-    header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method')
-    header['DEBAYER'] = (args.debayer_method, 'Debayering method used')
-
-    # Add quality metrics including FWHM
+    # Add quality metrics if available
     if frames and frames[0].metrics:
-        frames_with_metrics = [f for f in frames if f.metrics and 'score' in f.metrics]
-        if frames_with_metrics:
-            header['AVGBRITE'] = (float(np.mean([f.metrics.get('brightness', 0) for f in frames_with_metrics])),
-                                  'Average frame brightness')
-            header['AVGCONTR'] = (float(np.mean([f.metrics.get('contrast', 0) for f in frames_with_metrics])),
-                                  'Average frame contrast')
-            header['AVGSCORE'] = (float(np.mean([f.metrics.get('score', 0) for f in frames_with_metrics])),
-                                  'Average quality score')
-            # FWHM statistics
-            fwhms = [f.metrics.get('fwhm', 0) for f in frames_with_metrics if f.metrics.get('fwhm', 0) > 0]
-            if fwhms:
-                header['AVGFWHM'] = (round(float(np.mean(fwhms)), 2), 'Average star FWHM in pixels')
-                header['MINFWHM'] = (round(float(np.min(fwhms)), 2), 'Minimum star FWHM in pixels')
-                header['MAXFWHM'] = (round(float(np.max(fwhms)), 2), 'Maximum star FWHM in pixels')
+        avg_metrics = {
+            'brightness': np.mean([f.metrics.get('brightness', 0) for f in frames if f.metrics]),
+            'contrast': np.mean([f.metrics.get('contrast', 0) for f in frames if f.metrics]),
+            'score': np.mean([f.metrics.get('score', 0) for f in frames if f.metrics]),
+        }
+        header['AVGBRITE'] = (float(avg_metrics['brightness']), 'Average frame brightness')
+        header['AVGCONTR'] = (float(avg_metrics['contrast']), 'Average frame contrast')
+        header['AVGSCORE'] = (float(avg_metrics['score']), 'Average quality score')
 
 
 def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str, verbose: bool = False) -> bool:
@@ -2108,796 +1406,512 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str, v
         return False
 
 
-def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[np.ndarray]],
-                          debayer_method: str, white_balance: str) -> Dict:
-    """Process one frame: load, calibrate, debayer, hot-pixel, quality.
-
-    Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
-    Used by both sequential and parallel paths.
-    """
-    try:
-        data, hdr = load_fits(path)
-    except Exception as e:
-        return {'error': f'load error: {e}'}
-    if data is None or data.size == 0:
-        return {'error': 'empty data array'}
-
-    # Calibration — preserve negative noise through bias/dark subtraction,
-    # clip only once after all steps to avoid cumulative truncation of shadow detail
-    try:
-        bias_arr = masters.get('bias') if (masters.get('bias') is not None
-                                           and masters['bias'].shape == data.shape) else None
-        if bias_arr is not None:
-            data = data - bias_arr
-        if masters.get('dark') is not None and masters['dark'].shape == data.shape:
-            # Correct dark subtraction: the master dark still contains its own bias
-            # pedestal, so subtract bias-corrected dark current only, scaled to the
-            # light frame's exposure time to avoid over/under-subtraction.
-            dark_arr = masters['dark']
-            dark_current = dark_arr - (bias_arr if bias_arr is not None else 0.0)
-            dark_exptime = masters.get('dark_exptime') or None
-            light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
-            if dark_exptime and light_exptime and dark_exptime > 0:
-                dark_scale = light_exptime / dark_exptime
-            else:
-                dark_scale = 1.0
-            data = data - dark_current * dark_scale
-        if masters.get('flat') is not None and masters['flat'].shape == data.shape:
-            flat = masters['flat']
-            med = np.median(flat)
-            if med > 1e-6:
-                flat_norm = np.clip(flat / med, 0.4, 2.5)
-                data = data / flat_norm
-        if not np.isfinite(data).all():
-            return {'error': 'calibration produced non-finite values'}
-        data = np.clip(data, 0, None)
-        # Apply dark-derived hot pixel map on Bayer data (before debayering)
-        if data.ndim == 2 and masters.get('hot_pixel_map') is not None:
-            hot_map = masters['hot_pixel_map']
-            if hot_map.shape == data.shape:
-                data = apply_hot_pixel_map_bayer(data, hot_map)
-        # Per-sub-channel Bayer hot pixel detection (catches hot pixels
-        # not in the dark frame: intermittent defects, cosmic rays, etc.)
-        if data.ndim == 2:
-            data = remove_hot_pixels_bayer(data)
-    except Exception as e:
-        return {'error': f'calibration error: {e}'}
-
-    # Debayer
-    try:
-        if data.ndim == 2:
-            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
-            rgb = debayer(data, pattern=bayer, method=debayer_method)
-        else:
-            rgb = data
-    except Exception as e:
-        return {'error': f'debayering error: {e}'}
-
-    # Hot pixel removal (single-channel detection, 3x faster)
-    try:
-        if rgb.ndim != 3 or rgb.shape[2] < 1:
-            return {'error': f'Invalid RGB shape: {rgb.shape}'}
-        rgb = remove_hot_pixels_rgb(rgb)
-    except Exception as e:
-        return {'error': f'hot pixel removal error: {e}'}
-
-    # White balance
-    if white_balance == 'grayworld':
-        rgb = white_balance_grayworld(rgb)
-    elif white_balance == 'whitepatch':
-        rgb = white_balance_whitepatch(rgb)
-
-    # Ensure arrays are on CPU (GPU/CuPy paths return device arrays)
-    gpu = get_gpu()
-    rgb = gpu.to_host(rgb)
-
-    # Compute luminance & quality
-    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-    is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
-    if not is_valid:
-        return {'error': f'validation failed: {validation_error}'}
-
-    metrics = compute_quality_metrics(lum)
-    return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None}
-
-
-# Module-level state for parallel workers
-_worker_masters: Dict[str, Optional[np.ndarray]] = {}
-
-
-def _init_worker(master_paths: Dict[str, str]):
-    """Initializer for pool workers — load master calibration arrays from disk."""
-    global _worker_masters
-    _worker_masters = {}
-    for name, p in master_paths.items():
-        _worker_masters[name] = np.load(p)
-
-
-def _parallel_frame_worker(args_tuple):
-    """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
-    path, frame_idx, debayer_method, white_balance, mm_rgb_path, mm_lum_path, rgb_shape, lum_shape = args_tuple
-    global _worker_masters
-    result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance)
-    if result.get('error'):
-        return (frame_idx, None, result['error'])
-
-    rgb = result['rgb']
-    lum = result['lum']
-    metrics = result['metrics']
-    # Remove non-picklable star sources from metrics for IPC
-    metrics_clean = {k: v for k, v in metrics.items() if k != '_star_sources'}
-
-    # Write processed data to shared memmap
-    try:
-        mem_rgb = np.memmap(mm_rgb_path, dtype='float32', mode='r+', shape=rgb_shape)
-        mem_lum = np.memmap(mm_lum_path, dtype='float32', mode='r+', shape=lum_shape)
-        mem_rgb[frame_idx] = rgb
-        mem_lum[frame_idx] = lum
-        mem_rgb.flush()
-        mem_lum.flush()
-        del mem_rgb, mem_lum
-    except Exception as e:
-        return (frame_idx, None, f'memmap write error: {e}')
-
-    return (frame_idx, metrics_clean, None)
-
-
-def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace,
-                 masters: Dict[str, Optional[np.ndarray]], stats: ProcessingStats):
+def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace, masters: Dict[str, Optional[np.ndarray]], stats: ProcessingStats):
     lights = [f for f in frames if f.type == 'light']
     if not lights:
         print('  No light frames found for target')
         return None
 
     stats.total_frames = len(lights)
-    n = len(lights)
 
-    # ======================================================================
-    # PHASE 1: Process & Analyse (fused — each frame loaded only ONCE)
-    # ======================================================================
-    print_phase(1, "Processing & Quality Analysis")
+    # Phase 1: Quality Analysis
+    print_phase(1, "Quality Analysis")
     phase_start = time.time()
+    print(f"  Analyzing {len(lights)} light frames...")
 
-    # Probe first frame for dimensions
-    first_data, first_hdr = load_fits(lights[0].path)
-    if first_data.ndim == 2:
-        first_rgb = debayer(first_data,
-                            pattern=first_hdr.get('BAYERPAT', first_hdr.get('COLORTYP', 'RGGB')),
-                            method=args.debayer_method)
-        H_rgb, W_rgb, C = first_rgb.shape
-    else:
-        H_rgb, W_rgb = first_data.shape[:2]
-        C = first_data.shape[2] if first_data.ndim == 3 else 1
-    del first_data
-
-    # Create memmaps for ALL frames (unaligned, white-balanced, calibrated)
-    mm_rgb_path = os.path.join(tempfile.gettempdir(), f'stack_rgb_{os.getpid()}.dat')
-    mm_lum_path = os.path.join(tempfile.gettempdir(), f'stack_lum_{os.getpid()}.dat')
-    rgb_shape = (n, H_rgb, W_rgb, C)
-    lum_shape = (n, H_rgb, W_rgb)
-    mem_rgb = np.memmap(mm_rgb_path, dtype='float32', mode='w+', shape=rgb_shape)
-    mem_lum = np.memmap(mm_lum_path, dtype='float32', mode='w+', shape=lum_shape)
-
-    rejected_reasons = {}
-    use_process_pool = (getattr(args, 'parallel', 1) != 1
-                        and not get_gpu().active
-                        and n >= 4)
-
-    if use_process_pool:
-        # --- ProcessPool path (-j N): separate processes, true parallelism,
-        #     master arrays serialised to disk for IPC. ---
-        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
-        print(f"  Processing {n} frames in parallel ({workers} workers)...")
-
-        master_paths = {}
-        for name, arr in masters.items():
-            if arr is not None:
-                p = os.path.join(tempfile.gettempdir(), f'master_{name}_{os.getpid()}.npy')
-                np.save(p, arr)
-                master_paths[name] = p
-
-        tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape)
-                 for i in range(n)]
-
-        with ProcessPoolExecutor(max_workers=workers,
-                                 initializer=_init_worker,
-                                 initargs=(master_paths,)) as pool:
-            futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
-            done_iter = tqdm(as_completed(futures), total=n,
-                             desc="  Processing", unit="frame",
-                             disable=args.verbose)
-            for future in done_iter:
-                idx = futures[future]
-                frame_idx, metrics, error = future.result()
-                f = lights[frame_idx]
-                if error:
-                    f.accepted = False
-                    f.metrics = {'error': error}
-                    rejected_reasons[f.path] = error
-                    stats.add_error(f.path, error)
-                    if args.verbose:
-                        print(f'  REJECT {os.path.basename(f.path)}: {error}')
-                else:
-                    f.metrics = metrics
-
-        # Cleanup master temp files
-        for p in master_paths.values():
-            try:
-                os.remove(p)
-            except Exception:
-                pass
-
-    elif n >= 2:
-        # --- Thread-parallel path (default for both CPU and GPU) ---
-        # ThreadPoolExecutor shares memory: no master serialization, no IPC
-        # overhead, and _star_sources are preserved for affine registration.
-        # GPU: VRAM-limited workers with per-thread CUDA streams.
-        gpu = get_gpu()
-        if gpu.active:
-            n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
-                                                Config.GPU_VRAM_RESERVE_MB), n)
-        else:
-            n_workers = min(os.cpu_count() or 4, n)
-        safe_print(f"  Processing {n} frames with {n_workers} threads"
-                   f"{' (GPU)' if gpu.active else ''}...")
-
-        def _thread_process_frame(i, f):
-            with gpu.stream_context():
-                result = _process_single_frame(
-                    f.path, f.header, masters, args.debayer_method, args.white_balance)
-            if result.get('error'):
-                return i, None, result['error']
-            mem_rgb[i] = result['rgb']
-            mem_lum[i] = result['lum']
-            return i, result['metrics'], None
-
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_thread_process_frame, i, f): i
-                       for i, f in enumerate(lights)}
-            for future in tqdm(as_completed(futures), total=n,
-                               desc="  Processing", unit="frame",
-                               disable=args.verbose):
-                i, metrics, error = future.result()
-                f = lights[i]
-                if error:
-                    f.accepted = False
-                    f.metrics = {'error': error}
-                    rejected_reasons[f.path] = error
-                    stats.add_error(f.path, error)
-                    if args.verbose:
-                        safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
-                else:
-                    f.metrics = metrics
-                    if args.verbose:
-                        m = f.metrics
-                        safe_print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
-                                   f'stars={m["star_count"]}, FWHM={m.get("fwhm",0):.1f}, '
-                                   f'score={m["score"]:.1f}')
-        mem_rgb.flush()
-        mem_lum.flush()
-
-    else:
-        # --- Sequential path (single frame) ---
-        print(f"  Processing {n} frames sequentially...")
-        frame_iter = tqdm(enumerate(lights), total=n,
-                          desc="  Processing", unit="frame",
-                          disable=args.verbose)
-        for i, f in frame_iter:
-            result = _process_single_frame(
-                f.path, f.header, masters, args.debayer_method, args.white_balance)
-            if result.get('error'):
-                f.accepted = False
-                f.metrics = {'error': result['error']}
-                rejected_reasons[f.path] = result['error']
-                stats.add_error(f.path, result['error'])
-                if args.verbose:
-                    print(f'  REJECT {os.path.basename(f.path)}: {result["error"]}')
-            else:
-                mem_rgb[i] = result['rgb']
-                mem_lum[i] = result['lum']
-                f.metrics = result['metrics']
-                if args.verbose:
-                    m = f.metrics
-                    print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
-                          f'stars={m["star_count"]}, FWHM={m.get("fwhm",0):.1f}, '
-                          f'score={m["score"]:.1f}')
-        mem_rgb.flush()
-        mem_lum.flush()
-
-    # --- Quality gating ---
     accepted = []
-    for f in lights:
-        if not f.accepted or not f.metrics or 'score' not in f.metrics:
-            continue
-        metrics = f.metrics
-        reject_reason = None
-        if metrics['star_count'] < 3:
-            reject_reason = f"insufficient stars ({metrics['star_count']} < 3)"
-        elif metrics['snr'] < 0.5:
-            reject_reason = f"extremely low SNR ({metrics['snr']:.2f} < 0.5)"
-        elif metrics['contrast'] < 2.0:
-            reject_reason = f"extremely low contrast ({metrics['contrast']:.1f} < 2.0)"
-        elif metrics['dynamic_range'] < 20:
-            reject_reason = f"extremely low dynamic range ({metrics['dynamic_range']:.1f} < 20)"
-        elif metrics['noise'] > metrics['brightness'] * 0.8:
-            reject_reason = f"excessive noise ({metrics['noise']:.1f} > {metrics['brightness']*0.8:.1f})"
-        if reject_reason:
+    rejected_reasons = {}
+
+    # Create progress iterator
+    lights_iter = tqdm(lights, desc="  Analyzing", unit="frame", disable=args.verbose) if not args.verbose else lights
+
+    for f in lights_iter:
+        try:
+            data, hdr = load_fits(f.path)
+        except Exception as e:
             f.accepted = False
-            rejected_reasons[f.path] = reject_reason
+            error_msg = f'load error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
             if args.verbose:
-                print(f'  REJECT {os.path.basename(f.path)}: {reject_reason}')
-        else:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
+        # Validate data is not empty
+        if data is None or data.size == 0:
+            f.accepted = False
+            error_msg = 'empty data array'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
+        # Calibration with validation
+        try:
+            # Apply bias subtraction
+            if masters.get('bias') is not None:
+                if masters['bias'].shape == data.shape:
+                    data = np.clip(data - masters['bias'], 0, None)
+                else:
+                    if args.verbose:
+                        print(f'    WARNING: bias shape mismatch for {os.path.basename(f.path)}, skipping bias')
+
+            # Apply dark subtraction
+            if masters.get('dark') is not None:
+                if masters['dark'].shape == data.shape:
+                    data = np.clip(data - masters['dark'], 0, None)
+                else:
+                    if args.verbose:
+                        print(f'    WARNING: dark shape mismatch for {os.path.basename(f.path)}, skipping dark')
+
+            # Apply flat division
+            if masters.get('flat') is not None:
+                if masters['flat'].shape == data.shape:
+                    flat = masters['flat'].copy()
+                    # Normalize flat to median
+                    med = np.median(flat)
+                    if med > 1e-6:  # Avoid division by zero
+                        flat_norm = flat / med
+                        # Avoid division by very small numbers
+                        flat_norm = np.clip(flat_norm, 0.1, 10.0)
+                        data = data / flat_norm
+                    else:
+                        if args.verbose:
+                            print(f'    WARNING: flat field median too low ({med:.6f}), skipping flat')
+                else:
+                    if args.verbose:
+                        print(f'    WARNING: flat shape mismatch for {os.path.basename(f.path)}, skipping flat')
+
+            # Check for calibration artifacts (negative or NaN values)
+            if not np.isfinite(data).all():
+                raise ValueError(f"calibration produced non-finite values")
+            if np.any(data < 0):
+                if args.verbose:
+                    neg_count = np.sum(data < 0)
+                    print(f'    WARNING: {neg_count} negative values after calibration, clipping to zero')
+                data = np.clip(data, 0, None)
+
+        except Exception as e:
+            f.accepted = False
+            error_msg = f'calibration error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
+        # debayer if 2D raw single channel and header indicates bayer or shape suggests
+        try:
+            if data.ndim == 2:
+                bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
+                rgb = debayer_bilinear(data, pattern=bayer, method=args.debayer_method)
+            else:
+                # already multi-channel
+                rgb = data
+        except Exception as e:
+            f.accepted = False
+            error_msg = f'debayering error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
+        # hot pixel removal
+        try:
+            if rgb.ndim != 3 or rgb.shape[2] < 1:
+                raise ValueError(f'Invalid RGB shape: {rgb.shape}')
+            for c in range(rgb.shape[2]):
+                rgb[:, :, c] = remove_hot_pixels(rgb[:, :, c])
+        except Exception as e:
+            f.accepted = False
+            error_msg = f'hot pixel removal error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
+        # Validate image data
+        try:
+            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+            # First pass: validate image is usable
+            is_valid, validation_error = validate_image_data(lum, os.path.basename(f.path))
+            if not is_valid:
+                f.accepted = False
+                error_msg = f'validation failed: {validation_error}'
+                f.metrics = {'error': error_msg}
+                rejected_reasons[f.path] = error_msg
+                if args.verbose:
+                    print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+                continue
+
+            # Compute comprehensive quality metrics
+            metrics = compute_quality_metrics(lum)
+            f.metrics = metrics
+
+            # Hard quality gates (reject obviously bad frames immediately)
+            reject_reason = None
+
+            # Gate 1: Minimum star count (very lenient - just need SOME stars)
+            if metrics['star_count'] < 3:
+                reject_reason = f"insufficient stars ({metrics['star_count']} < 3)"
+
+            # Gate 2: Minimum SNR (relaxed threshold)
+            elif metrics['snr'] < 0.5:
+                reject_reason = f"extremely low SNR ({metrics['snr']:.2f} < 0.5)"
+
+            # Gate 3: Minimum contrast
+            elif metrics['contrast'] < 2.0:
+                reject_reason = f"extremely low contrast ({metrics['contrast']:.1f} < 2.0)"
+
+            # Gate 4: Minimum dynamic range
+            elif metrics['dynamic_range'] < 20:
+                reject_reason = f"extremely low dynamic range ({metrics['dynamic_range']:.1f} < 20)"
+
+            # Gate 5: Check for excessive noise (very lenient)
+            elif metrics['noise'] > metrics['brightness'] * 0.8:
+                reject_reason = f"excessive noise ({metrics['noise']:.1f} > {metrics['brightness']*0.8:.1f})"
+
+            if reject_reason:
+                f.accepted = False
+                rejected_reasons[f.path] = reject_reason
+                if args.verbose:
+                    print(f'  REJECT {os.path.basename(f.path)}: {reject_reason}')
+                continue
+
+            # Passed all hard gates - add to potential accepts
             accepted.append(f)
+            if args.verbose:
+                print(f'    {os.path.basename(f.path)}: SNR={metrics["snr"]:.1f}, stars={metrics["star_count"]}, contrast={metrics["contrast"]:.1f}, score={metrics["score"]:.1f}')
+
+        except Exception as e:
+            f.accepted = False
+            error_msg = f'quality analysis error: {str(e)}'
+            f.metrics = {'error': error_msg}
+            rejected_reasons[f.path] = error_msg
+            stats.add_error(f.path, error_msg)
+            if args.verbose:
+                print(f'  REJECT {os.path.basename(f.path)}: {error_msg}')
+            continue
 
     # Statistical outlier detection
     if len(accepted) > 3:
+        # Collect metrics arrays
         snrs = np.array([f.metrics['snr'] for f in accepted])
         star_counts = np.array([f.metrics['star_count'] for f in accepted])
         contrasts = np.array([f.metrics['contrast'] for f in accepted])
+        scores = np.array([f.metrics['score'] for f in accepted])
 
+        # Calculate z-scores for each metric
         def reject_outliers(values, threshold=2.5):
+            """Return boolean mask of outliers (True = keep, False = reject)."""
             if len(values) < 3:
                 return np.ones(len(values), dtype=bool)
-            m, s = np.mean(values), np.std(values)
-            if s < 1e-6:
+            mean = np.mean(values)
+            std = np.std(values)
+            if std < 1e-6:  # All values identical
                 return np.ones(len(values), dtype=bool)
-            return np.abs((values - m) / s) < threshold
+            z_scores = np.abs((values - mean) / std)
+            return z_scores < threshold
 
-        snr_ok = reject_outliers(snrs)
-        star_ok = reject_outliers(star_counts)
-        contrast_ok = reject_outliers(contrasts)
+        # Identify outliers
+        snr_ok = reject_outliers(snrs, threshold=2.5)
+        star_ok = reject_outliers(star_counts, threshold=2.5)
+        contrast_ok = reject_outliers(contrasts, threshold=2.5)
+
+        # Combined outlier detection (reject if outlier in 2+ metrics)
         outlier_count = (~snr_ok).astype(int) + (~star_ok).astype(int) + (~contrast_ok).astype(int)
+
         for i, f in enumerate(accepted):
             if outlier_count[i] >= 2:
-                parts = []
+                outlier_reasons = []
                 if not snr_ok[i]:
-                    parts.append(f"SNR={f.metrics['snr']:.1f}")
+                    outlier_reasons.append(f"SNR={f.metrics['snr']:.1f} (mean={np.mean(snrs):.1f})")
                 if not star_ok[i]:
-                    parts.append(f"stars={f.metrics['star_count']}")
+                    outlier_reasons.append(f"stars={f.metrics['star_count']} (mean={np.mean(star_counts):.0f})")
                 if not contrast_ok[i]:
-                    parts.append(f"contrast={f.metrics['contrast']:.1f}")
-                reason = "statistical outlier: " + ", ".join(parts)
+                    outlier_reasons.append(f"contrast={f.metrics['contrast']:.1f} (mean={np.mean(contrasts):.1f})")
+
+                reason = f"statistical outlier: " + ", ".join(outlier_reasons)
                 rejected_reasons[f.path] = reason
                 f.accepted = False
+                if args.verbose:
+                    print(f'  REJECT {os.path.basename(f.path)}: {reason}')
             else:
                 f.accepted = True
 
+    # If quality_filter, apply additional percentile threshold
     if args.quality_filter and accepted:
-        valid = [f for f in accepted if f.accepted]
-        if valid:
-            scores = np.array([f.metrics['score'] for f in valid])
+        # Only consider non-rejected frames
+        valid_frames = [f for f in accepted if f.accepted]
+        if valid_frames:
+            scores = np.array([f.metrics['score'] for f in valid_frames])
             pct = np.percentile(scores, args.quality_threshold)
-            for f in valid:
+
+            for f in valid_frames:
                 if f.metrics['score'] < pct:
                     f.accepted = False
-                    rejected_reasons[f.path] = f'score {f.metrics["score"]:.1f} < {pct:.1f}'
-
+                    rejected_reasons[f.path] = f'quality score {f.metrics["score"]:.1f} below threshold {pct:.1f}'
+                    if args.verbose:
+                        print(f'  REJECT {os.path.basename(f.path)}: score {f.metrics["score"]:.1f} < {pct:.1f}')
+    # Build list of final accepted frames
     final = [f for f in lights if f.accepted]
-    # Build index map: for each final frame, its original index in `lights`
-    final_indices = [lights.index(f) for f in final]
     stats.accepted_frames = len(final)
-    stats.rejected_frames = n - len(final)
+    stats.rejected_frames = len(lights) - len(final)
     stats.quality_time = time.time() - phase_start
 
+    # Show detailed table in verbose mode
     if args.verbose:
         print_quality_table(lights, show_all=len(lights) <= 50)
-    safe_print(f"  ✓ Accepted: {len(final)}/{n} ({len(final)/n*100:.1f}%)")
+
+    # Summary of quality analysis
+    safe_print(f"  ✓ Accepted: {len(final)}/{len(lights)} ({len(final)/len(lights)*100:.1f}%)")
     if stats.rejected_frames > 0:
+        # Categorize rejection reasons
         reason_counts = {}
         for reason in rejected_reasons.values():
+            # Extract category
             if 'brightness' in reason or 'contrast' in reason:
-                cat = 'Poor quality'
-            elif 'star' in reason:
-                cat = 'No stars detected'
+                category = 'Poor quality'
+            elif 'stars' in reason or 'star' in reason:
+                category = 'No stars detected'
             elif 'load' in reason or 'empty' in reason:
-                cat = 'Load/data errors'
+                category = 'Load/data errors'
             else:
-                cat = 'Other'
-            reason_counts[cat] = reason_counts.get(cat, 0) + 1
-        safe_print(f"  ✗ Rejected: {stats.rejected_frames} "
-                   f"({', '.join(f'{c}: {n}' for c, n in reason_counts.items())})")
+                category = 'Other'
+            reason_counts[category] = reason_counts.get(category, 0) + 1
+
+        safe_print(f"  ✗ Rejected: {stats.rejected_frames} ({', '.join(f'{cat}: {cnt}' for cat, cnt in reason_counts.items())})")
 
     if not final:
-        print(f'\n  ERROR: All {n} frames rejected!')
+        print(f'\n  ERROR: All {len(lights)} frames rejected!')
         if rejected_reasons:
             print('  Rejection reasons:')
-            for path, reason in list(rejected_reasons.items())[:10]:
-                print(f'    - {os.path.basename(path)}: {reason}')
-        # Cleanup memmaps
-        del mem_rgb, mem_lum
-        for p in (mm_rgb_path, mm_lum_path):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+            for path, reason in list(rejected_reasons.items())[:10]:  # Show first 10
+                print(f'    • {os.path.basename(path)}: {reason}')
+            if len(rejected_reasons) > 10:
+                print(f'    ... and {len(rejected_reasons) - 10} more')
         return None
-
-    # ======================================================================
-    # PHASE 2: Registration (reads from stored memmaps — no re-load)
-    # ======================================================================
+    # Phase 2: Registration
     print_phase(2, "Registration")
     phase_start = time.time()
 
+    ref = None
+    ref_path = None
     best = max(final, key=lambda x: x.metrics.get('score', 0))
-    best_idx = lights.index(best)
-    print(f"  Reference frame: {os.path.basename(best.path)} "
-          f"(score={best.metrics.get('score', 0):.1f})")
+    ref_path = best.path
+    print(f"  Reference frame: {os.path.basename(ref_path)} (score={best.metrics.get('score', 0):.1f})")
 
-    ref_lum = np.array(mem_lum[best_idx])  # copy from memmap
+    ref_data, ref_hdr = load_fits(ref_path)
+    if ref_data.ndim == 2:
+        ref_rgb = debayer_bilinear(ref_data, pattern=best.header.get('BAYERPAT', 'RGGB'))
+    else:
+        ref_rgb = ref_data
+    # use luminance for registration
+    ref_lum = 0.299 * ref_rgb[:, :, 0] + 0.587 * ref_rgb[:, :, 1] + 0.114 * ref_rgb[:, :, 2]
+    shifts = []
+    aligned_shapes = []
+    tmp_files = []
+    # Prepare memmap for median/sigma_clip stacking if requested
+    use_memmap = args.stack_method in ('median', 'sigma_clip')
+    n = len(final)
     H, W = ref_lum.shape
-    ref_lum_std = np.std(ref_lum)
+    # create temporary memmap if median or sigma_clip
+    memmap_path = None
+    mem = None
+    if use_memmap:
+        memmap_path = os.path.join(tempfile.gettempdir(), f'stack_{os.getpid()}.dat')
+        mem = np.memmap(memmap_path, dtype='float32', mode='w+', shape=(n, H, W, 3))
+
+    idx = 0
+    ref_lum_std = np.std(ref_lum)  # Cache for diagnostics
 
     if args.verbose:
-        print(f'  Reference luminance: min={np.min(ref_lum):.1f}, max={np.max(ref_lum):.1f}, '
-              f'mean={np.mean(ref_lum):.1f}, std={ref_lum_std:.1f}')
-
-    # Get reference star positions for affine registration
-    ref_stars = best.metrics.get('_star_sources')
-
-    shifts = [None] * len(final)
-    transforms = [None] * len(final)  # For affine mode
-    print(f"  Calculating shifts for {len(final)} frames...")
-
-    def _register_one_frame(j, f, orig_idx):
-        """Compute registration for a single frame (thread-safe, reads only)."""
-        if orig_idx == best_idx or args.no_registration:
-            return j, (0.0, 0.0), None
-
-        with gpu.stream_context():
-            lum = np.array(mem_lum[orig_idx])
-
-            # Try affine (rotation+translation) registration when stars are available.
-            # Enabled by default when skimage is present; use --no-affine to disable.
-            affine_tf = None
-            use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
-            if use_affine:
-                img_stars = f.metrics.get('_star_sources')
-                sy, sx = calculate_shift(ref_lum, lum, verbose=False,
-                                         skip_phase_cc=args.skip_phase_correlation)
-                affine_tf = match_stars_affine(ref_stars, img_stars,
-                                               initial_shift=(sy, sx))
-                if affine_tf is not None:
-                    tx = affine_tf.params[0, 2]
-                    ty = affine_tf.params[1, 2]
-                    return j, (ty, tx), affine_tf
-
-            # Translation-only registration
-            sy, sx = calculate_shift(
-                ref_lum, lum, verbose=args.verbose,
-                debug=args.debug_registration,
-                frame_name=os.path.splitext(os.path.basename(f.path))[0],
-                skip_phase_cc=args.skip_phase_correlation)
-            if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
-                safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
-                sx, sy = 0.0, 0.0
-            return j, (sy, sx), None
-
-    gpu = get_gpu()
-    if gpu.active:
-        n_reg_workers = min(gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB,
-                                                Config.GPU_VRAM_RESERVE_MB), len(final))
-    else:
-        n_reg_workers = min(os.cpu_count() or 4, len(final))
-    with ThreadPoolExecutor(max_workers=n_reg_workers) as executor:
-        futures = {
-            executor.submit(_register_one_frame, j, f, orig_idx): j
-            for j, (f, orig_idx) in enumerate(zip(final, final_indices))
+        # Diagnostic: show reference image statistics
+        ref_stats = {
+            'min': np.min(ref_lum),
+            'max': np.max(ref_lum),
+            'mean': np.mean(ref_lum),
+            'std': ref_lum_std,
         }
-        for future in tqdm(as_completed(futures), total=len(final),
-                           desc="  Registering", unit="frame",
-                           disable=args.verbose):
-            j, shift_val, transform_val = future.result()
-            shifts[j] = shift_val
-            transforms[j] = transform_val
-            final[j].shift = shift_val
-            if args.verbose:
-                f = final[j]
-                if transform_val is not None:
-                    tx, ty = shift_val[1], shift_val[0]
-                    rot_deg = np.degrees(np.arctan2(transform_val.params[1, 0],
-                                                    transform_val.params[0, 0]))
-                    safe_print(f'    {os.path.basename(f.path)}: affine shift=({tx:+.1f}, '
-                               f'{ty:+.1f}) px, rotation={rot_deg:+.3f} deg')
-                elif shift_val != (0.0, 0.0):
-                    sy, sx = shift_val
-                    mag = np.sqrt(sy**2 + sx**2)
-                    safe_print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
-                               f'magnitude={mag:.2f} px')
+        print(f'  Reference luminance: min={ref_stats["min"]:.1f}, max={ref_stats["max"]:.1f}, mean={ref_stats["mean"]:.1f}, std={ref_stats["std"]:.1f}')
+
+    # Create progress iterator
+    print(f"  Calculating shifts for {len(final)} frames...")
+    final_iter = tqdm(final, desc="  Registering", unit="frame", disable=args.verbose) if not args.verbose else final
+
+    for f in final_iter:
+        data, hdr = load_fits(f.path)
+        if data.ndim == 2:
+            rgb = debayer_bilinear(data, pattern=hdr.get('BAYERPAT', 'RGGB'), method=args.debayer_method)
+        else:
+            rgb = data
+        # optional white balance
+        if args.white_balance == 'grayworld':
+            rgb = white_balance_grayworld(rgb)
+        elif args.white_balance == 'whitepatch':
+            rgb = white_balance_whitepatch(rgb)
+        else:
+            rgb = rgb
+        # registration
+        if not args.no_registration:
+            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+            # Diagnostic: check image statistics
+            lum_std = np.std(lum)
+            if args.verbose and lum_std < ref_lum_std * 0.1:
+                lum_min, lum_max = np.min(lum), np.max(lum)
+                print(f'      [WARNING: very low contrast] min={lum_min:.1f}, max={lum_max:.1f}, std={lum_std:.1f} (ref_std={ref_lum_std:.1f})')
+            sy, sx = calculate_shift(ref_lum, lum, verbose=args.verbose, debug=args.debug_registration, frame_name=os.path.splitext(os.path.basename(f.path))[0], skip_phase_cc=args.skip_phase_correlation)
+            # gate unrealistic shifts
+            if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
+                print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
+                sx, sy = 0.0, 0.0
+            f.shift = (sy, sx)
+        else:
+            f.shift = (0.0, 0.0)
+        shifts.append(f.shift)
+        
+        # Report shift with diagnostics
+        shift_mag = np.sqrt(f.shift[0]**2 + f.shift[1]**2)
+        if args.verbose:
+            print(f'    {os.path.basename(f.path)}: shift=({f.shift[1]:+.1f}, {f.shift[0]:+.1f}) px, magnitude={shift_mag:.2f} px')
+        # apply shift and write to memmap or accumulate
+        aligned = np.zeros_like(rgb)
+        for c in range(3):
+            aligned[:, :, c] = apply_shift(rgb[:, :, c], f.shift)
+        if use_memmap:
+            mem[idx] = aligned
+            mem.flush()
+        else:
+            tmp_files.append(aligned.astype(np.float32))
+        aligned_shapes.append(aligned.shape[:2])
+        idx += 1
 
     stats.registration_time = time.time() - phase_start
 
-    # Shift statistics
+    # Calculate shift statistics
     shift_x = [s[1] for s in shifts]
     shift_y = [s[0] for s in shifts]
     shift_mags = [np.sqrt(sx**2 + sy**2) for sx, sy in shifts]
+
     if not args.no_registration:
         print(f"  Shift statistics:")
-        print(f"    X: mean={np.mean(shift_x):+.1f}px, std={np.std(shift_x):.1f}px, "
-              f"range=[{np.min(shift_x):+.1f}, {np.max(shift_x):+.1f}]")
-        print(f"    Y: mean={np.mean(shift_y):+.1f}px, std={np.std(shift_y):.1f}px, "
-              f"range=[{np.min(shift_y):+.1f}, {np.max(shift_y):+.1f}]")
+        print(f"    X: mean={np.mean(shift_x):+.1f}px, std={np.std(shift_x):.1f}px, range=[{np.min(shift_x):+.1f}, {np.max(shift_x):+.1f}]")
+        print(f"    Y: mean={np.mean(shift_y):+.1f}px, std={np.std(shift_y):.1f}px, range=[{np.min(shift_y):+.1f}, {np.max(shift_y):+.1f}]")
         print(f"    Magnitude: mean={np.mean(shift_mags):.1f}px, max={np.max(shift_mags):.1f}px")
+
+        # Check for large shifts
         if np.max(shift_mags) > Config.LARGE_SHIFT_WARNING_PX:
-            warning = f"Large shifts detected (max={np.max(shift_mags):.1f}px)"
+            warning = f"Large shifts detected (max={np.max(shift_mags):.1f}px) - possible tracking issues"
             stats.add_warning(warning)
             safe_print(f"  ⚠ {warning}")
 
-    # Shift pattern warnings
+    # Check for suspicious shift patterns (possible algorithm failure)
     shift_set = set(f.shift for f in final)
     zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
+    
+    # Only warn about identical shifts - all frames having zero shift might be correct
+    # if the images are naturally well-aligned
     if len(shift_set) == 1 and len(final) > 2:
         unique_shift = list(shift_set)[0]
         if unique_shift != (0.0, 0.0):
-            warning = f'All {len(final)} frames have IDENTICAL shift — registration failure!'
+            # All non-zero identical shifts = impossible, algorithm failure
+            warning = f'All {len(final)} frames have IDENTICAL shift {unique_shift} - registration algorithm failure!'
             stats.add_warning(warning)
             safe_print(f'\n  ⚠ WARNING: {warning}')
-        elif len(final) <= 3:
-            safe_print(f'\n  INFO: All frames registered with zero shift — well-aligned.')
+            print(f'  DIAGNOSIS: Registration algorithm is not distinguishing between frames.')
+            print(f'  SUGGESTION: Try with --skip-phase-correlation --debug-registration')
+            print(f'  Then check PNG images in _registration_debug/ folder.')
+        else:
+            # All frames have zero shift - this is valid if phase correlation succeeded with low error
+            if len(final) <= 3:
+                safe_print(f'\n  ℹ INFO: All {len(final)} frames registered with zero shift - images appear well-aligned.')
     elif zero_shifts > len(final) * 0.8 and len(final) > 2:
-        warning = f'{zero_shifts}/{len(final)} frames have zero shift'
+        # Majority (but not all) have zero shifts - this suggests inconsistency
+        warning = f'{zero_shifts}/{len(final)} frames have zero shift - registration may have issues'
         stats.add_warning(warning)
         safe_print(f'\n  ⚠ WARNING: {warning}')
-
+        print(f'  SUGGESTION: Try with --debug-registration to visualize registration')
+        print(f'  Check PNG images in _registration_debug/ folder.')
+    
+    # Dither analysis
     dither_info = detect_dither(shifts, verbose=args.verbose)
     if not args.no_registration and len(shifts) > 2:
         print(f"\n  Dither analysis:")
         print(f"    Pattern: {dither_info['pattern'].replace('_', ' ').title()}")
         print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
         print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
-        if dither_info['is_dithered'] and args.stack_method is None:
-            args.stack_method = 'sigma_clip'
-            safe_print(f"    Auto-selected sigma_clip stacking (dithered data — rejects cosmic rays)")
-        elif dither_info['is_dithered'] and args.stack_method == 'mean':
-            safe_print(f"    Warning: mean stacking does not reject cosmic rays; "
-                       f"consider --stack-method sigma_clip")
+        print(f"    Direction spread: {dither_info['direction_spread']:.1f}\u00b0")
+        if dither_info['is_dithered'] and args.stack_method == 'mean':
+            safe_print(f"    \u2139 Recommendation: Use --stack-method sigma_clip for best results with dithered data")
 
-    if args.stack_method is None:
-        args.stack_method = 'mean'
-
-    # ======================================================================
-    # PHASE 3: Stacking (quality-weighted, with post-processing chain)
-    # ======================================================================
+    # Phase 3: Stacking
     print_phase(3, "Stacking")
     phase_start = time.time()
     print(f"  Method: {args.stack_method}")
     print(f"  Combining {len(final)} frames...")
 
-    # Compute quality weights for weighted stacking
-    scores = np.array([f.metrics.get('score', 1.0) for f in final])
-    max_score = scores.max() if scores.max() > 0 else 1.0
-    weights = np.sqrt(scores / max_score)  # Sqrt-compress: preserves ranking, improves effective frame count
-    print(f"  Quality weights: min={weights.min():.3f}, max={weights.max():.3f}, "
-          f"mean={weights.mean():.3f} (sqrt-compressed)")
-
     # Crop to common valid region
-    top, bottom, left, right = calc_common_crop(shifts, (H, W), transforms=transforms)
+    top, bottom, left, right = calc_common_crop([f.shift for f in final], (H, W))
+    cropped_h = H - (top + (H - bottom))
+    cropped_w = W - (left + (W - right))
     stats.output_shape = (bottom - top, right - left)
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
-    n_final = len(final)
-    use_aligned_memmap = args.stack_method in ('median', 'sigma_clip')
-
-    if use_aligned_memmap:
-        # Create aligned memmap for median/sigma_clip
-        mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
-        crop_h, crop_w = bottom - top, right - left
-        mem_aligned = np.memmap(mm_aligned_path, dtype='float32', mode='w+',
-                                shape=(n_final, crop_h, crop_w, C))
-
-        gpu = get_gpu()
-
-        def _align_one_frame(j):
-            with gpu.stream_context():
-                orig_idx = final_indices[j]
-                rgb = np.array(mem_rgb[orig_idx])
-                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
-                mem_aligned[j] = aligned[top:bottom, left:right, :]
-
-        if gpu.active:
-            n_align_workers = min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
-                                                      Config.GPU_VRAM_RESERVE_MB), n_final)
-        else:
-            n_align_workers = min(os.cpu_count() or 4, n_final)
-        with ThreadPoolExecutor(max_workers=n_align_workers) as executor:
-            futures = {executor.submit(_align_one_frame, j): j for j in range(n_final)}
-            for future in tqdm(as_completed(futures), total=n_final,
-                               desc="  Aligning", unit="frame",
-                               disable=args.verbose):
-                future.result()  # propagate exceptions
-        mem_aligned.flush()
-
-        if args.stack_method == 'sigma_clip':
-            print(f"  Sigma-clip: sigma={args.rejection_sigma}, iters={args.rejection_iters}, "
-                  f"mode={'winsorized' if getattr(args, 'winsorize', False) else 'reject'}")
-            stacked = sigma_clip_combine(
-                mem_aligned, sigma=args.rejection_sigma,
-                max_iters=args.rejection_iters,
-                weights=weights,
-                winsorize=getattr(args, 'winsorize', False),
-                verbose=args.verbose)
-        else:
-            stacked = np.median(mem_aligned, axis=0).astype(np.float32)
-
-        del mem_aligned
+    # Crop & combine
+    if args.stack_method == 'sigma_clip':
+        cropped_data = mem[:, top:bottom, left:right, :]
+        print(f"  Sigma-clip rejection: sigma={args.rejection_sigma}, iters={args.rejection_iters}")
+        stacked = sigma_clip_combine(
+            cropped_data,
+            sigma=args.rejection_sigma,
+            max_iters=args.rejection_iters,
+            verbose=args.verbose
+        )
+        # cleanup memmap file
         try:
-            os.remove(mm_aligned_path)
+            del mem
+            os.remove(memmap_path)
+        except Exception:
+            pass
+    elif args.stack_method == 'median':
+        stacked = np.median(mem[:, top:bottom, left:right, :], axis=0)
+        # cleanup memmap file
+        try:
+            del mem
+            os.remove(memmap_path)
         except Exception:
             pass
     else:
-        # Weighted mean combine — align in parallel, accumulate as results arrive
-        acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
-        total_weight = 0.0
-
-        gpu = get_gpu()
-
-        def _align_and_crop(j):
-            with gpu.stream_context():
-                orig_idx = final_indices[j]
-                rgb = np.array(mem_rgb[orig_idx])
-                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
-                return j, aligned[top:bottom, left:right, :]
-
-        if gpu.active:
-            n_mean_workers = min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
-                                                     Config.GPU_VRAM_RESERVE_MB), n_final)
-        else:
-            n_mean_workers = min(os.cpu_count() or 4, n_final)
-        with ThreadPoolExecutor(max_workers=n_mean_workers) as executor:
-            futures = {executor.submit(_align_and_crop, j): j for j in range(n_final)}
-            for future in tqdm(as_completed(futures), total=n_final,
-                               desc="  Stacking", unit="frame",
-                               disable=args.verbose):
-                j, cropped = future.result()
-                w = float(weights[j])
-                acc += cropped.astype(np.float64) * w
-                total_weight += w
-
-        stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
-
+        # mean combine streaming
+        acc = None
+        count = 0
+        for a in tmp_files:
+            cropped = a[top:bottom, left:right, :]
+            if acc is None:
+                acc = np.zeros_like(cropped, dtype=np.float64)
+            acc += cropped.astype(np.float64)
+            count += 1
+        stacked = (acc / max(1, count)).astype(np.float32)
     stats.stacking_time = time.time() - phase_start
 
-    # Cleanup input memmaps
-    del mem_rgb, mem_lum
-    for p in (mm_rgb_path, mm_lum_path):
-        try:
-            os.remove(p)
-        except Exception:
-            pass
-
-    # ======================================================================
-    # Post-processing chain
-    # ======================================================================
-
-    # 1. Background extraction (with star mask for better exclusion)
+    # Post-stack background extraction
     if args.background_extraction:
         print(f"\n  Applying background extraction (mesh={args.bg_mesh_size}, "
               f"sigma={args.bg_clip_sigma})...")
         bg_start = time.time()
-        # Generate star mask from stacked luminance for better bg estimation
-        star_mask = None
-        stacked_lum = 0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1] + 0.114 * stacked[:, :, 2]
-        if DAOStarFinder is not None and sigma_clipped_stats is not None:
-            try:
-                _, bg_med, bg_std = sigma_clipped_stats(stacked_lum, sigma=3.0, maxiters=5)
-                daof = DAOStarFinder(fwhm=3.0, threshold=float(bg_med) + 5.0 * float(bg_std))
-                stacked_sources = daof(stacked_lum - float(bg_med))
-                if stacked_sources is not None and len(stacked_sources) > 0:
-                    star_mask = generate_star_mask(stacked_lum.shape, stacked_sources, fwhm=4.0)
-                    if args.verbose:
-                        safe_print(f"    Star mask: {len(stacked_sources)} stars masked")
-            except Exception:
-                pass
-
         stacked = apply_background_extraction(
-            stacked, mesh_size=args.bg_mesh_size,
+            stacked,
+            mesh_size=args.bg_mesh_size,
             filter_size=args.bg_filter_size,
             clip_sigma=args.bg_clip_sigma,
-            verbose=args.verbose,
-            star_mask=star_mask)
-
-        safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
-
-    # 2. Chroma noise reduction
-    if getattr(args, 'chroma_nr', True):
-        cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
-        print(f"\n  Applying chroma noise reduction (sigma={cnr_sigma})...")
-        cnr_start = time.time()
-        stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma)
-        safe_print(f"  ✓ Chroma noise reduction ({format_time(time.time() - cnr_start)})")
-
-    # Sky floor correction: subtract residual per-channel pedestal from background
-    # extraction + chroma NR.  Measured globally across all sky pixels (excluding
-    # galaxy and bright stars) so that the higher-sigma interior sky is captured,
-    # not just the lower-sigma border pixels (which have fewer dither frames).
-    if args.background_extraction:
-        try:
-            H_s, W_s = stacked.shape[:2]
-            lum_s = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                     + 0.114 * stacked[:, :, 2])
-
-            # Build sky mask: start with all pixels, then exclude galaxy/nebula
-            sky_mask = np.ones((H_s, W_s), dtype=bool)
-
-            # Auto-detect galaxy/nebula using the same method as apply_background_extraction
-            try:
-                smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
-                lum_smooth = ndimage.gaussian_filter(lum_s, sigma=smooth_sigma)
-                border_frac = 0.12
-                by = max(10, int(H_s * border_frac))
-                bx = max(10, int(W_s * border_frac))
-                border_pix = np.concatenate([
-                    lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
-                    lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
-                ])
-                sky_med_lum = float(np.median(border_pix))
-                sky_std_lum = float(np.std(border_pix))
-                peak_y, peak_x = np.unravel_index(int(np.argmax(lum_smooth)), (H_s, W_s))
-                peak_val = float(lum_smooth[peak_y, peak_x])
-                detect_thresh = sky_med_lum + max(
-                    2.0 * max(sky_std_lum, 1.0), 0.05 * (peak_val - sky_med_lum))
-                frac_bright = float(np.mean(lum_smooth > detect_thresh))
-                if peak_val > detect_thresh and frac_bright > 0.001:
-                    excl_radius = int(min(H_s, W_s) * 0.30)
-                    yy, xx = np.mgrid[:H_s, :W_s]
-                    # Detect multiple extended sources (handles galaxy pairs/groups)
-                    remaining_lum = lum_smooth.copy()
-                    for _ in range(3):
-                        py, px = np.unravel_index(
-                            int(np.argmax(remaining_lum)), (H_s, W_s))
-                        pv = float(remaining_lum[py, px])
-                        if pv <= detect_thresh:
-                            break
-                        dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
-                        sky_mask &= (dist >= excl_radius)
-                        remaining_lum[dist < excl_radius] = float(
-                            np.min(remaining_lum))
-            except Exception:
-                pass
-
-            # Exclude bright point sources (stars) using sigma-clipped luminance threshold
-            try:
-                if sigma_clipped_stats is not None:
-                    sample = lum_s[sky_mask].ravel() if sky_mask.any() else lum_s.ravel()
-                    _, lum_med, lum_std = sigma_clipped_stats(sample, sigma=3.0, maxiters=5)
-                    star_thresh = float(lum_med) + 3.0 * float(lum_std)
-                    sky_mask &= (lum_s < star_thresh)
-            except Exception:
-                pass
-
-            if sky_mask.sum() > 1000:
-                for c in range(3):
-                    col = stacked[:, :, c][sky_mask].ravel()
-                    if sigma_clipped_stats is not None:
-                        try:
-                            _, sky_floor, _ = sigma_clipped_stats(col, sigma=3.0, maxiters=5)
-                            sky_floor = float(sky_floor)
-                        except Exception:
-                            sky_floor = float(np.median(col))
-                    else:
-                        sky_floor = float(np.median(col))
-                    if sky_floor > 0:
-                        stacked[:, :, c] = np.clip(stacked[:, :, c] - sky_floor, 0, None)
-                        if args.verbose:
-                            safe_print(f"    Sky floor correction ch{c}: -{sky_floor:.2f}")
-        except Exception:
-            pass
-
-    # 3. Local normalization
-    if getattr(args, 'local_normalize', False):
-        ln_sigma = getattr(args, 'local_normalize_sigma', 50.0)
-        print(f"\n  Applying local normalization (sigma={ln_sigma})...")
-        ln_start = time.time()
-        stacked = local_normalize(stacked, sigma=ln_sigma)
-        safe_print(f"  ✓ Local normalization ({format_time(time.time() - ln_start)})")
-
-    # 4. Wavelet denoising
-    if getattr(args, 'denoise', False):
-        strength = getattr(args, 'denoise_strength', 3.0)
-        print(f"\n  Applying wavelet denoising (strength={strength})...")
-        dn_start = time.time()
-        stacked = wavelet_denoise(stacked, threshold_factor=strength)
-        safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
+            verbose=args.verbose
+        )
+        bg_time = time.time() - bg_start
+        safe_print(f"  ✓ Background extraction complete ({format_time(bg_time)})")
 
     # Update memory usage
     if HAS_PSUTIL:
@@ -2906,58 +1920,83 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Save FITS (3,H,W)
     out_h, out_w, _ = stacked.shape
     hdu = fits.PrimaryHDU()
+    # store as (3,H,W)
     data_out = np.transpose(stacked, (2, 0, 1)).astype(np.float32)
     hdu.data = data_out
 
+    # Populate comprehensive FITS header
     populate_fits_header(
-        header=hdu.header, frames=final, stats=stats, args=args,
-        stacked_shape=stacked.shape, shifts=shifts,
-        masters=masters, dither_info=dither_info)
+        header=hdu.header,
+        frames=final,
+        stats=stats,
+        args=args,
+        stacked_shape=stacked.shape,
+        shifts=shifts,
+        masters=masters,
+        dither_info=dither_info
+    )
+
+    # Save FITS file
     hdu.writeto(output_path, overwrite=True)
 
-    # Plate solving
+    # Attempt plate solving to add WCS and object identification
     plate_solved = False
     if not args.skip_plate_solve:
         if args.verbose:
             print("\n  Attempting plate solving...")
         plate_solved = solve_plate(data_out, hdu.header, output_path, verbose=args.verbose)
+
+        # Re-save FITS with updated header if plate solving succeeded
         if plate_solved:
             hdu.writeto(output_path, overwrite=True)
+            if args.verbose:
+                print("  FITS header updated with WCS and object info")
     elif args.verbose:
         print("\n  Plate solving skipped (--skip-plate-solve)")
 
-    # Preview with configurable stretch
+    # preview
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
-    stretch_method = getattr(args, 'stretch', 'linear')
-    save_preview_rgb(stacked, preview_path, stretch=stretch_method)
+    save_preview_rgb(stacked, preview_path)
 
-    print(f"  Output size: {out_h}x{out_w} "
-          f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)")
+    print(f"  Output size: {out_h}×{out_w} (cropped {stats.cropped_pixels[0]}×{stats.cropped_pixels[1]} pixels)")
 
-    # Summary
+    # Print summary
     print_header("SUMMARY", "=")
     print(f"  Frames analyzed:  {stats.total_frames}")
-    print(f"  Frames stacked:   {stats.accepted_frames} "
-          f"({stats.accepted_frames/stats.total_frames*100:.1f}%)")
+    print(f"  Frames stacked:   {stats.accepted_frames} ({stats.accepted_frames/stats.total_frames*100:.1f}%)")
     if stats.rejected_frames > 0:
         print(f"  Frames rejected:  {stats.rejected_frames}")
-    print(f"  Output:           {os.path.basename(output_path)} ({out_h}x{out_w}x3)")
-    print(f"  Preview:          {os.path.basename(preview_path)} ({stretch_method} stretch)")
+    print(f"  Output:           {os.path.basename(output_path)} ({out_h}×{out_w}×3)")
+    print(f"  Preview:          {os.path.basename(preview_path)}")
     print(f"  Processing time:  {format_time(stats.total_time())}")
-    print(f"    Quality+Load:   {format_time(stats.quality_time)}")
+    print(f"    Quality:        {format_time(stats.quality_time)}")
     print(f"    Registration:   {format_time(stats.registration_time)}")
     print(f"    Stacking:       {format_time(stats.stacking_time)}")
+
     if HAS_PSUTIL:
         print(f"  Peak memory:      {stats.peak_memory_mb:.1f} MB")
+        frames_per_gb = (stats.accepted_frames / (stats.peak_memory_mb / 1024)) if stats.peak_memory_mb > 0 else 0
+        if frames_per_gb > 0:
+            print(f"  Memory efficiency: {frames_per_gb:.1f} frames/GB")
 
+    # Print warnings if any
     if stats.warnings:
-        safe_print(f"\n  Warnings:")
-        for w in stats.warnings[:5]:
-            safe_print(f"    - {w}")
-    if stats.errors:
-        safe_print(f"\n  Errors: {len(stats.errors)}")
+        safe_print(f"\n  ⚠ Warnings:")
+        for warning in stats.warnings[:5]:  # Show first 5
+            safe_print(f"    • {warning}")
+        if len(stats.warnings) > 5:
+            safe_print(f"    ... and {len(stats.warnings) - 5} more")
 
-    safe_print(f"\n  Stack complete!")
+    # Print errors if any
+    if stats.errors:
+        safe_print(f"\n  ✗ Errors encountered: {len(stats.errors)}")
+        if args.verbose:
+            for path, error in stats.errors[:10]:
+                safe_print(f"    • {os.path.basename(path)}: {error}")
+            if len(stats.errors) > 10:
+                safe_print(f"    ... and {len(stats.errors) - 10} more")
+
+    safe_print(f"\n  ✓ Stack complete!")
     return output_path
 
 
@@ -3040,103 +2079,6 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         else:
             masters['flat'] = None
 
-        # Build hot pixel map from unsmoothed dark BEFORE smoothing.
-        # Dark smoothing destroys per-pixel hot pixel information, so we
-        # capture it first for Bayer-level correction in each light frame.
-        masters['hot_pixel_map'] = None
-        if masters.get('dark') is not None:
-            hot_map = build_hot_pixel_map(masters['dark'])
-            n_hot = int(np.sum(hot_map))
-            if n_hot > 0:
-                masters['hot_pixel_map'] = hot_map
-                safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
-
-        # Smooth master calibration frames to reduce pixel-level noise.
-        # With few calibration frames (especially 1), per-pixel noise is as high
-        # as a single light frame — this noise is correlated across all lights
-        # and does NOT stack out.  Calibration corrects large-scale effects
-        # (bias pedestal, thermal gradient, vignetting/dust), so heavy smoothing
-        # preserves the correction while eliminating the noise penalty.
-        if masters.get('bias') is not None:
-            n_bias = len(frames['bias'])
-            # Bias is nearly constant; smooth aggressively
-            sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
-            masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma=sigma_b)
-        if masters.get('dark') is not None:
-            n_dark = len(frames['dark'])
-            # Dark has amp-glow gradients (>100px scale); moderate smoothing
-            sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
-            masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
-        if masters.get('flat') is not None:
-            n_flat = len(frames['flat'])
-            # Flat has vignetting + dust donuts (>30px); preserve those.
-            # CRITICAL: smooth each Bayer colour channel independently.
-            # A whole-image Gaussian with sigma > ~2 px averages adjacent R/G/B
-            # Bayer pixels together, making flat_norm identical for all channels
-            # (~0.888) and completely disabling per-channel QE correction.
-            # Per-channel smoothing keeps the correct flat_norm values
-            # (R≈0.39, G≈1.00, B≈1.16 for this camera) so the flat field
-            # simultaneously corrects vignetting AND camera spectral response.
-            sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
-            flat_raw = masters['flat'].astype(np.float32)
-            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                ch = flat_raw[r_off::2, c_off::2]
-                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
-            masters['flat'] = flat_raw
-
-        # Store dark exposure time so _process_single_frame can scale correctly
-        masters['dark_exptime'] = None
-        if frames.get('dark'):
-            try:
-                masters['dark_exptime'] = float(
-                    frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
-            except Exception:
-                pass
-
-        # --- Calibration frame analysis ---
-        if frames['dark'] or frames['flat'] or frames['bias']:
-            try:
-                if masters.get('bias') is not None:
-                    b = masters['bias']
-                    safe_print(f"    Bias:  pedestal={np.median(b):.1f} ADU  "
-                               f"range={b.min():.1f}\u2013{b.max():.1f}")
-                if masters.get('dark') is not None:
-                    d = masters['dark']
-                    dark_med = float(np.median(d))
-                    dark_peak = float(d.max())
-                    dark_et = masters.get('dark_exptime')
-                    if dark_et and dark_et > 0:
-                        rate_str = f"  ({dark_med / dark_et:.4f} ADU/s)"
-                    else:
-                        rate_str = ''
-                    safe_print(f"    Dark:  median={dark_med:.1f} ADU{rate_str}  "
-                               f"peak={dark_peak:.0f} ADU")
-                if masters.get('flat') is not None:
-                    flat = masters['flat']
-                    flat_med = float(np.median(flat))
-                    if flat_med > 0:
-                        bayer_labels = ['R', 'G1', 'G2', 'B']
-                        bayer_ratios = []
-                        for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                            ch_med = float(np.median(flat[r_off::2, c_off::2]))
-                            bayer_ratios.append(ch_med / flat_med)
-                        ratio_str = '/'.join(
-                            f'{lbl}={r:.3f}'
-                            for lbl, r in zip(bayer_labels, bayer_ratios))
-                        H_f, W_f = flat.shape
-                        qh, qw = H_f // 8, W_f // 8
-                        center_med = float(np.median(
-                            flat[H_f // 2 - qh:H_f // 2 + qh,
-                                 W_f // 2 - qw:W_f // 2 + qw]))
-                        cs = max(10, min(100, H_f // 12, W_f // 12))
-                        corner_med = float(np.median(np.concatenate([
-                            flat[:cs, :cs].ravel(), flat[:cs, -cs:].ravel(),
-                            flat[-cs:, :cs].ravel(), flat[-cs:, -cs:].ravel()])))
-                        vign = (1.0 - corner_med / center_med) * 100.0 if center_med > 0 else 0.0
-                        safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%")
-            except Exception:
-                pass
-
         if frames['dark'] or frames['flat'] or frames['bias']:
             stats.calibration_time = time.time() - cal_start
 
@@ -3176,7 +2118,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         out_hdu.header['NTARGETS'] = len(produced)
         out_hdu.writeto(output, overwrite=True)
         preview_path = os.path.splitext(output)[0] + '.jpg'
-        save_preview_rgb(combined, preview_path, stretch=getattr(args, 'stretch', 'linear'))
+        save_preview_rgb(combined, preview_path)
 
         safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hm}×{Wm}×3)")
         safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
@@ -3196,64 +2138,30 @@ def parse_args():
     p.add_argument('-d', '--directory', required=True)
     p.add_argument('-o', '--output', required=True)
     p.add_argument('--no-registration', action='store_true')
-    p.add_argument('--skip-phase-correlation', action='store_true',
-                   help='Skip phase correlation, use only fallback methods (debug)')
-    p.add_argument('--no-affine', action='store_true',
-                   help='Disable affine (rotation+translation) registration; use translation-only')
-    p.add_argument('--affine', action='store_true',
-                   help='(Legacy, now default) affine registration is on unless --no-affine is set')
+    p.add_argument('--skip-phase-correlation', action='store_true', help='Skip phase correlation, use only fallback methods (debug)')
     p.add_argument('--quality-filter', action='store_true')
     p.add_argument('--quality-threshold', type=float, default=50.0)
     p.add_argument('--keep-intermediates', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true')
-    p.add_argument('--debug-registration', action='store_true',
-                   help='Detailed registration diagnostics (implies -v)')
-    p.add_argument('--stack-method', choices=['mean', 'median', 'sigma_clip'], default=None,
-                   help='Stacking method (default: sigma_clip for dithered data, mean otherwise)')
+    p.add_argument('--debug-registration', action='store_true', help='Detailed registration diagnostics (implies -v)')
+    p.add_argument('--stack-method', choices=['mean', 'median', 'sigma_clip'], default='mean')
     p.add_argument('--rejection-sigma', type=float, default=3.0,
                    help='Sigma threshold for pixel rejection in sigma_clip stacking (default: 3.0)')
     p.add_argument('--rejection-iters', type=int, default=3,
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
-    p.add_argument('--winsorize', action='store_true',
-                   help='Winsorized sigma-clip: clip outliers to boundary instead of rejecting')
-    p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
-                   help='Debayering method (vng requires OpenCV)')
+    p.add_argument('--debayer-method', choices=['bilinear', 'malvar'], default='bilinear')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
-    p.add_argument('--drizzle-scale', type=int, default=1,
-                   help='Integer drizzle scale factor (1 = disabled)')
-    p.add_argument('--use-gpu', action='store_true',
-                   help='Use CuPy for available operations (experimental)')
-    p.add_argument('--skip-plate-solve', action='store_true',
-                   help='Skip plate solving (astrometry)')
-    p.add_argument('--background-extraction', action='store_true', default=True,
-                   help='Enable intelligent background removal for darker sky (default: on)')
-    p.add_argument('--no-background-extraction', dest='background_extraction',
-                   action='store_false',
-                   help='Disable background extraction')
-    p.add_argument('--bg-mesh-size', type=int, default=128,
-                   help='Grid cell size in pixels for background estimation (default: 128)')
+    p.add_argument('--drizzle-scale', type=int, default=1, help='Integer drizzle scale factor (1 = disabled)')
+    p.add_argument('--use-gpu', action='store_true', help='Use CuPy for available operations (experimental)')
+    p.add_argument('--skip-plate-solve', action='store_true', help='Skip plate solving (astrometry)')
+    p.add_argument('--background-extraction', action='store_true',
+                   help='Enable intelligent background removal for darker sky')
+    p.add_argument('--bg-mesh-size', type=int, default=256,
+                   help='Grid cell size in pixels for background estimation (default: 256)')
     p.add_argument('--bg-filter-size', type=int, default=3,
                    help='Median filter size for background grid smoothing (default: 3, must be odd)')
     p.add_argument('--bg-clip-sigma', type=float, default=3.0,
                    help='Sigma for star rejection in background estimation (default: 3.0)')
-    p.add_argument('--denoise', action='store_true',
-                   help='Enable wavelet denoising post-stack (requires pywt)')
-    p.add_argument('--denoise-strength', type=float, default=3.0,
-                   help='Wavelet denoise threshold factor (default: 3.0)')
-    p.add_argument('--local-normalize', action='store_true',
-                   help='Enable local normalization to remove vignetting residuals')
-    p.add_argument('--local-normalize-sigma', type=float, default=50.0,
-                   help='Gaussian sigma for local normalization (default: 50)')
-    p.add_argument('--chroma-nr', action='store_true', default=True,
-                   help='Enable chroma noise reduction to remove color speckle in sky background (default: on)')
-    p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
-                   help='Disable chroma noise reduction')
-    p.add_argument('--chroma-nr-sigma', type=float, default=2.0,
-                   help='Gaussian sigma for chroma smoothing in pixels (default: 2.0)')
-    p.add_argument('--stretch', choices=['linear', 'arcsinh'], default='linear',
-                   help='Preview image stretch method (default: linear)')
-    p.add_argument('-j', '--parallel', type=int, default=1,
-                   help='Parallel workers for frame processing (0=auto, 1=sequential)')
     return p.parse_args()
 
 

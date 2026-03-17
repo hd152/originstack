@@ -1,8 +1,6 @@
 # Test data directories
 orion-live/
 synthetic_data/
-# Observation session directories (e.g. Pinwheel_Galaxy_2026-01-26_18-14-12/)
-*_20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
 
 # Claude Code directories
 .claude/
