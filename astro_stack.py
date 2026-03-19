@@ -1301,7 +1301,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
                 # Skip cells in the extended source exclusion zone —
                 # their emission must not be treated as sky residual.
                 if cell_excluded[iy, ix]:
-                    bg_grid[iy, ix] = 0.0
+                    bg_grid[iy, ix] = np.nan
                     continue
 
                 cell = ch[y0:y1, x0:x1].ravel()
@@ -1322,6 +1322,16 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
                     except Exception:
                         pass
                 bg_grid[iy, ix] = float(np.median(cell))
+
+        # Fill excluded cells by copying from their nearest valid sky cell.
+        # Setting them to 0 would collapse the background model to zero inside
+        # the target, creating a residual halo after subtraction.
+        nan_mask = np.isnan(bg_grid)
+        if nan_mask.any() and not nan_mask.all():
+            _, nn_idx = ndimage.distance_transform_edt(nan_mask, return_indices=True)
+            bg_grid[nan_mask] = bg_grid[nn_idx[0][nan_mask], nn_idx[1][nan_mask]]
+        elif nan_mask.all():
+            bg_grid[:] = 0.0
 
         # Smooth grid to suppress star contamination between cells
         if filter_size > 1 and min(ny, nx) >= filter_size:
@@ -1580,7 +1590,7 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
         out_chroma = chroma * protect + smooth_chroma * sky_mask
         result[:, :, c] = lum + out_chroma
 
-    return result.astype(np.float32)
+    return np.clip(result, 0, None).astype(np.float32)
 
 
 def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
@@ -3888,22 +3898,24 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             except Exception:
                 pass
 
-            # Compute a single sky floor from luminance and subtract uniformly
+            # Subtract per-channel sky floor so each channel is independently
+            # zeroed.  A single luminance offset can leave residual color casts
+            # when Bayer channels have different sky backgrounds.
             if sky_mask.sum() > 1000:
-                sky_lum = lum_s[sky_mask].ravel()
-                if sigma_clipped_stats is not None:
-                    try:
-                        _, sky_floor, _ = sigma_clipped_stats(sky_lum, sigma=3.0, maxiters=5)
-                        sky_floor = float(sky_floor)
-                    except Exception:
-                        sky_floor = float(np.median(sky_lum))
-                else:
-                    sky_floor = float(np.median(sky_lum))
-                if sky_floor > 0:
-                    for c in range(3):
+                for c in range(3):
+                    col = stacked[:, :, c][sky_mask].ravel()
+                    if sigma_clipped_stats is not None:
+                        try:
+                            _, sky_floor, _ = sigma_clipped_stats(col, sigma=3.0, maxiters=5)
+                            sky_floor = float(sky_floor)
+                        except Exception:
+                            sky_floor = float(np.median(col))
+                    else:
+                        sky_floor = float(np.median(col))
+                    if sky_floor > 0:
                         stacked[:, :, c] -= sky_floor
-                    if args.verbose:
-                        safe_print(f"    Sky floor correction (uniform): -{sky_floor:.2f}")
+                        if args.verbose:
+                            safe_print(f"    Sky floor correction ch{c}: -{sky_floor:.2f}")
         except Exception:
             pass
 
