@@ -1,3 +1,4 @@
+
 """Astro FITS Stream Stacker
 
 Features:
@@ -1384,6 +1385,119 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     return result
 
 
+def sky_floor_normalize(rgb: np.ndarray,
+                        star_mask: np.ndarray = None,
+                        verbose: bool = False) -> np.ndarray:
+    """Drive the constant sky pedestal to zero without touching sources.
+
+    After background extraction the sky is spatially flat but may sit on a
+    non-zero pedestal (residual bias, uncorrected dark, or an extraction that
+    only removed gradient variation).  This function:
+
+      1. Builds a comprehensive *source mask* — every pixel that is not pure
+         sky: stars (passed in via ``star_mask``), plus anything above the sky
+         noise floor estimated from the outermost image border.
+      2. Estimates a per-channel sky floor as the sigma-clipped median of the
+         unmasked sky pixels.
+      3. Subtracts that constant per-channel floor from the entire image.
+
+    Because the floor is a single scalar per channel, it cannot distort the
+    galaxy shape or wash out extended emission — it simply shifts all values
+    down so that true sky reads zero.
+
+    Parameters
+    ----------
+    rgb : (H, W, 3) float32 array  — calibrated, background-extracted stack.
+    star_mask : (H, W) float32, optional  — 1 where stars detected, 0 elsewhere.
+    verbose : bool
+
+    Returns
+    -------
+    (H, W, 3) float32 with sky floor subtracted; negatives clipped to 0.
+    """
+    from scipy.ndimage import gaussian_filter as _gf
+
+    H, W = rgb.shape[:2]
+    result = rgb.copy()
+
+    lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
+           + 0.114 * rgb[:, :, 2])
+
+    # --- Build source mask ---
+    # Step 1: start with the star mask if provided.
+    src_mask = np.zeros((H, W), dtype=np.float32)
+    if star_mask is not None:
+        np.clip(src_mask + star_mask, 0, 1, out=src_mask)
+
+    # Step 2: estimate sky noise from the outermost 12% border strip —
+    # these pixels are furthest from the target and contain the least emission.
+    border_frac = 0.12
+    by = max(10, int(H * border_frac))
+    bx = max(10, int(W * border_frac))
+    border_lum = np.concatenate([
+        lum[:by, :].ravel(), lum[-by:, :].ravel(),
+        lum[by:-by, :bx].ravel(), lum[by:-by, -bx:].ravel(),
+    ])
+    # Use sigma-clipped stats to reject stars in the border strip
+    if sigma_clipped_stats is not None:
+        try:
+            _, sky_med, sky_std = sigma_clipped_stats(
+                border_lum, sigma=3.0, maxiters=5)
+            sky_med = float(sky_med)
+            sky_std = float(sky_std)
+        except Exception:
+            sky_med = float(np.median(border_lum))
+            sky_std = float(np.std(border_lum))
+    else:
+        sky_med = float(np.median(border_lum))
+        sky_std = float(np.std(border_lum))
+
+    # Step 3: mask every pixel where the *smoothed* luminance exceeds the sky
+    # floor by more than 2× the sky noise — this catches the galaxy core,
+    # spiral arms, IFN halo, and faint nebulosity.  Using the Gaussian-smoothed
+    # luminance prevents individual noisy pixels from leaking through.
+    smooth_sigma = max(5.0, min(H, W) / 200.0)
+    lum_smooth = _gf(lum, sigma=smooth_sigma)
+    src_thresh = sky_med + 2.0 * max(sky_std, 1.0)
+    np.clip(src_mask + (lum_smooth > src_thresh).astype(np.float32), 0, 1,
+            out=src_mask)
+
+    sky_pix_mask = src_mask < 0.5     # True where it is pure sky
+
+    if sky_pix_mask.sum() < 1000:
+        # Extremely crowded field or failed detection — skip safely
+        if verbose:
+            safe_print("  Sky floor: too few sky pixels to normalise, skipping")
+        return result
+
+    sky_frac = 100.0 * sky_pix_mask.sum() / (H * W)
+
+    # --- Per-channel floor subtraction ---
+    floors = []
+    for c in range(3):
+        ch_sky = rgb[:, :, c][sky_pix_mask]
+        if sigma_clipped_stats is not None:
+            try:
+                _, floor, _ = sigma_clipped_stats(ch_sky, sigma=3.0, maxiters=5)
+                floor = float(floor)
+            except Exception:
+                floor = float(np.median(ch_sky))
+        else:
+            floor = float(np.median(ch_sky))
+        floors.append(floor)
+        result[:, :, c] -= floor
+
+    # Clip negative sky to zero — we never want the background to go below black.
+    np.clip(result, 0, None, out=result)
+
+    if verbose:
+        safe_print(f"  Sky floor: {sky_frac:.1f}% sky pixels used, "
+                   f"floors subtracted R={floors[0]:.2f} G={floors[1]:.2f} "
+                   f"B={floors[2]:.2f} ADU")
+
+    return result
+
+
 def bilateral_denoise(img: np.ndarray, sigma_color: float = None,
                       sigma_space: float = 3.0) -> np.ndarray:
     """Edge-preserving bilateral filter denoising (second-pass after wavelet).
@@ -1833,17 +1947,29 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
         # Normalised coordinates for numerical stability
         y_good = (iy_good.astype(float) + 0.5) / ny
         x_good = (ix_good.astype(float) + 0.5) / nx
-        # Build degree-2 polynomial design matrix (6 terms)
+        # Build polynomial design matrix for gap-filling.
+        # Degree-3 (10 terms) better captures the steep-then-flat radial
+        # falloff of LP gradients and IFN halos than a degree-2 parabola.
+        # Fall back to degree-2 (6 terms) when there are too few clean cells
+        # to constrain a 10-parameter fit reliably (need ≥ 30 points).
+        def poly3_features(y, x):
+            return np.column_stack([
+                np.ones(len(y)), y, x,
+                y ** 2, y * x, x ** 2,
+                y ** 3, y ** 2 * x, y * x ** 2, x ** 3])
+
         def poly2_features(y, x):
             return np.column_stack([
                 np.ones(len(y)), y, x, y ** 2, y * x, x ** 2])
-        A_good = poly2_features(y_good, x_good)
+
+        poly_features = poly3_features if len(y_good) >= 30 else poly2_features
+        A_good = poly_features(y_good, x_good)
         try:
             coeffs, _, _, _ = np.linalg.lstsq(A_good, vals_good, rcond=None)
             iy_bad, ix_bad = np.where(outlier_mask)
             y_bad = (iy_bad.astype(float) + 0.5) / ny
             x_bad = (ix_bad.astype(float) + 0.5) / nx
-            bg_grid[outlier_mask] = poly2_features(y_bad, x_bad).dot(coeffs)
+            bg_grid[outlier_mask] = poly_features(y_bad, x_bad).dot(coeffs)
         except Exception:
             bg_grid[outlier_mask] = grid_median
     elif np.all(outlier_mask):
@@ -3945,8 +4071,20 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Always run after background extraction to ensure a clean sky.
     if args.background_extraction:
         _sr_mesh = max(32, args.bg_mesh_size // 2)
-        print(f"\n  Correcting sky residuals (mesh={_sr_mesh})...")
+        _H_pp, _W_pp = stacked.shape[:2]
+        # Broad pass first: removes large-scale gradient residuals (LP
+        # gradient, IFN halo) that survive the main extraction because the
+        # galaxy exclusion zone covers a large image fraction.  Using a mesh
+        # cell ~1/6 of the shorter image dimension captures structure at the
+        # same spatial scale as the exclusion zone.
+        _sr_broad_mesh = max(args.bg_mesh_size, min(_H_pp, _W_pp) // 6)
+        print(f"\n  Correcting sky residuals "
+              f"(broad={_sr_broad_mesh}px, fine={_sr_mesh}px)...")
         _sr_start = time.time()
+        stacked = remove_sky_residual(
+            stacked, mesh_size=_sr_broad_mesh, filter_size=1,
+            clip_sigma=args.bg_clip_sigma,
+            star_mask=pp_star_mask, verbose=args.verbose)
         for _sr_pass in range(2):
             stacked = remove_sky_residual(
                 stacked, mesh_size=_sr_mesh, filter_size=1,
@@ -3954,6 +4092,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 star_mask=pp_star_mask, verbose=(args.verbose and _sr_pass == 0))
         safe_print(f"  ✓ Sky residual correction "
                    f"({format_time(time.time() - _sr_start)})")
+
+        # Sky floor normalisation: subtract the per-channel constant pedestal
+        # so the true sky reads zero.  Background extraction removes the
+        # *gradient* across the image; this step removes the remaining flat
+        # *offset* (residual bias, dark current, or extraction reference level).
+        stacked = sky_floor_normalize(
+            stacked, star_mask=pp_star_mask, verbose=args.verbose)
 
     # 5. Non-local means denoising (optional second pass for faint extended emission)
     if getattr(args, 'denoise_nlm', False):
@@ -4069,14 +4214,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     # Plate solving
     plate_solved = False
-    if not args.skip_plate_solve:
+    if getattr(args, 'plate_solve', False):
         if args.verbose:
             print("\n  Attempting plate solving...")
         plate_solved = solve_plate(data_out, hdu.header, output_path, verbose=args.verbose)
         if plate_solved:
             hdu.writeto(output_path, overwrite=True)
     elif args.verbose:
-        print("\n  Plate solving skipped (--skip-plate-solve)")
+        print("\n  Plate solving skipped (use --plate-solve to enable)")
 
     # Preview with configurable stretch
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
@@ -4542,23 +4687,57 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         print_header("HIERARCHICAL COMBINING", "=")
         print(f"  Combining {len(produced)} target stacks into final output...")
 
-        # load all stacks, resize to minimum
-        stacks = []
+        # Load all stacks, crop to minimum common dimensions
         shapes = [fits.open(p)[0].data.shape for p in produced]
         # shapes are (3,H,W)
         mins = np.min([[s[1], s[2]] for s in shapes], axis=0)
         Hm, Wm = int(mins[0]), int(mins[1])
-        print(f"  Resizing all to minimum dimensions: {Hm}×{Wm}")
+        print(f"  Cropping all stacks to minimum dimensions: {Hm}×{Wm}")
 
-        acc = None
-        for p in tqdm(produced, desc="  Combining", unit="target", disable=args.verbose):
+        stacks = []
+        for p in tqdm(produced, desc="  Loading", unit="target", disable=args.verbose):
             with fits.open(p, memmap=True) as hd:
                 d = np.transpose(hd[0].data, (1, 2, 0)).astype(np.float32)
-                d = d[:Hm, :Wm, :]
-                if acc is None:
-                    acc = np.zeros_like(d, dtype=np.float64)
-                acc += d
-        combined = (acc / len(produced)).astype(np.float32)
+                stacks.append(d[:Hm, :Wm, :])
+
+        # Register each stack against the first (reference) stack
+        print(f"  Registering {len(stacks) - 1} stack(s) against reference...")
+        ref_lum = np.mean(stacks[0], axis=2)
+        shifts = [(0.0, 0.0)]
+        for i in range(1, len(stacks)):
+            lum = np.mean(stacks[i], axis=2)
+            sy, sx = calculate_shift(ref_lum, lum, verbose=getattr(args, 'verbose', False))
+            shifts.append((sy, sx))
+            safe_print(f"    Stack {i + 1}/{len(stacks)}: shift=({sx:.2f}, {sy:.2f}) px")
+
+        # Apply shifts (zero-pad edges)
+        aligned = []
+        for stack, (sy, sx) in zip(stacks, shifts):
+            if sy == 0.0 and sx == 0.0:
+                aligned.append(stack)
+            else:
+                aligned.append(apply_transform(stack, shift=(sy, sx)))
+
+        # Crop to the valid (non-padded) overlap region across all aligned stacks
+        all_dy = [s[0] for s in shifts]
+        all_dx = [s[1] for s in shifts]
+        y0 = int(np.ceil(max(0.0, max(all_dy))))
+        y1 = int(np.floor(Hm + min(0.0, min(all_dy))))
+        x0 = int(np.ceil(max(0.0, max(all_dx))))
+        x1 = int(np.floor(Wm + min(0.0, min(all_dx))))
+
+        if y0 >= y1 or x0 >= x1:
+            safe_print("  Warning: shifts exceed image overlap — combining without registration")
+            y0, y1, x0, x1 = 0, Hm, 0, Wm
+
+        Hf, Wf = y1 - y0, x1 - x0
+        print(f"  Valid overlap after registration: {Hf}×{Wf}")
+
+        acc = np.zeros((Hf, Wf, 3), dtype=np.float64)
+        for img in aligned:
+            acc += img[y0:y1, x0:x1, :]
+        combined = (acc / len(aligned)).astype(np.float32)
+
         out_hdu = fits.PrimaryHDU()
         out_hdu.data = np.transpose(combined, (2, 0, 1))
         out_hdu.header['NTARGETS'] = len(produced)
@@ -4566,7 +4745,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         preview_path = os.path.splitext(output)[0] + '.jpg'
         save_preview_rgb(combined, preview_path, stretch=getattr(args, 'stretch', 'linear'))
 
-        safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hm}×{Wm}×3)")
+        safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
         safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
 
     # Overall summary
@@ -4621,8 +4800,8 @@ def parse_args():
                         'Smaller values yield sharper results at the cost of noise.')
     p.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
-    p.add_argument('--skip-plate-solve', action='store_true',
-                   help='Skip plate solving (astrometry)')
+    p.add_argument('--plate-solve', action='store_true',
+                   help='Enable plate solving via astrometry.net (requires astroquery and ASTROMETRY_API_KEY)')
     p.add_argument('--background-extraction', action='store_true', default=True,
                    help='Enable intelligent background removal for darker sky (default: on)')
     p.add_argument('--no-background-extraction', dest='background_extraction',

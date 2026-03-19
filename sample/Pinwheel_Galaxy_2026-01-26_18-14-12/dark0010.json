@@ -1,0 +1,19 @@
+{
+    "averageBrightness": 4851.699098117689,
+    "bayerPattern": "rggb",
+    "biasAverageBrightness": 4974.653033351399,
+    "biasFileName": "bias0010.fits",
+    "biasStandardDeviation": 75.93277955974372,
+    "binning": 1,
+    "bitDepth": 16,
+    "cameraID": "Origin178-932f562381e97ce70",
+    "cameraType": "Origin178",
+    "captureTemperatureC": 23.0,
+    "dateTaken": "2026-01-26 17:53:51",
+    "exposureTimeMS": 20000.0,
+    "fileName": "dark0010.fits",
+    "gain": 27.79757742454438,
+    "iso": 500,
+    "numberOfExposures": 20,
+    "standardDeviation": 781.8649122777127
+}
