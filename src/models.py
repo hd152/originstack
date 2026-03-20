@@ -1,0 +1,79 @@
+"""Data models and configuration constants."""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Optional
+
+
+class Config:
+    """Central configuration for magic numbers and thresholds."""
+    HOT_PIXEL_THRESHOLD = 12.0
+    HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
+    WHITE_PATCH_PERCENTILE = 99.5
+    MAX_SHIFT_FRACTION = 0.1
+    STAR_DETECTION_SIGMA = 5.0
+    CROP_MARGIN = 2
+    XCORR_DOWNSCALE_TARGET = 256  # Target size for cross-correlation
+    CENTROID_PERCENTILES = [95, 90, 85, 80]
+    QUALITY_LOW_BRIGHTNESS = 10
+    QUALITY_LOW_CONTRAST = 1
+    LARGE_SHIFT_WARNING_PX = 20
+    MIN_RECOMMENDED_FRAMES = 10
+    PREVIEW_JPEG_QUALITY = 95
+    PREVIEW_STRETCH_PERCENTILES = (1, 99)
+    TILE_SIZE = 256  # Tile size for tiled sigma-clip (pixels)
+    FWHM_CUTOUT_RADIUS = 10  # Cutout radius for FWHM measurement
+    FWHM_MAX_STARS = 50  # Max stars to measure for FWHM
+    ARCSINH_STRETCH_FACTOR = 5.0  # Default arcsinh stretch factor
+    STAR_MASK_MAX_STARS = 500  # Max stars for mask generation
+    AFFINE_MAX_STARS = 80  # Max stars for affine matching
+    AFFINE_MATCH_RADIUS = 10.0  # Max pixel distance for star matching
+    GPU_PHASE1_WORKER_MB = 250.0   # VRAM per thread for debayer+hotpix+wb
+    GPU_FFT_WORKER_MB = 800.0      # VRAM per thread for padded complex128 FFT
+    GPU_ALIGN_WORKER_MB = 250.0    # VRAM per thread for ndimage.shift on 3-ch image
+    GPU_VRAM_RESERVE_MB = 512.0    # Reserved for CuPy overhead / driver
+    RL_PSF_CUTOUT_RADIUS = 15      # Radius for star cutouts used in PSF estimation
+    RL_PSF_MAX_STARS = 30          # Max stars to sample for PSF building
+    RL_PSF_MIN_STARS = 5           # Min successful fits for reliable PSF
+    RL_PSF_SIZE = 31               # Output PSF kernel size (odd)
+    RL_DEFAULT_ITERATIONS = 15     # Default Richardson-Lucy iterations
+    BORDER_FRAC = 0.12             # Fraction of image border used for sky reference
+
+
+@dataclass
+class FrameInfo:
+    path: str
+    type: str  # 'light','dark','flat','bias'
+    header: dict
+    accepted: bool = True
+    metrics: Optional[Dict] = None
+    shift: Tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass
+class ProcessingStats:
+    """Track timing and statistics during processing."""
+    start_time: float = field(default_factory=time.time)
+    discovery_time: float = 0.0
+    calibration_time: float = 0.0
+    quality_time: float = 0.0
+    registration_time: float = 0.0
+    stacking_time: float = 0.0
+    total_frames: int = 0
+    accepted_frames: int = 0
+    rejected_frames: int = 0
+    errors: List[Tuple[str, str]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    output_shape: Optional[Tuple[int, int]] = None
+    cropped_pixels: Optional[Tuple[int, int]] = None
+    peak_memory_mb: float = 0.0
+
+    def total_time(self) -> float:
+        return time.time() - self.start_time
+
+    def add_error(self, path: str, error: str):
+        self.errors.append((path, error))
+
+    def add_warning(self, warning: str):
+        self.warnings.append(warning)
