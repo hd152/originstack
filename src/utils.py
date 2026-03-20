@@ -96,21 +96,15 @@ def print_quality_table(frames, show_all: bool = False):
 
     # Header
     safe_print("\n  Frame Quality Details:")
-    safe_print("  " + "─" * 100)
-    safe_print(f"  {'Frame':<30} {'Bright':>8} {'Contr':>8} {'Stars':>6} {'Score':>10} {'Status':>8}")
-    safe_print("  " + "─" * 100)
+    safe_print("  " + "─" * 110)
+    safe_print(f"  {'Frame':<30} {'Bright':>8} {'Bg':>8} {'Noise':>7} {'SNR':>5} "
+               f"{'Stars':>6} {'FWHM':>6} {'Sharp':>8} {'Score':>10} {'St':>3}")
+    safe_print("  " + "─" * 110)
 
-    # Show first 10, last 10, or all if show_all
-    if show_all or len(frames_with_metrics) <= 20:
-        frames_to_show = frames_with_metrics
-    else:
-        frames_to_show = frames_with_metrics[:10] + frames_with_metrics[-10:]
-        show_ellipsis = True
-
-    shown_count = 0
     for i, f in enumerate(frames_with_metrics):
         if not show_all and len(frames_with_metrics) > 20 and i == 10:
-            print(f"  {'...':<30} {'...':>8} {'...':>8} {'...':>6} {'...':>10} {'...':>8}")
+            safe_print(f"  {'...':<30} {'...':>8} {'...':>8} {'...':>7} {'...':>5} "
+                       f"{'...':>6} {'...':>6} {'...':>8} {'...':>10} {'...':>3}")
             continue
         elif not show_all and len(frames_with_metrics) > 20 and 10 < i < len(frames_with_metrics) - 10:
             continue
@@ -119,15 +113,21 @@ def print_quality_table(frames, show_all: bool = False):
         if len(name) > 30:
             name = name[:27] + "..."
 
-        brightness = f.metrics.get('brightness', 0)
-        contrast = f.metrics.get('contrast', 0)
-        stars = f.metrics.get('star_count', 0)
-        score = f.metrics.get('score', 0)
-        status = "✓" if f.accepted else "✗"
+        m = f.metrics
+        brightness  = m.get('brightness', 0)
+        background  = m.get('background', 0)
+        noise       = m.get('noise', 0)
+        snr         = m.get('snr', 0)
+        stars       = m.get('star_count', 0)
+        fwhm        = m.get('fwhm', 0)
+        sharpness   = m.get('sharpness', 0)
+        score       = m.get('score', 0)
+        status      = "✓" if f.accepted else "✗"
 
-        safe_print(f"  {name:<30} {brightness:8.1f} {contrast:8.1f} {stars:6} {score:10.1f} {status:>8}")
+        safe_print(f"  {name:<30} {brightness:8.1f} {background:8.1f} {noise:7.2f} {snr:5.1f} "
+                   f"{stars:6} {fwhm:6.1f} {sharpness:8.0f} {score:10.1f} {status:>3}")
 
-    safe_print("  " + "─" * 100)
+    safe_print("  " + "─" * 110)
 
 
 def print_phase(phase_num: int, title: str):

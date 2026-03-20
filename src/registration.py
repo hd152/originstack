@@ -222,8 +222,18 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         gpu = get_gpu()
         xp = gpu.xp
 
+        # Pre-apply pyramid coarse shift so the FFT only needs to find the
+        # small residual — mirrors the same optimisation in the phase_cc path
+        # and avoids wrap-around on large dither offsets.
+        psy, psx = pyramid_shift
+        if psy != 0.0 or psx != 0.0:
+            img_fft = ndimage.shift(img, shift=(psy, psx), order=1,
+                                    mode='constant', cval=0.0)
+        else:
+            img_fft = img
+
         ref_norm = xp.asarray((ref - np.mean(ref)), dtype=xp.float64)
-        img_norm = xp.asarray((img - np.mean(img)), dtype=xp.float64)
+        img_norm = xp.asarray((img_fft - np.mean(img_fft)), dtype=xp.float64)
 
         h, w = ref_norm.shape
         pad_h, pad_w = 2 * h, 2 * w
@@ -253,8 +263,8 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             sub_x = max(-0.5, min(0.5, (vm - vp) / denom))
         del corr  # free VRAM
 
-        shift_y = float(dy + sub_y)
-        shift_x = float(dx + sub_x)
+        shift_y = float(dy + sub_y) + psy
+        shift_x = float(dx + sub_x) + psx
 
         if np.isfinite(shift_y) and np.isfinite(shift_x) and max(abs(shift_y), abs(shift_x)) < max(h, w) * 0.5:
             if verbose:

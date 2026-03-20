@@ -192,19 +192,28 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
     acc = np.zeros((out_h, out_w, C) if is_3d else (out_h, out_w), dtype=np.float64)
     weight_map = np.zeros_like(acc, dtype=np.float64)
 
+    # Output coordinate arrays (reused for each frame's coverage check)
+    _oy = np.arange(out_h, dtype=np.float64)
+    _ox = np.arange(out_w, dtype=np.float64)
+
     for i, (im, sh) in enumerate(zip(aligned_list, shifts)):
         w = float(weights[i]) if weights is not None else 1.0
         resampled = _lanczos_resample_frame(im, sh, scale, out_h, out_w)
 
-        # Build a coverage mask: pixels that map to valid input region
-        # (map_coordinates returns 0 for out-of-bounds, so detect via a
-        # ones-image mapped the same way)
-        ones = np.ones(im.shape[:2], dtype=np.float64)
-        coverage = _lanczos_resample_frame(ones, sh, scale, out_h, out_w)
-        valid = coverage > 0.5  # pixel has >50% coverage
+        # Compute coverage mask analytically: output pixel (oy, ox) maps to
+        # input (iy, ix) = (oy/scale - sh[0], ox/scale - sh[1]).  A pixel is
+        # valid when both coordinates fall inside the input frame boundaries.
+        # This replaces the previous approach of resampling a ones-image, which
+        # ran a full Lanczos pass per frame for an invariant result.
+        iy = _oy / scale - sh[0]
+        ix = _ox / scale - sh[1]
+        valid = (
+            (iy[:, np.newaxis] >= 0) & (iy[:, np.newaxis] < H) &
+            (ix[np.newaxis, :] >= 0) & (ix[np.newaxis, :] < W)
+        )
 
         if is_3d:
-            valid3 = valid[:, :, np.newaxis] if valid.ndim == 2 else valid
+            valid3 = valid[:, :, np.newaxis]
             acc += np.where(valid3, resampled * w, 0.0)
             weight_map += np.where(valid3, w, 0.0)
         else:
@@ -216,32 +225,41 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
 
 
 def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
-                     weights: Optional[np.ndarray], winsorize: bool) -> np.ndarray:
+                     weights: Optional[np.ndarray], winsorize: bool,
+                     use_mad: bool = True) -> np.ndarray:
     """Process a single spatial tile for sigma-clip combine.
 
-    Uses MAD (Median Absolute Deviation) for robust spread estimation
-    instead of standard deviation, which is less sensitive to the very
-    outliers we are trying to reject.
+    Uses MAD (Median Absolute Deviation) by default for robust spread
+    estimation.  When ``use_mad=False``, uses standard deviation instead
+    (equivalent to PixInsight's "Linear Clipping").
     """
     N = tile.shape[0]
     mask = np.ones(tile.shape, dtype=bool)
+    # Pre-allocate once; avoids allocating a new float64 array on every iteration.
+    # Using float32 throughout also prevents the silent float64 promotion that
+    # np.where(mask, tile, np.nan) causes (np.nan is float64).
+    masked = tile.astype(np.float32, copy=True)
 
     for iteration in range(max_iters):
-        masked = np.where(mask, tile, np.nan)
         with np.errstate(all='ignore'):
-            median = np.nanmedian(masked, axis=0)
-            # MAD * 1.4826 is a consistent estimator of std for normal data
-            mad = np.nanmedian(np.abs(masked - median[np.newaxis]), axis=0) * 1.4826
+            if use_mad:
+                median = np.nanmedian(masked, axis=0)
+                # MAD * 1.4826 is a consistent estimator of std for normal data
+                spread = np.nanmedian(np.abs(masked - median[np.newaxis]), axis=0) * 1.4826
+                center = median
+            else:
+                center = np.nanmean(masked, axis=0)
+                spread = np.nanstd(masked, axis=0)
 
-        # Fallback to std where MAD is zero (constant regions)
-        spread = mad.copy()
-        zero_mad = spread < 1e-12
-        if np.any(zero_mad):
+        # Fallback to std/mad where spread is zero (constant regions)
+        zero_spread = spread < 1e-12
+        if np.any(zero_spread):
             with np.errstate(all='ignore'):
-                std_fallback = np.nanstd(masked, axis=0)
-            spread[zero_mad] = std_fallback[zero_mad]
+                fallback = np.nanstd(masked, axis=0) if use_mad else \
+                           np.nanmedian(np.abs(masked - np.nanmedian(masked, axis=0)[np.newaxis]), axis=0) * 1.4826
+            spread[zero_spread] = fallback[zero_spread]
 
-        deviation = np.abs(tile - median[np.newaxis])
+        deviation = np.abs(tile - center[np.newaxis])
         new_mask = mask & (deviation <= sigma * spread[np.newaxis])
 
         # Ensure at least 1 frame survives at every pixel
@@ -253,36 +271,43 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
 
         rejected = int(mask.sum() - new_mask.sum())
         mask = new_mask
+        # Update masked in-place: restore tile values then nan-out rejected pixels
+        np.copyto(masked, tile)
+        masked[~mask] = np.nan
         if rejected == 0:
             break
 
     if winsorize:
         # Replace outliers with clip boundaries instead of masking to NaN
-        masked_final = np.where(mask, tile, np.nan)
+        # masked already equals np.where(mask, tile, np.nan) at this point
         with np.errstate(all='ignore'):
-            med_final = np.nanmedian(masked_final, axis=0)
-            mad_final = np.nanmedian(
-                np.abs(masked_final - med_final[np.newaxis]), axis=0) * 1.4826
-        mad_final = np.maximum(mad_final, 1e-12)
-        upper = med_final + sigma * mad_final
-        lower = med_final - sigma * mad_final
+            if use_mad:
+                med_final = np.nanmedian(masked, axis=0)
+                spread_final = np.nanmedian(
+                    np.abs(masked - med_final[np.newaxis]), axis=0) * 1.4826
+                center_final = med_final
+            else:
+                center_final = np.nanmean(masked, axis=0)
+                spread_final = np.nanstd(masked, axis=0)
+        spread_final = np.maximum(spread_final, 1e-12)
+        upper = center_final + sigma * spread_final
+        lower = center_final - sigma * spread_final
         clipped = np.clip(tile, lower[np.newaxis], upper[np.newaxis])
         if weights is not None:
             w = weights[:, np.newaxis, np.newaxis, np.newaxis]
             return (np.sum(clipped * w, axis=0) / np.sum(w)).astype(np.float32)
         return np.mean(clipped, axis=0).astype(np.float32)
     else:
-        masked_final = np.where(mask, tile, np.nan)
         if weights is not None:
             w = np.where(mask, weights[:, np.newaxis, np.newaxis, np.newaxis], 0.0)
             with np.errstate(all='ignore'):
                 total_w = np.sum(w, axis=0)
                 total_w[total_w == 0] = 1.0
-                result = np.nansum(masked_final * w, axis=0) / total_w
+                result = np.nansum(masked * w, axis=0) / total_w
             np.nan_to_num(result, copy=False, nan=0.0)
             return result.astype(np.float32)
         with np.errstate(all='ignore'):
-            result = np.nanmean(masked_final, axis=0)
+            result = np.nanmean(masked, axis=0)
         np.nan_to_num(result, copy=False, nan=0.0)
         return result.astype(np.float32)
 
@@ -290,27 +315,26 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
 def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
                        weights: Optional[np.ndarray] = None,
                        winsorize: bool = False,
+                       use_mad: bool = True,
                        verbose: bool = False) -> np.ndarray:
-    """Combine frames using tiled, MAD-based, optionally winsorized sigma-clip.
+    """Combine frames using tiled, optionally winsorized sigma-clip.
 
     Processes the image in spatial tiles to keep peak memory low.  Uses
-    MAD (Median Absolute Deviation) instead of standard deviation for more
-    robust outlier detection.  Optionally supports quality-weighted
-    combination and winsorized clipping.
+    MAD (Median Absolute Deviation) by default; pass ``use_mad=False`` for
+    standard-deviation-based clipping (PixInsight "Linear Clipping").
 
     Args:
         data: Array of shape ``(N, H, W, C)`` (all aligned frames).
-        sigma: Rejection threshold in MADs.
+        sigma: Rejection threshold in MADs (or std when use_mad=False).
         max_iters: Maximum clipping iterations.
         weights: Optional 1-D array of length N with per-frame quality weights.
         winsorize: If True, clip outliers to boundary instead of rejecting.
+        use_mad: If True (default), use MAD for spread; False uses std.
         verbose: Print per-tile progress.
     """
     N, H, W, C = data.shape
     tile_size = Config.TILE_SIZE
     result = np.zeros((H, W, C), dtype=np.float32)
-    total_rejected = 0
-    total_pixels = 0
 
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -325,7 +349,7 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     def _process_tile(coords):
         ty, ty_end, tx, tx_end = coords
         tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize)
+        return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize, use_mad)
 
     n_tile_workers = min(os.cpu_count() or 4, len(tile_coords))
     with ThreadPoolExecutor(max_workers=n_tile_workers) as executor:
@@ -334,6 +358,218 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
             result[ty:ty_end, tx:tx_end, :] = tile_result
 
     if verbose:
+        estimator = 'MAD' if use_mad else 'std'
+        mode = 'winsorized' if winsorize else 'reject'
         safe_print(f"    Tiled sigma-clip: {n_tiles_y * n_tiles_x} tiles of "
-                   f"{tile_size}x{tile_size}, mode={'winsorized' if winsorize else 'reject'}")
+                   f"{tile_size}x{tile_size}, estimator={estimator}, mode={mode}")
+    return result
+
+
+def _percentile_clip_tile(tile: np.ndarray, low: float, high: float,
+                          weights: Optional[np.ndarray]) -> np.ndarray:
+    """Percentile-clip a single spatial tile."""
+    N = tile.shape[0]
+    lo = np.percentile(tile, low, axis=0)
+    hi = np.percentile(tile, high, axis=0)
+    mask = (tile >= lo[np.newaxis]) & (tile <= hi[np.newaxis])
+
+    # Ensure at least 1 frame survives at every pixel
+    surviving = mask.sum(axis=0)
+    all_rejected = surviving == 0
+    if np.any(all_rejected):
+        for frame_idx in range(N):
+            mask[frame_idx][all_rejected] = True
+
+    masked = np.where(mask, tile, np.nan)
+    if weights is not None:
+        w = np.where(mask, weights[:, np.newaxis, np.newaxis, np.newaxis], 0.0)
+        with np.errstate(all='ignore'):
+            total_w = np.sum(w, axis=0)
+            total_w[total_w == 0] = 1.0
+            result = np.nansum(masked * w, axis=0) / total_w
+    else:
+        with np.errstate(all='ignore'):
+            result = np.nanmean(masked, axis=0)
+    np.nan_to_num(result, copy=False, nan=0.0)
+    return result.astype(np.float32)
+
+
+def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 80.0,
+                            weights: Optional[np.ndarray] = None,
+                            verbose: bool = False) -> np.ndarray:
+    """Combine frames using percentile clipping rejection.
+
+    Rejects pixels outside the [low, high] percentile range across the
+    frame stack at each pixel position, then averages survivors.  This is
+    PixInsight's "Percentile Clipping" method.  Works well for small frame
+    counts (< 8) where sigma-based estimators are unreliable.
+
+    Args:
+        data: Array of shape ``(N, H, W, C)``.
+        low: Lower rejection percentile (default 20 — symmetric with high=80).
+        high: Upper rejection percentile (default 80).
+        weights: Optional 1-D per-frame quality weights.
+        verbose: Print summary.
+    """
+    N, H, W, C = data.shape
+    tile_size = Config.TILE_SIZE
+    result = np.zeros((H, W, C), dtype=np.float32)
+
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    tile_coords = [
+        (ty * tile_size, min((ty + 1) * tile_size, H),
+         tx * tile_size, min((tx + 1) * tile_size, W))
+        for ty in range(n_tiles_y)
+        for tx in range(n_tiles_x)
+    ]
+
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        return coords, _percentile_clip_tile(tile, low, high, weights)
+
+    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for coords, tile_result in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
+
+    if verbose:
+        safe_print(f"    Percentile clip: low={low}%, high={high}%, "
+                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+    return result
+
+
+def _esd_clip_tile(tile: np.ndarray, max_outliers: int, significance: float,
+                   weights: Optional[np.ndarray]) -> np.ndarray:
+    """Generalized ESD (Extreme Studentized Deviate) rejection for a tile.
+
+    Iteratively removes the most extreme outlier at each pixel position
+    using the Grubbs test statistic, corrected for multiple comparisons via
+    the t-distribution.  Better than sigma-clip for small N (< ~10 frames)
+    because it accounts for the sample size in the rejection threshold.
+    """
+    try:
+        from scipy import stats as scipy_stats
+    except ImportError:
+        # Fall back to sigma-clip if scipy unavailable
+        return _sigma_clip_tile(tile, 3.0, 3, weights, False, True)
+
+    N = tile.shape[0]
+    mask = np.ones(tile.shape, dtype=bool)
+
+    # Precompute Grubbs critical values: lambda(n_eff, i) for each iteration i
+    # lambda = (n-1)/sqrt(n) * t / sqrt(n-2+t^2)
+    # where t = t_{alpha/(2*n), n-2} (two-tailed, Bonferroni-corrected)
+    lambda_lut: dict = {}
+    for n_eff in range(3, N + 1):
+        for i in range(min(max_outliers, n_eff - 2)):
+            n_cur = n_eff - i
+            if n_cur <= 2:
+                lambda_lut[(n_eff, i)] = np.inf
+                continue
+            p = significance / (2.0 * n_cur)
+            p = min(max(p, 1e-10), 0.4999)
+            df = max(n_cur - 2, 1)
+            t_crit = scipy_stats.t.ppf(1.0 - p, df=df)
+            denom = np.sqrt((n_cur - 2.0 + t_crit ** 2) * n_cur)
+            lambda_lut[(n_eff, i)] = (n_cur - 1.0) * t_crit / denom if denom > 0 else np.inf
+
+    for i in range(max_outliers):
+        masked = np.where(mask, tile, np.nan)
+        with np.errstate(all='ignore'):
+            mean = np.nanmean(masked, axis=0)
+            std = np.nanstd(masked, axis=0, ddof=1)
+        std = np.maximum(std, 1e-12)
+
+        deviation = np.where(mask, np.abs(tile - mean[np.newaxis]) / std[np.newaxis], -1.0)
+        max_dev = deviation.max(axis=0)
+        most_extreme_idx = deviation.argmax(axis=0)
+
+        n_active = mask.sum(axis=0)  # (th, tw, C)
+
+        # Build per-pixel critical value map from LUT
+        lambda_map = np.full(max_dev.shape, np.inf)
+        for n_c in np.unique(n_active):
+            key = (int(n_c), i)
+            lam = lambda_lut.get(key, np.inf)
+            lambda_map[n_active == n_c] = lam
+
+        reject = max_dev > lambda_map
+        if not np.any(reject):
+            break
+
+        # Remove the most extreme frame at each rejected pixel position
+        for frame_idx in range(N):
+            is_extreme_rejected = (most_extreme_idx == frame_idx) & reject
+            mask[frame_idx][is_extreme_rejected] = False
+
+        # Ensure at least 1 frame survives
+        surviving = mask.sum(axis=0)
+        all_gone = surviving == 0
+        if np.any(all_gone):
+            for frame_idx in range(N):
+                mask[frame_idx][all_gone] = True
+
+    masked_final = np.where(mask, tile, np.nan)
+    if weights is not None:
+        w = np.where(mask, weights[:, np.newaxis, np.newaxis, np.newaxis], 0.0)
+        with np.errstate(all='ignore'):
+            total_w = np.sum(w, axis=0)
+            total_w[total_w == 0] = 1.0
+            result = np.nansum(masked_final * w, axis=0) / total_w
+    else:
+        with np.errstate(all='ignore'):
+            result = np.nanmean(masked_final, axis=0)
+    np.nan_to_num(result, copy=False, nan=0.0)
+    return result.astype(np.float32)
+
+
+def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0.05,
+                weights: Optional[np.ndarray] = None,
+                verbose: bool = False) -> np.ndarray:
+    """Combine frames using Generalized ESD (Extreme Studentized Deviate) rejection.
+
+    Recommended for small frame counts (< ~15) where sigma-clip's MAD
+    estimator is unreliable.  Uses per-pixel Grubbs test with t-distribution
+    critical values corrected for multiple comparisons.
+
+    Args:
+        data: Array of shape ``(N, H, W, C)``.
+        max_outliers: Maximum outliers to remove per pixel (default: N//4).
+        significance: Type-I error rate for the ESD test (default: 0.05).
+        weights: Optional 1-D per-frame quality weights.
+        verbose: Print summary.
+    """
+    N, H, W, C = data.shape
+    if max_outliers <= 0:
+        max_outliers = max(1, N // 4)
+
+    tile_size = Config.TILE_SIZE
+    result = np.zeros((H, W, C), dtype=np.float32)
+
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    tile_coords = [
+        (ty * tile_size, min((ty + 1) * tile_size, H),
+         tx * tile_size, min((tx + 1) * tile_size, W))
+        for ty in range(n_tiles_y)
+        for tx in range(n_tiles_x)
+    ]
+
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        return coords, _esd_clip_tile(tile, max_outliers, significance, weights)
+
+    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for coords, tile_result in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
+
+    if verbose:
+        safe_print(f"    ESD: max_outliers={max_outliers}, significance={significance}, "
+                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
     return result
