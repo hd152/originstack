@@ -10,7 +10,9 @@ from scipy import ndimage
 
 from src.gpu_context import get_gpu
 from src.models import Config
-from src.utils import safe_print
+from src.utils import safe_print, get_logger
+
+_log = get_logger()
 
 try:
     from skimage.registration import phase_cross_correlation
@@ -119,7 +121,19 @@ def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
     return img
 
 
-def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False) -> Tuple[float, float]:
+def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True) -> Tuple[float, float]:
+    """Calculate the (shift_y, shift_x) needed to align ``img`` to ``ref``.
+
+    Registration cascade:
+      1. Multi-scale pyramid (coarse-to-fine) — handles large shifts reliably
+         and provides a warm-start estimate for the subsequent methods.
+      2. Phase cross-correlation (skimage) — sub-pixel accurate when error < 0.1.
+      3. FFT cross-correlation at full resolution — fallback for phase-cc failure.
+      4. Centroid difference — last resort for featureless or very noisy frames.
+
+    The ``use_pyramid`` flag (default True) enables step 1; set it to False for
+    frames where a near-zero shift is expected (e.g., the reference frame itself).
+    """
     debug_info = []
 
     # Debug mode: save diagnostic images
@@ -141,13 +155,38 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         except Exception as e:
             pass
 
+    # Step 1: Multi-scale pyramid registration (coarse-to-fine).
+    # Handles large dither offsets and tracking drift that can exceed the
+    # unambiguous range of single-scale FFT cross-correlation.  The pyramid
+    # result is used as an initial integer-pixel estimate; subsequent methods
+    # refine it to sub-pixel accuracy.
+    pyramid_shift = (0.0, 0.0)
+    if use_pyramid:
+        try:
+            psy, psx = calculate_shift_pyramid(ref, img)
+            if np.isfinite(psy) and np.isfinite(psx):
+                pyramid_shift = (psy, psx)
+                debug_info.append(f"pyramid: shift=({psx:.1f}, {psy:.1f})")
+        except Exception as exc:
+            debug_info.append(f"pyramid error: {type(exc).__name__}")
+
     # Use phase cross correlation for subpixel shifts when available
     if not skip_phase_cc and phase_cross_correlation is not None:
         try:
+            # Pre-apply the pyramid coarse shift to img so phase correlation
+            # only needs to find the sub-pixel residual — this keeps the
+            # search range small and avoids wrap-around on large offsets.
+            psy, psx = pyramid_shift
+            if psy != 0.0 or psx != 0.0:
+                img_pre = ndimage.shift(img, shift=(psy, psx), order=1,
+                                        mode='constant', cval=0.0)
+            else:
+                img_pre = img
+
             # Normalize images for phase correlation (zero mean, unit variance)
             # This is critical for good phase correlation performance
             ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
-            img_norm = (img - np.mean(img)) / (np.std(img) + 1e-12)
+            img_norm = (img_pre - np.mean(img_pre)) / (np.std(img_pre) + 1e-12)
 
             # Suppress overflow warnings in phase correlation
             with warnings.catch_warnings():
@@ -160,12 +199,14 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 # Check error threshold - phase correlation must have low error to be trusted
                 # error < 0.01 is excellent, error < 0.1 is acceptable, error >= 0.5 is failure
                 if error < 0.1:
+                    total_sy = float(shift[0]) + psy
+                    total_sx = float(shift[1]) + psx
                     if verbose:
-                        if np.allclose(shift, 0.0):
+                        if total_sy == 0.0 and total_sx == 0.0:
                             print(f"      [phase_correlation: zero shift (error={error:.4f}, images well-aligned)]")
                         else:
-                            print(f"      [phase_correlation succeeded: shift={shift}, error={error:.4f}]")
-                    return float(shift[0]), float(shift[1])
+                            print(f"      [phase_correlation succeeded: shift=({total_sx:.3f}, {total_sy:.3f}), error={error:.4f}]")
+                    return total_sy, total_sx
                 else:
                     debug_info.append(f"phase_cc rejected: high error ({error:.4f} >= 0.1)")
             else:
@@ -266,6 +307,90 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
 
 def apply_shift(img: np.ndarray, shift: Tuple[float, float]) -> np.ndarray:
     return ndimage.shift(img, shift=shift, order=3, mode='constant', cval=0.0, prefilter=True)
+
+
+def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
+    """Fast integer-accurate FFT cross-correlation without GPU, for pyramid levels."""
+    ref_n = ref - ref.mean()
+    img_n = img - img.mean()
+    h, w = ref_n.shape
+    pad_h, pad_w = 2 * h, 2 * w
+    F_ref = np.fft.rfft2(ref_n, s=(pad_h, pad_w))
+    F_img = np.fft.rfft2(img_n, s=(pad_h, pad_w))
+    corr = np.fft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w))
+    peak_flat = int(np.argmax(corr))
+    py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
+    dy = py if py < h else py - pad_h
+    dx = px if px < w else px - pad_w
+    return float(dy), float(dx)
+
+
+def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
+                             levels: int = 4,
+                             min_size: int = 32) -> Tuple[float, float]:
+    """Coarse-to-fine multi-scale pyramid registration.
+
+    Builds image pyramids by successive 2× mean-pooling and registers from the
+    coarsest level to the finest.  At each level the previously accumulated
+    shift is applied to the downsampled image before computing the residual,
+    so the correlation only needs to find a small local correction rather than
+    the full shift.  This makes large-shift registration (dithering, tracking
+    drift > 10 % of frame) reliable when plain cross-correlation would wrap
+    around or lock onto a sidelobe.
+
+    The final shift is returned in full-resolution pixel units.
+
+    Args:
+        ref: 2-D luminance reference image (float).
+        img: 2-D luminance image to register against ``ref``.
+        levels: Maximum pyramid depth.  Actual depth is limited by
+                ``min_size`` — levels where either axis < ``min_size``
+                are not used (default 4).
+        min_size: Minimum axis length (pixels) at the coarsest pyramid level
+                  (default 32).
+
+    Returns:
+        ``(shift_y, shift_x)`` in full-resolution pixels.
+    """
+    def _downsample(arr: np.ndarray) -> np.ndarray:
+        h, w = arr.shape
+        h2, w2 = (h // 2) * 2, (w // 2) * 2  # trim to even
+        patch = arr[:h2, :w2].reshape(h2 // 2, 2, w2 // 2, 2)
+        return patch.mean(axis=(1, 3))
+
+    # Build pyramids
+    ref_pyr = [ref.astype(np.float64)]
+    img_pyr = [img.astype(np.float64)]
+    for _ in range(levels - 1):
+        if min(ref_pyr[-1].shape) // 2 < min_size:
+            break
+        ref_pyr.append(_downsample(ref_pyr[-1]))
+        img_pyr.append(_downsample(img_pyr[-1]))
+
+    actual_levels = len(ref_pyr)
+    total_sy, total_sx = 0.0, 0.0
+
+    for lvl in range(actual_levels - 1, -1, -1):
+        r = ref_pyr[lvl]
+        i = img_pyr[lvl]
+
+        # Apply accumulated shift (scaled to this level's resolution) then compute residual
+        if total_sy != 0.0 or total_sx != 0.0:
+            i = ndimage.shift(i, shift=(total_sy, total_sx), order=1,
+                              mode='constant', cval=0.0)
+
+        sy_res, sx_res = _fft_shift_single(r, i)
+        total_sy += sy_res
+        total_sx += sx_res
+
+        if lvl > 0:
+            # Scale up accumulated shift to next finer level
+            total_sy *= 2.0
+            total_sx *= 2.0
+
+    _log.debug("pyramid_registration: shift=(%.2f, %.2f) over %d levels",
+               total_sy, total_sx, actual_levels)
+    return total_sy, total_sx
 
 
 def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],

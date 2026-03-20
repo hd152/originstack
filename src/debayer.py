@@ -6,6 +6,9 @@ from scipy import ndimage
 
 from src.gpu_context import get_gpu
 from src.models import Config
+from src.utils import get_logger
+
+_log = get_logger()
 
 try:
     import cv2
@@ -13,6 +16,13 @@ try:
 except Exception:
     cv2 = None
     HAS_CV2 = False
+
+try:
+    from skimage.registration import phase_cross_correlation as _pcc
+    _HAS_PCC = True
+except Exception:
+    _pcc = None
+    _HAS_PCC = False
 
 
 def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
@@ -196,6 +206,59 @@ def apply_hot_pixel_map_bayer(data: np.ndarray, hot_map: np.ndarray) -> np.ndarr
                 med = ndimage.median_filter(sub, size=3)
                 sub[mask] = med[mask]
                 result[dy::2, dx::2] = sub
+    return result
+
+
+def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
+                                  upsample: int = 10) -> np.ndarray:
+    """Correct lateral chromatic aberration by sub-pixel per-channel registration.
+
+    Registers the red and blue channels against the green channel using phase
+    cross-correlation and applies a sub-pixel shift to bring them into alignment.
+    Correction is intentionally limited to ``max_shift_px`` pixels to avoid
+    over-correcting in frames where phase correlation fails.
+
+    Requires skimage (``phase_cross_correlation``).  Returns the original image
+    unchanged if the dependency is missing or registration fails.
+
+    Args:
+        rgb: Float32 image (H, W, 3), R/G/B order.
+        max_shift_px: Maximum plausible CA shift in pixels (default 5).
+                      Corrections larger than this are silently suppressed.
+        upsample: Sub-pixel upsample factor for phase correlation (default 10).
+    """
+    if not _HAS_PCC or rgb.ndim != 3 or rgb.shape[2] != 3:
+        return rgb
+
+    result = rgb.copy()
+    g = rgb[:, :, 1].astype(np.float64)
+    g_std = g.std()
+    if g_std < 1e-12:
+        return rgb
+    g_norm = (g - g.mean()) / g_std
+
+    for c_idx in (0, 2):  # Red, Blue
+        ch = rgb[:, :, c_idx].astype(np.float64)
+        ch_std = ch.std()
+        if ch_std < 1e-12:
+            continue
+        ch_norm = (ch - ch.mean()) / ch_std
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                shift, error, _ = _pcc(g_norm, ch_norm, upsample_factor=upsample)
+            if (np.isfinite(shift).all()
+                    and np.abs(shift[0]) <= max_shift_px
+                    and np.abs(shift[1]) <= max_shift_px):
+                result[:, :, c_idx] = ndimage.shift(
+                    rgb[:, :, c_idx], shift=shift,
+                    order=3, mode='reflect').astype(np.float32)
+                _log.debug("CA correction ch%d: shift=(%.3f, %.3f) err=%.4f",
+                           c_idx, float(shift[0]), float(shift[1]), float(error))
+        except Exception as exc:
+            _log.debug("CA correction ch%d failed: %s", c_idx, exc)
+
     return result
 
 

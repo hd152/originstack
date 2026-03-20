@@ -9,7 +9,84 @@ import numpy as np
 from scipy import ndimage
 
 from src.models import Config
-from src.utils import safe_print
+from src.utils import safe_print, get_logger
+
+_log = get_logger()
+
+
+def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
+                    gain: float = 1.0, readnoise: float = 6.5) -> np.ndarray:
+    """L.A.Cosmic-style cosmic ray rejection for a single RGB frame.
+
+    Implements a simplified version of the Laplacian edge detection algorithm
+    (van Dokkum 2001) adapted for debayered RGB data.  Works per-channel so
+    single-channel cosmic ray hits (the common case for OSC sensors) are
+    detected and cleaned independently.
+
+    Algorithm:
+      1. Convolve channel with a 3x3 Laplacian kernel — cosmic rays produce
+         a sharp positive spike in the fine-structure image.
+      2. Build a Poisson + read-noise model: noise = sqrt(signal/gain + (RN/gain)²).
+      3. Normalise the Laplacian by the noise model to get a detection statistic S.
+      4. Reject pixels where S > ``sigclip`` **and** S / median(S, 3x3) > ``objlim``.
+         The second condition prevents real compact objects (star cores) from
+         being flagged — their Laplacian spike is surrounded by a similarly
+         elevated neighbourhood, so the ratio stays below ``objlim``.
+      5. Replace flagged pixels with the 5x5 local median.
+
+    Args:
+        img: Calibrated, debayered float32 RGB frame (H, W, 3).
+        sigclip: Detection threshold in units of the per-pixel noise model
+                 (default 4.5 — conservative to avoid touching star cores).
+        objlim: Minimum ratio of S to local-median(S) required for CR flagging
+                (default 5.0).  Increase to flag only sharper spikes.
+        gain: Effective detector gain in e⁻/ADU (default 1.0).  Used in the
+              Poisson noise model; inaccuracy has little effect on detection.
+        readnoise: Read noise in ADU (default 6.5).  Added in quadrature to
+                   the Poisson term.
+
+    Returns:
+        Cleaned float32 RGB image with cosmic rays replaced by local median.
+    """
+    if img.ndim != 3 or img.shape[2] != 3:
+        return img
+
+    result = img.copy()
+    lap_kernel = np.array([[0.0, -1.0, 0.0],
+                           [-1.0,  4.0, -1.0],
+                           [0.0, -1.0, 0.0]], dtype=np.float64)
+    rn_term = (readnoise / gain) ** 2
+    total_fixed = 0
+
+    for c in range(3):
+        ch = img[:, :, c].astype(np.float64)
+
+        # Fine-structure image via Laplacian — keep only positive spikes
+        fine = ndimage.convolve(ch, lap_kernel, mode='reflect')
+        fine = np.clip(fine, 0.0, None)
+
+        # Local median for signal estimate (5x5) and noise model
+        med5 = ndimage.median_filter(ch, size=5)
+        noise = np.sqrt(np.maximum(med5, 0.0) / gain + rn_term)
+        noise = np.maximum(noise, 1e-6)
+
+        # Normalised detection statistic
+        S = fine / (2.0 * noise)  # factor of 2: Laplacian amplifies noise by ~2
+
+        # Object rejection: local median of S in 3x3 neighbourhood
+        S_med = ndimage.median_filter(S, size=3)
+        ratio = S / np.maximum(S_med, 1e-6)
+
+        mask = (S > sigclip) & (ratio > objlim)
+        n_cr = int(np.sum(mask))
+        if n_cr > 0:
+            result[:, :, c][mask] = med5[mask].astype(np.float32)
+            total_fixed += n_cr
+            _log.debug("lacosmic ch%d: %d cosmic ray pixels replaced", c, n_cr)
+
+    if total_fixed:
+        _log.info("lacosmic_reject: replaced %d cosmic ray pixels total", total_fixed)
+    return result
 
 
 def _lanczos_kernel(x: np.ndarray, a: int = 3) -> np.ndarray:

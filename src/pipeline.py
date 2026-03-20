@@ -17,14 +17,16 @@ from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, print_phase, print_quality_table, format_time, get_memory_usage_mb
 from src.io_fits import load_fits, save_preview_rgb, populate_fits_header
 from src.debayer import (debayer, remove_hot_pixels_bayer, apply_hot_pixel_map_bayer,
-                         remove_hot_pixels_rgb, white_balance_grayworld, white_balance_whitepatch)
+                         remove_hot_pixels_rgb, white_balance_grayworld, white_balance_whitepatch,
+                         correct_chromatic_aberration)
 from src.quality import validate_image_data, compute_quality_metrics, generate_star_mask
 from src.registration import (calculate_shift, apply_transform, calc_common_crop,
                                detect_dither, match_stars_affine, HAS_SKIMAGE_TRANSFORM)
-from src.stacking import (sigma_clip_combine, _lanczos_resample_frame, drizzle_combine)
+from src.stacking import (sigma_clip_combine, _lanczos_resample_frame, drizzle_combine,
+                          lacosmic_reject)
 from src.background import (apply_background_extraction, remove_sky_residual, sky_floor_normalize)
-from src.denoising import (wavelet_denoise, nlm_denoise, bilateral_denoise,
-                           local_normalize, reduce_chroma_noise)
+from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
+                           bilateral_denoise, local_normalize, reduce_chroma_noise)
 from src.psf_deconvolution import estimate_psf, make_synthetic_psf, richardson_lucy_deconvolve
 from src.plate_solve import solve_plate
 
@@ -54,7 +56,9 @@ except Exception:
 
 
 def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[np.ndarray]],
-                          debayer_method: str, white_balance: str) -> Dict:
+                          debayer_method: str, white_balance: str,
+                          ca_correction: bool = False,
+                          cosmic_ray_rejection: bool = False) -> Dict:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -136,6 +140,20 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     gpu = get_gpu()
     rgb = gpu.to_host(rgb)
 
+    # Chromatic aberration correction (per-channel sub-pixel alignment to green)
+    if ca_correction:
+        try:
+            rgb = correct_chromatic_aberration(rgb)
+        except Exception:
+            pass  # non-critical; fall through with uncorrected rgb
+
+    # Cosmic ray rejection (L.A.Cosmic per-channel Laplacian detection)
+    if cosmic_ray_rejection:
+        try:
+            rgb = lacosmic_reject(rgb)
+        except Exception:
+            pass  # non-critical; fall through with un-cleaned rgb
+
     # Compute luminance & quality
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
     is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
@@ -160,9 +178,11 @@ def _init_worker(master_paths: Dict[str, str]):
 
 def _parallel_frame_worker(args_tuple):
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
-    path, frame_idx, debayer_method, white_balance, mm_rgb_path, mm_lum_path, rgb_shape, lum_shape = args_tuple
+    path, frame_idx, debayer_method, white_balance, mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, ca_correction, cosmic_ray_rejection = args_tuple
     global _worker_masters
-    result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance)
+    result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
+                                   ca_correction=ca_correction,
+                                   cosmic_ray_rejection=cosmic_ray_rejection)
     if result.get('error'):
         return (frame_idx, None, result['error'])
 
@@ -243,8 +263,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 np.save(p, arr)
                 master_paths[name] = p
 
+        _ca = getattr(args, 'ca_correction', False)
+        _cr = getattr(args, 'cosmic_ray_rejection', False)
         tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape)
+                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr)
                  for i in range(n)]
 
         with ProcessPoolExecutor(max_workers=workers,
@@ -292,7 +314,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         def _thread_process_frame(i, f):
             with gpu.stream_context():
                 result = _process_single_frame(
-                    f.path, f.header, masters, args.debayer_method, args.white_balance)
+                    f.path, f.header, masters, args.debayer_method, args.white_balance,
+                    ca_correction=getattr(args, 'ca_correction', False),
+                    cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False))
             if result.get('error'):
                 return i, None, result['error'], None
             mem_rgb[i] = result['rgb']
@@ -333,7 +357,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                           disable=args.verbose)
         for i, f in frame_iter:
             result = _process_single_frame(
-                f.path, f.header, masters, args.debayer_method, args.white_balance)
+                f.path, f.header, masters, args.debayer_method, args.white_balance,
+                ca_correction=getattr(args, 'ca_correction', False),
+                cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False))
             if result.get('error'):
                 f.accepted = False
                 f.metrics = {'error': result['error']}
@@ -948,14 +974,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     # 4. Wavelet denoising (luma/chroma split, star-protected)
     if getattr(args, 'denoise', False):
-        strength = getattr(args, 'denoise_strength', 3.0)
         chroma_boost = getattr(args, 'denoise_chroma_boost', 2.0)
-        print(f"\n  Applying wavelet denoising "
-              f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f})...")
+        use_adaptive = getattr(args, 'denoise_adaptive', False)
         dn_start = time.time()
-        stacked = wavelet_denoise(stacked, threshold_factor=strength,
-                                  chroma_factor=chroma_boost,
-                                  star_mask=pp_star_mask)
+        if use_adaptive:
+            print(f"\n  Applying adaptive wavelet denoising (BayesShrink, "
+                  f"chroma_factor={chroma_boost:.1f})...")
+            stacked = adaptive_wavelet_denoise(stacked,
+                                               chroma_factor=chroma_boost,
+                                               star_mask=pp_star_mask)
+        else:
+            strength = getattr(args, 'denoise_strength', 3.0)
+            print(f"\n  Applying wavelet denoising "
+                  f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f})...")
+            stacked = wavelet_denoise(stacked, threshold_factor=strength,
+                                      chroma_factor=chroma_boost,
+                                      star_mask=pp_star_mask)
         safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
 
     # 4.5. Sky residual correction

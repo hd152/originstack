@@ -21,7 +21,7 @@ except Exception:
 
 from src.gpu_context import GpuContext, get_gpu
 from src.models import Config, ProcessingStats
-from src.utils import safe_print, print_header, format_time
+from src.utils import safe_print, print_header, format_time, setup_logging
 from src.io_fits import make_master, save_preview_rgb
 from src.frame_discovery import discover_frames, select_matching_darks
 from src.debayer import build_hot_pixel_map
@@ -456,6 +456,33 @@ def parse_args():
                    help='Preview image stretch method (default: arcsinh)')
     p.add_argument('-j', '--parallel', type=int, default=1,
                    help='Parallel workers for frame processing (0=auto, 1=sequential)')
+    # --- Chromatic aberration correction ---
+    p.add_argument('--ca-correction', action='store_true', default=False,
+                   help='Correct lateral chromatic aberration by aligning R/B channels '
+                        'to green via phase cross-correlation (requires skimage)')
+    # --- Cosmic ray rejection ---
+    p.add_argument('--cosmic-ray-rejection', action='store_true', default=False,
+                   help='Apply L.A.Cosmic-style Laplacian cosmic ray rejection to each '
+                        'light frame before stacking (default: off)')
+    p.add_argument('--cr-sigclip', type=float, default=4.5,
+                   help='L.A.Cosmic detection threshold in noise sigma units (default: 4.5)')
+    p.add_argument('--cr-objlim', type=float, default=5.0,
+                   help='L.A.Cosmic object-rejection ratio — prevents flagging star cores '
+                        '(default: 5.0, increase to be more conservative)')
+    # --- Adaptive denoising ---
+    p.add_argument('--denoise-adaptive', action='store_true', default=False,
+                   help='Use BayesShrink per-subband thresholds for wavelet denoising '
+                        'instead of a fixed global threshold factor. Adapts automatically '
+                        'to local noise — preserves faint nebulosity better. '
+                        'Requires --denoise.')
+    # --- Structured logging ---
+    p.add_argument('--log-level',
+                   choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='WARNING',
+                   help='Minimum log severity printed to stderr (default: WARNING). '
+                        'Use DEBUG for verbose diagnostic output from all modules.')
+    p.add_argument('--log-file', default=None, metavar='PATH',
+                   help='Write a full DEBUG-level log to this file in addition to '
+                        'console output.')
     return p.parse_args()
 
 
@@ -467,6 +494,9 @@ def main():
     # debug_registration implies verbose
     if args.debug_registration:
         args.verbose = True
+    # Initialise structured logging before anything else
+    setup_logging(level=getattr(args, 'log_level', 'WARNING'),
+                  log_file=getattr(args, 'log_file', None))
     # Initialise GPU context (module-level singleton)
     from src import gpu_context as _gpu_mod
     _gpu_mod._gpu = GpuContext(use_gpu=args.use_gpu)

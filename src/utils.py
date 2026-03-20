@@ -1,14 +1,60 @@
 """Utility functions for printing and formatting."""
 from __future__ import annotations
 
+import logging
 import os
-from typing import List
+import sys
+from typing import List, Optional
 
 try:
     import psutil
     HAS_PSUTIL = True
 except Exception:
     HAS_PSUTIL = False
+
+
+def setup_logging(level: str = 'WARNING', log_file: Optional[str] = None) -> logging.Logger:
+    """Configure the 'originstack' logger hierarchy.
+
+    Sets up a named logger so all modules can emit structured log records
+    through a single hierarchy rather than using bare ``logging.warning()``.
+    The console handler only emits WARNING+ by default; the optional file
+    handler captures everything at DEBUG level for post-run diagnostics.
+
+    Args:
+        level: Minimum severity shown on the console ('DEBUG', 'INFO',
+               'WARNING', 'ERROR').  Does not affect the file handler.
+        log_file: Optional path to write a full DEBUG-level log.  Created
+                  (or appended to) each run.
+    """
+    log_level = getattr(logging, level.upper(), logging.WARNING)
+    logger = logging.getLogger('originstack')
+    logger.setLevel(logging.DEBUG)  # capture everything; handlers filter
+
+    if not logger.handlers:
+        ch = logging.StreamHandler(sys.stderr)
+        ch.setLevel(log_level)
+        ch.setFormatter(logging.Formatter('%(levelname)s [%(module)s]: %(message)s'))
+        logger.addHandler(ch)
+
+    if log_file:
+        # Remove any existing file handler before adding a new one
+        for h in list(logger.handlers):
+            if isinstance(h, logging.FileHandler):
+                logger.removeHandler(h)
+                h.close()
+        fh = logging.FileHandler(log_file, encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)-8s [%(name)s.%(module)s]: %(message)s'))
+        logger.addHandler(fh)
+
+    return logger
+
+
+def get_logger() -> logging.Logger:
+    """Return the package-level 'originstack' logger."""
+    return logging.getLogger('originstack')
 
 
 def safe_print(text: str):

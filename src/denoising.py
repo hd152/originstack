@@ -9,8 +9,10 @@ import numpy as np
 from scipy import ndimage
 
 from src.models import Config
-from src.utils import safe_print
+from src.utils import safe_print, get_logger
 from src.background import _estimate_sky_sigma
+
+_log = get_logger()
 
 try:
     import pywt
@@ -37,6 +39,108 @@ except Exception:
     sigma_clipped_stats = None
 
 
+def _bayesshrink_threshold(coeffs: np.ndarray, sigma_noise: float) -> float:
+    """BayesShrink adaptive threshold for one wavelet subband.
+
+    Estimates the signal standard deviation from the observed subband variance
+    minus the noise variance and computes T = sigma_noise² / sigma_signal.
+    This per-subband threshold adapts naturally: high-noise subbands (e.g.
+    finest detail levels of a faint stack) receive a larger threshold and are
+    smoothed more aggressively, while signal-rich subbands (coarser scales
+    with nebula structure) receive a smaller threshold that preserves detail.
+
+    Returns ``inf`` for subbands that appear to be pure noise (signal variance
+    <= 0), causing all coefficients to be zeroed via soft thresholding.
+    """
+    sigma_sq_y = float(np.mean(coeffs ** 2))
+    sigma_sq_s = max(sigma_sq_y - sigma_noise ** 2, 0.0)
+    if sigma_sq_s < 1e-30:
+        return float('inf')
+    return sigma_noise ** 2 / np.sqrt(sigma_sq_s)
+
+
+def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
+                              levels: int = 4,
+                              chroma_factor: float = 2.0,
+                              star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Adaptive multi-scale wavelet denoising using BayesShrink thresholds.
+
+    Unlike ``wavelet_denoise`` which applies a single global
+    ``threshold_factor × sigma`` to every subband, this function computes a
+    separate BayesShrink threshold for **each** detail subband and channel.
+    Subbands dominated by noise receive a large threshold (heavy smoothing);
+    subbands with genuine signal receive a small threshold (gentle smoothing).
+
+    This produces better-preserved fine nebula filaments and star halos compared
+    to the global-threshold approach, while suppressing sky background noise at
+    least as effectively.
+
+    Args:
+        img: Float32 stacked image (H, W, 3).
+        wavelet: Wavelet family (default ``'bior1.3'``).
+        levels: Maximum decomposition depth (default 4).
+        chroma_factor: Multiplier applied to the noise estimate for the Cb/Cr
+                       chroma channels (default 2.0).  Higher values remove more
+                       colour speckle at the cost of slight chroma blurring.
+        star_mask: Optional float mask (0–1, 1 = star core).  Star pixels are
+                   blended back from the original to avoid core softening.
+
+    Returns:
+        Denoised float32 image (H, W, 3).
+    """
+    if not HAS_PYWT:
+        _log.warning("pywt not installed, skipping adaptive wavelet denoise")
+        return img
+
+    h, w = img.shape[0], img.shape[1]
+    src = img.astype(np.float64)
+
+    # RGB -> YCbCr (ITU-R BT.601)
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    def _adaptive_denoise_plane(plane: np.ndarray, chroma_mult: float) -> np.ndarray:
+        max_level = pywt.dwt_max_level(min(plane.shape), pywt.Wavelet(wavelet).dec_len)
+        use_levels = min(levels, max_level)
+        if use_levels < 1:
+            return plane
+
+        coeffs = pywt.wavedec2(plane, wavelet, level=use_levels)
+
+        # Global noise estimate from finest-level HH subband (standard MAD estimator)
+        sigma_noise = np.median(np.abs(coeffs[-1][-1])) / 0.6745
+        sigma_noise = max(sigma_noise * chroma_mult, 1e-12)
+
+        new_coeffs = [coeffs[0]]  # keep approximation coefficients unchanged
+        for detail_level in coeffs[1:]:
+            new_detail = []
+            for d in detail_level:
+                threshold = _bayesshrink_threshold(d, sigma_noise)
+                new_detail.append(pywt.threshold(d, threshold, mode='soft'))
+            new_coeffs.append(tuple(new_detail))
+
+        return pywt.waverec2(new_coeffs, wavelet)[:h, :w]
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_Y  = executor.submit(_adaptive_denoise_plane, Y,  1.0)
+        f_Cb = executor.submit(_adaptive_denoise_plane, Cb, chroma_factor)
+        f_Cr = executor.submit(_adaptive_denoise_plane, Cr, chroma_factor)
+        Y_d, Cb_d, Cr_d = f_Y.result(), f_Cb.result(), f_Cr.result()
+
+    # YCbCr -> RGB
+    R = Y_d + 1.40200 * Cr_d
+    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+    B = Y_d + 1.77200 * Cb_d
+    result = np.stack([R, G, B], axis=2)
+
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return result.astype(np.float32)
+
+
 def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
                     levels: int = 4, threshold_factor: float = 3.0,
                     chroma_factor: float = 2.0,
@@ -53,7 +157,7 @@ def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     softened and their colours are preserved.
     """
     if not HAS_PYWT:
-        logging.warning("pywt not installed, skipping wavelet denoise")
+        _log.warning("pywt not installed, skipping wavelet denoise")
         return img
 
     h, w = img.shape[0], img.shape[1]
@@ -121,7 +225,7 @@ def bilateral_denoise(img: np.ndarray, sigma_color: float = None,
                   values smooth over bigger areas but are slower.
     """
     if not HAS_CV2:
-        logging.warning("Bilateral denoising requires cv2; skipping")
+        _log.warning("Bilateral denoising requires cv2; skipping")
         return img
 
     img_max = float(img.max())
@@ -175,7 +279,7 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
         return img
 
     sky_sigma = _estimate_sky_sigma(img)
-    logging.debug("NLM: sky_sigma=%.4f, img_max=%.1f", sky_sigma, img_max)
+    _log.debug("NLM: sky_sigma=%.4f, img_max=%.1f", sky_sigma, img_max)
 
     # Pedestal trick: add 3*sigma before NLM and remove it after.
     # Without this, NLM patches that straddle exact-zero sky pixels anchor their
@@ -213,7 +317,7 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
         result = blend * nlm_result + (1.0 - blend) * img_f64
         return result.astype(np.float32)
 
-    logging.warning("NLM denoising requires skimage.restoration or cv2; skipping")
+    _log.warning("NLM denoising requires skimage.restoration or cv2; skipping")
     return img
 
 

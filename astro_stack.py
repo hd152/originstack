@@ -52,6 +52,8 @@ from src.utils import (
     print_phase,
     format_time,
     get_memory_usage_mb,
+    setup_logging,
+    get_logger,
 )
 
 # io_fits
@@ -84,6 +86,7 @@ from src.debayer import (
     apply_hot_pixel_map_bayer,
     background_gradient_subtract,
     remove_hot_pixels_rgb,
+    correct_chromatic_aberration,
 )
 
 # quality
@@ -112,6 +115,7 @@ from src.background import (
 # denoising
 from src.denoising import (
     wavelet_denoise,
+    adaptive_wavelet_denoise,
     bilateral_denoise,
     nlm_denoise,
     local_normalize,
@@ -124,6 +128,7 @@ from src.registration import (
     match_stars_affine,
     apply_transform,
     calculate_shift,
+    calculate_shift_pyramid,
     apply_shift,
     calc_common_crop,
     detect_dither,
@@ -134,6 +139,7 @@ from src.stacking import (
     drizzle_combine,
     _lanczos_resample_frame,
     sigma_clip_combine,
+    lacosmic_reject,
 )
 
 # plate_solve
