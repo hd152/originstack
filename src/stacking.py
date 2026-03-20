@@ -188,7 +188,8 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
     out_h = int(round(H * scale))
     out_w = int(round(W * scale))
 
-    acc = np.zeros((out_h, out_w, C) if C > 1 else (out_h, out_w), dtype=np.float64)
+    is_3d = aligned_list[0].ndim == 3
+    acc = np.zeros((out_h, out_w, C) if is_3d else (out_h, out_w), dtype=np.float64)
     weight_map = np.zeros_like(acc, dtype=np.float64)
 
     for i, (im, sh) in enumerate(zip(aligned_list, shifts)):
@@ -202,7 +203,7 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
         coverage = _lanczos_resample_frame(ones, sh, scale, out_h, out_w)
         valid = coverage > 0.5  # pixel has >50% coverage
 
-        if im.ndim == 3:
+        if is_3d:
             valid3 = valid[:, :, np.newaxis] if valid.ndim == 2 else valid
             acc += np.where(valid3, resampled * w, 0.0)
             weight_map += np.where(valid3, w, 0.0)

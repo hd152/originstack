@@ -138,6 +138,7 @@ from src.registration import (
 from src.stacking import (
     drizzle_combine,
     _lanczos_resample_frame,
+    _sigma_clip_tile,
     sigma_clip_combine,
     lacosmic_reject,
 )

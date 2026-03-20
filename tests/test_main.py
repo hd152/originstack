@@ -201,6 +201,8 @@ finally:
     sys.stdout = _orig_stdout
     _devnull.close()
 
+import src.gpu_context as _gpu_mod
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -369,12 +371,12 @@ class TestComputeQualityMetrics(unittest.TestCase):
 
 class TestDebayerBilinear(unittest.TestCase):
     def setUp(self):
-        self._gpu = astro._gpu
-        astro._gpu = astro.GpuContext(use_gpu=False)
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
         self.raw = np.random.default_rng(1).uniform(0, 1000, (64, 64)).astype(np.float32)
 
     def tearDown(self):
-        astro._gpu = self._gpu
+        _gpu_mod._gpu = self._gpu
 
     def test_output_shape(self):
         self.assertEqual(astro.debayer_bilinear(self.raw).shape, (64, 64, 3))
@@ -407,12 +409,12 @@ class TestDebayerBilinear(unittest.TestCase):
 
 class TestDebayerDispatch(unittest.TestCase):
     def setUp(self):
-        self._gpu = astro._gpu
-        astro._gpu = astro.GpuContext(use_gpu=False)
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
         self.raw = np.random.default_rng(2).uniform(100, 1000, (64, 64)).astype(np.float32)
 
     def tearDown(self):
-        astro._gpu = self._gpu
+        _gpu_mod._gpu = self._gpu
 
     def test_bilinear(self):
         self.assertEqual(astro.debayer(self.raw, method="bilinear").shape, (64, 64, 3))
@@ -432,11 +434,11 @@ class TestDebayerDispatch(unittest.TestCase):
 
 class TestWhiteBalance(unittest.TestCase):
     def setUp(self):
-        self._gpu = astro._gpu
-        astro._gpu = astro.GpuContext(use_gpu=False)
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
 
     def tearDown(self):
-        astro._gpu = self._gpu
+        _gpu_mod._gpu = self._gpu
 
     def test_grayworld_equalises_means(self):
         img = np.zeros((16, 16, 3), dtype=np.float32)
@@ -463,11 +465,11 @@ class TestWhiteBalance(unittest.TestCase):
 
 class TestRemoveHotPixels(unittest.TestCase):
     def setUp(self):
-        self._gpu = astro._gpu
-        astro._gpu = astro.GpuContext(use_gpu=False)
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
 
     def tearDown(self):
-        astro._gpu = self._gpu
+        _gpu_mod._gpu = self._gpu
 
     def test_2d_hot_pixel_corrected(self):
         img = np.full((32, 32), 100.0, dtype=np.float32)
@@ -749,11 +751,11 @@ class TestReduceChromaNoise(unittest.TestCase):
 
 class TestApplyTransform(unittest.TestCase):
     def setUp(self):
-        self._gpu = astro._gpu
-        astro._gpu = astro.GpuContext(use_gpu=False)
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
 
     def tearDown(self):
-        astro._gpu = self._gpu
+        _gpu_mod._gpu = self._gpu
 
     def test_zero_shift_identity(self):
         img = _rgb(32, 32) + 100.0
@@ -933,11 +935,11 @@ class TestDiscoverFrames(unittest.TestCase):
 
 class TestCalculateShift(unittest.TestCase):
     def setUp(self):
-        self._gpu = astro._gpu
-        astro._gpu = astro.GpuContext(use_gpu=False)
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
 
     def tearDown(self):
-        astro._gpu = self._gpu
+        _gpu_mod._gpu = self._gpu
 
     def test_identical_images_near_zero(self):
         img = _star_field(64, 64)
@@ -1030,12 +1032,12 @@ class TestEndToEnd(unittest.TestCase):
     """Full mini-pipeline smoke tests."""
 
     def setUp(self):
-        self._gpu = astro._gpu
-        astro._gpu = astro.GpuContext(use_gpu=False)
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
         self.tmp = tempfile.mkdtemp()
 
     def tearDown(self):
-        astro._gpu = self._gpu
+        _gpu_mod._gpu = self._gpu
 
     def test_sigma_clip_on_data_with_outlier(self):
         data = np.random.default_rng(20).uniform(100, 200, (10, 8, 8, 3)).astype(np.float32)
