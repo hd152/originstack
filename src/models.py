@@ -60,6 +60,7 @@ class ProcessingStats:
     quality_time: float = 0.0
     registration_time: float = 0.0
     stacking_time: float = 0.0
+    post_processing_time: float = 0.0
     total_frames: int = 0
     accepted_frames: int = 0
     rejected_frames: int = 0

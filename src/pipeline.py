@@ -642,7 +642,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         args.stack_method = 'mean'
 
     # ======================================================================
-    # PHASE 3: Stacking (quality-weighted, with post-processing chain)
+    # PHASE 3: Stacking (quality-weighted combine)
     # ======================================================================
     print_phase(3, "Stacking")
     phase_start = time.time()
@@ -803,8 +803,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             pass
 
     # ======================================================================
-    # Post-processing chain
+    # PHASE 4: Post-processing
     # ======================================================================
+    print_phase(4, "Post-processing")
+    phase_start = time.time()
 
     # Per-channel hot pixel removal.  The per-frame removal (remove_hot_pixels_rgb)
     # detects on luminance, so single-channel hot pixels (especially red on Bayer
@@ -1082,6 +1084,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                                   star_mask=pp_star_mask)
             safe_print(f"  ✓ Richardson-Lucy deconvolution ({format_time(time.time() - rl_start)})")
 
+    stats.post_processing_time = time.time() - phase_start
+
     # Update memory usage
     if HAS_PSUTIL:
         stats.peak_memory_mb = get_memory_usage_mb()
@@ -1173,6 +1177,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     print(f"    Quality+Load:   {format_time(stats.quality_time)}")
     print(f"    Registration:   {format_time(stats.registration_time)}")
     print(f"    Stacking:       {format_time(stats.stacking_time)}")
+    print(f"    Post-process:   {format_time(stats.post_processing_time)}")
     if HAS_PSUTIL:
         print(f"  Peak memory:      {stats.peak_memory_mb:.1f} MB")
 
