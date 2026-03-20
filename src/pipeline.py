@@ -842,7 +842,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     safe_print(f"  ✓ Per-channel hot pixel removal: {_hp_fixed} pixels fixed "
                f"({format_time(time.time() - _hp_start)})")
 
-    # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution
+    # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution.
+    # Use the same multi-FWHM + quality-filter logic as compute_quality_metrics so that
+    # varying seeing, focal ratios, and stacked noise floors don't produce zero detections.
     pp_star_mask = None
     _pp_sources = None
     if DAOStarFinder is not None and sigma_clipped_stats is not None:
@@ -850,13 +852,32 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
                        + 0.114 * stacked[:, :, 2])
             _, _bg_med, _bg_std = sigma_clipped_stats(_pp_lum, sigma=3.0, maxiters=5)
-            _daof = DAOStarFinder(fwhm=3.0,
-                                  threshold=float(_bg_med) + 5.0 * float(_bg_std))
-            _pp_sources = _daof(_pp_lum - float(_bg_med))
+            _threshold = 5.0 * float(_bg_std)
+            _bg_sub = _pp_lum - float(_bg_med)
+
+            best_sources = None
+            best_quality_count = 0
+            for trial_fwhm in (3.0, 5.0, 8.0):
+                _daof = DAOStarFinder(fwhm=trial_fwhm, threshold=_threshold)
+                trial_sources = _daof(_bg_sub)
+                if trial_sources is None or len(trial_sources) == 0:
+                    continue
+                round_ok = (np.abs(trial_sources['roundness1']) < 0.5) & \
+                           (np.abs(trial_sources['roundness2']) < 0.5)
+                sharp_ok = (trial_sources['sharpness'] > 0.3) & \
+                           (trial_sources['sharpness'] < 0.9)
+                quality_mask = round_ok & sharp_ok
+                quality_count = int(np.sum(quality_mask))
+                if quality_count > best_quality_count:
+                    best_quality_count = quality_count
+                    best_sources = trial_sources[quality_mask]
+            _pp_sources = best_sources
+
             if _pp_sources is not None and len(_pp_sources) > 0:
                 pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
                 if args.verbose:
-                    safe_print(f"    Post-processing star mask: {len(_pp_sources)} stars")
+                    safe_print(f"    Post-processing star mask: {len(_pp_sources)} stars "
+                               f"(best FWHM trial)")
         except Exception:
             pass
 
