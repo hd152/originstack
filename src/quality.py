@@ -156,12 +156,24 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
             # DAOStarFinder is sensitive to the fwhm parameter — a mismatch
             # causes it to reject real stars via its sharpness/roundness criteria.
             best_sources = None
+            best_quality_count = 0
             for trial_fwhm in (3.0, 5.0, 8.0):
                 daof = DAOStarFinder(fwhm=trial_fwhm, threshold=threshold)
                 trial_sources = daof(bg_sub)
-                if trial_sources is not None and len(trial_sources) > 0:
-                    if best_sources is None or len(trial_sources) > len(best_sources):
-                        best_sources = trial_sources
+                if trial_sources is None or len(trial_sources) == 0:
+                    continue
+                # Filter by roundness and sharpness to count only genuine
+                # star-like sources. Noise peaks and Bayer/hot-pixel artefacts
+                # are typically highly elongated or have extreme sharpness.
+                round_ok = (np.abs(trial_sources['roundness1']) < 0.5) & \
+                           (np.abs(trial_sources['roundness2']) < 0.5)
+                sharp_ok = (trial_sources['sharpness'] > 0.3) & \
+                           (trial_sources['sharpness'] < 0.9)
+                quality_mask = round_ok & sharp_ok
+                quality_count = int(np.sum(quality_mask))
+                if quality_count > best_quality_count:
+                    best_quality_count = quality_count
+                    best_sources = trial_sources[quality_mask]
             sources = best_sources
 
             if sources is not None and len(sources) > 0:
