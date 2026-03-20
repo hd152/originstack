@@ -82,7 +82,13 @@ def make_master(frames, method: str = 'median') -> Optional[np.ndarray]:
     # Median — use memmap for large datasets to avoid OOM
     n = len(frames)
     estimated_bytes = n * int(np.prod(shape)) * 4
-    if estimated_bytes > 500_000_000:  # > 500 MB → memmap
+    try:
+        import psutil
+        _avail = psutil.virtual_memory().available
+        _memmap_threshold = max(200_000_000, _avail // 3)
+    except Exception:
+        _memmap_threshold = 500_000_000
+    if estimated_bytes > _memmap_threshold:
         mm_path = os.path.join(tempfile.gettempdir(), f'master_{os.getpid()}.dat')
         mem = np.memmap(mm_path, dtype='float32', mode='w+', shape=(n, *shape))
         count = 0
@@ -121,12 +127,23 @@ def make_master(frames, method: str = 'median') -> Optional[np.ndarray]:
         return np.median(np.stack(imgs, axis=0), axis=0).astype(np.float32)
 
 
-def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear'):
-    from src.denoising import arcsinh_stretch
+def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
+                     ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                     ghs_hp: float = 0.95):
+    from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
     if Image is None:
         return
-    if stretch == 'arcsinh':
+    if stretch == 'ghs':
+        # Generalized Hyperbolic Stretch — the state-of-the-art algorithm for
+        # galaxy imaging. Independently controls shadow lift (SP), black point
+        # (LP=0), highlights protection (HP), and overall stretch intensity (b).
+        out = np.zeros_like(rgb)
+        for c in range(3):
+            out[:, :, c] = generalized_hyperbolic_stretch(
+                rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp)
+        out = np.clip(out * 255, 0, 255).astype(np.uint8)
+    elif stretch == 'arcsinh':
         # Arcsinh stretch — preserves faint nebulosity and bright stars
         out = np.zeros_like(rgb)
         for c in range(3):

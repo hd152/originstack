@@ -39,6 +39,50 @@ except Exception:
     sigma_clipped_stats = None
 
 
+def estimate_denoise_strength(stacked: np.ndarray, fwhm_mean: float = 0.0) -> float:
+    """Auto-tune wavelet denoise threshold_factor from stacked image noise level.
+
+    Measures sky background noise and maps signal-to-noise ratio to a denoise
+    strength.  Noisy stacks (low SNR) receive a higher threshold to suppress
+    sky graininess; clean high-SNR stacks receive a lower threshold to avoid
+    over-smoothing faint nebula detail.
+
+    Args:
+        stacked: Float32 stacked RGB image (H, W, 3).
+        fwhm_mean: Mean star FWHM in pixels from quality analysis (0 = unknown).
+
+    Returns:
+        Recommended threshold_factor for ``wavelet_denoise`` (1.0–5.5).
+    """
+    sky_sigma = _estimate_sky_sigma(stacked)
+    if sky_sigma < 1e-10:
+        return 3.0
+
+    green = stacked[:, :, 1].astype(np.float64)
+    if sigma_clipped_stats is not None:
+        try:
+            _, bg_median, _ = sigma_clipped_stats(green, sigma=3.0, maxiters=5)
+            bg_median = float(bg_median)
+        except Exception:
+            bg_median = float(np.median(green))
+    else:
+        bg_median = float(np.median(green))
+
+    p95 = float(np.percentile(green, 95))
+    signal = max(p95 - bg_median, 0.0)
+    stack_snr = signal / sky_sigma
+
+    # Map SNR → strength:  SNR=1→4.5,  SNR=10→3.0,  SNR=100→1.5
+    strength = 4.5 - 1.5 * np.log10(max(stack_snr, 1.0))
+
+    # FWHM modulation: large PSF spreads noise to coarser scales, allowing a
+    # slightly more aggressive threshold; reference is 4 px (typical).
+    if fwhm_mean > 0.0:
+        strength *= float(np.clip(fwhm_mean / 4.0, 0.8, 1.3))
+
+    return float(np.clip(strength, 1.0, 5.5))
+
+
 def _bayesshrink_threshold(coeffs: np.ndarray, sigma_noise: float) -> float:
     """BayesShrink adaptive threshold for one wavelet subband.
 
@@ -412,6 +456,204 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
         result[:, :, c] = lum + out_chroma
 
     return np.clip(result, 0, None).astype(np.float32)
+
+
+def generalized_hyperbolic_stretch(
+        img: np.ndarray,
+        b: float = 8.0,
+        SP: float = 0.15,
+        LP: float = 0.0,
+        HP: float = 0.95) -> np.ndarray:
+    """Generalized Hyperbolic Stretch (GHS) for galaxy/nebula imaging.
+
+    The state-of-the-art stretch algorithm for deep-sky display.  Unlike the
+    classic arcsinh stretch (which applies a fixed symmetric curve), GHS gives
+    independent control over four parameters that together handle the extreme
+    dynamic range in galaxy images:
+
+    b  — Stretch factor.  0 = linear; 5 = moderate; 8–12 = galaxy-optimised.
+         Higher values push faint outer spiral arms and dust lanes into the
+         displayable range while compressing the bright nucleus.
+    SP — Symmetry Point [0–1 normalised].  The pivot of the stretch: the curve
+         applies equal emphasis to data above and below SP.  Setting SP well
+         below the galaxy core (0.10–0.20) lifts faint outer structure
+         disproportionately relative to the bright inner regions — exactly what
+         is needed for objects like M64 where the outer arms are orders of
+         magnitude fainter than the nucleus.
+    LP — Linear Point [0–1].  Black-point cut-in: values ≤ LP map to 0.
+         All normalised sky noise below LP is clipped to black.  Typical: 0–0.05.
+    HP — Highlights Protection [0–1].  Values ≥ HP map to 1.  Protects the
+         bright nucleus and star cores from blowing out to pure white while the
+         faint outer arms are being stretched into visibility.  Typical: 0.85–0.98.
+
+    The image is normalised via the same sigma-clipped sky estimation used by
+    ``arcsinh_stretch``, so sky → ~0 and bright stars → ~1 before the GHS
+    transform is applied, ensuring the parameters are object-independent.
+
+    Reference: Cranfield & Symons (2021), https://ghsastro.co.uk/
+    """
+    # --- Normalise to [0, 1] using sigma-clipped sky statistics ---
+    flat = img.ravel().astype(np.float64)
+    med = float(np.median(flat))
+    for _ in range(3):
+        mad = np.median(np.abs(flat - med))
+        sig = 1.4826 * mad
+        flat = flat[np.abs(flat - med) < 2.5 * sig]
+        if len(flat) < 100:
+            break
+        med = float(np.median(flat))
+    bg = med
+    bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
+    black = max(bg - 1.0 * bg_sigma, 0.0)
+    white = float(np.percentile(img, 99.9))
+    span = white - black
+    if span < 1e-12:
+        return np.zeros_like(img, dtype=np.float32)
+
+    norm = np.clip((img.astype(np.float64) - black) / span, 0.0, 1.0)
+
+    # --- Apply GHS piecewise transform ---
+    if abs(b) < 1e-6:
+        # b ≈ 0: degenerate case — linear transform over [LP, HP]
+        if HP > LP:
+            out = np.clip((norm - LP) / (HP - LP), 0.0, 1.0)
+        else:
+            out = norm.copy()
+        return out.astype(np.float32)
+
+    # arcsinh evaluated at LP and HP establishes the normalisation range
+    ghs_lp = float(np.arcsinh(b * (LP - SP)))
+    ghs_hp = float(np.arcsinh(b * (HP - SP)))
+    denom = ghs_hp - ghs_lp
+    if abs(denom) < 1e-12:
+        return np.zeros_like(img, dtype=np.float32)
+
+    # Core GHS transform: arcsinh-based, centred on SP
+    core = (np.arcsinh(b * (norm - SP)) - ghs_lp) / denom
+
+    # Piecewise: below LP → black, above HP → white, middle → GHS curve
+    out = np.where(norm <= LP, 0.0, np.where(norm >= HP, 1.0, core))
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def multiscale_local_contrast(
+        img: np.ndarray,
+        strength: float = 0.7,
+        scales: tuple = (2, 12, 40),
+        scale_weights: tuple = (0.3, 0.6, 0.1),
+        star_mask: np.ndarray = None) -> np.ndarray:
+    """Multiscale local contrast enhancement (MLCE) for galaxy structure.
+
+    Applies luminance-domain unsharp masking simultaneously at fine, medium,
+    and coarse spatial scales with a mid-tone protection mask that:
+
+      • Suppresses enhancement in the sky background (avoids amplifying noise).
+      • Protects bright nuclei and star cores from ringing or blowout.
+      • Focuses full enhancement on the mid-tone range where galaxy spiral arms,
+        dust lanes, and star-forming regions live.
+
+    For the Black Eye Galaxy (M64) the medium scale (σ ≈ 12 px) is the most
+    valuable: it precisely targets the width of the characteristic dark dust
+    band, creating the stark contrast that makes this galaxy recognisable.
+
+    Args:
+        img:           Float32 stacked RGB image (H, W, 3), linear scale.
+        strength:      Overall enhancement multiplier (0 = off, 1 = full).
+                       Typical range 0.4–0.9 for galaxy imaging.
+        scales:        Gaussian σ values (px) for each detail layer.
+                       Default (2, 12, 40) = fine / medium / coarse.
+        scale_weights: Relative weight of each scale (sum need not equal 1).
+                       Default gives primary weight to the medium-scale layer.
+        star_mask:     Float mask (1 = star core).  Star pixels receive no
+                       contrast enhancement — their halos must not grow.
+
+    Returns:
+        Enhanced float32 image (H, W, 3), non-negative.
+    """
+    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
+           + 0.114 * img[:, :, 2]).astype(np.float64)
+
+    # Mid-tone protection mask —————————————————————————————————————————————
+    # Ramp from 0 at the sky floor to 1 over 2×sky_sigma, then ramp back
+    # to 0 as we approach the top 3% (bright nucleus / saturated stars).
+    sky_sigma = float(_estimate_sky_sigma(img))
+    sky_floor = float(np.median(lum)) + 1.5 * sky_sigma
+    highlight_cap = float(np.percentile(lum, 97))
+
+    # Low ramp: 0 at sky_floor → 1 at sky_floor + 2*sky_sigma
+    low_ramp_range = max(2.0 * sky_sigma, 1e-6)
+    mask = np.clip((lum - sky_floor) / low_ramp_range, 0.0, 1.0)
+
+    # High ramp: 1 below highlight_cap → 0 at highlight_cap + 0.2*(cap-floor)
+    hi_transition = max((highlight_cap - sky_floor) * 0.2, 1.0)
+    mask *= np.clip(1.0 - (lum - highlight_cap) / hi_transition, 0.0, 1.0)
+
+    # Star protection: no enhancement at star core positions
+    if star_mask is not None:
+        mask *= (1.0 - star_mask.astype(np.float64))
+
+    # Multiscale detail injection ——————————————————————————————————————————
+    enhanced_lum = lum.copy()
+    for sigma, w in zip(scales, scale_weights):
+        if w <= 0 or strength <= 0:
+            continue
+        blurred = ndimage.gaussian_filter(lum, sigma=float(sigma))
+        detail = lum - blurred          # high-frequency detail at this scale
+        enhanced_lum += strength * w * detail * mask
+
+    # Reconstruct RGB by the luminance ratio (hue/saturation preserved)
+    safe_lum = np.where(lum > 1e-10, lum, 1e-10)
+    ratio = enhanced_lum / safe_lum
+    result = img.astype(np.float64) * ratio[:, :, np.newaxis]
+    return np.clip(result, 0.0, None).astype(np.float32)
+
+
+def reduce_stars(
+        img: np.ndarray,
+        star_mask: np.ndarray,
+        reduction_factor: float = 0.4,
+        blur_sigma: float = 1.5) -> np.ndarray:
+    """Reduce star prominence to improve galaxy-to-star visual balance.
+
+    Stars in galaxy images compete visually with the delicate structure of
+    spiral arms and dust lanes.  This function softens star cores by blending
+    the original image with a Gaussian-blurred version at star positions,
+    making stars appear slightly smaller and less dominant without erasing them.
+
+    The effect is purposefully subtle: star colours and relative brightnesses
+    are preserved; only their apparent angular size is reduced.  This is the
+    same technique used in post-processing tools like StarXTerminator (when
+    operated in 'reduce' mode rather than 'remove' mode).
+
+    Args:
+        img:              Float32 stacked RGB image (H, W, 3).
+        star_mask:        Float mask (1 = star core, 0 = background).
+                          If None, returns the image unchanged.
+        reduction_factor: Blend fraction toward the blurred image at star
+                          positions (0 = no change, 1 = full blur).
+                          Typical: 0.3–0.6 for subtle to moderate reduction.
+        blur_sigma:       Gaussian blur radius for the replacement (px).
+                          Larger values give softer but dimmer star cores.
+
+    Returns:
+        Float32 image (H, W, 3) with reduced star sizes, non-negative.
+    """
+    if star_mask is None:
+        return img
+
+    reduction_factor = float(np.clip(reduction_factor, 0.0, 1.0))
+    if reduction_factor <= 0.0:
+        return img
+
+    # Blur per spatial dimension only (channel axis excluded)
+    blurred = ndimage.gaussian_filter(
+        img.astype(np.float64),
+        sigma=(blur_sigma, blur_sigma, 0))
+
+    blend = (star_mask * reduction_factor).astype(np.float64)
+    mask3 = blend[:, :, np.newaxis]
+    result = img.astype(np.float64) * (1.0 - mask3) + blurred * mask3
+    return np.clip(result, 0.0, None).astype(np.float32)
 
 
 def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:

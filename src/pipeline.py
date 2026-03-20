@@ -19,14 +19,16 @@ from src.io_fits import load_fits, save_preview_rgb, populate_fits_header
 from src.debayer import (debayer, remove_hot_pixels_bayer, apply_hot_pixel_map_bayer,
                          remove_hot_pixels_rgb, white_balance_grayworld, white_balance_whitepatch,
                          correct_chromatic_aberration)
-from src.quality import validate_image_data, compute_quality_metrics, generate_star_mask
+from src.quality import validate_image_data, compute_quality_metrics, generate_star_mask, _detect_stars_multi_fwhm
 from src.registration import (calculate_shift, apply_transform, calc_common_crop,
                                detect_dither, match_stars_affine, HAS_SKIMAGE_TRANSFORM)
-from src.stacking import (sigma_clip_combine, _lanczos_resample_frame, drizzle_combine,
-                          lacosmic_reject)
+from src.stacking import (sigma_clip_combine, percentile_clip_combine, esd_combine,
+                          _lanczos_resample_frame, drizzle_combine, lacosmic_reject)
 from src.background import (apply_background_extraction, remove_sky_residual, sky_floor_normalize)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
-                           bilateral_denoise, local_normalize, reduce_chroma_noise)
+                           bilateral_denoise, local_normalize, reduce_chroma_noise,
+                           estimate_denoise_strength, reduce_stars,
+                           multiscale_local_contrast)
 from src.psf_deconvolution import estimate_psf, make_synthetic_psf, richardson_lucy_deconvolve
 from src.plate_solve import solve_plate
 
@@ -189,8 +191,10 @@ def _parallel_frame_worker(args_tuple):
     rgb = result['rgb']
     lum = result['lum']
     metrics = result['metrics']
-    # Remove non-picklable star sources from metrics for IPC
-    metrics_clean = {k: v for k, v in metrics.items() if k != '_star_sources'}
+    # _star_sources is an astropy QTable which IS picklable; keep it so that
+    # Phase 2 can use star positions for affine registration even on the
+    # process-pool path (the prior stripping was incorrect).
+    metrics_clean = dict(metrics)
 
     # Write processed data to shared memmap
     try:
@@ -343,9 +347,15 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     cached_lums[i] = lum_arr
                     if args.verbose:
                         m = f.metrics
-                        safe_print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
-                                   f'stars={m["star_count"]}, FWHM={m.get("fwhm",0):.1f}, '
-                                   f'score={m["score"]:.1f}')
+                        safe_print(f'    {os.path.basename(f.path)}: '
+                                   f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
+                                   f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
+                                   f'sharpness={m.get("sharpness",0):.0f}')
+                        safe_print(f'      bg={m.get("background",0):.1f}  '
+                                   f'noise={m.get("noise",0):.2f}  '
+                                   f'brightness={m.get("brightness",0):.1f}  '
+                                   f'contrast={m.get("contrast",0):.1f}  '
+                                   f'dynamic_range={m.get("dynamic_range",0):.0f}')
         mem_rgb.flush()
         mem_lum.flush()
 
@@ -374,9 +384,15 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 f.metrics = result['metrics']
                 if args.verbose:
                     m = f.metrics
-                    print(f'    {os.path.basename(f.path)}: SNR={m["snr"]:.1f}, '
-                          f'stars={m["star_count"]}, FWHM={m.get("fwhm",0):.1f}, '
-                          f'score={m["score"]:.1f}')
+                    print(f'    {os.path.basename(f.path)}: '
+                          f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
+                          f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
+                          f'sharpness={m.get("sharpness",0):.0f}')
+                    print(f'      bg={m.get("background",0):.1f}  '
+                          f'noise={m.get("noise",0):.2f}  '
+                          f'brightness={m.get("brightness",0):.1f}  '
+                          f'contrast={m.get("contrast",0):.1f}  '
+                          f'dynamic_range={m.get("dynamic_range",0):.0f}')
         mem_rgb.flush()
         mem_lum.flush()
 
@@ -493,6 +509,26 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 pass
         return None
 
+    # AI parameter advisor: runs after Phase 1 quality analysis so Claude has
+    # the full quality statistics, and before Phase 2 so its recommendations
+    # (stack method, rejection sigma, drizzle scale, denoise strength) take
+    # effect in the subsequent phases.
+    if getattr(args, 'ai_advisor', False):
+        from src.ai_advisor import get_parameter_recommendations, apply_recommendations
+        rec, explanation = get_parameter_recommendations(final, rejected_reasons, args)
+        if rec is not None:
+            print(f"\n  AI Advisor:\n  {explanation}")
+            if rec.warnings:
+                for w in rec.warnings:
+                    safe_print(f"  ⚠  {w}")
+            changes = apply_recommendations(rec, args)
+            if changes:
+                safe_print("  Applied recommendations:")
+                for c in changes:
+                    safe_print(f"    • {c}")
+            else:
+                safe_print("  Current settings look good — no changes applied.")
+
     # ======================================================================
     # PHASE 2: Registration (reads from stored memmaps — no re-load)
     # ======================================================================
@@ -514,6 +550,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     # Get reference star positions for affine registration
     ref_stars = best.metrics.get('_star_sources')
+    if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
+                   "registration disabled, falling back to translation only")
 
     shifts = [None] * len(final)
     transforms = [None] * len(final)  # For affine mode
@@ -631,15 +670,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
         if dither_info.get('direction_spread_deg', 0) > 0:
             print(f"    Direction spread: {dither_info['direction_spread_deg']:.1f} deg")
-        if dither_info['is_dithered'] and args.stack_method is None:
-            args.stack_method = 'sigma_clip'
-            safe_print(f"    Auto-selected sigma_clip stacking (dithered data — rejects cosmic rays)")
-        elif dither_info['is_dithered'] and args.stack_method == 'mean':
+        if dither_info['is_dithered'] and args.stack_method == 'mean':
             safe_print(f"    Warning: mean stacking does not reject cosmic rays; "
                        f"consider --stack-method sigma_clip")
 
-    if args.stack_method is None:
-        args.stack_method = 'mean'
+    # Resolve 'auto' and legacy --winsorize shorthand
+    n_frames_for_auto = len(final)
+    if args.stack_method == 'auto':
+        if n_frames_for_auto < 8:
+            args.stack_method = 'percentile'
+            safe_print(f"    Auto-selected percentile clipping (<8 frames)")
+        else:
+            args.stack_method = 'sigma_clip'
+            safe_print(f"    Auto-selected sigma_clip ({n_frames_for_auto} frames)")
+    elif getattr(args, 'winsorize', False) and args.stack_method not in ('winsorized',):
+        args.stack_method = 'winsorized'
 
     # ======================================================================
     # PHASE 3: Stacking (quality-weighted combine)
@@ -650,11 +695,52 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     print(f"  Combining {len(final)} frames...")
 
     # Compute quality weights for weighted stacking
-    scores = np.array([f.metrics.get('score', 1.0) for f in final])
-    max_score = scores.max() if scores.max() > 0 else 1.0
-    weights = np.sqrt(scores / max_score)  # Sqrt-compress: preserves ranking, improves effective frame count
-    print(f"  Quality weights: min={weights.min():.3f}, max={weights.max():.3f}, "
-          f"mean={weights.mean():.3f} (sqrt-compressed)")
+    w_snr   = getattr(args, 'weight_snr',   1.0)
+    w_fwhm  = getattr(args, 'weight_fwhm',  1.0)
+    w_stars = getattr(args, 'weight_stars', 1.0)
+    use_noise_weight = getattr(args, 'weight_noise', False)
+
+    if w_snr != 1.0 or w_fwhm != 1.0 or w_stars != 1.0 or use_noise_weight:
+        # Per-component weighting: each factor is independently normalized to [0,1]
+        # and raised to the user-specified exponent (0 = ignore, >1 = emphasize).
+        snr_vals   = np.array([f.metrics.get('snr', 1.0)        for f in final], dtype=np.float64)
+        fwhm_vals  = np.array([f.metrics.get('fwhm', 0.0)       for f in final], dtype=np.float64)
+        star_vals  = np.array([f.metrics.get('star_count', 1)   for f in final], dtype=np.float64)
+
+        snr_max = snr_vals.max() if snr_vals.max() > 0 else 1.0
+        snr_factor = np.clip(snr_vals / snr_max, 0.01, 1.0)
+
+        # FWHM: lower = sharper = better; frames without FWHM get neutral weight
+        fwhm_pos = fwhm_vals[fwhm_vals > 0]
+        if len(fwhm_pos):
+            fwhm_inv = np.where(fwhm_vals > 0, 1.0 / np.maximum(fwhm_vals, 0.5), 1.0)
+            fwhm_factor = np.clip(fwhm_inv / fwhm_inv.max(), 0.01, 1.0)
+        else:
+            fwhm_factor = np.ones(len(final))
+
+        star_max = star_vals.max() if star_vals.max() > 0 else 1.0
+        star_factor = np.clip(star_vals / star_max, 0.01, 1.0)
+
+        weights = (snr_factor ** w_snr) * (fwhm_factor ** w_fwhm) * (star_factor ** w_stars)
+
+        if use_noise_weight:
+            # Noise ≈ signal / SNR; weight by 1/noise (lower noise = better)
+            brightness = np.array([f.metrics.get('brightness', 1.0) for f in final], dtype=np.float64)
+            noise_est = brightness / np.maximum(snr_vals, 0.001)
+            noise_max = noise_est.max() if noise_est.max() > 0 else 1.0
+            noise_factor = np.clip(noise_max / np.maximum(noise_est, 1e-6), 0.01, 1.0)
+            weights *= noise_factor
+
+        weights = np.sqrt(weights / (weights.max() if weights.max() > 0 else 1.0))
+        print(f"  Quality weights (per-component SNR^{w_snr} FWHM^{w_fwhm} stars^{w_stars}"
+              f"{' noise' if use_noise_weight else ''}): "
+              f"min={weights.min():.3f}, max={weights.max():.3f}, mean={weights.mean():.3f}")
+    else:
+        scores = np.array([f.metrics.get('score', 1.0) for f in final])
+        max_score = scores.max() if scores.max() > 0 else 1.0
+        weights = np.sqrt(scores / max_score)
+        print(f"  Quality weights: min={weights.min():.3f}, max={weights.max():.3f}, "
+              f"mean={weights.mean():.3f} (sqrt-compressed)")
 
     # Crop to common valid region
     top, bottom, left, right = calc_common_crop(shifts, (H, W), transforms=transforms)
@@ -662,7 +748,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
     n_final = len(final)
-    use_aligned_memmap = args.stack_method in ('median', 'sigma_clip')
+    use_aligned_memmap = args.stack_method in ('median', 'sigma_clip', 'winsorized',
+                                               'percentile', 'esd')
 
     if use_aligned_memmap:
         # Create aligned memmap for median/sigma_clip
@@ -693,15 +780,34 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 future.result()  # propagate exceptions
         mem_aligned.flush()
 
-        if args.stack_method == 'sigma_clip':
+        if args.stack_method in ('sigma_clip', 'winsorized'):
+            use_winsorize = (args.stack_method == 'winsorized')
+            use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
+            estimator_label = 'MAD' if use_mad else 'std'
+            mode_label = 'winsorized' if use_winsorize else 'reject'
             print(f"  Sigma-clip: sigma={args.rejection_sigma}, iters={args.rejection_iters}, "
-                  f"mode={'winsorized' if getattr(args, 'winsorize', False) else 'reject'}")
+                  f"estimator={estimator_label}, mode={mode_label}")
             stacked = sigma_clip_combine(
                 mem_aligned, sigma=args.rejection_sigma,
                 max_iters=args.rejection_iters,
                 weights=weights,
-                winsorize=getattr(args, 'winsorize', False),
+                winsorize=use_winsorize,
+                use_mad=use_mad,
                 verbose=args.verbose)
+        elif args.stack_method == 'percentile':
+            low  = getattr(args, 'percentile_low',  20.0)
+            high = getattr(args, 'percentile_high', 80.0)
+            print(f"  Percentile clip: low={low}%, high={high}%")
+            stacked = percentile_clip_combine(mem_aligned, low=low, high=high,
+                                              weights=weights, verbose=args.verbose)
+        elif args.stack_method == 'esd':
+            max_out = getattr(args, 'esd_max_outliers', 0)
+            sig     = getattr(args, 'esd_significance', 0.05)
+            print(f"  ESD: max_outliers={'N//4' if max_out == 0 else max_out}, "
+                  f"significance={sig}")
+            stacked = esd_combine(mem_aligned, max_outliers=max_out,
+                                  significance=sig, weights=weights,
+                                  verbose=args.verbose)
         else:
             stacked = np.median(mem_aligned, axis=0).astype(np.float32)
 
@@ -820,24 +926,19 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     print("\n  Removing residual hot pixels (per-channel)...")
     _hp_start = time.time()
     _hp_fixed = 0
-    _hp_meds = [ndimage.median_filter(stacked[:, :, c], size=5) for c in range(3)]
-    _hp_diffs = [stacked[:, :, c] - _hp_meds[c] for c in range(3)]
-    _hp_sigmas = []
-    for c in range(3):
-        _mad = np.median(np.abs(_hp_diffs[c]))
-        _hp_sigmas.append(max(_mad * 1.4826, 1e-6))
+    # Single 3D median filter (size 5×5 per channel, no cross-channel mixing)
+    _hp_meds = ndimage.median_filter(stacked, size=(5, 5, 1))
+    _hp_diffs = stacked - _hp_meds                              # (H, W, 3)
+    _hp_mads = np.median(np.abs(_hp_diffs), axis=(0, 1))        # (3,)
+    _hp_sigmas = np.maximum(_hp_mads * 1.4826, 1e-6)            # (3,)
+    ch_spikes = _hp_diffs / _hp_sigmas[np.newaxis, np.newaxis, :]  # (H, W, 3)
     for c in range(3):
         others = [i for i in range(3) if i != c]
-        # This channel spikes > 12 sigma above local median
-        ch_spike = _hp_diffs[c] / _hp_sigmas[c]
-        # Other channels must NOT be similarly elevated (< 4 sigma each)
-        other_normal = np.ones(stacked.shape[:2], dtype=bool)
-        for o in others:
-            other_normal &= (_hp_diffs[o] / _hp_sigmas[o] < 4.0)
-        hot = (ch_spike > 12.0) & other_normal
+        other_normal = np.all(ch_spikes[:, :, others] < 4.0, axis=2)
+        hot = (ch_spikes[:, :, c] > 12.0) & other_normal
         n_hot = int(np.sum(hot))
         if n_hot > 0:
-            stacked[:, :, c][hot] = _hp_meds[c][hot]
+            stacked[:, :, c][hot] = _hp_meds[:, :, c][hot]
             _hp_fixed += n_hot
     safe_print(f"  ✓ Per-channel hot pixel removal: {_hp_fixed} pixels fixed "
                f"({format_time(time.time() - _hp_start)})")
@@ -855,23 +956,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             _threshold = 5.0 * float(_bg_std)
             _bg_sub = _pp_lum - float(_bg_med)
 
-            best_sources = None
-            best_quality_count = 0
-            for trial_fwhm in (3.0, 5.0, 8.0):
-                _daof = DAOStarFinder(fwhm=trial_fwhm, threshold=_threshold)
-                trial_sources = _daof(_bg_sub)
-                if trial_sources is None or len(trial_sources) == 0:
-                    continue
-                round_ok = (np.abs(trial_sources['roundness1']) < 0.5) & \
-                           (np.abs(trial_sources['roundness2']) < 0.5)
-                sharp_ok = (trial_sources['sharpness'] > 0.3) & \
-                           (trial_sources['sharpness'] < 0.9)
-                quality_mask = round_ok & sharp_ok
-                quality_count = int(np.sum(quality_mask))
-                if quality_count > best_quality_count:
-                    best_quality_count = quality_count
-                    best_sources = trial_sources[quality_mask]
-            _pp_sources = best_sources
+            _pp_sources = _detect_stars_multi_fwhm(_bg_sub, _threshold)
 
             if _pp_sources is not None and len(_pp_sources) > 0:
                 pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
@@ -1008,6 +1093,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                                star_mask=pp_star_mask)
         else:
             strength = getattr(args, 'denoise_strength', 3.0)
+            if getattr(args, 'auto_denoise_strength', True):
+                fwhm_vals = [f.metrics.get('fwhm', 0.0) for f in final
+                             if f.metrics and f.metrics.get('fwhm', 0.0) > 0]
+                fwhm_mean = float(np.mean(fwhm_vals)) if fwhm_vals else 0.0
+                strength = estimate_denoise_strength(stacked, fwhm_mean=fwhm_mean)
+                fwhm_note = f', FWHM={fwhm_mean:.1f}px' if fwhm_mean > 0 else ''
+                safe_print(f"\n  Auto-denoise strength: {strength:.2f}"
+                           f" (from stacked SNR{fwhm_note})")
             print(f"\n  Applying wavelet denoising "
                   f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f})...")
             stacked = wavelet_denoise(stacked, threshold_factor=strength,
@@ -1105,6 +1198,35 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                                   star_mask=pp_star_mask)
             safe_print(f"  ✓ Richardson-Lucy deconvolution ({format_time(time.time() - rl_start)})")
 
+    # 8. Star reduction — shrink star halos to improve galaxy-to-star visual ratio.
+    # Stars in galaxy fields compete visually with the delicate spiral arms and dust
+    # lanes.  This step softens star cores via blending with a Gaussian-blurred
+    # version, making stars appear slightly smaller without removing them.
+    if getattr(args, 'star_reduce', False):
+        sr_factor = float(getattr(args, 'star_reduce_factor', 0.4))
+        sr_sigma = float(getattr(args, 'star_reduce_sigma', 1.5))
+        print(f"\n  Applying star reduction (factor={sr_factor:.2f}, blur_sigma={sr_sigma:.1f})...")
+        sr_start = time.time()
+        stacked = reduce_stars(stacked, pp_star_mask,
+                               reduction_factor=sr_factor,
+                               blur_sigma=sr_sigma)
+        safe_print(f"  ✓ Star reduction ({format_time(time.time() - sr_start)})")
+
+    # 9. Multiscale local contrast enhancement — reveals galaxy structure at
+    # fine (dust-lane edges), medium (spiral arm boundaries), and coarse
+    # (overall brightness profile) spatial scales via luminance unsharp masking.
+    # A mid-tone protection mask prevents sky-noise amplification and nucleus
+    # blowout; the medium scale (σ ≈ 12 px) is the most effective for typical
+    # galaxy targets like M64 where the dust lane is the key feature.
+    if getattr(args, 'local_contrast', False):
+        lc_strength = float(getattr(args, 'local_contrast_strength', 0.7))
+        print(f"\n  Applying multiscale local contrast enhancement "
+              f"(strength={lc_strength:.2f}, scales=2/12/40 px)...")
+        lc_start = time.time()
+        stacked = multiscale_local_contrast(stacked, strength=lc_strength,
+                                            star_mask=pp_star_mask)
+        safe_print(f"  ✓ Local contrast enhancement ({format_time(time.time() - lc_start)})")
+
     stats.post_processing_time = time.time() - phase_start
 
     # Update memory usage
@@ -1179,7 +1301,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Preview with configurable stretch
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     stretch_method = getattr(args, 'stretch', 'linear')
-    save_preview_rgb(stacked, preview_path, stretch=stretch_method)
+    save_preview_rgb(stacked, preview_path, stretch=stretch_method,
+                     ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+                     ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
 
     print(f"  Output size: {out_h}x{out_w} "
           f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)")
@@ -1210,4 +1335,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         safe_print(f"\n  Errors: {len(stats.errors)}")
 
     safe_print(f"\n  Stack complete!")
+
+    # AI session report: streams a narrative summary to stdout and saves a
+    # Markdown file alongside the output FITS.
+    if getattr(args, 'ai_report', False):
+        from src.ai_advisor import build_report_context, generate_session_report
+        report_ctx = build_report_context(
+            final=final,
+            rejected_reasons=rejected_reasons,
+            args=args,
+            stats=stats,
+            shifts=shifts,
+            dither_info=dither_info,
+            output_path=output_path,
+            stacked_shape=stacked.shape,
+        )
+        generate_session_report(report_ctx, output_path)
+
     return output_path

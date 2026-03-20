@@ -376,14 +376,43 @@ def parse_args():
     p.add_argument('-v', '--verbose', action='store_true')
     p.add_argument('--debug-registration', action='store_true',
                    help='Detailed registration diagnostics (implies -v)')
-    p.add_argument('--stack-method', choices=['mean', 'median', 'sigma_clip'], default=None,
-                   help='Stacking method (default: sigma_clip for dithered data, mean otherwise)')
+    p.add_argument('--stack-method',
+                   choices=['mean', 'median', 'sigma_clip', 'winsorized',
+                            'percentile', 'esd', 'auto'],
+                   default='auto',
+                   help='Stacking/rejection method. '
+                        'sigma_clip: MAD-based iterative rejection (default for dithered data). '
+                        'winsorized: like sigma_clip but clips to boundary instead of rejecting. '
+                        'percentile: reject outside [low,high] percentile (good for <8 frames). '
+                        'esd: Grubbs/ESD test (best for <15 frames, needs scipy). '
+                        'auto: choose based on frame count (<8→percentile, else sigma_clip). '
+                        'mean/median: no rejection.')
     p.add_argument('--rejection-sigma', type=float, default=3.0,
-                   help='Sigma threshold for pixel rejection in sigma_clip stacking (default: 3.0)')
+                   help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
     p.add_argument('--rejection-iters', type=int, default=3,
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
+    p.add_argument('--rejection-estimator', choices=['mad', 'std'], default='mad',
+                   help='Spread estimator for sigma_clip/winsorized: '
+                        'mad (default, robust) or std (PixInsight "Linear Clipping")')
     p.add_argument('--winsorize', action='store_true',
-                   help='Winsorized sigma-clip: clip outliers to boundary instead of rejecting')
+                   help='(Deprecated) Shorthand for --stack-method winsorized')
+    p.add_argument('--percentile-low', type=float, default=20.0,
+                   help='Lower rejection percentile for --stack-method percentile (default: 20)')
+    p.add_argument('--percentile-high', type=float, default=80.0,
+                   help='Upper rejection percentile for --stack-method percentile (default: 80)')
+    p.add_argument('--esd-max-outliers', type=int, default=0,
+                   help='Max outliers per pixel for ESD rejection (default: 0 = N//4)')
+    p.add_argument('--esd-significance', type=float, default=0.05,
+                   help='Significance level for ESD test (default: 0.05)')
+    p.add_argument('--weight-snr', type=float, default=1.0,
+                   help='Exponent for per-frame SNR quality weight (default: 1.0; 0 = ignore SNR)')
+    p.add_argument('--weight-fwhm', type=float, default=1.0,
+                   help='Exponent for per-frame FWHM quality weight (default: 1.0; 0 = ignore FWHM; '
+                        'lower FWHM = sharper stars = higher weight)')
+    p.add_argument('--weight-stars', type=float, default=1.0,
+                   help='Exponent for per-frame star-count quality weight (default: 1.0; 0 = ignore)')
+    p.add_argument('--weight-noise', action='store_true',
+                   help='Add 1/noise² weighting component (favours low-background frames)')
     p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
                    help='Debayering method (default: bilinear; malvar/vng require OpenCV)')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
@@ -412,7 +441,15 @@ def parse_args():
     p.add_argument('--no-denoise', dest='denoise', action='store_false',
                    help='Disable wavelet denoising')
     p.add_argument('--denoise-strength', type=float, default=3.0,
-                   help='Wavelet luma denoise threshold factor (default: 3.0)')
+                   help='Wavelet luma denoise threshold factor (default: 3.0); '
+                        'overridden by --auto-denoise-strength unless disabled')
+    p.add_argument('--auto-denoise-strength', action='store_true', default=True,
+                   help='Auto-tune denoise strength from stacked image SNR '
+                        '(default: on; applies to fixed-threshold mode only, '
+                        'i.e. when --no-denoise-adaptive is set)')
+    p.add_argument('--no-auto-denoise-strength', dest='auto_denoise_strength',
+                   action='store_false',
+                   help='Use fixed --denoise-strength instead of auto-tuning')
     p.add_argument('--denoise-chroma-boost', type=float, default=2.0,
                    help='Chroma threshold multiplier relative to luma (default: 2.0)')
     p.add_argument('--denoise-nlm', action='store_true',
@@ -454,8 +491,62 @@ def parse_args():
                    help='Disable chroma noise reduction')
     p.add_argument('--chroma-nr-sigma', type=float, default=2.0,
                    help='Gaussian sigma for chroma smoothing in pixels (default: 2.0)')
-    p.add_argument('--stretch', choices=['linear', 'arcsinh'], default='arcsinh',
-                   help='Preview image stretch method (default: arcsinh)')
+    p.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
+                   help='Preview JPEG stretch method (default: ghs). '
+                        'ghs = Generalized Hyperbolic Stretch — the state-of-the-art '
+                        'algorithm for galaxy imaging, giving independent control of '
+                        'shadow lift (--ghs-sp), highlights protection (--ghs-hp), '
+                        'and stretch intensity (--ghs-b).')
+    p.add_argument('--ghs-b', type=float, default=8.0,
+                   help='GHS stretch factor b (default: 8.0). '
+                        '0 = linear, 5 = moderate, 8–12 = galaxy-optimised. '
+                        'Higher values lift fainter outer spiral arms and dust lanes '
+                        'while compressing bright nuclei. Only used when --stretch=ghs.')
+    p.add_argument('--ghs-sp', type=float, default=0.15,
+                   help='GHS symmetry point SP [0–1] (default: 0.15). '
+                        'The pivot of the stretch curve. Setting SP below the galaxy '
+                        'core lifts faint outer arms disproportionately relative to '
+                        'the bright nucleus. Typical galaxy range: 0.10–0.20. '
+                        'Only used when --stretch=ghs.')
+    p.add_argument('--ghs-hp', type=float, default=0.95,
+                   help='GHS highlights protection HP [0–1] (default: 0.95). '
+                        'Values above HP map to white, protecting bright nuclear '
+                        'cores from blowout while faint structure is stretched. '
+                        'Increase toward 0.99 for targets with very bright nuclei. '
+                        'Only used when --stretch=ghs.')
+    # --- Star reduction (galaxy imaging) ---
+    p.add_argument('--star-reduce', action='store_true', default=True,
+                   help='Reduce star prominence in the final stack to improve the '
+                        'galaxy-to-star visual balance. Softens star cores via '
+                        'Gaussian blending, making them appear slightly smaller '
+                        'without removing them. Useful for galaxy targets. '
+                        'Modifies the FITS output data (default: on).')
+    p.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
+                   help='Disable star reduction')
+    p.add_argument('--star-reduce-factor', type=float, default=0.4,
+                   help='Star reduction blend fraction (default: 0.4). '
+                        '0 = no effect, 1 = replace star cores with blurred version. '
+                        'Typical range 0.3–0.6. Only used when --star-reduce.')
+    p.add_argument('--star-reduce-sigma', type=float, default=1.5,
+                   help='Gaussian blur radius for star reduction in pixels (default: 1.5). '
+                        'Larger values give softer but dimmer star cores. '
+                        'Only used when --star-reduce.')
+    # --- Multiscale local contrast enhancement (galaxy structure) ---
+    p.add_argument('--local-contrast', action='store_true', default=True,
+                   help='Apply multiscale local contrast enhancement (MLCE) to reveal '
+                        'galaxy structure: dust lanes, spiral arm boundaries, and star '
+                        'forming regions. Uses luminance-domain unsharp masking at '
+                        'fine (2 px), medium (12 px), and coarse (40 px) scales with '
+                        'a mid-tone mask that protects sky noise and bright nuclei. '
+                        'Particularly effective for the Black Eye Galaxy (M64) where '
+                        'the medium scale targets the characteristic dark dust band. '
+                        'Modifies the FITS output data (default: on).')
+    p.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
+                   help='Disable multiscale local contrast enhancement')
+    p.add_argument('--local-contrast-strength', type=float, default=0.7,
+                   help='MLCE overall strength multiplier (default: 0.7). '
+                        '0 = off, 1 = full enhancement. Typical range 0.4–0.9. '
+                        'Only used when --local-contrast.')
     p.add_argument('-j', '--parallel', type=int, default=0,
                    help='Parallel workers for frame processing (default: 0=auto, 1=sequential)')
     # --- Chromatic aberration correction ---
@@ -492,6 +583,15 @@ def parse_args():
     p.add_argument('--log-file', default=None, metavar='PATH',
                    help='Write a full DEBUG-level log to this file in addition to '
                         'console output.')
+    # --- AI features (require: pip install anthropic  +  ANTHROPIC_API_KEY env var) ---
+    p.add_argument('--ai-advisor', action='store_true',
+                   help='After Phase 1, call Claude to recommend optimal stacking '
+                        'parameters and apply them automatically. '
+                        'Requires: pip install anthropic  and  ANTHROPIC_API_KEY.')
+    p.add_argument('--ai-report', action='store_true',
+                   help='After stacking, call Claude to generate a narrative session '
+                        'report (saved as <output>_report.md). '
+                        'Requires: pip install anthropic  and  ANTHROPIC_API_KEY.')
     return p.parse_args()
 
 
