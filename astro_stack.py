@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 import logging
+import warnings
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -39,8 +40,7 @@ from astropy.io import fits
 
 try:
     from scipy import ndimage
-    from scipy import fftpack
-    from scipy.signal import fftconvolve
+    from scipy.interpolate import RectBivariateSpline
 except Exception:
     print("scipy is required", file=sys.stderr)
     raise
@@ -285,6 +285,7 @@ class Config:
     RL_PSF_MIN_STARS = 5           # Min successful fits for reliable PSF
     RL_PSF_SIZE = 31               # Output PSF kernel size (odd)
     RL_DEFAULT_ITERATIONS = 15     # Default Richardson-Lucy iterations
+    BORDER_FRAC = 0.12             # Fraction of image border used for sky reference
 
 
 @dataclass
@@ -426,31 +427,30 @@ def get_memory_usage_mb() -> float:
     return 0.0
 
 
+def _read_fits_header(path: str) -> dict:
+    """Read FITS header only, with memmap fallback on keyword-compression errors."""
+    try:
+        with fits.open(path, memmap=True) as hd:
+            return dict(hd[0].header)
+    except Exception:
+        try:
+            with fits.open(path, memmap=False) as hd:
+                return dict(hd[0].header)
+        except Exception:
+            return {}
+
+
 def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
     """Discover FITS files and classify them by heuristics and headers."""
-    files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(('.fit', '.fits'))]
+    files = sorted(
+        os.path.join(directory, f)
+        for f in os.listdir(directory)
+        if f.lower().endswith(('.fit', '.fits'))
+    )
     frames = {'light': [], 'dark': [], 'flat': [], 'bias': []}
-    for p in sorted(files):
-        hdr = {}
-        try:
-            with fits.open(p, memmap=True) as hd:
-                hdr = dict(hd[0].header)
-        except Exception as e:
-            # Retry without memmap for files with BZERO/BSCALE/BLANK keywords
-            err_str = str(e).lower()
-            if 'memmap' in err_str or 'bzero' in err_str or 'bscale' in err_str or 'blank' in err_str:
-                try:
-                    with fits.open(p, memmap=False) as hd:
-                        hdr = dict(hd[0].header)
-                except Exception:
-                    hdr = {}
-            # If not a memmap issue, still try non-memmap as fallback
-            else:
-                try:
-                    with fits.open(p, memmap=False) as hd:
-                        hdr = dict(hd[0].header)
-                except Exception:
-                    hdr = {}
+    with ThreadPoolExecutor() as ex:
+        headers = list(ex.map(_read_fits_header, files))
+    for p, hdr in zip(files, headers):
         ftype = classify_frame(p, hdr)
         if ftype == 'skip':
             continue
@@ -966,7 +966,7 @@ def estimate_psf(img: np.ndarray, star_positions,
         r2 = (x - x0) ** 2 + (y - y0) ** 2
         return (amplitude * (1.0 + r2 / (alpha ** 2)) ** (-beta) + background).ravel()
 
-    # 2D Gaussian: I(x,y) = A * exp(-((x-x0)^2 + (y-y0)^2) / (2*sigma^2)) + bg
+    # 2D Gaussian: used as fallback when model='gaussian'
     def gaussian_2d(coords, amplitude, x0, y0, sigma, background):
         y, x = coords
         r2 = (x - x0) ** 2 + (y - y0) ** 2
@@ -1225,8 +1225,6 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     Includes automatic extended-source detection so that nebula/galaxy
     emission is not mistaken for a sky residual and subtracted.
     """
-    from scipy.interpolate import RectBivariateSpline
-
     H, W = img.shape[:2]
     ny = max(1, H // mesh_size)
     nx = max(1, W // mesh_size)
@@ -1241,9 +1239,8 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
         lum_smooth = ndimage.gaussian_filter(lum, sigma=smooth_sigma)
-        border_frac = 0.12
-        by = max(10, int(H * border_frac))
-        bx = max(10, int(W * border_frac))
+        by = max(10, int(H * Config.BORDER_FRAC))
+        bx = max(10, int(W * Config.BORDER_FRAC))
         border_pix = np.concatenate([
             lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
             lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
@@ -1429,11 +1426,10 @@ def sky_floor_normalize(rgb: np.ndarray,
     if star_mask is not None:
         np.clip(src_mask + star_mask, 0, 1, out=src_mask)
 
-    # Step 2: estimate sky noise from the outermost 12% border strip —
+    # Step 2: estimate sky noise from the outermost border strip —
     # these pixels are furthest from the target and contain the least emission.
-    border_frac = 0.12
-    by = max(10, int(H * border_frac))
-    bx = max(10, int(W * border_frac))
+    by = max(10, int(H * Config.BORDER_FRAC))
+    bx = max(10, int(W * Config.BORDER_FRAC))
     border_lum = np.concatenate([
         lum[:by, :].ravel(), lum[-by:, :].ravel(),
         lum[by:-by, :bx].ravel(), lum[by:-by, -bx:].ravel(),
@@ -1997,8 +1993,6 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
     # spline only *interpolates* (never extrapolates) across the full image.
     # Without this, cubic spline extrapolation at image edges overshoots,
     # and the subsequent hard clamp creates flat patches → mottled background.
-    from scipy.interpolate import RectBivariateSpline
-
     grid_y = np.array([(i + 0.5) * cell_h for i in range(ny)])
     grid_x = np.array([(j + 0.5) * cell_w for j in range(nx)])
 
@@ -2070,9 +2064,8 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
         lum_smooth = ndimage.gaussian_filter(lum, sigma=smooth_sigma)
 
         # Sky reference from the image border (avoids galaxy near centre)
-        border_frac = 0.12
-        by = max(10, int(H * border_frac))
-        bx = max(10, int(W * border_frac))
+        by = max(10, int(H * Config.BORDER_FRAC))
+        bx = max(10, int(W * Config.BORDER_FRAC))
         border_pix = np.concatenate([
             lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
             lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
@@ -2337,11 +2330,12 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     background = mean
     noise = contrast
 
+    _scs_bg_mean = _scs_bg_median = _scs_bg_std = None
     if sigma_clipped_stats is not None:
         try:
-            bg_mean, bg_median, bg_std = sigma_clipped_stats(img, sigma=3.0, maxiters=5)
-            background = float(bg_median)
-            noise = float(bg_std)
+            _scs_bg_mean, _scs_bg_median, _scs_bg_std = sigma_clipped_stats(img, sigma=3.0, maxiters=5)
+            background = float(_scs_bg_median)
+            noise = float(_scs_bg_std)
             snr = (p95 - background) / (noise + 1e-12) if noise > 0 else 0.0
         except:
             snr = (p95 - mean) / (contrast + 1e-12)
@@ -2353,9 +2347,9 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     star_snr = 0.0
 
     sources = None
-    if DAOStarFinder is not None and sigma_clipped_stats is not None:
+    if DAOStarFinder is not None and _scs_bg_std is not None:
         try:
-            bg_mean, bg_median, bg_std = sigma_clipped_stats(img, sigma=3.0)
+            bg_mean, bg_median, bg_std = _scs_bg_mean, _scs_bg_median, _scs_bg_std
             # Threshold for background-subtracted image: N * sigma above zero
             threshold = 5.0 * float(bg_std)
             bg_sub = img - float(bg_median)
@@ -2471,7 +2465,6 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             img_norm = (img - np.mean(img)) / (np.std(img) + 1e-12)
             
             # Suppress overflow warnings in phase correlation
-            import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 shift, error, diffphase = phase_cross_correlation(ref_norm, img_norm, upsample_factor=upsample)
@@ -3531,7 +3524,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     final = [f for f in lights if f.accepted]
     # Build index map: for each final frame, its original index in `lights`
-    final_indices = [lights.index(f) for f in final]
+    _lights_index = {id(f): i for i, f in enumerate(lights)}
+    final_indices = [_lights_index[id(f)] for f in final]
     stats.accepted_frames = len(final)
     stats.rejected_frames = n - len(final)
     stats.quality_time = time.time() - phase_start
@@ -3977,9 +3971,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             try:
                 smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
                 lum_smooth = ndimage.gaussian_filter(lum_s, sigma=smooth_sigma)
-                border_frac = 0.12
-                by = max(10, int(H_s * border_frac))
-                bx = max(10, int(W_s * border_frac))
+                by = max(10, int(H_s * Config.BORDER_FRAC))
+                bx = max(10, int(W_s * Config.BORDER_FRAC))
                 border_pix = np.concatenate([
                     lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
                     lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
@@ -4688,7 +4681,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         print(f"  Combining {len(produced)} target stacks into final output...")
 
         # Load all stacks, crop to minimum common dimensions
-        shapes = [fits.open(p)[0].data.shape for p in produced]
+        def _fits_shape(p):
+            with fits.open(p, memmap=True) as hd:
+                return hd[0].data.shape
+        shapes = [_fits_shape(p) for p in produced]
         # shapes are (3,H,W)
         mins = np.min([[s[1], s[2]] for s in shapes], axis=0)
         Hm, Wm = int(mins[0]), int(mins[1])
