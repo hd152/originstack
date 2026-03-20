@@ -110,7 +110,5 @@ Then share the `diagnostic.log` file. The quality and shift data tells us:
 
 ## Read More
 
-- `DIAGNOSTICS_IMPROVEMENTS.md` - Complete feature guide
-- `SHIFT_PATTERN_GUIDE.md` - Detailed pattern analysis
-- `SESSION_SUMMARY.md` - What was improved and why
 - `README.md` - Usage and installation
+- `PROJECT_SPEC.md` - Complete feature and architecture guide

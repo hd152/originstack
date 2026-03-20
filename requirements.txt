@@ -9,5 +9,8 @@ tqdm>=4.65
 Pillow>=9.0
 psutil>=5.9
 
-# Optional GPU dependencies are moved to `requirements-gpu.txt` to avoid
-# failing CI installs on runners without CUDA.
+# Optional dependencies (install separately as needed):
+#   opencv-python   — malvar/vng debayer, bilateral denoising (--debayer-method malvar/vng, --denoise-bilateral)
+#   PyWavelets      — wavelet denoising (--denoise)
+#   cupy-cudaXXx    — GPU acceleration (--use-gpu); see requirements-gpu.txt
+#   astroquery      — plate solving (--plate-solve); see requirements-astrometry.txt
