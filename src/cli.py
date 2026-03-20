@@ -384,9 +384,8 @@ def parse_args():
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
     p.add_argument('--winsorize', action='store_true',
                    help='Winsorized sigma-clip: clip outliers to boundary instead of rejecting')
-    p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='malvar',
-                   help='Debayering method (default: malvar; vng also requires OpenCV; '
-                        'bilinear is pure-numpy fallback)')
+    p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
+                   help='Debayering method (default: bilinear; malvar/vng require OpenCV)')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     p.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
