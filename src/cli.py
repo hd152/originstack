@@ -384,8 +384,9 @@ def parse_args():
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
     p.add_argument('--winsorize', action='store_true',
                    help='Winsorized sigma-clip: clip outliers to boundary instead of rejecting')
-    p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
-                   help='Debayering method (vng requires OpenCV)')
+    p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='malvar',
+                   help='Debayering method (default: malvar; vng also requires OpenCV; '
+                        'bilinear is pure-numpy fallback)')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     p.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
@@ -407,8 +408,10 @@ def parse_args():
                    help='Median filter size for background grid smoothing (default: 3, must be odd)')
     p.add_argument('--bg-clip-sigma', type=float, default=3.0,
                    help='Sigma for star rejection in background estimation (default: 3.0)')
-    p.add_argument('--denoise', action='store_true',
-                   help='Enable wavelet denoising post-stack (requires pywt)')
+    p.add_argument('--denoise', action='store_true', default=True,
+                   help='Enable wavelet denoising post-stack (default: on; requires pywt)')
+    p.add_argument('--no-denoise', dest='denoise', action='store_false',
+                   help='Disable wavelet denoising')
     p.add_argument('--denoise-strength', type=float, default=3.0,
                    help='Wavelet luma denoise threshold factor (default: 3.0)')
     p.add_argument('--denoise-chroma-boost', type=float, default=2.0,
@@ -454,27 +457,34 @@ def parse_args():
                    help='Gaussian sigma for chroma smoothing in pixels (default: 2.0)')
     p.add_argument('--stretch', choices=['linear', 'arcsinh'], default='arcsinh',
                    help='Preview image stretch method (default: arcsinh)')
-    p.add_argument('-j', '--parallel', type=int, default=1,
-                   help='Parallel workers for frame processing (0=auto, 1=sequential)')
+    p.add_argument('-j', '--parallel', type=int, default=0,
+                   help='Parallel workers for frame processing (default: 0=auto, 1=sequential)')
     # --- Chromatic aberration correction ---
-    p.add_argument('--ca-correction', action='store_true', default=False,
+    p.add_argument('--ca-correction', action='store_true', default=True,
                    help='Correct lateral chromatic aberration by aligning R/B channels '
-                        'to green via phase cross-correlation (requires skimage)')
+                        'to green via phase cross-correlation (default: on; requires skimage)')
+    p.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
+                   help='Disable chromatic aberration correction')
     # --- Cosmic ray rejection ---
-    p.add_argument('--cosmic-ray-rejection', action='store_true', default=False,
+    p.add_argument('--cosmic-ray-rejection', action='store_true', default=True,
                    help='Apply L.A.Cosmic-style Laplacian cosmic ray rejection to each '
-                        'light frame before stacking (default: off)')
+                        'light frame before stacking (default: on)')
+    p.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
+                   action='store_false',
+                   help='Disable cosmic ray rejection')
     p.add_argument('--cr-sigclip', type=float, default=4.5,
                    help='L.A.Cosmic detection threshold in noise sigma units (default: 4.5)')
     p.add_argument('--cr-objlim', type=float, default=5.0,
                    help='L.A.Cosmic object-rejection ratio — prevents flagging star cores '
                         '(default: 5.0, increase to be more conservative)')
     # --- Adaptive denoising ---
-    p.add_argument('--denoise-adaptive', action='store_true', default=False,
+    p.add_argument('--denoise-adaptive', action='store_true', default=True,
                    help='Use BayesShrink per-subband thresholds for wavelet denoising '
-                        'instead of a fixed global threshold factor. Adapts automatically '
-                        'to local noise — preserves faint nebulosity better. '
-                        'Requires --denoise.')
+                        'instead of a fixed global threshold factor (default: on). '
+                        'Adapts automatically to local noise — preserves faint nebulosity '
+                        'better. Requires --denoise.')
+    p.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
+                   help='Use fixed global threshold factor instead of BayesShrink')
     # --- Structured logging ---
     p.add_argument('--log-level',
                    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='WARNING',
