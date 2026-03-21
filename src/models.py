@@ -40,6 +40,16 @@ class Config:
     RL_DEFAULT_ITERATIONS = 15     # Default Richardson-Lucy iterations
     BORDER_FRAC = 0.12             # Fraction of image border used for sky reference
 
+    # Dynamic Background Extraction (DBE)
+    DBE_PATCH_SIZE = 64            # Candidate background patch size in pixels
+    DBE_MASKED_FRAC_THRESH = 0.30 # Max allowed emission-masked fraction per patch
+    DBE_OUTLIER_SIGMA = 2.5       # Sigma for iterative RBF residual rejection
+    DBE_OUTLIER_ITERS = 3         # Max outlier rejection passes
+    DBE_MIN_SAMPLES = 20          # Min accepted patches before falling back to mesh
+    DBE_MAX_SAMPLES = 2000        # Cap to keep RBF O(N²) tractable on large images
+    DBE_RBF_KERNEL = 'thin_plate_spline'
+    DBE_RBF_SMOOTHING = 0.0
+
 
 @dataclass
 class FrameInfo:

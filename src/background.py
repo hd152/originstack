@@ -9,6 +9,12 @@ import numpy as np
 from scipy import ndimage
 from scipy.interpolate import RectBivariateSpline
 
+try:
+    from scipy.interpolate import RBFInterpolator
+    HAS_RBF = True
+except ImportError:
+    HAS_RBF = False
+
 from src.models import Config
 from src.utils import safe_print
 
@@ -640,5 +646,344 @@ def sky_floor_normalize(rgb: np.ndarray,
         safe_print(f"  Sky floor: {sky_frac:.1f}% sky pixels used, "
                    f"floors subtracted R={floors[0]:.2f} G={floors[1]:.2f} "
                    f"B={floors[2]:.2f} ADU")
+
+    return result
+
+
+# =============================================================================
+# Dynamic Background Extraction (DBE)
+# =============================================================================
+
+def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
+                         lum_smooth: np.ndarray,
+                         sky_med: float, sky_std: float) -> np.ndarray:
+    """Build a float32 exclusion mask (1 = emission/star, 0 = safe background).
+
+    Uses morphological dilation of the smoothed-luminance threshold to trace
+    the actual shape of extended sources (galaxies, nebulae) rather than
+    imposing a fixed-radius circular exclusion zone.  This is the key
+    improvement over ``apply_background_extraction``: an elongated galaxy or
+    one with extended spiral arms gets a mask that follows its morphology.
+    """
+    H, W = lum.shape
+    emission = np.zeros((H, W), dtype=np.float32)
+
+    # Seed with provided star mask
+    if star_mask is not None:
+        np.clip(emission + star_mask, 0.0, 1.0, out=emission)
+
+    # Detect extended sources and dilate their footprints
+    detect_thresh = sky_med + 5.0 * max(sky_std, 1.0)
+    frac_bright = float(np.mean(lum_smooth > detect_thresh))
+    if frac_bright > 0.005:
+        # Dilation radius: ~2% of shorter image dimension, min 15 px
+        dil_radius = max(15, int(min(H, W) * 0.02))
+        r = dil_radius
+        y_idx, x_idx = np.ogrid[-r:r + 1, -r:r + 1]
+        disk = (y_idx ** 2 + x_idx ** 2 <= r ** 2)
+
+        remaining_lum = lum_smooth.copy()
+        primary_peak = float(np.max(remaining_lum))
+
+        for src_i in range(3):
+            py, px = np.unravel_index(int(np.argmax(remaining_lum)), (H, W))
+            pv = float(remaining_lum[py, px])
+            if pv <= detect_thresh:
+                break
+            # Secondary/tertiary sources must be >= 50% as bright as the primary
+            if src_i > 0:
+                if (primary_peak - sky_med) > 0:
+                    if (pv - sky_med) < 0.5 * (primary_peak - sky_med):
+                        break
+            # Threshold this source's footprint and dilate to cover faint outskirts.
+            # Use sky_med + 50% of the (detect_thresh - sky_med) gap so the binary
+            # captures emission above 2.5-sigma rather than collapsing to sky level.
+            src_thresh = sky_med + 0.5 * (detect_thresh - sky_med)
+            src_binary = (lum_smooth > src_thresh).astype(np.uint8)
+            from scipy.ndimage import binary_dilation
+            dilated = binary_dilation(src_binary, structure=disk).astype(np.float32)
+            np.clip(emission + dilated, 0.0, 1.0, out=emission)
+            # Blank out so next iteration finds a different peak
+            remaining_lum[dilated > 0.5] = float(np.min(remaining_lum))
+
+    return emission
+
+
+def _sample_background_patches(
+        channel: np.ndarray, emission_mask: np.ndarray,
+        patch_size: int, masked_frac_thresh: float,
+        sky_ref: float, sky_std: float) -> tuple:
+    """Find clean background patches and return their centres and sky values.
+
+    Returns:
+        coords: (N, 2) float64 normalised [0,1] (y, x) patch centres.
+        values: (N,)  float64 sigma-clipped median sky value per patch.
+    """
+    H, W = channel.shape
+    coords_list = []
+    values_list = []
+    variances = []
+
+    ny = max(1, H // patch_size)
+    nx = max(1, W // patch_size)
+    cell_h = H / ny
+    cell_w = W / nx
+
+    for iy in range(ny):
+        y0 = int(round(iy * cell_h))
+        y1 = min(int(round((iy + 1) * cell_h)), H)
+        for ix in range(nx):
+            x0 = int(round(ix * cell_w))
+            x1 = min(int(round((ix + 1) * cell_w)), W)
+
+            em_patch = emission_mask[y0:y1, x0:x1].ravel()
+            masked_frac = float(np.mean(em_patch >= 0.5))
+            if masked_frac > masked_frac_thresh:
+                continue
+
+            px = channel[y0:y1, x0:x1].ravel()
+            px = px[em_patch < 0.5]
+            if px.size < 10:
+                continue
+
+            # Reject patches whose median significantly exceeds the sky reference
+            patch_med = float(np.median(px))
+            if patch_med > sky_ref + 2.0 * max(sky_std, 1.0):
+                continue
+
+            # Sigma-clipped median
+            if sigma_clipped_stats is not None:
+                try:
+                    _, med_val, _ = sigma_clipped_stats(px, sigma=3.0, maxiters=5)
+                    med_val = float(med_val)
+                except Exception:
+                    med_val = patch_med
+            else:
+                med_val = patch_med
+
+            cy = (y0 + y1) * 0.5
+            cx = (x0 + x1) * 0.5
+            coords_list.append((cy / H, cx / W))
+            values_list.append(med_val)
+            variances.append(float(np.var(px)))
+
+    if not coords_list:
+        return np.empty((0, 2)), np.empty((0,))
+
+    coords = np.array(coords_list, dtype=np.float64)
+    values = np.array(values_list, dtype=np.float64)
+    variances = np.array(variances, dtype=np.float64)
+
+    # Variance outlier rejection: discard high-variance patches (residual stars)
+    if len(variances) >= 5:
+        med_var = float(np.median(variances))
+        mad_var = float(np.median(np.abs(variances - med_var)))
+        var_thresh = med_var + 3.0 * 1.4826 * max(mad_var, 1e-12)
+        keep = variances <= var_thresh
+        coords = coords[keep]
+        values = values[keep]
+
+    return coords, values
+
+
+def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
+                     H: int, W: int,
+                     kernel: str, smoothing: float,
+                     outlier_sigma: float, max_iter: int,
+                     patch_size: int, verbose: bool) -> np.ndarray:
+    """Fit a smooth background surface to scattered sample points via RBF.
+
+    Applies iterative outlier rejection to remove misclassified emission
+    patches, then evaluates the final surface on the full pixel grid.
+    Falls back to polynomial least-squares when too few points remain.
+    """
+    if not HAS_RBF or len(coords) < 6:
+        return _polynomial_surface(coords, values, H, W, patch_size)
+
+    c, v = coords.copy(), values.copy()
+
+    for iteration in range(max_iter):
+        try:
+            rbf = RBFInterpolator(c, v, kernel=kernel, smoothing=smoothing, degree=1)
+        except Exception:
+            return _polynomial_surface(c, v, H, W, patch_size)
+
+        residuals = v - rbf(c)
+        res_std = float(np.std(residuals))
+        if res_std < 1e-12:
+            break
+        keep = np.abs(residuals) <= outlier_sigma * res_std
+        if keep.all():
+            break
+        if verbose:
+            safe_print(f"    DBE iter {iteration + 1}: rejected {int((~keep).sum())} outlier patches")
+        c, v = c[keep], v[keep]
+        if len(c) < 6:
+            break
+
+    if len(c) < 6:
+        return _polynomial_surface(c, v, H, W, patch_size)
+
+    # Evaluate final RBF on the full pixel grid
+    yy = np.linspace(0.0, 1.0, H)
+    xx = np.linspace(0.0, 1.0, W)
+    grid_y, grid_x = np.meshgrid(yy, xx, indexing='ij')
+    query_pts = np.column_stack([grid_y.ravel(), grid_x.ravel()])
+    try:
+        surface = rbf(query_pts).reshape(H, W).astype(np.float64)
+    except Exception:
+        return _polynomial_surface(c, v, H, W, patch_size)
+
+    # Suppress RBF ringing at the sample-point spatial scale
+    return ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+
+
+def _polynomial_surface(coords: np.ndarray, values: np.ndarray,
+                        H: int, W: int, patch_size: int) -> np.ndarray:
+    """Polynomial least-squares fallback when too few RBF samples remain."""
+    if len(coords) < 3:
+        return np.full((H, W), float(np.median(values)) if len(values) else 0.0,
+                       dtype=np.float64)
+
+    def poly3(y, x):
+        return np.column_stack([
+            np.ones(len(y)), y, x,
+            y ** 2, y * x, x ** 2,
+            y ** 3, y ** 2 * x, y * x ** 2, x ** 3])
+
+    def poly2(y, x):
+        return np.column_stack([np.ones(len(y)), y, x, y ** 2, y * x, x ** 2])
+
+    poly = poly3 if len(coords) >= 10 else poly2
+    A = poly(coords[:, 0], coords[:, 1])
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(A, values, rcond=None)
+    except Exception:
+        return np.full((H, W), float(np.median(values)) if len(values) else 0.0,
+                       dtype=np.float64)
+
+    yy = np.linspace(0.0, 1.0, H)
+    xx = np.linspace(0.0, 1.0, W)
+    grid_y, grid_x = np.meshgrid(yy, xx, indexing='ij')
+    surface = poly(grid_y.ravel(), grid_x.ravel()).dot(coeffs).reshape(H, W)
+    return ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+
+
+def dynamic_background_extraction(
+        rgb: np.ndarray,
+        patch_size: int = Config.DBE_PATCH_SIZE,
+        masked_frac_thresh: float = Config.DBE_MASKED_FRAC_THRESH,
+        clip_sigma: float = 3.0,
+        rbf_kernel: str = Config.DBE_RBF_KERNEL,
+        rbf_smoothing: float = Config.DBE_RBF_SMOOTHING,
+        outlier_sigma: float = Config.DBE_OUTLIER_SIGMA,
+        outlier_iters: int = Config.DBE_OUTLIER_ITERS,
+        star_mask: Optional[np.ndarray] = None,
+        verbose: bool = False) -> np.ndarray:
+    """Dynamic Background Extraction (DBE) via adaptive sampling and RBF fitting.
+
+    Unlike the mesh-based ``apply_background_extraction``, DBE places sample
+    points only where the background is demonstrably clean — avoiding not just
+    stars (via ``star_mask``) but the full morphological footprint of any
+    extended source (galaxy, nebula, IFN) via dilation.  A radial basis
+    function surface is then fitted to the accepted samples and subtracted
+    per channel.
+
+    Falls back to polynomial fitting (< 20 clean patches) or the mesh
+    estimator (< 6 patches) so the pipeline never stalls on difficult fields.
+
+    Args:
+        rgb:               Float32 stacked RGB image (H, W, 3).
+        patch_size:        Background sampling patch size in pixels (default 64).
+        masked_frac_thresh: Max masked fraction per patch before rejection.
+        clip_sigma:        Sigma for sigma-clipped median inside each patch.
+        rbf_kernel:        RBFInterpolator kernel (default 'thin_plate_spline').
+        rbf_smoothing:     RBF smoothing (0 = exact interpolation at samples).
+        outlier_sigma:     Residual sigma threshold for iterative rejection.
+        outlier_iters:     Maximum outlier rejection iterations.
+        star_mask:         Float mask (1 = star core) from quality analysis.
+        verbose:           Print per-channel diagnostics.
+
+    Returns:
+        Background-subtracted float32 image (H, W, 3).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    H, W = rgb.shape[:2]
+    lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
+           + 0.114 * rgb[:, :, 2]).astype(np.float64)
+
+    # Large-scale Gaussian smoothing: removes stars, preserves galaxy shape
+    smooth_sigma = max(20.0, min(H, W) / 50.0)
+    lum_smooth = ndimage.gaussian_filter(lum, sigma=smooth_sigma)
+
+    # Sky reference from image border (furthest from central galaxy)
+    by = max(10, int(H * Config.BORDER_FRAC))
+    bx = max(10, int(W * Config.BORDER_FRAC))
+    border_pix = np.concatenate([
+        lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
+        lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
+    ])
+    if sigma_clipped_stats is not None:
+        try:
+            _, sky_med, sky_std = sigma_clipped_stats(border_pix, sigma=3.0, maxiters=5)
+            sky_med, sky_std = float(sky_med), float(sky_std)
+        except Exception:
+            sky_med, sky_std = float(np.median(border_pix)), float(np.std(border_pix))
+    else:
+        sky_med, sky_std = float(np.median(border_pix)), float(np.std(border_pix))
+
+    # Emission mask is shared across all three channels — one detection pass
+    emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
+    if verbose:
+        masked_pct = 100.0 * float(np.mean(emission_mask >= 0.5))
+        safe_print(f"    DBE: emission mask covers {masked_pct:.1f}% of image")
+
+    result = np.empty_like(rgb)
+    channel_names = ['Red', 'Green', 'Blue']
+
+    def _process_channel(c):
+        channel = rgb[:, :, c].astype(np.float64)
+        coords, values = _sample_background_patches(
+            channel, emission_mask, patch_size, masked_frac_thresh,
+            sky_ref=sky_med, sky_std=sky_std)
+
+        n = len(coords)
+        if verbose:
+            safe_print(f"    DBE {channel_names[c]}: {n} background patches accepted")
+
+        if n < Config.DBE_MIN_SAMPLES:
+            if verbose:
+                safe_print(f"    DBE {channel_names[c]}: insufficient samples, "
+                           f"falling back to mesh extraction")
+            background = extract_background(channel, mesh_size=patch_size,
+                                            clip_sigma=clip_sigma,
+                                            star_mask=emission_mask).astype(np.float64)
+        else:
+            # Cap for O(N²) RBF tractability on large/drizzled images
+            if n > Config.DBE_MAX_SAMPLES:
+                step = max(1, n // Config.DBE_MAX_SAMPLES)
+                coords = coords[::step]
+                values = values[::step]
+                if verbose:
+                    safe_print(f"    DBE {channel_names[c]}: subsampled to "
+                               f"{len(coords)} patches (N cap)")
+
+            background = _fit_rbf_surface(
+                coords, values, H, W,
+                kernel=rbf_kernel, smoothing=rbf_smoothing,
+                outlier_sigma=outlier_sigma, max_iter=outlier_iters,
+                patch_size=patch_size, verbose=verbose)
+
+        subtracted = channel - background
+        if verbose:
+            safe_print(f"    {channel_names[c]}: bg_median="
+                       f"{float(np.median(background)):.1f}, "
+                       f"subtracted_median={float(np.median(subtracted)):.1f}")
+        return c, subtracted.astype(np.float32)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        for c, ch_result in executor.map(_process_channel, range(3)):
+            result[:, :, c] = ch_result
 
     return result

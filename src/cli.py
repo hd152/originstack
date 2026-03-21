@@ -436,6 +436,19 @@ def parse_args():
                    help='Median filter size for background grid smoothing (default: 3, must be odd)')
     p.add_argument('--bg-clip-sigma', type=float, default=3.0,
                    help='Sigma for star rejection in background estimation (default: 3.0)')
+    p.add_argument('--dbe', action='store_true', default=True,
+                   help='Use Dynamic Background Extraction (RBF scattered-point fitting) '
+                        'instead of the legacy mesh estimator (default: on). '
+                        'DBE traces the actual morphology of extended sources via dilation, '
+                        'then fits a thin-plate-spline surface to clean sky samples. '
+                        'Only active when --background-extraction is enabled.')
+    p.add_argument('--no-dbe', dest='dbe', action='store_false',
+                   help='Use legacy mesh-based background extraction instead of DBE')
+    p.add_argument('--dbe-patch-size', type=int, default=64,
+                   help='DBE background sampling patch size in pixels (default: 64). '
+                        'Smaller patches give denser samples and capture finer gradients; '
+                        'larger patches are faster. --bg-mesh-size is ignored when DBE '
+                        'is active.')
     p.add_argument('--denoise', action='store_true', default=True,
                    help='Enable wavelet denoising post-stack (default: on; requires pywt)')
     p.add_argument('--no-denoise', dest='denoise', action='store_false',

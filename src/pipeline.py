@@ -24,7 +24,8 @@ from src.registration import (calculate_shift, apply_transform, calc_common_crop
                                detect_dither, match_stars_affine, HAS_SKIMAGE_TRANSFORM)
 from src.stacking import (sigma_clip_combine, percentile_clip_combine, esd_combine,
                           _lanczos_resample_frame, drizzle_combine, lacosmic_reject)
-from src.background import (apply_background_extraction, remove_sky_residual, sky_floor_normalize)
+from src.background import (apply_background_extraction, remove_sky_residual,
+                            sky_floor_normalize, dynamic_background_extraction)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
                            bilateral_denoise, local_normalize, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
@@ -966,20 +967,34 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         except Exception:
             pass
 
-    # 1. Background extraction
+    # 1. Background extraction (DBE or legacy mesh)
     if args.background_extraction:
-        print(f"\n  Applying background extraction (mesh={args.bg_mesh_size}, "
-              f"sigma={args.bg_clip_sigma})...")
+        use_dbe = getattr(args, 'dbe', True)
         bg_start = time.time()
-
-        stacked = apply_background_extraction(
-            stacked, mesh_size=args.bg_mesh_size,
-            filter_size=args.bg_filter_size,
-            clip_sigma=args.bg_clip_sigma,
-            verbose=args.verbose,
-            star_mask=pp_star_mask)
-
-        safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
+        if use_dbe:
+            dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
+            print(f"\n  Applying Dynamic Background Extraction "
+                  f"(patch={dbe_patch}px, RBF thin-plate-spline, "
+                  f"sigma={args.bg_clip_sigma})...")
+            stacked = dynamic_background_extraction(
+                stacked,
+                patch_size=dbe_patch,
+                clip_sigma=args.bg_clip_sigma,
+                verbose=args.verbose,
+                star_mask=pp_star_mask)
+            safe_print(f"  ✓ Dynamic Background Extraction "
+                       f"({format_time(time.time() - bg_start)})")
+        else:
+            print(f"\n  Applying background extraction (mesh={args.bg_mesh_size}, "
+                  f"sigma={args.bg_clip_sigma})...")
+            stacked = apply_background_extraction(
+                stacked, mesh_size=args.bg_mesh_size,
+                filter_size=args.bg_filter_size,
+                clip_sigma=args.bg_clip_sigma,
+                verbose=args.verbose,
+                star_mask=pp_star_mask)
+            safe_print(f"  ✓ Background extraction "
+                       f"({format_time(time.time() - bg_start)})")
 
     # 2. Chroma noise reduction
     if getattr(args, 'chroma_nr', True):
