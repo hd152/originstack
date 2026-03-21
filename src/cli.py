@@ -483,8 +483,8 @@ def parse_args():
                         'Try 1–5× the expected sky noise level.')
     p.add_argument('--denoise-bilateral-sigma-space', type=float, default=3.0,
                    help='Bilateral spatial smoothing radius in pixels (default: 3.0).')
-    p.add_argument('--deconvolve', action='store_true', default=True,
-                   help='Enable Richardson-Lucy deconvolution for sharpening (default: on, requires scikit-image)')
+    p.add_argument('--deconvolve', action='store_true', default=False,
+                   help='Enable Richardson-Lucy deconvolution for sharpening (default: off, requires scikit-image)')
     p.add_argument('--no-deconvolve', dest='deconvolve', action='store_false',
                    help='Disable Richardson-Lucy deconvolution')
     p.add_argument('--deconvolve-iterations', type=int, default=Config.RL_DEFAULT_ITERATIONS,
