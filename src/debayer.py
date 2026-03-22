@@ -52,35 +52,50 @@ def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
 
 
 def debayer_malvar(raw, pattern: str = 'RGGB'):
-    """Malvar-He-Cutler demosaicing (simplified kernels)."""
-    gpu = get_gpu()
-    xp = gpu.xp
-    raw = gpu.to_device(raw)
-    H, W = raw.shape
-    kG = xp.array([[0, 0, -1, 0, 0], [0, 0, 2, 0, 0], [-1, 2, 4, 2, -1],
-                   [0, 0, 2, 0, 0], [0, 0, -1, 0, 0]], dtype=xp.float32) / 8.0
-    kR = xp.array([[0, 0, 1, 0, 0], [0, -2, 0, -2, 0], [1, 0, 4, 0, 1],
-                   [0, -2, 0, -2, 0], [0, 0, 1, 0, 0]], dtype=xp.float32) / 8.0
-    kB = kR[::-1, ::-1]
-    out = xp.zeros((H, W, 3), dtype=xp.float32)
-    out[:, :, 0] = gpu.xndimage.convolve(raw, kR, mode='mirror')
-    out[:, :, 1] = gpu.xndimage.convolve(raw, kG, mode='mirror')
-    out[:, :, 2] = gpu.xndimage.convolve(raw, kB, mode='mirror')
-    # Malvar kernels have negative coefficients that can produce negative values;
-    # clip to zero since negative light is physically meaningless
-    xp.clip(out, 0, None, out=out)
-    return out
+    """Malvar-He-Cutler demosaicing.
+
+    Uses OpenCV's edge-aware (EA) implementation when cv2 is available —
+    this is the correct Malvar-He-Cutler algorithm.  Falls back to bilinear
+    when cv2 is absent; the old simplified difference-kernel approach is NOT
+    used because its kR/kB kernels sum to zero, which destroys R and B signal
+    whenever the per-channel sky background levels differ (e.g. after flat
+    calibration normalises a colour-imbalanced sensor like the IMX178).
+    """
+    if HAS_CV2:
+        # cv2 COLOR_BAYER_*2RGB_EA is the Malvar-He-Cutler edge-aware algorithm
+        # Note: OpenCV's _2BGR_EA produces the correct R=ch0,G=ch1,B=ch2 numpy
+        # array when accessed as a C-order array.  The _2RGB_EA variants have
+        # R and B swapped in the output despite the misleading name suffix.
+        pat_map = {
+            'RGGB': cv2.COLOR_BAYER_RG2BGR_EA,
+            'BGGR': cv2.COLOR_BAYER_BG2BGR_EA,
+            'GRBG': cv2.COLOR_BAYER_GR2BGR_EA,
+            'GBRG': cv2.COLOR_BAYER_GB2BGR_EA,
+        }
+        code = pat_map.get(pattern.upper())
+        if code is not None:
+            raw_np = np.asarray(raw, dtype=np.float32)
+            max_val = raw_np.max()
+            if max_val <= 0:
+                return np.zeros((*raw_np.shape, 3), dtype=np.float32)
+            raw_u16 = np.clip(raw_np / max_val * 65535, 0, 65535).astype(np.uint16)
+            rgb = cv2.cvtColor(raw_u16, code)
+            return rgb.astype(np.float32) / 65535.0 * max_val
+
+    # Fallback: bilinear (correct, though lower quality than Malvar)
+    return debayer_bilinear(raw, pattern)
 
 
 def debayer_vng(raw, pattern: str = 'RGGB'):
     """VNG (Variable Number of Gradients) debayering via OpenCV."""
     if not HAS_CV2:
         return debayer_malvar(raw, pattern)
+    # _2BGR_EA/VNG yields correct R=ch0,G=ch1,B=ch2 in numpy (same quirk as EA)
     pat_map = {
-        'RGGB': cv2.COLOR_BAYER_RG2RGB_VNG,
-        'BGGR': cv2.COLOR_BAYER_BG2RGB_VNG,
-        'GRBG': cv2.COLOR_BAYER_GR2RGB_VNG,
-        'GBRG': cv2.COLOR_BAYER_GB2RGB_VNG,
+        'RGGB': cv2.COLOR_BAYER_RG2BGR_VNG,
+        'BGGR': cv2.COLOR_BAYER_BG2BGR_VNG,
+        'GRBG': cv2.COLOR_BAYER_GR2BGR_VNG,
+        'GBRG': cv2.COLOR_BAYER_GB2BGR_VNG,
     }
     code = pat_map.get(pattern.upper())
     if code is None:
@@ -89,9 +104,10 @@ def debayer_vng(raw, pattern: str = 'RGGB'):
     max_val = raw_np.max()
     if max_val <= 0:
         return np.zeros((*raw_np.shape, 3), dtype=np.float32)
-    raw_u16 = np.clip(raw_np / max_val * 65535, 0, 65535).astype(np.uint16)
-    rgb = cv2.cvtColor(raw_u16, code)
-    return (rgb.astype(np.float32) / 65535.0 * max_val)
+    # VNG requires uint8 input in OpenCV ≥ 4.x
+    raw_u8 = np.clip(raw_np / max_val * 255, 0, 255).astype(np.uint8)
+    rgb = cv2.cvtColor(raw_u8, code)
+    return rgb.astype(np.float32) / 255.0 * max_val
 
 
 def debayer(raw, pattern: str = 'RGGB', method: str = 'bilinear'):

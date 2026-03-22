@@ -530,6 +530,28 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             else:
                 safe_print("  Current settings look good — no changes applied.")
 
+    # Heuristic auto-advisor: pure Python, no API key required.
+    # Classifies the target from Phase 1 metrics and applies optimal settings
+    # before Phase 2 so they take effect for registration, stacking, and post-
+    # processing.
+    if getattr(args, 'auto', False):
+        from src.auto_settings import apply_auto_settings
+        target_type, label, signals, changes = apply_auto_settings(final, args)
+        print(f"\n  Auto Advisor: detected '{label}'")
+        if signals:
+            print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
+                  f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
+                  f"peak_excess={signals.get('peak_excess', 0):.1f}  "
+                  f"stars={signals.get('star_count', 0):.0f}  "
+                  f"FWHM={signals.get('fwhm', 0):.1f}px  "
+                  f"frames={signals.get('n_frames', 0)}")
+        if changes:
+            safe_print("  Applied auto settings:")
+            for c in changes:
+                safe_print(f"    * {c}")
+        else:
+            safe_print("  Current settings already optimal — no changes applied.")
+
     # ======================================================================
     # PHASE 2: Registration (reads from stored memmaps — no re-load)
     # ======================================================================

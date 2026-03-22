@@ -607,6 +607,15 @@ def parse_args():
                    help='After stacking, call Claude to generate a narrative session '
                         'report (saved as <output>_report.md). '
                         'Requires: pip install anthropic  and  ANTHROPIC_API_KEY.')
+    # --- Heuristic auto-advisor (no API key required) ---
+    p.add_argument('--auto', action='store_true',
+                   help='After Phase 1, automatically classify the target '
+                        '(emission nebula, galaxy, reflection nebula, star field, '
+                        'wide field) from frame metrics and apply optimised settings. '
+                        'No API key required. Upgrades debayer to malvar when '
+                        'OpenCV is available, scales denoising to SNR, resolves the '
+                        'stacking method by frame count, and tunes deconvolution and '
+                        'stretch parameters to the detected target type.')
     return p.parse_args()
 
 
