@@ -226,13 +226,23 @@ def populate_fits_header(header: fits.Header, frames, stats, args: argparse.Name
     # Copy relevant metadata from first light frame
     if frames:
         first_header = frames[0].header
-        # Copy common FITS keywords if they exist
+        # Copy common FITS keywords if they exist.
+        # BAYERPAT is intentionally excluded: the output is a debayered RGB
+        # image, not a raw CFA mosaic.  Viewers such as Siril use BAYERPAT to
+        # detect raw frames and will attempt to debayer the already-processed
+        # image if the keyword is present, producing garbage.
         copy_keys = ['TELESCOP', 'INSTRUME', 'OBSERVER', 'OBJECT', 'DATE-OBS',
                      'EXPTIME', 'CCD-TEMP', 'GAIN', 'OFFSET', 'XBINNING', 'YBINNING',
-                     'BAYERPAT', 'XPIXSZ', 'YPIXSZ', 'FOCALLEN', 'APTDIA']
+                     'XPIXSZ', 'YPIXSZ', 'FOCALLEN', 'APTDIA']
         for key in copy_keys:
             if key in first_header:
                 header[key] = first_header[key]
+
+        # Mark the output as a debayered RGB image so FITS viewers open it
+        # correctly.  Siril and many other tools recognise COLORTYP=SRGB to
+        # identify a 3-plane (NAXIS3=3) FITS cube as a colour image rather
+        # than three separate science frames.
+        header['COLORTYP'] = ('SRGB', 'Colour space of the stacked image')
 
         # Calculate total exposure time
         if 'EXPTIME' in first_header:
