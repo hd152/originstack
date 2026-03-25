@@ -74,7 +74,11 @@ def safe_print(text: str):
         text = text.replace('≠', '!=')
         text = text.replace('–', '-')
         text = text.replace('—', '--')
-        print(text)
+        text = text.replace('σ', 'sigma')
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            print(text.encode('ascii', errors='replace').decode('ascii'))
 
 
 def print_header(text: str, char: str = "="):

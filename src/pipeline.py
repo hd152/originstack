@@ -931,6 +931,16 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         except Exception:
             pass
 
+    # Save a copy of the stacked data BEFORE post-processing for the FITS
+    # output.  Post-processing (background extraction, local contrast, etc.)
+    # drops the sky level from ~5000+ ADU to ~5 ADU, reducing the sky SNR
+    # from 60-100 to ~4.  FITS viewers auto-stretch this low-SNR data and
+    # show prominent chromatic noise ("multicolored pixels").  By saving the
+    # pre-processed stack, the FITS retains the original sky level and SNR,
+    # matching what tools like DeepSkyStacker and Siril's own stacker produce.
+    # The JPG preview still uses the fully post-processed data.
+    fits_stacked = stacked.copy()
+
     # ======================================================================
     # PHASE 4: Post-processing
     # ======================================================================
@@ -1270,53 +1280,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if HAS_PSUTIL:
         stats.peak_memory_mb = get_memory_usage_mb()
 
-    # After background extraction the sky noise is symmetric around zero,
-    # with ~48% of pixels negative.  FITS viewers clip negatives per-channel
-    # before stretching, and since each channel has independent noise, random
-    # combinations of clipped/unclipped channels produce rainbow pixel noise
-    # (white, magenta, cyan, green speckles).
-    #
-    # Fix: add a uniform positive pedestal so virtually all sky noise is
-    # above zero.  The pedestal must be a SINGLE value for all channels to
-    # preserve color balance.  It is sized to the noisiest channel (typically
-    # R due to Bayer filter) so even that channel stays positive.
-    if args.background_extraction:
-        try:
-            # Measure sky noise per channel, excluding bright objects
-            _ped_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                        + 0.114 * stacked[:, :, 2])
-            _ped_sky = np.ones(stacked.shape[:2], dtype=bool)
-            if sigma_clipped_stats is not None:
-                _, _ped_med, _ped_std = sigma_clipped_stats(
-                    _ped_lum.ravel(), sigma=3.0, maxiters=5)
-                _ped_sky &= (_ped_lum < float(_ped_med) + 3.0 * float(_ped_std))
-            # Find the largest pedestal needed across all channels:
-            # pedestal = 3.3*sigma - median  (keeps 99.95% of noise positive)
-            max_pedestal = 0.0
-            for c in range(3):
-                ch_sky = stacked[:, :, c][_ped_sky].ravel()
-                if sigma_clipped_stats is not None:
-                    _, _ch_med, _ch_std = sigma_clipped_stats(
-                        ch_sky, sigma=3.0, maxiters=5)
-                else:
-                    _ch_med = float(np.median(ch_sky))
-                    _ch_std = float(np.std(ch_sky))
-                needed = 3.3 * float(_ch_std) - float(_ch_med)
-                max_pedestal = max(max_pedestal, needed)
-            if max_pedestal > 0:
-                for c in range(3):
-                    stacked[:, :, c] += max_pedestal
-                if args.verbose:
-                    safe_print(f"    Sky pedestal (uniform): +{max_pedestal:.2f}")
-        except Exception:
-            pass
-
-    # Save FITS (3,H,W)
+    # Save FITS from the pre-processed stacked data (high sky SNR).
+    # Post-processing is only used for the JPG preview.
     from astropy.io import fits
     out_h, out_w, _ = stacked.shape
     hdu = fits.PrimaryHDU()
-    data_out = np.transpose(stacked, (2, 0, 1)).astype(np.float32)
+    data_out = np.transpose(fits_stacked, (2, 0, 1)).astype(np.float32)
     hdu.data = data_out
+    del fits_stacked  # free memory
 
     populate_fits_header(
         header=hdu.header, frames=final, stats=stats, args=args,
