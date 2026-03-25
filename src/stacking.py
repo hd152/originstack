@@ -1,15 +1,25 @@
 """Stacking algorithms: Lanczos resampling, drizzle combine, sigma-clip combine."""
 from __future__ import annotations
 
+import argparse
 import os
-from concurrent.futures import ThreadPoolExecutor
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
 
-from src.models import Config
+from src.gpu_context import get_gpu
+from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, get_logger
+
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 _log = get_logger()
 
@@ -573,3 +583,187 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
         safe_print(f"    ESD: max_outliers={max_outliers}, significance={significance}, "
                    f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
     return result
+
+
+def run_stacking_phase(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    mem_rgb: np.ndarray,
+    shifts: List,
+    transforms: List,
+    H: int,
+    W: int,
+    C: int,
+    args: argparse.Namespace,
+    stats: ProcessingStats,
+) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
+    """Align and combine frames into a stacked image.
+
+    Returns (stacked, fits_stacked, top, bottom, left, right).
+    fits_stacked is the pre-post-processing copy saved in the FITS file.
+    """
+    from src.registration import apply_transform, calc_common_crop
+
+    n_final = len(final)
+    print(f"  Method: {args.stack_method}")
+    print(f"  Combining {n_final} frames...")
+
+    # Quality weights
+    w_snr   = getattr(args, 'weight_snr',   1.0)
+    w_fwhm  = getattr(args, 'weight_fwhm',  1.0)
+    w_stars = getattr(args, 'weight_stars', 1.0)
+    use_noise_weight = getattr(args, 'weight_noise', False)
+
+    if w_snr != 1.0 or w_fwhm != 1.0 or w_stars != 1.0 or use_noise_weight:
+        snr_vals  = np.array([f.metrics.get('snr', 1.0)       for f in final], dtype=np.float64)
+        fwhm_vals = np.array([f.metrics.get('fwhm', 0.0)      for f in final], dtype=np.float64)
+        star_vals = np.array([f.metrics.get('star_count', 1)  for f in final], dtype=np.float64)
+
+        snr_factor = np.clip(snr_vals / max(snr_vals.max(), 1e-9), 0.01, 1.0)
+
+        fwhm_pos = fwhm_vals[fwhm_vals > 0]
+        if len(fwhm_pos):
+            fwhm_inv = np.where(fwhm_vals > 0, 1.0 / np.maximum(fwhm_vals, 0.5), 1.0)
+            fwhm_factor = np.clip(fwhm_inv / fwhm_inv.max(), 0.01, 1.0)
+        else:
+            fwhm_factor = np.ones(n_final)
+
+        star_factor = np.clip(star_vals / max(star_vals.max(), 1e-9), 0.01, 1.0)
+        weights = (snr_factor ** w_snr) * (fwhm_factor ** w_fwhm) * (star_factor ** w_stars)
+
+        if use_noise_weight:
+            brightness = np.array([f.metrics.get('brightness', 1.0) for f in final],
+                                   dtype=np.float64)
+            noise_est = brightness / np.maximum(snr_vals, 0.001)
+            noise_factor = np.clip(noise_est.max() / np.maximum(noise_est, 1e-6), 0.01, 1.0)
+            weights *= noise_factor
+
+        weights = np.sqrt(weights / max(weights.max(), 1e-9))
+        print(f"  Quality weights (per-component SNR^{w_snr} FWHM^{w_fwhm} stars^{w_stars}"
+              f"{' noise' if use_noise_weight else ''}): "
+              f"min={weights.min():.3f}, max={weights.max():.3f}, mean={weights.mean():.3f}")
+    else:
+        scores = np.array([f.metrics.get('score', 1.0) for f in final])
+        weights = np.sqrt(scores / max(scores.max(), 1e-9))
+        print(f"  Quality weights: min={weights.min():.3f}, max={weights.max():.3f}, "
+              f"mean={weights.mean():.3f} (sqrt-compressed)")
+
+    top, bottom, left, right = calc_common_crop(shifts, (H, W), transforms=transforms)
+    stats.output_shape = (bottom - top, right - left)
+    stats.cropped_pixels = (H - (bottom - top), W - (right - left))
+
+    use_aligned_memmap = args.stack_method in ('median', 'sigma_clip', 'winsorized',
+                                               'percentile', 'esd')
+    if use_aligned_memmap:
+        mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
+        crop_h, crop_w = bottom - top, right - left
+        mem_aligned = np.memmap(mm_aligned_path, dtype='float32', mode='w+',
+                                shape=(n_final, crop_h, crop_w, C))
+
+        gpu = get_gpu()
+
+        def _align_one(j):
+            with gpu.stream_context():
+                rgb = np.array(mem_rgb[final_indices[j]])
+                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
+                mem_aligned[j] = aligned[top:bottom, left:right, :]
+
+        n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
+                                           Config.GPU_VRAM_RESERVE_MB), n_final)
+                   if gpu.active else min(os.cpu_count() or 4, n_final))
+        with ThreadPoolExecutor(max_workers=n_align) as executor:
+            futures = {executor.submit(_align_one, j): j for j in range(n_final)}
+            for future in tqdm(as_completed(futures), total=n_final,
+                               desc="  Aligning", unit="frame", disable=args.verbose):
+                future.result()
+        mem_aligned.flush()
+
+        if args.stack_method in ('sigma_clip', 'winsorized'):
+            use_winsorize = (args.stack_method == 'winsorized')
+            use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
+            print(f"  Sigma-clip: sigma={args.rejection_sigma}, iters={args.rejection_iters}, "
+                  f"estimator={'MAD' if use_mad else 'std'}, "
+                  f"mode={'winsorized' if use_winsorize else 'reject'}")
+            stacked = sigma_clip_combine(mem_aligned, sigma=args.rejection_sigma,
+                                         max_iters=args.rejection_iters, weights=weights,
+                                         winsorize=use_winsorize, use_mad=use_mad,
+                                         verbose=args.verbose)
+        elif args.stack_method == 'percentile':
+            low  = getattr(args, 'percentile_low',  20.0)
+            high = getattr(args, 'percentile_high', 80.0)
+            print(f"  Percentile clip: low={low}%, high={high}%")
+            stacked = percentile_clip_combine(mem_aligned, low=low, high=high,
+                                              weights=weights, verbose=args.verbose)
+        elif args.stack_method == 'esd':
+            max_out = getattr(args, 'esd_max_outliers', 0)
+            sig     = getattr(args, 'esd_significance', 0.05)
+            print(f"  ESD: max_outliers={'N//4' if max_out == 0 else max_out}, significance={sig}")
+            stacked = esd_combine(mem_aligned, max_outliers=max_out, significance=sig,
+                                  weights=weights, verbose=args.verbose)
+        else:
+            stacked = np.median(mem_aligned, axis=0).astype(np.float32)
+
+        del mem_aligned
+        try:
+            os.remove(mm_aligned_path)
+        except Exception:
+            pass
+
+    else:
+        drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
+
+        if drizzle_scale > 1.0:
+            crop_h, crop_w = bottom - top, right - left
+            out_h = int(round(crop_h * drizzle_scale))
+            out_w = int(round(crop_w * drizzle_scale))
+            print(f"  Drizzle: {drizzle_scale:.1f}x ({crop_h}x{crop_w} -> {out_h}x{out_w})")
+            acc = np.zeros((out_h, out_w, C), dtype=np.float64)
+            weight_map = np.zeros((out_h, out_w, C), dtype=np.float64)
+            gpu = get_gpu()
+            ones_template = None
+            for j in tqdm(range(n_final), desc="  Drizzling", unit="frame",
+                          disable=args.verbose):
+                with gpu.stream_context():
+                    rgb = np.array(mem_rgb[final_indices[j]])
+                    cropped = apply_transform(rgb, shift=shifts[j],
+                                             transform=transforms[j])[top:bottom, left:right, :]
+                w = float(weights[j])
+                resampled = _lanczos_resample_frame(cropped, (0.0, 0.0),
+                                                     drizzle_scale, out_h, out_w)
+                if ones_template is None or ones_template.shape != cropped.shape[:2]:
+                    ones_template = np.ones(cropped.shape[:2], dtype=np.float64)
+                coverage = _lanczos_resample_frame(ones_template, (0.0, 0.0),
+                                                    drizzle_scale, out_h, out_w)
+                valid3 = (coverage > 0.5)[:, :, np.newaxis]
+                acc += np.where(valid3, resampled * w, 0.0)
+                weight_map += np.where(valid3, w, 0.0)
+            weight_map[weight_map == 0] = 1.0
+            stacked = (acc / weight_map).astype(np.float32)
+
+        else:
+            acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
+            total_weight = 0.0
+            gpu = get_gpu()
+
+            def _align_crop(j):
+                with gpu.stream_context():
+                    rgb = np.array(mem_rgb[final_indices[j]])
+                    return j, apply_transform(rgb, shift=shifts[j],
+                                             transform=transforms[j])[top:bottom, left:right, :]
+
+            n_workers = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
+                                                  Config.GPU_VRAM_RESERVE_MB), n_final)
+                         if gpu.active else min(os.cpu_count() or 4, n_final))
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_align_crop, j): j for j in range(n_final)}
+                for future in tqdm(as_completed(futures), total=n_final,
+                                   desc="  Stacking", unit="frame", disable=args.verbose):
+                    j, cropped = future.result()
+                    w = float(weights[j])
+                    acc += cropped.astype(np.float64) * w
+                    total_weight += w
+            stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
+
+    # Save a pre-post-processing copy for FITS output (preserves high sky SNR)
+    fits_stacked = stacked.copy()
+    return stacked, fits_stacked, top, bottom, left, right

@@ -154,6 +154,12 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('ghs_b',                   7.0),
         ('ghs_sp',                  0.18),
         ('dbe_patch_size',          48),
+        # Denoising: MMT's edge-preserving median cascade protects thin Ha
+        # filaments better than the DWT; ACDNR then adaptively smooths any
+        # residual sky noise without touching the filament edges.
+        ('denoise',                 False),   # wavelet replaced by MMT
+        ('denoise_mmt',             True),
+        ('denoise_acdnr',           True),
     ],
     'galaxy': [
         ('deconvolve',              True),
@@ -164,6 +170,12 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('ghs_b',                   10.0),    # stretch faint halo
         ('ghs_sp',                  0.12),
         ('dbe_patch_size',          48),
+        # Denoising: MMT handles the non-Gaussian noise near the bright core
+        # without smearing the faint outer halo; ACDNR cleans up sky between
+        # the spiral arms without blurring the arm edges.
+        ('denoise',                 False),   # wavelet replaced by MMT
+        ('denoise_mmt',             True),
+        ('denoise_acdnr',           True),
     ],
     'reflection_nebula': [
         ('deconvolve',              True),
@@ -172,12 +184,22 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.70),
         ('ghs_b',                   8.0),
         ('ghs_sp',                  0.15),
+        # Denoising: same reasoning as emission nebula; reflection nebulae
+        # have fine dust structure that median-based MMT handles well.
+        ('denoise',                 False),   # wavelet replaced by MMT
+        ('denoise_mmt',             True),
+        ('denoise_acdnr',           True),
     ],
     'star_field': [
         # deconvolve is conditional — set in _apply_target_settings
         ('star_reduce',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
+        # Denoising: wavelet (default) handles uniform background well;
+        # ACDNR added conservatively to clean sky patches between stars
+        # without touching star halos (high k → only flat-sky pixels smoothed).
+        ('denoise_acdnr',           True),
+        ('denoise_acdnr_k',         4.0),
     ],
     'wide_field': [
         ('deconvolve',              False),
@@ -185,6 +207,10 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),
         ('ghs_sp',                  0.20),
+        # Denoising: wavelet (default) is fine for dense star fields;
+        # ACDNR removes sky graininess conservatively.
+        ('denoise_acdnr',           True),
+        ('denoise_acdnr_k',         4.0),
     ],
     'unknown': [],
 }
@@ -272,6 +298,22 @@ def _apply_quality_settings(sig: dict, args) -> List[str]:
             _set('debayer_method', 'malvar')
         except ImportError:
             pass
+
+    # 5. MMT strength scaled to SNR (only when MMT was selected by target type)
+    #    Wavelet strength is handled separately by estimate_denoise_strength().
+    if getattr(args, 'denoise_mmt', False) and snr > 0:
+        if snr < 5:
+            _set('denoise_mmt_strength', 4.0)   # heavy for very noisy stacks
+        elif snr < 10:
+            _set('denoise_mmt_strength', 3.5)
+        elif snr > 20:
+            _set('denoise_mmt_strength', 2.0)   # gentle; clean data needs less
+
+    # 6. For unknown/unclassified targets: add ACDNR when the stack is very
+    #    noisy (SNR < 5) and nothing else has already been set.  At this noise
+    #    level the adaptive sky smoothing always helps regardless of target type.
+    if snr < 5 and snr > 0 and not getattr(args, 'denoise_acdnr', False):
+        _set('denoise_acdnr', True)
 
     return changes
 

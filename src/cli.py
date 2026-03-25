@@ -483,6 +483,44 @@ def parse_args():
                         'Try 1–5× the expected sky noise level.')
     p.add_argument('--denoise-bilateral-sigma-space', type=float, default=3.0,
                    help='Bilateral spatial smoothing radius in pixels (default: 3.0).')
+    # --- MMT denoising ---
+    p.add_argument('--denoise-mmt', action='store_true',
+                   help='Enable Multiscale Median Transform (MMT) denoising. '
+                        'Decomposes the stack into detail layers via successive median '
+                        'filters (scales 3, 5, 9, 17 px), estimates noise per-scale '
+                        'via the MAD estimator, and removes it by soft thresholding. '
+                        'More robust to non-Gaussian noise (Poisson + read noise) than '
+                        'wavelet denoising; better edge preservation in fine filaments. '
+                        'Can run alongside --denoise or as a standalone pass. '
+                        'Requires cv2 for best performance (scipy fallback available).')
+    p.add_argument('--denoise-mmt-levels', type=int, default=4,
+                   help='MMT decomposition depth (default: 4 → kernel sizes 3,5,9,17 px). '
+                        'Increase to 5 (adds 33 px scale) for very noisy stacks with '
+                        'prominent large-scale sky gradients. Only used when --denoise-mmt.')
+    p.add_argument('--denoise-mmt-strength', type=float, default=3.0,
+                   help='MMT soft-threshold noise-sigma multiplier (default: 3.0). '
+                        'Larger values remove more noise but may smooth fine structure. '
+                        'Typical range 2.0–5.0. Only used when --denoise-mmt.')
+    # --- ACDNR denoising ---
+    p.add_argument('--denoise-acdnr', action='store_true',
+                   help='Enable Adaptive Contrast-based Denoising with Noise Reduction '
+                        '(ACDNR-style). Computes a per-pixel weight from local luminance '
+                        'contrast relative to sky noise: w = exp(-0.5*(contrast/(k*sigma))^2). '
+                        'Flat sky pixels (contrast << k*sigma) are fully smoothed; '
+                        'structured pixels (nebula edges, filaments) are preserved. '
+                        'Effective as a lightweight final pass after wavelet or MMT denoising. '
+                        'No extra dependencies required.')
+    p.add_argument('--denoise-acdnr-sigma', type=float, default=1.5,
+                   help='ACDNR Gaussian smoothing radius in pixels (default: 1.5). '
+                        'Controls both the scale of contrast detection and the smoothing '
+                        'kernel. Larger values remove coarser noise but blur finer structure. '
+                        'Typical range 1.0–3.0. Only used when --denoise-acdnr.')
+    p.add_argument('--denoise-acdnr-k', type=float, default=3.0,
+                   help='ACDNR contrast threshold multiplier k (default: 3.0). '
+                        'Smoothing triggers when local contrast < k * sky_sigma. '
+                        'Lower → more aggressive (smooth structured regions too); '
+                        'higher → conservative sky-only smoothing. Typical range 2.0–5.0. '
+                        'Only used when --denoise-acdnr.')
     p.add_argument('--deconvolve', action='store_true', default=False,
                    help='Enable Richardson-Lucy deconvolution for sharpening (default: off, requires scikit-image)')
     p.add_argument('--no-deconvolve', dest='deconvolve', action='store_false',
@@ -613,9 +651,13 @@ def parse_args():
                         '(emission nebula, galaxy, reflection nebula, star field, '
                         'wide field) from frame metrics and apply optimised settings. '
                         'No API key required. Upgrades debayer to malvar when '
-                        'OpenCV is available, scales denoising to SNR, resolves the '
-                        'stacking method by frame count, and tunes deconvolution and '
-                        'stretch parameters to the detected target type.')
+                        'OpenCV is available, resolves the stacking method by frame '
+                        'count, tunes deconvolution and stretch parameters to the '
+                        'detected target type, and selects the best denoising method: '
+                        'nebulae and galaxies switch to MMT+ACDNR (edge-preserving '
+                        'median cascade + adaptive contrast cleanup); star fields and '
+                        'wide fields keep wavelet and add ACDNR for sky cleanup; '
+                        'MMT strength is scaled to stack SNR.')
     return p.parse_args()
 
 

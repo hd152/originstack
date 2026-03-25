@@ -1,16 +1,25 @@
 """Image registration: shift calculation, affine transform, cropping, dither detection."""
 from __future__ import annotations
 
+import argparse
 import os
+import time
 import warnings
-from typing import List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
 
 from src.gpu_context import get_gpu
-from src.models import Config
+from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, get_logger
+
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 _log = get_logger()
 
@@ -542,3 +551,134 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
         safe_print(f"    Autocorrelation: {autocorrelation:.2f}")
 
     return result
+
+
+def run_registration_phase(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    best: FrameInfo,
+    best_idx: int,
+    ref_lum: np.ndarray,
+    mem_lum: np.ndarray,
+    cached_lums: List,
+    H: int,
+    W: int,
+    args: argparse.Namespace,
+    stats: ProcessingStats,
+) -> Tuple[List, List, Dict]:
+    """Compute per-frame registration shifts/transforms for all accepted frames.
+
+    Returns (shifts, transforms, dither_info).
+    """
+    ref_stars = best.metrics.get('_star_sources')
+    if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
+                   "registration disabled, falling back to translation only")
+
+    shifts = [None] * len(final)
+    transforms = [None] * len(final)
+    print(f"  Calculating shifts for {len(final)} frames...")
+
+    gpu = get_gpu()
+
+    def _register_one(j, f, orig_idx):
+        if orig_idx == best_idx or args.no_registration:
+            return j, (0.0, 0.0), None
+        with gpu.stream_context():
+            lum = (cached_lums[orig_idx] if cached_lums[orig_idx] is not None
+                   else np.array(mem_lum[orig_idx]))
+            use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
+            if use_affine:
+                sy, sx = calculate_shift(ref_lum, lum, verbose=False,
+                                         skip_phase_cc=args.skip_phase_correlation)
+                affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
+                                               initial_shift=(sy, sx))
+                if affine_tf is not None:
+                    return j, (affine_tf.params[1, 2], affine_tf.params[0, 2]), affine_tf
+            sy, sx = calculate_shift(
+                ref_lum, lum, verbose=args.verbose,
+                debug=args.debug_registration,
+                frame_name=os.path.splitext(os.path.basename(f.path))[0],
+                skip_phase_cc=args.skip_phase_correlation)
+            if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
+                safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
+                sx, sy = 0.0, 0.0
+            return j, (sy, sx), None
+
+    if gpu.active:
+        n_workers = min(gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB,
+                                            Config.GPU_VRAM_RESERVE_MB), len(final))
+    else:
+        n_workers = min(os.cpu_count() or 4, len(final))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_register_one, j, f, orig_idx): j
+                   for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
+        for future in tqdm(as_completed(futures), total=len(final),
+                           desc="  Registering", unit="frame", disable=args.verbose):
+            j, shift_val, transform_val = future.result()
+            shifts[j] = shift_val
+            transforms[j] = transform_val
+            final[j].shift = shift_val
+            if args.verbose:
+                f = final[j]
+                if transform_val is not None:
+                    tx, ty = shift_val[1], shift_val[0]
+                    rot_deg = np.degrees(np.arctan2(transform_val.params[1, 0],
+                                                    transform_val.params[0, 0]))
+                    safe_print(f'    {os.path.basename(f.path)}: affine shift=({tx:+.1f}, '
+                               f'{ty:+.1f}) px, rotation={rot_deg:+.3f} deg')
+                elif shift_val != (0.0, 0.0):
+                    sy, sx = shift_val
+                    safe_print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
+                               f'magnitude={np.sqrt(sy**2 + sx**2):.2f} px')
+
+    # Shift statistics
+    shift_x = [s[1] for s in shifts]
+    shift_y = [s[0] for s in shifts]
+    shift_mags = [np.sqrt(sx**2 + sy**2) for sx, sy in shifts]
+    if not args.no_registration:
+        print(f"  Shift statistics:")
+        print(f"    X: mean={np.mean(shift_x):+.1f}px, std={np.std(shift_x):.1f}px, "
+              f"range=[{np.min(shift_x):+.1f}, {np.max(shift_x):+.1f}]")
+        print(f"    Y: mean={np.mean(shift_y):+.1f}px, std={np.std(shift_y):.1f}px, "
+              f"range=[{np.min(shift_y):+.1f}, {np.max(shift_y):+.1f}]")
+        print(f"    Magnitude: mean={np.mean(shift_mags):.1f}px, max={np.max(shift_mags):.1f}px")
+        if np.max(shift_mags) > Config.LARGE_SHIFT_WARNING_PX:
+            warning = f"Large shifts detected (max={np.max(shift_mags):.1f}px)"
+            stats.add_warning(warning)
+            safe_print(f"  ⚠ {warning}")
+
+    shift_set = set(f.shift for f in final)
+    zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
+    if len(shift_set) == 1 and len(final) > 2:
+        unique_shift = list(shift_set)[0]
+        if unique_shift != (0.0, 0.0):
+            warning = f'All {len(final)} frames have IDENTICAL shift — registration failure!'
+            stats.add_warning(warning)
+            safe_print(f'\n  ⚠ WARNING: {warning}')
+        elif len(final) <= 3:
+            safe_print(f'\n  INFO: All frames registered with zero shift — well-aligned.')
+    elif zero_shifts > len(final) * 0.8 and len(final) > 2:
+        warning = f'{zero_shifts}/{len(final)} frames have zero shift'
+        stats.add_warning(warning)
+        safe_print(f'\n  ⚠ WARNING: {warning}')
+
+    dither_info = detect_dither(shifts, verbose=False)
+    if not args.no_registration and len(shifts) > 2:
+        labels = {'dithered': 'Dithered (random offsets)',
+                  'tracking_drift': 'Tracking drift (systematic trend)',
+                  'aligned': 'Well-aligned (minimal offsets)'}
+        print(f"\n  Dither analysis:")
+        print(f"    Pattern: {labels.get(dither_info['pattern'], dither_info['pattern'])}")
+        print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
+        print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
+        if dither_info.get('direction_spread_deg', 0) > 0:
+            print(f"    Direction spread: {dither_info['direction_spread_deg']:.1f} deg")
+        if dither_info['is_dithered'] and args.stack_method == 'mean':
+            safe_print(f"    Warning: mean stacking does not reject cosmic rays; "
+                       f"consider --stack-method sigma_clip")
+        if dither_info['is_dithered'] and getattr(args, 'drizzle_scale', 1.0) <= 1.0:
+            safe_print(f"    Tip: dithered data detected — add --drizzle-scale 2.0 "
+                       f"to enable sub-pixel super-resolution stacking")
+
+    return shifts, transforms, dither_info

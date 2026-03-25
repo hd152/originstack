@@ -365,6 +365,200 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
     return img
 
 
+def _median_filter_fast(plane: np.ndarray, ksize: int) -> np.ndarray:
+    """Median filter with cv2 float32 fast-path and scipy fallback.
+
+    cv2.medianBlur supports float32 input for ksize 3 and 5 (SIMD-accelerated).
+    For ksize > 5, cv2 only accepts uint8, which is insufficient precision for
+    astrophoto data; scipy.ndimage.median_filter (C-based histogram algorithm)
+    is used instead and handles arbitrary odd kernel sizes on float64 directly.
+
+    Args:
+        plane: 2-D float64 array.
+        ksize: Odd kernel side length (3, 5, 9, 17, …).
+
+    Returns:
+        Median-filtered float64 array of the same shape.
+    """
+    if HAS_CV2 and ksize in (3, 5):
+        return cv2.medianBlur(plane.astype(np.float32), ksize).astype(np.float64)
+    return ndimage.median_filter(plane, size=ksize)
+
+
+def mmt_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 3.0,
+                chroma_factor: float = 2.0,
+                star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Multiscale Median Transform (MMT) denoising.
+
+    Decomposes the image into detail layers using successive median filters
+    (kernel sizes 3, 5, 9, 17 px for 4 levels).  Each layer captures structure
+    at one spatial scale; noise is estimated per-layer via the MAD estimator
+    and removed via soft thresholding.  The image is reconstructed from the
+    thresholded layers plus the coarsest background residual.
+
+    Advantages over DWT (wavelet_denoise):
+    - Median filters are robust to non-Gaussian noise (Poisson + read noise).
+    - Better edge preservation in thin filaments and star halos.
+    - More effective against residual hot pixels that survive calibration.
+
+    Operates in YCbCr space; chroma channels receive a larger effective
+    threshold (chroma_factor × luma threshold) so colour speckle is removed
+    more aggressively than luminance structure.
+
+    Args:
+        img:              Float32 stacked image (H, W, 3).
+        levels:           Number of decomposition scales (default 4 → kernel
+                          sizes 3, 5, 9, 17 px).
+        threshold_factor: Noise-sigma multiplier for soft thresholding
+                          (default 3.0).  Larger → more aggressive noise removal.
+        chroma_factor:    Multiplier on the noise estimate for Cb/Cr channels
+                          (default 2.0).  Higher removes more colour speckle at
+                          the cost of slight chroma blurring.
+        star_mask:        Optional float mask (0–1, 1 = star core).  Star pixels
+                          are blended back from the original to protect cores.
+
+    Returns:
+        Denoised float32 image (H, W, 3).
+    """
+    h, w = img.shape[:2]
+    src = img.astype(np.float64)
+
+    # RGB → YCbCr (ITU-R BT.601)
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    def _mmt_plane(plane: np.ndarray, chroma_mult: float) -> np.ndarray:
+        prev = plane.copy()
+        detail_layers = []
+        for k in range(levels):
+            ksize = 2 ** (k + 1) + 1  # 3, 5, 9, 17 for k = 0..3
+            blurred = _median_filter_fast(prev, ksize)
+            detail_layers.append(prev - blurred)
+            prev = blurred  # carry residual to next finer scale
+
+        # Noise estimate from the finest detail layer (MAD, consistent with
+        # the estimator used in adaptive_wavelet_denoise)
+        sigma_noise = np.median(np.abs(detail_layers[0])) / 0.6745
+        sigma_noise = max(sigma_noise * chroma_mult, 1e-12)
+
+        # Soft-threshold each detail layer.  Noise amplitude decays across
+        # scales roughly as 1/sqrt(k+1) for the median cascade (empirically
+        # matches PixInsight MMT behaviour); coarser scales therefore receive
+        # a smaller threshold so genuine large-scale structure is preserved.
+        result = prev.copy()  # start from coarsest background residual
+        for k, layer in enumerate(detail_layers):
+            scale_sigma = sigma_noise / np.sqrt(float(k + 1))
+            threshold = threshold_factor * scale_sigma
+            thresholded = np.sign(layer) * np.maximum(np.abs(layer) - threshold, 0.0)
+            result = result + thresholded
+
+        return result
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_Y  = executor.submit(_mmt_plane, Y,  1.0)
+        f_Cb = executor.submit(_mmt_plane, Cb, chroma_factor)
+        f_Cr = executor.submit(_mmt_plane, Cr, chroma_factor)
+        Y_d, Cb_d, Cr_d = f_Y.result(), f_Cb.result(), f_Cr.result()
+
+    # YCbCr → RGB
+    R = Y_d + 1.40200 * Cr_d
+    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+    B = Y_d + 1.77200 * Cb_d
+    result = np.stack([R, G, B], axis=2)
+
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return result.astype(np.float32)
+
+
+def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
+                  contrast_k: float = 3.0, chroma_factor: float = 2.0,
+                  star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Adaptive Contrast-based Denoising with Noise Reduction (ACDNR-style).
+
+    Computes a per-pixel adaptive weight from local luminance contrast relative
+    to the sky-noise level::
+
+        w(x,y) = exp(-0.5 * (contrast(x,y) / (k * sigma_noise))^2)
+
+    where ``contrast(x,y) = |luma(x,y) - gaussian_smooth(luma, sigma)|``.
+
+    Pixels in flat sky regions (contrast << k·σ) receive w ≈ 1 and are
+    fully smoothed.  Pixels near nebula filaments or galaxy edges (contrast >>
+    k·σ) receive w ≈ 0 and are left unchanged.  The transition is controlled
+    by ``contrast_k``: smaller values smooth more structure aggressively;
+    larger values restrict smoothing to featureless sky only.
+
+    Chroma channels (Cb/Cr) use the same luma-derived contrast mask but with
+    a lower effective threshold (k / chroma_factor), so colour speckle in the
+    sky background is always removed more aggressively than luma detail.
+
+    Args:
+        img:             Float32 stacked image (H, W, 3).
+        smoothing_sigma: Gaussian σ for contrast detection and smoothing
+                         (default 1.5 px).  Larger values remove coarser
+                         spatial noise but blur fine structure.
+        contrast_k:      Noise-sigma multiplier for the contrast threshold
+                         (default 3.0).  Lower → more aggressive; higher →
+                         sky-only smoothing.
+        chroma_factor:   Chroma channels use k / chroma_factor as threshold
+                         (default 2.0), making them 2× more aggressively
+                         denoised than luma.
+        star_mask:       Optional float mask (0–1, 1 = star core).  Star
+                         pixels are blended back from the original.
+
+    Returns:
+        Denoised float32 image (H, W, 3).
+    """
+    src = img.astype(np.float64)
+
+    luma = (0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1]
+            + 0.11400 * src[:, :, 2])
+
+    sigma_noise = float(_estimate_sky_sigma(img))
+    if sigma_noise < 1e-10:
+        return img.copy()
+
+    # Local contrast map at the smoothing scale
+    smooth_luma = ndimage.gaussian_filter(luma, sigma=smoothing_sigma)
+    contrast = np.abs(luma - smooth_luma)
+
+    # YCbCr split (same BT.601 coefficients as the other denoisers)
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    # Adaptive weights: Gaussian decay around the noise threshold
+    luma_thr   = max(contrast_k * sigma_noise, 1e-12)
+    chroma_thr = max(contrast_k * sigma_noise / max(chroma_factor, 1e-6), 1e-12)
+    luma_w   = np.exp(-0.5 * (contrast / luma_thr)   ** 2)
+    chroma_w = np.exp(-0.5 * (contrast / chroma_thr) ** 2)
+
+    # Smooth each YCbCr plane, then adaptively blend
+    Y_smooth  = ndimage.gaussian_filter(Y,  sigma=smoothing_sigma)
+    Cb_smooth = ndimage.gaussian_filter(Cb, sigma=smoothing_sigma)
+    Cr_smooth = ndimage.gaussian_filter(Cr, sigma=smoothing_sigma)
+
+    Y_d  = luma_w   * Y_smooth  + (1.0 - luma_w)   * Y
+    Cb_d = chroma_w * Cb_smooth + (1.0 - chroma_w) * Cb
+    Cr_d = chroma_w * Cr_smooth + (1.0 - chroma_w) * Cr
+
+    # YCbCr → RGB
+    R = Y_d + 1.40200 * Cr_d
+    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+    B = Y_d + 1.77200 * Cb_d
+    result = np.stack([R, G, B], axis=2)
+
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return result.astype(np.float32)
+
+
 def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
     """Local normalization to remove flat-field residuals and vignetting."""
     result = np.empty_like(img)
