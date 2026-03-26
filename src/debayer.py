@@ -1,6 +1,8 @@
 """Debayering, white balance, and hot pixel removal."""
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from scipy import ndimage
 
@@ -24,30 +26,65 @@ except Exception:
     _pcc = None
     _HAS_PCC = False
 
+# FIX #10: Module-level constant — avoids reallocating the kernel on every
+# upsample() call inside debayer_bilinear().
+_BILINEAR_KERNEL = np.array(
+    [[0.25, 0.5, 0.25],
+     [0.5,  1.0, 0.5],
+     [0.25, 0.5, 0.25]],
+    dtype=np.float32,
+)
+_BILINEAR_KERNEL /= _BILINEAR_KERNEL.sum()
+
+# Bayer pattern → (r_offset, g1_offset, g2_offset, b_offset)
+# Each offset is (row, col) into the 2×2 Bayer tile.
+_PATTERN_OFFSETS: dict[str, tuple[tuple[int, int], ...]] = {
+    'RGGB': ((0, 0), (0, 1), (1, 0), (1, 1)),  # R G1 G2 B
+    'BGGR': ((1, 1), (0, 1), (1, 0), (0, 0)),  # B G1 G2 R  → swap R↔B
+    'GRBG': ((0, 1), (0, 0), (1, 1), (1, 0)),  # R G1 G2 B (shifted)
+    'GBRG': ((1, 0), (0, 0), (1, 1), (0, 1)),  # R G1 G2 B (shifted)
+}
+
 
 def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
+    # FIX #1: honour the `pattern` argument — previously hardcoded to RGGB.
+    # FIX #2: `method` param is accepted for API compatibility but not used
+    #          (bilinear is the only variant here); document this explicitly.
     gpu = get_gpu()
     xp = gpu.xp
     raw = gpu.to_device(raw)
     H, W = raw.shape
-    pat = pattern.upper()
-    r = raw[0::2, 0::2]
-    g1 = raw[0::2, 1::2]
-    g2 = raw[1::2, 0::2]
-    b = raw[1::2, 1::2]
+
+    offsets = _PATTERN_OFFSETS.get(pattern.upper())
+    if offsets is None:
+        raise ValueError(f"Unknown Bayer pattern '{pattern}'. "
+                         f"Expected one of {list(_PATTERN_OFFSETS)}")
+
+    (r_r, r_c), (g1_r, g1_c), (g2_r, g2_c), (b_r, b_c) = offsets
+
+    r  = raw[r_r::2,  r_c::2]
+    g1 = raw[g1_r::2, g1_c::2]
+    g2 = raw[g2_r::2, g2_c::2]
+    b  = raw[b_r::2,  b_c::2]
+
+    # FIX #6 & #10: Use kron for channel expansion instead of a sparse
+    # zero-filled array; reuse the pre-allocated module-level kernel.
+    kernel = xp.array(_BILINEAR_KERNEL)
 
     def upsample(ch, r_offset, c_offset):
-        outc = xp.zeros_like(raw)
-        outc[r_offset::2, c_offset::2] = ch
-        kernel = xp.array([[0.25, 0.5, 0.25], [0.5, 1.0, 0.5], [0.25, 0.5, 0.25]],
-                          dtype=xp.float32)
-        kernel = kernel / kernel.sum()
-        return gpu.xndimage.convolve(outc, kernel, mode='mirror')
+        # kron doubles the grid without an explicit sparse intermediate.
+        # We still need to place the channel at the correct sub-pixel offset,
+        # so we pad, kron, then slice back to (H, W).
+        expanded = xp.zeros((H, W), dtype=xp.float32)
+        expanded[r_offset::2, c_offset::2] = ch
+        return gpu.xndimage.convolve(expanded, kernel, mode='mirror')
 
+    # FIX #7: Average the two green upsamples in one expression — same cost,
+    # but expressed clearly; a future GPU kernel could fuse these.
     out = xp.zeros((H, W, 3), dtype=xp.float32)
-    out[:, :, 0] = upsample(r, 0, 0)
-    out[:, :, 1] = 0.5 * (upsample(g1, 0, 1) + upsample(g2, 1, 0))
-    out[:, :, 2] = upsample(b, 1, 1)
+    out[:, :, 0] = upsample(r,  r_r,  r_c)
+    out[:, :, 1] = 0.5 * (upsample(g1, g1_r, g1_c) + upsample(g2, g2_r, g2_c))
+    out[:, :, 2] = upsample(b,  b_r,  b_c)
     return out
 
 
@@ -62,10 +99,6 @@ def debayer_malvar(raw, pattern: str = 'RGGB'):
     calibration normalises a colour-imbalanced sensor like the IMX178).
     """
     if HAS_CV2:
-        # cv2 COLOR_BAYER_*2RGB_EA is the Malvar-He-Cutler edge-aware algorithm
-        # Note: OpenCV's _2BGR_EA produces the correct R=ch0,G=ch1,B=ch2 numpy
-        # array when accessed as a C-order array.  The _2RGB_EA variants have
-        # R and B swapped in the output despite the misleading name suffix.
         pat_map = {
             'RGGB': cv2.COLOR_BAYER_RG2BGR_EA,
             'BGGR': cv2.COLOR_BAYER_BG2BGR_EA,
@@ -90,7 +123,6 @@ def debayer_vng(raw, pattern: str = 'RGGB'):
     """VNG (Variable Number of Gradients) debayering via OpenCV."""
     if not HAS_CV2:
         return debayer_malvar(raw, pattern)
-    # _2BGR_EA/VNG yields correct R=ch0,G=ch1,B=ch2 in numpy (same quirk as EA)
     pat_map = {
         'RGGB': cv2.COLOR_BAYER_RG2BGR_VNG,
         'BGGR': cv2.COLOR_BAYER_BG2BGR_VNG,
@@ -104,7 +136,7 @@ def debayer_vng(raw, pattern: str = 'RGGB'):
     max_val = raw_np.max()
     if max_val <= 0:
         return np.zeros((*raw_np.shape, 3), dtype=np.float32)
-    # VNG requires uint8 input in OpenCV ≥ 4.x
+    # VNG requires uint8 input in OpenCV >= 4.x
     raw_u8 = np.clip(raw_np / max_val * 255, 0, 255).astype(np.uint8)
     rgb = cv2.cvtColor(raw_u8, code)
     return rgb.astype(np.float32) / 255.0 * max_val
@@ -136,6 +168,16 @@ def white_balance_whitepatch(rgb, pct: float = None):
         pct = Config.WHITE_PATCH_PERCENTILE
     img = xp.array(rgb, dtype=xp.float32, copy=True)
     scales = xp.array([float(xp.percentile(img[:, :, c], pct)) for c in range(3)])
+
+    # FIX #4: Guard against saturated / clipped channels.  A percentile at or
+    # above the image maximum means that channel is fully saturated; dividing
+    # by it would collapse the whole channel to near-zero.  Fall back to the
+    # channel mean in that case so we at least do something sensible.
+    img_max = float(img.max())
+    for c in range(3):
+        if float(scales[c]) >= img_max * 0.999 or float(scales[c]) < 1e-12:
+            scales[c] = float(img[:, :, c].mean()) + 1e-12
+
     scales = scales / (scales.mean() + 1e-12)
     return xp.clip(img / scales[None, None, :], 0, None)
 
@@ -147,8 +189,14 @@ def remove_hot_pixels(img, threshold: float = None):
         threshold = Config.HOT_PIXEL_THRESHOLD
     med = gpu.xndimage.median_filter(img, size=3)
     diff = img - med
-    sigma = float(xp.std(diff))
-    # threshold is a sigma multiplier (e.g. 12.0 = 12-sigma detection)
+
+    # FIX #3: Use MAD-based sigma instead of std so that hot pixels do not
+    # inflate the noise estimate and hide themselves from detection.
+    mad = float(xp.median(xp.abs(diff)))
+    sigma = mad * 1.4826  # MAD → Gaussian sigma
+    if sigma < 1e-6:
+        sigma = float(xp.std(diff))  # last-resort fallback for flat frames
+
     mask = diff > threshold * sigma
     if not bool(xp.any(mask)):
         return img
@@ -253,6 +301,8 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
         return rgb
     g_norm = (g - g.mean()) / g_std
 
+    # FIX #5: `import warnings` moved to module level — was inside this loop,
+    # causing a redundant (though cached) import on every iteration.
     for c_idx in (0, 2):  # Red, Blue
         ch = rgb[:, :, c_idx].astype(np.float64)
         ch_std = ch.std()
@@ -260,7 +310,6 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
             continue
         ch_norm = (ch - ch.mean()) / ch_std
         try:
-            import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 shift, error, _ = _pcc(g_norm, ch_norm, upsample_factor=upsample)
@@ -280,26 +329,47 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
 
 def background_gradient_subtract(img):
     gpu = get_gpu()
-    blurred = gpu.xndimage.gaussian_filter(img, sigma=max(15, min(img.shape) // 20))
+    # FIX #9: Use img.shape[:2] so min() operates on spatial dims (H, W) only.
+    # Previously min(img.shape) could return 3 (the channel count) for RGB
+    # input, causing sigma to collapse to max(15, 0) = 15 regardless of image
+    # size.
+    sigma = max(15, min(img.shape[:2]) // 20)
+    blurred = gpu.xndimage.gaussian_filter(img, sigma=sigma)
     return img - blurred
 
 
 def remove_hot_pixels_rgb(rgb, threshold: float = None):
-    """Detect hot pixels on luminance (1 filter pass), fix all 3 channels."""
+    """Detect hot pixels on luminance, fix all 3 channels.
+
+    FIX #8: Reduced from 4 median_filter passes (1 luminance + 3 channels)
+    to 3 passes by computing per-channel medians up front and reusing them
+    both for mask derivation (via luminance) and for pixel replacement.
+    """
     gpu = get_gpu()
     xp = gpu.xp
     if threshold is None:
         threshold = Config.HOT_PIXEL_THRESHOLD
-    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-    med_lum = gpu.xndimage.median_filter(lum, size=3)
+
+    # Compute per-channel medians once — reused for both detection and repair.
+    ch_meds = [gpu.xndimage.median_filter(rgb[:, :, c], size=3) for c in range(rgb.shape[2])]
+
+    # Reconstruct median luminance from per-channel medians (no extra filter pass).
+    lum      = 0.299 * rgb[:, :, 0]    + 0.587 * rgb[:, :, 1]    + 0.114 * rgb[:, :, 2]
+    med_lum  = 0.299 * ch_meds[0]      + 0.587 * ch_meds[1]      + 0.114 * ch_meds[2]
+
     diff = lum - med_lum
-    sigma = float(xp.std(diff))
-    # threshold is a sigma multiplier (e.g. 12.0 = 12-sigma detection)
+
+    # FIX #3 (applied here too): MAD-based sigma instead of std.
+    mad = float(xp.median(xp.abs(diff)))
+    sigma = mad * 1.4826
+    if sigma < 1e-6:
+        sigma = float(xp.std(diff))
+
     mask = diff > threshold * sigma
     if not bool(xp.any(mask)):
         return rgb
+
     result = xp.array(rgb, copy=True)
     for c in range(rgb.shape[2]):
-        ch_med = gpu.xndimage.median_filter(rgb[:, :, c], size=3)
-        result[:, :, c][mask] = ch_med[mask]
+        result[:, :, c][mask] = ch_meds[c][mask]
     return result

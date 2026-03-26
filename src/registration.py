@@ -63,8 +63,12 @@ def match_stars_affine(ref_positions, img_positions,
     img_pts = np.array([(float(s['xcentroid']), float(s['ycentroid']))
                         for s in img_positions[:max_stars]])
 
-    # Shift img points by initial estimate for better matching
-    img_pts_shifted = img_pts + np.array([initial_shift[1], initial_shift[0]])
+    # Shift img points by initial estimate for better matching.
+    # Initial shift is the amount needed to move 'img' to align with 'ref'.
+    # So img_points = ref_points + shift. To find correspondence, we map 
+    # img_points back to ref space: img_points - shift.
+    shift_vec = np.array([initial_shift[1], initial_shift[0]]) # [sx, sy]
+    img_pts_shifted = img_pts - shift_vec
 
     tree = cKDTree(ref_pts)
     distances, indices = tree.query(img_pts_shifted, k=1)
@@ -93,25 +97,37 @@ def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
     """Apply translation or affine transform to a multi-channel image.
 
     Uses cubic spline interpolation (order=3) for subpixel accuracy.
-    With accurate registration (full-resolution FFT cross-correlation),
-    subpixel shifts preserve detail better than integer rounding.
     Dispatches to GPU (cupyx.scipy.ndimage) when available.
     """
+    # Ensure 3D shape for consistent channel processing (H, W, 1) for grayscale
+    original_ndim = img.ndim
+    if original_ndim == 2:
+        img = img[:, :, np.newaxis]
+        squeeze_back = True
+    else:
+        squeeze_back = False
+
     gpu = get_gpu()
     xp = gpu.xp
     _ndimage = gpu.xndimage
     img_d = gpu.to_device(img)
+    
     if transform is not None:
         matrix = transform.params
         R = matrix[:2, :2]        # EuclideanTransform stores t in (x=col, y=row) space.
         # scipy.ndimage.affine_transform operates in (row, col) space and applies the
         # inverse mapping: input_coord = M @ output_coord + offset.
-        # Correct offset: -R @ [ty, tx]  (swap x/y to row/col, then negate for inverse).
-        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)=(x, y)
+        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)
         t_rowcol = np.array([t_xy[1], t_xy[0]])  # swap to (row, col)
         offset = -R @ t_rowcol
-        mat_d = xp.asarray(R) if gpu.active else R
-        off_d = xp.asarray(offset) if gpu.active else offset
+        
+        if gpu.active:
+            mat_d = xp.asarray(R)
+            off_d = xp.asarray(offset)
+        else:
+            mat_d = R
+            off_d = offset
+
         result = xp.zeros_like(img_d)
         for c in range(img_d.shape[2]):
             result[:, :, c] = _ndimage.affine_transform(
@@ -119,6 +135,7 @@ def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
                 order=3, mode='constant', cval=0.0
             )
         return gpu.to_host(result)
+        
     elif shift is not None:
         result = xp.zeros_like(img_d)
         for c in range(img_d.shape[2]):
@@ -127,6 +144,11 @@ def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
                 mode='constant', cval=0.0, prefilter=True
             )
         return gpu.to_host(result)
+        
+    # If neither transform nor shift is provided, return original img
+    # (ensure it is on CPU as per function convention)
+    if squeeze_back:
+        img = img[0]
     return img
 
 
@@ -135,13 +157,9 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
 
     Registration cascade:
       1. Multi-scale pyramid (coarse-to-fine) — handles large shifts reliably
-         and provides a warm-start estimate for the subsequent methods.
       2. Phase cross-correlation (skimage) — sub-pixel accurate when error < 0.1.
       3. FFT cross-correlation at full resolution — fallback for phase-cc failure.
       4. Centroid difference — last resort for featureless or very noisy frames.
-
-    The ``use_pyramid`` flag (default True) enables step 1; set it to False for
-    frames where a near-zero shift is expected (e.g., the reference frame itself).
     """
     debug_info = []
 
@@ -165,10 +183,6 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             pass
 
     # Step 1: Multi-scale pyramid registration (coarse-to-fine).
-    # Handles large dither offsets and tracking drift that can exceed the
-    # unambiguous range of single-scale FFT cross-correlation.  The pyramid
-    # result is used as an initial integer-pixel estimate; subsequent methods
-    # refine it to sub-pixel accuracy.
     pyramid_shift = (0.0, 0.0)
     if use_pyramid:
         try:
@@ -182,9 +196,6 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     # Use phase cross correlation for subpixel shifts when available
     if not skip_phase_cc and phase_cross_correlation is not None:
         try:
-            # Pre-apply the pyramid coarse shift to img so phase correlation
-            # only needs to find the sub-pixel residual — this keeps the
-            # search range small and avoids wrap-around on large offsets.
             psy, psx = pyramid_shift
             if psy != 0.0 or psx != 0.0:
                 img_pre = ndimage.shift(img, shift=(psy, psx), order=1,
@@ -192,21 +203,15 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             else:
                 img_pre = img
 
-            # Normalize images for phase correlation (zero mean, unit variance)
-            # This is critical for good phase correlation performance
             ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
             img_norm = (img_pre - np.mean(img_pre)) / (np.std(img_pre) + 1e-12)
 
-            # Suppress overflow warnings in phase correlation
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 shift, error, diffphase = phase_cross_correlation(ref_norm, img_norm, upsample_factor=upsample)
             debug_info.append(f"phase_cc: shift={shift}, error={error:.4f}")
 
-            # Validate shift magnitude (sanity check)
             if np.isfinite(shift).all() and np.abs(shift).max() < max(ref.shape) * 0.5:
-                # Check error threshold - phase correlation must have low error to be trusted
-                # error < 0.01 is excellent, error < 0.1 is acceptable, error >= 0.5 is failure
                 if error < 0.1:
                     total_sy = float(shift[0]) + psy
                     total_sx = float(shift[1]) + psx
@@ -224,16 +229,10 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             debug_info.append(f"phase_cc error: {type(e).__name__}")
 
     # FFT cross-correlation at full resolution with zero-padding.
-    # No downscaling or windowing — these cause multi-pixel registration
-    # errors that broaden stars in the stacked result.
-    # Uses GPU (CuPy) when available for ~10x speedup on large images.
     try:
         gpu = get_gpu()
         xp = gpu.xp
 
-        # Pre-apply pyramid coarse shift so the FFT only needs to find the
-        # small residual — mirrors the same optimisation in the phase_cc path
-        # and avoids wrap-around on large dither offsets.
         psy, psx = pyramid_shift
         if psy != 0.0 or psx != 0.0:
             img_fft = ndimage.shift(img, shift=(psy, psx), order=1,
@@ -284,7 +283,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     except Exception as e:
         debug_info.append(f"fft_xcorr error: {type(e).__name__}")
 
-    # Fallback to centroid difference - try multiple percentiles for robustness
+    # Fallback to centroid difference
     best_shift = (0.0, 0.0)
     best_score = float('inf')
 
@@ -301,16 +300,11 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 cim = ndimage.center_of_mass(ref * rmask)
                 cim2 = ndimage.center_of_mass(img * imask)
                 if cim and cim2:
-                    # Shift needed to align img with ref: ref_center - img_center
-                    # If img is down by 5px, img_center.y = ref_center.y + 5
-                    # We need to shift img UP by -5, which is ref_center.y - img_center.y
                     shift_y = float(cim[0] - cim2[0])
                     shift_x = float(cim[1] - cim2[1])
                     shift_mag = np.sqrt(shift_x**2 + shift_y**2)
 
-                    # Prefer solution from lower percentile (more pixels = more stable)
-                    # But if shift is too large, use lower percentile threshold
-                    if shift_mag > 0.1 or n_ref > 50:  # Have a real shift or many pixels
+                    if shift_mag > 0.1 or n_ref > 50: 
                         if verbose:
                             print(f"      [centroid fallback (p{percentile}): ({shift_x:.1f}, {shift_y:.1f})]")
                         return shift_y, shift_x
@@ -347,30 +341,7 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
 def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
                              levels: int = 4,
                              min_size: int = 32) -> Tuple[float, float]:
-    """Coarse-to-fine multi-scale pyramid registration.
-
-    Builds image pyramids by successive 2× mean-pooling and registers from the
-    coarsest level to the finest.  At each level the previously accumulated
-    shift is applied to the downsampled image before computing the residual,
-    so the correlation only needs to find a small local correction rather than
-    the full shift.  This makes large-shift registration (dithering, tracking
-    drift > 10 % of frame) reliable when plain cross-correlation would wrap
-    around or lock onto a sidelobe.
-
-    The final shift is returned in full-resolution pixel units.
-
-    Args:
-        ref: 2-D luminance reference image (float).
-        img: 2-D luminance image to register against ``ref``.
-        levels: Maximum pyramid depth.  Actual depth is limited by
-                ``min_size`` — levels where either axis < ``min_size``
-                are not used (default 4).
-        min_size: Minimum axis length (pixels) at the coarsest pyramid level
-                  (default 32).
-
-    Returns:
-        ``(shift_y, shift_x)`` in full-resolution pixels.
-    """
+    """Coarse-to-fine multi-scale pyramid registration."""
     def _downsample(arr: np.ndarray) -> np.ndarray:
         h, w = arr.shape
         h2, w2 = (h // 2) * 2, (w // 2) * 2  # trim to even
@@ -389,6 +360,7 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
     actual_levels = len(ref_pyr)
     total_sy, total_sx = 0.0, 0.0
 
+    # Loop from coarsest (N-1) to finest (0)
     for lvl in range(actual_levels - 1, -1, -1):
         r = ref_pyr[lvl]
         i = img_pyr[lvl]
@@ -403,7 +375,9 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
         total_sx += sx_res
 
         if lvl > 0:
-            # Scale up accumulated shift to next finer level
+            # Scale accumulated shift to next finer level (pixel units * 2)
+            # We multiply total here so that the accumulated shift from coarser levels 
+            # is properly scaled when used as a starting point for the finer level.
             total_sy *= 2.0
             total_sx *= 2.0
 
@@ -414,13 +388,7 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
 
 def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
                      transforms=None) -> Tuple[int, int, int, int]:
-    """Compute the largest axis-aligned crop valid in all aligned frames.
-
-    For translation-only frames uses shift magnitudes.  For frames with a
-    rotation transform the four corners of the input are forward-mapped to
-    output space; the inner axis-aligned rectangle of the resulting rotated
-    quad is used as the per-frame valid region.
-    """
+    """Compute the largest axis-aligned crop valid in all aligned frames."""
     H, W = shape
     transforms = transforms or [None] * len(shifts)
     top_vals, bottom_vals, left_vals, right_vals = [], [], [], []
@@ -431,17 +399,15 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
             matrix = transform.params
             R = matrix[:2, :2]      # rotation in (col=x, row=y) space
             t_xy = matrix[:2, 2]    # [tx, ty] in (col=x, row=y)
-            # 4 corners of input in (col=x, row=y): TL, TR, BL, BR
             corners_xy = np.array([[0.0, 0.0], [W, 0.0], [0.0, H], [W, H]])
             out_xy = (R @ corners_xy.T).T + t_xy  # forward map to output
             cols_out = out_xy[:, 0]  # x = col
             rows_out = out_xy[:, 1]  # y = row
-            # Inner axis-aligned rect that fits inside the rotated quad
-            # (valid for |rotation| < 45 deg, which always holds for field rotation)
-            top_vals.append(max(rows_out[0], rows_out[1]))   # max row of top edge
-            bottom_vals.append(min(rows_out[2], rows_out[3]))  # min row of bottom edge
-            left_vals.append(max(cols_out[0], cols_out[2]))  # max col of left edge
-            right_vals.append(min(cols_out[1], cols_out[3]))  # min col of right edge
+            
+            top_vals.append(max(rows_out[0], rows_out[1]))
+            bottom_vals.append(min(rows_out[2], rows_out[3]))
+            left_vals.append(max(cols_out[0], cols_out[2]))
+            right_vals.append(min(cols_out[1], cols_out[3]))
         else:
             top_vals.append(max(0.0, sy))
             bottom_vals.append(min(float(H), H + sy))
@@ -452,22 +418,14 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
     bottom = int(np.floor(min(bottom_vals))) - Config.CROP_MARGIN
     left = int(np.ceil(max(left_vals))) + Config.CROP_MARGIN
     right = int(np.floor(min(right_vals))) - Config.CROP_MARGIN
+    
     if top >= bottom or left >= right:
         return 0, H, 0, W
     return top, bottom, left, right
 
 
 def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> dict:
-    """Analyse registration shifts to detect dithering patterns.
-
-    Returns a dict with:
-      - ``is_dithered`` (bool)
-      - ``pattern`` (str): 'dithered', 'tracking_drift', or 'aligned'
-      - ``mean_magnitude`` (float): mean shift magnitude in pixels
-      - ``unique_positions`` (int): approx distinct integer pixel positions
-      - ``direction_spread_deg`` (float): std of shift angles in degrees
-      - ``autocorrelation`` (float): correlation between consecutive shift vectors
-    """
+    """Analyse registration shifts to detect dithering patterns."""
     if len(shifts) < 3:
         return {'is_dithered': False, 'pattern': 'aligned',
                 'mean_magnitude': 0.0, 'unique_positions': len(shifts),
@@ -478,16 +436,12 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
     mags = np.sqrt(sy ** 2 + sx ** 2)
 
     mean_mag = float(np.mean(mags))
-
-    # Count approximately unique integer positions
     int_positions = set((int(round(y)), int(round(x))) for y, x in shifts)
     unique_positions = len(int_positions)
 
-    # Direction spread — std of angles (in degrees)
-    non_zero = mags > 0.5  # ignore near-zero shifts
+    non_zero = mags > 0.5
     if non_zero.sum() >= 3:
         angles = np.degrees(np.arctan2(sy[non_zero], sx[non_zero]))
-        # Circular std: use the Mardia definition
         sin_mean = np.mean(np.sin(np.radians(angles)))
         cos_mean = np.mean(np.cos(np.radians(angles)))
         R = np.sqrt(sin_mean ** 2 + cos_mean ** 2)
@@ -495,7 +449,6 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
     else:
         direction_spread = 0.0
 
-    # Autocorrelation of consecutive shift vectors (low = random / dithered)
     if len(shifts) >= 4:
         dx = np.diff(sx)
         dy = np.diff(sy)
@@ -510,9 +463,8 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
     else:
         autocorrelation = 0.0
 
-    # Classification heuristics
     all_near_zero = mean_mag < 1.0
-    is_random_direction = direction_spread > 40.0  # degrees
+    is_random_direction = direction_spread > 40.0
     is_low_autocorr = abs(autocorrelation) < 0.5
     has_many_positions = unique_positions >= len(shifts) * 0.5
 
@@ -566,10 +518,7 @@ def run_registration_phase(
     args: argparse.Namespace,
     stats: ProcessingStats,
 ) -> Tuple[List, List, Dict]:
-    """Compute per-frame registration shifts/transforms for all accepted frames.
-
-    Returns (shifts, transforms, dither_info).
-    """
+    """Compute per-frame registration shifts/transforms for all accepted frames."""
     ref_stars = best.metrics.get('_star_sources')
     if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
         safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
@@ -610,6 +559,7 @@ def run_registration_phase(
                                             Config.GPU_VRAM_RESERVE_MB), len(final))
     else:
         n_workers = min(os.cpu_count() or 4, len(final))
+        
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_register_one, j, f, orig_idx): j
                    for j, (f, orig_idx) in enumerate(zip(final, final_indices))}

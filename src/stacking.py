@@ -61,7 +61,7 @@ def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
     if img.ndim != 3 or img.shape[2] != 3:
         return img
 
-    result = img.copy()
+    result = img.astype(np.float32, copy=True)
     lap_kernel = np.array([[0.0, -1.0, 0.0],
                            [-1.0,  4.0, -1.0],
                            [0.0, -1.0, 0.0]], dtype=np.float64)
@@ -141,10 +141,11 @@ def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
     coords_y, coords_x = np.meshgrid(iy, ix, indexing='ij')
 
     if img.ndim == 3:
+        img64 = img.astype(np.float64)
         result = np.empty((out_h, out_w, C), dtype=np.float64)
         for c in range(C):
             result[:, :, c] = ndimage.map_coordinates(
-                img[:, :, c].astype(np.float64),
+                img64[:, :, c],
                 [coords_y, coords_x],
                 order=spline_order, mode='constant', cval=0.0)
     else:
@@ -181,6 +182,9 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
         input pixel on the output grid.  Smaller values (0.5-0.7) yield
         sharper results at the cost of noise.  1.0 = no shrinking.
     """
+    if not aligned_list:
+        raise ValueError("drizzle_combine: aligned_list is empty")
+
     if scale <= 1.0:
         # No upscaling — weighted mean combine
         acc = None
@@ -269,7 +273,7 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
                            np.nanmedian(np.abs(masked - np.nanmedian(masked, axis=0)[np.newaxis]), axis=0) * 1.4826
             spread[zero_spread] = fallback[zero_spread]
 
-        deviation = np.abs(tile - center[np.newaxis])
+        deviation = np.abs(masked - center[np.newaxis])
         new_mask = mask & (deviation <= sigma * spread[np.newaxis])
 
         # Ensure at least 1 frame survives at every pixel
@@ -279,11 +283,10 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
             for frame_idx in range(N):
                 new_mask[frame_idx][all_rejected] = mask[frame_idx][all_rejected]
 
+        newly_rejected = mask & ~new_mask
         rejected = int(mask.sum() - new_mask.sum())
         mask = new_mask
-        # Update masked in-place: restore tile values then nan-out rejected pixels
-        np.copyto(masked, tile)
-        masked[~mask] = np.nan
+        masked[newly_rejected] = np.nan
         if rejected == 0:
             break
 
@@ -499,12 +502,11 @@ def _esd_clip_tile(tile: np.ndarray, max_outliers: int, significance: float,
 
         n_active = mask.sum(axis=0)  # (th, tw, C)
 
-        # Build per-pixel critical value map from LUT
-        lambda_map = np.full(max_dev.shape, np.inf)
-        for n_c in np.unique(n_active):
-            key = (int(n_c), i)
-            lam = lambda_lut.get(key, np.inf)
-            lambda_map[n_active == n_c] = lam
+        # Build per-pixel critical value map from LUT using vectorized indexing
+        lam_arr = np.full(N + 1, np.inf)
+        for n_c in range(3, N + 1):
+            lam_arr[n_c] = lambda_lut.get((n_c, i), np.inf)
+        lambda_map = lam_arr[n_active]
 
         reject = max_dev > lambda_map
         if not np.any(reject):
@@ -515,12 +517,15 @@ def _esd_clip_tile(tile: np.ndarray, max_outliers: int, significance: float,
             is_extreme_rejected = (most_extreme_idx == frame_idx) & reject
             mask[frame_idx][is_extreme_rejected] = False
 
-        # Ensure at least 1 frame survives
+        # Ensure at least 1 frame survives: restore only the least-bad frame
         surviving = mask.sum(axis=0)
         all_gone = surviving == 0
         if np.any(all_gone):
+            raw_dev = np.abs(tile - mean[np.newaxis]) / std[np.newaxis]
+            best_frame = raw_dev.argmin(axis=0)
             for frame_idx in range(N):
-                mask[frame_idx][all_gone] = True
+                is_best = (best_frame == frame_idx) & all_gone
+                mask[frame_idx][is_best] = True
 
     masked_final = np.where(mask, tile, np.nan)
     if weights is not None:
@@ -674,7 +679,7 @@ def run_stacking_phase(
         with ThreadPoolExecutor(max_workers=n_align) as executor:
             futures = {executor.submit(_align_one, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
-                               desc="  Aligning", unit="frame", disable=args.verbose):
+                               desc="  Aligning", unit="frame", disable=not args.verbose):
                 future.result()
         mem_aligned.flush()
 
@@ -720,9 +725,12 @@ def run_stacking_phase(
             acc = np.zeros((out_h, out_w, C), dtype=np.float64)
             weight_map = np.zeros((out_h, out_w, C), dtype=np.float64)
             gpu = get_gpu()
-            ones_template = None
+            # Coverage mask is invariant across frames (same shape, zero shift, fixed scale)
+            ones_template = np.ones((crop_h, crop_w), dtype=np.float64)
+            coverage = _lanczos_resample_frame(ones_template, (0.0, 0.0), drizzle_scale, out_h, out_w)
+            valid3 = (coverage > 0.5)[:, :, np.newaxis]
             for j in tqdm(range(n_final), desc="  Drizzling", unit="frame",
-                          disable=args.verbose):
+                          disable=not args.verbose):
                 with gpu.stream_context():
                     rgb = np.array(mem_rgb[final_indices[j]])
                     cropped = apply_transform(rgb, shift=shifts[j],
@@ -730,11 +738,6 @@ def run_stacking_phase(
                 w = float(weights[j])
                 resampled = _lanczos_resample_frame(cropped, (0.0, 0.0),
                                                      drizzle_scale, out_h, out_w)
-                if ones_template is None or ones_template.shape != cropped.shape[:2]:
-                    ones_template = np.ones(cropped.shape[:2], dtype=np.float64)
-                coverage = _lanczos_resample_frame(ones_template, (0.0, 0.0),
-                                                    drizzle_scale, out_h, out_w)
-                valid3 = (coverage > 0.5)[:, :, np.newaxis]
                 acc += np.where(valid3, resampled * w, 0.0)
                 weight_map += np.where(valid3, w, 0.0)
             weight_map[weight_map == 0] = 1.0
@@ -757,7 +760,7 @@ def run_stacking_phase(
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
                 futures = {executor.submit(_align_crop, j): j for j in range(n_final)}
                 for future in tqdm(as_completed(futures), total=n_final,
-                                   desc="  Stacking", unit="frame", disable=args.verbose):
+                                   desc="  Stacking", unit="frame", disable=not args.verbose):
                     j, cropped = future.result()
                     w = float(weights[j])
                     acc += cropped.astype(np.float64) * w
