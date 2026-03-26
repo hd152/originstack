@@ -46,10 +46,8 @@ def generate_star_mask(shape: Tuple[int, int], star_positions, fwhm: float = 3.0
 
     if gaussian_filter is not None:
         # Vectorised centroid extraction and scatter — no Python loop.
-        ys = np.round(np.array([float(star_positions[i]['ycentroid'])
-                                 for i in range(n_stars)])).astype(int)
-        xs = np.round(np.array([float(star_positions[i]['xcentroid'])
-                                 for i in range(n_stars)])).astype(int)
+        ys = np.round(np.asarray(star_positions['ycentroid'][:n_stars], dtype=np.float64)).astype(int)
+        xs = np.round(np.asarray(star_positions['xcentroid'][:n_stars], dtype=np.float64)).astype(int)
         in_bounds = (ys >= 0) & (ys < H) & (xs >= 0) & (xs < W)
         point_mask = np.zeros(shape, dtype=np.float32)
         # np.maximum.at handles multiple stars landing on the same pixel safely.
@@ -101,13 +99,10 @@ def measure_fwhm(img: np.ndarray, star_positions, cutout_radius: int = None) -> 
     except (KeyError, TypeError):
         sorted_idx = range(n_stars)
 
-    # Vectorised border pre-filter — compute validity mask before the loop.
-    try:
-        all_y = np.array([float(star_positions[i]['ycentroid']) for i in sorted_idx[:n_stars]])
-        all_x = np.array([float(star_positions[i]['xcentroid']) for i in sorted_idx[:n_stars]])
-    except (TypeError, IndexError):
-        all_y = np.array([float(star_positions[idx]['ycentroid']) for idx in sorted_idx[:n_stars]])
-        all_x = np.array([float(star_positions[idx]['xcentroid']) for idx in sorted_idx[:n_stars]])
+    # Vectorised border pre-filter — column slicing + fancy indexing in C.
+    indices = sorted_idx[:n_stars]
+    all_y = np.asarray(star_positions['ycentroid'][indices], dtype=np.float64)
+    all_x = np.asarray(star_positions['xcentroid'][indices], dtype=np.float64)
 
     iy = np.round(all_y).astype(int)
     ix = np.round(all_x).astype(int)
@@ -116,12 +111,12 @@ def measure_fwhm(img: np.ndarray, star_positions, cutout_radius: int = None) -> 
         (ix >= cutout_radius) & (ix < W - cutout_radius)
     )
 
-    for orig_idx, y, x, is_valid in zip(sorted_idx[:n_stars], iy, ix, border_valid):
+    for _, y, x, is_valid in zip(sorted_idx[:n_stars], iy, ix, border_valid):
         if not is_valid:
             continue
 
         cutout = img[y - cutout_radius:y + cutout_radius + 1,
-                     x - cutout_radius:x + cutout_radius + 1].astype(np.float64)
+                     x - cutout_radius:x + cutout_radius + 1].astype(np.float32)
 
         peak = float(np.max(cutout))
 
@@ -180,9 +175,8 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
         if saturated_fraction > 0.95:
             return False, f"saturated ({saturated_fraction*100:.1f}% at max)"
 
-    # Compute the boolean zero mask once; .sum() reuses it without a second
-    # comparison pass.
-    zero_fraction = float((img == 0).sum()) / img.size
+    # count_nonzero avoids allocating a full boolean array.
+    zero_fraction = (img.size - np.count_nonzero(img)) / img.size
     if zero_fraction > 0.5:
         return False, f"mostly zeros ({zero_fraction*100:.1f}%)"
 
@@ -277,7 +271,7 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     img_s_stars = img  # star detection always at full resolution
 
     # All percentiles in one pass — p50 replaces a separate np.median call.
-    p01, p05, p25, p50, p75, p95, p99 = np.percentile(img_s, [1, 5, 25, 50, 75, 95, 99])
+    p01, p50, p75, p95, p99 = np.percentile(img_s, [1, 50, 75, 95, 99])
     brightness = float(p50)  # median == p50, no extra traversal
 
     mean = float(np.mean(img_s))
