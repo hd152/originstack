@@ -52,19 +52,42 @@ The pipeline is split across `src/` modules. [astro_stack.py](astro_stack.py) is
 | [src/debayer.py](src/debayer.py) | Debayering, hot pixels, white balance |
 | [src/quality.py](src/quality.py) | `compute_quality_metrics`, star detection, FWHM |
 | [src/psf_deconvolution.py](src/psf_deconvolution.py) | PSF estimation, Richardson-Lucy deconvolution |
-| [src/background.py](src/background.py) | Mesh-based sky extraction, residual removal |
-| [src/denoising.py](src/denoising.py) | Wavelet, bilateral, NLM, arcsinh stretch |
-| [src/registration.py](src/registration.py) | `calculate_shift`, affine transform, `calc_common_crop` |
-| [src/stacking.py](src/stacking.py) | Sigma-clip combine, drizzle, Lanczos |
+| [src/background.py](src/background.py) | Mesh-based sky extraction, DBE, residual removal |
+| [src/denoising.py](src/denoising.py) | Wavelet, MMT, ACDNR, bilateral, NLM, star reduction, local contrast |
+| [src/registration.py](src/registration.py) | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase` |
+| [src/stacking.py](src/stacking.py) | Sigma-clip, percentile, ESD, drizzle, Lanczos, `run_stacking_phase` |
+| [src/frame_processor.py](src/frame_processor.py) | Parallel workers, `execute_frame_processing`, `quality_gate` |
+| [src/postprocess.py](src/postprocess.py) | Full post-processing chain: `postprocess_stack` |
+| [src/auto_settings.py](src/auto_settings.py) | Heuristic target classifier and parameter advisor (`--auto`) |
+| [src/ai_advisor.py](src/ai_advisor.py) | Claude API parameter advisor and session report (`--ai-advisor`) |
 | [src/plate_solve.py](src/plate_solve.py) | Astrometry.net plate solving |
-| [src/pipeline.py](src/pipeline.py) | Three-phase pipeline, parallel workers, `stack_target` |
+| [src/pipeline.py](src/pipeline.py) | Thin orchestrator: `stack_target` wires all four phases |
 | [src/health_check.py](src/health_check.py) | `run_health_check` |
 | [src/cli.py](src/cli.py) | `process_directory`, `parse_args`, `main` |
 
-### Three-phase processing pipeline
-1. **Validation & Quality Analysis** — Load each frame, compute brightness/contrast/star-count/FWHM/SNR, reject below-threshold frames. Quality filter is on by default; controlled by `--quality-threshold` (default: 25th percentile, i.e. keep best 75%).
-2. **Registration** — Calculate per-frame alignment shifts using phase cross-correlation (skimage) with FFT cross-correlation fallback, then optional affine (rotation+scale) via star matching + RANSAC. Reference frame is the highest-quality accepted frame.
-3. **Stacking** — Shift-align each frame, crop to the valid region common to all frames (eliminates black borders), accumulate into running mean/median/sigma-clip combine.
+### Four-phase processing pipeline
+1. **Phase 1 — Process & Quality Analysis** — Load, calibrate, debayer, and quality-analyse each frame in parallel (ProcessPool, ThreadPool, or sequential). Hard-limit rejection, statistical outlier detection, and percentile quality threshold filter out bad frames. Handled by `frame_processor.py`.
+2. **Phase 2 — Registration** — Calculate per-frame alignment shifts via phase cross-correlation (skimage) with FFT fallback, then optional affine (rotation+scale) via star matching + RANSAC. Reference frame is the highest-quality accepted frame. Handled by `run_registration_phase` in `registration.py`.
+3. **Phase 3 — Stacking** — Align, crop to the valid common region (eliminates black borders), and combine via the selected method (mean, median, sigma-clip, percentile, ESD, or drizzle). Handled by `run_stacking_phase` in `stacking.py`.
+4. **Phase 4 — Post-processing** — Full chain applied to the stacked image (see below). Handled by `postprocess_stack` in `postprocess.py`.
+
+### Post-processing chain (Phase 4)
+Applied in order; most steps are on by default:
+1. Per-channel hot pixel removal on stacked image
+2. Star detection (single pass; mask reused by all steps below)
+3. Dynamic Background Extraction (DBE) or legacy mesh extraction
+4. Chroma noise reduction
+5. Sky floor correction (per-channel pedestal removal)
+6. Local normalisation (vignette residual removal) — `--local-normalize`
+7. Wavelet denoising (luma/chroma split, star-protected, adaptive BayesShrink by default)
+8. Sky residual correction (broad + fine passes after background extraction)
+9. NLM denoising — `--denoise-nlm`
+10. Bilateral filter denoising — `--denoise-bilateral`
+11. MMT denoising (multiscale median transform) — `--denoise-mmt`
+12. ACDNR denoising (adaptive contrast-based) — `--denoise-acdnr`
+13. Richardson-Lucy deconvolution — `--deconvolve`
+14. Star reduction (halo softening) — on by default, `--no-star-reduce`
+15. Multiscale local contrast enhancement — on by default, `--no-local-contrast`
 
 ### Streaming memory model
 Frames are processed one at a time: load → process → accumulate → free. Memory usage stays at ~1-2 frames regardless of total frame count. This is the core design constraint — never accumulate all frames in memory.
@@ -88,8 +111,9 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 - `psutil` — memory usage reporting
 - `cupy` — GPU acceleration (`--use-gpu`)
 - `cv2` (OpenCV) — advanced debayer methods (Malvar, VNG), bilateral filter denoising
-- `pywt` — wavelet denoising (`--denoise`)
+- `pywt` — wavelet denoising
 - `astroquery` — plate solving via nova.astrometry.net (`--plate-solve`)
+- `anthropic` — AI parameter advisor (`--ai-advisor`, `--ai-report`)
 
 ### Plate solving
 Requires `astroquery` installed and `ASTROMETRY_API_KEY` environment variable set. Enable with `--plate-solve`.
@@ -100,5 +124,6 @@ Requires `astroquery` installed and `ASTROMETRY_API_KEY` environment variable se
 - `vng` (requires cv2)
 
 ### Parallelism
-- `-j N` controls worker count for frame processing via `ProcessPoolExecutor`/`ThreadPoolExecutor`.
+- `-j N` (or `--parallel N`) controls worker count. `0` = auto (default), `1` = sequential, `N` = N processes.
+- Uses `ProcessPoolExecutor` for CPU multi-process, `ThreadPoolExecutor` for GPU or thread-parallel paths.
 - GPU mode auto-limits workers based on available VRAM.

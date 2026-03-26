@@ -9,25 +9,29 @@ The codebase is split into focused modules under `src/`. `astro_stack.py` (root)
 
 | Module | Lines | Contents |
 |--------|-------|----------|
-| `src/gpu_context.py` | ~125 | `GpuContext`, CUDA stream contexts, `get_gpu()` |
-| `src/models.py` | ~80 | `Config`, `FrameInfo`, `ProcessingStats` |
-| `src/utils.py` | ~115 | Print helpers, `format_time`, `get_memory_usage_mb` |
-| `src/io_fits.py` | ~310 | FITS load/save, `make_master`, `populate_fits_header` |
-| `src/frame_discovery.py` | ~125 | `discover_frames`, `classify_frame`, `select_matching_darks` |
-| `src/debayer.py` | ~250 | Debayering, hot pixels, white balance |
-| `src/quality.py` | ~300 | `compute_quality_metrics`, star detection, FWHM |
-| `src/psf_deconvolution.py` | ~195 | PSF estimation (Moffat/Gaussian), Richardson-Lucy |
-| `src/background.py` | ~700 | Mesh-based sky extraction, residual removal, floor normalisation |
-| `src/denoising.py` | ~450 | Wavelet, bilateral, NLM, chroma NR, arcsinh stretch |
-| `src/registration.py` | ~480 | `calculate_shift`, affine/RANSAC, `calc_common_crop` |
-| `src/stacking.py` | ~370 | Sigma-clip combine, drizzle, Lanczos resampling |
-| `src/plate_solve.py` | ~150 | Astrometry.net + SIMBAD identification |
-| `src/pipeline.py` | ~730 | Three-phase pipeline, parallel workers, `stack_target` |
-| `src/health_check.py` | ~180 | Frame consistency and calibration analysis |
-| `src/cli.py` | ~480 | `process_directory`, `parse_args`, `main` |
-| `astro_stack.py` | ~165 | Backward-compat re-export shim |
+| `src/gpu_context.py` | ~160 | `GpuContext`, CUDA stream contexts, `get_gpu()` |
+| `src/models.py` | ~90 | `Config`, `FrameInfo`, `ProcessingStats` |
+| `src/utils.py` | ~160 | Print helpers, `format_time`, `get_memory_usage_mb` |
+| `src/io_fits.py` | ~315 | FITS load/save, `make_master`, `populate_fits_header` |
+| `src/frame_discovery.py` | ~140 | `discover_frames`, `classify_frame`, `select_matching_darks` |
+| `src/debayer.py` | ~305 | Debayering, hot pixels, white balance, CA correction |
+| `src/quality.py` | ~375 | `compute_quality_metrics`, star detection, FWHM |
+| `src/psf_deconvolution.py` | ~215 | PSF estimation (Moffat/Gaussian), Richardson-Lucy |
+| `src/background.py` | ~1000 | DBE (RBF thin-plate spline), mesh-based sky extraction, floor normalisation |
+| `src/denoising.py` | ~895 | Wavelet (BayesShrink), bilateral, NLM, MMT, ACDNR, chroma NR, GHS/arcsinh stretch |
+| `src/registration.py` | ~685 | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase` |
+| `src/stacking.py` | ~770 | Sigma-clip/percentile/ESD combine, drizzle, Lanczos resampling, `run_stacking_phase` |
+| `src/plate_solve.py` | ~160 | Astrometry.net + SIMBAD identification |
+| `src/pipeline.py` | ~265 | Four-phase pipeline orchestrator, `stack_target` (thin; phase logic in domain modules) |
+| `src/frame_processor.py` | ~430 | `_process_single_frame`, `execute_frame_processing`, `quality_gate`, parallel workers |
+| `src/postprocess.py` | ~315 | `postprocess_stack` — 15-step post-processing chain |
+| `src/auto_settings.py` | ~360 | Heuristic target classifier, `apply_auto_settings` (`--auto`) |
+| `src/ai_advisor.py` | ~515 | Claude AI parameter advisor and session report generator (`--ai-advisor`, `--ai-report`) |
+| `src/health_check.py` | ~190 | Frame consistency and calibration analysis |
+| `src/cli.py` | ~685 | `process_directory`, `parse_args`, `main` |
+| `astro_stack.py` | ~170 | Backward-compat re-export shim |
 
-**Total: ~5,200 lines. Tests: `tests/test_core.py` imports symbols directly from `astro_stack`.**
+**Total: ~8,200 lines. Tests: `tests/test_core.py` imports symbols directly from `astro_stack`.**
 
 ## Core Architecture
 
@@ -38,10 +42,11 @@ The codebase is split into focused modules under `src/`. `astro_stack.py` (root)
 - **Traditional approach**: 10-20GB for 50 images
 - **This approach**: 0.4-1.2GB for 50 images (~13x reduction)
 
-### Three-Phase Processing
+### Four-Phase Processing
 1. **Phase 1: Validation & Quality Analysis** — Load, calibrate, debayer, analyse quality, reject bad frames
 2. **Phase 2: Registration** — Calculate alignment shifts, select reference frame
 3. **Phase 3: Stacking** — Align, crop valid region, accumulate, combine
+4. **Phase 4: Post-processing** — 15-step chain (background, denoising, sharpening, star reduction, local contrast)
 
 ## Key Features
 
@@ -117,19 +122,30 @@ The codebase is split into focused modules under `src/`. `astro_stack.py` (root)
 ### 10. Stacking Methods
 - `mean` — fastest, no rejection
 - `median` — robust, uses temporary memmaps for large datasets
-- `sigma_clip` (default when dithering detected) — MAD-based tiled sigma-clipping with configurable sigma and iterations
-- **Winsorize option**: clip outliers to boundary value instead of rejecting
+- `sigma_clip` — MAD-based tiled sigma-clipping with configurable sigma and iterations
+- `winsorized` — like sigma_clip but clips to boundary instead of rejecting
+- `percentile` — reject outside [low, high] percentile; good for fewer than 8 frames
+- `esd` — Grubbs/ESD statistical test; best for fewer than 15 frames
+- `auto` (default) — selects `percentile` for fewer than 8 frames, otherwise `sigma_clip`
 - **Drizzle**: Lanczos-interpolated sub-pixel accumulation for super-resolution (`--drizzle-scale`)
 
 ### 11. Post-Stack Processing Chain
-Applied in order after stacking:
-1. Background extraction (if enabled)
-2. Wavelet denoising (luma + chroma, star-protected) — `--denoise`
-3. Non-local means denoising — `--denoise-nlm`
-4. Bilateral filter denoising — `--denoise-bilateral`
-5. Chroma noise reduction — `--chroma-nr` (on by default)
+Applied in order after stacking (`src/postprocess.py`):
+1. Hot pixel removal on the stacked image
+2. Star mask generation (used to protect structure in subsequent steps)
+3. Background extraction / Dynamic Background Extraction (DBE) — `--background-extraction` / `--dbe`
+4. Chroma noise reduction — `--chroma-nr` (on by default)
+5. Sky floor normalisation — removes constant sky pedestal per channel
 6. Local normalisation (vignette residual removal) — `--local-normalize`
-7. Richardson-Lucy deconvolution (PSF sharpening) — `--deconvolve`
+7. Wavelet denoising (BayesShrink adaptive or fixed-threshold) — `--denoise` (on by default)
+8. Sky residual correction (second-pass after denoising)
+9. Non-local means denoising — `--denoise-nlm`
+10. Bilateral filter denoising — `--denoise-bilateral`
+11. Multiscale Median Transform (MMT) denoising — `--denoise-mmt`
+12. ACDNR adaptive contrast denoising — `--denoise-acdnr`
+13. Richardson-Lucy deconvolution (PSF sharpening) — `--deconvolve`
+14. Star reduction (softens star cores for galaxy imaging) — `--star-reduce` (on by default)
+15. Multiscale local contrast enhancement (MLCE) — `--local-contrast` (on by default)
 
 ### 12. Plate Solving
 - Via nova.astrometry.net (requires `astroquery` and `ASTROMETRY_API_KEY`)
@@ -151,12 +167,14 @@ Applied in order after stacking:
 ### 15. Output Generation
 - **FITS format**: (3, H, W) float32 for maximum compatibility
 - **Metadata**: frame count, rejection count, target name, processing parameters
-- **Preview JPEG**: arcsinh or linear stretch (default arcsinh), 95% quality
+- **Preview JPEG**: GHS, arcsinh, or linear stretch (default: ghs), 95% quality
 - **Plate-solve WCS**: written to FITS header when solved
+- **Session report**: narrative markdown report when `--ai-report` is used
 
 ### 16. Parallel Processing
-- `-j N` workers (0 = auto-detect CPU count, 1 = sequential)
-- `ProcessPoolExecutor` for CPU, auto-limited for GPU
+- `-j N` workers (default: 0 = auto-detect CPU count, 1 = sequential)
+- `ProcessPoolExecutor` for CPU, `ThreadPoolExecutor` for GPU, sequential fallback
+- Auto-limits workers based on available VRAM in GPU mode
 
 ### 17. Health Check
 - `--health-check`: analyse calibration quality and frame consistency without stacking
@@ -207,31 +225,50 @@ session/
 - `--quality-threshold N` — Reject frames below Nth percentile (default: 25 = keep best 75%)
 
 ### Stacking
-- `--stack-method {mean,median,sigma_clip}` — Override auto-selected method
-- `--rejection-sigma N` — Sigma threshold for sigma_clip (default: 3.0)
+- `--stack-method {mean,median,sigma_clip,winsorized,percentile,esd,auto}` — Stacking method (default: auto)
+- `--rejection-sigma N` — Sigma threshold for sigma_clip/winsorized (default: 3.0)
 - `--rejection-iters N` — Clipping iterations for sigma_clip (default: 3)
-- `--winsorize` — Clip outliers to boundary instead of rejecting
+- `--rejection-estimator {mad,std}` — Spread estimator (default: mad)
+- `--winsorize` — Deprecated shorthand for `--stack-method winsorized`
+- `--percentile-low N` — Lower rejection percentile for percentile method (default: 20)
+- `--percentile-high N` — Upper rejection percentile for percentile method (default: 80)
+- `--esd-max-outliers N` — Max outliers per pixel for ESD (default: 0 = N//4)
+- `--esd-significance N` — Significance level for ESD test (default: 0.05)
+- `--weight-snr N` — SNR quality weight exponent (default: 1.0; 0 = disable)
+- `--weight-fwhm N` — FWHM quality weight exponent (default: 1.0; 0 = disable)
+- `--weight-stars N` — Star-count quality weight exponent (default: 1.0; 0 = disable)
+- `--weight-noise` — Add 1/noise² weighting component
 
 ### Debayering & Colour
 - `--debayer-method {bilinear,malvar,vng}` — Demosaicing algorithm (default: bilinear)
 - `--white-balance {none,grayworld,whitepatch}` — White balance method (default: grayworld)
 
 ### Background Extraction
-- `--no-background-extraction` — Disable mesh-based background removal
-- `--bg-mesh-size N` — Grid cell size in pixels (default: 64)
-- `--bg-filter-size N` — Median filter size for grid smoothing (default: 3, must be odd)
-- `--bg-clip-sigma N` — Sigma for star rejection (default: 3.0)
+- `--no-background-extraction` — Disable background removal
+- `--dbe` / `--no-dbe` — Use Dynamic Background Extraction (RBF thin-plate spline, default: on) vs legacy mesh
+- `--dbe-patch-size N` — DBE sampling patch size in pixels (default: 64)
+- `--bg-mesh-size N` — Legacy mesh cell size in pixels (default: 64; ignored when DBE is active)
+- `--bg-filter-size N` — Median filter size for mesh smoothing (default: 3, must be odd)
+- `--bg-clip-sigma N` — Sigma for star rejection in background estimation (default: 3.0)
 
 ### Denoising
-- `--denoise` — Enable wavelet denoising
-- `--denoise-strength N` — Wavelet luma threshold factor (default: 3.0)
+- `--denoise` / `--no-denoise` — Wavelet denoising (default: on; requires pywt)
+- `--denoise-strength N` — Wavelet luma threshold factor (default: 3.0; overridden by auto-tune)
+- `--denoise-adaptive` / `--no-denoise-adaptive` — BayesShrink per-subband thresholds (default: on)
+- `--auto-denoise-strength` / `--no-auto-denoise-strength` — Auto-tune strength from SNR (default: on)
 - `--denoise-chroma-boost N` — Chroma threshold multiplier (default: 2.0)
 - `--denoise-nlm` — Enable non-local means after wavelet
 - `--denoise-nlm-strength N` — NLM strength multiplier (default: 1.0)
 - `--denoise-nlm-blend N` — Blend fraction 0–1 (default: 0.5)
-- `--denoise-bilateral` — Enable bilateral filter
+- `--denoise-bilateral` — Enable bilateral filter (requires cv2)
 - `--denoise-bilateral-sigma-color N` — Value-similarity scale in ADU (default: auto)
 - `--denoise-bilateral-sigma-space N` — Spatial smoothing radius in pixels (default: 3.0)
+- `--denoise-mmt` — Enable Multiscale Median Transform denoising
+- `--denoise-mmt-levels N` — MMT decomposition depth (default: 4)
+- `--denoise-mmt-strength N` — MMT soft-threshold multiplier (default: 3.0)
+- `--denoise-acdnr` — Enable ACDNR adaptive contrast-based denoising
+- `--denoise-acdnr-sigma N` — ACDNR Gaussian smoothing radius in pixels (default: 1.5)
+- `--denoise-acdnr-k N` — ACDNR contrast threshold multiplier (default: 3.0)
 - `--no-chroma-nr` — Disable chroma noise reduction (on by default)
 - `--chroma-nr-sigma N` — Gaussian sigma for chroma smoothing (default: 2.0)
 
@@ -244,33 +281,58 @@ session/
 ### Other Post-Processing
 - `--local-normalize` — Remove vignetting residuals via local normalisation
 - `--local-normalize-sigma N` — Gaussian sigma (default: 50)
-- `--stretch {linear,arcsinh}` — Preview stretch method (default: arcsinh)
+- `--star-reduce` / `--no-star-reduce` — Reduce star prominence for galaxy imaging (default: on)
+- `--star-reduce-factor N` — Star reduction blend fraction 0–1 (default: 0.4)
+- `--star-reduce-sigma N` — Gaussian blur radius for star reduction in pixels (default: 1.5)
+- `--local-contrast` / `--no-local-contrast` — Multiscale local contrast enhancement (default: on)
+- `--local-contrast-strength N` — MLCE overall strength multiplier 0–1 (default: 0.7)
+- `--ca-correction` / `--no-ca-correction` — Chromatic aberration correction (default: on; requires skimage)
+- `--cosmic-ray-rejection` / `--no-cosmic-ray-rejection` — L.A.Cosmic rejection per frame (default: on)
+- `--cr-sigclip N` — L.A.Cosmic detection threshold in sigma (default: 4.5)
+- `--cr-objlim N` — L.A.Cosmic object rejection ratio (default: 5.0)
+- `--stretch {linear,arcsinh,ghs}` — Preview JPEG stretch method (default: ghs)
+- `--ghs-b N` — GHS stretch factor (default: 8.0)
+- `--ghs-sp N` — GHS symmetry point 0–1 (default: 0.15)
+- `--ghs-hp N` — GHS highlights protection 0–1 (default: 0.95)
 
 ### Super-Resolution
 - `--drizzle-scale N` — Drizzle output scale factor (1.0 = disabled, 2.0 = 2× super-res)
 - `--drizzle-drop-size N` — Pixfrac/drop size 0.5–1.0 (default: 0.7)
 
+### Automation & AI
+- `--auto` — Heuristic target classifier: detects target type from frame metrics and applies optimised settings (no API key required)
+- `--ai-advisor` — Claude AI parameter advisor: recommends and applies stacking parameters after Phase 1 (requires `anthropic` + `ANTHROPIC_API_KEY`)
+- `--ai-report` — Claude AI session report: generates narrative report as `<output>_report.md` after stacking
+
 ### Infrastructure
 - `--use-gpu` — CuPy GPU acceleration (experimental)
 - `--plate-solve` — Plate solve via astrometry.net
-- `-j N, --parallel N` — Worker count (0 = auto, 1 = sequential, default: 1)
+- `-j N, --parallel N` — Worker count (default: 0 = auto-detect CPU count, 1 = sequential)
 - `--keep-intermediates` — Save per-subfolder stacks in hierarchical mode
 - `-v, --verbose` — Detailed per-frame output
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` — Minimum log severity to stderr (default: WARNING)
+- `--log-file PATH` — Write full DEBUG log to file
 - `--health-check` — Analyse frames and calibration without stacking
 
 ### Example Commands
 ```bash
-# Single folder, basic
+# Single folder, basic (most defaults are on)
 python astro_stack.py -d lights/ -o stacked.fits
 
 # With verbose output
 python astro_stack.py -d lights/ -o stacked.fits -v
 
-# Hierarchical with quality filtering and intermediates
+# Hierarchical with intermediates saved
 python astro_stack.py -d session/ -o combined.fits --keep-intermediates -v
 
-# Full post-processing pipeline
-python astro_stack.py -d lights/ -o stacked.fits --denoise --deconvolve --stretch arcsinh
+# Auto target detection (heuristic, no API key)
+python astro_stack.py -d lights/ -o stacked.fits --auto
+
+# AI-assisted parameter selection (requires ANTHROPIC_API_KEY)
+python astro_stack.py -d lights/ -o stacked.fits --ai-advisor --ai-report
+
+# Explicit post-processing flags
+python astro_stack.py -d lights/ -o stacked.fits --deconvolve --denoise-nlm --stretch ghs
 
 # Check calibration quality without stacking
 python astro_stack.py -d lights/ --health-check
@@ -280,6 +342,9 @@ python astro_stack.py -d lights/ -o stacked.fits --debug-registration
 
 # GPU + drizzle super-resolution
 python astro_stack.py -d lights/ -o stacked.fits --use-gpu --drizzle-scale 2.0
+
+# Disable new-default features for a minimal run
+python astro_stack.py -d lights/ -o stacked.fits --no-star-reduce --no-local-contrast --no-dbe
 ```
 
 ## Dependencies
@@ -297,10 +362,11 @@ python astro_stack.py -d lights/ -o stacked.fits --use-gpu --drizzle-scale 2.0
 - `psutil >= 5.9` — Memory usage reporting
 
 ### Optional (install separately as needed)
-- `opencv-python` (`cv2`) — Malvar/VNG debayer, bilateral denoising
+- `opencv-python` (`cv2`) — Malvar/VNG debayer, bilateral denoising, MMT fallback
 - `pywt` (`PyWavelets`) — Wavelet denoising (`--denoise`)
 - `cupy-cudaXXx` — GPU acceleration (see `requirements-gpu.txt`)
 - `astroquery >= 0.4.6` — Plate solving (see `requirements-astrometry.txt`)
+- `anthropic` — Claude AI advisor and session reports (`--ai-advisor`, `--ai-report`)
 
 ## Performance Characteristics
 
