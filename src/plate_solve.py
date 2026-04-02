@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 
 import numpy as np
 from astropy.io import fits
@@ -91,16 +92,38 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str, v
                 except (ValueError, ZeroDivisionError):
                     pass
 
-            # Submit for solving
-            wcs_header = ast.solve_from_image(
-                tmp_path,
-                force_image_upload=True,
-                solve_timeout=300,  # 5 minute timeout
-                scale_units=scale_units,
-                scale_lower=scale_lower,
-                scale_upper=scale_upper,
-                publicly_visible='n'
-            )
+            # Submit for solving with timeout protection
+            solve_result = [None]
+            solve_error = [None]
+
+            def _solve():
+                try:
+                    solve_result[0] = ast.solve_from_image(
+                        tmp_path,
+                        force_image_upload=True,
+                        solve_timeout=300,
+                        scale_units=scale_units,
+                        scale_lower=scale_lower,
+                        scale_upper=scale_upper,
+                        publicly_visible='n'
+                    )
+                except Exception as e:
+                    solve_error[0] = e
+
+            solver_thread = threading.Thread(target=_solve, daemon=True)
+            solver_thread.start()
+            solver_thread.join(timeout=360)  # 6 minute hard timeout
+
+            if solver_thread.is_alive():
+                if verbose:
+                    print("  [Plate solving] Timed out after 360 seconds")
+                header['PLTSOLVD'] = (False, 'Plate solving timed out')
+                return False
+
+            if solve_error[0] is not None:
+                raise solve_error[0]
+
+            wcs_header = solve_result[0]
 
             if wcs_header:
                 if verbose:

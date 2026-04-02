@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import warnings
+from typing import Optional
 
 import numpy as np
 from scipy import ndimage
@@ -12,12 +13,21 @@ from src.utils import get_logger
 
 _log = get_logger()
 
-try:
-    import cv2
-    HAS_CV2 = True
-except Exception:
-    cv2 = None
-    HAS_CV2 = False
+cv2 = None
+HAS_CV2 = False
+
+
+def _ensure_cv2():
+    global cv2, HAS_CV2
+    if not HAS_CV2:
+        try:
+            import cv2 as _cv2
+            if hasattr(_cv2, 'cvtColor'):
+                cv2 = _cv2
+                HAS_CV2 = True
+        except Exception:
+            pass
+    return cv2
 
 try:
     from skimage.registration import phase_cross_correlation as _pcc
@@ -46,7 +56,7 @@ _PATTERN_OFFSETS: dict[str, tuple[tuple[int, int], ...]] = {
 }
 
 
-def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
+def debayer_bilinear(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
     # FIX #1: honour the `pattern` argument — previously hardcoded to RGGB.
     # FIX #2: `method` param is accepted for API compatibility but not used
     #          (bilinear is the only variant here); document this explicitly.
@@ -88,7 +98,7 @@ def debayer_bilinear(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
     return out
 
 
-def debayer_malvar(raw, pattern: str = 'RGGB'):
+def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     """Malvar-He-Cutler demosaicing.
 
     Uses OpenCV's edge-aware (EA) implementation when cv2 is available —
@@ -98,12 +108,13 @@ def debayer_malvar(raw, pattern: str = 'RGGB'):
     whenever the per-channel sky background levels differ (e.g. after flat
     calibration normalises a colour-imbalanced sensor like the IMX178).
     """
+    _ensure_cv2()
     if HAS_CV2:
         pat_map = {
-            'RGGB': cv2.COLOR_BAYER_RG2BGR_EA,
-            'BGGR': cv2.COLOR_BAYER_BG2BGR_EA,
-            'GRBG': cv2.COLOR_BAYER_GR2BGR_EA,
-            'GBRG': cv2.COLOR_BAYER_GB2BGR_EA,
+            'RGGB': getattr(cv2, 'COLOR_BAYER_RG2BGR_EA', None),
+            'BGGR': getattr(cv2, 'COLOR_BAYER_BG2BGR_EA', None),
+            'GRBG': getattr(cv2, 'COLOR_BAYER_GR2BGR_EA', None),
+            'GBRG': getattr(cv2, 'COLOR_BAYER_GB2BGR_EA', None),
         }
         code = pat_map.get(pattern.upper())
         if code is not None:
@@ -119,15 +130,16 @@ def debayer_malvar(raw, pattern: str = 'RGGB'):
     return debayer_bilinear(raw, pattern)
 
 
-def debayer_vng(raw, pattern: str = 'RGGB'):
+def debayer_vng(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     """VNG (Variable Number of Gradients) debayering via OpenCV."""
+    _ensure_cv2()
     if not HAS_CV2:
         return debayer_malvar(raw, pattern)
     pat_map = {
-        'RGGB': cv2.COLOR_BAYER_RG2BGR_VNG,
-        'BGGR': cv2.COLOR_BAYER_BG2BGR_VNG,
-        'GRBG': cv2.COLOR_BAYER_GR2BGR_VNG,
-        'GBRG': cv2.COLOR_BAYER_GB2BGR_VNG,
+        'RGGB': getattr(cv2, 'COLOR_BAYER_RG2BGR_VNG', None),
+        'BGGR': getattr(cv2, 'COLOR_BAYER_BG2BGR_VNG', None),
+        'GRBG': getattr(cv2, 'COLOR_BAYER_GR2BGR_VNG', None),
+        'GBRG': getattr(cv2, 'COLOR_BAYER_GB2BGR_VNG', None),
     }
     code = pat_map.get(pattern.upper())
     if code is None:
@@ -142,7 +154,7 @@ def debayer_vng(raw, pattern: str = 'RGGB'):
     return rgb.astype(np.float32) / 255.0 * max_val
 
 
-def debayer(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
+def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
     """Dispatch to the appropriate debayering method."""
     if method == 'vng':
         return debayer_vng(raw, pattern)
@@ -152,7 +164,7 @@ def debayer(raw, pattern: str = 'RGGB', method: str = 'bilinear'):
         return debayer_bilinear(raw, pattern, method)
 
 
-def white_balance_grayworld(rgb):
+def white_balance_grayworld(rgb: np.ndarray) -> np.ndarray:
     gpu = get_gpu()
     xp = gpu.xp
     img = xp.array(rgb, dtype=xp.float32, copy=True)
@@ -161,7 +173,7 @@ def white_balance_grayworld(rgb):
     return xp.clip(img * scale, 0, None)
 
 
-def white_balance_whitepatch(rgb, pct: float = None):
+def white_balance_whitepatch(rgb: np.ndarray, pct: Optional[float] = None) -> np.ndarray:
     gpu = get_gpu()
     xp = gpu.xp
     if pct is None:
@@ -182,60 +194,6 @@ def white_balance_whitepatch(rgb, pct: float = None):
     return xp.clip(img / scales[None, None, :], 0, None)
 
 
-def remove_hot_pixels(img, threshold: float = None):
-    gpu = get_gpu()
-    xp = gpu.xp
-    if threshold is None:
-        threshold = Config.HOT_PIXEL_THRESHOLD
-    med = gpu.xndimage.median_filter(img, size=3)
-    diff = img - med
-
-    # FIX #3: Use MAD-based sigma instead of std so that hot pixels do not
-    # inflate the noise estimate and hide themselves from detection.
-    mad = float(xp.median(xp.abs(diff)))
-    sigma = mad * 1.4826  # MAD → Gaussian sigma
-    if sigma < 1e-6:
-        sigma = float(xp.std(diff))  # last-resort fallback for flat frames
-
-    mask = diff > threshold * sigma
-    if not bool(xp.any(mask)):
-        return img
-    img_fixed = xp.array(img, copy=True)
-    img_fixed[mask] = med[mask]
-    return img_fixed
-
-
-def remove_hot_pixels_bayer(data: np.ndarray, threshold: float = None) -> np.ndarray:
-    """Detect and replace hot pixels on raw Bayer data per sub-channel.
-
-    Each 2x2 Bayer sub-channel (R, G1, G2, B) is processed independently,
-    so single-color hot pixels are detected at full strength — unlike
-    luminance-based detection which dilutes them by 70-89%.
-
-    Uses MAD-based sigma (robust to outliers) instead of std, preventing
-    hot pixels from inflating the noise estimate and hiding themselves.
-    """
-    if threshold is None:
-        threshold = Config.HOT_PIXEL_BAYER_THRESHOLD
-    if data.ndim != 2:
-        return data
-    result = data.astype(np.float32, copy=True)
-    for dy in range(2):
-        for dx in range(2):
-            sub = result[dy::2, dx::2]
-            med = ndimage.median_filter(sub, size=3)
-            diff = sub - med
-            mad = np.median(np.abs(diff))
-            sigma = mad * 1.4826  # MAD to Gaussian sigma
-            if sigma < 1e-6:
-                continue
-            mask = diff > threshold * sigma
-            if np.any(mask):
-                sub[mask] = med[mask]
-                result[dy::2, dx::2] = sub
-    return result
-
-
 def build_hot_pixel_map(dark: np.ndarray, sigma_threshold: float = 5.0) -> np.ndarray:
     """Build a boolean hot pixel map from an unsmoothed dark frame.
 
@@ -252,25 +210,139 @@ def build_hot_pixel_map(dark: np.ndarray, sigma_threshold: float = 5.0) -> np.nd
     return dark_f > (med + sigma_threshold * sigma)
 
 
-def apply_hot_pixel_map_bayer(data: np.ndarray, hot_map: np.ndarray) -> np.ndarray:
-    """Replace hot pixels in Bayer data using same-color median neighbors.
+_DETECT = object()  # sentinel: use default threshold for statistical detection
 
-    Processes each Bayer sub-channel (R, G1, G2, B) independently so the
-    3x3 median filter only uses same-color pixels (equivalent to 6x6 on
-    the full grid).  This preserves color accuracy.
+
+def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
+                   threshold: Optional[float] = _DETECT,
+                   hot_map: Optional[np.ndarray] = None) -> np.ndarray:
+    """Unified hot pixel detection and replacement.
+
+    Modes:
+        'bayer'  — Process each 2x2 Bayer sub-channel independently.
+                   If *hot_map* is provided, those pixels are replaced.
+                   Statistical detection also runs unless *threshold=None*.
+        'rgb'    — Detect on luminance, replace all 3 channels.
+        'mono'   — Single-channel statistical detection (GPU-accelerated).
+        'auto'   — Infer from data shape: 2D → bayer, 3D → rgb.
+
+    Args:
+        threshold: Sigma multiplier for statistical detection. Pass *None*
+                   to skip detection (useful when only applying a hot_map).
+                   Defaults to the per-mode Config value.
+
+    All modes use MAD-based sigma for robust noise estimation.
     """
-    if hot_map is None or not np.any(hot_map):
+    if mode == 'auto':
+        mode = 'bayer' if data.ndim == 2 else 'rgb'
+
+    if mode == 'bayer':
+        return _fix_hot_bayer(data, threshold, hot_map)
+    elif mode == 'rgb':
+        return _fix_hot_rgb(data, threshold)
+    elif mode == 'mono':
+        return _fix_hot_mono(data, threshold)
+    else:
+        raise ValueError(f"Unknown hot pixel mode: {mode!r}")
+
+
+def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
+                   hot_map: Optional[np.ndarray] = None) -> np.ndarray:
+    """Bayer-aware hot pixel fix: apply pre-built map and/or statistical detection."""
+    if data.ndim != 2:
         return data
     result = data.astype(np.float32, copy=True)
+
+    # Apply pre-built dark-frame map if provided
+    if hot_map is not None and hot_map.shape == data.shape and np.any(hot_map):
+        for dy in range(2):
+            for dx in range(2):
+                sub = result[dy::2, dx::2]
+                mask = hot_map[dy::2, dx::2]
+                if np.any(mask):
+                    med = ndimage.median_filter(sub, size=3)
+                    sub[mask] = med[mask]
+                    result[dy::2, dx::2] = sub
+
+    # Statistical detection per sub-channel (skip if threshold is None)
+    if threshold is None:
+        return result
+    if threshold is _DETECT:
+        threshold = Config.HOT_PIXEL_BAYER_THRESHOLD
     for dy in range(2):
         for dx in range(2):
             sub = result[dy::2, dx::2]
-            mask = hot_map[dy::2, dx::2]
+            med = ndimage.median_filter(sub, size=3)
+            diff = sub - med
+            mad = np.median(np.abs(diff))
+            sigma = mad * 1.4826
+            if sigma < 1e-6:
+                continue
+            mask = diff > threshold * sigma
             if np.any(mask):
-                med = ndimage.median_filter(sub, size=3)
                 sub[mask] = med[mask]
                 result[dy::2, dx::2] = sub
     return result
+
+
+def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT) -> np.ndarray:
+    """Detect hot pixels on luminance, fix all 3 channels.
+
+    Computes per-channel medians once (3 passes), reconstructs median
+    luminance from them, and reuses medians for replacement.
+    """
+    gpu = get_gpu()
+    xp = gpu.xp
+    if threshold is _DETECT:
+        threshold = Config.HOT_PIXEL_THRESHOLD
+
+    ch_meds = [gpu.xndimage.median_filter(rgb[:, :, c], size=3) for c in range(rgb.shape[2])]
+    lum     = 0.299 * rgb[:, :, 0]   + 0.587 * rgb[:, :, 1]   + 0.114 * rgb[:, :, 2]
+    med_lum = 0.299 * ch_meds[0]     + 0.587 * ch_meds[1]     + 0.114 * ch_meds[2]
+
+    diff = lum - med_lum
+    mad = float(xp.median(xp.abs(diff)))
+    sigma = mad * 1.4826
+    if sigma < 1e-6:
+        sigma = float(xp.std(diff))
+
+    mask = diff > threshold * sigma
+    if not bool(xp.any(mask)):
+        return rgb
+
+    result = xp.array(rgb, copy=True)
+    for c in range(rgb.shape[2]):
+        result[:, :, c][mask] = ch_meds[c][mask]
+    return result
+
+
+def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.ndarray:
+    """Single-channel hot pixel detection and replacement (GPU-accelerated)."""
+    gpu = get_gpu()
+    xp = gpu.xp
+    if threshold is _DETECT:
+        threshold = Config.HOT_PIXEL_THRESHOLD
+    med = gpu.xndimage.median_filter(img, size=3)
+    diff = img - med
+
+    mad = float(xp.median(xp.abs(diff)))
+    sigma = mad * 1.4826
+    if sigma < 1e-6:
+        sigma = float(xp.std(diff))
+
+    mask = diff > threshold * sigma
+    if not bool(xp.any(mask)):
+        return img
+    img_fixed = xp.array(img, copy=True)
+    img_fixed[mask] = med[mask]
+    return img_fixed
+
+
+# Legacy aliases for backwards compatibility
+remove_hot_pixels = _fix_hot_mono
+remove_hot_pixels_bayer = lambda data, threshold=_DETECT: fix_hot_pixels(data, mode='bayer', threshold=threshold)
+remove_hot_pixels_rgb = lambda rgb, threshold=_DETECT: fix_hot_pixels(rgb, mode='rgb', threshold=threshold)
+apply_hot_pixel_map_bayer = lambda data, hot_map: fix_hot_pixels(data, mode='bayer', hot_map=hot_map, threshold=None)
 
 
 def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
@@ -327,7 +399,7 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
     return result
 
 
-def background_gradient_subtract(img):
+def background_gradient_subtract(img: np.ndarray) -> np.ndarray:
     gpu = get_gpu()
     # FIX #9: Use img.shape[:2] so min() operates on spatial dims (H, W) only.
     # Previously min(img.shape) could return 3 (the channel count) for RGB
@@ -338,7 +410,7 @@ def background_gradient_subtract(img):
     return img - blurred
 
 
-def remove_hot_pixels_rgb(rgb, threshold: float = None):
+def remove_hot_pixels_rgb(rgb: np.ndarray, threshold: Optional[float] = None) -> np.ndarray:
     """Detect hot pixels on luminance, fix all 3 channels.
 
     FIX #8: Reduced from 4 median_filter passes (1 luminance + 3 channels)

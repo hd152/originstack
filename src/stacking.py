@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -285,9 +285,13 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
 
         newly_rejected = mask & ~new_mask
         rejected = int(mask.sum() - new_mask.sum())
+        total_valid = int(mask.sum())
         mask = new_mask
         masked[newly_rejected] = np.nan
         if rejected == 0:
+            break
+        # Early stopping: <0.1% change means convergence
+        if total_valid > 0 and rejected / total_valid < 0.001:
             break
 
     if winsorize:
@@ -594,8 +598,8 @@ def run_stacking_phase(
     final: List[FrameInfo],
     final_indices: List[int],
     mem_rgb: np.ndarray,
-    shifts: List,
-    transforms: List,
+    shifts: List[Tuple[float, float]],
+    transforms: List[Optional[Any]],
     H: int,
     W: int,
     C: int,

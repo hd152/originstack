@@ -5,7 +5,7 @@ import argparse
 import os
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -29,7 +29,8 @@ except Exception:
 def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[np.ndarray]],
                           debayer_method: str, white_balance: str,
                           ca_correction: bool = False,
-                          cosmic_ray_rejection: bool = False) -> Dict:
+                          cosmic_ray_rejection: bool = False,
+                          quick_quality: bool = False) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -121,7 +122,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
 
-    metrics = compute_quality_metrics(lum)
+    metrics = compute_quality_metrics(lum, quick=quick_quality)
     return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None}
 
 
@@ -129,7 +130,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 _worker_masters: Dict[str, Optional[np.ndarray]] = {}
 
 
-def _init_worker(master_paths: Dict[str, str]):
+def _init_worker(master_paths: Dict[str, str]) -> None:
     """Initializer for pool workers — load master calibration arrays from disk."""
     global _worker_masters
     _worker_masters = {}
@@ -137,7 +138,7 @@ def _init_worker(master_paths: Dict[str, str]):
         _worker_masters[name] = np.load(p)
 
 
-def _parallel_frame_worker(args_tuple):
+def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Optional[str]]:
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
     path, frame_idx, debayer_method, white_balance, mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, ca_correction, cosmic_ray_rejection = args_tuple
     global _worker_masters
@@ -223,6 +224,17 @@ def execute_frame_processing(
                         print(f'  REJECT {os.path.basename(f.path)}: {error}')
                 else:
                     f.metrics = metrics
+                    if args.verbose:
+                        m = f.metrics
+                        safe_print(f'    {os.path.basename(f.path)}: '
+                                   f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
+                                   f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
+                                   f'sharpness={m.get("sharpness",0):.0f}')
+                        safe_print(f'      bg={m.get("background",0):.1f}  '
+                                   f'noise={m.get("noise",0):.2f}  '
+                                   f'brightness={m.get("brightness",0):.1f}  '
+                                   f'contrast={m.get("contrast",0):.1f}  '
+                                   f'dynamic_range={m.get("dynamic_range",0):.0f}')
 
         for p in master_paths.values():
             try:

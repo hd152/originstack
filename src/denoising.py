@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -14,24 +14,56 @@ from src.background import _estimate_sky_sigma
 
 _log = get_logger()
 
-try:
-    import pywt
-    HAS_PYWT = True
-except Exception:
-    HAS_PYWT = False
+pywt = None
+HAS_PYWT = False
+cv2 = None
+HAS_CV2 = False
+denoise_nl_means = estimate_sigma = richardson_lucy = None
+HAS_SKIMAGE_RESTORATION = False
 
-try:
-    import cv2
-    HAS_CV2 = True
-except Exception:
-    cv2 = None
-    HAS_CV2 = False
 
-try:
-    from skimage.restoration import denoise_nl_means, estimate_sigma, richardson_lucy
-    HAS_SKIMAGE_RESTORATION = True
-except Exception:
-    HAS_SKIMAGE_RESTORATION = False
+def _ensure_pywt():
+    global pywt, HAS_PYWT
+    if not HAS_PYWT:
+        try:
+            import pywt as _pywt
+            if hasattr(_pywt, 'dwt_max_level'):
+                pywt = _pywt
+                HAS_PYWT = True
+        except Exception:
+            pass
+    return pywt
+
+
+def _ensure_cv2():
+    global cv2, HAS_CV2
+    if not HAS_CV2:
+        try:
+            import cv2 as _cv2
+            if hasattr(_cv2, 'bilateralFilter'):
+                cv2 = _cv2
+                HAS_CV2 = True
+        except Exception:
+            pass
+    return cv2
+
+
+def _ensure_skimage_restoration():
+    global denoise_nl_means, estimate_sigma, richardson_lucy, HAS_SKIMAGE_RESTORATION
+    if not HAS_SKIMAGE_RESTORATION:
+        try:
+            from skimage.restoration import (
+                denoise_nl_means as _dnlm,
+                estimate_sigma as _es,
+                richardson_lucy as _rl)
+            if callable(_dnlm):
+                denoise_nl_means = _dnlm
+                estimate_sigma = _es
+                richardson_lucy = _rl
+                HAS_SKIMAGE_RESTORATION = True
+        except Exception:
+            pass
+    return HAS_SKIMAGE_RESTORATION
 
 try:
     from astropy.stats import sigma_clipped_stats
@@ -132,6 +164,7 @@ def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     Returns:
         Denoised float32 image (H, W, 3).
     """
+    _ensure_pywt()
     if not HAS_PYWT:
         _log.warning("pywt not installed, skipping adaptive wavelet denoise")
         return img
@@ -200,6 +233,7 @@ def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     blended back with the original at star positions so that star cores are not
     softened and their colours are preserved.
     """
+    _ensure_pywt()
     if not HAS_PYWT:
         _log.warning("pywt not installed, skipping wavelet denoise")
         return img
@@ -249,7 +283,7 @@ def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     return result.astype(np.float32)
 
 
-def bilateral_denoise(img: np.ndarray, sigma_color: float = None,
+def bilateral_denoise(img: np.ndarray, sigma_color: Optional[float] = None,
                       sigma_space: float = 3.0) -> np.ndarray:
     """Edge-preserving bilateral filter denoising (second-pass after wavelet).
 
@@ -268,6 +302,7 @@ def bilateral_denoise(img: np.ndarray, sigma_color: float = None,
     sigma_space:  Spatial smoothing radius in pixels (default 3.0).  Larger
                   values smooth over bigger areas but are slower.
     """
+    _ensure_cv2()
     if not HAS_CV2:
         _log.warning("Bilateral denoising requires cv2; skipping")
         return img
@@ -338,6 +373,8 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
     blend = float(np.clip(blend, 0.0, 1.0))
     img_f64 = img.astype(np.float64)
 
+    _ensure_skimage_restoration()
+    _ensure_cv2()
     if HAS_SKIMAGE_RESTORATION:
         img_norm = img_ped.astype(np.float32) / ped_max
         h_norm = h * sky_sigma / ped_max
@@ -380,6 +417,7 @@ def _median_filter_fast(plane: np.ndarray, ksize: int) -> np.ndarray:
     Returns:
         Median-filtered float64 array of the same shape.
     """
+    _ensure_cv2()
     if HAS_CV2 and ksize in (3, 5):
         return cv2.medianBlur(plane.astype(np.float32), ksize).astype(np.float64)
     return ndimage.median_filter(plane, size=ksize)
@@ -733,9 +771,9 @@ def generalized_hyperbolic_stretch(
 def multiscale_local_contrast(
         img: np.ndarray,
         strength: float = 0.7,
-        scales: tuple = (2, 12, 40),
-        scale_weights: tuple = (0.3, 0.6, 0.1),
-        star_mask: np.ndarray = None) -> np.ndarray:
+        scales: Tuple[int, ...] = (2, 12, 40),
+        scale_weights: Tuple[float, ...] = (0.3, 0.6, 0.1),
+        star_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Multiscale local contrast enhancement (MLCE) for galaxy structure.
 
     Applies luminance-domain unsharp masking simultaneously at fine, medium,
@@ -850,7 +888,7 @@ def reduce_stars(
     return np.clip(result, 0.0, None).astype(np.float32)
 
 
-def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
+def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None) -> np.ndarray:
     """Non-linear arcsinh stretch with sigma-clipped sky background estimation.
 
     Estimates the true sky background via iterative sigma-clipping, sets it as

@@ -306,7 +306,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
     if blur_sigma > 0:
         background = ndimage.gaussian_filter(background.astype(np.float64), sigma=blur_sigma)
 
-    return background
+    return np.asarray(background, dtype=np.float32)
 
 
 def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
@@ -377,8 +377,8 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
                 if verbose:
                     safe_print(f"    Galaxy mask #{n_sources}: centre=({px},{py}), "
                                f"radius={excl_radius}px")
-    except Exception:
-        pass
+    except Exception as e:
+        safe_print(f"    WARNING: Galaxy detection failed ({e}) — proceeding without exclusion mask")
 
     # --- Per-channel background subtraction ---
     # Process channels in parallel
@@ -783,7 +783,8 @@ def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
     for iteration in range(max_iter):
         try:
             rbf = RBFInterpolator(c, v, kernel=kernel, smoothing=smoothing, degree=1)
-        except Exception:
+        except Exception as e:
+            safe_print(f"    WARNING: RBF fitting failed ({e}) — falling back to polynomial")
             return _polynomial_surface(c, v, H, W, patch_size)
 
         residuals = v - rbf(c)
@@ -803,7 +804,12 @@ def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
         return _polynomial_surface(c, v, H, W, patch_size)
 
     # Evaluation
-    stride = max(4, patch_size // 4)
+    # Use coarser grid for large images to keep evaluation tractable
+    min_dim = min(H, W)
+    if min_dim > 4000:
+        stride = max(8, patch_size // 2)
+    else:
+        stride = max(4, patch_size // 4)
     Hc = max(4, H // stride)
     Wc = max(4, W // stride)
     yc = np.linspace(0.0, 1.0, Hc)
@@ -813,7 +819,8 @@ def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
     
     try:
         coarse = rbf(query_pts).reshape(Hc, Wc).astype(np.float64)
-    except Exception:
+    except Exception as e:
+        safe_print(f"    WARNING: RBF evaluation failed ({e}) — falling back to polynomial")
         return _polynomial_surface(c, v, H, W, patch_size)
 
     surface = zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W]
@@ -838,7 +845,8 @@ def _polynomial_surface(coords: np.ndarray, values: np.ndarray,
     A = poly(coords[:, 0], coords[:, 1])
     try:
         coeffs, _, _, _ = np.linalg.lstsq(A, values, rcond=None)
-    except Exception:
+    except Exception as e:
+        safe_print(f"    WARNING: Polynomial fit failed ({e}) — using flat median background")
         med_val = float(np.median(values)) if len(values) else 0.0
         return np.full((H, W), med_val, dtype=np.float64)
 

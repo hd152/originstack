@@ -6,7 +6,7 @@ import os
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -41,8 +41,8 @@ except Exception:
     Image = None
 
 
-def match_stars_affine(ref_positions, img_positions,
-                       initial_shift: Tuple[float, float] = (0.0, 0.0)):
+def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
+                       initial_shift: Tuple[float, float] = (0.0, 0.0)) -> Optional[Any]:
     """Match star catalogs and compute a Euclidean (rotation+translation) transform.
 
     Uses nearest-neighbor matching after applying an initial translation estimate,
@@ -92,8 +92,8 @@ def match_stars_affine(ref_positions, img_positions,
     return None
 
 
-def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
-                    transform=None) -> np.ndarray:
+def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
+                    transform: Optional[Any] = None) -> np.ndarray:
     """Apply translation or affine transform to a multi-channel image.
 
     Uses cubic spline interpolation (order=3) for subpixel accuracy.
@@ -203,11 +203,20 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             else:
                 img_pre = img
 
-            ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
-            img_norm = (img_pre - np.mean(img_pre)) / (np.std(img_pre) + 1e-12)
+            ref_std = float(np.std(ref))
+            img_std = float(np.std(img_pre))
+            # Skip phase_cc when either image has near-zero variance — normalization
+            # produces huge values that confuse the correlation.
+            if ref_std < 1.0 or img_std < 1.0:
+                debug_info.append("phase_cc skipped: near-zero image variance")
+                raise StopIteration  # caught by outer except, falls through to FFT
+
+            ref_norm = (ref - np.mean(ref)) / ref_std
+            img_norm = (img_pre - np.mean(img_pre)) / img_std
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
+                warnings.simplefilter("ignore", UserWarning)
                 shift, error, diffphase = phase_cross_correlation(ref_norm, img_norm, upsample_factor=upsample)
             debug_info.append(f"phase_cc: shift={shift}, error={error:.4f}")
 
@@ -387,7 +396,7 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
 
 
 def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
-                     transforms=None) -> Tuple[int, int, int, int]:
+                     transforms: Optional[List[Optional[Any]]] = None) -> Tuple[int, int, int, int]:
     """Compute the largest axis-aligned crop valid in all aligned frames."""
     H, W = shape
     transforms = transforms or [None] * len(shifts)
@@ -424,7 +433,7 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
     return top, bottom, left, right
 
 
-def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> dict:
+def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> Dict[str, Any]:
     """Analyse registration shifts to detect dithering patterns."""
     if len(shifts) < 3:
         return {'is_dithered': False, 'pattern': 'aligned',
@@ -512,14 +521,35 @@ def run_registration_phase(
     best_idx: int,
     ref_lum: np.ndarray,
     mem_lum: np.ndarray,
-    cached_lums: List,
+    cached_lums: List[Optional[np.ndarray]],
     H: int,
     W: int,
     args: argparse.Namespace,
     stats: ProcessingStats,
-) -> Tuple[List, List, Dict]:
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]], Dict[str, Any]]:
     """Compute per-frame registration shifts/transforms for all accepted frames."""
     ref_stars = best.metrics.get('_star_sources')
+
+    # If star sources are missing from metrics (e.g. loaded from checkpoint, or
+    # DAOStarFinder was unavailable during quality phase), attempt re-detection now
+    # using the reference luminance we already have in memory.
+    if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        try:
+            from src.quality import _detect_stars_multi_fwhm, _ensure_photutils, _ensure_astropy_stats
+            _ensure_photutils()
+            _ensure_astropy_stats()
+            from src.quality import DAOStarFinder, sigma_clipped_stats
+            if DAOStarFinder is not None and sigma_clipped_stats is not None:
+                _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)
+                if bg_std and float(bg_std) > 0:
+                    bg_sub = ref_lum - float(bg_med)
+                    ref_stars = _detect_stars_multi_fwhm(bg_sub, threshold=5.0 * float(bg_std))
+                    if ref_stars is not None and len(ref_stars) > 0:
+                        best.metrics['_star_sources'] = ref_stars
+                        safe_print(f"  Re-detected {len(ref_stars)} stars in reference frame for affine registration")
+        except Exception as e:
+            _log.debug("Re-detection of reference stars failed: %s", e)
+
     if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
         safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
                    "registration disabled, falling back to translation only")
