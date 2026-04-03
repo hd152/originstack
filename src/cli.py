@@ -935,6 +935,74 @@ def parse_args():
     p.add_argument('--log-file', default=None, metavar='PATH',
                    help='Write a full DEBUG-level log to this file in addition to '
                         'console output.')
+    # --- Output formats ---
+    p.add_argument('--output-tiff', action='store_true',
+                   help='Write a 32-bit float TIFF alongside the FITS output '
+                        '(requires tifffile; falls back to 16-bit via Pillow)')
+    p.add_argument('--output-xisf', action='store_true',
+                   help='Write output in PixInsight XISF 1.0 format alongside FITS '
+                        '(no extra dependencies)')
+    # --- Quality report ---
+    p.add_argument('--quality-report', default=None, metavar='PATH',
+                   help='Write per-frame quality metrics CSV after Phase 1 '
+                        '(columns: filename, snr, fwhm, star_count, quality_score, '
+                        'accepted, rejection_reason)')
+    # --- Per-frame preview export ---
+    p.add_argument('--export-frames-dir', default=None, metavar='PATH',
+                   help='Directory to write a stretched JPEG for every accepted frame '
+                        'after Phase 1 processing')
+    # --- Plate solver backend ---
+    p.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
+                   help='Plate solver backend: astap (fast, local binary) or '
+                        'astrometry (nova.astrometry.net, requires API key). '
+                        'Default: astrometry. ASTAP is recommended when the binary '
+                        'is installed — it solves in ~1 s vs 30–120 s online.')
+    p.add_argument('--astap-path', default=None, metavar='PATH',
+                   help='Explicit path to the ASTAP binary (auto-detected if omitted)')
+    # --- Background extraction method ---
+    p.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default=None,
+                   help='Background extraction method: '
+                        'mesh: legacy polynomial grid (fastest). '
+                        'dbe: Dynamic Background Extraction, RBF thin-plate-spline (default). '
+                        'graxpert: AI-powered gradient removal via GraXpert subprocess '
+                        '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
+    p.add_argument('--graxpert-path', default=None, metavar='PATH',
+                   help='Path to GraXpert binary (auto-detected if omitted). '
+                        'Download from https://www.graxpert.com/')
+    # --- Starnet++ star removal ---
+    p.add_argument('--star-remove', action='store_true',
+                   help='Remove stars using Starnet++ after post-processing. '
+                        'Saves <output>_starless.fits and <output>_stars.fits. '
+                        'The main FITS output becomes the starless image. '
+                        'Requires Starnet++ binary on PATH or --starnet-path.')
+    p.add_argument('--starnet-path', default=None, metavar='PATH',
+                   help='Path to Starnet++ binary (auto-detected if omitted). '
+                        'Download from https://www.starnetastro.com/')
+    # --- Comet stacking ---
+    p.add_argument('--comet-mode', action='store_true',
+                   help='Enable comet nucleus tracking: produces a second stack '
+                        'aligned on the brightest extended blob (comet nucleus) in '
+                        'addition to the normal star-aligned stack. '
+                        'Comet-aligned output is saved as <stem>_comet.fits.')
+    # --- HDR combination ---
+    p.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
+                   help='Blend a short-exposure stack FITS into saturated regions '
+                        'of the main (long-exposure) stack for HDR targets '
+                        '(e.g. Orion Nebula core, globular clusters). '
+                        'The short stack is automatically scaled to match the '
+                        'long stack background level before blending.')
+    # --- Photometric colour calibration ---
+    p.add_argument('--color-calibrate', action='store_true',
+                   help='Apply photometric colour calibration after plate solving: '
+                        'queries Gaia DR3 (or 2MASS via VizieR) for stars in the '
+                        'field, matches them to the image via aperture photometry, '
+                        'and derives per-channel scale factors. '
+                        'Requires --plate-solve and astroquery.')
+    # --- Mask export ---
+    p.add_argument('--export-masks', action='store_true',
+                   help='Save the star detection mask as a FITS sidecar file '
+                        '(<stem>_star_mask.fits) for use in external tools '
+                        '(PixInsight, Siril, etc.)')
     # --- AI features (require: pip install anthropic  +  ANTHROPIC_API_KEY env var) ---
     p.add_argument('--ai-advisor', action='store_true',
                    help='After Phase 1, call Claude to recommend optimal stacking '
@@ -961,6 +1029,12 @@ def parse_args():
 
 
 def main():
+    # Dispatch to the 'combine' subcommand without touching the main parser
+    if len(sys.argv) > 1 and sys.argv[1] == 'combine':
+        from src.channel_combine import run_combine_cli
+        run_combine_cli(sys.argv[2:])
+        return
+
     args = parse_args()
     if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
         print("ERROR: -o/--output is required unless --health-check or --dry-run is specified",

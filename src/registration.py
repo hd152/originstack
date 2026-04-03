@@ -662,3 +662,112 @@ def run_registration_phase(
                        f"to enable sub-pixel super-resolution stacking")
 
     return shifts, transforms, dither_info
+
+
+# ---------------------------------------------------------------------------
+# Comet stacking support
+# ---------------------------------------------------------------------------
+
+def find_comet_centroid(lum: np.ndarray,
+                        smooth_sigma: float = 5.0,
+                        percentile: float = 99.5) -> Tuple[float, float]:
+    """Locate the brightest compact extended object in a luminance frame.
+
+    Used for comet nucleus tracking: the comet typically appears as the
+    brightest non-stellar blob.  Stars are smaller and more numerous; the
+    comet nucleus is the single dominant bright region after smoothing.
+
+    Args:
+        lum:          2-D luminance frame (H, W).
+        smooth_sigma: Gaussian blur radius to suppress point sources.
+        percentile:   Threshold percentile for nucleus detection.
+
+    Returns:
+        (cy, cx) sub-pixel centroid of the brightest region.
+    """
+    smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
+    threshold = np.percentile(smoothed, percentile)
+    mask = smoothed > threshold
+    if not mask.any():
+        # fallback: return frame centre
+        return lum.shape[0] / 2.0, lum.shape[1] / 2.0
+
+    # Label connected regions above threshold
+    labeled, n_labels = ndimage.label(mask)
+    if n_labels == 0:
+        cy, cx = np.unravel_index(int(np.argmax(smoothed)), smoothed.shape)
+        return float(cy), float(cx)
+
+    # Pick the brightest (integrated flux) region
+    fluxes = [float(np.sum(smoothed[labeled == i])) for i in range(1, n_labels + 1)]
+    best_label = int(np.argmax(fluxes)) + 1
+    cy, cx = ndimage.center_of_mass(smoothed, labeled, best_label)
+    return float(cy), float(cx)
+
+
+def run_comet_registration_phase(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    best_idx: int,
+    ref_lum: np.ndarray,
+    mem_lum: np.ndarray,
+    H: int,
+    W: int,
+    args: argparse.Namespace,
+    stats: ProcessingStats,
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]]]:
+    """Compute per-frame registration shifts aligned on a comet nucleus.
+
+    Instead of aligning on the star field, this tracks the brightest extended
+    blob (comet nucleus) in each frame relative to the reference frame.
+
+    Returns:
+        (shifts, transforms) — transforms are always None (translation only).
+    """
+    print(f"  [Comet] Locating nucleus in reference frame...")
+    ref_cy, ref_cx = find_comet_centroid(ref_lum)
+    print(f"  [Comet] Reference nucleus centroid: ({ref_cx:.1f}, {ref_cy:.1f})")
+
+    shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
+    transforms: List[Optional[Any]] = [None] * len(final)
+
+    def _register_comet(j: int, orig_idx: int) -> Tuple[int, Tuple[float, float]]:
+        if orig_idx == best_idx or getattr(args, 'no_registration', False):
+            return j, (0.0, 0.0)
+        lum = np.array(mem_lum[orig_idx])
+        cy, cx = find_comet_centroid(lum)
+        sy = ref_cy - cy
+        sx = ref_cx - cx
+        return j, (sy, sx)
+
+    gpu = get_gpu()
+    n_workers = min(
+        gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB, Config.GPU_VRAM_RESERVE_MB)
+        if gpu.active else (os.cpu_count() or 4),
+        len(final),
+    )
+
+    print(f"  [Comet] Tracking nucleus in {len(final)} frames...")
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(_register_comet, j, orig_idx): j
+            for j, orig_idx in enumerate(final_indices)
+        }
+        for future in tqdm(
+            as_completed(futures), total=len(final),
+            desc="  Comet tracking", unit="frame", disable=args.verbose
+        ):
+            j, shift_val = future.result()
+            shifts[j] = shift_val
+            if args.verbose:
+                sy, sx = shift_val
+                safe_print(
+                    f"    {os.path.basename(final[j].path)}: "
+                    f"comet shift=({sx:+.1f}, {sy:+.1f}) px"
+                )
+
+    shift_mags = [np.sqrt(s[0] ** 2 + s[1] ** 2) for s in shifts]
+    print(f"  [Comet] Mean shift: {np.mean(shift_mags):.1f} px, "
+          f"max: {np.max(shift_mags):.1f} px")
+
+    return shifts, transforms

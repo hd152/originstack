@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import tempfile
 import time
@@ -92,6 +93,145 @@ def _save_blink_frames(final: List[FrameInfo], final_indices: List[int],
         safe_print(f"  Blink frame save failed: {e}")
 
 
+# ---------------------------------------------------------------------------
+# New output helpers
+# ---------------------------------------------------------------------------
+
+def _write_quality_report(lights: List[FrameInfo], rejected_reasons: dict,
+                           report_path: str) -> None:
+    """Write per-frame quality metrics to a CSV file."""
+    rows = []
+    for f in lights:
+        m = f.metrics or {}
+        rows.append({
+            'filename':        os.path.basename(f.path),
+            'snr':             round(float(m.get('snr', 0)), 3),
+            'fwhm':            round(float(m.get('fwhm', 0)), 3),
+            'star_count':      int(m.get('star_count', 0)),
+            'quality_score':   round(float(m.get('score', 0)), 2),
+            'accepted':        getattr(f, 'accepted', True),
+            'rejection_reason': rejected_reasons.get(f.path, ''),
+        })
+    if not rows:
+        return
+    try:
+        with open(report_path, 'w', newline='', encoding='utf-8') as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        safe_print(f"  Quality report: {os.path.basename(report_path)} ({len(rows)} frames)")
+    except Exception as e:
+        safe_print(f"  WARNING: could not write quality report: {e}")
+
+
+def _export_frame_jpegs(final: List[FrameInfo], final_indices: List[int],
+                         mem_rgb: np.ndarray, export_dir: str,
+                         args: argparse.Namespace) -> None:
+    """Write a stretched JPEG preview for each accepted frame."""
+    os.makedirs(export_dir, exist_ok=True)
+    stretch = getattr(args, 'stretch', 'ghs')
+    ghs_b  = float(getattr(args, 'ghs_b', 8.0))
+    ghs_sp = float(getattr(args, 'ghs_sp', 0.15))
+    ghs_hp = float(getattr(args, 'ghs_hp', 0.95))
+    for j, f in zip(final_indices, final):
+        rgb = np.array(mem_rgb[j])
+        stem = os.path.splitext(os.path.basename(f.path))[0]
+        out_path = os.path.join(export_dir, stem + '.jpg')
+        try:
+            save_preview_rgb(rgb, out_path, stretch=stretch,
+                             ghs_b=ghs_b, ghs_sp=ghs_sp, ghs_hp=ghs_hp)
+        except Exception as e:
+            safe_print(f"  WARNING: frame JPEG export failed for {stem}: {e}")
+    safe_print(f"  Exported {len(final)} frame JPEGs → {export_dir}")
+
+
+def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
+    """Save (H, W, 3) float32 image as TIFF alongside the FITS output."""
+    tiff_path = os.path.splitext(output_path)[0] + '.tiff'
+    try:
+        import tifffile
+        # Planar (3, H, W) is the most widely compatible layout for 32-bit float
+        data = np.ascontiguousarray(np.transpose(stacked.astype(np.float32), (2, 0, 1)))
+        tifffile.imwrite(tiff_path, data, photometric='rgb', planarconfig='contig',
+                         imagej=False)
+    except ImportError:
+        try:
+            from PIL import Image
+            arr16 = (np.clip(stacked, 0, 1) * 65535).astype(np.uint16)
+            Image.fromarray(arr16).save(tiff_path)
+            safe_print("  NOTE: tifffile not installed; saved 16-bit TIFF via Pillow")
+        except Exception as e:
+            safe_print(f"  WARNING: TIFF export failed: {e}")
+            return
+    safe_print(f"  TIFF output: {os.path.basename(tiff_path)}")
+
+
+def _save_xisf(stacked: np.ndarray, output_path: str, header) -> None:
+    """Save stacked image as PixInsight XISF alongside the FITS output."""
+    xisf_path = os.path.splitext(output_path)[0] + '.xisf'
+    try:
+        from src.xisf_writer import write_xisf
+        meta = {k: header.get(k) for k in
+                ['OBJECT', 'DATE-OBS', 'EXPTIME', 'TELESCOP', 'INSTRUME',
+                 'CRVAL1', 'CRVAL2', 'EQUINOX']
+                if header.get(k) is not None}
+        write_xisf(stacked, xisf_path, header_meta=meta)
+        safe_print(f"  XISF output: {os.path.basename(xisf_path)}")
+    except Exception as e:
+        safe_print(f"  WARNING: XISF export failed: {e}")
+
+
+def _hdr_blend(long_stack: np.ndarray, short_fits_path: str,
+               verbose: bool = False) -> np.ndarray:
+    """Blend a short-exposure stack into the saturated regions of the long stack.
+
+    Rescales the short stack to match the long stack's background level, then
+    blends smoothly in the regions where the long stack is near or above its
+    98th-percentile value.
+    """
+    try:
+        short_data, _ = load_fits(short_fits_path)
+    except Exception as e:
+        safe_print(f"  WARNING: HDR combine: could not load '{short_fits_path}': {e}")
+        return long_stack
+
+    # Normalise short to (H, W, 3)
+    if short_data.ndim == 3 and short_data.shape[0] == 3:
+        short_rgb = np.transpose(short_data, (1, 2, 0)).astype(np.float32)
+    elif short_data.ndim == 3 and short_data.shape[2] == 3:
+        short_rgb = short_data.astype(np.float32)
+    else:
+        safe_print("  WARNING: HDR combine: unexpected short-stack shape — skipping")
+        return long_stack
+
+    H, W, C = long_stack.shape
+    if short_rgb.shape[:2] != (H, W):
+        from scipy.ndimage import zoom
+        zy, zx = H / short_rgb.shape[0], W / short_rgb.shape[1]
+        short_rgb = zoom(short_rgb, (zy, zx, 1), order=1).astype(np.float32)
+
+    # Per-channel sky-level scale: match short sky to long sky
+    sat_threshold = float(np.percentile(long_stack, 98))
+    # sky_mask is 2D: pixels where luminance is below median
+    lum_long = long_stack.mean(axis=2)
+    sky_mask = lum_long < float(np.percentile(lum_long, 50))
+    for c in range(C):
+        sky_long  = long_stack[:, :, c][sky_mask]
+        sky_short = short_rgb[:, :, c][sky_mask]
+        if len(sky_short) > 0 and sky_short.mean() > 0:
+            short_rgb[:, :, c] *= sky_long.mean() / sky_short.mean()
+
+    # Smooth blend mask centred around the saturation threshold
+    blend_width = sat_threshold * 0.1
+    sat_mask = np.clip((long_stack - (sat_threshold - blend_width)) / (2 * blend_width),
+                       0.0, 1.0)
+    blended = long_stack * (1.0 - sat_mask) + short_rgb * sat_mask
+    if verbose:
+        n_blended = int(np.sum(sat_mask > 0.01))
+        safe_print(f"  HDR blend: {n_blended:,} pixels blended from short stack")
+    return blended.astype(np.float32)
+
+
 def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace,
                  masters: Dict[str, Optional[np.ndarray]], stats: ProcessingStats) -> Optional[str]:
     lights = [f for f in frames if f.type == 'light']
@@ -151,6 +291,15 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
         _lights_index = {id(f): i for i, f in enumerate(lights)}
         final_indices = [_lights_index[id(f)] for f in final]
+
+        # Quality metrics CSV export
+        if getattr(args, 'quality_report', None):
+            _write_quality_report(lights, rejected_reasons, args.quality_report)
+
+        # Per-frame JPEG export
+        if getattr(args, 'export_frames_dir', None):
+            _export_frame_jpegs(final, final_indices, mem_rgb,
+                                args.export_frames_dir, args)
 
         # Save checkpoint after phase 1
         save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats)
@@ -246,6 +395,33 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         if getattr(args, 'keep_intermediates', False):
             _save_blink_frames(final, final_indices, mem_rgb, shifts, transforms,
                                top, bottom, left, right, output_path)
+
+        # Comet stacking: second pass aligned on comet nucleus
+        if getattr(args, 'comet_mode', False):
+            print_phase(3, "Comet Stacking (nucleus-aligned pass)")
+            from src.registration import run_comet_registration_phase
+            comet_shifts, comet_transforms = run_comet_registration_phase(
+                final, final_indices, best_idx,
+                ref_lum, mem_lum, H, W, args, stats)
+            comet_stacked, _, ct, cb, cl, cr = run_stacking_phase(
+                final, final_indices, mem_rgb,
+                comet_shifts, comet_transforms, H, W, C, args, stats)
+            comet_out = os.path.splitext(output_path)[0] + '_comet.fits'
+            from astropy.io import fits as _cfits
+            comet_hdu = _cfits.PrimaryHDU(
+                data=np.transpose(comet_stacked.astype(np.float32), (2, 0, 1))
+            )
+            comet_hdu.header['COMET'] = (True, 'Nucleus-aligned comet stack')
+            comet_hdu.header['CREATOR'] = 'astro_stack.py comet_mode'
+            comet_hdu.writeto(comet_out, overwrite=True)
+            comet_prev = os.path.splitext(comet_out)[0] + '.jpg'
+            save_preview_rgb(comet_stacked, comet_prev,
+                             stretch=getattr(args, 'stretch', 'ghs'),
+                             ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+                             ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+                             ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+            safe_print(f"  Comet stack: {os.path.basename(comet_out)}")
+
     finally:
         mm_mgr.cleanup()
 
@@ -273,6 +449,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     stats.post_processing_time = time.time() - phase_start
 
+    # HDR multi-exposure blend (applied to post-processed stack)
+    if getattr(args, 'hdr_combine', None):
+        safe_print(f"\n  Applying HDR blend from {os.path.basename(args.hdr_combine)}...")
+        hdr_start = time.time()
+        stacked = _hdr_blend(stacked, args.hdr_combine, verbose=args.verbose)
+        safe_print(f"  ✓ HDR blend ({format_time(time.time() - hdr_start)})")
+
     # ======================================================================
     # Output
     # ======================================================================
@@ -295,10 +478,48 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if getattr(args, 'plate_solve', False):
         if args.verbose:
             print("\n  Attempting plate solving...")
-        if solve_plate(data_out, hdu.header, output_path, verbose=args.verbose):
+        solver   = getattr(args, 'plate_solver', 'astrometry')
+        astap_bin = getattr(args, 'astap_path', None)
+        if solve_plate(data_out, hdu.header, output_path,
+                       verbose=args.verbose, solver=solver, astap_path=astap_bin):
             hdu.writeto(output_path, overwrite=True)
+
+            # Photometric colour calibration (requires successful plate solve)
+            if getattr(args, 'color_calibrate', False):
+                safe_print("\n  Applying photometric colour calibration...")
+                cc_start = time.time()
+                try:
+                    from src.color_calibrate import run_photometric_calibration
+                    stacked_cc, scales = run_photometric_calibration(
+                        stacked, hdu.header, verbose=args.verbose)
+                    if scales != (1.0, 1.0, 1.0):
+                        stacked = stacked_cc
+                        # Update FITS data
+                        hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))
+                        hdu.header['COLCAL'] = (True, 'Photometric colour calibration applied')
+                        hdu.header['COLCAL_R'] = (round(scales[0], 4), 'R scale factor')
+                        hdu.header['COLCAL_G'] = (round(scales[1], 4), 'G scale factor')
+                        hdu.header['COLCAL_B'] = (round(scales[2], 4), 'B scale factor')
+                        hdu.writeto(output_path, overwrite=True)
+                        safe_print(
+                            f"  ✓ Colour calibration: "
+                            f"R={scales[0]:.4f} G={scales[1]:.4f} B={scales[2]:.4f} "
+                            f"({format_time(time.time() - cc_start)})"
+                        )
+                    else:
+                        safe_print("  Colour calibration: no correction applied (scale≈1.0)")
+                except Exception as e:
+                    safe_print(f"  WARNING: colour calibration failed: {e}")
     elif args.verbose:
         print("\n  Plate solving skipped (use --plate-solve to enable)")
+
+    # TIFF export
+    if getattr(args, 'output_tiff', False):
+        _save_tiff(stacked, output_path)
+
+    # XISF export
+    if getattr(args, 'output_xisf', False):
+        _save_xisf(stacked, output_path, hdu.header)
 
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     stretch_method = getattr(args, 'stretch', 'linear')
