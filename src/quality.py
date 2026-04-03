@@ -113,7 +113,7 @@ def measure_fwhm(img: np.ndarray, star_positions: Optional[object], cutout_radiu
     # Sort by flux (brightest first) for more reliable measurements.
     try:
         sorted_idx = np.argsort(star_positions['flux'])[::-1]
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         sorted_idx = range(n_stars)
 
     # Vectorised border pre-filter — column slicing + fancy indexing in C.
@@ -322,6 +322,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
     fwhm = 0.0
 
     if not quick:
+        _ensure_photutils()
         if DAOStarFinder is not None and _scs_bg_std is not None:
             try:
                 threshold = 5.0 * float(_scs_bg_std)
@@ -334,17 +335,30 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
                 logging.debug(f"DAOStarFinder failed: {type(e).__name__}: {e}")
                 sources_s = None
 
-        # Fallback: local-maxima detection.  The dead elif/re-import branch from
-        # the previous version is removed — if the module-level scipy import
-        # failed, a per-call import will fail identically and is not worth keeping.
+        # Fallback: local-maxima detection when DAOStarFinder is unavailable.
         if star_count == 0 and maximum_filter is not None:
             try:
                 threshold = background + 5.0 * noise
                 local_max = maximum_filter(img_s_stars, size=11)
                 detected_peaks = (img_s_stars == local_max) & (img_s_stars > threshold)
-                star_count = min(int(np.sum(detected_peaks)), 500)
+                peak_ys, peak_xs = np.nonzero(detected_peaks)
+                # Sort by brightness descending so FWHM samples the best stars.
+                peak_vals = img_s_stars[peak_ys, peak_xs]
+                order = np.argsort(peak_vals)[::-1]
+                peak_ys = peak_ys[order]
+                peak_xs = peak_xs[order]
+                star_count = min(len(peak_ys), 500)
                 if star_count > 0:
-                    star_snr = float(np.median(img_s_stars[detected_peaks])) / (noise + 1e-12)
+                    star_snr = float(np.median(peak_vals)) / (noise + 1e-12)
+                    # Build a minimal structured array compatible with measure_fwhm.
+                    sources_s = np.zeros(star_count, dtype=[
+                        ('ycentroid', np.float32),
+                        ('xcentroid', np.float32),
+                        ('peak', np.float32),
+                    ])
+                    sources_s['ycentroid'] = peak_ys[:star_count].astype(np.float32)
+                    sources_s['xcentroid'] = peak_xs[:star_count].astype(np.float32)
+                    sources_s['peak'] = peak_vals[order[:star_count]].astype(np.float32)
             except Exception:
                 star_count = 0
 

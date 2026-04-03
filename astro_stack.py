@@ -150,7 +150,7 @@ from src.plate_solve import solve_plate
 from src.pipeline import stack_target
 from src.frame_processor import (
     _process_single_frame,
-    _init_worker,
+    _init_worker_shm,
     _parallel_frame_worker,
     _worker_masters,
 )
