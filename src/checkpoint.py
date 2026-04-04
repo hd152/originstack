@@ -17,12 +17,39 @@ def _checkpoint_dir(output_path: str) -> str:
     return os.path.splitext(output_path)[0] + '_checkpoint'
 
 
+def save_raw_stack(output_path: str, stacked: np.ndarray) -> None:
+    """Save the pre-post-processing stacked array to the checkpoint directory."""
+    ckpt_dir = _checkpoint_dir(output_path)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    path = os.path.join(ckpt_dir, 'raw_stack.npy')
+    np.save(path, stacked.astype(np.float32))
+    size_mb = stacked.nbytes / (1024 ** 2)
+    safe_print(f"  Raw stack saved to checkpoint ({size_mb:.0f} MB)")
+
+
+def load_raw_stack(output_path: str) -> Optional[np.ndarray]:
+    """Load the pre-post-processing stacked array from the checkpoint directory."""
+    path = os.path.join(_checkpoint_dir(output_path), 'raw_stack.npy')
+    if not os.path.exists(path):
+        return None
+    try:
+        arr = np.load(path)
+        safe_print(f"  Loaded raw stack from checkpoint "
+                   f"({arr.shape[1]}x{arr.shape[0]}x{arr.shape[2]}, "
+                   f"{arr.nbytes / (1024**2):.0f} MB)")
+        return arr
+    except Exception as e:
+        safe_print(f"  WARNING: Could not load raw stack ({e})")
+        return None
+
+
 def save_checkpoint(output_path: str, phase: int,
                     lights: List[FrameInfo],
                     final: Optional[List[FrameInfo]] = None,
                     shifts: Optional[List] = None,
                     dither_info: Optional[Dict] = None,
-                    stats: Optional[ProcessingStats] = None) -> None:
+                    stats: Optional[ProcessingStats] = None,
+                    crop: Optional[List[int]] = None) -> None:
     """Save pipeline state after a completed phase."""
     ckpt_dir = _checkpoint_dir(output_path)
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -59,6 +86,9 @@ def save_checkpoint(output_path: str, phase: int,
         # Filter to serializable values
         state['dither_info'] = {k: v for k, v in dither_info.items()
                                 if isinstance(v, (int, float, str, bool, list))}
+
+    if crop is not None:
+        state['crop'] = [int(v) for v in crop]
 
     if stats is not None:
         state['stats'] = {
@@ -112,11 +142,22 @@ def can_resume(output_path: str, lights: List[FrameInfo]) -> Tuple[bool, int, Op
 
     phase = state.get('phase', 0)
     age_hours = (time.time() - state.get('timestamp', 0)) / 3600
-    if age_hours > 24:
+    if age_hours > 72:
         safe_print(f"  Checkpoint found but too old ({age_hours:.0f}h) — starting fresh")
         return False, 0, None
 
-    safe_print(f"  Checkpoint found: phase {phase} complete ({age_hours:.1f}h ago)")
+    # Phase 3 requires the raw stack array on disk — downgrade if missing
+    if phase >= 3:
+        raw_path = os.path.join(_checkpoint_dir(output_path), 'raw_stack.npy')
+        if not os.path.exists(raw_path):
+            phase = 2
+            safe_print(f"  Checkpoint found: phase 3 complete but no raw_stack.npy "
+                       f"— resuming from phase 2 ({age_hours:.1f}h ago)")
+        else:
+            safe_print(f"  Checkpoint found: phase {phase} complete ({age_hours:.1f}h ago) "
+                       f"— will skip phases 1-3 and re-run post-processing only")
+    else:
+        safe_print(f"  Checkpoint found: phase {phase} complete ({age_hours:.1f}h ago)")
     return True, phase, state
 
 

@@ -252,6 +252,106 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
         safe_print(f"  WARNING: Could not save config file ({e})")
 
 
+def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace) -> None:
+    """Pool all light frames from multiple session subfolders into one unified stack.
+
+    Each subfolder's calibration frames are aggregated together to build
+    stronger master frames. All lights are passed to a single stack_target
+    call so registration, sigma-clip rejection, and post-processing operate
+    across the full multi-night dataset at once.
+    """
+    overall_start = time.time()
+    stats = ProcessingStats()
+
+    combined: dict = {'light': [], 'dark': [], 'flat': [], 'bias': [], 'skip': []}
+    for d in sorted(subdirs):
+        sub = discover_frames(d)
+        for ftype in combined:
+            combined[ftype].extend(sub.get(ftype, []))
+
+    n_lights = len(combined['light'])
+    n_sessions = len(subdirs)
+    print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
+          f"({len(combined['dark'])} darks, {len(combined['flat'])} flats, "
+          f"{len(combined['bias'])} bias)")
+
+    if not n_lights:
+        print('  ERROR: No light frames found across sessions', file=sys.stderr)
+        raise SystemExit('No light frames found')
+
+    # Build master calibration frames from all sessions combined
+    if combined['dark'] or combined['flat'] or combined['bias']:
+        print("\nCreating master calibration frames...")
+        cal_start = time.time()
+
+    masters: dict = {}
+    if combined['bias']:
+        masters['bias'] = make_master(combined['bias'], method='median')
+        if masters['bias'] is not None:
+            safe_print(f"  ✓ Master bias:  {len(combined['bias'])} frames → "
+                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
+    else:
+        masters['bias'] = None
+
+    if combined['dark']:
+        combined['dark'] = select_matching_darks(combined['light'], combined['dark'])
+        masters['dark'] = make_master(combined['dark'], method='median')
+        if masters['dark'] is not None:
+            safe_print(f"  ✓ Master dark:  {len(combined['dark'])} frames → "
+                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+    else:
+        masters['dark'] = None
+
+    if combined['flat']:
+        masters['flat'] = make_master(combined['flat'], method='median')
+        if masters['flat'] is not None:
+            safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames → "
+                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+    else:
+        masters['flat'] = None
+
+    masters['hot_pixel_map'] = None
+    if masters.get('dark') is not None:
+        hot_map = build_hot_pixel_map(masters['dark'])
+        n_hot = int(np.sum(hot_map))
+        if n_hot > 0:
+            masters['hot_pixel_map'] = hot_map
+            safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
+
+    if combined['dark'] or combined['flat'] or combined['bias']:
+        # Smooth calibration frames (same logic as single-folder path)
+        if masters.get('bias') is not None:
+            n_bias = len(combined['bias'])
+            sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
+            masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma_b)
+        if masters.get('dark') is not None:
+            n_dark = len(combined['dark'])
+            sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
+            masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma_d)
+        if masters.get('flat') is not None:
+            n_flat = len(combined['flat'])
+            sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
+            flat_raw = masters['flat'].astype(np.float32)
+            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                ch = flat_raw[r_off::2, c_off::2]
+                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma_f)
+            masters['flat'] = flat_raw
+        stats.calibration_time = time.time() - cal_start
+
+    masters['dark_exptime'] = None
+    if combined.get('dark'):
+        try:
+            masters['dark_exptime'] = float(
+                combined['dark'][0].header.get('EXPTIME', 0) or 0) or None
+        except Exception as e:
+            safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+
+    all_frames = [f for ftype in combined.values() for f in (ftype if isinstance(ftype, list) else [])]
+    stack_target(all_frames, output, args, masters, stats)
+    save_effective_config(args, output)
+    safe_print(f"\n  Total elapsed: {format_time(time.time() - overall_start)}")
+
+
 def process_directory(directory: str, output: str, args: argparse.Namespace):
     # Print banner
     print_header("Astrophotography FITS Stacker", "=")
@@ -275,6 +375,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         # single folder
         targets = [(directory, output)]
         print(f"  Mode: Single folder")
+    elif subdirs and getattr(args, 'combine_sessions', False):
+        # Combined-sessions mode: pool all lights from all subfolders into one stack
+        safe_print(f"  Mode: Combined sessions ({len(subdirs)} subfolders -> single unified stack)")
+        _run_combined_sessions(subdirs, output, args)
+        return
     elif subdirs:
         # hierarchical: produce per-subfolder stacks then combine
         tmp_stacks = []
@@ -1012,6 +1117,27 @@ def parse_args():
                    help='After stacking, call Claude to generate a narrative session '
                         'report (saved as <output>_report.md). '
                         'Requires: pip install anthropic  and  ANTHROPIC_API_KEY.')
+    # --- Checkpoint resume ---
+    p.add_argument('--keep-checkpoint', action='store_true',
+                   help='After a successful stack, keep the checkpoint directory and '
+                        'save the raw pre-post-processing stack to disk. Re-running '
+                        'the same command will skip phases 1-3 and only re-run '
+                        'post-processing, letting you quickly test different denoising, '
+                        'background extraction, stretch, or deconvolution settings.')
+    p.add_argument('--no-resume', action='store_true',
+                   help='Ignore any existing checkpoint and start from scratch. '
+                        'By default, if a checkpoint exists from an interrupted run '
+                        '(within the last 72 hours, same frame set), phases 1 and/or 2 '
+                        'are skipped and pixel data is reloaded from the accepted frames only.')
+    # --- Multi-session combining ---
+    p.add_argument('--combine-sessions', action='store_true',
+                   help='When the input directory contains subfolders, pool all light '
+                        'frames from every subfolder into a single unified stack instead '
+                        'of stacking each subfolder separately then averaging the results. '
+                        'Use this when all sessions were shot on the same target with the '
+                        'same equipment. Calibration frames from all sessions are merged '
+                        'into stronger master frames. Registration, sigma-clip rejection, '
+                        'and post-processing all run once across the full multi-night dataset.')
     # --- Heuristic auto-advisor (no API key required) ---
     p.add_argument('--auto', action='store_true',
                    help='After Phase 1, automatically classify the target '

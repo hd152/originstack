@@ -31,7 +31,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           debayer_method: str, white_balance: str,
                           ca_correction: bool = False,
                           cosmic_ray_rejection: bool = False,
-                          quick_quality: bool = False) -> Dict[str, Any]:
+                          quick_quality: bool = False,
+                          skip_quality: bool = False) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -135,7 +136,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
 
-    metrics = compute_quality_metrics(lum, quick=quick_quality)
+    metrics = {} if skip_quality else compute_quality_metrics(lum, quick=quick_quality)
     return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None}
 
 
@@ -374,6 +375,67 @@ def execute_frame_processing(
                           f'dynamic_range={m.get("dynamic_range",0):.0f}')
         mem_rgb.flush()
         mem_lum.flush()
+
+
+def reload_accepted_frames(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    masters: Dict[str, Optional[np.ndarray]],
+    args: argparse.Namespace,
+    mem_rgb: np.ndarray,
+    mem_lum: np.ndarray,
+    cached_lums: list,
+) -> None:
+    """Re-load and calibrate accepted frames into memmaps after a checkpoint restore.
+
+    Skips quality analysis — metrics were already restored from the checkpoint JSON.
+    Only processes accepted frames, so it is faster than a full phase 1 run when
+    many frames were rejected.
+    """
+    n = len(final)
+    gpu = get_gpu()
+    if gpu.active:
+        n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
+                                            Config.GPU_VRAM_RESERVE_MB), n)
+    else:
+        n_workers = min(os.cpu_count() or 4, n)
+    safe_print(f"  Reloading {n} accepted frames ({n_workers} threads, "
+               f"quality analysis skipped)...")
+
+    flat_arr = masters.get('flat')
+    if flat_arr is not None and masters.get('_flat_norm') is None:
+        med = np.median(flat_arr)
+        masters['_flat_norm'] = np.clip(flat_arr / med, 0.4, 2.5) if med > 1e-6 else None
+
+    def _reload_one(j: int, f: FrameInfo, orig_idx: int):
+        with gpu.stream_context():
+            result = _process_single_frame(
+                f.path, f.header, masters, args.debayer_method, args.white_balance,
+                ca_correction=getattr(args, 'ca_correction', False),
+                cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
+                skip_quality=True)
+        if result.get('error'):
+            return j, orig_idx, None, None, result['error']
+        return j, orig_idx, result['rgb'], result['lum'], None
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_reload_one, j, f, orig_idx): j
+                   for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
+        for future in tqdm(as_completed(futures), total=n,
+                           desc="  Reloading", unit="frame",
+                           disable=args.verbose):
+            j, orig_idx, rgb, lum, error = future.result()
+            if error:
+                safe_print(f"  WARNING: Could not reload {os.path.basename(final[j].path)}: {error}")
+            else:
+                mem_rgb[orig_idx] = rgb
+                mem_lum[orig_idx] = lum
+                cached_lums[orig_idx] = lum
+                if args.verbose:
+                    safe_print(f"    Reloaded: {os.path.basename(final[j].path)}")
+
+    mem_rgb.flush()
+    mem_lum.flush()
 
 
 def quality_gate(

@@ -249,10 +249,36 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         else:
             img_fft = img
 
-        ref_norm = xp.asarray((ref - np.mean(ref)), dtype=xp.float64)
-        img_norm = xp.asarray((img_fft - np.mean(img_fft)), dtype=xp.float64)
+        h, w = ref.shape
+        if psy != 0.0 or psx != 0.0:
+            # The pre-shift fills vacated edges with zeros. A whole-image mean
+            # includes those zeros, making the padded border strongly negative
+            # after subtraction. The FFT treats this as a large feature and
+            # produces a spurious correlation peak that fails the validity check,
+            # causing unnecessary fallback to centroid.
+            # Fix: compute means only over the valid overlap region; zero-fill
+            # outside so the FFT only operates on real pixel data.
+            y0 = max(0, int(round(psy)))
+            y1 = h + min(0, int(round(psy)))
+            x0 = max(0, int(round(psx)))
+            x1 = w + min(0, int(round(psx)))
+            if y1 > y0 and x1 > x0:
+                ref_region = ref[y0:y1, x0:x1].astype(np.float64)
+                img_region = img_fft[y0:y1, x0:x1].astype(np.float64)
+                ref_np = np.zeros((h, w), dtype=np.float64)
+                img_np = np.zeros((h, w), dtype=np.float64)
+                ref_np[y0:y1, x0:x1] = ref_region - ref_region.mean()
+                img_np[y0:y1, x0:x1] = img_region - img_region.mean()
+            else:
+                ref_np = (ref - np.mean(ref)).astype(np.float64)
+                img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
+        else:
+            ref_np = (ref - np.mean(ref)).astype(np.float64)
+            img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
 
-        h, w = ref_norm.shape
+        ref_norm = xp.asarray(ref_np)
+        img_norm = xp.asarray(img_np)
+
         pad_h, pad_w = 2 * h, 2 * w
         F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
         F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
