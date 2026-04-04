@@ -661,8 +661,10 @@ def run_stacking_phase(
     stats.output_shape = (bottom - top, right - left)
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
-    use_aligned_memmap = args.stack_method in ('median', 'sigma_clip', 'winsorized',
-                                               'percentile', 'esd')
+    drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
+    use_aligned_memmap = (drizzle_scale <= 1.0 and
+                          args.stack_method in ('median', 'sigma_clip', 'winsorized',
+                                                'percentile', 'esd'))
     if use_aligned_memmap:
         mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
         crop_h, crop_w = bottom - top, right - left
@@ -719,8 +721,6 @@ def run_stacking_phase(
             pass
 
     else:
-        drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
-
         if drizzle_scale > 1.0:
             crop_h, crop_w = bottom - top, right - left
             out_h = int(round(crop_h * drizzle_scale))

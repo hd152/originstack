@@ -15,11 +15,12 @@ from src.utils import safe_print, print_phase, format_time, get_memory_usage_mb
 from src.io_fits import load_fits, save_preview_rgb, populate_fits_header
 from src.debayer import debayer
 from src.plate_solve import solve_plate
-from src.frame_processor import execute_frame_processing, quality_gate
+from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
 from src.registration import run_registration_phase
 from src.stacking import run_stacking_phase
 from src.postprocess import postprocess_stack
-from src.checkpoint import save_checkpoint, can_resume, restore_frame_state, cleanup_checkpoint
+from src.checkpoint import (save_checkpoint, save_raw_stack, load_raw_stack,
+                            can_resume, restore_frame_state, cleanup_checkpoint)
 
 
 try:
@@ -36,8 +37,10 @@ class _MemmapManager:
         self._files: List[str] = []
         self._memmaps: List = []
 
-    def create(self, path: str, dtype: str, mode: str, shape: tuple) -> np.ndarray:
-        mm = np.memmap(path, dtype=dtype, mode=mode, shape=shape)
+    def create(self, prefix: str, dtype: str, shape: tuple) -> np.ndarray:
+        fd, path = tempfile.mkstemp(suffix='.dat', prefix=prefix)
+        os.close(fd)
+        mm = np.memmap(path, dtype=dtype, mode='w+', shape=shape)
         self._files.append(path)
         self._memmaps.append(mm)
         return mm
@@ -242,11 +245,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     stats.total_frames = len(lights)
     n = len(lights)
 
-    # ======================================================================
-    # PHASE 1: Process & Analyse
-    # ======================================================================
-    print_phase(1, "Processing & Quality Analysis")
-    phase_start = time.time()
+    # Check for a checkpoint from a previous interrupted run
+    resume_phase = 0
+    ckpt_state: Optional[Dict] = None
+    if not getattr(args, 'no_resume', False):
+        _ok, resume_phase, ckpt_state = can_resume(output_path, lights)
+        # Drizzle must re-run phase 3: the saved raw_stack.npy is at input
+        # resolution, not the upscaled drizzle output.  Downgrade so stacking
+        # is repeated with the correct drizzle pass.
+        if resume_phase >= 3 and getattr(args, 'drizzle_scale', 1.0) > 1.0:
+            resume_phase = 2
+            safe_print("  Drizzle requested — phase 3 checkpoint skipped; stacking will re-run")
 
     # Probe first frame for dimensions
     first_data, first_hdr = load_fits(lights[0].path)
@@ -260,170 +269,241 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         C = first_data.shape[2] if first_data.ndim == 3 else 1
     del first_data
 
-    mm_mgr = _MemmapManager()
-    mm_rgb_path = os.path.join(tempfile.gettempdir(), f'stack_rgb_{os.getpid()}.dat')
-    mm_lum_path = os.path.join(tempfile.gettempdir(), f'stack_lum_{os.getpid()}.dat')
-    rgb_shape = (n, H_rgb, W_rgb, C)
-    lum_shape = (n, H_rgb, W_rgb)
-    mem_rgb = mm_mgr.create(mm_rgb_path, 'float32', 'w+', rgb_shape)
-    mem_lum = mm_mgr.create(mm_lum_path, 'float32', 'w+', lum_shape)
-    cached_lums: list = [None] * n
     rejected_reasons: dict = {}
 
-    try:
-        execute_frame_processing(
-            lights, masters, args,
-            mem_rgb, mem_lum, mm_rgb_path, mm_lum_path,
-            cached_lums, rgb_shape, lum_shape,
-            rejected_reasons, stats)
+    if resume_phase >= 3:
+        # ======================================================================
+        # PHASE 3 RESUME: load saved raw stack, skip phases 1-3 entirely
+        # ======================================================================
+        print_phase(3, "Stacking (resumed from checkpoint — loading saved raw stack)")
+        stacked = load_raw_stack(output_path)
+        if stacked is None:
+            safe_print("  WARNING: raw_stack.npy missing — falling back to phase 2 resume")
+            resume_phase = 2
 
-        final = quality_gate(lights, args, rejected_reasons, stats)
-        stats.quality_time = time.time() - phase_start
+        if resume_phase >= 3:
+            final = restore_frame_state(lights, ckpt_state)
+            _lights_index = {id(f): i for i, f in enumerate(lights)}
+            final_indices = [_lights_index[id(f)] for f in final]
+            shifts = [tuple(s) for s in ckpt_state['shifts']]
+            transforms = [None] * len(final)
+            dither_info = ckpt_state.get('dither_info', {})
+            crop = ckpt_state.get('crop', [0, stacked.shape[0], 0, stacked.shape[1]])
+            top, bottom, left, right = [int(v) for v in crop]
+            fits_stacked = stacked.copy()
+            H, W, C = stacked.shape
+            stats.accepted_frames = len(final)
+            stats.rejected_frames = n - len(final)
 
-        if not final:
-            print(f'\n  ERROR: All {n} frames rejected!')
-            if rejected_reasons:
-                print('  Rejection reasons:')
-                for path, reason in list(rejected_reasons.items())[:10]:
-                    print(f'    - {os.path.basename(path)}: {reason}')
-            mm_mgr.cleanup()
-            return None
+    if resume_phase < 3:
+        # ======================================================================
+        # PHASES 1-3: Normal path (requires memmap)
+        # ======================================================================
+        mm_mgr = _MemmapManager()
+        rgb_shape = (n, H_rgb, W_rgb, C)
+        lum_shape = (n, H_rgb, W_rgb)
+        mem_rgb = mm_mgr.create('stack_rgb_', 'float32', rgb_shape)
+        mm_rgb_path = mm_mgr._files[-1]
+        mem_lum = mm_mgr.create('stack_lum_', 'float32', lum_shape)
+        mm_lum_path = mm_mgr._files[-1]
+        cached_lums: list = [None] * n
 
-        _lights_index = {id(f): i for i, f in enumerate(lights)}
-        final_indices = [_lights_index[id(f)] for f in final]
+        try:
+            # ======================================================================
+            # PHASE 1: Process & Analyse
+            # ======================================================================
+            if resume_phase >= 1:
+                print_phase(1, "Processing & Quality Analysis (resumed from checkpoint)")
+                final = restore_frame_state(lights, ckpt_state)
+                _lights_index = {id(f): i for i, f in enumerate(lights)}
+                final_indices = [_lights_index[id(f)] for f in final]
+                stats.accepted_frames = len(final)
+                stats.rejected_frames = n - len(final)
+                safe_print(f"  Restored {len(final)}/{n} accepted frames — "
+                           f"reloading pixel data (skipping quality analysis)...")
+                reload_accepted_frames(final, final_indices, masters, args,
+                                       mem_rgb, mem_lum, cached_lums)
+                stats.quality_time = 0.0
+            else:
+                print_phase(1, "Processing & Quality Analysis")
+                phase_start = time.time()
 
-        # Quality metrics CSV export
-        if getattr(args, 'quality_report', None):
-            _write_quality_report(lights, rejected_reasons, args.quality_report)
+                execute_frame_processing(
+                    lights, masters, args,
+                    mem_rgb, mem_lum, mm_rgb_path, mm_lum_path,
+                    cached_lums, rgb_shape, lum_shape,
+                    rejected_reasons, stats)
 
-        # Per-frame JPEG export
-        if getattr(args, 'export_frames_dir', None):
-            _export_frame_jpegs(final, final_indices, mem_rgb,
-                                args.export_frames_dir, args)
+                final = quality_gate(lights, args, rejected_reasons, stats)
+                stats.quality_time = time.time() - phase_start
 
-        # Save checkpoint after phase 1
-        save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats)
+                if not final:
+                    print(f'\n  ERROR: All {n} frames rejected!')
+                    if rejected_reasons:
+                        print('  Rejection reasons:')
+                        for path, reason in list(rejected_reasons.items())[:10]:
+                            print(f'    - {os.path.basename(path)}: {reason}')
+                    mm_mgr.cleanup()
+                    return None
 
-        # AI parameter advisor (runs between phase 1 and 2)
-        if getattr(args, 'ai_advisor', False):
-            from src.ai_advisor import get_parameter_recommendations, apply_recommendations
-            rec, explanation = get_parameter_recommendations(final, rejected_reasons, args)
-            if rec is not None:
-                print(f"\n  AI Advisor:\n  {explanation}")
-                if rec.warnings:
-                    for w in rec.warnings:
-                        safe_print(f"  ⚠  {w}")
-                changes = apply_recommendations(rec, args)
-                if changes:
-                    safe_print("  Applied recommendations:")
-                    for c in changes:
-                        safe_print(f"    • {c}")
+                _lights_index = {id(f): i for i, f in enumerate(lights)}
+                final_indices = [_lights_index[id(f)] for f in final]
+
+                # Quality metrics CSV export
+                if getattr(args, 'quality_report', None):
+                    _write_quality_report(lights, rejected_reasons, args.quality_report)
+
+                # Per-frame JPEG export
+                if getattr(args, 'export_frames_dir', None):
+                    _export_frame_jpegs(final, final_indices, mem_rgb,
+                                        args.export_frames_dir, args)
+
+                # Save checkpoint after phase 1
+                save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats)
+
+                # AI parameter advisor (runs between phase 1 and 2)
+                if getattr(args, 'ai_advisor', False):
+                    from src.ai_advisor import get_parameter_recommendations, apply_recommendations
+                    rec, explanation = get_parameter_recommendations(final, rejected_reasons, args)
+                    if rec is not None:
+                        print(f"\n  AI Advisor:\n  {explanation}")
+                        if rec.warnings:
+                            for w in rec.warnings:
+                                safe_print(f"  ⚠  {w}")
+                        changes = apply_recommendations(rec, args)
+                        if changes:
+                            safe_print("  Applied recommendations:")
+                            for c in changes:
+                                safe_print(f"    • {c}")
+                        else:
+                            safe_print("  Current settings look good — no changes applied.")
+
+                # Heuristic auto-advisor
+                if getattr(args, 'auto', False):
+                    from src.auto_settings import apply_auto_settings
+                    target_type, label, signals, changes = apply_auto_settings(final, args)
+                    print(f"\n  Auto Advisor: detected '{label}'")
+                    if signals:
+                        print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
+                              f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
+                              f"peak_excess={signals.get('peak_excess', 0):.1f}  "
+                              f"stars={signals.get('star_count', 0):.0f}  "
+                              f"FWHM={signals.get('fwhm', 0):.1f}px  "
+                              f"frames={signals.get('n_frames', 0)}")
+                    if changes:
+                        safe_print("  Applied auto settings:")
+                        for c in changes:
+                            safe_print(f"    * {c}")
+                    else:
+                        safe_print("  Current settings already optimal — no changes applied.")
+
+            if not final:
+                print(f'\n  ERROR: No accepted frames after checkpoint restore!')
+                mm_mgr.cleanup()
+                return None
+
+            # ======================================================================
+            # PHASE 2: Registration
+            # ======================================================================
+            H, W = H_rgb, W_rgb
+
+            if resume_phase >= 2:
+                print_phase(2, "Registration (resumed from checkpoint)")
+                shifts = [tuple(s) for s in ckpt_state['shifts']]
+                transforms = [None] * len(final)
+                dither_info = ckpt_state.get('dither_info', {})
+                safe_print(f"  Restored {len(shifts)} frame shifts from checkpoint")
+                stats.registration_time = 0.0
+                del cached_lums
+            else:
+                print_phase(2, "Registration")
+                phase_start = time.time()
+
+                best = max(final, key=lambda x: x.metrics.get('score', 0))
+                best_idx = lights.index(best)
+                print(f"  Reference frame: {os.path.basename(best.path)} "
+                      f"(score={best.metrics.get('score', 0):.1f})")
+
+                ref_lum = np.array(mem_lum[best_idx])
+                if args.verbose:
+                    print(f'  Reference luminance: min={np.min(ref_lum):.1f}, '
+                          f'max={np.max(ref_lum):.1f}, mean={np.mean(ref_lum):.1f}, '
+                          f'std={np.std(ref_lum):.1f}')
+
+                shifts, transforms, dither_info = run_registration_phase(
+                    final, final_indices, best, best_idx,
+                    ref_lum, mem_lum, cached_lums, H, W, args, stats)
+
+                stats.registration_time = time.time() - phase_start
+                del cached_lums
+
+                save_checkpoint(output_path, phase=2, lights=lights, final=final,
+                                shifts=shifts, dither_info=dither_info, stats=stats)
+
+            # Resolve 'auto' and legacy --winsorize shorthand
+            if args.stack_method == 'auto':
+                if len(final) < 8:
+                    args.stack_method = 'percentile'
+                    safe_print(f"    Auto-selected percentile clipping (<8 frames)")
                 else:
-                    safe_print("  Current settings look good — no changes applied.")
+                    args.stack_method = 'sigma_clip'
+                    safe_print(f"    Auto-selected sigma_clip ({len(final)} frames)")
+            elif getattr(args, 'winsorize', False) and args.stack_method not in ('winsorized',):
+                args.stack_method = 'winsorized'
 
-        # Heuristic auto-advisor
-        if getattr(args, 'auto', False):
-            from src.auto_settings import apply_auto_settings
-            target_type, label, signals, changes = apply_auto_settings(final, args)
-            print(f"\n  Auto Advisor: detected '{label}'")
-            if signals:
-                print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
-                      f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
-                      f"peak_excess={signals.get('peak_excess', 0):.1f}  "
-                      f"stars={signals.get('star_count', 0):.0f}  "
-                      f"FWHM={signals.get('fwhm', 0):.1f}px  "
-                      f"frames={signals.get('n_frames', 0)}")
-            if changes:
-                safe_print("  Applied auto settings:")
-                for c in changes:
-                    safe_print(f"    * {c}")
-            else:
-                safe_print("  Current settings already optimal — no changes applied.")
+            # ======================================================================
+            # PHASE 3: Stacking
+            # ======================================================================
+            print_phase(3, "Stacking")
+            phase_start = time.time()
 
-        # ======================================================================
-        # PHASE 2: Registration
-        # ======================================================================
-        print_phase(2, "Registration")
-        phase_start = time.time()
-
-        best = max(final, key=lambda x: x.metrics.get('score', 0))
-        best_idx = lights.index(best)
-        print(f"  Reference frame: {os.path.basename(best.path)} "
-              f"(score={best.metrics.get('score', 0):.1f})")
-
-        ref_lum = np.array(mem_lum[best_idx])
-        H, W = ref_lum.shape
-        if args.verbose:
-            print(f'  Reference luminance: min={np.min(ref_lum):.1f}, max={np.max(ref_lum):.1f}, '
-                  f'mean={np.mean(ref_lum):.1f}, std={np.std(ref_lum):.1f}')
-
-        shifts, transforms, dither_info = run_registration_phase(
-            final, final_indices, best, best_idx,
-            ref_lum, mem_lum, cached_lums, H, W, args, stats)
-
-        stats.registration_time = time.time() - phase_start
-        del cached_lums
-
-        # Save checkpoint after phase 2
-        save_checkpoint(output_path, phase=2, lights=lights, final=final,
-                        shifts=shifts, dither_info=dither_info, stats=stats)
-
-        # Resolve 'auto' and legacy --winsorize shorthand
-        if args.stack_method == 'auto':
-            if len(final) < 8:
-                args.stack_method = 'percentile'
-                safe_print(f"    Auto-selected percentile clipping (<8 frames)")
-            else:
-                args.stack_method = 'sigma_clip'
-                safe_print(f"    Auto-selected sigma_clip ({len(final)} frames)")
-        elif getattr(args, 'winsorize', False) and args.stack_method not in ('winsorized',):
-            args.stack_method = 'winsorized'
-
-        # ======================================================================
-        # PHASE 3: Stacking
-        # ======================================================================
-        print_phase(3, "Stacking")
-        phase_start = time.time()
-
-        stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
-            final, final_indices, mem_rgb,
-            shifts, transforms, H, W, C, args, stats)
-
-        stats.stacking_time = time.time() - phase_start
-
-        # Save blink comparator frames (before memmap cleanup)
-        if getattr(args, 'keep_intermediates', False):
-            _save_blink_frames(final, final_indices, mem_rgb, shifts, transforms,
-                               top, bottom, left, right, output_path)
-
-        # Comet stacking: second pass aligned on comet nucleus
-        if getattr(args, 'comet_mode', False):
-            print_phase(3, "Comet Stacking (nucleus-aligned pass)")
-            from src.registration import run_comet_registration_phase
-            comet_shifts, comet_transforms = run_comet_registration_phase(
-                final, final_indices, best_idx,
-                ref_lum, mem_lum, H, W, args, stats)
-            comet_stacked, _, ct, cb, cl, cr = run_stacking_phase(
+            stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
-                comet_shifts, comet_transforms, H, W, C, args, stats)
-            comet_out = os.path.splitext(output_path)[0] + '_comet.fits'
-            from astropy.io import fits as _cfits
-            comet_hdu = _cfits.PrimaryHDU(
-                data=np.transpose(comet_stacked.astype(np.float32), (2, 0, 1))
-            )
-            comet_hdu.header['COMET'] = (True, 'Nucleus-aligned comet stack')
-            comet_hdu.header['CREATOR'] = 'astro_stack.py comet_mode'
-            comet_hdu.writeto(comet_out, overwrite=True)
-            comet_prev = os.path.splitext(comet_out)[0] + '.jpg'
-            save_preview_rgb(comet_stacked, comet_prev,
-                             stretch=getattr(args, 'stretch', 'ghs'),
-                             ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-                             ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                             ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
-            safe_print(f"  Comet stack: {os.path.basename(comet_out)}")
+                shifts, transforms, H, W, C, args, stats)
 
-    finally:
-        mm_mgr.cleanup()
+            stats.stacking_time = time.time() - phase_start
+
+            # Save blink comparator frames (before memmap cleanup)
+            if getattr(args, 'keep_intermediates', False):
+                _save_blink_frames(final, final_indices, mem_rgb, shifts, transforms,
+                                   top, bottom, left, right, output_path)
+
+            # Comet stacking: second pass aligned on comet nucleus
+            if getattr(args, 'comet_mode', False):
+                print_phase(3, "Comet Stacking (nucleus-aligned pass)")
+                from src.registration import run_comet_registration_phase
+                comet_shifts, comet_transforms = run_comet_registration_phase(
+                    final, final_indices, best_idx,
+                    ref_lum, mem_lum, H, W, args, stats)
+                comet_stacked, _, ct, cb, cl, cr = run_stacking_phase(
+                    final, final_indices, mem_rgb,
+                    comet_shifts, comet_transforms, H, W, C, args, stats)
+                comet_out = os.path.splitext(output_path)[0] + '_comet.fits'
+                from astropy.io import fits as _cfits
+                comet_hdu = _cfits.PrimaryHDU(
+                    data=np.transpose(comet_stacked.astype(np.float32), (2, 0, 1))
+                )
+                comet_hdu.header['COMET'] = (True, 'Nucleus-aligned comet stack')
+                comet_hdu.header['CREATOR'] = 'astro_stack.py comet_mode'
+                comet_hdu.writeto(comet_out, overwrite=True)
+                comet_prev = os.path.splitext(comet_out)[0] + '.jpg'
+                save_preview_rgb(comet_stacked, comet_prev,
+                                 stretch=getattr(args, 'stretch', 'ghs'),
+                                 ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+                                 ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+                                 ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+                safe_print(f"  Comet stack: {os.path.basename(comet_out)}")
+
+            # Save raw stack so post-processing can be re-run without phases 1-3
+            if getattr(args, 'keep_checkpoint', False):
+                save_raw_stack(output_path, stacked)
+                save_checkpoint(output_path, phase=3, lights=lights, final=final,
+                                shifts=shifts, dither_info=dither_info, stats=stats,
+                                crop=[top, bottom, left, right])
+
+        finally:
+            mm_mgr.cleanup()
+        # end: if resume_phase < 3
 
     # ======================================================================
     # PHASE 4: Post-processing
@@ -528,8 +608,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
 
-    print(f"  Output size: {out_h}x{out_w} "
-          f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)")
+    crop_str = (f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)"
+                if stats.cropped_pixels else "(crop info not available)")
+    print(f"  Output size: {out_h}x{out_w} {crop_str}")
 
     from src.utils import print_header
     print_header("SUMMARY", "=")
@@ -578,7 +659,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         safe_print(f"\n  Errors: {len(stats.errors)}")
 
     safe_print(f"\n  Stack complete!")
-    cleanup_checkpoint(output_path)
+    if getattr(args, 'keep_checkpoint', False):
+        safe_print("  Checkpoint preserved (--keep-checkpoint). Re-run with same "
+                   "output path to test different post-processing settings.")
+    else:
+        cleanup_checkpoint(output_path)
 
     if getattr(args, 'ai_report', False):
         from src.ai_advisor import build_report_context, generate_session_report
