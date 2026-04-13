@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
@@ -36,6 +35,7 @@ except Exception:
 try:
     from astropy.stats import sigma_clipped_stats
 except Exception:
+    
     sigma_clipped_stats = None
 
 
@@ -166,11 +166,9 @@ def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
 
         return pywt.waverec2(new_coeffs, wavelet)[:h, :w]
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        f_Y  = executor.submit(_adaptive_denoise_plane, Y,  1.0)
-        f_Cb = executor.submit(_adaptive_denoise_plane, Cb, chroma_factor)
-        f_Cr = executor.submit(_adaptive_denoise_plane, Cr, chroma_factor)
-        Y_d, Cb_d, Cr_d = f_Y.result(), f_Cb.result(), f_Cr.result()
+    Y_d  = _adaptive_denoise_plane(Y,  1.0)
+    Cb_d = _adaptive_denoise_plane(Cb, chroma_factor)
+    Cr_d = _adaptive_denoise_plane(Cr, chroma_factor)
 
     # YCbCr -> RGB
     R = Y_d + 1.40200 * Cr_d
@@ -229,11 +227,9 @@ def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
         return pywt.waverec2(new_coeffs, wavelet)[:h, :w]
 
     chroma_thresh = threshold_factor * chroma_factor
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        f_Y  = executor.submit(_denoise_plane, Y,  threshold_factor)
-        f_Cb = executor.submit(_denoise_plane, Cb, chroma_thresh)
-        f_Cr = executor.submit(_denoise_plane, Cr, chroma_thresh)
-        Y_d, Cb_d, Cr_d = f_Y.result(), f_Cb.result(), f_Cr.result()
+    Y_d  = _denoise_plane(Y,  threshold_factor)
+    Cb_d = _denoise_plane(Cb, chroma_thresh)
+    Cr_d = _denoise_plane(Cr, chroma_thresh)
 
     # YCbCr -> RGB
     R = Y_d + 1.40200 * Cr_d
@@ -455,11 +451,9 @@ def mmt_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 3.0,
 
         return result
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        f_Y  = executor.submit(_mmt_plane, Y,  1.0)
-        f_Cb = executor.submit(_mmt_plane, Cb, chroma_factor)
-        f_Cr = executor.submit(_mmt_plane, Cr, chroma_factor)
-        Y_d, Cb_d, Cr_d = f_Y.result(), f_Cb.result(), f_Cr.result()
+    Y_d  = _mmt_plane(Y,  1.0)
+    Cb_d = _mmt_plane(Cb, chroma_factor)
+    Cr_d = _mmt_plane(Cr, chroma_factor)
 
     # YCbCr → RGB
     R = Y_d + 1.40200 * Cr_d
@@ -493,7 +487,7 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
     larger values restrict smoothing to featureless sky only.
 
     Chroma channels (Cb/Cr) use the same luma-derived contrast mask but with
-    a lower effective threshold (k / chroma_factor), so colour speckle in the
+    a higher effective threshold (k * chroma_factor), so colour speckle in the
     sky background is always removed more aggressively than luma detail.
 
     Args:
@@ -504,7 +498,7 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
         contrast_k:      Noise-sigma multiplier for the contrast threshold
                          (default 3.0).  Lower → more aggressive; higher →
                          sky-only smoothing.
-        chroma_factor:   Chroma channels use k / chroma_factor as threshold
+        chroma_factor:   Chroma channels use k * chroma_factor as threshold
                          (default 2.0), making them 2× more aggressively
                          denoised than luma.
         star_mask:       Optional float mask (0–1, 1 = star core).  Star
@@ -533,7 +527,7 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
 
     # Adaptive weights: Gaussian decay around the noise threshold
     luma_thr   = max(contrast_k * sigma_noise, 1e-12)
-    chroma_thr = max(contrast_k * sigma_noise / max(chroma_factor, 1e-6), 1e-12)
+    chroma_thr = max(contrast_k * sigma_noise * max(chroma_factor, 1.0), 1e-12)
     luma_w   = np.exp(-0.5 * (contrast / luma_thr)   ** 2)
     chroma_w = np.exp(-0.5 * (contrast / chroma_thr) ** 2)
 
@@ -563,16 +557,12 @@ def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
     """Local normalization to remove flat-field residuals and vignetting."""
     result = np.empty_like(img)
 
-    def _normalize_channel(c):
+    for c in range(img.shape[2]):
         channel = img[:, :, c].astype(np.float64)
         local_mean = ndimage.gaussian_filter(channel, sigma=sigma)
         local_sq_mean = ndimage.gaussian_filter(channel ** 2, sigma=sigma)
         local_std = np.sqrt(np.maximum(local_sq_mean - local_mean ** 2, 0))
-        return c, (channel - local_mean) / (local_std + 1e-12)
-
-    with ThreadPoolExecutor(max_workers=img.shape[2]) as executor:
-        for c, ch_result in executor.map(_normalize_channel, range(img.shape[2])):
-            result[:, :, c] = ch_result
+        result[:, :, c] = (channel - local_mean) / (local_std + 1e-12)
     # Re-scale to original data range (positive values)
     result = result - result.min()
     orig_max = np.max(img)
@@ -885,7 +875,7 @@ def arcsinh_stretch(img: np.ndarray, factor: float = None) -> np.ndarray:
     if factor is None:
         target_bg = 0.15
         bg_norm = float(np.clip((bg - black) / span, 1e-6, 1.0))
-        factor = Config.ARCSINH_STRETCH_FACTOR
+        factor = getattr(Config, 'ARCSINH_STRETCH_FACTOR', 10.0)
         for f in (3.0, 5.0, 10.0, 20.0, 50.0, 100.0):
             if np.arcsinh(bg_norm * f) / np.arcsinh(f) >= target_bg:
                 factor = f

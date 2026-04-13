@@ -7,6 +7,12 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
+try:
+    from multiprocessing.shared_memory import SharedMemory as _SharedMemory
+    _HAS_SHM = True
+except ImportError:
+    _HAS_SHM = False
+
 import numpy as np
 
 from src.gpu_context import get_gpu
@@ -59,7 +65,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             else:
                 dark_scale = 1.0
             data = data - dark_current * dark_scale
-        if masters.get('flat') is not None and masters['flat'].shape == data.shape:
+        if masters.get('flat_norm') is not None and masters['flat_norm'].shape == data.shape:
+            data = data / masters['flat_norm']
+        elif masters.get('flat') is not None and masters['flat'].shape == data.shape:
             flat = masters['flat']
             med = np.median(flat)
             if med > 1e-6:
@@ -127,6 +135,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
 # Module-level state for parallel workers (must be module-level for pickling)
 _worker_masters: Dict[str, Optional[np.ndarray]] = {}
+_worker_shm_handles: Dict[str, object] = {}  # keep SharedMemory handles alive in workers
 
 
 def _init_worker(master_paths: Dict[str, str]):
@@ -135,6 +144,21 @@ def _init_worker(master_paths: Dict[str, str]):
     _worker_masters = {}
     for name, p in master_paths.items():
         _worker_masters[name] = np.load(p)
+
+
+def _init_worker_shm(shm_info: Dict[str, tuple], scalar_masters: Dict[str, object]):
+    """Initializer for pool workers — attach to shared-memory blocks for arrays.
+
+    shm_info maps name → (shm_name, shape, dtype_str).
+    scalar_masters carries 0-d values (e.g. dark_exptime) that cannot go through shm.
+    """
+    global _worker_masters, _worker_shm_handles
+    _worker_masters = dict(scalar_masters)
+    _worker_shm_handles = {}
+    for name, (shm_name, shape, dtype_str) in shm_info.items():
+        shm = _SharedMemory(name=shm_name)
+        _worker_shm_handles[name] = shm          # prevent GC / handle close
+        _worker_masters[name] = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
 
 
 def _parallel_frame_worker(args_tuple):
@@ -182,6 +206,13 @@ def execute_frame_processing(
     Selects between ProcessPool, ThreadPool, or sequential execution.
     Mutates lights[*].metrics / .accepted and rejected_reasons in-place.
     """
+    # Precompute flat_norm once — saves an O(H×W) division + clip on every frame.
+    if masters.get('flat') is not None and masters.get('flat_norm') is None:
+        _flat = masters['flat']
+        _med = float(np.median(_flat))
+        if _med > 1e-6:
+            masters['flat_norm'] = np.clip(_flat / _med, 0.4, 2.5).astype(np.float32)
+
     n = len(lights)
     use_process_pool = (getattr(args, 'parallel', 1) != 1
                         and not get_gpu().active
@@ -191,12 +222,47 @@ def execute_frame_processing(
         workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
         print(f"  Processing {n} frames in parallel ({workers} workers)...")
 
-        master_paths = {}
-        for name, arr in masters.items():
-            if arr is not None:
-                p = os.path.join(tempfile.gettempdir(), f'master_{name}_{os.getpid()}.npy')
-                np.save(p, arr)
-                master_paths[name] = p
+        # Share master calibration arrays via shared memory (zero disk I/O).
+        # If SharedMemory is unavailable or any allocation fails, fall back to
+        # the original temporary-.npy approach for the entire batch.
+        shm_list: list = []
+        shm_info: Dict[str, tuple] = {}
+        scalar_masters: Dict[str, object] = {}
+        use_shm = _HAS_SHM
+
+        if use_shm:
+            for name, val in masters.items():
+                if val is None:
+                    continue
+                arr = np.asarray(val)
+                if arr.ndim == 0:
+                    scalar_masters[name] = val
+                    continue
+                try:
+                    shm = _SharedMemory(create=True, size=max(arr.nbytes, 1))
+                    shm_list.append(shm)
+                    np.copyto(np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf), arr)
+                    shm_info[name] = (shm.name, arr.shape, arr.dtype.str)
+                except Exception:
+                    use_shm = False
+                    for s in shm_list:
+                        try:
+                            s.close()
+                            s.unlink()
+                        except Exception:
+                            pass
+                    shm_list.clear()
+                    shm_info.clear()
+                    break
+
+        if not use_shm:
+            master_paths: Dict[str, str] = {}
+            for name, val in masters.items():
+                if val is not None:
+                    p = os.path.join(tempfile.gettempdir(),
+                                     f'master_{name}_{os.getpid()}.npy')
+                    np.save(p, np.asarray(val))
+                    master_paths[name] = p
 
         _ca = getattr(args, 'ca_correction', False)
         _cr = getattr(args, 'cosmic_ray_rejection', False)
@@ -204,31 +270,44 @@ def execute_frame_processing(
                   mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr)
                  for i in range(n)]
 
-        with ProcessPoolExecutor(max_workers=workers,
-                                 initializer=_init_worker,
-                                 initargs=(master_paths,)) as pool:
-            futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
-            for future in tqdm(as_completed(futures), total=n,
-                               desc="  Processing", unit="frame",
-                               disable=args.verbose):
-                idx = futures[future]
-                frame_idx, metrics, error = future.result()
-                f = lights[frame_idx]
-                if error:
-                    f.accepted = False
-                    f.metrics = {'error': error}
-                    rejected_reasons[f.path] = error
-                    stats.add_error(f.path, error)
-                    if args.verbose:
-                        print(f'  REJECT {os.path.basename(f.path)}: {error}')
-                else:
-                    f.metrics = metrics
+        if use_shm:
+            _initializer, _initargs = _init_worker_shm, (shm_info, scalar_masters)
+        else:
+            _initializer, _initargs = _init_worker, (master_paths,)
 
-        for p in master_paths.values():
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+        try:
+            with ProcessPoolExecutor(max_workers=workers,
+                                     initializer=_initializer,
+                                     initargs=_initargs) as pool:
+                futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
+                for future in tqdm(as_completed(futures), total=n,
+                                   desc="  Processing", unit="frame",
+                                   disable=args.verbose):
+                    idx = futures[future]
+                    frame_idx, metrics, error = future.result()
+                    f = lights[frame_idx]
+                    if error:
+                        f.accepted = False
+                        f.metrics = {'error': error}
+                        rejected_reasons[f.path] = error
+                        stats.add_error(f.path, error)
+                        if args.verbose:
+                            print(f'  REJECT {os.path.basename(f.path)}: {error}')
+                    else:
+                        f.metrics = metrics
+        finally:
+            for shm in shm_list:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
+            if not use_shm:
+                for p in master_paths.values():
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
     elif n >= 2:
         gpu = get_gpu()
@@ -389,16 +468,23 @@ def quality_gate(
             else:
                 f.accepted = True
 
-    # Percentile quality threshold
+    # Relative quality threshold: reject frames whose score falls more than
+    # quality_threshold% below the best frame's score.  Unlike a fixed
+    # percentile cut this does not drop frames when the whole set is good.
     if args.quality_filter and accepted:
         valid = [f for f in accepted if f.accepted]
         if valid:
             scores = np.array([f.metrics['score'] for f in valid])
-            pct = np.percentile(scores, args.quality_threshold)
-            for f in valid:
-                if f.metrics['score'] < pct:
-                    f.accepted = False
-                    rejected_reasons[f.path] = f'score {f.metrics["score"]:.1f} < {pct:.1f}'
+            best_score = float(scores.max())
+            if best_score > 1e-6:
+                min_score = best_score * (1.0 - args.quality_threshold / 100.0)
+                for f in valid:
+                    if f.metrics['score'] < min_score:
+                        f.accepted = False
+                        rejected_reasons[f.path] = (
+                            f'score {f.metrics["score"]:.1f} < {min_score:.1f} '
+                            f'({args.quality_threshold:.0f}% below best {best_score:.1f})'
+                        )
 
     final = [f for f in lights if f.accepted]
     stats.accepted_frames = len(final)
