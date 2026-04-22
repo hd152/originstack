@@ -369,10 +369,11 @@ def parse_args():
     p.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
-    p.add_argument('--quality-threshold', type=float, default=25.0,
+    p.add_argument('--quality-threshold', type=float, default=50.0,
                    help='Reject frames whose score falls more than this percent below the '
-                        'best frame (default: 25). All frames within 25%% of the best are '
-                        'kept. Use --no-quality-filter to disable entirely.')
+                        'reference score (90th-percentile of the session, default: 50). '
+                        'E.g. 50 keeps every frame with score >= 50%% of the reference. '
+                        'Use --no-quality-filter to disable entirely.')
     p.add_argument('--keep-intermediates', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true')
     p.add_argument('--debug-registration', action='store_true',

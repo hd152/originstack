@@ -420,8 +420,8 @@ def quality_gate(
             continue
         m = f.metrics
         reject_reason = None
-        if m['star_count'] < 3:
-            reject_reason = f"insufficient stars ({m['star_count']} < 3)"
+        if m['star_count'] == 0:
+            reject_reason = "no stars detected"
         elif m['snr'] < 0.5:
             reject_reason = f"extremely low SNR ({m['snr']:.2f} < 0.5)"
         elif m['contrast'] < 2.0:
@@ -448,7 +448,12 @@ def quality_gate(
             if len(values) < 3:
                 return np.ones(len(values), dtype=bool)
             m, s = np.mean(values), np.std(values)
-            return s < 1e-6 or np.abs((values - m) / s) < threshold
+            if s < 1e-6:
+                # All values identical — everyone is an inlier.
+                # Always return an array; returning a Python bool causes
+                # (~bool).astype(int) to raise AttributeError.
+                return np.ones(len(values), dtype=bool)
+            return np.abs((values - m) / s) < threshold
 
         snr_ok   = _is_inlier(snrs)
         star_ok  = _is_inlier(star_cnts)
@@ -469,21 +474,30 @@ def quality_gate(
                 f.accepted = True
 
     # Relative quality threshold: reject frames whose score falls more than
-    # quality_threshold% below the best frame's score.  Unlike a fixed
-    # percentile cut this does not drop frames when the whole set is good.
+    # quality_threshold% below a robust reference score.
+    #
+    # Reference is the 90th-percentile score rather than the single maximum.
+    # The quality score formula is multiplicative with a star_factor that spans
+    # 0.01–1.0 (100× range), so one frame with unusually good star detection
+    # would set an unreachable threshold if we used the raw maximum.  The 90th
+    # percentile is much more robust while still reflecting the top tier of the
+    # session.
     if args.quality_filter and accepted:
         valid = [f for f in accepted if f.accepted]
         if valid:
             scores = np.array([f.metrics['score'] for f in valid])
-            best_score = float(scores.max())
-            if best_score > 1e-6:
-                min_score = best_score * (1.0 - args.quality_threshold / 100.0)
+            if len(scores) >= 10:
+                ref_score = float(np.percentile(scores, 90))
+            else:
+                ref_score = float(scores.max())
+            if ref_score > 1e-6:
+                min_score = ref_score * (1.0 - args.quality_threshold / 100.0)
                 for f in valid:
                     if f.metrics['score'] < min_score:
                         f.accepted = False
                         rejected_reasons[f.path] = (
                             f'score {f.metrics["score"]:.1f} < {min_score:.1f} '
-                            f'({args.quality_threshold:.0f}% below best {best_score:.1f})'
+                            f'({args.quality_threshold:.0f}% below ref {ref_score:.1f})'
                         )
 
     final = [f for f in lights if f.accepted]
