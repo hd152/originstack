@@ -3,15 +3,9 @@ from __future__ import annotations
 
 import argparse
 import os
-import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
-
-try:
-    from multiprocessing.shared_memory import SharedMemory as _SharedMemory
-    _HAS_SHM = True
-except ImportError:
-    _HAS_SHM = False
+from multiprocessing.shared_memory import SharedMemory
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -20,7 +14,8 @@ from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, print_quality_table
 from src.io_fits import load_fits
 from src.debayer import (debayer, remove_hot_pixels_bayer, apply_hot_pixel_map_bayer,
-                         remove_hot_pixels_rgb, white_balance_grayworld, white_balance_whitepatch,
+                         remove_hot_pixels_rgb, remove_hot_pixels_rgb_with_lum,
+                         white_balance_grayworld, white_balance_whitepatch,
                          correct_chromatic_aberration)
 from src.quality import validate_image_data, compute_quality_metrics
 from src.stacking import lacosmic_reject
@@ -35,7 +30,9 @@ except Exception:
 def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[np.ndarray]],
                           debayer_method: str, white_balance: str,
                           ca_correction: bool = False,
-                          cosmic_ray_rejection: bool = False) -> Dict:
+                          cosmic_ray_rejection: bool = False,
+                          quick_quality: bool = False,
+                          skip_quality: bool = False) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -51,12 +48,14 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # Calibration — preserve negative noise through bias/dark subtraction,
     # clip only once after all steps to avoid cumulative truncation of shadow detail
     try:
-        bias_arr = masters.get('bias') if (masters.get('bias') is not None
-                                           and masters['bias'].shape == data.shape) else None
+        bias_arr = masters.get('bias')
+        if bias_arr is not None and bias_arr.shape != data.shape:
+            bias_arr = None
         if bias_arr is not None:
             data = data - bias_arr
-        if masters.get('dark') is not None and masters['dark'].shape == data.shape:
-            dark_arr = masters['dark']
+
+        dark_arr = masters.get('dark')
+        if dark_arr is not None and dark_arr.shape == data.shape:
             dark_current = dark_arr - (bias_arr if bias_arr is not None else 0.0)
             dark_exptime = masters.get('dark_exptime') or None
             light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
@@ -65,14 +64,17 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             else:
                 dark_scale = 1.0
             data = data - dark_current * dark_scale
-        if masters.get('flat_norm') is not None and masters['flat_norm'].shape == data.shape:
-            data = data / masters['flat_norm']
-        elif masters.get('flat') is not None and masters['flat'].shape == data.shape:
-            flat = masters['flat']
-            med = np.median(flat)
-            if med > 1e-6:
-                flat_norm = np.clip(flat / med, 0.4, 2.5)
-                data = data / flat_norm
+
+        flat_norm = masters.get('_flat_norm')  # pre-computed by caller when possible
+        if flat_norm is None:
+            flat_arr = masters.get('flat')
+            if flat_arr is not None and flat_arr.shape == data.shape:
+                med = np.median(flat_arr)
+                if med > 1e-6:
+                    flat_norm = np.clip(flat_arr / med, 0.4, 2.5)
+        if flat_norm is not None and flat_norm.shape == data.shape:
+            data = data / flat_norm
+
         if not np.isfinite(data).all():
             return {'error': 'calibration produced non-finite values'}
         data = np.clip(data, 0, None)
@@ -95,11 +97,11 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     except Exception as e:
         return {'error': f'debayering error: {e}'}
 
-    # Hot pixel removal (single-channel detection, 3x faster)
+    # Hot pixel removal — returns (rgb_fixed, lum) to avoid recomputing luminance.
     try:
         if rgb.ndim != 3 or rgb.shape[2] < 1:
             return {'error': f'Invalid RGB shape: {rgb.shape}'}
-        rgb = remove_hot_pixels_rgb(rgb)
+        rgb, lum = remove_hot_pixels_rgb_with_lum(rgb)
     except Exception as e:
         return {'error': f'hot pixel removal error: {e}'}
 
@@ -124,46 +126,45 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         except Exception:
             pass
 
-    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    # Recompute lum only when white balance or post-processing changed the image.
+    if white_balance != 'none' or ca_correction or cosmic_ray_rejection:
+        lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    else:
+        lum = np.asarray(lum)  # ensure host numpy array
+
     is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
 
-    metrics = compute_quality_metrics(lum)
+    metrics = {} if skip_quality else compute_quality_metrics(lum, quick=quick_quality)
     return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None}
 
 
 # Module-level state for parallel workers (must be module-level for pickling)
-_worker_masters: Dict[str, Optional[np.ndarray]] = {}
-_worker_shm_handles: Dict[str, object] = {}  # keep SharedMemory handles alive in workers
+_worker_masters: Dict[str, Any] = {}
 
 
-def _init_worker(master_paths: Dict[str, str]):
-    """Initializer for pool workers — load master calibration arrays from disk."""
+def _init_worker_shm(shm_specs: Dict[str, tuple]) -> None:
+    """Initializer for pool workers — attach to shared-memory calibration arrays.
+
+    *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
+    attach (read-only view) without copying data or touching the filesystem.
+    """
     global _worker_masters
     _worker_masters = {}
-    for name, p in master_paths.items():
-        _worker_masters[name] = np.load(p)
+    for name, (shm_name, dtype_str, shape) in shm_specs.items():
+        shm = SharedMemory(name=shm_name, create=False)
+        arr = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
+        # Keep shm alive for the process lifetime; store both so we can close later.
+        _worker_masters[name] = arr
+        _worker_masters[f'_shm_{name}'] = shm
 
 
-def _init_worker_shm(shm_info: Dict[str, tuple], scalar_masters: Dict[str, object]):
-    """Initializer for pool workers — attach to shared-memory blocks for arrays.
-
-    shm_info maps name → (shm_name, shape, dtype_str).
-    scalar_masters carries 0-d values (e.g. dark_exptime) that cannot go through shm.
-    """
-    global _worker_masters, _worker_shm_handles
-    _worker_masters = dict(scalar_masters)
-    _worker_shm_handles = {}
-    for name, (shm_name, shape, dtype_str) in shm_info.items():
-        shm = _SharedMemory(name=shm_name)
-        _worker_shm_handles[name] = shm          # prevent GC / handle close
-        _worker_masters[name] = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
-
-
-def _parallel_frame_worker(args_tuple):
+def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Optional[str]]:
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
-    path, frame_idx, debayer_method, white_balance, mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, ca_correction, cosmic_ray_rejection = args_tuple
+    (path, frame_idx, debayer_method, white_balance,
+     mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
+     ca_correction, cosmic_ray_rejection) = args_tuple
     global _worker_masters
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    ca_correction=ca_correction,
@@ -178,8 +179,8 @@ def _parallel_frame_worker(args_tuple):
         mem_lum = np.memmap(mm_lum_path, dtype='float32', mode='r+', shape=lum_shape)
         mem_rgb[frame_idx] = result['rgb']
         mem_lum[frame_idx] = result['lum']
-        mem_rgb.flush()
-        mem_lum.flush()
+        # Flush deferred to main process after all workers complete — flushing
+        # the entire memmap on every frame causes excessive concurrent I/O.
         del mem_rgb, mem_lum
     except Exception as e:
         return (frame_idx, None, f'memmap write error: {e}')
@@ -206,63 +207,34 @@ def execute_frame_processing(
     Selects between ProcessPool, ThreadPool, or sequential execution.
     Mutates lights[*].metrics / .accepted and rejected_reasons in-place.
     """
-    # Precompute flat_norm once — saves an O(H×W) division + clip on every frame.
-    if masters.get('flat') is not None and masters.get('flat_norm') is None:
-        _flat = masters['flat']
-        _med = float(np.median(_flat))
-        if _med > 1e-6:
-            masters['flat_norm'] = np.clip(_flat / _med, 0.4, 2.5).astype(np.float32)
-
     n = len(lights)
     use_process_pool = (getattr(args, 'parallel', 1) != 1
                         and not get_gpu().active
                         and n >= 4)
 
+    # Pre-compute flat_norm once so workers don't redo it per-frame.
+    flat_arr = masters.get('flat')
+    if flat_arr is not None:
+        med = np.median(flat_arr)
+        masters['_flat_norm'] = np.clip(flat_arr / med, 0.4, 2.5) if med > 1e-6 else None
+
     if use_process_pool:
         workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
         print(f"  Processing {n} frames in parallel ({workers} workers)...")
 
-        # Share master calibration arrays via shared memory (zero disk I/O).
-        # If SharedMemory is unavailable or any allocation fails, fall back to
-        # the original temporary-.npy approach for the entire batch.
-        shm_list: list = []
-        shm_info: Dict[str, tuple] = {}
-        scalar_masters: Dict[str, object] = {}
-        use_shm = _HAS_SHM
-
-        if use_shm:
-            for name, val in masters.items():
-                if val is None:
-                    continue
-                arr = np.asarray(val)
-                if arr.ndim == 0:
-                    scalar_masters[name] = val
-                    continue
-                try:
-                    shm = _SharedMemory(create=True, size=max(arr.nbytes, 1))
-                    shm_list.append(shm)
-                    np.copyto(np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf), arr)
-                    shm_info[name] = (shm.name, arr.shape, arr.dtype.str)
-                except Exception:
-                    use_shm = False
-                    for s in shm_list:
-                        try:
-                            s.close()
-                            s.unlink()
-                        except Exception:
-                            pass
-                    shm_list.clear()
-                    shm_info.clear()
-                    break
-
-        if not use_shm:
-            master_paths: Dict[str, str] = {}
-            for name, val in masters.items():
-                if val is not None:
-                    p = os.path.join(tempfile.gettempdir(),
-                                     f'master_{name}_{os.getpid()}.npy')
-                    np.save(p, np.asarray(val))
-                    master_paths[name] = p
+        # Share calibration arrays via shared memory — zero disk I/O, one copy
+        # in RAM shared across all workers (read-only view per worker process).
+        shm_blocks: list = []
+        shm_specs: Dict[str, tuple] = {}
+        for name, arr in masters.items():
+            if arr is None or name.startswith('_shm_') or not isinstance(arr, np.ndarray):
+                continue
+            arr_c = np.ascontiguousarray(arr)
+            shm = SharedMemory(create=True, size=arr_c.nbytes)
+            shm_arr = np.ndarray(arr_c.shape, dtype=arr_c.dtype, buffer=shm.buf)
+            shm_arr[:] = arr_c
+            shm_blocks.append(shm)
+            shm_specs[name] = (shm.name, arr_c.dtype.str, arr_c.shape)
 
         _ca = getattr(args, 'ca_correction', False)
         _cr = getattr(args, 'cosmic_ray_rejection', False)
@@ -270,15 +242,10 @@ def execute_frame_processing(
                   mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr)
                  for i in range(n)]
 
-        if use_shm:
-            _initializer, _initargs = _init_worker_shm, (shm_info, scalar_masters)
-        else:
-            _initializer, _initargs = _init_worker, (master_paths,)
-
         try:
             with ProcessPoolExecutor(max_workers=workers,
-                                     initializer=_initializer,
-                                     initargs=_initargs) as pool:
+                                     initializer=_init_worker_shm,
+                                     initargs=(shm_specs,)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Processing", unit="frame",
@@ -295,19 +262,30 @@ def execute_frame_processing(
                             print(f'  REJECT {os.path.basename(f.path)}: {error}')
                     else:
                         f.metrics = metrics
+                        if args.verbose:
+                            m = f.metrics
+                            safe_print(f'    {os.path.basename(f.path)}: '
+                                       f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
+                                       f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
+                                       f'sharpness={m.get("sharpness",0):.0f}')
+                            safe_print(f'      bg={m.get("background",0):.1f}  '
+                                       f'noise={m.get("noise",0):.2f}  '
+                                       f'brightness={m.get("brightness",0):.1f}  '
+                                       f'contrast={m.get("contrast",0):.1f}  '
+                                       f'dynamic_range={m.get("dynamic_range",0):.0f}')
         finally:
-            for shm in shm_list:
+            # Release shared memory after all workers are done.
+            for shm in shm_blocks:
                 try:
                     shm.close()
                     shm.unlink()
                 except Exception:
                     pass
-            if not use_shm:
-                for p in master_paths.values():
-                    try:
-                        os.remove(p)
-                    except Exception:
-                        pass
+
+        # Flush memmaps once after all workers complete — per-frame flushing
+        # inside workers causes excessive concurrent full-file I/O.
+        mem_rgb.flush()
+        mem_lum.flush()
 
     elif n >= 2:
         gpu = get_gpu()
@@ -397,6 +375,67 @@ def execute_frame_processing(
                           f'dynamic_range={m.get("dynamic_range",0):.0f}')
         mem_rgb.flush()
         mem_lum.flush()
+
+
+def reload_accepted_frames(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    masters: Dict[str, Optional[np.ndarray]],
+    args: argparse.Namespace,
+    mem_rgb: np.ndarray,
+    mem_lum: np.ndarray,
+    cached_lums: list,
+) -> None:
+    """Re-load and calibrate accepted frames into memmaps after a checkpoint restore.
+
+    Skips quality analysis — metrics were already restored from the checkpoint JSON.
+    Only processes accepted frames, so it is faster than a full phase 1 run when
+    many frames were rejected.
+    """
+    n = len(final)
+    gpu = get_gpu()
+    if gpu.active:
+        n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
+                                            Config.GPU_VRAM_RESERVE_MB), n)
+    else:
+        n_workers = min(os.cpu_count() or 4, n)
+    safe_print(f"  Reloading {n} accepted frames ({n_workers} threads, "
+               f"quality analysis skipped)...")
+
+    flat_arr = masters.get('flat')
+    if flat_arr is not None and masters.get('_flat_norm') is None:
+        med = np.median(flat_arr)
+        masters['_flat_norm'] = np.clip(flat_arr / med, 0.4, 2.5) if med > 1e-6 else None
+
+    def _reload_one(j: int, f: FrameInfo, orig_idx: int):
+        with gpu.stream_context():
+            result = _process_single_frame(
+                f.path, f.header, masters, args.debayer_method, args.white_balance,
+                ca_correction=getattr(args, 'ca_correction', False),
+                cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
+                skip_quality=True)
+        if result.get('error'):
+            return j, orig_idx, None, None, result['error']
+        return j, orig_idx, result['rgb'], result['lum'], None
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_reload_one, j, f, orig_idx): j
+                   for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
+        for future in tqdm(as_completed(futures), total=n,
+                           desc="  Reloading", unit="frame",
+                           disable=args.verbose):
+            j, orig_idx, rgb, lum, error = future.result()
+            if error:
+                safe_print(f"  WARNING: Could not reload {os.path.basename(final[j].path)}: {error}")
+            else:
+                mem_rgb[orig_idx] = rgb
+                mem_lum[orig_idx] = lum
+                cached_lums[orig_idx] = lum
+                if args.verbose:
+                    safe_print(f"    Reloaded: {os.path.basename(final[j].path)}")
+
+    mem_rgb.flush()
+    mem_lum.flush()
 
 
 def quality_gate(

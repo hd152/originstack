@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -285,9 +285,13 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
 
         newly_rejected = mask & ~new_mask
         rejected = int(mask.sum() - new_mask.sum())
+        total_valid = int(mask.sum())
         mask = new_mask
         masked[newly_rejected] = np.nan
         if rejected == 0:
+            break
+        # Early stopping: <0.1% change means convergence
+        if total_valid > 0 and rejected / total_valid < 0.001:
             break
 
     if winsorize:
@@ -594,8 +598,8 @@ def run_stacking_phase(
     final: List[FrameInfo],
     final_indices: List[int],
     mem_rgb: np.ndarray,
-    shifts: List,
-    transforms: List,
+    shifts: List[Tuple[float, float]],
+    transforms: List[Optional[Any]],
     H: int,
     W: int,
     C: int,
@@ -657,8 +661,10 @@ def run_stacking_phase(
     stats.output_shape = (bottom - top, right - left)
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
-    use_aligned_memmap = args.stack_method in ('median', 'sigma_clip', 'winsorized',
-                                               'percentile', 'esd')
+    drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
+    use_aligned_memmap = (drizzle_scale <= 1.0 and
+                          args.stack_method in ('median', 'sigma_clip', 'winsorized',
+                                                'percentile', 'esd'))
     if use_aligned_memmap:
         mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
         crop_h, crop_w = bottom - top, right - left
@@ -715,8 +721,6 @@ def run_stacking_phase(
             pass
 
     else:
-        drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
-
         if drizzle_scale > 1.0:
             crop_h, crop_w = bottom - top, right - left
             out_h = int(round(crop_h * drizzle_scale))

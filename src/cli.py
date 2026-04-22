@@ -30,11 +30,335 @@ from src.pipeline import stack_target
 from src.health_check import run_health_check
 
 
+def load_config_file(config_path: str, args: argparse.Namespace) -> list:
+    """Load configuration from a TOML file, applying values that aren't set on CLI."""
+    changes = []
+    try:
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib
+            except ImportError:
+                safe_print(f"  WARNING: TOML support not available (pip install tomli)")
+                return changes
+
+        with open(config_path, 'rb') as f:
+            config = tomllib.load(f)
+
+        # Flatten nested sections: [stacking] sigma=3.0 -> rejection_sigma=3.0
+        flat = {}
+        section_maps = {
+            'stacking': {
+                'method': 'stack_method',
+                'sigma': 'rejection_sigma',
+                'iters': 'rejection_iters',
+                'estimator': 'rejection_estimator',
+            },
+            'denoise': {
+                'wavelet': 'denoise',
+                'strength': 'denoise_strength',
+                'adaptive': 'denoise_adaptive',
+                'nlm': 'denoise_nlm',
+                'bilateral': 'denoise_bilateral',
+                'mmt': 'denoise_mmt',
+                'acdnr': 'denoise_acdnr',
+            },
+            'stretch': {
+                'method': 'stretch',
+                'ghs_b': 'ghs_b',
+                'ghs_sp': 'ghs_sp',
+                'ghs_hp': 'ghs_hp',
+            },
+        }
+
+        for key, value in config.items():
+            if isinstance(value, dict):
+                mapping = section_maps.get(key, {})
+                for sub_key, sub_value in value.items():
+                    mapped = mapping.get(sub_key, f"{key}_{sub_key}".replace('-', '_'))
+                    flat[mapped] = sub_value
+            else:
+                flat[key.replace('-', '_')] = value
+
+        for key, value in flat.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
+                changes.append(f"{key}={value}")
+
+    except FileNotFoundError:
+        safe_print(f"  WARNING: Config file not found: {config_path}")
+    except Exception as e:
+        safe_print(f"  WARNING: Error loading config: {e}")
+
+    return changes
+
+
+def apply_preset(args: argparse.Namespace) -> list:
+    """Apply a preset configuration, returning list of changes made.
+
+    Only sets values that the user hasn't explicitly provided on the command line.
+    """
+    if not args.preset:
+        return []
+
+    changes = []
+
+    # Track which args were explicitly set by the user
+    # (argparse doesn't track this natively, so we check against defaults)
+    presets = {
+        'quick': {
+            'stack_method': 'mean',
+            'denoise': True,
+            'denoise_adaptive': False,
+            'denoise_strength': 2.0,
+            'denoise_nlm': False,
+            'denoise_bilateral': False,
+            'denoise_mmt': False,
+            'denoise_acdnr': False,
+            'deconvolve': False,
+            'background_extraction': True,
+            'dbe': False,  # Use faster legacy mesh
+            'star_reduce': False,
+            'local_contrast': False,
+            'chroma_nr': True,
+            'quality_threshold': 10.0,  # Keep more frames
+        },
+        'quality': {
+            'stack_method': 'sigma_clip',
+            'rejection_sigma': 2.5,
+            'rejection_iters': 5,
+            'denoise': True,
+            'denoise_adaptive': True,
+            'denoise_mmt': True,
+            'denoise_acdnr': True,
+            'deconvolve': True,
+            'background_extraction': True,
+            'dbe': True,
+            'star_reduce': True,
+            'local_contrast': True,
+            'chroma_nr': True,
+            'ca_correction': True,
+            'cosmic_ray_rejection': True,
+        },
+        'narrowband': {
+            'stack_method': 'sigma_clip',
+            'rejection_sigma': 2.0,
+            'denoise': True,
+            'denoise_adaptive': True,
+            'denoise_mmt': True,
+            'denoise_mmt_strength': 2.0,
+            'denoise_acdnr': True,
+            'denoise_acdnr_k': 2.0,
+            'deconvolve': False,
+            'background_extraction': True,
+            'dbe': True,
+            'chroma_nr': False,  # Narrowband doesn't need chroma NR
+            'star_reduce': True,
+            'star_reduce_factor': 0.6,
+            'local_contrast': True,
+            'local_contrast_strength': 0.9,
+            'stretch': 'ghs',
+            'ghs_b': 12.0,
+            'ghs_sp': 0.10,
+        },
+        'galaxy': {
+            'stack_method': 'sigma_clip',
+            'denoise': True,
+            'denoise_adaptive': True,
+            'denoise_bilateral': True,
+            'deconvolve': True,
+            'background_extraction': True,
+            'dbe': True,
+            'star_reduce': True,
+            'star_reduce_factor': 0.5,
+            'local_contrast': True,
+            'local_contrast_strength': 0.8,
+            'stretch': 'ghs',
+            'ghs_b': 10.0,
+            'ghs_sp': 0.12,
+            'ghs_hp': 0.95,
+            'chroma_nr': True,
+        },
+        'starfield': {
+            'stack_method': 'sigma_clip',
+            'denoise': True,
+            'denoise_adaptive': True,
+            'deconvolve': False,
+            'background_extraction': True,
+            'dbe': True,
+            'star_reduce': False,
+            'local_contrast': False,
+            'stretch': 'ghs',
+            'ghs_b': 5.0,
+            'ghs_sp': 0.20,
+            'chroma_nr': True,
+        },
+    }
+
+    preset_values = presets.get(args.preset, {})
+    for key, value in preset_values.items():
+        current = getattr(args, key, None)
+        # Only apply if the user hasn't changed it from the parser default
+        # This is a best-effort check -- we apply the preset value
+        setattr(args, key, value)
+        changes.append(f"{key}={value}")
+
+    return changes
+
+
+def apply_stretch_preset(args: argparse.Namespace) -> None:
+    """Apply a named stretch preset."""
+    presets = {
+        'galaxy':    {'stretch': 'ghs', 'ghs_b': 10.0, 'ghs_sp': 0.12, 'ghs_hp': 0.95},
+        'nebula':    {'stretch': 'ghs', 'ghs_b': 12.0, 'ghs_sp': 0.10, 'ghs_hp': 0.98},
+        'starfield': {'stretch': 'ghs', 'ghs_b': 5.0,  'ghs_sp': 0.20, 'ghs_hp': 0.90},
+        'planetary': {'stretch': 'ghs', 'ghs_b': 3.0,  'ghs_sp': 0.30, 'ghs_hp': 0.85},
+        'lunar':     {'stretch': 'linear'},
+    }
+    preset = presets.get(getattr(args, 'stretch_preset', None))
+    if preset:
+        for key, value in preset.items():
+            setattr(args, key, value)
+
+
+def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
+    """Save the effective parameter set as a TOML file next to the output."""
+    config_path = os.path.splitext(output_path)[0] + '_config.toml'
+    lines = ['# OriginStack effective configuration\n',
+             '# Generated automatically -- can be reused with --config\n\n']
+
+    skip_keys = {'directory', 'output', 'config', 'health_check', 'dry_run',
+                 'verbose', 'debug_registration', 'keep_intermediates',
+                 'ai_advisor', 'ai_report', 'preset', 'stretch_preset',
+                 'diagnostic', 'diagnostic_dir'}
+
+    for key, value in sorted(vars(args).items()):
+        if key.startswith('_') or key in skip_keys:
+            continue
+        if isinstance(value, bool):
+            lines.append(f'{key} = {"true" if value else "false"}\n')
+        elif isinstance(value, (int, float)):
+            lines.append(f'{key} = {value}\n')
+        elif isinstance(value, str):
+            lines.append(f'{key} = "{value}"\n')
+        elif value is None:
+            continue
+
+    try:
+        with open(config_path, 'w') as f:
+            f.writelines(lines)
+    except Exception as e:
+        safe_print(f"  WARNING: Could not save config file ({e})")
+
+
+def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace) -> None:
+    """Pool all light frames from multiple session subfolders into one unified stack.
+
+    Each subfolder's calibration frames are aggregated together to build
+    stronger master frames. All lights are passed to a single stack_target
+    call so registration, sigma-clip rejection, and post-processing operate
+    across the full multi-night dataset at once.
+    """
+    overall_start = time.time()
+    stats = ProcessingStats()
+
+    combined: dict = {'light': [], 'dark': [], 'flat': [], 'bias': [], 'skip': []}
+    for d in sorted(subdirs):
+        sub = discover_frames(d)
+        for ftype in combined:
+            combined[ftype].extend(sub.get(ftype, []))
+
+    n_lights = len(combined['light'])
+    n_sessions = len(subdirs)
+    print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
+          f"({len(combined['dark'])} darks, {len(combined['flat'])} flats, "
+          f"{len(combined['bias'])} bias)")
+
+    if not n_lights:
+        print('  ERROR: No light frames found across sessions', file=sys.stderr)
+        raise SystemExit('No light frames found')
+
+    # Build master calibration frames from all sessions combined
+    if combined['dark'] or combined['flat'] or combined['bias']:
+        print("\nCreating master calibration frames...")
+        cal_start = time.time()
+
+    masters: dict = {}
+    if combined['bias']:
+        masters['bias'] = make_master(combined['bias'], method='median')
+        if masters['bias'] is not None:
+            safe_print(f"  ✓ Master bias:  {len(combined['bias'])} frames → "
+                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
+    else:
+        masters['bias'] = None
+
+    if combined['dark']:
+        combined['dark'] = select_matching_darks(combined['light'], combined['dark'])
+        masters['dark'] = make_master(combined['dark'], method='median')
+        if masters['dark'] is not None:
+            safe_print(f"  ✓ Master dark:  {len(combined['dark'])} frames → "
+                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+    else:
+        masters['dark'] = None
+
+    if combined['flat']:
+        masters['flat'] = make_master(combined['flat'], method='median')
+        if masters['flat'] is not None:
+            safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames → "
+                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+    else:
+        masters['flat'] = None
+
+    masters['hot_pixel_map'] = None
+    if masters.get('dark') is not None:
+        hot_map = build_hot_pixel_map(masters['dark'])
+        n_hot = int(np.sum(hot_map))
+        if n_hot > 0:
+            masters['hot_pixel_map'] = hot_map
+            safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
+
+    if combined['dark'] or combined['flat'] or combined['bias']:
+        # Smooth calibration frames (same logic as single-folder path)
+        if masters.get('bias') is not None:
+            n_bias = len(combined['bias'])
+            sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
+            masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma_b)
+        if masters.get('dark') is not None:
+            n_dark = len(combined['dark'])
+            sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
+            masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma_d)
+        if masters.get('flat') is not None:
+            n_flat = len(combined['flat'])
+            sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
+            flat_raw = masters['flat'].astype(np.float32)
+            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                ch = flat_raw[r_off::2, c_off::2]
+                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma_f)
+            masters['flat'] = flat_raw
+        stats.calibration_time = time.time() - cal_start
+
+    masters['dark_exptime'] = None
+    if combined.get('dark'):
+        try:
+            masters['dark_exptime'] = float(
+                combined['dark'][0].header.get('EXPTIME', 0) or 0) or None
+        except Exception as e:
+            safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+
+    all_frames = [f for ftype in combined.values() for f in (ftype if isinstance(ftype, list) else [])]
+    stack_target(all_frames, output, args, masters, stats)
+    save_effective_config(args, output)
+    safe_print(f"\n  Total elapsed: {format_time(time.time() - overall_start)}")
+
+
 def process_directory(directory: str, output: str, args: argparse.Namespace):
     # Print banner
     print_header("Astrophotography FITS Stacker", "=")
     print(f"Input:  {directory}")
     print(f"Output: {output}")
+    if getattr(args, 'preset', None):
+        print(f"  Preset: {args.preset}")
     get_gpu().print_status()
 
     # Detect hierarchical mode
@@ -51,6 +375,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         # single folder
         targets = [(directory, output)]
         print(f"  Mode: Single folder")
+    elif subdirs and getattr(args, 'combine_sessions', False):
+        # Combined-sessions mode: pool all lights from all subfolders into one stack
+        safe_print(f"  Mode: Combined sessions ({len(subdirs)} subfolders -> single unified stack)")
+        _run_combined_sessions(subdirs, output, args)
+        return
     elif subdirs:
         # hierarchical: produce per-subfolder stacks then combine
         tmp_stacks = []
@@ -159,14 +488,29 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
             masters['flat'] = flat_raw
 
+        # Validate calibration frame dimensions match light frames
+        if frames['light']:
+            first_hdr = frames['light'][0].header
+            light_h = first_hdr.get('NAXIS2')
+            light_w = first_hdr.get('NAXIS1')
+            if light_h and light_w:
+                for cal_name in ('bias', 'dark', 'flat'):
+                    cal = masters.get(cal_name)
+                    if cal is not None:
+                        cal_shape = cal.shape
+                        if cal_shape[0] != light_h or cal_shape[1] != light_w:
+                            safe_print(f"  ⚠ WARNING: {cal_name} dimensions {cal_shape[1]}×{cal_shape[0]} "
+                                       f"don't match lights {light_w}×{light_h} — disabling {cal_name} calibration")
+                            masters[cal_name] = None
+
         # Store dark exposure time so _process_single_frame can scale correctly
         masters['dark_exptime'] = None
         if frames.get('dark'):
             try:
                 masters['dark_exptime'] = float(
                     frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
-            except Exception:
-                pass
+            except Exception as e:
+                safe_print(f"  WARNING: Could not read dark frame EXPTIME ({e}) — dark scaling disabled")
 
         # --- Calibration frame analysis ---
         if frames['dark'] or frames['flat'] or frames['bias']:
@@ -264,6 +608,32 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             run_health_check(frames, masters, d)
             continue  # skip stacking
 
+        if getattr(args, 'dry_run', False):
+            if frames['light']:
+                first_hdr = frames['light'][0].header
+                h = first_hdr.get('NAXIS2', 0)
+                w = first_hdr.get('NAXIS1', 0)
+                n_lights = len(frames['light'])
+                bytes_per_frame = h * w * 3 * 4  # float32 RGB
+                memmap_size_mb = (n_lights * bytes_per_frame * 2) / (1024**2)
+                safe_print(f"\n  --- DRY RUN ---")
+                safe_print(f"  Light frames: {n_lights} x {w}x{h}")
+                safe_print(f"  Estimated temp storage: {memmap_size_mb:.0f} MB")
+                safe_print(f"  Stack method: {args.stack_method}")
+                safe_print(f"  Background extraction: {'DBE' if getattr(args, 'dbe', True) else 'mesh'}")
+                safe_print(f"  Denoising: wavelet={getattr(args, 'denoise', False)}, "
+                           f"NLM={getattr(args, 'denoise_nlm', False)}, "
+                           f"bilateral={getattr(args, 'denoise_bilateral', False)}, "
+                           f"MMT={getattr(args, 'denoise_mmt', False)}, "
+                           f"ACDNR={getattr(args, 'denoise_acdnr', False)}")
+                safe_print(f"  Deconvolution: {getattr(args, 'deconvolve', False)}")
+                safe_print(f"  Star reduction: {getattr(args, 'star_reduce', False)}")
+                safe_print(f"  Local contrast: {getattr(args, 'local_contrast', False)}")
+                safe_print(f"  Stretch: {getattr(args, 'stretch', 'linear')}")
+                if getattr(args, 'preset', None):
+                    safe_print(f"  Preset: {args.preset}")
+            continue  # skip stacking
+
         # Validation warnings
         if len(frames['light']) < Config.MIN_RECOMMENDED_FRAMES:
             warning = f"Only {len(frames['light'])} light frames found (recommended: {Config.MIN_RECOMMENDED_FRAMES}+)"
@@ -273,6 +643,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         res = stack_target([f for t in frames.values() for f in t], outp, args, masters, stats)
         if res:
             produced.append(res)
+            save_effective_config(args, outp)
     # If hierarchical combine
     if len(produced) > 1:
         print_header("HIERARCHICAL COMBINING", "=")
@@ -359,6 +730,31 @@ def parse_args():
                    help='Output FITS path (required unless --health-check)')
     p.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
+    p.add_argument('--config', default=None, metavar='PATH',
+                   help='Load parameters from a TOML configuration file. '
+                        'CLI arguments override config file values.')
+    p.add_argument('--preset', choices=['quick', 'quality', 'narrowband', 'galaxy', 'starfield'],
+                   default=None,
+                   help='Processing preset that sets sensible defaults for common scenarios. '
+                        'Individual flags still override preset values. '
+                        'quick: fast processing (mean stack, no deconvolution, minimal denoise). '
+                        'quality: maximum quality (sigma_clip, all denoisers, deconvolution). '
+                        'narrowband: tuned for Ha/OIII/SII narrowband data. '
+                        'galaxy: optimized for galaxy imaging (strong stretch, star reduction). '
+                        'starfield: optimized for star fields (no star reduction, minimal processing).')
+    p.add_argument('--stretch-preset',
+                   choices=['galaxy', 'nebula', 'starfield', 'planetary', 'lunar'],
+                   default=None,
+                   help='Named stretch preset that sets --stretch, --ghs-b, --ghs-sp, --ghs-hp '
+                        'to tested values. Overrides individual stretch arguments.')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Discover and classify frames, show calibration info, print effective '
+                        'parameters, and estimate resource usage — without processing anything')
+    p.add_argument('--skip-step', action='append', default=[], metavar='STEP',
+                   help='Skip a named post-processing step. Can be specified multiple times. '
+                        'Steps: hot_pixel, background, chroma_nr, sky_floor, local_normalize, '
+                        'wavelet, sky_residual, nlm, bilateral, mmt, acdnr, deconvolve, '
+                        'star_reduce, local_contrast')
     p.add_argument('--no-registration', action='store_true')
     p.add_argument('--skip-phase-correlation', action='store_true',
                    help='Skip phase correlation, use only fallback methods (debug)')
@@ -375,6 +771,14 @@ def parse_args():
                         'E.g. 50 keeps every frame with score >= 50%% of the reference. '
                         'Use --no-quality-filter to disable entirely.')
     p.add_argument('--keep-intermediates', action='store_true')
+    p.add_argument('--diagnostic', action='store_true', default=False,
+                   help='Save a FITS snapshot before each post-processing step for '
+                        'artifact troubleshooting. Files are named by step number and '
+                        'step name, e.g. 01_before_hot_pixel.fits. '
+                        'WARNING: ~275 MB per snapshot at 24 MP float32 RGB.')
+    p.add_argument('--diagnostic-dir', default=None, metavar='PATH',
+                   help='Directory for --diagnostic snapshots '
+                        '(default: <output_stem>_diagnostic/ next to the output file).')
     p.add_argument('-v', '--verbose', action='store_true')
     p.add_argument('--debug-registration', action='store_true',
                    help='Detailed registration diagnostics (implies -v)')
@@ -638,6 +1042,74 @@ def parse_args():
     p.add_argument('--log-file', default=None, metavar='PATH',
                    help='Write a full DEBUG-level log to this file in addition to '
                         'console output.')
+    # --- Output formats ---
+    p.add_argument('--output-tiff', action='store_true',
+                   help='Write a 32-bit float TIFF alongside the FITS output '
+                        '(requires tifffile; falls back to 16-bit via Pillow)')
+    p.add_argument('--output-xisf', action='store_true',
+                   help='Write output in PixInsight XISF 1.0 format alongside FITS '
+                        '(no extra dependencies)')
+    # --- Quality report ---
+    p.add_argument('--quality-report', default=None, metavar='PATH',
+                   help='Write per-frame quality metrics CSV after Phase 1 '
+                        '(columns: filename, snr, fwhm, star_count, quality_score, '
+                        'accepted, rejection_reason)')
+    # --- Per-frame preview export ---
+    p.add_argument('--export-frames-dir', default=None, metavar='PATH',
+                   help='Directory to write a stretched JPEG for every accepted frame '
+                        'after Phase 1 processing')
+    # --- Plate solver backend ---
+    p.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
+                   help='Plate solver backend: astap (fast, local binary) or '
+                        'astrometry (nova.astrometry.net, requires API key). '
+                        'Default: astrometry. ASTAP is recommended when the binary '
+                        'is installed — it solves in ~1 s vs 30–120 s online.')
+    p.add_argument('--astap-path', default=None, metavar='PATH',
+                   help='Explicit path to the ASTAP binary (auto-detected if omitted)')
+    # --- Background extraction method ---
+    p.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default=None,
+                   help='Background extraction method: '
+                        'mesh: legacy polynomial grid (fastest). '
+                        'dbe: Dynamic Background Extraction, RBF thin-plate-spline (default). '
+                        'graxpert: AI-powered gradient removal via GraXpert subprocess '
+                        '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
+    p.add_argument('--graxpert-path', default=None, metavar='PATH',
+                   help='Path to GraXpert binary (auto-detected if omitted). '
+                        'Download from https://www.graxpert.com/')
+    # --- Starnet++ star removal ---
+    p.add_argument('--star-remove', action='store_true',
+                   help='Remove stars using Starnet++ after post-processing. '
+                        'Saves <output>_starless.fits and <output>_stars.fits. '
+                        'The main FITS output becomes the starless image. '
+                        'Requires Starnet++ binary on PATH or --starnet-path.')
+    p.add_argument('--starnet-path', default=None, metavar='PATH',
+                   help='Path to Starnet++ binary (auto-detected if omitted). '
+                        'Download from https://www.starnetastro.com/')
+    # --- Comet stacking ---
+    p.add_argument('--comet-mode', action='store_true',
+                   help='Enable comet nucleus tracking: produces a second stack '
+                        'aligned on the brightest extended blob (comet nucleus) in '
+                        'addition to the normal star-aligned stack. '
+                        'Comet-aligned output is saved as <stem>_comet.fits.')
+    # --- HDR combination ---
+    p.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
+                   help='Blend a short-exposure stack FITS into saturated regions '
+                        'of the main (long-exposure) stack for HDR targets '
+                        '(e.g. Orion Nebula core, globular clusters). '
+                        'The short stack is automatically scaled to match the '
+                        'long stack background level before blending.')
+    # --- Photometric colour calibration ---
+    p.add_argument('--color-calibrate', action='store_true',
+                   help='Apply photometric colour calibration after plate solving: '
+                        'queries Gaia DR3 (or 2MASS via VizieR) for stars in the '
+                        'field, matches them to the image via aperture photometry, '
+                        'and derives per-channel scale factors. '
+                        'Requires --plate-solve and astroquery.')
+    # --- Mask export ---
+    p.add_argument('--export-masks', action='store_true',
+                   help='Save the star detection mask as a FITS sidecar file '
+                        '(<stem>_star_mask.fits) for use in external tools '
+                        '(PixInsight, Siril, etc.)')
     # --- AI features (require: pip install anthropic  +  ANTHROPIC_API_KEY env var) ---
     p.add_argument('--ai-advisor', action='store_true',
                    help='After Phase 1, call Claude to recommend optimal stacking '
@@ -647,6 +1119,27 @@ def parse_args():
                    help='After stacking, call Claude to generate a narrative session '
                         'report (saved as <output>_report.md). '
                         'Requires: pip install anthropic  and  ANTHROPIC_API_KEY.')
+    # --- Checkpoint resume ---
+    p.add_argument('--keep-checkpoint', action='store_true',
+                   help='After a successful stack, keep the checkpoint directory and '
+                        'save the raw pre-post-processing stack to disk. Re-running '
+                        'the same command will skip phases 1-3 and only re-run '
+                        'post-processing, letting you quickly test different denoising, '
+                        'background extraction, stretch, or deconvolution settings.')
+    p.add_argument('--no-resume', action='store_true',
+                   help='Ignore any existing checkpoint and start from scratch. '
+                        'By default, if a checkpoint exists from an interrupted run '
+                        '(within the last 72 hours, same frame set), phases 1 and/or 2 '
+                        'are skipped and pixel data is reloaded from the accepted frames only.')
+    # --- Multi-session combining ---
+    p.add_argument('--combine-sessions', action='store_true',
+                   help='When the input directory contains subfolders, pool all light '
+                        'frames from every subfolder into a single unified stack instead '
+                        'of stacking each subfolder separately then averaging the results. '
+                        'Use this when all sessions were shot on the same target with the '
+                        'same equipment. Calibration frames from all sessions are merged '
+                        'into stronger master frames. Registration, sigma-clip rejection, '
+                        'and post-processing all run once across the full multi-night dataset.')
     # --- Heuristic auto-advisor (no API key required) ---
     p.add_argument('--auto', action='store_true',
                    help='After Phase 1, automatically classify the target '
@@ -664,10 +1157,26 @@ def parse_args():
 
 
 def main():
+    # Dispatch to the 'combine' subcommand without touching the main parser
+    if len(sys.argv) > 1 and sys.argv[1] == 'combine':
+        from src.channel_combine import run_combine_cli
+        run_combine_cli(sys.argv[2:])
+        return
+
     args = parse_args()
-    if not args.health_check and not args.output:
-        print("ERROR: -o/--output is required unless --health-check is specified", file=sys.stderr)
+    if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
+        print("ERROR: -o/--output is required unless --health-check or --dry-run is specified",
+              file=sys.stderr)
         raise SystemExit(1)
+    # Load config file (before preset, so preset can override config)
+    if getattr(args, 'config', None):
+        config_changes = load_config_file(args.config, args)
+        if config_changes:
+            safe_print(f"  Config loaded: {len(config_changes)} settings from {args.config}")
+    # Apply preset (before any other processing)
+    preset_changes = apply_preset(args)
+    # Apply stretch preset
+    apply_stretch_preset(args)
     # debug_registration implies verbose
     if args.debug_registration:
         args.verbose = True

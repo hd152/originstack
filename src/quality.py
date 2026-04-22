@@ -8,15 +8,32 @@ import numpy as np
 
 from src.models import Config
 
-try:
-    from photutils.detection import DAOStarFinder
-except Exception:
-    DAOStarFinder = None
+DAOStarFinder = None
+sigma_clipped_stats = None
 
-try:
-    from astropy.stats import sigma_clipped_stats
-except Exception:
-    sigma_clipped_stats = None
+
+def _ensure_photutils():
+    global DAOStarFinder
+    if DAOStarFinder is None:
+        try:
+            from photutils.detection import DAOStarFinder as _dao
+            if callable(_dao):
+                DAOStarFinder = _dao
+        except Exception:
+            pass
+    return DAOStarFinder
+
+
+def _ensure_astropy_stats():
+    global sigma_clipped_stats
+    if sigma_clipped_stats is None:
+        try:
+            from astropy.stats import sigma_clipped_stats as _scs
+            if callable(_scs):
+                sigma_clipped_stats = _scs
+        except Exception:
+            pass
+    return sigma_clipped_stats
 
 # Module-level imports for scipy — avoids repeated sys.modules lookups and
 # attribute resolution on every call to compute_quality_metrics.
@@ -28,7 +45,7 @@ except ImportError:
     _SCIPY_AVAILABLE = False
 
 
-def generate_star_mask(shape: Tuple[int, int], star_positions, fwhm: float = 3.0) -> np.ndarray:
+def generate_star_mask(shape: Tuple[int, int], star_positions: Optional[object], fwhm: float = 3.0) -> np.ndarray:
     """Generate a float mask with Gaussian PSFs at detected star positions.
 
     Fast path: centroid coordinates are extracted with a fully vectorised
@@ -74,7 +91,7 @@ def generate_star_mask(shape: Tuple[int, int], star_positions, fwhm: float = 3.0
     return mask
 
 
-def measure_fwhm(img: np.ndarray, star_positions, cutout_radius: int = None) -> float:
+def measure_fwhm(img: np.ndarray, star_positions: Optional[object], cutout_radius: Optional[int] = None) -> float:
     """Measure median FWHM from star cutouts using half-max area method.
 
     Performance improvements vs original:
@@ -96,7 +113,7 @@ def measure_fwhm(img: np.ndarray, star_positions, cutout_radius: int = None) -> 
     # Sort by flux (brightest first) for more reliable measurements.
     try:
         sorted_idx = np.argsort(star_positions['flux'])[::-1]
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         sorted_idx = range(n_stars)
 
     # Vectorised border pre-filter — column slicing + fancy indexing in C.
@@ -186,7 +203,7 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
     return True, None
 
 
-def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float):
+def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float) -> Optional[object]:
     """Run DAOStarFinder at FWHM 2, 3, 5, 8 and return the best quality-filtered table.
 
     Short-circuits as soon as a trial yields >=20 quality stars.  If the strict
@@ -199,6 +216,7 @@ def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float):
     - Relaxed fallback recomputes the same fused roundness on all_raw_sources
       once, not twice as in the original duplicated mask logic.
     """
+    _ensure_photutils()
     if DAOStarFinder is None:
         return None
 
@@ -250,7 +268,7 @@ def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float):
     return best_sources
 
 
-def compute_quality_metrics(img: np.ndarray) -> Dict:
+def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
     """Comprehensive quality analysis with multiple metrics.
 
     Performance improvements vs original:
@@ -283,6 +301,7 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     noise = contrast
 
     _scs_bg_mean = _scs_bg_median = _scs_bg_std = None
+    _ensure_astropy_stats()
     if sigma_clipped_stats is not None:
         try:
             _scs_bg_mean, _scs_bg_median, _scs_bg_std = sigma_clipped_stats(
@@ -300,32 +319,52 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
     star_count = 0
     star_snr = 0.0
     sources_s = None
+    fwhm = 0.0
 
-    if DAOStarFinder is not None and _scs_bg_std is not None:
-        try:
-            threshold = 5.0 * float(_scs_bg_std)
-            bg_sub = img_s_stars - float(_scs_bg_median)
-            sources_s = _detect_stars_multi_fwhm(bg_sub, threshold)
-            if sources_s is not None and len(sources_s) > 0:
-                star_count = len(sources_s)
-                star_snr = float(np.median(sources_s['peak'])) / (noise + 1e-12)
-        except Exception as e:
-            logging.debug(f"DAOStarFinder failed: {type(e).__name__}: {e}")
-            sources_s = None
+    if not quick:
+        _ensure_photutils()
+        if DAOStarFinder is not None and _scs_bg_std is not None:
+            try:
+                threshold = 5.0 * float(_scs_bg_std)
+                bg_sub = img_s_stars - float(_scs_bg_median)
+                sources_s = _detect_stars_multi_fwhm(bg_sub, threshold)
+                if sources_s is not None and len(sources_s) > 0:
+                    star_count = len(sources_s)
+                    star_snr = float(np.median(sources_s['peak'])) / (noise + 1e-12)
+            except Exception as e:
+                logging.debug(f"DAOStarFinder failed: {type(e).__name__}: {e}")
+                sources_s = None
 
-    # Fallback: local-maxima detection.  The dead elif/re-import branch from
-    # the previous version is removed — if the module-level scipy import
-    # failed, a per-call import will fail identically and is not worth keeping.
-    if star_count == 0 and maximum_filter is not None:
-        try:
-            threshold = background + 5.0 * noise
-            local_max = maximum_filter(img_s_stars, size=11)
-            detected_peaks = (img_s_stars == local_max) & (img_s_stars > threshold)
-            star_count = min(int(np.sum(detected_peaks)), 500)
-            if star_count > 0:
-                star_snr = float(np.median(img_s_stars[detected_peaks])) / (noise + 1e-12)
-        except Exception:
-            star_count = 0
+        # Fallback: local-maxima detection when DAOStarFinder is unavailable.
+        if star_count == 0 and maximum_filter is not None:
+            try:
+                threshold = background + 5.0 * noise
+                local_max = maximum_filter(img_s_stars, size=11)
+                detected_peaks = (img_s_stars == local_max) & (img_s_stars > threshold)
+                peak_ys, peak_xs = np.nonzero(detected_peaks)
+                # Sort by brightness descending so FWHM samples the best stars.
+                peak_vals = img_s_stars[peak_ys, peak_xs]
+                order = np.argsort(peak_vals)[::-1]
+                peak_ys = peak_ys[order]
+                peak_xs = peak_xs[order]
+                star_count = min(len(peak_ys), 500)
+                if star_count > 0:
+                    star_snr = float(np.median(peak_vals)) / (noise + 1e-12)
+                    # Build a minimal structured array compatible with measure_fwhm.
+                    sources_s = np.zeros(star_count, dtype=[
+                        ('ycentroid', np.float32),
+                        ('xcentroid', np.float32),
+                        ('peak', np.float32),
+                    ])
+                    sources_s['ycentroid'] = peak_ys[:star_count].astype(np.float32)
+                    sources_s['xcentroid'] = peak_xs[:star_count].astype(np.float32)
+                    sources_s['peak'] = peak_vals[order[:star_count]].astype(np.float32)
+            except Exception:
+                star_count = 0
+
+        # FWHM at full resolution
+        if star_count > 0 and sources_s is not None:
+            fwhm = measure_fwhm(img_s_stars, sources_s)
 
     # Laplacian sharpness — img_s is already float32, no cast needed.
     sharpness = 0.0
@@ -335,19 +374,18 @@ def compute_quality_metrics(img: np.ndarray) -> Dict:
         except Exception:
             sharpness = 0.0
 
-    # FWHM at full resolution
-    fwhm = 0.0
-    if star_count > 0 and sources_s is not None:
-        fwhm = measure_fwhm(img_s_stars, sources_s)
-
     # Composite quality score
-    star_factor = min(star_count / 50.0, 1.0) if star_count > 0 else 0.01
-    snr_factor = min(snr / 10.0, 1.0) if snr > 0 else 0.01
-    fwhm_factor = (
-        max(0.1, 1.0 / (1.0 + max(0.0, fwhm - 2.0) ** 2 * 0.1))
-        if fwhm > 0 else 1.0
-    )
-    score = brightness * contrast * star_factor * snr_factor * fwhm_factor * 100.0
+    if quick:
+        # Simplified score without star metrics — used for initial quality gate
+        score = brightness * contrast * max(snr / 10.0, 0.01) * 100.0
+    else:
+        star_factor = min(star_count / 50.0, 1.0) if star_count > 0 else 0.01
+        snr_factor = min(snr / 10.0, 1.0) if snr > 0 else 0.01
+        fwhm_factor = (
+            max(0.1, 1.0 / (1.0 + max(0.0, fwhm - 2.0) ** 2 * 0.1))
+            if fwhm > 0 else 1.0
+        )
+        score = brightness * contrast * star_factor * snr_factor * fwhm_factor * 100.0
 
     return {
         'brightness': brightness,

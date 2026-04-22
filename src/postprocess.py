@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import subprocess
+import tempfile
 import time
-from typing import List
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -19,15 +23,257 @@ from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denois
                            multiscale_local_contrast, mmt_denoise, acdnr_denoise)
 from src.psf_deconvolution import estimate_psf, make_synthetic_psf, richardson_lucy_deconvolve
 
-try:
-    from photutils.detection import DAOStarFinder
-except Exception:
-    DAOStarFinder = None
+DAOStarFinder = None
+
+
+def _ensure_photutils() -> Optional[Any]:
+    global DAOStarFinder
+    if DAOStarFinder is None:
+        try:
+            from photutils.detection import DAOStarFinder as _dao
+            if callable(_dao):
+                DAOStarFinder = _dao
+        except Exception:
+            pass
+    return DAOStarFinder
 
 try:
     from astropy.stats import sigma_clipped_stats
 except Exception:
     sigma_clipped_stats = None
+
+
+def _diag_save(img: np.ndarray, diag_dir: Optional[str], counter: list, slug: str) -> None:
+    """Save a float32 FITS snapshot to diag_dir if diagnostic mode is active.
+
+    counter is a one-element list [int] so the caller can mutate it across calls
+    without a nonlocal statement. Only called when the step actually runs.
+    """
+    if not diag_dir:
+        return
+    try:
+        from astropy.io import fits as _fits
+        fname = f"{counter[0]:02d}_{slug}.fits"
+        path = os.path.join(diag_dir, fname)
+        data_out = np.transpose(img, (2, 0, 1)).astype(np.float32)
+        hdu = _fits.PrimaryHDU(data=data_out)
+        hdu.header['DIAGSTEP'] = (slug, 'Diagnostic step name')
+        hdu.header['DIAGIDX'] = (counter[0], 'Diagnostic step index')
+        hdu.writeto(path, overwrite=True)
+        safe_print(f"  [diagnostic] saved {fname}")
+    except Exception as e:
+        safe_print(f"  [diagnostic] WARNING: could not save {slug}: {e}")
+    finally:
+        counter[0] += 1
+
+
+# ---------------------------------------------------------------------------
+# External tool helpers
+# ---------------------------------------------------------------------------
+
+def _find_binary(names: list) -> Optional[str]:
+    """Search PATH and common install locations for any of the given binary names."""
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _write_u16_tiff(img: np.ndarray, path: str) -> None:
+    """Write (H, W, 3) float32 image as 16-bit RGB TIFF for external tools."""
+    arr16 = (np.clip(img, 0.0, 1.0) * 65535).astype(np.uint16)
+    try:
+        import tifffile
+        tifffile.imwrite(path, arr16, photometric="rgb")
+    except ImportError:
+        try:
+            from PIL import Image
+            Image.fromarray(arr16).save(path)
+        except Exception as e:
+            raise RuntimeError(f"Cannot write TIFF: tifffile and Pillow both unavailable ({e})")
+
+
+def _read_tiff_as_float(path: str) -> np.ndarray:
+    """Read a TIFF and return (H, W, 3) float32 in [0, 1]."""
+    try:
+        import tifffile
+        arr = tifffile.imread(path)
+    except ImportError:
+        from PIL import Image
+        arr = np.array(Image.open(path))
+    if arr.dtype == np.uint16:
+        return arr.astype(np.float32) / 65535.0
+    if arr.dtype == np.uint8:
+        return arr.astype(np.float32) / 255.0
+    return arr.astype(np.float32)
+
+
+def _save_sidecar_fits(img: np.ndarray, output_path: str, suffix: str) -> None:
+    """Save a (H, W, 3) or (H, W) float32 array as a sidecar FITS file."""
+    from astropy.io import fits as _fits
+    path = os.path.splitext(output_path)[0] + suffix + ".fits"
+    if img.ndim == 3:
+        data_out = np.transpose(img.astype(np.float32), (2, 0, 1))
+    else:
+        data_out = img.astype(np.float32)
+    hdu = _fits.PrimaryHDU(data=data_out)
+    hdu.header["CREATOR"] = "astro_stack.py postprocess"
+    hdu.header["COMBINED"] = (True, "Sidecar output")
+    hdu.writeto(path, overwrite=True)
+    safe_print(f"  Saved: {os.path.basename(path)}")
+
+
+# ---------------------------------------------------------------------------
+# GraXpert background extraction
+# ---------------------------------------------------------------------------
+
+def _find_graxpert_binary() -> Optional[str]:
+    return _find_binary([
+        "graxpert", "GraXpert",
+        "/usr/local/bin/graxpert",
+        r"C:\Program Files\GraXpert\graxpert.exe",
+        "/Applications/GraXpert.app/Contents/MacOS/GraXpert",
+    ])
+
+
+def _graxpert_background_extraction(img: np.ndarray,
+                                     graxpert_path: Optional[str] = None,
+                                     verbose: bool = False) -> np.ndarray:
+    """Call the GraXpert CLI for AI-powered gradient removal.
+
+    Falls back to DBE on failure.
+    """
+    from astropy.io import fits as _fits
+
+    binary = graxpert_path or _find_graxpert_binary()
+    if binary is None:
+        safe_print("  WARNING: GraXpert binary not found — falling back to DBE")
+        return dynamic_background_extraction(img, verbose=verbose)
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            in_fits = os.path.join(td, "graxpert_in.fits")
+            out_fits = os.path.join(td, "graxpert_out.fits")
+
+            # Write (3, H, W) float32 FITS
+            data_out = np.transpose(img.astype(np.float32), (2, 0, 1))
+            _fits.PrimaryHDU(data=data_out).writeto(in_fits, overwrite=True)
+
+            cmd = [binary, "-i", in_fits, "-o", out_fits, "background_extraction"]
+            if verbose:
+                print(f"  [GraXpert] Running: {' '.join(cmd)}")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                safe_print(f"  WARNING: GraXpert exited with code {result.returncode} "
+                           "— falling back to DBE")
+                if verbose and result.stderr:
+                    print(f"    GraXpert stderr: {result.stderr[:200]}")
+                return dynamic_background_extraction(img, verbose=verbose)
+
+            if not os.path.exists(out_fits):
+                safe_print("  WARNING: GraXpert produced no output — falling back to DBE")
+                return dynamic_background_extraction(img, verbose=verbose)
+
+            with _fits.open(out_fits) as hdul:
+                out_data = hdul[0].data.astype(np.float32)
+            if out_data.ndim == 3 and out_data.shape[0] == 3:
+                return np.transpose(out_data, (1, 2, 0))
+            return out_data
+    except subprocess.TimeoutExpired:
+        safe_print("  WARNING: GraXpert timed out — falling back to DBE")
+        return dynamic_background_extraction(img, verbose=verbose)
+    except Exception as e:
+        safe_print(f"  WARNING: GraXpert error ({e}) — falling back to DBE")
+        return dynamic_background_extraction(img, verbose=verbose)
+
+
+# ---------------------------------------------------------------------------
+# Starnet++ star removal
+# ---------------------------------------------------------------------------
+
+def _find_starnet_binary(hint: Optional[str] = None) -> Optional[str]:
+    if hint and os.path.isfile(hint):
+        return hint
+    return _find_binary([
+        "starnet++", "starnet", "StarNet++",
+        "/usr/local/bin/starnet++",
+        r"C:\Program Files\StarNet++\starnet++.exe",
+        r"C:\Program Files\StarNet\starnet++.exe",
+    ])
+
+
+def apply_starnet(img: np.ndarray,
+                  output_path: str,
+                  binary_path: Optional[str] = None,
+                  verbose: bool = False) -> np.ndarray:
+    """Remove stars from the image using the Starnet++ binary.
+
+    Saves:
+      <stem>_starless.fits  — star-removed image
+      <stem>_stars.fits     — stars-only layer (img − starless)
+
+    Returns the starless image (or the original if Starnet++ fails).
+    The caller continues post-processing on the returned starless image.
+    Stars can be re-added later with: final = starless + stars_only
+    """
+    binary = _find_starnet_binary(binary_path)
+    if binary is None:
+        safe_print(
+            "  WARNING: Starnet++ binary not found — star removal skipped.\n"
+            "  Install from https://www.starnetastro.com/ and ensure it is on PATH."
+        )
+        return img
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            in_tiff  = os.path.join(td, "sn_input.tif")
+            out_tiff = os.path.join(td, "sn_output.tif")
+
+            # Starnet++ requires 16-bit RGB TIFF
+            _write_u16_tiff(img, in_tiff)
+
+            cmd = [binary, in_tiff, out_tiff]
+            if verbose:
+                print(f"  [Starnet++] Running: {' '.join(cmd)}")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0 or not os.path.exists(out_tiff):
+                safe_print(f"  WARNING: Starnet++ failed (code {result.returncode}) "
+                           "— star removal skipped")
+                if verbose and result.stderr:
+                    print(f"    stderr: {result.stderr[:200]}")
+                return img
+
+            starless = _read_tiff_as_float(out_tiff)
+            if starless.shape != img.shape:
+                safe_print("  WARNING: Starnet++ output shape mismatch — star removal skipped")
+                return img
+
+        stars_only = np.clip(img - starless, 0.0, None)
+        if output_path:
+            _save_sidecar_fits(starless,   output_path, "_starless")
+            _save_sidecar_fits(stars_only, output_path, "_stars")
+
+        safe_print(f"  ✓ Star removal complete (starless + stars layers saved)")
+        return starless
+
+    except subprocess.TimeoutExpired:
+        safe_print("  WARNING: Starnet++ timed out (600 s) — star removal skipped")
+        return img
+    except Exception as e:
+        safe_print(f"  WARNING: Starnet++ error ({e}) — star removal skipped")
+        return img
+
+
+def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
+    """Replace NaN/Inf with zero and clip negatives."""
+    if not np.isfinite(img).all():
+        n_bad = int(np.sum(~np.isfinite(img)))
+        safe_print(f"    ⚠ Sanitized {n_bad} non-finite pixels after {step_name}")
+        np.nan_to_num(img, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return img
 
 
 def postprocess_stack(
@@ -37,30 +283,37 @@ def postprocess_stack(
     stats: ProcessingStats,
 ) -> np.ndarray:
     """Apply all post-processing steps to the stacked image and return it."""
+    skip_steps = set(getattr(args, 'skip_step', []) or [])
+    _diag_dir = getattr(args, '_diagnostic_dir', None)
+    _diag_counter = [1]
 
     # Per-channel hot pixel removal
-    print("\n  Removing residual hot pixels (per-channel)...")
-    _hp_start = time.time()
-    _hp_fixed = 0
-    _hp_meds = ndimage.median_filter(stacked, size=(5, 5, 1))
-    _hp_diffs = stacked - _hp_meds
-    _hp_mads = np.median(np.abs(_hp_diffs), axis=(0, 1))
-    _hp_sigmas = np.maximum(_hp_mads * 1.4826, 1e-6)
-    ch_spikes = _hp_diffs / _hp_sigmas[np.newaxis, np.newaxis, :]
-    for c in range(3):
-        others = [i for i in range(3) if i != c]
-        other_normal = np.all(ch_spikes[:, :, others] < 4.0, axis=2)
-        hot = (ch_spikes[:, :, c] > 12.0) & other_normal
-        n_hot = int(np.sum(hot))
-        if n_hot > 0:
-            stacked[:, :, c][hot] = _hp_meds[:, :, c][hot]
-            _hp_fixed += n_hot
-    safe_print(f"  ✓ Per-channel hot pixel removal: {_hp_fixed} pixels fixed "
-               f"({format_time(time.time() - _hp_start)})")
+    if 'hot_pixel' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_hot_pixel')
+        print("\n  Removing residual hot pixels (per-channel)...")
+        _hp_start = time.time()
+        _hp_fixed = 0
+        _hp_meds = ndimage.median_filter(stacked, size=(5, 5, 1))
+        _hp_diffs = stacked - _hp_meds
+        _hp_mads = np.median(np.abs(_hp_diffs), axis=(0, 1))
+        _hp_sigmas = np.maximum(_hp_mads * 1.4826, 1e-6)
+        ch_spikes = _hp_diffs / _hp_sigmas[np.newaxis, np.newaxis, :]
+        for c in range(3):
+            others = [i for i in range(3) if i != c]
+            other_normal = np.all(ch_spikes[:, :, others] < 4.0, axis=2)
+            hot = (ch_spikes[:, :, c] > 12.0) & other_normal
+            n_hot = int(np.sum(hot))
+            if n_hot > 0:
+                stacked[:, :, c][hot] = _hp_meds[:, :, c][hot]
+                _hp_fixed += n_hot
+        safe_print(f"  ✓ Per-channel hot pixel removal: {_hp_fixed} pixels fixed "
+                   f"({format_time(time.time() - _hp_start)})")
+        stacked = _sanitize(stacked, "hot pixel removal")
 
     # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution
     pp_star_mask = None
     _pp_sources = None
+    _ensure_photutils()
     if DAOStarFinder is not None and sigma_clipped_stats is not None:
         try:
             _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
@@ -75,11 +328,32 @@ def postprocess_stack(
         except Exception:
             pass
 
-    # 1. Background extraction (DBE or legacy mesh)
-    if args.background_extraction:
-        use_dbe = getattr(args, 'dbe', True)
+    # Export star/galaxy masks (before any post-processing modifies them)
+    if getattr(args, 'export_masks', False) and pp_star_mask is not None:
+        _output_path = getattr(args, 'output', None)
+        if _output_path:
+            _save_sidecar_fits(pp_star_mask.astype(np.float32), _output_path, "_star_mask")
+
+    # 1. Background extraction (GraXpert / DBE / legacy mesh)
+    _pre_bg = None
+    if getattr(args, 'keep_intermediates', False) and args.background_extraction:
+        _pre_bg = stacked.copy()
+    if args.background_extraction and 'background' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_background')
         bg_start = time.time()
-        if use_dbe:
+
+        # Determine method: --bg-method takes precedence; fall back to --dbe/--no-dbe
+        bg_method = getattr(args, 'bg_method', None)
+        if bg_method is None:
+            bg_method = 'dbe' if getattr(args, 'dbe', True) else 'mesh'
+
+        if bg_method == 'graxpert':
+            graxpert_bin = getattr(args, 'graxpert_path', None)
+            print(f"\n  Applying GraXpert background extraction...")
+            stacked = _graxpert_background_extraction(
+                stacked, graxpert_path=graxpert_bin, verbose=args.verbose)
+            safe_print(f"  ✓ GraXpert background extraction ({format_time(time.time() - bg_start)})")
+        elif bg_method == 'dbe':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
             print(f"\n  Applying Dynamic Background Extraction "
                   f"(patch={dbe_patch}px, RBF thin-plate-spline, sigma={args.bg_clip_sigma})...")
@@ -94,17 +368,35 @@ def postprocess_stack(
                 stacked, mesh_size=args.bg_mesh_size, filter_size=args.bg_filter_size,
                 clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=pp_star_mask)
             safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
+        stacked = _sanitize(stacked, "background extraction")
+        # Save background map as diagnostic
+        if _pre_bg is not None:
+            try:
+                import os
+                output_path = getattr(args, 'output', None)
+                if output_path:
+                    bg_map = np.clip(_pre_bg - stacked, 0, None)
+                    bg_path = os.path.splitext(output_path)[0] + '_background.jpg'
+                    from src.io_fits import save_preview_rgb
+                    save_preview_rgb(bg_map, bg_path, stretch='linear')
+                    safe_print(f"    Saved background map: {os.path.basename(bg_path)}")
+            except Exception:
+                pass
+            del _pre_bg
 
     # 2. Chroma noise reduction
-    if getattr(args, 'chroma_nr', True):
+    if getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_chroma_nr')
         cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
         print(f"\n  Applying chroma noise reduction (sigma={cnr_sigma})...")
         cnr_start = time.time()
         stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma)
         safe_print(f"  ✓ Chroma noise reduction ({format_time(time.time() - cnr_start)})")
+        stacked = _sanitize(stacked, "chroma noise reduction")
 
     # Sky floor correction (per-channel pedestal removal after background extraction)
-    if args.background_extraction:
+    if args.background_extraction and 'sky_floor' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_sky_floor')
         try:
             H_s, W_s = stacked.shape[:2]
             lum_s = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
@@ -170,7 +462,8 @@ def postprocess_stack(
             pass
 
     # 3. Local normalization
-    if getattr(args, 'local_normalize', False):
+    if getattr(args, 'local_normalize', False) and 'local_normalize' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_local_normalize')
         ln_sigma = getattr(args, 'local_normalize_sigma', 50.0)
         print(f"\n  Applying local normalization (sigma={ln_sigma})...")
         ln_start = time.time()
@@ -178,7 +471,8 @@ def postprocess_stack(
         safe_print(f"  ✓ Local normalization ({format_time(time.time() - ln_start)})")
 
     # 4. Wavelet denoising
-    if getattr(args, 'denoise', False):
+    if getattr(args, 'denoise', False) and 'wavelet' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_wavelet_denoise')
         chroma_boost = getattr(args, 'denoise_chroma_boost', 2.0)
         dn_start = time.time()
         if getattr(args, 'denoise_adaptive', False):
@@ -200,9 +494,11 @@ def postprocess_stack(
             stacked = wavelet_denoise(stacked, threshold_factor=strength,
                                       chroma_factor=chroma_boost, star_mask=pp_star_mask)
         safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
+        stacked = _sanitize(stacked, "wavelet denoising")
 
     # 4.5. Sky residual correction (always after background extraction)
-    if args.background_extraction:
+    if args.background_extraction and 'sky_residual' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_sky_residual')
         _sr_mesh = max(32, args.bg_mesh_size // 2)
         _H_pp, _W_pp = stacked.shape[:2]
         _sr_broad_mesh = max(args.bg_mesh_size, min(_H_pp, _W_pp) // 6)
@@ -219,16 +515,19 @@ def postprocess_stack(
         stacked = sky_floor_normalize(stacked, star_mask=pp_star_mask, verbose=args.verbose)
 
     # 5. NLM denoising
-    if getattr(args, 'denoise_nlm', False):
+    if getattr(args, 'denoise_nlm', False) and 'nlm' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_nlm_denoise')
         nlm_h = getattr(args, 'denoise_nlm_strength', 1.0)
         nlm_blend = getattr(args, 'denoise_nlm_blend', 0.5)
         print(f"\n  Applying NLM denoising (h={nlm_h:.1f}, blend={nlm_blend:.2f})...")
         nlm_start = time.time()
         stacked = nlm_denoise(stacked, h=nlm_h, blend=nlm_blend)
         safe_print(f"  ✓ NLM denoise ({format_time(time.time() - nlm_start)})")
+        stacked = _sanitize(stacked, "NLM denoising")
 
     # 6. Bilateral denoising
-    if getattr(args, 'denoise_bilateral', False):
+    if getattr(args, 'denoise_bilateral', False) and 'bilateral' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_bilateral_denoise')
         bil_sigma_color = getattr(args, 'denoise_bilateral_sigma_color', None)
         bil_sigma_space = getattr(args, 'denoise_bilateral_sigma_space', 3.0)
         sc_str = f"{bil_sigma_color:.2f}" if bil_sigma_color is not None else "auto"
@@ -238,9 +537,11 @@ def postprocess_stack(
         stacked = bilateral_denoise(stacked, sigma_color=bil_sigma_color,
                                     sigma_space=bil_sigma_space)
         safe_print(f"  ✓ Bilateral denoise ({format_time(time.time() - bil_start)})")
+        stacked = _sanitize(stacked, "bilateral denoising")
 
     # 6.5. MMT denoising
-    if getattr(args, 'denoise_mmt', False):
+    if getattr(args, 'denoise_mmt', False) and 'mmt' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_mmt_denoise')
         mmt_levels = getattr(args, 'denoise_mmt_levels', 4)
         mmt_strength = getattr(args, 'denoise_mmt_strength', 3.0)
         mmt_chroma = getattr(args, 'denoise_chroma_boost', 2.0)
@@ -252,7 +553,8 @@ def postprocess_stack(
         safe_print(f"  ✓ MMT denoise ({format_time(time.time() - mmt_start)})")
 
     # 6.6. ACDNR denoising
-    if getattr(args, 'denoise_acdnr', False):
+    if getattr(args, 'denoise_acdnr', False) and 'acdnr' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_acdnr_denoise')
         acdnr_sigma = getattr(args, 'denoise_acdnr_sigma', 1.5)
         acdnr_k = getattr(args, 'denoise_acdnr_k', 3.0)
         acdnr_chroma = getattr(args, 'denoise_chroma_boost', 2.0)
@@ -264,7 +566,8 @@ def postprocess_stack(
         safe_print(f"  ✓ ACDNR denoise ({format_time(time.time() - acdnr_start)})")
 
     # 7. Richardson-Lucy deconvolution
-    if getattr(args, 'deconvolve', False):
+    if getattr(args, 'deconvolve', False) and 'deconvolve' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_deconvolve')
         rl_iters = getattr(args, 'deconvolve_iterations', Config.RL_DEFAULT_ITERATIONS)
         rl_fwhm_override = getattr(args, 'deconvolve_fwhm', None)
         rl_model = getattr(args, 'deconvolve_psf_model', 'moffat')
@@ -289,9 +592,11 @@ def postprocess_stack(
             stacked = richardson_lucy_deconvolve(stacked, psf, iterations=rl_iters,
                                                   star_mask=pp_star_mask)
             safe_print(f"  ✓ Richardson-Lucy deconvolution ({format_time(time.time() - rl_start)})")
+            stacked = _sanitize(stacked, "deconvolution")
 
     # 8. Star reduction
-    if getattr(args, 'star_reduce', False):
+    if getattr(args, 'star_reduce', False) and 'star_reduce' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_star_reduce')
         sr_factor = float(getattr(args, 'star_reduce_factor', 0.4))
         sr_sigma = float(getattr(args, 'star_reduce_sigma', 1.5))
         print(f"\n  Applying star reduction (factor={sr_factor:.2f}, blur_sigma={sr_sigma:.1f})...")
@@ -301,7 +606,8 @@ def postprocess_stack(
         safe_print(f"  ✓ Star reduction ({format_time(time.time() - sr_start)})")
 
     # 9. Multiscale local contrast enhancement
-    if getattr(args, 'local_contrast', False):
+    if getattr(args, 'local_contrast', False) and 'local_contrast' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_local_contrast')
         lc_strength = float(getattr(args, 'local_contrast_strength', 0.7))
         print(f"\n  Applying multiscale local contrast enhancement "
               f"(strength={lc_strength:.2f}, scales=2/12/40 px)...")
@@ -310,4 +616,20 @@ def postprocess_stack(
                                             star_mask=pp_star_mask)
         safe_print(f"  ✓ Local contrast enhancement ({format_time(time.time() - lc_start)})")
 
+    # 10. Star removal via Starnet++
+    if getattr(args, 'star_remove', False) and 'star_remove' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_star_remove')
+        print(f"\n  Applying star removal (Starnet++)...")
+        sr_start = time.time()
+        _output_path = getattr(args, 'output', None) or ''
+        stacked = apply_starnet(
+            stacked,
+            output_path=_output_path,
+            binary_path=getattr(args, 'starnet_path', None),
+            verbose=args.verbose,
+        )
+        safe_print(f"  ✓ Star removal ({format_time(time.time() - sr_start)})")
+        stacked = _sanitize(stacked, "star removal")
+
+    stacked = _sanitize(stacked, "final post-processing")
     return stacked

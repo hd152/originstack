@@ -6,7 +6,7 @@ import os
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -41,8 +41,8 @@ except Exception:
     Image = None
 
 
-def match_stars_affine(ref_positions, img_positions,
-                       initial_shift: Tuple[float, float] = (0.0, 0.0)):
+def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
+                       initial_shift: Tuple[float, float] = (0.0, 0.0)) -> Optional[Any]:
     """Match star catalogs and compute a Euclidean (rotation+translation) transform.
 
     Uses nearest-neighbor matching after applying an initial translation estimate,
@@ -95,8 +95,8 @@ def match_stars_affine(ref_positions, img_positions,
     return None
 
 
-def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
-                    transform=None) -> np.ndarray:
+def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
+                    transform: Optional[Any] = None) -> np.ndarray:
     """Apply translation or affine transform to a multi-channel image.
 
     Uses cubic spline interpolation (order=3) for subpixel accuracy.
@@ -206,11 +206,20 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             else:
                 img_pre = img
 
-            ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
-            img_norm = (img_pre - np.mean(img_pre)) / (np.std(img_pre) + 1e-12)
+            ref_std = float(np.std(ref))
+            img_std = float(np.std(img_pre))
+            # Skip phase_cc when either image has near-zero variance — normalization
+            # produces huge values that confuse the correlation.
+            if ref_std < 1.0 or img_std < 1.0:
+                debug_info.append("phase_cc skipped: near-zero image variance")
+                raise StopIteration  # caught by outer except, falls through to FFT
+
+            ref_norm = (ref - np.mean(ref)) / ref_std
+            img_norm = (img_pre - np.mean(img_pre)) / img_std
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
+                warnings.simplefilter("ignore", UserWarning)
                 shift, error, diffphase = phase_cross_correlation(ref_norm, img_norm, upsample_factor=upsample)
             debug_info.append(f"phase_cc: shift={shift}, error={error:.4f}")
 
@@ -243,10 +252,36 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         else:
             img_fft = img
 
-        ref_norm = xp.asarray((ref - np.mean(ref)), dtype=xp.float64)
-        img_norm = xp.asarray((img_fft - np.mean(img_fft)), dtype=xp.float64)
+        h, w = ref.shape
+        if psy != 0.0 or psx != 0.0:
+            # The pre-shift fills vacated edges with zeros. A whole-image mean
+            # includes those zeros, making the padded border strongly negative
+            # after subtraction. The FFT treats this as a large feature and
+            # produces a spurious correlation peak that fails the validity check,
+            # causing unnecessary fallback to centroid.
+            # Fix: compute means only over the valid overlap region; zero-fill
+            # outside so the FFT only operates on real pixel data.
+            y0 = max(0, int(round(psy)))
+            y1 = h + min(0, int(round(psy)))
+            x0 = max(0, int(round(psx)))
+            x1 = w + min(0, int(round(psx)))
+            if y1 > y0 and x1 > x0:
+                ref_region = ref[y0:y1, x0:x1].astype(np.float64)
+                img_region = img_fft[y0:y1, x0:x1].astype(np.float64)
+                ref_np = np.zeros((h, w), dtype=np.float64)
+                img_np = np.zeros((h, w), dtype=np.float64)
+                ref_np[y0:y1, x0:x1] = ref_region - ref_region.mean()
+                img_np[y0:y1, x0:x1] = img_region - img_region.mean()
+            else:
+                ref_np = (ref - np.mean(ref)).astype(np.float64)
+                img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
+        else:
+            ref_np = (ref - np.mean(ref)).astype(np.float64)
+            img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
 
-        h, w = ref_norm.shape
+        ref_norm = xp.asarray(ref_np)
+        img_norm = xp.asarray(img_np)
+
         pad_h, pad_w = 2 * h, 2 * w
         F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
         F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
@@ -390,7 +425,7 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
 
 
 def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
-                     transforms=None) -> Tuple[int, int, int, int]:
+                     transforms: Optional[List[Optional[Any]]] = None) -> Tuple[int, int, int, int]:
     """Compute the largest axis-aligned crop valid in all aligned frames."""
     H, W = shape
     transforms = transforms or [None] * len(shifts)
@@ -427,7 +462,7 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
     return top, bottom, left, right
 
 
-def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> dict:
+def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> Dict[str, Any]:
     """Analyse registration shifts to detect dithering patterns."""
     if len(shifts) < 3:
         return {'is_dithered': False, 'pattern': 'aligned',
@@ -515,14 +550,35 @@ def run_registration_phase(
     best_idx: int,
     ref_lum: np.ndarray,
     mem_lum: np.ndarray,
-    cached_lums: List,
+    cached_lums: List[Optional[np.ndarray]],
     H: int,
     W: int,
     args: argparse.Namespace,
     stats: ProcessingStats,
-) -> Tuple[List, List, Dict]:
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]], Dict[str, Any]]:
     """Compute per-frame registration shifts/transforms for all accepted frames."""
     ref_stars = best.metrics.get('_star_sources')
+
+    # If star sources are missing from metrics (e.g. loaded from checkpoint, or
+    # DAOStarFinder was unavailable during quality phase), attempt re-detection now
+    # using the reference luminance we already have in memory.
+    if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        try:
+            from src.quality import _detect_stars_multi_fwhm, _ensure_photutils, _ensure_astropy_stats
+            _ensure_photutils()
+            _ensure_astropy_stats()
+            from src.quality import DAOStarFinder, sigma_clipped_stats
+            if DAOStarFinder is not None and sigma_clipped_stats is not None:
+                _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)
+                if bg_std and float(bg_std) > 0:
+                    bg_sub = ref_lum - float(bg_med)
+                    ref_stars = _detect_stars_multi_fwhm(bg_sub, threshold=5.0 * float(bg_std))
+                    if ref_stars is not None and len(ref_stars) > 0:
+                        best.metrics['_star_sources'] = ref_stars
+                        safe_print(f"  Re-detected {len(ref_stars)} stars in reference frame for affine registration")
+        except Exception as e:
+            _log.debug("Re-detection of reference stars failed: %s", e)
+
     if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
         safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
                    "registration disabled, falling back to translation only")
@@ -635,3 +691,112 @@ def run_registration_phase(
                        f"to enable sub-pixel super-resolution stacking")
 
     return shifts, transforms, dither_info
+
+
+# ---------------------------------------------------------------------------
+# Comet stacking support
+# ---------------------------------------------------------------------------
+
+def find_comet_centroid(lum: np.ndarray,
+                        smooth_sigma: float = 5.0,
+                        percentile: float = 99.5) -> Tuple[float, float]:
+    """Locate the brightest compact extended object in a luminance frame.
+
+    Used for comet nucleus tracking: the comet typically appears as the
+    brightest non-stellar blob.  Stars are smaller and more numerous; the
+    comet nucleus is the single dominant bright region after smoothing.
+
+    Args:
+        lum:          2-D luminance frame (H, W).
+        smooth_sigma: Gaussian blur radius to suppress point sources.
+        percentile:   Threshold percentile for nucleus detection.
+
+    Returns:
+        (cy, cx) sub-pixel centroid of the brightest region.
+    """
+    smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
+    threshold = np.percentile(smoothed, percentile)
+    mask = smoothed > threshold
+    if not mask.any():
+        # fallback: return frame centre
+        return lum.shape[0] / 2.0, lum.shape[1] / 2.0
+
+    # Label connected regions above threshold
+    labeled, n_labels = ndimage.label(mask)
+    if n_labels == 0:
+        cy, cx = np.unravel_index(int(np.argmax(smoothed)), smoothed.shape)
+        return float(cy), float(cx)
+
+    # Pick the brightest (integrated flux) region
+    fluxes = [float(np.sum(smoothed[labeled == i])) for i in range(1, n_labels + 1)]
+    best_label = int(np.argmax(fluxes)) + 1
+    cy, cx = ndimage.center_of_mass(smoothed, labeled, best_label)
+    return float(cy), float(cx)
+
+
+def run_comet_registration_phase(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    best_idx: int,
+    ref_lum: np.ndarray,
+    mem_lum: np.ndarray,
+    H: int,
+    W: int,
+    args: argparse.Namespace,
+    stats: ProcessingStats,
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]]]:
+    """Compute per-frame registration shifts aligned on a comet nucleus.
+
+    Instead of aligning on the star field, this tracks the brightest extended
+    blob (comet nucleus) in each frame relative to the reference frame.
+
+    Returns:
+        (shifts, transforms) — transforms are always None (translation only).
+    """
+    print(f"  [Comet] Locating nucleus in reference frame...")
+    ref_cy, ref_cx = find_comet_centroid(ref_lum)
+    print(f"  [Comet] Reference nucleus centroid: ({ref_cx:.1f}, {ref_cy:.1f})")
+
+    shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
+    transforms: List[Optional[Any]] = [None] * len(final)
+
+    def _register_comet(j: int, orig_idx: int) -> Tuple[int, Tuple[float, float]]:
+        if orig_idx == best_idx or getattr(args, 'no_registration', False):
+            return j, (0.0, 0.0)
+        lum = np.array(mem_lum[orig_idx])
+        cy, cx = find_comet_centroid(lum)
+        sy = ref_cy - cy
+        sx = ref_cx - cx
+        return j, (sy, sx)
+
+    gpu = get_gpu()
+    n_workers = min(
+        gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB, Config.GPU_VRAM_RESERVE_MB)
+        if gpu.active else (os.cpu_count() or 4),
+        len(final),
+    )
+
+    print(f"  [Comet] Tracking nucleus in {len(final)} frames...")
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(_register_comet, j, orig_idx): j
+            for j, orig_idx in enumerate(final_indices)
+        }
+        for future in tqdm(
+            as_completed(futures), total=len(final),
+            desc="  Comet tracking", unit="frame", disable=args.verbose
+        ):
+            j, shift_val = future.result()
+            shifts[j] = shift_val
+            if args.verbose:
+                sy, sx = shift_val
+                safe_print(
+                    f"    {os.path.basename(final[j].path)}: "
+                    f"comet shift=({sx:+.1f}, {sy:+.1f}) px"
+                )
+
+    shift_mags = [np.sqrt(s[0] ** 2 + s[1] ** 2) for s in shifts]
+    print(f"  [Comet] Mean shift: {np.mean(shift_mags):.1f} px, "
+          f"max: {np.max(shift_mags):.1f} px")
+
+    return shifts, transforms

@@ -9,6 +9,7 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 
+from src.models import FrameInfo, ProcessingStats
 from src.utils import safe_print
 
 try:
@@ -53,7 +54,7 @@ def load_fits(path: str) -> Tuple[np.ndarray, dict]:
     return data, hdr
 
 
-def make_master(frames, method: str = 'median') -> Optional[np.ndarray]:
+def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.ndarray]:
     """Create master calibration frame using streaming (mean) or memmap (median)."""
     if not frames:
         return None
@@ -129,7 +130,7 @@ def make_master(frames, method: str = 'median') -> Optional[np.ndarray]:
 
 def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_b: float = 8.0, ghs_sp: float = 0.15,
-                     ghs_hp: float = 0.95):
+                     ghs_hp: float = 0.95) -> None:
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
     if Image is None:
@@ -162,7 +163,8 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
     Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
 
 
-def populate_fits_header(header: fits.Header, frames, stats, args: argparse.Namespace,
+def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
+                         stats: ProcessingStats, args: argparse.Namespace,
                          stacked_shape: Tuple[int, int, int],
                          shifts: List[Tuple[float, float]],
                          masters: Dict[str, Optional[np.ndarray]],
@@ -244,13 +246,41 @@ def populate_fits_header(header: fits.Header, frames, stats, args: argparse.Name
         # than three separate science frames.
         header['COLORTYP'] = ('SRGB', 'Colour space of the stacked image')
 
-        # Calculate total exposure time
-        if 'EXPTIME' in first_header:
+        # Aggregate exposure info across all frames
+        frame_dates = []
+        total_integration = 0.0
+        iso_values = set()
+        for f in frames:
+            if f.header.get('DATE-OBS'):
+                frame_dates.append(str(f.header['DATE-OBS']))
+            if f.header.get('EXPTIME'):
+                try:
+                    total_integration += float(f.header['EXPTIME'])
+                except (ValueError, TypeError):
+                    pass
+            iso = f.header.get('ISOSPEED') or f.header.get('ISO') or f.header.get('GAIN')
+            if iso is not None:
+                iso_values.add(str(iso))
+
+        if total_integration > 0:
+            header['INTGTIME'] = (round(total_integration, 1),
+                                  'Total integration time across all frames (seconds)')
+            if total_integration >= 60:
+                header['INTGMIN'] = (round(total_integration / 60, 1),
+                                     'Total integration time (minutes)')
+            header['TOTEXP'] = (round(total_integration, 1),
+                                'Total integrated exposure time in seconds')
+        elif 'EXPTIME' in first_header:
             try:
                 total_exp = float(first_header['EXPTIME']) * len(frames)
                 header['TOTEXP'] = (total_exp, 'Total integrated exposure time in seconds')
             except (ValueError, TypeError):
                 pass
+        if frame_dates:
+            header['DATEFRST'] = (min(frame_dates), 'Date of first frame')
+            header['DATELAST'] = (max(frame_dates), 'Date of last frame')
+        if iso_values:
+            header['ISOVALUS'] = (','.join(sorted(iso_values)), 'ISO/gain values used')
 
     # Background extraction info
     if args.background_extraction:
