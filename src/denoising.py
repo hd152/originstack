@@ -878,6 +878,407 @@ def reduce_stars(
     return np.clip(result, 0.0, None).astype(np.float32)
 
 
+def bm3d_denoise(img: np.ndarray, sigma_psd: float = 0.0,
+                  block_size: int = 8, stride: Optional[int] = None,
+                  search_window: int = 16, group_size: int = 8,
+                  star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """BM3D collaborative-filter denoising on the luminance channel.
+
+    Implements the core BM3D pipeline (Dabov et al. 2007):
+      Step 1 — hard-thresholding in joint 3-D DCT domain.
+      Step 2 — Wiener filter using the Step-1 estimate as pilot.
+
+    Similar-looking 8×8 patches are grouped into a 3-D stack, a 3-D DCT is
+    applied (2-D spatial + 1-D across the group axis), coefficients are
+    thresholded or Wiener-filtered, then the result is inverse-transformed and
+    aggregated back into the image using weighted overlap-add.
+
+    Only luminance is processed; chroma channels receive mild Gaussian
+    smoothing proportional to the estimated noise level to keep colour noise
+    suppressed without blurring colour gradients.
+
+    Args:
+        img:          Float32 stacked image (H, W, 3).
+        sigma_psd:    Noise standard deviation in image units.  0 = auto from
+                      sky-background estimate.
+        block_size:   Patch side length in pixels (default 8).
+        stride:       Step between reference block centres (default: auto,
+                      8 px for images > 1500 px, 4 px otherwise).
+        search_window: Half-size of the local block-matching window (pixels).
+        group_size:   Maximum number of similar blocks per group (default 8).
+        star_mask:    Optional float mask (1 = star core) blended back to
+                      preserve star colours and prevent core softening.
+
+    Returns:
+        Denoised float32 image (H, W, 3).
+
+    Notes:
+        Runtime scales with image area ÷ stride².  Expect 15–60 s on a
+        2 K image at stride=8.  Use ``--bm3d-stride 16`` for large images.
+    """
+    try:
+        from scipy.fft import dctn, idctn
+    except ImportError:
+        from scipy.fftpack import dctn, idctn
+
+    src = img.astype(np.float64)
+    H, W = src.shape[:2]
+
+    if stride is None:
+        stride = 8 if max(H, W) > 1500 else 4
+
+    if sigma_psd <= 0.0:
+        sigma_psd = float(_estimate_sky_sigma(img))
+    if sigma_psd < 1e-9:
+        return img.copy()
+
+    # YCbCr decomposition
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    bs = block_size
+    sw = search_window
+
+    # Reflective padding avoids border artefacts
+    pad = sw + bs
+    Yp = np.pad(Y, pad, mode='reflect')
+
+    # Reference block grid on the original (unpadded) image
+    ref_ys = np.arange(0, H - bs + 1, stride)
+    ref_xs = np.arange(0, W - bs + 1, stride)
+    ny, nx = len(ref_ys), len(ref_xs)
+
+    # --- Precompute 2-D DCTs of all reference blocks in one batched call ---
+    all_ref = np.array([[Y[yr:yr + bs, xr:xr + bs]
+                         for xr in ref_xs] for yr in ref_ys])  # (ny, nx, bs, bs)
+    all_dcts = dctn(all_ref.reshape(ny * nx, bs, bs),
+                    axes=(1, 2), norm='ortho')            # (N, bs, bs)
+    all_dcts_flat = all_dcts.reshape(ny * nx, bs * bs)   # (N, bs²)
+
+    # Hard-threshold value (global, Step 1)
+    ht_threshold = sigma_psd * np.sqrt(2.0 * np.log(float(bs * bs)))
+    # Distance threshold: blocks whose mean squared pixel diff < this are "similar"
+    dist_threshold = (ht_threshold * 0.5) ** 2 * bs * bs
+
+    max_dy = max(1, sw // stride)
+    max_dx = max(1, sw // stride)
+
+    # Accumulation arrays (Step 1 and Step 2)
+    acc1 = np.zeros((H, W), dtype=np.float64)
+    wgt1 = np.zeros((H, W), dtype=np.float64)
+    acc2 = np.zeros((H, W), dtype=np.float64)
+    wgt2 = np.zeros((H, W), dtype=np.float64)
+
+    for iy in range(ny):
+        yr = ref_ys[iy]
+        iy_lo = max(0, iy - max_dy)
+        iy_hi = min(ny - 1, iy + max_dy)
+
+        for ix in range(nx):
+            xr = ref_xs[ix]
+            ix_lo = max(0, ix - max_dx)
+            ix_hi = min(nx - 1, ix + max_dx)
+
+            i_ref = iy * nx + ix
+            ref_dct_flat = all_dcts_flat[i_ref]       # (bs²,)
+
+            # Candidate block indices in the search window
+            cand_iy, cand_ix = np.mgrid[iy_lo:iy_hi + 1, ix_lo:ix_hi + 1]
+            cand_idx = (cand_iy * nx + cand_ix).ravel()   # (N_cand,)
+
+            # Vectorised L2 distance in DCT domain (proportional to pixel-domain L2)
+            diffs = all_dcts_flat[cand_idx] - ref_dct_flat   # (N_cand, bs²)
+            dists = np.einsum('ij,ij->i', diffs, diffs)       # (N_cand,)
+
+            # Keep similar blocks, capped at group_size
+            similar_mask = dists < dist_threshold
+            similar_idx = cand_idx[similar_mask]
+            if len(similar_idx) == 0:
+                similar_idx = cand_idx[:1]   # always include self
+            if len(similar_idx) > group_size:
+                order = np.argsort(dists[similar_mask])[:group_size]
+                similar_idx = similar_idx[order]
+
+            # Pixel-domain group blocks
+            sim_iy = similar_idx // nx
+            sim_ix = similar_idx % nx
+            group_blks = all_ref[sim_iy, sim_ix, :, :]   # (N_g, bs, bs)
+            N_g = len(similar_idx)
+
+            # --- Step 1: Hard thresholding in full 3-D DCT domain ---
+            spec3 = dctn(group_blks, axes=(0, 1, 2), norm='ortho')
+            ht = np.where(np.abs(spec3) >= ht_threshold, spec3, 0.0)
+            n_nz = max(1, int(np.count_nonzero(ht)))
+            w1 = 1.0 / n_nz
+            denoised1 = idctn(ht, axes=(0, 1, 2), norm='ortho')
+
+            for k, (gi, gj) in enumerate(zip(sim_iy, sim_ix)):
+                yr2, xr2 = ref_ys[gi], ref_xs[gj]
+                acc1[yr2:yr2 + bs, xr2:xr2 + bs] += w1 * denoised1[k]
+                wgt1[yr2:yr2 + bs, xr2:xr2 + bs] += w1
+
+    pilot = np.where(wgt1 > 0, acc1 / wgt1, Y)
+
+    # --- Step 2: Wiener filter using pilot estimate ---
+    pilot_dcts = dctn(np.array([[pilot[yr:yr + bs, xr:xr + bs]
+                                  for xr in ref_xs] for yr in ref_ys]).reshape(ny * nx, bs, bs),
+                      axes=(1, 2), norm='ortho')       # (N, bs, bs)
+
+    for iy in range(ny):
+        yr = ref_ys[iy]
+        iy_lo = max(0, iy - max_dy)
+        iy_hi = min(ny - 1, iy + max_dy)
+
+        for ix in range(nx):
+            xr = ref_xs[ix]
+            ix_lo = max(0, ix - max_dx)
+            ix_hi = min(nx - 1, ix + max_dx)
+
+            i_ref = iy * nx + ix
+            ref_dct_flat = all_dcts_flat[i_ref]
+
+            cand_iy, cand_ix = np.mgrid[iy_lo:iy_hi + 1, ix_lo:ix_hi + 1]
+            cand_idx = (cand_iy * nx + cand_ix).ravel()
+
+            diffs = all_dcts_flat[cand_idx] - ref_dct_flat
+            dists = np.einsum('ij,ij->i', diffs, diffs)
+            similar_mask = dists < dist_threshold
+            similar_idx = cand_idx[similar_mask]
+            if len(similar_idx) == 0:
+                similar_idx = cand_idx[:1]
+            if len(similar_idx) > group_size:
+                order = np.argsort(dists[similar_mask])[:group_size]
+                similar_idx = similar_idx[order]
+
+            sim_iy = similar_idx // nx
+            sim_ix = similar_idx % nx
+            noisy_group = all_ref[sim_iy, sim_ix, :, :]     # (N_g, bs, bs)
+            pilot_group = np.array([pilot[ref_ys[gi]:ref_ys[gi] + bs,
+                                         ref_xs[gj]:ref_xs[gj] + bs]
+                                     for gi, gj in zip(sim_iy, sim_ix)])
+
+            spec_noisy = dctn(noisy_group, axes=(0, 1, 2), norm='ortho')
+            spec_pilot = dctn(pilot_group, axes=(0, 1, 2), norm='ortho')
+
+            pilot_sq = spec_pilot ** 2
+            wiener = pilot_sq / (pilot_sq + sigma_psd ** 2 + 1e-30)
+            spec_filt = wiener * spec_noisy
+
+            wiener_w = float(np.sum(wiener ** 2)) / max(len(similar_idx), 1)
+            w2 = 1.0 / max(wiener_w, 1e-12)
+            denoised2 = idctn(spec_filt, axes=(0, 1, 2), norm='ortho')
+
+            for k, (gi, gj) in enumerate(zip(sim_iy, sim_ix)):
+                yr2, xr2 = ref_ys[gi], ref_xs[gj]
+                acc2[yr2:yr2 + bs, xr2:xr2 + bs] += w2 * denoised2[k]
+                wgt2[yr2:yr2 + bs, xr2:xr2 + bs] += w2
+
+    Y_d = np.where(wgt2 > 0, acc2 / wgt2, pilot)
+
+    # Chroma: Gaussian proportional to noise level (fast, avoids colour noise)
+    img_scale = float(np.percentile(img, 95)) + 1e-9
+    chroma_sigma_px = float(np.clip(sigma_psd / img_scale * 3.0, 0.5, 4.0))
+    Cb_d = ndimage.gaussian_filter(Cb, sigma=chroma_sigma_px)
+    Cr_d = ndimage.gaussian_filter(Cr, sigma=chroma_sigma_px)
+
+    R = Y_d + 1.40200 * Cr_d
+    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+    B = Y_d + 1.77200 * Cb_d
+    result = np.stack([R, G, B], axis=2)
+
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return result.astype(np.float32)
+
+
+def anisotropic_diffusion(img: np.ndarray, iterations: int = 20,
+                           kappa: float = 30.0, gamma: float = 0.1,
+                           option: int = 1,
+                           star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Perona-Malik anisotropic diffusion for edge-preserving noise reduction.
+
+    Iterates the PDE:  ∂I/∂t = div( c(|∇I|) · ∇I )
+    where the conduction coefficient c(·) inhibits diffusion across edges.
+
+    Two conduction functions are available:
+      option=1: c(d) = exp(-(d/κ)²)          — favours high-contrast edges
+      option=2: c(d) = 1 / (1 + (d/κ)²)     — favours wide regions
+
+    Unlike Gaussian smoothing, fine nebula filaments and galaxy arms whose
+    gradient magnitude exceeds κ are preserved while flat-sky regions (gradients
+    ≪ κ) are smoothed heavily.
+
+    Args:
+        img:        Float32 stacked image (H, W, 3).
+        iterations: Number of time steps (default 20; more = smoother).
+        kappa:      Gradient edge threshold in ADU (default 30).  Set to ~3×
+                    sky noise for conservative structure preservation.
+        gamma:      Time step; must satisfy 0 < γ ≤ 0.25 for numerical
+                    stability (default 0.1).
+        option:     Conduction function choice (1 or 2).
+        star_mask:  Optional float mask (1 = star core) blended back.
+
+    Returns:
+        Denoised float32 image (H, W, 3).
+    """
+    src = img.astype(np.float64)
+    gamma = float(np.clip(gamma, 1e-6, 0.25))
+    result = src.copy()
+
+    for _ in range(iterations):
+        for c in range(3):
+            ch = result[:, :, c]
+
+            dN = np.roll(ch, -1, axis=0) - ch
+            dS = np.roll(ch,  1, axis=0) - ch
+            dE = np.roll(ch, -1, axis=1) - ch
+            dW = np.roll(ch,  1, axis=1) - ch
+
+            if option == 1:
+                cN = np.exp(-(dN / kappa) ** 2)
+                cS = np.exp(-(dS / kappa) ** 2)
+                cE = np.exp(-(dE / kappa) ** 2)
+                cW = np.exp(-(dW / kappa) ** 2)
+            else:
+                cN = 1.0 / (1.0 + (dN / kappa) ** 2)
+                cS = 1.0 / (1.0 + (dS / kappa) ** 2)
+                cE = 1.0 / (1.0 + (dE / kappa) ** 2)
+                cW = 1.0 / (1.0 + (dW / kappa) ** 2)
+
+            result[:, :, c] = ch + gamma * (cN * dN + cS * dS + cE * dE + cW * dW)
+
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return np.clip(result, 0.0, None).astype(np.float32)
+
+
+def scnr(img: np.ndarray, amount: float = 1.0,
+         target: str = 'green') -> np.ndarray:
+    """Subtractive Chromatic Noise Reduction (SCNR).
+
+    Neutralises an unwanted colour cast (most often a green bias in OSC/DSLR
+    images caused by the 2:1 green-pixel Bayer pattern) by replacing each
+    target-channel pixel with the smaller of its value and the per-pixel
+    average of the two other channels.
+
+    The ``amount`` parameter controls the blend between the corrected and
+    original value (1.0 = full correction, 0.0 = no change):
+
+        out = lerp(original, min(original, average_mask), amount)
+
+    Args:
+        img:    Float32 stacked image (H, W, 3).
+        amount: Correction strength [0, 1] (default 1.0 = full).
+        target: Which channel to neutralise: 'green' (default), 'red', or
+                'blue'.
+
+    Returns:
+        Colour-corrected float32 image (H, W, 3), same dynamic range.
+    """
+    channel_map = {'red': 0, 'green': 1, 'blue': 2}
+    tc = channel_map.get(target, 1)
+    others = [i for i in range(3) if i != tc]
+
+    src = img.astype(np.float64)
+    result = src.copy()
+
+    avg_mask = (src[:, :, others[0]] + src[:, :, others[1]]) * 0.5
+    corrected = np.minimum(src[:, :, tc], avg_mask)
+    result[:, :, tc] = src[:, :, tc] * (1.0 - amount) + corrected * amount
+
+    return np.clip(result, 0.0, None).astype(np.float32)
+
+
+def adaptive_mtf(img: np.ndarray,
+                 target_bg: float = 0.15,
+                 shadows: float = 0.0,
+                 highlights: float = 1.0) -> np.ndarray:
+    """Adaptive Midtone Transfer Function (MTF) auto-stretch.
+
+    Derives the sky-background level via iterative sigma-clipping, then
+    computes the midtone parameter *m* such that the background maps to
+    ``target_bg`` in the output (default 15 %, matching PixInsight's
+    AutoSTF convention).
+
+    The MTF curve is:
+        f(x) = (m - 1) · x / ((2m - 1) · x - m)
+
+    which is a rational function passing through (0, 0), (m, 0.5), (1, 1).
+    It amplifies faint nebulosity near the sky floor while compressing
+    bright stars and galaxy cores.
+
+    Args:
+        img:       Float32 stacked image (H, W, 3), linear scale.
+        target_bg: Target output level for sky background (default 0.15).
+        shadows:   Black-point clip (values ≤ shadows → 0).
+        highlights: White-point clip (values ≥ highlights → 1).
+
+    Returns:
+        Stretched float32 image in [0, 1] (display-ready).
+
+    Notes:
+        This is a display stretch, not a denoising step — it should be
+        applied after all linear-space processing is complete.  Applying
+        denoising to the output of adaptive_mtf will not work correctly.
+    """
+    src = img.astype(np.float64)
+
+    # Sigma-clipped sky estimate (identical to arcsinh_stretch logic)
+    flat = src.ravel()
+    med = np.median(flat)
+    for _ in range(3):
+        mad = np.median(np.abs(flat - med))
+        sig = 1.4826 * mad
+        flat = flat[np.abs(flat - med) < 2.5 * sig]
+        if len(flat) < 100:
+            break
+        med = np.median(flat)
+    bg = float(med)
+    bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
+
+    black = max(bg - bg_sigma, 0.0)
+    white = float(np.percentile(img, 99.9))
+    span = white - black
+    if span < 1e-12:
+        return np.zeros_like(img, dtype=np.float32)
+
+    # Normalise to [0, 1]
+    norm = np.clip((src - black) / span, 0.0, 1.0)
+
+    # Apply shadow / highlight clipping
+    if highlights > shadows:
+        norm = np.clip((norm - shadows) / (highlights - shadows), 0.0, 1.0)
+
+    # Compute MTF midtone parameter m such that f(bg_norm) = target_bg
+    bg_norm = float(np.clip((bg - black) / span, 1e-6, 0.9999))
+    bg_norm = float(np.clip((bg_norm - shadows) / max(highlights - shadows, 1e-9), 1e-6, 0.9999))
+    # Solve: target = (m-1)*bg_n / ((2m-1)*bg_n - m)
+    # → m * (target*(2*bg_n - 1) - bg_n + 1) = target * bg_n
+    # → m = target * bg_n / (target*(2*bg_n - 1) - bg_n + 1)  [when denominator ≠ 0]
+    tb = float(np.clip(target_bg, 0.01, 0.49))
+    denom = tb * (2.0 * bg_norm - 1.0) - bg_norm + 1.0
+    if abs(denom) < 1e-9 or bg_norm < 1e-6:
+        m = 0.5
+    else:
+        m = float(np.clip(tb * bg_norm / denom, 0.001, 0.999))
+
+    # Apply MTF: f(x) = (m-1)*x / ((2m-1)*x - m)
+    denom_map = (2.0 * m - 1.0) * norm - m
+    # Avoid division by zero (occurs at x=m/(2m-1))
+    safe_denom = np.where(np.abs(denom_map) < 1e-12, 1e-12, denom_map)
+    stretched = (m - 1.0) * norm / safe_denom
+
+    # Boundary enforcement: x=0 → 0, x=1 → 1
+    stretched = np.where(norm <= 0.0, 0.0, np.where(norm >= 1.0, 1.0, stretched))
+
+    return np.clip(stretched, 0.0, 1.0).astype(np.float32)
+
+
 def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None) -> np.ndarray:
     """Non-linear arcsinh stretch with sigma-clipped sky background estimation.
 

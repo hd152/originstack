@@ -268,6 +268,178 @@ def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float) -> Optional[o
     return best_sources
 
 
+def estimate_strehl_ratio(img: np.ndarray, star_positions,
+                           fwhm: float = 0.0) -> float:
+    """Estimate a Strehl-proxy metric from bright star PSF profiles.
+
+    True Strehl ratio requires knowledge of the telescope aperture and
+    wavelength.  This function computes a normalised proxy:
+
+        S_proxy = peak_norm / peak_gaussian
+
+    where ``peak_norm`` is the measured peak of the background-subtracted,
+    unit-integral star profile, and ``peak_gaussian`` is the expected peak
+    of a Gaussian PSF with the same measured FWHM:
+
+        peak_gaussian = 4 ln(2) / (π · FWHM²)
+
+    For a perfect Gaussian PSF the ratio is exactly 1.0.  Aberrated or
+    atmospherically blurred PSFs have S_proxy < 1.0; over-sharp / spiky
+    PSFs (e.g. from lucky imaging) may exceed 1.0.
+
+    Args:
+        img:            Float32 stacked image (H, W, 3).
+        star_positions: Source table (DAOStarFinder output).
+        fwhm:           Pre-measured median FWHM in pixels; if 0 it is
+                        re-estimated from cutouts.
+
+    Returns:
+        Strehl proxy (float).  0.0 if estimation fails.
+    """
+    if star_positions is None or len(star_positions) == 0:
+        return 0.0
+
+    H, W = img.shape[:2]
+    lum = (img if img.ndim == 2
+           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    cutout_r = Config.STREHL_CUTOUT_RADIUS
+    try:
+        sorted_idx = np.argsort(star_positions['flux'])[::-1]
+    except (KeyError, TypeError):
+        sorted_idx = range(len(star_positions))
+
+    measured_peaks = []
+    measured_fwhms = []
+
+    for idx in list(sorted_idx)[:20]:
+        star = star_positions[idx]
+        yc = int(round(float(star['ycentroid'])))
+        xc = int(round(float(star['xcentroid'])))
+        if (yc < cutout_r or yc >= H - cutout_r or
+                xc < cutout_r or xc >= W - cutout_r):
+            continue
+
+        cutout = lum[yc - cutout_r:yc + cutout_r + 1,
+                     xc - cutout_r:xc + cutout_r + 1].astype(np.float64)
+        peak = float(cutout.max())
+        bg = float(np.percentile(cutout, 25))
+        if (peak - bg) < 10.0:
+            continue
+        # Skip saturated stars
+        if int(np.sum(cutout >= peak - 1e-6 * max(peak, 1.0))) > 4:
+            continue
+
+        cutout_sub = np.maximum(cutout - bg, 0.0)
+        total = cutout_sub.sum()
+        if total < 1e-12:
+            continue
+        norm_peak = float(cutout_sub.max()) / total
+        measured_peaks.append(norm_peak)
+
+        # Per-star FWHM estimate
+        half_max_val = cutout_sub.max() * 0.5
+        above = int(np.sum(cutout_sub > half_max_val))
+        if above > 0:
+            measured_fwhms.append(2.0 * np.sqrt(above / np.pi))
+
+        if len(measured_peaks) >= 10:
+            break
+
+    if not measured_peaks:
+        return 0.0
+
+    if fwhm <= 0.0:
+        fwhm = float(np.median(measured_fwhms)) if measured_fwhms else 4.0
+    if fwhm < 0.5:
+        fwhm = 0.5
+
+    # Gaussian peak for unit-integral normalised PSF
+    gaussian_peak = 4.0 * np.log(2.0) / (np.pi * fwhm ** 2)
+
+    mean_peak = float(np.median(measured_peaks))
+    strehl_proxy = mean_peak / (gaussian_peak + 1e-12)
+    return float(np.clip(strehl_proxy, 0.0, 5.0))
+
+
+def measure_atmospheric_dispersion(img: np.ndarray, star_positions,
+                                    cutout_radius: Optional[int] = None) -> float:
+    """Measure RGB centroid offsets per star as an atmospheric dispersion proxy.
+
+    Atmospheric dispersion shifts shorter wavelengths (blue) more than longer
+    ones (red) along the altitude axis, stretching each star into a tiny
+    spectrum.  This function measures the RMS separation between R, G, and B
+    channel centroids for a set of bright stars; the result is a proxy for
+    how much dispersion is degrading the data.
+
+    A value < 0.3 px is negligible.  Values > 1 px indicate significant
+    dispersion that warrants Atmospheric Dispersion Corrector use.
+
+    Args:
+        img:            Float32 stacked image (H, W, 3).
+        star_positions: Source table (DAOStarFinder).
+        cutout_radius:  Half-size of extraction window (default
+                        Config.DISP_CUTOUT_RADIUS = 10 px).
+
+    Returns:
+        Median RGB centroid separation in pixels.  0.0 on failure.
+    """
+    if star_positions is None or len(star_positions) == 0:
+        return 0.0
+    if img.ndim != 3 or img.shape[2] < 3:
+        return 0.0
+
+    if cutout_radius is None:
+        cutout_radius = Config.DISP_CUTOUT_RADIUS
+
+    H, W = img.shape[:2]
+    try:
+        sorted_idx = np.argsort(star_positions['flux'])[::-1]
+    except (KeyError, TypeError):
+        sorted_idx = range(len(star_positions))
+
+    dispersions = []
+    yy, xx = np.mgrid[:2 * cutout_radius + 1, :2 * cutout_radius + 1]
+
+    for idx in list(sorted_idx)[:30]:
+        star = star_positions[idx]
+        y0 = int(round(float(star['ycentroid'])))
+        x0 = int(round(float(star['xcentroid'])))
+        if (y0 < cutout_radius or y0 >= H - cutout_radius or
+                x0 < cutout_radius or x0 >= W - cutout_radius):
+            continue
+
+        centroids = []
+        for c in range(3):
+            cut = img[y0 - cutout_radius:y0 + cutout_radius + 1,
+                      x0 - cutout_radius:x0 + cutout_radius + 1, c].astype(np.float64)
+            bg = float(np.percentile(cut, 25))
+            cut = np.maximum(cut - bg, 0.0)
+            total = cut.sum()
+            if total < 1e-9:
+                break
+            cy = float(np.sum(yy * cut)) / total
+            cx = float(np.sum(xx * cut)) / total
+            centroids.append((cy, cx))
+
+        if len(centroids) != 3:
+            continue
+
+        # RMS distance between all channel-pair centroids
+        dists = []
+        for i in range(3):
+            for j in range(i + 1, 3):
+                dy = centroids[i][0] - centroids[j][0]
+                dx = centroids[i][1] - centroids[j][1]
+                dists.append(np.sqrt(dy ** 2 + dx ** 2))
+        dispersions.append(float(np.mean(dists)))
+
+        if len(dispersions) >= 15:
+            break
+
+    return float(np.median(dispersions)) if dispersions else 0.0
+
+
 def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
     """Comprehensive quality analysis with multiple metrics.
 
@@ -366,6 +538,21 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
         if star_count > 0 and sources_s is not None:
             fwhm = measure_fwhm(img_s_stars, sources_s)
 
+    # Strehl proxy and atmospheric dispersion — both derived from star cutouts.
+    # Computed per-frame so the auto advisor can gate deconvolution on PSF quality.
+    strehl = 0.0
+    dispersion_px = 0.0
+    if not quick and star_count > 0 and sources_s is not None:
+        try:
+            strehl = estimate_strehl_ratio(img_s_stars, sources_s, fwhm=fwhm)
+        except Exception:
+            strehl = 0.0
+        if img_s_stars.ndim == 3:
+            try:
+                dispersion_px = measure_atmospheric_dispersion(img_s_stars, sources_s)
+            except Exception:
+                dispersion_px = 0.0
+
     # Laplacian sharpness — img_s is already float32, no cast needed.
     sharpness = 0.0
     if laplace is not None:
@@ -374,18 +561,22 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
         except Exception:
             sharpness = 0.0
 
-    # Composite quality score
+    # Composite quality score.
+    # Uses SNR² as the base so the score is unitless and scale-independent —
+    # raw ADU brightness values varied by orders of magnitude across cameras
+    # and caused artificially inflated absolute scores.
+    # SNR² penalises noisy frames quadratically; star_factor and fwhm_factor
+    # weight resolution and star detection quality on top.
+    # Typical range: ~1 (poor) to ~6000 (excellent).
     if quick:
-        # Simplified score without star metrics — used for initial quality gate
-        score = brightness * contrast * max(snr / 10.0, 0.01) * 100.0
+        score = max(snr, 0.01) ** 2 * 10.0
     else:
         star_factor = min(star_count / 50.0, 1.0) if star_count > 0 else 0.01
-        snr_factor = min(snr / 10.0, 1.0) if snr > 0 else 0.01
         fwhm_factor = (
             max(0.1, 1.0 / (1.0 + max(0.0, fwhm - 2.0) ** 2 * 0.1))
             if fwhm > 0 else 1.0
         )
-        score = brightness * contrast * star_factor * snr_factor * fwhm_factor * 100.0
+        score = max(snr, 0.0) ** 2 * star_factor * fwhm_factor * 10.0
 
     return {
         'brightness': brightness,
@@ -405,5 +596,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
         'p95': float(p95),
         'p99': float(p99),
         'dynamic_range': float(p99 - p01),
+        'strehl': float(strehl),
+        'dispersion_px': float(dispersion_px),
         '_star_sources': sources_s,
     }

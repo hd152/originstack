@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import numpy as np
 
+from src.models import Config
+
 if TYPE_CHECKING:
     import argparse
 
@@ -48,21 +50,24 @@ def _aggregate(final: list) -> dict:
         vals = [f.metrics.get(key, default) for f in final if f.metrics]
         return float(np.mean(vals)) if vals else default
 
-    # fwhm: exclude zero values (frames with no stars)
+    # Exclude zeros for metrics that are only valid when measured successfully
     fwhm_vals = [f.metrics.get('fwhm', 0.0) for f in final
                  if f.metrics and f.metrics.get('fwhm', 0.0) > 0]
+    strehl_vals = [f.metrics.get('strehl', 0.0) for f in final
+                   if f.metrics and f.metrics.get('strehl', 0.0) > 0]
 
-    # brightness == median pixel value == p50
     return {
         'median_background':  _med('background'),
         'median_noise':       _med('noise'),
-        'median_p50':         _med('p50', _med('brightness')),  # frame median pixel
+        'median_p50':         _med('p50', _med('brightness')),
         'median_p75':         _med('p75'),
         'median_p95':         _med('p95'),
         'mean_star_count':    _mean('star_count'),
         'mean_dynamic_range': _mean('dynamic_range'),
         'mean_snr':           _mean('snr'),
         'mean_fwhm':          float(np.mean(fwhm_vals)) if fwhm_vals else 0.0,
+        'mean_strehl':        float(np.mean(strehl_vals)) if strehl_vals else 0.0,
+        'mean_dispersion':    _mean('dispersion_px'),
         'n_frames':           len(final),
     }
 
@@ -78,18 +83,15 @@ def _compute_signals(agg: dict) -> dict:
     p75   = agg['median_p75']
     p95   = agg['median_p95']
 
-    # How much of the frame is filled with emission (signal at the median pixel).
-    # High (>1) → extended object covers >50% of the FOV (e.g. emission nebula).
-    # Near zero → most pixels are sky background (galaxy, star field).
+    # How much of the frame is filled with emission at the median pixel.
+    # High (>1) → extended object covers >50% of the FOV.
     median_filling = (p50 - bg) / noise
 
     # Signal present in the upper quartile above sky background.
     diffuse_excess = (p75 - bg) / noise
 
-    # How concentrated the brightest signal is relative to the mid-signal.
-    # High → compact bright source (galaxy nucleus, bright star).
-    # Low  → emission is spread uniformly across the frame.
-    peak_excess = (p95 - bg) / noise  # ≈ frame SNR
+    # How concentrated the brightest signal is (≈ frame SNR).
+    peak_excess = (p95 - bg) / noise
 
     return {
         'median_filling': round(median_filling, 2),
@@ -99,6 +101,8 @@ def _compute_signals(agg: dict) -> dict:
         'dynamic_range':  agg['mean_dynamic_range'],
         'snr':            agg['mean_snr'],
         'fwhm':           agg['mean_fwhm'],
+        'strehl':         round(agg['mean_strehl'], 3),
+        'dispersion':     round(agg['mean_dispersion'], 3),
         'n_frames':       agg['n_frames'],
     }
 
@@ -108,9 +112,9 @@ def _compute_signals(agg: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _classify(sig: dict) -> str:
-    mf  = sig['median_filling']   # signal filling the frame at p50
-    de  = sig['diffuse_excess']   # signal at p75 above sky
-    pe  = sig['peak_excess']      # signal at p95 above sky  (≈ SNR)
+    mf  = sig['median_filling']
+    de  = sig['diffuse_excess']
+    pe  = sig['peak_excess']
     sc  = sig['star_count']
     dr  = sig['dynamic_range']
 
@@ -118,19 +122,19 @@ def _classify(sig: dict) -> str:
     if sc > 200:
         return 'wide_field'
 
-    # Star field: many stars, sky fills most pixels (mf low)
+    # Star field: many stars, sky fills most pixels
     if sc > 80 and mf < 1:
         return 'star_field'
 
-    # Emission nebula: emission fills >50% of the frame (mf high), few stars
+    # Emission nebula: emission fills >50% of the frame
     if mf > 1 and sc < 100:
         return 'emission_nebula'
 
-    # Galaxy: compact bright source (p95 >> p75), but frame is mostly sky (mf low)
+    # Galaxy: compact bright source, but frame is mostly sky
     if pe > 8 and mf < 0.5 and dr > 100:
         return 'galaxy'
 
-    # Reflection / bright nebula: moderate extended emission, fewer stars
+    # Reflection / bright nebula: moderate extended emission
     if de > 2 and sc < 100:
         return 'reflection_nebula'
 
@@ -140,66 +144,95 @@ def _classify(sig: dict) -> str:
 # ---------------------------------------------------------------------------
 # Per-target settings table
 # ---------------------------------------------------------------------------
-
-# Each list holds (attr_name, value) pairs applied unconditionally for that type.
-# Conditional logic (e.g. FWHM-gated deconvolution for star_field) is handled
-# inline in _apply_target_settings.
+#
+# Each list holds (attr_name, value) pairs applied unconditionally for that
+# target type.  Conditional logic (SNR gates, Strehl gates, frame-count
+# thresholds) is handled in _apply_quality_settings.
 
 _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'emission_nebula': [
         ('deconvolve',              True),
         ('deconvolve_iterations',   20),
-        ('star_reduce',             False),   # keep stars crisp
+        # Empirical PSF captures asymmetric shapes from atmospheric turbulence
+        # better than a parametric Gaussian/Moffat for filamentary nebulae.
+        ('deconvolve_blind_psf',    True),
+        ('star_reduce',             False),
         ('local_contrast_strength', 0.75),
         ('ghs_b',                   7.0),
         ('ghs_sp',                  0.18),
         ('dbe_patch_size',          48),
-        # Denoising: MMT's edge-preserving median cascade protects thin Ha
-        # filaments better than the DWT; ACDNR then adaptively smooths any
-        # residual sky noise without touching the filament edges.
-        ('denoise',                 False),   # wavelet replaced by MMT
+        # Emission patches have high entropy; rejecting them gives a cleaner
+        # background model on narrowband data.
+        ('entropy_bg',              True),
+        # OSC sensors have 2:1 green-to-R/B Bayer ratio; SCNR removes the
+        # residual green cast that survives flat-field correction.
+        ('scnr',                    True),
+        ('photometric_calibration', True),
+        # Denoising: MMT edge-preserving median cascade for Ha filaments,
+        # ACDNR for residual sky noise, then a gentle Perona-Malik pass
+        # with option=2 (soft roll-off) to further protect filament edges.
+        ('denoise',                 False),
         ('denoise_mmt',             True),
         ('denoise_acdnr',           True),
+        ('denoise_aniso',           True),
+        ('aniso_option',            2),
+        ('aniso_iterations',        15),
     ],
     'galaxy': [
         ('deconvolve',              True),
         ('deconvolve_iterations',   15),
+        ('deconvolve_blind_psf',    True),
+        # TV regularisation avoids the ringing artefacts that RL produces on
+        # the sharp galaxy disc edge and bright nuclear core.
+        ('deconvolve_tv',           True),
         ('star_reduce',             True),
-        ('star_reduce_factor',      0.5),     # softer stars vs galaxy
-        ('local_contrast_strength', 0.85),    # strong for dust lanes
-        ('ghs_b',                   10.0),    # stretch faint halo
+        ('star_reduce_factor',      0.5),
+        ('local_contrast_strength', 0.85),
+        ('ghs_b',                   10.0),
         ('ghs_sp',                  0.12),
         ('dbe_patch_size',          48),
-        # Denoising: MMT handles the non-Gaussian noise near the bright core
-        # without smearing the faint outer halo; ACDNR cleans up sky between
-        # the spiral arms without blurring the arm edges.
-        ('denoise',                 False),   # wavelet replaced by MMT
+        # Outer globular cluster halos and H-II regions push patch entropy up,
+        # biasing the background model toward the galaxy — reject them.
+        ('entropy_bg',              True),
+        ('scnr',                    True),
+        ('photometric_calibration', True),
+        # Denoising: MMT handles non-Gaussian noise near the bright core;
+        # ACDNR cleans sky between arms; BM3D added conditionally when
+        # SNR and frame count are sufficient (see _apply_quality_settings).
+        ('denoise',                 False),
         ('denoise_mmt',             True),
         ('denoise_acdnr',           True),
     ],
     'reflection_nebula': [
         ('deconvolve',              True),
         ('deconvolve_iterations',   15),
+        ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
         ('local_contrast_strength', 0.70),
         ('ghs_b',                   8.0),
         ('ghs_sp',                  0.15),
-        # Denoising: same reasoning as emission nebula; reflection nebulae
-        # have fine dust structure that median-based MMT handles well.
-        ('denoise',                 False),   # wavelet replaced by MMT
+        ('entropy_bg',              True),
+        ('scnr',                    True),
+        ('photometric_calibration', True),
+        # Same MMT + ACDNR + anisotropic diffusion combination as emission
+        # nebulae; dust structure in reflection nebulae responds well to the
+        # PDE edge preservation.
+        ('denoise',                 False),
         ('denoise_mmt',             True),
         ('denoise_acdnr',           True),
+        ('denoise_aniso',           True),
+        ('aniso_option',            2),
+        ('aniso_iterations',        15),
     ],
     'star_field': [
         # deconvolve is conditional — set in _apply_target_settings
         ('star_reduce',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
-        # Denoising: wavelet (default) handles uniform background well;
-        # ACDNR added conservatively to clean sky patches between stars
-        # without touching star halos (high k → only flat-sky pixels smoothed).
+        ('scnr',                    True),
+        ('photometric_calibration', True),
         ('denoise_acdnr',           True),
-        ('denoise_acdnr_k',         4.0),
+        ('denoise_acdnr_k',         4.0),   # conservative: only flat-sky pixels
     ],
     'wide_field': [
         ('deconvolve',              False),
@@ -207,12 +240,15 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),
         ('ghs_sp',                  0.20),
-        # Denoising: wavelet (default) is fine for dense star fields;
-        # ACDNR removes sky graininess conservatively.
+        ('scnr',                    True),
+        ('photometric_calibration', True),
         ('denoise_acdnr',           True),
         ('denoise_acdnr_k',         4.0),
     ],
-    'unknown': [],
+    'unknown': [
+        ('scnr',                    True),
+        ('photometric_calibration', True),
+    ],
 }
 
 
@@ -247,8 +283,10 @@ def _apply_target_settings(
 # Quality-based adjustments (always applied, independent of target type)
 # ---------------------------------------------------------------------------
 
-def _apply_quality_settings(sig: dict, args) -> List[str]:
-    """Apply frame-count, SNR, FWHM, and debayer quality adjustments."""
+def _apply_quality_settings(
+    sig: dict, args, target_type: str = 'unknown'
+) -> List[str]:
+    """Apply frame-count, SNR, FWHM, Strehl, and dispersion adjustments."""
     changes: List[str] = []
 
     def _set(attr: str, val: object) -> None:
@@ -257,9 +295,12 @@ def _apply_quality_settings(sig: dict, args) -> List[str]:
             setattr(args, attr, val)
             changes.append(f"{attr}  {old!r} -> {val!r}")
 
-    n   = int(sig['n_frames'])
-    snr = sig['snr']
-    fwhm = sig['fwhm']
+    n          = int(sig['n_frames'])
+    snr        = sig['snr']
+    fwhm       = sig['fwhm']
+    sc         = sig['star_count']
+    strehl     = sig.get('strehl', 0.0)
+    dispersion = sig.get('dispersion', 0.0)
 
     # 1. Frame-count-based stacking method (only when still at default 'auto')
     if getattr(args, 'stack_method', 'auto') == 'auto':
@@ -283,7 +324,7 @@ def _apply_quality_settings(sig: dict, args) -> List[str]:
             elif snr > 20:
                 _set('denoise_strength', 2.0)
 
-    # 3. FWHM-scaled deconvolution iterations (applied after target-type set them)
+    # 3. FWHM-scaled deconvolution iterations (applied after target type sets them)
     if getattr(args, 'deconvolve', False) and fwhm > 4.0:
         current_iters = getattr(args, 'deconvolve_iterations', 15)
         extra = int((fwhm - 3.0) * 3)
@@ -299,21 +340,78 @@ def _apply_quality_settings(sig: dict, args) -> List[str]:
         except ImportError:
             pass
 
-    # 5. MMT strength scaled to SNR (only when MMT was selected by target type)
-    #    Wavelet strength is handled separately by estimate_denoise_strength().
+    # 5. MMT strength scaled to SNR
     if getattr(args, 'denoise_mmt', False) and snr > 0:
         if snr < 5:
-            _set('denoise_mmt_strength', 4.0)   # heavy for very noisy stacks
+            _set('denoise_mmt_strength', 4.0)
         elif snr < 10:
             _set('denoise_mmt_strength', 3.5)
         elif snr > 20:
-            _set('denoise_mmt_strength', 2.0)   # gentle; clean data needs less
+            _set('denoise_mmt_strength', 2.0)
 
-    # 6. For unknown/unclassified targets: add ACDNR when the stack is very
-    #    noisy (SNR < 5) and nothing else has already been set.  At this noise
-    #    level the adaptive sky smoothing always helps regardless of target type.
+    # 6. Baseline ACDNR for unknown/noisy targets not already using it
     if snr < 5 and snr > 0 and not getattr(args, 'denoise_acdnr', False):
         _set('denoise_acdnr', True)
+
+    # 7. BM3D: enable for galaxies when the stack is clean enough for
+    #    block-matching to outperform median-based MMT.  Requires SNR >= 12
+    #    (enough signal for meaningful patch similarity) and >= 20 frames
+    #    (reduces noise floor so BM3D doesn't chase noise patterns).
+    #    Use finer stride on very clean stacks to resolve dust lane texture.
+    if (target_type == 'galaxy'
+            and snr >= 12
+            and n >= 20
+            and not getattr(args, 'denoise_bm3d', False)):
+        _set('denoise_bm3d', True)
+        if snr > 20:
+            _set('bm3d_stride', 4)
+
+    # 8. Polynomial distortion correction: enable when seeing is poor AND
+    #    enough stars exist for a stable degree-2 polynomial fit (want 40+).
+    #    Poor FWHM is correlated with tracking errors that introduce geometric
+    #    distortion not captured by the shift/affine registration pass.
+    if fwhm > 4.0 and sc >= 40 and not getattr(args, 'poly_distortion', False):
+        _set('poly_distortion', True)
+
+    # 9. TV deconvolution iteration count scaled to stack SNR.
+    #    Low SNR: fewer iterations to avoid converging toward noise.
+    #    High SNR: more iterations converge to a sharper solution.
+    if getattr(args, 'deconvolve_tv', False):
+        base = Config.TV_ITERATIONS
+        if snr > 0 and snr < 8:
+            _set('tv_iterations', max(30, base - 10))
+        elif snr > 20:
+            _set('tv_iterations', min(80, base + 20))
+
+    # 10. Strehl-based deconvolution gate.
+    #     Very low Strehl means PSF varies significantly across frames after
+    #     stacking; deconvolution amplifies mis-modelled PSF artefacts.
+    #     - Strehl < 0.15: PSF too variable — disable deconvolution entirely.
+    #     - Strehl 0.15–0.25: cut iterations in half as a safety margin.
+    if strehl > 0:
+        if strehl < 0.15:
+            if getattr(args, 'deconvolve', False):
+                _set('deconvolve', False)
+            if getattr(args, 'deconvolve_tv', False):
+                _set('deconvolve_tv', False)
+        elif strehl < 0.25:
+            current_iters = getattr(args, 'deconvolve_iterations', 15)
+            _set('deconvolve_iterations', max(8, current_iters // 2))
+
+    # 11. Atmospheric dispersion gate.
+    #     High dispersion makes the PSF strongly chromatic — a single PSF
+    #     estimate will fit R/G/B channels poorly, producing colour fringes.
+    #     - Dispersion > 3.0 px: disable deconvolution.
+    #     - Dispersion 1.5–3.0 px: reduce iterations by 40%.
+    if dispersion > 0:
+        if dispersion > 3.0:
+            if getattr(args, 'deconvolve', False):
+                _set('deconvolve', False)
+            if getattr(args, 'deconvolve_tv', False):
+                _set('deconvolve_tv', False)
+        elif dispersion > 1.5:
+            current_iters = getattr(args, 'deconvolve_iterations', 15)
+            _set('deconvolve_iterations', max(5, int(current_iters * 0.6)))
 
     return changes
 
@@ -356,6 +454,6 @@ def apply_auto_settings(
 
     changes: List[str] = []
     changes.extend(_apply_target_settings(target_type, sig, args))
-    changes.extend(_apply_quality_settings(sig, args))
+    changes.extend(_apply_quality_settings(sig, args, target_type=target_type))
 
     return target_type, label, sig, changes

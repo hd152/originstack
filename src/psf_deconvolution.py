@@ -170,6 +170,222 @@ def make_synthetic_psf(fwhm: float, psf_size: int = None, model: str = 'gaussian
     return psf
 
 
+def estimate_psf_blind(img: np.ndarray, star_positions,
+                        psf_size: int = None,
+                        iterations: int = None) -> Tuple[Optional[np.ndarray], float]:
+    """Empirical (model-free) PSF estimation by stacking bright star cutouts.
+
+    Instead of fitting a parametric model, this function extracts cutouts
+    around bright unsaturated stars, background-subtracts each, normalises
+    them to unit integral, and returns the median stack.  The result is the
+    *actual* on-sky PSF shape, including any asymmetry, coma, or tracking
+    errors that a Gaussian/Moffat model cannot capture.
+
+    The ``iterations`` parameter optionally runs Richardson-Lucy blind
+    deconvolution update steps on top of the median-stack PSF to sharpen
+    the estimate.  Each step refines the PSF by computing:
+
+        psf_new = psf * correlate(img / (psf * img), img_reversed)
+
+    Args:
+        img:            Float32 stacked image (H, W, 3).
+        star_positions: Source table from DAOStarFinder / detect_stars.
+        psf_size:       Output kernel side length (default Config.RL_PSF_SIZE).
+        iterations:     RL blind update iterations (0 = median stack only).
+
+    Returns:
+        (psf_kernel, fwhm_pixels) — (None, 0.0) if estimation fails.
+    """
+    if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
+        logging.warning("Blind PSF: too few stars (%d)", 0 if star_positions is None else len(star_positions))
+        return None, 0.0
+
+    if psf_size is None:
+        psf_size = Config.RL_PSF_SIZE
+    if iterations is None:
+        iterations = Config.BLIND_PSF_ITERATIONS
+
+    H, W = img.shape[:2]
+    lum = (img if img.ndim == 2
+           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    half = psf_size // 2
+    cutout_r = half + 4   # slightly larger than psf_size for clean border
+
+    try:
+        sorted_idx = np.argsort(star_positions['flux'])[::-1]
+    except (KeyError, TypeError):
+        sorted_idx = range(len(star_positions))
+
+    stacked_cutouts = []
+    for idx in list(sorted_idx)[:Config.RL_PSF_MAX_STARS]:
+        star = star_positions[idx]
+        yc = int(round(float(star['ycentroid'])))
+        xc = int(round(float(star['xcentroid'])))
+        if (yc < cutout_r or yc >= H - cutout_r or
+                xc < cutout_r or xc >= W - cutout_r):
+            continue
+
+        cutout = lum[yc - cutout_r:yc + cutout_r + 1,
+                     xc - cutout_r:xc + cutout_r + 1].astype(np.float64)
+        peak = float(cutout.max())
+        bg = float(np.percentile(cutout, 25))
+        signal = peak - bg
+        if signal < bg * 0.5 or signal < 10.0:
+            continue
+
+        # Skip saturated (flat-topped) stars
+        if int(np.sum(cutout >= peak - 1e-6 * max(peak, 1.0))) > 4:
+            continue
+
+        cutout = cutout - bg
+        cutout = np.maximum(cutout, 0.0)
+        total = cutout.sum()
+        if total < 1e-12:
+            continue
+        cutout /= total
+
+        # Centre-crop to psf_size
+        c = cutout_r
+        psf_cutout = cutout[c - half:c + half + 1, c - half:c + half + 1]
+        if psf_cutout.shape != (psf_size, psf_size):
+            continue
+        stacked_cutouts.append(psf_cutout)
+
+    if len(stacked_cutouts) < Config.RL_PSF_MIN_STARS:
+        logging.warning("Blind PSF: only %d usable stars (need %d)",
+                        len(stacked_cutouts), Config.RL_PSF_MIN_STARS)
+        return None, 0.0
+
+    psf = np.median(np.array(stacked_cutouts), axis=0)
+    psf = np.maximum(psf, 0.0)
+    psf /= psf.sum()
+
+    # Optional blind RL refinement
+    if iterations > 0 and HAS_SKIMAGE_RESTORATION:
+        from scipy.signal import fftconvolve
+        lum_pos = lum - lum.min() + 1e-6
+        psf_est = psf.copy()
+        for _ in range(iterations):
+            conv = fftconvolve(lum_pos, psf_est, mode='same')
+            ratio = lum_pos / (conv + 1e-12)
+            update = fftconvolve(ratio, psf_est[::-1, ::-1], mode='same')
+            # PSF update: cross-correlate ratio with lum
+            psf_update = fftconvolve(ratio[::-1, ::-1], lum_pos, mode='same')
+            # Trim to psf_size
+            cy, cx = np.unravel_index(np.argmax(psf_update), psf_update.shape)
+            y0 = max(0, cy - half)
+            x0 = max(0, cx - half)
+            patch = psf_update[y0:y0 + psf_size, x0:x0 + psf_size]
+            if patch.shape == (psf_size, psf_size):
+                patch = np.maximum(patch, 0.0)
+                s = patch.sum()
+                if s > 1e-12:
+                    psf_est = 0.7 * psf_est + 0.3 * patch / s
+
+        psf = np.maximum(psf_est, 0.0)
+        psf /= psf.sum()
+
+    # Estimate FWHM from the median PSF
+    half_max = psf.max() * 0.5
+    above = int(np.sum(psf > half_max))
+    fwhm = 2.0 * np.sqrt(above / np.pi) if above > 0 else float(psf_size // 4)
+
+    logging.info("Blind PSF: stacked %d stars, FWHM≈%.2f px", len(stacked_cutouts), fwhm)
+    return psf.astype(np.float64), fwhm
+
+
+def tv_regularized_deconvolve(img: np.ndarray, psf: np.ndarray,
+                               iterations: int = None,
+                               lambda_tv: float = None,
+                               star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Total Variation regularized deconvolution via gradient descent.
+
+    Minimises the Tikhonov-TV functional:
+
+        E(x) = ½ ‖H x − y‖² + λ ‖∇x‖_TV
+
+    where H is convolution with the PSF, y is the observed image, and the
+    TV norm ‖∇x‖_TV = Σ √(|∂x/∂r|² + |∂x/∂c|² + ε) promotes piecewise-
+    smooth solutions while allowing sharp edges (galaxy arms, nebula filaments)
+    — unlike Tikhonov-L2 regularisation which blurs them.
+
+    Each gradient descent step:
+      1. Data gradient:  ∇E_data = H^T (H x − y)   (correlation with PSF)
+      2. TV gradient:    ∇E_tv   = −div( ∇x / |∇x|_ε )
+      3. Update:         x ← x − step · (∇E_data + λ ∇E_tv)
+
+    Operates on luminance only (YCbCr split) to avoid colour artefacts.
+
+    Args:
+        img:        Float32 stacked image (H, W, 3).
+        psf:        Normalised 2-D PSF kernel.
+        iterations: Gradient descent steps (default Config.TV_ITERATIONS = 50).
+        lambda_tv:  TV regularisation strength (default Config.TV_LAMBDA = 0.02).
+                    Larger → smoother; smaller → sharper but noisier.
+        star_mask:  Optional float mask (1 = star core) blended from original
+                    to avoid ringing artefacts on bright star cores.
+
+    Returns:
+        Deconvolved float32 image (H, W, 3).
+    """
+    from scipy.signal import fftconvolve
+
+    if iterations is None:
+        iterations = Config.TV_ITERATIONS
+    if lambda_tv is None:
+        lambda_tv = Config.TV_LAMBDA
+
+    src = img.astype(np.float64)
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    psf_d = psf.astype(np.float64)
+    psf_d /= psf_d.sum()
+    psf_flip = psf_d[::-1, ::-1]
+
+    # Pedestal (RL requires strictly positive input)
+    y_min = float(Y.min())
+    pedestal = max(-y_min + 1e-6, 1e-6)
+    y = Y + pedestal
+
+    # Step size: spectral norm of H^T H ≈ max(|FFT(psf)|²) = 1 (normalised PSF)
+    step = 0.9 / (1.0 + lambda_tv * 8.0)
+
+    x = y.copy()
+    eps_tv = 1e-6   # smoothing constant for TV gradient
+
+    for _ in range(iterations):
+        # Data gradient
+        Hx = fftconvolve(x, psf_d, mode='same')
+        data_grad = fftconvolve(Hx - y, psf_flip, mode='same')
+
+        # TV gradient (anisotropic: discrete divergence of normalised gradient)
+        dx = np.roll(x, -1, axis=1) - x
+        dy = np.roll(x, -1, axis=0) - x
+        norm_grad = np.sqrt(dx ** 2 + dy ** 2 + eps_tv)
+        Px = dx / norm_grad
+        Py = dy / norm_grad
+        tv_grad = (Px - np.roll(Px, 1, axis=1)
+                   + Py - np.roll(Py, 1, axis=0))
+
+        x = x - step * (data_grad + lambda_tv * tv_grad)
+        np.clip(x, 1e-12, None, out=x)
+
+    Y_d = x - pedestal
+
+    if star_mask is not None:
+        Y_d = Y_d * (1.0 - star_mask) + Y * star_mask
+
+    R = Y_d + 1.40200 * Cr
+    G = Y_d - 0.34414 * Cb - 0.71414 * Cr
+    B = Y_d + 1.77200 * Cb
+    result = np.stack([R, G, B], axis=2)
+    np.clip(result, 0.0, None, out=result)
+    return result.astype(np.float32)
+
+
 def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
                                 iterations: int = None,
                                 star_mask: Optional[np.ndarray] = None) -> np.ndarray:

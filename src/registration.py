@@ -543,6 +543,146 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> D
     return result
 
 
+def _poly_features(y: np.ndarray, x: np.ndarray, degree: int) -> np.ndarray:
+    """Build the polynomial feature matrix for 2-D warp fitting.
+
+    Returns an (N, D) matrix where each row contains the monomial terms
+    1, y, x, y², yx, x², … up to total degree ``degree``.
+    """
+    cols = [np.ones(len(y))]
+    for d in range(1, degree + 1):
+        for py in range(d, -1, -1):
+            px = d - py
+            cols.append(y ** py * x ** px)
+    return np.column_stack(cols)
+
+
+def fit_polynomial_distortion(src_y: np.ndarray, src_x: np.ndarray,
+                               dst_y: np.ndarray, dst_x: np.ndarray,
+                               degree: int = None
+                               ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Fit a 2-D polynomial distortion map from matched star-pair coordinates.
+
+    Given N matched pairs (src → dst), fits independent least-squares
+    polynomials of the specified degree for the row (y) and column (x)
+    output coordinates:
+
+        dst_y ≈ P_y(src_y, src_x)
+        dst_x ≈ P_x(src_y, src_x)
+
+    A degree-2 polynomial captures field curvature and lateral colour
+    aberration present in many fast refractors and wide-field systems.
+    A degree-3 polynomial additionally models barrel/pincushion distortion.
+
+    Args:
+        src_y, src_x: Source (unregistered frame) star coordinates, arrays (N,).
+        dst_y, dst_x: Destination (reference frame) star coordinates, arrays (N,).
+        degree:       Polynomial degree (default Config.POLY_DISTORTION_DEGREE).
+
+    Returns:
+        (coeffs_y, coeffs_x) — 1-D coefficient arrays for the two polynomials,
+        or None if fitting fails (too few points or singular system).
+    """
+    if degree is None:
+        degree = Config.POLY_DISTORTION_DEGREE
+    min_pts = Config.POLY_MIN_STARS
+
+    if len(src_y) < min_pts:
+        _log.debug("Polynomial distortion: too few stars (%d < %d)", len(src_y), min_pts)
+        return None
+
+    # Normalise coordinates to [-1, 1] for numerical stability
+    cy, sy = float(np.mean(src_y)), max(float(np.std(src_y)), 1.0)
+    cx, sx = float(np.mean(src_x)), max(float(np.std(src_x)), 1.0)
+    yn = (src_y - cy) / sy
+    xn = (src_x - cx) / sx
+
+    A = _poly_features(yn, xn, degree)
+    try:
+        coeffs_y, _, _, _ = np.linalg.lstsq(A, dst_y - src_y, rcond=None)
+        coeffs_x, _, _, _ = np.linalg.lstsq(A, dst_x - src_x, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+
+    # Check residuals — reject if worse than pure translation
+    pred_dy = A @ coeffs_y
+    pred_dx = A @ coeffs_x
+    res_rms = float(np.sqrt(np.mean((dst_y - src_y - pred_dy) ** 2 +
+                                     (dst_x - src_x - pred_dx) ** 2)))
+    naive_rms = float(np.sqrt(np.mean((dst_y - src_y - np.mean(dst_y - src_y)) ** 2 +
+                                       (dst_x - src_x - np.mean(dst_x - src_x)) ** 2)))
+    if res_rms > naive_rms * 1.2:
+        _log.debug("Polynomial distortion: poly fit worse than translation (%.2f > %.2f); "
+                   "discarding", res_rms, naive_rms)
+        return None
+
+    # Pack normalisation parameters into the coefficient arrays (appended)
+    norm_params = np.array([cy, sy, cx, sx])
+    return (np.append(coeffs_y, norm_params),
+            np.append(coeffs_x, norm_params))
+
+
+def apply_polynomial_warp(img: np.ndarray,
+                           coeffs_y: np.ndarray,
+                           coeffs_x: np.ndarray,
+                           degree: int = None) -> np.ndarray:
+    """Apply a polynomial distortion map to a multi-channel image.
+
+    Uses the coefficient arrays produced by ``fit_polynomial_distortion``
+    to compute per-pixel output coordinates and resamples the image with
+    bicubic (order=3) interpolation via scipy.ndimage.map_coordinates.
+
+    Args:
+        img:      Float32 image (H, W, 3) or (H, W).
+        coeffs_y: Coefficient array from ``fit_polynomial_distortion`` (y).
+        coeffs_x: Coefficient array from ``fit_polynomial_distortion`` (x).
+        degree:   Polynomial degree (default Config.POLY_DISTORTION_DEGREE).
+
+    Returns:
+        Warped float32 image of the same shape.
+    """
+    from scipy.ndimage import map_coordinates as _map_coords
+
+    if degree is None:
+        degree = Config.POLY_DISTORTION_DEGREE
+
+    # Extract normalisation parameters (last 4 elements of each coefficient array)
+    cy, sy, cx, sx = coeffs_y[-4:]
+    cy2, sy2, cx2, sx2 = coeffs_x[-4:]
+    c_y = coeffs_y[:-4]
+    c_x = coeffs_x[:-4]
+
+    ndim_orig = img.ndim
+    if ndim_orig == 2:
+        img = img[:, :, np.newaxis]
+    H, W = img.shape[:2]
+
+    # Build output grid in normalised coords
+    row_idx, col_idx = np.mgrid[0:H, 0:W]
+    yn = (row_idx.astype(np.float64) - cy) / sy
+    xn = (col_idx.astype(np.float64) - cx) / sx
+
+    A = _poly_features(yn.ravel(), xn.ravel(), degree)
+
+    # Map destination pixel → source pixel (inverse mapping)
+    dy = (A @ c_y).reshape(H, W)
+    dx = (A @ c_x).reshape(H, W)
+    src_rows = np.clip(row_idx - dy, 0, H - 1)
+    src_cols = np.clip(col_idx - dx, 0, W - 1)
+
+    result = np.zeros_like(img, dtype=np.float32)
+    for c in range(img.shape[2]):
+        result[:, :, c] = _map_coords(
+            img[:, :, c].astype(np.float64),
+            [src_rows, src_cols],
+            order=3, mode='constant', cval=0.0
+        ).astype(np.float32)
+
+    if ndim_orig == 2:
+        result = result[:, :, 0]
+    return result
+
+
 def run_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],

@@ -774,3 +774,126 @@ def run_stacking_phase(
     # Save a pre-post-processing copy for FITS output (preserves high sky SNR)
     fits_stacked = stacked.copy()
     return stacked, fits_stacked, top, bottom, left, right
+
+
+# ---------------------------------------------------------------------------
+# HDR stack blending
+# ---------------------------------------------------------------------------
+
+def hdr_blend_stacks(short_stack: np.ndarray, long_stack: np.ndarray,
+                     short_exptime: float = 1.0, long_exptime: float = 1.0,
+                     transition_width: float = None) -> np.ndarray:
+    """SNR-weighted HDR blend of two stacks with different exposure times.
+
+    Merges a short-exposure stack (unsaturated bright cores) with a
+    long-exposure stack (high-SNR faint regions) using a sigmoid transition
+    centred at the saturation knee of the long-exposure stack.
+
+    The blend weight for the long stack is:
+
+        w_long(x) = sigmoid( (x_norm - knee) / transition_width )
+
+    where ``x_norm`` is the per-pixel luminance normalised to [0, 1] and
+    ``knee`` is estimated as the 98th percentile of the long-stack luminance
+    (the level above which the long exposure is likely saturated or nonlinear).
+
+    The short stack is rescaled to match the long stack's flux calibration
+    via the ``short_exptime / long_exptime`` ratio before blending.
+
+    Args:
+        short_stack:      Float32 (H, W, 3) shorter-exposure stack.
+        long_stack:       Float32 (H, W, 3) longer-exposure stack.
+        short_exptime:    Short-stack total effective exposure (s or arbitrary).
+        long_exptime:     Long-stack total effective exposure.
+        transition_width: Fractional luminance range for the sigmoid
+                          (default Config.HDR_TRANSITION_WIDTH = 0.1).
+
+    Returns:
+        Blended float32 HDR image (H, W, 3).
+    """
+    if transition_width is None:
+        transition_width = Config.HDR_TRANSITION_WIDTH
+
+    if short_stack.shape != long_stack.shape:
+        raise ValueError(f"HDR blend: shape mismatch "
+                         f"({short_stack.shape} vs {long_stack.shape})")
+
+    # Scale short stack to long stack's calibration
+    scale = float(long_exptime) / max(float(short_exptime), 1e-9)
+    short_scaled = short_stack.astype(np.float64) * scale
+    long_d = long_stack.astype(np.float64)
+
+    lum_long = (0.299 * long_d[:, :, 0] + 0.587 * long_d[:, :, 1]
+                + 0.114 * long_d[:, :, 2])
+    white = float(np.percentile(lum_long, 98))
+    if white < 1e-9:
+        return long_stack.copy()
+
+    lum_norm = np.clip(lum_long / white, 0.0, 1.0)
+    knee = float(np.percentile(lum_norm, 95))
+
+    # Sigmoid: 0 (use short) → 1 (use long) as luminance increases through knee
+    sig_arg = np.clip((lum_norm - knee) / max(transition_width, 1e-4), -10.0, 10.0)
+    w_long = 1.0 / (1.0 + np.exp(-sig_arg))   # high lum → short stack wins
+    # Invert: for saturated bright areas we want the short (unsaturated) stack
+    w_short = w_long          # bright pixels → more short weight
+    w_long_use = 1.0 - w_short
+
+    w_long_3 = w_long_use[:, :, np.newaxis]
+    w_short_3 = w_short[:, :, np.newaxis]
+
+    blended = w_long_3 * long_d + w_short_3 * short_scaled
+    return np.clip(blended, 0.0, None).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Comet dual-track stacking
+# ---------------------------------------------------------------------------
+
+def blend_comet_star_stacks(star_stack: np.ndarray,
+                             comet_stack: np.ndarray,
+                             comet_lum: np.ndarray,
+                             blend_sigma: float = 30.0) -> np.ndarray:
+    """Blend a star-aligned and comet-aligned stack for dual-track imaging.
+
+    In standard comet stacking the astronomer must choose between sharpening
+    the comet nucleus (comet alignment) and sharpening the star field (star
+    alignment).  This function blends both stacks spatially:
+
+    • Near the comet nucleus: ``comet_stack`` dominates (sharp nucleus,
+      smeared stars).
+    • Away from the nucleus: ``star_stack`` dominates (sharp stars,
+      smeared nucleus).
+
+    The blend mask is derived from the comet luminance: a Gaussian envelope
+    centred on the brightest region (the nucleus) whose width is controlled
+    by ``blend_sigma`` pixels.
+
+    Args:
+        star_stack:   Float32 (H, W, 3) star-aligned stack.
+        comet_stack:  Float32 (H, W, 3) comet-aligned stack.
+        comet_lum:    Float32 (H, W) luminance map for locating the nucleus
+                      (typically the comet-aligned stack luminance).
+        blend_sigma:  Gaussian half-width (px) of the comet blend zone.
+
+    Returns:
+        Blended float32 image (H, W, 3).
+    """
+    from scipy.ndimage import gaussian_filter as _gf
+
+    H, W = star_stack.shape[:2]
+
+    # Locate comet nucleus (brightest smooth blob)
+    smoothed = _gf(comet_lum.astype(np.float64), sigma=5.0)
+    peak_flat = int(np.argmax(smoothed))
+    py, px = peak_flat // W, peak_flat % W
+
+    # Build distance-based Gaussian mask centred on nucleus
+    yy, xx = np.mgrid[:H, :W]
+    dist2 = (yy - py) ** 2.0 + (xx - px) ** 2.0
+    mask = np.exp(-dist2 / (2.0 * blend_sigma ** 2))   # 1 at nucleus, 0 far away
+
+    mask3 = mask[:, :, np.newaxis]
+    blended = (mask3 * comet_stack.astype(np.float64)
+               + (1.0 - mask3) * star_stack.astype(np.float64))
+    return np.clip(blended, 0.0, None).astype(np.float32)

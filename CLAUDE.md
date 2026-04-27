@@ -59,7 +59,6 @@ The pipeline is split across `src/` modules. [astro_stack.py](astro_stack.py) is
 | [src/frame_processor.py](src/frame_processor.py) | Parallel workers, `execute_frame_processing`, `quality_gate` |
 | [src/postprocess.py](src/postprocess.py) | Full post-processing chain: `postprocess_stack` |
 | [src/auto_settings.py](src/auto_settings.py) | Heuristic target classifier and parameter advisor (`--auto`) |
-| [src/ai_advisor.py](src/ai_advisor.py) | Claude API parameter advisor and session report (`--ai-advisor`) |
 | [src/plate_solve.py](src/plate_solve.py) | Astrometry.net plate solving |
 | [src/pipeline.py](src/pipeline.py) | Thin orchestrator: `stack_target` wires all four phases |
 | [src/health_check.py](src/health_check.py) | `run_health_check` |
@@ -113,7 +112,6 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 - `cv2` (OpenCV) — advanced debayer methods (Malvar, VNG), bilateral filter denoising
 - `pywt` — wavelet denoising
 - `astroquery` — plate solving via nova.astrometry.net (`--plate-solve`)
-- `anthropic` — AI parameter advisor (`--ai-advisor`, `--ai-report`)
 
 ### Plate solving
 Requires `astroquery` installed and `ASTROMETRY_API_KEY` environment variable set. Enable with `--plate-solve`.

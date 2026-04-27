@@ -695,10 +695,32 @@ def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
     return emission
 
 
+def _patch_entropy(pixels: np.ndarray, n_bins: int = 16) -> float:
+    """Shannon entropy of a pixel sample (lower = more uniform = better background).
+
+    Uses a fixed-width histogram with ``n_bins`` bins spanning the pixel
+    range.  Returns 0 for constant patches and log2(n_bins) for perfectly
+    uniform histograms.  Sky-background patches are nearly Gaussian around
+    the sky mean and have low entropy; patches contaminated by stars or
+    nebula emission have high entropy and should be down-weighted.
+    """
+    if len(pixels) < 4:
+        return 0.0
+    mn, mx = float(pixels.min()), float(pixels.max())
+    rng = mx - mn
+    if rng < 1e-12:
+        return 0.0
+    counts, _ = np.histogram(pixels, bins=n_bins, range=(mn, mx))
+    probs = counts / float(counts.sum() + 1e-12)
+    probs = probs[probs > 0]
+    return float(-np.sum(probs * np.log2(probs)))
+
+
 def _sample_background_patches(
         channel: np.ndarray, emission_mask: np.ndarray,
         patch_size: int, masked_frac_thresh: float,
-        sky_ref: float, sky_std: float) -> Tuple[np.ndarray, np.ndarray]:
+        sky_ref: float, sky_std: float,
+        use_entropy_weights: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """Find clean background patches."""
     H, W = channel.shape
     ny = max(1, H // patch_size)
@@ -765,6 +787,38 @@ def _sample_background_patches(
         keep = variances <= var_thresh
         coords = coords[keep]
         values = values[keep]
+        variances = variances[keep]
+
+    # Entropy filter: reject patches whose Shannon entropy is unusually high,
+    # indicating residual contamination by stars or emission structure that the
+    # binary emission mask missed.  Low-entropy patches (nearly uniform ADU
+    # histogram) are genuine sky background samples.
+    if use_entropy_weights and len(values) >= 8:
+        H_ch, W_ch = channel.shape
+        ny_g = max(1, H_ch // patch_size)
+        nx_g = max(1, W_ch // patch_size)
+        cell_h_g = H_ch / ny_g
+        cell_w_g = W_ch / nx_g
+        entropies = []
+        for coord in coords:
+            iy = int(np.clip(round(coord[0] * ny_g - 0.5), 0, ny_g - 1))
+            ix = int(np.clip(round(coord[1] * nx_g - 0.5), 0, nx_g - 1))
+            y0 = int(round(iy * cell_h_g))
+            y1 = min(int(round((iy + 1) * cell_h_g)), H_ch)
+            x0 = int(round(ix * cell_w_g))
+            x1 = min(int(round((ix + 1) * cell_w_g)), W_ch)
+            em = emission_mask[y0:y1, x0:x1].ravel()
+            px = channel[y0:y1, x0:x1].ravel()
+            px = px[em < 0.5]
+            entropies.append(_patch_entropy(px))
+        entropies = np.array(entropies, dtype=np.float64)
+        med_ent = float(np.median(entropies))
+        mad_ent = float(np.median(np.abs(entropies - med_ent)))
+        ent_thresh = med_ent + 2.5 * 1.4826 * max(mad_ent, 1e-9)
+        keep_ent = entropies <= ent_thresh
+        if keep_ent.sum() >= 6:
+            coords = coords[keep_ent]
+            values = values[keep_ent]
 
     return coords, values
 
@@ -867,7 +921,8 @@ def dynamic_background_extraction(
         outlier_sigma: float = Config.DBE_OUTLIER_SIGMA,
         outlier_iters: int = Config.DBE_OUTLIER_ITERS,
         star_mask: Optional[np.ndarray] = None,
-        verbose: bool = False) -> np.ndarray:
+        verbose: bool = False,
+        use_entropy_weights: bool = False) -> np.ndarray:
     """Dynamic Background Extraction (DBE) via adaptive sampling and RBF fitting."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -908,7 +963,8 @@ def dynamic_background_extraction(
         channel = rgb[:, :, c].astype(np.float64)
         coords, values = _sample_background_patches(
             channel, emission_mask, patch_size, masked_frac_thresh,
-            sky_ref=sky_med, sky_std=sky_std)
+            sky_ref=sky_med, sky_std=sky_std,
+            use_entropy_weights=use_entropy_weights)
 
         n = len(coords)
         if verbose:

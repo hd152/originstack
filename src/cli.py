@@ -230,7 +230,7 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
 
     skip_keys = {'directory', 'output', 'config', 'health_check', 'dry_run',
                  'verbose', 'debug_registration', 'keep_intermediates',
-                 'ai_advisor', 'ai_report', 'preset', 'stretch_preset',
+                 'preset', 'stretch_preset',
                  'diagnostic', 'diagnostic_dir'}
 
     for key, value in sorted(vars(args).items()):
@@ -288,7 +288,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
     if combined['bias']:
         masters['bias'] = make_master(combined['bias'], method='median')
         if masters['bias'] is not None:
-            safe_print(f"  ✓ Master bias:  {len(combined['bias'])} frames → "
+            safe_print(f"  ✓ Master bias:  {len(combined['bias'])} frames -> "
                        f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
     else:
         masters['bias'] = None
@@ -297,7 +297,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         combined['dark'] = select_matching_darks(combined['light'], combined['dark'])
         masters['dark'] = make_master(combined['dark'], method='median')
         if masters['dark'] is not None:
-            safe_print(f"  ✓ Master dark:  {len(combined['dark'])} frames → "
+            safe_print(f"  ✓ Master dark:  {len(combined['dark'])} frames -> "
                        f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
     else:
         masters['dark'] = None
@@ -305,7 +305,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
     if combined['flat']:
         masters['flat'] = make_master(combined['flat'], method='median')
         if masters['flat'] is not None:
-            safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames → "
+            safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames -> "
                        f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
     else:
         masters['flat'] = None
@@ -424,7 +424,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         if frames['bias']:
             masters['bias'] = make_master(frames['bias'], method='median')
             if masters['bias'] is not None:
-                safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames → {masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
+                safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> {masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
         else:
             masters['bias'] = None
 
@@ -433,14 +433,14 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             frames['dark'] = select_matching_darks(frames.get('light', []), frames['dark'])
             masters['dark'] = make_master(frames['dark'], method='median')
             if masters['dark'] is not None:
-                safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames → {masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+                safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> {masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
         else:
             masters['dark'] = None
 
         if frames['flat']:
             masters['flat'] = make_master(frames['flat'], method='median')
             if masters['flat'] is not None:
-                safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames → {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+                safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
         else:
             masters['flat'] = None
 
@@ -479,7 +479,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             # Bayer pixels together, making flat_norm identical for all channels
             # (~0.888) and completely disabling per-channel QE correction.
             # Per-channel smoothing keeps the correct flat_norm values
-            # (R≈0.39, G≈1.00, B≈1.16 for this camera) so the flat field
+            # (R~=0.39, G~=1.00, B~=1.16 for this camera) so the flat field
             # simultaneously corrects vignetting AND camera spectral response.
             sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
             flat_raw = masters['flat'].astype(np.float32)
@@ -526,7 +526,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     else:
                         b_quality = "Poor (noisy — stack more bias frames)"
                     safe_print(f"    Bias:  pedestal={b_med:.1f} ADU  "
-                               f"noise={b_std:.1f} ADU  → {b_quality}")
+                               f"noise={b_std:.1f} ADU  -> {b_quality}")
                 if masters.get('dark') is not None:
                     d = masters['dark']
                     dark_med = float(np.median(d))
@@ -554,7 +554,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     exp_str = f"  exp={dark_et:.1f}s" if dark_et else ''
                     iso_str = f"  ISO={dark_iso}" if dark_iso is not None else ''
                     safe_print(f"    Dark:  median={dark_med:.1f} ADU{rate_str}"
-                               f"{temp_str}{exp_str}{iso_str}  peak={dark_peak:.0f} ADU  → {d_quality}")
+                               f"{temp_str}{exp_str}{iso_str}  peak={dark_peak:.0f} ADU  -> {d_quality}")
                     # Warn if dark ISO doesn't match the majority of light frames
                     if dark_iso is not None and frames.get('light'):
                         light_isos = []
@@ -597,7 +597,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                             f_quality = "Heavy vignetting — flat correction important"
                         else:
                             f_quality = "Severe vignetting — check flat exposure/optics"
-                        safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%  → {f_quality}")
+                        safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%  -> {f_quality}")
             except Exception:
                 pass
 
@@ -791,7 +791,7 @@ def parse_args():
                         'winsorized: like sigma_clip but clips to boundary instead of rejecting. '
                         'percentile: reject outside [low,high] percentile (good for <8 frames). '
                         'esd: Grubbs/ESD test (best for <15 frames, needs scipy). '
-                        'auto: choose based on frame count (<8→percentile, else sigma_clip). '
+                        'auto: choose based on frame count (<8->percentile, else sigma_clip). '
                         'mean/median: no rejection.')
     p.add_argument('--rejection-sigma', type=float, default=3.0,
                    help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
@@ -900,7 +900,7 @@ def parse_args():
                         'Can run alongside --denoise or as a standalone pass. '
                         'Requires cv2 for best performance (scipy fallback available).')
     p.add_argument('--denoise-mmt-levels', type=int, default=4,
-                   help='MMT decomposition depth (default: 4 → kernel sizes 3,5,9,17 px). '
+                   help='MMT decomposition depth (default: 4 -> kernel sizes 3,5,9,17 px). '
                         'Increase to 5 (adds 33 px scale) for very noisy stacks with '
                         'prominent large-scale sky gradients. Only used when --denoise-mmt.')
     p.add_argument('--denoise-mmt-strength', type=float, default=3.0,
@@ -924,8 +924,8 @@ def parse_args():
     p.add_argument('--denoise-acdnr-k', type=float, default=3.0,
                    help='ACDNR contrast threshold multiplier k (default: 3.0). '
                         'Smoothing triggers when local contrast < k * sky_sigma. '
-                        'Lower → more aggressive (smooth structured regions too); '
-                        'higher → conservative sky-only smoothing. Typical range 2.0–5.0. '
+                        'Lower -> more aggressive (smooth structured regions too); '
+                        'higher -> conservative sky-only smoothing. Typical range 2.0–5.0. '
                         'Only used when --denoise-acdnr.')
     p.add_argument('--deconvolve', action='store_true', default=False,
                    help='Enable Richardson-Lucy deconvolution for sharpening (default: off, requires scikit-image)')
@@ -1110,15 +1110,6 @@ def parse_args():
                    help='Save the star detection mask as a FITS sidecar file '
                         '(<stem>_star_mask.fits) for use in external tools '
                         '(PixInsight, Siril, etc.)')
-    # --- AI features (require: pip install anthropic  +  ANTHROPIC_API_KEY env var) ---
-    p.add_argument('--ai-advisor', action='store_true',
-                   help='After Phase 1, call Claude to recommend optimal stacking '
-                        'parameters and apply them automatically. '
-                        'Requires: pip install anthropic  and  ANTHROPIC_API_KEY.')
-    p.add_argument('--ai-report', action='store_true',
-                   help='After stacking, call Claude to generate a narrative session '
-                        'report (saved as <output>_report.md). '
-                        'Requires: pip install anthropic  and  ANTHROPIC_API_KEY.')
     # --- Checkpoint resume ---
     p.add_argument('--keep-checkpoint', action='store_true',
                    help='After a successful stack, keep the checkpoint directory and '
@@ -1153,6 +1144,169 @@ def parse_args():
                         'median cascade + adaptive contrast cleanup); star fields and '
                         'wide fields keep wavelet and add ACDNR for sky cleanup; '
                         'MMT strength is scaled to stack SNR.')
+    # --- BM3D denoising ---
+    p.add_argument('--denoise-bm3d', action='store_true',
+                   help='Apply BM3D (Block-Matching 3D) collaborative filter denoising. '
+                        'Groups visually similar 8×8 patches across the image, performs '
+                        'joint 3D DCT thresholding on each group, then aggregates via '
+                        'overlap-add weighted averaging. A two-step process (hard threshold '
+                        'then Wiener filter) gives near-optimal denoising. Operates on '
+                        'luminance only to preserve colour. Slower than wavelet but '
+                        'better preserves fine texture at low noise levels.')
+    p.add_argument('--bm3d-sigma', type=float, default=0.0,
+                   help='BM3D noise standard deviation estimate (default: 0.0 = auto). '
+                        'Auto-estimates from the median absolute deviation of a robust '
+                        'sky region. Override if you know the noise level. '
+                        'Only used when --denoise-bm3d.')
+    p.add_argument('--bm3d-stride', type=int, default=None,
+                   help='BM3D reference block stride in pixels (default: auto = 8 for '
+                        'images >1500px, 4 otherwise). Larger strides are faster but '
+                        'may produce a slight blocking artefact in very smooth sky regions. '
+                        'Typical range 4–16. Only used when --denoise-bm3d.')
+    p.add_argument('--bm3d-search-window', type=int, default=16,
+                   help='BM3D patch-matching search window radius in pixels (default: 16). '
+                        'Larger values find more similar patches but increase runtime '
+                        'quadratically. Only used when --denoise-bm3d.')
+    p.add_argument('--bm3d-group-size', type=int, default=8,
+                   help='BM3D maximum number of similar patches per group (default: 8). '
+                        'More patches = better noise suppression but diminishing returns '
+                        'beyond 16. Only used when --denoise-bm3d.')
+    # --- Anisotropic diffusion ---
+    p.add_argument('--denoise-aniso', action='store_true',
+                   help='Apply Perona-Malik anisotropic diffusion: a PDE-based iterative '
+                        'smoother that reduces noise in uniform regions while sharpening '
+                        'edges. Each iteration computes the gradient magnitude and applies '
+                        'a conduction function that inhibits diffusion across strong edges. '
+                        'Particularly effective at preserving nebula filaments and galaxy '
+                        'dust lane boundaries.')
+    p.add_argument('--aniso-iterations', type=int, default=20,
+                   help='Anisotropic diffusion iteration count (default: 20). '
+                        'More iterations give stronger smoothing. Typical range 10–50. '
+                        'Only used when --denoise-aniso.')
+    p.add_argument('--aniso-kappa', type=float, default=30.0,
+                   help='Anisotropic diffusion edge sensitivity kappa (default: 30.0). '
+                        'Lower values preserve finer edges; higher values allow diffusion '
+                        'across weaker gradients. Typical range 10–50. '
+                        'Only used when --denoise-aniso.')
+    p.add_argument('--aniso-gamma', type=float, default=0.1,
+                   help='Anisotropic diffusion step size gamma (default: 0.1). '
+                        'Must be <=0.25 for numerical stability. Reduce to 0.05 if '
+                        'artefacts appear with many iterations. Only used when --denoise-aniso.')
+    p.add_argument('--aniso-option', type=int, choices=[1, 2], default=1,
+                   help='Anisotropic diffusion conduction function (default: 1). '
+                        '1 = exp(-(|nablaI|/kappa)²): sharper edge preservation, better for '
+                        'point-like features and star halos. '
+                        '2 = 1/(1+(|nablaI|/kappa)²): softer roll-off, better for extended '
+                        'smooth nebulosity. Only used when --denoise-aniso.')
+    # --- SCNR (Subtractive Chromatic Noise Reduction) ---
+    p.add_argument('--scnr', action='store_true',
+                   help='Apply Subtractive Chromatic Noise Reduction to the target colour '
+                        'channel (default: green). Replaces each pixel in the target channel '
+                        'with min(pixel, average_of_other_two_channels), selectively removing '
+                        'chromatic noise without introducing colour casts. Effective for '
+                        'suppressing green cast artefacts common in OSC/DSLR images taken '
+                        'under artificial light pollution.')
+    p.add_argument('--scnr-amount', type=float, default=1.0,
+                   help='SCNR correction strength blend fraction (default: 1.0 = full). '
+                        '0 = no correction, 1 = full min-replacement. '
+                        'Partial correction (0.5–0.8) is useful when a mild colour cast '
+                        'is present but full suppression would be too aggressive. '
+                        'Only used when --scnr.')
+    p.add_argument('--scnr-target', choices=['green', 'red', 'blue'], default='green',
+                   help='SCNR target channel to suppress (default: green). '
+                        'Green is the most common artefact channel in OSC sensors '
+                        'due to the 2:1 green-to-R/B Bayer ratio. '
+                        'Only used when --scnr.')
+    # --- Photometric colour calibration (gray-locus + optional Gaia) ---
+    p.add_argument('--photometric-calibration', action='store_true',
+                   help='Apply gray-locus photometric colour calibration. '
+                        'Performs aperture photometry on detected stars, identifies '
+                        'solar-type F-G-K stars via iterative sigma-clipping of '
+                        'colour ratios, and derives per-channel scale factors that '
+                        'drive the median gray-locus star colour to neutral. '
+                        'Corrects systematic white-balance errors from unequal '
+                        'Bayer QE, residual atmospheric extinction, and flat-field '
+                        'colour response errors. No external dependencies required.')
+    p.add_argument('--gaia-calibration', action='store_true',
+                   help='Extend --photometric-calibration with a Gaia DR3 catalogue '
+                        'query for improved accuracy. Matches detected stars to Gaia '
+                        'sources, uses the BP-RP colour index to predict expected '
+                        'R/G/B ratios, and fits per-channel scales via least squares. '
+                        'Falls back to gray-locus method if fewer than 10 Gaia matches '
+                        'are found. Requires --plate-solve and astroquery.')
+    # --- Blind PSF estimation ---
+    p.add_argument('--deconvolve-blind-psf', action='store_true',
+                   help='Use a model-free empirical PSF estimated by median-stacking '
+                        'normalised star cutouts instead of a parametric Gaussian/Moffat '
+                        'model. Captures asymmetric PSF shapes from atmospheric turbulence, '
+                        'mirror diffraction spikes, and field curvature. '
+                        'Combined with --deconvolve for Richardson-Lucy or --deconvolve-tv '
+                        'for Total Variation regularized deconvolution.')
+    # --- Total Variation regularized deconvolution ---
+    p.add_argument('--deconvolve-tv', action='store_true',
+                   help='Apply Total Variation regularized deconvolution instead of '
+                        'Richardson-Lucy. Minimises ½||Hx-y||² + lambda||nablax||_TV via gradient '
+                        'descent, where the TV term suppresses ringing artefacts. '
+                        'Better than RL for images with sharp edges (galaxy discs, '
+                        'nebula boundaries) but slower. Use --tv-lambda to tune '
+                        'regularisation strength.')
+    p.add_argument('--tv-lambda', type=float, default=None,
+                   help=f'TV deconvolution regularisation weight lambda '
+                        f'(default: {Config.TV_LAMBDA}). '
+                        'Larger values -> stronger noise suppression, reduced ringing, '
+                        'but softer fine structure. Smaller values -> more aggressive '
+                        'sharpening. Typical range 0.005–0.1. '
+                        'Only used when --deconvolve-tv.')
+    p.add_argument('--tv-iterations', type=int, default=None,
+                   help=f'TV deconvolution gradient-descent iterations '
+                        f'(default: {Config.TV_ITERATIONS}). '
+                        'More iterations converge toward a sharper solution but '
+                        'increase runtime linearly. Typical range 30–100. '
+                        'Only used when --deconvolve-tv.')
+    # --- Entropy-weighted background ---
+    p.add_argument('--entropy-bg', action='store_true',
+                   help='Enable Shannon-entropy filtering of background sample patches '
+                        'during Dynamic Background Extraction. Patches whose entropy '
+                        'significantly exceeds the median (> 2.5sigma above MAD) are '
+                        'rejected as likely contaminated by uncaught stars, faint '
+                        'nebulosity, or hot pixel clusters. Produces a cleaner '
+                        'background model in crowded fields or emission nebula regions. '
+                        'Only used when --bg-method=dbe (or default DBE).')
+    # --- Polynomial distortion correction ---
+    p.add_argument('--poly-distortion', action='store_true',
+                   help='Enable polynomial distortion correction during registration. '
+                        'After the initial shift/affine alignment, fits a degree-2 (or '
+                        '--poly-distortion-degree) polynomial warp to residual star '
+                        'position errors across the frame and applies a per-pixel '
+                        'correction via bicubic resampling. Corrects barrel/pincushion '
+                        'lens distortion, field curvature, and atmospheric refraction '
+                        'gradients. Requires at least 12 matched star pairs.')
+    p.add_argument('--poly-distortion-degree', type=int, default=2, choices=[2, 3],
+                   help='Polynomial degree for distortion correction (default: 2). '
+                        'Degree 2 fits barrel/pincushion (6 terms per axis). '
+                        'Degree 3 adds higher-order field curvature (10 terms). '
+                        'Only used when --poly-distortion. '
+                        'Degree 3 requires more matched stars (>20 recommended).')
+    # --- HDR exposure blend ---
+    p.add_argument('--hdr-short-exptime', type=float, default=1.0,
+                   help='Nominal exposure time (seconds) of the short-exposure stack '
+                        'supplied via --hdr-combine, used to scale it to the long '
+                        'stack brightness before blending (default: 1.0). '
+                        'Set to the actual sub-frame exposure of the short stack '
+                        'for accurate scaling.')
+    p.add_argument('--hdr-long-exptime', type=float, default=1.0,
+                   help='Nominal exposure time (seconds) of the main (long-exposure) '
+                        'stack for HDR scaling (default: 1.0). '
+                        'Used together with --hdr-short-exptime to compute the '
+                        'brightness ratio before blending.')
+    # --- Comet dual-track blend ---
+    p.add_argument('--comet-blend-sigma', type=float, default=30.0,
+                   help='Gaussian blend radius in pixels for comet+star dual-stack '
+                        'blending (default: 30.0). Controls the spatial width of the '
+                        'transition from the comet-aligned stack (near nucleus) to '
+                        'the star-aligned stack (field). Increase for large comets or '
+                        'when the coma extends far from the nucleus. '
+                        'Only used when --comet-mode.')
     return p.parse_args()
 
 

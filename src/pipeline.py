@@ -361,23 +361,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 # Save checkpoint after phase 1
                 save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats)
 
-                # AI parameter advisor (runs between phase 1 and 2)
-                if getattr(args, 'ai_advisor', False):
-                    from src.ai_advisor import get_parameter_recommendations, apply_recommendations
-                    rec, explanation = get_parameter_recommendations(final, rejected_reasons, args)
-                    if rec is not None:
-                        print(f"\n  AI Advisor:\n  {explanation}")
-                        if rec.warnings:
-                            for w in rec.warnings:
-                                safe_print(f"  ⚠  {w}")
-                        changes = apply_recommendations(rec, args)
-                        if changes:
-                            safe_print("  Applied recommendations:")
-                            for c in changes:
-                                safe_print(f"    • {c}")
-                        else:
-                            safe_print("  Current settings look good — no changes applied.")
-
                 # Heuristic auto-advisor
                 if getattr(args, 'auto', False):
                     from src.auto_settings import apply_auto_settings
@@ -664,13 +647,5 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                    "output path to test different post-processing settings.")
     else:
         cleanup_checkpoint(output_path)
-
-    if getattr(args, 'ai_report', False):
-        from src.ai_advisor import build_report_context, generate_session_report
-        report_ctx = build_report_context(
-            final=final, rejected_reasons=rejected_reasons, args=args, stats=stats,
-            shifts=shifts, dither_info=dither_info, output_path=output_path,
-            stacked_shape=stacked.shape)
-        generate_session_report(report_ctx, output_path)
 
     return output_path

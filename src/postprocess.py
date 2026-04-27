@@ -20,8 +20,12 @@ from src.background import (apply_background_extraction, remove_sky_residual,
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
                            bilateral_denoise, local_normalize, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
-                           multiscale_local_contrast, mmt_denoise, acdnr_denoise)
-from src.psf_deconvolution import estimate_psf, make_synthetic_psf, richardson_lucy_deconvolve
+                           multiscale_local_contrast, mmt_denoise, acdnr_denoise,
+                           bm3d_denoise, anisotropic_diffusion, scnr, adaptive_mtf)
+from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
+                                    richardson_lucy_deconvolve,
+                                    estimate_psf_blind, tv_regularized_deconvolve)
+from src.photometric_calibration import photometric_color_calibrate, try_gaia_calibration
 
 DAOStarFinder = None
 
@@ -357,9 +361,11 @@ def postprocess_stack(
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
             print(f"\n  Applying Dynamic Background Extraction "
                   f"(patch={dbe_patch}px, RBF thin-plate-spline, sigma={args.bg_clip_sigma})...")
+            _entropy_bg = getattr(args, 'entropy_bg', False)
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
-                verbose=args.verbose, star_mask=pp_star_mask)
+                verbose=args.verbose, star_mask=pp_star_mask,
+                use_entropy_weights=_entropy_bg)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
         else:
             print(f"\n  Applying background extraction "
@@ -565,33 +571,117 @@ def postprocess_stack(
                                 chroma_factor=acdnr_chroma, star_mask=pp_star_mask)
         safe_print(f"  ✓ ACDNR denoise ({format_time(time.time() - acdnr_start)})")
 
-    # 7. Richardson-Lucy deconvolution
+    # 6.7. BM3D denoising
+    if getattr(args, 'denoise_bm3d', False) and 'bm3d' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_bm3d_denoise')
+        bm3d_sigma = getattr(args, 'bm3d_sigma', 0.0)
+        bm3d_stride = getattr(args, 'bm3d_stride', None)
+        bm3d_sw = getattr(args, 'bm3d_search_window', 16)
+        bm3d_gs = getattr(args, 'bm3d_group_size', 8)
+        sig_str = f"auto" if bm3d_sigma <= 0 else f"{bm3d_sigma:.1f}"
+        print(f"\n  Applying BM3D denoising (sigma={sig_str}, stride={bm3d_stride or 'auto'})...")
+        bm3d_start = time.time()
+        stacked = bm3d_denoise(stacked, sigma_psd=bm3d_sigma,
+                               stride=bm3d_stride, search_window=bm3d_sw,
+                               group_size=bm3d_gs, star_mask=pp_star_mask)
+        safe_print(f"  ✓ BM3D denoise ({format_time(time.time() - bm3d_start)})")
+        stacked = _sanitize(stacked, "BM3D denoising")
+
+    # 6.8. Anisotropic diffusion (Perona-Malik)
+    if getattr(args, 'denoise_aniso', False) and 'aniso' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_aniso_denoise')
+        aniso_iters = getattr(args, 'aniso_iterations', 20)
+        aniso_kappa = getattr(args, 'aniso_kappa', 30.0)
+        aniso_gamma = getattr(args, 'aniso_gamma', 0.1)
+        aniso_opt = getattr(args, 'aniso_option', 1)
+        print(f"\n  Applying anisotropic diffusion "
+              f"(iters={aniso_iters}, κ={aniso_kappa:.1f}, γ={aniso_gamma:.2f})...")
+        aniso_start = time.time()
+        stacked = anisotropic_diffusion(stacked, iterations=aniso_iters,
+                                        kappa=aniso_kappa, gamma=aniso_gamma,
+                                        option=aniso_opt, star_mask=pp_star_mask)
+        safe_print(f"  ✓ Anisotropic diffusion ({format_time(time.time() - aniso_start)})")
+        stacked = _sanitize(stacked, "anisotropic diffusion")
+
+    # 6.9. SCNR (Subtractive Chromatic Noise Reduction)
+    if getattr(args, 'scnr', False) and 'scnr' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_scnr')
+        scnr_amount = getattr(args, 'scnr_amount', 1.0)
+        scnr_target = getattr(args, 'scnr_target', 'green')
+        print(f"\n  Applying SCNR ({scnr_target} channel, amount={scnr_amount:.2f})...")
+        scnr_start = time.time()
+        stacked = scnr(stacked, amount=scnr_amount, target=scnr_target)
+        safe_print(f"  ✓ SCNR ({format_time(time.time() - scnr_start)})")
+
+    # 6.95. Photometric color calibration
+    if getattr(args, 'photometric_calibration', False) and 'photo_cal' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_photo_cal')
+        print(f"\n  Applying photometric color calibration (gray-locus method)...")
+        pc_start = time.time()
+        use_gaia = getattr(args, 'gaia_calibration', False)
+        wcs_obj = getattr(args, '_wcs', None)
+        if use_gaia and wcs_obj is not None:
+            stacked, _pc_scales = try_gaia_calibration(
+                stacked, _pp_sources, wcs=wcs_obj, verbose=args.verbose)
+        else:
+            stacked, _pc_scales = photometric_color_calibrate(
+                stacked, _pp_sources, verbose=args.verbose)
+        if _pc_scales is not None:
+            safe_print(f"  ✓ Photometric calibration "
+                       f"(R×{_pc_scales[0]:.3f} G×{_pc_scales[1]:.3f} B×{_pc_scales[2]:.3f}, "
+                       f"{format_time(time.time() - pc_start)})")
+        else:
+            safe_print(f"  ⚠ Photometric calibration skipped (insufficient stars)")
+        stacked = _sanitize(stacked, "photometric calibration")
+
+    # 7. Deconvolution (RL, blind PSF, or TV)
     if getattr(args, 'deconvolve', False) and 'deconvolve' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_deconvolve')
         rl_iters = getattr(args, 'deconvolve_iterations', Config.RL_DEFAULT_ITERATIONS)
         rl_fwhm_override = getattr(args, 'deconvolve_fwhm', None)
         rl_model = getattr(args, 'deconvolve_psf_model', 'moffat')
+        use_blind_psf = getattr(args, 'deconvolve_blind_psf', False)
+        use_tv = getattr(args, 'deconvolve_tv', False)
+        tv_lambda = getattr(args, 'tv_lambda', Config.TV_LAMBDA)
+        tv_iters = getattr(args, 'tv_iterations', Config.TV_ITERATIONS)
         psf = None
+
         if rl_fwhm_override is not None:
             psf = make_synthetic_psf(rl_fwhm_override, model=rl_model)
-            safe_print(f"\n  Richardson-Lucy deconvolution "
-                       f"(FWHM={rl_fwhm_override:.2f}px manual, iters={rl_iters})...")
+            safe_print(f"\n  Deconvolution: synthetic PSF FWHM={rl_fwhm_override:.2f}px...")
+        elif use_blind_psf and _pp_sources is not None and len(_pp_sources) > 0:
+            safe_print(f"\n  Estimating PSF (blind star-stacking, no model fitting)...")
+            psf, psf_fwhm = estimate_psf_blind(stacked, _pp_sources)
+            if psf is not None:
+                safe_print(f"    Blind PSF FWHM ≈ {psf_fwhm:.2f} px")
+            else:
+                safe_print("    Blind PSF estimation failed — skipping deconvolution")
         elif _pp_sources is not None and len(_pp_sources) > 0:
             safe_print(f"\n  Estimating PSF from star profiles ({rl_model} model)...")
             psf, psf_fwhm = estimate_psf(stacked, _pp_sources, model=rl_model)
             if psf is not None:
                 safe_print(f"    PSF FWHM: {psf_fwhm:.2f} px")
-                safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
             else:
                 safe_print("    PSF estimation failed — skipping deconvolution")
         else:
-            safe_print("\n  No star detections for PSF estimation — use --deconvolve-fwhm "
-                       "to specify manually")
+            safe_print("\n  No star detections for PSF — use --deconvolve-fwhm to specify")
+
         if psf is not None:
-            rl_start = time.time()
-            stacked = richardson_lucy_deconvolve(stacked, psf, iterations=rl_iters,
-                                                  star_mask=pp_star_mask)
-            safe_print(f"  ✓ Richardson-Lucy deconvolution ({format_time(time.time() - rl_start)})")
+            deconv_start = time.time()
+            if use_tv:
+                safe_print(f"  Total Variation deconvolution "
+                           f"(λ={tv_lambda:.4f}, iters={tv_iters})...")
+                stacked = tv_regularized_deconvolve(stacked, psf,
+                                                     iterations=tv_iters,
+                                                     lambda_tv=tv_lambda,
+                                                     star_mask=pp_star_mask)
+                safe_print(f"  ✓ TV deconvolution ({format_time(time.time() - deconv_start)})")
+            else:
+                safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
+                stacked = richardson_lucy_deconvolve(stacked, psf, iterations=rl_iters,
+                                                      star_mask=pp_star_mask)
+                safe_print(f"  ✓ Richardson-Lucy deconvolution "
+                           f"({format_time(time.time() - deconv_start)})")
             stacked = _sanitize(stacked, "deconvolution")
 
     # 8. Star reduction
