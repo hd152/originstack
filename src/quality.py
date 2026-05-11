@@ -128,10 +128,9 @@ def measure_fwhm(img: np.ndarray, star_positions: Optional[object], cutout_radiu
         (ix >= cutout_radius) & (ix < W - cutout_radius)
     )
 
-    for _, y, x, is_valid in zip(sorted_idx[:n_stars], iy, ix, border_valid):
-        if not is_valid:
-            continue
-
+    valid_mask = border_valid.nonzero()[0]
+    for idx in valid_mask:
+        y, x = iy[idx], ix[idx]
         cutout = img[y - cutout_radius:y + cutout_radius + 1,
                      x - cutout_radius:x + cutout_radius + 1].astype(np.float32)
 
@@ -374,18 +373,20 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False) -> Dict:
         except Exception:
             sharpness = 0.0
 
-    # Composite quality score
+    # Composite quality score (0–100 range).
+    # Normalisation targets realistic single-frame values:
+    #   SNR ~2 = good sky-limited frame; FWHM ~4px = good seeing (gentle penalty above that).
     if quick:
-        # Simplified score without star metrics — used for initial quality gate
-        score = brightness * contrast * max(snr / 10.0, 0.01) * 100.0
+        # SNR-only score for the initial quality gate (no star detection overhead)
+        score = min(max(snr / 2.0, 0.01), 1.0) * 100.0
     else:
         star_factor = min(star_count / 50.0, 1.0) if star_count > 0 else 0.01
-        snr_factor = min(snr / 10.0, 1.0) if snr > 0 else 0.01
+        snr_factor = min(snr / 2.0, 1.0) if snr > 0 else 0.01
         fwhm_factor = (
-            max(0.1, 1.0 / (1.0 + max(0.0, fwhm - 2.0) ** 2 * 0.1))
+            max(0.1, 1.0 / (1.0 + max(0.0, fwhm - 2.0) ** 2 * 0.02))
             if fwhm > 0 else 1.0
         )
-        score = brightness * contrast * star_factor * snr_factor * fwhm_factor * 100.0
+        score = snr_factor * star_factor * fwhm_factor * 100.0
 
     return {
         'brightness': brightness,

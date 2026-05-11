@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shutil
 import tempfile
 import time
 from typing import Dict, List, Optional
@@ -79,7 +80,7 @@ def _save_blink_frames(final: List[FrameInfo], final_indices: List[int],
     try:
         hdu_list = [afits.PrimaryHDU()]
         for j, f in enumerate(final):
-            rgb = np.array(mem_rgb[final_indices[j]])
+            rgb = mem_rgb[final_indices[j]]
             aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
             cropped = aligned[top:bottom, left:right, :]
             data_out = np.transpose(cropped, (2, 0, 1)).astype(np.float32)
@@ -283,8 +284,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
         if resume_phase >= 3:
             final = restore_frame_state(lights, ckpt_state)
-            _lights_index = {id(f): i for i, f in enumerate(lights)}
-            final_indices = [_lights_index[id(f)] for f in final]
+            _lights_index = {f.path: i for i, f in enumerate(lights)}
+            final_indices = [_lights_index[f.path] for f in final if f.path in _lights_index]
             shifts = [tuple(s) for s in ckpt_state['shifts']]
             transforms = [None] * len(final)
             dither_info = ckpt_state.get('dither_info', {})
@@ -302,6 +303,16 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         mm_mgr = _MemmapManager()
         rgb_shape = (n, H_rgb, W_rgb, C)
         lum_shape = (n, H_rgb, W_rgb)
+        bytes_needed = (n * H_rgb * W_rgb * C * 4) + (n * H_rgb * W_rgb * 4)
+        try:
+            tmpdir = tempfile.gettempdir()
+            _, _, free_bytes = shutil.disk_usage(tmpdir)
+            if free_bytes < bytes_needed:
+                safe_print(f"  WARNING: temp dir may lack space for memmaps: "
+                           f"need ~{bytes_needed / 1e9:.2f} GB, "
+                           f"{free_bytes / 1e9:.2f} GB free in {tmpdir}")
+        except Exception:
+            pass
         mem_rgb = mm_mgr.create('stack_rgb_', 'float32', rgb_shape)
         mm_rgb_path = mm_mgr._files[-1]
         mem_lum = mm_mgr.create('stack_lum_', 'float32', lum_shape)

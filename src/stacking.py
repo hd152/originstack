@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
@@ -727,25 +728,94 @@ def run_stacking_phase(
             out_w = int(round(crop_w * drizzle_scale))
             print(f"  Drizzle: {drizzle_scale:.1f}x ({crop_h}x{crop_w} -> {out_h}x{out_w})")
             acc = np.zeros((out_h, out_w, C), dtype=np.float64)
-            weight_map = np.zeros((out_h, out_w, C), dtype=np.float64)
             gpu = get_gpu()
-            # Coverage mask is invariant across frames (same shape, zero shift, fixed scale)
-            ones_template = np.ones((crop_h, crop_w), dtype=np.float64)
-            coverage = _lanczos_resample_frame(ones_template, (0.0, 0.0), drizzle_scale, out_h, out_w)
-            valid3 = (coverage > 0.5)[:, :, np.newaxis]
-            for j in tqdm(range(n_final), desc="  Drizzling", unit="frame",
-                          disable=not args.verbose):
-                with gpu.stream_context():
-                    rgb = np.array(mem_rgb[final_indices[j]])
-                    cropped = apply_transform(rgb, shift=shifts[j],
-                                             transform=transforms[j])[top:bottom, left:right, :]
+            spline_order = 5
+            inv_scale = 1.0 / drizzle_scale
+
+            # Compose alignment + crop + upscale into a single affine_transform
+            # per frame, avoiding large per-worker coordinate arrays.
+            #
+            # apply_transform uses ndimage.affine_transform(raw, R, offset) or
+            # ndimage.shift(raw, shift), both computing:
+            #   aligned[o] = raw[R @ o + offset]   (affine)
+            #   aligned[o] = raw[o - shift]         (shift)
+            #
+            # We want: for drizzle output pixel (oy, ox), read from raw at:
+            #   raw_coord = R @ (oy/scale + top, ox/scale + left) + alignment_offset
+            # Rearranging as affine_transform form (raw[M @ out + off]):
+            #   M = R / scale,  off = R @ [top, left] + alignment_offset
+            #
+            # calc_common_crop guarantees the crop is valid for all frames,
+            # so all output pixels map to valid raw pixels — no per-frame
+            # validity mask needed.
+
+            acc_lock = threading.Lock()
+
+            def _drizzle_one(j):
+                """Single-pass drizzle: raw frame → upscaled output via one affine."""
+                rgb = np.array(mem_rgb[final_indices[j]])
                 w = float(weights[j])
-                resampled = _lanczos_resample_frame(cropped, (0.0, 0.0),
-                                                     drizzle_scale, out_h, out_w)
-                acc += np.where(valid3, resampled * w, 0.0)
-                weight_map += np.where(valid3, w, 0.0)
-            weight_map[weight_map == 0] = 1.0
-            stacked = (acc / weight_map).astype(np.float32)
+                shift_j = shifts[j]
+                transform_j = transforms[j]
+
+                crop_offset = np.array([float(top), float(left)])
+
+                if transform_j is not None:
+                    R = transform_j.params[:2, :2]
+                    t_xy = transform_j.params[:2, 2]
+                    t_rowcol = np.array([t_xy[1], t_xy[0]])
+                    align_offset = -R @ t_rowcol
+                    # Compose: M = R * inv_scale, off = R @ crop_offset + align_offset
+                    M = R * inv_scale
+                    off = R @ crop_offset + align_offset
+                else:
+                    sy, sx = shift_j if shift_j is not None else (0.0, 0.0)
+                    # shift case: raw = aligned - shift
+                    # M = I * inv_scale, off = crop_offset - shift
+                    M = np.array([[inv_scale, 0.0], [0.0, inv_scale]])
+                    off = crop_offset - np.array([sy, sx])
+
+                resampled = np.empty((out_h, out_w, C), dtype=np.float32)
+                for c in range(C):
+                    resampled[:, :, c] = ndimage.affine_transform(
+                        rgb[:, :, c], M, offset=off,
+                        output_shape=(out_h, out_w),
+                        order=spline_order, mode='constant', cval=0.0)
+
+                resampled *= w  # in-place float32, avoids float64 temporary
+                with acc_lock:
+                    np.add(acc, resampled, out=acc)  # float64 += float32 (promoted)
+                    total_weight_ref[0] += w
+
+            total_weight_ref = [0.0]
+
+            # Cap workers based on available RAM.
+            # Per worker: raw frame (H*W*C*4) + resampled output (out_h*out_w*C*4)
+            # + affine_transform internal buffer (~out_h*out_w*8 per channel call).
+            n_drizzle = min(os.cpu_count() or 4, n_final)
+            try:
+                import psutil
+                avail_mb = psutil.virtual_memory().available / 1e6
+                raw_mb = H * W * C * 4 / 1e6
+                out_mb = out_h * out_w * C * 4 / 1e6
+                affine_buf_mb = out_h * out_w * 8 / 1e6  # scipy internal float64
+                per_worker_mb = raw_mb + out_mb + affine_buf_mb + 100
+                safe_workers = max(1, int(avail_mb / per_worker_mb))
+                if safe_workers < n_drizzle:
+                    print(f"  NOTE: limiting drizzle threads {n_drizzle}\u2192{safe_workers} "
+                          f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
+                    n_drizzle = safe_workers
+            except Exception:
+                pass
+
+            with ThreadPoolExecutor(max_workers=n_drizzle) as executor:
+                futures = {executor.submit(_drizzle_one, j): j for j in range(n_final)}
+                for future in tqdm(as_completed(futures), total=n_final,
+                                   desc="  Drizzling", unit="frame",
+                                   disable=not args.verbose):
+                    future.result()
+
+            stacked = (acc / max(total_weight_ref[0], 1e-12)).astype(np.float32)
 
         else:
             acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
