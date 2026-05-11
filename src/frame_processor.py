@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
+import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,19 +29,84 @@ except Exception:
         return iterable
 
 
+def _get_frame_rotation(hdr: dict) -> Optional[float]:
+    """Extract camera/rotator angle from FITS header. Returns degrees or None."""
+    for key in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
+        val = hdr.get(key)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _build_flat_norm(
+    masters: Dict[str, Optional[np.ndarray]],
+    lights: Optional[List['FrameInfo']] = None,
+) -> None:
+    """Pre-compute masters['_flat_norm'], rotating the flat to match lights if needed.
+
+    Stores the result in masters['_flat_norm'].  Safe to call multiple times —
+    returns immediately if '_flat_norm' is already set.
+    """
+    if masters.get('_flat_norm') is not None:
+        return
+
+    flat_arr = masters.get('flat')
+    if flat_arr is None:
+        return
+
+    med = float(np.median(flat_arr))
+    if med <= 1e-6:
+        return
+
+    flat_norm = np.clip(flat_arr / med, 0.4, 2.5).astype(np.float32)
+
+    # Rotate flat to match light frame orientation when a mismatch is detected.
+    # A flat taken with the camera at a different rotation angle creates a
+    # vignetting correction that is offset from the actual vignetting pattern
+    # of the light frames, producing swirly/crescent dark artifacts.
+    flat_rotation = masters.get('flat_rotation')
+    if flat_rotation is not None and lights:
+        light_rots = [_get_frame_rotation(f.header) for f in lights]
+        light_rots = [r for r in light_rots if r is not None]
+        if light_rots:
+            light_rotation = float(np.median(light_rots))
+            delta = (light_rotation - flat_rotation + 180.0) % 360.0 - 180.0
+            if abs(delta) > 0.5:
+                try:
+                    from scipy.ndimage import rotate as _ndimage_rotate
+                    safe_print(f"  Rotating master flat by {delta:+.1f}° to match lights "
+                               f"(flat={flat_rotation:.1f}°, lights={light_rotation:.1f}°)")
+                    flat_norm = _ndimage_rotate(flat_norm, -delta, reshape=False,
+                                               order=1, mode='nearest')
+                    flat_norm = np.clip(flat_norm, 0.4, 2.5).astype(np.float32)
+                except Exception as e:
+                    safe_print(f"  WARNING: flat rotation correction failed ({e}) — "
+                               "proceeding with unrotated flat")
+
+    masters['_flat_norm'] = flat_norm
+
+
 def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[np.ndarray]],
                           debayer_method: str, white_balance: str,
                           ca_correction: bool = False,
                           cosmic_ray_rejection: bool = False,
                           quick_quality: bool = False,
-                          skip_quality: bool = False) -> Dict[str, Any]:
+                          skip_quality: bool = False,
+                          advanced_metrics: bool = True,
+                          preloaded_data: Optional[tuple] = None) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
     Used by both sequential and parallel paths.
     """
     try:
-        data, hdr = load_fits(path)
+        if preloaded_data is not None:
+            data, hdr = preloaded_data
+        else:
+            data, hdr = load_fits(path)
     except Exception as e:
         return {'error': f'load error: {e}'}
     if data is None or data.size == 0:
@@ -136,7 +203,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
 
-    metrics = {} if skip_quality else compute_quality_metrics(lum, quick=quick_quality)
+    metrics = {} if skip_quality else compute_quality_metrics(
+        lum, quick=quick_quality, advanced_metrics=advanced_metrics)
     return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None}
 
 
@@ -164,11 +232,12 @@ def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Opti
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
     (path, frame_idx, debayer_method, white_balance,
      mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
-     ca_correction, cosmic_ray_rejection) = args_tuple
+     ca_correction, cosmic_ray_rejection, advanced_metrics) = args_tuple
     global _worker_masters
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    ca_correction=ca_correction,
-                                   cosmic_ray_rejection=cosmic_ray_rejection)
+                                   cosmic_ray_rejection=cosmic_ray_rejection,
+                                   advanced_metrics=advanced_metrics)
     if result.get('error'):
         return (frame_idx, None, result['error'])
 
@@ -212,11 +281,8 @@ def execute_frame_processing(
                         and not get_gpu().active
                         and n >= 4)
 
-    # Pre-compute flat_norm once so workers don't redo it per-frame.
-    flat_arr = masters.get('flat')
-    if flat_arr is not None:
-        med = np.median(flat_arr)
-        masters['_flat_norm'] = np.clip(flat_arr / med, 0.4, 2.5) if med > 1e-6 else None
+    # Pre-compute flat_norm once (with rotation correction) so workers don't redo it.
+    _build_flat_norm(masters, lights)
 
     if use_process_pool:
         workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
@@ -238,8 +304,9 @@ def execute_frame_processing(
 
         _ca = getattr(args, 'ca_correction', False)
         _cr = getattr(args, 'cosmic_ray_rejection', False)
+        _adv = getattr(args, 'advanced_metrics', True)
         tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr)
+                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv)
                  for i in range(n)]
 
         try:
@@ -297,12 +364,28 @@ def execute_frame_processing(
         safe_print(f"  Processing {n} frames with {n_workers} threads"
                    f"{' (GPU)' if gpu.active else ''}...")
 
+        # Prefetch FITS data in a dedicated I/O thread pool.  FITS reads release
+        # the GIL (system calls), so these overlap with compute threads for free.
+        # The I/O pool runs up to 4 concurrent reads regardless of n_workers so
+        # we don't swamp the disk with too many concurrent seeks.
+        _adv = getattr(args, 'advanced_metrics', True)
+        _io_workers = min(4, n)
+        _io_pool = ThreadPoolExecutor(max_workers=_io_workers)
+        _load_futures = {i: _io_pool.submit(load_fits, f.path)
+                         for i, f in enumerate(lights)}
+
         def _thread_process_frame(i, f):
+            try:
+                preloaded = _load_futures[i].result()
+            except Exception as e:
+                return i, None, f'load error: {e}', None
             with gpu.stream_context():
                 result = _process_single_frame(
                     f.path, f.header, masters, args.debayer_method, args.white_balance,
                     ca_correction=getattr(args, 'ca_correction', False),
-                    cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False))
+                    cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
+                    advanced_metrics=_adv,
+                    preloaded_data=preloaded)
             if result.get('error'):
                 return i, None, result['error'], None
             mem_rgb[i] = result['rgb']
@@ -338,6 +421,7 @@ def execute_frame_processing(
                                    f'brightness={m.get("brightness",0):.1f}  '
                                    f'contrast={m.get("contrast",0):.1f}  '
                                    f'dynamic_range={m.get("dynamic_range",0):.0f}')
+        _io_pool.shutdown(wait=False)
         mem_rgb.flush()
         mem_lum.flush()
 
@@ -349,7 +433,8 @@ def execute_frame_processing(
             result = _process_single_frame(
                 f.path, f.header, masters, args.debayer_method, args.white_balance,
                 ca_correction=getattr(args, 'ca_correction', False),
-                cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False))
+                cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
+                advanced_metrics=getattr(args, 'advanced_metrics', True))
             if result.get('error'):
                 f.accepted = False
                 f.metrics = {'error': result['error']}
@@ -402,10 +487,7 @@ def reload_accepted_frames(
     safe_print(f"  Reloading {n} accepted frames ({n_workers} threads, "
                f"quality analysis skipped)...")
 
-    flat_arr = masters.get('flat')
-    if flat_arr is not None and masters.get('_flat_norm') is None:
-        med = np.median(flat_arr)
-        masters['_flat_norm'] = np.clip(flat_arr / med, 0.4, 2.5) if med > 1e-6 else None
+    _build_flat_norm(masters, final)
 
     def _reload_one(j: int, f: FrameInfo, orig_idx: int):
         with gpu.stream_context():

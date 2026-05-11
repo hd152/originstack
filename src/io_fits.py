@@ -136,19 +136,49 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
     if Image is None:
         return
     if stretch == 'ghs':
-        # Generalized Hyperbolic Stretch — the state-of-the-art algorithm for
-        # galaxy imaging. Independently controls shadow lift (SP), black point
-        # (LP=0), highlights protection (HP), and overall stretch intensity (b).
+        # Generalized Hyperbolic Stretch — uses unified luminance-based normalization
+        # so all three channels share the same black/white reference, preserving
+        # cross-channel color ratios that would otherwise be destroyed by independent
+        # per-channel sky statistics.
         out = np.zeros_like(rgb)
+        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        flat_lum = lum.ravel().astype(np.float64)
+        _med = float(np.median(flat_lum))
+        for _ in range(3):
+            _mad = float(np.median(np.abs(flat_lum - _med)))
+            _sig = 1.4826 * _mad
+            flat_lum = flat_lum[np.abs(flat_lum - _med) < 2.5 * _sig]
+            if len(flat_lum) < 100:
+                break
+            _med = float(np.median(flat_lum))
+        _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
+        unified_black = max(_med - 1.0 * _bg_sigma, 0.0)
+        unified_white = float(np.percentile(lum, 99.9))
         for c in range(3):
             out[:, :, c] = generalized_hyperbolic_stretch(
-                rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp)
+                rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+                black_point=unified_black, white_point=unified_white)
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
     elif stretch == 'arcsinh':
-        # Arcsinh stretch — preserves faint nebulosity and bright stars
+        # Arcsinh stretch — unified luminance-based normalization to preserve color
         out = np.zeros_like(rgb)
+        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        flat_lum = lum.ravel().astype(np.float64)
+        _med = float(np.median(flat_lum))
+        for _ in range(3):
+            _mad = float(np.median(np.abs(flat_lum - _med)))
+            _sig = 1.4826 * _mad
+            flat_lum = flat_lum[np.abs(flat_lum - _med) < 2.5 * _sig]
+            if len(flat_lum) < 100:
+                break
+            _med = float(np.median(flat_lum))
+        _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
+        unified_black = max(_med - 1.0 * _bg_sigma, 0.0)
+        unified_white = float(np.percentile(lum, 99.8))
         for c in range(3):
-            out[:, :, c] = arcsinh_stretch(rgb[:, :, c])
+            out[:, :, c] = arcsinh_stretch(rgb[:, :, c],
+                                           black_point=unified_black,
+                                           white_point=unified_white)
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
     else:
         # Linear percentile stretch (original behaviour)

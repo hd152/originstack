@@ -952,9 +952,14 @@ def dynamic_background_extraction(
         sky_med, sky_std = float(np.median(border_pix)), float(np.std(border_pix))
 
     emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
+    _masked_pct = float(np.mean(emission_mask >= 0.5))
+    _dense_field = _masked_pct > Config.DBE_DENSE_FIELD_THRESH
     if verbose:
-        masked_pct = 100.0 * float(np.mean(emission_mask >= 0.5))
-        safe_print(f"    DBE: emission mask covers {masked_pct:.1f}% of image")
+        safe_print(f"    DBE: emission mask covers {_masked_pct * 100.0:.1f}% of image"
+                   + (" (dense star field — sigma-clip mesh fallback)" if _dense_field else ""))
+    elif _dense_field:
+        safe_print(f"    DBE: dense star field detected ({_masked_pct * 100.0:.0f}% masked) "
+                   f"— using sigma-clip mesh without emission mask")
 
     result = np.empty_like(rgb)
     channel_names = ['Red', 'Green', 'Blue']
@@ -972,12 +977,21 @@ def dynamic_background_extraction(
 
         if n < Config.DBE_MIN_SAMPLES:
             if verbose:
-                safe_print(f"    DBE {channel_names[c]}: insufficient samples, "
-                           f"falling back to mesh extraction")
-            # Fallback uses patch_size as mesh size
-            background = extract_background(channel, mesh_size=patch_size,
-                                            clip_sigma=clip_sigma,
-                                            star_mask=emission_mask).astype(np.float64)
+                safe_print(f"    DBE {channel_names[c]}: insufficient samples ({n}), "
+                           f"falling back to "
+                           f"{'sigma-clip mesh (no emission mask)' if _dense_field else 'mesh extraction'}")
+            if _dense_field:
+                # Ultra-dense field: emission mask would exclude too much.
+                # Sigma-clipping within each mesh cell reliably rejects bright
+                # stars without needing an explicit exclusion mask.
+                background = extract_background(
+                    channel, mesh_size=patch_size * 2,
+                    clip_sigma=clip_sigma,
+                    star_mask=None).astype(np.float64)
+            else:
+                background = extract_background(channel, mesh_size=patch_size,
+                                                clip_sigma=clip_sigma,
+                                                star_mask=emission_mask).astype(np.float64)
         else:
             # Subsample if too many for RBF performance
             if n > Config.DBE_MAX_SAMPLES:

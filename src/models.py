@@ -47,6 +47,7 @@ class Config:
     DBE_OUTLIER_ITERS = 3         # Max outlier rejection passes
     DBE_MIN_SAMPLES = 20          # Min accepted patches before falling back to mesh
     DBE_MAX_SAMPLES = 2000        # Cap to keep RBF O(N²) tractable on large images
+    DBE_DENSE_FIELD_THRESH = 0.70 # Emission-mask coverage above which dense-field fallback is used
     DBE_RBF_KERNEL = 'thin_plate_spline'
     DBE_RBF_SMOOTHING = 0.0
 

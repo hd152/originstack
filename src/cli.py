@@ -230,7 +230,7 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
 
     skip_keys = {'directory', 'output', 'config', 'health_check', 'dry_run',
                  'verbose', 'debug_registration', 'keep_intermediates',
-                 'preset', 'stretch_preset',
+                 'preset', 'stretch_preset', 'advanced_metrics',
                  'diagnostic', 'diagnostic_dir'}
 
     for key, value in sorted(vars(args).items()):
@@ -307,6 +307,19 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         if masters['flat'] is not None:
             safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames -> "
                        f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+        # Store median flat rotation so execute_frame_processing can detect mismatch
+        _flat_rots = []
+        for _ff in combined['flat']:
+            for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
+                _rval = _ff.header.get(_rkey)
+                if _rval is not None:
+                    try:
+                        _flat_rots.append(float(_rval))
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        if _flat_rots:
+            masters['flat_rotation'] = float(np.median(_flat_rots))
     else:
         masters['flat'] = None
 
@@ -441,6 +454,19 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             masters['flat'] = make_master(frames['flat'], method='median')
             if masters['flat'] is not None:
                 safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+            # Store median flat rotation so execute_frame_processing can detect mismatch
+            _flat_rots = []
+            for _ff in frames['flat']:
+                for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
+                    _rval = _ff.header.get(_rkey)
+                    if _rval is not None:
+                        try:
+                            _flat_rots.append(float(_rval))
+                            break
+                        except (TypeError, ValueError):
+                            pass
+            if _flat_rots:
+                masters['flat_rotation'] = float(np.median(_flat_rots))
         else:
             masters['flat'] = None
 
@@ -765,6 +791,10 @@ def parse_args():
     p.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
+    p.add_argument('--no-advanced-metrics', action='store_false', dest='advanced_metrics',
+                   default=True,
+                   help='Skip Strehl ratio and atmospheric dispersion measurements to '
+                        'speed up Phase 1 quality analysis (saves ~10-20%% per frame)')
     p.add_argument('--quality-threshold', type=float, default=50.0,
                    help='Reject frames whose score falls more than this percent below the '
                         'reference score (90th-percentile of the session, default: 50). '

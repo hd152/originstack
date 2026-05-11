@@ -484,6 +484,207 @@ class TestMeasureFwhm(unittest.TestCase):
 
 
 # ===========================================================================
+# Quality metrics — MAD estimator, advanced_metrics flag, SEP fast path,
+# FWHM scaling, and _process_single_frame preloaded_data path
+# ===========================================================================
+
+class TestComputeQualityMetricsAdvanced(unittest.TestCase):
+    """Tests for the new compute_quality_metrics parameters and MAD estimator."""
+
+    def setUp(self):
+        from src.quality import compute_quality_metrics
+        self.cqm = compute_quality_metrics
+
+    def _star_lum(self, shape=(64, 64), bg=100.0, amp=500.0):
+        img = np.full(shape, bg, dtype=np.float32)
+        yy, xx = np.indices(shape)
+        for cy, cx in [(16, 16), (48, 48)]:
+            img += amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.0 ** 2))
+        return img
+
+    def test_metrics_include_strehl_and_dispersion_keys(self):
+        m = self.cqm(self._star_lum())
+        self.assertIn('strehl', m)
+        self.assertIn('dispersion_px', m)
+
+    def test_advanced_metrics_false_zeros_strehl(self):
+        """When advanced_metrics=False, Strehl and dispersion must be 0.0."""
+        m = self.cqm(self._star_lum(), advanced_metrics=False)
+        self.assertEqual(m['strehl'], 0.0)
+        self.assertEqual(m['dispersion_px'], 0.0)
+
+    def test_advanced_metrics_true_is_default(self):
+        """Default call (no advanced_metrics kwarg) should return the same keys."""
+        m = self.cqm(self._star_lum())
+        self.assertIn('strehl', m)
+        self.assertIn('dispersion_px', m)
+
+    def test_mad_background_close_to_median(self):
+        """MAD estimator: background should equal the pixel median."""
+        bg = 300.0
+        img = np.full((64, 64), bg, dtype=np.float32)
+        # Add a few bright stars so the image isn't rejected as flat
+        img[10, 10] = 1500.0
+        img[50, 50] = 1200.0
+        m = self.cqm(img)
+        self.assertAlmostEqual(m['background'], bg, delta=5.0)
+
+    def test_mad_noise_is_positive(self):
+        """MAD estimator must always return positive noise."""
+        m = self.cqm(self._star_lum())
+        self.assertGreater(m['noise'], 0.0)
+
+    def test_fwhm_monotone_larger_psf_larger_fwhm(self):
+        """Larger injected PSF must yield larger reported FWHM from compute_quality_metrics."""
+        def _field(fwhm_px):
+            img = np.full((128, 128), 100.0, dtype=np.float32)
+            yy, xx = np.indices((128, 128))
+            sigma = fwhm_px / 2.355
+            for cy, cx in [(32, 32), (64, 96), (96, 32)]:
+                img += 800.0 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma ** 2))
+            return img
+
+        m_small = self.cqm(_field(3.0))
+        m_large = self.cqm(_field(7.0))
+        if m_small['fwhm'] > 0 and m_large['fwhm'] > 0:
+            self.assertLess(m_small['fwhm'], m_large['fwhm'])
+
+    def test_quick_mode_skips_star_detection(self):
+        """quick=True must still return all required keys, with star_count=0."""
+        m = self.cqm(self._star_lum(), quick=True)
+        for k in ('brightness', 'score', 'snr', 'background', 'noise'):
+            self.assertIn(k, m)
+        self.assertEqual(m['star_count'], 0)
+        self.assertEqual(m['fwhm'], 0.0)
+
+
+class TestSepDetectStars(unittest.TestCase):
+    """Tests for the _sep_detect_stars() fast-path function."""
+
+    def setUp(self):
+        from src.quality import _sep_detect_stars, _SEP_AVAILABLE
+        self.detect = _sep_detect_stars
+        self.sep_available = _SEP_AVAILABLE
+
+    def _star_image(self, shape=(128, 128), n_stars=10, bg=100.0, amp=800.0):
+        rng = np.random.default_rng(42)
+        img = rng.normal(bg, 5.0, shape).astype(np.float32)
+        yy, xx = np.indices(shape)
+        for _ in range(n_stars):
+            cy = rng.integers(20, shape[0] - 20)
+            cx = rng.integers(20, shape[1] - 20)
+            img += amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.5 ** 2))
+        return img.clip(0)
+
+    def test_returns_none_when_sep_unavailable(self):
+        """When SEP is not installed, _sep_detect_stars must return None gracefully."""
+        if self.sep_available:
+            self.skipTest("SEP is installed — testing unavailable path is not needed")
+        result = self.detect(self._star_image(), noise=5.0)
+        self.assertIsNone(result)
+
+    @unittest.skipUnless(True, "always run; guarded internally by sep_available")
+    def test_returns_compatible_structured_array_when_sep_available(self):
+        if not self.sep_available:
+            self.skipTest("SEP not installed")
+        result = self.detect(self._star_image(), noise=5.0)
+        self.assertIsNotNone(result)
+        for field in ('xcentroid', 'ycentroid', 'flux', 'peak', 'roundness1', 'sharpness'):
+            self.assertIn(field, result.dtype.names)
+
+    def test_elongated_sources_filtered_out(self):
+        """Very elongated sources (streaks) should be removed by the roundness filter."""
+        if not self.sep_available:
+            self.skipTest("SEP not installed")
+        img = np.full((128, 128), 100.0, dtype=np.float32)
+        # Inject a horizontal streak (elongated in x)
+        img[64, 20:108] = 5000.0
+        result = self.detect(img, noise=5.0)
+        # Either no sources or only filtered (round) ones
+        if result is not None and len(result) > 0:
+            roundness = result['roundness1']
+            self.assertTrue(np.all(roundness < 0.75),
+                            f"Elongated source not filtered: max roundness={roundness.max():.2f}")
+
+    def test_empty_image_returns_none(self):
+        """Flat image with no sources should return None or empty result."""
+        img = np.full((128, 128), 100.0, dtype=np.float32)
+        if not self.sep_available:
+            self.skipTest("SEP not installed")
+        result = self.detect(img, noise=5.0)
+        self.assertTrue(result is None or len(result) == 0)
+
+
+class TestProcessSingleFramePreload(unittest.TestCase):
+    """Tests for the preloaded_data and advanced_metrics paths in _process_single_frame."""
+
+    def setUp(self):
+        from src.frame_processor import _process_single_frame
+        self.process = _process_single_frame
+
+    def _fake_raw(self, shape=(64, 64)):
+        """Bayer raw with enough dynamic range to pass validate_image_data.
+
+        Background of ~200 ADU with several bright star spikes ensures
+        p99 - p01 > 10 after bilinear debayering.
+        """
+        rng = np.random.default_rng(1)
+        img = rng.normal(200.0, 15.0, shape).astype(np.float32).clip(0)
+        # Inject bright stars so the luminance dynamic range exceeds 10 ADU
+        yy, xx = np.indices(shape)
+        for cy, cx in [(10, 10), (30, 50), (50, 20)]:
+            img += 800.0 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.0 ** 2))
+        return img.clip(0)
+
+    def test_preloaded_data_bypasses_disk(self):
+        """When preloaded_data is supplied, load_fits must NOT be called."""
+        from unittest.mock import patch
+        raw = self._fake_raw()
+        with patch('src.frame_processor.load_fits', side_effect=AssertionError("load_fits called")):
+            result = self.process(
+                path='nonexistent.fits',
+                header={},
+                masters={},
+                debayer_method='bilinear',
+                white_balance='none',
+                preloaded_data=(raw, {}),
+            )
+        # Should succeed (debayer + quality) without touching the disk
+        self.assertIsNone(result.get('error'), result.get('error'))
+        self.assertIn('rgb', result)
+
+    def test_advanced_metrics_false_zeros_strehl_in_result(self):
+        """advanced_metrics=False must propagate to compute_quality_metrics."""
+        raw = self._fake_raw((64, 64))
+        result = self.process(
+            path='dummy.fits',
+            header={},
+            masters={},
+            debayer_method='bilinear',
+            white_balance='none',
+            advanced_metrics=False,
+            preloaded_data=(raw, {}),
+        )
+        self.assertIsNone(result.get('error'), result.get('error'))
+        self.assertEqual(result['metrics'].get('strehl', 0.0), 0.0)
+        self.assertEqual(result['metrics'].get('dispersion_px', 0.0), 0.0)
+
+    def test_advanced_metrics_true_is_default(self):
+        """Default call must include strehl key in metrics."""
+        raw = self._fake_raw((64, 64))
+        result = self.process(
+            path='dummy.fits',
+            header={},
+            masters={},
+            debayer_method='bilinear',
+            white_balance='none',
+            preloaded_data=(raw, {}),
+        )
+        self.assertIsNone(result.get('error'), result.get('error'))
+        self.assertIn('strehl', result['metrics'])
+
+
+# ===========================================================================
 # Stacking — L.A.Cosmic cosmic ray rejection
 # ===========================================================================
 

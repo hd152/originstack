@@ -685,7 +685,9 @@ def generalized_hyperbolic_stretch(
         b: float = 8.0,
         SP: float = 0.15,
         LP: float = 0.0,
-        HP: float = 0.95) -> np.ndarray:
+        HP: float = 0.95,
+        black_point: Optional[float] = None,
+        white_point: Optional[float] = None) -> np.ndarray:
     """Generalized Hyperbolic Stretch (GHS) for galaxy/nebula imaging.
 
     The state-of-the-art stretch algorithm for deep-sky display.  Unlike the
@@ -715,24 +717,25 @@ def generalized_hyperbolic_stretch(
     Reference: Cranfield & Symons (2021), https://ghsastro.co.uk/
     """
     # --- Normalise to [0, 1] using sigma-clipped sky statistics ---
-    flat = img.ravel().astype(np.float64)
-    med = float(np.median(flat))
-    for _ in range(3):
-        mad = np.median(np.abs(flat - med))
-        sig = 1.4826 * mad
-        flat = flat[np.abs(flat - med) < 2.5 * sig]
-        if len(flat) < 100:
-            break
+    if black_point is None or white_point is None:
+        flat = img.ravel().astype(np.float64)
         med = float(np.median(flat))
-    bg = med
-    bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
-    black = max(bg - 1.0 * bg_sigma, 0.0)
-    white = float(np.percentile(img, 99.9))
-    span = white - black
+        for _ in range(3):
+            mad = np.median(np.abs(flat - med))
+            sig = 1.4826 * mad
+            flat = flat[np.abs(flat - med) < 2.5 * sig]
+            if len(flat) < 100:
+                break
+            med = float(np.median(flat))
+        bg = med
+        bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
+        black_point = max(bg - 1.0 * bg_sigma, 0.0)
+        white_point = float(np.percentile(img, 99.9))
+    span = white_point - black_point
     if span < 1e-12:
         return np.zeros_like(img, dtype=np.float32)
 
-    norm = np.clip((img.astype(np.float64) - black) / span, 0.0, 1.0)
+    norm = np.clip((img.astype(np.float64) - black_point) / span, 0.0, 1.0)
 
     # --- Apply GHS piecewise transform ---
     if abs(b) < 1e-6:
@@ -1279,41 +1282,48 @@ def adaptive_mtf(img: np.ndarray,
     return np.clip(stretched, 0.0, 1.0).astype(np.float32)
 
 
-def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None) -> np.ndarray:
+def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None,
+                    black_point: Optional[float] = None,
+                    white_point: Optional[float] = None) -> np.ndarray:
     """Non-linear arcsinh stretch with sigma-clipped sky background estimation.
 
     Estimates the true sky background via iterative sigma-clipping, sets it as
     the black point, then auto-tunes the arcsinh factor so the sky maps to a
     target display level (~15 %).  This preserves faint nebulosity and avoids
     the flat, grey-sky look produced by simple percentile clipping.
-    """
-    flat = img.ravel().astype(np.float64)
-    # Sigma-clipped sky estimate (3 iterations, 2.5-sigma)
-    med = np.median(flat)
-    for _ in range(3):
-        mad = np.median(np.abs(flat - med))
-        sig = 1.4826 * mad
-        flat = flat[np.abs(flat - med) < 2.5 * sig]
-        if len(flat) < 100:
-            break
-        med = np.median(flat)
-    bg = float(med)
-    bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
 
-    # Black point: just below the sky floor
-    black = max(bg - 1.0 * bg_sigma, 0.0)
-    # White point: bright stars / bright nebula cap
-    white = np.percentile(img, 99.8)
-    span = white - black
+    When black_point and white_point are provided (e.g. pre-computed from
+    luminance), the per-channel stats step is skipped so all channels share
+    the same normalization range, preserving cross-channel color ratios.
+    """
+    if black_point is None or white_point is None:
+        flat = img.ravel().astype(np.float64)
+        # Sigma-clipped sky estimate (3 iterations, 2.5-sigma)
+        med = np.median(flat)
+        for _ in range(3):
+            mad = np.median(np.abs(flat - med))
+            sig = 1.4826 * mad
+            flat = flat[np.abs(flat - med) < 2.5 * sig]
+            if len(flat) < 100:
+                break
+            med = np.median(flat)
+        bg = float(med)
+        bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
+        black_point = max(bg - 1.0 * bg_sigma, 0.0)
+        white_point = float(np.percentile(img, 99.8))
+    else:
+        bg = black_point  # used below for factor auto-tuning
+        bg_sigma = 0.0
+    span = white_point - black_point
     if span < 1e-12:
         return np.zeros_like(img)
 
-    norm = np.clip((img - black) / span, 0.0, 1.0)
+    norm = np.clip((img - black_point) / span, 0.0, 1.0)
 
     # Auto-tune arcsinh factor so sky maps to ~15 % of output range
     if factor is None:
         target_bg = 0.15
-        bg_norm = float(np.clip((bg - black) / span, 1e-6, 1.0))
+        bg_norm = float(np.clip((bg - black_point) / span, 1e-6, 1.0))
         factor = getattr(Config, 'ARCSINH_STRETCH_FACTOR', 10.0)
         for f in (3.0, 5.0, 10.0, 20.0, 50.0, 100.0):
             if np.arcsinh(bg_norm * f) / np.arcsinh(f) >= target_bg:
