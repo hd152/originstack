@@ -137,8 +137,9 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
                 img_d[:, :, c], mat_d, offset=off_d,
                 order=3, mode='constant', cval=0.0
             )
-        return gpu.to_host(result)
-        
+        out = gpu.to_host(result)
+        return out[:, :, 0] if squeeze_back else out
+
     elif shift is not None:
         result = xp.zeros_like(img_d)
         for c in range(img_d.shape[2]):
@@ -146,12 +147,13 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
                 img_d[:, :, c], shift=shift, order=3,
                 mode='constant', cval=0.0, prefilter=True
             )
-        return gpu.to_host(result)
-        
+        out = gpu.to_host(result)
+        return out[:, :, 0] if squeeze_back else out
+
     # If neither transform nor shift is provided, return original img
     # (ensure it is on CPU as per function convention)
     if squeeze_back:
-        img = img[0]
+        img = img[:, :, 0]
     return img
 
 
@@ -196,15 +198,18 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         except Exception as exc:
             debug_info.append(f"pyramid error: {type(exc).__name__}")
 
+    # Pre-apply pyramid shift once; reused by both phase_cc and FFT paths
+    psy, psx = pyramid_shift
+    if psy != 0.0 or psx != 0.0:
+        img_shifted = ndimage.shift(img, shift=(psy, psx), order=1,
+                                    mode='constant', cval=0.0)
+    else:
+        img_shifted = img
+
     # Use phase cross correlation for subpixel shifts when available
     if not skip_phase_cc and phase_cross_correlation is not None:
         try:
-            psy, psx = pyramid_shift
-            if psy != 0.0 or psx != 0.0:
-                img_pre = ndimage.shift(img, shift=(psy, psx), order=1,
-                                        mode='constant', cval=0.0)
-            else:
-                img_pre = img
+            img_pre = img_shifted
 
             ref_std = float(np.std(ref))
             img_std = float(np.std(img_pre))
@@ -245,12 +250,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         gpu = get_gpu()
         xp = gpu.xp
 
-        psy, psx = pyramid_shift
-        if psy != 0.0 or psx != 0.0:
-            img_fft = ndimage.shift(img, shift=(psy, psx), order=1,
-                                    mode='constant', cval=0.0)
-        else:
-            img_fft = img
+        img_fft = img_shifted  # reuse pyramid-shifted image computed above
 
         h, w = ref.shape
         if psy != 0.0 or psx != 0.0:
@@ -321,14 +321,16 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     except Exception as e:
         debug_info.append(f"fft_xcorr error: {type(e).__name__}")
 
-    # Fallback to centroid difference
+    # Fallback to centroid difference — compute all percentile thresholds in one pass
     best_shift = (0.0, 0.0)
     best_score = float('inf')
 
-    for percentile in Config.CENTROID_PERCENTILES:
+    _pcts = list(Config.CENTROID_PERCENTILES)
+    _ref_thresholds = np.percentile(ref, _pcts)
+    _img_thresholds = np.percentile(img, _pcts)
+
+    for percentile, thresh_ref, thresh_img in zip(_pcts, _ref_thresholds, _img_thresholds):
         try:
-            thresh_ref = np.percentile(ref, percentile)
-            thresh_img = np.percentile(img, percentile)
             rmask = ref > thresh_ref
             imask = img > thresh_img
             n_ref = rmask.sum()
@@ -381,10 +383,10 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
                              min_size: int = 32) -> Tuple[float, float]:
     """Coarse-to-fine multi-scale pyramid registration."""
     def _downsample(arr: np.ndarray) -> np.ndarray:
-        h, w = arr.shape
-        h2, w2 = (h // 2) * 2, (w // 2) * 2  # trim to even
-        patch = arr[:h2, :w2].reshape(h2 // 2, 2, w2 // 2, 2)
-        return patch.mean(axis=(1, 3))
+        h2 = (arr.shape[0] // 2) * 2
+        w2 = (arr.shape[1] // 2) * 2
+        a = arr[:h2, :w2]
+        return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
 
     # Build pyramids
     ref_pyr = [ref.astype(np.float64)]

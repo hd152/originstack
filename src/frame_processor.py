@@ -61,6 +61,11 @@ def _build_flat_norm(
     if med <= 1e-6:
         return
 
+    zero_frac = float(np.mean(flat_arr < med * 0.05))
+    if zero_frac > 0.01:
+        safe_print(f"  WARNING: flat field has {zero_frac * 100:.1f}% near-zero pixels "
+                   f"(< 5% of median) — possible sensor defects or bad flat")
+
     flat_norm = np.clip(flat_arr / med, 0.4, 2.5).astype(np.float32)
 
     # Rotate flat to match light frame orientation when a mismatch is detected.
@@ -119,18 +124,30 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         if bias_arr is not None and bias_arr.shape != data.shape:
             bias_arr = None
         if bias_arr is not None:
-            data = data - bias_arr
+            data = data.astype(np.float32, copy=False)
+            data -= bias_arr
 
         dark_arr = masters.get('dark')
         if dark_arr is not None and dark_arr.shape == data.shape:
-            dark_current = dark_arr - (bias_arr if bias_arr is not None else 0.0)
             dark_exptime = masters.get('dark_exptime') or None
             light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
             if dark_exptime and light_exptime and dark_exptime > 0:
                 dark_scale = light_exptime / dark_exptime
+                if abs(dark_scale - 1.0) > 0.05:
+                    key = (round(dark_exptime, 1), round(light_exptime, 1))
+                    if key not in _warned_dark_scales:
+                        _warned_dark_scales.add(key)
+                        safe_print(f"  NOTE: dark scaling {dark_scale:.2f}x "
+                                   f"(light {light_exptime:.1f}s / dark {dark_exptime:.1f}s) "
+                                   f"— ensure dark exposure matches lights for best results")
             else:
                 dark_scale = 1.0
-            data = data - dark_current * dark_scale
+            # Subtract scaled dark in-place: data -= (dark - bias) * scale
+            # = data -= dark*scale, then += bias*scale (avoiding a full dark_current copy)
+            data = data.astype(np.float32, copy=False)
+            np.subtract(data, dark_arr * dark_scale, out=data)
+            if bias_arr is not None:
+                data += bias_arr * dark_scale
 
         flat_norm = masters.get('_flat_norm')  # pre-computed by caller when possible
         if flat_norm is None:
@@ -138,9 +155,14 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             if flat_arr is not None and flat_arr.shape == data.shape:
                 med = np.median(flat_arr)
                 if med > 1e-6:
+                    zero_frac = float(np.mean(flat_arr < med * 0.05))
+                    if zero_frac > 0.01:
+                        safe_print(f"  WARNING: flat field has {zero_frac * 100:.1f}% near-zero "
+                                   f"pixels — possible sensor defects or bad flat")
                     flat_norm = np.clip(flat_arr / med, 0.4, 2.5)
         if flat_norm is not None and flat_norm.shape == data.shape:
-            data = data / flat_norm
+            data = data.astype(np.float32, copy=False)
+            data /= flat_norm
 
         if not np.isfinite(data).all():
             return {'error': 'calibration produced non-finite values'}
@@ -173,10 +195,13 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         return {'error': f'hot pixel removal error: {e}'}
 
     # White balance
-    if white_balance == 'grayworld':
-        rgb = white_balance_grayworld(rgb)
-    elif white_balance == 'whitepatch':
-        rgb = white_balance_whitepatch(rgb)
+    try:
+        if white_balance == 'grayworld':
+            rgb = white_balance_grayworld(rgb)
+        elif white_balance == 'whitepatch':
+            rgb = white_balance_whitepatch(rgb)
+    except Exception as e:
+        return {'error': f'white balance error: {e}'}
 
     gpu = get_gpu()
     rgb = gpu.to_host(rgb)
@@ -194,10 +219,13 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             pass
 
     # Recompute lum only when white balance or post-processing changed the image.
-    if white_balance != 'none' or ca_correction or cosmic_ray_rejection:
-        lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-    else:
-        lum = np.asarray(lum)  # ensure host numpy array
+    try:
+        if white_balance != 'none' or ca_correction or cosmic_ray_rejection:
+            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        else:
+            lum = np.asarray(lum)  # ensure host numpy array
+    except Exception as e:
+        return {'error': f'luminance computation error: {e}'}
 
     is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
     if not is_valid:
@@ -210,6 +238,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
 # Module-level state for parallel workers (must be module-level for pickling)
 _worker_masters: Dict[str, Any] = {}
+_warned_dark_scales: set = set()  # dedup dark-scale mismatch warnings across frames
 
 
 def _init_worker_shm(shm_specs: Dict[str, tuple]) -> None:
@@ -286,6 +315,24 @@ def execute_frame_processing(
 
     if use_process_pool:
         workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
+
+        # Cap workers so total frame-data memory stays within available RAM.
+        # Each worker peak: raw Bayer + calibration intermediates (~3×raw) + RGB + Python overhead.
+        try:
+            import psutil
+            avail_mb = psutil.virtual_memory().available / 1e6
+            H_f, W_f = rgb_shape[1], rgb_shape[2]
+            bayer_mb = H_f * W_f * 4 / 1e6
+            rgb_mb   = H_f * W_f * 3 * 4 / 1e6
+            per_worker_mb = bayer_mb * 4 + rgb_mb + 200  # 4× bayer for cal intermediates + RGB + Python
+            safe_workers = max(1, int(avail_mb / per_worker_mb))
+            if safe_workers < workers:
+                safe_print(f"  NOTE: limiting workers {workers}→{safe_workers} "
+                           f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
+                workers = safe_workers
+        except Exception:
+            pass
+
         print(f"  Processing {n} frames in parallel ({workers} workers)...")
 
         # Share calibration arrays via shared memory — zero disk I/O, one copy
@@ -484,6 +531,25 @@ def reload_accepted_frames(
                                             Config.GPU_VRAM_RESERVE_MB), n)
     else:
         n_workers = min(os.cpu_count() or 4, n)
+
+    # Cap workers so concurrent frame data fits in available RAM.
+    # Each worker holds: raw Bayer (~1× frame) + calibration intermediates (~3×)
+    # + RGB + white-balanced copy ≈ 6× raw frame size, plus Python overhead.
+    try:
+        import psutil
+        avail_mb = psutil.virtual_memory().available / 1e6
+        H_f, W_f = mem_rgb.shape[1], mem_rgb.shape[2]
+        bayer_mb = H_f * W_f * 4 / 1e6          # float32
+        rgb_mb   = H_f * W_f * 3 * 4 / 1e6      # float32 × 3ch
+        per_worker_mb = bayer_mb * 4 + rgb_mb + 100
+        safe_workers = max(1, int(avail_mb / per_worker_mb))
+        if safe_workers < n_workers:
+            safe_print(f"  NOTE: limiting reload threads {n_workers}\u2192{safe_workers} "
+                       f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
+            n_workers = safe_workers
+    except Exception:
+        pass
+
     safe_print(f"  Reloading {n} accepted frames ({n_workers} threads, "
                f"quality analysis skipped)...")
 
@@ -500,6 +566,7 @@ def reload_accepted_frames(
             return j, orig_idx, None, None, result['error']
         return j, orig_idx, result['rgb'], result['lum'], None
 
+    n_failed = 0
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_reload_one, j, f, orig_idx): j
                    for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
@@ -509,12 +576,19 @@ def reload_accepted_frames(
             j, orig_idx, rgb, lum, error = future.result()
             if error:
                 safe_print(f"  WARNING: Could not reload {os.path.basename(final[j].path)}: {error}")
+                n_failed += 1
             else:
                 mem_rgb[orig_idx] = rgb
                 mem_lum[orig_idx] = lum
                 cached_lums[orig_idx] = lum
                 if args.verbose:
                     safe_print(f"    Reloaded: {os.path.basename(final[j].path)}")
+
+    if n_failed > 0:
+        safe_print(f"  WARNING: {n_failed}/{n} frames failed to reload")
+        if n_failed == n:
+            raise RuntimeError("All frames failed to reload — cannot proceed "
+                               "(likely out of memory)")
 
     mem_rgb.flush()
     mem_lum.flush()

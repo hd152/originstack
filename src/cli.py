@@ -407,6 +407,16 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         print('  ERROR: No FITS files found', file=sys.stderr)
         raise SystemExit('No FITS files found')
 
+    # Mosaic mode requires hierarchical layout (one subfolder per panel)
+    if getattr(args, 'mosaic', False):
+        if len(targets) < 2:
+            print('  ERROR: --mosaic requires subfolders (one per panel); '
+                  'only a single target was found', file=sys.stderr)
+            raise SystemExit('--mosaic requires subfolders')
+        if not getattr(args, 'plate_solve', False):
+            safe_print("  NOTE: --mosaic implies --plate-solve — enabling automatically")
+            args.plate_solve = True
+
     # Process each target
     produced = []
     for target_idx, (d, outp) in enumerate(targets, 1):
@@ -675,69 +685,78 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         print_header("HIERARCHICAL COMBINING", "=")
         print(f"  Combining {len(produced)} target stacks into final output...")
 
-        # Load all stacks, crop to minimum common dimensions
-        def _fits_shape(p):
-            with fits.open(p, memmap=True) as hd:
-                return hd[0].data.shape
-        shapes = [_fits_shape(p) for p in produced]
-        # shapes are (3,H,W)
-        mins = np.min([[s[1], s[2]] for s in shapes], axis=0)
-        Hm, Wm = int(mins[0]), int(mins[1])
-        print(f"  Cropping all stacks to minimum dimensions: {Hm}×{Wm}")
+        # --- Mosaic path (WCS reprojection) ---
+        mosaic_done = False
+        if getattr(args, 'mosaic', False):
+            from src.mosaic import stitch_mosaic_panels
+            mosaic_done = stitch_mosaic_panels(produced, output, args)
+            if not mosaic_done:
+                safe_print("  Falling back to translation-based combine...")
 
-        stacks = []
-        for p in tqdm(produced, desc="  Loading", unit="target", disable=args.verbose):
-            with fits.open(p, memmap=True) as hd:
-                d = np.transpose(hd[0].data, (1, 2, 0)).astype(np.float32)
-                stacks.append(d[:Hm, :Wm, :])
+        if not mosaic_done:
+            # --- Translation-based combine (default / fallback) ---
+            def _fits_shape(p):
+                with fits.open(p, memmap=True) as hd:
+                    return hd[0].data.shape
+            shapes = [_fits_shape(p) for p in produced]
+            # shapes are (3,H,W)
+            mins = np.min([[s[1], s[2]] for s in shapes], axis=0)
+            Hm, Wm = int(mins[0]), int(mins[1])
+            print(f"  Cropping all stacks to minimum dimensions: {Hm}×{Wm}")
 
-        # Register each stack against the first (reference) stack
-        print(f"  Registering {len(stacks) - 1} stack(s) against reference...")
-        ref_lum = np.mean(stacks[0], axis=2)
-        shifts = [(0.0, 0.0)]
-        for i in range(1, len(stacks)):
-            lum = np.mean(stacks[i], axis=2)
-            sy, sx = calculate_shift(ref_lum, lum, verbose=getattr(args, 'verbose', False))
-            shifts.append((sy, sx))
-            safe_print(f"    Stack {i + 1}/{len(stacks)}: shift=({sx:.2f}, {sy:.2f}) px")
+            stacks = []
+            for p in tqdm(produced, desc="  Loading", unit="target", disable=args.verbose):
+                with fits.open(p, memmap=True) as hd:
+                    d = np.transpose(hd[0].data, (1, 2, 0)).astype(np.float32)
+                    stacks.append(d[:Hm, :Wm, :])
 
-        # Apply shifts (zero-pad edges)
-        aligned = []
-        for stack, (sy, sx) in zip(stacks, shifts):
-            if sy == 0.0 and sx == 0.0:
-                aligned.append(stack)
-            else:
-                aligned.append(apply_transform(stack, shift=(sy, sx)))
+            # Register each stack against the first (reference) stack
+            print(f"  Registering {len(stacks) - 1} stack(s) against reference...")
+            ref_lum = np.mean(stacks[0], axis=2)
+            shifts = [(0.0, 0.0)]
+            for i in range(1, len(stacks)):
+                lum = np.mean(stacks[i], axis=2)
+                sy, sx = calculate_shift(ref_lum, lum, verbose=getattr(args, 'verbose', False))
+                shifts.append((sy, sx))
+                safe_print(f"    Stack {i + 1}/{len(stacks)}: shift=({sx:.2f}, {sy:.2f}) px")
 
-        # Crop to the valid (non-padded) overlap region across all aligned stacks
-        all_dy = [s[0] for s in shifts]
-        all_dx = [s[1] for s in shifts]
-        y0 = int(np.ceil(max(0.0, max(all_dy))))
-        y1 = int(np.floor(Hm + min(0.0, min(all_dy))))
-        x0 = int(np.ceil(max(0.0, max(all_dx))))
-        x1 = int(np.floor(Wm + min(0.0, min(all_dx))))
+            # Apply shifts (zero-pad edges)
+            aligned = []
+            for stack, (sy, sx) in zip(stacks, shifts):
+                if sy == 0.0 and sx == 0.0:
+                    aligned.append(stack)
+                else:
+                    aligned.append(apply_transform(stack, shift=(sy, sx)))
 
-        if y0 >= y1 or x0 >= x1:
-            safe_print("  Warning: shifts exceed image overlap — combining without registration")
-            y0, y1, x0, x1 = 0, Hm, 0, Wm
+            # Crop to the valid (non-padded) overlap region across all aligned stacks
+            all_dy = [s[0] for s in shifts]
+            all_dx = [s[1] for s in shifts]
+            y0 = int(np.ceil(max(0.0, max(all_dy))))
+            y1 = int(np.floor(Hm + min(0.0, min(all_dy))))
+            x0 = int(np.ceil(max(0.0, max(all_dx))))
+            x1 = int(np.floor(Wm + min(0.0, min(all_dx))))
 
-        Hf, Wf = y1 - y0, x1 - x0
-        print(f"  Valid overlap after registration: {Hf}×{Wf}")
+            if y0 >= y1 or x0 >= x1:
+                safe_print("  Warning: shifts exceed image overlap — combining without registration")
+                y0, y1, x0, x1 = 0, Hm, 0, Wm
 
-        acc = np.zeros((Hf, Wf, 3), dtype=np.float64)
-        for img in aligned:
-            acc += img[y0:y1, x0:x1, :]
-        combined = (acc / len(aligned)).astype(np.float32)
+            Hf, Wf = y1 - y0, x1 - x0
+            print(f"  Valid overlap after registration: {Hf}×{Wf}")
 
-        out_hdu = fits.PrimaryHDU()
-        out_hdu.data = np.transpose(combined, (2, 0, 1))
-        out_hdu.header['NTARGETS'] = len(produced)
-        out_hdu.writeto(output, overwrite=True)
-        preview_path = os.path.splitext(output)[0] + '.jpg'
-        save_preview_rgb(combined, preview_path, stretch=getattr(args, 'stretch', 'linear'))
+            acc = np.zeros((Hf, Wf, 3), dtype=np.float64)
+            for img in aligned:
+                acc += img[y0:y1, x0:x1, :]
+            combined = (acc / len(aligned)).astype(np.float32)
 
-        safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
-        safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
+            out_hdu = fits.PrimaryHDU()
+            out_hdu.data = np.transpose(combined, (2, 0, 1))
+            out_hdu.header['NTARGETS'] = len(produced)
+            out_hdu.writeto(output, overwrite=True)
+            preview_path = os.path.splitext(output)[0] + '.jpg'
+            save_preview_rgb(combined, preview_path, stretch=getattr(args, 'stretch', 'linear'))
+
+            safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
+            safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
 
     # Overall summary
     total_time = time.time() - overall_start
@@ -1161,6 +1180,15 @@ def parse_args():
                         'same equipment. Calibration frames from all sessions are merged '
                         'into stronger master frames. Registration, sigma-clip rejection, '
                         'and post-processing all run once across the full multi-night dataset.')
+    p.add_argument('--mosaic', action='store_true',
+                   help='Stitch per-subfolder stacks into a mosaic via WCS reprojection '
+                        'instead of the default translation-based combine. Each subfolder '
+                        'is stacked independently, then all panels are plate-solved and '
+                        'reprojected onto a common RA/Dec grid with overlap feathering '
+                        'and background-level matching. '
+                        'Requires: pip install reproject  and a working plate solver '
+                        '(--plate-solver astap recommended for speed). '
+                        'Automatically enables --plate-solve.')
     # --- Heuristic auto-advisor (no API key required) ---
     p.add_argument('--auto', action='store_true',
                    help='After Phase 1, automatically classify the target '

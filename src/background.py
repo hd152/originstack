@@ -257,8 +257,8 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
         bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
 
     # --- Interpolation to Full Res ---
-    grid_y = np.array([(i + 0.5) * cell_h for i in range(ny)])
-    grid_x = np.array([(j + 0.5) * cell_w for j in range(nx)])
+    grid_y = (np.arange(ny) + 0.5) * cell_h
+    grid_x = (np.arange(nx) + 0.5) * cell_w
 
     # Edge extrapolation using linear logic to avoid spline instability at borders
     if ny >= 2 and nx >= 2:
@@ -396,10 +396,10 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
         for c, ch_result in executor.map(_process_channel, range(3)):
             result[:, :, c] = ch_result
 
-        # Log details
-        if verbose:
-            for c, ch_result in list(executor.map(_process_channel, range(3))):
-                safe_print(f"    {channel_names[c]}: bg_median={float(np.median(extract_background(rgb[:, :, c], mesh_size=mesh_size, filter_size=filter_size, clip_sigma=clip_sigma, star_mask=combined_mask))):.1f}")
+    if verbose:
+        for c in range(3):
+            bg_median = float(np.median(rgb[:, :, c] - result[:, :, c]))
+            safe_print(f"    {channel_names[c]}: bg_median={bg_median:.1f}")
 
     return result
 
@@ -436,37 +436,35 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             nx = max(1, W // mesh_size)
             cell_h = H / ny
             cell_w = W / nx
-            
+            excl_radius = int(min(H, W) * 0.30)
+
             remaining_lum = lum_smooth.copy()
             primary_peak = float(np.max(remaining_lum))
-            
+
+            # Pre-compute full-res pixel grid and cell-centre grids once
+            yy, xx = np.mgrid[:H, :W]
+            cell_cy = (np.arange(ny) + 0.5) * cell_h  # (ny,)
+            cell_cx = (np.arange(nx) + 0.5) * cell_w  # (nx,)
+            cy_grid, cx_grid = np.meshgrid(cell_cy, cell_cx, indexing='ij')  # (ny, nx)
+
             for _src_i in range(3):
                 py, px = np.unravel_index(int(np.argmax(remaining_lum)), (H, W))
                 pv = float(remaining_lum[py, px])
                 if pv <= detect_thresh:
                     break
-                
+
                 if _src_i > 0:
                     primary_excess = primary_peak - sky_med
                     current_excess = pv - sky_med
                     if primary_excess > 0 and current_excess < 0.5 * primary_excess:
                         break
-                
-                excl_radius = int(min(H, W) * 0.30)
-                
-                # Mark cells
-                for iy in range(ny):
-                    cy = (iy + 0.5) * cell_h
-                    for ix in range(nx):
-                        cx = (ix + 0.5) * cell_w
-                        if np.sqrt((cy - py) ** 2 + (cx - px) ** 2) < excl_radius:
-                            cell_excluded[iy, ix] = True
-                            
-                remaining_lum[int(py):int(py)+1, int(px):int(px)+1] = 0 
-                # Simplified blanking: Just suppress region center to find next peak
-                # A full mask blanking is safer but slower. 
-                # Re-implementation of blanking for efficiency:
-                yy, xx = np.mgrid[:H, :W]
+
+                # Vectorised cell exclusion (replaces O(ny*nx) Python loop)
+                cell_excluded |= (
+                    np.sqrt((cy_grid - py) ** 2 + (cx_grid - px) ** 2) < excl_radius
+                )
+
+                # Suppress this source region to find next peak
                 dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
                 remaining_lum[dist < excl_radius] = float(np.min(remaining_lum))
     except Exception:
@@ -527,8 +525,8 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         if min(ny, nx) >= 4:
             bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
 
-        grid_y = np.array([(i + 0.5) * (H/ny) for i in range(ny)])
-        grid_x = np.array([(j + 0.5) * (W/nx) for j in range(nx)])
+        grid_y = (np.arange(ny) + 0.5) * (H / ny)
+        grid_x = (np.arange(nx) + 0.5) * (W / nx)
         
         if ny >= 2 and nx >= 2:
             ext_grid = np.zeros((ny + 2, nx + 2), dtype=np.float64)
