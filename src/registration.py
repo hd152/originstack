@@ -81,10 +81,13 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     dst = ref_pts[indices[good]]
 
     try:
-        model, inliers = ransac(
-            (src, dst), EuclideanTransform,
-            min_samples=3, residual_threshold=2.0, max_trials=1000
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='No inliers found',
+                                    category=UserWarning)
+            model, inliers = ransac(
+                (src, dst), EuclideanTransform,
+                min_samples=3, residual_threshold=2.0, max_trials=1000
+            )
         if inliers is not None and inliers.sum() >= 3:
             return model
     except Exception:
