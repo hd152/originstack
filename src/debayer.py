@@ -56,6 +56,77 @@ _PATTERN_OFFSETS: dict[str, tuple[tuple[int, int], ...]] = {
 }
 
 
+def _sigma_clipped_median(arr: np.ndarray, sigma: float = 3.0, iters: int = 3) -> float:
+    x = arr.ravel()
+    for _ in range(iters):
+        med = float(np.median(x))
+        std = float(np.std(x))
+        if std < 1e-12:
+            break
+        x = x[np.abs(x - med) < sigma * std]
+        if len(x) == 0:
+            break
+    return float(np.median(x)) if len(x) > 0 else float(np.median(arr))
+
+
+def green_equalize(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+    """Scale the G2 sub-channel to match G1's sigma-clipped median.
+
+    CMOS sensors have two physically distinct green sub-pixels (G1, G2) per
+    Bayer tile that often differ by a few percent in sensitivity.  After
+    bilinear debayering, the mismatch propagates as a 2-pixel-period
+    checkerboard across the green channel (and therefore luminance).  Scaling
+    G2 to match G1 before debayering removes the artifact entirely.
+
+    The correction is capped at ±20 % to guard against bad frames where one
+    sub-channel is near zero (saturated sky, very low counts, etc.).
+    """
+    offsets = _PATTERN_OFFSETS.get(pattern.upper())
+    if offsets is None:
+        return raw
+    (_, _), (g1_r, g1_c), (g2_r, g2_c), (_, _) = offsets
+    raw_f = raw.astype(np.float32, copy=True)
+    g1 = raw_f[g1_r::2, g1_c::2].ravel()
+    g2 = raw_f[g2_r::2, g2_c::2].ravel()
+    g1_med = _sigma_clipped_median(g1)
+    g2_med = _sigma_clipped_median(g2)
+    if g2_med > 1e-6 and abs(g1_med / g2_med - 1.0) < 0.2:
+        raw_f[g2_r::2, g2_c::2] *= g1_med / g2_med
+    return raw_f
+
+
+def _equalize_bayer_grid(rgb: np.ndarray) -> np.ndarray:
+    """Remove 2×2 position-dependent green bias introduced by edge-aware CFA interpolation.
+
+    Malvar/VNG debayering produces systematically different green values at
+    interpolated positions (R and B cells) vs source positions (G1 and G2 cells).
+    After stacking many frames, this coherent per-pixel offset survives noise
+    averaging and becomes a visible checkerboard in the sky background.
+
+    Uses sigma-clipped medians to estimate the sky-level offset for each of the
+    four Bayer-position sub-channels, then subtracts the deviation from the
+    per-image mean.  Guards skip corrections outside the plausible 0.01–100 ADU
+    range to avoid modifying high-SNR targets or corrupted frames.
+    """
+    G = rgb[:, :, 1]
+    ee = _sigma_clipped_median(G[::2,  ::2])   # R positions (even row, even col)
+    eo = _sigma_clipped_median(G[::2,  1::2])  # G1 positions (even row, odd col)
+    oe = _sigma_clipped_median(G[1::2, ::2])   # G2 positions (odd row, even col)
+    oo = _sigma_clipped_median(G[1::2, 1::2])  # B positions (odd row, odd col)
+    overall = (ee + eo + oe + oo) / 4.0
+    spread = max(abs(ee - overall), abs(eo - overall),
+                 abs(oe - overall), abs(oo - overall))
+    if spread < 0.01 or spread > 100.0:
+        return rgb
+    result = rgb.copy()
+    G_out = result[:, :, 1]
+    G_out[::2,  ::2]  = np.clip(G[::2,  ::2]  - float(ee - overall), 0, None)
+    G_out[::2,  1::2] = np.clip(G[::2,  1::2] - float(eo - overall), 0, None)
+    G_out[1::2, ::2]  = np.clip(G[1::2, ::2]  - float(oe - overall), 0, None)
+    G_out[1::2, 1::2] = np.clip(G[1::2, 1::2] - float(oo - overall), 0, None)
+    return result
+
+
 def debayer_bilinear(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
     # FIX #1: honour the `pattern` argument — previously hardcoded to RGGB.
     # FIX #2: `method` param is accepted for API compatibility but not used
@@ -123,8 +194,9 @@ def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
             if max_val <= 0:
                 return np.zeros((*raw_np.shape, 3), dtype=np.float32)
             raw_u16 = np.clip(raw_np / max_val * 65535, 0, 65535).astype(np.uint16)
-            rgb = cv2.cvtColor(raw_u16, code)
-            return rgb.astype(np.float32) / 65535.0 * max_val
+            bgr = cv2.cvtColor(raw_u16, code)
+            result = bgr[:, :, ::-1].astype(np.float32) / 65535.0 * max_val
+            return _equalize_bayer_grid(result)
 
     # Fallback: bilinear (correct, though lower quality than Malvar)
     return debayer_bilinear(raw, pattern)
@@ -150,8 +222,9 @@ def debayer_vng(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
         return np.zeros((*raw_np.shape, 3), dtype=np.float32)
     # VNG requires uint8 input in OpenCV >= 4.x
     raw_u8 = np.clip(raw_np / max_val * 255, 0, 255).astype(np.uint8)
-    rgb = cv2.cvtColor(raw_u8, code)
-    return rgb.astype(np.float32) / 255.0 * max_val
+    bgr = cv2.cvtColor(raw_u8, code)
+    result = bgr[:, :, ::-1].astype(np.float32) / 255.0 * max_val
+    return _equalize_bayer_grid(result)
 
 
 def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:

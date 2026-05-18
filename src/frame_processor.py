@@ -15,7 +15,8 @@ from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, print_quality_table
 from src.io_fits import load_fits
-from src.debayer import (debayer, remove_hot_pixels_bayer, apply_hot_pixel_map_bayer,
+from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
+                         apply_hot_pixel_map_bayer,
                          remove_hot_pixels_rgb, remove_hot_pixels_rgb_with_lum,
                          white_balance_grayworld, white_balance_whitepatch,
                          correct_chromatic_aberration)
@@ -180,6 +181,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     try:
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
+            data = green_equalize(data, pattern=bayer)
             rgb = debayer(data, pattern=bayer, method=debayer_method)
         else:
             rgb = data

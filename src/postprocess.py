@@ -346,10 +346,7 @@ def postprocess_stack(
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_background')
         bg_start = time.time()
 
-        # Determine method: --bg-method takes precedence; fall back to --dbe/--no-dbe
-        bg_method = getattr(args, 'bg_method', None)
-        if bg_method is None:
-            bg_method = 'dbe' if getattr(args, 'dbe', True) else 'mesh'
+        bg_method = getattr(args, 'bg_method', 'dbe')
 
         if bg_method == 'graxpert':
             graxpert_bin = getattr(args, 'graxpert_path', None)

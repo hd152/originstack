@@ -152,8 +152,8 @@ def apply_preset(args: argparse.Namespace) -> list:
             'denoise_acdnr_k': 2.0,
             'deconvolve': False,
             'background_extraction': True,
-            'dbe': True,
-            'chroma_nr': False,  # Narrowband doesn't need chroma NR
+            'bg_method': 'dbe',
+            'chroma_nr': False,
             'star_reduce': True,
             'star_reduce_factor': 0.6,
             'local_contrast': True,
@@ -169,7 +169,7 @@ def apply_preset(args: argparse.Namespace) -> list:
             'denoise_bilateral': True,
             'deconvolve': True,
             'background_extraction': True,
-            'dbe': True,
+            'bg_method': 'dbe',
             'star_reduce': True,
             'star_reduce_factor': 0.5,
             'local_contrast': True,
@@ -186,13 +186,55 @@ def apply_preset(args: argparse.Namespace) -> list:
             'denoise_adaptive': True,
             'deconvolve': False,
             'background_extraction': True,
-            'dbe': True,
+            'bg_method': 'dbe',
             'star_reduce': False,
             'local_contrast': False,
             'stretch': 'ghs',
             'ghs_b': 5.0,
             'ghs_sp': 0.20,
             'chroma_nr': True,
+        },
+        'nebula': {
+            'stack_method': 'sigma_clip',
+            'rejection_sigma': 2.5,
+            'denoise': True,
+            'denoise_adaptive': True,
+            'denoise_mmt': True,
+            'denoise_acdnr': True,
+            'deconvolve': False,
+            'background_extraction': True,
+            'bg_method': 'dbe',
+            'star_reduce': True,
+            'local_contrast': True,
+            'chroma_nr': True,
+            'stretch': 'ghs',
+            'ghs_b': 12.0,
+            'ghs_sp': 0.10,
+            'ghs_hp': 0.98,
+        },
+        'planetary': {
+            'stack_method': 'mean',
+            'denoise': True,
+            'denoise_adaptive': True,
+            'deconvolve': True,
+            'background_extraction': False,
+            'star_reduce': False,
+            'local_contrast': True,
+            'chroma_nr': True,
+            'stretch': 'ghs',
+            'ghs_b': 3.0,
+            'ghs_sp': 0.30,
+            'ghs_hp': 0.85,
+        },
+        'lunar': {
+            'stack_method': 'mean',
+            'denoise': True,
+            'denoise_adaptive': True,
+            'background_extraction': False,
+            'star_reduce': False,
+            'local_contrast': True,
+            'chroma_nr': False,
+            'stretch': 'linear',
         },
     }
 
@@ -207,20 +249,6 @@ def apply_preset(args: argparse.Namespace) -> list:
     return changes
 
 
-def apply_stretch_preset(args: argparse.Namespace) -> None:
-    """Apply a named stretch preset."""
-    presets = {
-        'galaxy':    {'stretch': 'ghs', 'ghs_b': 10.0, 'ghs_sp': 0.12, 'ghs_hp': 0.95},
-        'nebula':    {'stretch': 'ghs', 'ghs_b': 12.0, 'ghs_sp': 0.10, 'ghs_hp': 0.98},
-        'starfield': {'stretch': 'ghs', 'ghs_b': 5.0,  'ghs_sp': 0.20, 'ghs_hp': 0.90},
-        'planetary': {'stretch': 'ghs', 'ghs_b': 3.0,  'ghs_sp': 0.30, 'ghs_hp': 0.85},
-        'lunar':     {'stretch': 'linear'},
-    }
-    preset = presets.get(getattr(args, 'stretch_preset', None))
-    if preset:
-        for key, value in preset.items():
-            setattr(args, key, value)
-
 
 def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
     """Save the effective parameter set as a TOML file next to the output."""
@@ -230,8 +258,7 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
 
     skip_keys = {'directory', 'output', 'config', 'health_check', 'dry_run',
                  'verbose', 'debug_registration', 'keep_intermediates',
-                 'preset', 'stretch_preset', 'advanced_metrics',
-                 'diagnostic', 'diagnostic_dir'}
+                 'preset', 'diagnostic', 'diagnostic_dir'}
 
     for key, value in sorted(vars(args).items()):
         if key.startswith('_') or key in skip_keys:
@@ -777,21 +804,21 @@ def parse_args():
                    help='Analyse input frames and calibration quality without stacking')
     p.add_argument('--config', default=None, metavar='PATH',
                    help='Load parameters from a TOML configuration file. '
-                        'CLI arguments override config file values.')
-    p.add_argument('--preset', choices=['quick', 'quality', 'narrowband', 'galaxy', 'starfield'],
+                        'CLI arguments override config file values. Fine-grained tuning '
+                        'parameters removed from the CLI can still be set via config file.')
+    p.add_argument('--preset',
+                   choices=['quick', 'quality', 'narrowband', 'galaxy', 'starfield',
+                            'nebula', 'planetary', 'lunar'],
                    default=None,
-                   help='Processing preset that sets sensible defaults for common scenarios. '
-                        'Individual flags still override preset values. '
-                        'quick: fast processing (mean stack, no deconvolution, minimal denoise). '
+                   help='Processing preset. Individual flags still override preset values. '
+                        'quick: fast (mean stack, minimal denoise, no deconvolution). '
                         'quality: maximum quality (sigma_clip, all denoisers, deconvolution). '
-                        'narrowband: tuned for Ha/OIII/SII narrowband data. '
-                        'galaxy: optimized for galaxy imaging (strong stretch, star reduction). '
-                        'starfield: optimized for star fields (no star reduction, minimal processing).')
-    p.add_argument('--stretch-preset',
-                   choices=['galaxy', 'nebula', 'starfield', 'planetary', 'lunar'],
-                   default=None,
-                   help='Named stretch preset that sets --stretch, --ghs-b, --ghs-sp, --ghs-hp '
-                        'to tested values. Overrides individual stretch arguments.')
+                        'narrowband: tuned for Ha/OIII/SII data. '
+                        'galaxy: galaxy imaging (GHS stretch, star reduction, bilateral denoise). '
+                        'starfield: star fields (no star reduction, minimal processing). '
+                        'nebula: emission/reflection nebula (GHS stretch, MMT+ACDNR denoise). '
+                        'planetary: planetary targets (no background extraction, deconvolution). '
+                        'lunar: lunar surface (linear stretch, no star reduction).')
     p.add_argument('--dry-run', action='store_true',
                    help='Discover and classify frames, show calibration info, print effective '
                         'parameters, and estimate resource usage — without processing anything')
@@ -801,19 +828,11 @@ def parse_args():
                         'wavelet, sky_residual, nlm, bilateral, mmt, acdnr, deconvolve, '
                         'star_reduce, local_contrast')
     p.add_argument('--no-registration', action='store_true')
-    p.add_argument('--skip-phase-correlation', action='store_true',
-                   help='Skip phase correlation, use only fallback methods (debug)')
     p.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
-    p.add_argument('--affine', action='store_true',
-                   help='(Legacy, now default) affine registration is on unless --no-affine is set')
     p.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
-    p.add_argument('--no-advanced-metrics', action='store_false', dest='advanced_metrics',
-                   default=True,
-                   help='Skip Strehl ratio and atmospheric dispersion measurements to '
-                        'speed up Phase 1 quality analysis (saves ~10-20%% per frame)')
     p.add_argument('--quality-threshold', type=float, default=50.0,
                    help='Reject frames whose score falls more than this percent below the '
                         'reference score (90th-percentile of the session, default: 50). '
@@ -849,33 +868,11 @@ def parse_args():
     p.add_argument('--rejection-estimator', choices=['mad', 'std'], default='mad',
                    help='Spread estimator for sigma_clip/winsorized: '
                         'mad (default, robust) or std (PixInsight "Linear Clipping")')
-    p.add_argument('--winsorize', action='store_true',
-                   help='(Deprecated) Shorthand for --stack-method winsorized')
-    p.add_argument('--percentile-low', type=float, default=20.0,
-                   help='Lower rejection percentile for --stack-method percentile (default: 20)')
-    p.add_argument('--percentile-high', type=float, default=80.0,
-                   help='Upper rejection percentile for --stack-method percentile (default: 80)')
-    p.add_argument('--esd-max-outliers', type=int, default=0,
-                   help='Max outliers per pixel for ESD rejection (default: 0 = N//4)')
-    p.add_argument('--esd-significance', type=float, default=0.05,
-                   help='Significance level for ESD test (default: 0.05)')
-    p.add_argument('--weight-snr', type=float, default=1.0,
-                   help='Exponent for per-frame SNR quality weight (default: 1.0; 0 = ignore SNR)')
-    p.add_argument('--weight-fwhm', type=float, default=1.0,
-                   help='Exponent for per-frame FWHM quality weight (default: 1.0; 0 = ignore FWHM; '
-                        'lower FWHM = sharper stars = higher weight)')
-    p.add_argument('--weight-stars', type=float, default=1.0,
-                   help='Exponent for per-frame star-count quality weight (default: 1.0; 0 = ignore)')
-    p.add_argument('--weight-noise', action='store_true',
-                   help='Add 1/noise² weighting component (favours low-background frames)')
     p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
                    help='Debayering method (default: bilinear; malvar/vng require OpenCV)')
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     p.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
-    p.add_argument('--drizzle-drop-size', type=float, default=0.7,
-                   help='Drizzle pixfrac / drop size (0.5-1.0, default: 0.7). '
-                        'Smaller values yield sharper results at the cost of noise.')
     p.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     p.add_argument('--plate-solve', action='store_true',
@@ -885,486 +882,230 @@ def parse_args():
     p.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
-    p.add_argument('--bg-mesh-size', type=int, default=64,
-                   help='Grid cell size in pixels for background estimation (default: 64)')
-    p.add_argument('--bg-filter-size', type=int, default=3,
-                   help='Median filter size for background grid smoothing (default: 3, must be odd)')
-    p.add_argument('--bg-clip-sigma', type=float, default=3.0,
-                   help='Sigma for star rejection in background estimation (default: 3.0)')
-    p.add_argument('--dbe', action='store_true', default=True,
-                   help='Use Dynamic Background Extraction (RBF scattered-point fitting) '
-                        'instead of the legacy mesh estimator (default: on). '
-                        'DBE traces the actual morphology of extended sources via dilation, '
-                        'then fits a thin-plate-spline surface to clean sky samples. '
-                        'Only active when --background-extraction is enabled.')
-    p.add_argument('--no-dbe', dest='dbe', action='store_false',
-                   help='Use legacy mesh-based background extraction instead of DBE')
-    p.add_argument('--dbe-patch-size', type=int, default=64,
-                   help='DBE background sampling patch size in pixels (default: 64). '
-                        'Smaller patches give denser samples and capture finer gradients; '
-                        'larger patches are faster. --bg-mesh-size is ignored when DBE '
-                        'is active.')
+    p.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default='dbe',
+                   help='Background extraction method (default: dbe). '
+                        'mesh: legacy polynomial grid (fastest). '
+                        'dbe: Dynamic Background Extraction, RBF thin-plate-spline. '
+                        'graxpert: AI-powered gradient removal via GraXpert subprocess '
+                        '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
+    p.add_argument('--graxpert-path', default=None, metavar='PATH',
+                   help='Path to GraXpert binary (auto-detected if omitted).')
     p.add_argument('--denoise', action='store_true', default=True,
                    help='Enable wavelet denoising post-stack (default: on; requires pywt)')
     p.add_argument('--no-denoise', dest='denoise', action='store_false',
                    help='Disable wavelet denoising')
     p.add_argument('--denoise-strength', type=float, default=3.0,
-                   help='Wavelet luma denoise threshold factor (default: 3.0); '
-                        'overridden by --auto-denoise-strength unless disabled')
+                   help='Wavelet luma denoise threshold factor (default: 3.0)')
     p.add_argument('--auto-denoise-strength', action='store_true', default=True,
-                   help='Auto-tune denoise strength from stacked image SNR '
-                        '(default: on; applies to fixed-threshold mode only, '
-                        'i.e. when --no-denoise-adaptive is set)')
+                   help='Auto-tune denoise strength from stacked image SNR (default: on)')
     p.add_argument('--no-auto-denoise-strength', dest='auto_denoise_strength',
                    action='store_false',
                    help='Use fixed --denoise-strength instead of auto-tuning')
-    p.add_argument('--denoise-chroma-boost', type=float, default=2.0,
-                   help='Chroma threshold multiplier relative to luma (default: 2.0)')
     p.add_argument('--denoise-nlm', action='store_true',
                    help='Enable non-local means denoising after wavelet (requires skimage or cv2)')
-    p.add_argument('--denoise-nlm-strength', type=float, default=1.0,
-                   help='NLM filter strength multiplier relative to auto-estimated sigma (default: 1.0)')
-    p.add_argument('--denoise-nlm-blend', type=float, default=0.5,
-                   help='Blend fraction of NLM result with original (0=no NLM, 1=full NLM, default: 0.5). '
-                        'Lower values prevent the non-uniform smoothing ("leopard print") artifact by '
-                        'letting the original noise dominate. 0.5 reduces noise by ~30%% with <3%% '
-                        'spatial variation. Increase to 0.7–1.0 for heavier denoising if no pattern appears.')
     p.add_argument('--denoise-bilateral', action='store_true',
-                   help='Enable bilateral filter denoising after wavelet (requires cv2). '
-                        'Spatially uniform by construction — no leopard-print artifact.')
-    p.add_argument('--denoise-bilateral-sigma-color', type=float, default=None,
-                   help='Bilateral value-similarity scale in ADU (default: auto from sky noise). '
-                        'Pixels differing by more than ~2× this value are not mixed. '
-                        'Try 1–5× the expected sky noise level.')
-    p.add_argument('--denoise-bilateral-sigma-space', type=float, default=3.0,
-                   help='Bilateral spatial smoothing radius in pixels (default: 3.0).')
-    # --- MMT denoising ---
+                   help='Enable bilateral filter denoising after wavelet (requires cv2)')
     p.add_argument('--denoise-mmt', action='store_true',
                    help='Enable Multiscale Median Transform (MMT) denoising. '
-                        'Decomposes the stack into detail layers via successive median '
-                        'filters (scales 3, 5, 9, 17 px), estimates noise per-scale '
-                        'via the MAD estimator, and removes it by soft thresholding. '
-                        'More robust to non-Gaussian noise (Poisson + read noise) than '
-                        'wavelet denoising; better edge preservation in fine filaments. '
-                        'Can run alongside --denoise or as a standalone pass. '
-                        'Requires cv2 for best performance (scipy fallback available).')
-    p.add_argument('--denoise-mmt-levels', type=int, default=4,
-                   help='MMT decomposition depth (default: 4 -> kernel sizes 3,5,9,17 px). '
-                        'Increase to 5 (adds 33 px scale) for very noisy stacks with '
-                        'prominent large-scale sky gradients. Only used when --denoise-mmt.')
-    p.add_argument('--denoise-mmt-strength', type=float, default=3.0,
-                   help='MMT soft-threshold noise-sigma multiplier (default: 3.0). '
-                        'Larger values remove more noise but may smooth fine structure. '
-                        'Typical range 2.0–5.0. Only used when --denoise-mmt.')
-    # --- ACDNR denoising ---
+                        'More robust than wavelet for Poisson + read noise; better edge '
+                        'preservation in fine filaments.')
     p.add_argument('--denoise-acdnr', action='store_true',
-                   help='Enable Adaptive Contrast-based Denoising with Noise Reduction '
-                        '(ACDNR-style). Computes a per-pixel weight from local luminance '
-                        'contrast relative to sky noise: w = exp(-0.5*(contrast/(k*sigma))^2). '
-                        'Flat sky pixels (contrast << k*sigma) are fully smoothed; '
-                        'structured pixels (nebula edges, filaments) are preserved. '
-                        'Effective as a lightweight final pass after wavelet or MMT denoising. '
-                        'No extra dependencies required.')
-    p.add_argument('--denoise-acdnr-sigma', type=float, default=1.5,
-                   help='ACDNR Gaussian smoothing radius in pixels (default: 1.5). '
-                        'Controls both the scale of contrast detection and the smoothing '
-                        'kernel. Larger values remove coarser noise but blur finer structure. '
-                        'Typical range 1.0–3.0. Only used when --denoise-acdnr.')
-    p.add_argument('--denoise-acdnr-k', type=float, default=3.0,
-                   help='ACDNR contrast threshold multiplier k (default: 3.0). '
-                        'Smoothing triggers when local contrast < k * sky_sigma. '
-                        'Lower -> more aggressive (smooth structured regions too); '
-                        'higher -> conservative sky-only smoothing. Typical range 2.0–5.0. '
-                        'Only used when --denoise-acdnr.')
+                   help='Enable Adaptive Contrast-based Denoising (ACDNR). '
+                        'Flat sky regions are smoothed; structured pixels are preserved. '
+                        'Effective as a lightweight final pass after wavelet or MMT.')
+    p.add_argument('--denoise-adaptive', action='store_true', default=True,
+                   help='Use BayesShrink per-subband thresholds for wavelet denoising '
+                        '(default: on). Requires --denoise.')
+    p.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
+                   help='Use fixed global threshold factor instead of BayesShrink')
+    p.add_argument('--denoise-bm3d', action='store_true',
+                   help='Apply BM3D collaborative filter denoising (luminance only). '
+                        'Near-optimal noise suppression; slower than wavelet.')
+    p.add_argument('--denoise-aniso', action='store_true',
+                   help='Apply Perona-Malik anisotropic diffusion. Reduces noise in '
+                        'uniform regions while sharpening edges and filament boundaries.')
     p.add_argument('--deconvolve', action='store_true', default=False,
-                   help='Enable Richardson-Lucy deconvolution for sharpening (default: off, requires scikit-image)')
+                   help='Enable Richardson-Lucy deconvolution for sharpening '
+                        '(default: off, requires scikit-image)')
     p.add_argument('--no-deconvolve', dest='deconvolve', action='store_false',
                    help='Disable Richardson-Lucy deconvolution')
-    p.add_argument('--deconvolve-iterations', type=int, default=Config.RL_DEFAULT_ITERATIONS,
-                   help=f'Number of Richardson-Lucy iterations (default: {Config.RL_DEFAULT_ITERATIONS}). '
-                        'More iterations = sharper but may amplify noise.')
-    p.add_argument('--deconvolve-fwhm', type=float, default=None,
-                   help='Override auto-estimated PSF FWHM in pixels. If set, a synthetic '
-                        'Gaussian PSF is used instead of fitting star profiles.')
-    p.add_argument('--deconvolve-psf-model', choices=['moffat', 'gaussian'], default='moffat',
-                   help='PSF model for auto-estimation (default: moffat). '
-                        'Moffat is preferred for seeing-limited images.')
+    p.add_argument('--deconvolve-tv', action='store_true',
+                   help='Apply Total Variation regularized deconvolution instead of '
+                        'Richardson-Lucy. Better for sharp edges; slower.')
+    p.add_argument('--deconvolve-blind-psf', action='store_true',
+                   help='Use empirical PSF estimated by median-stacking normalised star '
+                        'cutouts instead of a parametric model.')
     p.add_argument('--local-normalize', action='store_true',
                    help='Enable local normalization to remove vignetting residuals')
-    p.add_argument('--local-normalize-sigma', type=float, default=50.0,
-                   help='Gaussian sigma for local normalization (default: 50)')
     p.add_argument('--chroma-nr', action='store_true', default=True,
-                   help='Enable chroma noise reduction to remove color speckle in sky background (default: on)')
+                   help='Enable chroma noise reduction to remove color speckle (default: on)')
     p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
-    p.add_argument('--chroma-nr-sigma', type=float, default=2.0,
-                   help='Gaussian sigma for chroma smoothing in pixels (default: 2.0)')
     p.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
-                   help='Preview JPEG stretch method (default: ghs). '
-                        'ghs = Generalized Hyperbolic Stretch — the state-of-the-art '
-                        'algorithm for galaxy imaging, giving independent control of '
-                        'shadow lift (--ghs-sp), highlights protection (--ghs-hp), '
-                        'and stretch intensity (--ghs-b).')
+                   help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
     p.add_argument('--ghs-b', type=float, default=8.0,
                    help='GHS stretch factor b (default: 8.0). '
-                        '0 = linear, 5 = moderate, 8–12 = galaxy-optimised. '
-                        'Higher values lift fainter outer spiral arms and dust lanes '
-                        'while compressing bright nuclei. Only used when --stretch=ghs.')
+                        '0 = linear, 5 = moderate, 8–12 = galaxy-optimised.')
     p.add_argument('--ghs-sp', type=float, default=0.15,
-                   help='GHS symmetry point SP [0–1] (default: 0.15). '
-                        'The pivot of the stretch curve. Setting SP below the galaxy '
-                        'core lifts faint outer arms disproportionately relative to '
-                        'the bright nucleus. Typical galaxy range: 0.10–0.20. '
-                        'Only used when --stretch=ghs.')
+                   help='GHS symmetry point SP [0–1] (default: 0.15). Pivot of the stretch curve.')
     p.add_argument('--ghs-hp', type=float, default=0.95,
                    help='GHS highlights protection HP [0–1] (default: 0.95). '
-                        'Values above HP map to white, protecting bright nuclear '
-                        'cores from blowout while faint structure is stretched. '
-                        'Increase toward 0.99 for targets with very bright nuclei. '
-                        'Only used when --stretch=ghs.')
-    # --- Star reduction (galaxy imaging) ---
+                        'Values above HP map to white, protecting bright cores from blowout.')
     p.add_argument('--star-reduce', action='store_true', default=True,
-                   help='Reduce star prominence in the final stack to improve the '
-                        'galaxy-to-star visual balance. Softens star cores via '
-                        'Gaussian blending, making them appear slightly smaller '
-                        'without removing them. Useful for galaxy targets. '
-                        'Modifies the FITS output data (default: on).')
+                   help='Reduce star prominence to improve galaxy-to-star visual balance '
+                        '(default: on). Softens star cores without removing them.')
     p.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
                    help='Disable star reduction')
-    p.add_argument('--star-reduce-factor', type=float, default=0.4,
-                   help='Star reduction blend fraction (default: 0.4). '
-                        '0 = no effect, 1 = replace star cores with blurred version. '
-                        'Typical range 0.3–0.6. Only used when --star-reduce.')
-    p.add_argument('--star-reduce-sigma', type=float, default=1.5,
-                   help='Gaussian blur radius for star reduction in pixels (default: 1.5). '
-                        'Larger values give softer but dimmer star cores. '
-                        'Only used when --star-reduce.')
-    # --- Multiscale local contrast enhancement (galaxy structure) ---
     p.add_argument('--local-contrast', action='store_true', default=True,
-                   help='Apply multiscale local contrast enhancement (MLCE) to reveal '
-                        'galaxy structure: dust lanes, spiral arm boundaries, and star '
-                        'forming regions. Uses luminance-domain unsharp masking at '
-                        'fine (2 px), medium (12 px), and coarse (40 px) scales with '
-                        'a mid-tone mask that protects sky noise and bright nuclei. '
-                        'Particularly effective for the Black Eye Galaxy (M64) where '
-                        'the medium scale targets the characteristic dark dust band. '
-                        'Modifies the FITS output data (default: on).')
+                   help='Apply multiscale local contrast enhancement to reveal galaxy '
+                        'structure: dust lanes, spiral arm boundaries (default: on).')
     p.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
                    help='Disable multiscale local contrast enhancement')
-    p.add_argument('--local-contrast-strength', type=float, default=0.7,
-                   help='MLCE overall strength multiplier (default: 0.7). '
-                        '0 = off, 1 = full enhancement. Typical range 0.4–0.9. '
-                        'Only used when --local-contrast.')
     p.add_argument('-j', '--parallel', type=int, default=0,
                    help='Parallel workers for frame processing (default: 0=auto, 1=sequential)')
-    # --- Chromatic aberration correction ---
     p.add_argument('--ca-correction', action='store_true', default=True,
                    help='Correct lateral chromatic aberration by aligning R/B channels '
-                        'to green via phase cross-correlation (default: on; requires skimage)')
+                        'to green (default: on; requires skimage)')
     p.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
-    # --- Cosmic ray rejection ---
     p.add_argument('--cosmic-ray-rejection', action='store_true', default=True,
-                   help='Apply L.A.Cosmic-style Laplacian cosmic ray rejection to each '
-                        'light frame before stacking (default: on)')
+                   help='Apply L.A.Cosmic-style cosmic ray rejection per frame (default: on)')
     p.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
                    help='Disable cosmic ray rejection')
-    p.add_argument('--cr-sigclip', type=float, default=4.5,
-                   help='L.A.Cosmic detection threshold in noise sigma units (default: 4.5)')
-    p.add_argument('--cr-objlim', type=float, default=5.0,
-                   help='L.A.Cosmic object-rejection ratio — prevents flagging star cores '
-                        '(default: 5.0, increase to be more conservative)')
-    # --- Adaptive denoising ---
-    p.add_argument('--denoise-adaptive', action='store_true', default=True,
-                   help='Use BayesShrink per-subband thresholds for wavelet denoising '
-                        'instead of a fixed global threshold factor (default: on). '
-                        'Adapts automatically to local noise — preserves faint nebulosity '
-                        'better. Requires --denoise.')
-    p.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
-                   help='Use fixed global threshold factor instead of BayesShrink')
-    # --- Structured logging ---
     p.add_argument('--log-level',
                    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='WARNING',
                    help='Minimum log severity printed to stderr (default: WARNING). '
                         'Use DEBUG for verbose diagnostic output from all modules.')
     p.add_argument('--log-file', default=None, metavar='PATH',
-                   help='Write a full DEBUG-level log to this file in addition to '
-                        'console output.')
-    # --- Output formats ---
+                   help='Write a full DEBUG-level log to this file in addition to console output.')
     p.add_argument('--output-tiff', action='store_true',
-                   help='Write a 32-bit float TIFF alongside the FITS output '
-                        '(requires tifffile; falls back to 16-bit via Pillow)')
+                   help='Write a 32-bit float TIFF alongside the FITS output')
     p.add_argument('--output-xisf', action='store_true',
-                   help='Write output in PixInsight XISF 1.0 format alongside FITS '
-                        '(no extra dependencies)')
-    # --- Quality report ---
+                   help='Write output in PixInsight XISF 1.0 format alongside FITS')
     p.add_argument('--quality-report', default=None, metavar='PATH',
                    help='Write per-frame quality metrics CSV after Phase 1 '
                         '(columns: filename, snr, fwhm, star_count, quality_score, '
                         'accepted, rejection_reason)')
-    # --- Per-frame preview export ---
     p.add_argument('--export-frames-dir', default=None, metavar='PATH',
-                   help='Directory to write a stretched JPEG for every accepted frame '
-                        'after Phase 1 processing')
-    # --- Plate solver backend ---
+                   help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
     p.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
-                   help='Plate solver backend: astap (fast, local binary) or '
+                   help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
-                        'Default: astrometry. ASTAP is recommended when the binary '
-                        'is installed — it solves in ~1 s vs 30–120 s online.')
+                        'ASTAP recommended when the binary is installed (~1 s vs 30–120 s online).')
     p.add_argument('--astap-path', default=None, metavar='PATH',
                    help='Explicit path to the ASTAP binary (auto-detected if omitted)')
-    # --- Background extraction method ---
-    p.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default=None,
-                   help='Background extraction method: '
-                        'mesh: legacy polynomial grid (fastest). '
-                        'dbe: Dynamic Background Extraction, RBF thin-plate-spline (default). '
-                        'graxpert: AI-powered gradient removal via GraXpert subprocess '
-                        '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
-    p.add_argument('--graxpert-path', default=None, metavar='PATH',
-                   help='Path to GraXpert binary (auto-detected if omitted). '
-                        'Download from https://www.graxpert.com/')
-    # --- Starnet++ star removal ---
     p.add_argument('--star-remove', action='store_true',
                    help='Remove stars using Starnet++ after post-processing. '
                         'Saves <output>_starless.fits and <output>_stars.fits. '
-                        'The main FITS output becomes the starless image. '
                         'Requires Starnet++ binary on PATH or --starnet-path.')
     p.add_argument('--starnet-path', default=None, metavar='PATH',
-                   help='Path to Starnet++ binary (auto-detected if omitted). '
-                        'Download from https://www.starnetastro.com/')
-    # --- Comet stacking ---
+                   help='Path to Starnet++ binary (auto-detected if omitted).')
     p.add_argument('--comet-mode', action='store_true',
-                   help='Enable comet nucleus tracking: produces a second stack '
-                        'aligned on the brightest extended blob (comet nucleus) in '
-                        'addition to the normal star-aligned stack. '
-                        'Comet-aligned output is saved as <stem>_comet.fits.')
-    # --- HDR combination ---
+                   help='Enable comet nucleus tracking. Produces a second stack aligned '
+                        'on the comet nucleus saved as <stem>_comet.fits.')
     p.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
-                   help='Blend a short-exposure stack FITS into saturated regions '
-                        'of the main (long-exposure) stack for HDR targets '
-                        '(e.g. Orion Nebula core, globular clusters). '
-                        'The short stack is automatically scaled to match the '
-                        'long stack background level before blending.')
-    # --- Photometric colour calibration ---
+                   help='Blend a short-exposure stack into saturated regions of the main '
+                        'stack for HDR targets (e.g. Orion Nebula core, globular clusters).')
     p.add_argument('--color-calibrate', action='store_true',
-                   help='Apply photometric colour calibration after plate solving: '
-                        'queries Gaia DR3 (or 2MASS via VizieR) for stars in the '
-                        'field, matches them to the image via aperture photometry, '
-                        'and derives per-channel scale factors. '
-                        'Requires --plate-solve and astroquery.')
-    # --- Mask export ---
+                   help='Apply photometric colour calibration after plate solving '
+                        '(queries Gaia DR3). Requires --plate-solve and astroquery.')
     p.add_argument('--export-masks', action='store_true',
-                   help='Save the star detection mask as a FITS sidecar file '
-                        '(<stem>_star_mask.fits) for use in external tools '
-                        '(PixInsight, Siril, etc.)')
-    # --- Checkpoint resume ---
+                   help='Save the star detection mask as <stem>_star_mask.fits')
     p.add_argument('--keep-checkpoint', action='store_true',
-                   help='After a successful stack, keep the checkpoint directory and '
-                        'save the raw pre-post-processing stack to disk. Re-running '
-                        'the same command will skip phases 1-3 and only re-run '
-                        'post-processing, letting you quickly test different denoising, '
-                        'background extraction, stretch, or deconvolution settings.')
+                   help='Keep the raw pre-post-processing stack after a successful run. '
+                        'Re-running skips phases 1–3 so you can iterate on post-processing '
+                        'settings quickly.')
     p.add_argument('--no-resume', action='store_true',
-                   help='Ignore any existing checkpoint and start from scratch. '
-                        'By default, if a checkpoint exists from an interrupted run '
-                        '(within the last 72 hours, same frame set), phases 1 and/or 2 '
-                        'are skipped and pixel data is reloaded from the accepted frames only.')
-    # --- Multi-session combining ---
+                   help='Ignore any existing checkpoint and start from scratch.')
     p.add_argument('--combine-sessions', action='store_true',
-                   help='When the input directory contains subfolders, pool all light '
-                        'frames from every subfolder into a single unified stack instead '
-                        'of stacking each subfolder separately then averaging the results. '
-                        'Use this when all sessions were shot on the same target with the '
-                        'same equipment. Calibration frames from all sessions are merged '
-                        'into stronger master frames. Registration, sigma-clip rejection, '
-                        'and post-processing all run once across the full multi-night dataset.')
+                   help='Pool all light frames from every subfolder into a single unified '
+                        'stack instead of stacking each subfolder separately.')
     p.add_argument('--mosaic', action='store_true',
-                   help='Stitch per-subfolder stacks into a mosaic via WCS reprojection '
-                        'instead of the default translation-based combine. Each subfolder '
-                        'is stacked independently, then all panels are plate-solved and '
-                        'reprojected onto a common RA/Dec grid with overlap feathering '
-                        'and background-level matching. '
-                        'Requires: pip install reproject  and a working plate solver '
-                        '(--plate-solver astap recommended for speed). '
+                   help='Stitch per-subfolder stacks into a mosaic via WCS reprojection. '
+                        'Requires: pip install reproject and a working plate solver. '
                         'Automatically enables --plate-solve.')
-    # --- Heuristic auto-advisor (no API key required) ---
     p.add_argument('--auto', action='store_true',
-                   help='After Phase 1, automatically classify the target '
-                        '(emission nebula, galaxy, reflection nebula, star field, '
-                        'wide field) from frame metrics and apply optimised settings. '
-                        'No API key required. Upgrades debayer to malvar when '
-                        'OpenCV is available, resolves the stacking method by frame '
-                        'count, tunes deconvolution and stretch parameters to the '
-                        'detected target type, and selects the best denoising method: '
-                        'nebulae and galaxies switch to MMT+ACDNR (edge-preserving '
-                        'median cascade + adaptive contrast cleanup); star fields and '
-                        'wide fields keep wavelet and add ACDNR for sky cleanup; '
-                        'MMT strength is scaled to stack SNR.')
-    # --- BM3D denoising ---
-    p.add_argument('--denoise-bm3d', action='store_true',
-                   help='Apply BM3D (Block-Matching 3D) collaborative filter denoising. '
-                        'Groups visually similar 8×8 patches across the image, performs '
-                        'joint 3D DCT thresholding on each group, then aggregates via '
-                        'overlap-add weighted averaging. A two-step process (hard threshold '
-                        'then Wiener filter) gives near-optimal denoising. Operates on '
-                        'luminance only to preserve colour. Slower than wavelet but '
-                        'better preserves fine texture at low noise levels.')
-    p.add_argument('--bm3d-sigma', type=float, default=0.0,
-                   help='BM3D noise standard deviation estimate (default: 0.0 = auto). '
-                        'Auto-estimates from the median absolute deviation of a robust '
-                        'sky region. Override if you know the noise level. '
-                        'Only used when --denoise-bm3d.')
-    p.add_argument('--bm3d-stride', type=int, default=None,
-                   help='BM3D reference block stride in pixels (default: auto = 8 for '
-                        'images >1500px, 4 otherwise). Larger strides are faster but '
-                        'may produce a slight blocking artefact in very smooth sky regions. '
-                        'Typical range 4–16. Only used when --denoise-bm3d.')
-    p.add_argument('--bm3d-search-window', type=int, default=16,
-                   help='BM3D patch-matching search window radius in pixels (default: 16). '
-                        'Larger values find more similar patches but increase runtime '
-                        'quadratically. Only used when --denoise-bm3d.')
-    p.add_argument('--bm3d-group-size', type=int, default=8,
-                   help='BM3D maximum number of similar patches per group (default: 8). '
-                        'More patches = better noise suppression but diminishing returns '
-                        'beyond 16. Only used when --denoise-bm3d.')
-    # --- Anisotropic diffusion ---
-    p.add_argument('--denoise-aniso', action='store_true',
-                   help='Apply Perona-Malik anisotropic diffusion: a PDE-based iterative '
-                        'smoother that reduces noise in uniform regions while sharpening '
-                        'edges. Each iteration computes the gradient magnitude and applies '
-                        'a conduction function that inhibits diffusion across strong edges. '
-                        'Particularly effective at preserving nebula filaments and galaxy '
-                        'dust lane boundaries.')
-    p.add_argument('--aniso-iterations', type=int, default=20,
-                   help='Anisotropic diffusion iteration count (default: 20). '
-                        'More iterations give stronger smoothing. Typical range 10–50. '
-                        'Only used when --denoise-aniso.')
-    p.add_argument('--aniso-kappa', type=float, default=30.0,
-                   help='Anisotropic diffusion edge sensitivity kappa (default: 30.0). '
-                        'Lower values preserve finer edges; higher values allow diffusion '
-                        'across weaker gradients. Typical range 10–50. '
-                        'Only used when --denoise-aniso.')
-    p.add_argument('--aniso-gamma', type=float, default=0.1,
-                   help='Anisotropic diffusion step size gamma (default: 0.1). '
-                        'Must be <=0.25 for numerical stability. Reduce to 0.05 if '
-                        'artefacts appear with many iterations. Only used when --denoise-aniso.')
-    p.add_argument('--aniso-option', type=int, choices=[1, 2], default=1,
-                   help='Anisotropic diffusion conduction function (default: 1). '
-                        '1 = exp(-(|nablaI|/kappa)²): sharper edge preservation, better for '
-                        'point-like features and star halos. '
-                        '2 = 1/(1+(|nablaI|/kappa)²): softer roll-off, better for extended '
-                        'smooth nebulosity. Only used when --denoise-aniso.')
-    # --- SCNR (Subtractive Chromatic Noise Reduction) ---
+                   help='Classify the target after Phase 1 and apply optimised settings '
+                        'automatically. No API key required.')
     p.add_argument('--scnr', action='store_true',
-                   help='Apply Subtractive Chromatic Noise Reduction to the target colour '
-                        'channel (default: green). Replaces each pixel in the target channel '
-                        'with min(pixel, average_of_other_two_channels), selectively removing '
-                        'chromatic noise without introducing colour casts. Effective for '
-                        'suppressing green cast artefacts common in OSC/DSLR images taken '
-                        'under artificial light pollution.')
-    p.add_argument('--scnr-amount', type=float, default=1.0,
-                   help='SCNR correction strength blend fraction (default: 1.0 = full). '
-                        '0 = no correction, 1 = full min-replacement. '
-                        'Partial correction (0.5–0.8) is useful when a mild colour cast '
-                        'is present but full suppression would be too aggressive. '
-                        'Only used when --scnr.')
-    p.add_argument('--scnr-target', choices=['green', 'red', 'blue'], default='green',
-                   help='SCNR target channel to suppress (default: green). '
-                        'Green is the most common artefact channel in OSC sensors '
-                        'due to the 2:1 green-to-R/B Bayer ratio. '
-                        'Only used when --scnr.')
-    # --- Photometric colour calibration (gray-locus + optional Gaia) ---
+                   help='Apply Subtractive Chromatic Noise Reduction to suppress green '
+                        'cast artefacts common in OSC/DSLR images under light pollution.')
     p.add_argument('--photometric-calibration', action='store_true',
                    help='Apply gray-locus photometric colour calibration. '
-                        'Performs aperture photometry on detected stars, identifies '
-                        'solar-type F-G-K stars via iterative sigma-clipping of '
-                        'colour ratios, and derives per-channel scale factors that '
-                        'drive the median gray-locus star colour to neutral. '
-                        'Corrects systematic white-balance errors from unequal '
-                        'Bayer QE, residual atmospheric extinction, and flat-field '
-                        'colour response errors. No external dependencies required.')
+                        'No external dependencies required.')
     p.add_argument('--gaia-calibration', action='store_true',
-                   help='Extend --photometric-calibration with a Gaia DR3 catalogue '
-                        'query for improved accuracy. Matches detected stars to Gaia '
-                        'sources, uses the BP-RP colour index to predict expected '
-                        'R/G/B ratios, and fits per-channel scales via least squares. '
-                        'Falls back to gray-locus method if fewer than 10 Gaia matches '
-                        'are found. Requires --plate-solve and astroquery.')
-    # --- Blind PSF estimation ---
-    p.add_argument('--deconvolve-blind-psf', action='store_true',
-                   help='Use a model-free empirical PSF estimated by median-stacking '
-                        'normalised star cutouts instead of a parametric Gaussian/Moffat '
-                        'model. Captures asymmetric PSF shapes from atmospheric turbulence, '
-                        'mirror diffraction spikes, and field curvature. '
-                        'Combined with --deconvolve for Richardson-Lucy or --deconvolve-tv '
-                        'for Total Variation regularized deconvolution.')
-    # --- Total Variation regularized deconvolution ---
-    p.add_argument('--deconvolve-tv', action='store_true',
-                   help='Apply Total Variation regularized deconvolution instead of '
-                        'Richardson-Lucy. Minimises ½||Hx-y||² + lambda||nablax||_TV via gradient '
-                        'descent, where the TV term suppresses ringing artefacts. '
-                        'Better than RL for images with sharp edges (galaxy discs, '
-                        'nebula boundaries) but slower. Use --tv-lambda to tune '
-                        'regularisation strength.')
-    p.add_argument('--tv-lambda', type=float, default=None,
-                   help=f'TV deconvolution regularisation weight lambda '
-                        f'(default: {Config.TV_LAMBDA}). '
-                        'Larger values -> stronger noise suppression, reduced ringing, '
-                        'but softer fine structure. Smaller values -> more aggressive '
-                        'sharpening. Typical range 0.005–0.1. '
-                        'Only used when --deconvolve-tv.')
-    p.add_argument('--tv-iterations', type=int, default=None,
-                   help=f'TV deconvolution gradient-descent iterations '
-                        f'(default: {Config.TV_ITERATIONS}). '
-                        'More iterations converge toward a sharper solution but '
-                        'increase runtime linearly. Typical range 30–100. '
-                        'Only used when --deconvolve-tv.')
-    # --- Entropy-weighted background ---
-    p.add_argument('--entropy-bg', action='store_true',
-                   help='Enable Shannon-entropy filtering of background sample patches '
-                        'during Dynamic Background Extraction. Patches whose entropy '
-                        'significantly exceeds the median (> 2.5sigma above MAD) are '
-                        'rejected as likely contaminated by uncaught stars, faint '
-                        'nebulosity, or hot pixel clusters. Produces a cleaner '
-                        'background model in crowded fields or emission nebula regions. '
-                        'Only used when --bg-method=dbe (or default DBE).')
-    # --- Polynomial distortion correction ---
-    p.add_argument('--poly-distortion', action='store_true',
-                   help='Enable polynomial distortion correction during registration. '
-                        'After the initial shift/affine alignment, fits a degree-2 (or '
-                        '--poly-distortion-degree) polynomial warp to residual star '
-                        'position errors across the frame and applies a per-pixel '
-                        'correction via bicubic resampling. Corrects barrel/pincushion '
-                        'lens distortion, field curvature, and atmospheric refraction '
-                        'gradients. Requires at least 12 matched star pairs.')
-    p.add_argument('--poly-distortion-degree', type=int, default=2, choices=[2, 3],
-                   help='Polynomial degree for distortion correction (default: 2). '
-                        'Degree 2 fits barrel/pincushion (6 terms per axis). '
-                        'Degree 3 adds higher-order field curvature (10 terms). '
-                        'Only used when --poly-distortion. '
-                        'Degree 3 requires more matched stars (>20 recommended).')
-    # --- HDR exposure blend ---
-    p.add_argument('--hdr-short-exptime', type=float, default=1.0,
-                   help='Nominal exposure time (seconds) of the short-exposure stack '
-                        'supplied via --hdr-combine, used to scale it to the long '
-                        'stack brightness before blending (default: 1.0). '
-                        'Set to the actual sub-frame exposure of the short stack '
-                        'for accurate scaling.')
-    p.add_argument('--hdr-long-exptime', type=float, default=1.0,
-                   help='Nominal exposure time (seconds) of the main (long-exposure) '
-                        'stack for HDR scaling (default: 1.0). '
-                        'Used together with --hdr-short-exptime to compute the '
-                        'brightness ratio before blending.')
-    # --- Comet dual-track blend ---
-    p.add_argument('--comet-blend-sigma', type=float, default=30.0,
-                   help='Gaussian blend radius in pixels for comet+star dual-stack '
-                        'blending (default: 30.0). Controls the spatial width of the '
-                        'transition from the comet-aligned stack (near nucleus) to '
-                        'the star-aligned stack (field). Increase for large comets or '
-                        'when the coma extends far from the nucleus. '
-                        'Only used when --comet-mode.')
+                   help='Extend --photometric-calibration with a Gaia DR3 catalogue query. '
+                        'Requires --plate-solve and astroquery.')
+
+    # Defaults for parameters that are tunable via config file but not exposed on the CLI.
+    # Set these in a TOML config with --config to override them.
+    p.set_defaults(
+        # Denoiser tuning
+        denoise_chroma_boost=2.0,
+        chroma_nr_sigma=2.0,
+        denoise_nlm_strength=1.0,
+        denoise_nlm_blend=0.5,
+        denoise_bilateral_sigma_color=None,
+        denoise_bilateral_sigma_space=3.0,
+        denoise_mmt_levels=4,
+        denoise_mmt_strength=3.0,
+        denoise_acdnr_sigma=1.5,
+        denoise_acdnr_k=3.0,
+        bm3d_sigma=0.0,
+        bm3d_stride=None,
+        bm3d_search_window=16,
+        bm3d_group_size=8,
+        aniso_iterations=20,
+        aniso_kappa=30.0,
+        aniso_gamma=0.1,
+        aniso_option=1,
+        # Deconvolution tuning
+        deconvolve_iterations=Config.RL_DEFAULT_ITERATIONS,
+        deconvolve_fwhm=None,
+        deconvolve_psf_model='moffat',
+        tv_lambda=None,
+        tv_iterations=None,
+        # Background tuning
+        bg_mesh_size=64,
+        bg_filter_size=3,
+        bg_clip_sigma=3.0,
+        dbe_patch_size=64,
+        entropy_bg=False,
+        # Registration internals
+        skip_phase_correlation=False,
+        no_alignment_centrality=False,
+        no_shift_outlier_filter=False,
+        no_reg_residual_check=False,
+        reg_residual_reject=False,
+        patch_registration=False,
+        poly_distortion=False,
+        poly_distortion_degree=2,
+        # Stacking internals
+        percentile_low=20.0,
+        percentile_high=80.0,
+        esd_max_outliers=0,
+        esd_significance=0.05,
+        # Quality
+        advanced_metrics=True,
+        # Per-feature tuning
+        star_reduce_factor=0.4,
+        star_reduce_sigma=1.5,
+        local_contrast_strength=0.7,
+        local_normalize_sigma=50.0,
+        scnr_amount=1.0,
+        scnr_target='green',
+        comet_blend_sigma=30.0,
+        hdr_short_exptime=1.0,
+        hdr_long_exptime=1.0,
+        drizzle_drop_size=0.7,
+        weight_snr=1.0,
+        weight_fwhm=1.0,
+        weight_stars=1.0,
+        weight_noise=False,
+        cr_sigclip=4.5,
+        cr_objlim=5.0,
+    )
     return p.parse_args()
 
 
@@ -1387,8 +1128,6 @@ def main():
             safe_print(f"  Config loaded: {len(config_changes)} settings from {args.config}")
     # Apply preset (before any other processing)
     preset_changes = apply_preset(args)
-    # Apply stretch preset
-    apply_stretch_preset(args)
     # debug_registration implies verbose
     if args.debug_registration:
         args.verbose = True

@@ -53,6 +53,7 @@ def _sep_detect_stars(img_2d: np.ndarray, noise: float) -> Optional[object]:
         ('flux', np.float64), ('peak', np.float64),
         ('roundness1', np.float64), ('roundness2', np.float64),
         ('sharpness', np.float64),
+        ('a', np.float64), ('b', np.float64), ('theta', np.float64),
     ])
     out = np.zeros(len(raw), dtype=dt)
     out['xcentroid'] = raw['x']
@@ -65,6 +66,9 @@ def _sep_detect_stars(img_2d: np.ndarray, noise: float) -> Optional[object]:
     out['roundness1'] = roundness
     out['roundness2'] = roundness
     out['sharpness'] = 0.5  # neutral; passes the (0.3, 0.9) quality filter
+    out['a'] = a
+    out['b'] = b
+    out['theta'] = raw['theta']  # position angle in radians (SEP convention)
 
     quality_mask = roundness < 0.5
     if np.sum(quality_mask) == 0:
@@ -476,6 +480,273 @@ def measure_atmospheric_dispersion(img: np.ndarray, star_positions,
     return float(np.median(dispersions)) if dispersions else 0.0
 
 
+def compute_brenner_sharpness(img: np.ndarray) -> float:
+    """Brenner gradient function: mean of squared 2-pixel horizontal differences.
+
+    More noise-robust than the Laplacian for star fields because the step size
+    of two pixels suppresses high-frequency shot noise while still capturing the
+    steep edges of star PSF cores.  A sharp frame scores higher than a blurred
+    or trailed one of equal SNR.
+    """
+    lum = (img if img.ndim == 2
+           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+    lum = lum.astype(np.float64)
+    diff = lum[:, 2:] - lum[:, :-2]
+    return float(np.mean(diff * diff))
+
+
+def measure_psf_anisotropy(sources) -> Tuple[float, float, str]:
+    """Compute PSF ellipticity and position-angle scatter from SEP source catalog.
+
+    Uses the semi-major/minor axes (a, b) and orientation angle (theta) stored
+    in the extended SEP source array returned by _sep_detect_stars.
+
+    Returns:
+        median_ellipticity: median (a²-b²)/(a²+b²) across sources; 0=circular.
+        pa_scatter_deg:     circular standard deviation of position angles (°).
+        interpretation:     'isotropic' | 'tracking_drift' | 'field_curvature'
+
+    Interpretation heuristics:
+        - Low ellipticity → round stars, no issue.
+        - High ellipticity + low PA scatter → uniform elongation direction
+          (tracking drift or atmospheric dispersion along one axis).
+        - High ellipticity + high PA scatter → direction varies spatially
+          (field curvature, coma, or optical distortion across the FOV).
+    """
+    if sources is None or len(sources) == 0:
+        return 0.0, 0.0, 'isotropic'
+
+    if 'a' not in sources.dtype.names or 'b' not in sources.dtype.names:
+        return 0.0, 0.0, 'isotropic'
+
+    a = np.asarray(sources['a'], dtype=np.float64)
+    b = np.asarray(sources['b'], dtype=np.float64)
+    a2, b2 = a ** 2, b ** 2
+    ellipticity = (a2 - b2) / np.maximum(a2 + b2, 1e-12)
+    med_e = float(np.median(ellipticity))
+
+    pa_scatter = 0.0
+    if 'theta' in sources.dtype.names and len(sources) >= 3:
+        angles = np.asarray(sources['theta'], dtype=np.float64)
+        sin_mean = float(np.mean(np.sin(2.0 * angles)))
+        cos_mean = float(np.mean(np.cos(2.0 * angles)))
+        R = np.sqrt(sin_mean ** 2 + cos_mean ** 2)
+        # Circular SD in degrees (factor of 2 because PA is π-periodic)
+        pa_scatter = float(np.degrees(np.sqrt(max(-2.0 * np.log(max(R, 1e-12)), 0.0))) * 0.5)
+
+    if med_e < 0.15:
+        interp = 'isotropic'
+    elif pa_scatter < 20.0:
+        interp = 'tracking_drift'
+    else:
+        interp = 'field_curvature'
+
+    return float(med_e), float(pa_scatter), interp
+
+
+def compute_multiscale_entropy(img: np.ndarray, levels: int = None) -> float:
+    """Wavelet entropy ratio: fine-scale / coarse-scale detail energy.
+
+    Decomposes luminance into ``levels`` wavelet scales using a db4 filter.
+    A sharp, well-focused frame concentrates energy in fine (high-frequency)
+    scales; a blurry or turbulence-smeared frame redistributes energy to
+    coarser scales.  The ratio of finest-scale entropy to coarsest-scale
+    entropy is therefore a seeing-quality indicator independent of SNR.
+
+    Requires pywt.  Returns 0.0 when pywt is unavailable or the image is too
+    small for the requested decomposition depth.
+    """
+    try:
+        import pywt as _pywt
+    except ImportError:
+        return 0.0
+
+    if levels is None:
+        from src.models import Config
+        levels = Config.WAVELET_ENTROPY_LEVELS
+
+    lum = (img if img.ndim == 2
+           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+    lum = lum.astype(np.float32)
+
+    try:
+        coeffs = _pywt.wavedec2(lum, 'db4', level=levels)
+    except Exception:
+        return 0.0
+
+    def _band_entropy(band: np.ndarray) -> float:
+        flat = band.ravel().astype(np.float64)
+        norm = np.linalg.norm(flat)
+        if norm < 1e-12:
+            return 0.0
+        p = (flat / norm) ** 2
+        p = p[p > 1e-15]
+        return float(-np.sum(p * np.log2(p)))
+
+    # coeffs[0] = approximation; coeffs[1..N] = detail tuples per level
+    # Level 1 = finest detail, level N = coarsest detail
+    entropies_per_level = []
+    for level_detail in coeffs[1:]:
+        level_ent = sum(_band_entropy(b) for b in level_detail)
+        entropies_per_level.append(level_ent)
+
+    if len(entropies_per_level) < 2:
+        return 0.0
+
+    coarse = entropies_per_level[-1]
+    fine = entropies_per_level[0]
+    return float(fine / (coarse + 1e-12))
+
+
+def _zernike_radial(n: int, m_abs: int, rho: np.ndarray) -> np.ndarray:
+    """Radial polynomial R_n^m_abs(rho) for Zernike basis."""
+    from math import factorial
+    result = np.zeros(len(rho), dtype=np.float64)
+    half = (n - m_abs) // 2
+    for s in range(half + 1):
+        num = factorial(n - s)
+        den = factorial(s) * factorial((n + m_abs) // 2 - s) * factorial(half - s)
+        result += ((-1) ** s) * (num / den) * rho ** (n - 2 * s)
+    return result
+
+
+def _build_zernike_matrix(rho: np.ndarray, theta: np.ndarray, max_order: int) -> np.ndarray:
+    """Build (N_pixels, N_modes) Zernike basis matrix up to radial order max_order.
+
+    Uses OSA/ANSI normalisation so that each mode has unit RMS on the unit disk.
+    Modes are ordered as: (0,0), (1,-1), (1,1), (2,-2), (2,0), (2,2), ...
+    """
+    cols = []
+    for n in range(max_order + 1):
+        for m in range(-n, n + 1, 2 if n > 0 else 1):
+            m_abs = abs(m)
+            R = _zernike_radial(n, m_abs, rho)
+            if m == 0:
+                norm = np.sqrt(n + 1)
+                cols.append(norm * R)
+            elif m > 0:
+                norm = np.sqrt(2.0 * (n + 1))
+                cols.append(norm * R * np.cos(m_abs * theta))
+            else:
+                norm = np.sqrt(2.0 * (n + 1))
+                cols.append(norm * R * np.sin(m_abs * theta))
+    return np.column_stack(cols) if len(cols) > 1 else np.array(cols).T
+
+
+def decompose_psf_zernike(img: np.ndarray, star_positions,
+                           cutout_radius: int = None,
+                           max_order: int = None) -> Dict:
+    """Decompose star PSFs into Zernike modes; return per-mode coefficients and RMS.
+
+    Extracts a cutout centred on each bright star, fits the background-subtracted
+    PSF to an orthonormal Zernike basis (up to radial order ``max_order``), and
+    returns the median coefficients across stars.
+
+    Optical aberration RMS = sqrt(sum of squared coefficients for modes Z4+),
+    i.e. ignoring piston (Z1), tip (Z2), and tilt (Z3).
+
+    Returns a dict with keys:
+        'zernike_coeffs'  : list of median coefficients (one per mode)
+        'zernike_rms'     : optical aberration RMS (modes 4+ only)
+        'zernike_defocus' : Z(2,0) defocus coefficient
+        'zernike_astig'   : sqrt(Z(2,-2)²+Z(2,2)²) astigmatism magnitude
+        'zernike_coma'    : sqrt(Z(3,-1)²+Z(3,1)²) coma magnitude
+        'zernike_spherical': |Z(4,0)| spherical aberration
+    """
+    if cutout_radius is None:
+        from src.models import Config
+        cutout_radius = Config.ZERNIKE_CUTOUT_RADIUS
+    if max_order is None:
+        from src.models import Config
+        max_order = Config.ZERNIKE_MAX_ORDER
+    max_stars = Config.ZERNIKE_MAX_STARS if 'Config' in dir() else 15
+
+    empty = {
+        'zernike_coeffs': [], 'zernike_rms': 0.0,
+        'zernike_defocus': 0.0, 'zernike_astig': 0.0,
+        'zernike_coma': 0.0, 'zernike_spherical': 0.0,
+    }
+
+    if star_positions is None or len(star_positions) == 0:
+        return empty
+
+    H, W = img.shape[:2]
+    lum = (img if img.ndim == 2
+           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    try:
+        sorted_idx = list(np.argsort(star_positions['flux'])[::-1])
+    except (KeyError, TypeError):
+        sorted_idx = list(range(len(star_positions)))
+
+    # Build pixel grid for the cutout once (reused for every star)
+    d = cutout_radius
+    size = 2 * d + 1
+    yy, xx = np.mgrid[-d:d + 1, -d:d + 1].astype(np.float64)
+    r = np.sqrt(xx ** 2 + yy ** 2)
+    unit_mask = (r <= d)
+    rho_flat = (r[unit_mask] / d).ravel()         # normalised radius in [0,1]
+    theta_flat = np.arctan2(yy[unit_mask], xx[unit_mask]).ravel()
+    Z = _build_zernike_matrix(rho_flat, theta_flat, max_order)
+
+    all_coeffs = []
+    for idx in sorted_idx[:max_stars]:
+        star = star_positions[idx]
+        yc = int(round(float(star['ycentroid'])))
+        xc = int(round(float(star['xcentroid'])))
+        if yc < d or yc >= H - d or xc < d or xc >= W - d:
+            continue
+
+        cut = lum[yc - d:yc + d + 1, xc - d:xc + d + 1].astype(np.float64)
+        bg = float(np.percentile(cut, 25))
+        cut_sub = np.maximum(cut - bg, 0.0)
+        peak = cut_sub.max()
+        if peak < 10.0:
+            continue
+        # Skip saturated stars (flat top)
+        if int(np.sum(cut_sub >= peak * 0.99)) > 6:
+            continue
+
+        psf_flat = cut_sub[unit_mask].ravel()
+        total = psf_flat.sum()
+        if total < 1e-9:
+            continue
+        psf_norm = psf_flat / total
+
+        try:
+            coeffs, _, _, _ = np.linalg.lstsq(Z, psf_norm, rcond=None)
+            all_coeffs.append(coeffs)
+        except np.linalg.LinAlgError:
+            continue
+
+    if not all_coeffs:
+        return empty
+
+    med_coeffs = np.median(np.array(all_coeffs), axis=0)
+
+    # Mode index map: (0,0)=0, (1,-1)=1, (1,1)=2, (2,-2)=3, (2,0)=4, (2,2)=5,
+    # (3,-3)=6, (3,-1)=7, (3,1)=8, (3,3)=9, (4,-4)=10, (4,-2)=11, (4,0)=12, ...
+    # Aberration RMS from mode index 3 onward (skip piston + tip + tilt at 0,1,2)
+    aberr_rms = float(np.sqrt(np.sum(med_coeffs[3:] ** 2))) if len(med_coeffs) > 3 else 0.0
+
+    # Extract named aberrations by mode index
+    defocus = float(med_coeffs[4]) if len(med_coeffs) > 4 else 0.0
+    astig = (float(np.sqrt(med_coeffs[3] ** 2 + med_coeffs[5] ** 2))
+             if len(med_coeffs) > 5 else 0.0)
+    coma = (float(np.sqrt(med_coeffs[7] ** 2 + med_coeffs[8] ** 2))
+            if len(med_coeffs) > 8 else 0.0)
+    spherical = float(abs(med_coeffs[12])) if len(med_coeffs) > 12 else 0.0
+
+    return {
+        'zernike_coeffs': med_coeffs.tolist(),
+        'zernike_rms': aberr_rms,
+        'zernike_defocus': defocus,
+        'zernike_astig': astig,
+        'zernike_coma': coma,
+        'zernike_spherical': spherical,
+    }
+
+
 def compute_quality_metrics(img: np.ndarray, quick: bool = False,
                             advanced_metrics: bool = True) -> Dict:
     """Comprehensive quality analysis with multiple metrics.
@@ -597,6 +868,39 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         except Exception:
             sharpness = 0.0
 
+    # Brenner gradient sharpness — noise-robust complement to Laplacian.
+    brenner = 0.0
+    try:
+        brenner = compute_brenner_sharpness(img_s)
+    except Exception:
+        brenner = 0.0
+
+    # Wavelet multi-scale entropy ratio — captures seeing quality independently of SNR.
+    wavelet_entropy_ratio = 0.0
+    if not quick:
+        try:
+            wavelet_entropy_ratio = compute_multiscale_entropy(img_s)
+        except Exception:
+            wavelet_entropy_ratio = 0.0
+
+    # PSF anisotropy — ellipticity and PA scatter from SEP semi-axes.
+    psf_ellipticity = 0.0
+    psf_pa_scatter = 0.0
+    psf_anisotropy_type = 'isotropic'
+    if not quick and sources_s is not None and len(sources_s) > 0:
+        try:
+            psf_ellipticity, psf_pa_scatter, psf_anisotropy_type = measure_psf_anisotropy(sources_s)
+        except Exception:
+            pass
+
+    # Zernike PSF decomposition — optical aberration fingerprint.
+    zernike_result: Dict = {}
+    if advanced_metrics and not quick and star_count > 0 and sources_s is not None:
+        try:
+            zernike_result = decompose_psf_zernike(img_s_stars, sources_s)
+        except Exception:
+            zernike_result = {}
+
     # Composite quality score (0–100 range).
     # Normalisation targets realistic single-frame values:
     #   SNR ~2 = good sky-limited frame; FWHM ~4px = good seeing (gentle penalty above that).
@@ -620,6 +924,8 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         'star_count': star_count,
         'star_snr': float(star_snr),
         'sharpness': sharpness,
+        'brenner': float(brenner),
+        'wavelet_entropy_ratio': float(wavelet_entropy_ratio),
         'fwhm': fwhm,
         'background': float(background),
         'noise': float(noise),
@@ -632,5 +938,13 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         'dynamic_range': float(p99 - p01),
         'strehl': float(strehl),
         'dispersion_px': float(dispersion_px),
+        'psf_ellipticity': float(psf_ellipticity),
+        'psf_pa_scatter': float(psf_pa_scatter),
+        'psf_anisotropy_type': psf_anisotropy_type,
+        'zernike_rms': float(zernike_result.get('zernike_rms', 0.0)),
+        'zernike_defocus': float(zernike_result.get('zernike_defocus', 0.0)),
+        'zernike_astig': float(zernike_result.get('zernike_astig', 0.0)),
+        'zernike_coma': float(zernike_result.get('zernike_coma', 0.0)),
+        'zernike_spherical': float(zernike_result.get('zernike_spherical', 0.0)),
         '_star_sources': sources_s,
     }

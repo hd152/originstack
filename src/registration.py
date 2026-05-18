@@ -685,6 +685,349 @@ def apply_polynomial_warp(img: np.ndarray,
     return result
 
 
+def _geometric_median_2d(points: np.ndarray, max_iters: int = 50,
+                          tol: float = 1e-5) -> Tuple[float, float]:
+    """Weiszfeld algorithm for the L1 geometric median of 2D shift vectors.
+
+    More outlier-robust than the arithmetic mean; used to locate the "central"
+    shift position when selecting an alignment-optimal reference frame.
+    """
+    if len(points) == 0:
+        return 0.0, 0.0
+    p = points.astype(np.float64)
+    med = p.mean(axis=0)
+    for _ in range(max_iters):
+        dists = np.linalg.norm(p - med, axis=1)
+        dists = np.maximum(dists, 1e-10)
+        weights = 1.0 / dists
+        new_med = (weights[:, None] * p).sum(axis=0) / weights.sum()
+        if np.linalg.norm(new_med - med) < tol:
+            break
+        med = new_med
+    return float(med[0]), float(med[1])
+
+
+def select_reference_frame(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    mem_lum: np.ndarray,
+    H: int,
+    W: int,
+    centrality_weight: float = None,
+    n_workers: int = None,
+    cached_lums: Optional[List[Optional[np.ndarray]]] = None,
+) -> Tuple[FrameInfo, int, List[Tuple[float, float]]]:
+    """Choose reference frame by blending quality score with alignment centrality.
+
+    A purely quality-ranked reference may sit at the edge of the shift
+    distribution, forcing all other frames to be shifted further (accumulating
+    interpolation error).  This function does a cheap pyramid-only registration
+    pass, finds the geometric median of all shifts, and re-scores each frame as:
+
+        combined = quality_norm * (1 - w) + centrality_norm * w
+
+    where w = centrality_weight (default Config.ALIGNMENT_CENTRALITY_WEIGHT).
+
+    Returns:
+        best_frame       – FrameInfo of the chosen reference.
+        best_lights_idx  – index into the *lights* list (not final).
+        pyramid_shifts   – cheap shifts computed during this pass (recycled by
+                           the outlier filter so the pyramid pass runs only once).
+    """
+    from src.models import Config
+    if centrality_weight is None:
+        centrality_weight = Config.ALIGNMENT_CENTRALITY_WEIGHT
+    if n_workers is None:
+        n_workers = min(Config.REF_PYRAMID_WORKERS, len(final))
+
+    def _get_lum(orig_idx: int) -> np.ndarray:
+        if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
+            return np.asarray(cached_lums[orig_idx], dtype=np.float32)
+        return np.array(mem_lum[orig_idx], dtype=np.float32)
+
+    # Tentative reference: highest quality frame (for consistent pyramid base)
+    tentative_best = max(final, key=lambda f: f.metrics.get('score', 0.0))
+    tentative_idx_in_lights = None
+    # We need the lights-list index; final_indices maps final[j] → lights[orig_idx]
+    tentative_j = final.index(tentative_best)
+    tentative_idx_in_lights = final_indices[tentative_j]
+    ref_lum = _get_lum(tentative_idx_in_lights)
+
+    # Run cheap pyramid registration in parallel
+    pyramid_shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
+
+    def _pyramid_one(j: int, orig_idx: int) -> Tuple[int, float, float]:
+        if orig_idx == tentative_idx_in_lights:
+            return j, 0.0, 0.0
+        lum = _get_lum(orig_idx)
+        try:
+            sy, sx = calculate_shift_pyramid(ref_lum, lum)
+            if np.isfinite(sy) and np.isfinite(sx):
+                return j, float(sy), float(sx)
+        except Exception:
+            pass
+        return j, 0.0, 0.0
+
+    safe_print(f"  Pyramid pass for reference selection ({len(final)} frames, {n_workers} workers)...")
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futs = {executor.submit(_pyramid_one, j, orig_idx): j
+                for j, orig_idx in enumerate(final_indices)}
+        for fut in tqdm(as_completed(futs), total=len(final),
+                        desc="  Ref-select", unit="frame"):
+            j, sy, sx = fut.result()
+            pyramid_shifts[j] = (sy, sx)
+
+    # Geometric median of shift cloud
+    shift_arr = np.array(pyramid_shifts, dtype=np.float64)  # (N, 2)
+    med_sy, med_sx = _geometric_median_2d(shift_arr)
+
+    # Centrality score: inversely proportional to distance from geometric median
+    dists = np.sqrt((shift_arr[:, 0] - med_sy) ** 2 +
+                    (shift_arr[:, 1] - med_sx) ** 2)
+    max_dist = dists.max()
+    if max_dist < 1e-6:
+        centrality = np.ones(len(final))
+    else:
+        centrality = 1.0 - dists / max_dist  # 1 = at median, 0 = furthest away
+
+    # Quality scores (normalised)
+    q_scores = np.array([f.metrics.get('score', 1.0) for f in final], dtype=np.float64)
+    q_max = q_scores.max()
+    q_norm = q_scores / max(q_max, 1e-9)
+
+    combined = q_norm * (1.0 - centrality_weight) + centrality * centrality_weight
+    best_j = int(np.argmax(combined))
+    best_frame = final[best_j]
+    best_lights_idx = final_indices[best_j]
+
+    safe_print(
+        f"  Reference selection: {os.path.basename(best_frame.path)} "
+        f"(quality={q_norm[best_j]:.3f}, centrality={centrality[best_j]:.3f}, "
+        f"combined={combined[best_j]:.3f})"
+    )
+    if best_frame is not tentative_best:
+        safe_print(
+            f"    (Alignment-centrality promoted over pure-quality choice "
+            f"{os.path.basename(tentative_best.path)})"
+        )
+
+    return best_frame, best_lights_idx, pyramid_shifts
+
+
+def _filter_shift_outliers(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    pyramid_shifts: List[Tuple[float, float]],
+    sigma: float = None,
+) -> np.ndarray:
+    """Flag frames whose pyramid shift lies >sigma*MAD from the session median.
+
+    Returns a boolean array (len = len(final)) where True = frame is an outlier
+    that should be skipped in the expensive full registration pass.  Outliers
+    are caused by large mount slippage, guiding failures, or meridian flips
+    that score fine on per-frame quality metrics.
+    """
+    from src.models import Config
+    if sigma is None:
+        sigma = Config.SHIFT_OUTLIER_SIGMA
+
+    shifts_arr = np.array(pyramid_shifts, dtype=np.float64)
+    magnitudes = np.sqrt(shifts_arr[:, 0] ** 2 + shifts_arr[:, 1] ** 2)
+
+    med = float(np.median(magnitudes))
+    mad = float(np.median(np.abs(magnitudes - med)))
+    threshold = med + sigma * max(1.4826 * mad, 1.0)  # floor of 1px avoids zero-threshold
+
+    outlier_mask = magnitudes > threshold
+    n_out = int(outlier_mask.sum())
+    if n_out > 0:
+        safe_print(
+            f"  Shift outlier filter: {n_out}/{len(final)} frames exceed "
+            f"{sigma:.1f}σ threshold ({threshold:.1f} px); "
+            f"skipping expensive registration for these frames"
+        )
+        for j, is_out in enumerate(outlier_mask):
+            if is_out:
+                _log.debug(
+                    "  Outlier frame: %s (shift=%.1f px)",
+                    os.path.basename(final[j].path), magnitudes[j]
+                )
+    return outlier_mask
+
+
+def score_registration_residuals(
+    final: List[FrameInfo],
+    shifts: List[Tuple[float, float]],
+    transforms,
+    ref_lum: np.ndarray,
+    ref_stars,
+    mem_lum: np.ndarray,
+    final_indices: List[int],
+    best_lights_idx: int,
+    max_residual_px: float = None,
+    cached_lums: Optional[List[Optional[np.ndarray]]] = None,
+) -> Tuple[List[float], List[bool]]:
+    """Post-registration centroid residual check.
+
+    After registration, re-detects stars in each registered luminance frame
+    and matches them to the reference star catalog.  Frames whose RMS centroid
+    displacement exceeds ``max_residual_px`` are flagged as misaligned.
+
+    Returns:
+        residuals   – per-frame RMS centroid displacement in pixels.
+        passed      – per-frame bool (True = within tolerance).
+    """
+    from src.models import Config
+    from src.quality import _sep_detect_stars, _detect_stars_multi_fwhm, _ensure_photutils
+
+    if max_residual_px is None:
+        max_residual_px = Config.REG_RESIDUAL_MAX_PX
+
+    residuals: List[float] = [0.0] * len(final)
+    passed: List[bool] = [True] * len(final)
+
+    if ref_stars is None or len(ref_stars) == 0:
+        return residuals, passed
+
+    try:
+        ref_xy = np.array(
+            [(float(s['xcentroid']), float(s['ycentroid'])) for s in ref_stars],
+            dtype=np.float64
+        )
+    except Exception:
+        return residuals, passed
+
+    from scipy.spatial import cKDTree
+    ref_tree = cKDTree(ref_xy)
+
+    def _check_one(j: int, f: FrameInfo, orig_idx: int) -> Tuple[int, float, bool]:
+        if orig_idx == best_lights_idx:
+            return j, 0.0, True
+        try:
+            if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
+                lum = np.asarray(cached_lums[orig_idx], dtype=np.float32)
+            else:
+                lum = np.array(mem_lum[orig_idx], dtype=np.float32)
+            aligned_lum = ndimage.shift(
+                lum, shift=shifts[j], order=1, mode='constant', cval=0.0
+            ) if transforms[j] is None else ndimage.affine_transform(
+                lum.astype(np.float64),
+                transforms[j].params[:2, :2],
+                offset=-(transforms[j].params[:2, :2] @
+                         np.array([shifts[j][0], shifts[j][1]])),
+                order=1, mode='constant', cval=0.0
+            )
+            noise_val = float(f.metrics.get('noise', 1.0)) if f.metrics else 1.0
+            frame_stars = _sep_detect_stars(aligned_lum.astype(np.float32), noise_val)
+            if frame_stars is None or len(frame_stars) < 3:
+                _ensure_photutils()
+                from src.quality import DAOStarFinder
+                if DAOStarFinder is not None:
+                    bg = float(np.median(aligned_lum))
+                    std = max(noise_val, 1e-6)
+                    frame_stars = _detect_stars_multi_fwhm(
+                        aligned_lum - bg, threshold=5.0 * std
+                    )
+            if frame_stars is None or len(frame_stars) < 3:
+                return j, 0.0, True
+            frame_xy = np.array(
+                [(float(s['xcentroid']), float(s['ycentroid'])) for s in frame_stars],
+                dtype=np.float64
+            )
+            dists, _ = ref_tree.query(frame_xy, k=1, distance_upper_bound=10.0)
+            valid = np.isfinite(dists) & (dists < 10.0)
+            if valid.sum() < 3:
+                return j, 0.0, True
+            rms = float(np.sqrt(np.mean(dists[valid] ** 2)))
+            return j, rms, rms <= max_residual_px
+        except Exception as exc:
+            _log.debug("Residual check failed for frame %s: %s",
+                       os.path.basename(f.path), exc)
+            return j, 0.0, True
+
+    n_workers = min(os.cpu_count() or 4, len(final))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futs = {executor.submit(_check_one, j, f, orig_idx): j
+                for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
+        for fut in tqdm(as_completed(futs), total=len(final),
+                        desc="  Residual check", unit="frame"):
+            j, rms, ok = fut.result()
+            residuals[j] = rms
+            passed[j] = ok
+
+    n_failed = sum(1 for p in passed if not p)
+    if n_failed > 0:
+        safe_print(
+            f"  Post-registration residual check: {n_failed}/{len(final)} frames "
+            f"exceeded {max_residual_px:.1f} px RMS threshold"
+        )
+
+    return residuals, passed
+
+
+def compute_patch_quality_map(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
+    """Divide luminance frame into a grid and compute per-patch Brenner sharpness.
+
+    Returns a float32 (H, W) array where each pixel holds the normalised quality
+    weight of its patch.  The map is bilinearly interpolated from the patch grid
+    to full resolution so it can be used as a per-pixel stacking weight.
+
+    Higher values indicate sharper, better-seeing patches (suitable for
+    weighted stacking in the lucky imaging paradigm).
+    """
+    from src.models import Config
+    if grid_size is None:
+        grid_size = Config.PATCH_GRID_SIZE
+    min_patch = Config.PATCH_MIN_SIZE
+
+    H, W = lum.shape[:2]
+    # Enforce minimum patch size; fall back to 1x1 grid if image is tiny
+    ph = max(H // grid_size, min_patch)
+    pw = max(W // grid_size, min_patch)
+    ny = max(H // ph, 1)
+    nx = max(W // pw, 1)
+
+    patch_scores = np.zeros((ny, nx), dtype=np.float32)
+    lum_f = lum.astype(np.float64)
+
+    for iy in range(ny):
+        for ix in range(nx):
+            y0, y1 = iy * ph, min((iy + 1) * ph, H)
+            x0, x1 = ix * pw, min((ix + 1) * pw, W)
+            patch = lum_f[y0:y1, x0:x1]
+            if patch.size < 4:
+                continue
+            diff = patch[:, 2:] - patch[:, :-2]
+            patch_scores[iy, ix] = float(np.mean(diff * diff))
+
+    # Normalise to [0, 1]
+    pmax = patch_scores.max()
+    if pmax > 1e-12:
+        patch_scores /= pmax
+
+    # Upsample patch grid to full frame resolution via bilinear interpolation
+    if ny == H and nx == W:
+        return patch_scores
+
+    zoom_y = H / ny
+    zoom_x = W / nx
+    quality_map = ndimage.zoom(patch_scores, (zoom_y, zoom_x), order=1)
+    quality_map = np.clip(quality_map, 0.0, 1.0).astype(np.float32)
+    # Ensure exact output shape (zoom can differ by 1 pixel due to rounding)
+    if quality_map.shape != (H, W):
+        from scipy.ndimage import map_coordinates
+        gy = np.linspace(0, ny - 1, H)
+        gx = np.linspace(0, nx - 1, W)
+        coords_y, coords_x = np.meshgrid(gy, gx, indexing='ij')
+        quality_map = map_coordinates(
+            patch_scores.astype(np.float64),
+            [coords_y, coords_x], order=1, mode='nearest'
+        ).astype(np.float32)
+        np.clip(quality_map, 0.0, 1.0, out=quality_map)
+
+    return quality_map
+
+
 def run_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -697,41 +1040,129 @@ def run_registration_phase(
     W: int,
     args: argparse.Namespace,
     stats: ProcessingStats,
+    pyramid_shifts: Optional[List[Tuple[float, float]]] = None,
 ) -> Tuple[List[Tuple[float, float]], List[Optional[Any]], Dict[str, Any]]:
-    """Compute per-frame registration shifts/transforms for all accepted frames."""
+    """Compute per-frame registration shifts/transforms for all accepted frames.
+
+    When ``pyramid_shifts`` is supplied (from select_reference_frame), the
+    shift-outlier filter is applied before the expensive full-registration pass,
+    saving time on frames with catastrophic guiding failures.
+    """
     ref_stars = best.metrics.get('_star_sources')
+    if ref_stars is not None and len(ref_stars) == 0:
+        ref_stars = None  # treat empty array same as absent
 
-    # If star sources are missing from metrics (e.g. loaded from checkpoint, or
-    # DAOStarFinder was unavailable during quality phase), attempt re-detection now
-    # using the reference luminance we already have in memory.
+    # If star sources are missing (lost from checkpoint JSON serialisation, or
+    # detection unavailable in Phase 1), attempt re-detection now using the
+    # reference luminance already in memory.  Try in order: SEP (fastest, no
+    # extra deps), DAOStarFinder (photutils), local-maxima fallback (scipy only).
     if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        noise_val = float(best.metrics.get('noise', 1.0)) if best.metrics else 1.0
+        _redet_tried: list = []
         try:
-            from src.quality import _detect_stars_multi_fwhm, _ensure_photutils, _ensure_astropy_stats
-            _ensure_photutils()
-            _ensure_astropy_stats()
-            from src.quality import DAOStarFinder, sigma_clipped_stats
-            if DAOStarFinder is not None and sigma_clipped_stats is not None:
-                _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)
-                if bg_std and float(bg_std) > 0:
-                    bg_sub = ref_lum - float(bg_med)
-                    ref_stars = _detect_stars_multi_fwhm(bg_sub, threshold=5.0 * float(bg_std))
-                    if ref_stars is not None and len(ref_stars) > 0:
-                        best.metrics['_star_sources'] = ref_stars
-                        safe_print(f"  Re-detected {len(ref_stars)} stars in reference frame for affine registration")
+            # 1. SEP — handles high-pedestal images well via local background mesh
+            from src.quality import _sep_detect_stars
+            _redet_tried.append('SEP')
+            ref_stars = _sep_detect_stars(ref_lum.astype(np.float32), noise_val)
+            if ref_stars is not None and len(ref_stars) > 0:
+                safe_print(f"  Re-detected {len(ref_stars)} stars via SEP")
+            else:
+                ref_stars = None
         except Exception as e:
-            _log.debug("Re-detection of reference stars failed: %s", e)
+            _log.debug("SEP re-detection failed: %s", e)
 
-    if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        if ref_stars is None:
+            try:
+                # 2. DAOStarFinder with sigma-clipped background estimate
+                from src.quality import (_detect_stars_multi_fwhm,
+                                         _ensure_photutils, _ensure_astropy_stats)
+                _ensure_photutils()
+                _ensure_astropy_stats()
+                from src.quality import DAOStarFinder, sigma_clipped_stats
+                if DAOStarFinder is not None and sigma_clipped_stats is not None:
+                    _redet_tried.append('DAOStarFinder')
+                    _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)
+                    bg_std_f = float(bg_std) if bg_std else 0.0
+                    if bg_std_f > 0:
+                        bg_sub = ref_lum - float(bg_med)
+                        ref_stars = _detect_stars_multi_fwhm(bg_sub, threshold=5.0 * bg_std_f)
+                        if ref_stars is not None and len(ref_stars) > 0:
+                            safe_print(f"  Re-detected {len(ref_stars)} stars via DAOStarFinder")
+                        else:
+                            ref_stars = None
+            except Exception as e:
+                _log.debug("DAOStarFinder re-detection failed: %s", e)
+
+        if ref_stars is None:
+            try:
+                # 3. Local-maxima fallback — pure scipy, always available
+                from scipy.ndimage import maximum_filter, gaussian_filter
+                _redet_tried.append('local-maxima')
+                smoothed = gaussian_filter(ref_lum.astype(np.float64), sigma=2.0)
+                bg = float(np.median(smoothed))
+                thresh = bg + 5.0 * max(noise_val, float(np.std(smoothed)) * 0.5)
+                local_max = maximum_filter(smoothed, size=11)
+                mask = (smoothed == local_max) & (smoothed > thresh)
+                peak_ys, peak_xs = np.where(mask)
+                peak_vals = smoothed[peak_ys, peak_xs]
+                if len(peak_ys) > 0:
+                    order = np.argsort(peak_vals)[::-1]
+                    n_stars = min(len(order), 200)
+                    dt = np.dtype([('xcentroid', np.float64), ('ycentroid', np.float64),
+                                   ('flux', np.float64), ('peak', np.float64),
+                                   ('roundness1', np.float64), ('roundness2', np.float64),
+                                   ('sharpness', np.float64),
+                                   ('a', np.float64), ('b', np.float64), ('theta', np.float64)])
+                    ref_stars = np.zeros(n_stars, dtype=dt)
+                    ref_stars['xcentroid'] = peak_xs[order[:n_stars]]
+                    ref_stars['ycentroid'] = peak_ys[order[:n_stars]]
+                    ref_stars['peak'] = peak_vals[order[:n_stars]]
+                    ref_stars['flux'] = ref_stars['peak']
+                    ref_stars['a'] = 2.0
+                    ref_stars['b'] = 2.0
+                    ref_stars['roundness1'] = 0.1
+                    ref_stars['roundness2'] = 0.1
+                    ref_stars['sharpness'] = 0.5
+                    safe_print(f"  Re-detected {n_stars} stars via local-maxima fallback")
+            except Exception as e:
+                _log.debug("Local-maxima re-detection failed: %s", e)
+
+        if ref_stars is not None and len(ref_stars) > 0:
+            best.metrics['_star_sources'] = ref_stars
+        else:
+            tried_str = ', '.join(_redet_tried) if _redet_tried else 'none available'
+            safe_print(f"  ⚠ No stars detected in reference frame (tried: {tried_str}) — "
+                       f"affine (rotation) registration disabled, falling back to translation only")
+            ref_stars = None
+
+    elif ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
         safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
                    "registration disabled, falling back to translation only")
+
+    # Shift-space outlier pre-filter: skip expensive full registration for
+    # frames whose pyramid shift is catastrophically far from the session median.
+    outlier_mask = np.zeros(len(final), dtype=bool)
+    if (pyramid_shifts is not None
+            and not getattr(args, 'no_shift_outlier_filter', False)
+            and len(pyramid_shifts) == len(final)):
+        outlier_mask = _filter_shift_outliers(final, final_indices, pyramid_shifts)
 
     shifts = [None] * len(final)
     transforms = [None] * len(final)
     print(f"  Calculating shifts for {len(final)} frames...")
 
+    # Pre-seed outlier frames with their pyramid shift so they still appear in
+    # the output with a reasonable (if coarse) alignment rather than zero.
+    for j in range(len(final)):
+        if outlier_mask[j] and pyramid_shifts is not None:
+            shifts[j] = pyramid_shifts[j]
+            transforms[j] = None
+
     gpu = get_gpu()
 
     def _register_one(j, f, orig_idx):
+        if outlier_mask[j]:
+            return j, shifts[j] or (0.0, 0.0), None
         if orig_idx == best_idx or args.no_registration:
             return j, (0.0, 0.0), None
         with gpu.stream_context():
@@ -814,7 +1245,60 @@ def run_registration_phase(
         stats.add_warning(warning)
         safe_print(f'\n  ⚠ WARNING: {warning}')
 
+    # Post-registration centroid residual check: verify alignment quality by
+    # re-detecting stars in each registered frame and measuring RMS star position error.
+    if (not getattr(args, 'no_reg_residual_check', False)
+            and ref_stars is not None
+            and len(ref_stars) >= 5
+            and not args.no_registration):
+        safe_print(f"  Post-registration residual check ({len(final)} frames)...")
+        residuals, res_passed = score_registration_residuals(
+            final, shifts, transforms, ref_lum, ref_stars,
+            mem_lum, final_indices, best_idx,
+            cached_lums=cached_lums,
+        )
+        n_res_failed = sum(1 for p in res_passed if not p)
+        for j, (f, passed, rms) in enumerate(zip(final, res_passed, residuals)):
+            if f.metrics is not None:
+                f.metrics['reg_residual_px'] = round(rms, 3)
+        if n_res_failed > 0 and getattr(args, 'reg_residual_reject', False):
+            rejected_by_residual = [j for j, p in enumerate(res_passed) if not p]
+            safe_print(
+                f"  Residual rejection (--reg-residual-reject): "
+                f"removing {n_res_failed} frame(s)"
+            )
+            keep_mask = [p for p in res_passed]
+            final = [f for f, k in zip(final, keep_mask) if k]
+            final_indices = [i for i, k in zip(final_indices, keep_mask) if k]
+            shifts = [s for s, k in zip(shifts, keep_mask) if k]
+            transforms = [t for t, k in zip(transforms, keep_mask) if k]
+
+    # Patch quality maps for per-pixel lucky-imaging weighted stacking.
+    quality_maps: Optional[List[np.ndarray]] = None
+    if getattr(args, 'patch_registration', False) and not args.no_registration:
+        safe_print(f"\n  Computing patch quality maps ({len(final)} frames)...")
+        quality_maps = []
+        for j, orig_idx in enumerate(final_indices):
+            lum = np.array(mem_lum[orig_idx]).astype(np.float32)
+            # Apply registration so the quality map is in aligned space
+            if transforms[j] is not None:
+                from scipy.ndimage import affine_transform as _aff
+                tfm = transforms[j]
+                R = tfm.params[:2, :2]
+                t_xy = tfm.params[:2, 2]
+                t_rc = np.array([t_xy[1], t_xy[0]])
+                offset = -R @ t_rc
+                lum = _aff(lum.astype(np.float64), R, offset=offset,
+                           order=1, mode='constant', cval=0.0).astype(np.float32)
+            elif shifts[j] != (0.0, 0.0):
+                lum = ndimage.shift(lum, shift=shifts[j], order=1,
+                                    mode='constant', cval=0.0)
+            qmap = compute_patch_quality_map(lum)
+            quality_maps.append(qmap)
+        safe_print(f"  Patch quality maps computed.")
+
     dither_info = detect_dither(shifts, verbose=False)
+    dither_info['quality_maps'] = quality_maps  # carry through to stacking
     if not args.no_registration and len(shifts) > 2:
         labels = {'dithered': 'Dithered (random offsets)',
                   'tracking_drift': 'Tracking drift (systematic trend)',
@@ -832,7 +1316,7 @@ def run_registration_phase(
             safe_print(f"    Tip: dithered data detected — add --drizzle-scale 2.0 "
                        f"to enable sub-pixel super-resolution stacking")
 
-    return shifts, transforms, dither_info
+    return shifts, transforms, dither_info, final, final_indices
 
 
 # ---------------------------------------------------------------------------

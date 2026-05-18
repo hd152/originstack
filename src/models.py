@@ -86,6 +86,24 @@ class Config:
     STREHL_CUTOUT_RADIUS = 20       # Cutout half-size for Strehl measurement
     DISP_CUTOUT_RADIUS = 10         # Cutout half-size for dispersion centroid
 
+    # Brenner / wavelet entropy quality metrics
+    WAVELET_ENTROPY_LEVELS = 4      # Wavelet decomposition levels for entropy ratio
+
+    # Zernike PSF decomposition
+    ZERNIKE_CUTOUT_RADIUS = 15      # Half-size for Zernike PSF cutout extraction
+    ZERNIKE_MAX_ORDER = 4           # Max radial order (covers 15 modes: piston through spherical)
+    ZERNIKE_MAX_STARS = 15          # Stars to sample for Zernike decomposition
+
+    # Registration enhancements
+    SHIFT_OUTLIER_SIGMA = 3.5       # MAD-sigma threshold for pre-registration outlier rejection
+    REG_RESIDUAL_MAX_PX = 1.5       # Max post-registration centroid RMS (px) before rejection
+    ALIGNMENT_CENTRALITY_WEIGHT = 0.3   # Blend weight: 0=pure quality score, 1=pure centrality
+    REF_PYRAMID_WORKERS = 4         # Max parallel workers for cheap reference-selection pass
+
+    # Patch-based local registration (lucky imaging mode)
+    PATCH_GRID_SIZE = 8             # NxN grid for patch quality map (8x8 = 64 patches)
+    PATCH_MIN_SIZE = 64             # Minimum patch dimension in pixels
+
 
 @dataclass
 class FrameInfo:

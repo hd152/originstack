@@ -198,8 +198,14 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
                          stacked_shape: Tuple[int, int, int],
                          shifts: List[Tuple[float, float]],
                          masters: Dict[str, Optional[np.ndarray]],
-                         dither_info: Optional[Dict] = None) -> None:
-    """Populate FITS header with comprehensive metadata."""
+                         dither_info: Optional[Dict] = None,
+                         post_processed: bool = False) -> None:
+    """Populate FITS header with comprehensive metadata.
+
+    post_processed: True if the saved data has had post-processing applied
+    (background extraction, denoising, etc.).  False means the FITS contains
+    the raw linear stacked data before Phase 4.
+    """
     from datetime import datetime, timezone
 
     try:
@@ -312,14 +318,19 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
         if iso_values:
             header['ISOVALUS'] = (','.join(sorted(iso_values)), 'ISO/gain values used')
 
-    # Background extraction info
-    if args.background_extraction:
-        header['BGEXTR'] = (True, 'Background extraction applied')
+    # Whether post-processing was applied to the data in this FITS
+    header['RAWSTACK'] = (not post_processed,
+                          'True = pre-post-processing linear stack; sky background not subtracted')
+
+    # Background extraction info (reflects what was done to the saved data)
+    bg_applied = post_processed and args.background_extraction
+    if bg_applied:
+        header['BGEXTR'] = (True, 'Background extraction applied to FITS data')
         header['BGMESH'] = (args.bg_mesh_size, 'Background mesh cell size in pixels')
         header['BGFILTR'] = (args.bg_filter_size, 'Background grid filter size')
         header['BGCLIP'] = (args.bg_clip_sigma, 'Background sigma-clip threshold')
     else:
-        header['BGEXTR'] = (False, 'No background extraction applied')
+        header['BGEXTR'] = (False, 'Background extraction NOT applied to FITS data')
 
     # Dither analysis info
     if dither_info is not None:
@@ -335,12 +346,14 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
     # Affine registration
     header['AFFINE'] = (not getattr(args, 'no_affine', False), 'Affine registration enabled')
 
-    # Post-processing flags
-    header['DENOISE'] = (getattr(args, 'denoise', False), 'Wavelet denoising applied')
-    if getattr(args, 'denoise', False):
+    # Post-processing flags (reflect what was done to the saved data, not just config)
+    denoise_applied = post_processed and getattr(args, 'denoise', False)
+    header['DENOISE'] = (denoise_applied, 'Wavelet denoising applied to FITS data')
+    if denoise_applied:
         header['DNSTRNG'] = (getattr(args, 'denoise_strength', 3.0), 'Denoise threshold factor')
-    header['LOCNORM'] = (getattr(args, 'local_normalize', False), 'Local normalization applied')
-    header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method')
+    locnorm_applied = post_processed and getattr(args, 'local_normalize', False)
+    header['LOCNORM'] = (locnorm_applied, 'Local normalization applied to FITS data')
+    header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method (JPG only)')
     header['DEBAYER'] = (args.debayer_method, 'Debayering method used')
 
     # Drizzle
@@ -351,7 +364,8 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
         header['DRZPIXFR'] = (getattr(args, 'drizzle_drop_size', 0.7), 'Drizzle pixel fraction')
 
     # Richardson-Lucy deconvolution
-    header['DECONV'] = (getattr(args, 'deconvolve', False), 'Richardson-Lucy deconvolution applied')
+    deconv_applied = post_processed and getattr(args, 'deconvolve', False)
+    header['DECONV'] = (deconv_applied, 'Richardson-Lucy deconvolution applied to FITS data')
     if getattr(args, 'deconvolve', False):
         header['DCITERS'] = (getattr(args, 'deconvolve_iterations', 15), 'Deconvolution iterations')
         if getattr(args, 'deconvolve_fwhm', None):

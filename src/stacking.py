@@ -595,6 +595,57 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
     return result
 
 
+def patch_weighted_mean_combine(
+    mem_aligned: np.ndarray,
+    quality_maps: List[np.ndarray],
+    global_weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Quality-map-weighted mean combine for per-pixel lucky-imaging stacking.
+
+    Each frame contributes to each output pixel with a weight equal to its
+    normalised per-patch quality score at that position, optionally further
+    multiplied by the frame's global quality weight.  Pixels that fall in a
+    sharp isoplanatic patch of a frame receive more weight than pixels in a
+    blurry region of the same frame — exactly the lucky imaging principle
+    applied to deep-sky (non-planetary) data.
+
+    Args:
+        mem_aligned:    (N, H, W, C) float32 memmap of aligned, cropped frames.
+        quality_maps:   List of N (H, W) float32 per-pixel quality weight arrays.
+                        Must be pre-cropped to match the aligned frame dimensions.
+        global_weights: Optional (N,) global per-frame weights (e.g. SNR-based).
+
+    Returns:
+        (H, W, C) float32 stacked image.
+    """
+    N, H, W, C = mem_aligned.shape
+    acc = np.zeros((H, W, C), dtype=np.float64)
+    weight_sum = np.zeros((H, W), dtype=np.float64)
+
+    for j in range(N):
+        frame = mem_aligned[j].astype(np.float64)
+        qmap = quality_maps[j].astype(np.float64)
+        # Crop quality map to match aligned frame if shapes differ
+        if qmap.shape != (H, W):
+            from scipy.ndimage import zoom
+            qmap = zoom(qmap, (H / qmap.shape[0], W / qmap.shape[1]), order=1)
+            qmap = np.clip(qmap, 0.0, 1.0)
+
+        w = qmap
+        if global_weights is not None:
+            w = w * float(global_weights[j])
+
+        weight_sum += w
+        for c in range(C):
+            acc[:, :, c] += frame[:, :, c] * w
+
+    safe_denom = np.maximum(weight_sum, 1e-12)
+    result = np.zeros((H, W, C), dtype=np.float32)
+    for c in range(C):
+        result[:, :, c] = (acc[:, :, c] / safe_denom).astype(np.float32)
+    return result
+
+
 def run_stacking_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -606,6 +657,7 @@ def run_stacking_phase(
     C: int,
     args: argparse.Namespace,
     stats: ProcessingStats,
+    quality_maps: Optional[List[np.ndarray]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
     """Align and combine frames into a stacked image.
 
@@ -690,7 +742,22 @@ def run_stacking_phase(
                 future.result()
         mem_aligned.flush()
 
-        if args.stack_method in ('sigma_clip', 'winsorized'):
+        # Patch-weighted lucky-imaging combine (if quality maps were computed in Phase 2)
+        if quality_maps is not None and len(quality_maps) == n_final:
+            print(f"  Patch-weighted mean combine ({n_final} frames × {top},{bottom},{left},{right} crop)...")
+            # Crop quality maps to the common region so they match mem_aligned shape
+            cropped_qmaps = []
+            for qmap in quality_maps:
+                if qmap.shape[0] >= bottom and qmap.shape[1] >= right:
+                    cropped_qmaps.append(qmap[top:bottom, left:right])
+                else:
+                    from scipy.ndimage import zoom
+                    qmap_c = zoom(qmap, ((bottom - top) / qmap.shape[0],
+                                        (right - left) / qmap.shape[1]), order=1)
+                    cropped_qmaps.append(np.clip(qmap_c, 0.0, 1.0).astype(np.float32))
+            stacked = patch_weighted_mean_combine(mem_aligned, cropped_qmaps,
+                                                  global_weights=weights)
+        elif args.stack_method in ('sigma_clip', 'winsorized'):
             use_winsorize = (args.stack_method == 'winsorized')
             use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
             print(f"  Sigma-clip: sigma={args.rejection_sigma}, iters={args.rejection_iters}, "

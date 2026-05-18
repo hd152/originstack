@@ -17,7 +17,7 @@ from src.io_fits import load_fits, save_preview_rgb, populate_fits_header
 from src.debayer import debayer
 from src.plate_solve import solve_plate
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
-from src.registration import run_registration_phase
+from src.registration import run_registration_phase, select_reference_frame
 from src.stacking import run_stacking_phase
 from src.postprocess import postprocess_stack
 from src.checkpoint import (save_checkpoint, save_raw_stack, load_raw_stack,
@@ -413,8 +413,19 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 print_phase(2, "Registration")
                 phase_start = time.time()
 
-                best = max(final, key=lambda x: x.metrics.get('score', 0))
-                best_idx = lights.index(best)
+                # Reference frame selection: alignment-centrality scoring
+                # (does a cheap pyramid pass, then blends quality + centrality).
+                # Falls back to pure quality if --no-alignment-centrality is set.
+                pyramid_shifts = None
+                if getattr(args, 'no_alignment_centrality', False):
+                    best = max(final, key=lambda x: x.metrics.get('score', 0))
+                    best_idx = lights.index(best)
+                else:
+                    best, best_idx, pyramid_shifts = select_reference_frame(
+                        final, final_indices, mem_lum, H, W,
+                        cached_lums=cached_lums,
+                    )
+
                 print(f"  Reference frame: {os.path.basename(best.path)} "
                       f"(score={best.metrics.get('score', 0):.1f})")
 
@@ -424,9 +435,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                           f'max={np.max(ref_lum):.1f}, mean={np.mean(ref_lum):.1f}, '
                           f'std={np.std(ref_lum):.1f}')
 
-                shifts, transforms, dither_info = run_registration_phase(
+                shifts, transforms, dither_info, final, final_indices = run_registration_phase(
                     final, final_indices, best, best_idx,
-                    ref_lum, mem_lum, cached_lums, H, W, args, stats)
+                    ref_lum, mem_lum, cached_lums, H, W, args, stats,
+                    pyramid_shifts=pyramid_shifts)
 
                 stats.registration_time = time.time() - phase_start
                 del cached_lums
@@ -451,9 +463,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             print_phase(3, "Stacking")
             phase_start = time.time()
 
+            quality_maps = dither_info.pop('quality_maps', None)
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
-                shifts, transforms, H, W, C, args, stats)
+                shifts, transforms, H, W, C, args, stats,
+                quality_maps=quality_maps)
 
             stats.stacking_time = time.time() - phase_start
 
@@ -546,7 +560,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     populate_fits_header(
         header=hdu.header, frames=final, stats=stats, args=args,
         stacked_shape=stacked.shape, shifts=shifts,
-        masters=masters, dither_info=dither_info)
+        masters=masters, dither_info=dither_info,
+        post_processed=False)
     hdu.writeto(output_path, overwrite=True)
 
     if getattr(args, 'plate_solve', False):
