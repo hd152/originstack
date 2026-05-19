@@ -1,15 +1,26 @@
 """Stacking algorithms: Lanczos resampling, drizzle combine, sigma-clip combine."""
 from __future__ import annotations
 
+import argparse
 import os
-from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple
+import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
 
-from src.models import Config
+from src.gpu_context import get_gpu
+from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, get_logger
+
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 _log = get_logger()
 
@@ -51,7 +62,7 @@ def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
     if img.ndim != 3 or img.shape[2] != 3:
         return img
 
-    result = img.copy()
+    result = img.astype(np.float32, copy=True)
     lap_kernel = np.array([[0.0, -1.0, 0.0],
                            [-1.0,  4.0, -1.0],
                            [0.0, -1.0, 0.0]], dtype=np.float64)
@@ -131,10 +142,11 @@ def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
     coords_y, coords_x = np.meshgrid(iy, ix, indexing='ij')
 
     if img.ndim == 3:
+        img64 = img.astype(np.float64)
         result = np.empty((out_h, out_w, C), dtype=np.float64)
         for c in range(C):
             result[:, :, c] = ndimage.map_coordinates(
-                img[:, :, c].astype(np.float64),
+                img64[:, :, c],
                 [coords_y, coords_x],
                 order=spline_order, mode='constant', cval=0.0)
     else:
@@ -171,6 +183,9 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
         input pixel on the output grid.  Smaller values (0.5-0.7) yield
         sharper results at the cost of noise.  1.0 = no shrinking.
     """
+    if not aligned_list:
+        raise ValueError("drizzle_combine: aligned_list is empty")
+
     if scale <= 1.0:
         # No upscaling — weighted mean combine
         acc = None
@@ -259,7 +274,7 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
                            np.nanmedian(np.abs(masked - np.nanmedian(masked, axis=0)[np.newaxis]), axis=0) * 1.4826
             spread[zero_spread] = fallback[zero_spread]
 
-        deviation = np.abs(tile - center[np.newaxis])
+        deviation = np.abs(masked - center[np.newaxis])
         new_mask = mask & (deviation <= sigma * spread[np.newaxis])
 
         # Ensure at least 1 frame survives at every pixel
@@ -269,12 +284,15 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
             for frame_idx in range(N):
                 new_mask[frame_idx][all_rejected] = mask[frame_idx][all_rejected]
 
+        newly_rejected = mask & ~new_mask
         rejected = int(mask.sum() - new_mask.sum())
+        total_valid = int(mask.sum())
         mask = new_mask
-        # Update masked in-place: restore tile values then nan-out rejected pixels
-        np.copyto(masked, tile)
-        masked[~mask] = np.nan
+        masked[newly_rejected] = np.nan
         if rejected == 0:
+            break
+        # Early stopping: <0.1% change means convergence
+        if total_valid > 0 and rejected / total_valid < 0.001:
             break
 
     if winsorize:
@@ -489,12 +507,11 @@ def _esd_clip_tile(tile: np.ndarray, max_outliers: int, significance: float,
 
         n_active = mask.sum(axis=0)  # (th, tw, C)
 
-        # Build per-pixel critical value map from LUT
-        lambda_map = np.full(max_dev.shape, np.inf)
-        for n_c in np.unique(n_active):
-            key = (int(n_c), i)
-            lam = lambda_lut.get(key, np.inf)
-            lambda_map[n_active == n_c] = lam
+        # Build per-pixel critical value map from LUT using vectorized indexing
+        lam_arr = np.full(N + 1, np.inf)
+        for n_c in range(3, N + 1):
+            lam_arr[n_c] = lambda_lut.get((n_c, i), np.inf)
+        lambda_map = lam_arr[n_active]
 
         reject = max_dev > lambda_map
         if not np.any(reject):
@@ -505,12 +522,15 @@ def _esd_clip_tile(tile: np.ndarray, max_outliers: int, significance: float,
             is_extreme_rejected = (most_extreme_idx == frame_idx) & reject
             mask[frame_idx][is_extreme_rejected] = False
 
-        # Ensure at least 1 frame survives
+        # Ensure at least 1 frame survives: restore only the least-bad frame
         surviving = mask.sum(axis=0)
         all_gone = surviving == 0
         if np.any(all_gone):
+            raw_dev = np.abs(tile - mean[np.newaxis]) / std[np.newaxis]
+            best_frame = raw_dev.argmin(axis=0)
             for frame_idx in range(N):
-                mask[frame_idx][all_gone] = True
+                is_best = (best_frame == frame_idx) & all_gone
+                mask[frame_idx][is_best] = True
 
     masked_final = np.where(mask, tile, np.nan)
     if weights is not None:
@@ -573,3 +593,444 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
         safe_print(f"    ESD: max_outliers={max_outliers}, significance={significance}, "
                    f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
     return result
+
+
+def patch_weighted_mean_combine(
+    mem_aligned: np.ndarray,
+    quality_maps: List[np.ndarray],
+    global_weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Quality-map-weighted mean combine for per-pixel lucky-imaging stacking.
+
+    Each frame contributes to each output pixel with a weight equal to its
+    normalised per-patch quality score at that position, optionally further
+    multiplied by the frame's global quality weight.  Pixels that fall in a
+    sharp isoplanatic patch of a frame receive more weight than pixels in a
+    blurry region of the same frame — exactly the lucky imaging principle
+    applied to deep-sky (non-planetary) data.
+
+    Args:
+        mem_aligned:    (N, H, W, C) float32 memmap of aligned, cropped frames.
+        quality_maps:   List of N (H, W) float32 per-pixel quality weight arrays.
+                        Must be pre-cropped to match the aligned frame dimensions.
+        global_weights: Optional (N,) global per-frame weights (e.g. SNR-based).
+
+    Returns:
+        (H, W, C) float32 stacked image.
+    """
+    N, H, W, C = mem_aligned.shape
+    acc = np.zeros((H, W, C), dtype=np.float64)
+    weight_sum = np.zeros((H, W), dtype=np.float64)
+
+    for j in range(N):
+        frame = mem_aligned[j].astype(np.float64)
+        qmap = quality_maps[j].astype(np.float64)
+        # Crop quality map to match aligned frame if shapes differ
+        if qmap.shape != (H, W):
+            from scipy.ndimage import zoom
+            qmap = zoom(qmap, (H / qmap.shape[0], W / qmap.shape[1]), order=1)
+            qmap = np.clip(qmap, 0.0, 1.0)
+
+        w = qmap
+        if global_weights is not None:
+            w = w * float(global_weights[j])
+
+        weight_sum += w
+        for c in range(C):
+            acc[:, :, c] += frame[:, :, c] * w
+
+    safe_denom = np.maximum(weight_sum, 1e-12)
+    result = np.zeros((H, W, C), dtype=np.float32)
+    for c in range(C):
+        result[:, :, c] = (acc[:, :, c] / safe_denom).astype(np.float32)
+    return result
+
+
+def run_stacking_phase(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    mem_rgb: np.ndarray,
+    shifts: List[Tuple[float, float]],
+    transforms: List[Optional[Any]],
+    H: int,
+    W: int,
+    C: int,
+    args: argparse.Namespace,
+    stats: ProcessingStats,
+    quality_maps: Optional[List[np.ndarray]] = None,
+) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
+    """Align and combine frames into a stacked image.
+
+    Returns (stacked, fits_stacked, top, bottom, left, right).
+    fits_stacked is the pre-post-processing copy saved in the FITS file.
+    """
+    from src.registration import apply_transform, calc_common_crop
+
+    n_final = len(final)
+    print(f"  Method: {args.stack_method}")
+    print(f"  Combining {n_final} frames...")
+
+    # Quality weights
+    w_snr   = getattr(args, 'weight_snr',   1.0)
+    w_fwhm  = getattr(args, 'weight_fwhm',  1.0)
+    w_stars = getattr(args, 'weight_stars', 1.0)
+    use_noise_weight = getattr(args, 'weight_noise', False)
+
+    if w_snr != 1.0 or w_fwhm != 1.0 or w_stars != 1.0 or use_noise_weight:
+        snr_vals  = np.array([f.metrics.get('snr', 1.0)       for f in final], dtype=np.float64)
+        fwhm_vals = np.array([f.metrics.get('fwhm', 0.0)      for f in final], dtype=np.float64)
+        star_vals = np.array([f.metrics.get('star_count', 1)  for f in final], dtype=np.float64)
+
+        snr_factor = np.clip(snr_vals / max(snr_vals.max(), 1e-9), 0.01, 1.0)
+
+        fwhm_pos = fwhm_vals[fwhm_vals > 0]
+        if len(fwhm_pos):
+            fwhm_inv = np.where(fwhm_vals > 0, 1.0 / np.maximum(fwhm_vals, 0.5), 1.0)
+            fwhm_factor = np.clip(fwhm_inv / fwhm_inv.max(), 0.01, 1.0)
+        else:
+            fwhm_factor = np.ones(n_final)
+
+        star_factor = np.clip(star_vals / max(star_vals.max(), 1e-9), 0.01, 1.0)
+        weights = (snr_factor ** w_snr) * (fwhm_factor ** w_fwhm) * (star_factor ** w_stars)
+
+        if use_noise_weight:
+            brightness = np.array([f.metrics.get('brightness', 1.0) for f in final],
+                                   dtype=np.float64)
+            noise_est = brightness / np.maximum(snr_vals, 0.001)
+            noise_factor = np.clip(noise_est.max() / np.maximum(noise_est, 1e-6), 0.01, 1.0)
+            weights *= noise_factor
+
+        weights = np.sqrt(weights / max(weights.max(), 1e-9))
+        print(f"  Quality weights (per-component SNR^{w_snr} FWHM^{w_fwhm} stars^{w_stars}"
+              f"{' noise' if use_noise_weight else ''}): "
+              f"min={weights.min():.3f}, max={weights.max():.3f}, mean={weights.mean():.3f}")
+    else:
+        scores = np.array([f.metrics.get('score', 1.0) for f in final])
+        weights = np.sqrt(scores / max(scores.max(), 1e-9))
+        print(f"  Quality weights: min={weights.min():.3f}, max={weights.max():.3f}, "
+              f"mean={weights.mean():.3f} (sqrt-compressed)")
+
+    top, bottom, left, right = calc_common_crop(shifts, (H, W), transforms=transforms)
+    stats.output_shape = (bottom - top, right - left)
+    stats.cropped_pixels = (H - (bottom - top), W - (right - left))
+
+    drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
+    use_aligned_memmap = (drizzle_scale <= 1.0 and
+                          args.stack_method in ('median', 'sigma_clip', 'winsorized',
+                                                'percentile', 'esd'))
+    if use_aligned_memmap:
+        mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
+        crop_h, crop_w = bottom - top, right - left
+        mem_aligned = np.memmap(mm_aligned_path, dtype='float32', mode='w+',
+                                shape=(n_final, crop_h, crop_w, C))
+
+        gpu = get_gpu()
+
+        def _align_one(j):
+            with gpu.stream_context():
+                rgb = np.array(mem_rgb[final_indices[j]])
+                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
+                mem_aligned[j] = aligned[top:bottom, left:right, :]
+
+        n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
+                                           Config.GPU_VRAM_RESERVE_MB), n_final)
+                   if gpu.active else min(os.cpu_count() or 4, n_final))
+        with ThreadPoolExecutor(max_workers=n_align) as executor:
+            futures = {executor.submit(_align_one, j): j for j in range(n_final)}
+            for future in tqdm(as_completed(futures), total=n_final,
+                               desc="  Aligning", unit="frame", disable=not args.verbose):
+                future.result()
+        mem_aligned.flush()
+
+        # Patch-weighted lucky-imaging combine (if quality maps were computed in Phase 2)
+        if quality_maps is not None and len(quality_maps) == n_final:
+            print(f"  Patch-weighted mean combine ({n_final} frames × {top},{bottom},{left},{right} crop)...")
+            # Crop quality maps to the common region so they match mem_aligned shape
+            cropped_qmaps = []
+            for qmap in quality_maps:
+                if qmap.shape[0] >= bottom and qmap.shape[1] >= right:
+                    cropped_qmaps.append(qmap[top:bottom, left:right])
+                else:
+                    from scipy.ndimage import zoom
+                    qmap_c = zoom(qmap, ((bottom - top) / qmap.shape[0],
+                                        (right - left) / qmap.shape[1]), order=1)
+                    cropped_qmaps.append(np.clip(qmap_c, 0.0, 1.0).astype(np.float32))
+            stacked = patch_weighted_mean_combine(mem_aligned, cropped_qmaps,
+                                                  global_weights=weights)
+        elif args.stack_method in ('sigma_clip', 'winsorized'):
+            use_winsorize = (args.stack_method == 'winsorized')
+            use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
+            print(f"  Sigma-clip: sigma={args.rejection_sigma}, iters={args.rejection_iters}, "
+                  f"estimator={'MAD' if use_mad else 'std'}, "
+                  f"mode={'winsorized' if use_winsorize else 'reject'}")
+            stacked = sigma_clip_combine(mem_aligned, sigma=args.rejection_sigma,
+                                         max_iters=args.rejection_iters, weights=weights,
+                                         winsorize=use_winsorize, use_mad=use_mad,
+                                         verbose=args.verbose)
+        elif args.stack_method == 'percentile':
+            low  = getattr(args, 'percentile_low',  20.0)
+            high = getattr(args, 'percentile_high', 80.0)
+            print(f"  Percentile clip: low={low}%, high={high}%")
+            stacked = percentile_clip_combine(mem_aligned, low=low, high=high,
+                                              weights=weights, verbose=args.verbose)
+        elif args.stack_method == 'esd':
+            max_out = getattr(args, 'esd_max_outliers', 0)
+            sig     = getattr(args, 'esd_significance', 0.05)
+            print(f"  ESD: max_outliers={'N//4' if max_out == 0 else max_out}, significance={sig}")
+            stacked = esd_combine(mem_aligned, max_outliers=max_out, significance=sig,
+                                  weights=weights, verbose=args.verbose)
+        else:
+            stacked = np.median(mem_aligned, axis=0).astype(np.float32)
+
+        del mem_aligned
+        try:
+            os.remove(mm_aligned_path)
+        except Exception:
+            pass
+
+    else:
+        if drizzle_scale > 1.0:
+            crop_h, crop_w = bottom - top, right - left
+            out_h = int(round(crop_h * drizzle_scale))
+            out_w = int(round(crop_w * drizzle_scale))
+            print(f"  Drizzle: {drizzle_scale:.1f}x ({crop_h}x{crop_w} -> {out_h}x{out_w})")
+            acc = np.zeros((out_h, out_w, C), dtype=np.float64)
+            gpu = get_gpu()
+            spline_order = 5
+            inv_scale = 1.0 / drizzle_scale
+
+            # Compose alignment + crop + upscale into a single affine_transform
+            # per frame, avoiding large per-worker coordinate arrays.
+            #
+            # apply_transform uses ndimage.affine_transform(raw, R, offset) or
+            # ndimage.shift(raw, shift), both computing:
+            #   aligned[o] = raw[R @ o + offset]   (affine)
+            #   aligned[o] = raw[o - shift]         (shift)
+            #
+            # We want: for drizzle output pixel (oy, ox), read from raw at:
+            #   raw_coord = R @ (oy/scale + top, ox/scale + left) + alignment_offset
+            # Rearranging as affine_transform form (raw[M @ out + off]):
+            #   M = R / scale,  off = R @ [top, left] + alignment_offset
+            #
+            # calc_common_crop guarantees the crop is valid for all frames,
+            # so all output pixels map to valid raw pixels — no per-frame
+            # validity mask needed.
+
+            acc_lock = threading.Lock()
+
+            def _drizzle_one(j):
+                """Single-pass drizzle: raw frame → upscaled output via one affine."""
+                rgb = np.array(mem_rgb[final_indices[j]])
+                w = float(weights[j])
+                shift_j = shifts[j]
+                transform_j = transforms[j]
+
+                crop_offset = np.array([float(top), float(left)])
+
+                if transform_j is not None:
+                    R = transform_j.params[:2, :2]
+                    t_xy = transform_j.params[:2, 2]
+                    t_rowcol = np.array([t_xy[1], t_xy[0]])
+                    align_offset = -R @ t_rowcol
+                    # Compose: M = R * inv_scale, off = R @ crop_offset + align_offset
+                    M = R * inv_scale
+                    off = R @ crop_offset + align_offset
+                else:
+                    sy, sx = shift_j if shift_j is not None else (0.0, 0.0)
+                    # shift case: raw = aligned - shift
+                    # M = I * inv_scale, off = crop_offset - shift
+                    M = np.array([[inv_scale, 0.0], [0.0, inv_scale]])
+                    off = crop_offset - np.array([sy, sx])
+
+                resampled = np.empty((out_h, out_w, C), dtype=np.float32)
+                for c in range(C):
+                    resampled[:, :, c] = ndimage.affine_transform(
+                        rgb[:, :, c], M, offset=off,
+                        output_shape=(out_h, out_w),
+                        order=spline_order, mode='constant', cval=0.0)
+
+                resampled *= w  # in-place float32, avoids float64 temporary
+                with acc_lock:
+                    np.add(acc, resampled, out=acc)  # float64 += float32 (promoted)
+                    total_weight_ref[0] += w
+
+            total_weight_ref = [0.0]
+
+            # Cap workers based on available RAM.
+            # Per worker: raw frame (H*W*C*4) + resampled output (out_h*out_w*C*4)
+            # + affine_transform internal buffer (~out_h*out_w*8 per channel call).
+            n_drizzle = min(os.cpu_count() or 4, n_final)
+            try:
+                import psutil
+                avail_mb = psutil.virtual_memory().available / 1e6
+                raw_mb = H * W * C * 4 / 1e6
+                out_mb = out_h * out_w * C * 4 / 1e6
+                affine_buf_mb = out_h * out_w * 8 / 1e6  # scipy internal float64
+                per_worker_mb = raw_mb + out_mb + affine_buf_mb + 100
+                safe_workers = max(1, int(avail_mb / per_worker_mb))
+                if safe_workers < n_drizzle:
+                    print(f"  NOTE: limiting drizzle threads {n_drizzle}\u2192{safe_workers} "
+                          f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
+                    n_drizzle = safe_workers
+            except Exception:
+                pass
+
+            with ThreadPoolExecutor(max_workers=n_drizzle) as executor:
+                futures = {executor.submit(_drizzle_one, j): j for j in range(n_final)}
+                for future in tqdm(as_completed(futures), total=n_final,
+                                   desc="  Drizzling", unit="frame",
+                                   disable=not args.verbose):
+                    future.result()
+
+            stacked = (acc / max(total_weight_ref[0], 1e-12)).astype(np.float32)
+
+        else:
+            acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
+            total_weight = 0.0
+            gpu = get_gpu()
+
+            def _align_crop(j):
+                with gpu.stream_context():
+                    rgb = np.array(mem_rgb[final_indices[j]])
+                    return j, apply_transform(rgb, shift=shifts[j],
+                                             transform=transforms[j])[top:bottom, left:right, :]
+
+            n_workers = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
+                                                  Config.GPU_VRAM_RESERVE_MB), n_final)
+                         if gpu.active else min(os.cpu_count() or 4, n_final))
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_align_crop, j): j for j in range(n_final)}
+                for future in tqdm(as_completed(futures), total=n_final,
+                                   desc="  Stacking", unit="frame", disable=not args.verbose):
+                    j, cropped = future.result()
+                    w = float(weights[j])
+                    acc += cropped.astype(np.float64) * w
+                    total_weight += w
+            stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
+
+    # Save a pre-post-processing copy for FITS output (preserves high sky SNR)
+    fits_stacked = stacked.copy()
+    return stacked, fits_stacked, top, bottom, left, right
+
+
+# ---------------------------------------------------------------------------
+# HDR stack blending
+# ---------------------------------------------------------------------------
+
+def hdr_blend_stacks(short_stack: np.ndarray, long_stack: np.ndarray,
+                     short_exptime: float = 1.0, long_exptime: float = 1.0,
+                     transition_width: float = None) -> np.ndarray:
+    """SNR-weighted HDR blend of two stacks with different exposure times.
+
+    Merges a short-exposure stack (unsaturated bright cores) with a
+    long-exposure stack (high-SNR faint regions) using a sigmoid transition
+    centred at the saturation knee of the long-exposure stack.
+
+    The blend weight for the long stack is:
+
+        w_long(x) = sigmoid( (x_norm - knee) / transition_width )
+
+    where ``x_norm`` is the per-pixel luminance normalised to [0, 1] and
+    ``knee`` is estimated as the 98th percentile of the long-stack luminance
+    (the level above which the long exposure is likely saturated or nonlinear).
+
+    The short stack is rescaled to match the long stack's flux calibration
+    via the ``short_exptime / long_exptime`` ratio before blending.
+
+    Args:
+        short_stack:      Float32 (H, W, 3) shorter-exposure stack.
+        long_stack:       Float32 (H, W, 3) longer-exposure stack.
+        short_exptime:    Short-stack total effective exposure (s or arbitrary).
+        long_exptime:     Long-stack total effective exposure.
+        transition_width: Fractional luminance range for the sigmoid
+                          (default Config.HDR_TRANSITION_WIDTH = 0.1).
+
+    Returns:
+        Blended float32 HDR image (H, W, 3).
+    """
+    if transition_width is None:
+        transition_width = Config.HDR_TRANSITION_WIDTH
+
+    if short_stack.shape != long_stack.shape:
+        raise ValueError(f"HDR blend: shape mismatch "
+                         f"({short_stack.shape} vs {long_stack.shape})")
+
+    # Scale short stack to long stack's calibration
+    scale = float(long_exptime) / max(float(short_exptime), 1e-9)
+    short_scaled = short_stack.astype(np.float64) * scale
+    long_d = long_stack.astype(np.float64)
+
+    lum_long = (0.299 * long_d[:, :, 0] + 0.587 * long_d[:, :, 1]
+                + 0.114 * long_d[:, :, 2])
+    white = float(np.percentile(lum_long, 98))
+    if white < 1e-9:
+        return long_stack.copy()
+
+    lum_norm = np.clip(lum_long / white, 0.0, 1.0)
+    knee = float(np.percentile(lum_norm, 95))
+
+    # Sigmoid: 0 (use short) → 1 (use long) as luminance increases through knee
+    sig_arg = np.clip((lum_norm - knee) / max(transition_width, 1e-4), -10.0, 10.0)
+    w_long = 1.0 / (1.0 + np.exp(-sig_arg))   # high lum → short stack wins
+    # Invert: for saturated bright areas we want the short (unsaturated) stack
+    w_short = w_long          # bright pixels → more short weight
+    w_long_use = 1.0 - w_short
+
+    w_long_3 = w_long_use[:, :, np.newaxis]
+    w_short_3 = w_short[:, :, np.newaxis]
+
+    blended = w_long_3 * long_d + w_short_3 * short_scaled
+    return np.clip(blended, 0.0, None).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Comet dual-track stacking
+# ---------------------------------------------------------------------------
+
+def blend_comet_star_stacks(star_stack: np.ndarray,
+                             comet_stack: np.ndarray,
+                             comet_lum: np.ndarray,
+                             blend_sigma: float = 30.0) -> np.ndarray:
+    """Blend a star-aligned and comet-aligned stack for dual-track imaging.
+
+    In standard comet stacking the astronomer must choose between sharpening
+    the comet nucleus (comet alignment) and sharpening the star field (star
+    alignment).  This function blends both stacks spatially:
+
+    • Near the comet nucleus: ``comet_stack`` dominates (sharp nucleus,
+      smeared stars).
+    • Away from the nucleus: ``star_stack`` dominates (sharp stars,
+      smeared nucleus).
+
+    The blend mask is derived from the comet luminance: a Gaussian envelope
+    centred on the brightest region (the nucleus) whose width is controlled
+    by ``blend_sigma`` pixels.
+
+    Args:
+        star_stack:   Float32 (H, W, 3) star-aligned stack.
+        comet_stack:  Float32 (H, W, 3) comet-aligned stack.
+        comet_lum:    Float32 (H, W) luminance map for locating the nucleus
+                      (typically the comet-aligned stack luminance).
+        blend_sigma:  Gaussian half-width (px) of the comet blend zone.
+
+    Returns:
+        Blended float32 image (H, W, 3).
+    """
+    from scipy.ndimage import gaussian_filter as _gf
+
+    H, W = star_stack.shape[:2]
+
+    # Locate comet nucleus (brightest smooth blob)
+    smoothed = _gf(comet_lum.astype(np.float64), sigma=5.0)
+    peak_flat = int(np.argmax(smoothed))
+    py, px = peak_flat // W, peak_flat % W
+
+    # Build distance-based Gaussian mask centred on nucleus
+    yy, xx = np.mgrid[:H, :W]
+    dist2 = (yy - py) ** 2.0 + (xx - px) ** 2.0
+    mask = np.exp(-dist2 / (2.0 * blend_sigma ** 2))   # 1 at nucleus, 0 far away
+
+    mask3 = mask[:, :, np.newaxis]
+    blended = (mask3 * comet_stack.astype(np.float64)
+               + (1.0 - mask3) * star_stack.astype(np.float64))
+    return np.clip(blended, 0.0, None).astype(np.float32)

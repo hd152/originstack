@@ -147,11 +147,11 @@ from src.stacking import (
 from src.plate_solve import solve_plate
 
 # pipeline
-from src.pipeline import (
+from src.pipeline import stack_target
+from src.frame_processor import (
     _process_single_frame,
-    _init_worker,
+    _init_worker_shm,
     _parallel_frame_worker,
-    stack_target,
     _worker_masters,
 )
 

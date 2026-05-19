@@ -9,6 +9,7 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 
+from src.models import FrameInfo, ProcessingStats
 from src.utils import safe_print
 
 try:
@@ -53,7 +54,7 @@ def load_fits(path: str) -> Tuple[np.ndarray, dict]:
     return data, hdr
 
 
-def make_master(frames, method: str = 'median') -> Optional[np.ndarray]:
+def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.ndarray]:
     """Create master calibration frame using streaming (mean) or memmap (median)."""
     if not frames:
         return None
@@ -129,25 +130,58 @@ def make_master(frames, method: str = 'median') -> Optional[np.ndarray]:
 
 def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_b: float = 8.0, ghs_sp: float = 0.15,
-                     ghs_hp: float = 0.95):
+                     ghs_hp: float = 0.95) -> None:
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
     if Image is None:
         return
     if stretch == 'ghs':
-        # Generalized Hyperbolic Stretch — the state-of-the-art algorithm for
-        # galaxy imaging. Independently controls shadow lift (SP), black point
-        # (LP=0), highlights protection (HP), and overall stretch intensity (b).
+        # Generalized Hyperbolic Stretch — uses unified luminance-based normalization
+        # so all three channels share the same black/white reference, preserving
+        # cross-channel color ratios that would otherwise be destroyed by independent
+        # per-channel sky statistics.
         out = np.zeros_like(rgb)
+        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        flat_lum = lum.ravel().astype(np.float64)
+        _med = float(np.median(flat_lum))
+        for _ in range(3):
+            _mad = float(np.median(np.abs(flat_lum - _med)))
+            _sig = 1.4826 * _mad
+            flat_lum = flat_lum[np.abs(flat_lum - _med) < 2.5 * _sig]
+            if len(flat_lum) < 100:
+                break
+            _med = float(np.median(flat_lum))
+        _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
+        # Allow a slightly negative black point so the stretch can correctly
+        # distinguish sky noise (near zero) from faint nebula signal — a 0.0
+        # floor would conflate both and produce black mottling in the output.
+        unified_black = _med - 1.0 * _bg_sigma
+        unified_white = float(np.percentile(lum, 99.9))
         for c in range(3):
             out[:, :, c] = generalized_hyperbolic_stretch(
-                rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp)
+                rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+                black_point=unified_black, white_point=unified_white)
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
     elif stretch == 'arcsinh':
-        # Arcsinh stretch — preserves faint nebulosity and bright stars
+        # Arcsinh stretch — unified luminance-based normalization to preserve color
         out = np.zeros_like(rgb)
+        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        flat_lum = lum.ravel().astype(np.float64)
+        _med = float(np.median(flat_lum))
+        for _ in range(3):
+            _mad = float(np.median(np.abs(flat_lum - _med)))
+            _sig = 1.4826 * _mad
+            flat_lum = flat_lum[np.abs(flat_lum - _med) < 2.5 * _sig]
+            if len(flat_lum) < 100:
+                break
+            _med = float(np.median(flat_lum))
+        _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
+        unified_black = _med - 1.0 * _bg_sigma
+        unified_white = float(np.percentile(lum, 99.8))
         for c in range(3):
-            out[:, :, c] = arcsinh_stretch(rgb[:, :, c])
+            out[:, :, c] = arcsinh_stretch(rgb[:, :, c],
+                                           black_point=unified_black,
+                                           white_point=unified_white)
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
     else:
         # Linear percentile stretch (original behaviour)
@@ -162,12 +196,19 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
     Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
 
 
-def populate_fits_header(header: fits.Header, frames, stats, args: argparse.Namespace,
+def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
+                         stats: ProcessingStats, args: argparse.Namespace,
                          stacked_shape: Tuple[int, int, int],
                          shifts: List[Tuple[float, float]],
                          masters: Dict[str, Optional[np.ndarray]],
-                         dither_info: Optional[Dict] = None) -> None:
-    """Populate FITS header with comprehensive metadata."""
+                         dither_info: Optional[Dict] = None,
+                         post_processed: bool = False) -> None:
+    """Populate FITS header with comprehensive metadata.
+
+    post_processed: True if the saved data has had post-processing applied
+    (background extraction, denoising, etc.).  False means the FITS contains
+    the raw linear stacked data before Phase 4.
+    """
     from datetime import datetime, timezone
 
     try:
@@ -238,28 +279,116 @@ def populate_fits_header(header: fits.Header, frames, stats, args: argparse.Name
             if key in first_header:
                 header[key] = first_header[key]
 
+        # Inferred target metadata (set by target_inference before this call)
+        inferred_name = getattr(args, '_inferred_target', None)
+        inferred_type = getattr(args, '_inferred_type', None)
+        inferred_conf = getattr(args, '_inferred_confidence', 0.0)
+        inferred_src  = getattr(args, '_inferred_source', None)
+        if inferred_name and inferred_type and inferred_type != 'unknown':
+            # Only write OBJECT if no capture software already filled it in
+            if 'OBJECT' not in header:
+                header['OBJECT'] = (inferred_name[:68], 'Inferred target name')
+            header['OBJTYPE'] = (inferred_type[:68], 'Inferred object type')
+            header['INFCONF'] = (round(float(inferred_conf), 3),
+                                 'Target inference confidence (0-1)')
+            if inferred_src:
+                header['INFSRC'] = (inferred_src[:68],
+                                    'Target inference source')
+
+        # Session info metadata (from info.json written by capture app)
+        si = getattr(args, '_session_info', None)
+        if si is not None:
+            # Equipment metadata — only fill gaps not already covered by FITS headers
+            if si.telescope and 'TELESCOP' not in header:
+                header['TELESCOP'] = (si.telescope[:68], 'Telescope from session info')
+            if si.mount:
+                header['MOUNT'] = (si.mount[:68], 'Mount from session info')
+            if si.reducer:
+                header['REDUCER'] = (si.reducer[:68], 'Reducer/flattener from session info')
+            # Filter — prefer existing FITS keyword
+            if si.filter_name and 'FILTER' not in header:
+                header['FILTER'] = (si.filter_name[:68], 'Filter from session info')
+            # Fallback exposure/ISO from session when FITS headers are missing
+            if si.exposure is not None and 'EXPTIME' not in header:
+                header['EXPTIME'] = (si.exposure, 'Exposure time from session info (s)')
+            if si.iso is not None and 'GAIN' not in header:
+                header['ISO'] = (si.iso, 'ISO from session info')
+            if si.temperature is not None and 'CCD-TEMP' not in header:
+                header['CCD-TEMP'] = (si.temperature, 'Sensor temperature from session info (C)')
+            # Observation site GPS coordinates
+            if si.has_gps:
+                header['SITELAT'] = (round(si.latitude, 6), 'Observatory latitude (degrees)')
+                header['SITELONG'] = (round(si.longitude, 6), 'Observatory longitude (degrees)')
+                if si.altitude is not None:
+                    header['SITEELEV'] = (round(si.altitude, 1), 'Observatory altitude (metres)')
+            # Session integration info
+            if si.total_duration_ms is not None:
+                total_s = si.total_duration_ms / 1000.0
+                if 'INTGTIME' not in header:
+                    header['INTGTIME'] = (round(total_s, 1),
+                                          'Total integration time (session info, seconds)')
+            # WCS from celestial + FOV + orientation (only when plate solve has not run)
+            if si.has_wcs and 'CTYPE1' not in header:
+                from src.session_info import build_wcs_keywords
+                wcs = build_wcs_keywords(si)
+                for kw, (val, comment) in wcs.items():
+                    header[kw] = (val, comment)
+
         # Mark the output as a debayered RGB image so FITS viewers open it
         # correctly.  Siril and many other tools recognise COLORTYP=SRGB to
         # identify a 3-plane (NAXIS3=3) FITS cube as a colour image rather
         # than three separate science frames.
         header['COLORTYP'] = ('SRGB', 'Colour space of the stacked image')
 
-        # Calculate total exposure time
-        if 'EXPTIME' in first_header:
+        # Aggregate exposure info across all frames
+        frame_dates = []
+        total_integration = 0.0
+        iso_values = set()
+        for f in frames:
+            if f.header.get('DATE-OBS'):
+                frame_dates.append(str(f.header['DATE-OBS']))
+            if f.header.get('EXPTIME'):
+                try:
+                    total_integration += float(f.header['EXPTIME'])
+                except (ValueError, TypeError):
+                    pass
+            iso = f.header.get('ISOSPEED') or f.header.get('ISO') or f.header.get('GAIN')
+            if iso is not None:
+                iso_values.add(str(iso))
+
+        if total_integration > 0:
+            header['INTGTIME'] = (round(total_integration, 1),
+                                  'Total integration time across all frames (seconds)')
+            if total_integration >= 60:
+                header['INTGMIN'] = (round(total_integration / 60, 1),
+                                     'Total integration time (minutes)')
+            header['TOTEXP'] = (round(total_integration, 1),
+                                'Total integrated exposure time in seconds')
+        elif 'EXPTIME' in first_header:
             try:
                 total_exp = float(first_header['EXPTIME']) * len(frames)
                 header['TOTEXP'] = (total_exp, 'Total integrated exposure time in seconds')
             except (ValueError, TypeError):
                 pass
+        if frame_dates:
+            header['DATEFRST'] = (min(frame_dates), 'Date of first frame')
+            header['DATELAST'] = (max(frame_dates), 'Date of last frame')
+        if iso_values:
+            header['ISOVALUS'] = (','.join(sorted(iso_values)), 'ISO/gain values used')
 
-    # Background extraction info
-    if args.background_extraction:
-        header['BGEXTR'] = (True, 'Background extraction applied')
+    # Whether post-processing was applied to the data in this FITS
+    header['RAWSTACK'] = (not post_processed,
+                          'True = pre-post-processing linear stack; sky background not subtracted')
+
+    # Background extraction info (reflects what was done to the saved data)
+    bg_applied = post_processed and args.background_extraction
+    if bg_applied:
+        header['BGEXTR'] = (True, 'Background extraction applied to FITS data')
         header['BGMESH'] = (args.bg_mesh_size, 'Background mesh cell size in pixels')
         header['BGFILTR'] = (args.bg_filter_size, 'Background grid filter size')
         header['BGCLIP'] = (args.bg_clip_sigma, 'Background sigma-clip threshold')
     else:
-        header['BGEXTR'] = (False, 'No background extraction applied')
+        header['BGEXTR'] = (False, 'Background extraction NOT applied to FITS data')
 
     # Dither analysis info
     if dither_info is not None:
@@ -275,12 +404,14 @@ def populate_fits_header(header: fits.Header, frames, stats, args: argparse.Name
     # Affine registration
     header['AFFINE'] = (not getattr(args, 'no_affine', False), 'Affine registration enabled')
 
-    # Post-processing flags
-    header['DENOISE'] = (getattr(args, 'denoise', False), 'Wavelet denoising applied')
-    if getattr(args, 'denoise', False):
+    # Post-processing flags (reflect what was done to the saved data, not just config)
+    denoise_applied = post_processed and getattr(args, 'denoise', False)
+    header['DENOISE'] = (denoise_applied, 'Wavelet denoising applied to FITS data')
+    if denoise_applied:
         header['DNSTRNG'] = (getattr(args, 'denoise_strength', 3.0), 'Denoise threshold factor')
-    header['LOCNORM'] = (getattr(args, 'local_normalize', False), 'Local normalization applied')
-    header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method')
+    locnorm_applied = post_processed and getattr(args, 'local_normalize', False)
+    header['LOCNORM'] = (locnorm_applied, 'Local normalization applied to FITS data')
+    header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method (JPG only)')
     header['DEBAYER'] = (args.debayer_method, 'Debayering method used')
 
     # Drizzle
@@ -291,7 +422,8 @@ def populate_fits_header(header: fits.Header, frames, stats, args: argparse.Name
         header['DRZPIXFR'] = (getattr(args, 'drizzle_drop_size', 0.7), 'Drizzle pixel fraction')
 
     # Richardson-Lucy deconvolution
-    header['DECONV'] = (getattr(args, 'deconvolve', False), 'Richardson-Lucy deconvolution applied')
+    deconv_applied = post_processed and getattr(args, 'deconvolve', False)
+    header['DECONV'] = (deconv_applied, 'Richardson-Lucy deconvolution applied to FITS data')
     if getattr(args, 'deconvolve', False):
         header['DCITERS'] = (getattr(args, 'deconvolve_iterations', 15), 'Deconvolution iterations')
         if getattr(args, 'deconvolve_fwhm', None):

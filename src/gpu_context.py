@@ -118,6 +118,19 @@ class GpuContext:
             return _CudaStreamContext()
         return _NullContext()
 
+    def safe_compute(self, gpu_func, cpu_func, *args, **kwargs):
+        """Try GPU computation; fall back to CPU on OOM."""
+        if self.active:
+            try:
+                return gpu_func(*args, **kwargs)
+            except Exception as exc:
+                if 'out of memory' in str(exc).lower() or 'OutOfMemoryError' in type(exc).__name__:
+                    logging.warning("GPU out of memory — falling back to CPU for this operation")
+                    self.free_pool()
+                    return cpu_func(*args, **kwargs)
+                raise
+        return cpu_func(*args, **kwargs)
+
     def print_status(self):
         if self.active:
             safe_print(f"  GPU: {self.device_name}")

@@ -47,8 +47,62 @@ class Config:
     DBE_OUTLIER_ITERS = 3         # Max outlier rejection passes
     DBE_MIN_SAMPLES = 20          # Min accepted patches before falling back to mesh
     DBE_MAX_SAMPLES = 2000        # Cap to keep RBF O(N²) tractable on large images
+    DBE_DENSE_FIELD_THRESH = 0.70 # Emission-mask coverage above which dense-field fallback is used
     DBE_RBF_KERNEL = 'thin_plate_spline'
     DBE_RBF_SMOOTHING = 0.0
+
+    # BM3D denoising
+    BM3D_SIGMA_PSD = 0.0            # 0 = auto-estimate from sky noise
+    BM3D_BLOCK_SIZE = 8
+    BM3D_GROUP_SIZE = 8
+    BM3D_SEARCH_WINDOW = 16
+
+    # Anisotropic diffusion (Perona-Malik)
+    ANISO_ITERATIONS = 20
+    ANISO_KAPPA = 30.0              # Gradient threshold (ADU)
+    ANISO_GAMMA = 0.1               # Time step (0 < γ ≤ 0.25 for stability)
+
+    # SCNR
+    SCNR_AMOUNT = 1.0               # 1.0 = full neutralisation
+
+    # Adaptive MTF
+    MTF_TARGET_BG = 0.15            # Target output level for sky background
+
+    # Blind PSF estimation
+    BLIND_PSF_ITERATIONS = 8        # RL iterations for PSF update
+
+    # Total Variation deconvolution
+    TV_LAMBDA = 0.02                # TV regularisation weight
+    TV_ITERATIONS = 50              # Gradient descent steps
+
+    # Polynomial distortion correction
+    POLY_DISTORTION_DEGREE = 2      # Polynomial degree (2=quadratic, 3=cubic)
+    POLY_MIN_STARS = 12             # Min matched pairs for reliable poly fit
+
+    # HDR stack blending
+    HDR_TRANSITION_WIDTH = 0.1      # Fractional signal range for sigmoid blend
+
+    # Strehl / atmospheric dispersion
+    STREHL_CUTOUT_RADIUS = 20       # Cutout half-size for Strehl measurement
+    DISP_CUTOUT_RADIUS = 10         # Cutout half-size for dispersion centroid
+
+    # Brenner / wavelet entropy quality metrics
+    WAVELET_ENTROPY_LEVELS = 4      # Wavelet decomposition levels for entropy ratio
+
+    # Zernike PSF decomposition
+    ZERNIKE_CUTOUT_RADIUS = 15      # Half-size for Zernike PSF cutout extraction
+    ZERNIKE_MAX_ORDER = 4           # Max radial order (covers 15 modes: piston through spherical)
+    ZERNIKE_MAX_STARS = 15          # Stars to sample for Zernike decomposition
+
+    # Registration enhancements
+    SHIFT_OUTLIER_SIGMA = 3.5       # MAD-sigma threshold for pre-registration outlier rejection
+    REG_RESIDUAL_MAX_PX = 1.5       # Max post-registration centroid RMS (px) before rejection
+    ALIGNMENT_CENTRALITY_WEIGHT = 0.3   # Blend weight: 0=pure quality score, 1=pure centrality
+    REF_PYRAMID_WORKERS = 4         # Max parallel workers for cheap reference-selection pass
+
+    # Patch-based local registration (lucky imaging mode)
+    PATCH_GRID_SIZE = 8             # NxN grid for patch quality map (8x8 = 64 patches)
+    PATCH_MIN_SIZE = 64             # Minimum patch dimension in pixels
 
 
 @dataclass

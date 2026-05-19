@@ -7,9 +7,14 @@
 python astro_stack.py -d your_images/ -o output.fits -v
 ```
 
-### Stack with quality filtering and diagnostics
+### Stack with verbose output and auto target detection
 ```bash
-python astro_stack.py -d your_images/ -o output.fits -v --quality-filter
+python astro_stack.py -d your_images/ -o output.fits -v --auto
+```
+
+### Disable quality filtering (keep all frames)
+```bash
+python astro_stack.py -d your_images/ -o output.fits -v --no-quality-filter
 ```
 
 ## What Each Output Line Means
@@ -63,7 +68,7 @@ Object_005.fit: brightness=18.2, contrast=12.1, stars=159
 - Object 003 has lower brightness (cloud? focus drift? dew?)
 - Object 003 has much lower contrast (lack of detail)
 - Object 003 detected far fewer stars (trailing? saturation?)
-- With `--quality-filter`, this frame will be rejected ✓
+- Quality filter (on by default) will reject this frame ✓
 
 **Shifts would tell us:**
 ```
@@ -95,11 +100,28 @@ A: Likely cloud or focus issue. Quality filter should reject automatically.
 **Q: All shifts are >5 px?**
 A: Check your guide system calibration. May indicate tracking error or wind.
 
+## Post-processing Defaults (as of current version)
+
+Most post-processing is **on by default**. To disable specific steps:
+
+| Feature | Disable flag |
+|---------|-------------|
+| Background extraction (DBE) | `--no-background-extraction` |
+| Dynamic Background Extraction | `--no-dbe` (uses legacy mesh instead) |
+| Wavelet denoising | `--no-denoise` |
+| Chroma noise reduction | `--no-chroma-nr` |
+| Star reduction | `--no-star-reduce` |
+| Local contrast enhancement | `--no-local-contrast` |
+| CA correction | `--no-ca-correction` |
+| Cosmic ray rejection | `--no-cosmic-ray-rejection` |
+
+Preview stretch default is **GHS** (Generalized Hyperbolic Stretch). Use `--stretch arcsinh` or `--stretch linear` to change.
+
 ## Report Issues With This Format
 
 If something looks wrong, copy the full verbose output:
-```
-python astro_stack.py -d images/ -o output.fits -v --quality-filter 2>&1 | tee diagnostic.log
+```bash
+python astro_stack.py -d images/ -o output.fits -v 2>&1 | tee diagnostic.log
 ```
 
 Then share the `diagnostic.log` file. The quality and shift data tells us:

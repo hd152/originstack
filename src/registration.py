@@ -1,16 +1,25 @@
 """Image registration: shift calculation, affine transform, cropping, dither detection."""
 from __future__ import annotations
 
+import argparse
 import os
+import time
 import warnings
-from typing import List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
 
 from src.gpu_context import get_gpu
-from src.models import Config
+from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, get_logger
+
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 _log = get_logger()
 
@@ -32,8 +41,8 @@ except Exception:
     Image = None
 
 
-def match_stars_affine(ref_positions, img_positions,
-                       initial_shift: Tuple[float, float] = (0.0, 0.0)):
+def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
+                       initial_shift: Tuple[float, float] = (0.0, 0.0)) -> Optional[Any]:
     """Match star catalogs and compute a Euclidean (rotation+translation) transform.
 
     Uses nearest-neighbor matching after applying an initial translation estimate,
@@ -54,8 +63,12 @@ def match_stars_affine(ref_positions, img_positions,
     img_pts = np.array([(float(s['xcentroid']), float(s['ycentroid']))
                         for s in img_positions[:max_stars]])
 
-    # Shift img points by initial estimate for better matching
-    img_pts_shifted = img_pts + np.array([initial_shift[1], initial_shift[0]])
+    # Shift img points by initial estimate for better matching.
+    # Initial shift is the amount needed to move 'img' to align with 'ref'.
+    # So img_points = ref_points + shift. To find correspondence, we map 
+    # img_points back to ref space: img_points - shift.
+    shift_vec = np.array([initial_shift[1], initial_shift[0]]) # [sx, sy]
+    img_pts_shifted = img_pts - shift_vec
 
     tree = cKDTree(ref_pts)
     distances, indices = tree.query(img_pts_shifted, k=1)
@@ -68,10 +81,13 @@ def match_stars_affine(ref_positions, img_positions,
     dst = ref_pts[indices[good]]
 
     try:
-        model, inliers = ransac(
-            (src, dst), EuclideanTransform,
-            min_samples=3, residual_threshold=2.0, max_trials=1000
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='No inliers found',
+                                    category=UserWarning)
+            model, inliers = ransac(
+                (src, dst), EuclideanTransform,
+                min_samples=3, residual_threshold=2.0, max_trials=1000
+            )
         if inliers is not None and inliers.sum() >= 3:
             return model
     except Exception:
@@ -79,37 +95,51 @@ def match_stars_affine(ref_positions, img_positions,
     return None
 
 
-def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
-                    transform=None) -> np.ndarray:
+def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
+                    transform: Optional[Any] = None) -> np.ndarray:
     """Apply translation or affine transform to a multi-channel image.
 
     Uses cubic spline interpolation (order=3) for subpixel accuracy.
-    With accurate registration (full-resolution FFT cross-correlation),
-    subpixel shifts preserve detail better than integer rounding.
     Dispatches to GPU (cupyx.scipy.ndimage) when available.
     """
+    # Ensure 3D shape for consistent channel processing (H, W, 1) for grayscale
+    original_ndim = img.ndim
+    if original_ndim == 2:
+        img = img[:, :, np.newaxis]
+        squeeze_back = True
+    else:
+        squeeze_back = False
+
     gpu = get_gpu()
     xp = gpu.xp
     _ndimage = gpu.xndimage
     img_d = gpu.to_device(img)
+    
     if transform is not None:
         matrix = transform.params
         R = matrix[:2, :2]        # EuclideanTransform stores t in (x=col, y=row) space.
         # scipy.ndimage.affine_transform operates in (row, col) space and applies the
         # inverse mapping: input_coord = M @ output_coord + offset.
-        # Correct offset: -R @ [ty, tx]  (swap x/y to row/col, then negate for inverse).
-        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)=(x, y)
+        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)
         t_rowcol = np.array([t_xy[1], t_xy[0]])  # swap to (row, col)
         offset = -R @ t_rowcol
-        mat_d = xp.asarray(R) if gpu.active else R
-        off_d = xp.asarray(offset) if gpu.active else offset
+        
+        if gpu.active:
+            mat_d = xp.asarray(R)
+            off_d = xp.asarray(offset)
+        else:
+            mat_d = R
+            off_d = offset
+
         result = xp.zeros_like(img_d)
         for c in range(img_d.shape[2]):
             result[:, :, c] = _ndimage.affine_transform(
                 img_d[:, :, c], mat_d, offset=off_d,
                 order=3, mode='constant', cval=0.0
             )
-        return gpu.to_host(result)
+        out = gpu.to_host(result)
+        return out[:, :, 0] if squeeze_back else out
+
     elif shift is not None:
         result = xp.zeros_like(img_d)
         for c in range(img_d.shape[2]):
@@ -117,7 +147,13 @@ def apply_transform(img: np.ndarray, shift: Tuple[float, float] = None,
                 img_d[:, :, c], shift=shift, order=3,
                 mode='constant', cval=0.0, prefilter=True
             )
-        return gpu.to_host(result)
+        out = gpu.to_host(result)
+        return out[:, :, 0] if squeeze_back else out
+
+    # If neither transform nor shift is provided, return original img
+    # (ensure it is on CPU as per function convention)
+    if squeeze_back:
+        img = img[:, :, 0]
     return img
 
 
@@ -126,13 +162,9 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
 
     Registration cascade:
       1. Multi-scale pyramid (coarse-to-fine) — handles large shifts reliably
-         and provides a warm-start estimate for the subsequent methods.
       2. Phase cross-correlation (skimage) — sub-pixel accurate when error < 0.1.
       3. FFT cross-correlation at full resolution — fallback for phase-cc failure.
       4. Centroid difference — last resort for featureless or very noisy frames.
-
-    The ``use_pyramid`` flag (default True) enables step 1; set it to False for
-    frames where a near-zero shift is expected (e.g., the reference frame itself).
     """
     debug_info = []
 
@@ -156,10 +188,6 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             pass
 
     # Step 1: Multi-scale pyramid registration (coarse-to-fine).
-    # Handles large dither offsets and tracking drift that can exceed the
-    # unambiguous range of single-scale FFT cross-correlation.  The pyramid
-    # result is used as an initial integer-pixel estimate; subsequent methods
-    # refine it to sub-pixel accuracy.
     pyramid_shift = (0.0, 0.0)
     if use_pyramid:
         try:
@@ -170,34 +198,37 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         except Exception as exc:
             debug_info.append(f"pyramid error: {type(exc).__name__}")
 
+    # Pre-apply pyramid shift once; reused by both phase_cc and FFT paths
+    psy, psx = pyramid_shift
+    if psy != 0.0 or psx != 0.0:
+        img_shifted = ndimage.shift(img, shift=(psy, psx), order=1,
+                                    mode='constant', cval=0.0)
+    else:
+        img_shifted = img
+
     # Use phase cross correlation for subpixel shifts when available
     if not skip_phase_cc and phase_cross_correlation is not None:
         try:
-            # Pre-apply the pyramid coarse shift to img so phase correlation
-            # only needs to find the sub-pixel residual — this keeps the
-            # search range small and avoids wrap-around on large offsets.
-            psy, psx = pyramid_shift
-            if psy != 0.0 or psx != 0.0:
-                img_pre = ndimage.shift(img, shift=(psy, psx), order=1,
-                                        mode='constant', cval=0.0)
-            else:
-                img_pre = img
+            img_pre = img_shifted
 
-            # Normalize images for phase correlation (zero mean, unit variance)
-            # This is critical for good phase correlation performance
-            ref_norm = (ref - np.mean(ref)) / (np.std(ref) + 1e-12)
-            img_norm = (img_pre - np.mean(img_pre)) / (np.std(img_pre) + 1e-12)
+            ref_std = float(np.std(ref))
+            img_std = float(np.std(img_pre))
+            # Skip phase_cc when either image has near-zero variance — normalization
+            # produces huge values that confuse the correlation.
+            if ref_std < 1.0 or img_std < 1.0:
+                debug_info.append("phase_cc skipped: near-zero image variance")
+                raise StopIteration  # caught by outer except, falls through to FFT
 
-            # Suppress overflow warnings in phase correlation
+            ref_norm = (ref - np.mean(ref)) / ref_std
+            img_norm = (img_pre - np.mean(img_pre)) / img_std
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
+                warnings.simplefilter("ignore", UserWarning)
                 shift, error, diffphase = phase_cross_correlation(ref_norm, img_norm, upsample_factor=upsample)
             debug_info.append(f"phase_cc: shift={shift}, error={error:.4f}")
 
-            # Validate shift magnitude (sanity check)
             if np.isfinite(shift).all() and np.abs(shift).max() < max(ref.shape) * 0.5:
-                # Check error threshold - phase correlation must have low error to be trusted
-                # error < 0.01 is excellent, error < 0.1 is acceptable, error >= 0.5 is failure
                 if error < 0.1:
                     total_sy = float(shift[0]) + psy
                     total_sx = float(shift[1]) + psx
@@ -215,27 +246,42 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             debug_info.append(f"phase_cc error: {type(e).__name__}")
 
     # FFT cross-correlation at full resolution with zero-padding.
-    # No downscaling or windowing — these cause multi-pixel registration
-    # errors that broaden stars in the stacked result.
-    # Uses GPU (CuPy) when available for ~10x speedup on large images.
     try:
         gpu = get_gpu()
         xp = gpu.xp
 
-        # Pre-apply pyramid coarse shift so the FFT only needs to find the
-        # small residual — mirrors the same optimisation in the phase_cc path
-        # and avoids wrap-around on large dither offsets.
-        psy, psx = pyramid_shift
+        img_fft = img_shifted  # reuse pyramid-shifted image computed above
+
+        h, w = ref.shape
         if psy != 0.0 or psx != 0.0:
-            img_fft = ndimage.shift(img, shift=(psy, psx), order=1,
-                                    mode='constant', cval=0.0)
+            # The pre-shift fills vacated edges with zeros. A whole-image mean
+            # includes those zeros, making the padded border strongly negative
+            # after subtraction. The FFT treats this as a large feature and
+            # produces a spurious correlation peak that fails the validity check,
+            # causing unnecessary fallback to centroid.
+            # Fix: compute means only over the valid overlap region; zero-fill
+            # outside so the FFT only operates on real pixel data.
+            y0 = max(0, int(round(psy)))
+            y1 = h + min(0, int(round(psy)))
+            x0 = max(0, int(round(psx)))
+            x1 = w + min(0, int(round(psx)))
+            if y1 > y0 and x1 > x0:
+                ref_region = ref[y0:y1, x0:x1].astype(np.float64)
+                img_region = img_fft[y0:y1, x0:x1].astype(np.float64)
+                ref_np = np.zeros((h, w), dtype=np.float64)
+                img_np = np.zeros((h, w), dtype=np.float64)
+                ref_np[y0:y1, x0:x1] = ref_region - ref_region.mean()
+                img_np[y0:y1, x0:x1] = img_region - img_region.mean()
+            else:
+                ref_np = (ref - np.mean(ref)).astype(np.float64)
+                img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
         else:
-            img_fft = img
+            ref_np = (ref - np.mean(ref)).astype(np.float64)
+            img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
 
-        ref_norm = xp.asarray((ref - np.mean(ref)), dtype=xp.float64)
-        img_norm = xp.asarray((img_fft - np.mean(img_fft)), dtype=xp.float64)
+        ref_norm = xp.asarray(ref_np)
+        img_norm = xp.asarray(img_np)
 
-        h, w = ref_norm.shape
         pad_h, pad_w = 2 * h, 2 * w
         F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
         F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
@@ -275,14 +321,16 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     except Exception as e:
         debug_info.append(f"fft_xcorr error: {type(e).__name__}")
 
-    # Fallback to centroid difference - try multiple percentiles for robustness
+    # Fallback to centroid difference — compute all percentile thresholds in one pass
     best_shift = (0.0, 0.0)
     best_score = float('inf')
 
-    for percentile in Config.CENTROID_PERCENTILES:
+    _pcts = list(Config.CENTROID_PERCENTILES)
+    _ref_thresholds = np.percentile(ref, _pcts)
+    _img_thresholds = np.percentile(img, _pcts)
+
+    for percentile, thresh_ref, thresh_img in zip(_pcts, _ref_thresholds, _img_thresholds):
         try:
-            thresh_ref = np.percentile(ref, percentile)
-            thresh_img = np.percentile(img, percentile)
             rmask = ref > thresh_ref
             imask = img > thresh_img
             n_ref = rmask.sum()
@@ -292,16 +340,11 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 cim = ndimage.center_of_mass(ref * rmask)
                 cim2 = ndimage.center_of_mass(img * imask)
                 if cim and cim2:
-                    # Shift needed to align img with ref: ref_center - img_center
-                    # If img is down by 5px, img_center.y = ref_center.y + 5
-                    # We need to shift img UP by -5, which is ref_center.y - img_center.y
                     shift_y = float(cim[0] - cim2[0])
                     shift_x = float(cim[1] - cim2[1])
                     shift_mag = np.sqrt(shift_x**2 + shift_y**2)
 
-                    # Prefer solution from lower percentile (more pixels = more stable)
-                    # But if shift is too large, use lower percentile threshold
-                    if shift_mag > 0.1 or n_ref > 50:  # Have a real shift or many pixels
+                    if shift_mag > 0.1 or n_ref > 50: 
                         if verbose:
                             print(f"      [centroid fallback (p{percentile}): ({shift_x:.1f}, {shift_y:.1f})]")
                         return shift_y, shift_x
@@ -338,35 +381,12 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
 def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
                              levels: int = 4,
                              min_size: int = 32) -> Tuple[float, float]:
-    """Coarse-to-fine multi-scale pyramid registration.
-
-    Builds image pyramids by successive 2× mean-pooling and registers from the
-    coarsest level to the finest.  At each level the previously accumulated
-    shift is applied to the downsampled image before computing the residual,
-    so the correlation only needs to find a small local correction rather than
-    the full shift.  This makes large-shift registration (dithering, tracking
-    drift > 10 % of frame) reliable when plain cross-correlation would wrap
-    around or lock onto a sidelobe.
-
-    The final shift is returned in full-resolution pixel units.
-
-    Args:
-        ref: 2-D luminance reference image (float).
-        img: 2-D luminance image to register against ``ref``.
-        levels: Maximum pyramid depth.  Actual depth is limited by
-                ``min_size`` — levels where either axis < ``min_size``
-                are not used (default 4).
-        min_size: Minimum axis length (pixels) at the coarsest pyramid level
-                  (default 32).
-
-    Returns:
-        ``(shift_y, shift_x)`` in full-resolution pixels.
-    """
+    """Coarse-to-fine multi-scale pyramid registration."""
     def _downsample(arr: np.ndarray) -> np.ndarray:
-        h, w = arr.shape
-        h2, w2 = (h // 2) * 2, (w // 2) * 2  # trim to even
-        patch = arr[:h2, :w2].reshape(h2 // 2, 2, w2 // 2, 2)
-        return patch.mean(axis=(1, 3))
+        h2 = (arr.shape[0] // 2) * 2
+        w2 = (arr.shape[1] // 2) * 2
+        a = arr[:h2, :w2]
+        return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
 
     # Build pyramids
     ref_pyr = [ref.astype(np.float64)]
@@ -380,6 +400,7 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
     actual_levels = len(ref_pyr)
     total_sy, total_sx = 0.0, 0.0
 
+    # Loop from coarsest (N-1) to finest (0)
     for lvl in range(actual_levels - 1, -1, -1):
         r = ref_pyr[lvl]
         i = img_pyr[lvl]
@@ -394,7 +415,9 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
         total_sx += sx_res
 
         if lvl > 0:
-            # Scale up accumulated shift to next finer level
+            # Scale accumulated shift to next finer level (pixel units * 2)
+            # We multiply total here so that the accumulated shift from coarser levels 
+            # is properly scaled when used as a starting point for the finer level.
             total_sy *= 2.0
             total_sx *= 2.0
 
@@ -404,14 +427,8 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
 
 
 def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
-                     transforms=None) -> Tuple[int, int, int, int]:
-    """Compute the largest axis-aligned crop valid in all aligned frames.
-
-    For translation-only frames uses shift magnitudes.  For frames with a
-    rotation transform the four corners of the input are forward-mapped to
-    output space; the inner axis-aligned rectangle of the resulting rotated
-    quad is used as the per-frame valid region.
-    """
+                     transforms: Optional[List[Optional[Any]]] = None) -> Tuple[int, int, int, int]:
+    """Compute the largest axis-aligned crop valid in all aligned frames."""
     H, W = shape
     transforms = transforms or [None] * len(shifts)
     top_vals, bottom_vals, left_vals, right_vals = [], [], [], []
@@ -422,17 +439,15 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
             matrix = transform.params
             R = matrix[:2, :2]      # rotation in (col=x, row=y) space
             t_xy = matrix[:2, 2]    # [tx, ty] in (col=x, row=y)
-            # 4 corners of input in (col=x, row=y): TL, TR, BL, BR
             corners_xy = np.array([[0.0, 0.0], [W, 0.0], [0.0, H], [W, H]])
             out_xy = (R @ corners_xy.T).T + t_xy  # forward map to output
             cols_out = out_xy[:, 0]  # x = col
             rows_out = out_xy[:, 1]  # y = row
-            # Inner axis-aligned rect that fits inside the rotated quad
-            # (valid for |rotation| < 45 deg, which always holds for field rotation)
-            top_vals.append(max(rows_out[0], rows_out[1]))   # max row of top edge
-            bottom_vals.append(min(rows_out[2], rows_out[3]))  # min row of bottom edge
-            left_vals.append(max(cols_out[0], cols_out[2]))  # max col of left edge
-            right_vals.append(min(cols_out[1], cols_out[3]))  # min col of right edge
+            
+            top_vals.append(max(rows_out[0], rows_out[1]))
+            bottom_vals.append(min(rows_out[2], rows_out[3]))
+            left_vals.append(max(cols_out[0], cols_out[2]))
+            right_vals.append(min(cols_out[1], cols_out[3]))
         else:
             top_vals.append(max(0.0, sy))
             bottom_vals.append(min(float(H), H + sy))
@@ -443,22 +458,14 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
     bottom = int(np.floor(min(bottom_vals))) - Config.CROP_MARGIN
     left = int(np.ceil(max(left_vals))) + Config.CROP_MARGIN
     right = int(np.floor(min(right_vals))) - Config.CROP_MARGIN
+    
     if top >= bottom or left >= right:
         return 0, H, 0, W
     return top, bottom, left, right
 
 
-def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> dict:
-    """Analyse registration shifts to detect dithering patterns.
-
-    Returns a dict with:
-      - ``is_dithered`` (bool)
-      - ``pattern`` (str): 'dithered', 'tracking_drift', or 'aligned'
-      - ``mean_magnitude`` (float): mean shift magnitude in pixels
-      - ``unique_positions`` (int): approx distinct integer pixel positions
-      - ``direction_spread_deg`` (float): std of shift angles in degrees
-      - ``autocorrelation`` (float): correlation between consecutive shift vectors
-    """
+def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> Dict[str, Any]:
+    """Analyse registration shifts to detect dithering patterns."""
     if len(shifts) < 3:
         return {'is_dithered': False, 'pattern': 'aligned',
                 'mean_magnitude': 0.0, 'unique_positions': len(shifts),
@@ -469,16 +476,12 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
     mags = np.sqrt(sy ** 2 + sx ** 2)
 
     mean_mag = float(np.mean(mags))
-
-    # Count approximately unique integer positions
     int_positions = set((int(round(y)), int(round(x))) for y, x in shifts)
     unique_positions = len(int_positions)
 
-    # Direction spread — std of angles (in degrees)
-    non_zero = mags > 0.5  # ignore near-zero shifts
+    non_zero = mags > 0.5
     if non_zero.sum() >= 3:
         angles = np.degrees(np.arctan2(sy[non_zero], sx[non_zero]))
-        # Circular std: use the Mardia definition
         sin_mean = np.mean(np.sin(np.radians(angles)))
         cos_mean = np.mean(np.cos(np.radians(angles)))
         R = np.sqrt(sin_mean ** 2 + cos_mean ** 2)
@@ -486,7 +489,6 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
     else:
         direction_spread = 0.0
 
-    # Autocorrelation of consecutive shift vectors (low = random / dithered)
     if len(shifts) >= 4:
         dx = np.diff(sx)
         dy = np.diff(sy)
@@ -501,9 +503,8 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
     else:
         autocorrelation = 0.0
 
-    # Classification heuristics
     all_near_zero = mean_mag < 1.0
-    is_random_direction = direction_spread > 40.0  # degrees
+    is_random_direction = direction_spread > 40.0
     is_low_autocorr = abs(autocorrelation) < 0.5
     has_many_positions = unique_positions >= len(shifts) * 0.5
 
@@ -542,3 +543,886 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> d
         safe_print(f"    Autocorrelation: {autocorrelation:.2f}")
 
     return result
+
+
+def _poly_features(y: np.ndarray, x: np.ndarray, degree: int) -> np.ndarray:
+    """Build the polynomial feature matrix for 2-D warp fitting.
+
+    Returns an (N, D) matrix where each row contains the monomial terms
+    1, y, x, y², yx, x², … up to total degree ``degree``.
+    """
+    cols = [np.ones(len(y))]
+    for d in range(1, degree + 1):
+        for py in range(d, -1, -1):
+            px = d - py
+            cols.append(y ** py * x ** px)
+    return np.column_stack(cols)
+
+
+def fit_polynomial_distortion(src_y: np.ndarray, src_x: np.ndarray,
+                               dst_y: np.ndarray, dst_x: np.ndarray,
+                               degree: int = None
+                               ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Fit a 2-D polynomial distortion map from matched star-pair coordinates.
+
+    Given N matched pairs (src → dst), fits independent least-squares
+    polynomials of the specified degree for the row (y) and column (x)
+    output coordinates:
+
+        dst_y ≈ P_y(src_y, src_x)
+        dst_x ≈ P_x(src_y, src_x)
+
+    A degree-2 polynomial captures field curvature and lateral colour
+    aberration present in many fast refractors and wide-field systems.
+    A degree-3 polynomial additionally models barrel/pincushion distortion.
+
+    Args:
+        src_y, src_x: Source (unregistered frame) star coordinates, arrays (N,).
+        dst_y, dst_x: Destination (reference frame) star coordinates, arrays (N,).
+        degree:       Polynomial degree (default Config.POLY_DISTORTION_DEGREE).
+
+    Returns:
+        (coeffs_y, coeffs_x) — 1-D coefficient arrays for the two polynomials,
+        or None if fitting fails (too few points or singular system).
+    """
+    if degree is None:
+        degree = Config.POLY_DISTORTION_DEGREE
+    min_pts = Config.POLY_MIN_STARS
+
+    if len(src_y) < min_pts:
+        _log.debug("Polynomial distortion: too few stars (%d < %d)", len(src_y), min_pts)
+        return None
+
+    # Normalise coordinates to [-1, 1] for numerical stability
+    cy, sy = float(np.mean(src_y)), max(float(np.std(src_y)), 1.0)
+    cx, sx = float(np.mean(src_x)), max(float(np.std(src_x)), 1.0)
+    yn = (src_y - cy) / sy
+    xn = (src_x - cx) / sx
+
+    A = _poly_features(yn, xn, degree)
+    try:
+        coeffs_y, _, _, _ = np.linalg.lstsq(A, dst_y - src_y, rcond=None)
+        coeffs_x, _, _, _ = np.linalg.lstsq(A, dst_x - src_x, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+
+    # Check residuals — reject if worse than pure translation
+    pred_dy = A @ coeffs_y
+    pred_dx = A @ coeffs_x
+    res_rms = float(np.sqrt(np.mean((dst_y - src_y - pred_dy) ** 2 +
+                                     (dst_x - src_x - pred_dx) ** 2)))
+    naive_rms = float(np.sqrt(np.mean((dst_y - src_y - np.mean(dst_y - src_y)) ** 2 +
+                                       (dst_x - src_x - np.mean(dst_x - src_x)) ** 2)))
+    if res_rms > naive_rms * 1.2:
+        _log.debug("Polynomial distortion: poly fit worse than translation (%.2f > %.2f); "
+                   "discarding", res_rms, naive_rms)
+        return None
+
+    # Pack normalisation parameters into the coefficient arrays (appended)
+    norm_params = np.array([cy, sy, cx, sx])
+    return (np.append(coeffs_y, norm_params),
+            np.append(coeffs_x, norm_params))
+
+
+def apply_polynomial_warp(img: np.ndarray,
+                           coeffs_y: np.ndarray,
+                           coeffs_x: np.ndarray,
+                           degree: int = None) -> np.ndarray:
+    """Apply a polynomial distortion map to a multi-channel image.
+
+    Uses the coefficient arrays produced by ``fit_polynomial_distortion``
+    to compute per-pixel output coordinates and resamples the image with
+    bicubic (order=3) interpolation via scipy.ndimage.map_coordinates.
+
+    Args:
+        img:      Float32 image (H, W, 3) or (H, W).
+        coeffs_y: Coefficient array from ``fit_polynomial_distortion`` (y).
+        coeffs_x: Coefficient array from ``fit_polynomial_distortion`` (x).
+        degree:   Polynomial degree (default Config.POLY_DISTORTION_DEGREE).
+
+    Returns:
+        Warped float32 image of the same shape.
+    """
+    from scipy.ndimage import map_coordinates as _map_coords
+
+    if degree is None:
+        degree = Config.POLY_DISTORTION_DEGREE
+
+    # Extract normalisation parameters (last 4 elements of each coefficient array)
+    cy, sy, cx, sx = coeffs_y[-4:]
+    cy2, sy2, cx2, sx2 = coeffs_x[-4:]
+    c_y = coeffs_y[:-4]
+    c_x = coeffs_x[:-4]
+
+    ndim_orig = img.ndim
+    if ndim_orig == 2:
+        img = img[:, :, np.newaxis]
+    H, W = img.shape[:2]
+
+    # Build output grid in normalised coords
+    row_idx, col_idx = np.mgrid[0:H, 0:W]
+    yn = (row_idx.astype(np.float64) - cy) / sy
+    xn = (col_idx.astype(np.float64) - cx) / sx
+
+    A = _poly_features(yn.ravel(), xn.ravel(), degree)
+
+    # Map destination pixel → source pixel (inverse mapping)
+    dy = (A @ c_y).reshape(H, W)
+    dx = (A @ c_x).reshape(H, W)
+    src_rows = np.clip(row_idx - dy, 0, H - 1)
+    src_cols = np.clip(col_idx - dx, 0, W - 1)
+
+    result = np.zeros_like(img, dtype=np.float32)
+    for c in range(img.shape[2]):
+        result[:, :, c] = _map_coords(
+            img[:, :, c].astype(np.float64),
+            [src_rows, src_cols],
+            order=3, mode='constant', cval=0.0
+        ).astype(np.float32)
+
+    if ndim_orig == 2:
+        result = result[:, :, 0]
+    return result
+
+
+def _geometric_median_2d(points: np.ndarray, max_iters: int = 50,
+                          tol: float = 1e-5) -> Tuple[float, float]:
+    """Weiszfeld algorithm for the L1 geometric median of 2D shift vectors.
+
+    More outlier-robust than the arithmetic mean; used to locate the "central"
+    shift position when selecting an alignment-optimal reference frame.
+    """
+    if len(points) == 0:
+        return 0.0, 0.0
+    p = points.astype(np.float64)
+    med = p.mean(axis=0)
+    for _ in range(max_iters):
+        dists = np.linalg.norm(p - med, axis=1)
+        dists = np.maximum(dists, 1e-10)
+        weights = 1.0 / dists
+        new_med = (weights[:, None] * p).sum(axis=0) / weights.sum()
+        if np.linalg.norm(new_med - med) < tol:
+            break
+        med = new_med
+    return float(med[0]), float(med[1])
+
+
+def select_reference_frame(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    mem_lum: np.ndarray,
+    H: int,
+    W: int,
+    centrality_weight: float = None,
+    n_workers: int = None,
+    cached_lums: Optional[List[Optional[np.ndarray]]] = None,
+) -> Tuple[FrameInfo, int, List[Tuple[float, float]]]:
+    """Choose reference frame by blending quality score with alignment centrality.
+
+    A purely quality-ranked reference may sit at the edge of the shift
+    distribution, forcing all other frames to be shifted further (accumulating
+    interpolation error).  This function does a cheap pyramid-only registration
+    pass, finds the geometric median of all shifts, and re-scores each frame as:
+
+        combined = quality_norm * (1 - w) + centrality_norm * w
+
+    where w = centrality_weight (default Config.ALIGNMENT_CENTRALITY_WEIGHT).
+
+    Returns:
+        best_frame       – FrameInfo of the chosen reference.
+        best_lights_idx  – index into the *lights* list (not final).
+        pyramid_shifts   – cheap shifts computed during this pass (recycled by
+                           the outlier filter so the pyramid pass runs only once).
+    """
+    from src.models import Config
+    if centrality_weight is None:
+        centrality_weight = Config.ALIGNMENT_CENTRALITY_WEIGHT
+    if n_workers is None:
+        n_workers = min(Config.REF_PYRAMID_WORKERS, len(final))
+
+    def _get_lum(orig_idx: int) -> np.ndarray:
+        if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
+            return np.asarray(cached_lums[orig_idx], dtype=np.float32)
+        return np.array(mem_lum[orig_idx], dtype=np.float32)
+
+    # Tentative reference: highest quality frame (for consistent pyramid base)
+    tentative_best = max(final, key=lambda f: f.metrics.get('score', 0.0))
+    tentative_idx_in_lights = None
+    # We need the lights-list index; final_indices maps final[j] → lights[orig_idx]
+    tentative_j = final.index(tentative_best)
+    tentative_idx_in_lights = final_indices[tentative_j]
+    ref_lum = _get_lum(tentative_idx_in_lights)
+
+    # Run cheap pyramid registration in parallel
+    pyramid_shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
+
+    def _pyramid_one(j: int, orig_idx: int) -> Tuple[int, float, float]:
+        if orig_idx == tentative_idx_in_lights:
+            return j, 0.0, 0.0
+        lum = _get_lum(orig_idx)
+        try:
+            sy, sx = calculate_shift_pyramid(ref_lum, lum)
+            if np.isfinite(sy) and np.isfinite(sx):
+                return j, float(sy), float(sx)
+        except Exception:
+            pass
+        return j, 0.0, 0.0
+
+    safe_print(f"  Pyramid pass for reference selection ({len(final)} frames, {n_workers} workers)...")
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futs = {executor.submit(_pyramid_one, j, orig_idx): j
+                for j, orig_idx in enumerate(final_indices)}
+        for fut in tqdm(as_completed(futs), total=len(final),
+                        desc="  Ref-select", unit="frame"):
+            j, sy, sx = fut.result()
+            pyramid_shifts[j] = (sy, sx)
+
+    # Geometric median of shift cloud
+    shift_arr = np.array(pyramid_shifts, dtype=np.float64)  # (N, 2)
+    med_sy, med_sx = _geometric_median_2d(shift_arr)
+
+    # Centrality score: inversely proportional to distance from geometric median
+    dists = np.sqrt((shift_arr[:, 0] - med_sy) ** 2 +
+                    (shift_arr[:, 1] - med_sx) ** 2)
+    max_dist = dists.max()
+    if max_dist < 1e-6:
+        centrality = np.ones(len(final))
+    else:
+        centrality = 1.0 - dists / max_dist  # 1 = at median, 0 = furthest away
+
+    # Quality scores (normalised)
+    q_scores = np.array([f.metrics.get('score', 1.0) for f in final], dtype=np.float64)
+    q_max = q_scores.max()
+    q_norm = q_scores / max(q_max, 1e-9)
+
+    combined = q_norm * (1.0 - centrality_weight) + centrality * centrality_weight
+    best_j = int(np.argmax(combined))
+    best_frame = final[best_j]
+    best_lights_idx = final_indices[best_j]
+
+    safe_print(
+        f"  Reference selection: {os.path.basename(best_frame.path)} "
+        f"(quality={q_norm[best_j]:.3f}, centrality={centrality[best_j]:.3f}, "
+        f"combined={combined[best_j]:.3f})"
+    )
+    if best_frame is not tentative_best:
+        safe_print(
+            f"    (Alignment-centrality promoted over pure-quality choice "
+            f"{os.path.basename(tentative_best.path)})"
+        )
+
+    return best_frame, best_lights_idx, pyramid_shifts
+
+
+def _filter_shift_outliers(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    pyramid_shifts: List[Tuple[float, float]],
+    sigma: float = None,
+) -> np.ndarray:
+    """Flag frames whose pyramid shift lies >sigma*MAD from the session median.
+
+    Returns a boolean array (len = len(final)) where True = frame is an outlier
+    that should be skipped in the expensive full registration pass.  Outliers
+    are caused by large mount slippage, guiding failures, or meridian flips
+    that score fine on per-frame quality metrics.
+    """
+    from src.models import Config
+    if sigma is None:
+        sigma = Config.SHIFT_OUTLIER_SIGMA
+
+    shifts_arr = np.array(pyramid_shifts, dtype=np.float64)
+    magnitudes = np.sqrt(shifts_arr[:, 0] ** 2 + shifts_arr[:, 1] ** 2)
+
+    med = float(np.median(magnitudes))
+    mad = float(np.median(np.abs(magnitudes - med)))
+    threshold = med + sigma * max(1.4826 * mad, 1.0)  # floor of 1px avoids zero-threshold
+
+    outlier_mask = magnitudes > threshold
+    n_out = int(outlier_mask.sum())
+    if n_out > 0:
+        safe_print(
+            f"  Shift outlier filter: {n_out}/{len(final)} frames exceed "
+            f"{sigma:.1f}σ threshold ({threshold:.1f} px); "
+            f"skipping expensive registration for these frames"
+        )
+        for j, is_out in enumerate(outlier_mask):
+            if is_out:
+                _log.debug(
+                    "  Outlier frame: %s (shift=%.1f px)",
+                    os.path.basename(final[j].path), magnitudes[j]
+                )
+    return outlier_mask
+
+
+def score_registration_residuals(
+    final: List[FrameInfo],
+    shifts: List[Tuple[float, float]],
+    transforms,
+    ref_lum: np.ndarray,
+    ref_stars,
+    mem_lum: np.ndarray,
+    final_indices: List[int],
+    best_lights_idx: int,
+    max_residual_px: float = None,
+    cached_lums: Optional[List[Optional[np.ndarray]]] = None,
+) -> Tuple[List[float], List[bool]]:
+    """Post-registration centroid residual check.
+
+    After registration, re-detects stars in each registered luminance frame
+    and matches them to the reference star catalog.  Frames whose RMS centroid
+    displacement exceeds ``max_residual_px`` are flagged as misaligned.
+
+    Returns:
+        residuals   – per-frame RMS centroid displacement in pixels.
+        passed      – per-frame bool (True = within tolerance).
+    """
+    from src.models import Config
+    from src.quality import _sep_detect_stars, _detect_stars_multi_fwhm, _ensure_photutils
+
+    if max_residual_px is None:
+        max_residual_px = Config.REG_RESIDUAL_MAX_PX
+
+    residuals: List[float] = [0.0] * len(final)
+    passed: List[bool] = [True] * len(final)
+
+    if ref_stars is None or len(ref_stars) == 0:
+        return residuals, passed
+
+    try:
+        ref_xy = np.array(
+            [(float(s['xcentroid']), float(s['ycentroid'])) for s in ref_stars],
+            dtype=np.float64
+        )
+    except Exception:
+        return residuals, passed
+
+    from scipy.spatial import cKDTree
+    ref_tree = cKDTree(ref_xy)
+
+    def _check_one(j: int, f: FrameInfo, orig_idx: int) -> Tuple[int, float, bool]:
+        if orig_idx == best_lights_idx:
+            return j, 0.0, True
+        try:
+            if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
+                lum = np.asarray(cached_lums[orig_idx], dtype=np.float32)
+            else:
+                lum = np.array(mem_lum[orig_idx], dtype=np.float32)
+            aligned_lum = ndimage.shift(
+                lum, shift=shifts[j], order=1, mode='constant', cval=0.0
+            ) if transforms[j] is None else ndimage.affine_transform(
+                lum.astype(np.float64),
+                transforms[j].params[:2, :2],
+                offset=-(transforms[j].params[:2, :2] @
+                         np.array([shifts[j][0], shifts[j][1]])),
+                order=1, mode='constant', cval=0.0
+            )
+            noise_val = float(f.metrics.get('noise', 1.0)) if f.metrics else 1.0
+            frame_stars = _sep_detect_stars(aligned_lum.astype(np.float32), noise_val)
+            if frame_stars is None or len(frame_stars) < 3:
+                _ensure_photutils()
+                from src.quality import DAOStarFinder
+                if DAOStarFinder is not None:
+                    bg = float(np.median(aligned_lum))
+                    std = max(noise_val, 1e-6)
+                    frame_stars = _detect_stars_multi_fwhm(
+                        aligned_lum - bg, threshold=5.0 * std
+                    )
+            if frame_stars is None or len(frame_stars) < 3:
+                return j, 0.0, True
+            frame_xy = np.array(
+                [(float(s['xcentroid']), float(s['ycentroid'])) for s in frame_stars],
+                dtype=np.float64
+            )
+            dists, _ = ref_tree.query(frame_xy, k=1, distance_upper_bound=10.0)
+            valid = np.isfinite(dists) & (dists < 10.0)
+            if valid.sum() < 3:
+                return j, 0.0, True
+            rms = float(np.sqrt(np.mean(dists[valid] ** 2)))
+            return j, rms, rms <= max_residual_px
+        except Exception as exc:
+            _log.debug("Residual check failed for frame %s: %s",
+                       os.path.basename(f.path), exc)
+            return j, 0.0, True
+
+    n_workers = min(os.cpu_count() or 4, len(final))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futs = {executor.submit(_check_one, j, f, orig_idx): j
+                for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
+        for fut in tqdm(as_completed(futs), total=len(final),
+                        desc="  Residual check", unit="frame"):
+            j, rms, ok = fut.result()
+            residuals[j] = rms
+            passed[j] = ok
+
+    n_failed = sum(1 for p in passed if not p)
+    if n_failed > 0:
+        safe_print(
+            f"  Post-registration residual check: {n_failed}/{len(final)} frames "
+            f"exceeded {max_residual_px:.1f} px RMS threshold"
+        )
+
+    return residuals, passed
+
+
+def compute_patch_quality_map(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
+    """Divide luminance frame into a grid and compute per-patch Brenner sharpness.
+
+    Returns a float32 (H, W) array where each pixel holds the normalised quality
+    weight of its patch.  The map is bilinearly interpolated from the patch grid
+    to full resolution so it can be used as a per-pixel stacking weight.
+
+    Higher values indicate sharper, better-seeing patches (suitable for
+    weighted stacking in the lucky imaging paradigm).
+    """
+    from src.models import Config
+    if grid_size is None:
+        grid_size = Config.PATCH_GRID_SIZE
+    min_patch = Config.PATCH_MIN_SIZE
+
+    H, W = lum.shape[:2]
+    # Enforce minimum patch size; fall back to 1x1 grid if image is tiny
+    ph = max(H // grid_size, min_patch)
+    pw = max(W // grid_size, min_patch)
+    ny = max(H // ph, 1)
+    nx = max(W // pw, 1)
+
+    patch_scores = np.zeros((ny, nx), dtype=np.float32)
+    lum_f = lum.astype(np.float64)
+
+    for iy in range(ny):
+        for ix in range(nx):
+            y0, y1 = iy * ph, min((iy + 1) * ph, H)
+            x0, x1 = ix * pw, min((ix + 1) * pw, W)
+            patch = lum_f[y0:y1, x0:x1]
+            if patch.size < 4:
+                continue
+            diff = patch[:, 2:] - patch[:, :-2]
+            patch_scores[iy, ix] = float(np.mean(diff * diff))
+
+    # Normalise to [0, 1]
+    pmax = patch_scores.max()
+    if pmax > 1e-12:
+        patch_scores /= pmax
+
+    # Upsample patch grid to full frame resolution via bilinear interpolation
+    if ny == H and nx == W:
+        return patch_scores
+
+    zoom_y = H / ny
+    zoom_x = W / nx
+    quality_map = ndimage.zoom(patch_scores, (zoom_y, zoom_x), order=1)
+    quality_map = np.clip(quality_map, 0.0, 1.0).astype(np.float32)
+    # Ensure exact output shape (zoom can differ by 1 pixel due to rounding)
+    if quality_map.shape != (H, W):
+        from scipy.ndimage import map_coordinates
+        gy = np.linspace(0, ny - 1, H)
+        gx = np.linspace(0, nx - 1, W)
+        coords_y, coords_x = np.meshgrid(gy, gx, indexing='ij')
+        quality_map = map_coordinates(
+            patch_scores.astype(np.float64),
+            [coords_y, coords_x], order=1, mode='nearest'
+        ).astype(np.float32)
+        np.clip(quality_map, 0.0, 1.0, out=quality_map)
+
+    return quality_map
+
+
+def run_registration_phase(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    best: FrameInfo,
+    best_idx: int,
+    ref_lum: np.ndarray,
+    mem_lum: np.ndarray,
+    cached_lums: List[Optional[np.ndarray]],
+    H: int,
+    W: int,
+    args: argparse.Namespace,
+    stats: ProcessingStats,
+    pyramid_shifts: Optional[List[Tuple[float, float]]] = None,
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]], Dict[str, Any]]:
+    """Compute per-frame registration shifts/transforms for all accepted frames.
+
+    When ``pyramid_shifts`` is supplied (from select_reference_frame), the
+    shift-outlier filter is applied before the expensive full-registration pass,
+    saving time on frames with catastrophic guiding failures.
+    """
+    ref_stars = best.metrics.get('_star_sources')
+    if ref_stars is not None and len(ref_stars) == 0:
+        ref_stars = None  # treat empty array same as absent
+
+    # If star sources are missing (lost from checkpoint JSON serialisation, or
+    # detection unavailable in Phase 1), attempt re-detection now using the
+    # reference luminance already in memory.  Try in order: SEP (fastest, no
+    # extra deps), DAOStarFinder (photutils), local-maxima fallback (scipy only).
+    if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        noise_val = float(best.metrics.get('noise', 1.0)) if best.metrics else 1.0
+        _redet_tried: list = []
+        try:
+            # 1. SEP — handles high-pedestal images well via local background mesh
+            from src.quality import _sep_detect_stars
+            _redet_tried.append('SEP')
+            ref_stars = _sep_detect_stars(ref_lum.astype(np.float32), noise_val)
+            if ref_stars is not None and len(ref_stars) > 0:
+                safe_print(f"  Re-detected {len(ref_stars)} stars via SEP")
+            else:
+                ref_stars = None
+        except Exception as e:
+            _log.debug("SEP re-detection failed: %s", e)
+
+        if ref_stars is None:
+            try:
+                # 2. DAOStarFinder with sigma-clipped background estimate
+                from src.quality import (_detect_stars_multi_fwhm,
+                                         _ensure_photutils, _ensure_astropy_stats)
+                _ensure_photutils()
+                _ensure_astropy_stats()
+                from src.quality import DAOStarFinder, sigma_clipped_stats
+                if DAOStarFinder is not None and sigma_clipped_stats is not None:
+                    _redet_tried.append('DAOStarFinder')
+                    _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)
+                    bg_std_f = float(bg_std) if bg_std else 0.0
+                    if bg_std_f > 0:
+                        bg_sub = ref_lum - float(bg_med)
+                        ref_stars = _detect_stars_multi_fwhm(bg_sub, threshold=5.0 * bg_std_f)
+                        if ref_stars is not None and len(ref_stars) > 0:
+                            safe_print(f"  Re-detected {len(ref_stars)} stars via DAOStarFinder")
+                        else:
+                            ref_stars = None
+            except Exception as e:
+                _log.debug("DAOStarFinder re-detection failed: %s", e)
+
+        if ref_stars is None:
+            try:
+                # 3. Local-maxima fallback — pure scipy, always available
+                from scipy.ndimage import maximum_filter, gaussian_filter
+                _redet_tried.append('local-maxima')
+                smoothed = gaussian_filter(ref_lum.astype(np.float64), sigma=2.0)
+                bg = float(np.median(smoothed))
+                thresh = bg + 5.0 * max(noise_val, float(np.std(smoothed)) * 0.5)
+                local_max = maximum_filter(smoothed, size=11)
+                mask = (smoothed == local_max) & (smoothed > thresh)
+                peak_ys, peak_xs = np.where(mask)
+                peak_vals = smoothed[peak_ys, peak_xs]
+                if len(peak_ys) > 0:
+                    order = np.argsort(peak_vals)[::-1]
+                    n_stars = min(len(order), 200)
+                    dt = np.dtype([('xcentroid', np.float64), ('ycentroid', np.float64),
+                                   ('flux', np.float64), ('peak', np.float64),
+                                   ('roundness1', np.float64), ('roundness2', np.float64),
+                                   ('sharpness', np.float64),
+                                   ('a', np.float64), ('b', np.float64), ('theta', np.float64)])
+                    ref_stars = np.zeros(n_stars, dtype=dt)
+                    ref_stars['xcentroid'] = peak_xs[order[:n_stars]]
+                    ref_stars['ycentroid'] = peak_ys[order[:n_stars]]
+                    ref_stars['peak'] = peak_vals[order[:n_stars]]
+                    ref_stars['flux'] = ref_stars['peak']
+                    ref_stars['a'] = 2.0
+                    ref_stars['b'] = 2.0
+                    ref_stars['roundness1'] = 0.1
+                    ref_stars['roundness2'] = 0.1
+                    ref_stars['sharpness'] = 0.5
+                    safe_print(f"  Re-detected {n_stars} stars via local-maxima fallback")
+            except Exception as e:
+                _log.debug("Local-maxima re-detection failed: %s", e)
+
+        if ref_stars is not None and len(ref_stars) > 0:
+            best.metrics['_star_sources'] = ref_stars
+        else:
+            tried_str = ', '.join(_redet_tried) if _redet_tried else 'none available'
+            safe_print(f"  ⚠ No stars detected in reference frame (tried: {tried_str}) — "
+                       f"affine (rotation) registration disabled, falling back to translation only")
+            ref_stars = None
+
+    elif ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
+        safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
+                   "registration disabled, falling back to translation only")
+
+    # Shift-space outlier pre-filter: skip expensive full registration for
+    # frames whose pyramid shift is catastrophically far from the session median.
+    outlier_mask = np.zeros(len(final), dtype=bool)
+    if (pyramid_shifts is not None
+            and not getattr(args, 'no_shift_outlier_filter', False)
+            and len(pyramid_shifts) == len(final)):
+        outlier_mask = _filter_shift_outliers(final, final_indices, pyramid_shifts)
+
+    shifts = [None] * len(final)
+    transforms = [None] * len(final)
+    print(f"  Calculating shifts for {len(final)} frames...")
+
+    # Pre-seed outlier frames with their pyramid shift so they still appear in
+    # the output with a reasonable (if coarse) alignment rather than zero.
+    for j in range(len(final)):
+        if outlier_mask[j] and pyramid_shifts is not None:
+            shifts[j] = pyramid_shifts[j]
+            transforms[j] = None
+
+    gpu = get_gpu()
+
+    def _register_one(j, f, orig_idx):
+        if outlier_mask[j]:
+            return j, shifts[j] or (0.0, 0.0), None
+        if orig_idx == best_idx or args.no_registration:
+            return j, (0.0, 0.0), None
+        with gpu.stream_context():
+            lum = (cached_lums[orig_idx] if cached_lums[orig_idx] is not None
+                   else np.array(mem_lum[orig_idx]))
+            use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
+            if use_affine:
+                sy, sx = calculate_shift(ref_lum, lum, verbose=False,
+                                         skip_phase_cc=args.skip_phase_correlation)
+                affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
+                                               initial_shift=(sy, sx))
+                if affine_tf is not None:
+                    return j, (affine_tf.params[1, 2], affine_tf.params[0, 2]), affine_tf
+            sy, sx = calculate_shift(
+                ref_lum, lum, verbose=args.verbose,
+                debug=args.debug_registration,
+                frame_name=os.path.splitext(os.path.basename(f.path))[0],
+                skip_phase_cc=args.skip_phase_correlation)
+            if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
+                safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
+                sx, sy = 0.0, 0.0
+            return j, (sy, sx), None
+
+    if gpu.active:
+        n_workers = min(gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB,
+                                            Config.GPU_VRAM_RESERVE_MB), len(final))
+    else:
+        n_workers = min(os.cpu_count() or 4, len(final))
+        
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_register_one, j, f, orig_idx): j
+                   for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
+        for future in tqdm(as_completed(futures), total=len(final),
+                           desc="  Registering", unit="frame", disable=args.verbose):
+            j, shift_val, transform_val = future.result()
+            shifts[j] = shift_val
+            transforms[j] = transform_val
+            final[j].shift = shift_val
+            if args.verbose:
+                f = final[j]
+                if transform_val is not None:
+                    tx, ty = shift_val[1], shift_val[0]
+                    rot_deg = np.degrees(np.arctan2(transform_val.params[1, 0],
+                                                    transform_val.params[0, 0]))
+                    safe_print(f'    {os.path.basename(f.path)}: affine shift=({tx:+.1f}, '
+                               f'{ty:+.1f}) px, rotation={rot_deg:+.3f} deg')
+                elif shift_val != (0.0, 0.0):
+                    sy, sx = shift_val
+                    safe_print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
+                               f'magnitude={np.sqrt(sy**2 + sx**2):.2f} px')
+
+    # Shift statistics
+    shift_x = [s[1] for s in shifts]
+    shift_y = [s[0] for s in shifts]
+    shift_mags = [np.sqrt(sx**2 + sy**2) for sx, sy in shifts]
+    if not args.no_registration:
+        print(f"  Shift statistics:")
+        print(f"    X: mean={np.mean(shift_x):+.1f}px, std={np.std(shift_x):.1f}px, "
+              f"range=[{np.min(shift_x):+.1f}, {np.max(shift_x):+.1f}]")
+        print(f"    Y: mean={np.mean(shift_y):+.1f}px, std={np.std(shift_y):.1f}px, "
+              f"range=[{np.min(shift_y):+.1f}, {np.max(shift_y):+.1f}]")
+        print(f"    Magnitude: mean={np.mean(shift_mags):.1f}px, max={np.max(shift_mags):.1f}px")
+        if np.max(shift_mags) > Config.LARGE_SHIFT_WARNING_PX:
+            warning = f"Large shifts detected (max={np.max(shift_mags):.1f}px)"
+            stats.add_warning(warning)
+            safe_print(f"  ⚠ {warning}")
+
+    shift_set = set(f.shift for f in final)
+    zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
+    if len(shift_set) == 1 and len(final) > 2:
+        unique_shift = list(shift_set)[0]
+        if unique_shift != (0.0, 0.0):
+            warning = f'All {len(final)} frames have IDENTICAL shift — registration failure!'
+            stats.add_warning(warning)
+            safe_print(f'\n  ⚠ WARNING: {warning}')
+        elif len(final) <= 3:
+            safe_print(f'\n  INFO: All frames registered with zero shift — well-aligned.')
+    elif zero_shifts > len(final) * 0.8 and len(final) > 2:
+        warning = f'{zero_shifts}/{len(final)} frames have zero shift'
+        stats.add_warning(warning)
+        safe_print(f'\n  ⚠ WARNING: {warning}')
+
+    # Post-registration centroid residual check: verify alignment quality by
+    # re-detecting stars in each registered frame and measuring RMS star position error.
+    if (not getattr(args, 'no_reg_residual_check', False)
+            and ref_stars is not None
+            and len(ref_stars) >= 5
+            and not args.no_registration):
+        safe_print(f"  Post-registration residual check ({len(final)} frames)...")
+        residuals, res_passed = score_registration_residuals(
+            final, shifts, transforms, ref_lum, ref_stars,
+            mem_lum, final_indices, best_idx,
+            cached_lums=cached_lums,
+        )
+        n_res_failed = sum(1 for p in res_passed if not p)
+        for j, (f, passed, rms) in enumerate(zip(final, res_passed, residuals)):
+            if f.metrics is not None:
+                f.metrics['reg_residual_px'] = round(rms, 3)
+        if n_res_failed > 0 and getattr(args, 'reg_residual_reject', False):
+            rejected_by_residual = [j for j, p in enumerate(res_passed) if not p]
+            safe_print(
+                f"  Residual rejection (--reg-residual-reject): "
+                f"removing {n_res_failed} frame(s)"
+            )
+            keep_mask = [p for p in res_passed]
+            final = [f for f, k in zip(final, keep_mask) if k]
+            final_indices = [i for i, k in zip(final_indices, keep_mask) if k]
+            shifts = [s for s, k in zip(shifts, keep_mask) if k]
+            transforms = [t for t, k in zip(transforms, keep_mask) if k]
+
+    # Patch quality maps for per-pixel lucky-imaging weighted stacking.
+    quality_maps: Optional[List[np.ndarray]] = None
+    if getattr(args, 'patch_registration', False) and not args.no_registration:
+        safe_print(f"\n  Computing patch quality maps ({len(final)} frames)...")
+        quality_maps = []
+        for j, orig_idx in enumerate(final_indices):
+            lum = np.array(mem_lum[orig_idx]).astype(np.float32)
+            # Apply registration so the quality map is in aligned space
+            if transforms[j] is not None:
+                from scipy.ndimage import affine_transform as _aff
+                tfm = transforms[j]
+                R = tfm.params[:2, :2]
+                t_xy = tfm.params[:2, 2]
+                t_rc = np.array([t_xy[1], t_xy[0]])
+                offset = -R @ t_rc
+                lum = _aff(lum.astype(np.float64), R, offset=offset,
+                           order=1, mode='constant', cval=0.0).astype(np.float32)
+            elif shifts[j] != (0.0, 0.0):
+                lum = ndimage.shift(lum, shift=shifts[j], order=1,
+                                    mode='constant', cval=0.0)
+            qmap = compute_patch_quality_map(lum)
+            quality_maps.append(qmap)
+        safe_print(f"  Patch quality maps computed.")
+
+    dither_info = detect_dither(shifts, verbose=False)
+    dither_info['quality_maps'] = quality_maps  # carry through to stacking
+    if not args.no_registration and len(shifts) > 2:
+        labels = {'dithered': 'Dithered (random offsets)',
+                  'tracking_drift': 'Tracking drift (systematic trend)',
+                  'aligned': 'Well-aligned (minimal offsets)'}
+        print(f"\n  Dither analysis:")
+        print(f"    Pattern: {labels.get(dither_info['pattern'], dither_info['pattern'])}")
+        print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
+        print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
+        if dither_info.get('direction_spread_deg', 0) > 0:
+            print(f"    Direction spread: {dither_info['direction_spread_deg']:.1f} deg")
+        if dither_info['is_dithered'] and args.stack_method == 'mean':
+            safe_print(f"    Warning: mean stacking does not reject cosmic rays; "
+                       f"consider --stack-method sigma_clip")
+        if dither_info['is_dithered'] and getattr(args, 'drizzle_scale', 1.0) <= 1.0:
+            safe_print(f"    Tip: dithered data detected — add --drizzle-scale 2.0 "
+                       f"to enable sub-pixel super-resolution stacking")
+
+    return shifts, transforms, dither_info, final, final_indices
+
+
+# ---------------------------------------------------------------------------
+# Comet stacking support
+# ---------------------------------------------------------------------------
+
+def find_comet_centroid(lum: np.ndarray,
+                        smooth_sigma: float = 5.0,
+                        percentile: float = 99.5) -> Tuple[float, float]:
+    """Locate the brightest compact extended object in a luminance frame.
+
+    Used for comet nucleus tracking: the comet typically appears as the
+    brightest non-stellar blob.  Stars are smaller and more numerous; the
+    comet nucleus is the single dominant bright region after smoothing.
+
+    Args:
+        lum:          2-D luminance frame (H, W).
+        smooth_sigma: Gaussian blur radius to suppress point sources.
+        percentile:   Threshold percentile for nucleus detection.
+
+    Returns:
+        (cy, cx) sub-pixel centroid of the brightest region.
+    """
+    smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
+    threshold = np.percentile(smoothed, percentile)
+    mask = smoothed > threshold
+    if not mask.any():
+        # fallback: return frame centre
+        return lum.shape[0] / 2.0, lum.shape[1] / 2.0
+
+    # Label connected regions above threshold
+    labeled, n_labels = ndimage.label(mask)
+    if n_labels == 0:
+        cy, cx = np.unravel_index(int(np.argmax(smoothed)), smoothed.shape)
+        return float(cy), float(cx)
+
+    # Pick the brightest (integrated flux) region
+    fluxes = [float(np.sum(smoothed[labeled == i])) for i in range(1, n_labels + 1)]
+    best_label = int(np.argmax(fluxes)) + 1
+    cy, cx = ndimage.center_of_mass(smoothed, labeled, best_label)
+    return float(cy), float(cx)
+
+
+def run_comet_registration_phase(
+    final: List[FrameInfo],
+    final_indices: List[int],
+    best_idx: int,
+    ref_lum: np.ndarray,
+    mem_lum: np.ndarray,
+    H: int,
+    W: int,
+    args: argparse.Namespace,
+    stats: ProcessingStats,
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]]]:
+    """Compute per-frame registration shifts aligned on a comet nucleus.
+
+    Instead of aligning on the star field, this tracks the brightest extended
+    blob (comet nucleus) in each frame relative to the reference frame.
+
+    Returns:
+        (shifts, transforms) — transforms are always None (translation only).
+    """
+    print(f"  [Comet] Locating nucleus in reference frame...")
+    ref_cy, ref_cx = find_comet_centroid(ref_lum)
+    print(f"  [Comet] Reference nucleus centroid: ({ref_cx:.1f}, {ref_cy:.1f})")
+
+    shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
+    transforms: List[Optional[Any]] = [None] * len(final)
+
+    def _register_comet(j: int, orig_idx: int) -> Tuple[int, Tuple[float, float]]:
+        if orig_idx == best_idx or getattr(args, 'no_registration', False):
+            return j, (0.0, 0.0)
+        lum = np.array(mem_lum[orig_idx])
+        cy, cx = find_comet_centroid(lum)
+        sy = ref_cy - cy
+        sx = ref_cx - cx
+        return j, (sy, sx)
+
+    gpu = get_gpu()
+    n_workers = min(
+        gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB, Config.GPU_VRAM_RESERVE_MB)
+        if gpu.active else (os.cpu_count() or 4),
+        len(final),
+    )
+
+    print(f"  [Comet] Tracking nucleus in {len(final)} frames...")
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(_register_comet, j, orig_idx): j
+            for j, orig_idx in enumerate(final_indices)
+        }
+        for future in tqdm(
+            as_completed(futures), total=len(final),
+            desc="  Comet tracking", unit="frame", disable=args.verbose
+        ):
+            j, shift_val = future.result()
+            shifts[j] = shift_val
+            if args.verbose:
+                sy, sx = shift_val
+                safe_print(
+                    f"    {os.path.basename(final[j].path)}: "
+                    f"comet shift=({sx:+.1f}, {sy:+.1f}) px"
+                )
+
+    shift_mags = [np.sqrt(s[0] ** 2 + s[1] ** 2) for s in shifts]
+    print(f"  [Comet] Mean shift: {np.mean(shift_mags):.1f} px, "
+          f"max: {np.max(shift_mags):.1f} px")
+
+    return shifts, transforms
