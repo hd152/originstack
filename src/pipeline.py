@@ -21,7 +21,8 @@ from src.registration import run_registration_phase, select_reference_frame
 from src.stacking import run_stacking_phase
 from src.postprocess import postprocess_stack
 from src.checkpoint import (save_checkpoint, save_raw_stack, load_raw_stack,
-                            can_resume, restore_frame_state, cleanup_checkpoint)
+                            can_resume, restore_frame_state, cleanup_checkpoint,
+                            load_transforms)
 
 
 try:
@@ -449,9 +450,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if resume_phase >= 2:
                 print_phase(2, "Registration (resumed from checkpoint)")
                 shifts = [tuple(s) for s in ckpt_state['shifts']]
-                transforms = [None] * len(final)
+                transforms = load_transforms(output_path, len(final))
+                n_affine = sum(1 for t in transforms if t is not None)
                 dither_info = ckpt_state.get('dither_info', {})
-                safe_print(f"  Restored {len(shifts)} frame shifts from checkpoint")
+                safe_print(f"  Restored {len(shifts)} frame shifts"
+                           + (f", {n_affine} affine transforms" if n_affine else "")
+                           + " from checkpoint")
                 stats.registration_time = 0.0
                 del cached_lums
             else:
@@ -489,7 +493,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 del cached_lums
 
                 save_checkpoint(output_path, phase=2, lights=lights, final=final,
-                                shifts=shifts, dither_info=dither_info, stats=stats)
+                                shifts=shifts, transforms=transforms,
+                                dither_info=dither_info, stats=stats)
 
             # Resolve 'auto' and legacy --winsorize shorthand
             if args.stack_method == 'auto':
@@ -551,7 +556,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if getattr(args, 'keep_checkpoint', False):
                 save_raw_stack(output_path, stacked)
                 save_checkpoint(output_path, phase=3, lights=lights, final=final,
-                                shifts=shifts, dither_info=dither_info, stats=stats,
+                                shifts=shifts, transforms=transforms,
+                                dither_info=dither_info, stats=stats,
                                 crop=[top, bottom, left, right])
 
         finally:

@@ -22,7 +22,7 @@ env/
 ENV/
 .venv/
 
-# FITS and output files
+# FITS and image output files — never publish raw or processed data
 *.fits
 *.fit
 *.jpg
@@ -30,6 +30,8 @@ ENV/
 *.png
 *.tif
 *.tiff
+# Allow sample preview JPEGs used in README
+!sample/*.jpg
 
 # Temporary files
 *.tmp
@@ -66,6 +68,6 @@ htmlcov/
 # Jupyter Notebook
 .ipynb_checkpoints/
 
-# Keep example files (if any)
-!example*.fits
-!example*.jpg
+# Session data files that may contain PII (GPS coords, observer info, telescope location)
+**/info.json
+sample/**/*.json

@@ -1,136 +1,178 @@
-# Quick Reference: Shift Diagnostics
+# OriginStack — Quick Reference
 
 ## One-Line Commands
 
-### View diagnostics with quality metrics
 ```bash
-python astro_stack.py -d your_images/ -o output.fits -v
+# Basic stack with all defaults
+python astro_stack.py -d lights/ -o stacked.fits
+
+# With verbose per-frame output
+python astro_stack.py -d lights/ -o stacked.fits -v
+
+# Auto target detection (no API key needed)
+python astro_stack.py -d lights/ -o stacked.fits -v --auto
+
+# Specific target preset
+python astro_stack.py -d lights/ -o stacked.fits --preset galaxy
+
+# Keep all frames (disable quality filter)
+python astro_stack.py -d lights/ -o stacked.fits --no-quality-filter
+
+# Debug registration problems
+python astro_stack.py -d lights/ -o stacked.fits --debug-registration
+
+# Health check without stacking
+python astro_stack.py -d lights/ --health-check
+
+# Dry run — see resolved parameters without processing
+python astro_stack.py -d lights/ -o stacked.fits --dry-run
 ```
 
-### Stack with verbose output and auto target detection
-```bash
-python astro_stack.py -d your_images/ -o output.fits -v --auto
+---
+
+## Understanding Verbose Output
+
+### Quality Metrics
+
+```
+light_001.fit: brightness=18.2, contrast=12.1, stars=156, snr=42.1, score=0.87
+               ↑                ↑               ↑          ↑         ↑
+        Exposure level    Detail/dynamic    Star count   Signal   Composite
+                          range indicator               to noise  quality
 ```
 
-### Disable quality filtering (keep all frames)
-```bash
-python astro_stack.py -d your_images/ -o output.fits -v --no-quality-filter
-```
+**Healthy ranges:**
+| Metric | Good | Investigate |
+|--------|------|-------------|
+| Brightness | 15–22 | < 10 or > 28 |
+| Contrast | 8–20 | < 5 |
+| Stars | > 80 | < 30 |
+| SNR | > 20 | < 10 |
 
-## What Each Output Line Means
+### Shift Output
 
-### Quality Analysis Output
 ```
-light_001.fit: brightness=18.2, contrast=12.1, stars=156
-               ↑                ↑               ↑
-        Exposure level    Detail/Dynamic     Star detection
-                          range indicator    count
-```
-
-**Good Frame:** brightness 15-20, contrast 10-15, stars 100+
-**Suspect Frame:** brightness <12 or >22, contrast <8, stars <50
-
-### Shift Reporting Output
-```
-Object_001.fit: shift=(+0.1, +2.1) px, magnitude=2.10 px
+light_001.fit: shift=(+0.1, +2.1) px, magnitude=2.10 px
                ↑                       ↑
-        X and Y offsets         Total shift distance
-        (left/right, up/down)   (Pythagoras)
+        X and Y pixel offsets     Total displacement
+        (+ = right/down)          (Pythagorean distance)
 ```
 
-**Normal:** magnitude <1 pixel
-**Acceptable:** magnitude <5 pixels
-**Problem:** magnitude >10 pixels
+**Shift magnitudes:**
+| Magnitude | Meaning |
+|-----------|---------|
+| < 0.5 px | Excellent tracking |
+| 0.5–5 px | Normal for unguided or lightly guided |
+| 5–15 px | Check guiding; will be corrected by registration |
+| > 15 px | Possible guide star loss or mount problem |
 
-## Shift Pattern Quick Guide
+---
 
-| Pattern | Magnitude | Fix |
-|---------|-----------|-----|
-| Stable scatter | <0.5 px | ✅ Perfect |
-| Linear increase | 0→3+ px | Check mount tracking |
-| Oscillating | 1-2 px repeat | Stabilize mount |
-| Sudden jump | jumps 5+ px | Guide star loss → remove frame |
-| Circular motion | 0.5-2 px circle | Check leveling/alignment |
-| High random | 1-4 px random | Just atmospheric - wait for better seeing |
+## Shift Pattern Guide
 
-## Interpret Quality Example
+| Pattern | Likely Cause | Action |
+|---------|-------------|--------|
+| Small stable scatter ≤ 0.5 px | Perfect tracking | Nothing |
+| Steady linear drift | Polar alignment or RA tracking rate | Tune mount |
+| Oscillation (1–3 px repeating) | Wind, vibration, or periodic error | Check mount stability |
+| Sudden large jump then return | Guide star loss, auto-guider correction | Review those frames |
+| Increasing magnitude over time | Slow PE or Dec drift | Check alignment |
+| High random scatter | Atmospheric seeing | Normal at high magnification |
 
-**Real output:**
+---
+
+## Diagnosing Problem Frames
+
+**Scenario: One frame has low contrast AND a large shift**
 ```
-Object_001.fit: brightness=18.2, contrast=12.1, stars=156
-Object_002.fit: brightness=18.3, contrast=11.9, stars=163
-Object_003.fit: brightness=17.2, contrast= 8.3, stars= 87  ← Problem!
-Object_004.fit: brightness=18.1, contrast=12.0, stars=161
-Object_005.fit: brightness=18.2, contrast=12.1, stars=159
-```
-
-**Analysis:**
-- Object 003 has lower brightness (cloud? focus drift? dew?)
-- Object 003 has much lower contrast (lack of detail)
-- Object 003 detected far fewer stars (trailing? saturation?)
-- Quality filter (on by default) will reject this frame ✓
-
-**Shifts would tell us:**
-```
-Object_001.fit: shift=(+0.2, +0.1) px, magnitude=0.22 px
-Object_002.fit: shift=(+0.1, +0.2) px, magnitude=0.22 px
-Object_003.fit: shift=(+4.2, +5.1) px, magnitude=6.60 px  ← Big shift!
-Object_004.fit: shift=(+0.3, +0.0) px, magnitude=0.30 px
-Object_005.fit: shift=(+0.1, +0.1) px, magnitude=0.14 px
+light_001.fit: brightness=18.2, contrast=12.1, stars=156, shift=0.22 px  ← normal
+light_002.fit: brightness=18.3, contrast=11.9, stars=163, shift=0.22 px  ← normal
+light_003.fit: brightness=17.2, contrast= 8.3, stars= 87, shift=6.60 px  ← PROBLEM
+light_004.fit: brightness=18.1, contrast=12.0, stars=161, shift=0.30 px  ← normal
 ```
 
-**What it means:**
-- Object 003 might be from focus adjustment (explains low quality AND big shift)
-- Definitely reject this frame
+Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejects it automatically.
+
+---
+
+## Post-Processing Default Flags
+
+| Feature | On by default | Disable |
+|---------|:---:|---------|
+| Background extraction (DBE) | ✅ | `--no-background-extraction` |
+| Wavelet denoising | ✅ | `--no-denoise` |
+| Chroma noise reduction | ✅ | `--no-chroma-nr` |
+| Star reduction | ✅ | `--no-star-reduce` |
+| Local contrast enhancement | ✅ | `--no-local-contrast` |
+| CA correction | ✅ | `--no-ca-correction` |
+| Cosmic ray rejection | ✅ | `--no-cosmic-ray-rejection` |
+| Quality filtering | ✅ | `--no-quality-filter` |
+| Affine registration | ✅ | `--no-affine` |
+
+| Feature | Off by default | Enable |
+|---------|:---:|---------|
+| NLM denoising | ❌ | `--denoise-nlm` |
+| Bilateral denoising | ❌ | `--denoise-bilateral` |
+| MMT denoising | ❌ | `--denoise-mmt` |
+| ACDNR denoising | ❌ | `--denoise-acdnr` |
+| Richardson-Lucy deconvolution | ❌ | `--deconvolve` |
+| Local normalisation | ❌ | `--local-normalize` |
+| Drizzle super-resolution | ❌ | `--drizzle-scale 2.0` |
+| Plate solving | ❌ | `--plate-solve` |
+| Star removal | ❌ | `--star-remove` |
+
+---
+
+## Presets
+
+```bash
+--preset quick        # Fastest: mean stack, minimal post-processing
+--preset quality      # Best output: sigma_clip, all denoisers, deconvolution
+--preset galaxy       # GHS stretch, star reduction, bilateral
+--preset nebula       # GHS stretch, MMT + ACDNR
+--preset narrowband   # Tuned for Ha/OIII/SII data
+--preset starfield    # No star reduction, minimal processing
+--preset planetary    # No background, with deconvolution
+--preset lunar        # Linear stretch, no star reduction
+```
+
+---
+
+## Collecting a Diagnostic Log
+
+```bash
+python astro_stack.py -d lights/ -o out.fits -v 2>&1 | tee diagnostic.log
+```
+
+The `diagnostic.log` file contains:
+- Per-frame quality metrics and shift values
+- Reference frame selection
+- Frame rejection reasons
+- Stacking configuration
+- Phase timing
+
+---
 
 ## Common Questions
 
-**Q: Why do my shifts increase every frame?**
-A: Linear drift = tracking bias. Check mount collimation and RA/Dec guiding rates.
+**Q: How do I know which frames were rejected?**  
+Run with `-v`. Each rejected frame will show `[REJECTED]` with the reason.
 
-**Q: Shifts are all over the place, no pattern?**
-A: That's just atmospheric seeing (turbulence). Normal at high magnification.
+**Q: Can I re-run post-processing without re-stacking?**  
+Yes. Use `--keep-checkpoint` on the first run, then on subsequent runs the raw stack is loaded from the checkpoint automatically.
 
-**Q: One frame has huge shift (10+ px)?**
-A: Guide star lost, auto-guider error, or manual correction. Consider removing it.
+**Q: My shifts are all > 10 px — is that a problem?**  
+Not necessarily. Registration will correct them. Large shifts only matter if they exceed the image border (> ~50 px for typical setups), which would cause the valid crop to cut off too much. Use `--debug-registration` to inspect.
 
-**Q: Brightness drops suddenly, shift gets bigger?**
-A: Likely cloud or focus issue. Quality filter should reject automatically.
+**Q: Why does the preview JPEG look different from the FITS?**  
+The FITS is stored as linear float32 data. The JPEG has a stretch applied (GHS by default). Load the FITS in PixInsight, Siril, or AstroImageJ and apply your own stretch.
 
-**Q: All shifts are >5 px?**
-A: Check your guide system calibration. May indicate tracking error or wind.
+**Q: Frames look OK but post-processing is too aggressive?**  
+Try `--no-star-reduce --no-local-contrast` first to isolate which step is causing issues. Then use `--diagnostic` to get a FITS snapshot before each step.
 
-## Post-processing Defaults (as of current version)
+---
 
-Most post-processing is **on by default**. To disable specific steps:
+## Further Documentation
 
-| Feature | Disable flag |
-|---------|-------------|
-| Background extraction (DBE) | `--no-background-extraction` |
-| Dynamic Background Extraction | `--no-dbe` (uses legacy mesh instead) |
-| Wavelet denoising | `--no-denoise` |
-| Chroma noise reduction | `--no-chroma-nr` |
-| Star reduction | `--no-star-reduce` |
-| Local contrast enhancement | `--no-local-contrast` |
-| CA correction | `--no-ca-correction` |
-| Cosmic ray rejection | `--no-cosmic-ray-rejection` |
-
-Preview stretch default is **GHS** (Generalized Hyperbolic Stretch). Use `--stretch arcsinh` or `--stretch linear` to change.
-
-## Report Issues With This Format
-
-If something looks wrong, copy the full verbose output:
-```bash
-python astro_stack.py -d images/ -o output.fits -v 2>&1 | tee diagnostic.log
-```
-
-Then share the `diagnostic.log` file. The quality and shift data tells us:
-- Frame quality assessment
-- Reference frame selection
-- Shift calculation results
-- Any rejected frames and why
-
-## Read More
-
-- `README.md` - Usage and installation
-- `PROJECT_SPEC.md` - Complete feature and architecture guide
+- [README.md](README.md) — Installation, quick start, examples
+- [PROJECT_SPEC.md](PROJECT_SPEC.md) — Full CLI reference and architecture detail
