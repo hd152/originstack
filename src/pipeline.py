@@ -264,10 +264,19 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     _session_info = load_session_info(_directory)
     args._session_info = _session_info
     args._session_bayer = _session_info.bayer if _session_info else None
-    if _session_info and _session_info.object_name:
-        safe_print(f"  Session info: {_session_info.object_name}"
-                   + (f"  bayer={_session_info.bayer}" if _session_info.bayer else "")
-                   + (f"  WCS={'yes' if _session_info.has_wcs else 'no'}"))
+    if _session_info:
+        _si_parts = [f"  Session info (info.json):"]
+        if _session_info.object_name:
+            _si_parts.append(f"object={_session_info.object_name!r}")
+        if _session_info.bayer:
+            _si_parts.append(f"bayer={_session_info.bayer}")
+        if _session_info.has_wcs:
+            _si_parts.append("WCS=yes")
+        if _session_info.has_gps:
+            _si_parts.append(f"GPS=yes")
+        safe_print("  ".join(_si_parts))
+    else:
+        safe_print(f"  Session info: no info.json found in {os.path.basename(_directory)!r}")
 
     # Probe first frame for dimensions
     first_data, first_hdr = load_fits(lights[0].path)
