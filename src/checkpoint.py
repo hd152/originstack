@@ -47,6 +47,7 @@ def save_checkpoint(output_path: str, phase: int,
                     lights: List[FrameInfo],
                     final: Optional[List[FrameInfo]] = None,
                     shifts: Optional[List] = None,
+                    transforms: Optional[List] = None,
                     dither_info: Optional[Dict] = None,
                     stats: Optional[ProcessingStats] = None,
                     crop: Optional[List[int]] = None) -> None:
@@ -82,6 +83,11 @@ def save_checkpoint(output_path: str, phase: int,
     if shifts is not None:
         state['shifts'] = [list(s) if s else [0.0, 0.0] for s in shifts]
 
+    # Affine transforms are numpy arrays (or None); save separately as .npy
+    if transforms is not None:
+        _save_transforms(ckpt_dir, transforms)
+        state['has_transforms'] = True
+
     if dither_info is not None:
         # Filter to serializable values
         state['dither_info'] = {k: v for k, v in dither_info.items()
@@ -103,6 +109,36 @@ def save_checkpoint(output_path: str, phase: int,
     with open(ckpt_path, 'w') as f:
         json.dump(state, f, indent=2)
     safe_print(f"  Checkpoint saved: phase {phase} complete")
+
+
+def _save_transforms(ckpt_dir: str, transforms: List) -> None:
+    """Serialize a list of affine transform matrices (or None) to transforms.npy."""
+    arr = np.empty(len(transforms), dtype=object)
+    for i, t in enumerate(transforms):
+        arr[i] = np.array(t, dtype=np.float64) if t is not None else None
+    np.save(os.path.join(ckpt_dir, 'transforms.npy'), arr, allow_pickle=True)
+
+
+def load_transforms(output_path: str, n_frames: int) -> List:
+    """Load affine transforms from checkpoint.
+
+    Returns a list of length *n_frames* where each entry is a numpy array or None.
+    Falls back to all-None if the file is absent or unreadable.
+    """
+    path = os.path.join(_checkpoint_dir(output_path), 'transforms.npy')
+    if not os.path.exists(path):
+        return [None] * n_frames
+    try:
+        arr = np.load(path, allow_pickle=True)
+        transforms = list(arr)
+        if len(transforms) != n_frames:
+            safe_print(f"  WARNING: transforms checkpoint length mismatch "
+                       f"({len(transforms)} vs {n_frames}) — affine skipped")
+            return [None] * n_frames
+        return transforms
+    except Exception as e:
+        safe_print(f"  WARNING: Could not load transforms from checkpoint ({e}) — affine skipped")
+        return [None] * n_frames
 
 
 def load_checkpoint(output_path: str) -> Optional[Dict]:
