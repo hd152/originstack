@@ -6,13 +6,11 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 
 ---
 
-## Sample Results
+## Sample Result
 
-| Flaming Star Nebula (IC 405) | Whirlpool Galaxy (M51) |
-|:---:|:---:|
-| ![Flaming Star Nebula](sample/flaming997.jpg) | ![Whirlpool Galaxy](sample/whirlz1.jpg) |
+![Whirlpool Galaxy (M51)](sample/whirlz1.jpg)
 
-*Stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames.*
+*Whirlpool Galaxy (M51) — stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames.*
 
 ---
 
@@ -89,8 +87,6 @@ Eight built-in target presets tune all parameters at once:
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
-- **AI advisor** — Claude AI recommends parameters after Phase 1 analysis (`--ai-advisor`)
-- **AI session report** — narrative markdown processing report (`--ai-report`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`)
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--diagnostic`)
 - **Quality CSV** — per-frame metrics exported for external analysis (`--quality-report`)
@@ -137,7 +133,6 @@ pip install PyWavelets
 | `astroquery` | Plate solving via astrometry.net |
 | `cupy-cuda*` | GPU acceleration |
 | `reproject` | Mosaic stitching |
-| `anthropic` | AI parameter advisor and reports |
 
 ---
 
@@ -380,8 +375,6 @@ python astro_stack.py -d <dir> -o <output.fits> [options]
 | `--use-gpu` | Enable CuPy GPU acceleration |
 | `-j N, --parallel N` | Worker count (0 = auto-detect) |
 | `-v, --verbose` | Detailed per-frame output |
-| `--ai-advisor` | Claude AI parameter advisor (requires `anthropic` + `ANTHROPIC_API_KEY`) |
-| `--ai-report` | Generate narrative session report after stacking |
 
 For the full CLI reference with all flags and defaults, see [PROJECT_SPEC.md](PROJECT_SPEC.md).
 
@@ -418,7 +411,6 @@ astro_stack.py                  ← thin backward-compatibility entry point
     ├── io_fits.py              ← FITS load/save, master frame creation
     ├── frame_discovery.py      ← automatic frame classification
     ├── auto_settings.py        ← heuristic target classifier (--auto)
-    ├── ai_advisor.py           ← Claude AI advisor and report generator
     ├── plate_solve.py          ← astrometry.net + SIMBAD
     ├── gpu_context.py          ← CPU/GPU abstraction (numpy ↔ cupy)
     ├── models.py               ← Config, FrameInfo, ProcessingStats

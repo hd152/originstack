@@ -29,7 +29,6 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/frame_processor.py` | ~430 | `_process_single_frame`, `execute_frame_processing`, `quality_gate` |
 | `src/postprocess.py` | ~315 | `postprocess_stack` — 15-step post-processing chain |
 | `src/auto_settings.py` | ~360 | Heuristic target classifier, `apply_auto_settings` (`--auto`) |
-| `src/ai_advisor.py` | ~515 | Claude AI parameter advisor and session report generator |
 | `src/health_check.py` | ~190 | Frame consistency and calibration quality analysis |
 | `src/cli.py` | ~685 | `process_directory`, `parse_args`, `main` |
 | `astro_stack.py` | ~170 | Backward-compatibility re-export shim |
@@ -349,11 +348,9 @@ Frames with better quality contribute more to the final stack.
 - Auto-limits parallel workers based on available VRAM
 - Enable with `--use-gpu`; requires `cupy-cuda*` installed (see `requirements-gpu.txt`)
 
-### 28. AI Features
+### 28. Auto Target Detection (`--auto`)
 
-- **`--ai-advisor`**: After Phase 1, sends frame metrics to Claude AI which recommends and applies optimal stacking parameters. Requires `anthropic` package and `ANTHROPIC_API_KEY`.
-- **`--ai-report`**: After stacking completes, generates a narrative markdown processing report (`<output>_report.md`). Summarises target, frame statistics, rejected frames, post-processing applied, and quality assessment.
-- **`--auto`**: Heuristic target classifier (no API key required). Analyses frame metrics and automatically applies preset-like parameter sets for the detected target type.
+Heuristic target classifier — analyses frame metrics (star count, brightness distribution, contrast) and automatically applies optimised parameter sets for the detected target type. No external dependencies or API keys required.
 
 ---
 
@@ -521,8 +518,6 @@ Frames with better quality contribute more to the final stack.
 | `--hdr-short-exptime N` | Short exposure time (s) |
 | `--hdr-long-exptime N` | Long exposure time (s) |
 | `--mosaic` | Stitch per-subfolder stacks into mosaic |
-| `--ai-advisor` | Claude AI parameter advisor (requires `anthropic` + `ANTHROPIC_API_KEY`) |
-| `--ai-report` | Generate narrative session report |
 
 ### Checkpointing & Diagnostics
 
@@ -584,8 +579,6 @@ python astro_stack.py -d lights/ -o stacked.fits --debug-registration
 # Health check only
 python astro_stack.py -d lights/ --health-check
 
-# AI advisor + report (requires ANTHROPIC_API_KEY)
-python astro_stack.py -d lights/ -o stacked.fits --ai-advisor --ai-report -v
 
 # Minimal run (turn off new-default post-processing)
 python astro_stack.py -d lights/ -o stacked.fits \
@@ -617,7 +610,6 @@ python astro_stack.py -d lights/ -o stacked.fits \
 | `PyWavelets` | Wavelet denoising (`--denoise`) |
 | `sep` | 5–10× faster star detection than DAOStarFinder |
 | `astroquery >= 0.4.6` | Plate solving via nova.astrometry.net |
-| `anthropic` | AI advisor and session reports |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see `requirements-gpu.txt`) |
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
 | `tifffile` | 16-bit TIFF output |
