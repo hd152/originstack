@@ -152,7 +152,10 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                 break
             _med = float(np.median(flat_lum))
         _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
-        unified_black = max(_med - 1.0 * _bg_sigma, 0.0)
+        # Allow a slightly negative black point so the stretch can correctly
+        # distinguish sky noise (near zero) from faint nebula signal — a 0.0
+        # floor would conflate both and produce black mottling in the output.
+        unified_black = _med - 1.0 * _bg_sigma
         unified_white = float(np.percentile(lum, 99.9))
         for c in range(3):
             out[:, :, c] = generalized_hyperbolic_stretch(
@@ -173,7 +176,7 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                 break
             _med = float(np.median(flat_lum))
         _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
-        unified_black = max(_med - 1.0 * _bg_sigma, 0.0)
+        unified_black = _med - 1.0 * _bg_sigma
         unified_white = float(np.percentile(lum, 99.8))
         for c in range(3):
             out[:, :, c] = arcsinh_stretch(rgb[:, :, c],
@@ -275,6 +278,22 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
         for key in copy_keys:
             if key in first_header:
                 header[key] = first_header[key]
+
+        # Inferred target metadata (set by target_inference before this call)
+        inferred_name = getattr(args, '_inferred_target', None)
+        inferred_type = getattr(args, '_inferred_type', None)
+        inferred_conf = getattr(args, '_inferred_confidence', 0.0)
+        inferred_src  = getattr(args, '_inferred_source', None)
+        if inferred_name and inferred_type and inferred_type != 'unknown':
+            # Only write OBJECT if no capture software already filled it in
+            if 'OBJECT' not in header:
+                header['OBJECT'] = (inferred_name[:68], 'Inferred target name')
+            header['OBJTYPE'] = (inferred_type[:68], 'Inferred object type')
+            header['INFCONF'] = (round(float(inferred_conf), 3),
+                                 'Target inference confidence (0-1)')
+            if inferred_src:
+                header['INFSRC'] = (inferred_src[:68],
+                                    'Target inference source (header/folder/simbad)')
 
         # Mark the output as a debayered RGB image so FITS viewers open it
         # correctly.  Siril and many other tools recognise COLORTYP=SRGB to

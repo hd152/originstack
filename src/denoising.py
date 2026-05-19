@@ -729,10 +729,10 @@ def generalized_hyperbolic_stretch(
             med = float(np.median(flat))
         bg = med
         bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
-        black_point = max(bg - 1.0 * bg_sigma, 0.0)
+        black_point = bg - 1.0 * bg_sigma
         white_point = float(np.percentile(img, 99.9))
     span = white_point - black_point
-    if span < 1e-12:
+    if span < 1e-12 or white_point <= 0.0:
         return np.zeros_like(img, dtype=np.float32)
 
     norm = np.clip((img.astype(np.float64) - black_point) / span, 0.0, 1.0)
@@ -1309,13 +1309,13 @@ def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None,
             med = np.median(flat)
         bg = float(med)
         bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
-        black_point = max(bg - 1.0 * bg_sigma, 0.0)
+        black_point = bg - 1.0 * bg_sigma
         white_point = float(np.percentile(img, 99.8))
     else:
         bg = black_point  # used below for factor auto-tuning
         bg_sigma = 0.0
     span = white_point - black_point
-    if span < 1e-12:
+    if span < 1e-12 or white_point <= 0.0:
         return np.zeros_like(img)
 
     norm = np.clip((img - black_point) / span, 0.0, 1.0)

@@ -630,10 +630,12 @@ def sky_floor_normalize(rgb: np.ndarray, star_mask: Optional[np.ndarray] = None,
         floors.append(floor)
         result[:, :, c] -= floor
 
-    # Clip negative sky to zero for final output normalization.
-    # Note: This is intentional for this specific function to normalize the floor,
-    # but callers must be aware it modifies noise statistics slightly.
-    np.clip(result, 0, None, out=result)
+    # Do NOT clip negatives to zero here.  Floor subtraction shifts the sky
+    # noise distribution to centre on zero, so roughly half the sky pixels
+    # will be slightly negative.  Hard-clipping those to zero creates a
+    # one-sided truncation that makes faint nebula pixels indistinguishable
+    # from over-subtracted sky, producing black mottling in the stretch.
+    # The stretch functions handle the black point independently.
 
     if verbose:
         safe_print(f"  Sky floor: {sky_frac:.1f}% sky pixels used, "

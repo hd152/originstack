@@ -13,7 +13,7 @@ apply_auto_settings(final, args) -> (target_type, label, signals, changes)
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 TARGET_LABELS: Dict[str, str] = {
     'emission_nebula':   'Emission Nebula',
     'galaxy':            'Galaxy',
+    'globular_cluster':  'Globular Cluster',
+    'planetary_nebula':  'Planetary Nebula',
     'reflection_nebula': 'Reflection Nebula',
     'star_field':        'Star Field',
     'wide_field':        'Wide Field / Milky Way',
@@ -93,10 +95,16 @@ def _compute_signals(agg: dict) -> dict:
     # How concentrated the brightest signal is (≈ frame SNR).
     peak_excess = (p95 - bg) / noise
 
+    # Ratio of peak brightness to diffuse brightness: high for compact objects
+    # (globular cores, planetary nebula disks, galaxy nuclei), low for extended
+    # emission that fills the frame uniformly.
+    concentration = peak_excess / max(diffuse_excess, 0.1)
+
     return {
         'median_filling': round(median_filling, 2),
         'diffuse_excess': round(diffuse_excess, 2),
         'peak_excess':    round(peak_excess, 2),
+        'concentration':  round(concentration, 2),
         'star_count':     agg['mean_star_count'],
         'dynamic_range':  agg['mean_dynamic_range'],
         'snr':            agg['mean_snr'],
@@ -112,15 +120,28 @@ def _compute_signals(agg: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _classify(sig: dict) -> str:
-    mf  = sig['median_filling']
-    de  = sig['diffuse_excess']
-    pe  = sig['peak_excess']
-    sc  = sig['star_count']
-    dr  = sig['dynamic_range']
+    mf   = sig['median_filling']
+    de   = sig['diffuse_excess']
+    pe   = sig['peak_excess']
+    sc   = sig['star_count']
+    dr   = sig['dynamic_range']
+    conc = sig['concentration']
 
-    # Wide field (Milky Way): very dense star field
+    # Globular cluster: many stars with a strongly concentrated, very bright
+    # core.  Checked before wide_field because rich globulars have sc > 200.
+    # High dynamic range separates them from flat star fields.
+    if sc > 60 and pe > 15 and conc > 2.5 and dr > 150:
+        return 'globular_cluster'
+
+    # Wide field (Milky Way): very dense star field, but not a concentrated blob
     if sc > 200:
         return 'wide_field'
+
+    # Planetary nebula: compact bright extended source with few background stars.
+    # High concentration distinguishes it from a galaxy (which also has low mf
+    # and high pe but typically more foreground stars and lower concentration).
+    if pe > 10 and mf < 0.3 and sc < 30 and conc > 2.0 and dr > 60:
+        return 'planetary_nebula'
 
     # Star field: many stars, sky fills most pixels
     if sc > 80 and mf < 1:
@@ -202,6 +223,57 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('denoise',                 False),
         ('denoise_mmt',             True),
         ('denoise_acdnr',           True),
+    ],
+    'globular_cluster': [
+        ('deconvolve',              True),
+        ('deconvolve_iterations',   20),
+        ('deconvolve_blind_psf',    True),
+        # TV avoids RL ringing on the sharp stellar PSF edges in the dense core.
+        ('deconvolve_tv',           True),
+        # Stars are the target — never soften them.
+        ('star_reduce',             False),
+        ('local_contrast',          True),
+        ('local_contrast_strength', 0.80),
+        # Higher SP lifts faint outer halo stars relative to the saturated core.
+        ('ghs_b',                   7.0),
+        ('ghs_sp',                  0.25),
+        ('dbe_patch_size',          48),
+        ('entropy_bg',              True),
+        ('scnr',                    True),
+        ('photometric_calibration', True),
+        ('denoise',                 False),
+        ('denoise_mmt',             True),
+        ('denoise_acdnr',           True),
+    ],
+    'planetary_nebula': [
+        # More iterations than other targets: resolving a compact disk or ring
+        # requires many RL/TV cycles to recover sub-seeing shell structure.
+        ('deconvolve',              True),
+        ('deconvolve_iterations',   25),
+        ('deconvolve_blind_psf',    True),
+        # TV avoids ringing on the hard shell boundary — critical for ring nebulae.
+        ('deconvolve_tv',           True),
+        # Reduce background stars so the compact nebula is not dominated by halos.
+        ('star_reduce',             True),
+        ('star_reduce_factor',      0.5),
+        ('local_contrast',          True),
+        ('local_contrast_strength', 0.80),
+        # Aggressive stretch to lift the faint outer halo and jets.
+        ('ghs_b',                   9.0),
+        ('ghs_sp',                  0.10),
+        # Protect the bright central star from blowout.
+        ('ghs_hp',                  0.92),
+        # Smaller patches → denser background sampling around the compact disk.
+        ('dbe_patch_size',          32),
+        ('entropy_bg',              True),
+        ('scnr',                    True),
+        ('photometric_calibration', True),
+        ('denoise',                 False),
+        ('denoise_mmt',             True),
+        ('denoise_acdnr',           True),
+        ('denoise_aniso',           True),
+        ('aniso_option',            2),
+        ('aniso_iterations',        15),
     ],
     'reflection_nebula': [
         ('deconvolve',              True),
@@ -353,17 +425,18 @@ def _apply_quality_settings(
     if snr < 5 and snr > 0 and not getattr(args, 'denoise_acdnr', False):
         _set('denoise_acdnr', True)
 
-    # 7. BM3D: enable for galaxies when the stack is clean enough for
-    #    block-matching to outperform median-based MMT.  Requires SNR >= 12
-    #    (enough signal for meaningful patch similarity) and >= 20 frames
-    #    (reduces noise floor so BM3D doesn't chase noise patterns).
-    #    Use finer stride on very clean stacks to resolve dust lane texture.
-    if (target_type == 'galaxy'
+    # 7. BM3D: enable for galaxies and globular clusters when the stack is clean
+    #    enough for block-matching to outperform median-based MMT.  Requires
+    #    SNR >= 12 (enough signal for meaningful patch similarity) and >= 20
+    #    frames (reduces noise floor so BM3D doesn't chase noise patterns).
+    #    For globulars, finer stride is always used to resolve individual stars
+    #    in the core; for galaxies it is only applied on very clean stacks.
+    if (target_type in ('galaxy', 'globular_cluster')
             and snr >= 12
             and n >= 20
             and not getattr(args, 'denoise_bm3d', False)):
         _set('denoise_bm3d', True)
-        if snr > 20:
+        if target_type == 'globular_cluster' or snr > 20:
             _set('bm3d_stride', 4)
 
     # 8. Polynomial distortion correction: enable when seeing is poor AND
@@ -423,6 +496,8 @@ def _apply_quality_settings(
 def apply_auto_settings(
     final: list,
     args,
+    prior_type: Optional[str] = None,
+    prior_confidence: float = 0.0,
 ) -> Tuple[str, str, dict, List[str]]:
     """Classify the target and apply heuristic settings to args in-place.
 
@@ -432,6 +507,13 @@ def apply_auto_settings(
         Accepted frames after Phase 1, each with .metrics populated.
     args : argparse.Namespace
         Modified in-place.
+    prior_type : str or None
+        Object type inferred from metadata (folder/header/Simbad).  When
+        confidence is high enough this overrides the pixel-signal classifier.
+    prior_confidence : float
+        Confidence of *prior_type* in the range 0–1.
+        ≥ 0.85 → prior overrides the heuristic classifier outright.
+        ≥ 0.70 → prior wins when heuristic returns 'unknown'.
 
     Returns
     -------
@@ -449,7 +531,18 @@ def apply_auto_settings(
 
     agg = _aggregate(final)
     sig = _compute_signals(agg)
-    target_type = _classify(sig)
+    heuristic_type = _classify(sig)
+
+    # Resolve final classification
+    valid_prior = (prior_type and prior_type in TARGET_LABELS
+                   and prior_type != 'unknown')
+    if valid_prior and prior_confidence >= 0.85:
+        target_type = prior_type
+    elif valid_prior and prior_confidence >= 0.70 and heuristic_type == 'unknown':
+        target_type = prior_type
+    else:
+        target_type = heuristic_type
+
     label = TARGET_LABELS[target_type]
 
     changes: List[str] = []

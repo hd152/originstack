@@ -372,10 +372,33 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 # Save checkpoint after phase 1
                 save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats)
 
+                # Target inference from metadata (always runs; result written to header)
+                from src.target_inference import infer_target_from_metadata
+                _inferred_name, _inferred_type, _inferred_conf, _inferred_src = \
+                    infer_target_from_metadata(
+                        getattr(args, 'directory', os.path.dirname(output_path)),
+                        final,
+                        use_simbad=True,
+                    )
+                args._inferred_target     = _inferred_name
+                args._inferred_type       = _inferred_type
+                args._inferred_confidence = _inferred_conf
+                args._inferred_source     = _inferred_src
+                if _inferred_name and _inferred_type and _inferred_type != 'unknown':
+                    safe_print(
+                        f"\n  Target: {_inferred_name} "
+                        f"[{_inferred_type.replace('_', ' ').title()}]  "
+                        f"conf={_inferred_conf:.0%}  source={_inferred_src}"
+                    )
+
                 # Heuristic auto-advisor
                 if getattr(args, 'auto', False):
                     from src.auto_settings import apply_auto_settings
-                    target_type, label, signals, changes = apply_auto_settings(final, args)
+                    target_type, label, signals, changes = apply_auto_settings(
+                        final, args,
+                        prior_type=_inferred_type,
+                        prior_confidence=_inferred_conf,
+                    )
                     print(f"\n  Auto Advisor: detected '{label}'")
                     if signals:
                         print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
