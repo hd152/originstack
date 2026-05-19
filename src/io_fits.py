@@ -293,7 +293,46 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
                                  'Target inference confidence (0-1)')
             if inferred_src:
                 header['INFSRC'] = (inferred_src[:68],
-                                    'Target inference source (header/folder/simbad)')
+                                    'Target inference source')
+
+        # Session info metadata (from info.json written by capture app)
+        si = getattr(args, '_session_info', None)
+        if si is not None:
+            # Equipment metadata — only fill gaps not already covered by FITS headers
+            if si.telescope and 'TELESCOP' not in header:
+                header['TELESCOP'] = (si.telescope[:68], 'Telescope from session info')
+            if si.mount:
+                header['MOUNT'] = (si.mount[:68], 'Mount from session info')
+            if si.reducer:
+                header['REDUCER'] = (si.reducer[:68], 'Reducer/flattener from session info')
+            # Filter — prefer existing FITS keyword
+            if si.filter_name and 'FILTER' not in header:
+                header['FILTER'] = (si.filter_name[:68], 'Filter from session info')
+            # Fallback exposure/ISO from session when FITS headers are missing
+            if si.exposure is not None and 'EXPTIME' not in header:
+                header['EXPTIME'] = (si.exposure, 'Exposure time from session info (s)')
+            if si.iso is not None and 'GAIN' not in header:
+                header['ISO'] = (si.iso, 'ISO from session info')
+            if si.temperature is not None and 'CCD-TEMP' not in header:
+                header['CCD-TEMP'] = (si.temperature, 'Sensor temperature from session info (C)')
+            # Observation site GPS coordinates
+            if si.has_gps:
+                header['SITELAT'] = (round(si.latitude, 6), 'Observatory latitude (degrees)')
+                header['SITELONG'] = (round(si.longitude, 6), 'Observatory longitude (degrees)')
+                if si.altitude is not None:
+                    header['SITEELEV'] = (round(si.altitude, 1), 'Observatory altitude (metres)')
+            # Session integration info
+            if si.total_duration_ms is not None:
+                total_s = si.total_duration_ms / 1000.0
+                if 'INTGTIME' not in header:
+                    header['INTGTIME'] = (round(total_s, 1),
+                                          'Total integration time (session info, seconds)')
+            # WCS from celestial + FOV + orientation (only when plate solve has not run)
+            if si.has_wcs and 'CTYPE1' not in header:
+                from src.session_info import build_wcs_keywords
+                wcs = build_wcs_keywords(si)
+                for kw, (val, comment) in wcs.items():
+                    header[kw] = (val, comment)
 
         # Mark the output as a debayered RGB image so FITS viewers open it
         # correctly.  Siril and many other tools recognise COLORTYP=SRGB to

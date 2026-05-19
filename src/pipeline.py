@@ -258,12 +258,23 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             resume_phase = 2
             safe_print("  Drizzle requested — phase 3 checkpoint skipped; stacking will re-run")
 
+    # Load session info (info.json written by capture app)
+    from src.session_info import load_session_info
+    _directory = getattr(args, 'directory', os.path.dirname(output_path))
+    _session_info = load_session_info(_directory)
+    args._session_info = _session_info
+    args._session_bayer = _session_info.bayer if _session_info else None
+    if _session_info and _session_info.object_name:
+        safe_print(f"  Session info: {_session_info.object_name}"
+                   + (f"  bayer={_session_info.bayer}" if _session_info.bayer else "")
+                   + (f"  WCS={'yes' if _session_info.has_wcs else 'no'}"))
+
     # Probe first frame for dimensions
     first_data, first_hdr = load_fits(lights[0].path)
     if first_data.ndim == 2:
-        first_rgb = debayer(first_data,
-                            pattern=first_hdr.get('BAYERPAT', first_hdr.get('COLORTYP', 'RGGB')),
-                            method=args.debayer_method)
+        _probe_bayer = first_hdr.get('BAYERPAT',
+                                     first_hdr.get('COLORTYP', args._session_bayer or 'RGGB'))
+        first_rgb = debayer(first_data, pattern=_probe_bayer, method=args.debayer_method)
         H_rgb, W_rgb, C = first_rgb.shape
     else:
         H_rgb, W_rgb = first_data.shape[:2]
@@ -374,11 +385,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
                 # Target inference from metadata (always runs; result written to header)
                 from src.target_inference import infer_target_from_metadata
+                _si = getattr(args, '_session_info', None)
                 _inferred_name, _inferred_type, _inferred_conf, _inferred_src = \
                     infer_target_from_metadata(
                         getattr(args, 'directory', os.path.dirname(output_path)),
                         final,
                         use_simbad=True,
+                        session_name=_si.object_name if _si else None,
                     )
                 args._inferred_target     = _inferred_name
                 args._inferred_type       = _inferred_type
@@ -595,35 +608,47 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         if solve_plate(data_out, hdu.header, output_path,
                        verbose=args.verbose, solver=solver, astap_path=astap_bin):
             hdu.writeto(output_path, overwrite=True)
+            _wcs_available = True
+        else:
+            _wcs_available = False
+    else:
+        _wcs_available = False
+        if args.verbose:
+            print("\n  Plate solving skipped (use --plate-solve to enable)")
 
-            # Photometric colour calibration (requires successful plate solve)
-            if getattr(args, 'color_calibrate', False):
-                safe_print("\n  Applying photometric colour calibration...")
-                cc_start = time.time()
-                try:
-                    from src.color_calibrate import run_photometric_calibration
-                    stacked_cc, scales = run_photometric_calibration(
-                        stacked, hdu.header, verbose=args.verbose)
-                    if scales != (1.0, 1.0, 1.0):
-                        stacked = stacked_cc
-                        # Update FITS data
-                        hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))
-                        hdu.header['COLCAL'] = (True, 'Photometric colour calibration applied')
-                        hdu.header['COLCAL_R'] = (round(scales[0], 4), 'R scale factor')
-                        hdu.header['COLCAL_G'] = (round(scales[1], 4), 'G scale factor')
-                        hdu.header['COLCAL_B'] = (round(scales[2], 4), 'B scale factor')
-                        hdu.writeto(output_path, overwrite=True)
-                        safe_print(
-                            f"  ✓ Colour calibration: "
-                            f"R={scales[0]:.4f} G={scales[1]:.4f} B={scales[2]:.4f} "
-                            f"({format_time(time.time() - cc_start)})"
-                        )
-                    else:
-                        safe_print("  Colour calibration: no correction applied (scale≈1.0)")
-                except Exception as e:
-                    safe_print(f"  WARNING: colour calibration failed: {e}")
-    elif args.verbose:
-        print("\n  Plate solving skipped (use --plate-solve to enable)")
+    # Photometric colour calibration — runs when WCS is available.
+    # WCS comes from plate solve above, or from session info.json.
+    _si = getattr(args, '_session_info', None)
+    _session_has_wcs = _si is not None and _si.has_wcs
+    if not _wcs_available and _session_has_wcs and 'CTYPE1' not in hdu.header:
+        # Session info WCS was written to header by populate_fits_header;
+        # re-read it in case populate_fits_header ran before plate solve path.
+        _wcs_available = True
+
+    if getattr(args, 'color_calibrate', False) and _wcs_available:
+        safe_print("\n  Applying photometric colour calibration...")
+        cc_start = time.time()
+        try:
+            from src.color_calibrate import run_photometric_calibration
+            stacked_cc, scales = run_photometric_calibration(
+                stacked, hdu.header, verbose=args.verbose)
+            if scales != (1.0, 1.0, 1.0):
+                stacked = stacked_cc
+                hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))
+                hdu.header['COLCAL'] = (True, 'Photometric colour calibration applied')
+                hdu.header['COLCAL_R'] = (round(scales[0], 4), 'R scale factor')
+                hdu.header['COLCAL_G'] = (round(scales[1], 4), 'G scale factor')
+                hdu.header['COLCAL_B'] = (round(scales[2], 4), 'B scale factor')
+                hdu.writeto(output_path, overwrite=True)
+                safe_print(
+                    f"  Colour calibration: "
+                    f"R={scales[0]:.4f} G={scales[1]:.4f} B={scales[2]:.4f} "
+                    f"({format_time(time.time() - cc_start)})"
+                )
+            else:
+                safe_print("  Colour calibration: no correction applied (scale≈1.0)")
+        except Exception as e:
+            safe_print(f"  WARNING: colour calibration failed: {e}")
 
     # TIFF export
     if getattr(args, 'output_tiff', False):

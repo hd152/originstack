@@ -577,10 +577,12 @@ def infer_target_from_metadata(
     directory: str,
     frames: list,
     use_simbad: bool = True,
+    session_name: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str], float, Optional[str]]:
     """Infer target name and type from available metadata.
 
     Checks (in priority order):
+      0. session_name from info.json (confidence 1.0 when provided).
       1. FITS OBJECT header keyword across accepted frames.
       2. Input directory name (date/time suffix stripped).
       3. Individual file name stems.
@@ -591,9 +593,24 @@ def infer_target_from_metadata(
     target_name : str or None
     object_type : str or None   — key matching auto_settings TARGET_LABELS
     confidence  : float         — 0.0–1.0
-    source      : str or None   — 'header' | 'folder' | 'filename' | 'simbad'
+    source      : str or None   — 'session' | 'header' | 'folder' | 'filename' | 'simbad'
     """
     candidates: List[Tuple[str, str, float, str]] = []  # (name, type, conf, source)
+
+    # ---- Source 0: session info.json objectName (highest priority) ----
+    if session_name and session_name.lower() not in _EMPTY_OBJECT_VALUES:
+        result = _lookup_text(session_name)
+        if result:
+            candidates.append((result[0], result[1], 1.0, 'session'))
+        elif use_simbad:
+            simbad_result = _simbad_lookup(session_name)
+            if simbad_result:
+                candidates.append((simbad_result[0], simbad_result[1], 1.0, 'session'))
+            else:
+                # Raw name, type unknown — still high confidence in the name itself
+                candidates.append((session_name, 'unknown', 0.80, 'session'))
+        else:
+            candidates.append((session_name, 'unknown', 0.80, 'session'))
 
     # ---- Source 1: FITS OBJECT header ----
     header_name = _object_from_headers(frames)
@@ -643,8 +660,8 @@ def infer_target_from_metadata(
     typed = [c for c in candidates if c[1] != 'unknown']
     pool = typed if typed else candidates
 
-    # Pick highest confidence; break ties by source priority (header > folder > simbad > filename)
-    source_priority = {'header': 4, 'folder': 3, 'simbad': 2, 'filename': 1}
+    # Pick highest confidence; break ties by source priority
+    source_priority = {'session': 5, 'header': 4, 'folder': 3, 'simbad': 2, 'filename': 1}
     best = max(pool, key=lambda c: (c[2], source_priority.get(c[3], 0)))
 
     target_name, object_type, confidence, source = best

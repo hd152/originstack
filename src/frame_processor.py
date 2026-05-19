@@ -102,7 +102,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           quick_quality: bool = False,
                           skip_quality: bool = False,
                           advanced_metrics: bool = True,
-                          preloaded_data: Optional[tuple] = None) -> Dict[str, Any]:
+                          preloaded_data: Optional[tuple] = None,
+                          session_bayer: Optional[str] = None) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -180,7 +181,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # Debayer
     try:
         if data.ndim == 2:
-            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
+            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', session_bayer or 'RGGB'))
             data = green_equalize(data, pattern=bayer)
             rgb = debayer(data, pattern=bayer, method=debayer_method)
         else:
@@ -263,12 +264,13 @@ def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Opti
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
     (path, frame_idx, debayer_method, white_balance,
      mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
-     ca_correction, cosmic_ray_rejection, advanced_metrics) = args_tuple
+     ca_correction, cosmic_ray_rejection, advanced_metrics, session_bayer) = args_tuple
     global _worker_masters
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    ca_correction=ca_correction,
                                    cosmic_ray_rejection=cosmic_ray_rejection,
-                                   advanced_metrics=advanced_metrics)
+                                   advanced_metrics=advanced_metrics,
+                                   session_bayer=session_bayer)
     if result.get('error'):
         return (frame_idx, None, result['error'])
 
@@ -354,8 +356,9 @@ def execute_frame_processing(
         _ca = getattr(args, 'ca_correction', False)
         _cr = getattr(args, 'cosmic_ray_rejection', False)
         _adv = getattr(args, 'advanced_metrics', True)
+        _sb = getattr(args, '_session_bayer', None)
         tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv)
+                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb)
                  for i in range(n)]
 
         try:
@@ -418,6 +421,7 @@ def execute_frame_processing(
         # The I/O pool runs up to 4 concurrent reads regardless of n_workers so
         # we don't swamp the disk with too many concurrent seeks.
         _adv = getattr(args, 'advanced_metrics', True)
+        _sb = getattr(args, '_session_bayer', None)
         _io_workers = min(4, n)
         _io_pool = ThreadPoolExecutor(max_workers=_io_workers)
         _load_futures = {i: _io_pool.submit(load_fits, f.path)
@@ -434,7 +438,8 @@ def execute_frame_processing(
                     ca_correction=getattr(args, 'ca_correction', False),
                     cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
                     advanced_metrics=_adv,
-                    preloaded_data=preloaded)
+                    preloaded_data=preloaded,
+                    session_bayer=_sb)
             if result.get('error'):
                 return i, None, result['error'], None
             mem_rgb[i] = result['rgb']
@@ -476,6 +481,7 @@ def execute_frame_processing(
 
     else:
         print(f"  Processing {n} frames sequentially...")
+        _sb = getattr(args, '_session_bayer', None)
         for i, f in tqdm(enumerate(lights), total=n,
                          desc="  Processing", unit="frame",
                          disable=args.verbose):
@@ -483,7 +489,8 @@ def execute_frame_processing(
                 f.path, f.header, masters, args.debayer_method, args.white_balance,
                 ca_correction=getattr(args, 'ca_correction', False),
                 cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
-                advanced_metrics=getattr(args, 'advanced_metrics', True))
+                advanced_metrics=getattr(args, 'advanced_metrics', True),
+                session_bayer=_sb)
             if result.get('error'):
                 f.accepted = False
                 f.metrics = {'error': result['error']}
