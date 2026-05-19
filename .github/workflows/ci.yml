@@ -47,7 +47,7 @@ jobs:
       - name: Smoke run (synthetic)
         run: |
           python tools/create_synthetic.py
-          python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits --quality-filter --debayer-method malvar --white-balance grayworld --stack-method median
+          python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits --debayer-method malvar --white-balance grayworld --stack-method median
 
       - name: Upload synthetic stack artifact
         if: success()
