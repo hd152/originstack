@@ -14,6 +14,128 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 
 ---
 
+## Sample Output
+
+<details>
+<summary>Click to expand — verbose run on 300 Whirlpool Galaxy frames</summary>
+
+```
+======================================================================
+Astrophotography FITS Stacker
+======================================================================
+Input:  lights/Whirlpool_Galaxy
+Output: whirlpool.fits
+  Compute: CPU
+
+Discovering frames...
+  Mode: Single folder
+  Found 303 FITS files: 300 lights, 1 darks, 1 flats, 1 bias
+
+Creating master calibration frames...
+  [OK] Master bias:  1 frames -> 2048x3056
+  [OK] Master dark:  1 frames -> 2048x3056
+  [OK] Master flat:  1 frames -> 2048x3056
+  [OK] Hot pixel map: 214576 pixels from dark frame
+    Bias:  pedestal=4990.7 ADU  noise=0.8 ADU  -> Good (low read noise)
+    Dark:  median=4917.1 ADU  temp=31.3°C  exp=30.0s  ISO=200  -> OK
+    Flat:  R=0.765/G1=1.114/G2=1.122/B=0.922  vignetting=3.4%  -> Good
+
+======================================================================
+PHASE 1: PROCESSING & QUALITY ANALYSIS
+======================================================================
+  Processing 300 frames in parallel (8 workers)...
+
+  Frame Quality Details:
+  ---------------------------------------------------------------------------------------------------------------
+  Frame                            Bright       Bg   Noise   SNR  Stars   FWHM    Sharp      Score  St
+  ---------------------------------------------------------------------------------------------------------------
+  Light0001.fits                   4558.1   4558.1  101.99   1.7     78    7.0   236280       56.4   [OK]
+  Light0002.fits                   4531.2   4531.2  101.13   1.7     77    7.0   224233       56.4   [OK]
+  Light0003.fits                   4499.2   4499.2  104.04   1.6     73    7.1   248395       53.5   [OK]
+  Light0004.fits                   4491.5   4491.5  100.00   1.7     72    6.8   217981       58.1   [OK]
+  Light0005.fits                   4458.1   4458.1  104.04   1.6     71    6.6   244558       57.8   [OK]
+  ...
+  ---------------------------------------------------------------------------------------------------------------
+  [OK] Accepted: 287/300 (95.7%)
+  [X] Rejected:  13 (quality threshold)
+
+  Target: Whirlpool Galaxy [Galaxy]  conf=90%  source=header
+
+======================================================================
+PHASE 2: REGISTRATION
+======================================================================
+  Reference frame: Light0009.fits (score=60.9)
+  Calculating shifts for 287 frames...
+    Light0001.fits: affine shift=(-6.0, +5.1) px, rotation=+0.000 deg
+    Light0002.fits: affine shift=(-2.6, +1.4) px, rotation=+0.000 deg
+    Light0003.fits: affine shift=(-1.8, +1.1) px, rotation=-0.003 deg
+    Light0004.fits: affine shift=(-0.4, +0.4) px, rotation=-0.003 deg
+    Light0005.fits: affine shift=(+0.0, +0.0) px, rotation=+0.000 deg  [reference]
+    ...
+  Shift statistics:
+    X: mean=+13.7px, std=16.1px, range=[-6.0, +33.9]
+    Y: mean=-11.7px, std=13.8px, range=[-30.4, +5.1]
+    Magnitude: mean=20.8px, max=43.3px
+  Dither pattern detected — sigma_clip stacking recommended
+  Tip: dithered data detected — add --drizzle-scale 2.0 for super-resolution
+
+======================================================================
+PHASE 3: STACKING
+======================================================================
+  Method: sigma_clip (sigma=3.0, iters=3, estimator=MAD)
+  Quality weights: min=0.937, max=1.000, mean=0.972
+  Tiled sigma-clip: 96 tiles of 256x256
+
+======================================================================
+PHASE 4: POST-PROCESSING
+======================================================================
+  Removing residual hot pixels (per-channel)...
+  [OK] Per-channel hot pixel removal: 144 pixels fixed (5.9s)
+    Post-processing star mask: 115 stars
+
+  Applying Dynamic Background Extraction (patch=64px, RBF thin-plate-spline)...
+  [OK] Dynamic Background Extraction (24.5s)
+
+  Applying chroma noise reduction (sigma=2.0)...
+  [OK] Chroma noise reduction (1.8s)
+
+  Applying adaptive wavelet denoising (BayesShrink, chroma_factor=2.0)...
+  [OK] Wavelet denoise (2.1s)
+
+  Correcting sky residuals...
+  [OK] Sky residual correction (35.1s)
+
+  Applying star reduction (factor=0.40, blur_sigma=1.5)...
+  [OK] Star reduction (0.9s)
+
+  Applying multiscale local contrast enhancement (strength=0.70)...
+  [OK] Local contrast enhancement (3.2s)
+
+  Output size: 3036x2030 (cropped 20x18 pixels)
+
+======================================================================
+SUMMARY
+======================================================================
+  Frames analyzed:  300
+  Frames stacked:   287 (95.7%)
+  Integration time: 2h 23m
+  Output:           whirlpool.fits (3036x2030x3)
+  Preview:          whirlpool.jpg (ghs stretch)
+  Avg FWHM:         6.73 px (best: 6.38)
+  Avg SNR:          1.7  (best: 1.7)
+  Processing time:  18m 42s
+    Quality+Load:   4m 21s
+    Registration:   3m 15s
+    Stacking:       1m 44s
+    Post-process:   9m 22s
+  Peak memory:      1477.4 MB
+======================================================================
+```
+
+</details>
+
+---
+
 ## Features at a Glance
 
 ### Core Pipeline
