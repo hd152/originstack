@@ -47,24 +47,29 @@ Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-interpolated sub-p
 - Hard rejection: blank, corrupt, or severely underexposed frames
 - Quality-weighted stacking (SNR, FWHM, star count weighting)
 
-### Post-Processing Chain (15 steps)
-Applied in order after stacking; most steps are **on by default**:
+### Post-Processing Chain (up to 20 steps)
+Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be explicitly enabled:
 
-1. Hot pixel removal on stacked image
-2. Star mask generation (protects nebulosity in subsequent steps)
-3. Background extraction (DBE via RBF thin-plate spline, or legacy mesh, or GraXpert AI)
-4. Chroma noise reduction
-5. Sky floor normalisation (per-channel pedestal removal)
-6. Local normalisation (vignette residual removal) — `--local-normalize`
-7. Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
-8. Sky residual correction (second pass after denoising)
-9. Non-local means denoising — `--denoise-nlm`
-10. Bilateral filter — `--denoise-bilateral`
-11. Multiscale Median Transform (MMT) — `--denoise-mmt`
-12. ACDNR adaptive contrast denoising — `--denoise-acdnr`
-13. Richardson-Lucy deconvolution — `--deconvolve`
-14. Star reduction (softens star cores) — on by default
-15. Multiscale local contrast enhancement (MLCE) — on by default
+1. ✅ Hot pixel removal on stacked image
+2. ✅ Star mask generation (protects structure in subsequent steps)
+3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh, or GraXpert AI)
+4. ✅ Chroma noise reduction
+5. ✅ Sky floor normalisation (per-channel pedestal removal)
+6. ❌ Local normalisation — `--local-normalize`
+7. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
+8. ✅ Sky residual correction (second pass after denoising)
+9. ❌ Non-local means denoising — `--denoise-nlm`
+10. ❌ Bilateral filter — `--denoise-bilateral`
+11. ❌ Multiscale Median Transform (MMT) — `--denoise-mmt`
+12. ❌ ACDNR adaptive contrast denoising — `--denoise-acdnr`
+13. ❌ BM3D collaborative filter — `--denoise-bm3d`
+14. ❌ Perona-Malik anisotropic diffusion — `--denoise-aniso`
+15. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
+16. ❌ Photometric colour calibration — `--photometric-calibration`
+17. ❌ Richardson-Lucy deconvolution — `--deconvolve`
+18. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
+19. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
+20. ❌ Star removal via Starnet++ — `--star-remove`
 
 ### Presets
 Eight built-in target presets tune all parameters at once:
@@ -402,7 +407,7 @@ astro_stack.py                  ← thin backward-compatibility entry point
     ├── frame_processor.py      ← Phase 1: parallel per-frame load/calibrate/quality
     ├── registration.py         ← Phase 2: shift calculation, affine/RANSAC
     ├── stacking.py             ← Phase 3: alignment, cropping, combine
-    ├── postprocess.py          ← Phase 4: 15-step post-processing chain
+    ├── postprocess.py          ← Phase 4: up to 20-step post-processing chain
     ├── debayer.py              ← Bayer demosaicing, hot pixels, white balance
     ├── quality.py              ← star detection, FWHM, quality metrics
     ├── background.py           ← DBE, mesh sky extraction, floor normalisation

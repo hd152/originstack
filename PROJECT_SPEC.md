@@ -27,13 +27,22 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/plate_solve.py` | ~160 | Astrometry.net + ASTAP + SIMBAD identification |
 | `src/pipeline.py` | ~265 | Four-phase orchestrator, `stack_target` |
 | `src/frame_processor.py` | ~430 | `_process_single_frame`, `execute_frame_processing`, `quality_gate` |
-| `src/postprocess.py` | ~315 | `postprocess_stack` — 15-step post-processing chain |
+| `src/postprocess.py` | ~315 | `postprocess_stack` — up to 20-step post-processing chain |
 | `src/auto_settings.py` | ~360 | Heuristic target classifier, `apply_auto_settings` (`--auto`) |
 | `src/health_check.py` | ~190 | Frame consistency and calibration quality analysis |
+| `src/session_info.py` | ~200 | Session metadata reader (Celestron Origin `info.json` — GPS, filter, ISO, orientation) |
+| `src/target_inference.py` | ~670 | Target type inference — heuristic galaxy/nebula/starfield classification |
+| `src/color_calibrate.py` | ~395 | Photometric colour calibration using plate-solved star colours |
+| `src/photometric_calibration.py` | ~300 | Gray-locus photometric colour calibration (`--photometric-calibration`) |
+| `src/mosaic.py` | ~315 | WCS-based mosaic stitching (`--mosaic`) |
+| `src/checkpoint.py` | ~225 | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
+| `src/xisf_writer.py` | ~105 | XISF 1.0 format writer (`--output-xisf`) |
+| `src/channel_combine.py` | ~310 | Multi-channel combination (L-RGB, OSC + narrowband workflows) |
+| `src/features.py` | ~90 | Low-level feature extraction helpers |
 | `src/cli.py` | ~685 | `process_directory`, `parse_args`, `main` |
 | `astro_stack.py` | ~170 | Backward-compatibility re-export shim |
 
-**Total: ~8,200 lines.** Tests in `tests/test_core.py` import symbols directly from `astro_stack`.
+**Total: ~10,800 lines.** Tests in `tests/test_core.py` import symbols directly from `astro_stack`.
 
 ---
 
@@ -70,7 +79,7 @@ Phase 3  ──  Stacking
              7 methods: mean, median, sigma_clip, winsorized, percentile, esd, drizzle
 
 Phase 4  ──  Post-Processing
-             15-step chain: background → denoising → deconvolution → contrast
+             up to 20-step chain: background → denoising → deconvolution → contrast
 ```
 
 ---
@@ -530,7 +539,7 @@ Heuristic target classifier — analyses frame metrics (star count, brightness d
 | `--diagnostic-dir PATH` | Directory for diagnostic snapshots |
 | `--quality-report PATH` | Write per-frame metrics to CSV |
 
-Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky_floor`, `local_normalize`, `wavelet`, `sky_residual`, `nlm`, `bilateral`, `mmt`, `acdnr`, `deconvolve`, `star_reduce`, `local_contrast`
+Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky_floor`, `local_normalize`, `wavelet`, `sky_residual`, `nlm`, `bilateral`, `mmt`, `acdnr`, `bm3d`, `aniso`, `scnr`, `photo_cal`, `deconvolve`, `star_reduce`, `local_contrast`, `star_remove`
 
 ### Infrastructure
 
