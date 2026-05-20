@@ -40,6 +40,13 @@ try:
 except Exception:
     Image = None
 
+try:
+    import astroalign as _astroalign
+    HAS_ASTROALIGN = True
+except Exception:
+    _astroalign = None  # type: ignore[assignment]
+    HAS_ASTROALIGN = False
+
 
 def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
                        initial_shift: Tuple[float, float] = (0.0, 0.0)) -> Optional[Any]:
@@ -93,6 +100,29 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     except Exception:
         pass
     return None
+
+
+def _astroalign_transform(ref_lum: np.ndarray,
+                          img_lum: np.ndarray) -> Optional[Any]:
+    """Use astroalign triangle-pattern matching to find a Euclidean transform.
+
+    Called as a fallback when star-catalog RANSAC matching fails (e.g. too few
+    detected stars, large rotation, or significant scale mismatch between panels).
+    Returns a skimage EuclideanTransform compatible with apply_transform, or None.
+    """
+    if not HAS_ASTROALIGN or not HAS_SKIMAGE_TRANSFORM:
+        return None
+    try:
+        transform, _ = _astroalign.find_transform(
+            img_lum.astype(np.float32),
+            ref_lum.astype(np.float32),
+        )
+        return EuclideanTransform(
+            rotation=transform.rotation,
+            translation=(transform.translation[0], transform.translation[1]),
+        )
+    except Exception:
+        return None
 
 
 def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
@@ -1172,6 +1202,8 @@ def run_registration_phase(
                                          skip_phase_cc=args.skip_phase_correlation)
                 affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
                                                initial_shift=(sy, sx))
+                if affine_tf is None:
+                    affine_tf = _astroalign_transform(ref_lum, lum)
                 if affine_tf is not None:
                     return j, (affine_tf.params[1, 2], affine_tf.params[0, 2]), affine_tf
             sy, sx = calculate_shift(

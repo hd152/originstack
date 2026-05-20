@@ -14,7 +14,7 @@ import numpy as np
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, print_quality_table
-from src.io_fits import load_fits
+from src.io_fits import load_fits, load_frame
 from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
                          apply_hot_pixel_map_bayer,
                          remove_hot_pixels_rgb, remove_hot_pixels_rgb_with_lum,
@@ -113,7 +113,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         if preloaded_data is not None:
             data, hdr = preloaded_data
         else:
-            data, hdr = load_fits(path)
+            data, hdr = load_frame(path)
     except Exception as e:
         return {'error': f'load error: {e}'}
     if data is None or data.size == 0:
@@ -424,7 +424,7 @@ def execute_frame_processing(
         _sb = getattr(args, '_session_bayer', None)
         _io_workers = min(4, n)
         _io_pool = ThreadPoolExecutor(max_workers=_io_workers)
-        _load_futures = {i: _io_pool.submit(load_fits, f.path)
+        _load_futures = {i: _io_pool.submit(load_frame, f.path)
                          for i, f in enumerate(lights)}
 
         def _thread_process_frame(i, f):

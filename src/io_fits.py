@@ -36,6 +36,17 @@ def _read_fits_header(path: str) -> dict:
             return {}
 
 
+def load_frame(path: str) -> Tuple[np.ndarray, dict]:
+    """Load a FITS or camera RAW file; dispatches on file extension."""
+    try:
+        from src.io_raw import RAW_EXTENSIONS, read_raw
+        if os.path.splitext(path)[1].lower() in RAW_EXTENSIONS:
+            return read_raw(path)
+    except Exception:
+        pass
+    return load_fits(path)
+
+
 def load_fits(path: str) -> Tuple[np.ndarray, dict]:
     """Load FITS file; retry without memmap if keyword compression is present."""
     try:

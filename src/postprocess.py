@@ -150,6 +150,29 @@ def _graxpert_background_extraction(img: np.ndarray,
     """
     from astropy.io import fits as _fits
 
+    # Prefer the graxpert Python package over the subprocess CLI when available.
+    try:
+        from graxpert.background_extraction import extract_background as _gx_extract
+        img_max = float(img.max()) or 1.0
+        img_norm = (img / img_max).astype(np.float32)
+        result = _gx_extract(
+            img_norm,
+            bg_pts=None,
+            correction_type='Subtraction',
+            smoothing='medium',
+            kernel_size=50,
+        )
+        if verbose:
+            safe_print("  [GraXpert] Background extracted via Python API")
+        return np.clip(
+            np.asarray(result, dtype=np.float32) * img_max, 0.0, None
+        )
+    except ImportError:
+        pass  # Python package not installed — fall through to subprocess
+    except Exception as _gx_err:
+        if verbose:
+            safe_print(f"  [GraXpert] Python API failed ({_gx_err}), trying subprocess")
+
     binary = graxpert_path or _find_graxpert_binary()
     if binary is None:
         safe_print("  WARNING: GraXpert binary not found — falling back to DBE")

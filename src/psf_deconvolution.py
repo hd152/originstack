@@ -20,6 +20,74 @@ try:
 except Exception:
     HAS_SKIMAGE_RESTORATION = False
 
+try:
+    from photutils.psf import EPSFBuilder
+    from photutils.psf import extract_stars as _phot_extract_stars
+    from astropy.nddata import NDData as _NDData
+    from astropy.table import Table as _AstroTable
+    HAS_PHOTUTILS_PSF = True
+except Exception:
+    HAS_PHOTUTILS_PSF = False
+
+
+def _estimate_psf_epsf(img: np.ndarray, star_positions,
+                       psf_size: int) -> Tuple[Optional[np.ndarray], float]:
+    """Empirical PSF via photutils EPSFBuilder.
+
+    Stacks oversampled star cutouts without assuming any parametric model,
+    producing a more accurate kernel than the Moffat/Gaussian fitting approach
+    when stars are well-sampled (typical for stacked deep-sky images).
+    Returns (psf_kernel, fwhm_px) or (None, 0.0) on failure.
+    """
+    if not HAS_PHOTUTILS_PSF:
+        return None, 0.0
+    if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
+        return None, 0.0
+
+    lum = (img if img.ndim == 2
+           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    try:
+        # Sort by flux, take brightest unsaturated stars
+        try:
+            order = np.argsort(star_positions['flux'])[::-1][:Config.RL_PSF_MAX_STARS]
+        except (KeyError, TypeError):
+            order = range(min(Config.RL_PSF_MAX_STARS, len(star_positions)))
+
+        xs = [float(star_positions[i]['xcentroid']) for i in order]
+        ys = [float(star_positions[i]['ycentroid']) for i in order]
+
+        tbl = _AstroTable()
+        tbl['x'] = xs
+        tbl['y'] = ys
+
+        stars = _phot_extract_stars(
+            _NDData(data=lum.astype(np.float64)), tbl, size=psf_size
+        )
+        if len(stars) < Config.RL_PSF_MIN_STARS:
+            return None, 0.0
+
+        epsf, _ = EPSFBuilder(oversampling=2, maxiters=10,
+                               progress_bar=False)(stars)
+
+        kernel = np.array(epsf.data, dtype=np.float64)
+        kernel = np.maximum(kernel, 0.0)
+        total = kernel.sum()
+        if total <= 0.0:
+            return None, 0.0
+        kernel /= total
+
+        # Estimate FWHM from the fraction of kernel above half-maximum
+        half_max = kernel.max() / 2.0
+        fwhm = float(np.sqrt(np.sum(kernel >= half_max) / np.pi) * 2.0)
+
+        logging.info("PSF estimated via EPSFBuilder: FWHM=%.2f px, "
+                     "from %d stars", fwhm, len(stars))
+        return kernel, fwhm
+    except Exception as exc:
+        logging.debug("EPSFBuilder failed: %s", exc)
+        return None, 0.0
+
 
 def estimate_psf(img: np.ndarray, star_positions,
                  cutout_radius: int = None, psf_size: int = None,
@@ -32,12 +100,21 @@ def estimate_psf(img: np.ndarray, star_positions,
     Returns (psf_kernel, fwhm_pixels).  Returns (None, 0.0) if too few stars
     are successfully fit.
     """
-    if not HAS_CURVE_FIT:
-        logging.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
-        return None, 0.0
     if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
         logging.warning("Too few stars for PSF estimation "
                         f"({0 if star_positions is None else len(star_positions)} < {Config.RL_PSF_MIN_STARS})")
+        return None, 0.0
+
+    if psf_size is None:
+        psf_size = Config.RL_PSF_SIZE
+
+    # Prefer photutils EPSFBuilder (empirical, model-free) when available
+    epsf_kernel, epsf_fwhm = _estimate_psf_epsf(img, star_positions, psf_size)
+    if epsf_kernel is not None:
+        return epsf_kernel, epsf_fwhm
+
+    if not HAS_CURVE_FIT:
+        logging.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
         return None, 0.0
 
     if cutout_radius is None:

@@ -12,15 +12,29 @@ from src.utils import safe_print
 
 
 def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
-    """Discover FITS files and classify them by heuristics and headers."""
+    """Discover FITS and RAW files and classify them by heuristics and headers."""
+    try:
+        from src.io_raw import RAW_EXTENSIONS, read_raw_header, HAS_RAWPY
+        _raw_exts: tuple = RAW_EXTENSIONS if HAS_RAWPY else ()
+    except Exception:
+        _raw_exts = ()
+
+    _all_exts = ('.fit', '.fits') + _raw_exts
+
     files = sorted(
         os.path.join(directory, f)
         for f in os.listdir(directory)
-        if f.lower().endswith(('.fit', '.fits'))
+        if f.lower().endswith(_all_exts)
     )
     frames = {'light': [], 'dark': [], 'flat': [], 'bias': []}
+
+    def _read_header(path: str) -> dict:
+        if _raw_exts and path.lower().endswith(_raw_exts):
+            return read_raw_header(path)
+        return _read_fits_header(path)
+
     with ThreadPoolExecutor() as ex:
-        headers = list(ex.map(_read_fits_header, files))
+        headers = list(ex.map(_read_header, files))
     for p, hdr in zip(files, headers):
         ftype = classify_frame(p, hdr)
         if ftype == 'skip':

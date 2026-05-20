@@ -19,6 +19,13 @@ HAS_CV2 = False
 denoise_nl_means = None
 HAS_SKIMAGE_RESTORATION = False
 
+try:
+    import bm3d as _bm3d_pkg
+    HAS_BM3D_PKG = True
+except Exception:
+    _bm3d_pkg = None  # type: ignore[assignment]
+    HAS_BM3D_PKG = False
+
 
 def _ensure_pywt():
     global pywt, HAS_PYWT
@@ -913,6 +920,44 @@ def bm3d_denoise(img: np.ndarray, sigma_psd: float = 0.0,
         Runtime scales with image area ÷ stride².  Expect 15–60 s on a
         2 K image at stride=8.  Use ``--bm3d-stride 16`` for large images.
     """
+    if sigma_psd <= 0.0:
+        sigma_psd = float(_estimate_sky_sigma(img))
+    if sigma_psd < 1e-9:
+        return img.copy()
+
+    # Fast path: use the bm3d package when installed (significantly faster than
+    # the pure-scipy DCT fallback below and handles all stages in one call).
+    if HAS_BM3D_PKG:
+        try:
+            src_f = img.astype(np.float64)
+            img_max = float(src_f.max()) or 1.0
+            Y_raw = (0.29900 * src_f[:, :, 0] + 0.58700 * src_f[:, :, 1]
+                     + 0.11400 * src_f[:, :, 2])
+            Y_norm = Y_raw / img_max
+            sigma_norm = sigma_psd / img_max
+            Y_denoised = _bm3d_pkg.bm3d(
+                Y_norm,
+                sigma_psd=sigma_norm,
+                stage_arg=_bm3d_pkg.BM3DStages.ALL_STAGES,
+            )
+            Y_d = Y_denoised * img_max
+            # Chroma: mild Gaussian smoothing proportional to noise level
+            Cb = -0.16875 * src_f[:, :, 0] - 0.33126 * src_f[:, :, 1] + 0.50000 * src_f[:, :, 2]
+            Cr =  0.50000 * src_f[:, :, 0] - 0.41869 * src_f[:, :, 1] - 0.08131 * src_f[:, :, 2]
+            chroma_sigma = max(1.0, sigma_psd / img_max * 3.0)
+            Cb_d = ndimage.gaussian_filter(Cb, sigma=chroma_sigma)
+            Cr_d = ndimage.gaussian_filter(Cr, sigma=chroma_sigma)
+            R = Y_d + 1.40200 * Cr_d
+            G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+            B = Y_d + 1.77200 * Cb_d
+            result = np.clip(np.stack([R, G, B], axis=2), 0.0, None).astype(np.float32)
+            if star_mask is not None:
+                mask3 = star_mask[:, :, np.newaxis]
+                result = (result * (1.0 - mask3) + img * mask3).astype(np.float32)
+            return result
+        except Exception:
+            pass  # fall through to pure-scipy DCT implementation
+
     try:
         from scipy.fft import dctn, idctn
     except ImportError:
@@ -923,11 +968,6 @@ def bm3d_denoise(img: np.ndarray, sigma_psd: float = 0.0,
 
     if stride is None:
         stride = 8 if max(H, W) > 1500 else 4
-
-    if sigma_psd <= 0.0:
-        sigma_psd = float(_estimate_sky_sigma(img))
-    if sigma_psd < 1e-9:
-        return img.copy()
 
     # YCbCr decomposition
     Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
