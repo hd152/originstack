@@ -664,8 +664,8 @@ def postprocess_stack(
         rl_model = getattr(args, 'deconvolve_psf_model', 'moffat')
         use_blind_psf = getattr(args, 'deconvolve_blind_psf', False)
         use_tv = getattr(args, 'deconvolve_tv', False)
-        tv_lambda = getattr(args, 'tv_lambda', Config.TV_LAMBDA)
-        tv_iters = getattr(args, 'tv_iterations', Config.TV_ITERATIONS)
+        tv_lambda = getattr(args, 'tv_lambda', None) or Config.TV_LAMBDA
+        tv_iters = getattr(args, 'tv_iterations', None) or Config.TV_ITERATIONS
         psf = None
 
         if rl_fwhm_override is not None:
