@@ -7,7 +7,6 @@ import queue
 import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from multiprocessing.shared_memory import SharedMemory
-from multiprocessing import shared_memory
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np

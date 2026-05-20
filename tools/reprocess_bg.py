@@ -29,13 +29,17 @@ import numpy as np
 from astropy.io import fits
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from astro_stack import (
-    sky_floor_normalize,
-    generate_star_mask,
-    sigma_clipped_stats,
-    DAOStarFinder,
-    safe_print,
-)
+from astro_stack import sky_floor_normalize, generate_star_mask, safe_print
+
+try:
+    from astropy.stats import sigma_clipped_stats
+except Exception:
+    sigma_clipped_stats = None
+
+try:
+    from photutils.detection import DAOStarFinder
+except Exception:
+    DAOStarFinder = None
 
 
 def detect_stars(rgb: np.ndarray, verbose: bool = False):

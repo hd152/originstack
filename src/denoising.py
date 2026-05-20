@@ -10,15 +10,13 @@ from scipy import ndimage
 from src.models import Config
 from src.utils import safe_print, get_logger
 from src.background import _estimate_sky_sigma
-from src.gpu_context import GpuContext
-
 _log = get_logger()
 
 pywt = None
 HAS_PYWT = False
 cv2 = None
 HAS_CV2 = False
-denoise_nl_means = estimate_sigma = richardson_lucy = None
+denoise_nl_means = None
 HAS_SKIMAGE_RESTORATION = False
 
 
@@ -49,17 +47,12 @@ def _ensure_cv2():
 
 
 def _ensure_skimage_restoration():
-    global denoise_nl_means, estimate_sigma, richardson_lucy, HAS_SKIMAGE_RESTORATION
+    global denoise_nl_means, HAS_SKIMAGE_RESTORATION
     if not HAS_SKIMAGE_RESTORATION:
         try:
-            from skimage.restoration import (
-                denoise_nl_means as _dnlm,
-                estimate_sigma as _es,
-                richardson_lucy as _rl)
+            from skimage.restoration import denoise_nl_means as _dnlm
             if callable(_dnlm):
                 denoise_nl_means = _dnlm
-                estimate_sigma = _es
-                richardson_lucy = _rl
                 HAS_SKIMAGE_RESTORATION = True
         except Exception:
             pass

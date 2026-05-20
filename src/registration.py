@@ -1074,11 +1074,9 @@ def run_registration_phase(
         if ref_stars is None:
             try:
                 # 2. DAOStarFinder with sigma-clipped background estimate
-                from src.quality import (_detect_stars_multi_fwhm,
-                                         _ensure_photutils, _ensure_astropy_stats)
+                from src.quality import _detect_stars_multi_fwhm, _ensure_photutils, DAOStarFinder
+                from astropy.stats import sigma_clipped_stats
                 _ensure_photutils()
-                _ensure_astropy_stats()
-                from src.quality import DAOStarFinder, sigma_clipped_stats
                 if DAOStarFinder is not None and sigma_clipped_stats is not None:
                     _redet_tried.append('DAOStarFinder')
                     _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)

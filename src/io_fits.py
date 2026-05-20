@@ -446,9 +446,3 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
                 header['AVGFWHM'] = (round(float(np.mean(fwhms)), 2), 'Average star FWHM in pixels')
                 header['MINFWHM'] = (round(float(np.min(fwhms)), 2), 'Minimum star FWHM in pixels')
                 header['MAXFWHM'] = (round(float(np.max(fwhms)), 2), 'Maximum star FWHM in pixels')
-
-
-def lazy_load_frames(frame_paths):
-    """Generator to lazily load frames."""
-    for path in frame_paths:
-        yield load_fits(path)
