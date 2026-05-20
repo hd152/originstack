@@ -81,7 +81,12 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
             else:
                 flat[key.replace('-', '_')] = value
 
+        _protected = {'directory', 'output', 'config', 'health_check', 'dry_run',
+                      'verbose', 'debug_registration', 'keep_intermediates',
+                      'preset', 'diagnostic', 'diagnostic_dir'}
         for key, value in flat.items():
+            if key in _protected:
+                continue
             if hasattr(args, key):
                 setattr(args, key, value)
                 changes.append(f"{key}={value}")
@@ -291,10 +296,39 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
     stats = ProcessingStats()
 
     combined: dict = {'light': [], 'dark': [], 'flat': [], 'bias': [], 'skip': []}
+    _session_bayers: dict = {}  # subfolder -> bayer pattern used by its lights
     for d in sorted(subdirs):
         sub = discover_frames(d)
         for ftype in combined:
             combined[ftype].extend(sub.get(ftype, []))
+        # Determine bayer pattern for this subfolder's lights
+        lights_here = sub.get('light', [])
+        if lights_here:
+            from src.session_info import load_session_info, _INFO_FILENAMES
+            si = load_session_info(d)
+            session_bayer = si.bayer if si else None
+            patterns = set()
+            for f in lights_here:
+                p = f.header.get('BAYERPAT') or f.header.get('COLORTYP') or session_bayer
+                if p:
+                    patterns.add(p.upper())
+            if patterns:
+                _session_bayers[os.path.basename(d)] = patterns
+
+    # Warn if different sessions use different bayer patterns
+    all_patterns = set(p for ps in _session_bayers.values() for p in ps)
+    if len(all_patterns) > 1:
+        safe_print(
+            f"\n  ⚠ WARNING: Bayer pattern mismatch across sessions — "
+            f"frames will be debayered with their individual BAYERPAT header if present, "
+            f"but sessions without a BAYERPAT header will use the first session's pattern."
+        )
+        for name, patterns in sorted(_session_bayers.items()):
+            safe_print(f"    {name}: {', '.join(sorted(patterns))}")
+        safe_print(
+            f"  ⚠ Mixing cameras with different Bayer patterns in a combined stack "
+            f"will produce incorrect colours in frames that lack a BAYERPAT header."
+        )
 
     n_lights = len(combined['light'])
     n_sessions = len(subdirs)
@@ -385,6 +419,15 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
                 combined['dark'][0].header.get('EXPTIME', 0) or 0) or None
         except Exception as e:
             safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+
+    # Use the first subfolder that has an info.json so pipeline can populate
+    # the FITS header with session metadata (bayer pattern, WCS, target name).
+    from src.session_info import _INFO_FILENAMES
+    args._input_directory = next(
+        (d for d in sorted(subdirs)
+         if any(os.path.isfile(os.path.join(d, f)) for f in _INFO_FILENAMES)),
+        sorted(subdirs)[0],  # fall back to first subfolder even if no info.json
+    )
 
     all_frames = [f for ftype in combined.values() for f in (ftype if isinstance(ftype, list) else [])]
     stack_target(all_frames, output, args, masters, stats)
@@ -703,6 +746,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             stats.add_warning(warning)
             safe_print(f"\n  ⚠ WARNING: {warning}")
 
+        args._input_directory = d  # per-target input dir for session info and target inference
         res = stack_target([f for t in frames.values() for f in t], outp, args, masters, stats)
         if res:
             produced.append(res)

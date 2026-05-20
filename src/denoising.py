@@ -10,6 +10,7 @@ from scipy import ndimage
 from src.models import Config
 from src.utils import safe_print, get_logger
 from src.background import _estimate_sky_sigma
+from src.gpu_context import GpuContext
 
 _log = get_logger()
 

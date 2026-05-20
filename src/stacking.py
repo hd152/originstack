@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from scipy import ndimage
 
-from src.gpu_context import get_gpu
+from src.gpu_context import get_gpu, GpuContext
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, get_logger
 

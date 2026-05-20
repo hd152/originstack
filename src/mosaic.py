@@ -5,7 +5,7 @@ Workflow
 Each panel subfolder is stacked independently (phases 1–4 unchanged).
 ``stitch_mosaic_panels`` then:
 
-  1. Verifies every panel has a plate-solved WCS (PLTSOLVD=True in header).
+  1. Verifies every panel has a usable WCS (PLTSOLVD=True or CTYPE1 from info.json).
   2. Computes the optimal output WCS grid covering all panels.
   3. Reprojects each panel onto that grid, per-channel.
   4. Blends overlaps with distance-transform feathering weights.
@@ -192,18 +192,21 @@ def stitch_mosaic_panels(
     panels: List[Tuple[np.ndarray, fits.Header]] = []
     for path in panel_paths:
         data, hdr = _load_panel(path)
-        if not hdr.get('PLTSOLVD', False):
+        _has_wcs = hdr.get('PLTSOLVD', False) or (
+            'CTYPE1' in hdr and 'CRVAL1' in hdr and 'CRPIX1' in hdr)
+        if not _has_wcs:
             safe_print(
-                f"  WARNING: {os.path.basename(path)} has no plate solution "
-                f"(PLTSOLVD not set in header).\n"
-                f"  Mosaic requires every panel to be plate-solved.  "
-                f"Re-run with --mosaic --plate-solve to add WCS."
+                f"  WARNING: {os.path.basename(path)} has no usable WCS.\n"
+                f"  Mosaic requires every panel to have either a plate solution "
+                f"(--plate-solve) or WCS from info.json (Celestron Origin / similar)."
             )
             return False
         panels.append((data, hdr))
 
+    wcs_sources = set(hdr.get('WCSORIGIN', 'plate_solve') for _, hdr in panels)
     safe_print(
-        f"  All {len(panels)} panels plate-solved — "
+        f"  All {len(panels)} panels have WCS "
+        f"(sources: {', '.join(sorted(wcs_sources))}) — "
         f"stitching via WCS reprojection"
     )
 

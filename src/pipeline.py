@@ -261,7 +261,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     # Load session info (info.json written by capture app)
     from src.session_info import load_session_info
-    _directory = getattr(args, 'directory', os.path.dirname(output_path))
+    _directory = getattr(args, '_input_directory', None)
+    if not isinstance(_directory, (str, os.PathLike)):
+        _directory = getattr(args, 'directory', None)
+    if not isinstance(_directory, (str, os.PathLike)):
+        _directory = os.path.dirname(output_path)
     _session_info = load_session_info(_directory)
     args._session_info = _session_info
     args._session_bayer = _session_info.bayer if _session_info else None
@@ -381,6 +385,31 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _lights_index = {id(f): i for i, f in enumerate(lights)}
                 final_indices = [_lights_index[id(f)] for f in final]
 
+                # Free rejected frames' luminance — they are never needed again.
+                accepted_set = set(final_indices)
+                for _i in range(len(cached_lums)):
+                    if _i not in accepted_set:
+                        cached_lums[_i] = None
+
+                # If the remaining cache would consume more than half of available
+                # RAM, release it entirely and let registration read from the
+                # mem_lum memmap instead (slightly slower, no RAM cost).
+                try:
+                    import psutil
+                    _cache_bytes = sum(
+                        a.nbytes for a in cached_lums if a is not None)
+                    _avail_bytes = psutil.virtual_memory().available
+                    if _cache_bytes > _avail_bytes * 0.5:
+                        safe_print(
+                            f"  NOTE: luminance cache ({_cache_bytes / 1e9:.1f} GB) "
+                            f"exceeds 50 % of available RAM "
+                            f"({_avail_bytes / 1e9:.1f} GB) — "
+                            f"releasing cache; registration will read from disk")
+                        for _i in range(len(cached_lums)):
+                            cached_lums[_i] = None
+                except Exception:
+                    pass
+
                 # Quality metrics CSV export
                 if getattr(args, 'quality_report', None):
                     _write_quality_report(lights, rejected_reasons, args.quality_report)
@@ -398,7 +427,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _si = getattr(args, '_session_info', None)
                 _inferred_name, _inferred_type, _inferred_conf, _inferred_src = \
                     infer_target_from_metadata(
-                        getattr(args, 'directory', os.path.dirname(output_path)),
+                        _directory,
                         final,
                         use_simbad=True,
                         session_name=_si.object_name if _si else None,
