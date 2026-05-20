@@ -19,6 +19,11 @@ import numpy as np
 
 from src.models import Config
 
+try:
+    from src.denoising import HAS_BM3D_PKG
+except Exception:
+    HAS_BM3D_PKG = False
+
 if TYPE_CHECKING:
     import argparse
 
@@ -378,6 +383,10 @@ def _apply_quality_settings(
     if getattr(args, 'stack_method', 'auto') == 'auto':
         if n < 8:
             _set('stack_method', 'percentile')
+        elif n < 15:
+            # ESD is statistically rigorous for small N where sigma-clip's MAD
+            # estimate is unreliable; it controls type-I error rate explicitly.
+            _set('stack_method', 'esd')
         elif n < 20:
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 3.0)
@@ -425,15 +434,16 @@ def _apply_quality_settings(
     if snr < 5 and snr > 0 and not getattr(args, 'denoise_acdnr', False):
         _set('denoise_acdnr', True)
 
-    # 7. BM3D: enable for galaxies and globular clusters when the stack is clean
-    #    enough for block-matching to outperform median-based MMT.  Requires
-    #    SNR >= 12 (enough signal for meaningful patch similarity) and >= 20
-    #    frames (reduces noise floor so BM3D doesn't chase noise patterns).
-    #    For globulars, finer stride is always used to resolve individual stars
-    #    in the core; for galaxies it is only applied on very clean stacks.
-    if (target_type in ('galaxy', 'globular_cluster')
-            and snr >= 12
-            and n >= 20
+    # 7. BM3D: enable when the bm3d package is installed and the stack has enough
+    #    SNR for block-matching to outperform median-based methods.  Thresholds are
+    #    lower when the package is available (hardware-accelerated C backend) vs
+    #    absent (pure-scipy DCT fallback which is ~5-10x slower and less effective).
+    _bm3d_targets = ('galaxy', 'globular_cluster', 'emission_nebula', 'reflection_nebula')
+    _bm3d_snr_min = 8 if HAS_BM3D_PKG else 12
+    _bm3d_n_min   = 12 if HAS_BM3D_PKG else 20
+    if (target_type in _bm3d_targets
+            and snr >= _bm3d_snr_min
+            and n >= _bm3d_n_min
             and not getattr(args, 'denoise_bm3d', False)):
         _set('denoise_bm3d', True)
         if target_type == 'globular_cluster' or snr > 20:

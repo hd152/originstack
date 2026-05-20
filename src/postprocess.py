@@ -14,7 +14,7 @@ from scipy import ndimage
 
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, format_time
-from src.quality import generate_star_mask, _detect_stars_multi_fwhm
+from src.quality import generate_star_mask, _detect_stars_multi_fwhm, _sep_detect_stars
 from src.background import (apply_background_extraction, remove_sky_residual,
                             sky_floor_normalize, dynamic_background_extraction)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
@@ -340,14 +340,16 @@ def postprocess_stack(
     # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution
     pp_star_mask = None
     _pp_sources = None
-    _ensure_photutils()
-    if DAOStarFinder is not None and sigma_clipped_stats is not None:
+    if sigma_clipped_stats is not None:
         try:
             _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
                        + 0.114 * stacked[:, :, 2])
             _, _bg_med, _bg_std = sigma_clipped_stats(_pp_lum, sigma=3.0, maxiters=5)
-            _bg_sub = _pp_lum - float(_bg_med)
-            _pp_sources = _detect_stars_multi_fwhm(_bg_sub, 5.0 * float(_bg_std))
+            _bg_noise = 5.0 * float(_bg_std)
+            _pp_sources = _sep_detect_stars(_pp_lum.astype(np.float32), float(_bg_std))
+            if _pp_sources is None or len(_pp_sources) == 0:
+                _bg_sub = _pp_lum - float(_bg_med)
+                _pp_sources = _detect_stars_multi_fwhm(_bg_sub, _bg_noise)
             if _pp_sources is not None and len(_pp_sources) > 0:
                 pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
                 if args.verbose:

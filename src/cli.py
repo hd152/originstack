@@ -1161,6 +1161,14 @@ def main():
         return
 
     args = parse_args()
+    # Upgrade bilinear → malvar when OpenCV is available; malvar resolves colour moiré
+    # that bilinear introduces around fine star disks at no perceptible speed cost.
+    if getattr(args, 'debayer_method', 'bilinear') == 'bilinear':
+        try:
+            import cv2 as _cv2  # noqa: F401
+            args.debayer_method = 'malvar'
+        except ImportError:
+            pass
     if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
         print("ERROR: -o/--output is required unless --health-check or --dry-run is specified",
               file=sys.stderr)
