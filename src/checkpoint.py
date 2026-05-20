@@ -119,23 +119,36 @@ def _save_transforms(ckpt_dir: str, transforms: List) -> None:
     np.save(os.path.join(ckpt_dir, 'transforms.npy'), arr, allow_pickle=True)
 
 
+class _RestoredTransform:
+    """Minimal shim wrapping a saved 3×3 matrix as a .params-bearing transform.
+
+    All downstream consumers (calc_common_crop, apply_transform, stacking,
+    quality-map patching) only access .params, so a full skimage object is
+    not required here.
+    """
+    __slots__ = ('params',)
+
+    def __init__(self, matrix: np.ndarray) -> None:
+        self.params = np.asarray(matrix, dtype=np.float64)
+
+
 def load_transforms(output_path: str, n_frames: int) -> List:
     """Load affine transforms from checkpoint.
 
-    Returns a list of length *n_frames* where each entry is a numpy array or None.
-    Falls back to all-None if the file is absent or unreadable.
+    Returns a list of length *n_frames* where each entry is a
+    _RestoredTransform (has .params) or None.  Falls back to all-None if the
+    file is absent or unreadable.
     """
     path = os.path.join(_checkpoint_dir(output_path), 'transforms.npy')
     if not os.path.exists(path):
         return [None] * n_frames
     try:
         arr = np.load(path, allow_pickle=True)
-        transforms = list(arr)
-        if len(transforms) != n_frames:
+        if len(arr) != n_frames:
             safe_print(f"  WARNING: transforms checkpoint length mismatch "
-                       f"({len(transforms)} vs {n_frames}) — affine skipped")
+                       f"({len(arr)} vs {n_frames}) — affine skipped")
             return [None] * n_frames
-        return transforms
+        return [_RestoredTransform(t) if t is not None else None for t in arr]
     except Exception as e:
         safe_print(f"  WARNING: Could not load transforms from checkpoint ({e}) — affine skipped")
         return [None] * n_frames
