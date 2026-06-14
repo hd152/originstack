@@ -22,6 +22,7 @@ class Config:
     MIN_RECOMMENDED_FRAMES = 10
     PREVIEW_JPEG_QUALITY = 95
     PREVIEW_STRETCH_PERCENTILES = (1, 99)
+    PREVIEW_MAX_DIMENSION = 8192
     TILE_SIZE = 256  # Tile size for tiled sigma-clip (pixels)
     FWHM_CUTOUT_RADIUS = 10  # Cutout radius for FWHM measurement
     FWHM_MAX_STARS = 50  # Max stars to measure for FWHM

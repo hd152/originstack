@@ -408,8 +408,8 @@ def postprocess_stack(
                     from src.io_fits import save_preview_rgb
                     save_preview_rgb(bg_map, bg_path, stretch='linear')
                     safe_print(f"    Saved background map: {os.path.basename(bg_path)}")
-            except Exception:
-                pass
+            except Exception as e:
+                safe_print(f"    WARNING: could not save background map: {e}")
             del _pre_bg
 
     # 2. Chroma noise reduction

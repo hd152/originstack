@@ -702,6 +702,16 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if getattr(args, 'output_xisf', False):
         _save_xisf(stacked, output_path, hdu.header)
 
+    # Post-processed FITS export
+    if getattr(args, 'output_processed_fits', False):
+        proc_path = os.path.splitext(output_path)[0] + '_processed.fits'
+        proc_hdu = fits.PrimaryHDU()
+        proc_hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))
+        proc_hdu.header.update(hdu.header)
+        proc_hdu.header['POSTPROC'] = (True, 'Post-processing applied to this FITS')
+        proc_hdu.writeto(proc_path, overwrite=True)
+        safe_print(f"  ✓ Processed FITS: {os.path.basename(proc_path)}")
+
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     stretch_method = getattr(args, 'stretch', 'linear')
     save_preview_rgb(stacked, preview_path, stretch=stretch_method,

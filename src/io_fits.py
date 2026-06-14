@@ -204,7 +204,19 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
             lo = max(lo, 0.0)  # Don't let negative noise expand the display range
             out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
-    Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
+    h, w = out.shape[:2]
+    max_dim = Config.PREVIEW_MAX_DIMENSION
+    if max(h, w) > max_dim:
+        # Pre-slice in numpy before PIL to avoid allocating a huge PIL Image object.
+        # A full-resolution fromarray() on a large stack can OOM mid-JPEG-write,
+        # leaving a corrupt partial file. Stride-slice to ~target size first, then
+        # let thumbnail() do a quality LANCZOS pass to the exact limit.
+        step = max(1, max(h, w) // max_dim)
+        out = np.ascontiguousarray(out[::step, ::step, :])
+    img = Image.fromarray(out)
+    if img.width > max_dim or img.height > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+    img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY)
 
 
 def populate_fits_header(header: fits.Header, frames: List[FrameInfo],

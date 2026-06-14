@@ -843,7 +843,7 @@ def parse_args():
     p = argparse.ArgumentParser(description='Streaming FITS stacker')
     p.add_argument('-d', '--directory', required=True)
     p.add_argument('-o', '--output', default=None,
-                   help='Output FITS path (required unless --health-check)')
+                   help='Output FITS path (default: <directory>_stacked.fits)')
     p.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
     p.add_argument('--config', default=None, metavar='PATH',
@@ -921,8 +921,6 @@ def parse_args():
                    help='Use CuPy for available operations (experimental)')
     p.add_argument('--plate-solve', action='store_true',
                    help='Enable plate solving via astrometry.net (requires astroquery and ASTROMETRY_API_KEY)')
-    p.add_argument('--background-extraction', action='store_true', default=True,
-                   help='Enable intelligent background removal for darker sky (default: on)')
     p.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
@@ -934,14 +932,10 @@ def parse_args():
                         '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
     p.add_argument('--graxpert-path', default=None, metavar='PATH',
                    help='Path to GraXpert binary (auto-detected if omitted).')
-    p.add_argument('--denoise', action='store_true', default=True,
-                   help='Enable wavelet denoising post-stack (default: on; requires pywt)')
     p.add_argument('--no-denoise', dest='denoise', action='store_false',
                    help='Disable wavelet denoising')
     p.add_argument('--denoise-strength', type=float, default=3.0,
                    help='Wavelet luma denoise threshold factor (default: 3.0)')
-    p.add_argument('--auto-denoise-strength', action='store_true', default=True,
-                   help='Auto-tune denoise strength from stacked image SNR (default: on)')
     p.add_argument('--no-auto-denoise-strength', dest='auto_denoise_strength',
                    action='store_false',
                    help='Use fixed --denoise-strength instead of auto-tuning')
@@ -957,9 +951,6 @@ def parse_args():
                    help='Enable Adaptive Contrast-based Denoising (ACDNR). '
                         'Flat sky regions are smoothed; structured pixels are preserved. '
                         'Effective as a lightweight final pass after wavelet or MMT.')
-    p.add_argument('--denoise-adaptive', action='store_true', default=True,
-                   help='Use BayesShrink per-subband thresholds for wavelet denoising '
-                        '(default: on). Requires --denoise.')
     p.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
                    help='Use fixed global threshold factor instead of BayesShrink')
     p.add_argument('--denoise-bm3d', action='store_true',
@@ -968,11 +959,9 @@ def parse_args():
     p.add_argument('--denoise-aniso', action='store_true',
                    help='Apply Perona-Malik anisotropic diffusion. Reduces noise in '
                         'uniform regions while sharpening edges and filament boundaries.')
-    p.add_argument('--deconvolve', action='store_true', default=False,
+    p.add_argument('--deconvolve', action='store_true',
                    help='Enable Richardson-Lucy deconvolution for sharpening '
-                        '(default: off, requires scikit-image)')
-    p.add_argument('--no-deconvolve', dest='deconvolve', action='store_false',
-                   help='Disable Richardson-Lucy deconvolution')
+                        '(requires scikit-image)')
     p.add_argument('--deconvolve-tv', action='store_true',
                    help='Apply Total Variation regularized deconvolution instead of '
                         'Richardson-Lucy. Better for sharp edges; slower.')
@@ -981,8 +970,6 @@ def parse_args():
                         'cutouts instead of a parametric model.')
     p.add_argument('--local-normalize', action='store_true',
                    help='Enable local normalization to remove vignetting residuals')
-    p.add_argument('--chroma-nr', action='store_true', default=True,
-                   help='Enable chroma noise reduction to remove color speckle (default: on)')
     p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
     p.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
@@ -995,25 +982,14 @@ def parse_args():
     p.add_argument('--ghs-hp', type=float, default=0.95,
                    help='GHS highlights protection HP [0–1] (default: 0.95). '
                         'Values above HP map to white, protecting bright cores from blowout.')
-    p.add_argument('--star-reduce', action='store_true', default=True,
-                   help='Reduce star prominence to improve galaxy-to-star visual balance '
-                        '(default: on). Softens star cores without removing them.')
     p.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
                    help='Disable star reduction')
-    p.add_argument('--local-contrast', action='store_true', default=True,
-                   help='Apply multiscale local contrast enhancement to reveal galaxy '
-                        'structure: dust lanes, spiral arm boundaries (default: on).')
     p.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
                    help='Disable multiscale local contrast enhancement')
     p.add_argument('-j', '--parallel', type=int, default=0,
                    help='Parallel workers for frame processing (default: 0=auto, 1=sequential)')
-    p.add_argument('--ca-correction', action='store_true', default=True,
-                   help='Correct lateral chromatic aberration by aligning R/B channels '
-                        'to green (default: on; requires skimage)')
     p.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
-    p.add_argument('--cosmic-ray-rejection', action='store_true', default=True,
-                   help='Apply L.A.Cosmic-style cosmic ray rejection per frame (default: on)')
     p.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
                    help='Disable cosmic ray rejection')
@@ -1027,6 +1003,9 @@ def parse_args():
                    help='Write a 32-bit float TIFF alongside the FITS output')
     p.add_argument('--output-xisf', action='store_true',
                    help='Write output in PixInsight XISF 1.0 format alongside FITS')
+    p.add_argument('--output-processed-fits', action='store_true',
+                   help='Write a second FITS file with post-processing applied '
+                        '(suffix _processed.fits alongside the main linear FITS)')
     p.add_argument('--quality-report', default=None, metavar='PATH',
                    help='Write per-frame quality metrics CSV after Phase 1 '
                         '(columns: filename, snr, fwhm, star_count, quality_score, '
@@ -1085,6 +1064,16 @@ def parse_args():
     # Defaults for parameters that are tunable via config file but not exposed on the CLI.
     # Set these in a TOML config with --config to override them.
     p.set_defaults(
+        # Features that are on by default (disabled via --no-* flags)
+        background_extraction=True,
+        denoise=True,
+        auto_denoise_strength=True,
+        denoise_adaptive=True,
+        chroma_nr=True,
+        star_reduce=True,
+        local_contrast=True,
+        ca_correction=True,
+        cosmic_ray_rejection=True,
         # Denoiser tuning
         denoise_chroma_boost=2.0,
         chroma_nr_sigma=2.0,
@@ -1170,9 +1159,9 @@ def main():
         except ImportError:
             pass
     if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
-        print("ERROR: -o/--output is required unless --health-check or --dry-run is specified",
-              file=sys.stderr)
-        raise SystemExit(1)
+        dir_name = os.path.basename(os.path.abspath(args.directory))
+        args.output = f"{dir_name}_stacked.fits"
+        safe_print(f"  No output path specified — writing to {args.output}")
     # Load config file (before preset, so preset can override config)
     if getattr(args, 'config', None):
         config_changes = load_config_file(args.config, args)
