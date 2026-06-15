@@ -383,6 +383,48 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     return result
 
 
+def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:
+    """Median-combine frames in spatial tiles to bound peak memory.
+
+    ``np.median(data, axis=0)`` over an ``(N, H, W, C)`` stack materialises a
+    full sort buffer the size of the whole stack at once.  Processing the image
+    in tiles keeps peak memory to roughly one tile-stack, matching the other
+    rejection combiners, while producing an identical result.
+
+    Args:
+        data: Array of shape ``(N, H, W, C)`` (all aligned frames; usually a memmap).
+        verbose: Print tiling summary.
+    """
+    N, H, W, C = data.shape
+    tile_size = Config.TILE_SIZE
+    result = np.zeros((H, W, C), dtype=np.float32)
+
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    tile_coords = [
+        (ty * tile_size, min((ty + 1) * tile_size, H),
+         tx * tile_size, min((tx + 1) * tile_size, W))
+        for ty in range(n_tiles_y)
+        for tx in range(n_tiles_x)
+    ]
+
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        tile = np.asarray(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        return coords, np.median(tile, axis=0).astype(np.float32)
+
+    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for coords, tile_result in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
+
+    if verbose:
+        safe_print(f"    Tiled median: {n_tiles_y * n_tiles_x} tiles of "
+                   f"{tile_size}x{tile_size}")
+    return result
+
+
 def _percentile_clip_tile(tile: np.ndarray, low: float, high: float,
                           weights: Optional[np.ndarray]) -> np.ndarray:
     """Percentile-clip a single spatial tile."""
@@ -780,7 +822,7 @@ def run_stacking_phase(
             stacked = esd_combine(mem_aligned, max_outliers=max_out, significance=sig,
                                   weights=weights, verbose=args.verbose)
         else:
-            stacked = np.median(mem_aligned, axis=0).astype(np.float32)
+            stacked = median_combine(mem_aligned, verbose=args.verbose)
 
         del mem_aligned
         try:

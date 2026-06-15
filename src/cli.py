@@ -874,6 +874,18 @@ def parse_args():
     p.add_argument('--no-registration', action='store_true')
     p.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
+    p.add_argument('--phase-correlation', action='store_false', dest='skip_phase_correlation',
+                   default=True,
+                   help='Run skimage phase cross-correlation before the FFT fallback. '
+                        'Off by default: on typical astronomical frames phase-cc almost always '
+                        'fails its error<0.1 acceptance test and the FFT cross-correlation is '
+                        'used anyway, so running it just wastes an upsampled correlation per frame.')
+    p.add_argument('--advanced-metrics', action='store_true', dest='advanced_metrics',
+                   default=False,
+                   help='Compute expensive diagnostic-only quality metrics per frame '
+                        '(Zernike PSF decomposition, Strehl proxy, atmospheric dispersion). '
+                        'Off by default: these do not affect frame acceptance or stacking weights, '
+                        'so they only add per-frame cost unless you want the diagnostics.')
     p.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -1106,7 +1118,7 @@ def parse_args():
         dbe_patch_size=64,
         entropy_bg=False,
         # Registration internals
-        skip_phase_correlation=False,
+        # (skip_phase_correlation default set on the --phase-correlation argument)
         no_alignment_centrality=False,
         no_shift_outlier_filter=False,
         no_reg_residual_check=False,
@@ -1120,7 +1132,7 @@ def parse_args():
         esd_max_outliers=0,
         esd_significance=0.05,
         # Quality
-        advanced_metrics=True,
+        # (advanced_metrics default set on the --advanced-metrics argument)
         # Per-feature tuning
         star_reduce_factor=0.4,
         star_reduce_sigma=1.5,

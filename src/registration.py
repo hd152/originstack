@@ -161,7 +161,9 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
             mat_d = R
             off_d = offset
 
-        result = xp.zeros_like(img_d)
+        # empty_like, not zeros_like: every channel slice is fully overwritten
+        # below, so pre-zeroing the H×W×C buffer is wasted work per frame.
+        result = xp.empty_like(img_d)
         for c in range(img_d.shape[2]):
             result[:, :, c] = _ndimage.affine_transform(
                 img_d[:, :, c], mat_d, offset=off_d,
@@ -171,7 +173,7 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
         return out[:, :, 0] if squeeze_back else out
 
     elif shift is not None:
-        result = xp.zeros_like(img_d)
+        result = xp.empty_like(img_d)
         for c in range(img_d.shape[2]):
             result[:, :, c] = _ndimage.shift(
                 img_d[:, :, c], shift=shift, order=3,
@@ -187,7 +189,7 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
     return img
 
 
-def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True) -> Tuple[float, float]:
+def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True, seed_shift: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
     """Calculate the (shift_y, shift_x) needed to align ``img`` to ``ref``.
 
     Registration cascade:
@@ -195,6 +197,11 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
       2. Phase cross-correlation (skimage) — sub-pixel accurate when error < 0.1.
       3. FFT cross-correlation at full resolution — fallback for phase-cc failure.
       4. Centroid difference — last resort for featureless or very noisy frames.
+
+    ``seed_shift`` supplies a pre-computed coarse shift (e.g. the pyramid shift
+    already calculated during reference-frame selection).  When given it is used
+    in place of running the pyramid pass again, so the expensive coarse-to-fine
+    registration runs only once per frame across the whole pipeline.
     """
     debug_info = []
 
@@ -218,8 +225,15 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             pass
 
     # Step 1: Multi-scale pyramid registration (coarse-to-fine).
+    # A caller-supplied seed (from the reference-selection pyramid pass) lets us
+    # skip recomputing the pyramid — it is the same coarse-to-fine result.
     pyramid_shift = (0.0, 0.0)
-    if use_pyramid:
+    if seed_shift is not None:
+        psy, psx = seed_shift
+        if np.isfinite(psy) and np.isfinite(psx):
+            pyramid_shift = (float(psy), float(psx))
+            debug_info.append(f"pyramid (seeded): shift=({psx:.1f}, {psy:.1f})")
+    elif use_pyramid:
         try:
             psy, psx = calculate_shift_pyramid(ref, img)
             if np.isfinite(psy) and np.isfinite(psx):
@@ -295,19 +309,21 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             y1 = h + min(0, int(round(psy)))
             x0 = max(0, int(round(psx)))
             x1 = w + min(0, int(round(psx)))
+            # float32 (complex64 FFT) halves the cost/memory of the zero-padded
+            # 2H×2W transform; only the correlation-peak location is used.
             if y1 > y0 and x1 > x0:
-                ref_region = ref[y0:y1, x0:x1].astype(np.float64)
-                img_region = img_fft[y0:y1, x0:x1].astype(np.float64)
-                ref_np = np.zeros((h, w), dtype=np.float64)
-                img_np = np.zeros((h, w), dtype=np.float64)
+                ref_region = ref[y0:y1, x0:x1].astype(np.float32)
+                img_region = img_fft[y0:y1, x0:x1].astype(np.float32)
+                ref_np = np.zeros((h, w), dtype=np.float32)
+                img_np = np.zeros((h, w), dtype=np.float32)
                 ref_np[y0:y1, x0:x1] = ref_region - ref_region.mean()
                 img_np[y0:y1, x0:x1] = img_region - img_region.mean()
             else:
-                ref_np = (ref - np.mean(ref)).astype(np.float64)
-                img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
+                ref_np = (ref - np.mean(ref)).astype(np.float32)
+                img_np = (img_fft - np.mean(img_fft)).astype(np.float32)
         else:
-            ref_np = (ref - np.mean(ref)).astype(np.float64)
-            img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
+            ref_np = (ref - np.mean(ref)).astype(np.float32)
+            img_np = (img_fft - np.mean(img_fft)).astype(np.float32)
 
         ref_norm = xp.asarray(ref_np)
         img_norm = xp.asarray(img_np)
@@ -394,8 +410,10 @@ def apply_shift(img: np.ndarray, shift: Tuple[float, float]) -> np.ndarray:
 
 def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
     """Fast integer-accurate FFT cross-correlation without GPU, for pyramid levels."""
-    ref_n = ref - ref.mean()
-    img_n = img - img.mean()
+    # float32 transforms (complex64) halve the FFT cost/memory vs float64; the
+    # result is only used for integer-peak detection, which is unaffected.
+    ref_n = (ref - ref.mean()).astype(np.float32, copy=False)
+    img_n = (img - img.mean()).astype(np.float32, copy=False)
     h, w = ref_n.shape
     pad_h, pad_w = 2 * h, 2 * w
     F_ref = np.fft.rfft2(ref_n, s=(pad_h, pad_w))
@@ -1186,6 +1204,21 @@ def run_registration_phase(
             shifts[j] = pyramid_shifts[j]
             transforms[j] = None
 
+    # Seed each frame's full registration with the pyramid shift already computed
+    # during reference selection, so the coarse-to-fine pyramid runs once per
+    # frame across the pipeline instead of twice.  The select_reference_frame
+    # pyramid pass measured shifts relative to a *tentative* reference; re-baseline
+    # them to the actually-chosen reference by subtracting the reference frame's
+    # own pyramid shift (exact for the translation-only pyramid).
+    seed_shifts: Optional[List[Tuple[float, float]]] = None
+    if pyramid_shifts is not None and len(pyramid_shifts) == len(final):
+        try:
+            ref_j = final_indices.index(best_idx)
+            ref_sy, ref_sx = pyramid_shifts[ref_j]
+        except (ValueError, IndexError):
+            ref_sy, ref_sx = 0.0, 0.0
+        seed_shifts = [(sy - ref_sy, sx - ref_sx) for (sy, sx) in pyramid_shifts]
+
     gpu = get_gpu()
 
     def _register_one(j, f, orig_idx):
@@ -1193,13 +1226,15 @@ def run_registration_phase(
             return j, shifts[j] or (0.0, 0.0), None
         if orig_idx == best_idx or args.no_registration:
             return j, (0.0, 0.0), None
+        seed = seed_shifts[j] if seed_shifts is not None else None
         with gpu.stream_context():
             lum = (cached_lums[orig_idx] if cached_lums[orig_idx] is not None
                    else np.array(mem_lum[orig_idx]))
             use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
             if use_affine:
                 sy, sx = calculate_shift(ref_lum, lum, verbose=False,
-                                         skip_phase_cc=args.skip_phase_correlation)
+                                         skip_phase_cc=args.skip_phase_correlation,
+                                         seed_shift=seed)
                 affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
                                                initial_shift=(sy, sx))
                 if affine_tf is None:
@@ -1210,7 +1245,8 @@ def run_registration_phase(
                 ref_lum, lum, verbose=args.verbose,
                 debug=args.debug_registration,
                 frame_name=os.path.splitext(os.path.basename(f.path))[0],
-                skip_phase_cc=args.skip_phase_correlation)
+                skip_phase_cc=args.skip_phase_correlation,
+                seed_shift=seed)
             if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
                 safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
                 sx, sy = 0.0, 0.0

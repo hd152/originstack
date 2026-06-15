@@ -67,7 +67,8 @@ def _estimate_psf_epsf(img: np.ndarray, star_positions,
         if len(stars) < Config.RL_PSF_MIN_STARS:
             return None, 0.0
 
-        epsf, _ = EPSFBuilder(oversampling=2, maxiters=10,
+        oversampling = 2
+        epsf, _ = EPSFBuilder(oversampling=oversampling, maxiters=10,
                                progress_bar=False)(stars)
 
         kernel = np.array(epsf.data, dtype=np.float64)
@@ -77,9 +78,12 @@ def _estimate_psf_epsf(img: np.ndarray, star_positions,
             return None, 0.0
         kernel /= total
 
-        # Estimate FWHM from the fraction of kernel above half-maximum
+        # Estimate FWHM from the area above half-maximum.  epsf.data lives on an
+        # oversampled grid (oversampling× finer than the detector), so the
+        # above-half-max pixel count is an area in oversampled pixels: the linear
+        # FWHM must be divided by the oversampling factor to return detector px.
         half_max = kernel.max() / 2.0
-        fwhm = float(np.sqrt(np.sum(kernel >= half_max) / np.pi) * 2.0)
+        fwhm = float(np.sqrt(np.sum(kernel >= half_max) / np.pi) * 2.0 / oversampling)
 
         logging.info("PSF estimated via EPSFBuilder: FWHM=%.2f px, "
                      "from %d stars", fwhm, len(stars))
