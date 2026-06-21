@@ -89,9 +89,34 @@ def save_checkpoint(output_path: str, phase: int,
         state['has_transforms'] = True
 
     if dither_info is not None:
-        # Filter to serializable values
-        state['dither_info'] = {k: v for k, v in dither_info.items()
-                                if isinstance(v, (int, float, str, bool, list))}
+        def _to_json(v):
+            """Recursively convert v to a JSON-safe Python value, or return _SKIP."""
+            if v is None or isinstance(v, (bool, str)):
+                return v
+            if isinstance(v, np.ndarray):
+                return _SKIP
+            if isinstance(v, np.integer):
+                return int(v)
+            if isinstance(v, np.floating):
+                return float(v)
+            if isinstance(v, (int, float)):
+                return v
+            if isinstance(v, (list, tuple)):
+                out = []
+                for item in v:
+                    converted = _to_json(item)
+                    if converted is _SKIP:
+                        return _SKIP
+                    out.append(converted)
+                return out
+            return _SKIP
+        _SKIP = object()
+        safe_dither: dict = {}
+        for k, v in dither_info.items():
+            converted = _to_json(v)
+            if converted is not _SKIP:
+                safe_dither[k] = converted
+        state['dither_info'] = safe_dither
 
     if crop is not None:
         state['crop'] = [int(v) for v in crop]
