@@ -21,7 +21,8 @@ from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denois
                            bilateral_denoise, local_normalize, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
                            multiscale_local_contrast, mmt_denoise, acdnr_denoise,
-                           bm3d_denoise, anisotropic_diffusion, scnr, adaptive_mtf)
+                           bm3d_denoise, anisotropic_diffusion, scnr, adaptive_mtf,
+                           remove_star_halos)
 from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
                                     richardson_lucy_deconvolve,
                                     estimate_psf_blind, tv_regularized_deconvolve)
@@ -356,6 +357,17 @@ def postprocess_stack(
                     safe_print(f"    Post-processing star mask: {len(_pp_sources)} stars")
         except Exception:
             pass
+
+    # Star halo removal (before background extraction)
+    if getattr(args, 'halo_removal', False) and _pp_sources is not None and len(_pp_sources) > 0:
+        _halo_fwhm = float(np.median(
+            [f.metrics.get('fwhm', 4.0) for f in final
+             if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
+        print(f"\n  Removing star halos (fwhm={_halo_fwhm:.1f}px)...")
+        _halo_start = time.time()
+        stacked = remove_star_halos(stacked, _pp_sources, fwhm=_halo_fwhm)
+        safe_print(f"  Star halo removal ({format_time(time.time() - _halo_start)})")
+        stacked = _sanitize(stacked, "halo removal")
 
     # Export star/galaxy masks (before any post-processing modifies them)
     if getattr(args, 'export_masks', False) and pp_star_mask is not None:

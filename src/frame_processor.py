@@ -103,7 +103,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           skip_quality: bool = False,
                           advanced_metrics: bool = True,
                           preloaded_data: Optional[tuple] = None,
-                          session_bayer: Optional[str] = None) -> Dict[str, Any]:
+                          session_bayer: Optional[str] = None,
+                          pre_gradient_removal: bool = False) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -230,6 +231,33 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     except Exception as e:
         return {'error': f'luminance computation error: {e}'}
 
+    # Per-frame polynomial gradient removal (degree-2 background subtraction)
+    if pre_gradient_removal:
+        try:
+            lum_pg = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+            H_pg, W_pg = lum_pg.shape
+            step = 32
+            ys = np.arange(step // 2, H_pg, step)
+            xs = np.arange(step // 2, W_pg, step)
+            Ys, Xs = np.meshgrid(ys, xs, indexing='ij')
+            vals = lum_pg[Ys, Xs]
+            Yn = Ys.ravel() / H_pg
+            Xn = Xs.ravel() / W_pg
+            A = np.column_stack([np.ones(len(Yn)), Yn, Xn, Yn * Yn, Yn * Xn, Xn * Xn])
+            b_vec = vals.ravel().astype(np.float64)
+            coeffs, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+            rows_n = np.arange(H_pg, dtype=np.float64) / H_pg
+            cols_n = np.arange(W_pg, dtype=np.float64) / W_pg
+            Rf, Cf = np.meshgrid(rows_n, cols_n, indexing='ij')
+            bg_model = (coeffs[0] + coeffs[1] * Rf + coeffs[2] * Cf
+                        + coeffs[3] * Rf * Rf + coeffs[4] * Rf * Cf
+                        + coeffs[5] * Cf * Cf).astype(np.float32)
+            for c in range(rgb.shape[2]):
+                rgb[:, :, c] = np.clip(rgb[:, :, c] - bg_model, 0.0, None)
+            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        except Exception:
+            pass
+
     is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
@@ -264,13 +292,15 @@ def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Opti
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
     (path, frame_idx, debayer_method, white_balance,
      mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
-     ca_correction, cosmic_ray_rejection, advanced_metrics, session_bayer) = args_tuple
+     ca_correction, cosmic_ray_rejection, advanced_metrics, session_bayer,
+     pre_gradient_removal) = args_tuple
     global _worker_masters
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    ca_correction=ca_correction,
                                    cosmic_ray_rejection=cosmic_ray_rejection,
                                    advanced_metrics=advanced_metrics,
-                                   session_bayer=session_bayer)
+                                   session_bayer=session_bayer,
+                                   pre_gradient_removal=pre_gradient_removal)
     if result.get('error'):
         return (frame_idx, None, result['error'])
 
@@ -357,8 +387,9 @@ def execute_frame_processing(
         _cr = getattr(args, 'cosmic_ray_rejection', False)
         _adv = getattr(args, 'advanced_metrics', True)
         _sb = getattr(args, '_session_bayer', None)
+        _pgr = getattr(args, 'pre_gradient_removal', False)
         tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb)
+                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb, _pgr)
                  for i in range(n)]
 
         try:
@@ -427,6 +458,8 @@ def execute_frame_processing(
         _load_futures = {i: _io_pool.submit(load_frame, f.path)
                          for i, f in enumerate(lights)}
 
+        _pgr = getattr(args, 'pre_gradient_removal', False)
+
         def _thread_process_frame(i, f):
             try:
                 preloaded = _load_futures[i].result()
@@ -439,7 +472,8 @@ def execute_frame_processing(
                     cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
                     advanced_metrics=_adv,
                     preloaded_data=preloaded,
-                    session_bayer=_sb)
+                    session_bayer=_sb,
+                    pre_gradient_removal=_pgr)
             if result.get('error'):
                 return i, None, result['error'], None
             mem_rgb[i] = result['rgb']
@@ -482,6 +516,7 @@ def execute_frame_processing(
     else:
         print(f"  Processing {n} frames sequentially...")
         _sb = getattr(args, '_session_bayer', None)
+        _pgr = getattr(args, 'pre_gradient_removal', False)
         for i, f in tqdm(enumerate(lights), total=n,
                          desc="  Processing", unit="frame",
                          disable=args.verbose):
@@ -490,7 +525,8 @@ def execute_frame_processing(
                 ca_correction=getattr(args, 'ca_correction', False),
                 cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
                 advanced_metrics=getattr(args, 'advanced_metrics', True),
-                session_bayer=_sb)
+                session_bayer=_sb,
+                pre_gradient_removal=_pgr)
             if result.get('error'):
                 f.accepted = False
                 f.metrics = {'error': result['error']}
@@ -564,13 +600,16 @@ def reload_accepted_frames(
 
     _build_flat_norm(masters, final)
 
+    _pgr_reload = getattr(args, 'pre_gradient_removal', False)
+
     def _reload_one(j: int, f: FrameInfo, orig_idx: int):
         with gpu.stream_context():
             result = _process_single_frame(
                 f.path, f.header, masters, args.debayer_method, args.white_balance,
                 ca_correction=getattr(args, 'ca_correction', False),
                 cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
-                skip_quality=True)
+                skip_quality=True,
+                pre_gradient_removal=_pgr_reload)
         if result.get('error'):
             return j, orig_idx, None, None, result['error']
         return j, orig_idx, result['rgb'], result['lum'], None
@@ -703,6 +742,15 @@ def quality_gate(
                             f'score {f.metrics["score"]:.1f} < {min_score:.1f} '
                             f'({args.quality_threshold:.0f}% below ref {ref_score:.1f})'
                         )
+
+    # Soft ellipticity check — warns but does NOT reject frames
+    max_ellipticity = getattr(args, 'max_ellipticity', 0.5)
+    if max_ellipticity > 0:
+        for f in [fr for fr in lights if fr.accepted and fr.metrics]:
+            ellip = f.metrics.get('ellipticity', 0.0)
+            if ellip > max_ellipticity:
+                print(f"  WARNING: {os.path.basename(f.path)}: high star ellipticity "
+                      f"({ellip:.3f} > {max_ellipticity:.2f}) — tracking error suspected")
 
     final = [f for f in lights if f.accepted]
     stats.accepted_frames = len(final)

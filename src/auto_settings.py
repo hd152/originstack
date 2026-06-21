@@ -63,6 +63,8 @@ def _aggregate(final: list) -> dict:
     strehl_vals = [f.metrics.get('strehl', 0.0) for f in final
                    if f.metrics and f.metrics.get('strehl', 0.0) > 0]
 
+    ellip_vals = [f.metrics.get('ellipticity', 0.0) for f in final
+                  if f.metrics and f.metrics.get('ellipticity', 0.0) > 0]
     return {
         'median_background':  _med('background'),
         'median_noise':       _med('noise'),
@@ -76,6 +78,7 @@ def _aggregate(final: list) -> dict:
         'mean_strehl':        float(np.mean(strehl_vals)) if strehl_vals else 0.0,
         'mean_dispersion':    _mean('dispersion_px'),
         'n_frames':           len(final),
+        'median_ellipticity': float(np.median(ellip_vals)) if ellip_vals else 0.0,
     }
 
 
@@ -106,17 +109,18 @@ def _compute_signals(agg: dict) -> dict:
     concentration = peak_excess / max(diffuse_excess, 0.1)
 
     return {
-        'median_filling': round(median_filling, 2),
-        'diffuse_excess': round(diffuse_excess, 2),
-        'peak_excess':    round(peak_excess, 2),
-        'concentration':  round(concentration, 2),
-        'star_count':     agg['mean_star_count'],
-        'dynamic_range':  agg['mean_dynamic_range'],
-        'snr':            agg['mean_snr'],
-        'fwhm':           agg['mean_fwhm'],
-        'strehl':         round(agg['mean_strehl'], 3),
-        'dispersion':     round(agg['mean_dispersion'], 3),
-        'n_frames':       agg['n_frames'],
+        'median_filling':    round(median_filling, 2),
+        'diffuse_excess':    round(diffuse_excess, 2),
+        'peak_excess':       round(peak_excess, 2),
+        'concentration':     round(concentration, 2),
+        'star_count':        agg['mean_star_count'],
+        'dynamic_range':     agg['mean_dynamic_range'],
+        'snr':               agg['mean_snr'],
+        'fwhm':              agg['mean_fwhm'],
+        'strehl':            round(agg['mean_strehl'], 3),
+        'dispersion':        round(agg['mean_dispersion'], 3),
+        'n_frames':          agg['n_frames'],
+        'median_ellipticity': round(agg['median_ellipticity'], 3),
     }
 
 
@@ -177,6 +181,8 @@ def _classify(sig: dict) -> str:
 
 _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'emission_nebula': [
+        ('masked_correlation',      True),
+        ('pre_gradient_removal',    True),
         ('deconvolve',              True),
         ('deconvolve_iterations',   20),
         # Empirical PSF captures asymmetric shapes from atmospheric turbulence
@@ -205,6 +211,7 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('aniso_iterations',        15),
     ],
     'galaxy': [
+        ('pre_gradient_removal',    True),
         ('deconvolve',              True),
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
@@ -281,6 +288,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('aniso_iterations',        15),
     ],
     'reflection_nebula': [
+        ('masked_correlation',      True),
+        ('pre_gradient_removal',    True),
         ('deconvolve',              True),
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
@@ -372,21 +381,21 @@ def _apply_quality_settings(
             setattr(args, attr, val)
             changes.append(f"{attr}  {old!r} -> {val!r}")
 
-    n          = int(sig['n_frames'])
-    snr        = sig['snr']
-    fwhm       = sig['fwhm']
-    sc         = sig['star_count']
-    strehl     = sig.get('strehl', 0.0)
-    dispersion = sig.get('dispersion', 0.0)
+    n           = int(sig['n_frames'])
+    snr         = sig['snr']
+    fwhm        = sig['fwhm']
+    sc          = sig['star_count']
+    strehl      = sig.get('strehl', 0.0)
+    dispersion  = sig.get('dispersion', 0.0)
+    med_ellip   = sig.get('median_ellipticity', 0.0)
 
     # 1. Frame-count-based stacking method (only when still at default 'auto')
     if getattr(args, 'stack_method', 'auto') == 'auto':
         if n < 8:
             _set('stack_method', 'percentile')
         elif n < 15:
-            # ESD is statistically rigorous for small N where sigma-clip's MAD
-            # estimate is unreliable; it controls type-I error rate explicitly.
-            _set('stack_method', 'esd')
+            # Trimmed mean: simple, robust alternative to ESD for moderate N.
+            _set('stack_method', 'trimmed_mean')
         elif n < 20:
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 3.0)
@@ -394,6 +403,10 @@ def _apply_quality_settings(
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 2.8)
             _set('rejection_iters', 4)
+
+    # Consensus reference frame: enable for large frame counts (≥20)
+    if n >= 20 and not getattr(args, 'consensus_ref', False):
+        _set('consensus_ref', True)
 
     # 2. SNR-based denoising (only when auto-tuning is explicitly disabled)
     if not getattr(args, 'auto_denoise_strength', True):
@@ -404,6 +417,12 @@ def _apply_quality_settings(
                 _set('denoise_strength', 3.5)
             elif snr > 20:
                 _set('denoise_strength', 2.0)
+
+    # Ellipticity warning: poor tracking produces elongated stars
+    if fwhm > 4.0 and med_ellip > 0.3:
+        from src.utils import safe_print as _sp
+        _sp(f"  NOTE: median star ellipticity={med_ellip:.3f} > 0.3 with FWHM={fwhm:.1f}px "
+            f"— possible tracking error or optical issue")
 
     # 3. FWHM-scaled deconvolution iterations (applied after target type sets them)
     if getattr(args, 'deconvolve', False) and fwhm > 4.0:

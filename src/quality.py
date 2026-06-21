@@ -932,11 +932,24 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     psf_ellipticity = 0.0
     psf_pa_scatter = 0.0
     psf_anisotropy_type = 'isotropic'
+    ellipticity = 0.0
     if not quick and sources_s is not None and len(sources_s) > 0:
         try:
             psf_ellipticity, psf_pa_scatter, psf_anisotropy_type = measure_psf_anisotropy(sources_s)
         except Exception:
             pass
+        # Star ellipticity: median(1 - b/a) for SEP sources; median|roundness1| for DAO
+        try:
+            if 'a' in sources_s.dtype.names and 'b' in sources_s.dtype.names:
+                a_vals = np.asarray(sources_s['a'], dtype=np.float64)
+                b_vals = np.asarray(sources_s['b'], dtype=np.float64)
+                valid = a_vals > 0
+                if valid.sum() > 0:
+                    ellipticity = float(np.median(1.0 - b_vals[valid] / a_vals[valid]))
+            elif 'roundness1' in sources_s.dtype.names:
+                ellipticity = float(np.median(np.abs(sources_s['roundness1'])))
+        except Exception:
+            ellipticity = 0.0
 
     # Zernike PSF decomposition — optical aberration fingerprint.
     zernike_result: Dict = {}
@@ -986,6 +999,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         'psf_ellipticity': float(psf_ellipticity),
         'psf_pa_scatter': float(psf_pa_scatter),
         'psf_anisotropy_type': psf_anisotropy_type,
+        'ellipticity': float(ellipticity),
         'zernike_rms': float(zernike_result.get('zernike_rms', 0.0)),
         'zernike_defocus': float(zernike_result.get('zernike_defocus', 0.0)),
         'zernike_astig': float(zernike_result.get('zernike_astig', 0.0)),

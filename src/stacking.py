@@ -160,7 +160,7 @@ def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
 
 def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, float]],
                     scale: float = 1.0, weights: Optional[np.ndarray] = None,
-                    drop_size: float = 0.7) -> np.ndarray:
+                    drop_size: float = 0.7, pixfrac: float = 1.0) -> np.ndarray:
     """Drizzle combine with Lanczos interpolation and fractional sub-pixel shifts.
 
     Each input frame is resampled onto an upscaled output grid using high-order
@@ -218,8 +218,6 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
         # Compute coverage mask analytically: output pixel (oy, ox) maps to
         # input (iy, ix) = (oy/scale - sh[0], ox/scale - sh[1]).  A pixel is
         # valid when both coordinates fall inside the input frame boundaries.
-        # This replaces the previous approach of resampling a ones-image, which
-        # ran a full Lanczos pass per frame for an invariant result.
         iy = _oy / scale - sh[0]
         ix = _ox / scale - sh[1]
         valid = (
@@ -227,13 +225,31 @@ def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, fl
             (ix[np.newaxis, :] >= 0) & (ix[np.newaxis, :] < W)
         )
 
-        if is_3d:
-            valid3 = valid[:, :, np.newaxis]
-            acc += np.where(valid3, resampled * w, 0.0)
-            weight_map += np.where(valid3, w, 0.0)
+        if pixfrac < 1.0:
+            # Tent-kernel pixfrac weight: each output pixel's contribution falls
+            # off toward the edge of the input pixel's footprint.
+            half_drop = pixfrac * scale / 2.0
+            iy_frac = np.abs((iy - np.round(iy)) * scale)  # (out_h,)
+            ix_frac = np.abs((ix - np.round(ix)) * scale)  # (out_w,)
+            w_y = np.maximum(0.0, 1.0 - iy_frac / max(half_drop, 1e-12))
+            w_x = np.maximum(0.0, 1.0 - ix_frac / max(half_drop, 1e-12))
+            pixfrac_weight = w_y[:, np.newaxis] * w_x[np.newaxis, :]  # (out_h, out_w)
+            if is_3d:
+                valid3 = valid[:, :, np.newaxis]
+                pfw3 = pixfrac_weight[:, :, np.newaxis]
+                acc += np.where(valid3, resampled * w * pfw3, 0.0)
+                weight_map += np.where(valid3, w * pfw3, 0.0)
+            else:
+                acc += np.where(valid, resampled * w * pixfrac_weight, 0.0)
+                weight_map += np.where(valid, w * pixfrac_weight, 0.0)
         else:
-            acc += np.where(valid, resampled * w, 0.0)
-            weight_map += np.where(valid, w, 0.0)
+            if is_3d:
+                valid3 = valid[:, :, np.newaxis]
+                acc += np.where(valid3, resampled * w, 0.0)
+                weight_map += np.where(valid3, w, 0.0)
+            else:
+                acc += np.where(valid, resampled * w, 0.0)
+                weight_map += np.where(valid, w, 0.0)
 
     weight_map[weight_map == 0] = 1.0
     return (acc / weight_map).astype(np.float32)
@@ -330,11 +346,86 @@ def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
         return result.astype(np.float32)
 
 
+def _sigma_clip_tile_with_mask(tile: np.ndarray, sigma: float, max_iters: int,
+                               weights: Optional[np.ndarray], winsorize: bool,
+                               use_mad: bool = True):
+    """Like _sigma_clip_tile but also returns the (N, th, tw, C) rejection mask."""
+    N = tile.shape[0]
+    mask = np.ones(tile.shape, dtype=bool)
+    masked = tile.astype(np.float32, copy=True)
+
+    for iteration in range(max_iters):
+        with np.errstate(all='ignore'):
+            if use_mad:
+                median = np.nanmedian(masked, axis=0)
+                spread = np.nanmedian(np.abs(masked - median[np.newaxis]), axis=0) * 1.4826
+                center = median
+            else:
+                center = np.nanmean(masked, axis=0)
+                spread = np.nanstd(masked, axis=0)
+        zero_spread = spread < 1e-12
+        if np.any(zero_spread):
+            with np.errstate(all='ignore'):
+                fallback = np.nanstd(masked, axis=0) if use_mad else \
+                           np.nanmedian(np.abs(masked - np.nanmedian(masked, axis=0)[np.newaxis]), axis=0) * 1.4826
+            spread[zero_spread] = fallback[zero_spread]
+        deviation = np.abs(masked - center[np.newaxis])
+        new_mask = mask & (deviation <= sigma * spread[np.newaxis])
+        surviving = new_mask.sum(axis=0)
+        all_rejected = surviving == 0
+        if np.any(all_rejected):
+            for frame_idx in range(N):
+                new_mask[frame_idx][all_rejected] = mask[frame_idx][all_rejected]
+        newly_rejected = mask & ~new_mask
+        rejected = int(mask.sum() - new_mask.sum())
+        total_valid = int(mask.sum())
+        mask = new_mask
+        masked[newly_rejected] = np.nan
+        if rejected == 0:
+            break
+        if total_valid > 0 and rejected / total_valid < 0.001:
+            break
+
+    rejection_mask = ~mask  # True where rejected
+
+    if winsorize:
+        with np.errstate(all='ignore'):
+            if use_mad:
+                med_final = np.nanmedian(masked, axis=0)
+                spread_final = np.nanmedian(np.abs(masked - med_final[np.newaxis]), axis=0) * 1.4826
+                center_final = med_final
+            else:
+                center_final = np.nanmean(masked, axis=0)
+                spread_final = np.nanstd(masked, axis=0)
+        spread_final = np.maximum(spread_final, 1e-12)
+        upper = center_final + sigma * spread_final
+        lower = center_final - sigma * spread_final
+        clipped = np.clip(tile, lower[np.newaxis], upper[np.newaxis])
+        if weights is not None:
+            w = weights[:, np.newaxis, np.newaxis, np.newaxis]
+            return (np.sum(clipped * w, axis=0) / np.sum(w)).astype(np.float32), rejection_mask
+        return np.mean(clipped, axis=0).astype(np.float32), rejection_mask
+    else:
+        if weights is not None:
+            w = np.where(mask, weights[:, np.newaxis, np.newaxis, np.newaxis], 0.0)
+            with np.errstate(all='ignore'):
+                total_w = np.sum(w, axis=0)
+                total_w[total_w == 0] = 1.0
+                result = np.nansum(masked * w, axis=0) / total_w
+            np.nan_to_num(result, copy=False, nan=0.0)
+            return result.astype(np.float32), rejection_mask
+        with np.errstate(all='ignore'):
+            result = np.nanmean(masked, axis=0)
+        np.nan_to_num(result, copy=False, nan=0.0)
+        return result.astype(np.float32), rejection_mask
+
+
 def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
                        weights: Optional[np.ndarray] = None,
                        winsorize: bool = False,
                        use_mad: bool = True,
-                       verbose: bool = False) -> np.ndarray:
+                       verbose: bool = False,
+                       return_mask: bool = False):
     """Combine frames using tiled, optionally winsorized sigma-clip.
 
     Processes the image in spatial tiles to keep peak memory low.  Uses
@@ -353,6 +444,7 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     N, H, W, C = data.shape
     tile_size = Config.TILE_SIZE
     result = np.zeros((H, W, C), dtype=np.float32)
+    rej_mask_full = np.zeros((N, H, W, C), dtype=bool) if return_mask else None
 
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -367,19 +459,26 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     def _process_tile(coords):
         ty, ty_end, tx, tx_end = coords
         tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize, use_mad)
+        if return_mask:
+            tile_result, tile_mask = _sigma_clip_tile_with_mask(tile, sigma, max_iters, weights, winsorize, use_mad)
+            return coords, tile_result, tile_mask
+        return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize, use_mad), None
 
     n_tile_workers = min(os.cpu_count() or 4, len(tile_coords))
     with ThreadPoolExecutor(max_workers=n_tile_workers) as executor:
-        for coords, tile_result in executor.map(_process_tile, tile_coords):
+        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
             result[ty:ty_end, tx:tx_end, :] = tile_result
+            if return_mask and tile_mask is not None:
+                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
 
     if verbose:
         estimator = 'MAD' if use_mad else 'std'
         mode = 'winsorized' if winsorize else 'reject'
         safe_print(f"    Tiled sigma-clip: {n_tiles_y * n_tiles_x} tiles of "
                    f"{tile_size}x{tile_size}, estimator={estimator}, mode={mode}")
+    if return_mask:
+        return result, rej_mask_full
     return result
 
 
@@ -456,7 +555,8 @@ def _percentile_clip_tile(tile: np.ndarray, low: float, high: float,
 
 def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 80.0,
                             weights: Optional[np.ndarray] = None,
-                            verbose: bool = False) -> np.ndarray:
+                            verbose: bool = False,
+                            return_mask: bool = False):
     """Combine frames using percentile clipping rejection.
 
     Rejects pixels outside the [low, high] percentile range across the
@@ -474,6 +574,7 @@ def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 8
     N, H, W, C = data.shape
     tile_size = Config.TILE_SIZE
     result = np.zeros((H, W, C), dtype=np.float32)
+    rej_mask_full = np.zeros((N, H, W, C), dtype=bool) if return_mask else None
 
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -487,17 +588,27 @@ def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 8
     def _process_tile(coords):
         ty, ty_end, tx, tx_end = coords
         tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        return coords, _percentile_clip_tile(tile, low, high, weights)
+        tile_result = _percentile_clip_tile(tile, low, high, weights)
+        if return_mask:
+            lo = np.percentile(tile, low, axis=0)
+            hi = np.percentile(tile, high, axis=0)
+            tile_mask = ~((tile >= lo[np.newaxis]) & (tile <= hi[np.newaxis]))
+            return coords, tile_result, tile_mask
+        return coords, tile_result, None
 
     n_workers = min(os.cpu_count() or 4, len(tile_coords))
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for coords, tile_result in executor.map(_process_tile, tile_coords):
+        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
             result[ty:ty_end, tx:tx_end, :] = tile_result
+            if return_mask and tile_mask is not None:
+                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
 
     if verbose:
         safe_print(f"    Percentile clip: low={low}%, high={high}%, "
                    f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+    if return_mask:
+        return result, rej_mask_full
     return result
 
 
@@ -590,7 +701,8 @@ def _esd_clip_tile(tile: np.ndarray, max_outliers: int, significance: float,
 
 def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0.05,
                 weights: Optional[np.ndarray] = None,
-                verbose: bool = False) -> np.ndarray:
+                verbose: bool = False,
+                return_mask: bool = False):
     """Combine frames using Generalized ESD (Extreme Studentized Deviate) rejection.
 
     Recommended for small frame counts (< ~15) where sigma-clip's MAD
@@ -610,6 +722,7 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
 
     tile_size = Config.TILE_SIZE
     result = np.zeros((H, W, C), dtype=np.float32)
+    rej_mask_full = np.zeros((N, H, W, C), dtype=bool) if return_mask else None
 
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -623,17 +736,70 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
     def _process_tile(coords):
         ty, ty_end, tx, tx_end = coords
         tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        return coords, _esd_clip_tile(tile, max_outliers, significance, weights)
+        tile_result = _esd_clip_tile(tile, max_outliers, significance, weights)
+        if return_mask:
+            # Re-compute mask for return: use nanmean+nanstd approach (approx)
+            # The ESD mask is expensive to recompute; use a simpler proxy mask
+            # based on whether each pixel is outside sigma*std of the result
+            with np.errstate(all='ignore'):
+                mean_r = np.mean(tile, axis=0)
+                std_r = np.std(tile, axis=0)
+                std_r = np.maximum(std_r, 1e-12)
+                tile_mask = np.abs(tile - mean_r[np.newaxis]) > 3.0 * std_r[np.newaxis]
+            return coords, tile_result, tile_mask
+        return coords, tile_result, None
+
+    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
+            if return_mask and tile_mask is not None:
+                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
+
+    if verbose:
+        safe_print(f"    ESD: max_outliers={max_outliers}, significance={significance}, "
+                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+    if return_mask:
+        return result, rej_mask_full
+    return result
+
+
+def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: float = 0.2,
+                         weights: Optional[np.ndarray] = None,
+                         verbose: bool = False) -> np.ndarray:
+    """Combine frames using trimmed mean (sorted, discard low/high fractions, mean)."""
+    N, H, W, C = data.shape
+    tile_size = Config.TILE_SIZE
+    result = np.zeros((H, W, C), dtype=np.float32)
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    tile_coords = [(ty * tile_size, min((ty + 1) * tile_size, H),
+                    tx * tile_size, min((tx + 1) * tile_size, W))
+                   for ty in range(n_tiles_y) for tx in range(n_tiles_x)]
+
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        N_t = tile.shape[0]
+        n_low = max(0, int(np.floor(N_t * trim_low)))
+        n_high = max(0, int(np.floor(N_t * trim_high)))
+        n_keep = N_t - n_low - n_high
+        if n_keep < 1:
+            n_keep = 1
+            n_low = 0
+            n_high = 0
+        sorted_tile = np.sort(tile, axis=0)
+        trimmed = sorted_tile[n_low:n_low + n_keep]
+        return coords, np.mean(trimmed, axis=0).astype(np.float32)
 
     n_workers = min(os.cpu_count() or 4, len(tile_coords))
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         for coords, tile_result in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
             result[ty:ty_end, tx:tx_end, :] = tile_result
-
     if verbose:
-        safe_print(f"    ESD: max_outliers={max_outliers}, significance={significance}, "
-                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+        safe_print(f"    Trimmed mean: trim_low={trim_low}, trim_high={trim_high}")
     return result
 
 
@@ -641,6 +807,7 @@ def patch_weighted_mean_combine(
     mem_aligned: np.ndarray,
     quality_maps: List[np.ndarray],
     global_weights: Optional[np.ndarray] = None,
+    rejection_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Quality-map-weighted mean combine for per-pixel lucky-imaging stacking.
 
@@ -664,6 +831,14 @@ def patch_weighted_mean_combine(
     acc = np.zeros((H, W, C), dtype=np.float64)
     weight_sum = np.zeros((H, W), dtype=np.float64)
 
+    # Prepare rejection mask: broadcast (N, H, W) -> (N, H, W, 1) if needed
+    rej_mask_3d = None
+    if rejection_mask is not None:
+        if rejection_mask.ndim == 4:
+            rej_mask_3d = rejection_mask
+        elif rejection_mask.ndim == 3:
+            rej_mask_3d = rejection_mask[:, :, :, np.newaxis]
+
     for j in range(N):
         frame = mem_aligned[j].astype(np.float64)
         qmap = quality_maps[j].astype(np.float64)
@@ -676,6 +851,14 @@ def patch_weighted_mean_combine(
         w = qmap
         if global_weights is not None:
             w = w * float(global_weights[j])
+
+        # Apply rejection mask: zero out weight for rejected pixels
+        if rej_mask_3d is not None:
+            # rej_mask_3d[j] is (H, W, C); use mean across channels for qmap
+            rej_j = rej_mask_3d[j]  # (H, W, C)
+            rej_lum = rej_j.mean(axis=2)  # (H, W)
+            rej_w = 1.0 - rej_lum.astype(np.float64)
+            w = w * rej_w
 
         weight_sum += w
         for c in range(C):
@@ -700,6 +883,7 @@ def run_stacking_phase(
     args: argparse.Namespace,
     stats: ProcessingStats,
     quality_maps: Optional[List[np.ndarray]] = None,
+    flow_fields: Optional[List[Optional[Any]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
     """Align and combine frames into a stacked image.
 
@@ -759,7 +943,7 @@ def run_stacking_phase(
     drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
     use_aligned_memmap = (drizzle_scale <= 1.0 and
                           args.stack_method in ('median', 'sigma_clip', 'winsorized',
-                                                'percentile', 'esd'))
+                                                'percentile', 'esd', 'trimmed_mean'))
     if use_aligned_memmap:
         mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
         crop_h, crop_w = bottom - top, right - left
@@ -772,6 +956,12 @@ def run_stacking_phase(
             with gpu.stream_context():
                 rgb = np.array(mem_rgb[final_indices[j]])
                 aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
+                if flow_fields is not None and j < len(flow_fields) and flow_fields[j] is not None:
+                    try:
+                        from src.registration import apply_optical_flow_warp
+                        aligned = apply_optical_flow_warp(aligned, flow_fields[j])
+                    except Exception:
+                        pass
                 mem_aligned[j] = aligned[top:bottom, left:right, :]
 
         n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
@@ -797,8 +987,28 @@ def run_stacking_phase(
                     qmap_c = zoom(qmap, ((bottom - top) / qmap.shape[0],
                                         (right - left) / qmap.shape[1]), order=1)
                     cropped_qmaps.append(np.clip(qmap_c, 0.0, 1.0).astype(np.float32))
+            # Pre-rejection + patch-weighted hybrid stacking
+            rej_mask = None
+            if args.stack_method in ('sigma_clip', 'winsorized'):
+                use_winsorize = (args.stack_method == 'winsorized')
+                use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
+                _, rej_mask = sigma_clip_combine(mem_aligned, sigma=args.rejection_sigma,
+                                                 max_iters=args.rejection_iters, weights=weights,
+                                                 winsorize=use_winsorize, use_mad=use_mad,
+                                                 return_mask=True)
+            elif args.stack_method == 'percentile':
+                low_p = getattr(args, 'percentile_low', 20.0)
+                high_p = getattr(args, 'percentile_high', 80.0)
+                _, rej_mask = percentile_clip_combine(mem_aligned, low=low_p, high=high_p,
+                                                      weights=weights, return_mask=True)
+            elif args.stack_method == 'esd':
+                max_out = getattr(args, 'esd_max_outliers', 0)
+                sig_esd = getattr(args, 'esd_significance', 0.05)
+                _, rej_mask = esd_combine(mem_aligned, max_outliers=max_out, significance=sig_esd,
+                                          weights=weights, return_mask=True)
             stacked = patch_weighted_mean_combine(mem_aligned, cropped_qmaps,
-                                                  global_weights=weights)
+                                                  global_weights=weights,
+                                                  rejection_mask=rej_mask)
         elif args.stack_method in ('sigma_clip', 'winsorized'):
             use_winsorize = (args.stack_method == 'winsorized')
             use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
@@ -821,6 +1031,12 @@ def run_stacking_phase(
             print(f"  ESD: max_outliers={'N//4' if max_out == 0 else max_out}, significance={sig}")
             stacked = esd_combine(mem_aligned, max_outliers=max_out, significance=sig,
                                   weights=weights, verbose=args.verbose)
+        elif args.stack_method == 'trimmed_mean':
+            tl = getattr(args, 'trim_low', 0.2)
+            th = getattr(args, 'trim_high', 0.2)
+            print(f"  Trimmed mean: trim_low={tl}, trim_high={th}")
+            stacked = trimmed_mean_combine(mem_aligned, trim_low=tl, trim_high=th,
+                                           weights=weights, verbose=args.verbose)
         else:
             stacked = median_combine(mem_aligned, verbose=args.verbose)
 

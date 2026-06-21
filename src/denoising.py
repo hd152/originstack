@@ -1366,3 +1366,77 @@ def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None,
 
     stretched = np.arcsinh(norm * factor) / np.arcsinh(factor)
     return np.clip(stretched, 0.0, 1.0)
+
+
+def remove_star_halos(img: np.ndarray, star_sources, fwhm: float,
+                      protection_radius: float = 2.0) -> np.ndarray:
+    """Fit and subtract Gaussian PSF halos from bright stars.
+
+    For each bright star (above 95th percentile of flux), fits a scaled Gaussian
+    and subtracts the predicted halo beyond protection_radius * fwhm from center.
+    """
+    if star_sources is None or len(star_sources) == 0 or fwhm <= 0:
+        return img
+
+    H, W = img.shape[:2]
+    result = img.copy()
+
+    try:
+        fluxes = np.asarray(star_sources['flux'], dtype=np.float64)
+    except (KeyError, TypeError):
+        return img
+
+    flux_thresh = float(np.percentile(fluxes, 95))
+    bright_mask = fluxes >= flux_thresh
+    bright_stars = star_sources[bright_mask]
+
+    if len(bright_stars) == 0:
+        return img
+
+    sigma = fwhm / 2.355
+    protect_radius_px = protection_radius * fwhm
+
+    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    for star in bright_stars:
+        try:
+            yc = int(round(float(star['ycentroid'])))
+            xc = int(round(float(star['xcentroid'])))
+        except (KeyError, TypeError):
+            continue
+
+        if yc < 0 or yc >= H or xc < 0 or xc >= W:
+            continue
+
+        r_cut = int(min(protect_radius_px * 3, 50))
+        y0, y1 = max(0, yc - r_cut), min(H, yc + r_cut + 1)
+        x0, x1 = max(0, xc - r_cut), min(W, xc + r_cut + 1)
+        if y1 <= y0 or x1 <= x0:
+            continue
+
+        cut_lum = lum[y0:y1, x0:x1]
+        peak = float(cut_lum.max())
+        bg = float(np.percentile(cut_lum, 25))
+        if peak - bg < 10.0:
+            continue
+
+        r_work = int(5 * sigma) + r_cut
+        wy0, wy1 = max(0, yc - r_work), min(H, yc + r_work + 1)
+        wx0, wx1 = max(0, xc - r_work), min(W, xc + r_work + 1)
+
+        yy, xx = np.mgrid[wy0:wy1, wx0:wx1]
+        dist2 = (yy - yc) ** 2 + (xx - xc) ** 2
+        gaussian = (peak - bg) * np.exp(-dist2 / (2 * sigma ** 2))
+
+        protect_mask = dist2 < protect_radius_px ** 2
+        halo_subtract = np.where(protect_mask, 0.0, gaussian)
+
+        for c in range(img.shape[2] if img.ndim == 3 else 1):
+            if img.ndim == 3:
+                result[wy0:wy1, wx0:wx1, c] = np.clip(
+                    result[wy0:wy1, wx0:wx1, c] - halo_subtract, 0.0, None)
+            else:
+                result[wy0:wy1, wx0:wx1] = np.clip(
+                    result[wy0:wy1, wx0:wx1] - halo_subtract, 0.0, None)
+
+    return result.astype(img.dtype)

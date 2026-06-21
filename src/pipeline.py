@@ -543,10 +543,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             phase_start = time.time()
 
             quality_maps = dither_info.pop('quality_maps', None)
+            flow_fields = dither_info.pop('flow_fields', None)
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
                 shifts, transforms, H, W, C, args, stats,
-                quality_maps=quality_maps)
+                quality_maps=quality_maps,
+                flow_fields=flow_fields)
 
             stats.stacking_time = time.time() - phase_start
 

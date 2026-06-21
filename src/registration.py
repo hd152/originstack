@@ -189,7 +189,7 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
     return img
 
 
-def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True, seed_shift: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
+def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True, seed_shift: Optional[Tuple[float, float]] = None, masked_correlation: bool = False) -> Tuple[float, float]:
     """Calculate the (shift_y, shift_x) needed to align ``img`` to ``ref``.
 
     Registration cascade:
@@ -249,6 +249,27 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                                     mode='constant', cval=0.0)
     else:
         img_shifted = img
+
+    # Masked cross-correlation: suppress bright nebula emission in background
+    if masked_correlation:
+        try:
+            ref_lum_m = ref.copy().astype(np.float32)
+            img_lum_m = img_shifted.copy().astype(np.float32)
+            bg_ref = float(np.median(ref_lum_m))
+            fill_ref = float(np.mean(ref_lum_m > 2 * bg_ref))
+            if fill_ref > 0.3:
+                from scipy.ndimage import binary_dilation
+                thresh_ref = float(np.percentile(ref_lum_m, 85))
+                thresh_img = float(np.percentile(img_lum_m, 85))
+                struct = np.ones((21, 21), dtype=bool)
+                mask_ref = binary_dilation(ref_lum_m > thresh_ref, structure=struct)
+                mask_img = binary_dilation(img_lum_m > thresh_img, structure=struct)
+                ref_lum_m[mask_ref] = 0.0
+                img_lum_m[mask_img] = 0.0
+                ref = ref_lum_m
+                img_shifted = img_lum_m
+        except Exception:
+            pass
 
     # Use phase cross correlation for subpixel shifts when available
     if not skip_phase_cc and phase_cross_correlation is not None:
@@ -1076,6 +1097,50 @@ def compute_patch_quality_map(lum: np.ndarray, grid_size: int = None) -> np.ndar
     return quality_map
 
 
+def compute_optical_flow_warp(ref_lum: np.ndarray, frame_lum: np.ndarray) -> Optional[np.ndarray]:
+    """Compute dense optical flow from frame_lum to ref_lum using Farneback method.
+
+    Returns flow array (H, W, 2) or None if cv2 unavailable.
+    """
+    try:
+        import cv2 as _cv2
+    except ImportError:
+        return None
+    try:
+        ref_u8 = np.clip(ref_lum / (ref_lum.max() + 1e-12) * 255, 0, 255).astype(np.uint8)
+        frm_u8 = np.clip(frame_lum / (frame_lum.max() + 1e-12) * 255, 0, 255).astype(np.uint8)
+        flow = _cv2.calcOpticalFlowFarneback(
+            frm_u8, ref_u8, None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+        return flow  # (H, W, 2): flow[y, x] = (dx, dy) displacement
+    except Exception:
+        return None
+
+
+def apply_optical_flow_warp(img: np.ndarray, flow: np.ndarray) -> np.ndarray:
+    """Apply optical flow warp to image using cv2.remap."""
+    try:
+        import cv2 as _cv2
+        H, W = img.shape[:2]
+        flow_map_x = (np.arange(W, dtype=np.float32)[np.newaxis, :]
+                      + flow[:, :, 0]).astype(np.float32)
+        flow_map_y = (np.arange(H, dtype=np.float32)[:, np.newaxis]
+                      + flow[:, :, 1]).astype(np.float32)
+        if img.ndim == 3:
+            result = np.stack([
+                _cv2.remap(img[:, :, c], flow_map_x, flow_map_y,
+                           _cv2.INTER_CUBIC, borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
+                for c in range(img.shape[2])
+            ], axis=2)
+        else:
+            result = _cv2.remap(img, flow_map_x, flow_map_y,
+                                _cv2.INTER_CUBIC, borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
+        return result.astype(img.dtype)
+    except Exception:
+        return img
+
+
 def run_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -1185,6 +1250,31 @@ def run_registration_phase(
         safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
                    "registration disabled, falling back to translation only")
 
+    # Consensus reference frame: override the selected reference with the frame
+    # whose pyramid shift is closest to the session median (most central frame).
+    if (getattr(args, 'consensus_ref', False)
+            and pyramid_shifts is not None
+            and len(final) >= 10):
+        try:
+            ps_arr = np.array(pyramid_shifts, dtype=np.float64)
+            median_sy = float(np.median(ps_arr[:, 0]))
+            median_sx = float(np.median(ps_arr[:, 1]))
+            dists = np.sqrt((ps_arr[:, 0] - median_sy) ** 2 +
+                            (ps_arr[:, 1] - median_sx) ** 2)
+            best_j = int(np.argmin(dists))
+            new_best_idx = final_indices[best_j]
+            if new_best_idx != best_idx:
+                best = final[best_j]
+                best_idx = new_best_idx
+                if cached_lums is not None and best_idx < len(cached_lums) and cached_lums[best_idx] is not None:
+                    ref_lum = np.asarray(cached_lums[best_idx], dtype=np.float32)
+                else:
+                    ref_lum = np.array(mem_lum[best_idx], dtype=np.float32)
+                safe_print(f"  Consensus reference: {os.path.basename(best.path)} "
+                           f"(shift closest to median)")
+        except Exception as _ce:
+            _log.debug("Consensus ref failed: %s", _ce)
+
     # Shift-space outlier pre-filter: skip expensive full registration for
     # frames whose pyramid shift is catastrophically far from the session median.
     outlier_mask = np.zeros(len(final), dtype=bool)
@@ -1230,11 +1320,13 @@ def run_registration_phase(
         with gpu.stream_context():
             lum = (cached_lums[orig_idx] if cached_lums[orig_idx] is not None
                    else np.array(mem_lum[orig_idx]))
+            _masked_corr = getattr(args, 'masked_correlation', False)
             use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
             if use_affine:
                 sy, sx = calculate_shift(ref_lum, lum, verbose=False,
                                          skip_phase_cc=args.skip_phase_correlation,
-                                         seed_shift=seed)
+                                         seed_shift=seed,
+                                         masked_correlation=_masked_corr)
                 affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
                                                initial_shift=(sy, sx))
                 if affine_tf is None:
@@ -1246,7 +1338,8 @@ def run_registration_phase(
                 debug=args.debug_registration,
                 frame_name=os.path.splitext(os.path.basename(f.path))[0],
                 skip_phase_cc=args.skip_phase_correlation,
-                seed_shift=seed)
+                seed_shift=seed,
+                masked_correlation=_masked_corr)
             if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
                 safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
                 sx, sy = 0.0, 0.0
@@ -1363,8 +1456,49 @@ def run_registration_phase(
             quality_maps.append(qmap)
         safe_print(f"  Patch quality maps computed.")
 
+    # Optional per-frame optical flow local warp correction
+    flow_fields: Optional[List[Optional[np.ndarray]]] = None
+    if getattr(args, 'optical_flow', False) and not args.no_registration:
+        try:
+            import cv2 as _cv2_check  # noqa: F401
+            safe_print(f"  Computing optical flow fields ({len(final)} frames)...")
+            flow_fields = []
+            for j, orig_idx in enumerate(final_indices):
+                if orig_idx == best_idx:
+                    flow_fields.append(None)
+                    continue
+                try:
+                    lum = (cached_lums[orig_idx] if cached_lums is not None
+                           and orig_idx < len(cached_lums)
+                           and cached_lums[orig_idx] is not None
+                           else np.array(mem_lum[orig_idx]))
+                    lum = np.asarray(lum, dtype=np.float32)
+                    # Pre-apply shift/transform to bring lum into alignment space
+                    if transforms[j] is not None:
+                        from scipy.ndimage import affine_transform as _aff2
+                        tfm = transforms[j]
+                        R = tfm.params[:2, :2]
+                        t_xy = tfm.params[:2, 2]
+                        t_rc = np.array([t_xy[1], t_xy[0]])
+                        off = -R @ t_rc
+                        lum = _aff2(lum.astype(np.float64), R, offset=off,
+                                    order=1, mode='constant', cval=0.0).astype(np.float32)
+                    elif shifts[j] and shifts[j] != (0.0, 0.0):
+                        lum = ndimage.shift(lum, shift=shifts[j], order=1,
+                                            mode='constant', cval=0.0)
+                    flow = compute_optical_flow_warp(ref_lum, lum)
+                    flow_fields.append(flow)
+                except Exception:
+                    flow_fields.append(None)
+            safe_print(f"  Optical flow fields computed.")
+        except ImportError:
+            safe_print("  WARNING: --optical-flow requires OpenCV (cv2) — skipping")
+            flow_fields = None
+
     dither_info = detect_dither(shifts, verbose=False)
     dither_info['quality_maps'] = quality_maps  # carry through to stacking
+    if flow_fields is not None:
+        dither_info['flow_fields'] = flow_fields
     if not args.no_registration and len(shifts) > 2:
         labels = {'dithered': 'Dithered (random offsets)',
                   'tracking_drift': 'Tracking drift (systematic trend)',

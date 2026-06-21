@@ -944,7 +944,7 @@ def parse_args():
                    help='Detailed registration diagnostics (implies -v)')
     p.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
-                            'percentile', 'esd', 'auto'],
+                            'percentile', 'esd', 'trimmed_mean', 'auto'],
                    default='auto',
                    help='Stacking/rejection method. '
                         'sigma_clip: MAD-based iterative rejection (default for dithered data). '
@@ -1114,6 +1114,33 @@ def parse_args():
                    help='Extend --photometric-calibration with a Gaia DR3 catalogue query. '
                         'Requires --plate-solve and astroquery.')
 
+    # New feature flags (improvements 1-9)
+    p.add_argument('--max-ellipticity', type=float, default=0.5, metavar='E',
+                   help='Warn (but do not reject) frames with median star ellipticity above '
+                        'this threshold (default: 0.5). Set 0 to disable.')
+    p.add_argument('--consensus-ref', action='store_true',
+                   help='Choose reference frame as the one with shift closest to the session '
+                        'median (most central frame) rather than highest quality score.')
+    p.add_argument('--masked-correlation', action='store_true',
+                   help='Suppress bright nebula emission before cross-correlation to improve '
+                        'registration accuracy on extended-emission targets.')
+    p.add_argument('--pre-gradient-removal', action='store_true',
+                   help='Fit and subtract a degree-2 polynomial sky gradient from each frame '
+                        'before quality analysis (useful for nebulae with strong gradients).')
+    p.add_argument('--trim-low', type=float, default=0.2, metavar='F',
+                   help='Low-fraction trim for trimmed_mean stacking (default: 0.2).')
+    p.add_argument('--trim-high', type=float, default=0.2, metavar='F',
+                   help='High-fraction trim for trimmed_mean stacking (default: 0.2).')
+    p.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
+                   help='Drizzle pixel fraction (tent-kernel weight; < 1.0 = sharper '
+                        'at cost of noise; default: 1.0).')
+    p.add_argument('--optical-flow', action='store_true',
+                   help='Apply per-frame Farneback optical flow local warp correction after '
+                        'global shift/affine registration. Requires OpenCV (cv2).')
+    p.add_argument('--halo-removal', action='store_true',
+                   help='Fit and subtract Gaussian PSF halos from bright stars in the '
+                        'stacked image (post-processing step).')
+
     # Defaults for parameters that are tunable via config file but not exposed on the CLI.
     # Set these in a TOML config with --config to override them.
     p.set_defaults(
@@ -1191,6 +1218,16 @@ def parse_args():
         weight_noise=False,
         cr_sigclip=4.5,
         cr_objlim=5.0,
+        # Improvements 1-9
+        max_ellipticity=0.5,
+        consensus_ref=False,
+        masked_correlation=False,
+        pre_gradient_removal=False,
+        trim_low=0.2,
+        trim_high=0.2,
+        drizzle_pixfrac=1.0,
+        optical_flow=False,
+        halo_removal=False,
     )
     return p.parse_args()
 
