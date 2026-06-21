@@ -1248,7 +1248,8 @@ def hdr_blend_stacks(short_stack: np.ndarray, long_stack: np.ndarray,
 def blend_comet_star_stacks(star_stack: np.ndarray,
                              comet_stack: np.ndarray,
                              comet_lum: np.ndarray,
-                             blend_sigma: float = 30.0) -> np.ndarray:
+                             blend_sigma: float = 30.0,
+                             tail_pa_deg: Optional[float] = None) -> np.ndarray:
     """Blend a star-aligned and comet-aligned stack for dual-track imaging.
 
     In standard comet stacking the astronomer must choose between sharpening
@@ -1260,6 +1261,10 @@ def blend_comet_star_stacks(star_stack: np.ndarray,
     • Away from the nucleus: ``star_stack`` dominates (sharp stars,
       smeared nucleus).
 
+    When ``tail_pa_deg`` is provided, the blend mask is elongated along the
+    tail direction with axis ratio 3:1, extending 3× further in the tail
+    direction than radially.
+
     The blend mask is derived from the comet luminance: a Gaussian envelope
     centred on the brightest region (the nucleus) whose width is controlled
     by ``blend_sigma`` pixels.
@@ -1270,6 +1275,9 @@ def blend_comet_star_stacks(star_stack: np.ndarray,
         comet_lum:    Float32 (H, W) luminance map for locating the nucleus
                       (typically the comet-aligned stack luminance).
         blend_sigma:  Gaussian half-width (px) of the comet blend zone.
+        tail_pa_deg:  Optional position angle of the tail in degrees from
+                      North (clockwise).  When provided, an elliptical mask
+                      elongated 3:1 along the tail is used.
 
     Returns:
         Blended float32 image (H, W, 3).
@@ -1283,10 +1291,32 @@ def blend_comet_star_stacks(star_stack: np.ndarray,
     peak_flat = int(np.argmax(smoothed))
     py, px = peak_flat // W, peak_flat % W
 
-    # Build distance-based Gaussian mask centred on nucleus
+    # Build blend mask centred on nucleus
     yy, xx = np.mgrid[:H, :W]
-    dist2 = (yy - py) ** 2.0 + (xx - px) ** 2.0
-    mask = np.exp(-dist2 / (2.0 * blend_sigma ** 2))   # 1 at nucleus, 0 far away
+    dy = (yy - py).astype(np.float64)
+    dx = (xx - px).astype(np.float64)
+
+    if tail_pa_deg is not None:
+        # Elliptical mask elongated along the tail direction (axis ratio 3:1)
+        # PA is measured clockwise from North (up = -row direction)
+        # tail_pa_deg: N=0, E=90, S=180, W=270
+        pa_rad = np.radians(float(tail_pa_deg))
+        # Unit vector along the tail (in row, col convention):
+        # North is -row, East is +col -> tail_row = -cos(pa), tail_col = sin(pa)
+        tail_row = -np.cos(pa_rad)
+        tail_col = np.sin(pa_rad)
+        # Project offsets onto tail direction and perpendicular
+        proj_tail = dy * tail_row + dx * tail_col      # along tail axis
+        proj_perp = dy * (-tail_col) + dx * tail_row   # perpendicular to tail
+        # Elliptical distance: tail sigma = 3 * blend_sigma, perp sigma = blend_sigma
+        sigma_tail = blend_sigma * 3.0
+        sigma_perp = blend_sigma
+        dist2 = (proj_tail / sigma_tail) ** 2 + (proj_perp / sigma_perp) ** 2
+    else:
+        # Circular Gaussian mask
+        dist2 = (dy ** 2 + dx ** 2) / (blend_sigma ** 2)
+
+    mask = np.exp(-0.5 * dist2)   # 1 at nucleus, 0 far away
 
     mask3 = mask[:, :, np.newaxis]
     blended = (mask3 * comet_stack.astype(np.float64)

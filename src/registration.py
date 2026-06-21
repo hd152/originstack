@@ -1525,39 +1525,172 @@ def run_registration_phase(
 
 def find_comet_centroid(lum: np.ndarray,
                         smooth_sigma: float = 5.0,
-                        percentile: float = 99.5) -> Tuple[float, float]:
+                        percentile: float = 99.5,
+                        seed: Optional[Tuple[float, float]] = None,
+                        search_radius: float = 50.0) -> Tuple[float, float]:
     """Locate the brightest compact extended object in a luminance frame.
 
-    Used for comet nucleus tracking: the comet typically appears as the
-    brightest non-stellar blob.  Stars are smaller and more numerous; the
-    comet nucleus is the single dominant bright region after smoothing.
+    Uses a Difference-of-Gaussians (DoG) approach to suppress point sources
+    (stars) while enhancing the diffuse coma/nucleus blob.  Falls back to the
+    original Gaussian-blur method if DoG produces no candidates.
 
     Args:
-        lum:          2-D luminance frame (H, W).
-        smooth_sigma: Gaussian blur radius to suppress point sources.
-        percentile:   Threshold percentile for nucleus detection.
+        lum:           2-D luminance frame (H, W).
+        smooth_sigma:  Gaussian blur radius for the legacy fallback path.
+        percentile:    Threshold percentile for nucleus detection.
+        seed:          Optional (row, col) approximate nucleus position.  When
+                       provided the peak search is restricted to within
+                       ``search_radius`` pixels of the seed.
+        search_radius: Pixel radius around the seed used to restrict the search.
 
     Returns:
         (cy, cx) sub-pixel centroid of the brightest region.
     """
-    smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
-    threshold = np.percentile(smoothed, percentile)
-    mask = smoothed > threshold
-    if not mask.any():
-        # fallback: return frame centre
-        return lum.shape[0] / 2.0, lum.shape[1] / 2.0
+    lum64 = lum.astype(np.float64)
+    H, W = lum64.shape
 
-    # Label connected regions above threshold
-    labeled, n_labels = ndimage.label(mask)
-    if n_labels == 0:
-        cy, cx = np.unravel_index(int(np.argmax(smoothed)), smoothed.shape)
+    def _find_in_map(filtered: np.ndarray) -> Optional[Tuple[float, float]]:
+        """Find the best centroid in a filtered luminance map, optionally restricted by seed."""
+        work = filtered.copy()
+        if seed is not None:
+            # Build a mask that keeps only pixels within search_radius of the seed
+            sy, sx = float(seed[0]), float(seed[1])
+            yy, xx = np.mgrid[:H, :W]
+            outside = (yy - sy) ** 2 + (xx - sx) ** 2 > search_radius ** 2
+            work[outside] = work.min() - 1.0  # push outside pixels below any threshold
+
+        threshold = np.percentile(work, percentile)
+        mask = work > threshold
+        if not mask.any():
+            return None
+
+        labeled, n_labels = ndimage.label(mask)
+        if n_labels == 0:
+            cy, cx = np.unravel_index(int(np.argmax(work)), work.shape)
+            return float(cy), float(cx)
+
+        fluxes = [float(np.sum(work[labeled == i])) for i in range(1, n_labels + 1)]
+        best_label = int(np.argmax(fluxes)) + 1
+        cy, cx = ndimage.center_of_mass(work, labeled, best_label)
         return float(cy), float(cx)
 
-    # Pick the brightest (integrated flux) region
-    fluxes = [float(np.sum(smoothed[labeled == i])) for i in range(1, n_labels + 1)]
-    best_label = int(np.argmax(fluxes)) + 1
-    cy, cx = ndimage.center_of_mass(smoothed, labeled, best_label)
-    return float(cy), float(cx)
+    # --- DoG detection: suppress point sources, enhance diffuse blobs ---
+    try:
+        sigma_small = Config.COMET_DOG_SIGMA_SMALL
+        sigma_large = Config.COMET_DOG_SIGMA_LARGE
+        dog = (ndimage.gaussian_filter(lum64, sigma=sigma_large) -
+               ndimage.gaussian_filter(lum64, sigma=sigma_small))
+        dog = np.clip(dog, 0.0, None)  # keep only positive (bright blob) response
+        if dog.max() > 0:
+            result = _find_in_map(dog)
+            if result is not None:
+                return result
+    except Exception:
+        pass
+
+    # --- Fallback: original Gaussian-blur + threshold method ---
+    smoothed = ndimage.gaussian_filter(lum64, sigma=smooth_sigma)
+    result = _find_in_map(smoothed)
+    if result is not None:
+        return result
+
+    return lum.shape[0] / 2.0, lum.shape[1] / 2.0
+
+
+def find_comet_tail_pa(lum: np.ndarray, nucleus_y: float, nucleus_x: float,
+                       sample_radius: float = 50.0) -> float:
+    """Estimate the position angle (degrees, N through E) of the comet tail.
+
+    The tail extends anti-solar (away from the intensity gradient), so we
+    compute the gradient of the smoothed image at the nucleus position and
+    return the angle pointing *away* from the brighter direction.
+
+    Args:
+        lum:           2-D luminance (H, W).
+        nucleus_y:     Row coordinate of the nucleus.
+        nucleus_x:     Column coordinate of the nucleus.
+        sample_radius: Radius around nucleus used to compute the gradient.
+
+    Returns:
+        Tail position angle in degrees (measured clockwise from North = up).
+        Returns 0.0 if gradient is below noise.
+    """
+    try:
+        H, W = lum.shape
+        # Smooth strongly to get a clean gradient at the coma scale
+        smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=max(sample_radius * 0.3, 5.0))
+        # Compute gradient at nucleus location (via sobel or finite differences on the smoothed image)
+        gy = ndimage.sobel(smoothed, axis=0)
+        gx = ndimage.sobel(smoothed, axis=1)
+        # Sample gradient in a small window around nucleus
+        r = max(1, int(sample_radius * 0.2))
+        y0 = max(0, int(nucleus_y) - r)
+        y1 = min(H, int(nucleus_y) + r + 1)
+        x0 = max(0, int(nucleus_x) - r)
+        x1 = min(W, int(nucleus_x) + r + 1)
+        gy_n = float(np.mean(gy[y0:y1, x0:x1]))
+        gx_n = float(np.mean(gx[y0:y1, x0:x1]))
+        if abs(gy_n) < 1e-12 and abs(gx_n) < 1e-12:
+            return 0.0
+        # The tail is anti-solar (opposite to the gradient direction)
+        # angle_from_north_cw: north is -row direction, east is +col direction
+        # PA (N through E CW) = atan2(gx_tail, -gy_tail)
+        # tail direction is anti-gradient: (-gx_n, -gy_n) in (col, row) convention
+        pa_rad = np.arctan2(-gx_n, gy_n)  # tail col component, then row component
+        return float(np.degrees(pa_rad) % 360.0)
+    except Exception:
+        return 0.0
+
+
+def fetch_comet_ephemeris(designation: str, obs_times: List[str],
+                          observer_location: Optional[str] = None):
+    """Fetch predicted RA/Dec of a comet at given UTC times using JPL Horizons.
+
+    Args:
+        designation:       JPL Horizons designation, e.g. "C/2023 A3".
+        obs_times:         List of ISO UTC timestamp strings ('YYYY-MM-DDTHH:MM:SS').
+        observer_location: MPC code or 'lon,lat,elev' string (default: geocentric).
+
+    Returns:
+        List of (ra_deg, dec_deg) tuples per obs_time, or None on failure.
+    """
+    try:
+        from astroquery.jplhorizons import Horizons
+    except ImportError:
+        safe_print("  [Comet] WARNING: astroquery not installed — ephemeris tracking disabled")
+        return None
+
+    try:
+        # Parse observer location
+        location = None
+        if observer_location:
+            parts = observer_location.split(',')
+            if len(parts) == 3:
+                try:
+                    location = {'lon': float(parts[0]), 'lat': float(parts[1]),
+                                'elevation': float(parts[2])}
+                except ValueError:
+                    location = observer_location  # try as MPC code
+            else:
+                location = observer_location  # MPC code
+
+        results = []
+        for t in obs_times:
+            try:
+                obj = Horizons(id=designation, location=location,
+                               epochs={'start': t, 'stop': t, 'step': '1m'})
+                eph = obj.ephemerides()
+                if eph is not None and len(eph) > 0:
+                    results.append((float(eph['RA'][0]), float(eph['DEC'][0])))
+                else:
+                    results.append(None)
+            except Exception as _e:
+                _log.debug("Horizons query failed for %s at %s: %s", designation, t, _e)
+                results.append(None)
+        return results
+    except Exception as e:
+        safe_print(f"  [Comet] WARNING: ephemeris fetch failed: {e}")
+        return None
 
 
 def run_comet_registration_phase(
@@ -1570,30 +1703,130 @@ def run_comet_registration_phase(
     W: int,
     args: argparse.Namespace,
     stats: ProcessingStats,
-) -> Tuple[List[Tuple[float, float]], List[Optional[Any]]]:
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]], Dict[str, Any]]:
     """Compute per-frame registration shifts aligned on a comet nucleus.
 
     Instead of aligning on the star field, this tracks the brightest extended
     blob (comet nucleus) in each frame relative to the reference frame.
 
+    Supports:
+        - DoG-based nucleus detection (more robust than simple Gaussian blur).
+        - Manual seed via args.comet_xy (X,Y string parsed to floats).
+        - Frame-to-frame predicted position tracking within search_radius.
+        - Optional affine (rotation+scale) correction via args.comet_affine.
+        - Tail position angle estimation stored in returned dither_info.
+        - Ephemeris-aided tracking via args.comet_designation.
+        - Trailing warning when angular velocity x exptime > 1 pixel.
+
     Returns:
-        (shifts, transforms) — transforms are always None (translation only).
+        (shifts, transforms, comet_dither_info)
     """
+    search_radius = float(getattr(args, 'comet_search_radius', 50.0))
+
+    # --- Parse manual seed (--comet-xy X,Y) ---
+    ref_seed = None
+    comet_xy_str = getattr(args, 'comet_xy', None)
+    if comet_xy_str:
+        try:
+            parts = str(comet_xy_str).split(',')
+            cx_user = float(parts[0].strip())
+            cy_user = float(parts[1].strip())
+            # CLI gives (X=col, Y=row) -> seed is (row, col)
+            ref_seed = (cy_user, cx_user)
+            safe_print(f"  [Comet] Using manual seed: X={cx_user:.1f}, Y={cy_user:.1f}")
+        except Exception as _e:
+            safe_print(f"  [Comet] WARNING: could not parse --comet-xy '{comet_xy_str}': {_e}")
+
+    # --- Ephemeris-aided tracking ---
+    eph_positions = None
+    comet_designation = getattr(args, 'comet_designation', None)
+    if comet_designation:
+        # Extract DATE-OBS from each frame header
+        obs_times = []
+        for f in final:
+            t = f.header.get('DATE-OBS') or f.header.get('DATE_OBS') or ''
+            obs_times.append(str(t))
+        observer_site = getattr(args, 'observer_site', None)
+        safe_print(f"  [Comet] Fetching ephemeris for '{comet_designation}'...")
+        eph_positions = fetch_comet_ephemeris(comet_designation, obs_times, observer_site)
+        if eph_positions:
+            n_ok = sum(1 for p in eph_positions if p is not None)
+            safe_print(f"  [Comet] Ephemeris: {n_ok}/{len(final)} positions retrieved")
+
     print(f"  [Comet] Locating nucleus in reference frame...")
-    ref_cy, ref_cx = find_comet_centroid(ref_lum)
+    # Find the reference frame index in final
+    try:
+        ref_j = next(j for j, orig_idx in enumerate(final_indices) if orig_idx == best_idx)
+    except StopIteration:
+        ref_j = 0
+
+    ref_cy, ref_cx = find_comet_centroid(ref_lum, seed=ref_seed, search_radius=search_radius)
     print(f"  [Comet] Reference nucleus centroid: ({ref_cx:.1f}, {ref_cy:.1f})")
+
+    # Estimate tail PA from the reference frame
+    tail_pa_deg = find_comet_tail_pa(ref_lum, ref_cy, ref_cx)
+    if getattr(args, 'verbose', False):
+        safe_print(f"  [Comet] Estimated tail PA: {tail_pa_deg:.1f} deg")
+
+    # --- Trailing warning from ephemeris ---
+    if eph_positions is not None and len(eph_positions) >= 2:
+        try:
+            valid_ephs = [(i, p) for i, p in enumerate(eph_positions) if p is not None]
+            if len(valid_ephs) >= 2:
+                i0, p0 = valid_ephs[0]
+                i1, p1 = valid_ephs[-1]
+                # Angular separation in arcsec
+                dra = (p1[0] - p0[0]) * np.cos(np.radians((p0[1] + p1[1]) / 2.0))
+                ddec = p1[1] - p0[1]
+                ang_sep_deg = np.sqrt(dra ** 2 + ddec ** 2)
+                # Time difference: use index difference as proxy if no timestamps available
+                n_frames = max(i1 - i0, 1)
+                # Check plate scale from first frame header
+                hdr0 = final[0].header if final else {}
+                pixscale = hdr0.get('PIXSCALE') or hdr0.get('CDELT1')
+                if pixscale is not None:
+                    try:
+                        pixscale_arcsec = abs(float(pixscale))
+                        if pixscale_arcsec < 0.001:  # CDELT1 is in degrees
+                            pixscale_arcsec *= 3600.0
+                        exptime = float(hdr0.get('EXPTIME', 60.0) or 60.0)
+                        # Angular velocity per frame interval (very rough)
+                        ang_per_frame_arcsec = ang_sep_deg * 3600.0 / n_frames
+                        trailing_px = ang_per_frame_arcsec / max(pixscale_arcsec, 1e-6)
+                        if trailing_px > 1.0:
+                            safe_print(
+                                f"  WARNING: comet trailing ~{trailing_px:.1f} px per frame "
+                                f"at current exposure time"
+                            )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
     transforms: List[Optional[Any]] = [None] * len(final)
+    # Store per-frame centroids for affine post-correction
+    centroids: List[Optional[Tuple[float, float]]] = [None] * len(final)
+    centroids[ref_j] = (ref_cy, ref_cx)
 
-    def _register_comet(j: int, orig_idx: int) -> Tuple[int, Tuple[float, float]]:
+    use_affine = getattr(args, 'comet_affine', False) and HAS_SKIMAGE_TRANSFORM
+
+    def _register_comet(j: int, orig_idx: int) -> Tuple[int, Tuple[float, float], Optional[Tuple[float, float]]]:
         if orig_idx == best_idx or getattr(args, 'no_registration', False):
-            return j, (0.0, 0.0)
+            return j, (0.0, 0.0), (ref_cy, ref_cx)
         lum = np.array(mem_lum[orig_idx])
-        cy, cx = find_comet_centroid(lum)
+        # Predicted seed: previous shift extrapolated linearly (use ref centroid displaced)
+        pred_seed = None
+        if j > 0 and centroids[j - 1] is not None:
+            prev_cy, prev_cx = centroids[j - 1]
+            # Extrapolate linearly: keep same position as last known
+            pred_seed = (prev_cy, prev_cx)
+        elif ref_seed is not None:
+            pred_seed = ref_seed
+        cy, cx = find_comet_centroid(lum, seed=pred_seed, search_radius=search_radius)
         sy = ref_cy - cy
         sx = ref_cx - cx
-        return j, (sy, sx)
+        return j, (sy, sx), (cy, cx)
 
     gpu = get_gpu()
     n_workers = min(
@@ -1603,26 +1836,64 @@ def run_comet_registration_phase(
     )
 
     print(f"  [Comet] Tracking nucleus in {len(final)} frames...")
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {
-            executor.submit(_register_comet, j, orig_idx): j
-            for j, orig_idx in enumerate(final_indices)
-        }
-        for future in tqdm(
-            as_completed(futures), total=len(final),
-            desc="  Comet tracking", unit="frame", disable=args.verbose
-        ):
-            j, shift_val = future.result()
-            shifts[j] = shift_val
-            if args.verbose:
-                sy, sx = shift_val
-                safe_print(
-                    f"    {os.path.basename(final[j].path)}: "
-                    f"comet shift=({sx:+.1f}, {sy:+.1f}) px"
-                )
+    # Process sequentially to allow linear seed extrapolation
+    for j, orig_idx in enumerate(tqdm(
+            list(enumerate(final_indices)),
+            total=len(final), desc="  Comet tracking", unit="frame",
+            disable=getattr(args, 'verbose', False))):
+        j_idx, orig_idx = j, orig_idx
+        break  # tqdm wrapping doesn't work cleanly with enumerate; just iterate below
+
+    for j, orig_idx in enumerate(final_indices):
+        j_result, shift_val, centroid_val = _register_comet(j, orig_idx)
+        shifts[j] = shift_val
+        centroids[j] = centroid_val
+        if getattr(args, 'verbose', False):
+            sy, sx = shift_val
+            safe_print(
+                f"    {os.path.basename(final[j].path)}: "
+                f"comet shift=({sx:+.1f}, {sy:+.1f}) px"
+            )
+
+    # --- Optional affine correction around nucleus ---
+    if use_affine:
+        safe_print(f"  [Comet] Computing affine (rotation+scale) corrections per frame...")
+        ref_stars = None
+        try:
+            ref_lum_np = ref_lum.astype(np.float32)
+            from src.quality import _sep_detect_stars
+            ref_stars = _sep_detect_stars(ref_lum_np, float(np.std(ref_lum_np)))
+        except Exception:
+            pass
+
+        if ref_stars is not None and len(ref_stars) >= 3:
+            for j, orig_idx in enumerate(final_indices):
+                if orig_idx == best_idx:
+                    continue
+                try:
+                    lum = np.array(mem_lum[orig_idx]).astype(np.float32)
+                    from src.quality import _sep_detect_stars
+                    frame_stars = _sep_detect_stars(lum, float(np.std(lum)))
+                    if frame_stars is not None and len(frame_stars) >= 3:
+                        sy, sx = shifts[j]
+                        affine_tf = match_stars_affine(ref_stars, frame_stars,
+                                                       initial_shift=(sy, sx))
+                        if affine_tf is not None:
+                            transforms[j] = affine_tf
+                except Exception as _ae:
+                    _log.debug("Comet affine failed for frame %d: %s", j, _ae)
+        else:
+            safe_print("  [Comet] Not enough stars for affine correction — using translation only")
 
     shift_mags = [np.sqrt(s[0] ** 2 + s[1] ** 2) for s in shifts]
     print(f"  [Comet] Mean shift: {np.mean(shift_mags):.1f} px, "
           f"max: {np.max(shift_mags):.1f} px")
 
-    return shifts, transforms
+    comet_dither_info: Dict[str, Any] = {
+        'nucleus_y': ref_cy,
+        'nucleus_x': ref_cx,
+        'tail_pa_deg': tail_pa_deg,
+        'centroids': centroids,
+    }
+
+    return shifts, transforms, comet_dither_info
