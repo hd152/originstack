@@ -23,7 +23,7 @@ from src.gpu_context import GpuContext, get_gpu
 from src.models import Config, ProcessingStats
 from src.utils import safe_print, print_header, format_time, setup_logging
 from src.io_fits import make_master, save_preview_rgb
-from src.frame_discovery import discover_frames, select_matching_darks
+from src.frame_discovery import discover_frames, select_matching_darks, select_matching_flats
 from src.debayer import build_hot_pixel_map
 from src.registration import calculate_shift, apply_transform
 from src.pipeline import stack_target
@@ -284,6 +284,27 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
         safe_print(f"  WARNING: Could not save config file ({e})")
 
 
+def _load_calibration_dir(args: argparse.Namespace) -> dict:
+    """Discover calibration frames from --cal-dir.
+
+    Returns a dict with keys 'dark', 'flat', 'bias' containing FrameInfo lists.
+    """
+    extra: dict = {'dark': [], 'flat': [], 'bias': []}
+    cal_dir = getattr(args, 'cal_dir', None)
+    if not cal_dir:
+        return extra
+    if not os.path.isdir(cal_dir):
+        print(f'  WARNING: --cal-dir path does not exist: {cal_dir}', file=sys.stderr)
+        return extra
+    discovered = discover_frames(cal_dir)
+    for ftype in ('dark', 'flat', 'bias'):
+        found = discovered.get(ftype, [])
+        extra[ftype].extend(found)
+        if found:
+            safe_print(f"  Calibration library: {len(found)} {ftype} frames from {cal_dir}")
+    return extra
+
+
 def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace) -> None:
     """Pool all light frames from multiple session subfolders into one unified stack.
 
@@ -330,6 +351,10 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
             f"will produce incorrect colours in frames that lack a BAYERPAT header."
         )
 
+    extra_cal = _load_calibration_dir(args)
+    for ftype in ('dark', 'flat', 'bias'):
+        combined[ftype].extend(extra_cal[ftype])
+
     n_lights = len(combined['light'])
     n_sessions = len(subdirs)
     print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
@@ -364,6 +389,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         masters['dark'] = None
 
     if combined['flat']:
+        combined['flat'] = select_matching_flats(combined['light'], combined['flat'])
         masters['flat'] = make_master(combined['flat'], method='median')
         if masters['flat'] is not None:
             safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames -> "
@@ -501,6 +527,9 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         stats = ProcessingStats()
 
         frames = discover_frames(d)
+        extra_cal = _load_calibration_dir(args)
+        for ftype in ('dark', 'flat', 'bias'):
+            frames[ftype].extend(extra_cal[ftype])
         nfiles = sum(len(v) for v in frames.values())
         print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
 
@@ -531,6 +560,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             masters['dark'] = None
 
         if frames['flat']:
+            frames['flat'] = select_matching_flats(frames.get('light', []), frames['flat'])
             masters['flat'] = make_master(frames['flat'], method='median')
             if masters['flat'] is not None:
                 safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
@@ -844,6 +874,12 @@ def parse_args():
     p.add_argument('-d', '--directory', required=True)
     p.add_argument('-o', '--output', default=None,
                    help='Output FITS path (default: <directory>_stacked.fits)')
+    p.add_argument('--cal-dir', default=None, metavar='PATH',
+                   help='Directory containing calibration frames (darks, flats, bias). '
+                        'Frames are classified automatically and the best-matching subset '
+                        'is selected per type (by ISO, CCD temperature, exposure, filter, '
+                        'and sensor dimensions). Supplements any calibration frames already '
+                        'present in --directory.')
     p.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
     p.add_argument('--config', default=None, metavar='PATH',
@@ -929,6 +965,11 @@ def parse_args():
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     p.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
+    p.add_argument('--patch-weighted', dest='patch_registration', action='store_true',
+                   help='Enable spatially-varying (patch-weighted) stacking: each frame contributes '
+                        'to each output pixel weighted by local sharpness, so sharp regions of a '
+                        'frame outweigh blurry ones from the same frame.  Automatically enabled by '
+                        '--auto when frame count and seeing metrics are favourable.')
     p.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     p.add_argument('--plate-solve', action='store_true',

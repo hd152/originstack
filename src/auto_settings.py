@@ -496,6 +496,18 @@ def _apply_quality_settings(
             current_iters = getattr(args, 'deconvolve_iterations', 15)
             _set('deconvolve_iterations', max(5, int(current_iters * 0.6)))
 
+    # 12. Patch-weighted stacking: enable when there are enough frames for the
+    #     quality-weighted mean to be statistically robust and quality maps will
+    #     have signal.  Requires fwhm > 0 (stars/structure detected) so that
+    #     Brenner sharpness has something to discriminate against.
+    #     With ≥15 frames each contributes ≤6.7% at full weight, so a single
+    #     bad-seeing patch is diluted sufficiently without hard rejection.
+    #     Only activates when the user has not already set --patch-weighted.
+    if (n >= 15
+            and fwhm > 0.0
+            and not getattr(args, 'patch_registration', False)):
+        _set('patch_registration', True)
+
     return changes
 
 
