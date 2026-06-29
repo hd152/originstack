@@ -1001,10 +1001,6 @@ class TestConfigConstants(unittest.TestCase):
     def test_hot_pixel_threshold_positive(self):
         self.assertGreater(astro.Config.HOT_PIXEL_THRESHOLD, 0)
 
-    def test_max_shift_fraction(self):
-        self.assertGreater(astro.Config.MAX_SHIFT_FRACTION, 0)
-        self.assertLess(astro.Config.MAX_SHIFT_FRACTION, 1.0)
-
     def test_crop_margin_nonneg(self):
         self.assertGreaterEqual(astro.Config.CROP_MARGIN, 0)
 

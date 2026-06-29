@@ -16,12 +16,13 @@ from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, format_time
 from src.quality import generate_star_mask, _detect_stars_multi_fwhm, _sep_detect_stars
 from src.background import (apply_background_extraction, remove_sky_residual,
-                            sky_floor_normalize, dynamic_background_extraction)
+                            sky_floor_normalize, dynamic_background_extraction,
+                            _border_pixels, _sigma_sky)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
                            bilateral_denoise, local_normalize, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
                            multiscale_local_contrast, mmt_denoise, acdnr_denoise,
-                           bm3d_denoise, anisotropic_diffusion, scnr, adaptive_mtf,
+                           bm3d_denoise, anisotropic_diffusion, scnr,
                            remove_star_halos, radial_renormalize, larson_sekanina)
 from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
                                     richardson_lucy_deconvolve,
@@ -467,14 +468,9 @@ def postprocess_stack(
             try:
                 smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
                 lum_smooth = ndimage.gaussian_filter(lum_s, sigma=smooth_sigma)
-                by = max(10, int(H_s * Config.BORDER_FRAC))
-                bx = max(10, int(W_s * Config.BORDER_FRAC))
-                border_pix = np.concatenate([
-                    lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
-                    lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
-                ])
-                sky_med_lum = float(np.median(border_pix))
-                sky_std_lum = float(np.std(border_pix))
+                _bp = _border_pixels(lum_smooth)
+                sky_med_lum = float(np.median(_bp))
+                sky_std_lum = float(np.std(_bp))
                 peak_y, peak_x = np.unravel_index(int(np.argmax(lum_smooth)), (H_s, W_s))
                 peak_val = float(lum_smooth[peak_y, peak_x])
                 detect_thresh = sky_med_lum + max(

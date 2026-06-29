@@ -28,6 +28,7 @@ from src.debayer import build_hot_pixel_map
 from src.registration import calculate_shift, apply_transform
 from src.pipeline import stack_target
 from src.health_check import run_health_check
+from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
 
 
 def load_config_file(config_path: str, args: argparse.Namespace) -> list:
@@ -305,6 +306,98 @@ def _load_calibration_dir(args: argparse.Namespace) -> dict:
     return extra
 
 
+def _build_masters(frames: dict, stats: "ProcessingStats | None" = None) -> dict:
+    """Build, filter, and smooth master bias/dark/flat from the frame lists in *frames*.
+
+    Mutates ``frames['dark']`` and ``frames['flat']`` in-place via
+    ``select_matching_darks`` / ``select_matching_flats`` so the caller sees
+    the filtered counts.  Returns a fully populated ``masters`` dict.
+    """
+    lights = frames.get('light', [])
+    cal_needed = frames.get('dark') or frames.get('flat') or frames.get('bias')
+    cal_start = time.time() if cal_needed else None
+    if cal_needed:
+        print("\nCreating master calibration frames...")
+
+    masters: dict = {}
+
+    if frames.get('bias'):
+        masters['bias'] = make_master(frames['bias'], method='median')
+        if masters['bias'] is not None:
+            safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> "
+                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
+    else:
+        masters['bias'] = None
+
+    if frames.get('dark'):
+        frames['dark'] = select_matching_darks(lights, frames['dark'])
+        masters['dark'] = make_master(frames['dark'], method='median')
+        if masters['dark'] is not None:
+            safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> "
+                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+    else:
+        masters['dark'] = None
+
+    if frames.get('flat'):
+        frames['flat'] = select_matching_flats(lights, frames['flat'])
+        masters['flat'] = make_master(frames['flat'], method='median')
+        if masters['flat'] is not None:
+            safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> "
+                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+        _flat_rots = []
+        for _ff in frames['flat']:
+            for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
+                _rval = _ff.header.get(_rkey)
+                if _rval is not None:
+                    try:
+                        _flat_rots.append(float(_rval))
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        if _flat_rots:
+            masters['flat_rotation'] = float(np.median(_flat_rots))
+    else:
+        masters['flat'] = None
+
+    masters['hot_pixel_map'] = None
+    if masters.get('dark') is not None:
+        hot_map = build_hot_pixel_map(masters['dark'])
+        n_hot = int(np.sum(hot_map))
+        if n_hot > 0:
+            masters['hot_pixel_map'] = hot_map
+            safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
+
+    if masters.get('bias') is not None:
+        n_bias = len(frames['bias'])
+        sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
+        masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma=sigma_b)
+    if masters.get('dark') is not None:
+        n_dark = len(frames['dark'])
+        sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
+        masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
+    if masters.get('flat') is not None:
+        n_flat = len(frames['flat'])
+        sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
+        flat_raw = masters['flat'].astype(np.float32)
+        for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+            ch = flat_raw[r_off::2, c_off::2]
+            flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
+        masters['flat'] = flat_raw
+
+    masters['dark_exptime'] = None
+    if frames.get('dark'):
+        try:
+            masters['dark_exptime'] = float(
+                frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
+        except Exception as e:
+            safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+
+    if cal_needed and cal_start is not None and stats is not None:
+        stats.calibration_time = time.time() - cal_start
+
+    return masters
+
+
 def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace) -> None:
     """Pool all light frames from multiple session subfolders into one unified stack.
 
@@ -365,86 +458,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         print('  ERROR: No light frames found across sessions', file=sys.stderr)
         raise SystemExit('No light frames found')
 
-    # Build master calibration frames from all sessions combined
-    if combined['dark'] or combined['flat'] or combined['bias']:
-        print("\nCreating master calibration frames...")
-        cal_start = time.time()
-
-    masters: dict = {}
-    if combined['bias']:
-        masters['bias'] = make_master(combined['bias'], method='median')
-        if masters['bias'] is not None:
-            safe_print(f"  ✓ Master bias:  {len(combined['bias'])} frames -> "
-                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
-    else:
-        masters['bias'] = None
-
-    if combined['dark']:
-        combined['dark'] = select_matching_darks(combined['light'], combined['dark'])
-        masters['dark'] = make_master(combined['dark'], method='median')
-        if masters['dark'] is not None:
-            safe_print(f"  ✓ Master dark:  {len(combined['dark'])} frames -> "
-                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
-    else:
-        masters['dark'] = None
-
-    if combined['flat']:
-        combined['flat'] = select_matching_flats(combined['light'], combined['flat'])
-        masters['flat'] = make_master(combined['flat'], method='median')
-        if masters['flat'] is not None:
-            safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames -> "
-                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
-        # Store median flat rotation so execute_frame_processing can detect mismatch
-        _flat_rots = []
-        for _ff in combined['flat']:
-            for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
-                _rval = _ff.header.get(_rkey)
-                if _rval is not None:
-                    try:
-                        _flat_rots.append(float(_rval))
-                        break
-                    except (TypeError, ValueError):
-                        pass
-        if _flat_rots:
-            masters['flat_rotation'] = float(np.median(_flat_rots))
-    else:
-        masters['flat'] = None
-
-    masters['hot_pixel_map'] = None
-    if masters.get('dark') is not None:
-        hot_map = build_hot_pixel_map(masters['dark'])
-        n_hot = int(np.sum(hot_map))
-        if n_hot > 0:
-            masters['hot_pixel_map'] = hot_map
-            safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
-
-    if combined['dark'] or combined['flat'] or combined['bias']:
-        # Smooth calibration frames (same logic as single-folder path)
-        if masters.get('bias') is not None:
-            n_bias = len(combined['bias'])
-            sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
-            masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma_b)
-        if masters.get('dark') is not None:
-            n_dark = len(combined['dark'])
-            sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
-            masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma_d)
-        if masters.get('flat') is not None:
-            n_flat = len(combined['flat'])
-            sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
-            flat_raw = masters['flat'].astype(np.float32)
-            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                ch = flat_raw[r_off::2, c_off::2]
-                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma_f)
-            masters['flat'] = flat_raw
-        stats.calibration_time = time.time() - cal_start
-
-    masters['dark_exptime'] = None
-    if combined.get('dark'):
-        try:
-            masters['dark_exptime'] = float(
-                combined['dark'][0].header.get('EXPTIME', 0) or 0) or None
-        except Exception as e:
-            safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+    masters = _build_masters(combined, stats)
 
     # Use the first subfolder that has an info.json so pipeline can populate
     # the FITS header with session metadata (bayer pattern, WCS, target name).
@@ -497,6 +511,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             outp = os.path.join(tempfile.gettempdir(), f'{name}_stack.fits')
             targets.append((d, outp))
             tmp_stacks.append(outp)
+            _cleanup_register(outp)
         print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
         # final combined output will be combined from tmp_stacks
     else:
@@ -538,91 +553,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             safe_print(f"  Directory: {os.path.abspath(d)}")
 
         # Create master calibration frames
-        if frames['dark'] or frames['flat'] or frames['bias']:
-            print("\nCreating master calibration frames...")
-            cal_start = time.time()
-
-        masters = {}
-        if frames['bias']:
-            masters['bias'] = make_master(frames['bias'], method='median')
-            if masters['bias'] is not None:
-                safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> {masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
-        else:
-            masters['bias'] = None
-
-        if frames['dark']:
-            # Select darks that best match the light frames (ISO, exposure, dimensions)
-            frames['dark'] = select_matching_darks(frames.get('light', []), frames['dark'])
-            masters['dark'] = make_master(frames['dark'], method='median')
-            if masters['dark'] is not None:
-                safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> {masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
-        else:
-            masters['dark'] = None
-
-        if frames['flat']:
-            frames['flat'] = select_matching_flats(frames.get('light', []), frames['flat'])
-            masters['flat'] = make_master(frames['flat'], method='median')
-            if masters['flat'] is not None:
-                safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
-            # Store median flat rotation so execute_frame_processing can detect mismatch
-            _flat_rots = []
-            for _ff in frames['flat']:
-                for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
-                    _rval = _ff.header.get(_rkey)
-                    if _rval is not None:
-                        try:
-                            _flat_rots.append(float(_rval))
-                            break
-                        except (TypeError, ValueError):
-                            pass
-            if _flat_rots:
-                masters['flat_rotation'] = float(np.median(_flat_rots))
-        else:
-            masters['flat'] = None
-
-        # Build hot pixel map from unsmoothed dark BEFORE smoothing.
-        # Dark smoothing destroys per-pixel hot pixel information, so we
-        # capture it first for Bayer-level correction in each light frame.
-        masters['hot_pixel_map'] = None
-        if masters.get('dark') is not None:
-            hot_map = build_hot_pixel_map(masters['dark'])
-            n_hot = int(np.sum(hot_map))
-            if n_hot > 0:
-                masters['hot_pixel_map'] = hot_map
-                safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
-
-        # Smooth master calibration frames to reduce pixel-level noise.
-        # With few calibration frames (especially 1), per-pixel noise is as high
-        # as a single light frame — this noise is correlated across all lights
-        # and does NOT stack out.  Calibration corrects large-scale effects
-        # (bias pedestal, thermal gradient, vignetting/dust), so heavy smoothing
-        # preserves the correction while eliminating the noise penalty.
-        if masters.get('bias') is not None:
-            n_bias = len(frames['bias'])
-            # Bias is nearly constant; smooth aggressively
-            sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
-            masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma=sigma_b)
-        if masters.get('dark') is not None:
-            n_dark = len(frames['dark'])
-            # Dark has amp-glow gradients (>100px scale); moderate smoothing
-            sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
-            masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
-        if masters.get('flat') is not None:
-            n_flat = len(frames['flat'])
-            # Flat has vignetting + dust donuts (>30px); preserve those.
-            # CRITICAL: smooth each Bayer colour channel independently.
-            # A whole-image Gaussian with sigma > ~2 px averages adjacent R/G/B
-            # Bayer pixels together, making flat_norm identical for all channels
-            # (~0.888) and completely disabling per-channel QE correction.
-            # Per-channel smoothing keeps the correct flat_norm values
-            # (R~=0.39, G~=1.00, B~=1.16 for this camera) so the flat field
-            # simultaneously corrects vignetting AND camera spectral response.
-            sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
-            flat_raw = masters['flat'].astype(np.float32)
-            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                ch = flat_raw[r_off::2, c_off::2]
-                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
-            masters['flat'] = flat_raw
+        masters = _build_masters(frames, stats)
 
         # Validate calibration frame dimensions match light frames
         if frames['light']:
@@ -638,15 +569,6 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                             safe_print(f"  ⚠ WARNING: {cal_name} dimensions {cal_shape[1]}×{cal_shape[0]} "
                                        f"don't match lights {light_w}×{light_h} — disabling {cal_name} calibration")
                             masters[cal_name] = None
-
-        # Store dark exposure time so _process_single_frame can scale correctly
-        masters['dark_exptime'] = None
-        if frames.get('dark'):
-            try:
-                masters['dark_exptime'] = float(
-                    frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
-            except Exception as e:
-                safe_print(f"  WARNING: Could not read dark frame EXPTIME ({e}) — dark scaling disabled")
 
         # --- Calibration frame analysis ---
         if frames['dark'] or frames['flat'] or frames['bias']:
@@ -736,9 +658,6 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                         safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%  -> {f_quality}")
             except Exception:
                 pass
-
-        if frames['dark'] or frames['flat'] or frames['bias']:
-            stats.calibration_time = time.time() - cal_start
 
         if getattr(args, 'health_check', False):
             run_health_check(frames, masters, d)
@@ -858,6 +777,14 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
 
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
+
+        # Remove per-target temp stacks now that the combined output is written
+        for p in tmp_stacks:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+            _cleanup_deregister(p)
 
     # Overall summary
     total_time = time.time() - overall_start
@@ -1226,8 +1153,6 @@ def parse_args():
         no_reg_residual_check=False,
         reg_residual_reject=False,
         patch_registration=False,
-        poly_distortion=False,
-        poly_distortion_degree=2,
         # Stacking internals
         percentile_low=20.0,
         percentile_high=80.0,
@@ -1253,15 +1178,10 @@ def parse_args():
         comet_designation=None,
         observer_site=None,
         comet_detrail=False,
-        hdr_short_exptime=1.0,
-        hdr_long_exptime=1.0,
-        drizzle_drop_size=0.7,
         weight_snr=1.0,
         weight_fwhm=1.0,
         weight_stars=1.0,
         weight_noise=False,
-        cr_sigclip=4.5,
-        cr_objlim=5.0,
         # Improvements 1-9
         max_ellipticity=0.5,
         consensus_ref=False,

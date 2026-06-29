@@ -120,62 +120,132 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     if data is None or data.size == 0:
         return {'error': 'empty data array'}
 
+    # ── GPU calibration probe: decide once per frame size whether GPU is faster ──
+    _gpu_ctx = get_gpu()
+    _use_gpu_calib = False
+    if _gpu_ctx.active and data.ndim == 2:
+        _shape = data.shape
+        if _shape not in _gpu_calib_cache:
+            with _gpu_calib_lock:
+                if _shape not in _gpu_calib_cache:
+                    _ensure_gpu_masters(masters, _gpu_ctx)
+                    _gpu_calib_cache[_shape] = _probe_gpu_calibration(
+                        _shape[0], _shape[1], _gpu_ctx, masters)
+        _use_gpu_calib = _gpu_calib_cache.get(_shape, False)
+
     # Calibration — preserve negative noise through bias/dark subtraction,
     # clip only once after all steps to avoid cumulative truncation of shadow detail
     try:
-        bias_arr = masters.get('bias')
-        if bias_arr is not None and bias_arr.shape != data.shape:
-            bias_arr = None
-        if bias_arr is not None:
-            data = data.astype(np.float32, copy=False)
-            data -= bias_arr
+        if _use_gpu_calib:
+            # ── GPU path: H→D transfer once, then dark/flat on device ──
+            # data stays as CuPy through green_equalize + bilinear debayer.
+            try:
+                xp  = _gpu_ctx.xp
+                gm  = _gpu_masters
+                data_g = xp.asarray(data.astype(np.float32))
 
-        dark_arr = masters.get('dark')
-        if dark_arr is not None and dark_arr.shape == data.shape:
-            dark_exptime = masters.get('dark_exptime') or None
-            light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
-            if dark_exptime and light_exptime and dark_exptime > 0:
-                dark_scale = light_exptime / dark_exptime
-                if abs(dark_scale - 1.0) > 0.05:
-                    key = (round(dark_exptime, 1), round(light_exptime, 1))
-                    if key not in _warned_dark_scales:
-                        _warned_dark_scales.add(key)
-                        safe_print(f"  NOTE: dark scaling {dark_scale:.2f}x "
-                                   f"(light {light_exptime:.1f}s / dark {dark_exptime:.1f}s) "
-                                   f"— ensure dark exposure matches lights for best results")
-            else:
-                dark_scale = 1.0
-            # Subtract scaled dark in-place: data -= (dark - bias) * scale
-            # = data -= dark*scale, then += bias*scale (avoiding a full dark_current copy)
-            data = data.astype(np.float32, copy=False)
-            np.subtract(data, dark_arr * dark_scale, out=data)
+                bias_g = gm.get('bias')
+                if bias_g is not None and bias_g.shape == data_g.shape:
+                    data_g = data_g - bias_g
+
+                dark_g = gm.get('dark')
+                if dark_g is not None and dark_g.shape == data_g.shape:
+                    dark_exptime = masters.get('dark_exptime') or None
+                    light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
+                    if dark_exptime and light_exptime and dark_exptime > 0:
+                        dark_scale = light_exptime / dark_exptime
+                        if abs(dark_scale - 1.0) > 0.05:
+                            _wk = (round(dark_exptime, 1), round(light_exptime, 1))
+                            if _wk not in _warned_dark_scales:
+                                _warned_dark_scales.add(_wk)
+                                safe_print(f"  NOTE: dark scaling {dark_scale:.2f}x "
+                                           f"(light {light_exptime:.1f}s / dark {dark_exptime:.1f}s) "
+                                           f"-- ensure dark exposure matches lights for best results")
+                    else:
+                        dark_scale = 1.0
+                    data_g = data_g - dark_g * dark_scale
+                    if bias_g is not None and bias_g.shape == data_g.shape:
+                        data_g = data_g + bias_g * dark_scale
+
+                flat_norm_g = gm.get('_flat_norm')
+                if flat_norm_g is not None and flat_norm_g.shape == data_g.shape:
+                    data_g = data_g / flat_norm_g
+
+                if not bool(xp.all(xp.isfinite(data_g))):
+                    return {'error': 'calibration produced non-finite values'}
+                data_g = xp.clip(data_g, 0, None)
+
+                # Hot-pixel map needs CPU; do a brief round-trip only when map exists.
+                # Statistical Bayer removal is skipped — _fix_hot_rgb catches hot pixels
+                # post-debayer without needing a separate Bayer-space pass.
+                hot_map = masters.get('hot_pixel_map')
+                if hot_map is not None and hot_map.shape == data_g.shape:
+                    _data_np = data_g.get()
+                    _data_np = apply_hot_pixel_map_bayer(_data_np, hot_map)
+                    data_g = xp.asarray(_data_np)
+
+                data = data_g  # CuPy; green_equalize + bilinear debayer consume it directly
+            except Exception as _gpu_exc:
+                # GPU calibration failed — disable for this shape and fall back to CPU
+                _gpu_calib_cache[data.shape] = False
+                _use_gpu_calib = False
+                if _gpu_ctx.is_oom(_gpu_exc):
+                    _gpu_ctx.free_pool()
+
+        if not _use_gpu_calib:
+            bias_arr = masters.get('bias')
+            if bias_arr is not None and bias_arr.shape != data.shape:
+                bias_arr = None
             if bias_arr is not None:
-                data += bias_arr * dark_scale
+                data = data.astype(np.float32, copy=False)
+                data -= bias_arr
 
-        flat_norm = masters.get('_flat_norm')  # pre-computed by caller when possible
-        if flat_norm is None:
-            flat_arr = masters.get('flat')
-            if flat_arr is not None and flat_arr.shape == data.shape:
-                med = np.median(flat_arr)
-                if med > 1e-6:
-                    zero_frac = float(np.mean(flat_arr < med * 0.05))
-                    if zero_frac > 0.01:
-                        safe_print(f"  WARNING: flat field has {zero_frac * 100:.1f}% near-zero "
-                                   f"pixels — possible sensor defects or bad flat")
-                    flat_norm = np.clip(flat_arr / med, 0.4, 2.5)
-        if flat_norm is not None and flat_norm.shape == data.shape:
-            data = data.astype(np.float32, copy=False)
-            data /= flat_norm
+            dark_arr = masters.get('dark')
+            if dark_arr is not None and dark_arr.shape == data.shape:
+                dark_exptime = masters.get('dark_exptime') or None
+                light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
+                if dark_exptime and light_exptime and dark_exptime > 0:
+                    dark_scale = light_exptime / dark_exptime
+                    if abs(dark_scale - 1.0) > 0.05:
+                        key = (round(dark_exptime, 1), round(light_exptime, 1))
+                        if key not in _warned_dark_scales:
+                            _warned_dark_scales.add(key)
+                            safe_print(f"  NOTE: dark scaling {dark_scale:.2f}x "
+                                       f"(light {light_exptime:.1f}s / dark {dark_exptime:.1f}s) "
+                                       f"-- ensure dark exposure matches lights for best results")
+                else:
+                    dark_scale = 1.0
+                # Subtract scaled dark in-place: data -= (dark - bias) * scale
+                # = data -= dark*scale, then += bias*scale (avoiding a full dark_current copy)
+                data = data.astype(np.float32, copy=False)
+                np.subtract(data, dark_arr * dark_scale, out=data)
+                if bias_arr is not None:
+                    data += bias_arr * dark_scale
 
-        if not np.isfinite(data).all():
-            return {'error': 'calibration produced non-finite values'}
-        data = np.clip(data, 0, None)
-        if data.ndim == 2 and masters.get('hot_pixel_map') is not None:
-            hot_map = masters['hot_pixel_map']
-            if hot_map.shape == data.shape:
-                data = apply_hot_pixel_map_bayer(data, hot_map)
-        if data.ndim == 2:
-            data = remove_hot_pixels_bayer(data)
+            flat_norm = masters.get('_flat_norm')  # pre-computed by caller when possible
+            if flat_norm is None:
+                flat_arr = masters.get('flat')
+                if flat_arr is not None and flat_arr.shape == data.shape:
+                    med = np.median(flat_arr)
+                    if med > 1e-6:
+                        zero_frac = float(np.mean(flat_arr < med * 0.05))
+                        if zero_frac > 0.01:
+                            safe_print(f"  WARNING: flat field has {zero_frac * 100:.1f}% near-zero "
+                                       f"pixels -- possible sensor defects or bad flat")
+                        flat_norm = np.clip(flat_arr / med, 0.4, 2.5)
+            if flat_norm is not None and flat_norm.shape == data.shape:
+                data = data.astype(np.float32, copy=False)
+                data /= flat_norm
+
+            if not np.isfinite(data).all():
+                return {'error': 'calibration produced non-finite values'}
+            data = np.clip(data, 0, None)
+            if data.ndim == 2 and masters.get('hot_pixel_map') is not None:
+                hot_map = masters['hot_pixel_map']
+                if hot_map.shape == data.shape:
+                    data = apply_hot_pixel_map_bayer(data, hot_map)
+            if data.ndim == 2:
+                data = remove_hot_pixels_bayer(data)
     except Exception as e:
         return {'error': f'calibration error: {e}'}
 
@@ -184,6 +254,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', session_bayer or 'RGGB'))
             data = green_equalize(data, pattern=bayer)
+            # Malvar/VNG use cv2 which requires numpy — transfer D→H if data is on GPU
+            if debayer_method != 'bilinear' and hasattr(data, 'get'):
+                data = data.get()
             rgb = debayer(data, pattern=bayer, method=debayer_method)
         else:
             rgb = data
@@ -270,6 +343,101 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 # Module-level state for parallel workers (must be module-level for pickling)
 _worker_masters: Dict[str, Any] = {}
 _warned_dark_scales: set = set()  # dedup dark-scale mismatch warnings across frames
+
+# GPU calibration probe cache — probed once per unique frame size per session
+_gpu_calib_cache: Dict[Tuple[int, int], bool] = {}
+_gpu_calib_lock = threading.Lock()
+_gpu_masters: Dict[str, Any] = {}        # GPU-resident copies of master arrays
+_gpu_masters_sig: Optional[Tuple] = None  # signature to detect master changes
+
+
+def _masters_sig(masters: Dict) -> Tuple:
+    """Lightweight signature so we can detect when masters change between sessions."""
+    def _s(key):
+        arr = masters.get(key)
+        return (arr.shape, arr.dtype.str) if isinstance(arr, np.ndarray) else None
+    return (_s('dark'), _s('flat'), _s('bias'))
+
+
+def _ensure_gpu_masters(masters: Dict, gpu) -> None:
+    """Upload master calibration arrays to GPU once per session; re-uploads on change."""
+    global _gpu_masters, _gpu_masters_sig
+    sig = _masters_sig(masters)
+    if sig == _gpu_masters_sig and _gpu_masters:
+        return
+    xp = gpu.xp
+    result: Dict[str, Any] = {}
+    for key in ('bias', 'dark', 'flat', '_flat_norm', 'hot_pixel_map'):
+        arr = masters.get(key)
+        if isinstance(arr, np.ndarray):
+            result[key] = xp.asarray(arr)
+        elif arr is not None:
+            result[key] = arr
+    # Derive GPU _flat_norm if not pre-computed
+    if result.get('_flat_norm') is None and result.get('flat') is not None:
+        flat_g = result['flat']
+        med = float(xp.median(flat_g))
+        if med > 1e-6:
+            result['_flat_norm'] = xp.clip(flat_g / med, 0.4, 2.5)
+    for key, val in masters.items():
+        if key not in result:
+            result[key] = val
+    _gpu_masters = result
+    _gpu_masters_sig = sig
+
+
+def _probe_gpu_calibration(H: int, W: int, gpu, masters: Dict) -> bool:
+    """Benchmark CPU vs GPU for one frame's calibration.
+
+    Measures CPU numpy (dark/flat ops) vs GPU path (PCIe H→D transfer + CuPy ops).
+    Masters are assumed pre-uploaded to GPU.  Returns True if GPU wins.
+    """
+    import time
+    xp = gpu.xp
+    has_dark = masters.get('dark') is not None
+    has_flat = masters.get('_flat_norm') is not None or masters.get('flat') is not None
+
+    rng = np.random.default_rng(0)
+    frame_np = rng.random((H, W)).astype(np.float32)
+    dark_np  = np.full((H, W), 0.05, dtype=np.float32) if has_dark else None
+    flat_np  = np.ones((H, W), dtype=np.float32)        if has_flat else None
+    dark_g   = xp.asarray(dark_np) if dark_np is not None else None
+    flat_g   = xp.asarray(flat_np) if flat_np is not None else None
+
+    N = 8
+    # CPU warmup
+    for _ in range(2):
+        d = frame_np.copy()
+        if dark_np is not None: d -= dark_np
+        if flat_np is not None: d /= flat_np
+    t0 = time.perf_counter()
+    for _ in range(N):
+        d = frame_np.copy()
+        if dark_np is not None: np.subtract(d, dark_np, out=d)
+        if flat_np is not None: d /= flat_np
+    cpu_s = (time.perf_counter() - t0) / N
+
+    try:
+        # GPU warmup (H→D transfer included; masters already on device)
+        for _ in range(3):
+            d_g = xp.asarray(frame_np)
+            if dark_g is not None: d_g -= dark_g
+            if flat_g is not None: d_g /= flat_g
+            xp.cuda.Device(0).synchronize()
+        t0 = time.perf_counter()
+        for _ in range(N):
+            d_g = xp.asarray(frame_np)
+            if dark_g is not None: d_g -= dark_g
+            if flat_g is not None: d_g /= flat_g
+        xp.cuda.Device(0).synchronize()
+        gpu_s = (time.perf_counter() - t0) / N
+    except Exception:
+        return False
+
+    winner = 'GPU' if gpu_s < cpu_s else 'CPU'
+    safe_print(f"  Calibration probe {W}x{H}: "
+               f"CPU {cpu_s*1000:.1f}ms  GPU {gpu_s*1000:.1f}ms  -> {winner} path selected")
+    return gpu_s < cpu_s
 
 
 def _init_worker_shm(shm_specs: Dict[str, tuple]) -> None:
@@ -445,21 +613,31 @@ def execute_frame_processing(
                                                 Config.GPU_VRAM_RESERVE_MB), n)
         else:
             n_workers = min(os.cpu_count() or 4, n)
-        safe_print(f"  Processing {n} frames with {n_workers} threads"
-                   f"{' (GPU)' if gpu.active else ''}...")
 
-        # Prefetch FITS data in a dedicated I/O thread pool.  FITS reads release
-        # the GIL (system calls), so these overlap with compute threads for free.
-        # The I/O pool runs up to 4 concurrent reads regardless of n_workers so
-        # we don't swamp the disk with too many concurrent seeks.
         _adv = getattr(args, 'advanced_metrics', True)
-        _sb = getattr(args, '_session_bayer', None)
-        _io_workers = min(4, n)
+        _sb  = getattr(args, '_session_bayer', None)
+        _pgr = getattr(args, 'pre_gradient_removal', False)
+        _ca  = getattr(args, 'ca_correction', False)
+        _cr  = getattr(args, 'cosmic_ray_rejection', False)
+
+        # I/O prefetch pool — sized to keep GPU workers fed without thrashing the disk
+        _io_workers = min(max(n_workers, 8), 32, n)
         _io_pool = ThreadPoolExecutor(max_workers=_io_workers)
         _load_futures = {i: _io_pool.submit(load_frame, f.path)
                          for i, f in enumerate(lights)}
 
-        _pgr = getattr(args, 'pre_gradient_removal', False)
+        # When GPU is active, quality metrics (CPU-bound: star detection, FWHM) run
+        # in a dedicated CPU pool so GPU workers are never idle waiting for photutils.
+        # GPU workers skip quality (skip_quality=True) and return immediately after
+        # writing to memmap, keeping VRAM freed as quickly as possible.
+        _use_qpool = gpu.active
+        _n_cpu = min(os.cpu_count() or 4, n)
+        _qpool = ThreadPoolExecutor(max_workers=_n_cpu) if _use_qpool else None
+        _qfuts: Dict[int, Any] = {}   # frame index → quality Future
+
+        safe_print(f"  Processing {n} frames: {n_workers} GPU + {_n_cpu} quality threads"
+                   if _use_qpool else
+                   f"  Processing {n} frames with {n_workers} threads...")
 
         def _thread_process_frame(i, f):
             try:
@@ -469,17 +647,21 @@ def execute_frame_processing(
             with gpu.stream_context():
                 result = _process_single_frame(
                     f.path, f.header, masters, args.debayer_method, args.white_balance,
-                    ca_correction=getattr(args, 'ca_correction', False),
-                    cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
+                    ca_correction=_ca,
+                    cosmic_ray_rejection=_cr,
                     advanced_metrics=_adv,
                     preloaded_data=preloaded,
                     session_bayer=_sb,
-                    pre_gradient_removal=_pgr)
+                    pre_gradient_removal=_pgr,
+                    skip_quality=_use_qpool)  # GPU workers skip quality
             if result.get('error'):
                 return i, None, result['error'], None
             mem_rgb[i] = result['rgb']
             mem_lum[i] = result['lum']
             return i, result['metrics'], None, result['lum']
+
+        _completed = 0
+        _free_interval = Config.GPU_POOL_FREE_INTERVAL
 
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_thread_process_frame, i, f): i
@@ -497,19 +679,50 @@ def execute_frame_processing(
                     if args.verbose:
                         safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
                 else:
-                    f.metrics = metrics
                     cached_lums[i] = lum_arr
-                    if args.verbose:
-                        m = f.metrics
-                        safe_print(f'    {os.path.basename(f.path)}: '
-                                   f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
-                                   f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
-                                   f'sharpness={m.get("sharpness",0):.0f}')
-                        safe_print(f'      bg={m.get("background",0):.1f}  '
-                                   f'noise={m.get("noise",0):.2f}  '
-                                   f'brightness={m.get("brightness",0):.1f}  '
-                                   f'contrast={m.get("contrast",0):.1f}  '
-                                   f'dynamic_range={m.get("dynamic_range",0):.0f}')
+                    if _use_qpool and lum_arr is not None:
+                        # Submit quality to CPU pool; GPU thread is already freed
+                        _qfuts[i] = _qpool.submit(
+                            compute_quality_metrics, lum_arr, advanced_metrics=_adv)
+                    else:
+                        f.metrics = metrics
+                        if args.verbose:
+                            m = f.metrics
+                            safe_print(f'    {os.path.basename(f.path)}: '
+                                       f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
+                                       f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
+                                       f'sharpness={m.get("sharpness",0):.0f}')
+                            safe_print(f'      bg={m.get("background",0):.1f}  '
+                                       f'noise={m.get("noise",0):.2f}  '
+                                       f'brightness={m.get("brightness",0):.1f}  '
+                                       f'contrast={m.get("contrast",0):.1f}  '
+                                       f'dynamic_range={m.get("dynamic_range",0):.0f}')
+                _completed += 1
+                # Periodically free CuPy's cached memory pool to prevent VRAM exhaustion
+                # from accumulating unused cached blocks across many completed frames.
+                if gpu.active and (_completed % _free_interval == 0):
+                    gpu.free_pool()
+
+        # Collect deferred quality results (CPU pool runs while GPU was active)
+        if _qfuts:
+            for i, q_fut in _qfuts.items():
+                f = lights[i]
+                try:
+                    f.metrics = q_fut.result()
+                except Exception:
+                    f.metrics = {}
+                if args.verbose and f.metrics:
+                    m = f.metrics
+                    safe_print(f'    {os.path.basename(lights[i].path)}: '
+                               f'score={m.get("score",0):.0f}  SNR={m.get("snr",0):.1f}  '
+                               f'stars={m.get("star_count",0)}  '
+                               f'FWHM={m.get("fwhm",0):.1f}  '
+                               f'sharpness={m.get("sharpness",0):.0f}')
+            _qpool.shutdown(wait=False)
+
+        if gpu.active:
+            gpu.free_pool()  # final pool flush before moving to Phase 2
+
         _io_pool.shutdown(wait=False)
         mem_rgb.flush()
         mem_lum.flush()

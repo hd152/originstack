@@ -15,6 +15,7 @@ from scipy import ndimage
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, get_logger
+from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
 
 try:
     from tqdm import tqdm
@@ -115,6 +116,7 @@ def _make_rej_mask(N: int, H: int, W: int, C: int) -> np.ndarray:
                             f'stack_rejmap_{os.getpid()}_{N}x{H}x{W}.dat')
         arr = np.memmap(path, dtype=bool, mode='w+', shape=(N, H, W, C))
         arr._cleanup_path = path  # type: ignore[attr-defined]
+        _cleanup_register(path)
         return arr
     return np.zeros((N, H, W, C), dtype=bool)
 
@@ -139,12 +141,19 @@ def _cap_tile_workers(n_workers: int, N: int, tile_size: int, C: int) -> int:
 def _free_rej_mask(mask: np.ndarray) -> None:
     """Delete a rejection mask and clean up its backing file if disk-based."""
     path = getattr(mask, '_cleanup_path', None)
+    if path is not None:
+        try:
+            if hasattr(mask, '_mmap') and mask._mmap is not None:
+                mask._mmap.close()
+        except Exception:
+            pass
     del mask
     if path is not None:
         try:
             os.remove(path)
         except Exception:
             pass
+        _cleanup_deregister(path)
 
 
 def _adaptive_tile_size(N: int, C: int) -> int:
@@ -1303,72 +1312,6 @@ def run_stacking_phase(
 # ---------------------------------------------------------------------------
 # HDR stack blending
 # ---------------------------------------------------------------------------
-
-def hdr_blend_stacks(short_stack: np.ndarray, long_stack: np.ndarray,
-                     short_exptime: float = 1.0, long_exptime: float = 1.0,
-                     transition_width: float = None) -> np.ndarray:
-    """SNR-weighted HDR blend of two stacks with different exposure times.
-
-    Merges a short-exposure stack (unsaturated bright cores) with a
-    long-exposure stack (high-SNR faint regions) using a sigmoid transition
-    centred at the saturation knee of the long-exposure stack.
-
-    The blend weight for the long stack is:
-
-        w_long(x) = sigmoid( (x_norm - knee) / transition_width )
-
-    where ``x_norm`` is the per-pixel luminance normalised to [0, 1] and
-    ``knee`` is estimated as the 98th percentile of the long-stack luminance
-    (the level above which the long exposure is likely saturated or nonlinear).
-
-    The short stack is rescaled to match the long stack's flux calibration
-    via the ``short_exptime / long_exptime`` ratio before blending.
-
-    Args:
-        short_stack:      Float32 (H, W, 3) shorter-exposure stack.
-        long_stack:       Float32 (H, W, 3) longer-exposure stack.
-        short_exptime:    Short-stack total effective exposure (s or arbitrary).
-        long_exptime:     Long-stack total effective exposure.
-        transition_width: Fractional luminance range for the sigmoid
-                          (default Config.HDR_TRANSITION_WIDTH = 0.1).
-
-    Returns:
-        Blended float32 HDR image (H, W, 3).
-    """
-    if transition_width is None:
-        transition_width = Config.HDR_TRANSITION_WIDTH
-
-    if short_stack.shape != long_stack.shape:
-        raise ValueError(f"HDR blend: shape mismatch "
-                         f"({short_stack.shape} vs {long_stack.shape})")
-
-    # Scale short stack to long stack's calibration
-    scale = float(long_exptime) / max(float(short_exptime), 1e-9)
-    short_scaled = short_stack.astype(np.float64) * scale
-    long_d = long_stack.astype(np.float64)
-
-    lum_long = (0.299 * long_d[:, :, 0] + 0.587 * long_d[:, :, 1]
-                + 0.114 * long_d[:, :, 2])
-    white = float(np.percentile(lum_long, 98))
-    if white < 1e-9:
-        return long_stack.copy()
-
-    lum_norm = np.clip(lum_long / white, 0.0, 1.0)
-    knee = float(np.percentile(lum_norm, 95))
-
-    # Sigmoid: 0 (use short) → 1 (use long) as luminance increases through knee
-    sig_arg = np.clip((lum_norm - knee) / max(transition_width, 1e-4), -10.0, 10.0)
-    w_long = 1.0 / (1.0 + np.exp(-sig_arg))   # high lum → short stack wins
-    # Invert: for saturated bright areas we want the short (unsaturated) stack
-    w_short = w_long          # bright pixels → more short weight
-    w_long_use = 1.0 - w_short
-
-    w_long_3 = w_long_use[:, :, np.newaxis]
-    w_short_3 = w_short[:, :, np.newaxis]
-
-    blended = w_long_3 * long_d + w_short_3 * short_scaled
-    return np.clip(blended, 0.0, None).astype(np.float32)
-
 
 # ---------------------------------------------------------------------------
 # Comet dual-track stacking

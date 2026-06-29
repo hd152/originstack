@@ -468,14 +468,7 @@ def _apply_quality_settings(
         if target_type == 'globular_cluster' or snr > 20:
             _set('bm3d_stride', 4)
 
-    # 8. Polynomial distortion correction: enable when seeing is poor AND
-    #    enough stars exist for a stable degree-2 polynomial fit (want 40+).
-    #    Poor FWHM is correlated with tracking errors that introduce geometric
-    #    distortion not captured by the shift/affine registration pass.
-    if fwhm > 4.0 and sc >= 40 and not getattr(args, 'poly_distortion', False):
-        _set('poly_distortion', True)
-
-    # 9. TV deconvolution iteration count scaled to stack SNR.
+    # 8. TV deconvolution iteration count scaled to stack SNR.
     #    Low SNR: fewer iterations to avoid converging toward noise.
     #    High SNR: more iterations converge to a sharper solution.
     if getattr(args, 'deconvolve_tv', False):

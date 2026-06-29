@@ -84,7 +84,6 @@ from src.debayer import (
     remove_hot_pixels_bayer,
     build_hot_pixel_map,
     apply_hot_pixel_map_bayer,
-    background_gradient_subtract,
     remove_hot_pixels_rgb,
     correct_chromatic_aberration,
 )

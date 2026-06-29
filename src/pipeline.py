@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import os
 import shutil
 import tempfile
@@ -23,6 +24,7 @@ from src.postprocess import postprocess_stack
 from src.checkpoint import (save_checkpoint, save_raw_stack, load_raw_stack,
                             can_resume, restore_frame_state, cleanup_checkpoint,
                             load_transforms)
+from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
 
 
 try:
@@ -45,20 +47,31 @@ class _MemmapManager:
         mm = np.memmap(path, dtype=dtype, mode='w+', shape=shape)
         self._files.append(path)
         self._memmaps.append(mm)
+        _cleanup_register(path)
         return mm
 
     def cleanup(self):
+        # Explicitly close the underlying mmap handles.  On Windows,
+        # os.remove() on an open memory-mapped file raises PermissionError,
+        # so we must release the OS file lock before attempting deletion.
         for mm in self._memmaps:
             try:
-                del mm
+                mm.flush()
+            except Exception:
+                pass
+            try:
+                if hasattr(mm, '_mmap') and mm._mmap is not None:
+                    mm._mmap.close()
             except Exception:
                 pass
         self._memmaps.clear()
+        gc.collect()  # flush any remaining mmap references held by GC cycles
         for p in self._files:
             try:
                 os.remove(p)
             except Exception:
                 pass
+            _cleanup_deregister(p)
         self._files.clear()
 
     def __enter__(self):
