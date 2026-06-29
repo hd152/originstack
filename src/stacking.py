@@ -100,6 +100,76 @@ def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
     return result
 
 
+# ---------------------------------------------------------------------------
+# Memory-bounded helpers for large stacks
+# ---------------------------------------------------------------------------
+
+_REJ_MASK_THRESHOLD = 200 * 1024 * 1024  # 200 MB — above this use a disk memmap
+
+
+def _make_rej_mask(N: int, H: int, W: int, C: int) -> np.ndarray:
+    """Allocate a rejection mask, falling back to a disk-backed memmap for large N."""
+    total = N * H * W * C  # bool: 1 byte per element
+    if total > _REJ_MASK_THRESHOLD:
+        path = os.path.join(tempfile.gettempdir(),
+                            f'stack_rejmap_{os.getpid()}_{N}x{H}x{W}.dat')
+        arr = np.memmap(path, dtype=bool, mode='w+', shape=(N, H, W, C))
+        arr._cleanup_path = path  # type: ignore[attr-defined]
+        return arr
+    return np.zeros((N, H, W, C), dtype=bool)
+
+
+def _cap_tile_workers(n_workers: int, N: int, tile_size: int, C: int) -> int:
+    """Limit tile workers so concurrent tile buffers fit within available RAM.
+
+    Each tile worker holds two (N, tile, tile, C) float32 buffers — the
+    input tile and the masked copy inside _sigma_clip_tile.
+    """
+    per_worker_bytes = N * tile_size * tile_size * C * 4 * 2  # float32, 2 copies
+    try:
+        import psutil
+        avail = psutil.virtual_memory().available
+        safe = max(1, int(avail * 0.5 / max(per_worker_bytes, 1)))
+    except ImportError:
+        # Without psutil: conservatively allow 1 GB budget for tile workers
+        safe = max(1, (1024 * 1024 * 1024) // max(per_worker_bytes, 1))
+    return min(n_workers, safe)
+
+
+def _free_rej_mask(mask: np.ndarray) -> None:
+    """Delete a rejection mask and clean up its backing file if disk-based."""
+    path = getattr(mask, '_cleanup_path', None)
+    del mask
+    if path is not None:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
+def _adaptive_tile_size(N: int, C: int) -> int:
+    """Return the largest tile size that keeps one tile's working set in available RAM.
+
+    For large N (e.g. 972 frames) the default 256-pixel tile requires
+    N×T²×C×4×2 bytes per worker (float32 tile + masked/sorted copy).
+    When that exceeds available RAM every tile triggers OS paging and
+    throughput collapses by 10–100×.  This function scales T down until
+    one tile fits comfortably, without dropping below 16 px.
+    """
+    default = Config.TILE_SIZE
+    try:
+        import psutil
+        avail = psutil.virtual_memory().available
+        # Budget: 40 % of available RAM for one tile worker's working set
+        budget = avail * 0.4
+        max_t_sq = budget / max(N * C * 4 * 2, 1)
+        max_t = int(max_t_sq ** 0.5)
+        # Round down to nearest multiple of 16, min 16, cap at default
+        return max(16, (min(default, max_t) // 16) * 16)
+    except ImportError:
+        return default
+
+
 def _lanczos_kernel(x: np.ndarray, a: int = 3) -> np.ndarray:
     """Lanczos interpolation kernel.
 
@@ -442,9 +512,9 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
         verbose: Print per-tile progress.
     """
     N, H, W, C = data.shape
-    tile_size = Config.TILE_SIZE
+    tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
-    rej_mask_full = np.zeros((N, H, W, C), dtype=bool) if return_mask else None
+    rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
 
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -464,7 +534,7 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
             return coords, tile_result, tile_mask
         return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize, use_mad), None
 
-    n_tile_workers = min(os.cpu_count() or 4, len(tile_coords))
+    n_tile_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
     with ThreadPoolExecutor(max_workers=n_tile_workers) as executor:
         for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
@@ -495,7 +565,7 @@ def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:
         verbose: Print tiling summary.
     """
     N, H, W, C = data.shape
-    tile_size = Config.TILE_SIZE
+    tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
 
     n_tiles_y = (H + tile_size - 1) // tile_size
@@ -512,7 +582,7 @@ def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:
         tile = np.asarray(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
         return coords, np.median(tile, axis=0).astype(np.float32)
 
-    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         for coords, tile_result in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
@@ -572,9 +642,9 @@ def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 8
         verbose: Print summary.
     """
     N, H, W, C = data.shape
-    tile_size = Config.TILE_SIZE
+    tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
-    rej_mask_full = np.zeros((N, H, W, C), dtype=bool) if return_mask else None
+    rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
 
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -596,7 +666,7 @@ def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 8
             return coords, tile_result, tile_mask
         return coords, tile_result, None
 
-    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
@@ -720,9 +790,9 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
     if max_outliers <= 0:
         max_outliers = max(1, N // 4)
 
-    tile_size = Config.TILE_SIZE
+    tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
-    rej_mask_full = np.zeros((N, H, W, C), dtype=bool) if return_mask else None
+    rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
 
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -749,7 +819,7 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
             return coords, tile_result, tile_mask
         return coords, tile_result, None
 
-    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
@@ -770,7 +840,7 @@ def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: flo
                          verbose: bool = False) -> np.ndarray:
     """Combine frames using trimmed mean (sorted, discard low/high fractions, mean)."""
     N, H, W, C = data.shape
-    tile_size = Config.TILE_SIZE
+    tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
     n_tiles_y = (H + tile_size - 1) // tile_size
     n_tiles_x = (W + tile_size - 1) // tile_size
@@ -793,7 +863,7 @@ def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: flo
         trimmed = sorted_tile[n_low:n_low + n_keep]
         return coords, np.mean(trimmed, axis=0).astype(np.float32)
 
-    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         for coords, tile_result in executor.map(_process_tile, tile_coords):
             ty, ty_end, tx, tx_end = coords
@@ -801,6 +871,9 @@ def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: flo
     if verbose:
         safe_print(f"    Trimmed mean: trim_low={trim_low}, trim_high={trim_high}")
     return result
+
+
+_PATCH_FRAME_CHUNK = 64  # frames processed per vectorised batch inside each tile worker
 
 
 def patch_weighted_mean_combine(
@@ -818,6 +891,11 @@ def patch_weighted_mean_combine(
     blurry region of the same frame — exactly the lucky imaging principle
     applied to deep-sky (non-planetary) data.
 
+    Implemented as a tiled, parallel combine matching the pattern used by
+    sigma_clip_combine and median_combine.  Each tile reads frames in batches
+    of _PATCH_FRAME_CHUNK and accumulates with a vectorised einsum, eliminating
+    the per-frame Python loop overhead that dominated runtime for large stacks.
+
     Args:
         mem_aligned:    (N, H, W, C) float32 memmap of aligned, cropped frames.
         quality_maps:   List of N (H, W) float32 per-pixel quality weight arrays.
@@ -828,46 +906,80 @@ def patch_weighted_mean_combine(
         (H, W, C) float32 stacked image.
     """
     N, H, W, C = mem_aligned.shape
-    acc = np.zeros((H, W, C), dtype=np.float64)
-    weight_sum = np.zeros((H, W), dtype=np.float64)
+    tile_size = Config.TILE_SIZE
 
-    # Prepare rejection mask: broadcast (N, H, W) -> (N, H, W, 1) if needed
-    rej_mask_3d = None
-    if rejection_mask is not None:
-        if rejection_mask.ndim == 4:
-            rej_mask_3d = rejection_mask
-        elif rejection_mask.ndim == 3:
-            rej_mask_3d = rejection_mask[:, :, :, np.newaxis]
+    gw = (np.asarray(global_weights, dtype=np.float32)
+          if global_weights is not None else None)
 
-    for j in range(N):
-        frame = mem_aligned[j].astype(np.float64)
-        qmap = quality_maps[j].astype(np.float64)
-        # Crop quality map to match aligned frame if shapes differ
-        if qmap.shape != (H, W):
-            from scipy.ndimage import zoom
-            qmap = zoom(qmap, (H / qmap.shape[0], W / qmap.shape[1]), order=1)
-            qmap = np.clip(qmap, 0.0, 1.0)
-
-        w = qmap
-        if global_weights is not None:
-            w = w * float(global_weights[j])
-
-        # Apply rejection mask: zero out weight for rejected pixels
-        if rej_mask_3d is not None:
-            # rej_mask_3d[j] is (H, W, C); use mean across channels for qmap
-            rej_j = rej_mask_3d[j]  # (H, W, C)
-            rej_lum = rej_j.mean(axis=2)  # (H, W)
-            rej_w = 1.0 - rej_lum.astype(np.float64)
-            w = w * rej_w
-
-        weight_sum += w
-        for c in range(C):
-            acc[:, :, c] += frame[:, :, c] * w
-
-    safe_denom = np.maximum(weight_sum, 1e-12)
     result = np.zeros((H, W, C), dtype=np.float32)
-    for c in range(C):
-        result[:, :, c] = (acc[:, :, c] / safe_denom).astype(np.float32)
+
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    tile_coords = [
+        (ty * tile_size, min((ty + 1) * tile_size, H),
+         tx * tile_size, min((tx + 1) * tile_size, W))
+        for ty in range(n_tiles_y) for tx in range(n_tiles_x)
+    ]
+
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        th, tw = ty_end - ty, tx_end - tx
+
+        acc = np.zeros((th, tw, C), dtype=np.float64)
+        wsum = np.zeros((th, tw), dtype=np.float64)
+
+        for start in range(0, N, _PATCH_FRAME_CHUNK):
+            end = min(start + _PATCH_FRAME_CHUNK, N)
+            F = end - start
+
+            # (F, th, tw, C) float32 — one strided memmap read per chunk
+            chunk = np.asarray(mem_aligned[start:end, ty:ty_end, tx:tx_end, :],
+                               dtype=np.float32)
+
+            # Per-frame patch weights for this tile: (F, th, tw)
+            qstack = np.empty((F, th, tw), dtype=np.float32)
+            for k, j in enumerate(range(start, end)):
+                qmap = quality_maps[j]
+                if qmap.shape[0] >= ty_end and qmap.shape[1] >= tx_end:
+                    qstack[k] = qmap[ty:ty_end, tx:tx_end]
+                else:
+                    from scipy.ndimage import zoom as _zoom
+                    zoomed = _zoom(qmap, (H / qmap.shape[0], W / qmap.shape[1]), order=1)
+                    qstack[k] = np.clip(zoomed[ty:ty_end, tx:tx_end], 0.0, 1.0)
+
+            w = qstack
+            if gw is not None:
+                w = w * gw[start:end, np.newaxis, np.newaxis]
+
+            if rejection_mask is not None:
+                rej = np.asarray(rejection_mask[start:end, ty:ty_end, tx:tx_end, :])
+                w = w * (1.0 - rej.mean(axis=3).astype(np.float32))
+
+            # Vectorised weighted sum across the frame dimension.
+            # einsum avoids materialising an (F, th, tw, C) float64 intermediate.
+            acc  += np.einsum('fhwc,fhw->hwc', chunk.astype(np.float64),
+                              w.astype(np.float64))
+            wsum += w.astype(np.float64).sum(axis=0)
+
+        safe_denom = np.maximum(wsum[:, :, np.newaxis], 1e-12)
+        return coords, (acc / safe_denom).astype(np.float32)
+
+    # Peak per worker per chunk iteration: float64 chunk + float64 w (both copied)
+    per_worker_mb = (_PATCH_FRAME_CHUNK * tile_size * tile_size
+                     * (C * 8 + 8) * 2) / 1e6
+    n_workers = min(os.cpu_count() or 4, len(tile_coords))
+    try:
+        import psutil
+        avail_mb = psutil.virtual_memory().available / 1e6
+        n_workers = min(n_workers, max(1, int(avail_mb * 0.5 / per_worker_mb)))
+    except ImportError:
+        n_workers = min(n_workers, max(1, int(512 / per_worker_mb)))
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for coords, tile_result in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
+
     return result
 
 
@@ -967,6 +1079,20 @@ def run_stacking_phase(
         n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                            Config.GPU_VRAM_RESERVE_MB), n_final)
                    if gpu.active else min(os.cpu_count() or 4, n_final))
+        # Cap alignment workers so concurrent frame reads/writes don't thrash the
+        # disk when available RAM is below the total working-set size.
+        # Each worker needs: one source frame + one transformed frame in memory.
+        try:
+            import psutil as _ps
+            _avail_mb = _ps.virtual_memory().available / 1e6
+            _src_mb  = H * W * C * 4 / 1e6
+            _crop_mb = crop_h * crop_w * C * 4 / 1e6
+            _per_align_mb = _src_mb + _crop_mb + 64          # +64 MB headroom
+            _safe = max(1, int(_avail_mb * 0.6 / _per_align_mb))
+            if _safe < n_align:
+                n_align = _safe
+        except Exception:
+            pass
         with ThreadPoolExecutor(max_workers=n_align) as executor:
             futures = {executor.submit(_align_one, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
@@ -1009,6 +1135,9 @@ def run_stacking_phase(
             stacked = patch_weighted_mean_combine(mem_aligned, cropped_qmaps,
                                                   global_weights=weights,
                                                   rejection_mask=rej_mask)
+            if rej_mask is not None:
+                _free_rej_mask(rej_mask)
+                rej_mask = None
         elif args.stack_method in ('sigma_clip', 'winsorized'):
             use_winsorize = (args.stack_method == 'winsorized')
             use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')

@@ -358,7 +358,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 safe_print(f"  Restored {len(final)}/{n} accepted frames — "
                            f"reloading pixel data (skipping quality analysis)...")
                 reload_accepted_frames(final, final_indices, masters, args,
-                                       mem_rgb, mem_lum, cached_lums)
+                                       mem_rgb, mem_lum, cached_lums,
+                                       mm_rgb_path=mm_rgb_path,
+                                       mm_lum_path=mm_lum_path,
+                                       rgb_shape=rgb_shape,
+                                       lum_shape=lum_shape)
                 stats.quality_time = 0.0
             else:
                 print_phase(1, "Processing & Quality Analysis")

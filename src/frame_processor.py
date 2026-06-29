@@ -293,12 +293,13 @@ def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Opti
     (path, frame_idx, debayer_method, white_balance,
      mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
      ca_correction, cosmic_ray_rejection, advanced_metrics, session_bayer,
-     pre_gradient_removal) = args_tuple
+     pre_gradient_removal, skip_quality) = args_tuple
     global _worker_masters
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    ca_correction=ca_correction,
                                    cosmic_ray_rejection=cosmic_ray_rejection,
                                    advanced_metrics=advanced_metrics,
+                                   skip_quality=skip_quality,
                                    session_bayer=session_bayer,
                                    pre_gradient_removal=pre_gradient_removal)
     if result.get('error'):
@@ -389,7 +390,7 @@ def execute_frame_processing(
         _sb = getattr(args, '_session_bayer', None)
         _pgr = getattr(args, 'pre_gradient_removal', False)
         tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb, _pgr)
+                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb, _pgr, False)
                  for i in range(n)]
 
         try:
@@ -562,85 +563,170 @@ def reload_accepted_frames(
     mem_rgb: np.ndarray,
     mem_lum: np.ndarray,
     cached_lums: list,
+    mm_rgb_path: str = '',
+    mm_lum_path: str = '',
+    rgb_shape: tuple = (),
+    lum_shape: tuple = (),
 ) -> None:
     """Re-load and calibrate accepted frames into memmaps after a checkpoint restore.
 
     Skips quality analysis — metrics were already restored from the checkpoint JSON.
-    Only processes accepted frames, so it is faster than a full phase 1 run when
-    many frames were rejected.
+    Mirrors execute_frame_processing: uses ProcessPoolExecutor when args.parallel != 1
+    (bypasses the GIL for debayering), and adds an I/O prefetch pool on the thread
+    path so compute threads are never idle waiting for FITS reads.
     """
     n = len(final)
     gpu = get_gpu()
-    if gpu.active:
-        n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
-                                            Config.GPU_VRAM_RESERVE_MB), n)
-    else:
-        n_workers = min(os.cpu_count() or 4, n)
-
-    # Cap workers so concurrent frame data fits in available RAM.
-    # Each worker holds: raw Bayer (~1× frame) + calibration intermediates (~3×)
-    # + RGB + white-balanced copy ≈ 6× raw frame size, plus Python overhead.
-    try:
-        import psutil
-        avail_mb = psutil.virtual_memory().available / 1e6
-        H_f, W_f = mem_rgb.shape[1], mem_rgb.shape[2]
-        bayer_mb = H_f * W_f * 4 / 1e6          # float32
-        rgb_mb   = H_f * W_f * 3 * 4 / 1e6      # float32 × 3ch
-        per_worker_mb = bayer_mb * 4 + rgb_mb + 100
-        safe_workers = max(1, int(avail_mb / per_worker_mb))
-        if safe_workers < n_workers:
-            safe_print(f"  NOTE: limiting reload threads {n_workers}\u2192{safe_workers} "
-                       f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
-            n_workers = safe_workers
-    except Exception:
-        pass
-
-    safe_print(f"  Reloading {n} accepted frames ({n_workers} threads, "
-               f"quality analysis skipped)...")
 
     _build_flat_norm(masters, final)
 
-    _pgr_reload = getattr(args, 'pre_gradient_removal', False)
+    _ca  = getattr(args, 'ca_correction', False)
+    _cr  = getattr(args, 'cosmic_ray_rejection', False)
+    _sb  = getattr(args, '_session_bayer', None)
+    _pgr = getattr(args, 'pre_gradient_removal', False)
 
-    def _reload_one(j: int, f: FrameInfo, orig_idx: int):
-        with gpu.stream_context():
-            result = _process_single_frame(
-                f.path, f.header, masters, args.debayer_method, args.white_balance,
-                ca_correction=getattr(args, 'ca_correction', False),
-                cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
-                skip_quality=True,
-                pre_gradient_removal=_pgr_reload)
-        if result.get('error'):
-            return j, orig_idx, None, None, result['error']
-        return j, orig_idx, result['rgb'], result['lum'], None
+    def _worker_count_cap(n_workers: int) -> int:
+        try:
+            import psutil
+            avail_mb = psutil.virtual_memory().available / 1e6
+            H_f, W_f = mem_rgb.shape[1], mem_rgb.shape[2]
+            bayer_mb = H_f * W_f * 4 / 1e6
+            rgb_mb   = H_f * W_f * 3 * 4 / 1e6
+            per_worker_mb = bayer_mb * 4 + rgb_mb + 200
+            safe = max(1, int(avail_mb / per_worker_mb))
+            if safe < n_workers:
+                safe_print(f"  NOTE: limiting reload workers {n_workers}→{safe} "
+                           f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
+                return safe
+        except Exception:
+            pass
+        return n_workers
+
+    use_process_pool = (getattr(args, 'parallel', 1) != 1
+                        and not gpu.active
+                        and n >= 4
+                        and bool(mm_rgb_path and mm_lum_path and rgb_shape and lum_shape))
 
     n_failed = 0
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_reload_one, j, f, orig_idx): j
-                   for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
-        for future in tqdm(as_completed(futures), total=n,
-                           desc="  Reloading", unit="frame",
-                           disable=args.verbose):
-            j, orig_idx, rgb, lum, error = future.result()
-            if error:
-                safe_print(f"  WARNING: Could not reload {os.path.basename(final[j].path)}: {error}")
-                n_failed += 1
-            else:
-                mem_rgb[orig_idx] = rgb
-                mem_lum[orig_idx] = lum
-                cached_lums[orig_idx] = lum
-                if args.verbose:
-                    safe_print(f"    Reloaded: {os.path.basename(final[j].path)}")
+
+    if use_process_pool:
+        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
+        workers = _worker_count_cap(workers)
+
+        safe_print(f"  Reloading {n} accepted frames ({workers} workers, "
+                   f"quality analysis skipped)...")
+
+        shm_blocks: list = []
+        shm_specs: Dict[str, tuple] = {}
+        for name, arr in masters.items():
+            if arr is None or name.startswith('_shm_') or not isinstance(arr, np.ndarray):
+                continue
+            arr_c = np.ascontiguousarray(arr)
+            shm = SharedMemory(create=True, size=arr_c.nbytes)
+            shm_arr = np.ndarray(arr_c.shape, dtype=arr_c.dtype, buffer=shm.buf)
+            shm_arr[:] = arr_c
+            shm_blocks.append(shm)
+            shm_specs[name] = (shm.name, arr_c.dtype.str, arr_c.shape)
+
+        tasks = [(final[i].path, final_indices[i], args.debayer_method, args.white_balance,
+                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
+                  _ca, _cr, False, _sb, _pgr, True)
+                 for i in range(n)]
+
+        _orig_to_j = {orig: j for j, orig in enumerate(final_indices)}
+
+        try:
+            with ProcessPoolExecutor(max_workers=workers,
+                                     initializer=_init_worker_shm,
+                                     initargs=(shm_specs,)) as pool:
+                futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
+                for future in tqdm(as_completed(futures), total=n,
+                                   desc="  Reloading", unit="frame",
+                                   disable=args.verbose):
+                    orig_idx, _, error = future.result()
+                    if error:
+                        j = _orig_to_j.get(orig_idx, -1)
+                        fname = (os.path.basename(final[j].path)
+                                 if j >= 0 else str(orig_idx))
+                        safe_print(f"  WARNING: Could not reload {fname}: {error}")
+                        n_failed += 1
+                    elif args.verbose:
+                        j = _orig_to_j.get(orig_idx, -1)
+                        if j >= 0:
+                            safe_print(f"    Reloaded: {os.path.basename(final[j].path)}")
+        finally:
+            for shm in shm_blocks:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
+
+        mem_rgb.flush()
+        mem_lum.flush()
+
+    else:
+        # Thread pool with I/O prefetch — mirrors execute_frame_processing thread path.
+        if gpu.active:
+            n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
+                                                Config.GPU_VRAM_RESERVE_MB), n)
+        else:
+            n_workers = min(os.cpu_count() or 4, n)
+        n_workers = _worker_count_cap(n_workers)
+
+        safe_print(f"  Reloading {n} accepted frames ({n_workers} threads, "
+                   f"quality analysis skipped)...")
+
+        # Submit all FITS loads upfront so I/O runs ahead of compute threads.
+        _io_pool = ThreadPoolExecutor(max_workers=min(4, n))
+        _load_futures = {final_indices[j]: _io_pool.submit(load_frame, final[j].path)
+                         for j in range(n)}
+
+        def _reload_one(j: int, f: FrameInfo, orig_idx: int):
+            try:
+                preloaded = _load_futures[orig_idx].result()
+            except Exception as e:
+                return j, orig_idx, None, None, f'load error: {e}'
+            with gpu.stream_context():
+                result = _process_single_frame(
+                    f.path, f.header, masters, args.debayer_method, args.white_balance,
+                    ca_correction=_ca,
+                    cosmic_ray_rejection=_cr,
+                    skip_quality=True,
+                    session_bayer=_sb,
+                    pre_gradient_removal=_pgr,
+                    preloaded_data=preloaded)
+            if result.get('error'):
+                return j, orig_idx, None, None, result['error']
+            return j, orig_idx, result['rgb'], result['lum'], None
+
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_reload_one, j, f, orig_idx): j
+                       for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
+            for future in tqdm(as_completed(futures), total=n,
+                               desc="  Reloading", unit="frame",
+                               disable=args.verbose):
+                j, orig_idx, rgb, lum, error = future.result()
+                if error:
+                    safe_print(f"  WARNING: Could not reload "
+                               f"{os.path.basename(final[j].path)}: {error}")
+                    n_failed += 1
+                else:
+                    mem_rgb[orig_idx] = rgb
+                    mem_lum[orig_idx] = lum
+                    cached_lums[orig_idx] = lum
+                    if args.verbose:
+                        safe_print(f"    Reloaded: {os.path.basename(final[j].path)}")
+
+        _io_pool.shutdown(wait=False)
+        mem_rgb.flush()
+        mem_lum.flush()
 
     if n_failed > 0:
         safe_print(f"  WARNING: {n_failed}/{n} frames failed to reload")
         if n_failed == n:
             raise RuntimeError("All frames failed to reload — cannot proceed "
                                "(likely out of memory)")
-
-    mem_rgb.flush()
-    mem_lum.flush()
-
 
 def quality_gate(
     lights: List[FrameInfo],
