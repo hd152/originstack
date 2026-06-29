@@ -610,7 +610,7 @@ def reload_accepted_frames(
     n_failed = 0
 
     if use_process_pool:
-        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
+        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n)
         workers = _worker_count_cap(workers)
 
         safe_print(f"  Reloading {n} accepted frames ({workers} workers, "
@@ -667,18 +667,22 @@ def reload_accepted_frames(
 
     else:
         # Thread pool with I/O prefetch — mirrors execute_frame_processing thread path.
+        # Reload is I/O-dominated (FITS reads >> debayer time), so allow 2× cpu_count
+        # threads: threads blocked on disk let others continue, saturating both disk
+        # and CPU rather than one or the other.
         if gpu.active:
             n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
                                                 Config.GPU_VRAM_RESERVE_MB), n)
         else:
-            n_workers = min(os.cpu_count() or 4, n)
+            n_workers = min((os.cpu_count() or 4) * 2, 32, n)
         n_workers = _worker_count_cap(n_workers)
 
         safe_print(f"  Reloading {n} accepted frames ({n_workers} threads, "
                    f"quality analysis skipped)...")
 
-        # Submit all FITS loads upfront so I/O runs ahead of compute threads.
-        _io_pool = ThreadPoolExecutor(max_workers=min(4, n))
+        # Match I/O prefetch threads to compute threads so compute is never
+        # idle waiting on file reads.
+        _io_pool = ThreadPoolExecutor(max_workers=min(n_workers, n))
         _load_futures = {final_indices[j]: _io_pool.submit(load_frame, final[j].path)
                          for j in range(n)}
 
