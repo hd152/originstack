@@ -21,7 +21,8 @@ from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denois
                            bilateral_denoise, local_normalize, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
                            multiscale_local_contrast, mmt_denoise, acdnr_denoise,
-                           bm3d_denoise, anisotropic_diffusion, scnr, adaptive_mtf)
+                           bm3d_denoise, anisotropic_diffusion, scnr, adaptive_mtf,
+                           remove_star_halos, radial_renormalize, larson_sekanina)
 from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
                                     richardson_lucy_deconvolve,
                                     estimate_psf_blind, tv_regularized_deconvolve)
@@ -357,6 +358,17 @@ def postprocess_stack(
         except Exception:
             pass
 
+    # Star halo removal (before background extraction)
+    if getattr(args, 'halo_removal', False) and _pp_sources is not None and len(_pp_sources) > 0:
+        _halo_fwhm = float(np.median(
+            [f.metrics.get('fwhm', 4.0) for f in final
+             if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
+        print(f"\n  Removing star halos (fwhm={_halo_fwhm:.1f}px)...")
+        _halo_start = time.time()
+        stacked = remove_star_halos(stacked, _pp_sources, fwhm=_halo_fwhm)
+        safe_print(f"  Star halo removal ({format_time(time.time() - _halo_start)})")
+        stacked = _sanitize(stacked, "halo removal")
+
     # Export star/galaxy masks (before any post-processing modifies them)
     if getattr(args, 'export_masks', False) and pp_star_mask is not None:
         _output_path = getattr(args, 'output', None)
@@ -373,6 +385,26 @@ def postprocess_stack(
 
         bg_method = getattr(args, 'bg_method', 'dbe')
 
+        # Build comet coma exclusion mask to prevent background sampler from
+        # subtracting the comet itself as "background".
+        _coma_excl_mask = None
+        if getattr(args, 'comet_mode', False):
+            try:
+                from src.registration import find_comet_centroid
+                _pp_lum_comet = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                                 + 0.114 * stacked[:, :, 2])
+                _coma_cy, _coma_cx = find_comet_centroid(_pp_lum_comet)
+                _coma_radius = float(getattr(args, 'coma_mask_radius', 150))
+                _H_c, _W_c = stacked.shape[:2]
+                _yy_c, _xx_c = np.mgrid[:_H_c, :_W_c]
+                _coma_dist2 = (_yy_c - _coma_cy) ** 2 + (_xx_c - _coma_cx) ** 2
+                _coma_excl_mask = (_coma_dist2 <= _coma_radius ** 2).astype(np.float32)
+                if getattr(args, 'verbose', False):
+                    safe_print(f"    Coma exclusion mask: nucleus=({_coma_cx:.1f},{_coma_cy:.1f}), "
+                               f"radius={_coma_radius:.0f}px")
+            except Exception as _cme:
+                safe_print(f"  WARNING: coma exclusion mask failed: {_cme}")
+
         if bg_method == 'graxpert':
             graxpert_bin = getattr(args, 'graxpert_path', None)
             print(f"\n  Applying GraXpert background extraction...")
@@ -387,14 +419,16 @@ def postprocess_stack(
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
                 verbose=args.verbose, star_mask=pp_star_mask,
-                use_entropy_weights=_entropy_bg)
+                use_entropy_weights=_entropy_bg,
+                exclusion_mask=_coma_excl_mask)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
         else:
             print(f"\n  Applying background extraction "
                   f"(mesh={args.bg_mesh_size}, sigma={args.bg_clip_sigma})...")
             stacked = apply_background_extraction(
                 stacked, mesh_size=args.bg_mesh_size, filter_size=args.bg_filter_size,
-                clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=pp_star_mask)
+                clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=pp_star_mask,
+                exclusion_mask=_coma_excl_mask)
             safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
         stacked = _sanitize(stacked, "background extraction")
         # Save background map as diagnostic
@@ -742,6 +776,47 @@ def postprocess_stack(
         )
         safe_print(f"  ✓ Star removal ({format_time(time.time() - sr_start)})")
         stacked = _sanitize(stacked, "star removal")
+
+    # 11. Comet: radial renormalization (reveals jets by flattening coma gradient)
+    if (getattr(args, 'comet_mode', False)
+            and getattr(args, 'comet_radial_renorm', False)
+            and 'comet_radial_renorm' not in skip_steps):
+        print(f"\n  Applying comet radial renormalization...")
+        _rr_start = time.time()
+        try:
+            from src.registration import find_comet_centroid
+            _rr_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                       + 0.114 * stacked[:, :, 2])
+            _rr_cy, _rr_cx = find_comet_centroid(_rr_lum)
+            renormed = radial_renormalize(stacked, _rr_cy, _rr_cx)
+            # Save as sidecar FITS
+            _output_path_rr = getattr(args, 'output', None)
+            if _output_path_rr:
+                _save_sidecar_fits(renormed, _output_path_rr, '_comet_renorm')
+            safe_print(f"  ✓ Comet radial renormalization ({format_time(time.time() - _rr_start)})")
+        except Exception as _rre:
+            safe_print(f"  WARNING: radial renormalization failed: {_rre}")
+
+    # 12. Comet: Larson-Sekanina rotational difference filter (reveals jet structure)
+    if (getattr(args, 'comet_mode', False)
+            and getattr(args, 'comet_larson_sekanina', False)
+            and 'comet_larson_sekanina' not in skip_steps):
+        ls_rot = float(getattr(args, 'comet_ls_rotation', 15.0))
+        print(f"\n  Applying Larson-Sekanina filter (rotation={ls_rot:.1f} deg)...")
+        _ls_start = time.time()
+        try:
+            from src.registration import find_comet_centroid
+            _ls_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                       + 0.114 * stacked[:, :, 2])
+            _ls_cy, _ls_cx = find_comet_centroid(_ls_lum)
+            ls_img = larson_sekanina(stacked, _ls_cy, _ls_cx, rotation_deg=ls_rot)
+            # Save as sidecar FITS
+            _output_path_ls = getattr(args, 'output', None)
+            if _output_path_ls:
+                _save_sidecar_fits(ls_img, _output_path_ls, '_comet_ls')
+            safe_print(f"  ✓ Larson-Sekanina filter ({format_time(time.time() - _ls_start)})")
+        except Exception as _lse:
+            safe_print(f"  WARNING: Larson-Sekanina filter failed: {_lse}")
 
     stacked = _sanitize(stacked, "final post-processing")
     return stacked

@@ -358,7 +358,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 safe_print(f"  Restored {len(final)}/{n} accepted frames — "
                            f"reloading pixel data (skipping quality analysis)...")
                 reload_accepted_frames(final, final_indices, masters, args,
-                                       mem_rgb, mem_lum, cached_lums)
+                                       mem_rgb, mem_lum, cached_lums,
+                                       mm_rgb_path=mm_rgb_path,
+                                       mm_lum_path=mm_lum_path,
+                                       rgb_shape=rgb_shape,
+                                       lum_shape=lum_shape)
                 stats.quality_time = 0.0
             else:
                 print_phase(1, "Processing & Quality Analysis")
@@ -543,10 +547,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             phase_start = time.time()
 
             quality_maps = dither_info.pop('quality_maps', None)
+            flow_fields = dither_info.pop('flow_fields', None)
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
                 shifts, transforms, H, W, C, args, stats,
-                quality_maps=quality_maps)
+                quality_maps=quality_maps,
+                flow_fields=flow_fields)
 
             stats.stacking_time = time.time() - phase_start
 
@@ -559,7 +565,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if getattr(args, 'comet_mode', False):
                 print_phase(3, "Comet Stacking (nucleus-aligned pass)")
                 from src.registration import run_comet_registration_phase
-                comet_shifts, comet_transforms = run_comet_registration_phase(
+                comet_shifts, comet_transforms, comet_dither_info = run_comet_registration_phase(
                     final, final_indices, best_idx,
                     ref_lum, mem_lum, H, W, args, stats)
                 comet_stacked, _, ct, cb, cl, cr = run_stacking_phase(
@@ -580,6 +586,32 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                  ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                                  ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
                 safe_print(f"  Comet stack: {os.path.basename(comet_out)}")
+
+                # Blend star-aligned and comet-aligned stacks into a composite
+                from src.stacking import blend_comet_star_stacks
+                comet_lum = np.mean(comet_stacked, axis=2)
+                tail_pa = comet_dither_info.get('tail_pa_deg', None)
+                blended = blend_comet_star_stacks(
+                    stacked, comet_stacked, comet_lum,
+                    blend_sigma=float(getattr(args, 'comet_blend_sigma', 30.0)),
+                    tail_pa_deg=tail_pa,
+                )
+                blended_out = os.path.splitext(output_path)[0] + '_comet_blended.fits'
+                blended_hdu = _cfits.PrimaryHDU(
+                    data=np.transpose(blended.astype(np.float32), (2, 0, 1))
+                )
+                blended_hdu.header['COMET'] = (True, 'Blended comet+star stack')
+                blended_hdu.header['CREATOR'] = 'astro_stack.py comet_mode'
+                if tail_pa is not None:
+                    blended_hdu.header['TAIL_PA'] = (round(tail_pa, 1), 'Estimated tail PA (deg)')
+                blended_hdu.writeto(blended_out, overwrite=True)
+                blended_prev = os.path.splitext(blended_out)[0] + '.jpg'
+                save_preview_rgb(blended, blended_prev,
+                                 stretch=getattr(args, 'stretch', 'ghs'),
+                                 ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+                                 ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+                                 ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+                safe_print(f"  Comet blended stack: {os.path.basename(blended_out)}")
 
             # Save raw stack so post-processing can be re-run without phases 1-3
             if getattr(args, 'keep_checkpoint', False):

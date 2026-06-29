@@ -944,7 +944,7 @@ def parse_args():
                    help='Detailed registration diagnostics (implies -v)')
     p.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
-                            'percentile', 'esd', 'auto'],
+                            'percentile', 'esd', 'trimmed_mean', 'auto'],
                    default='auto',
                    help='Stacking/rejection method. '
                         'sigma_clip: MAD-based iterative rejection (default for dithered data). '
@@ -1080,6 +1080,40 @@ def parse_args():
     p.add_argument('--comet-mode', action='store_true',
                    help='Enable comet nucleus tracking. Produces a second stack aligned '
                         'on the comet nucleus saved as <stem>_comet.fits.')
+    p.add_argument('--comet-blend-sigma', type=float, default=30.0, metavar='PX',
+                   help='Gaussian blend radius (pixels) for comet+star blended composite '
+                        '(default: 30). Larger = more comet-stack area in the blend.')
+    p.add_argument('--comet-xy', default=None, metavar='X,Y',
+                   help='Approximate comet nucleus position in the reference frame '
+                        '(pixels, comma-separated, e.g. "1024,768"). X=column, Y=row.')
+    p.add_argument('--comet-search-radius', type=float, default=50.0, metavar='PX',
+                   help='Search radius (pixels) around predicted nucleus position for '
+                        'frame-to-frame tracking (default: 50).')
+    p.add_argument('--comet-affine', action='store_true',
+                   help='Apply rotation+scale correction (affine) on top of nucleus '
+                        'translation shift in comet registration (default: translation only).')
+    p.add_argument('--coma-mask-radius', type=int, default=150, metavar='PX',
+                   help='Circular exclusion radius (pixels) around the comet nucleus '
+                        'used to prevent background extraction from sampling the coma '
+                        '(default: 150). Only active when --comet-mode is set.')
+    p.add_argument('--comet-radial-renorm', action='store_true',
+                   help='Apply radial renormalization filter to flatten the coma gradient '
+                        'and reveal jets/structure. Saves result as <stem>_comet_renorm.fits.')
+    p.add_argument('--comet-larson-sekanina', action='store_true',
+                   help='Apply Larson-Sekanina rotational difference filter to enhance '
+                        'comet jet structure. Saves result as <stem>_comet_ls.fits.')
+    p.add_argument('--comet-ls-rotation', type=float, default=15.0, metavar='DEG',
+                   help='Rotation angle (degrees) for the Larson-Sekanina filter '
+                        '(default: 15).')
+    p.add_argument('--comet-designation', default=None, metavar='DESIG',
+                   help='JPL Horizons designation for ephemeris-aided nucleus tracking '
+                        '(e.g. "C/2023 A3"). Requires astroquery.')
+    p.add_argument('--observer-site', default=None, metavar='SITE',
+                   help='Observer location for ephemeris queries: MPC code (e.g. "G37") '
+                        'or "lon,lat,elev" in decimal degrees/metres (e.g. "-2.5,51.4,50").')
+    p.add_argument('--comet-detrail', action='store_true',
+                   help='Apply linear deconvolution to correct intra-frame nucleus trailing '
+                        '(requires --comet-designation or consecutive centroid positions).')
     p.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
                    help='Blend a short-exposure stack into saturated regions of the main '
                         'stack for HDR targets (e.g. Orion Nebula core, globular clusters).')
@@ -1113,6 +1147,33 @@ def parse_args():
     p.add_argument('--gaia-calibration', action='store_true',
                    help='Extend --photometric-calibration with a Gaia DR3 catalogue query. '
                         'Requires --plate-solve and astroquery.')
+
+    # New feature flags (improvements 1-9)
+    p.add_argument('--max-ellipticity', type=float, default=0.5, metavar='E',
+                   help='Warn (but do not reject) frames with median star ellipticity above '
+                        'this threshold (default: 0.5). Set 0 to disable.')
+    p.add_argument('--consensus-ref', action='store_true',
+                   help='Choose reference frame as the one with shift closest to the session '
+                        'median (most central frame) rather than highest quality score.')
+    p.add_argument('--masked-correlation', action='store_true',
+                   help='Suppress bright nebula emission before cross-correlation to improve '
+                        'registration accuracy on extended-emission targets.')
+    p.add_argument('--pre-gradient-removal', action='store_true',
+                   help='Fit and subtract a degree-2 polynomial sky gradient from each frame '
+                        'before quality analysis (useful for nebulae with strong gradients).')
+    p.add_argument('--trim-low', type=float, default=0.2, metavar='F',
+                   help='Low-fraction trim for trimmed_mean stacking (default: 0.2).')
+    p.add_argument('--trim-high', type=float, default=0.2, metavar='F',
+                   help='High-fraction trim for trimmed_mean stacking (default: 0.2).')
+    p.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
+                   help='Drizzle pixel fraction (tent-kernel weight; < 1.0 = sharper '
+                        'at cost of noise; default: 1.0).')
+    p.add_argument('--optical-flow', action='store_true',
+                   help='Apply per-frame Farneback optical flow local warp correction after '
+                        'global shift/affine registration. Requires OpenCV (cv2).')
+    p.add_argument('--halo-removal', action='store_true',
+                   help='Fit and subtract Gaussian PSF halos from bright stars in the '
+                        'stacked image (post-processing step).')
 
     # Defaults for parameters that are tunable via config file but not exposed on the CLI.
     # Set these in a TOML config with --config to override them.
@@ -1182,6 +1243,16 @@ def parse_args():
         scnr_amount=1.0,
         scnr_target='green',
         comet_blend_sigma=30.0,
+        comet_xy=None,
+        comet_search_radius=50.0,
+        comet_affine=False,
+        coma_mask_radius=150,
+        comet_radial_renorm=False,
+        comet_larson_sekanina=False,
+        comet_ls_rotation=15.0,
+        comet_designation=None,
+        observer_site=None,
+        comet_detrail=False,
         hdr_short_exptime=1.0,
         hdr_long_exptime=1.0,
         drizzle_drop_size=0.7,
@@ -1191,6 +1262,16 @@ def parse_args():
         weight_noise=False,
         cr_sigclip=4.5,
         cr_objlim=5.0,
+        # Improvements 1-9
+        max_ellipticity=0.5,
+        consensus_ref=False,
+        masked_correlation=False,
+        pre_gradient_removal=False,
+        trim_low=0.2,
+        trim_high=0.2,
+        drizzle_pixfrac=1.0,
+        optical_flow=False,
+        halo_removal=False,
     )
     return p.parse_args()
 

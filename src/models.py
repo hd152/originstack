@@ -105,6 +105,10 @@ class Config:
     PATCH_GRID_SIZE = 8             # NxN grid for patch quality map (8x8 = 64 patches)
     PATCH_MIN_SIZE = 64             # Minimum patch dimension in pixels
 
+    # Comet tracking / nucleus detection
+    COMET_DOG_SIGMA_SMALL = 2.0     # DoG small sigma (suppresses point sources)
+    COMET_DOG_SIGMA_LARGE = 10.0    # DoG large sigma (enhances diffuse coma core)
+
 
 @dataclass
 class FrameInfo:

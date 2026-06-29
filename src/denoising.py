@@ -1366,3 +1366,219 @@ def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None,
 
     stretched = np.arcsinh(norm * factor) / np.arcsinh(factor)
     return np.clip(stretched, 0.0, 1.0)
+
+
+def remove_star_halos(img: np.ndarray, star_sources, fwhm: float,
+                      protection_radius: float = 2.0) -> np.ndarray:
+    """Fit and subtract Gaussian PSF halos from bright stars.
+
+    For each bright star (above 95th percentile of flux), fits a scaled Gaussian
+    and subtracts the predicted halo beyond protection_radius * fwhm from center.
+    """
+    if star_sources is None or len(star_sources) == 0 or fwhm <= 0:
+        return img
+
+    H, W = img.shape[:2]
+    result = img.copy()
+
+    try:
+        fluxes = np.asarray(star_sources['flux'], dtype=np.float64)
+    except (KeyError, TypeError):
+        return img
+
+    flux_thresh = float(np.percentile(fluxes, 95))
+    bright_mask = fluxes >= flux_thresh
+    bright_stars = star_sources[bright_mask]
+
+    if len(bright_stars) == 0:
+        return img
+
+    sigma = fwhm / 2.355
+    protect_radius_px = protection_radius * fwhm
+
+    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    for star in bright_stars:
+        try:
+            yc = int(round(float(star['ycentroid'])))
+            xc = int(round(float(star['xcentroid'])))
+        except (KeyError, TypeError):
+            continue
+
+        if yc < 0 or yc >= H or xc < 0 or xc >= W:
+            continue
+
+        r_cut = int(min(protect_radius_px * 3, 50))
+        y0, y1 = max(0, yc - r_cut), min(H, yc + r_cut + 1)
+        x0, x1 = max(0, xc - r_cut), min(W, xc + r_cut + 1)
+        if y1 <= y0 or x1 <= x0:
+            continue
+
+        cut_lum = lum[y0:y1, x0:x1]
+        peak = float(cut_lum.max())
+        bg = float(np.percentile(cut_lum, 25))
+        if peak - bg < 10.0:
+            continue
+
+        r_work = int(5 * sigma) + r_cut
+        wy0, wy1 = max(0, yc - r_work), min(H, yc + r_work + 1)
+        wx0, wx1 = max(0, xc - r_work), min(W, xc + r_work + 1)
+
+        yy, xx = np.mgrid[wy0:wy1, wx0:wx1]
+        dist2 = (yy - yc) ** 2 + (xx - xc) ** 2
+        gaussian = (peak - bg) * np.exp(-dist2 / (2 * sigma ** 2))
+
+        protect_mask = dist2 < protect_radius_px ** 2
+        halo_subtract = np.where(protect_mask, 0.0, gaussian)
+
+        for c in range(img.shape[2] if img.ndim == 3 else 1):
+            if img.ndim == 3:
+                result[wy0:wy1, wx0:wx1, c] = np.clip(
+                    result[wy0:wy1, wx0:wx1, c] - halo_subtract, 0.0, None)
+            else:
+                result[wy0:wy1, wx0:wx1] = np.clip(
+                    result[wy0:wy1, wx0:wx1] - halo_subtract, 0.0, None)
+
+    return result.astype(img.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Comet-specific filters
+# ---------------------------------------------------------------------------
+
+def radial_renormalize(img: np.ndarray, nucleus_y: float, nucleus_x: float,
+                       smooth_sigma: float = 20.0, n_bins: int = 200) -> np.ndarray:
+    """Radial renormalization filter for comet coma structure enhancement.
+
+    Divides the image by a radially-smoothed profile centred on the nucleus,
+    flattening the steep coma gradient to reveal jets and fine structure.
+
+    Args:
+        img:          Float32 (H, W, 3) or (H, W) stacked image.
+        nucleus_y:    Row coordinate of the comet nucleus.
+        nucleus_x:    Column coordinate of the comet nucleus.
+        smooth_sigma: Gaussian sigma for smoothing the radial profile (degrees
+                      of the radial bin profile, not pixels).
+        n_bins:       Number of radial bins for the profile estimate.
+
+    Returns:
+        Float32 image of the same shape with the coma gradient flattened.
+    """
+    ndim_orig = img.ndim
+    if ndim_orig == 2:
+        img = img[:, :, np.newaxis]
+
+    H, W, C = img.shape
+    img_f = img.astype(np.float64)
+
+    # Build radial distance map
+    yy, xx = np.mgrid[:H, :W]
+    radii = np.sqrt((yy - nucleus_y) ** 2 + (xx - nucleus_x) ** 2).astype(np.float64)
+    max_radius = float(radii.max())
+    if max_radius < 1.0:
+        out = img_f.astype(np.float32)
+        if ndim_orig == 2:
+            out = out[:, :, 0]
+        return out
+
+    # Process each channel independently
+    result = np.zeros_like(img_f)
+    for c in range(C):
+        channel = img_f[:, :, c]
+        # Build radial profile: median per bin
+        bin_edges = np.linspace(0.0, max_radius + 1.0, n_bins + 1)
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        profile = np.zeros(n_bins, dtype=np.float64)
+        for b in range(n_bins):
+            in_bin = (radii >= bin_edges[b]) & (radii < bin_edges[b + 1])
+            if in_bin.any():
+                profile[b] = float(np.median(channel[in_bin]))
+
+        # Smooth the profile
+        from scipy.ndimage import gaussian_filter1d
+        profile_smooth = gaussian_filter1d(profile, sigma=smooth_sigma)
+
+        # Interpolate profile to full image
+        bin_indices = np.clip(
+            ((radii / max_radius) * (n_bins - 1)).astype(int), 0, n_bins - 1
+        )
+        model = profile_smooth[bin_indices]
+
+        # Scale: protect against near-zero model values
+        scale = np.where(model > 1e-12, model, 1e-12)
+        # Preserve overall brightness: multiply by mean model
+        mean_model = float(np.mean(profile_smooth[profile_smooth > 1e-12])) if np.any(profile_smooth > 1e-12) else 1.0
+        renormed = (channel / scale) * mean_model
+        result[:, :, c] = renormed
+
+    out = result.astype(np.float32)
+    if ndim_orig == 2:
+        out = out[:, :, 0]
+    return out
+
+
+def larson_sekanina(img: np.ndarray, nucleus_y: float, nucleus_x: float,
+                    rotation_deg: float = 15.0, dr: float = 0.0) -> np.ndarray:
+    """Larson-Sekanina rotational difference filter for comet jet detection.
+
+    Subtracts a rotationally-shifted copy of the image from the original,
+    revealing asymmetric jet structure in the coma.
+
+    Args:
+        img:          Float32 (H, W, 3) or (H, W) image.
+        nucleus_y:    Row coordinate of the comet nucleus (rotation centre).
+        nucleus_x:    Column coordinate of the comet nucleus (rotation centre).
+        rotation_deg: Rotation angle in degrees for the difference.
+        dr:           Optional radial shift of the rotated copy in pixels
+                      (positive = away from nucleus).
+
+    Returns:
+        Float32 image of the same shape with jets enhanced.
+    """
+    try:
+        from scipy.ndimage import rotate as _rotate, shift as _shift
+    except ImportError:
+        safe_print("  WARNING: larson_sekanina requires scipy — skipping")
+        return img.astype(np.float32)
+
+    ndim_orig = img.ndim
+    if ndim_orig == 2:
+        img = img[:, :, np.newaxis]
+
+    H, W, C = img.shape
+    img_f = img.astype(np.float64)
+    original_max = float(img_f.max()) or 1.0
+
+    # Rotate around nucleus: scipy.ndimage.rotate rotates around image centre.
+    # We compensate by shifting the image so nucleus is at centre, rotating, then shifting back.
+    centre_y, centre_x = H / 2.0 - 0.5, W / 2.0 - 0.5
+    shift_to_centre = (centre_y - nucleus_y, centre_x - nucleus_x)
+    shift_back = (nucleus_y - centre_y, nucleus_x - centre_x)
+
+    result = np.zeros_like(img_f)
+    for c in range(C):
+        ch = img_f[:, :, c]
+        # Shift nucleus to image centre
+        shifted = _shift(ch, shift=shift_to_centre, order=3, mode='constant', cval=0.0)
+        # Rotate
+        rotated = _rotate(shifted, angle=rotation_deg, reshape=False,
+                          order=3, mode='constant', cval=0.0)
+        # Optional radial shift: shift away from image centre (now = nucleus)
+        if abs(dr) > 0.1:
+            # Direction along the average gradient (use identity for simplicity: shift along Y)
+            rotated = _shift(rotated, shift=(dr, 0.0), order=1, mode='constant', cval=0.0)
+        # Shift nucleus back to original position
+        rotated = _shift(rotated, shift=shift_back, order=3, mode='constant', cval=0.0)
+        # Larson-Sekanina: original minus rotated-shifted copy
+        diff = ch - rotated
+        result[:, :, c] = diff
+
+    # Clip to [0, original_max] and re-normalise
+    result = np.clip(result, 0.0, original_max)
+    if result.max() > 1e-12:
+        result = result / result.max() * original_max
+
+    out = result.astype(np.float32)
+    if ndim_orig == 2:
+        out = out[:, :, 0]
+    return out

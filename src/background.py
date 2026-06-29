@@ -312,16 +312,25 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
                                 filter_size: int = 3, clip_sigma: float = 3.0,
                                 verbose: bool = False,
-                                star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                                star_mask: Optional[np.ndarray] = None,
+                                exclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Apply per-channel background subtraction with automatic extended-source masking."""
     H, W = rgb.shape[:2]
     if H == 0 or W == 0:
         return rgb.copy()
-        
+
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
     # --- Auto-detect extended source ---
     combined_mask = star_mask.astype(np.float32) if star_mask is not None else np.zeros((H, W), dtype=np.float32)
+    # Merge caller-supplied exclusion mask (e.g. comet coma region)
+    if exclusion_mask is not None:
+        try:
+            excl = np.asarray(exclusion_mask, dtype=np.float32)
+            if excl.shape == (H, W):
+                np.clip(combined_mask + excl, 0.0, 1.0, out=combined_mask)
+        except Exception:
+            pass
 
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
@@ -922,7 +931,8 @@ def dynamic_background_extraction(
         outlier_iters: int = Config.DBE_OUTLIER_ITERS,
         star_mask: Optional[np.ndarray] = None,
         verbose: bool = False,
-        use_entropy_weights: bool = False) -> np.ndarray:
+        use_entropy_weights: bool = False,
+        exclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Dynamic Background Extraction (DBE) via adaptive sampling and RBF fitting."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -952,6 +962,14 @@ def dynamic_background_extraction(
         sky_med, sky_std = float(np.median(border_pix)), float(np.std(border_pix))
 
     emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
+    # Merge optional caller-supplied exclusion mask (e.g. comet coma region)
+    if exclusion_mask is not None:
+        try:
+            excl = np.asarray(exclusion_mask, dtype=np.float32)
+            if excl.shape == emission_mask.shape:
+                np.clip(emission_mask + excl, 0.0, 1.0, out=emission_mask)
+        except Exception:
+            pass
     _masked_pct = float(np.mean(emission_mask >= 0.5))
     _dense_field = _masked_pct > Config.DBE_DENSE_FIELD_THRESH
     if verbose:
