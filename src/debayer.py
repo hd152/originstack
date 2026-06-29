@@ -376,6 +376,7 @@ def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT):
     """
     gpu = get_gpu()
     xp = gpu.xp
+    rgb = xp.asarray(rgb)  # ensure array is on the correct device (no-op for numpy when CPU)
     if threshold is _DETECT:
         threshold = Config.HOT_PIXEL_THRESHOLD
 
@@ -405,6 +406,7 @@ def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.n
     """Single-channel hot pixel detection and replacement (GPU-accelerated)."""
     gpu = get_gpu()
     xp = gpu.xp
+    img = xp.asarray(img)  # ensure array is on the correct device
     if threshold is _DETECT:
         threshold = Config.HOT_PIXEL_THRESHOLD
     med = gpu.xndimage.median_filter(img, size=3)
