@@ -141,52 +141,54 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
         squeeze_back = False
 
     gpu = get_gpu()
-    xp = gpu.xp
-    _ndimage = gpu.xndimage
-    img_d = gpu.to_device(img)
-    
-    if transform is not None:
-        matrix = transform.params
-        R = matrix[:2, :2]        # EuclideanTransform stores t in (x=col, y=row) space.
-        # scipy.ndimage.affine_transform operates in (row, col) space and applies the
-        # inverse mapping: input_coord = M @ output_coord + offset.
-        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)
-        t_rowcol = np.array([t_xy[1], t_xy[0]])  # swap to (row, col)
-        offset = -R @ t_rowcol
-        
-        if gpu.active:
+
+    def _run(xp, _ndimage, img_arr):
+        if transform is not None:
+            matrix = transform.params
+            R = matrix[:2, :2]
+            t_xy = matrix[:2, 2]
+            t_rowcol = np.array([t_xy[1], t_xy[0]])
+            offset = -R @ t_rowcol
             mat_d = xp.asarray(R)
             off_d = xp.asarray(offset)
-        else:
-            mat_d = R
-            off_d = offset
+            result = xp.empty_like(img_arr)
+            for c in range(img_arr.shape[2]):
+                result[:, :, c] = _ndimage.affine_transform(
+                    img_arr[:, :, c], mat_d, offset=off_d,
+                    order=3, mode='constant', cval=0.0
+                )
+            return result
+        elif shift is not None:
+            result = xp.empty_like(img_arr)
+            for c in range(img_arr.shape[2]):
+                result[:, :, c] = _ndimage.shift(
+                    img_arr[:, :, c], shift=shift, order=3,
+                    mode='constant', cval=0.0, prefilter=True
+                )
+            return result
+        return img_arr
 
-        # empty_like, not zeros_like: every channel slice is fully overwritten
-        # below, so pre-zeroing the H×W×C buffer is wasted work per frame.
-        result = xp.empty_like(img_d)
-        for c in range(img_d.shape[2]):
-            result[:, :, c] = _ndimage.affine_transform(
-                img_d[:, :, c], mat_d, offset=off_d,
-                order=3, mode='constant', cval=0.0
-            )
-        out = gpu.to_host(result)
-        return out[:, :, 0] if squeeze_back else out
+    if transform is None and shift is None:
+        if squeeze_back:
+            img = img[:, :, 0]
+        return img
 
-    elif shift is not None:
-        result = xp.empty_like(img_d)
-        for c in range(img_d.shape[2]):
-            result[:, :, c] = _ndimage.shift(
-                img_d[:, :, c], shift=shift, order=3,
-                mode='constant', cval=0.0, prefilter=True
-            )
-        out = gpu.to_host(result)
-        return out[:, :, 0] if squeeze_back else out
+    if gpu.active:
+        try:
+            result = _run(gpu.xp, gpu.xndimage, gpu.to_device(img))
+            out = gpu.to_host(result)
+            return out[:, :, 0] if squeeze_back else out
+        except Exception as exc:
+            if gpu.is_oom(exc):
+                gpu.free_pool()
+            else:
+                raise
 
-    # If neither transform nor shift is provided, return original img
-    # (ensure it is on CPU as per function convention)
-    if squeeze_back:
-        img = img[:, :, 0]
-    return img
+    # CPU path (also OOM fallback)
+    from scipy import ndimage as _scipy_ndimage
+    result = _run(np, _scipy_ndimage, np.asarray(img))
+    out = np.asarray(result)
+    return out[:, :, 0] if squeeze_back else out
 
 
 def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True, seed_shift: Optional[Tuple[float, float]] = None, masked_correlation: bool = False) -> Tuple[float, float]:

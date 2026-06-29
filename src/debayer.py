@@ -365,6 +365,26 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     return result
 
 
+def _fix_hot_rgb_impl(rgb, threshold, xp, _nd):
+    """Pure implementation of RGB hot-pixel correction; works with numpy or CuPy."""
+    ch_meds = [_nd.median_filter(rgb[:, :, c], size=3) for c in range(rgb.shape[2])]
+    lum     = 0.299 * rgb[:, :, 0]   + 0.587 * rgb[:, :, 1]   + 0.114 * rgb[:, :, 2]
+    med_lum = 0.299 * ch_meds[0]     + 0.587 * ch_meds[1]     + 0.114 * ch_meds[2]
+    diff = lum - med_lum
+    mad = float(xp.median(xp.abs(diff)))
+    sigma = mad * 1.4826
+    if sigma < 1e-6:
+        sigma = float(xp.std(diff))
+    mask = diff > threshold * sigma
+    if not bool(xp.any(mask)):
+        return rgb, lum
+    result = xp.array(rgb, copy=True)
+    for c in range(rgb.shape[2]):
+        result[:, :, c][mask] = ch_meds[c][mask]
+    lum_fixed = 0.299 * result[:, :, 0] + 0.587 * result[:, :, 1] + 0.114 * result[:, :, 2]
+    return result, lum_fixed
+
+
 def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT):
     """Detect hot pixels on luminance, fix all 3 channels.
 
@@ -372,57 +392,52 @@ def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT):
     luminance from them, and reuses medians for replacement.
 
     Returns (rgb_fixed, lum) so the caller can reuse the luminance array
-    instead of recomputing it.
+    instead of recomputing it.  Falls back to CPU scipy on GPU OOM.
     """
     gpu = get_gpu()
-    xp = gpu.xp
-    rgb = xp.asarray(rgb)  # ensure array is on the correct device (no-op for numpy when CPU)
     if threshold is _DETECT:
         threshold = Config.HOT_PIXEL_THRESHOLD
-
-    ch_meds = [gpu.xndimage.median_filter(rgb[:, :, c], size=3) for c in range(rgb.shape[2])]
-    lum     = 0.299 * rgb[:, :, 0]   + 0.587 * rgb[:, :, 1]   + 0.114 * rgb[:, :, 2]
-    med_lum = 0.299 * ch_meds[0]     + 0.587 * ch_meds[1]     + 0.114 * ch_meds[2]
-
-    diff = lum - med_lum
-    mad = float(xp.median(xp.abs(diff)))
-    sigma = mad * 1.4826
-    if sigma < 1e-6:
-        sigma = float(xp.std(diff))
-
-    mask = diff > threshold * sigma
-    if not bool(xp.any(mask)):
-        return rgb, lum
-
-    result = xp.array(rgb, copy=True)
-    for c in range(rgb.shape[2]):
-        result[:, :, c][mask] = ch_meds[c][mask]
-    # Recompute lum from the corrected image so the returned lum matches rgb_fixed.
-    lum_fixed = 0.299 * result[:, :, 0] + 0.587 * result[:, :, 1] + 0.114 * result[:, :, 2]
-    return result, lum_fixed
+    if gpu.active:
+        try:
+            return _fix_hot_rgb_impl(gpu.xp.asarray(rgb), threshold, gpu.xp, gpu.xndimage)
+        except Exception as exc:
+            if gpu.is_oom(exc):
+                gpu.free_pool()
+            else:
+                raise
+    return _fix_hot_rgb_impl(np.asarray(rgb), threshold, np, ndimage)
 
 
-def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.ndarray:
-    """Single-channel hot pixel detection and replacement (GPU-accelerated)."""
-    gpu = get_gpu()
-    xp = gpu.xp
-    img = xp.asarray(img)  # ensure array is on the correct device
-    if threshold is _DETECT:
-        threshold = Config.HOT_PIXEL_THRESHOLD
-    med = gpu.xndimage.median_filter(img, size=3)
+def _fix_hot_mono_impl(img, threshold, xp, _nd):
+    """Pure implementation of mono hot-pixel correction; works with numpy or CuPy."""
+    med = _nd.median_filter(img, size=3)
     diff = img - med
-
     mad = float(xp.median(xp.abs(diff)))
     sigma = mad * 1.4826
     if sigma < 1e-6:
         sigma = float(xp.std(diff))
-
     mask = diff > threshold * sigma
     if not bool(xp.any(mask)):
         return img
     img_fixed = xp.array(img, copy=True)
     img_fixed[mask] = med[mask]
     return img_fixed
+
+
+def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.ndarray:
+    """Single-channel hot pixel detection and replacement.  Falls back to CPU on GPU OOM."""
+    gpu = get_gpu()
+    if threshold is _DETECT:
+        threshold = Config.HOT_PIXEL_THRESHOLD
+    if gpu.active:
+        try:
+            return _fix_hot_mono_impl(gpu.xp.asarray(img), threshold, gpu.xp, gpu.xndimage)
+        except Exception as exc:
+            if gpu.is_oom(exc):
+                gpu.free_pool()
+            else:
+                raise
+    return _fix_hot_mono_impl(np.asarray(img), threshold, np, ndimage)
 
 
 # Legacy aliases for backwards compatibility
