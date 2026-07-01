@@ -163,6 +163,37 @@ def _export_frame_jpegs(final: List[FrameInfo], final_indices: List[int],
     safe_print(f"  Exported {len(final)} frame JPEGs → {export_dir}")
 
 
+def _run_auto_advisor(final: List[FrameInfo], args,
+                      prior_type: Optional[str] = None,
+                      prior_confidence: float = 0.0) -> None:
+    """Classify the target and apply heuristic post-processing settings in-place.
+
+    Runs on both the normal path and the checkpoint-resume path: the galaxy /
+    nebula presets (SCNR, photometric calibration, deconvolution, etc.) are set
+    here, so skipping it on resume would silently post-process with bare CLI
+    defaults and reintroduce colour casts the presets exist to remove.
+    """
+    if not getattr(args, 'auto', False):
+        return
+    from src.auto_settings import apply_auto_settings
+    _target_type, label, signals, changes = apply_auto_settings(
+        final, args, prior_type=prior_type, prior_confidence=prior_confidence)
+    print(f"\n  Auto Advisor: detected '{label}'")
+    if signals:
+        print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
+              f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
+              f"peak_excess={signals.get('peak_excess', 0):.1f}  "
+              f"stars={signals.get('star_count', 0):.0f}  "
+              f"FWHM={signals.get('fwhm', 0):.1f}px  "
+              f"frames={signals.get('n_frames', 0)}")
+    if changes:
+        safe_print("  Applied auto settings:")
+        for c in changes:
+            safe_print(f"    * {c}")
+    else:
+        safe_print("  Current settings already optimal — no changes applied.")
+
+
 def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
     """Save (H, W, 3) float32 image as TIFF alongside the FITS output."""
     tiff_path = os.path.splitext(output_path)[0] + '.tiff'
@@ -334,6 +365,24 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             stats.accepted_frames = len(final)
             stats.rejected_frames = n - len(final)
 
+            # Auto-advisor must also run on resume: phases 1-3 are skipped here,
+            # so without this the galaxy/nebula presets (SCNR, photometric
+            # calibration, deconvolution) never get applied and post-processing
+            # runs with bare CLI defaults — reintroducing colour casts.
+            # Recover the metadata prior (folder/header/session) locally so the
+            # classifier matches a fresh run; skip Simbad to avoid a network hit.
+            if getattr(args, 'auto', False):
+                from src.target_inference import infer_target_from_metadata
+                _r_name, _r_type, _r_conf, _r_src = infer_target_from_metadata(
+                    _directory, final, use_simbad=False,
+                    session_name=_session_info.object_name if _session_info else None)
+                if _r_name and _r_type and _r_type != 'unknown':
+                    safe_print(f"\n  Target: {_r_name} "
+                               f"[{_r_type.replace('_', ' ').title()}]  "
+                               f"conf={_r_conf:.0%}  source={_r_src}")
+                _run_auto_advisor(final, args,
+                                  prior_type=_r_type, prior_confidence=_r_conf)
+
     if resume_phase < 3:
         # ======================================================================
         # PHASES 1-3: Normal path (requires memmap)
@@ -461,27 +510,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     )
 
                 # Heuristic auto-advisor
-                if getattr(args, 'auto', False):
-                    from src.auto_settings import apply_auto_settings
-                    target_type, label, signals, changes = apply_auto_settings(
-                        final, args,
-                        prior_type=_inferred_type,
-                        prior_confidence=_inferred_conf,
-                    )
-                    print(f"\n  Auto Advisor: detected '{label}'")
-                    if signals:
-                        print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
-                              f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
-                              f"peak_excess={signals.get('peak_excess', 0):.1f}  "
-                              f"stars={signals.get('star_count', 0):.0f}  "
-                              f"FWHM={signals.get('fwhm', 0):.1f}px  "
-                              f"frames={signals.get('n_frames', 0)}")
-                    if changes:
-                        safe_print("  Applied auto settings:")
-                        for c in changes:
-                            safe_print(f"    * {c}")
-                    else:
-                        safe_print("  Current settings already optimal — no changes applied.")
+                _run_auto_advisor(final, args,
+                                  prior_type=_inferred_type,
+                                  prior_confidence=_inferred_conf)
 
             if not final:
                 print(f'\n  ERROR: No accepted frames after checkpoint restore!')

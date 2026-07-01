@@ -728,6 +728,25 @@ def postprocess_stack(
                 deconv_mask = generate_star_mask(stacked.shape[:2], _pp_sources,
                                                   fwhm=float(psf.shape[0]) * 0.5)
 
+            # Saturated / flat-topped sources (bright stars, companion-galaxy
+            # nuclei) are rejected by the star finder, so they never enter the
+            # mask above and get ringed/boxed by deconvolution. Protect the
+            # brightest pixels directly: threshold luminance, then dilate by the
+            # PSF half-width so the whole ringing zone is blended from original.
+            _dl = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                   + 0.114 * stacked[:, :, 2])
+            _hi = float(np.percentile(_dl, 99.7))
+            if _hi > 0:
+                bright = (_dl >= _hi).astype(np.float32)
+                if bright.any():
+                    bright = ndimage.gaussian_filter(
+                        bright, sigma=max(2.0, float(psf.shape[0]) * 0.5))
+                    _bm = float(bright.max())
+                    if _bm > 0:
+                        bright /= _bm
+                    deconv_mask = (bright if deconv_mask is None
+                                   else np.maximum(deconv_mask, bright))
+
             deconv_start = time.time()
             if use_tv:
                 safe_print(f"  Total Variation deconvolution "
