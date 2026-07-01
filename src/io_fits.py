@@ -446,7 +446,7 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
 
     # Richardson-Lucy deconvolution
     deconv_applied = post_processed and getattr(args, 'deconvolve', False)
-    header['DECONV'] = (deconv_applied, 'Richardson-Lucy deconvolution applied to FITS data')
+    header['DECONV'] = (deconv_applied, 'Richardson-Lucy deconvolution applied')
     if getattr(args, 'deconvolve', False):
         header['DCITERS'] = (getattr(args, 'deconvolve_iterations', 15), 'Deconvolution iterations')
         if getattr(args, 'deconvolve_fwhm', None):

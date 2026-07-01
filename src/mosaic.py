@@ -203,7 +203,7 @@ def stitch_mosaic_panels(
             return False
         panels.append((data, hdr))
 
-    wcs_sources = set(hdr.get('WCSORIGIN', 'plate_solve') for _, hdr in panels)
+    wcs_sources = set(hdr.get('WCSORIG', 'plate_solve') for _, hdr in panels)
     safe_print(
         f"  All {len(panels)} panels have WCS "
         f"(sources: {', '.join(sorted(wcs_sources))}) — "
