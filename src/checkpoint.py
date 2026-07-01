@@ -11,31 +11,45 @@ import numpy as np
 from src.models import FrameInfo, ProcessingStats
 from src.utils import safe_print
 
+# Sentinel for _to_json — module-level so it's not re-created on every call.
+_SKIP = object()
+
 
 def _checkpoint_dir(output_path: str) -> str:
-    """Return checkpoint directory path based on output path."""
     return os.path.splitext(output_path)[0] + '_checkpoint'
+
+
+def _raw_stack_path(ckpt_dir: str) -> str:
+    return os.path.join(ckpt_dir, 'raw_stack.npy')
+
+
+def _ckpt_json_path(ckpt_dir: str) -> str:
+    return os.path.join(ckpt_dir, 'checkpoint.json')
+
+
+def _transforms_path(ckpt_dir: str) -> str:
+    return os.path.join(ckpt_dir, 'transforms.npy')
 
 
 def save_raw_stack(output_path: str, stacked: np.ndarray) -> None:
     """Save the pre-post-processing stacked array to the checkpoint directory."""
     ckpt_dir = _checkpoint_dir(output_path)
     os.makedirs(ckpt_dir, exist_ok=True)
-    path = os.path.join(ckpt_dir, 'raw_stack.npy')
-    np.save(path, stacked.astype(np.float32))
-    size_mb = stacked.nbytes / (1024 ** 2)
+    arr32 = stacked.astype(np.float32)
+    np.save(_raw_stack_path(ckpt_dir), arr32)
+    size_mb = arr32.nbytes / (1024 ** 2)
     safe_print(f"  Raw stack saved to checkpoint ({size_mb:.0f} MB)")
 
 
 def load_raw_stack(output_path: str) -> Optional[np.ndarray]:
     """Load the pre-post-processing stacked array from the checkpoint directory."""
-    path = os.path.join(_checkpoint_dir(output_path), 'raw_stack.npy')
+    path = _raw_stack_path(_checkpoint_dir(output_path))
     if not os.path.exists(path):
         return None
     try:
         arr = np.load(path)
         safe_print(f"  Loaded raw stack from checkpoint "
-                   f"({arr.shape[1]}x{arr.shape[0]}x{arr.shape[2]}, "
+                   f"({arr.shape[0]}x{arr.shape[1]}x{arr.shape[2]}, "
                    f"{arr.nbytes / (1024**2):.0f} MB)")
         return arr
     except Exception as e:
@@ -71,14 +85,14 @@ def save_checkpoint(output_path: str, phase: int,
             'shift': list(f.shift) if f.shift else [0.0, 0.0],
         }
         if f.metrics:
-            # Exclude non-serializable items
             fd['metrics'] = {k: v for k, v in f.metrics.items()
                              if k != '_star_sources' and isinstance(v, (int, float, str, bool))}
         frame_data.append(fd)
     state['frames'] = frame_data
 
     if final is not None:
-        state['final_indices'] = [i for i, f in enumerate(lights) if f in final]
+        final_ids = {id(f) for f in final}
+        state['final_indices'] = [i for i, f in enumerate(lights) if id(f) in final_ids]
 
     if shifts is not None:
         state['shifts'] = [list(s) if s else [0.0, 0.0] for s in shifts]
@@ -110,7 +124,7 @@ def save_checkpoint(output_path: str, phase: int,
                     out.append(converted)
                 return out
             return _SKIP
-        _SKIP = object()
+
         safe_dither: dict = {}
         for k, v in dither_info.items():
             converted = _to_json(v)
@@ -130,18 +144,9 @@ def save_checkpoint(output_path: str, phase: int,
             'rejected_frames': stats.rejected_frames,
         }
 
-    ckpt_path = os.path.join(ckpt_dir, 'checkpoint.json')
-    with open(ckpt_path, 'w') as f:
+    with open(_ckpt_json_path(ckpt_dir), 'w') as f:
         json.dump(state, f, indent=2)
     safe_print(f"  Checkpoint saved: phase {phase} complete")
-
-
-def _save_transforms(ckpt_dir: str, transforms: List) -> None:
-    """Serialize a list of affine transform matrices (or None) to transforms.npy."""
-    arr = np.empty(len(transforms), dtype=object)
-    for i, t in enumerate(transforms):
-        arr[i] = np.array(t, dtype=np.float64) if t is not None else None
-    np.save(os.path.join(ckpt_dir, 'transforms.npy'), arr, allow_pickle=True)
 
 
 class _RestoredTransform:
@@ -157,6 +162,19 @@ class _RestoredTransform:
         self.params = np.asarray(matrix, dtype=np.float64)
 
 
+def _save_transforms(ckpt_dir: str, transforms: List) -> None:
+    """Serialize a list of affine transform matrices (or None) to transforms.npy."""
+    arr = np.empty(len(transforms), dtype=object)
+    for i, t in enumerate(transforms):
+        if t is None:
+            arr[i] = None
+        elif hasattr(t, 'params'):
+            arr[i] = np.array(t.params, dtype=np.float64)
+        else:
+            arr[i] = np.array(t, dtype=np.float64)
+    np.save(_transforms_path(ckpt_dir), arr, allow_pickle=True)
+
+
 def load_transforms(output_path: str, n_frames: int) -> List:
     """Load affine transforms from checkpoint.
 
@@ -164,7 +182,7 @@ def load_transforms(output_path: str, n_frames: int) -> List:
     _RestoredTransform (has .params) or None.  Falls back to all-None if the
     file is absent or unreadable.
     """
-    path = os.path.join(_checkpoint_dir(output_path), 'transforms.npy')
+    path = _transforms_path(_checkpoint_dir(output_path))
     if not os.path.exists(path):
         return [None] * n_frames
     try:
@@ -182,13 +200,11 @@ def load_transforms(output_path: str, n_frames: int) -> List:
 def load_checkpoint(output_path: str) -> Optional[Dict]:
     """Load checkpoint if it exists. Returns None if no checkpoint found."""
     ckpt_dir = _checkpoint_dir(output_path)
-    ckpt_path = os.path.join(ckpt_dir, 'checkpoint.json')
-
-    if not os.path.exists(ckpt_path):
+    path = _ckpt_json_path(ckpt_dir)
+    if not os.path.exists(path):
         return None
-
     try:
-        with open(ckpt_path, 'r') as f:
+        with open(path, 'r') as f:
             state = json.load(f)
         return state
     except Exception as e:
@@ -206,7 +222,6 @@ def can_resume(output_path: str, lights: List[FrameInfo]) -> Tuple[bool, int, Op
     if state is None:
         return False, 0, None
 
-    # Validate frame paths match
     saved_paths = {f['path'] for f in state.get('frames', [])}
     current_paths = {f.path for f in lights}
 
@@ -222,8 +237,7 @@ def can_resume(output_path: str, lights: List[FrameInfo]) -> Tuple[bool, int, Op
 
     # Phase 3 requires the raw stack array on disk — downgrade if missing
     if phase >= 3:
-        raw_path = os.path.join(_checkpoint_dir(output_path), 'raw_stack.npy')
-        if not os.path.exists(raw_path):
+        if not os.path.exists(_raw_stack_path(_checkpoint_dir(output_path))):
             phase = 2
             safe_print(f"  Checkpoint found: phase 3 complete but no raw_stack.npy "
                        f"— resuming from phase 2 ({age_hours:.1f}h ago)")

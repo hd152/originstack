@@ -719,6 +719,15 @@ def postprocess_stack(
             safe_print("\n  No star detections for PSF — use --deconvolve-fwhm to specify")
 
         if psf is not None:
+            # pp_star_mask (fwhm=4.0) only protects star cores from denoising.
+            # Deconvolution ringing/staircasing extends out to ~PSF half-size,
+            # so bright compact sources (saturated stars, galaxy nuclei) need a
+            # wider protection radius here to avoid visible box/ring artefacts.
+            deconv_mask = pp_star_mask
+            if _pp_sources is not None and len(_pp_sources) > 0:
+                deconv_mask = generate_star_mask(stacked.shape[:2], _pp_sources,
+                                                  fwhm=float(psf.shape[0]) * 0.5)
+
             deconv_start = time.time()
             if use_tv:
                 safe_print(f"  Total Variation deconvolution "
@@ -726,12 +735,12 @@ def postprocess_stack(
                 stacked = tv_regularized_deconvolve(stacked, psf,
                                                      iterations=tv_iters,
                                                      lambda_tv=tv_lambda,
-                                                     star_mask=pp_star_mask)
+                                                     star_mask=deconv_mask)
                 safe_print(f"  ✓ TV deconvolution ({format_time(time.time() - deconv_start)})")
             else:
                 safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
                 stacked = richardson_lucy_deconvolve(stacked, psf, iterations=rl_iters,
-                                                      star_mask=pp_star_mask)
+                                                      star_mask=deconv_mask)
                 safe_print(f"  ✓ Richardson-Lucy deconvolution "
                            f"({format_time(time.time() - deconv_start)})")
             stacked = _sanitize(stacked, "deconvolution")

@@ -420,7 +420,7 @@ def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT):
             return _fix_hot_rgb_impl(gpu.xp.asarray(rgb), threshold, gpu.xp, gpu.xndimage)
         except Exception as exc:
             if gpu.is_oom(exc):
-                gpu.free_pool()
+                gpu.disable()
             else:
                 raise
     return _fix_hot_rgb_impl(np.asarray(rgb), threshold, np, ndimage)
@@ -450,7 +450,7 @@ def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.n
             return _fix_hot_mono_impl(gpu.xp.asarray(img), threshold, gpu.xp, gpu.xndimage)
         except Exception as exc:
             if gpu.is_oom(exc):
-                gpu.free_pool()
+                gpu.disable()
             else:
                 raise
     return _fix_hot_mono_impl(np.asarray(img), threshold, np, ndimage)

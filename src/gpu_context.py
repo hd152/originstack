@@ -8,31 +8,14 @@ from typing import Optional
 import numpy as np
 from scipy import ndimage
 
+from src.utils import safe_print
+
 try:
     import cupy as cp
     HAS_CUPY = True
 except Exception:
     cp = None
     HAS_CUPY = False
-
-
-def safe_print(text: str):
-    """Print text with fallback for unicode characters on Windows."""
-    try:
-        print(text)
-    except UnicodeEncodeError:
-        text = text.replace('✓', '[OK]')
-        text = text.replace('✗', '[X]')
-        text = text.replace('⚠', '[!]')
-        text = text.replace('ℹ', '[i]')
-        text = text.replace('─', '-')
-        text = text.replace('→', '->')
-        text = text.replace('×', 'x')
-        text = text.replace('Δ', 'd')
-        text = text.replace('≠', '!=')
-        text = text.replace('–', '-')
-        text = text.replace('—', '--')
-        print(text)
 
 
 class GpuContext:
@@ -93,10 +76,28 @@ class GpuContext:
         return np.asarray(arr)
 
     def free_pool(self):
-        """Release CuPy's cached GPU memory."""
+        """Release CuPy's cached GPU memory.
+
+        Swallows any CUDA errors — when the GPU is completely exhausted even
+        cudaFree can fail, and we must not let cleanup raise while we're
+        already handling an OOM exception.
+        """
         if self.active:
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except Exception:
+                pass
+            try:
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+            except Exception:
+                pass
+
+    def disable(self):
+        """Permanently fall back to CPU for this session after an unrecoverable GPU error."""
+        self.free_pool()
+        self.active = False
+        self.xp = np
+        self.xndimage = ndimage
 
     def available_vram_mb(self) -> float:
         if self.active:
@@ -135,8 +136,11 @@ class GpuContext:
             except Exception as exc:
                 if self.is_oom(exc):
                     logging.warning("GPU out of memory — falling back to CPU for this operation")
-                    self.free_pool()
-                    return cpu_func(*args, **kwargs)
+                    self.disable()
+                    cpu_args = tuple(self.to_host(a) if hasattr(a, 'get') else a for a in args)
+                    cpu_kwargs = {k: self.to_host(v) if hasattr(v, 'get') else v
+                                  for k, v in kwargs.items()}
+                    return cpu_func(*cpu_args, **cpu_kwargs)
                 raise
         return cpu_func(*args, **kwargs)
 

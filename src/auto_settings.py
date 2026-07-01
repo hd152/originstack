@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import Config
+from src.utils import safe_print
 
 try:
     from src.denoising import HAS_BM3D_PKG
@@ -58,13 +59,12 @@ def _aggregate(final: list) -> dict:
         return float(np.mean(vals)) if vals else default
 
     # Exclude zeros for metrics that are only valid when measured successfully
-    fwhm_vals = [f.metrics.get('fwhm', 0.0) for f in final
-                 if f.metrics and f.metrics.get('fwhm', 0.0) > 0]
-    strehl_vals = [f.metrics.get('strehl', 0.0) for f in final
-                   if f.metrics and f.metrics.get('strehl', 0.0) > 0]
+    def _nz(key: str) -> list:
+        return [f.metrics[key] for f in final if f.metrics and f.metrics.get(key, 0.0) > 0]
 
-    ellip_vals = [f.metrics.get('ellipticity', 0.0) for f in final
-                  if f.metrics and f.metrics.get('ellipticity', 0.0) > 0]
+    fwhm_vals   = _nz('fwhm')
+    strehl_vals = _nz('strehl')
+    ellip_vals  = _nz('ellipticity')
     return {
         'median_background':  _med('background'),
         'median_noise':       _med('noise'),
@@ -215,9 +215,11 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve',              True),
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
-        # TV regularisation avoids the ringing artefacts that RL produces on
-        # the sharp galaxy disc edge and bright nuclear core.
-        ('deconvolve_tv',           True),
+        # TV staircasing produces square box artefacts around compact bright
+        # sources (galaxy nuclei, saturated stars). RL ringing is circular and
+        # far less objectionable; the wider deconvolution mask in postprocess
+        # blends in the original at star/nucleus positions to suppress it.
+        ('deconvolve_tv',           False),
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
         ('local_contrast_strength', 0.85),
@@ -240,8 +242,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve',              True),
         ('deconvolve_iterations',   20),
         ('deconvolve_blind_psf',    True),
-        # TV avoids RL ringing on the sharp stellar PSF edges in the dense core.
-        ('deconvolve_tv',           True),
+        # TV staircasing boxes every bright star in a dense field — use RL.
+        ('deconvolve_tv',           False),
         # Stars are the target — never soften them.
         ('star_reduce',             False),
         ('local_contrast',          True),
@@ -263,8 +265,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve',              True),
         ('deconvolve_iterations',   25),
         ('deconvolve_blind_psf',    True),
-        # TV avoids ringing on the hard shell boundary — critical for ring nebulae.
-        ('deconvolve_tv',           True),
+        # TV staircasing boxes the compact bright shell/disk — use RL instead.
+        ('deconvolve_tv',           False),
         # Reduce background stars so the compact nebula is not dominated by halos.
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
@@ -381,6 +383,12 @@ def _apply_quality_settings(
             setattr(args, attr, val)
             changes.append(f"{attr}  {old!r} -> {val!r}")
 
+    def _disable_deconvolve() -> None:
+        if getattr(args, 'deconvolve', False):
+            _set('deconvolve', False)
+        if getattr(args, 'deconvolve_tv', False):
+            _set('deconvolve_tv', False)
+
     n           = int(sig['n_frames'])
     snr         = sig['snr']
     fwhm        = sig['fwhm']
@@ -420,9 +428,8 @@ def _apply_quality_settings(
 
     # Ellipticity warning: poor tracking produces elongated stars
     if fwhm > 4.0 and med_ellip > 0.3:
-        from src.utils import safe_print as _sp
-        _sp(f"  NOTE: median star ellipticity={med_ellip:.3f} > 0.3 with FWHM={fwhm:.1f}px "
-            f"— possible tracking error or optical issue")
+        safe_print(f"  NOTE: median star ellipticity={med_ellip:.3f} > 0.3 with FWHM={fwhm:.1f}px "
+                   f"— possible tracking error or optical issue")
 
     # 3. FWHM-scaled deconvolution iterations (applied after target type sets them)
     if getattr(args, 'deconvolve', False) and fwhm > 4.0:
@@ -485,10 +492,7 @@ def _apply_quality_settings(
     #     - Strehl 0.15–0.25: cut iterations in half as a safety margin.
     if strehl > 0:
         if strehl < 0.15:
-            if getattr(args, 'deconvolve', False):
-                _set('deconvolve', False)
-            if getattr(args, 'deconvolve_tv', False):
-                _set('deconvolve_tv', False)
+            _disable_deconvolve()
         elif strehl < 0.25:
             current_iters = getattr(args, 'deconvolve_iterations', 15)
             _set('deconvolve_iterations', max(8, current_iters // 2))
@@ -500,10 +504,7 @@ def _apply_quality_settings(
     #     - Dispersion 1.5–3.0 px: reduce iterations by 40%.
     if dispersion > 0:
         if dispersion > 3.0:
-            if getattr(args, 'deconvolve', False):
-                _set('deconvolve', False)
-            if getattr(args, 'deconvolve_tv', False):
-                _set('deconvolve_tv', False)
+            _disable_deconvolve()
         elif dispersion > 1.5:
             current_iters = getattr(args, 'deconvolve_iterations', 15)
             _set('deconvolve_iterations', max(5, int(current_iters * 0.6)))
