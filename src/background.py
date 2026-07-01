@@ -579,9 +579,8 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             safe_print(f"    Channel {c}: residual median={float(np.median(background)):.2f}")
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        for c in range(3):
-            _process_channel(c)
-            
+        list(executor.map(_process_channel, range(3)))
+
     return result
 
 
