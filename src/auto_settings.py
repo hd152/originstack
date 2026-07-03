@@ -192,6 +192,9 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.75),
         ('ghs_b',                   7.0),
         ('ghs_sp',                  0.18),
+        # Emission nebula fills the frame — keep the black point below the sky
+        # so faint outer nebulosity is not clipped to black.
+        ('preview_black_sigma',    -0.5),
         ('dbe_patch_size',          48),
         # Emission patches have high entropy; rejecting them gives a cleaner
         # background model on narrowband data.
@@ -225,6 +228,9 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.85),
         ('ghs_b',                   10.0),
         ('ghs_sp',                  0.12),
+        # Galaxy is a small target on empty sky — clip the sky noise to black
+        # so the background does not become a colour-noise storm under stretch.
+        ('preview_black_sigma',     2.0),
         ('dbe_patch_size',          48),
         # Outer globular cluster halos and H-II regions push patch entropy up,
         # biasing the background model toward the galaxy — reject them.
@@ -251,6 +257,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # Higher SP lifts faint outer halo stars relative to the saturated core.
         ('ghs_b',                   7.0),
         ('ghs_sp',                  0.25),
+        # Cluster on empty sky — clip sky noise to black.
+        ('preview_black_sigma',     2.0),
         ('dbe_patch_size',          48),
         ('entropy_bg',              True),
         ('scnr',                    True),
@@ -277,6 +285,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('ghs_sp',                  0.10),
         # Protect the bright central star from blowout.
         ('ghs_hp',                  0.92),
+        # Compact nebula on empty sky, but keep the faint outer halo — mild clip.
+        ('preview_black_sigma',     1.0),
         # Smaller patches → denser background sampling around the compact disk.
         ('dbe_patch_size',          32),
         ('entropy_bg',              True),
@@ -299,6 +309,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.70),
         ('ghs_b',                   8.0),
         ('ghs_sp',                  0.15),
+        # Reflection nebula fills the frame — keep faint dust visible.
+        ('preview_black_sigma',    -0.5),
         ('entropy_bg',              True),
         ('scnr',                    True),
         ('photometric_calibration', True),
@@ -317,6 +329,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('star_reduce',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
+        # Stars on empty sky — clip sky noise to black.
+        ('preview_black_sigma',     2.0),
         ('scnr',                    True),
         ('photometric_calibration', True),
         ('denoise_acdnr',           True),
@@ -328,6 +342,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),
         ('ghs_sp',                  0.20),
+        # Wide field usually has scattered nebulosity — mild clip only.
+        ('preview_black_sigma',     0.5),
         ('scnr',                    True),
         ('photometric_calibration', True),
         ('denoise_acdnr',           True),

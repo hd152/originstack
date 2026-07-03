@@ -367,6 +367,28 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
         psf = np.maximum(psf_est, 0.0)
         psf /= psf.sum()
 
+    # Radial apodization — force the kernel to zero at its edge.
+    # An empirical PSF from stacked star cutouts retains non-zero energy in the
+    # square corners (star wings, residual noise), and blind RL refinement can
+    # inject blocky off-centre structure. FFT deconvolution with such a
+    # hard-edged square kernel produces square ringing ("boxes") around every
+    # point source. A Tukey (flat-core, cosine-taper) radial window keeps the
+    # PSF core/wings intact while tapering the outer edge smoothly to zero,
+    # yielding circular support and eliminating the box artefacts.
+    yy, xx = np.mgrid[0:psf_size, 0:psf_size]
+    r = np.sqrt((yy - half) ** 2 + (xx - half) ** 2) / float(max(half, 1))
+    taper_start = 0.6                       # inner 60% radius: unwindowed
+    w = np.ones_like(r)
+    edge = r >= 1.0
+    taper = (r >= taper_start) & (~edge)
+    w[taper] = 0.5 * (1.0 + np.cos(np.pi * (r[taper] - taper_start)
+                                   / (1.0 - taper_start)))
+    w[edge] = 0.0
+    psf = psf * w
+    _s = psf.sum()
+    if _s > 1e-12:
+        psf /= _s
+
     # Estimate FWHM from the median PSF
     half_max = psf.max() * 0.5
     above = int(np.sum(psf > half_max))

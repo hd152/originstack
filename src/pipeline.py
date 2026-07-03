@@ -792,7 +792,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     save_preview_rgb(stacked, preview_path, stretch=stretch_method,
                      ghs_b=float(getattr(args, 'ghs_b', 8.0)),
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
+                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)))
 
     crop_str = (f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)"
                 if stats.cropped_pixels else "(crop info not available)")

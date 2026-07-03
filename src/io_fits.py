@@ -141,7 +141,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
 
 def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_b: float = 8.0, ghs_sp: float = 0.15,
-                     ghs_hp: float = 0.95) -> None:
+                     ghs_hp: float = 0.95, black_sigma: float = 0.0) -> None:
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
     if Image is None:
@@ -163,10 +163,13 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                 break
             _med = float(np.median(flat_lum))
         _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
-        # Allow a slightly negative black point so the stretch can correctly
-        # distinguish sky noise (near zero) from faint nebula signal — a 0.0
-        # floor would conflate both and produce black mottling in the output.
-        unified_black = _med - 1.0 * _bg_sigma
+        # Black point relative to the sky median in units of sky sigma.
+        # black_sigma < 0 keeps sky noise visible (good for frame-filling faint
+        # nebulae); black_sigma > 0 clips the noise floor to black (good for a
+        # small target on empty sky, e.g. a galaxy or cluster, where a low black
+        # point turns the whole background into a colour-noise storm). The
+        # target-type advisor sets an appropriate value per preset.
+        unified_black = _med + black_sigma * _bg_sigma
         unified_white = float(np.percentile(lum, 99.9))
         for c in range(3):
             out[:, :, c] = generalized_hyperbolic_stretch(
@@ -187,7 +190,7 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                 break
             _med = float(np.median(flat_lum))
         _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
-        unified_black = _med - 1.0 * _bg_sigma
+        unified_black = _med + black_sigma * _bg_sigma
         unified_white = float(np.percentile(lum, 99.8))
         for c in range(3):
             out[:, :, c] = arcsinh_stretch(rgb[:, :, c],

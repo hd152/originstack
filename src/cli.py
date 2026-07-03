@@ -962,6 +962,11 @@ def parse_args():
     p.add_argument('--ghs-hp', type=float, default=0.95,
                    help='GHS highlights protection HP [0–1] (default: 0.95). '
                         'Values above HP map to white, protecting bright cores from blowout.')
+    p.add_argument('--preview-black-sigma', type=float, default=0.0,
+                   help='Preview black point, in sky-sigma above the sky median '
+                        '(default: 0.0). Higher (e.g. 2.0) clips background noise '
+                        'to black for a small target on empty sky; negative keeps '
+                        'faint frame-filling nebulosity visible. Set per target by --auto.')
     p.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
                    help='Disable star reduction')
     p.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
