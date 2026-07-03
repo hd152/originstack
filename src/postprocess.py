@@ -572,6 +572,26 @@ def postprocess_stack(
         safe_print(f"  ✓ Sky residual correction ({format_time(time.time() - _sr_start)})")
         stacked = sky_floor_normalize(stacked, star_mask=pp_star_mask, verbose=args.verbose)
 
+    # Sky pedestal — lift the background off zero after all background
+    # subtraction is complete. Background extraction centres the sky at ~0 with
+    # symmetric noise; the downstream non-negativity clips (Richardson-Lucy,
+    # star reduction) would otherwise crush every below-zero sky pixel to a hard
+    # zero, leaving ~half the sky as black holes that make the linear FITS
+    # unusable and mottle any autostretch. A small positive pedestal (a few sky
+    # sigma) keeps the whole noise distribution above zero so no clip can bite.
+    if args.background_extraction and 'sky_pedestal' not in skip_steps:
+        _ped_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                    + 0.114 * stacked[:, :, 2])
+        _ped_med = float(np.median(_ped_lum))
+        _ped_sigma = float(np.median(np.abs(_ped_lum - _ped_med)) * 1.4826)
+        # Target sky floor at ~8 sigma above zero, measured from the current
+        # (near-zero) sky median so we only add what is missing.
+        pedestal = max(8.0 * _ped_sigma - _ped_med, 0.0)
+        if pedestal > 0:
+            stacked = stacked + np.float32(pedestal)
+            safe_print(f"  ✓ Sky pedestal: +{pedestal:.2f} "
+                       f"(sky sigma={_ped_sigma:.2f})")
+
     # 5. NLM denoising
     if getattr(args, 'denoise_nlm', False) and 'nlm' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_nlm_denoise')
