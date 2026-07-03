@@ -1,6 +1,7 @@
 """Frame discovery and classification."""
 from __future__ import annotations
 
+import json
 import os
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -36,11 +37,46 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
     with ThreadPoolExecutor() as ex:
         headers = list(ex.map(_read_header, files))
     for p, hdr in zip(files, headers):
+        _merge_json_sidecar(p, hdr)
         ftype = classify_frame(p, hdr)
         if ftype == 'skip':
             continue
         frames[ftype].append(FrameInfo(path=p, type=ftype, header=hdr))
     return frames
+
+
+_JSON_FITS_MAP = (
+    # (json_key, fits_key, transform_fn)
+    ('iso',                'ISOSPEED', None),
+    ('gain',               'GAIN',     None),
+    ('captureTemperatureC','CCD-TEMP', None),
+    ('exposureTimeMS',     'EXPTIME',  lambda v: v / 1000.0),
+    ('bayerPattern',       'BAYERPAT', lambda v: str(v).upper()),
+)
+
+
+def _merge_json_sidecar(fits_path: str, hdr: dict) -> None:
+    """Backfill FITS header from a co-located JSON sidecar (if present).
+
+    Celestron Origin and similar apps write per-frame JSON sidecars with ISO,
+    gain, temperature, etc. that may not be embedded in the FITS header.
+    Only fills in keys that are absent from the header — never overwrites.
+    """
+    json_path = os.path.splitext(fits_path)[0] + '.json'
+    if not os.path.isfile(json_path):
+        return
+    try:
+        with open(json_path, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except Exception:
+        return
+    for jkey, fkey, transform in _JSON_FITS_MAP:
+        if fkey not in hdr and jkey in data and data[jkey] is not None:
+            try:
+                val = data[jkey]
+                hdr[fkey] = transform(val) if transform else val
+            except Exception:
+                pass
 
 
 def classify_frame(path: str, header: dict) -> str:
