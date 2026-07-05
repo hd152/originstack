@@ -215,13 +215,17 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     ],
     'galaxy': [
         ('pre_gradient_removal',    True),
-        ('deconvolve',              True),
+        # Deconvolution OFF by default. On wide-field OSC data (undersampled
+        # stars, small galaxy) Richardson-Lucy redistributes flux and lowers the
+        # local background, so every bright star gets a dark ring/moat — and any
+        # star-protection blend just moves the ring to the mask seam. The
+        # marginal sharpening is not worth ringing every star. The galaxy is
+        # already sharp from stacking. Re-enable with --deconvolve for
+        # well-sampled data. (Apodized-PSF + wide-mask paths in postprocess still
+        # apply when explicitly enabled.)
+        ('deconvolve',              False),
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
-        # TV staircasing produces square box artefacts around compact bright
-        # sources (galaxy nuclei, saturated stars). RL ringing is circular and
-        # far less objectionable; the wider deconvolution mask in postprocess
-        # blends in the original at star/nucleus positions to suppress it.
         ('deconvolve_tv',           False),
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
@@ -245,10 +249,12 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('denoise_acdnr',           True),
     ],
     'globular_cluster': [
-        ('deconvolve',              True),
+        # Deconvolution OFF: a dense star field is the worst case for RL
+        # ringing — every one of hundreds of stars gets a dark moat. Not worth
+        # it. Re-enable with --deconvolve for well-sampled data.
+        ('deconvolve',              False),
         ('deconvolve_iterations',   20),
         ('deconvolve_blind_psf',    True),
-        # TV staircasing boxes every bright star in a dense field — use RL.
         ('deconvolve_tv',           False),
         # Stars are the target — never soften them.
         ('star_reduce',             False),

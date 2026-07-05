@@ -572,20 +572,17 @@ def postprocess_stack(
         safe_print(f"  ✓ Sky residual correction ({format_time(time.time() - _sr_start)})")
         stacked = sky_floor_normalize(stacked, star_mask=pp_star_mask, verbose=args.verbose)
 
-    # Sky pedestal — lift the background off zero after all background
-    # subtraction is complete. Background extraction centres the sky at ~0 with
-    # symmetric noise; the downstream non-negativity clips (Richardson-Lucy,
-    # star reduction) would otherwise crush every below-zero sky pixel to a hard
-    # zero, leaving ~half the sky as black holes that make the linear FITS
-    # unusable and mottle any autostretch. A small positive pedestal (a few sky
-    # sigma) keeps the whole noise distribution above zero so no clip can bite.
+    # Sky pedestal — lift the background off zero before the downstream
+    # non-negativity clips (Richardson-Lucy, star reduction) crush every
+    # below-zero sky pixel to a hard zero, which would leave ~half the sky as
+    # black holes (unusable linear FITS, mottled autostretch). A scalar lift
+    # preserves the noise distribution; colour neutralisation happens at the end
+    # (after photometric calibration, which re-scales the channels).
     if args.background_extraction and 'sky_pedestal' not in skip_steps:
         _ped_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
                     + 0.114 * stacked[:, :, 2])
         _ped_med = float(np.median(_ped_lum))
         _ped_sigma = float(np.median(np.abs(_ped_lum - _ped_med)) * 1.4826)
-        # Target sky floor at ~8 sigma above zero, measured from the current
-        # (near-zero) sky median so we only add what is missing.
         pedestal = max(8.0 * _ped_sigma - _ped_med, 0.0)
         if pedestal > 0:
             stacked = stacked + np.float32(pedestal)
@@ -743,29 +740,45 @@ def postprocess_stack(
             # Deconvolution ringing/staircasing extends out to ~PSF half-size,
             # so bright compact sources (saturated stars, galaxy nuclei) need a
             # wider protection radius here to avoid visible box/ring artefacts.
-            deconv_mask = pp_star_mask
+            # Richardson-Lucy rings a dark moat around every bright point source.
+            # A brightness-normalised Gaussian mask (generate_star_mask) barely
+            # protects faint stars — their normalised peak is far below 1 — so
+            # they ring. Build a flat-topped protection mask instead: mark every
+            # star centroid AND every saturated/flat-topped pixel the finder
+            # misses, dilate over the whole ringing zone (~PSF radius) so the
+            # protection is 1.0 across each star's core and moat regardless of
+            # brightness, then feather the outer edge so the blend has no seam.
+            _H_dm, _W_dm = stacked.shape[:2]
+            _pts = np.zeros((_H_dm, _W_dm), dtype=bool)
             if _pp_sources is not None and len(_pp_sources) > 0:
-                deconv_mask = generate_star_mask(stacked.shape[:2], _pp_sources,
-                                                  fwhm=float(psf.shape[0]) * 0.5)
-
-            # Saturated / flat-topped sources (bright stars, companion-galaxy
-            # nuclei) are rejected by the star finder, so they never enter the
-            # mask above and get ringed/boxed by deconvolution. Protect the
-            # brightest pixels directly: threshold luminance, then dilate by the
-            # PSF half-width so the whole ringing zone is blended from original.
+                _ys = np.round(np.asarray(_pp_sources['ycentroid'],
+                                          dtype=np.float64)).astype(int)
+                _xs = np.round(np.asarray(_pp_sources['xcentroid'],
+                                          dtype=np.float64)).astype(int)
+                _ok = ((_ys >= 0) & (_ys < _H_dm) & (_xs >= 0) & (_xs < _W_dm))
+                _pts[_ys[_ok], _xs[_ok]] = True
             _dl = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
                    + 0.114 * stacked[:, :, 2])
             _hi = float(np.percentile(_dl, 99.7))
             if _hi > 0:
-                bright = (_dl >= _hi).astype(np.float32)
-                if bright.any():
-                    bright = ndimage.gaussian_filter(
-                        bright, sigma=max(2.0, float(psf.shape[0]) * 0.5))
-                    _bm = float(bright.max())
-                    if _bm > 0:
-                        bright /= _bm
-                    deconv_mask = (bright if deconv_mask is None
-                                   else np.maximum(deconv_mask, bright))
+                _pts |= (_dl >= _hi)
+            if _pts.any():
+                # Ring radius scales with source brightness (brighter stars push
+                # flux further out), so protect generously — out to a full PSF
+                # box — and feather well beyond. Deconvolution then only sharpens
+                # the star-free extended structure (galaxy arms), which is where
+                # it helps and where it does not ring.
+                _ring_r = max(4, int(float(psf.shape[0])))
+                _core = ndimage.binary_dilation(_pts, iterations=_ring_r)
+                deconv_mask = ndimage.gaussian_filter(
+                    _core.astype(np.float32),
+                    sigma=max(3.0, float(psf.shape[0]) * 0.45))
+                _dmx = float(deconv_mask.max())
+                if _dmx > 0:
+                    deconv_mask /= _dmx
+                np.clip(deconv_mask, 0.0, 1.0, out=deconv_mask)
+            else:
+                deconv_mask = pp_star_mask
 
             deconv_start = time.time()
             if use_tv:
@@ -861,6 +874,21 @@ def postprocess_stack(
             safe_print(f"  ✓ Larson-Sekanina filter ({format_time(time.time() - _ls_start)})")
         except Exception as _lse:
             safe_print(f"  WARNING: Larson-Sekanina filter failed: {_lse}")
+
+    # Final sky neutralisation — equalise the per-channel sky floor so the
+    # background is a neutral grey, not a colour cast. Runs last so nothing
+    # (photometric calibration, deconvolution) can re-introduce a tint after it.
+    # Only ADDS to each channel (raises every channel to the brightest channel's
+    # sky median) so no pixel is pushed negative — no new clipped holes.
+    if args.background_extraction and 'sky_neutralize' not in skip_steps:
+        _sky_meds = [float(np.median(stacked[:, :, c])) for c in range(3)]
+        _sky_target = max(_sky_meds)
+        for c in range(3):
+            _add = _sky_target - _sky_meds[c]
+            if _add > 0:
+                stacked[:, :, c] += np.float32(_add)
+        safe_print(f"  ✓ Sky neutralised to grey (floor={_sky_target:.1f}, "
+                   f"was R{_sky_meds[0]:.1f} G{_sky_meds[1]:.1f} B{_sky_meds[2]:.1f})")
 
     stacked = _sanitize(stacked, "final post-processing")
     return stacked
