@@ -115,7 +115,9 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 - `astro_native` — optional Rust hot-path kernels (see below); numpy fallback when absent
 
 ### Native (Rust) acceleration
-[ext/astro_native/](ext/astro_native/) is a PyO3/maturin crate of hot-path kernels. Currently: `sigma_clip_combine` (~35× faster than the numpy tiled combine, used by `--stack-method sigma_clip`/`winsorized`). `src/stacking.py` imports it as `astro_native` and falls back to the numpy path when it is not installed or the input is not a C-contiguous float32 `(N,H,W,C)` array (so the streaming memmap model is preserved — Rust views the memmap zero-copy).
+[ext/astro_native/](ext/astro_native/) is a PyO3/maturin crate of hot-path kernels, all with a numpy fallback. Coverage:
+- **Stacking combines** (`src/stacking.py`): `sigma_clip_combine` (~37×), `esd_combine` (~24×), `percentile_clip_combine` (~13×), `median_combine` (~6×), `trimmed_mean_combine` (~4×). Every `--stack-method` except drizzle. ESD's Student-t critical-value table is precomputed in Python (`_esd_lambda_table`) and passed to Rust — exact parity, no stats crate. Native path is taken when a rejection mask is not requested and the input is a C-contiguous float32 `(N,H,W,C)` array; the aligned stack memmap qualifies, so Rust views it zero-copy and the streaming memmap model is preserved.
+- **Per-frame warp** (`src/registration.py` `apply_transform`): `warp_affine_lanczos3`, a 2D Lanczos-3 affine/shift resample (~5×). CPU path only (GPU unchanged). This is a quality-validated change, not numeric parity: FWHM and flux match scipy order-3, and the mild Lanczos ringing is incoherent across dithered frames (averages to zero in the stack).
 
 Build (needs a Rust toolchain + `pip install maturin`):
 ```bash
