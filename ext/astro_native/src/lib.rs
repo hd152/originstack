@@ -6,7 +6,7 @@
 //! per-pixel loop in native code, parallelised across image rows with rayon, so
 //! there is no per-tile float32 copy and no repeated whole-stack NaN passes.
 
-use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray4};
+use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray3, PyReadonlyArray4};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -502,6 +502,105 @@ fn esd_combine<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
 }
 
+/// Lanczos-a windowed-sinc kernel weight for offset `x` (a = support radius).
+#[inline]
+fn lanczos_w(x: f64, a: f64) -> f64 {
+    if x == 0.0 {
+        1.0
+    } else if x.abs() >= a {
+        0.0
+    } else {
+        let px = std::f64::consts::PI * x;
+        (a * px.sin() * (px / a).sin()) / (px * px)
+    }
+}
+
+/// Affine warp with Lanczos-3 resampling, matching scipy's
+/// `affine_transform` sampling convention: `out[oy,ox] = in[M @ (oy,ox) + off]`,
+/// out-of-bounds -> `cval`. `mat` is row-major 2x2 `[[m00,m01],[m10,m11]]`
+/// mapping (row,col); `off` is `[off_row, off_col]`. All channels in one pass,
+/// parallel across output rows.
+#[pyfunction]
+#[pyo3(signature = (data, mat, off, out_h, out_w, cval=0.0))]
+fn warp_affine_lanczos3<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    mat: [f64; 4],
+    off: [f64; 2],
+    out_h: usize,
+    out_w: usize,
+    cval: f32,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let a = 3.0_f64;
+    let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
+    let (o0, o1) = (off[0], off[1]);
+
+    let mut out = vec![0f32; out_h * out_w * c];
+    py.allow_threads(|| {
+        out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy, out_row)| {
+            let mut wy = [0f64; 6];
+            let mut wx = [0f64; 6];
+            for ox in 0..out_w {
+                // Inverse map output -> input (scipy convention).
+                let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
+                let ix = m10 * oy as f64 + m11 * ox as f64 + o1;
+                let fy = iy.floor();
+                let fx = ix.floor();
+                let ry = iy - fy;
+                let rx = ix - fx;
+                // 6-tap Lanczos-3 weights, taps at floor-2 .. floor+3.
+                let mut sy = 0.0;
+                let mut sx = 0.0;
+                for t in 0..6 {
+                    let dy = (t as f64 - 2.0) - ry;
+                    let dx = (t as f64 - 2.0) - rx;
+                    wy[t] = lanczos_w(dy, a);
+                    wx[t] = lanczos_w(dx, a);
+                    sy += wy[t];
+                    sx += wx[t];
+                }
+                if sy != 0.0 {
+                    for v in wy.iter_mut() {
+                        *v /= sy;
+                    }
+                }
+                if sx != 0.0 {
+                    for v in wx.iter_mut() {
+                        *v /= sx;
+                    }
+                }
+                let base_y = fy as isize - 2;
+                let base_x = fx as isize - 2;
+                for ch in 0..c {
+                    let mut acc = 0.0f64;
+                    let mut any = false;
+                    for ty in 0..6 {
+                        let yy = base_y + ty as isize;
+                        if yy < 0 || yy >= h as isize || wy[ty] == 0.0 {
+                            continue;
+                        }
+                        let mut row_acc = 0.0f64;
+                        for tx in 0..6 {
+                            let xx = base_x + tx as isize;
+                            if xx < 0 || xx >= w as isize || wx[tx] == 0.0 {
+                                continue;
+                            }
+                            row_acc += wx[tx] * arr[[yy as usize, xx as usize, ch]] as f64;
+                            any = true;
+                        }
+                        acc += wy[ty] * row_acc;
+                    }
+                    out_row[ox * c + ch] = if any { acc as f32 } else { cval };
+                }
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((out_h, out_w, c), out).unwrap().into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -509,6 +608,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(trimmed_mean_combine, m)?)?;
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

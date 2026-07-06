@@ -23,6 +23,14 @@ except Exception:
 
 _log = get_logger()
 
+# Optional native (Rust) Lanczos-3 warp — CPU only; GPU path is unaffected.
+try:
+    import astro_native as _native
+    HAS_NATIVE = True
+except Exception:
+    _native = None
+    HAS_NATIVE = False
+
 try:
     from skimage.registration import phase_cross_correlation
 except Exception:
@@ -184,9 +192,32 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
             else:
                 raise
 
-    # CPU path (also OOM fallback)
+    # CPU path (also OOM fallback). Prefer the native Lanczos-3 warp: it holds
+    # star FWHM and flux identical to scipy order-3, its mild per-frame ringing
+    # averages out across dithered frames (validated), and it is multithreaded.
+    img_cpu = np.asarray(img)
+    if HAS_NATIVE and img_cpu.dtype == np.float32 and img_cpu.flags['C_CONTIGUOUS']:
+        try:
+            H_i, W_i = img_cpu.shape[:2]
+            if transform is not None:
+                matrix = transform.params
+                R = matrix[:2, :2]
+                t_xy = matrix[:2, 2]
+                t_rowcol = np.array([t_xy[1], t_xy[0]])
+                mat = R
+                off = -R @ t_rowcol
+            else:  # pure translation: out[o] = in[o - shift]
+                mat = np.eye(2)
+                off = np.array([-shift[0], -shift[1]], dtype=np.float64)
+            out = _native.warp_affine_lanczos3(
+                img_cpu, mat.astype(np.float64).ravel().tolist(),
+                off.astype(np.float64).tolist(), int(H_i), int(W_i), 0.0)
+            return out[:, :, 0] if squeeze_back else out
+        except Exception as exc:
+            _log.debug("native warp failed (%s); using scipy", exc)
+
     from scipy import ndimage as _scipy_ndimage
-    result = _run(np, _scipy_ndimage, np.asarray(img))
+    result = _run(np, _scipy_ndimage, img_cpu)
     out = np.asarray(result)
     return out[:, :, 0] if squeeze_back else out
 

@@ -81,6 +81,43 @@ def test_esd_matches_numpy(n, weighted):
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
 
 
+def test_warp_preserves_fwhm_and_matches_scipy():
+    """Native Lanczos-3 warp must hold star FWHM and agree closely with scipy."""
+    from scipy import ndimage
+    H = W = 200
+    yy, xx = np.mgrid[0:H, 0:W]
+    img = np.full((H, W, 3), 100.0, np.float32)
+    for c in range(3):
+        img[:, :, c] += 5000.0 * np.exp(-((yy - 100) ** 2 + (xx - 100) ** 2) / (2 * 1.8 ** 2))
+    theta = np.deg2rad(0.4)
+    R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    off = -R @ np.array([2.3, -1.6])
+
+    sci = np.empty_like(img)
+    for c in range(3):
+        sci[:, :, c] = ndimage.affine_transform(img[:, :, c], R, offset=off, order=3,
+                                                 mode='constant', cval=0.0)
+    got = native.warp_affine_lanczos3(img, R.ravel().tolist(), off.tolist(), H, W, 0.0)
+
+    assert got.shape == (H, W, 3) and got.dtype == np.float32
+    assert np.isfinite(got).all()
+
+    def fwhm(im):
+        b = im[80:120, 80:120, 1].astype(np.float64) - 100.0
+        b[b < 0] = 0
+        tot = b.sum()
+        gy, gx = np.mgrid[0:b.shape[0], 0:b.shape[1]]
+        cy, cx = (gy * b).sum() / tot, (gx * b).sum() / tot
+        var = ((gy - cy) ** 2 * b).sum() / tot + ((gx - cx) ** 2 * b).sum() / tot
+        return 2.3548 * np.sqrt(var / 2)
+
+    # FWHM within 2% of scipy, and the two warps highly correlated.
+    assert abs(fwhm(got) - fwhm(sci)) / fwhm(sci) < 0.02
+    m = 20
+    a = sci[m:-m, m:-m, 1].ravel(); b = got[m:-m, m:-m, 1].ravel()
+    assert np.corrcoef(a, b)[0, 1] > 0.999
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan
