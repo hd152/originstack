@@ -143,6 +143,55 @@ where
     out
 }
 
+/// Fill `active[i]` = survives sigma-clip (same iteration as the numpy
+/// `_sigma_clip_tile` per-pixel logic). NaN samples start rejected.
+fn sigma_clip_mask(
+    vals: &[f32],
+    sigma: f32,
+    max_iters: usize,
+    use_mad: bool,
+    active: &mut [bool],
+    gather: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
+) {
+    let n = vals.len();
+    for i in 0..n {
+        active[i] = !vals[i].is_nan();
+    }
+    for _ in 0..max_iters {
+        gather.clear();
+        for i in 0..n {
+            if active[i] {
+                gather.push(vals[i]);
+            }
+        }
+        if gather.is_empty() {
+            break;
+        }
+        let (center, spread) = center_spread(gather, scratch, use_mad);
+        let thresh = sigma * spread;
+        let mut survivors = 0usize;
+        for i in 0..n {
+            if active[i] && (vals[i] - center).abs() <= thresh {
+                survivors += 1;
+            }
+        }
+        if survivors == 0 {
+            break;
+        }
+        let mut changed = false;
+        for i in 0..n {
+            if active[i] && (vals[i] - center).abs() > thresh {
+                active[i] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 /// Combine one pixel's N samples. `vals`/`weights` are length N; NaN samples are
 /// treated as already-rejected.
 #[allow(clippy::too_many_arguments)]
@@ -676,9 +725,90 @@ fn anisotropic_diffusion<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
 }
 
+/// Fused patch-weighted + sigma-clip combine — one pass, no rejection-mask
+/// array. Matches the numpy two-pass path (sigma_clip_combine(return_mask=True)
+/// then patch_weighted_mean_combine): per pixel, sigma-clip each channel to get
+/// a per-frame reject fraction over channels, then weighted-mean the frames
+/// with weight = qmap * global_weight * (1 - reject_fraction).
+#[pyfunction]
+#[pyo3(signature = (data, qmaps, gweights=None, sigma=3.0, max_iters=3, use_mad=true))]
+fn patch_weighted_sigma_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    qmaps: PyReadonlyArray3<'py, f32>,
+    gweights: Option<PyReadonlyArray1<'py, f32>>,
+    sigma: f32,
+    max_iters: usize,
+    use_mad: bool,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let qm = qmaps.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+    let gw: Option<Vec<f32>> = gweights.map(|x| x.as_array().to_vec());
+    let gwref = gw.as_deref();
+
+    let mut out = vec![0f32; h * w * c];
+    py.allow_threads(|| {
+        out.par_chunks_mut(w * c).enumerate().for_each(|(row, out_row)| {
+            let mut chan = vec![0f32; n]; // one channel's N samples
+            let mut active = vec![true; n];
+            let mut gather: Vec<f32> = Vec::with_capacity(n);
+            let mut scratch: Vec<f32> = Vec::with_capacity(n);
+            let mut reject_count = vec![0u32; n]; // per-frame rejected-channel count
+            for col in 0..w {
+                for f in 0..n {
+                    reject_count[f] = 0;
+                }
+                // Sigma-clip each channel independently; tally per-frame rejections.
+                for ch in 0..c {
+                    for f in 0..n {
+                        chan[f] = arr[[f, row, col, ch]];
+                    }
+                    sigma_clip_mask(&chan, sigma, max_iters, use_mad,
+                                    &mut active, &mut gather, &mut scratch);
+                    for f in 0..n {
+                        if !active[f] {
+                            reject_count[f] += 1;
+                        }
+                    }
+                }
+                // Frame weights = qmap * gweight * (1 - reject_fraction).
+                let inv_c = 1.0f64 / c as f64;
+                let mut wsum = 0f64;
+                // accumulate per channel
+                let base = col * c;
+                for ch in 0..c {
+                    out_row[base + ch] = 0.0;
+                }
+                let mut accs = [0f64; 8]; // supports up to 8 channels
+                for f in 0..n {
+                    let rej_frac = reject_count[f] as f64 * inv_c;
+                    let qwt = qm[[f, row, col]] as f64;
+                    let gwt = gwref.map(|g| g[f] as f64).unwrap_or(1.0);
+                    let wt = qwt * gwt * (1.0 - rej_frac);
+                    if wt == 0.0 {
+                        continue;
+                    }
+                    for ch in 0..c {
+                        accs[ch] += wt * arr[[f, row, col, ch]] as f64;
+                    }
+                    wsum += wt;
+                }
+                let denom = if wsum > 1e-12 { wsum } else { 1e-12 };
+                for ch in 0..c {
+                    out_row[base + ch] = (accs[ch] / denom) as f32;
+                }
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine, m)?)?;
     m.add_function(wrap_pyfunction!(median_combine, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(trimmed_mean_combine, m)?)?;

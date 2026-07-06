@@ -14,7 +14,7 @@ from scipy import ndimage
 
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import safe_print, get_logger
+from src.utils import safe_print, get_logger, format_time
 from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
 
 try:
@@ -1194,12 +1194,15 @@ def run_stacking_phase(
         from src.registration import HAS_NATIVE as _reg_native
         if _reg_native:
             safe_print("    [rust] Lanczos-3 warp (per-frame alignment)")
+        _t_align = time.time()
         with ThreadPoolExecutor(max_workers=n_align) as executor:
             futures = {executor.submit(_align_one, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
                                desc="  Aligning", unit="frame", disable=not args.verbose):
                 future.result()
         mem_aligned.flush()
+        safe_print(f"    Alignment: {n_final} frames in {format_time(time.time() - _t_align)} "
+                   f"({n_align} workers, {n_final / max(time.time() - _t_align, 1e-9):.1f} frame/s)")
 
         # Patch-weighted lucky-imaging combine (if quality maps were computed in Phase 2)
         if quality_maps is not None and len(quality_maps) == n_final:
@@ -1214,9 +1217,34 @@ def run_stacking_phase(
                     qmap_c = zoom(qmap, ((bottom - top) / qmap.shape[0],
                                         (right - left) / qmap.shape[1]), order=1)
                     cropped_qmaps.append(np.clip(qmap_c, 0.0, 1.0).astype(np.float32))
-            # Pre-rejection + patch-weighted hybrid stacking
+            # Fused native fast path: sigma-clip rejection + patch weighting in a
+            # single Rust pass, no (N,H,W,C) rejection-mask array. Covers the
+            # sigma_clip/winsorized methods (the mask is clip-based, identical
+            # for both). Falls back to the two-pass numpy path below on any error.
+            _fused_done = False
+            if (args.stack_method in ('sigma_clip', 'winsorized')
+                    and _native_usable(mem_aligned)):
+                try:
+                    _t_fused = time.time()
+                    _qm = np.ascontiguousarray(np.stack(cropped_qmaps), dtype=np.float32)
+                    _w32 = (weights.astype(np.float32, copy=False)
+                            if weights is not None else None)
+                    _use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
+                    stacked = _native.patch_weighted_sigma_combine(
+                        mem_aligned, _qm, _w32, float(args.rejection_sigma),
+                        int(args.rejection_iters), _use_mad)
+                    del _qm
+                    safe_print(f"    [rust] fused patch-weighted + sigma-clip combine "
+                               f"({format_time(time.time() - _t_fused)})")
+                    _fused_done = True
+                except Exception as _fexc:
+                    _log.debug("native fused patch combine failed (%s); using numpy", _fexc)
+
+            # Pre-rejection + patch-weighted hybrid stacking (numpy two-pass)
             rej_mask = None
-            if args.stack_method in ('sigma_clip', 'winsorized'):
+            if _fused_done:
+                pass
+            elif args.stack_method in ('sigma_clip', 'winsorized'):
                 use_winsorize = (args.stack_method == 'winsorized')
                 use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
                 _, rej_mask = sigma_clip_combine(mem_aligned, sigma=args.rejection_sigma,
@@ -1233,9 +1261,13 @@ def run_stacking_phase(
                 sig_esd = getattr(args, 'esd_significance', 0.05)
                 _, rej_mask = esd_combine(mem_aligned, max_outliers=max_out, significance=sig_esd,
                                           weights=weights, return_mask=True)
-            stacked = patch_weighted_mean_combine(mem_aligned, cropped_qmaps,
-                                                  global_weights=weights,
-                                                  rejection_mask=rej_mask)
+            if not _fused_done:
+                _t_pw = time.time()
+                stacked = patch_weighted_mean_combine(mem_aligned, cropped_qmaps,
+                                                      global_weights=weights,
+                                                      rejection_mask=rej_mask)
+                safe_print(f"    Patch-weighted combine (numpy 2-pass): "
+                           f"{format_time(time.time() - _t_pw)}")
             if rej_mask is not None:
                 _free_rej_mask(rej_mask)
                 rej_mask = None

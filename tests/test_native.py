@@ -131,6 +131,22 @@ def test_anisotropic_diffusion_matches_numpy(option):
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1e-3
 
 
+@pytest.mark.parametrize("use_mad", [True, False])
+def test_fused_patch_combine_matches_numpy(use_mad):
+    """Fused patch-weighted+sigma-clip must match the numpy two-pass path."""
+    d = _stack(n=20, h=32, w=40, seed=99)
+    rng = np.random.default_rng(3)
+    qmaps = [rng.uniform(0.2, 1.0, (32, 40)).astype(np.float32) for _ in range(20)]
+    gw = rng.uniform(0.5, 1.5, 20).astype(np.float32)
+    _, rej = astro.sigma_clip_combine(d.astype(np.float64), sigma=3.0, max_iters=3,
+                                      weights=gw, use_mad=use_mad, return_mask=True)
+    ref = astro.patch_weighted_mean_combine(d, qmaps, global_weights=gw, rejection_mask=rej)
+    qm = np.ascontiguousarray(np.stack(qmaps), dtype=np.float32)
+    got = native.patch_weighted_sigma_combine(d, qm, gw, 3.0, 3, use_mad)
+    assert got.shape == ref.shape and got.dtype == np.float32
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1.0
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan

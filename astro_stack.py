@@ -143,6 +143,7 @@ from src.stacking import (
     trimmed_mean_combine,
     esd_combine,
     _esd_lambda_table,
+    patch_weighted_mean_combine,
     lacosmic_reject,
 )
 
