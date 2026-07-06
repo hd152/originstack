@@ -720,6 +720,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         post_processed=False)
     hdu.writeto(output_path, overwrite=True)
 
+    # The output header already carries a WCS from the session info.json when the
+    # capture app (e.g. Celestron Origin) plate-solved the session — written by
+    # populate_fits_header via build_wcs_keywords. --plate-solve re-solves and
+    # overwrites it with an astrometry.net/ASTAP solution.
+    _si = getattr(args, '_session_info', None)
+    _session_has_wcs = _si is not None and _si.has_wcs
+
     if getattr(args, 'plate_solve', False):
         if args.verbose:
             print("\n  Attempting plate solving...")
@@ -729,21 +736,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                        verbose=args.verbose, solver=solver, astap_path=astap_bin):
             hdu.writeto(output_path, overwrite=True)
             _wcs_available = True
+            safe_print("  Plate solved: WCS from astrometry solver")
+        elif _session_has_wcs:
+            _wcs_available = True
+            safe_print("  Plate solve failed — output keeps WCS from session info.json")
         else:
             _wcs_available = False
+            safe_print("  Plate solve failed — no WCS written")
+    elif _session_has_wcs:
+        # No solver run, but the session already provides a plate solution.
+        _wcs_available = True
+        safe_print("  Plate solving not run — output tagged with WCS from "
+                   "session info.json (Origin session solve)")
     else:
         _wcs_available = False
         if args.verbose:
             print("\n  Plate solving skipped (use --plate-solve to enable)")
-
-    # Photometric colour calibration — runs when WCS is available.
-    # WCS comes from plate solve above, or from session info.json.
-    _si = getattr(args, '_session_info', None)
-    _session_has_wcs = _si is not None and _si.has_wcs
-    if not _wcs_available and _session_has_wcs and 'CTYPE1' not in hdu.header:
-        # Session info WCS was written to header by populate_fits_header;
-        # re-read it in case populate_fits_header ran before plate solve path.
-        _wcs_available = True
 
     if getattr(args, 'color_calibrate', False) and _wcs_available:
         safe_print("\n  Applying photometric colour calibration...")
