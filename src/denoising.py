@@ -592,24 +592,6 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
     return result.astype(np.float32)
 
 
-def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
-    """Local normalization to remove flat-field residuals and vignetting."""
-    result = np.empty_like(img)
-
-    for c in range(img.shape[2]):
-        channel = img[:, :, c].astype(np.float64)
-        local_mean = ndimage.gaussian_filter(channel, sigma=sigma)
-        local_sq_mean = ndimage.gaussian_filter(channel ** 2, sigma=sigma)
-        local_std = np.sqrt(np.maximum(local_sq_mean - local_mean ** 2, 0))
-        result[:, :, c] = (channel - local_mean) / (local_std + 1e-12)
-    # Re-scale to original data range (positive values)
-    result = result - result.min()
-    orig_max = np.max(img)
-    if result.max() > 0 and orig_max > 0:
-        result = result / result.max() * orig_max
-    return result.astype(np.float32)
-
-
 def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
     """Remove chroma (color) noise from sky background using luminance-protected smoothing.
 

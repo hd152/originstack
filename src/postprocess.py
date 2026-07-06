@@ -19,7 +19,7 @@ from src.background import (apply_background_extraction, remove_sky_residual,
                             sky_floor_normalize, dynamic_background_extraction,
                             _border_pixels, _sigma_sky)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
-                           bilateral_denoise, local_normalize, reduce_chroma_noise,
+                           bilateral_denoise, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
                            multiscale_local_contrast, mmt_denoise, acdnr_denoise,
                            bm3d_denoise, anisotropic_diffusion, scnr,
@@ -519,15 +519,6 @@ def postprocess_stack(
         except Exception:
             pass
 
-    # 3. Local normalization
-    if getattr(args, 'local_normalize', False) and 'local_normalize' not in skip_steps:
-        _diag_save(stacked, _diag_dir, _diag_counter, 'before_local_normalize')
-        ln_sigma = getattr(args, 'local_normalize_sigma', 50.0)
-        print(f"\n  Applying local normalization (sigma={ln_sigma})...")
-        ln_start = time.time()
-        stacked = local_normalize(stacked, sigma=ln_sigma)
-        safe_print(f"  ✓ Local normalization ({format_time(time.time() - ln_start)})")
-
     # 4. Wavelet denoising
     if getattr(args, 'denoise', False) and 'wavelet' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_wavelet_denoise')
@@ -875,20 +866,43 @@ def postprocess_stack(
         except Exception as _lse:
             safe_print(f"  WARNING: Larson-Sekanina filter failed: {_lse}")
 
-    # Final sky neutralisation — equalise the per-channel sky floor so the
-    # background is a neutral grey, not a colour cast. Runs last so nothing
-    # (photometric calibration, deconvolution) can re-introduce a tint after it.
-    # Only ADDS to each channel (raises every channel to the brightest channel's
-    # sky median) so no pixel is pushed negative — no new clipped holes.
+    # Final sky flattening + neutralisation. Runs last so nothing (photometric
+    # calibration, deconvolution) can re-introduce a cast afterwards. Two parts:
+    #   1. Per-channel large-scale background flattening over MASKED sky —
+    #      removes residual low-frequency luminance gradient AND the colour
+    #      blotches (walking chroma noise) that a global offset cannot touch.
+    #      Only the smooth sky model is subtracted, so stars/galaxy structure
+    #      (high frequency) is untouched; bright objects are masked out of the
+    #      model and interpolated across, exactly like background extraction.
+    #   2. Equalise the per-channel floors to a common target (neutral grey).
+    # Add-only final lift keeps every pixel non-negative (no new clipped holes).
     if args.background_extraction and 'sky_neutralize' not in skip_steps:
-        _sky_meds = [float(np.median(stacked[:, :, c])) for c in range(3)]
-        _sky_target = max(_sky_meds)
+        _lum_sn = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                   + 0.114 * stacked[:, :, 2])
+        # Sky mask: exclude bright objects and star cores from the model.
+        _obj_hi = float(np.percentile(_lum_sn, 80.0))
+        _skym = (_lum_sn < _obj_hi).astype(np.float32)
+        if pp_star_mask is not None:
+            _skym *= (1.0 - np.clip(pp_star_mask.astype(np.float32), 0.0, 1.0))
+        _sig_sn = max(64.0, float(min(stacked.shape[:2])) / 8.0)
+        _den = ndimage.gaussian_filter(_skym, sigma=_sig_sn)
+        _gm = []
         for c in range(3):
-            _add = _sky_target - _sky_meds[c]
+            _ch = stacked[:, :, c]
+            _num = ndimage.gaussian_filter(_ch * _skym, sigma=_sig_sn)
+            _model = _num / (_den + 1e-6)          # smooth sky level per pixel
+            _cmed = float(np.median(_ch))
+            stacked[:, :, c] = _ch - (_model - _cmed)   # subtract deviation only
+            _gm.append(_cmed)
+        # Equalise floors to a common neutral target (add-only).
+        _target = max(_gm)
+        for c in range(3):
+            _add = _target - _gm[c]
             if _add > 0:
                 stacked[:, :, c] += np.float32(_add)
-        safe_print(f"  ✓ Sky neutralised to grey (floor={_sky_target:.1f}, "
-                   f"was R{_sky_meds[0]:.1f} G{_sky_meds[1]:.1f} B{_sky_meds[2]:.1f})")
+        np.clip(stacked, 0.0, None, out=stacked)
+        safe_print(f"  ✓ Sky flattened + neutralised to grey (floor={_target:.1f}, "
+                   f"was R{_gm[0]:.1f} G{_gm[1]:.1f} B{_gm[2]:.1f})")
 
     stacked = _sanitize(stacked, "final post-processing")
     return stacked

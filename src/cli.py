@@ -831,9 +831,9 @@ def parse_args():
                         'parameters, and estimate resource usage — without processing anything')
     p.add_argument('--skip-step', action='append', default=[], metavar='STEP',
                    help='Skip a named post-processing step. Can be specified multiple times. '
-                        'Steps: hot_pixel, background, chroma_nr, sky_floor, local_normalize, '
-                        'wavelet, sky_residual, nlm, bilateral, mmt, acdnr, deconvolve, '
-                        'star_reduce, local_contrast')
+                        'Steps: hot_pixel, background, chroma_nr, sky_floor, '
+                        'wavelet, sky_residual, sky_pedestal, nlm, bilateral, mmt, '
+                        'acdnr, deconvolve, star_reduce, local_contrast, sky_neutralize')
     p.add_argument('--no-registration', action='store_true')
     p.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
@@ -948,8 +948,6 @@ def parse_args():
     p.add_argument('--deconvolve-blind-psf', action='store_true',
                    help='Use empirical PSF estimated by median-stacking normalised star '
                         'cutouts instead of a parametric model.')
-    p.add_argument('--local-normalize', action='store_true',
-                   help='Enable local normalization to remove vignetting residuals')
     p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
     p.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
@@ -1169,7 +1167,6 @@ def parse_args():
         star_reduce_factor=0.4,
         star_reduce_sigma=1.5,
         local_contrast_strength=0.7,
-        local_normalize_sigma=50.0,
         scnr_amount=1.0,
         scnr_target='green',
         comet_blend_sigma=30.0,

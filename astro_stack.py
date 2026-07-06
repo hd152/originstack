@@ -117,7 +117,6 @@ from src.denoising import (
     adaptive_wavelet_denoise,
     bilateral_denoise,
     nlm_denoise,
-    local_normalize,
     reduce_chroma_noise,
     arcsinh_stretch,
 )

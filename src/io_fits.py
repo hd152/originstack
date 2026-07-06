@@ -435,8 +435,6 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
     header['DENOISE'] = (denoise_applied, 'Wavelet denoising applied to FITS data')
     if denoise_applied:
         header['DNSTRNG'] = (getattr(args, 'denoise_strength', 3.0), 'Denoise threshold factor')
-    locnorm_applied = post_processed and getattr(args, 'local_normalize', False)
-    header['LOCNORM'] = (locnorm_applied, 'Local normalization applied to FITS data')
     header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method (JPG only)')
     header['DEBAYER'] = (args.debayer_method, 'Debayering method used')
 
