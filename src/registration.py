@@ -1102,6 +1102,83 @@ def apply_optical_flow_warp(img: np.ndarray, flow: np.ndarray) -> np.ndarray:
         return img
 
 
+def _wcs_registration_diagnostic(final: List[FrameInfo], ref: FrameInfo,
+                                 shifts: List[Tuple[float, float]]) -> None:
+    """Compare per-frame WCS-predicted shift to the computed registration shift.
+
+    Diagnostic only — prints a summary and never changes behaviour. If frames
+    carry a per-frame plate solution (CTYPE/CRVAL/CRPIX/CDELT), the shift needed
+    to align a frame to the reference is predictable from metadata:
+    shift = ref_pixel(sky0) - frame_pixel(sky0) for a common sky point sky0.
+    A small median error means coarse registration could be seeded (or skipped)
+    from the WCS instead of the image pyramid.
+    """
+    try:
+        from astropy.wcs import WCS
+    except Exception:
+        return
+    _WCS_PREFIXES = ('CTYPE', 'CRVAL', 'CRPIX', 'CDELT', 'CUNIT', 'CROTA',
+                     'CD1_', 'CD2_', 'PC1_', 'PC2_', 'PV', 'NAXIS')
+    _WCS_EXACT = {'LONPOLE', 'LATPOLE', 'EQUINOX', 'RADESYS', 'WCSAXES'}
+
+    def _hdr(f):
+        h = getattr(f, 'header', None)
+        if h is None or 'CTYPE1' not in h or 'CRPIX1' not in h:
+            return None
+        # Keep only WCS keywords — avoids COMMENT/HISTORY cards (with newlines)
+        # that break WCS(dict) reconstruction.
+        return {k: v for k, v in h.items()
+                if k in _WCS_EXACT or any(k.startswith(p) for p in _WCS_PREFIXES)}
+
+    rh = _hdr(ref)
+    if rh is None:
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        rwcs = WCS(rh)
+        # common sky point = reference CRVAL (lands on ref CRPIX by definition)
+        rpx = float(rh['CRPIX1']) - 1.0
+        rpy = float(rh['CRPIX2']) - 1.0
+        sky0 = rwcs.pixel_to_world(rpx, rpy)
+
+        errs, n_ok, rows = [], 0, []
+        for f, (sy, sx) in zip(final, shifts):
+            if f is ref:
+                continue
+            fh = _hdr(f)
+            if fh is None or 'CRPIX1' not in fh:
+                continue
+            try:
+                fwcs = WCS(fh)
+                fpx, fpy = fwcs.world_to_pixel(sky0)
+                # shift to align frame -> ref, same convention as apply_transform
+                w_sy = (float(rh['CRPIX2']) - 1.0) - float(fpy)
+                w_sx = (float(rh['CRPIX1']) - 1.0) - float(fpx)
+            except Exception:
+                continue
+            err = float(np.hypot(w_sy - sy, w_sx - sx))
+            errs.append(err)
+            rows.append((os.path.basename(f.path), w_sy, w_sx, sy, sx, err))
+            n_ok += 1
+
+    if n_ok < 3:
+        return
+    errs_a = np.array(errs)
+    safe_print(f"\n  WCS-vs-image registration check ({n_ok} frames with plate solution):")
+    safe_print(f"    |WCS - computed| shift error: median={np.median(errs_a):.2f}px  "
+               f"90th={np.percentile(errs_a, 90):.2f}px  max={errs_a.max():.2f}px")
+    if np.median(errs_a) < 2.0:
+        safe_print("    -> WCS agrees with image registration: metadata could SEED "
+                   "coarse registration (skip pyramid).")
+    else:
+        safe_print("    -> WCS diverges from image registration: usable for dither "
+                   "detection only, not sub-pixel seeding.")
+    # A few sample rows for inspection.
+    for name, wsy, wsx, sy, sx, err in rows[:5]:
+        safe_print(f"      {name}: wcs=({wsy:+.1f},{wsx:+.1f}) "
+                   f"img=({sy:+.1f},{sx:+.1f}) err={err:.1f}px")
+
+
 def run_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -1349,6 +1426,16 @@ def run_registration_phase(
             warning = f"Large shifts detected (max={np.max(shift_mags):.1f}px)"
             stats.add_warning(warning)
             safe_print(f"  ⚠ {warning}")
+
+        # --- WCS-vs-image diagnostic (no behaviour change) ---------------------
+        # If frames carry a per-frame plate solution (Celestron Origin etc.),
+        # compare the shift the WCS predicts against the shift image registration
+        # actually computed. If they agree, coarse registration could be seeded
+        # (or replaced) from metadata — skipping the pyramid pass entirely.
+        try:
+            _wcs_registration_diagnostic(final, best, shifts)
+        except Exception as _wexc:
+            _log.debug("WCS diagnostic skipped (%s)", _wexc)
 
     shift_set = set(f.shift for f in final)
     zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
