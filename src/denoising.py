@@ -12,6 +12,14 @@ from src.utils import safe_print, get_logger
 from src.background import _estimate_sky_sigma
 _log = get_logger()
 
+# Optional native (Rust) kernels — graceful degradation to numpy if absent.
+try:
+    import astro_native as _native
+    _HAS_NATIVE = True
+except Exception:
+    _native = None
+    _HAS_NATIVE = False
+
 pywt = None
 HAS_PYWT = False
 cv2 = None
@@ -1161,6 +1169,20 @@ def anisotropic_diffusion(img: np.ndarray, iterations: int = 20,
     """
     src = img.astype(np.float64)
     gamma = float(np.clip(gamma, 1e-6, 0.25))
+
+    # Native fast path (Rust): identical Jacobi iteration with periodic boundary.
+    if _HAS_NATIVE and img.ndim == 3 and img.shape[2] == 3:
+        try:
+            result = _native.anisotropic_diffusion(
+                np.ascontiguousarray(img, dtype=np.float32),
+                int(iterations), float(kappa), float(gamma), int(option))
+            if star_mask is not None:
+                mask3 = star_mask[:, :, np.newaxis]
+                result = result * (1.0 - mask3) + src * mask3
+            return np.clip(result, 0.0, None).astype(np.float32)
+        except Exception as _exc:
+            _log.debug("native anisotropic_diffusion failed (%s); using numpy", _exc)
+
     result = src.copy()
 
     for _ in range(iterations):

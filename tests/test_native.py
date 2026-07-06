@@ -118,6 +118,19 @@ def test_warp_preserves_fwhm_and_matches_scipy():
     assert np.corrcoef(a, b)[0, 1] > 0.999
 
 
+@pytest.mark.parametrize("option", [1, 2])
+def test_anisotropic_diffusion_matches_numpy(option):
+    import src.denoising as dn
+    rng = np.random.default_rng(option)
+    img = np.clip(rng.normal(300, 40, (64, 80, 3)), 0, None).astype(np.float32)
+    h = dn._HAS_NATIVE
+    dn._HAS_NATIVE = False
+    ref = dn.anisotropic_diffusion(img, iterations=12, kappa=30.0, gamma=0.1, option=option)
+    dn._HAS_NATIVE = h
+    got = dn.anisotropic_diffusion(img, iterations=12, kappa=30.0, gamma=0.1, option=option)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1e-3
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan

@@ -601,6 +601,81 @@ fn warp_affine_lanczos3<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((out_h, out_w, c), out).unwrap().into_pyarray(py))
 }
 
+/// Perona-Malik anisotropic diffusion, `iterations` Jacobi steps with a
+/// periodic (np.roll) boundary. Matches the numpy reference; returns the
+/// diffused float64 image (H,W,C) BEFORE the Python-side star-mask blend/clip.
+#[pyfunction]
+#[pyo3(signature = (data, iterations, kappa, gamma, option))]
+fn anisotropic_diffusion<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    iterations: usize,
+    kappa: f64,
+    gamma: f64,
+    option: i32,
+) -> PyResult<Bound<'py, numpy::PyArray3<f64>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let g = gamma.clamp(1e-6, 0.25);
+
+    // Per-channel contiguous buffers for cache-friendly stencils.
+    let mut chans: Vec<Vec<f64>> = (0..c)
+        .map(|ch| {
+            let mut b = vec![0f64; h * w];
+            for y in 0..h {
+                for x in 0..w {
+                    b[y * w + x] = arr[[y, x, ch]] as f64;
+                }
+            }
+            b
+        })
+        .collect();
+
+    let cond = |d: f64| -> f64 {
+        if option == 1 {
+            (-(d / kappa) * (d / kappa)).exp()
+        } else {
+            1.0 / (1.0 + (d / kappa) * (d / kappa))
+        }
+    };
+
+    py.allow_threads(|| {
+        for buf in chans.iter_mut() {
+            let mut next = vec![0f64; h * w];
+            for _ in 0..iterations {
+                next.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+                    let yn = (y + 1) % h; // roll(-1, axis0): north neighbour
+                    let ys = (y + h - 1) % h; // roll(1, axis0): south
+                    for x in 0..w {
+                        let xe = (x + 1) % w; // roll(-1, axis1): east
+                        let xw = (x + w - 1) % w; // roll(1, axis1): west
+                        let ctr = buf[y * w + x];
+                        let dn = buf[yn * w + x] - ctr;
+                        let ds = buf[ys * w + x] - ctr;
+                        let de = buf[y * w + xe] - ctr;
+                        let dw = buf[y * w + xw] - ctr;
+                        out_row[x] = ctr
+                            + g * (cond(dn) * dn + cond(ds) * ds + cond(de) * de + cond(dw) * dw);
+                    }
+                });
+                std::mem::swap(buf, &mut next);
+            }
+        }
+    });
+
+    let mut out = vec![0f64; h * w * c];
+    for ch in 0..c {
+        let buf = &chans[ch];
+        for y in 0..h {
+            for x in 0..w {
+                out[(y * w + x) * c + ch] = buf[y * w + x];
+            }
+        }
+    }
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -609,6 +684,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trimmed_mean_combine, m)?)?;
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
+    m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
