@@ -1,0 +1,20 @@
+[package]
+name = "astro_native"
+version = "0.1.0"
+edition = "2021"
+description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
+
+[lib]
+name = "astro_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+numpy = "0.23"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

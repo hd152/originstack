@@ -23,7 +23,22 @@ except Exception:
     def tqdm(iterable, **kwargs):
         return iterable
 
+# Optional native (Rust) kernels — graceful degradation to numpy if absent.
+try:
+    import astro_native as _native
+    HAS_NATIVE = True
+except Exception:
+    _native = None
+    HAS_NATIVE = False
+
 _log = get_logger()
+
+
+def _native_usable(data: np.ndarray) -> bool:
+    """The native combine kernels require a C-contiguous float32 (N,H,W,C) view.
+    A non-matching array (wrong dtype / non-contiguous) falls back to numpy."""
+    return (HAS_NATIVE and data.ndim == 4 and data.dtype == np.float32
+            and data.flags['C_CONTIGUOUS'])
 
 
 def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
@@ -521,6 +536,23 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
         verbose: Print per-tile progress.
     """
     N, H, W, C = data.shape
+
+    # Native fast path (Rust): per-pixel sigma-clip, row-parallel, streaming the
+    # float32 memmap in place (no per-tile copies). Only when a rejection mask is
+    # not requested — the mask variant stays on the numpy path.
+    if not return_mask and _native_usable(data):
+        w32 = weights.astype(np.float32, copy=False) if weights is not None else None
+        try:
+            result = _native.sigma_clip_combine(
+                data, float(sigma), int(max_iters), w32, bool(winsorize), bool(use_mad))
+            if verbose:
+                estimator = 'MAD' if use_mad else 'std'
+                mode = 'winsorized' if winsorize else 'reject'
+                safe_print(f"    Native sigma-clip: estimator={estimator}, mode={mode}")
+            return result
+        except Exception as exc:
+            _log.debug("native sigma_clip_combine failed (%s); using numpy", exc)
+
     tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
     rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None

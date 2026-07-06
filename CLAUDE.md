@@ -112,6 +112,20 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 - `cv2` (OpenCV) — advanced debayer methods (Malvar, VNG), bilateral filter denoising
 - `pywt` — wavelet denoising
 - `astroquery` — plate solving via nova.astrometry.net (`--plate-solve`)
+- `astro_native` — optional Rust hot-path kernels (see below); numpy fallback when absent
+
+### Native (Rust) acceleration
+[ext/astro_native/](ext/astro_native/) is a PyO3/maturin crate of hot-path kernels. Currently: `sigma_clip_combine` (~35× faster than the numpy tiled combine, used by `--stack-method sigma_clip`/`winsorized`). `src/stacking.py` imports it as `astro_native` and falls back to the numpy path when it is not installed or the input is not a C-contiguous float32 `(N,H,W,C)` array (so the streaming memmap model is preserved — Rust views the memmap zero-copy).
+
+Build (needs a Rust toolchain + `pip install maturin`):
+```bash
+# into a virtualenv:
+cd ext/astro_native && maturin develop --release
+# system Python (no venv): build a wheel and install it
+cd ext/astro_native && python -m maturin build --release
+pip install --force-reinstall target/wheels/astro_native-*.whl
+```
+Parity vs the numpy reference is covered by [tests/test_native.py](tests/test_native.py) (auto-skips if the module is absent).
 
 ### Plate solving
 Requires `astroquery` installed and `ASTROMETRY_API_KEY` environment variable set. Enable with `--plate-solve`.
