@@ -232,9 +232,10 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.85),
         ('ghs_b',                   10.0),
         ('ghs_sp',                  0.12),
-        # Galaxy is a small target on empty sky — clip the sky noise to black
-        # so the background does not become a colour-noise storm under stretch.
-        ('preview_black_sigma',     2.0),
+        # Galaxy is a small target on empty sky — clip the sky noise tail to
+        # black (median + 3*sigma) so the vast empty background renders clean,
+        # not grainy, under stretch. Faint arms/companion sit well above this.
+        ('preview_black_sigma',     3.0),
         # Smooth medium-scale colour blotches in the empty sky around the small
         # galaxy (object-masked, so galaxy/star colour is preserved).
         ('chroma_nr_large_sigma',   50.0),
@@ -267,8 +268,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # Higher SP lifts faint outer halo stars relative to the saturated core.
         ('ghs_b',                   7.0),
         ('ghs_sp',                  0.25),
-        # Cluster on empty sky — clip sky noise to black.
-        ('preview_black_sigma',     2.0),
+        # Cluster on empty sky — clip sky noise tail to black (stars sit above).
+        ('preview_black_sigma',     3.0),
         ('dbe_patch_size',          48),
         ('entropy_bg',              True),
         ('scnr',                    True),
@@ -339,8 +340,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('star_reduce',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
-        # Stars on empty sky — clip sky noise to black.
-        ('preview_black_sigma',     2.0),
+        # Stars on empty sky — clip sky noise tail to black (stars sit above).
+        ('preview_black_sigma',     3.0),
         ('scnr',                    True),
         ('photometric_calibration', True),
         ('denoise_acdnr',           True),
