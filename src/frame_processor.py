@@ -517,7 +517,9 @@ def execute_frame_processing(
     _build_flat_norm(masters, lights)
 
     if use_process_pool:
-        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n, 8)
+        # Auto: use all cores (RAM cap below governs the real limit). The old
+        # hard cap of 8 throttled Phase 1 on high-core machines; -j N overrides.
+        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n)
 
         # Cap workers so total frame-data memory stays within available RAM.
         # Each worker peak: raw Bayer + calibration intermediates (~3×raw) + RGB + Python overhead.
