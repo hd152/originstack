@@ -489,6 +489,24 @@ def tv_regularized_deconvolve(img: np.ndarray, psf: np.ndarray,
     return result.astype(np.float32)
 
 
+def _rl_deconvolve_xp(image, psf, iterations, xp, xsignal):
+    """Richardson-Lucy iteration on an arbitrary array backend (numpy or cupy).
+
+    Mirrors skimage.restoration.richardson_lucy (clip=False): start from a flat
+    0.5 estimate and iterate im *= conv(image / conv(im, psf), psf_mirror) using
+    FFT convolutions. With xp=cupy/xsignal=cupyx this runs on the GPU.
+    """
+    image = xp.asarray(image, dtype=xp.float32)
+    psf = xp.asarray(psf, dtype=xp.float32)
+    im_deconv = xp.full(image.shape, 0.5, dtype=xp.float32)
+    psf_mirror = psf[::-1, ::-1]
+    for _ in range(int(iterations)):
+        conv = xsignal.fftconvolve(im_deconv, psf, mode='same')
+        relative_blur = image / conv
+        im_deconv = im_deconv * xsignal.fftconvolve(relative_blur, psf_mirror, mode='same')
+    return im_deconv
+
+
 def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
                                 iterations: int = None,
                                 star_mask: Optional[np.ndarray] = None) -> np.ndarray:
@@ -500,8 +518,15 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
     star_mask (float [0,1], 1=star core): if provided, the deconvolved
     result is blended back with the original at star positions to prevent
     ringing artifacts on bright star cores.
+
+    Runs on the GPU (cupy FFT convolution) when --use-gpu is active; otherwise
+    uses skimage's CPU implementation.
     """
-    if not HAS_SKIMAGE_RESTORATION:
+    from src.gpu_context import get_gpu
+    _gpu = get_gpu()
+    _use_gpu = _gpu.active and _gpu.xsignal is not None and hasattr(_gpu.xsignal, 'fftconvolve')
+
+    if not HAS_SKIMAGE_RESTORATION and not _use_gpu:
         logging.warning("skimage.restoration not available; skipping Richardson-Lucy deconvolution")
         return img
     if iterations is None:
@@ -519,8 +544,19 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
     pedestal = max(-y_min + 1e-6, 1e-6)
     Y_pos = Y + pedestal
 
-    Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
-    Y_deconv = Y_deconv - pedestal
+    if _use_gpu:
+        try:
+            Y_deconv = _gpu.to_host(
+                _rl_deconvolve_xp(Y_pos, psf, iterations, _gpu.xp, _gpu.xsignal))
+            logging.info("Richardson-Lucy deconvolution ran on GPU")
+        except Exception as exc:
+            if _gpu.is_oom(exc):
+                _gpu.free_pool()
+            logging.debug("GPU RL failed (%s); falling back to CPU skimage", exc)
+            Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
+    else:
+        Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
+    Y_deconv = np.asarray(Y_deconv, dtype=np.float64) - pedestal
 
     # Star protection: blend original at star cores
     if star_mask is not None:
