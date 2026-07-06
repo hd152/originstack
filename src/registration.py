@@ -1427,15 +1427,18 @@ def run_registration_phase(
             stats.add_warning(warning)
             safe_print(f"  ⚠ {warning}")
 
-        # --- WCS-vs-image diagnostic (no behaviour change) ---------------------
+        # --- WCS-vs-image diagnostic (verbose only, no behaviour change) -------
         # If frames carry a per-frame plate solution (Celestron Origin etc.),
         # compare the shift the WCS predicts against the shift image registration
-        # actually computed. If they agree, coarse registration could be seeded
-        # (or replaced) from metadata — skipping the pyramid pass entirely.
-        try:
-            _wcs_registration_diagnostic(final, best, shifts)
-        except Exception as _wexc:
-            _log.debug("WCS diagnostic skipped (%s)", _wexc)
+        # actually computed. Measured on real Origin data the per-frame solve
+        # scatters by tens of px (median ~30, 90th ~65) — far too coarse to seed
+        # sub-pixel registration, so this stays an opt-in (-v) diagnostic rather
+        # than driving a metadata-seeded fast path.
+        if getattr(args, 'verbose', False):
+            try:
+                _wcs_registration_diagnostic(final, best, shifts)
+            except Exception as _wexc:
+                _log.debug("WCS diagnostic skipped (%s)", _wexc)
 
     shift_set = set(f.shift for f in final)
     zero_shifts = sum(1 for f in final if f.shift == (0.0, 0.0))
