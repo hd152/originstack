@@ -480,6 +480,69 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
     return float(dy), float(dx)
 
 
+def _downsample_half(arr: np.ndarray) -> np.ndarray:
+    """2x box-downsample (even-cropped 2x2 average)."""
+    h2 = (arr.shape[0] // 2) * 2
+    w2 = (arr.shape[1] // 2) * 2
+    a = arr[:h2, :w2]
+    return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
+
+
+def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) -> list:
+    """Precompute a fixed reference's pyramid FFTs once, for reuse across many
+    frames. Returns a coarsest-to-finest... no — finest-to-coarsest list matching
+    ``calculate_shift_pyramid`` indexing: entry lvl = (F_ref, h, w, pad_h, pad_w).
+
+    When one reference is registered against N frames (reference selection, and
+    the whole registration phase), this removes N-1 redundant reference-pyramid
+    builds and N-1 redundant reference FFTs per level.
+    """
+    ref_pyr = [ref.astype(np.float64)]
+    for _ in range(levels - 1):
+        if min(ref_pyr[-1].shape) // 2 < min_size:
+            break
+        ref_pyr.append(_downsample_half(ref_pyr[-1]))
+    prepared = []
+    for r in ref_pyr:
+        ref_n = (r - r.mean()).astype(np.float32, copy=False)
+        h, w = ref_n.shape
+        pad_h, pad_w = 2 * h, 2 * w
+        F_ref = np.fft.rfft2(ref_n, s=(pad_h, pad_w))
+        prepared.append((F_ref, h, w, pad_h, pad_w))
+    return prepared
+
+
+def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float, float]:
+    """Pyramid registration using a precomputed reference pyramid (see
+    ``prepare_ref_pyramid``). Bit-identical to ``calculate_shift_pyramid`` — only
+    the reference-side work is hoisted out of the per-frame loop."""
+    levels = len(prepared)
+    img_pyr = [img.astype(np.float64)]
+    for _ in range(levels - 1):
+        img_pyr.append(_downsample_half(img_pyr[-1]))
+
+    total_sy, total_sx = 0.0, 0.0
+    for lvl in range(levels - 1, -1, -1):
+        F_ref, h, w, pad_h, pad_w = prepared[lvl]
+        i = img_pyr[lvl]
+        if total_sy != 0.0 or total_sx != 0.0:
+            i = ndimage.shift(i, shift=(total_sy, total_sx), order=1,
+                              mode='constant', cval=0.0)
+        img_n = (i - i.mean()).astype(np.float32, copy=False)
+        F_img = np.fft.rfft2(img_n, s=(pad_h, pad_w))
+        corr = np.fft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w))
+        peak_flat = int(np.argmax(corr))
+        py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
+        dy = py if py < h else py - pad_h
+        dx = px if px < w else px - pad_w
+        total_sy += dy
+        total_sx += dx
+        if lvl > 0:
+            total_sy *= 2.0
+            total_sx *= 2.0
+    return total_sy, total_sx
+
+
 def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
                              levels: int = 4,
                              min_size: int = 32) -> Tuple[float, float]:
@@ -715,6 +778,11 @@ def select_reference_frame(
     tentative_idx_in_lights = final_indices[tentative_j]
     ref_lum = _get_lum(tentative_idx_in_lights)
 
+    # Precompute the (fixed) reference pyramid + per-level FFTs ONCE — every
+    # frame registers against this same reference, so this removes N-1 redundant
+    # reference-pyramid builds and reference FFTs.
+    ref_prepared = prepare_ref_pyramid(ref_lum)
+
     # Run cheap pyramid registration in parallel
     pyramid_shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
 
@@ -723,7 +791,7 @@ def select_reference_frame(
             return j, 0.0, 0.0
         lum = _get_lum(orig_idx)
         try:
-            sy, sx = calculate_shift_pyramid(ref_lum, lum)
+            sy, sx = calculate_shift_pyramid_pref(ref_prepared, lum)
             if np.isfinite(sy) and np.isfinite(sx):
                 return j, float(sy), float(sx)
         except Exception:
