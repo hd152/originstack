@@ -606,6 +606,16 @@ def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:
         verbose: Print tiling summary.
     """
     N, H, W, C = data.shape
+
+    if _native_usable(data):
+        try:
+            result = _native.median_combine(data)
+            if verbose:
+                safe_print("    Native median combine")
+            return result
+        except Exception as exc:
+            _log.debug("native median_combine failed (%s); using numpy", exc)
+
     tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
 
@@ -683,6 +693,17 @@ def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 8
         verbose: Print summary.
     """
     N, H, W, C = data.shape
+
+    if not return_mask and _native_usable(data):
+        w32 = weights.astype(np.float32, copy=False) if weights is not None else None
+        try:
+            result = _native.percentile_clip_combine(data, float(low), float(high), w32)
+            if verbose:
+                safe_print(f"    Native percentile-clip: [{low}, {high}]")
+            return result
+        except Exception as exc:
+            _log.debug("native percentile_clip_combine failed (%s); using numpy", exc)
+
     tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
     rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
@@ -810,6 +831,25 @@ def _esd_clip_tile(tile: np.ndarray, max_outliers: int, significance: float,
     return result.astype(np.float32)
 
 
+def _esd_lambda_table(N: int, max_outliers: int, significance: float) -> np.ndarray:
+    """Grubbs critical-value table λ[(n_active, iteration)] for the native ESD
+    kernel. Identical formula to `_esd_clip_tile`; +inf where undefined."""
+    from scipy import stats as scipy_stats
+    lut = np.full((N + 1, max_outliers), np.inf, dtype=np.float64)
+    for n_eff in range(3, N + 1):
+        for i in range(min(max_outliers, n_eff - 2)):
+            n_cur = n_eff - i
+            if n_cur <= 2:
+                continue
+            p = significance / (2.0 * n_cur)
+            p = min(max(p, 1e-10), 0.4999)
+            df = max(n_cur - 2, 1)
+            t_crit = scipy_stats.t.ppf(1.0 - p, df=df)
+            denom = np.sqrt((n_cur - 2.0 + t_crit ** 2) * n_cur)
+            lut[n_eff, i] = (n_cur - 1.0) * t_crit / denom if denom > 0 else np.inf
+    return lut
+
+
 def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0.05,
                 weights: Optional[np.ndarray] = None,
                 verbose: bool = False,
@@ -830,6 +870,18 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
     N, H, W, C = data.shape
     if max_outliers <= 0:
         max_outliers = max(1, N // 4)
+
+    if not return_mask and _native_usable(data):
+        try:
+            lut = _esd_lambda_table(N, max_outliers, significance)  # needs scipy
+            w32 = weights.astype(np.float32, copy=False) if weights is not None else None
+            result = _native.esd_combine(data, int(max_outliers), lut, w32)
+            if verbose:
+                safe_print(f"    Native ESD: max_outliers={max_outliers}, "
+                           f"significance={significance}")
+            return result
+        except Exception as exc:
+            _log.debug("native esd_combine failed (%s); using numpy", exc)
 
     tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
@@ -881,6 +933,16 @@ def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: flo
                          verbose: bool = False) -> np.ndarray:
     """Combine frames using trimmed mean (sorted, discard low/high fractions, mean)."""
     N, H, W, C = data.shape
+
+    if _native_usable(data):
+        try:
+            result = _native.trimmed_mean_combine(data, float(trim_low), float(trim_high))
+            if verbose:
+                safe_print(f"    Native trimmed mean: trim=[{trim_low}, {trim_high}]")
+            return result
+        except Exception as exc:
+            _log.debug("native trimmed_mean_combine failed (%s); using numpy", exc)
+
     tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
     n_tiles_y = (H + tile_size - 1) // tile_size

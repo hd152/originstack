@@ -48,6 +48,18 @@ fn std_pop(v: &[f32]) -> f32 {
     var.sqrt() as f32
 }
 
+/// Sample standard deviation (ddof=1), matching numpy `nanstd(..., ddof=1)`.
+#[inline]
+fn std_sample(v: &[f32]) -> f32 {
+    let n = v.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let m = mean(v) as f64;
+    let var = v.iter().map(|&x| (x as f64 - m) * (x as f64 - m)).sum::<f64>() / (n as f64 - 1.0);
+    var.sqrt() as f32
+}
+
 /// Center + spread for the active values, with the same zero-spread fallback as
 /// the numpy reference (MAD -> std, std -> MAD).
 #[inline]
@@ -76,6 +88,59 @@ fn center_spread(active: &[f32], scratch: &mut Vec<f32>, use_mad: bool) -> (f32,
         }
         (ctr, spread)
     }
+}
+
+/// numpy-`linear` percentile of an already-sorted slice (method='linear',
+/// the numpy default): rank = p/100 * (n-1), linear interpolation.
+#[inline]
+fn percentile_sorted(sorted: &[f32], p: f64) -> f32 {
+    let n = sorted.len();
+    if n == 0 {
+        return f32::NAN;
+    }
+    if n == 1 {
+        return sorted[0];
+    }
+    let rank = (p / 100.0) * (n as f64 - 1.0);
+    let k = rank.floor() as usize;
+    let frac = rank - k as f64;
+    if k + 1 >= n {
+        sorted[n - 1]
+    } else {
+        (sorted[k] as f64 + frac * (sorted[k + 1] as f64 - sorted[k] as f64)) as f32
+    }
+}
+
+/// Row-parallel driver: fills each pixel's N samples into `vals`, then calls
+/// `work` with per-thread `state` built once per row via `init`.
+fn row_parallel<S, Init, Work>(
+    arr: &numpy::ndarray::ArrayView4<'_, f32>,
+    h: usize,
+    w: usize,
+    c: usize,
+    n: usize,
+    init: Init,
+    work: Work,
+) -> Vec<f32>
+where
+    S: Send,
+    Init: Fn() -> S + Sync,
+    Work: Fn(&mut S, &[f32]) -> f32 + Sync,
+{
+    let mut out = vec![0f32; h * w * c];
+    out.par_chunks_mut(w * c).enumerate().for_each(|(row, out_row)| {
+        let mut state = init();
+        let mut vals = vec![0f32; n];
+        for col in 0..(w * c) {
+            let wj = col / c;
+            let cj = col % c;
+            for k in 0..n {
+                vals[k] = arr[[k, row, wj, cj]];
+            }
+            out_row[col] = work(&mut state, &vals);
+        }
+    });
+    out
 }
 
 /// Combine one pixel's N samples. `vals`/`weights` are length N; NaN samples are
@@ -249,9 +314,201 @@ fn sigma_clip_combine<'py>(
     Ok(out_arr.into_pyarray(py))
 }
 
+/// Median combine of an `(N,H,W,C)` float32 stack (even N averages the two
+/// middle values, matching `np.median`).
+#[pyfunction]
+fn median_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+    let out = py.allow_threads(|| {
+        row_parallel(&arr, h, w, c, n, || Vec::<f32>::with_capacity(n), |buf, vals| {
+            buf.clear();
+            buf.extend_from_slice(vals);
+            median_inplace(buf)
+        })
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
+/// Percentile-clip combine: reject samples outside [low, high] percentile at
+/// each pixel, then (weighted) mean the survivors. Matches
+/// `_percentile_clip_tile` (numpy 'linear' percentile).
+#[pyfunction]
+#[pyo3(signature = (data, low=20.0, high=80.0, weights=None))]
+fn percentile_clip_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    low: f64,
+    high: f64,
+    weights: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+    let wv: Option<Vec<f32>> = weights.map(|x| x.as_array().to_vec());
+    let wref = wv.as_deref();
+    let out = py.allow_threads(|| {
+        row_parallel(&arr, h, w, c, n, || Vec::<f32>::with_capacity(n), |buf, vals| {
+            buf.clear();
+            buf.extend_from_slice(vals);
+            buf.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let lo = percentile_sorted(buf, low);
+            let hi = percentile_sorted(buf, high);
+            // Survivors: lo <= v <= hi; if none, keep all (matches numpy).
+            let mut any = false;
+            for &v in vals.iter() {
+                if v >= lo && v <= hi {
+                    any = true;
+                    break;
+                }
+            }
+            let mut acc = 0f64;
+            let mut wsum = 0f64;
+            for (i, &v) in vals.iter().enumerate() {
+                let keep = any && v >= lo && v <= hi;
+                if keep || !any {
+                    let wt = wref.map(|w| w[i]).unwrap_or(1.0) as f64;
+                    acc += v as f64 * wt;
+                    wsum += wt;
+                }
+            }
+            if wsum == 0.0 { 0.0 } else { (acc / wsum) as f32 }
+        })
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
+/// Trimmed-mean combine: sort, drop floor(N*trim_low) low and floor(N*trim_high)
+/// high samples, mean the rest. Matches `trimmed_mean_combine`.
+#[pyfunction]
+#[pyo3(signature = (data, trim_low=0.2, trim_high=0.2))]
+fn trimmed_mean_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    trim_low: f64,
+    trim_high: f64,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+    let mut n_low = (n as f64 * trim_low).floor().max(0.0) as usize;
+    let mut n_high = (n as f64 * trim_high).floor().max(0.0) as usize;
+    let mut n_keep = n as isize - n_low as isize - n_high as isize;
+    if n_keep < 1 {
+        n_keep = 1;
+        n_low = 0;
+        n_high = 0;
+    }
+    let (n_low, n_keep) = (n_low, n_keep as usize);
+    let _ = n_high;
+    let out = py.allow_threads(|| {
+        row_parallel(&arr, h, w, c, n, || Vec::<f32>::with_capacity(n), |buf, vals| {
+            buf.clear();
+            buf.extend_from_slice(vals);
+            buf.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let slice = &buf[n_low..n_low + n_keep];
+            mean(slice)
+        })
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
+/// Generalized ESD (Grubbs) combine. The critical-value table `lut` (shape
+/// `(N+1, max_outliers)`, +inf where undefined) is precomputed in Python from
+/// the Student-t distribution and indexed `[n_active, iteration]`, so no
+/// statistics crate is needed here. Matches `_esd_clip_tile`.
+#[pyfunction]
+#[pyo3(signature = (data, max_outliers, lut, weights=None))]
+fn esd_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    max_outliers: usize,
+    lut: numpy::PyReadonlyArray2<'py, f64>,
+    weights: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+    let mo = max_outliers;
+    let lut_flat: Vec<f64> = lut.as_array().iter().copied().collect(); // (N+1)*mo row-major
+    let wv: Option<Vec<f32>> = weights.map(|x| x.as_array().to_vec());
+    let wref = wv.as_deref();
+
+    let out = py.allow_threads(|| {
+        row_parallel(
+            &arr,
+            h,
+            w,
+            c,
+            n,
+            || (vec![true; n], Vec::<f32>::with_capacity(n)),
+            |(active, gather), vals| {
+                for k in 0..n {
+                    active[k] = !vals[k].is_nan();
+                }
+                for i in 0..mo {
+                    gather.clear();
+                    for k in 0..n {
+                        if active[k] {
+                            gather.push(vals[k]);
+                        }
+                    }
+                    let m = gather.len();
+                    if m < 3 {
+                        break; // lambda is +inf for n_active < 3 -> never rejects
+                    }
+                    let mn = mean(gather);
+                    let mut sd = std_sample(gather);
+                    if sd < 1e-12 {
+                        sd = 1e-12;
+                    }
+                    let mut max_dev = -1f32;
+                    let mut idx = usize::MAX;
+                    for k in 0..n {
+                        if active[k] {
+                            let dv = (vals[k] - mn).abs() / sd;
+                            if dv > max_dev {
+                                max_dev = dv;
+                                idx = k;
+                            }
+                        }
+                    }
+                    let lam = lut_flat[m * mo + i];
+                    if (max_dev as f64) > lam && idx != usize::MAX {
+                        active[idx] = false; // m >= 3 -> m-1 >= 2 survive
+                    }
+                }
+                let mut acc = 0f64;
+                let mut wsum = 0f64;
+                for k in 0..n {
+                    if active[k] {
+                        let wt = wref.map(|w| w[k]).unwrap_or(1.0) as f64;
+                        acc += vals[k] as f64 * wt;
+                        wsum += wt;
+                    }
+                }
+                if wsum == 0.0 {
+                    0.0
+                } else {
+                    (acc / wsum) as f32
+                }
+            },
+        )
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(median_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(trimmed_mean_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

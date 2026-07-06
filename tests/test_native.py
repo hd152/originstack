@@ -45,6 +45,42 @@ def test_sigma_clip_matches_numpy(use_mad, winsorize, weighted):
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
 
 
+def test_median_matches_numpy():
+    d = _stack(seed=7)
+    ref = astro.median_combine(d.astype(np.float64))
+    got = native.median_combine(d)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1e-3
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_percentile_clip_matches_numpy(weighted):
+    d = _stack(seed=11)
+    w = (np.random.default_rng(2).uniform(0.5, 1.5, d.shape[0]).astype(np.float32)
+         if weighted else None)
+    ref = astro.percentile_clip_combine(d.astype(np.float64), low=20.0, high=80.0, weights=w)
+    got = native.percentile_clip_combine(d, 20.0, 80.0, w)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
+
+
+def test_trimmed_mean_matches_numpy():
+    d = _stack(seed=13)
+    ref = astro.trimmed_mean_combine(d.astype(np.float64), trim_low=0.2, trim_high=0.2)
+    got = native.trimmed_mean_combine(d, 0.2, 0.2)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1e-3
+
+
+@pytest.mark.parametrize("n,weighted", [(8, False), (30, False), (30, True)])
+def test_esd_matches_numpy(n, weighted):
+    d = _stack(n=n, seed=n)
+    mo = max(1, n // 4)
+    w = (np.random.default_rng(4).uniform(0.5, 1.5, n).astype(np.float32)
+         if weighted else None)
+    ref = astro.esd_combine(d.astype(np.float64), max_outliers=mo, significance=0.05, weights=w)
+    lut = astro._esd_lambda_table(n, mo, 0.05)
+    got = native.esd_combine(d, mo, lut, w)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan

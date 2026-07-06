@@ -138,6 +138,11 @@ from src.stacking import (
     _lanczos_resample_frame,
     _sigma_clip_tile,
     sigma_clip_combine,
+    median_combine,
+    percentile_clip_combine,
+    trimmed_mean_combine,
+    esd_combine,
+    _esd_lambda_table,
     lacosmic_reject,
 )
 
