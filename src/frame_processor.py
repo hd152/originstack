@@ -974,8 +974,15 @@ def quality_gate(
             reject_reason = f"extremely low contrast ({m['contrast']:.1f} < 2.0)"
         elif m['dynamic_range'] < 20:
             reject_reason = f"extremely low dynamic range ({m['dynamic_range']:.1f} < 20)"
-        elif m['noise'] > m['brightness'] * 0.8:
-            reject_reason = f"excessive noise ({m['noise']:.1f} > {m['brightness']*0.8:.1f})"
+        # NOTE: the old "excessive noise" hard limit (noise > brightness*0.8)
+        # compared a robust noise *sigma* to the background *median* — a
+        # dimensionless-mismatch that fires on well-calibrated frames: dark
+        # subtraction lowers the pedestal (brightness) while a light-pollution
+        # gradient inflates the whole-frame MAD (noise), so good frames with
+        # healthy SNR get rejected wholesale. Genuinely noise-dominated frames
+        # are already caught by the snr < 0.5 check above and by the relative
+        # SNR outlier test in the statistical stage below (SNR = signal / noise,
+        # so an abnormally noisy frame shows up as a low-SNR outlier).
         if reject_reason:
             f.accepted = False
             rejected_reasons[f.path] = reject_reason
