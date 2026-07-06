@@ -950,6 +950,14 @@ def parse_args():
                         'cutouts instead of a parametric model.')
     p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
+    p.add_argument('--chroma-nr-large-sigma', type=float, default=0.0,
+                   help='Coarse chroma-NR scale in px (default: 0 = off). Smooths '
+                        'medium-scale colour blotches (walking/chroma-noise mottle) '
+                        'over object-masked sky. Try 40-60 for wide-field galaxy '
+                        'fields. Auto sets it for the galaxy preset.')
+    p.add_argument('--chroma-nr-large-strength', type=float, default=0.7,
+                   help='Blend strength of the coarse chroma-NR pass [0-1] '
+                        '(default: 0.7). Lower preserves more faint sky colour (IFN).')
     p.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
                    help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
     p.add_argument('--ghs-b', type=float, default=8.0,
@@ -1121,6 +1129,8 @@ def parse_args():
         # Denoiser tuning
         denoise_chroma_boost=2.0,
         chroma_nr_sigma=2.0,
+        chroma_nr_large_sigma=0.0,
+        chroma_nr_large_strength=0.7,
         denoise_nlm_strength=1.0,
         denoise_nlm_blend=0.5,
         denoise_bilateral_sigma_color=None,

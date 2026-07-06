@@ -235,6 +235,10 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # Galaxy is a small target on empty sky — clip the sky noise to black
         # so the background does not become a colour-noise storm under stretch.
         ('preview_black_sigma',     2.0),
+        # Smooth medium-scale colour blotches in the empty sky around the small
+        # galaxy (object-masked, so galaxy/star colour is preserved).
+        ('chroma_nr_large_sigma',   50.0),
+        ('chroma_nr_large_strength', 0.7),
         ('dbe_patch_size',          48),
         # Outer globular cluster halos and H-II regions push patch entropy up,
         # biasing the background model toward the galaxy — reject them.

@@ -592,7 +592,9 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
     return result.astype(np.float32)
 
 
-def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
+def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
+                        sigma_large: float = 0.0,
+                        large_strength: float = 0.7) -> np.ndarray:
     """Remove chroma (color) noise from sky background using luminance-protected smoothing.
 
     Stars and bright objects are masked out before the blur so their chroma
@@ -652,12 +654,26 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
     blurred_weight = ndimage.gaussian_filter(sky_mask, sigma=sigma)
     safe_weight = np.maximum(blurred_weight, 1e-9)
 
+    # Optional coarse pass — smooths medium-scale colour blotches (walking /
+    # chroma-noise mottle, tens of px) that the fine pass leaves untouched.
+    # Same object masking, so star/galaxy colour is preserved; only sky chroma
+    # is flattened, blended in by large_strength.
+    do_large = sigma_large > 0.0
+    if do_large:
+        weight_large = np.maximum(
+            ndimage.gaussian_filter(sky_mask, sigma=sigma_large), 1e-9)
+        blend_large = np.clip(sky_mask * float(large_strength), 0.0, 1.0)
+
     for c in range(img.shape[2]):
         chroma = img[:, :, c].astype(np.float64) - lum
         # Weighted blur: star pixels contribute 0, background contributes 1
         smooth_chroma = ndimage.gaussian_filter(chroma * sky_mask, sigma=sigma) / safe_weight
         # Stars keep original chroma; background gets smoothed chroma
         out_chroma = chroma * protect + smooth_chroma * sky_mask
+        if do_large:
+            coarse = (ndimage.gaussian_filter(out_chroma * sky_mask,
+                                              sigma=sigma_large) / weight_large)
+            out_chroma = out_chroma * (1.0 - blend_large) + coarse * blend_large
         result[:, :, c] = lum + out_chroma
 
     return np.clip(result, 0, None).astype(np.float32)

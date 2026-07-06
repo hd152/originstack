@@ -451,9 +451,14 @@ def postprocess_stack(
     if getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_chroma_nr')
         cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
-        print(f"\n  Applying chroma noise reduction (sigma={cnr_sigma})...")
+        cnr_large = float(getattr(args, 'chroma_nr_large_sigma', 0.0))
+        cnr_large_str = float(getattr(args, 'chroma_nr_large_strength', 0.7))
+        _large_msg = f", large={cnr_large:.0f}" if cnr_large > 0 else ""
+        print(f"\n  Applying chroma noise reduction (sigma={cnr_sigma}{_large_msg})...")
         cnr_start = time.time()
-        stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma)
+        stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma,
+                                      sigma_large=cnr_large,
+                                      large_strength=cnr_large_str)
         safe_print(f"  ✓ Chroma noise reduction ({format_time(time.time() - cnr_start)})")
         stacked = _sanitize(stacked, "chroma noise reduction")
 
