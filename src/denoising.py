@@ -1176,6 +1176,7 @@ def anisotropic_diffusion(img: np.ndarray, iterations: int = 20,
             result = _native.anisotropic_diffusion(
                 np.ascontiguousarray(img, dtype=np.float32),
                 int(iterations), float(kappa), float(gamma), int(option))
+            safe_print(f"    [rust] anisotropic diffusion ({iterations} iters)")
             if star_mask is not None:
                 mask3 = star_mask[:, :, np.newaxis]
                 result = result * (1.0 - mask3) + src * mask3

@@ -545,10 +545,9 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
         try:
             result = _native.sigma_clip_combine(
                 data, float(sigma), int(max_iters), w32, bool(winsorize), bool(use_mad))
-            if verbose:
-                estimator = 'MAD' if use_mad else 'std'
-                mode = 'winsorized' if winsorize else 'reject'
-                safe_print(f"    Native sigma-clip: estimator={estimator}, mode={mode}")
+            estimator = 'MAD' if use_mad else 'std'
+            mode = 'winsorized' if winsorize else 'reject'
+            safe_print(f"    [rust] sigma-clip combine (estimator={estimator}, mode={mode})")
             return result
         except Exception as exc:
             _log.debug("native sigma_clip_combine failed (%s); using numpy", exc)
@@ -610,8 +609,7 @@ def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:
     if _native_usable(data):
         try:
             result = _native.median_combine(data)
-            if verbose:
-                safe_print("    Native median combine")
+            safe_print("    [rust] median combine")
             return result
         except Exception as exc:
             _log.debug("native median_combine failed (%s); using numpy", exc)
@@ -698,8 +696,7 @@ def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 8
         w32 = weights.astype(np.float32, copy=False) if weights is not None else None
         try:
             result = _native.percentile_clip_combine(data, float(low), float(high), w32)
-            if verbose:
-                safe_print(f"    Native percentile-clip: [{low}, {high}]")
+            safe_print(f"    [rust] percentile-clip combine ([{low}, {high}])")
             return result
         except Exception as exc:
             _log.debug("native percentile_clip_combine failed (%s); using numpy", exc)
@@ -876,9 +873,8 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
             lut = _esd_lambda_table(N, max_outliers, significance)  # needs scipy
             w32 = weights.astype(np.float32, copy=False) if weights is not None else None
             result = _native.esd_combine(data, int(max_outliers), lut, w32)
-            if verbose:
-                safe_print(f"    Native ESD: max_outliers={max_outliers}, "
-                           f"significance={significance}")
+            safe_print(f"    [rust] ESD combine (max_outliers={max_outliers}, "
+                       f"significance={significance})")
             return result
         except Exception as exc:
             _log.debug("native esd_combine failed (%s); using numpy", exc)
@@ -937,8 +933,7 @@ def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: flo
     if _native_usable(data):
         try:
             result = _native.trimmed_mean_combine(data, float(trim_low), float(trim_high))
-            if verbose:
-                safe_print(f"    Native trimmed mean: trim=[{trim_low}, {trim_high}]")
+            safe_print(f"    [rust] trimmed-mean combine (trim=[{trim_low}, {trim_high}])")
             return result
         except Exception as exc:
             _log.debug("native trimmed_mean_combine failed (%s); using numpy", exc)
@@ -1196,6 +1191,9 @@ def run_stacking_phase(
                 n_align = _safe
         except Exception:
             pass
+        from src.registration import HAS_NATIVE as _reg_native
+        if _reg_native:
+            safe_print("    [rust] Lanczos-3 warp (per-frame alignment)")
         with ThreadPoolExecutor(max_workers=n_align) as executor:
             futures = {executor.submit(_align_one, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,

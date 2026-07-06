@@ -483,6 +483,8 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     if getattr(args, 'preset', None):
         print(f"  Preset: {args.preset}")
     get_gpu().print_status()
+    from src.utils import native_status
+    print(native_status())
 
     # Detect hierarchical mode
     if not os.path.isdir(directory):
