@@ -668,9 +668,13 @@ def execute_frame_processing(
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_thread_process_frame, i, f): i
                        for i, f in enumerate(lights)}
+            # Always show the progress bar here: unlike the CPU path, per-frame
+            # quality metrics are computed asynchronously and only printed AFTER
+            # this loop, so disabling the bar under -v would leave the whole GPU
+            # processing loop with no output at all (looks hung).
             for future in tqdm(as_completed(futures), total=n,
                                desc="  Processing", unit="frame",
-                               disable=args.verbose):
+                               disable=False):
                 i, metrics, error, lum_arr = future.result()
                 f = lights[i]
                 if error:
