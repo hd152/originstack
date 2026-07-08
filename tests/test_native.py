@@ -173,6 +173,47 @@ def test_warp_shift_fast_path():
     assert np.corrcoef(a, b)[0, 1] > 0.999
 
 
+def test_lacosmic_reject_matches_numpy():
+    """Native L.A.Cosmic must match the numpy/scipy reference exactly (same
+    f64 intermediate dtype), including protecting compact bright sources."""
+    rng = np.random.default_rng(2)
+    H, W = 120, 140
+    rgb = np.clip(rng.normal(500, 60, (H, W, 3)), 0, None).astype(np.float32)
+    idx = rng.integers(0, [H, W, 3], size=(60, 3))
+    rgb[idx[:, 0], idx[:, 1], idx[:, 2]] += rng.uniform(2000, 8000, 60)
+    yy, xx = np.mgrid[0:H, 0:W]
+    for _ in range(5):
+        cy, cx = rng.uniform(15, H - 15), rng.uniform(15, W - 15)
+        g = rng.uniform(3000, 9000) * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.2 ** 2))
+        for c in range(3):
+            rgb[:, :, c] += g
+    rgb = np.ascontiguousarray(rgb)
+
+    ref = astro.lacosmic_reject(rgb.copy())
+    got = native.lacosmic_reject_native(rgb.copy(), 4.5, 5.0, 1.0, 6.5)
+    assert got.shape == ref.shape and got.dtype == np.float32
+    assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-2
+
+
+def test_lacosmic_reject_non_rgb_passthrough():
+    """Non-3-channel input must pass through unchanged (matches the Python
+    early-return), not error."""
+    img = np.zeros((10, 12, 1), dtype=np.float32)
+    img[3, 4, 0] = 7.0
+    out = native.lacosmic_reject_native(img, 4.5, 5.0, 1.0, 6.5)
+    assert np.array_equal(out, img)
+
+
+@pytest.mark.parametrize("size", [3, 5])
+def test_median_filter_native_matches_scipy(size):
+    from scipy import ndimage
+    rng = np.random.default_rng(3)
+    a = rng.normal(500, 50, (80, 96)).astype(np.float32)
+    ref = ndimage.median_filter(a, size=size)
+    got = native.median_filter_native(a, size)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan

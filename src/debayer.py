@@ -13,6 +13,14 @@ from src.utils import get_logger
 
 _log = get_logger()
 
+# Optional native (Rust) kernels — graceful degradation to numpy if absent.
+try:
+    import astro_native as _native
+    _HAS_NATIVE = True
+except Exception:
+    _native = None
+    _HAS_NATIVE = False
+
 cv2 = None
 HAS_CV2 = False
 
@@ -378,6 +386,20 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     return result
 
 
+def _median_filter3(arr, xp, _nd):
+    """3x3 median filter, native (Rust) on the CPU/numpy path when available —
+    ~10x faster than scipy's generic rank filter for this small, fixed
+    footprint. GPU (cupy) path is untouched; falls back to scipy on any error.
+    """
+    if (xp is np and _HAS_NATIVE and arr.dtype == np.float32
+            and arr.ndim == 2 and arr.flags['C_CONTIGUOUS']):
+        try:
+            return _native.median_filter_native(arr, 3)
+        except Exception:
+            pass
+    return _nd.median_filter(arr, size=3)
+
+
 def _fix_hot_rgb_impl(rgb, threshold, xp, _nd):
     """Pure implementation of RGB hot-pixel correction; works with numpy or CuPy.
 
@@ -386,7 +408,7 @@ def _fix_hot_rgb_impl(rgb, threshold, xp, _nd):
     median on GPU and gives equivalent quality for isolated hot pixels.
     """
     lum     = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-    med_lum = _nd.median_filter(lum, size=3)
+    med_lum = _median_filter3(lum, xp, _nd)
     diff    = lum - med_lum
     mad     = float(xp.median(xp.abs(diff)))
     sigma   = mad * 1.4826
@@ -428,7 +450,7 @@ def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT):
 
 def _fix_hot_mono_impl(img, threshold, xp, _nd):
     """Pure implementation of mono hot-pixel correction; works with numpy or CuPy."""
-    med   = _nd.median_filter(img, size=3)
+    med   = _median_filter3(img, xp, _nd)
     diff  = img - med
     mad   = float(xp.median(xp.abs(diff)))
     sigma = mad * 1.4826

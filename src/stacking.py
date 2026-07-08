@@ -78,6 +78,13 @@ def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
     if img.ndim != 3 or img.shape[2] != 3:
         return img
 
+    if HAS_NATIVE and img.dtype == np.float32 and img.flags['C_CONTIGUOUS']:
+        try:
+            return _native.lacosmic_reject_native(
+                img, float(sigclip), float(objlim), float(gain), float(readnoise))
+        except Exception as exc:
+            _log.debug("native lacosmic_reject failed (%s); using numpy", exc)
+
     result = img.astype(np.float32, copy=True)
     lap_kernel = np.array([[0.0, -1.0, 0.0],
                            [-1.0,  4.0, -1.0],

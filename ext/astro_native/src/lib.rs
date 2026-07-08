@@ -984,6 +984,211 @@ fn patch_weighted_sigma_combine<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
 }
 
+/// scipy `mode='reflect'` boundary index: (d c b a | a b c d | d c b a) — the
+/// edge value is duplicated (index -1 == index 0), not a full mirror without
+/// repeat. Looped so it is correct even if an offset exceeds one bounce.
+#[inline]
+fn reflect_idx(i: isize, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let n_i = n as isize;
+    let mut idx = i;
+    while idx < 0 || idx >= n_i {
+        idx = if idx < 0 { -idx - 1 } else { 2 * n_i - 1 - idx };
+    }
+    idx as usize
+}
+
+/// Windowed median filter (odd `size`, reflect boundary), row-parallel.
+/// The window is tiny (9 or 25 elements for size 3/5) so a per-pixel gather +
+/// insertion-style sort beats scipy's generic rank-filter machinery, which
+/// pays per-pixel dispatch overhead for an arbitrary footprint.
+fn median_filter_2d_f64(data: &[f64], h: usize, w: usize, size: usize) -> Vec<f64> {
+    let half = (size / 2) as isize;
+    let mut out = vec![0f64; h * w];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+        let mut window = vec![0f64; size * size];
+        for x in 0..w {
+            let mut k = 0usize;
+            for dy in -half..=half {
+                let yy = reflect_idx(y as isize + dy, h);
+                let base = yy * w;
+                for dx in -half..=half {
+                    let xx = reflect_idx(x as isize + dx, w);
+                    window[k] = data[base + xx];
+                    k += 1;
+                }
+            }
+            window.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            row_out[x] = window[window.len() / 2];
+        }
+    });
+    out
+}
+
+/// f32 variant of the above (used by the hot-pixel detector, which operates on
+/// float32 luminance).
+fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize) -> Vec<f32> {
+    let half = (size / 2) as isize;
+    let mut out = vec![0f32; h * w];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+        let mut window = vec![0f32; size * size];
+        for x in 0..w {
+            let mut k = 0usize;
+            for dy in -half..=half {
+                let yy = reflect_idx(y as isize + dy, h);
+                let base = yy * w;
+                for dx in -half..=half {
+                    let xx = reflect_idx(x as isize + dx, w);
+                    window[k] = data[base + xx];
+                    k += 1;
+                }
+            }
+            window.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            row_out[x] = window[window.len() / 2];
+        }
+    });
+    out
+}
+
+/// 3x3 Laplacian [[0,-1,0],[-1,4,-1],[0,-1,0]], reflect boundary. The kernel
+/// is symmetric under 180-degree rotation, so `convolve` and `correlate`
+/// coincide — no flip needed to match `scipy.ndimage.convolve`.
+fn laplacian_2d(data: &[f64], h: usize, w: usize) -> Vec<f64> {
+    let mut out = vec![0f64; h * w];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+        let yn = reflect_idx(y as isize - 1, h);
+        let ys = reflect_idx(y as isize + 1, h);
+        let row_c = y * w;
+        let row_n = yn * w;
+        let row_s = ys * w;
+        for x in 0..w {
+            let xw = reflect_idx(x as isize - 1, w);
+            let xe = reflect_idx(x as isize + 1, w);
+            row_out[x] = 4.0 * data[row_c + x]
+                - data[row_n + x]
+                - data[row_s + x]
+                - data[row_c + xw]
+                - data[row_c + xe];
+        }
+    });
+    out
+}
+
+/// L.A.Cosmic-style cosmic-ray rejection, matching `lacosmic_reject` in
+/// `src/stacking.py`: per channel, Laplacian spike / local-noise-model
+/// detection statistic, object-rejection ratio to protect star cores,
+/// replace flagged pixels with the 5x5 local median. All f64 internally
+/// (matching the numpy reference's dtype) for parity in the threshold test;
+/// output f32. Channels are processed sequentially (each internally
+/// row-parallel) since S_med depends on the fully-computed S array.
+#[pyfunction]
+#[pyo3(signature = (data, sigclip=4.5, objlim=5.0, gain=1.0, readnoise=6.5))]
+fn lacosmic_reject_native<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    sigclip: f64,
+    objlim: f64,
+    gain: f64,
+    readnoise: f64,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let rn_term = (readnoise / gain) * (readnoise / gain);
+    let flat: Option<&[f32]> = arr.as_slice();
+
+    let mut out = vec![0f32; h * w * c];
+    if c != 3 {
+        // Mirror the Python early-return: pass the input through unchanged.
+        match flat {
+            Some(f) => out.copy_from_slice(f),
+            None => {
+                for y in 0..h {
+                    for x in 0..w {
+                        for ch in 0..c {
+                            out[(y * w + x) * c + ch] = arr[[y, x, ch]];
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out)
+            .unwrap()
+            .into_pyarray(py));
+    }
+
+    py.allow_threads(|| {
+        for ch in 0..3usize {
+            let mut chd = vec![0f64; h * w];
+            match flat {
+                Some(f) => {
+                    chd.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                        let base = y * w * c + ch;
+                        for x in 0..w {
+                            row[x] = f[base + x * c] as f64;
+                        }
+                    });
+                }
+                None => {
+                    for y in 0..h {
+                        for x in 0..w {
+                            chd[y * w + x] = arr[[y, x, ch]] as f64;
+                        }
+                    }
+                }
+            }
+
+            let fine = laplacian_2d(&chd, h, w);
+            let med5 = median_filter_2d_f64(&chd, h, w, 5);
+
+            let mut sarr = vec![0f64; h * w];
+            sarr.par_iter_mut().enumerate().for_each(|(i, sv)| {
+                let f = fine[i].max(0.0);
+                let noise = (med5[i].max(0.0) / gain + rn_term).sqrt().max(1e-6);
+                *sv = f / (2.0 * noise);
+            });
+            let smed = median_filter_2d_f64(&sarr, h, w, 3);
+
+            out.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
+                let row_base = y * w;
+                for x in 0..w {
+                    let i = row_base + x;
+                    let sv = sarr[i];
+                    let smv = smed[i].max(1e-6);
+                    let ratio = sv / smv;
+                    let val = if sv > sigclip && ratio > objlim { med5[i] } else { chd[i] };
+                    row_out[x * c + ch] = val as f32;
+                }
+            });
+        }
+    });
+
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+/// Standalone median filter (odd `size`, reflect boundary) over a single
+/// float32 2D array. Exposed for reuse by other hot-pixel-style detectors.
+#[pyfunction]
+#[pyo3(signature = (data, size=3))]
+fn median_filter_native<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray2<'py, f32>,
+    size: usize,
+) -> PyResult<Bound<'py, numpy::PyArray2<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w) = (s[0], s[1]);
+    let flat: Vec<f32> = arr.iter().copied().collect();
+    let out = py.allow_threads(|| median_filter_2d_f32(&flat, h, w, size));
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -994,6 +1199,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
+    m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
+    m.add_function(wrap_pyfunction!(median_filter_native, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
