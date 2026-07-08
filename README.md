@@ -169,29 +169,35 @@ Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-interpolated sub-p
 - Hard rejection: blank, corrupt, or severely underexposed frames
 - Quality-weighted stacking (SNR, FWHM, star count weighting)
 
-### Post-Processing Chain (up to 20 steps)
+### Post-Processing Chain
 Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be explicitly enabled:
 
 1. ✅ Hot pixel removal on stacked image
 2. ✅ Star mask generation (protects structure in subsequent steps)
 3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh, or GraXpert AI)
-4. ✅ Chroma noise reduction
+4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches via `--chroma-nr-large-sigma`)
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
-6. ❌ Local normalisation — `--local-normalize`
-7. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
-8. ✅ Sky residual correction (second pass after denoising)
+6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
+7. ✅ Sky residual correction (second pass after denoising)
+8. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
 9. ❌ Non-local means denoising — `--denoise-nlm`
 10. ❌ Bilateral filter — `--denoise-bilateral`
 11. ❌ Multiscale Median Transform (MMT) — `--denoise-mmt`
 12. ❌ ACDNR adaptive contrast denoising — `--denoise-acdnr`
 13. ❌ BM3D collaborative filter — `--denoise-bm3d`
-14. ❌ Perona-Malik anisotropic diffusion — `--denoise-aniso`
+14. ❌ Perona-Malik anisotropic diffusion — `--denoise-aniso` (native/Rust accelerated)
 15. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
 16. ❌ Photometric colour calibration — `--photometric-calibration`
-17. ❌ Richardson-Lucy deconvolution — `--deconvolve`
+17. ❌ Richardson-Lucy deconvolution — `--deconvolve` (GPU-accelerated with `--use-gpu`)
 18. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
 19. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
 20. ❌ Star removal via Starnet++ — `--star-remove`
+21. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
+
+> The old `--local-normalize` step was **removed**: it applied local variance
+> equalisation (divide by local σ) which amplifies background noise; the gradient/
+> vignette job is already covered by `--pre-gradient-removal` + DBE + sky-floor +
+> sky-residual.
 
 ### Presets
 Eight built-in target presets tune all parameters at once:
@@ -248,6 +254,10 @@ pip install opencv-python
 
 # 7. Optional: wavelet denoising
 pip install PyWavelets
+
+# 8. Optional: native (Rust) acceleration for stacking + registration
+#    Needs a Rust toolchain + maturin. See "Native (Rust) acceleration" below.
+cd ext/astro_native && maturin develop --release   # into a venv
 ```
 
 **Optional dependencies** — all gracefully degraded when absent:
@@ -258,8 +268,9 @@ pip install PyWavelets
 | `PyWavelets` | Wavelet denoising |
 | `sep` | 5–10× faster star detection |
 | `astroquery` | Plate solving via astrometry.net |
-| `cupy-cuda*` | GPU acceleration |
+| `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
 | `reproject` | Mosaic stitching |
+| `astro_native` (Rust) | Native stacking combines, Lanczos warp, anisotropic diffusion |
 
 ---
 
@@ -356,7 +367,6 @@ python astro_stack.py -d lights/ -o best.fits \
   --debayer-method malvar \
   --denoise-nlm --denoise-bilateral --denoise-mmt --denoise-acdnr \
   --deconvolve \
-  --local-normalize \
   --stack-method sigma_clip --rejection-sigma 2.5 \
   --weight-snr 2.0 --weight-fwhm 2.0 \
   -v
@@ -412,9 +422,15 @@ python astro_stack.py -d lights/ -o stacked.fits --config my_settings.toml
 
 ---
 
-## Directory Structure
+## Folder Organization Modes
 
-### Single folder mode
+OriginStack supports four ways of organizing your input files. The first two are auto-detected; the last two require an explicit flag.
+
+---
+
+### Mode 1 — Single folder
+
+Put all your FITS files (lights and optional calibration frames) in one directory and point `-d` at it.
 
 ```
 lights/
@@ -426,22 +442,119 @@ lights/
 └── ...
 ```
 
-### Hierarchical mode (multi-target session)
+```bash
+python astro_stack.py -d lights/ -o stacked.fits
+```
+
+OriginStack builds master calibration frames from any bias/dark/flat files it finds, then processes and stacks all light frames into a single output FITS.
+
+---
+
+### Mode 2 — Hierarchical (multiple targets, auto-detected)
+
+Use this when you have captured several different targets in one night and want them each stacked separately. Create one subfolder per target. OriginStack detects subfolders automatically — no flag required.
 
 ```
 session/
 ├── M31/
 │   ├── dark_001.fit
 │   ├── flat_001.fit
+│   ├── info.json          (optional — Celestron Origin metadata)
 │   └── light_001.fit ... light_NNN.fit
 ├── M42/
 │   ├── dark_001.fit
+│   ├── info.json
 │   └── light_001.fit ... light_NNN.fit
 └── NGC7000/
-    └── light_001.fit ... light_NNN.fit   (no calibration = OK)
+    └── light_001.fit ... light_NNN.fit   (no calibration — OK)
 ```
 
-OriginStack auto-detects which mode to use: FITS files in the root → single-folder mode; subdirectories containing FITS → hierarchical mode.
+```bash
+python astro_stack.py -d session/ -o combined.fits -v
+```
+
+Each subfolder is stacked independently (its own calibration frames, quality analysis, and registration pass), then the per-target stacks are combined into the output FITS. Use `--keep-intermediates` to also save the individual per-target stacks alongside the combined output.
+
+**`info.json` support:** If a subfolder contains an `info.json` from the Celestron Origin app, OriginStack reads the target name, Bayer pattern, and WCS (RA/Dec/FOV/orientation) from it automatically. Each subfolder's `info.json` is loaded independently, so different subfolders can cover different sky coordinates.
+
+---
+
+### Mode 3 — Combine sessions (`--combine-sessions`)
+
+Use this when you have captured the **same target across multiple nights** and want a single unified deep stack. Every light frame from every subfolder is pooled into one registration and stacking pass.
+
+```
+m51_sessions/
+├── 2024-04-01/
+│   ├── info.json
+│   └── light_001.fit ... light_NNN.fit
+├── 2024-04-03/
+│   ├── info.json
+│   └── light_001.fit ... light_NNN.fit
+└── 2024-04-07/
+    ├── dark_001.fit      (shared calibration)
+    ├── flat_001.fit
+    ├── info.json
+    └── light_001.fit ... light_NNN.fit
+```
+
+```bash
+python astro_stack.py -d m51_sessions/ -o m51_deep.fits --combine-sessions -v
+```
+
+All calibration frames across all subfolders are merged into shared masters, then every light frame is quality-analysed, registered, and stacked together as if they came from a single session. This is the best approach for maximising integration time on a single target.
+
+**When to use vs. hierarchical mode:**
+
+| | Hierarchical (default) | Combine sessions |
+|---|---|---|
+| Multiple targets in `-d` | ✅ each stacked separately | ❌ only one target |
+| Same target, multiple nights | produces separate stacks | ✅ one deep unified stack |
+| Per-target calibration | ✅ each subfolder independent | merged into shared masters |
+| Memory usage | bounded per target | all frames pooled; larger |
+
+**Bayer pattern check:** If `info.json` files across subfolders report different Bayer patterns (e.g., mixing cameras), OriginStack will print a warning before stacking proceeds. Per-frame FITS headers always take priority over `info.json` defaults.
+
+---
+
+### Mode 4 — Mosaic (`--mosaic`)
+
+Use this when your subfolders are **adjacent sky panels** of the same large target, and you want them stitched into a single wide-field image using WCS reprojection.
+
+```
+panels/
+├── panel_1/
+│   ├── info.json          (provides WCS — or use --plate-solve)
+│   └── light_001.fit ... light_NNN.fit
+├── panel_2/
+│   ├── info.json
+│   └── light_001.fit ... light_NNN.fit
+└── panel_3/
+    ├── info.json
+    └── light_001.fit ... light_NNN.fit
+```
+
+```bash
+python astro_stack.py -d panels/ -o mosaic.fits --mosaic -v
+```
+
+Each subfolder is first stacked independently (phases 1–4), then all panel stacks are reprojected onto a common optimal WCS grid and blended with distance-weighted feathering to eliminate seams. Overlap zones are background-matched automatically.
+
+**Requirements:**
+- `pip install reproject` — WCS-based reprojection library
+- Every panel must have a valid WCS: either from `info.json` (Celestron Origin) or from plate solving (`--plate-solve`)
+- If any panel is missing a WCS, the mosaic step is skipped with a warning
+
+---
+
+### Auto-detection summary
+
+| What's in `-d` | Mode selected |
+|---|---|
+| FITS files directly in the directory | **Single folder** (auto) |
+| Subdirectories containing FITS files | **Hierarchical** (auto) |
+| Subdirectories + `--combine-sessions` flag | **Combine sessions** |
+| Subdirectories + `--mosaic` flag | **Mosaic** |
 
 ---
 
@@ -465,7 +578,6 @@ Most post-processing is **on by default**. Here are the disable flags:
 | MMT denoising | ❌ off | `--denoise-mmt` |
 | ACDNR denoising | ❌ off | `--denoise-acdnr` |
 | Richardson-Lucy deconvolution | ❌ off | `--deconvolve` |
-| Local normalisation | ❌ off | `--local-normalize` |
 
 ---
 
@@ -516,6 +628,37 @@ For the full CLI reference with all flags and defaults, see [PROJECT_SPEC.md](PR
 | 500 frames (tested) | same 0.4–1.2 GB | ~10× longer |
 
 Memory usage is bounded by the streaming architecture — frames are loaded one at a time and freed immediately after accumulation.
+
+### Native (Rust) acceleration
+
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the whole Phase-2 warp + Phase-3 combine hot path plus one denoiser:
+
+| Kernel | Speedup vs numpy |
+|--------|------------------|
+| `sigma_clip_combine` (default stack method) | ~37× |
+| `esd_combine` | ~24× |
+| `percentile_clip_combine` | ~13× |
+| `median_combine` | ~6× |
+| `trimmed_mean_combine` | ~4× |
+| Fused patch-weighted + sigma-clip combine | ~100× |
+| Per-frame Lanczos-3 alignment warp | ~5× |
+| Anisotropic diffusion | ~37× |
+
+Build (needs a Rust toolchain + `pip install maturin`):
+
+```bash
+# into a virtualenv:
+cd ext/astro_native && maturin develop --release
+# system Python (no venv): build a wheel and install it
+cd ext/astro_native && python -m maturin build --release
+pip install --force-reinstall target/wheels/astro_native-*.whl
+```
+
+At runtime the startup banner reports `Native accel: astro_native vX ACTIVE …`, and each accelerated step logs a `[rust] …` line. The aligned stack is a float32 memmap that Rust views zero-copy, so the streaming memory model is preserved. GPU (`--use-gpu`) additionally accelerates the registration warp and Richardson-Lucy deconvolution via cupy.
+
+### Iterating on the same data
+
+Re-running the *same* `-o` output with `--keep-checkpoint` makes subsequent runs **skip Phases 1–3 entirely** (load the saved raw stack, redo only post-processing) — the fastest way to tune stretch/denoise settings.
 
 ---
 
@@ -605,3 +748,22 @@ Alternatively, use the ASTAP solver:
 ```bash
 python astro_stack.py -d lights/ -o stacked.fits --plate-solve --plate-solver astap
 ```
+
+## GPU Acceleration
+
+This project supports GPU acceleration using CuPy. To enable GPU acceleration:
+
+1. Install CuPy:
+   ```bash
+   pip install cupy-cuda11x  # Replace `11x` with your CUDA version
+   ```
+2. Ensure your system has a compatible NVIDIA GPU and CUDA drivers installed.
+
+### Example Workflow with GPU Acceleration
+```bash
+python astro_stack.py -d lights/ -o stacked.fits --use-gpu
+```
+
+### Notes
+- GPU acceleration is experimental and may not cover all code paths.
+- Fallback to CPU occurs automatically if GPU is unavailable.

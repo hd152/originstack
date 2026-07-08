@@ -10,15 +10,29 @@ from scipy import ndimage
 from src.models import Config
 from src.utils import safe_print, get_logger
 from src.background import _estimate_sky_sigma
-
 _log = get_logger()
+
+# Optional native (Rust) kernels — graceful degradation to numpy if absent.
+try:
+    import astro_native as _native
+    _HAS_NATIVE = True
+except Exception:
+    _native = None
+    _HAS_NATIVE = False
 
 pywt = None
 HAS_PYWT = False
 cv2 = None
 HAS_CV2 = False
-denoise_nl_means = estimate_sigma = richardson_lucy = None
+denoise_nl_means = None
 HAS_SKIMAGE_RESTORATION = False
+
+try:
+    import bm3d as _bm3d_pkg
+    HAS_BM3D_PKG = True
+except Exception:
+    _bm3d_pkg = None  # type: ignore[assignment]
+    HAS_BM3D_PKG = False
 
 
 def _ensure_pywt():
@@ -48,17 +62,12 @@ def _ensure_cv2():
 
 
 def _ensure_skimage_restoration():
-    global denoise_nl_means, estimate_sigma, richardson_lucy, HAS_SKIMAGE_RESTORATION
+    global denoise_nl_means, HAS_SKIMAGE_RESTORATION
     if not HAS_SKIMAGE_RESTORATION:
         try:
-            from skimage.restoration import (
-                denoise_nl_means as _dnlm,
-                estimate_sigma as _es,
-                richardson_lucy as _rl)
+            from skimage.restoration import denoise_nl_means as _dnlm
             if callable(_dnlm):
                 denoise_nl_means = _dnlm
-                estimate_sigma = _es
-                richardson_lucy = _rl
                 HAS_SKIMAGE_RESTORATION = True
         except Exception:
             pass
@@ -591,25 +600,9 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
     return result.astype(np.float32)
 
 
-def local_normalize(img: np.ndarray, sigma: float = 50.0) -> np.ndarray:
-    """Local normalization to remove flat-field residuals and vignetting."""
-    result = np.empty_like(img)
-
-    for c in range(img.shape[2]):
-        channel = img[:, :, c].astype(np.float64)
-        local_mean = ndimage.gaussian_filter(channel, sigma=sigma)
-        local_sq_mean = ndimage.gaussian_filter(channel ** 2, sigma=sigma)
-        local_std = np.sqrt(np.maximum(local_sq_mean - local_mean ** 2, 0))
-        result[:, :, c] = (channel - local_mean) / (local_std + 1e-12)
-    # Re-scale to original data range (positive values)
-    result = result - result.min()
-    orig_max = np.max(img)
-    if result.max() > 0 and orig_max > 0:
-        result = result / result.max() * orig_max
-    return result.astype(np.float32)
-
-
-def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
+def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
+                        sigma_large: float = 0.0,
+                        large_strength: float = 0.7) -> np.ndarray:
     """Remove chroma (color) noise from sky background using luminance-protected smoothing.
 
     Stars and bright objects are masked out before the blur so their chroma
@@ -669,12 +662,26 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0) -> np.ndarray:
     blurred_weight = ndimage.gaussian_filter(sky_mask, sigma=sigma)
     safe_weight = np.maximum(blurred_weight, 1e-9)
 
+    # Optional coarse pass — smooths medium-scale colour blotches (walking /
+    # chroma-noise mottle, tens of px) that the fine pass leaves untouched.
+    # Same object masking, so star/galaxy colour is preserved; only sky chroma
+    # is flattened, blended in by large_strength.
+    do_large = sigma_large > 0.0
+    if do_large:
+        weight_large = np.maximum(
+            ndimage.gaussian_filter(sky_mask, sigma=sigma_large), 1e-9)
+        blend_large = np.clip(sky_mask * float(large_strength), 0.0, 1.0)
+
     for c in range(img.shape[2]):
         chroma = img[:, :, c].astype(np.float64) - lum
         # Weighted blur: star pixels contribute 0, background contributes 1
         smooth_chroma = ndimage.gaussian_filter(chroma * sky_mask, sigma=sigma) / safe_weight
         # Stars keep original chroma; background gets smoothed chroma
         out_chroma = chroma * protect + smooth_chroma * sky_mask
+        if do_large:
+            coarse = (ndimage.gaussian_filter(out_chroma * sky_mask,
+                                              sigma=sigma_large) / weight_large)
+            out_chroma = out_chroma * (1.0 - blend_large) + coarse * blend_large
         result[:, :, c] = lum + out_chroma
 
     return np.clip(result, 0, None).astype(np.float32)
@@ -919,6 +926,44 @@ def bm3d_denoise(img: np.ndarray, sigma_psd: float = 0.0,
         Runtime scales with image area ÷ stride².  Expect 15–60 s on a
         2 K image at stride=8.  Use ``--bm3d-stride 16`` for large images.
     """
+    if sigma_psd <= 0.0:
+        sigma_psd = float(_estimate_sky_sigma(img))
+    if sigma_psd < 1e-9:
+        return img.copy()
+
+    # Fast path: use the bm3d package when installed (significantly faster than
+    # the pure-scipy DCT fallback below and handles all stages in one call).
+    if HAS_BM3D_PKG:
+        try:
+            src_f = img.astype(np.float64)
+            img_max = float(src_f.max()) or 1.0
+            Y_raw = (0.29900 * src_f[:, :, 0] + 0.58700 * src_f[:, :, 1]
+                     + 0.11400 * src_f[:, :, 2])
+            Y_norm = Y_raw / img_max
+            sigma_norm = sigma_psd / img_max
+            Y_denoised = _bm3d_pkg.bm3d(
+                Y_norm,
+                sigma_psd=sigma_norm,
+                stage_arg=_bm3d_pkg.BM3DStages.ALL_STAGES,
+            )
+            Y_d = Y_denoised * img_max
+            # Chroma: mild Gaussian smoothing proportional to noise level
+            Cb = -0.16875 * src_f[:, :, 0] - 0.33126 * src_f[:, :, 1] + 0.50000 * src_f[:, :, 2]
+            Cr =  0.50000 * src_f[:, :, 0] - 0.41869 * src_f[:, :, 1] - 0.08131 * src_f[:, :, 2]
+            chroma_sigma = max(1.0, sigma_psd / img_max * 3.0)
+            Cb_d = ndimage.gaussian_filter(Cb, sigma=chroma_sigma)
+            Cr_d = ndimage.gaussian_filter(Cr, sigma=chroma_sigma)
+            R = Y_d + 1.40200 * Cr_d
+            G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+            B = Y_d + 1.77200 * Cb_d
+            result = np.clip(np.stack([R, G, B], axis=2), 0.0, None).astype(np.float32)
+            if star_mask is not None:
+                mask3 = star_mask[:, :, np.newaxis]
+                result = (result * (1.0 - mask3) + img * mask3).astype(np.float32)
+            return result
+        except Exception:
+            pass  # fall through to pure-scipy DCT implementation
+
     try:
         from scipy.fft import dctn, idctn
     except ImportError:
@@ -929,11 +974,6 @@ def bm3d_denoise(img: np.ndarray, sigma_psd: float = 0.0,
 
     if stride is None:
         stride = 8 if max(H, W) > 1500 else 4
-
-    if sigma_psd <= 0.0:
-        sigma_psd = float(_estimate_sky_sigma(img))
-    if sigma_psd < 1e-9:
-        return img.copy()
 
     # YCbCr decomposition
     Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
@@ -1129,6 +1169,21 @@ def anisotropic_diffusion(img: np.ndarray, iterations: int = 20,
     """
     src = img.astype(np.float64)
     gamma = float(np.clip(gamma, 1e-6, 0.25))
+
+    # Native fast path (Rust): identical Jacobi iteration with periodic boundary.
+    if _HAS_NATIVE and img.ndim == 3 and img.shape[2] == 3:
+        try:
+            result = _native.anisotropic_diffusion(
+                np.ascontiguousarray(img, dtype=np.float32),
+                int(iterations), float(kappa), float(gamma), int(option))
+            safe_print(f"    [rust] anisotropic diffusion ({iterations} iters)")
+            if star_mask is not None:
+                mask3 = star_mask[:, :, np.newaxis]
+                result = result * (1.0 - mask3) + src * mask3
+            return np.clip(result, 0.0, None).astype(np.float32)
+        except Exception as _exc:
+            _log.debug("native anisotropic_diffusion failed (%s); using numpy", _exc)
+
     result = src.copy()
 
     for _ in range(iterations):
@@ -1197,91 +1252,6 @@ def scnr(img: np.ndarray, amount: float = 1.0,
     return np.clip(result, 0.0, None).astype(np.float32)
 
 
-def adaptive_mtf(img: np.ndarray,
-                 target_bg: float = 0.15,
-                 shadows: float = 0.0,
-                 highlights: float = 1.0) -> np.ndarray:
-    """Adaptive Midtone Transfer Function (MTF) auto-stretch.
-
-    Derives the sky-background level via iterative sigma-clipping, then
-    computes the midtone parameter *m* such that the background maps to
-    ``target_bg`` in the output (default 15 %, matching PixInsight's
-    AutoSTF convention).
-
-    The MTF curve is:
-        f(x) = (m - 1) · x / ((2m - 1) · x - m)
-
-    which is a rational function passing through (0, 0), (m, 0.5), (1, 1).
-    It amplifies faint nebulosity near the sky floor while compressing
-    bright stars and galaxy cores.
-
-    Args:
-        img:       Float32 stacked image (H, W, 3), linear scale.
-        target_bg: Target output level for sky background (default 0.15).
-        shadows:   Black-point clip (values ≤ shadows → 0).
-        highlights: White-point clip (values ≥ highlights → 1).
-
-    Returns:
-        Stretched float32 image in [0, 1] (display-ready).
-
-    Notes:
-        This is a display stretch, not a denoising step — it should be
-        applied after all linear-space processing is complete.  Applying
-        denoising to the output of adaptive_mtf will not work correctly.
-    """
-    src = img.astype(np.float64)
-
-    # Sigma-clipped sky estimate (identical to arcsinh_stretch logic)
-    flat = src.ravel()
-    med = np.median(flat)
-    for _ in range(3):
-        mad = np.median(np.abs(flat - med))
-        sig = 1.4826 * mad
-        flat = flat[np.abs(flat - med) < 2.5 * sig]
-        if len(flat) < 100:
-            break
-        med = np.median(flat)
-    bg = float(med)
-    bg_sigma = float(np.std(flat)) if len(flat) > 1 else 1.0
-
-    black = max(bg - bg_sigma, 0.0)
-    white = float(np.percentile(img, 99.9))
-    span = white - black
-    if span < 1e-12:
-        return np.zeros_like(img, dtype=np.float32)
-
-    # Normalise to [0, 1]
-    norm = np.clip((src - black) / span, 0.0, 1.0)
-
-    # Apply shadow / highlight clipping
-    if highlights > shadows:
-        norm = np.clip((norm - shadows) / (highlights - shadows), 0.0, 1.0)
-
-    # Compute MTF midtone parameter m such that f(bg_norm) = target_bg
-    bg_norm = float(np.clip((bg - black) / span, 1e-6, 0.9999))
-    bg_norm = float(np.clip((bg_norm - shadows) / max(highlights - shadows, 1e-9), 1e-6, 0.9999))
-    # Solve: target = (m-1)*bg_n / ((2m-1)*bg_n - m)
-    # → m * (target*(2*bg_n - 1) - bg_n + 1) = target * bg_n
-    # → m = target * bg_n / (target*(2*bg_n - 1) - bg_n + 1)  [when denominator ≠ 0]
-    tb = float(np.clip(target_bg, 0.01, 0.49))
-    denom = tb * (2.0 * bg_norm - 1.0) - bg_norm + 1.0
-    if abs(denom) < 1e-9 or bg_norm < 1e-6:
-        m = 0.5
-    else:
-        m = float(np.clip(tb * bg_norm / denom, 0.001, 0.999))
-
-    # Apply MTF: f(x) = (m-1)*x / ((2m-1)*x - m)
-    denom_map = (2.0 * m - 1.0) * norm - m
-    # Avoid division by zero (occurs at x=m/(2m-1))
-    safe_denom = np.where(np.abs(denom_map) < 1e-12, 1e-12, denom_map)
-    stretched = (m - 1.0) * norm / safe_denom
-
-    # Boundary enforcement: x=0 → 0, x=1 → 1
-    stretched = np.where(norm <= 0.0, 0.0, np.where(norm >= 1.0, 1.0, stretched))
-
-    return np.clip(stretched, 0.0, 1.0).astype(np.float32)
-
-
 def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None,
                     black_point: Optional[float] = None,
                     white_point: Optional[float] = None) -> np.ndarray:
@@ -1332,3 +1302,219 @@ def arcsinh_stretch(img: np.ndarray, factor: Optional[float] = None,
 
     stretched = np.arcsinh(norm * factor) / np.arcsinh(factor)
     return np.clip(stretched, 0.0, 1.0)
+
+
+def remove_star_halos(img: np.ndarray, star_sources, fwhm: float,
+                      protection_radius: float = 2.0) -> np.ndarray:
+    """Fit and subtract Gaussian PSF halos from bright stars.
+
+    For each bright star (above 95th percentile of flux), fits a scaled Gaussian
+    and subtracts the predicted halo beyond protection_radius * fwhm from center.
+    """
+    if star_sources is None or len(star_sources) == 0 or fwhm <= 0:
+        return img
+
+    H, W = img.shape[:2]
+    result = img.copy()
+
+    try:
+        fluxes = np.asarray(star_sources['flux'], dtype=np.float64)
+    except (KeyError, TypeError):
+        return img
+
+    flux_thresh = float(np.percentile(fluxes, 95))
+    bright_mask = fluxes >= flux_thresh
+    bright_stars = star_sources[bright_mask]
+
+    if len(bright_stars) == 0:
+        return img
+
+    sigma = fwhm / 2.355
+    protect_radius_px = protection_radius * fwhm
+
+    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    for star in bright_stars:
+        try:
+            yc = int(round(float(star['ycentroid'])))
+            xc = int(round(float(star['xcentroid'])))
+        except (KeyError, TypeError):
+            continue
+
+        if yc < 0 or yc >= H or xc < 0 or xc >= W:
+            continue
+
+        r_cut = int(min(protect_radius_px * 3, 50))
+        y0, y1 = max(0, yc - r_cut), min(H, yc + r_cut + 1)
+        x0, x1 = max(0, xc - r_cut), min(W, xc + r_cut + 1)
+        if y1 <= y0 or x1 <= x0:
+            continue
+
+        cut_lum = lum[y0:y1, x0:x1]
+        peak = float(cut_lum.max())
+        bg = float(np.percentile(cut_lum, 25))
+        if peak - bg < 10.0:
+            continue
+
+        r_work = int(5 * sigma) + r_cut
+        wy0, wy1 = max(0, yc - r_work), min(H, yc + r_work + 1)
+        wx0, wx1 = max(0, xc - r_work), min(W, xc + r_work + 1)
+
+        yy, xx = np.mgrid[wy0:wy1, wx0:wx1]
+        dist2 = (yy - yc) ** 2 + (xx - xc) ** 2
+        gaussian = (peak - bg) * np.exp(-dist2 / (2 * sigma ** 2))
+
+        protect_mask = dist2 < protect_radius_px ** 2
+        halo_subtract = np.where(protect_mask, 0.0, gaussian)
+
+        for c in range(img.shape[2] if img.ndim == 3 else 1):
+            if img.ndim == 3:
+                result[wy0:wy1, wx0:wx1, c] = np.clip(
+                    result[wy0:wy1, wx0:wx1, c] - halo_subtract, 0.0, None)
+            else:
+                result[wy0:wy1, wx0:wx1] = np.clip(
+                    result[wy0:wy1, wx0:wx1] - halo_subtract, 0.0, None)
+
+    return result.astype(img.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Comet-specific filters
+# ---------------------------------------------------------------------------
+
+def radial_renormalize(img: np.ndarray, nucleus_y: float, nucleus_x: float,
+                       smooth_sigma: float = 20.0, n_bins: int = 200) -> np.ndarray:
+    """Radial renormalization filter for comet coma structure enhancement.
+
+    Divides the image by a radially-smoothed profile centred on the nucleus,
+    flattening the steep coma gradient to reveal jets and fine structure.
+
+    Args:
+        img:          Float32 (H, W, 3) or (H, W) stacked image.
+        nucleus_y:    Row coordinate of the comet nucleus.
+        nucleus_x:    Column coordinate of the comet nucleus.
+        smooth_sigma: Gaussian sigma for smoothing the radial profile (degrees
+                      of the radial bin profile, not pixels).
+        n_bins:       Number of radial bins for the profile estimate.
+
+    Returns:
+        Float32 image of the same shape with the coma gradient flattened.
+    """
+    ndim_orig = img.ndim
+    if ndim_orig == 2:
+        img = img[:, :, np.newaxis]
+
+    H, W, C = img.shape
+    img_f = img.astype(np.float64)
+
+    # Build radial distance map
+    yy, xx = np.mgrid[:H, :W]
+    radii = np.sqrt((yy - nucleus_y) ** 2 + (xx - nucleus_x) ** 2).astype(np.float64)
+    max_radius = float(radii.max())
+    if max_radius < 1.0:
+        out = img_f.astype(np.float32)
+        if ndim_orig == 2:
+            out = out[:, :, 0]
+        return out
+
+    # Process each channel independently
+    result = np.zeros_like(img_f)
+    for c in range(C):
+        channel = img_f[:, :, c]
+        # Build radial profile: median per bin
+        bin_edges = np.linspace(0.0, max_radius + 1.0, n_bins + 1)
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        profile = np.zeros(n_bins, dtype=np.float64)
+        for b in range(n_bins):
+            in_bin = (radii >= bin_edges[b]) & (radii < bin_edges[b + 1])
+            if in_bin.any():
+                profile[b] = float(np.median(channel[in_bin]))
+
+        # Smooth the profile
+        from scipy.ndimage import gaussian_filter1d
+        profile_smooth = gaussian_filter1d(profile, sigma=smooth_sigma)
+
+        # Interpolate profile to full image
+        bin_indices = np.clip(
+            ((radii / max_radius) * (n_bins - 1)).astype(int), 0, n_bins - 1
+        )
+        model = profile_smooth[bin_indices]
+
+        # Scale: protect against near-zero model values
+        scale = np.where(model > 1e-12, model, 1e-12)
+        # Preserve overall brightness: multiply by mean model
+        mean_model = float(np.mean(profile_smooth[profile_smooth > 1e-12])) if np.any(profile_smooth > 1e-12) else 1.0
+        renormed = (channel / scale) * mean_model
+        result[:, :, c] = renormed
+
+    out = result.astype(np.float32)
+    if ndim_orig == 2:
+        out = out[:, :, 0]
+    return out
+
+
+def larson_sekanina(img: np.ndarray, nucleus_y: float, nucleus_x: float,
+                    rotation_deg: float = 15.0, dr: float = 0.0) -> np.ndarray:
+    """Larson-Sekanina rotational difference filter for comet jet detection.
+
+    Subtracts a rotationally-shifted copy of the image from the original,
+    revealing asymmetric jet structure in the coma.
+
+    Args:
+        img:          Float32 (H, W, 3) or (H, W) image.
+        nucleus_y:    Row coordinate of the comet nucleus (rotation centre).
+        nucleus_x:    Column coordinate of the comet nucleus (rotation centre).
+        rotation_deg: Rotation angle in degrees for the difference.
+        dr:           Optional radial shift of the rotated copy in pixels
+                      (positive = away from nucleus).
+
+    Returns:
+        Float32 image of the same shape with jets enhanced.
+    """
+    try:
+        from scipy.ndimage import rotate as _rotate, shift as _shift
+    except ImportError:
+        safe_print("  WARNING: larson_sekanina requires scipy — skipping")
+        return img.astype(np.float32)
+
+    ndim_orig = img.ndim
+    if ndim_orig == 2:
+        img = img[:, :, np.newaxis]
+
+    H, W, C = img.shape
+    img_f = img.astype(np.float64)
+    original_max = float(img_f.max()) or 1.0
+
+    # Rotate around nucleus: scipy.ndimage.rotate rotates around image centre.
+    # We compensate by shifting the image so nucleus is at centre, rotating, then shifting back.
+    centre_y, centre_x = H / 2.0 - 0.5, W / 2.0 - 0.5
+    shift_to_centre = (centre_y - nucleus_y, centre_x - nucleus_x)
+    shift_back = (nucleus_y - centre_y, nucleus_x - centre_x)
+
+    result = np.zeros_like(img_f)
+    for c in range(C):
+        ch = img_f[:, :, c]
+        # Shift nucleus to image centre
+        shifted = _shift(ch, shift=shift_to_centre, order=3, mode='constant', cval=0.0)
+        # Rotate
+        rotated = _rotate(shifted, angle=rotation_deg, reshape=False,
+                          order=3, mode='constant', cval=0.0)
+        # Optional radial shift: shift away from image centre (now = nucleus)
+        if abs(dr) > 0.1:
+            # Direction along the average gradient (use identity for simplicity: shift along Y)
+            rotated = _shift(rotated, shift=(dr, 0.0), order=1, mode='constant', cval=0.0)
+        # Shift nucleus back to original position
+        rotated = _shift(rotated, shift=shift_back, order=3, mode='constant', cval=0.0)
+        # Larson-Sekanina: original minus rotated-shifted copy
+        diff = ch - rotated
+        result[:, :, c] = diff
+
+    # Clip to [0, original_max] and re-normalise
+    result = np.clip(result, 0.0, original_max)
+    if result.max() > 1e-12:
+        result = result / result.max() * original_max
+
+    out = result.astype(np.float32)
+    if ndim_orig == 2:
+        out = out[:, :, 0]
+    return out

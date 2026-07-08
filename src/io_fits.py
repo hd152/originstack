@@ -36,6 +36,17 @@ def _read_fits_header(path: str) -> dict:
             return {}
 
 
+def load_frame(path: str) -> Tuple[np.ndarray, dict]:
+    """Load a FITS or camera RAW file; dispatches on file extension."""
+    try:
+        from src.io_raw import RAW_EXTENSIONS, read_raw
+        if os.path.splitext(path)[1].lower() in RAW_EXTENSIONS:
+            return read_raw(path)
+    except Exception:
+        pass
+    return load_fits(path)
+
+
 def load_fits(path: str) -> Tuple[np.ndarray, dict]:
     """Load FITS file; retry without memmap if keyword compression is present."""
     try:
@@ -130,7 +141,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
 
 def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_b: float = 8.0, ghs_sp: float = 0.15,
-                     ghs_hp: float = 0.95) -> None:
+                     ghs_hp: float = 0.95, black_sigma: float = 0.0) -> None:
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
     if Image is None:
@@ -152,10 +163,13 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                 break
             _med = float(np.median(flat_lum))
         _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
-        # Allow a slightly negative black point so the stretch can correctly
-        # distinguish sky noise (near zero) from faint nebula signal — a 0.0
-        # floor would conflate both and produce black mottling in the output.
-        unified_black = _med - 1.0 * _bg_sigma
+        # Black point relative to the sky median in units of sky sigma.
+        # black_sigma < 0 keeps sky noise visible (good for frame-filling faint
+        # nebulae); black_sigma > 0 clips the noise floor to black (good for a
+        # small target on empty sky, e.g. a galaxy or cluster, where a low black
+        # point turns the whole background into a colour-noise storm). The
+        # target-type advisor sets an appropriate value per preset.
+        unified_black = _med + black_sigma * _bg_sigma
         unified_white = float(np.percentile(lum, 99.9))
         for c in range(3):
             out[:, :, c] = generalized_hyperbolic_stretch(
@@ -176,7 +190,7 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                 break
             _med = float(np.median(flat_lum))
         _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
-        unified_black = _med - 1.0 * _bg_sigma
+        unified_black = _med + black_sigma * _bg_sigma
         unified_white = float(np.percentile(lum, 99.8))
         for c in range(3):
             out[:, :, c] = arcsinh_stretch(rgb[:, :, c],
@@ -193,7 +207,19 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
             lo = max(lo, 0.0)  # Don't let negative noise expand the display range
             out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
-    Image.fromarray(out).save(path, quality=Config.PREVIEW_JPEG_QUALITY)
+    h, w = out.shape[:2]
+    max_dim = Config.PREVIEW_MAX_DIMENSION
+    if max(h, w) > max_dim:
+        # Pre-slice in numpy before PIL to avoid allocating a huge PIL Image object.
+        # A full-resolution fromarray() on a large stack can OOM mid-JPEG-write,
+        # leaving a corrupt partial file. Stride-slice to ~target size first, then
+        # let thumbnail() do a quality LANCZOS pass to the exact limit.
+        step = max(1, max(h, w) // max_dim)
+        out = np.ascontiguousarray(out[::step, ::step, :])
+    img = Image.fromarray(out)
+    if img.width > max_dim or img.height > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+    img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY)
 
 
 def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
@@ -409,8 +435,6 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
     header['DENOISE'] = (denoise_applied, 'Wavelet denoising applied to FITS data')
     if denoise_applied:
         header['DNSTRNG'] = (getattr(args, 'denoise_strength', 3.0), 'Denoise threshold factor')
-    locnorm_applied = post_processed and getattr(args, 'local_normalize', False)
-    header['LOCNORM'] = (locnorm_applied, 'Local normalization applied to FITS data')
     header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method (JPG only)')
     header['DEBAYER'] = (args.debayer_method, 'Debayering method used')
 
@@ -423,7 +447,7 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
 
     # Richardson-Lucy deconvolution
     deconv_applied = post_processed and getattr(args, 'deconvolve', False)
-    header['DECONV'] = (deconv_applied, 'Richardson-Lucy deconvolution applied to FITS data')
+    header['DECONV'] = (deconv_applied, 'Richardson-Lucy deconvolution applied')
     if getattr(args, 'deconvolve', False):
         header['DCITERS'] = (getattr(args, 'deconvolve_iterations', 15), 'Deconvolution iterations')
         if getattr(args, 'deconvolve_fwhm', None):

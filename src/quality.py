@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Dict, Tuple, Optional
 
 import numpy as np
@@ -75,6 +76,46 @@ def _sep_detect_stars(img_2d: np.ndarray, noise: float) -> Optional[object]:
         quality_mask = roundness < 0.7
     filtered = out[quality_mask]
     return filtered if len(filtered) > 0 else None
+
+
+_SOURCES_DTYPE = np.dtype([
+    ('xcentroid', np.float64), ('ycentroid', np.float64),
+    ('flux', np.float64), ('peak', np.float64),
+    ('roundness1', np.float64), ('roundness2', np.float64),
+    ('sharpness', np.float64),
+    ('a', np.float64), ('b', np.float64), ('theta', np.float64),
+])
+
+
+def _table_to_sources(table) -> np.ndarray:
+    """Convert a photutils DAOStarFinder Table to a plain numpy structured array.
+
+    Reads the non-deprecated column names (x_centroid / y_centroid, available
+    since photutils 3.0) when present, falls back to the old names for older
+    installs.  This prevents AstropyDeprecationWarning from propagating to the
+    user on every frame.
+    """
+    n = len(table)
+    out = np.zeros(n, dtype=_SOURCES_DTYPE)
+
+    def _col(new, old):
+        try:
+            return np.asarray(table[new], dtype=np.float64)
+        except (KeyError, AttributeError):
+            return np.asarray(table[old], dtype=np.float64)
+
+    out['xcentroid'] = _col('x_centroid', 'xcentroid')
+    out['ycentroid'] = _col('y_centroid', 'ycentroid')
+    out['flux']      = np.asarray(table['flux'],       dtype=np.float64)
+    out['peak']      = np.asarray(table['peak'],       dtype=np.float64)
+    out['roundness1'] = np.asarray(table['roundness1'], dtype=np.float64)
+    out['roundness2'] = np.asarray(table['roundness2'], dtype=np.float64)
+    out['sharpness']  = np.asarray(table['sharpness'],  dtype=np.float64)
+    # DAOStarFinder doesn't provide semi-axes; set neutral values.
+    out['a'] = 1.0
+    out['b'] = 1.0
+    return out
+
 
 # Module-level imports for scipy — avoids repeated sys.modules lookups and
 # attribute resolution on every call to compute_quality_metrics.
@@ -266,7 +307,9 @@ def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float) -> Optional[o
 
     for trial_fwhm in (3.0, 5.0, 2.0, 8.0):  # 3px most common seeing; short-circuits early
         daof = DAOStarFinder(fwhm=trial_fwhm, threshold=threshold)
-        trial_sources = daof(bg_sub)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            trial_sources = daof(bg_sub)
         if trial_sources is None or len(trial_sources) == 0:
             continue
         if all_raw_sources is None or len(trial_sources) > len(all_raw_sources):
@@ -305,7 +348,9 @@ def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float) -> Optional[o
                 f"relaxed filter found {len(best_sources)}"
             )
 
-    return best_sources
+    if best_sources is None:
+        return None
+    return _table_to_sources(best_sources)
 
 
 def estimate_strehl_ratio(img: np.ndarray, star_positions,
@@ -887,11 +932,24 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     psf_ellipticity = 0.0
     psf_pa_scatter = 0.0
     psf_anisotropy_type = 'isotropic'
+    ellipticity = 0.0
     if not quick and sources_s is not None and len(sources_s) > 0:
         try:
             psf_ellipticity, psf_pa_scatter, psf_anisotropy_type = measure_psf_anisotropy(sources_s)
         except Exception:
             pass
+        # Star ellipticity: median(1 - b/a) for SEP sources; median|roundness1| for DAO
+        try:
+            if 'a' in sources_s.dtype.names and 'b' in sources_s.dtype.names:
+                a_vals = np.asarray(sources_s['a'], dtype=np.float64)
+                b_vals = np.asarray(sources_s['b'], dtype=np.float64)
+                valid = a_vals > 0
+                if valid.sum() > 0:
+                    ellipticity = float(np.median(1.0 - b_vals[valid] / a_vals[valid]))
+            elif 'roundness1' in sources_s.dtype.names:
+                ellipticity = float(np.median(np.abs(sources_s['roundness1'])))
+        except Exception:
+            ellipticity = 0.0
 
     # Zernike PSF decomposition — optical aberration fingerprint.
     zernike_result: Dict = {}
@@ -941,6 +999,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         'psf_ellipticity': float(psf_ellipticity),
         'psf_pa_scatter': float(psf_pa_scatter),
         'psf_anisotropy_type': psf_anisotropy_type,
+        'ellipticity': float(ellipticity),
         'zernike_rms': float(zernike_result.get('zernike_rms', 0.0)),
         'zernike_defocus': float(zernike_result.get('zernike_defocus', 0.0)),
         'zernike_astig': float(zernike_result.get('zernike_astig', 0.0)),

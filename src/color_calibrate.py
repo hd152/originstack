@@ -360,9 +360,11 @@ def run_photometric_calibration(img: np.ndarray, header,
     Returns (calibrated_img, (scale_R, scale_G, scale_B)).
     On failure returns (original_img, (1.0, 1.0, 1.0)).
     """
-    if not header.get("PLTSOLVD", False):
+    _has_wcs = header.get("PLTSOLVD", False) or (
+        'CTYPE1' in header and 'CRVAL1' in header and 'CRPIX1' in header)
+    if not _has_wcs:
         if verbose:
-            print("  [colour cal] No plate solution — skipping colour calibration")
+            print("  [colour cal] No usable WCS — skipping colour calibration")
         return img, (1.0, 1.0, 1.0)
 
     catalog = None

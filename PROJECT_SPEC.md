@@ -41,8 +41,9 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/features.py` | ~90 | Low-level feature extraction helpers |
 | `src/cli.py` | ~685 | `process_directory`, `parse_args`, `main` |
 | `astro_stack.py` | ~170 | Backward-compatibility re-export shim |
+| `ext/astro_native/` (Rust) | — | Optional PyO3/maturin crate: native stacking combines, fused patch-weighted combine, Lanczos-3 warp, anisotropic diffusion (numpy fallback when absent) |
 
-**Total: ~10,800 lines.** Tests in `tests/test_core.py` import symbols directly from `astro_stack`.
+**Total: ~10,800 lines** (Python). Tests in `tests/test_core.py` import symbols directly from `astro_stack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
 ---
 
@@ -474,8 +475,9 @@ Heuristic target classifier — analyses frame metrics (star count, brightness d
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--local-normalize` | off | Vignette residual removal |
-| `--local-normalize-sigma N` | 50 | Gaussian sigma (px) |
+| `--chroma-nr-large-sigma N` | 0 (off) | Coarse chroma-NR scale (px); smooths medium-scale colour blotches over masked sky. Auto sets ~50 for galaxy |
+| `--chroma-nr-large-strength N` | 0.7 | Blend strength [0–1] of the coarse chroma-NR pass |
+| `--preview-black-sigma N` | 0.0 | Preview black point, in sky-σ above the sky median. Higher (2–3) clips background noise to black for a small target on empty sky; negative keeps faint frame-filling nebulosity. Auto sets it per target |
 | `--star-reduce / --no-star-reduce` | on | Soften star halos |
 | `--star-reduce-factor N` | 0.4 | Blend fraction 0–1 |
 | `--star-reduce-sigma N` | 1.5 | Gaussian blur radius (px) |
@@ -539,7 +541,7 @@ Heuristic target classifier — analyses frame metrics (star count, brightness d
 | `--diagnostic-dir PATH` | Directory for diagnostic snapshots |
 | `--quality-report PATH` | Write per-frame metrics to CSV |
 
-Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky_floor`, `local_normalize`, `wavelet`, `sky_residual`, `nlm`, `bilateral`, `mmt`, `acdnr`, `bm3d`, `aniso`, `scnr`, `photo_cal`, `deconvolve`, `star_reduce`, `local_contrast`, `star_remove`
+Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky_floor`, `wavelet`, `sky_residual`, `sky_pedestal`, `nlm`, `bilateral`, `mmt`, `acdnr`, `bm3d`, `aniso`, `scnr`, `photo_cal`, `deconvolve`, `star_reduce`, `local_contrast`, `sky_neutralize`, `star_remove`
 
 ### Infrastructure
 
@@ -574,7 +576,7 @@ python astro_stack.py -d lights/ -o galaxy.fits --preset galaxy --deconvolve -v
 # Maximum quality
 python astro_stack.py -d lights/ -o best.fits --preset quality \
   --denoise-nlm --denoise-bilateral --denoise-mmt --denoise-acdnr \
-  --deconvolve --local-normalize -v
+  --deconvolve -v
 
 # Super-resolution drizzle
 python astro_stack.py -d lights/ -o drizzled.fits --drizzle-scale 2.0 -v

@@ -23,11 +23,12 @@ from src.gpu_context import GpuContext, get_gpu
 from src.models import Config, ProcessingStats
 from src.utils import safe_print, print_header, format_time, setup_logging
 from src.io_fits import make_master, save_preview_rgb
-from src.frame_discovery import discover_frames, select_matching_darks
+from src.frame_discovery import discover_frames, select_matching_darks, select_matching_flats
 from src.debayer import build_hot_pixel_map
 from src.registration import calculate_shift, apply_transform
 from src.pipeline import stack_target
 from src.health_check import run_health_check
+from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
 
 
 def load_config_file(config_path: str, args: argparse.Namespace) -> list:
@@ -81,7 +82,12 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
             else:
                 flat[key.replace('-', '_')] = value
 
+        _protected = {'directory', 'output', 'config', 'health_check', 'dry_run',
+                      'verbose', 'debug_registration', 'keep_intermediates',
+                      'preset', 'diagnostic', 'diagnostic_dir'}
         for key, value in flat.items():
+            if key in _protected:
+                continue
             if hasattr(args, key):
                 setattr(args, key, value)
                 changes.append(f"{key}={value}")
@@ -279,64 +285,67 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
         safe_print(f"  WARNING: Could not save config file ({e})")
 
 
-def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace) -> None:
-    """Pool all light frames from multiple session subfolders into one unified stack.
+def _load_calibration_dir(args: argparse.Namespace) -> dict:
+    """Discover calibration frames from --cal-dir.
 
-    Each subfolder's calibration frames are aggregated together to build
-    stronger master frames. All lights are passed to a single stack_target
-    call so registration, sigma-clip rejection, and post-processing operate
-    across the full multi-night dataset at once.
+    Returns a dict with keys 'dark', 'flat', 'bias' containing FrameInfo lists.
     """
-    overall_start = time.time()
-    stats = ProcessingStats()
+    extra: dict = {'dark': [], 'flat': [], 'bias': []}
+    cal_dir = getattr(args, 'cal_dir', None)
+    if not cal_dir:
+        return extra
+    if not os.path.isdir(cal_dir):
+        print(f'  WARNING: --cal-dir path does not exist: {cal_dir}', file=sys.stderr)
+        return extra
+    discovered = discover_frames(cal_dir)
+    for ftype in ('dark', 'flat', 'bias'):
+        found = discovered.get(ftype, [])
+        extra[ftype].extend(found)
+        if found:
+            safe_print(f"  Calibration library: {len(found)} {ftype} frames from {cal_dir}")
+    return extra
 
-    combined: dict = {'light': [], 'dark': [], 'flat': [], 'bias': [], 'skip': []}
-    for d in sorted(subdirs):
-        sub = discover_frames(d)
-        for ftype in combined:
-            combined[ftype].extend(sub.get(ftype, []))
 
-    n_lights = len(combined['light'])
-    n_sessions = len(subdirs)
-    print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
-          f"({len(combined['dark'])} darks, {len(combined['flat'])} flats, "
-          f"{len(combined['bias'])} bias)")
+def _build_masters(frames: dict, stats: "ProcessingStats | None" = None) -> dict:
+    """Build, filter, and smooth master bias/dark/flat from the frame lists in *frames*.
 
-    if not n_lights:
-        print('  ERROR: No light frames found across sessions', file=sys.stderr)
-        raise SystemExit('No light frames found')
-
-    # Build master calibration frames from all sessions combined
-    if combined['dark'] or combined['flat'] or combined['bias']:
+    Mutates ``frames['dark']`` and ``frames['flat']`` in-place via
+    ``select_matching_darks`` / ``select_matching_flats`` so the caller sees
+    the filtered counts.  Returns a fully populated ``masters`` dict.
+    """
+    lights = frames.get('light', [])
+    cal_needed = frames.get('dark') or frames.get('flat') or frames.get('bias')
+    cal_start = time.time() if cal_needed else None
+    if cal_needed:
         print("\nCreating master calibration frames...")
-        cal_start = time.time()
 
     masters: dict = {}
-    if combined['bias']:
-        masters['bias'] = make_master(combined['bias'], method='median')
+
+    if frames.get('bias'):
+        masters['bias'] = make_master(frames['bias'], method='median')
         if masters['bias'] is not None:
-            safe_print(f"  ✓ Master bias:  {len(combined['bias'])} frames -> "
+            safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> "
                        f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
     else:
         masters['bias'] = None
 
-    if combined['dark']:
-        combined['dark'] = select_matching_darks(combined['light'], combined['dark'])
-        masters['dark'] = make_master(combined['dark'], method='median')
+    if frames.get('dark'):
+        frames['dark'] = select_matching_darks(lights, frames['dark'])
+        masters['dark'] = make_master(frames['dark'], method='median')
         if masters['dark'] is not None:
-            safe_print(f"  ✓ Master dark:  {len(combined['dark'])} frames -> "
+            safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> "
                        f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
     else:
         masters['dark'] = None
 
-    if combined['flat']:
-        masters['flat'] = make_master(combined['flat'], method='median')
+    if frames.get('flat'):
+        frames['flat'] = select_matching_flats(lights, frames['flat'])
+        masters['flat'] = make_master(frames['flat'], method='median')
         if masters['flat'] is not None:
-            safe_print(f"  ✓ Master flat:  {len(combined['flat'])} frames -> "
+            safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> "
                        f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
-        # Store median flat rotation so execute_frame_processing can detect mismatch
         _flat_rots = []
-        for _ff in combined['flat']:
+        for _ff in frames['flat']:
             for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
                 _rval = _ff.header.get(_rkey)
                 if _rval is not None:
@@ -358,33 +367,107 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
             masters['hot_pixel_map'] = hot_map
             safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
 
-    if combined['dark'] or combined['flat'] or combined['bias']:
-        # Smooth calibration frames (same logic as single-folder path)
-        if masters.get('bias') is not None:
-            n_bias = len(combined['bias'])
-            sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
-            masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma_b)
-        if masters.get('dark') is not None:
-            n_dark = len(combined['dark'])
-            sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
-            masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma_d)
-        if masters.get('flat') is not None:
-            n_flat = len(combined['flat'])
-            sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
-            flat_raw = masters['flat'].astype(np.float32)
-            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                ch = flat_raw[r_off::2, c_off::2]
-                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma_f)
-            masters['flat'] = flat_raw
-        stats.calibration_time = time.time() - cal_start
+    if masters.get('bias') is not None:
+        n_bias = len(frames['bias'])
+        sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
+        masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma=sigma_b)
+    if masters.get('dark') is not None:
+        n_dark = len(frames['dark'])
+        sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
+        masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
+    if masters.get('flat') is not None:
+        n_flat = len(frames['flat'])
+        sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
+        flat_raw = masters['flat'].astype(np.float32)
+        for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+            ch = flat_raw[r_off::2, c_off::2]
+            flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
+        masters['flat'] = flat_raw
 
     masters['dark_exptime'] = None
-    if combined.get('dark'):
+    if frames.get('dark'):
         try:
             masters['dark_exptime'] = float(
-                combined['dark'][0].header.get('EXPTIME', 0) or 0) or None
+                frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
         except Exception as e:
             safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+
+    if cal_needed and cal_start is not None and stats is not None:
+        stats.calibration_time = time.time() - cal_start
+
+    return masters
+
+
+def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace) -> None:
+    """Pool all light frames from multiple session subfolders into one unified stack.
+
+    Each subfolder's calibration frames are aggregated together to build
+    stronger master frames. All lights are passed to a single stack_target
+    call so registration, sigma-clip rejection, and post-processing operate
+    across the full multi-night dataset at once.
+    """
+    overall_start = time.time()
+    stats = ProcessingStats()
+
+    combined: dict = {'light': [], 'dark': [], 'flat': [], 'bias': [], 'skip': []}
+    _session_bayers: dict = {}  # subfolder -> bayer pattern used by its lights
+    for d in sorted(subdirs):
+        sub = discover_frames(d)
+        for ftype in combined:
+            combined[ftype].extend(sub.get(ftype, []))
+        # Determine bayer pattern for this subfolder's lights
+        lights_here = sub.get('light', [])
+        if lights_here:
+            from src.session_info import load_session_info, _INFO_FILENAMES
+            si = load_session_info(d)
+            session_bayer = si.bayer if si else None
+            patterns = set()
+            for f in lights_here:
+                p = f.header.get('BAYERPAT') or f.header.get('COLORTYP') or session_bayer
+                if p:
+                    patterns.add(p.upper())
+            if patterns:
+                _session_bayers[os.path.basename(d)] = patterns
+
+    # Warn if different sessions use different bayer patterns
+    all_patterns = set(p for ps in _session_bayers.values() for p in ps)
+    if len(all_patterns) > 1:
+        safe_print(
+            f"\n  ⚠ WARNING: Bayer pattern mismatch across sessions — "
+            f"frames will be debayered with their individual BAYERPAT header if present, "
+            f"but sessions without a BAYERPAT header will use the first session's pattern."
+        )
+        for name, patterns in sorted(_session_bayers.items()):
+            safe_print(f"    {name}: {', '.join(sorted(patterns))}")
+        safe_print(
+            f"  ⚠ Mixing cameras with different Bayer patterns in a combined stack "
+            f"will produce incorrect colours in frames that lack a BAYERPAT header."
+        )
+
+    extra_cal = _load_calibration_dir(args)
+    for ftype in ('dark', 'flat', 'bias'):
+        combined[ftype].extend(extra_cal[ftype])
+
+    n_lights = len(combined['light'])
+    n_sessions = len(subdirs)
+    print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
+          f"({len(combined['dark'])} darks, {len(combined['flat'])} flats, "
+          f"{len(combined['bias'])} bias)")
+
+    if not n_lights:
+        print('  ERROR: No light frames found across sessions', file=sys.stderr)
+        raise SystemExit('No light frames found')
+
+    masters = _build_masters(combined, stats)
+
+    # Use the first subfolder that has an info.json so pipeline can populate
+    # the FITS header with session metadata (bayer pattern, WCS, target name).
+    from src.session_info import _INFO_FILENAMES
+    args._input_directory = next(
+        (d for d in sorted(subdirs)
+         if any(os.path.isfile(os.path.join(d, f)) for f in _INFO_FILENAMES)),
+        sorted(subdirs)[0],  # fall back to first subfolder even if no info.json
+    )
 
     all_frames = [f for ftype in combined.values() for f in (ftype if isinstance(ftype, list) else [])]
     stack_target(all_frames, output, args, masters, stats)
@@ -400,6 +483,8 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     if getattr(args, 'preset', None):
         print(f"  Preset: {args.preset}")
     get_gpu().print_status()
+    from src.utils import native_status
+    print(native_status())
 
     # Detect hierarchical mode
     if not os.path.isdir(directory):
@@ -428,6 +513,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             outp = os.path.join(tempfile.gettempdir(), f'{name}_stack.fits')
             targets.append((d, outp))
             tmp_stacks.append(outp)
+            _cleanup_register(outp)
         print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
         # final combined output will be combined from tmp_stacks
     else:
@@ -458,6 +544,9 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         stats = ProcessingStats()
 
         frames = discover_frames(d)
+        extra_cal = _load_calibration_dir(args)
+        for ftype in ('dark', 'flat', 'bias'):
+            frames[ftype].extend(extra_cal[ftype])
         nfiles = sum(len(v) for v in frames.values())
         print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
 
@@ -466,90 +555,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             safe_print(f"  Directory: {os.path.abspath(d)}")
 
         # Create master calibration frames
-        if frames['dark'] or frames['flat'] or frames['bias']:
-            print("\nCreating master calibration frames...")
-            cal_start = time.time()
-
-        masters = {}
-        if frames['bias']:
-            masters['bias'] = make_master(frames['bias'], method='median')
-            if masters['bias'] is not None:
-                safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> {masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
-        else:
-            masters['bias'] = None
-
-        if frames['dark']:
-            # Select darks that best match the light frames (ISO, exposure, dimensions)
-            frames['dark'] = select_matching_darks(frames.get('light', []), frames['dark'])
-            masters['dark'] = make_master(frames['dark'], method='median')
-            if masters['dark'] is not None:
-                safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> {masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
-        else:
-            masters['dark'] = None
-
-        if frames['flat']:
-            masters['flat'] = make_master(frames['flat'], method='median')
-            if masters['flat'] is not None:
-                safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> {masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
-            # Store median flat rotation so execute_frame_processing can detect mismatch
-            _flat_rots = []
-            for _ff in frames['flat']:
-                for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
-                    _rval = _ff.header.get(_rkey)
-                    if _rval is not None:
-                        try:
-                            _flat_rots.append(float(_rval))
-                            break
-                        except (TypeError, ValueError):
-                            pass
-            if _flat_rots:
-                masters['flat_rotation'] = float(np.median(_flat_rots))
-        else:
-            masters['flat'] = None
-
-        # Build hot pixel map from unsmoothed dark BEFORE smoothing.
-        # Dark smoothing destroys per-pixel hot pixel information, so we
-        # capture it first for Bayer-level correction in each light frame.
-        masters['hot_pixel_map'] = None
-        if masters.get('dark') is not None:
-            hot_map = build_hot_pixel_map(masters['dark'])
-            n_hot = int(np.sum(hot_map))
-            if n_hot > 0:
-                masters['hot_pixel_map'] = hot_map
-                safe_print(f"  ✓ Hot pixel map: {n_hot} pixels from dark frame")
-
-        # Smooth master calibration frames to reduce pixel-level noise.
-        # With few calibration frames (especially 1), per-pixel noise is as high
-        # as a single light frame — this noise is correlated across all lights
-        # and does NOT stack out.  Calibration corrects large-scale effects
-        # (bias pedestal, thermal gradient, vignetting/dust), so heavy smoothing
-        # preserves the correction while eliminating the noise penalty.
-        if masters.get('bias') is not None:
-            n_bias = len(frames['bias'])
-            # Bias is nearly constant; smooth aggressively
-            sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
-            masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma=sigma_b)
-        if masters.get('dark') is not None:
-            n_dark = len(frames['dark'])
-            # Dark has amp-glow gradients (>100px scale); moderate smoothing
-            sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
-            masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
-        if masters.get('flat') is not None:
-            n_flat = len(frames['flat'])
-            # Flat has vignetting + dust donuts (>30px); preserve those.
-            # CRITICAL: smooth each Bayer colour channel independently.
-            # A whole-image Gaussian with sigma > ~2 px averages adjacent R/G/B
-            # Bayer pixels together, making flat_norm identical for all channels
-            # (~0.888) and completely disabling per-channel QE correction.
-            # Per-channel smoothing keeps the correct flat_norm values
-            # (R~=0.39, G~=1.00, B~=1.16 for this camera) so the flat field
-            # simultaneously corrects vignetting AND camera spectral response.
-            sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
-            flat_raw = masters['flat'].astype(np.float32)
-            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                ch = flat_raw[r_off::2, c_off::2]
-                flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
-            masters['flat'] = flat_raw
+        masters = _build_masters(frames, stats)
 
         # Validate calibration frame dimensions match light frames
         if frames['light']:
@@ -565,15 +571,6 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                             safe_print(f"  ⚠ WARNING: {cal_name} dimensions {cal_shape[1]}×{cal_shape[0]} "
                                        f"don't match lights {light_w}×{light_h} — disabling {cal_name} calibration")
                             masters[cal_name] = None
-
-        # Store dark exposure time so _process_single_frame can scale correctly
-        masters['dark_exptime'] = None
-        if frames.get('dark'):
-            try:
-                masters['dark_exptime'] = float(
-                    frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
-            except Exception as e:
-                safe_print(f"  WARNING: Could not read dark frame EXPTIME ({e}) — dark scaling disabled")
 
         # --- Calibration frame analysis ---
         if frames['dark'] or frames['flat'] or frames['bias']:
@@ -664,9 +661,6 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             except Exception:
                 pass
 
-        if frames['dark'] or frames['flat'] or frames['bias']:
-            stats.calibration_time = time.time() - cal_start
-
         if getattr(args, 'health_check', False):
             run_health_check(frames, masters, d)
             continue  # skip stacking
@@ -703,6 +697,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             stats.add_warning(warning)
             safe_print(f"\n  ⚠ WARNING: {warning}")
 
+        args._input_directory = d  # per-target input dir for session info and target inference
         res = stack_target([f for t in frames.values() for f in t], outp, args, masters, stats)
         if res:
             produced.append(res)
@@ -785,6 +780,14 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
 
+        # Remove per-target temp stacks now that the combined output is written
+        for p in tmp_stacks:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+            _cleanup_deregister(p)
+
     # Overall summary
     total_time = time.time() - overall_start
     print_header("OVERALL SUMMARY", "=")
@@ -799,7 +802,13 @@ def parse_args():
     p = argparse.ArgumentParser(description='Streaming FITS stacker')
     p.add_argument('-d', '--directory', required=True)
     p.add_argument('-o', '--output', default=None,
-                   help='Output FITS path (required unless --health-check)')
+                   help='Output FITS path (default: <directory>_stacked.fits)')
+    p.add_argument('--cal-dir', default=None, metavar='PATH',
+                   help='Directory containing calibration frames (darks, flats, bias). '
+                        'Frames are classified automatically and the best-matching subset '
+                        'is selected per type (by ISO, CCD temperature, exposure, filter, '
+                        'and sensor dimensions). Supplements any calibration frames already '
+                        'present in --directory.')
     p.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
     p.add_argument('--config', default=None, metavar='PATH',
@@ -824,12 +833,24 @@ def parse_args():
                         'parameters, and estimate resource usage — without processing anything')
     p.add_argument('--skip-step', action='append', default=[], metavar='STEP',
                    help='Skip a named post-processing step. Can be specified multiple times. '
-                        'Steps: hot_pixel, background, chroma_nr, sky_floor, local_normalize, '
-                        'wavelet, sky_residual, nlm, bilateral, mmt, acdnr, deconvolve, '
-                        'star_reduce, local_contrast')
+                        'Steps: hot_pixel, background, chroma_nr, sky_floor, '
+                        'wavelet, sky_residual, sky_pedestal, nlm, bilateral, mmt, '
+                        'acdnr, deconvolve, star_reduce, local_contrast, sky_neutralize')
     p.add_argument('--no-registration', action='store_true')
     p.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
+    p.add_argument('--phase-correlation', action='store_false', dest='skip_phase_correlation',
+                   default=True,
+                   help='Run skimage phase cross-correlation before the FFT fallback. '
+                        'Off by default: on typical astronomical frames phase-cc almost always '
+                        'fails its error<0.1 acceptance test and the FFT cross-correlation is '
+                        'used anyway, so running it just wastes an upsampled correlation per frame.')
+    p.add_argument('--advanced-metrics', action='store_true', dest='advanced_metrics',
+                   default=False,
+                   help='Compute expensive diagnostic-only quality metrics per frame '
+                        '(Zernike PSF decomposition, Strehl proxy, atmospheric dispersion). '
+                        'Off by default: these do not affect frame acceptance or stacking weights, '
+                        'so they only add per-frame cost unless you want the diagnostics.')
     p.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -852,7 +873,7 @@ def parse_args():
                    help='Detailed registration diagnostics (implies -v)')
     p.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
-                            'percentile', 'esd', 'auto'],
+                            'percentile', 'esd', 'trimmed_mean', 'auto'],
                    default='auto',
                    help='Stacking/rejection method. '
                         'sigma_clip: MAD-based iterative rejection (default for dithered data). '
@@ -873,12 +894,15 @@ def parse_args():
     p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     p.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
+    p.add_argument('--patch-weighted', dest='patch_registration', action='store_true',
+                   help='Enable spatially-varying (patch-weighted) stacking: each frame contributes '
+                        'to each output pixel weighted by local sharpness, so sharp regions of a '
+                        'frame outweigh blurry ones from the same frame.  Automatically enabled by '
+                        '--auto when frame count and seeing metrics are favourable.')
     p.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     p.add_argument('--plate-solve', action='store_true',
                    help='Enable plate solving via astrometry.net (requires astroquery and ASTROMETRY_API_KEY)')
-    p.add_argument('--background-extraction', action='store_true', default=True,
-                   help='Enable intelligent background removal for darker sky (default: on)')
     p.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
@@ -890,14 +914,10 @@ def parse_args():
                         '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
     p.add_argument('--graxpert-path', default=None, metavar='PATH',
                    help='Path to GraXpert binary (auto-detected if omitted).')
-    p.add_argument('--denoise', action='store_true', default=True,
-                   help='Enable wavelet denoising post-stack (default: on; requires pywt)')
     p.add_argument('--no-denoise', dest='denoise', action='store_false',
                    help='Disable wavelet denoising')
     p.add_argument('--denoise-strength', type=float, default=3.0,
                    help='Wavelet luma denoise threshold factor (default: 3.0)')
-    p.add_argument('--auto-denoise-strength', action='store_true', default=True,
-                   help='Auto-tune denoise strength from stacked image SNR (default: on)')
     p.add_argument('--no-auto-denoise-strength', dest='auto_denoise_strength',
                    action='store_false',
                    help='Use fixed --denoise-strength instead of auto-tuning')
@@ -913,9 +933,6 @@ def parse_args():
                    help='Enable Adaptive Contrast-based Denoising (ACDNR). '
                         'Flat sky regions are smoothed; structured pixels are preserved. '
                         'Effective as a lightweight final pass after wavelet or MMT.')
-    p.add_argument('--denoise-adaptive', action='store_true', default=True,
-                   help='Use BayesShrink per-subband thresholds for wavelet denoising '
-                        '(default: on). Requires --denoise.')
     p.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
                    help='Use fixed global threshold factor instead of BayesShrink')
     p.add_argument('--denoise-bm3d', action='store_true',
@@ -924,23 +941,25 @@ def parse_args():
     p.add_argument('--denoise-aniso', action='store_true',
                    help='Apply Perona-Malik anisotropic diffusion. Reduces noise in '
                         'uniform regions while sharpening edges and filament boundaries.')
-    p.add_argument('--deconvolve', action='store_true', default=False,
+    p.add_argument('--deconvolve', action='store_true',
                    help='Enable Richardson-Lucy deconvolution for sharpening '
-                        '(default: off, requires scikit-image)')
-    p.add_argument('--no-deconvolve', dest='deconvolve', action='store_false',
-                   help='Disable Richardson-Lucy deconvolution')
+                        '(requires scikit-image)')
     p.add_argument('--deconvolve-tv', action='store_true',
                    help='Apply Total Variation regularized deconvolution instead of '
                         'Richardson-Lucy. Better for sharp edges; slower.')
     p.add_argument('--deconvolve-blind-psf', action='store_true',
                    help='Use empirical PSF estimated by median-stacking normalised star '
                         'cutouts instead of a parametric model.')
-    p.add_argument('--local-normalize', action='store_true',
-                   help='Enable local normalization to remove vignetting residuals')
-    p.add_argument('--chroma-nr', action='store_true', default=True,
-                   help='Enable chroma noise reduction to remove color speckle (default: on)')
     p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
+    p.add_argument('--chroma-nr-large-sigma', type=float, default=0.0,
+                   help='Coarse chroma-NR scale in px (default: 0 = off). Smooths '
+                        'medium-scale colour blotches (walking/chroma-noise mottle) '
+                        'over object-masked sky. Try 40-60 for wide-field galaxy '
+                        'fields. Auto sets it for the galaxy preset.')
+    p.add_argument('--chroma-nr-large-strength', type=float, default=0.7,
+                   help='Blend strength of the coarse chroma-NR pass [0-1] '
+                        '(default: 0.7). Lower preserves more faint sky colour (IFN).')
     p.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
                    help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
     p.add_argument('--ghs-b', type=float, default=8.0,
@@ -951,25 +970,19 @@ def parse_args():
     p.add_argument('--ghs-hp', type=float, default=0.95,
                    help='GHS highlights protection HP [0–1] (default: 0.95). '
                         'Values above HP map to white, protecting bright cores from blowout.')
-    p.add_argument('--star-reduce', action='store_true', default=True,
-                   help='Reduce star prominence to improve galaxy-to-star visual balance '
-                        '(default: on). Softens star cores without removing them.')
+    p.add_argument('--preview-black-sigma', type=float, default=0.0,
+                   help='Preview black point, in sky-sigma above the sky median '
+                        '(default: 0.0). Higher (e.g. 2.0) clips background noise '
+                        'to black for a small target on empty sky; negative keeps '
+                        'faint frame-filling nebulosity visible. Set per target by --auto.')
     p.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
                    help='Disable star reduction')
-    p.add_argument('--local-contrast', action='store_true', default=True,
-                   help='Apply multiscale local contrast enhancement to reveal galaxy '
-                        'structure: dust lanes, spiral arm boundaries (default: on).')
     p.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
                    help='Disable multiscale local contrast enhancement')
     p.add_argument('-j', '--parallel', type=int, default=0,
                    help='Parallel workers for frame processing (default: 0=auto, 1=sequential)')
-    p.add_argument('--ca-correction', action='store_true', default=True,
-                   help='Correct lateral chromatic aberration by aligning R/B channels '
-                        'to green (default: on; requires skimage)')
     p.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
-    p.add_argument('--cosmic-ray-rejection', action='store_true', default=True,
-                   help='Apply L.A.Cosmic-style cosmic ray rejection per frame (default: on)')
     p.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
                    help='Disable cosmic ray rejection')
@@ -983,6 +996,9 @@ def parse_args():
                    help='Write a 32-bit float TIFF alongside the FITS output')
     p.add_argument('--output-xisf', action='store_true',
                    help='Write output in PixInsight XISF 1.0 format alongside FITS')
+    p.add_argument('--output-processed-fits', action='store_true',
+                   help='Write a second FITS file with post-processing applied '
+                        '(suffix _processed.fits alongside the main linear FITS)')
     p.add_argument('--quality-report', default=None, metavar='PATH',
                    help='Write per-frame quality metrics CSV after Phase 1 '
                         '(columns: filename, snr, fwhm, star_count, quality_score, '
@@ -1004,6 +1020,40 @@ def parse_args():
     p.add_argument('--comet-mode', action='store_true',
                    help='Enable comet nucleus tracking. Produces a second stack aligned '
                         'on the comet nucleus saved as <stem>_comet.fits.')
+    p.add_argument('--comet-blend-sigma', type=float, default=30.0, metavar='PX',
+                   help='Gaussian blend radius (pixels) for comet+star blended composite '
+                        '(default: 30). Larger = more comet-stack area in the blend.')
+    p.add_argument('--comet-xy', default=None, metavar='X,Y',
+                   help='Approximate comet nucleus position in the reference frame '
+                        '(pixels, comma-separated, e.g. "1024,768"). X=column, Y=row.')
+    p.add_argument('--comet-search-radius', type=float, default=50.0, metavar='PX',
+                   help='Search radius (pixels) around predicted nucleus position for '
+                        'frame-to-frame tracking (default: 50).')
+    p.add_argument('--comet-affine', action='store_true',
+                   help='Apply rotation+scale correction (affine) on top of nucleus '
+                        'translation shift in comet registration (default: translation only).')
+    p.add_argument('--coma-mask-radius', type=int, default=150, metavar='PX',
+                   help='Circular exclusion radius (pixels) around the comet nucleus '
+                        'used to prevent background extraction from sampling the coma '
+                        '(default: 150). Only active when --comet-mode is set.')
+    p.add_argument('--comet-radial-renorm', action='store_true',
+                   help='Apply radial renormalization filter to flatten the coma gradient '
+                        'and reveal jets/structure. Saves result as <stem>_comet_renorm.fits.')
+    p.add_argument('--comet-larson-sekanina', action='store_true',
+                   help='Apply Larson-Sekanina rotational difference filter to enhance '
+                        'comet jet structure. Saves result as <stem>_comet_ls.fits.')
+    p.add_argument('--comet-ls-rotation', type=float, default=15.0, metavar='DEG',
+                   help='Rotation angle (degrees) for the Larson-Sekanina filter '
+                        '(default: 15).')
+    p.add_argument('--comet-designation', default=None, metavar='DESIG',
+                   help='JPL Horizons designation for ephemeris-aided nucleus tracking '
+                        '(e.g. "C/2023 A3"). Requires astroquery.')
+    p.add_argument('--observer-site', default=None, metavar='SITE',
+                   help='Observer location for ephemeris queries: MPC code (e.g. "G37") '
+                        'or "lon,lat,elev" in decimal degrees/metres (e.g. "-2.5,51.4,50").')
+    p.add_argument('--comet-detrail', action='store_true',
+                   help='Apply linear deconvolution to correct intra-frame nucleus trailing '
+                        '(requires --comet-designation or consecutive centroid positions).')
     p.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
                    help='Blend a short-exposure stack into saturated regions of the main '
                         'stack for HDR targets (e.g. Orion Nebula core, globular clusters).')
@@ -1038,12 +1088,51 @@ def parse_args():
                    help='Extend --photometric-calibration with a Gaia DR3 catalogue query. '
                         'Requires --plate-solve and astroquery.')
 
+    # New feature flags (improvements 1-9)
+    p.add_argument('--max-ellipticity', type=float, default=0.5, metavar='E',
+                   help='Warn (but do not reject) frames with median star ellipticity above '
+                        'this threshold (default: 0.5). Set 0 to disable.')
+    p.add_argument('--consensus-ref', action='store_true',
+                   help='Choose reference frame as the one with shift closest to the session '
+                        'median (most central frame) rather than highest quality score.')
+    p.add_argument('--masked-correlation', action='store_true',
+                   help='Suppress bright nebula emission before cross-correlation to improve '
+                        'registration accuracy on extended-emission targets.')
+    p.add_argument('--pre-gradient-removal', action='store_true',
+                   help='Fit and subtract a degree-2 polynomial sky gradient from each frame '
+                        'before quality analysis (useful for nebulae with strong gradients).')
+    p.add_argument('--trim-low', type=float, default=0.2, metavar='F',
+                   help='Low-fraction trim for trimmed_mean stacking (default: 0.2).')
+    p.add_argument('--trim-high', type=float, default=0.2, metavar='F',
+                   help='High-fraction trim for trimmed_mean stacking (default: 0.2).')
+    p.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
+                   help='Drizzle pixel fraction (tent-kernel weight; < 1.0 = sharper '
+                        'at cost of noise; default: 1.0).')
+    p.add_argument('--optical-flow', action='store_true',
+                   help='Apply per-frame Farneback optical flow local warp correction after '
+                        'global shift/affine registration. Requires OpenCV (cv2).')
+    p.add_argument('--halo-removal', action='store_true',
+                   help='Fit and subtract Gaussian PSF halos from bright stars in the '
+                        'stacked image (post-processing step).')
+
     # Defaults for parameters that are tunable via config file but not exposed on the CLI.
     # Set these in a TOML config with --config to override them.
     p.set_defaults(
+        # Features that are on by default (disabled via --no-* flags)
+        background_extraction=True,
+        denoise=True,
+        auto_denoise_strength=True,
+        denoise_adaptive=True,
+        chroma_nr=True,
+        star_reduce=True,
+        local_contrast=True,
+        ca_correction=True,
+        cosmic_ray_rejection=True,
         # Denoiser tuning
         denoise_chroma_boost=2.0,
         chroma_nr_sigma=2.0,
+        chroma_nr_large_sigma=0.0,
+        chroma_nr_large_strength=0.7,
         denoise_nlm_strength=1.0,
         denoise_nlm_blend=0.5,
         denoise_bilateral_sigma_color=None,
@@ -1073,38 +1162,50 @@ def parse_args():
         dbe_patch_size=64,
         entropy_bg=False,
         # Registration internals
-        skip_phase_correlation=False,
+        # (skip_phase_correlation default set on the --phase-correlation argument)
         no_alignment_centrality=False,
         no_shift_outlier_filter=False,
         no_reg_residual_check=False,
         reg_residual_reject=False,
         patch_registration=False,
-        poly_distortion=False,
-        poly_distortion_degree=2,
         # Stacking internals
         percentile_low=20.0,
         percentile_high=80.0,
         esd_max_outliers=0,
         esd_significance=0.05,
         # Quality
-        advanced_metrics=True,
+        # (advanced_metrics default set on the --advanced-metrics argument)
         # Per-feature tuning
         star_reduce_factor=0.4,
         star_reduce_sigma=1.5,
         local_contrast_strength=0.7,
-        local_normalize_sigma=50.0,
         scnr_amount=1.0,
         scnr_target='green',
         comet_blend_sigma=30.0,
-        hdr_short_exptime=1.0,
-        hdr_long_exptime=1.0,
-        drizzle_drop_size=0.7,
+        comet_xy=None,
+        comet_search_radius=50.0,
+        comet_affine=False,
+        coma_mask_radius=150,
+        comet_radial_renorm=False,
+        comet_larson_sekanina=False,
+        comet_ls_rotation=15.0,
+        comet_designation=None,
+        observer_site=None,
+        comet_detrail=False,
         weight_snr=1.0,
         weight_fwhm=1.0,
         weight_stars=1.0,
         weight_noise=False,
-        cr_sigclip=4.5,
-        cr_objlim=5.0,
+        # Improvements 1-9
+        max_ellipticity=0.5,
+        consensus_ref=False,
+        masked_correlation=False,
+        pre_gradient_removal=False,
+        trim_low=0.2,
+        trim_high=0.2,
+        drizzle_pixfrac=1.0,
+        optical_flow=False,
+        halo_removal=False,
     )
     return p.parse_args()
 
@@ -1117,10 +1218,18 @@ def main():
         return
 
     args = parse_args()
+    # Upgrade bilinear → malvar when OpenCV is available; malvar resolves colour moiré
+    # that bilinear introduces around fine star disks at no perceptible speed cost.
+    if getattr(args, 'debayer_method', 'bilinear') == 'bilinear':
+        try:
+            import cv2 as _cv2  # noqa: F401
+            args.debayer_method = 'malvar'
+        except ImportError:
+            pass
     if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
-        print("ERROR: -o/--output is required unless --health-check or --dry-run is specified",
-              file=sys.stderr)
-        raise SystemExit(1)
+        dir_name = os.path.basename(os.path.abspath(args.directory))
+        args.output = f"{dir_name}_stacked.fits"
+        safe_print(f"  No output path specified — writing to {args.output}")
     # Load config file (before preset, so preset can override config)
     if getattr(args, 'config', None):
         config_changes = load_config_file(args.config, args)

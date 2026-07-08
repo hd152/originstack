@@ -8,6 +8,8 @@ OriginStack is a local image-processing pipeline. It reads FITS files from disk 
 - **Network access**: `--plate-solve` (astrometry.net mode) sends your stacked FITS image to [nova.astrometry.net](https://nova.astrometry.net) for solving. Do not use this flag if your data is sensitive.
 - **API keys**: `ASTROMETRY_API_KEY` is read from environment variables. Do not commit this to version control or include it in config TOML files that are checked in.
 - **FITS file parsing**: FITS files from untrusted sources are parsed by `astropy`. Malformed FITS files could trigger issues in the parser. Only process files from trusted telescopes and cameras.
+- **JSON sidecar parsing**: per-frame `*.json` sidecars and session `info.json` files co-located with the data are read with the standard-library `json` parser to backfill missing metadata (ISO, gain, temperature, WCS). No code is executed from them; only known keys are used. Still, only process metadata from trusted capture apps.
+- **Native (Rust) extension**: the optional `astro_native` module (`ext/astro_native/`) is compiled from the source in this repository via PyO3/maturin. It performs numeric work on in-memory float32 arrays only — no file, network, or subprocess access — and every kernel has a pure-Python fallback. Build it yourself from source; do not install prebuilt `astro_native` wheels from untrusted third parties.
 
 ## Reporting a Vulnerability
 

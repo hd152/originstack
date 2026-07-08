@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from scipy import ndimage
 
-from src.gpu_context import get_gpu
+from src.gpu_context import GpuContext, get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, get_logger
 
@@ -22,6 +22,14 @@ except Exception:
         return iterable
 
 _log = get_logger()
+
+# Optional native (Rust) Lanczos-3 warp — CPU only; GPU path is unaffected.
+try:
+    import astro_native as _native
+    HAS_NATIVE = True
+except Exception:
+    _native = None
+    HAS_NATIVE = False
 
 try:
     from skimage.registration import phase_cross_correlation
@@ -39,6 +47,13 @@ try:
     from PIL import Image
 except Exception:
     Image = None
+
+try:
+    import astroalign as _astroalign
+    HAS_ASTROALIGN = True
+except Exception:
+    _astroalign = None  # type: ignore[assignment]
+    HAS_ASTROALIGN = False
 
 
 def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
@@ -95,6 +110,29 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     return None
 
 
+def _astroalign_transform(ref_lum: np.ndarray,
+                          img_lum: np.ndarray) -> Optional[Any]:
+    """Use astroalign triangle-pattern matching to find a Euclidean transform.
+
+    Called as a fallback when star-catalog RANSAC matching fails (e.g. too few
+    detected stars, large rotation, or significant scale mismatch between panels).
+    Returns a skimage EuclideanTransform compatible with apply_transform, or None.
+    """
+    if not HAS_ASTROALIGN or not HAS_SKIMAGE_TRANSFORM:
+        return None
+    try:
+        transform, _ = _astroalign.find_transform(
+            img_lum.astype(np.float32),
+            ref_lum.astype(np.float32),
+        )
+        return EuclideanTransform(
+            rotation=transform.rotation,
+            translation=(transform.translation[0], transform.translation[1]),
+        )
+    except Exception:
+        return None
+
+
 def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
                     transform: Optional[Any] = None) -> np.ndarray:
     """Apply translation or affine transform to a multi-channel image.
@@ -111,53 +149,80 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
         squeeze_back = False
 
     gpu = get_gpu()
-    xp = gpu.xp
-    _ndimage = gpu.xndimage
-    img_d = gpu.to_device(img)
-    
-    if transform is not None:
-        matrix = transform.params
-        R = matrix[:2, :2]        # EuclideanTransform stores t in (x=col, y=row) space.
-        # scipy.ndimage.affine_transform operates in (row, col) space and applies the
-        # inverse mapping: input_coord = M @ output_coord + offset.
-        t_xy = matrix[:2, 2]      # [tx, ty] in (col, row)
-        t_rowcol = np.array([t_xy[1], t_xy[0]])  # swap to (row, col)
-        offset = -R @ t_rowcol
-        
-        if gpu.active:
+
+    def _run(xp, _ndimage, img_arr):
+        if transform is not None:
+            matrix = transform.params
+            R = matrix[:2, :2]
+            t_xy = matrix[:2, 2]
+            t_rowcol = np.array([t_xy[1], t_xy[0]])
+            offset = -R @ t_rowcol
             mat_d = xp.asarray(R)
             off_d = xp.asarray(offset)
-        else:
-            mat_d = R
-            off_d = offset
+            result = xp.empty_like(img_arr)
+            for c in range(img_arr.shape[2]):
+                result[:, :, c] = _ndimage.affine_transform(
+                    img_arr[:, :, c], mat_d, offset=off_d,
+                    order=3, mode='constant', cval=0.0
+                )
+            return result
+        elif shift is not None:
+            result = xp.empty_like(img_arr)
+            for c in range(img_arr.shape[2]):
+                result[:, :, c] = _ndimage.shift(
+                    img_arr[:, :, c], shift=shift, order=3,
+                    mode='constant', cval=0.0, prefilter=True
+                )
+            return result
+        return img_arr
 
-        result = xp.zeros_like(img_d)
-        for c in range(img_d.shape[2]):
-            result[:, :, c] = _ndimage.affine_transform(
-                img_d[:, :, c], mat_d, offset=off_d,
-                order=3, mode='constant', cval=0.0
-            )
-        out = gpu.to_host(result)
-        return out[:, :, 0] if squeeze_back else out
+    if transform is None and shift is None:
+        if squeeze_back:
+            img = img[:, :, 0]
+        return img
 
-    elif shift is not None:
-        result = xp.zeros_like(img_d)
-        for c in range(img_d.shape[2]):
-            result[:, :, c] = _ndimage.shift(
-                img_d[:, :, c], shift=shift, order=3,
-                mode='constant', cval=0.0, prefilter=True
-            )
-        out = gpu.to_host(result)
-        return out[:, :, 0] if squeeze_back else out
+    if gpu.active:
+        try:
+            result = _run(gpu.xp, gpu.xndimage, gpu.to_device(img))
+            out = gpu.to_host(result)
+            return out[:, :, 0] if squeeze_back else out
+        except Exception as exc:
+            if gpu.is_oom(exc):
+                gpu.free_pool()
+            else:
+                raise
 
-    # If neither transform nor shift is provided, return original img
-    # (ensure it is on CPU as per function convention)
-    if squeeze_back:
-        img = img[:, :, 0]
-    return img
+    # CPU path (also OOM fallback). Prefer the native Lanczos-3 warp: it holds
+    # star FWHM and flux identical to scipy order-3, its mild per-frame ringing
+    # averages out across dithered frames (validated), and it is multithreaded.
+    img_cpu = np.asarray(img)
+    if HAS_NATIVE and img_cpu.dtype == np.float32 and img_cpu.flags['C_CONTIGUOUS']:
+        try:
+            H_i, W_i = img_cpu.shape[:2]
+            if transform is not None:
+                matrix = transform.params
+                R = matrix[:2, :2]
+                t_xy = matrix[:2, 2]
+                t_rowcol = np.array([t_xy[1], t_xy[0]])
+                mat = R
+                off = -R @ t_rowcol
+            else:  # pure translation: out[o] = in[o - shift]
+                mat = np.eye(2)
+                off = np.array([-shift[0], -shift[1]], dtype=np.float64)
+            out = _native.warp_affine_lanczos3(
+                img_cpu, mat.astype(np.float64).ravel().tolist(),
+                off.astype(np.float64).tolist(), int(H_i), int(W_i), 0.0)
+            return out[:, :, 0] if squeeze_back else out
+        except Exception as exc:
+            _log.debug("native warp failed (%s); using scipy", exc)
+
+    from scipy import ndimage as _scipy_ndimage
+    result = _run(np, _scipy_ndimage, img_cpu)
+    out = np.asarray(result)
+    return out[:, :, 0] if squeeze_back else out
 
 
-def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True) -> Tuple[float, float]:
+def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True, seed_shift: Optional[Tuple[float, float]] = None, masked_correlation: bool = False) -> Tuple[float, float]:
     """Calculate the (shift_y, shift_x) needed to align ``img`` to ``ref``.
 
     Registration cascade:
@@ -165,6 +230,11 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
       2. Phase cross-correlation (skimage) — sub-pixel accurate when error < 0.1.
       3. FFT cross-correlation at full resolution — fallback for phase-cc failure.
       4. Centroid difference — last resort for featureless or very noisy frames.
+
+    ``seed_shift`` supplies a pre-computed coarse shift (e.g. the pyramid shift
+    already calculated during reference-frame selection).  When given it is used
+    in place of running the pyramid pass again, so the expensive coarse-to-fine
+    registration runs only once per frame across the whole pipeline.
     """
     debug_info = []
 
@@ -188,8 +258,15 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             pass
 
     # Step 1: Multi-scale pyramid registration (coarse-to-fine).
+    # A caller-supplied seed (from the reference-selection pyramid pass) lets us
+    # skip recomputing the pyramid — it is the same coarse-to-fine result.
     pyramid_shift = (0.0, 0.0)
-    if use_pyramid:
+    if seed_shift is not None:
+        psy, psx = seed_shift
+        if np.isfinite(psy) and np.isfinite(psx):
+            pyramid_shift = (float(psy), float(psx))
+            debug_info.append(f"pyramid (seeded): shift=({psx:.1f}, {psy:.1f})")
+    elif use_pyramid:
         try:
             psy, psx = calculate_shift_pyramid(ref, img)
             if np.isfinite(psy) and np.isfinite(psx):
@@ -205,6 +282,27 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                                     mode='constant', cval=0.0)
     else:
         img_shifted = img
+
+    # Masked cross-correlation: suppress bright nebula emission in background
+    if masked_correlation:
+        try:
+            ref_lum_m = ref.copy().astype(np.float32)
+            img_lum_m = img_shifted.copy().astype(np.float32)
+            bg_ref = float(np.median(ref_lum_m))
+            fill_ref = float(np.mean(ref_lum_m > 2 * bg_ref))
+            if fill_ref > 0.3:
+                from scipy.ndimage import binary_dilation
+                thresh_ref = float(np.percentile(ref_lum_m, 85))
+                thresh_img = float(np.percentile(img_lum_m, 85))
+                struct = np.ones((21, 21), dtype=bool)
+                mask_ref = binary_dilation(ref_lum_m > thresh_ref, structure=struct)
+                mask_img = binary_dilation(img_lum_m > thresh_img, structure=struct)
+                ref_lum_m[mask_ref] = 0.0
+                img_lum_m[mask_img] = 0.0
+                ref = ref_lum_m
+                img_shifted = img_lum_m
+        except Exception:
+            pass
 
     # Use phase cross correlation for subpixel shifts when available
     if not skip_phase_cc and phase_cross_correlation is not None:
@@ -265,19 +363,21 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             y1 = h + min(0, int(round(psy)))
             x0 = max(0, int(round(psx)))
             x1 = w + min(0, int(round(psx)))
+            # float32 (complex64 FFT) halves the cost/memory of the zero-padded
+            # 2H×2W transform; only the correlation-peak location is used.
             if y1 > y0 and x1 > x0:
-                ref_region = ref[y0:y1, x0:x1].astype(np.float64)
-                img_region = img_fft[y0:y1, x0:x1].astype(np.float64)
-                ref_np = np.zeros((h, w), dtype=np.float64)
-                img_np = np.zeros((h, w), dtype=np.float64)
+                ref_region = ref[y0:y1, x0:x1].astype(np.float32)
+                img_region = img_fft[y0:y1, x0:x1].astype(np.float32)
+                ref_np = np.zeros((h, w), dtype=np.float32)
+                img_np = np.zeros((h, w), dtype=np.float32)
                 ref_np[y0:y1, x0:x1] = ref_region - ref_region.mean()
                 img_np[y0:y1, x0:x1] = img_region - img_region.mean()
             else:
-                ref_np = (ref - np.mean(ref)).astype(np.float64)
-                img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
+                ref_np = (ref - np.mean(ref)).astype(np.float32)
+                img_np = (img_fft - np.mean(img_fft)).astype(np.float32)
         else:
-            ref_np = (ref - np.mean(ref)).astype(np.float64)
-            img_np = (img_fft - np.mean(img_fft)).astype(np.float64)
+            ref_np = (ref - np.mean(ref)).astype(np.float32)
+            img_np = (img_fft - np.mean(img_fft)).astype(np.float32)
 
         ref_norm = xp.asarray(ref_np)
         img_norm = xp.asarray(img_np)
@@ -364,8 +464,10 @@ def apply_shift(img: np.ndarray, shift: Tuple[float, float]) -> np.ndarray:
 
 def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
     """Fast integer-accurate FFT cross-correlation without GPU, for pyramid levels."""
-    ref_n = ref - ref.mean()
-    img_n = img - img.mean()
+    # float32 transforms (complex64) halve the FFT cost/memory vs float64; the
+    # result is only used for integer-peak detection, which is unaffected.
+    ref_n = (ref - ref.mean()).astype(np.float32, copy=False)
+    img_n = (img - img.mean()).astype(np.float32, copy=False)
     h, w = ref_n.shape
     pad_h, pad_w = 2 * h, 2 * w
     F_ref = np.fft.rfft2(ref_n, s=(pad_h, pad_w))
@@ -376,6 +478,69 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
     dy = py if py < h else py - pad_h
     dx = px if px < w else px - pad_w
     return float(dy), float(dx)
+
+
+def _downsample_half(arr: np.ndarray) -> np.ndarray:
+    """2x box-downsample (even-cropped 2x2 average)."""
+    h2 = (arr.shape[0] // 2) * 2
+    w2 = (arr.shape[1] // 2) * 2
+    a = arr[:h2, :w2]
+    return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
+
+
+def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) -> list:
+    """Precompute a fixed reference's pyramid FFTs once, for reuse across many
+    frames. Returns a coarsest-to-finest... no — finest-to-coarsest list matching
+    ``calculate_shift_pyramid`` indexing: entry lvl = (F_ref, h, w, pad_h, pad_w).
+
+    When one reference is registered against N frames (reference selection, and
+    the whole registration phase), this removes N-1 redundant reference-pyramid
+    builds and N-1 redundant reference FFTs per level.
+    """
+    ref_pyr = [ref.astype(np.float64)]
+    for _ in range(levels - 1):
+        if min(ref_pyr[-1].shape) // 2 < min_size:
+            break
+        ref_pyr.append(_downsample_half(ref_pyr[-1]))
+    prepared = []
+    for r in ref_pyr:
+        ref_n = (r - r.mean()).astype(np.float32, copy=False)
+        h, w = ref_n.shape
+        pad_h, pad_w = 2 * h, 2 * w
+        F_ref = np.fft.rfft2(ref_n, s=(pad_h, pad_w))
+        prepared.append((F_ref, h, w, pad_h, pad_w))
+    return prepared
+
+
+def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float, float]:
+    """Pyramid registration using a precomputed reference pyramid (see
+    ``prepare_ref_pyramid``). Bit-identical to ``calculate_shift_pyramid`` — only
+    the reference-side work is hoisted out of the per-frame loop."""
+    levels = len(prepared)
+    img_pyr = [img.astype(np.float64)]
+    for _ in range(levels - 1):
+        img_pyr.append(_downsample_half(img_pyr[-1]))
+
+    total_sy, total_sx = 0.0, 0.0
+    for lvl in range(levels - 1, -1, -1):
+        F_ref, h, w, pad_h, pad_w = prepared[lvl]
+        i = img_pyr[lvl]
+        if total_sy != 0.0 or total_sx != 0.0:
+            i = ndimage.shift(i, shift=(total_sy, total_sx), order=1,
+                              mode='constant', cval=0.0)
+        img_n = (i - i.mean()).astype(np.float32, copy=False)
+        F_img = np.fft.rfft2(img_n, s=(pad_h, pad_w))
+        corr = np.fft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w))
+        peak_flat = int(np.argmax(corr))
+        py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
+        dy = py if py < h else py - pad_h
+        dx = px if px < w else px - pad_w
+        total_sy += dy
+        total_sx += dx
+        if lvl > 0:
+            total_sy *= 2.0
+            total_sx *= 2.0
+    return total_sy, total_sx
 
 
 def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
@@ -545,146 +710,6 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> D
     return result
 
 
-def _poly_features(y: np.ndarray, x: np.ndarray, degree: int) -> np.ndarray:
-    """Build the polynomial feature matrix for 2-D warp fitting.
-
-    Returns an (N, D) matrix where each row contains the monomial terms
-    1, y, x, y², yx, x², … up to total degree ``degree``.
-    """
-    cols = [np.ones(len(y))]
-    for d in range(1, degree + 1):
-        for py in range(d, -1, -1):
-            px = d - py
-            cols.append(y ** py * x ** px)
-    return np.column_stack(cols)
-
-
-def fit_polynomial_distortion(src_y: np.ndarray, src_x: np.ndarray,
-                               dst_y: np.ndarray, dst_x: np.ndarray,
-                               degree: int = None
-                               ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Fit a 2-D polynomial distortion map from matched star-pair coordinates.
-
-    Given N matched pairs (src → dst), fits independent least-squares
-    polynomials of the specified degree for the row (y) and column (x)
-    output coordinates:
-
-        dst_y ≈ P_y(src_y, src_x)
-        dst_x ≈ P_x(src_y, src_x)
-
-    A degree-2 polynomial captures field curvature and lateral colour
-    aberration present in many fast refractors and wide-field systems.
-    A degree-3 polynomial additionally models barrel/pincushion distortion.
-
-    Args:
-        src_y, src_x: Source (unregistered frame) star coordinates, arrays (N,).
-        dst_y, dst_x: Destination (reference frame) star coordinates, arrays (N,).
-        degree:       Polynomial degree (default Config.POLY_DISTORTION_DEGREE).
-
-    Returns:
-        (coeffs_y, coeffs_x) — 1-D coefficient arrays for the two polynomials,
-        or None if fitting fails (too few points or singular system).
-    """
-    if degree is None:
-        degree = Config.POLY_DISTORTION_DEGREE
-    min_pts = Config.POLY_MIN_STARS
-
-    if len(src_y) < min_pts:
-        _log.debug("Polynomial distortion: too few stars (%d < %d)", len(src_y), min_pts)
-        return None
-
-    # Normalise coordinates to [-1, 1] for numerical stability
-    cy, sy = float(np.mean(src_y)), max(float(np.std(src_y)), 1.0)
-    cx, sx = float(np.mean(src_x)), max(float(np.std(src_x)), 1.0)
-    yn = (src_y - cy) / sy
-    xn = (src_x - cx) / sx
-
-    A = _poly_features(yn, xn, degree)
-    try:
-        coeffs_y, _, _, _ = np.linalg.lstsq(A, dst_y - src_y, rcond=None)
-        coeffs_x, _, _, _ = np.linalg.lstsq(A, dst_x - src_x, rcond=None)
-    except np.linalg.LinAlgError:
-        return None
-
-    # Check residuals — reject if worse than pure translation
-    pred_dy = A @ coeffs_y
-    pred_dx = A @ coeffs_x
-    res_rms = float(np.sqrt(np.mean((dst_y - src_y - pred_dy) ** 2 +
-                                     (dst_x - src_x - pred_dx) ** 2)))
-    naive_rms = float(np.sqrt(np.mean((dst_y - src_y - np.mean(dst_y - src_y)) ** 2 +
-                                       (dst_x - src_x - np.mean(dst_x - src_x)) ** 2)))
-    if res_rms > naive_rms * 1.2:
-        _log.debug("Polynomial distortion: poly fit worse than translation (%.2f > %.2f); "
-                   "discarding", res_rms, naive_rms)
-        return None
-
-    # Pack normalisation parameters into the coefficient arrays (appended)
-    norm_params = np.array([cy, sy, cx, sx])
-    return (np.append(coeffs_y, norm_params),
-            np.append(coeffs_x, norm_params))
-
-
-def apply_polynomial_warp(img: np.ndarray,
-                           coeffs_y: np.ndarray,
-                           coeffs_x: np.ndarray,
-                           degree: int = None) -> np.ndarray:
-    """Apply a polynomial distortion map to a multi-channel image.
-
-    Uses the coefficient arrays produced by ``fit_polynomial_distortion``
-    to compute per-pixel output coordinates and resamples the image with
-    bicubic (order=3) interpolation via scipy.ndimage.map_coordinates.
-
-    Args:
-        img:      Float32 image (H, W, 3) or (H, W).
-        coeffs_y: Coefficient array from ``fit_polynomial_distortion`` (y).
-        coeffs_x: Coefficient array from ``fit_polynomial_distortion`` (x).
-        degree:   Polynomial degree (default Config.POLY_DISTORTION_DEGREE).
-
-    Returns:
-        Warped float32 image of the same shape.
-    """
-    from scipy.ndimage import map_coordinates as _map_coords
-
-    if degree is None:
-        degree = Config.POLY_DISTORTION_DEGREE
-
-    # Extract normalisation parameters (last 4 elements of each coefficient array)
-    cy, sy, cx, sx = coeffs_y[-4:]
-    cy2, sy2, cx2, sx2 = coeffs_x[-4:]
-    c_y = coeffs_y[:-4]
-    c_x = coeffs_x[:-4]
-
-    ndim_orig = img.ndim
-    if ndim_orig == 2:
-        img = img[:, :, np.newaxis]
-    H, W = img.shape[:2]
-
-    # Build output grid in normalised coords
-    row_idx, col_idx = np.mgrid[0:H, 0:W]
-    yn = (row_idx.astype(np.float64) - cy) / sy
-    xn = (col_idx.astype(np.float64) - cx) / sx
-
-    A = _poly_features(yn.ravel(), xn.ravel(), degree)
-
-    # Map destination pixel → source pixel (inverse mapping)
-    dy = (A @ c_y).reshape(H, W)
-    dx = (A @ c_x).reshape(H, W)
-    src_rows = np.clip(row_idx - dy, 0, H - 1)
-    src_cols = np.clip(col_idx - dx, 0, W - 1)
-
-    result = np.zeros_like(img, dtype=np.float32)
-    for c in range(img.shape[2]):
-        result[:, :, c] = _map_coords(
-            img[:, :, c].astype(np.float64),
-            [src_rows, src_cols],
-            order=3, mode='constant', cval=0.0
-        ).astype(np.float32)
-
-    if ndim_orig == 2:
-        result = result[:, :, 0]
-    return result
-
-
 def _geometric_median_2d(points: np.ndarray, max_iters: int = 50,
                           tol: float = 1e-5) -> Tuple[float, float]:
     """Weiszfeld algorithm for the L1 geometric median of 2D shift vectors.
@@ -753,6 +778,11 @@ def select_reference_frame(
     tentative_idx_in_lights = final_indices[tentative_j]
     ref_lum = _get_lum(tentative_idx_in_lights)
 
+    # Precompute the (fixed) reference pyramid + per-level FFTs ONCE — every
+    # frame registers against this same reference, so this removes N-1 redundant
+    # reference-pyramid builds and reference FFTs.
+    ref_prepared = prepare_ref_pyramid(ref_lum)
+
     # Run cheap pyramid registration in parallel
     pyramid_shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
 
@@ -761,7 +791,7 @@ def select_reference_frame(
             return j, 0.0, 0.0
         lum = _get_lum(orig_idx)
         try:
-            sy, sx = calculate_shift_pyramid(ref_lum, lum)
+            sy, sx = calculate_shift_pyramid_pref(ref_prepared, lum)
             if np.isfinite(sy) and np.isfinite(sx):
                 return j, float(sy), float(sx)
         except Exception:
@@ -1028,6 +1058,50 @@ def compute_patch_quality_map(lum: np.ndarray, grid_size: int = None) -> np.ndar
     return quality_map
 
 
+def compute_optical_flow_warp(ref_lum: np.ndarray, frame_lum: np.ndarray) -> Optional[np.ndarray]:
+    """Compute dense optical flow from frame_lum to ref_lum using Farneback method.
+
+    Returns flow array (H, W, 2) or None if cv2 unavailable.
+    """
+    try:
+        import cv2 as _cv2
+    except ImportError:
+        return None
+    try:
+        ref_u8 = np.clip(ref_lum / (ref_lum.max() + 1e-12) * 255, 0, 255).astype(np.uint8)
+        frm_u8 = np.clip(frame_lum / (frame_lum.max() + 1e-12) * 255, 0, 255).astype(np.uint8)
+        flow = _cv2.calcOpticalFlowFarneback(
+            frm_u8, ref_u8, None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+        return flow  # (H, W, 2): flow[y, x] = (dx, dy) displacement
+    except Exception:
+        return None
+
+
+def apply_optical_flow_warp(img: np.ndarray, flow: np.ndarray) -> np.ndarray:
+    """Apply optical flow warp to image using cv2.remap."""
+    try:
+        import cv2 as _cv2
+        H, W = img.shape[:2]
+        flow_map_x = (np.arange(W, dtype=np.float32)[np.newaxis, :]
+                      + flow[:, :, 0]).astype(np.float32)
+        flow_map_y = (np.arange(H, dtype=np.float32)[:, np.newaxis]
+                      + flow[:, :, 1]).astype(np.float32)
+        if img.ndim == 3:
+            result = np.stack([
+                _cv2.remap(img[:, :, c], flow_map_x, flow_map_y,
+                           _cv2.INTER_CUBIC, borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
+                for c in range(img.shape[2])
+            ], axis=2)
+        else:
+            result = _cv2.remap(img, flow_map_x, flow_map_y,
+                                _cv2.INTER_CUBIC, borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
+        return result.astype(img.dtype)
+    except Exception:
+        return img
+
+
 def run_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -1074,11 +1148,9 @@ def run_registration_phase(
         if ref_stars is None:
             try:
                 # 2. DAOStarFinder with sigma-clipped background estimate
-                from src.quality import (_detect_stars_multi_fwhm,
-                                         _ensure_photutils, _ensure_astropy_stats)
+                from src.quality import _detect_stars_multi_fwhm, _ensure_photutils, DAOStarFinder
+                from astropy.stats import sigma_clipped_stats
                 _ensure_photutils()
-                _ensure_astropy_stats()
-                from src.quality import DAOStarFinder, sigma_clipped_stats
                 if DAOStarFinder is not None and sigma_clipped_stats is not None:
                     _redet_tried.append('DAOStarFinder')
                     _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)
@@ -1139,6 +1211,31 @@ def run_registration_phase(
         safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
                    "registration disabled, falling back to translation only")
 
+    # Consensus reference frame: override the selected reference with the frame
+    # whose pyramid shift is closest to the session median (most central frame).
+    if (getattr(args, 'consensus_ref', False)
+            and pyramid_shifts is not None
+            and len(final) >= 10):
+        try:
+            ps_arr = np.array(pyramid_shifts, dtype=np.float64)
+            median_sy = float(np.median(ps_arr[:, 0]))
+            median_sx = float(np.median(ps_arr[:, 1]))
+            dists = np.sqrt((ps_arr[:, 0] - median_sy) ** 2 +
+                            (ps_arr[:, 1] - median_sx) ** 2)
+            best_j = int(np.argmin(dists))
+            new_best_idx = final_indices[best_j]
+            if new_best_idx != best_idx:
+                best = final[best_j]
+                best_idx = new_best_idx
+                if cached_lums is not None and best_idx < len(cached_lums) and cached_lums[best_idx] is not None:
+                    ref_lum = np.asarray(cached_lums[best_idx], dtype=np.float32)
+                else:
+                    ref_lum = np.array(mem_lum[best_idx], dtype=np.float32)
+                safe_print(f"  Consensus reference: {os.path.basename(best.path)} "
+                           f"(shift closest to median)")
+        except Exception as _ce:
+            _log.debug("Consensus ref failed: %s", _ce)
+
     # Shift-space outlier pre-filter: skip expensive full registration for
     # frames whose pyramid shift is catastrophically far from the session median.
     outlier_mask = np.zeros(len(final), dtype=bool)
@@ -1158,6 +1255,21 @@ def run_registration_phase(
             shifts[j] = pyramid_shifts[j]
             transforms[j] = None
 
+    # Seed each frame's full registration with the pyramid shift already computed
+    # during reference selection, so the coarse-to-fine pyramid runs once per
+    # frame across the pipeline instead of twice.  The select_reference_frame
+    # pyramid pass measured shifts relative to a *tentative* reference; re-baseline
+    # them to the actually-chosen reference by subtracting the reference frame's
+    # own pyramid shift (exact for the translation-only pyramid).
+    seed_shifts: Optional[List[Tuple[float, float]]] = None
+    if pyramid_shifts is not None and len(pyramid_shifts) == len(final):
+        try:
+            ref_j = final_indices.index(best_idx)
+            ref_sy, ref_sx = pyramid_shifts[ref_j]
+        except (ValueError, IndexError):
+            ref_sy, ref_sx = 0.0, 0.0
+        seed_shifts = [(sy - ref_sy, sx - ref_sx) for (sy, sx) in pyramid_shifts]
+
     gpu = get_gpu()
 
     def _register_one(j, f, orig_idx):
@@ -1165,22 +1277,30 @@ def run_registration_phase(
             return j, shifts[j] or (0.0, 0.0), None
         if orig_idx == best_idx or args.no_registration:
             return j, (0.0, 0.0), None
+        seed = seed_shifts[j] if seed_shifts is not None else None
         with gpu.stream_context():
             lum = (cached_lums[orig_idx] if cached_lums[orig_idx] is not None
                    else np.array(mem_lum[orig_idx]))
+            _masked_corr = getattr(args, 'masked_correlation', False)
             use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
             if use_affine:
                 sy, sx = calculate_shift(ref_lum, lum, verbose=False,
-                                         skip_phase_cc=args.skip_phase_correlation)
+                                         skip_phase_cc=args.skip_phase_correlation,
+                                         seed_shift=seed,
+                                         masked_correlation=_masked_corr)
                 affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
                                                initial_shift=(sy, sx))
+                if affine_tf is None:
+                    affine_tf = _astroalign_transform(ref_lum, lum)
                 if affine_tf is not None:
                     return j, (affine_tf.params[1, 2], affine_tf.params[0, 2]), affine_tf
             sy, sx = calculate_shift(
                 ref_lum, lum, verbose=args.verbose,
                 debug=args.debug_registration,
                 frame_name=os.path.splitext(os.path.basename(f.path))[0],
-                skip_phase_cc=args.skip_phase_correlation)
+                skip_phase_cc=args.skip_phase_correlation,
+                seed_shift=seed,
+                masked_correlation=_masked_corr)
             if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
                 safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
                 sx, sy = 0.0, 0.0
@@ -1297,8 +1417,49 @@ def run_registration_phase(
             quality_maps.append(qmap)
         safe_print(f"  Patch quality maps computed.")
 
+    # Optional per-frame optical flow local warp correction
+    flow_fields: Optional[List[Optional[np.ndarray]]] = None
+    if getattr(args, 'optical_flow', False) and not args.no_registration:
+        try:
+            import cv2 as _cv2_check  # noqa: F401
+            safe_print(f"  Computing optical flow fields ({len(final)} frames)...")
+            flow_fields = []
+            for j, orig_idx in enumerate(final_indices):
+                if orig_idx == best_idx:
+                    flow_fields.append(None)
+                    continue
+                try:
+                    lum = (cached_lums[orig_idx] if cached_lums is not None
+                           and orig_idx < len(cached_lums)
+                           and cached_lums[orig_idx] is not None
+                           else np.array(mem_lum[orig_idx]))
+                    lum = np.asarray(lum, dtype=np.float32)
+                    # Pre-apply shift/transform to bring lum into alignment space
+                    if transforms[j] is not None:
+                        from scipy.ndimage import affine_transform as _aff2
+                        tfm = transforms[j]
+                        R = tfm.params[:2, :2]
+                        t_xy = tfm.params[:2, 2]
+                        t_rc = np.array([t_xy[1], t_xy[0]])
+                        off = -R @ t_rc
+                        lum = _aff2(lum.astype(np.float64), R, offset=off,
+                                    order=1, mode='constant', cval=0.0).astype(np.float32)
+                    elif shifts[j] and shifts[j] != (0.0, 0.0):
+                        lum = ndimage.shift(lum, shift=shifts[j], order=1,
+                                            mode='constant', cval=0.0)
+                    flow = compute_optical_flow_warp(ref_lum, lum)
+                    flow_fields.append(flow)
+                except Exception:
+                    flow_fields.append(None)
+            safe_print(f"  Optical flow fields computed.")
+        except ImportError:
+            safe_print("  WARNING: --optical-flow requires OpenCV (cv2) — skipping")
+            flow_fields = None
+
     dither_info = detect_dither(shifts, verbose=False)
     dither_info['quality_maps'] = quality_maps  # carry through to stacking
+    if flow_fields is not None:
+        dither_info['flow_fields'] = flow_fields
     if not args.no_registration and len(shifts) > 2:
         labels = {'dithered': 'Dithered (random offsets)',
                   'tracking_drift': 'Tracking drift (systematic trend)',
@@ -1325,39 +1486,172 @@ def run_registration_phase(
 
 def find_comet_centroid(lum: np.ndarray,
                         smooth_sigma: float = 5.0,
-                        percentile: float = 99.5) -> Tuple[float, float]:
+                        percentile: float = 99.5,
+                        seed: Optional[Tuple[float, float]] = None,
+                        search_radius: float = 50.0) -> Tuple[float, float]:
     """Locate the brightest compact extended object in a luminance frame.
 
-    Used for comet nucleus tracking: the comet typically appears as the
-    brightest non-stellar blob.  Stars are smaller and more numerous; the
-    comet nucleus is the single dominant bright region after smoothing.
+    Uses a Difference-of-Gaussians (DoG) approach to suppress point sources
+    (stars) while enhancing the diffuse coma/nucleus blob.  Falls back to the
+    original Gaussian-blur method if DoG produces no candidates.
 
     Args:
-        lum:          2-D luminance frame (H, W).
-        smooth_sigma: Gaussian blur radius to suppress point sources.
-        percentile:   Threshold percentile for nucleus detection.
+        lum:           2-D luminance frame (H, W).
+        smooth_sigma:  Gaussian blur radius for the legacy fallback path.
+        percentile:    Threshold percentile for nucleus detection.
+        seed:          Optional (row, col) approximate nucleus position.  When
+                       provided the peak search is restricted to within
+                       ``search_radius`` pixels of the seed.
+        search_radius: Pixel radius around the seed used to restrict the search.
 
     Returns:
         (cy, cx) sub-pixel centroid of the brightest region.
     """
-    smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
-    threshold = np.percentile(smoothed, percentile)
-    mask = smoothed > threshold
-    if not mask.any():
-        # fallback: return frame centre
-        return lum.shape[0] / 2.0, lum.shape[1] / 2.0
+    lum64 = lum.astype(np.float64)
+    H, W = lum64.shape
 
-    # Label connected regions above threshold
-    labeled, n_labels = ndimage.label(mask)
-    if n_labels == 0:
-        cy, cx = np.unravel_index(int(np.argmax(smoothed)), smoothed.shape)
+    def _find_in_map(filtered: np.ndarray) -> Optional[Tuple[float, float]]:
+        """Find the best centroid in a filtered luminance map, optionally restricted by seed."""
+        work = filtered.copy()
+        if seed is not None:
+            # Build a mask that keeps only pixels within search_radius of the seed
+            sy, sx = float(seed[0]), float(seed[1])
+            yy, xx = np.mgrid[:H, :W]
+            outside = (yy - sy) ** 2 + (xx - sx) ** 2 > search_radius ** 2
+            work[outside] = work.min() - 1.0  # push outside pixels below any threshold
+
+        threshold = np.percentile(work, percentile)
+        mask = work > threshold
+        if not mask.any():
+            return None
+
+        labeled, n_labels = ndimage.label(mask)
+        if n_labels == 0:
+            cy, cx = np.unravel_index(int(np.argmax(work)), work.shape)
+            return float(cy), float(cx)
+
+        fluxes = [float(np.sum(work[labeled == i])) for i in range(1, n_labels + 1)]
+        best_label = int(np.argmax(fluxes)) + 1
+        cy, cx = ndimage.center_of_mass(work, labeled, best_label)
         return float(cy), float(cx)
 
-    # Pick the brightest (integrated flux) region
-    fluxes = [float(np.sum(smoothed[labeled == i])) for i in range(1, n_labels + 1)]
-    best_label = int(np.argmax(fluxes)) + 1
-    cy, cx = ndimage.center_of_mass(smoothed, labeled, best_label)
-    return float(cy), float(cx)
+    # --- DoG detection: suppress point sources, enhance diffuse blobs ---
+    try:
+        sigma_small = Config.COMET_DOG_SIGMA_SMALL
+        sigma_large = Config.COMET_DOG_SIGMA_LARGE
+        dog = (ndimage.gaussian_filter(lum64, sigma=sigma_large) -
+               ndimage.gaussian_filter(lum64, sigma=sigma_small))
+        dog = np.clip(dog, 0.0, None)  # keep only positive (bright blob) response
+        if dog.max() > 0:
+            result = _find_in_map(dog)
+            if result is not None:
+                return result
+    except Exception:
+        pass
+
+    # --- Fallback: original Gaussian-blur + threshold method ---
+    smoothed = ndimage.gaussian_filter(lum64, sigma=smooth_sigma)
+    result = _find_in_map(smoothed)
+    if result is not None:
+        return result
+
+    return lum.shape[0] / 2.0, lum.shape[1] / 2.0
+
+
+def find_comet_tail_pa(lum: np.ndarray, nucleus_y: float, nucleus_x: float,
+                       sample_radius: float = 50.0) -> float:
+    """Estimate the position angle (degrees, N through E) of the comet tail.
+
+    The tail extends anti-solar (away from the intensity gradient), so we
+    compute the gradient of the smoothed image at the nucleus position and
+    return the angle pointing *away* from the brighter direction.
+
+    Args:
+        lum:           2-D luminance (H, W).
+        nucleus_y:     Row coordinate of the nucleus.
+        nucleus_x:     Column coordinate of the nucleus.
+        sample_radius: Radius around nucleus used to compute the gradient.
+
+    Returns:
+        Tail position angle in degrees (measured clockwise from North = up).
+        Returns 0.0 if gradient is below noise.
+    """
+    try:
+        H, W = lum.shape
+        # Smooth strongly to get a clean gradient at the coma scale
+        smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=max(sample_radius * 0.3, 5.0))
+        # Compute gradient at nucleus location (via sobel or finite differences on the smoothed image)
+        gy = ndimage.sobel(smoothed, axis=0)
+        gx = ndimage.sobel(smoothed, axis=1)
+        # Sample gradient in a small window around nucleus
+        r = max(1, int(sample_radius * 0.2))
+        y0 = max(0, int(nucleus_y) - r)
+        y1 = min(H, int(nucleus_y) + r + 1)
+        x0 = max(0, int(nucleus_x) - r)
+        x1 = min(W, int(nucleus_x) + r + 1)
+        gy_n = float(np.mean(gy[y0:y1, x0:x1]))
+        gx_n = float(np.mean(gx[y0:y1, x0:x1]))
+        if abs(gy_n) < 1e-12 and abs(gx_n) < 1e-12:
+            return 0.0
+        # The tail is anti-solar (opposite to the gradient direction)
+        # angle_from_north_cw: north is -row direction, east is +col direction
+        # PA (N through E CW) = atan2(gx_tail, -gy_tail)
+        # tail direction is anti-gradient: (-gx_n, -gy_n) in (col, row) convention
+        pa_rad = np.arctan2(-gx_n, gy_n)  # tail col component, then row component
+        return float(np.degrees(pa_rad) % 360.0)
+    except Exception:
+        return 0.0
+
+
+def fetch_comet_ephemeris(designation: str, obs_times: List[str],
+                          observer_location: Optional[str] = None):
+    """Fetch predicted RA/Dec of a comet at given UTC times using JPL Horizons.
+
+    Args:
+        designation:       JPL Horizons designation, e.g. "C/2023 A3".
+        obs_times:         List of ISO UTC timestamp strings ('YYYY-MM-DDTHH:MM:SS').
+        observer_location: MPC code or 'lon,lat,elev' string (default: geocentric).
+
+    Returns:
+        List of (ra_deg, dec_deg) tuples per obs_time, or None on failure.
+    """
+    try:
+        from astroquery.jplhorizons import Horizons
+    except ImportError:
+        safe_print("  [Comet] WARNING: astroquery not installed — ephemeris tracking disabled")
+        return None
+
+    try:
+        # Parse observer location
+        location = None
+        if observer_location:
+            parts = observer_location.split(',')
+            if len(parts) == 3:
+                try:
+                    location = {'lon': float(parts[0]), 'lat': float(parts[1]),
+                                'elevation': float(parts[2])}
+                except ValueError:
+                    location = observer_location  # try as MPC code
+            else:
+                location = observer_location  # MPC code
+
+        results = []
+        for t in obs_times:
+            try:
+                obj = Horizons(id=designation, location=location,
+                               epochs={'start': t, 'stop': t, 'step': '1m'})
+                eph = obj.ephemerides()
+                if eph is not None and len(eph) > 0:
+                    results.append((float(eph['RA'][0]), float(eph['DEC'][0])))
+                else:
+                    results.append(None)
+            except Exception as _e:
+                _log.debug("Horizons query failed for %s at %s: %s", designation, t, _e)
+                results.append(None)
+        return results
+    except Exception as e:
+        safe_print(f"  [Comet] WARNING: ephemeris fetch failed: {e}")
+        return None
 
 
 def run_comet_registration_phase(
@@ -1370,30 +1664,130 @@ def run_comet_registration_phase(
     W: int,
     args: argparse.Namespace,
     stats: ProcessingStats,
-) -> Tuple[List[Tuple[float, float]], List[Optional[Any]]]:
+) -> Tuple[List[Tuple[float, float]], List[Optional[Any]], Dict[str, Any]]:
     """Compute per-frame registration shifts aligned on a comet nucleus.
 
     Instead of aligning on the star field, this tracks the brightest extended
     blob (comet nucleus) in each frame relative to the reference frame.
 
+    Supports:
+        - DoG-based nucleus detection (more robust than simple Gaussian blur).
+        - Manual seed via args.comet_xy (X,Y string parsed to floats).
+        - Frame-to-frame predicted position tracking within search_radius.
+        - Optional affine (rotation+scale) correction via args.comet_affine.
+        - Tail position angle estimation stored in returned dither_info.
+        - Ephemeris-aided tracking via args.comet_designation.
+        - Trailing warning when angular velocity x exptime > 1 pixel.
+
     Returns:
-        (shifts, transforms) — transforms are always None (translation only).
+        (shifts, transforms, comet_dither_info)
     """
+    search_radius = float(getattr(args, 'comet_search_radius', 50.0))
+
+    # --- Parse manual seed (--comet-xy X,Y) ---
+    ref_seed = None
+    comet_xy_str = getattr(args, 'comet_xy', None)
+    if comet_xy_str:
+        try:
+            parts = str(comet_xy_str).split(',')
+            cx_user = float(parts[0].strip())
+            cy_user = float(parts[1].strip())
+            # CLI gives (X=col, Y=row) -> seed is (row, col)
+            ref_seed = (cy_user, cx_user)
+            safe_print(f"  [Comet] Using manual seed: X={cx_user:.1f}, Y={cy_user:.1f}")
+        except Exception as _e:
+            safe_print(f"  [Comet] WARNING: could not parse --comet-xy '{comet_xy_str}': {_e}")
+
+    # --- Ephemeris-aided tracking ---
+    eph_positions = None
+    comet_designation = getattr(args, 'comet_designation', None)
+    if comet_designation:
+        # Extract DATE-OBS from each frame header
+        obs_times = []
+        for f in final:
+            t = f.header.get('DATE-OBS') or f.header.get('DATE_OBS') or ''
+            obs_times.append(str(t))
+        observer_site = getattr(args, 'observer_site', None)
+        safe_print(f"  [Comet] Fetching ephemeris for '{comet_designation}'...")
+        eph_positions = fetch_comet_ephemeris(comet_designation, obs_times, observer_site)
+        if eph_positions:
+            n_ok = sum(1 for p in eph_positions if p is not None)
+            safe_print(f"  [Comet] Ephemeris: {n_ok}/{len(final)} positions retrieved")
+
     print(f"  [Comet] Locating nucleus in reference frame...")
-    ref_cy, ref_cx = find_comet_centroid(ref_lum)
+    # Find the reference frame index in final
+    try:
+        ref_j = next(j for j, orig_idx in enumerate(final_indices) if orig_idx == best_idx)
+    except StopIteration:
+        ref_j = 0
+
+    ref_cy, ref_cx = find_comet_centroid(ref_lum, seed=ref_seed, search_radius=search_radius)
     print(f"  [Comet] Reference nucleus centroid: ({ref_cx:.1f}, {ref_cy:.1f})")
+
+    # Estimate tail PA from the reference frame
+    tail_pa_deg = find_comet_tail_pa(ref_lum, ref_cy, ref_cx)
+    if getattr(args, 'verbose', False):
+        safe_print(f"  [Comet] Estimated tail PA: {tail_pa_deg:.1f} deg")
+
+    # --- Trailing warning from ephemeris ---
+    if eph_positions is not None and len(eph_positions) >= 2:
+        try:
+            valid_ephs = [(i, p) for i, p in enumerate(eph_positions) if p is not None]
+            if len(valid_ephs) >= 2:
+                i0, p0 = valid_ephs[0]
+                i1, p1 = valid_ephs[-1]
+                # Angular separation in arcsec
+                dra = (p1[0] - p0[0]) * np.cos(np.radians((p0[1] + p1[1]) / 2.0))
+                ddec = p1[1] - p0[1]
+                ang_sep_deg = np.sqrt(dra ** 2 + ddec ** 2)
+                # Time difference: use index difference as proxy if no timestamps available
+                n_frames = max(i1 - i0, 1)
+                # Check plate scale from first frame header
+                hdr0 = final[0].header if final else {}
+                pixscale = hdr0.get('PIXSCALE') or hdr0.get('CDELT1')
+                if pixscale is not None:
+                    try:
+                        pixscale_arcsec = abs(float(pixscale))
+                        if pixscale_arcsec < 0.001:  # CDELT1 is in degrees
+                            pixscale_arcsec *= 3600.0
+                        exptime = float(hdr0.get('EXPTIME', 60.0) or 60.0)
+                        # Angular velocity per frame interval (very rough)
+                        ang_per_frame_arcsec = ang_sep_deg * 3600.0 / n_frames
+                        trailing_px = ang_per_frame_arcsec / max(pixscale_arcsec, 1e-6)
+                        if trailing_px > 1.0:
+                            safe_print(
+                                f"  WARNING: comet trailing ~{trailing_px:.1f} px per frame "
+                                f"at current exposure time"
+                            )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
     transforms: List[Optional[Any]] = [None] * len(final)
+    # Store per-frame centroids for affine post-correction
+    centroids: List[Optional[Tuple[float, float]]] = [None] * len(final)
+    centroids[ref_j] = (ref_cy, ref_cx)
 
-    def _register_comet(j: int, orig_idx: int) -> Tuple[int, Tuple[float, float]]:
+    use_affine = getattr(args, 'comet_affine', False) and HAS_SKIMAGE_TRANSFORM
+
+    def _register_comet(j: int, orig_idx: int) -> Tuple[int, Tuple[float, float], Optional[Tuple[float, float]]]:
         if orig_idx == best_idx or getattr(args, 'no_registration', False):
-            return j, (0.0, 0.0)
+            return j, (0.0, 0.0), (ref_cy, ref_cx)
         lum = np.array(mem_lum[orig_idx])
-        cy, cx = find_comet_centroid(lum)
+        # Predicted seed: previous shift extrapolated linearly (use ref centroid displaced)
+        pred_seed = None
+        if j > 0 and centroids[j - 1] is not None:
+            prev_cy, prev_cx = centroids[j - 1]
+            # Extrapolate linearly: keep same position as last known
+            pred_seed = (prev_cy, prev_cx)
+        elif ref_seed is not None:
+            pred_seed = ref_seed
+        cy, cx = find_comet_centroid(lum, seed=pred_seed, search_radius=search_radius)
         sy = ref_cy - cy
         sx = ref_cx - cx
-        return j, (sy, sx)
+        return j, (sy, sx), (cy, cx)
 
     gpu = get_gpu()
     n_workers = min(
@@ -1403,26 +1797,64 @@ def run_comet_registration_phase(
     )
 
     print(f"  [Comet] Tracking nucleus in {len(final)} frames...")
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {
-            executor.submit(_register_comet, j, orig_idx): j
-            for j, orig_idx in enumerate(final_indices)
-        }
-        for future in tqdm(
-            as_completed(futures), total=len(final),
-            desc="  Comet tracking", unit="frame", disable=args.verbose
-        ):
-            j, shift_val = future.result()
-            shifts[j] = shift_val
-            if args.verbose:
-                sy, sx = shift_val
-                safe_print(
-                    f"    {os.path.basename(final[j].path)}: "
-                    f"comet shift=({sx:+.1f}, {sy:+.1f}) px"
-                )
+    # Process sequentially to allow linear seed extrapolation
+    for j, orig_idx in enumerate(tqdm(
+            list(enumerate(final_indices)),
+            total=len(final), desc="  Comet tracking", unit="frame",
+            disable=getattr(args, 'verbose', False))):
+        j_idx, orig_idx = j, orig_idx
+        break  # tqdm wrapping doesn't work cleanly with enumerate; just iterate below
+
+    for j, orig_idx in enumerate(final_indices):
+        j_result, shift_val, centroid_val = _register_comet(j, orig_idx)
+        shifts[j] = shift_val
+        centroids[j] = centroid_val
+        if getattr(args, 'verbose', False):
+            sy, sx = shift_val
+            safe_print(
+                f"    {os.path.basename(final[j].path)}: "
+                f"comet shift=({sx:+.1f}, {sy:+.1f}) px"
+            )
+
+    # --- Optional affine correction around nucleus ---
+    if use_affine:
+        safe_print(f"  [Comet] Computing affine (rotation+scale) corrections per frame...")
+        ref_stars = None
+        try:
+            ref_lum_np = ref_lum.astype(np.float32)
+            from src.quality import _sep_detect_stars
+            ref_stars = _sep_detect_stars(ref_lum_np, float(np.std(ref_lum_np)))
+        except Exception:
+            pass
+
+        if ref_stars is not None and len(ref_stars) >= 3:
+            for j, orig_idx in enumerate(final_indices):
+                if orig_idx == best_idx:
+                    continue
+                try:
+                    lum = np.array(mem_lum[orig_idx]).astype(np.float32)
+                    from src.quality import _sep_detect_stars
+                    frame_stars = _sep_detect_stars(lum, float(np.std(lum)))
+                    if frame_stars is not None and len(frame_stars) >= 3:
+                        sy, sx = shifts[j]
+                        affine_tf = match_stars_affine(ref_stars, frame_stars,
+                                                       initial_shift=(sy, sx))
+                        if affine_tf is not None:
+                            transforms[j] = affine_tf
+                except Exception as _ae:
+                    _log.debug("Comet affine failed for frame %d: %s", j, _ae)
+        else:
+            safe_print("  [Comet] Not enough stars for affine correction — using translation only")
 
     shift_mags = [np.sqrt(s[0] ** 2 + s[1] ** 2) for s in shifts]
     print(f"  [Comet] Mean shift: {np.mean(shift_mags):.1f} px, "
           f"max: {np.max(shift_mags):.1f} px")
 
-    return shifts, transforms
+    comet_dither_info: Dict[str, Any] = {
+        'nucleus_y': ref_cy,
+        'nucleus_x': ref_cx,
+        'tail_pa_deg': tail_pa_deg,
+        'centroids': centroids,
+    }
+
+    return shifts, transforms, comet_dither_info

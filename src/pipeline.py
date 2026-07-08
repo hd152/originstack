@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import os
 import shutil
 import tempfile
@@ -23,6 +24,7 @@ from src.postprocess import postprocess_stack
 from src.checkpoint import (save_checkpoint, save_raw_stack, load_raw_stack,
                             can_resume, restore_frame_state, cleanup_checkpoint,
                             load_transforms)
+from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
 
 
 try:
@@ -45,20 +47,31 @@ class _MemmapManager:
         mm = np.memmap(path, dtype=dtype, mode='w+', shape=shape)
         self._files.append(path)
         self._memmaps.append(mm)
+        _cleanup_register(path)
         return mm
 
     def cleanup(self):
+        # Explicitly close the underlying mmap handles.  On Windows,
+        # os.remove() on an open memory-mapped file raises PermissionError,
+        # so we must release the OS file lock before attempting deletion.
         for mm in self._memmaps:
             try:
-                del mm
+                mm.flush()
+            except Exception:
+                pass
+            try:
+                if hasattr(mm, '_mmap') and mm._mmap is not None:
+                    mm._mmap.close()
             except Exception:
                 pass
         self._memmaps.clear()
+        gc.collect()  # flush any remaining mmap references held by GC cycles
         for p in self._files:
             try:
                 os.remove(p)
             except Exception:
                 pass
+            _cleanup_deregister(p)
         self._files.clear()
 
     def __enter__(self):
@@ -148,6 +161,37 @@ def _export_frame_jpegs(final: List[FrameInfo], final_indices: List[int],
         except Exception as e:
             safe_print(f"  WARNING: frame JPEG export failed for {stem}: {e}")
     safe_print(f"  Exported {len(final)} frame JPEGs → {export_dir}")
+
+
+def _run_auto_advisor(final: List[FrameInfo], args,
+                      prior_type: Optional[str] = None,
+                      prior_confidence: float = 0.0) -> None:
+    """Classify the target and apply heuristic post-processing settings in-place.
+
+    Runs on both the normal path and the checkpoint-resume path: the galaxy /
+    nebula presets (SCNR, photometric calibration, deconvolution, etc.) are set
+    here, so skipping it on resume would silently post-process with bare CLI
+    defaults and reintroduce colour casts the presets exist to remove.
+    """
+    if not getattr(args, 'auto', False):
+        return
+    from src.auto_settings import apply_auto_settings
+    _target_type, label, signals, changes = apply_auto_settings(
+        final, args, prior_type=prior_type, prior_confidence=prior_confidence)
+    print(f"\n  Auto Advisor: detected '{label}'")
+    if signals:
+        print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
+              f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
+              f"peak_excess={signals.get('peak_excess', 0):.1f}  "
+              f"stars={signals.get('star_count', 0):.0f}  "
+              f"FWHM={signals.get('fwhm', 0):.1f}px  "
+              f"frames={signals.get('n_frames', 0)}")
+    if changes:
+        safe_print("  Applied auto settings:")
+        for c in changes:
+            safe_print(f"    * {c}")
+    else:
+        safe_print("  Current settings already optimal — no changes applied.")
 
 
 def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
@@ -261,7 +305,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     # Load session info (info.json written by capture app)
     from src.session_info import load_session_info
-    _directory = getattr(args, 'directory', os.path.dirname(output_path))
+    _directory = getattr(args, '_input_directory', None)
+    if not isinstance(_directory, (str, os.PathLike)):
+        _directory = getattr(args, 'directory', None)
+    if not isinstance(_directory, (str, os.PathLike)):
+        _directory = os.path.dirname(output_path)
     _session_info = load_session_info(_directory)
     args._session_info = _session_info
     args._session_bayer = _session_info.bayer if _session_info else None
@@ -307,7 +355,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             final = restore_frame_state(lights, ckpt_state)
             _lights_index = {f.path: i for i, f in enumerate(lights)}
             final_indices = [_lights_index[f.path] for f in final if f.path in _lights_index]
-            shifts = [tuple(s) for s in ckpt_state['shifts']]
+            shifts = [tuple(s) for s in ckpt_state.get('shifts', [[0.0, 0.0]] * len(final))]
             transforms = [None] * len(final)
             dither_info = ckpt_state.get('dither_info', {})
             crop = ckpt_state.get('crop', [0, stacked.shape[0], 0, stacked.shape[1]])
@@ -316,6 +364,24 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             H, W, C = stacked.shape
             stats.accepted_frames = len(final)
             stats.rejected_frames = n - len(final)
+
+            # Auto-advisor must also run on resume: phases 1-3 are skipped here,
+            # so without this the galaxy/nebula presets (SCNR, photometric
+            # calibration, deconvolution) never get applied and post-processing
+            # runs with bare CLI defaults — reintroducing colour casts.
+            # Recover the metadata prior (folder/header/session) locally so the
+            # classifier matches a fresh run; skip Simbad to avoid a network hit.
+            if getattr(args, 'auto', False):
+                from src.target_inference import infer_target_from_metadata
+                _r_name, _r_type, _r_conf, _r_src = infer_target_from_metadata(
+                    _directory, final, use_simbad=False,
+                    session_name=_session_info.object_name if _session_info else None)
+                if _r_name and _r_type and _r_type != 'unknown':
+                    safe_print(f"\n  Target: {_r_name} "
+                               f"[{_r_type.replace('_', ' ').title()}]  "
+                               f"conf={_r_conf:.0%}  source={_r_src}")
+                _run_auto_advisor(final, args,
+                                  prior_type=_r_type, prior_confidence=_r_conf)
 
     if resume_phase < 3:
         # ======================================================================
@@ -354,7 +420,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 safe_print(f"  Restored {len(final)}/{n} accepted frames — "
                            f"reloading pixel data (skipping quality analysis)...")
                 reload_accepted_frames(final, final_indices, masters, args,
-                                       mem_rgb, mem_lum, cached_lums)
+                                       mem_rgb, mem_lum, cached_lums,
+                                       mm_rgb_path=mm_rgb_path,
+                                       mm_lum_path=mm_lum_path,
+                                       rgb_shape=rgb_shape,
+                                       lum_shape=lum_shape)
                 stats.quality_time = 0.0
             else:
                 print_phase(1, "Processing & Quality Analysis")
@@ -381,6 +451,31 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _lights_index = {id(f): i for i, f in enumerate(lights)}
                 final_indices = [_lights_index[id(f)] for f in final]
 
+                # Free rejected frames' luminance — they are never needed again.
+                accepted_set = set(final_indices)
+                for _i in range(len(cached_lums)):
+                    if _i not in accepted_set:
+                        cached_lums[_i] = None
+
+                # If the remaining cache would consume more than half of available
+                # RAM, release it entirely and let registration read from the
+                # mem_lum memmap instead (slightly slower, no RAM cost).
+                try:
+                    import psutil
+                    _cache_bytes = sum(
+                        a.nbytes for a in cached_lums if a is not None)
+                    _avail_bytes = psutil.virtual_memory().available
+                    if _cache_bytes > _avail_bytes * 0.5:
+                        safe_print(
+                            f"  NOTE: luminance cache ({_cache_bytes / 1e9:.1f} GB) "
+                            f"exceeds 50 % of available RAM "
+                            f"({_avail_bytes / 1e9:.1f} GB) — "
+                            f"releasing cache; registration will read from disk")
+                        for _i in range(len(cached_lums)):
+                            cached_lums[_i] = None
+                except Exception:
+                    pass
+
                 # Quality metrics CSV export
                 if getattr(args, 'quality_report', None):
                     _write_quality_report(lights, rejected_reasons, args.quality_report)
@@ -398,7 +493,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _si = getattr(args, '_session_info', None)
                 _inferred_name, _inferred_type, _inferred_conf, _inferred_src = \
                     infer_target_from_metadata(
-                        getattr(args, 'directory', os.path.dirname(output_path)),
+                        _directory,
                         final,
                         use_simbad=True,
                         session_name=_si.object_name if _si else None,
@@ -415,27 +510,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     )
 
                 # Heuristic auto-advisor
-                if getattr(args, 'auto', False):
-                    from src.auto_settings import apply_auto_settings
-                    target_type, label, signals, changes = apply_auto_settings(
-                        final, args,
-                        prior_type=_inferred_type,
-                        prior_confidence=_inferred_conf,
-                    )
-                    print(f"\n  Auto Advisor: detected '{label}'")
-                    if signals:
-                        print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
-                              f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
-                              f"peak_excess={signals.get('peak_excess', 0):.1f}  "
-                              f"stars={signals.get('star_count', 0):.0f}  "
-                              f"FWHM={signals.get('fwhm', 0):.1f}px  "
-                              f"frames={signals.get('n_frames', 0)}")
-                    if changes:
-                        safe_print("  Applied auto settings:")
-                        for c in changes:
-                            safe_print(f"    * {c}")
-                    else:
-                        safe_print("  Current settings already optimal — no changes applied.")
+                _run_auto_advisor(final, args,
+                                  prior_type=_inferred_type,
+                                  prior_confidence=_inferred_conf)
 
             if not final:
                 print(f'\n  ERROR: No accepted frames after checkpoint restore!')
@@ -449,7 +526,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
             if resume_phase >= 2:
                 print_phase(2, "Registration (resumed from checkpoint)")
-                shifts = [tuple(s) for s in ckpt_state['shifts']]
+                shifts = [tuple(s) for s in ckpt_state.get('shifts', [[0.0, 0.0]] * len(final))]
                 transforms = load_transforms(output_path, len(final))
                 n_affine = sum(1 for t in transforms if t is not None)
                 dither_info = ckpt_state.get('dither_info', {})
@@ -514,10 +591,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             phase_start = time.time()
 
             quality_maps = dither_info.pop('quality_maps', None)
+            flow_fields = dither_info.pop('flow_fields', None)
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
                 shifts, transforms, H, W, C, args, stats,
-                quality_maps=quality_maps)
+                quality_maps=quality_maps,
+                flow_fields=flow_fields)
 
             stats.stacking_time = time.time() - phase_start
 
@@ -530,7 +609,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if getattr(args, 'comet_mode', False):
                 print_phase(3, "Comet Stacking (nucleus-aligned pass)")
                 from src.registration import run_comet_registration_phase
-                comet_shifts, comet_transforms = run_comet_registration_phase(
+                comet_shifts, comet_transforms, comet_dither_info = run_comet_registration_phase(
                     final, final_indices, best_idx,
                     ref_lum, mem_lum, H, W, args, stats)
                 comet_stacked, _, ct, cb, cl, cr = run_stacking_phase(
@@ -551,6 +630,32 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                  ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                                  ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
                 safe_print(f"  Comet stack: {os.path.basename(comet_out)}")
+
+                # Blend star-aligned and comet-aligned stacks into a composite
+                from src.stacking import blend_comet_star_stacks
+                comet_lum = np.mean(comet_stacked, axis=2)
+                tail_pa = comet_dither_info.get('tail_pa_deg', None)
+                blended = blend_comet_star_stacks(
+                    stacked, comet_stacked, comet_lum,
+                    blend_sigma=float(getattr(args, 'comet_blend_sigma', 30.0)),
+                    tail_pa_deg=tail_pa,
+                )
+                blended_out = os.path.splitext(output_path)[0] + '_comet_blended.fits'
+                blended_hdu = _cfits.PrimaryHDU(
+                    data=np.transpose(blended.astype(np.float32), (2, 0, 1))
+                )
+                blended_hdu.header['COMET'] = (True, 'Blended comet+star stack')
+                blended_hdu.header['CREATOR'] = 'astro_stack.py comet_mode'
+                if tail_pa is not None:
+                    blended_hdu.header['TAIL_PA'] = (round(tail_pa, 1), 'Estimated tail PA (deg)')
+                blended_hdu.writeto(blended_out, overwrite=True)
+                blended_prev = os.path.splitext(blended_out)[0] + '.jpg'
+                save_preview_rgb(blended, blended_prev,
+                                 stretch=getattr(args, 'stretch', 'ghs'),
+                                 ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+                                 ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+                                 ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+                safe_print(f"  Comet blended stack: {os.path.basename(blended_out)}")
 
             # Save raw stack so post-processing can be re-run without phases 1-3
             if getattr(args, 'keep_checkpoint', False):
@@ -615,6 +720,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         post_processed=False)
     hdu.writeto(output_path, overwrite=True)
 
+    # The output header already carries a WCS from the session info.json when the
+    # capture app (e.g. Celestron Origin) plate-solved the session — written by
+    # populate_fits_header via build_wcs_keywords. --plate-solve re-solves and
+    # overwrites it with an astrometry.net/ASTAP solution.
+    _si = getattr(args, '_session_info', None)
+    _session_has_wcs = _si is not None and _si.has_wcs
+
     if getattr(args, 'plate_solve', False):
         if args.verbose:
             print("\n  Attempting plate solving...")
@@ -624,21 +736,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                        verbose=args.verbose, solver=solver, astap_path=astap_bin):
             hdu.writeto(output_path, overwrite=True)
             _wcs_available = True
+            safe_print("  Plate solved: WCS from astrometry solver")
+        elif _session_has_wcs:
+            _wcs_available = True
+            safe_print("  Plate solve failed — output keeps WCS from session info.json")
         else:
             _wcs_available = False
+            safe_print("  Plate solve failed — no WCS written")
+    elif _session_has_wcs:
+        # No solver run, but the session already provides a plate solution.
+        _wcs_available = True
+        safe_print("  Plate solving not run — output tagged with WCS from "
+                   "session info.json (Origin session solve)")
     else:
         _wcs_available = False
         if args.verbose:
             print("\n  Plate solving skipped (use --plate-solve to enable)")
-
-    # Photometric colour calibration — runs when WCS is available.
-    # WCS comes from plate solve above, or from session info.json.
-    _si = getattr(args, '_session_info', None)
-    _session_has_wcs = _si is not None and _si.has_wcs
-    if not _wcs_available and _session_has_wcs and 'CTYPE1' not in hdu.header:
-        # Session info WCS was written to header by populate_fits_header;
-        # re-read it in case populate_fits_header ran before plate solve path.
-        _wcs_available = True
 
     if getattr(args, 'color_calibrate', False) and _wcs_available:
         safe_print("\n  Applying photometric colour calibration...")
@@ -673,12 +786,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if getattr(args, 'output_xisf', False):
         _save_xisf(stacked, output_path, hdu.header)
 
+    # Post-processed FITS export (always written alongside the raw linear stack)
+    proc_path = os.path.splitext(output_path)[0] + '_processed.fits'
+    proc_hdu = fits.PrimaryHDU()
+    proc_hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))
+    proc_hdu.header.update(hdu.header)
+    proc_hdu.header['POSTPROC'] = (True, 'Post-processing applied to this FITS')
+    proc_hdu.writeto(proc_path, overwrite=True)
+    safe_print(f"  ✓ Processed FITS: {os.path.basename(proc_path)}")
+
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     stretch_method = getattr(args, 'stretch', 'linear')
     save_preview_rgb(stacked, preview_path, stretch=stretch_method,
                      ghs_b=float(getattr(args, 'ghs_b', 8.0)),
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
+                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)))
 
     crop_str = (f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)"
                 if stats.cropped_pixels else "(crop info not available)")
@@ -707,6 +830,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             int_str = f"{total_integration:.0f} seconds"
         print(f"  Integration time: {int_str}")
     print(f"  Output:           {os.path.basename(output_path)} ({out_h}x{out_w}x3)")
+    print(f"  Processed:        {os.path.basename(proc_path)} (DBE+denoise+deconv applied)")
     print(f"  Preview:          {os.path.basename(preview_path)} ({stretch_method} stretch)")
     # Stack quality summary
     fwhms = [f.metrics.get('fwhm', 0) for f in final if f.metrics and f.metrics.get('fwhm', 0) > 0]

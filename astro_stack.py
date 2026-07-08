@@ -84,7 +84,6 @@ from src.debayer import (
     remove_hot_pixels_bayer,
     build_hot_pixel_map,
     apply_hot_pixel_map_bayer,
-    background_gradient_subtract,
     remove_hot_pixels_rgb,
     correct_chromatic_aberration,
 )
@@ -118,7 +117,6 @@ from src.denoising import (
     adaptive_wavelet_denoise,
     bilateral_denoise,
     nlm_denoise,
-    local_normalize,
     reduce_chroma_noise,
     arcsinh_stretch,
 )
@@ -140,6 +138,12 @@ from src.stacking import (
     _lanczos_resample_frame,
     _sigma_clip_tile,
     sigma_clip_combine,
+    median_combine,
+    percentile_clip_combine,
+    trimmed_mean_combine,
+    esd_combine,
+    _esd_lambda_table,
+    patch_weighted_mean_combine,
     lacosmic_reject,
 )
 

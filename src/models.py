@@ -11,8 +11,6 @@ class Config:
     HOT_PIXEL_THRESHOLD = 12.0
     HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
     WHITE_PATCH_PERCENTILE = 99.5
-    MAX_SHIFT_FRACTION = 0.1
-    STAR_DETECTION_SIGMA = 5.0
     CROP_MARGIN = 2
     XCORR_DOWNSCALE_TARGET = 256  # Target size for cross-correlation
     CENTROID_PERCENTILES = [95, 90, 85, 80]
@@ -22,6 +20,7 @@ class Config:
     MIN_RECOMMENDED_FRAMES = 10
     PREVIEW_JPEG_QUALITY = 95
     PREVIEW_STRETCH_PERCENTILES = (1, 99)
+    PREVIEW_MAX_DIMENSION = 8192
     TILE_SIZE = 256  # Tile size for tiled sigma-clip (pixels)
     FWHM_CUTOUT_RADIUS = 10  # Cutout radius for FWHM measurement
     FWHM_MAX_STARS = 50  # Max stars to measure for FWHM
@@ -29,10 +28,11 @@ class Config:
     STAR_MASK_MAX_STARS = 500  # Max stars for mask generation
     AFFINE_MAX_STARS = 80  # Max stars for affine matching
     AFFINE_MATCH_RADIUS = 10.0  # Max pixel distance for star matching
-    GPU_PHASE1_WORKER_MB = 250.0   # VRAM per thread for debayer+hotpix+wb
+    GPU_PHASE1_WORKER_MB = 450.0   # VRAM per thread: raw+cal+green_eq+debayer+hotpix+wb peak
     GPU_FFT_WORKER_MB = 800.0      # VRAM per thread for padded complex128 FFT
     GPU_ALIGN_WORKER_MB = 250.0    # VRAM per thread for ndimage.shift on 3-ch image
-    GPU_VRAM_RESERVE_MB = 512.0    # Reserved for CuPy overhead / driver
+    GPU_VRAM_RESERVE_MB = 768.0    # Reserved for CuPy kernel cache / driver / masters
+    GPU_POOL_FREE_INTERVAL = 32    # Free CuPy memory pool every N completed GPU frames
     RL_PSF_CUTOUT_RADIUS = 15      # Radius for star cutouts used in PSF estimation
     RL_PSF_MAX_STARS = 30          # Max stars to sample for PSF building
     RL_PSF_MIN_STARS = 5           # Min successful fits for reliable PSF
@@ -53,20 +53,7 @@ class Config:
 
     # BM3D denoising
     BM3D_SIGMA_PSD = 0.0            # 0 = auto-estimate from sky noise
-    BM3D_BLOCK_SIZE = 8
-    BM3D_GROUP_SIZE = 8
     BM3D_SEARCH_WINDOW = 16
-
-    # Anisotropic diffusion (Perona-Malik)
-    ANISO_ITERATIONS = 20
-    ANISO_KAPPA = 30.0              # Gradient threshold (ADU)
-    ANISO_GAMMA = 0.1               # Time step (0 < γ ≤ 0.25 for stability)
-
-    # SCNR
-    SCNR_AMOUNT = 1.0               # 1.0 = full neutralisation
-
-    # Adaptive MTF
-    MTF_TARGET_BG = 0.15            # Target output level for sky background
 
     # Blind PSF estimation
     BLIND_PSF_ITERATIONS = 8        # RL iterations for PSF update
@@ -74,13 +61,6 @@ class Config:
     # Total Variation deconvolution
     TV_LAMBDA = 0.02                # TV regularisation weight
     TV_ITERATIONS = 50              # Gradient descent steps
-
-    # Polynomial distortion correction
-    POLY_DISTORTION_DEGREE = 2      # Polynomial degree (2=quadratic, 3=cubic)
-    POLY_MIN_STARS = 12             # Min matched pairs for reliable poly fit
-
-    # HDR stack blending
-    HDR_TRANSITION_WIDTH = 0.1      # Fractional signal range for sigmoid blend
 
     # Strehl / atmospheric dispersion
     STREHL_CUTOUT_RADIUS = 20       # Cutout half-size for Strehl measurement
@@ -103,6 +83,10 @@ class Config:
     # Patch-based local registration (lucky imaging mode)
     PATCH_GRID_SIZE = 8             # NxN grid for patch quality map (8x8 = 64 patches)
     PATCH_MIN_SIZE = 64             # Minimum patch dimension in pixels
+
+    # Comet tracking / nucleus detection
+    COMET_DOG_SIGMA_SMALL = 2.0     # DoG small sigma (suppresses point sources)
+    COMET_DOG_SIGMA_LARGE = 10.0    # DoG large sigma (enhances diffuse coma core)
 
 
 @dataclass

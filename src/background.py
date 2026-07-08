@@ -89,6 +89,30 @@ def _estimate_sky_sigma(img: np.ndarray) -> float:
     return max(raw, img_max * 1e-5)
 
 
+def _border_pixels(lum: np.ndarray, frac: float = None) -> np.ndarray:
+    """Return border-strip pixels from a 2-D luminance array."""
+    if frac is None:
+        frac = Config.BORDER_FRAC
+    H, W = lum.shape
+    by = max(10, int(H * frac))
+    bx = max(10, int(W * frac))
+    return np.concatenate([
+        lum[:by, :].ravel(), lum[-by:, :].ravel(),
+        lum[by:-by, :bx].ravel(), lum[by:-by, -bx:].ravel(),
+    ])
+
+
+def _sigma_sky(arr: np.ndarray, sigma: float = 3.0, maxiters: int = 5) -> Tuple[float, float]:
+    """Return (median, std) of sky samples with sigma-clipped stats when available."""
+    if sigma_clipped_stats is not None:
+        try:
+            _, med, std = sigma_clipped_stats(arr, sigma=sigma, maxiters=maxiters)
+            return float(med), float(std)
+        except Exception:
+            pass
+    return float(np.median(arr)), float(np.std(arr))
+
+
 def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int = 3,
                        clip_sigma: float = 3.0, clip_iters: int = 5,
                        star_mask: Optional[np.ndarray] = None) -> np.ndarray:
@@ -312,31 +336,31 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
                                 filter_size: int = 3, clip_sigma: float = 3.0,
                                 verbose: bool = False,
-                                star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                                star_mask: Optional[np.ndarray] = None,
+                                exclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Apply per-channel background subtraction with automatic extended-source masking."""
     H, W = rgb.shape[:2]
     if H == 0 or W == 0:
         return rgb.copy()
-        
+
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
     # --- Auto-detect extended source ---
     combined_mask = star_mask.astype(np.float32) if star_mask is not None else np.zeros((H, W), dtype=np.float32)
+    # Merge caller-supplied exclusion mask (e.g. comet coma region)
+    if exclusion_mask is not None:
+        try:
+            excl = np.asarray(exclusion_mask, dtype=np.float32)
+            if excl.shape == (H, W):
+                np.clip(combined_mask + excl, 0.0, 1.0, out=combined_mask)
+        except Exception:
+            pass
 
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
         lum_smooth = gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
 
-        by = max(10, int(H * Config.BORDER_FRAC))
-        bx = max(10, int(W * Config.BORDER_FRAC))
-        
-        # Efficient border extraction without excessive concatenation
-        border_pix = np.concatenate([
-            lum_smooth[:by, :].ravel(), 
-            lum_smooth[-by:, :].ravel(),
-            lum_smooth[by:-by, :bx].ravel(), 
-            lum_smooth[by:-by, -bx:].ravel(),
-        ])
+        border_pix = _border_pixels(lum_smooth)
         sky_med = float(np.median(border_pix))
         sky_std = float(np.std(border_pix))
 
@@ -420,12 +444,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
         lum_smooth = gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
-        by = max(10, int(H * Config.BORDER_FRAC))
-        bx = max(10, int(W * Config.BORDER_FRAC))
-        border_pix = np.concatenate([
-            lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
-            lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
-        ])
+        border_pix = _border_pixels(lum_smooth)
         sky_med = float(np.median(border_pix))
         sky_std = float(np.std(border_pix))
         detect_thresh = sky_med + 5.0 * max(sky_std, 1.0)
@@ -560,9 +579,8 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             safe_print(f"    Channel {c}: residual median={float(np.median(background)):.2f}")
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        for c in range(3):
-            _process_channel(c)
-            
+        list(executor.map(_process_channel, range(3)))
+
     return result
 
 
@@ -582,23 +600,8 @@ def sky_floor_normalize(rgb: np.ndarray, star_mask: Optional[np.ndarray] = None,
         np.clip(src_mask + star_mask, 0, 1, out=src_mask)
 
     # --- Detect emission in border for sky floor estimation ---
-    by = max(10, int(H * Config.BORDER_FRAC))
-    bx = max(10, int(W * Config.BORDER_FRAC))
-    border_lum = np.concatenate([
-        lum[:by, :].ravel(), lum[-by:, :].ravel(),
-        lum[by:-by, :bx].ravel(), lum[by:-by, -bx:].ravel(),
-    ])
-    
-    if sigma_clipped_stats is not None:
-        try:
-            _, sky_med, sky_std = sigma_clipped_stats(border_lum, sigma=3.0, maxiters=5)
-            sky_med, sky_std = float(sky_med), float(sky_std)
-        except Exception:
-            sky_med = float(np.median(border_lum))
-            sky_std = float(np.std(border_lum))
-    else:
-        sky_med = float(np.median(border_lum))
-        sky_std = float(np.std(border_lum))
+    border_lum = _border_pixels(lum)
+    sky_med, sky_std = _sigma_sky(border_lum)
 
     # --- Mask extended sources ---
     smooth_sigma = max(5.0, min(H, W) / 200.0)
@@ -922,7 +925,8 @@ def dynamic_background_extraction(
         outlier_iters: int = Config.DBE_OUTLIER_ITERS,
         star_mask: Optional[np.ndarray] = None,
         verbose: bool = False,
-        use_entropy_weights: bool = False) -> np.ndarray:
+        use_entropy_weights: bool = False,
+        exclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Dynamic Background Extraction (DBE) via adaptive sampling and RBF fitting."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -935,23 +939,17 @@ def dynamic_background_extraction(
     smooth_sigma = max(20.0, min(H, W) / 50.0)
     lum_smooth = gaussian_filter(lum, sigma=smooth_sigma)
 
-    by = max(10, int(H * Config.BORDER_FRAC))
-    bx = max(10, int(W * Config.BORDER_FRAC))
-    border_pix = np.concatenate([
-        lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
-        lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
-    ])
-    
-    if sigma_clipped_stats is not None:
-        try:
-            _, sky_med, sky_std = sigma_clipped_stats(border_pix, sigma=3.0, maxiters=5)
-            sky_med, sky_std = float(sky_med), float(sky_std)
-        except Exception:
-            sky_med, sky_std = float(np.median(border_pix)), float(np.std(border_pix))
-    else:
-        sky_med, sky_std = float(np.median(border_pix)), float(np.std(border_pix))
+    sky_med, sky_std = _sigma_sky(_border_pixels(lum_smooth))
 
     emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
+    # Merge optional caller-supplied exclusion mask (e.g. comet coma region)
+    if exclusion_mask is not None:
+        try:
+            excl = np.asarray(exclusion_mask, dtype=np.float32)
+            if excl.shape == emission_mask.shape:
+                np.clip(emission_mask + excl, 0.0, 1.0, out=emission_mask)
+        except Exception:
+            pass
     _masked_pct = float(np.mean(emission_mask >= 0.5))
     _dense_field = _masked_pct > Config.DBE_DENSE_FIELD_THRESH
     if verbose:

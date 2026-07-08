@@ -5,7 +5,6 @@ import logging
 import os
 import sys
 from typing import List, Optional
-
 try:
     import psutil
     HAS_PSUTIL = True
@@ -139,6 +138,19 @@ def print_phase(phase_num: int, title: str):
     print(f"\n{'=' * 70}")
     print(f"PHASE {phase_num}: {title.upper()}")
     print(f"{'=' * 70}")
+
+
+def native_status() -> str:
+    """One-line status of the optional native (Rust) acceleration."""
+    try:
+        import astro_native
+        ver = getattr(astro_native, '__version__', '?')
+        n_fns = len([f for f in dir(astro_native) if not f.startswith('_')])
+        return (f"Native accel: astro_native v{ver} ACTIVE - {n_fns} Rust kernels "
+                f"(stacking combine, Lanczos warp, aniso diffusion)")
+    except Exception:
+        return ("Native accel: not installed - using numpy fallback "
+                "(build ext/astro_native for ~5-37x on stacking/registration)")
 
 
 def format_time(seconds: float) -> str:

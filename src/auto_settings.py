@@ -18,6 +18,12 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import Config
+from src.utils import safe_print
+
+try:
+    from src.denoising import HAS_BM3D_PKG
+except Exception:
+    HAS_BM3D_PKG = False
 
 if TYPE_CHECKING:
     import argparse
@@ -53,11 +59,12 @@ def _aggregate(final: list) -> dict:
         return float(np.mean(vals)) if vals else default
 
     # Exclude zeros for metrics that are only valid when measured successfully
-    fwhm_vals = [f.metrics.get('fwhm', 0.0) for f in final
-                 if f.metrics and f.metrics.get('fwhm', 0.0) > 0]
-    strehl_vals = [f.metrics.get('strehl', 0.0) for f in final
-                   if f.metrics and f.metrics.get('strehl', 0.0) > 0]
+    def _nz(key: str) -> list:
+        return [f.metrics[key] for f in final if f.metrics and f.metrics.get(key, 0.0) > 0]
 
+    fwhm_vals   = _nz('fwhm')
+    strehl_vals = _nz('strehl')
+    ellip_vals  = _nz('ellipticity')
     return {
         'median_background':  _med('background'),
         'median_noise':       _med('noise'),
@@ -71,6 +78,7 @@ def _aggregate(final: list) -> dict:
         'mean_strehl':        float(np.mean(strehl_vals)) if strehl_vals else 0.0,
         'mean_dispersion':    _mean('dispersion_px'),
         'n_frames':           len(final),
+        'median_ellipticity': float(np.median(ellip_vals)) if ellip_vals else 0.0,
     }
 
 
@@ -101,17 +109,18 @@ def _compute_signals(agg: dict) -> dict:
     concentration = peak_excess / max(diffuse_excess, 0.1)
 
     return {
-        'median_filling': round(median_filling, 2),
-        'diffuse_excess': round(diffuse_excess, 2),
-        'peak_excess':    round(peak_excess, 2),
-        'concentration':  round(concentration, 2),
-        'star_count':     agg['mean_star_count'],
-        'dynamic_range':  agg['mean_dynamic_range'],
-        'snr':            agg['mean_snr'],
-        'fwhm':           agg['mean_fwhm'],
-        'strehl':         round(agg['mean_strehl'], 3),
-        'dispersion':     round(agg['mean_dispersion'], 3),
-        'n_frames':       agg['n_frames'],
+        'median_filling':    round(median_filling, 2),
+        'diffuse_excess':    round(diffuse_excess, 2),
+        'peak_excess':       round(peak_excess, 2),
+        'concentration':     round(concentration, 2),
+        'star_count':        agg['mean_star_count'],
+        'dynamic_range':     agg['mean_dynamic_range'],
+        'snr':               agg['mean_snr'],
+        'fwhm':              agg['mean_fwhm'],
+        'strehl':            round(agg['mean_strehl'], 3),
+        'dispersion':        round(agg['mean_dispersion'], 3),
+        'n_frames':          agg['n_frames'],
+        'median_ellipticity': round(agg['median_ellipticity'], 3),
     }
 
 
@@ -172,6 +181,8 @@ def _classify(sig: dict) -> str:
 
 _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'emission_nebula': [
+        ('masked_correlation',      True),
+        ('pre_gradient_removal',    True),
         ('deconvolve',              True),
         ('deconvolve_iterations',   20),
         # Empirical PSF captures asymmetric shapes from atmospheric turbulence
@@ -181,6 +192,9 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.75),
         ('ghs_b',                   7.0),
         ('ghs_sp',                  0.18),
+        # Emission nebula fills the frame — keep the black point below the sky
+        # so faint outer nebulosity is not clipped to black.
+        ('preview_black_sigma',    -0.5),
         ('dbe_patch_size',          48),
         # Emission patches have high entropy; rejecting them gives a cleaner
         # background model on narrowband data.
@@ -200,17 +214,32 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('aniso_iterations',        15),
     ],
     'galaxy': [
-        ('deconvolve',              True),
+        ('pre_gradient_removal',    True),
+        # Deconvolution OFF by default. On wide-field OSC data (undersampled
+        # stars, small galaxy) Richardson-Lucy redistributes flux and lowers the
+        # local background, so every bright star gets a dark ring/moat — and any
+        # star-protection blend just moves the ring to the mask seam. The
+        # marginal sharpening is not worth ringing every star. The galaxy is
+        # already sharp from stacking. Re-enable with --deconvolve for
+        # well-sampled data. (Apodized-PSF + wide-mask paths in postprocess still
+        # apply when explicitly enabled.)
+        ('deconvolve',              False),
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
-        # TV regularisation avoids the ringing artefacts that RL produces on
-        # the sharp galaxy disc edge and bright nuclear core.
-        ('deconvolve_tv',           True),
+        ('deconvolve_tv',           False),
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
         ('local_contrast_strength', 0.85),
         ('ghs_b',                   10.0),
         ('ghs_sp',                  0.12),
+        # Galaxy is a small target on empty sky — clip the sky noise tail to
+        # black (median + 3*sigma) so the vast empty background renders clean,
+        # not grainy, under stretch. Faint arms/companion sit well above this.
+        ('preview_black_sigma',     3.0),
+        # Smooth medium-scale colour blotches in the empty sky around the small
+        # galaxy (object-masked, so galaxy/star colour is preserved).
+        ('chroma_nr_large_sigma',   50.0),
+        ('chroma_nr_large_strength', 0.7),
         ('dbe_patch_size',          48),
         # Outer globular cluster halos and H-II regions push patch entropy up,
         # biasing the background model toward the galaxy — reject them.
@@ -225,11 +254,13 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('denoise_acdnr',           True),
     ],
     'globular_cluster': [
-        ('deconvolve',              True),
+        # Deconvolution OFF: a dense star field is the worst case for RL
+        # ringing — every one of hundreds of stars gets a dark moat. Not worth
+        # it. Re-enable with --deconvolve for well-sampled data.
+        ('deconvolve',              False),
         ('deconvolve_iterations',   20),
         ('deconvolve_blind_psf',    True),
-        # TV avoids RL ringing on the sharp stellar PSF edges in the dense core.
-        ('deconvolve_tv',           True),
+        ('deconvolve_tv',           False),
         # Stars are the target — never soften them.
         ('star_reduce',             False),
         ('local_contrast',          True),
@@ -237,6 +268,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # Higher SP lifts faint outer halo stars relative to the saturated core.
         ('ghs_b',                   7.0),
         ('ghs_sp',                  0.25),
+        # Cluster on empty sky — clip sky noise tail to black (stars sit above).
+        ('preview_black_sigma',     3.0),
         ('dbe_patch_size',          48),
         ('entropy_bg',              True),
         ('scnr',                    True),
@@ -251,8 +284,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve',              True),
         ('deconvolve_iterations',   25),
         ('deconvolve_blind_psf',    True),
-        # TV avoids ringing on the hard shell boundary — critical for ring nebulae.
-        ('deconvolve_tv',           True),
+        # TV staircasing boxes the compact bright shell/disk — use RL instead.
+        ('deconvolve_tv',           False),
         # Reduce background stars so the compact nebula is not dominated by halos.
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
@@ -263,6 +296,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('ghs_sp',                  0.10),
         # Protect the bright central star from blowout.
         ('ghs_hp',                  0.92),
+        # Compact nebula on empty sky, but keep the faint outer halo — mild clip.
+        ('preview_black_sigma',     1.0),
         # Smaller patches → denser background sampling around the compact disk.
         ('dbe_patch_size',          32),
         ('entropy_bg',              True),
@@ -276,6 +311,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('aniso_iterations',        15),
     ],
     'reflection_nebula': [
+        ('masked_correlation',      True),
+        ('pre_gradient_removal',    True),
         ('deconvolve',              True),
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
@@ -283,6 +320,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.70),
         ('ghs_b',                   8.0),
         ('ghs_sp',                  0.15),
+        # Reflection nebula fills the frame — keep faint dust visible.
+        ('preview_black_sigma',    -0.5),
         ('entropy_bg',              True),
         ('scnr',                    True),
         ('photometric_calibration', True),
@@ -301,6 +340,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('star_reduce',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
+        # Stars on empty sky — clip sky noise tail to black (stars sit above).
+        ('preview_black_sigma',     3.0),
         ('scnr',                    True),
         ('photometric_calibration', True),
         ('denoise_acdnr',           True),
@@ -312,6 +353,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),
         ('ghs_sp',                  0.20),
+        # Wide field usually has scattered nebulosity — mild clip only.
+        ('preview_black_sigma',     0.5),
         ('scnr',                    True),
         ('photometric_calibration', True),
         ('denoise_acdnr',           True),
@@ -367,17 +410,27 @@ def _apply_quality_settings(
             setattr(args, attr, val)
             changes.append(f"{attr}  {old!r} -> {val!r}")
 
-    n          = int(sig['n_frames'])
-    snr        = sig['snr']
-    fwhm       = sig['fwhm']
-    sc         = sig['star_count']
-    strehl     = sig.get('strehl', 0.0)
-    dispersion = sig.get('dispersion', 0.0)
+    def _disable_deconvolve() -> None:
+        if getattr(args, 'deconvolve', False):
+            _set('deconvolve', False)
+        if getattr(args, 'deconvolve_tv', False):
+            _set('deconvolve_tv', False)
+
+    n           = int(sig['n_frames'])
+    snr         = sig['snr']
+    fwhm        = sig['fwhm']
+    sc          = sig['star_count']
+    strehl      = sig.get('strehl', 0.0)
+    dispersion  = sig.get('dispersion', 0.0)
+    med_ellip   = sig.get('median_ellipticity', 0.0)
 
     # 1. Frame-count-based stacking method (only when still at default 'auto')
     if getattr(args, 'stack_method', 'auto') == 'auto':
         if n < 8:
             _set('stack_method', 'percentile')
+        elif n < 15:
+            # Trimmed mean: simple, robust alternative to ESD for moderate N.
+            _set('stack_method', 'trimmed_mean')
         elif n < 20:
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 3.0)
@@ -385,6 +438,10 @@ def _apply_quality_settings(
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 2.8)
             _set('rejection_iters', 4)
+
+    # Consensus reference frame: enable for large frame counts (≥20)
+    if n >= 20 and not getattr(args, 'consensus_ref', False):
+        _set('consensus_ref', True)
 
     # 2. SNR-based denoising (only when auto-tuning is explicitly disabled)
     if not getattr(args, 'auto_denoise_strength', True):
@@ -395,6 +452,11 @@ def _apply_quality_settings(
                 _set('denoise_strength', 3.5)
             elif snr > 20:
                 _set('denoise_strength', 2.0)
+
+    # Ellipticity warning: poor tracking produces elongated stars
+    if fwhm > 4.0 and med_ellip > 0.3:
+        safe_print(f"  NOTE: median star ellipticity={med_ellip:.3f} > 0.3 with FWHM={fwhm:.1f}px "
+                   f"— possible tracking error or optical issue")
 
     # 3. FWHM-scaled deconvolution iterations (applied after target type sets them)
     if getattr(args, 'deconvolve', False) and fwhm > 4.0:
@@ -425,28 +487,22 @@ def _apply_quality_settings(
     if snr < 5 and snr > 0 and not getattr(args, 'denoise_acdnr', False):
         _set('denoise_acdnr', True)
 
-    # 7. BM3D: enable for galaxies and globular clusters when the stack is clean
-    #    enough for block-matching to outperform median-based MMT.  Requires
-    #    SNR >= 12 (enough signal for meaningful patch similarity) and >= 20
-    #    frames (reduces noise floor so BM3D doesn't chase noise patterns).
-    #    For globulars, finer stride is always used to resolve individual stars
-    #    in the core; for galaxies it is only applied on very clean stacks.
-    if (target_type in ('galaxy', 'globular_cluster')
-            and snr >= 12
-            and n >= 20
+    # 7. BM3D: enable when the bm3d package is installed and the stack has enough
+    #    SNR for block-matching to outperform median-based methods.  Thresholds are
+    #    lower when the package is available (hardware-accelerated C backend) vs
+    #    absent (pure-scipy DCT fallback which is ~5-10x slower and less effective).
+    _bm3d_targets = ('galaxy', 'globular_cluster', 'emission_nebula', 'reflection_nebula')
+    _bm3d_snr_min = 8 if HAS_BM3D_PKG else 12
+    _bm3d_n_min   = 12 if HAS_BM3D_PKG else 20
+    if (target_type in _bm3d_targets
+            and snr >= _bm3d_snr_min
+            and n >= _bm3d_n_min
             and not getattr(args, 'denoise_bm3d', False)):
         _set('denoise_bm3d', True)
         if target_type == 'globular_cluster' or snr > 20:
             _set('bm3d_stride', 4)
 
-    # 8. Polynomial distortion correction: enable when seeing is poor AND
-    #    enough stars exist for a stable degree-2 polynomial fit (want 40+).
-    #    Poor FWHM is correlated with tracking errors that introduce geometric
-    #    distortion not captured by the shift/affine registration pass.
-    if fwhm > 4.0 and sc >= 40 and not getattr(args, 'poly_distortion', False):
-        _set('poly_distortion', True)
-
-    # 9. TV deconvolution iteration count scaled to stack SNR.
+    # 8. TV deconvolution iteration count scaled to stack SNR.
     #    Low SNR: fewer iterations to avoid converging toward noise.
     #    High SNR: more iterations converge to a sharper solution.
     if getattr(args, 'deconvolve_tv', False):
@@ -463,10 +519,7 @@ def _apply_quality_settings(
     #     - Strehl 0.15–0.25: cut iterations in half as a safety margin.
     if strehl > 0:
         if strehl < 0.15:
-            if getattr(args, 'deconvolve', False):
-                _set('deconvolve', False)
-            if getattr(args, 'deconvolve_tv', False):
-                _set('deconvolve_tv', False)
+            _disable_deconvolve()
         elif strehl < 0.25:
             current_iters = getattr(args, 'deconvolve_iterations', 15)
             _set('deconvolve_iterations', max(8, current_iters // 2))
@@ -478,13 +531,22 @@ def _apply_quality_settings(
     #     - Dispersion 1.5–3.0 px: reduce iterations by 40%.
     if dispersion > 0:
         if dispersion > 3.0:
-            if getattr(args, 'deconvolve', False):
-                _set('deconvolve', False)
-            if getattr(args, 'deconvolve_tv', False):
-                _set('deconvolve_tv', False)
+            _disable_deconvolve()
         elif dispersion > 1.5:
             current_iters = getattr(args, 'deconvolve_iterations', 15)
             _set('deconvolve_iterations', max(5, int(current_iters * 0.6)))
+
+    # 12. Patch-weighted stacking: enable when there are enough frames for the
+    #     quality-weighted mean to be statistically robust and quality maps will
+    #     have signal.  Requires fwhm > 0 (stars/structure detected) so that
+    #     Brenner sharpness has something to discriminate against.
+    #     With ≥15 frames each contributes ≤6.7% at full weight, so a single
+    #     bad-seeing patch is diluted sufficiently without hard rejection.
+    #     Only activates when the user has not already set --patch-weighted.
+    if (n >= 15
+            and fwhm > 0.0
+            and not getattr(args, 'patch_registration', False)):
+        _set('patch_registration', True)
 
     return changes
 

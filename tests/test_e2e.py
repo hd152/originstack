@@ -65,16 +65,15 @@ def _make_minimal_args(**overrides) -> argparse.Namespace:
         # Phase 4 post-processing  — disable everything for speed
         skip_step=[
             'hot_pixel', 'background', 'chroma_nr', 'sky_floor',
-            'local_normalize', 'wavelet', 'sky_residual',
+            'wavelet', 'sky_residual', 'sky_pedestal',
             'nlm', 'bilateral', 'mmt', 'acdnr',
-            'deconvolve', 'star_reduce', 'local_contrast',
+            'deconvolve', 'star_reduce', 'local_contrast', 'sky_neutralize',
         ],
         background_extraction=False,
         dbe=False,
         bg_mesh_size=64,
         bg_filter_size=3,
         bg_clip_sigma=3.0,
-        local_normalize=False,
         denoise=False,
         denoise_strength=1.0,
         denoise_adaptive=True,

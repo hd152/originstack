@@ -710,22 +710,6 @@ class TestArcsinhStretch(unittest.TestCase):
         self.assertLessEqual(float(out.max()), 1.0 + 1e-6)
 
 
-class TestLocalNormalize(unittest.TestCase):
-    def test_output_shape(self):
-        self.assertEqual(astro.local_normalize(_rgb(64, 64), sigma=10.0).shape, (64, 64, 3))
-
-    def test_output_dtype(self):
-        self.assertEqual(astro.local_normalize(_rgb(32, 32), sigma=5.0).dtype, np.float32)
-
-    def test_output_nonneg(self):
-        self.assertGreaterEqual(float(astro.local_normalize(_rgb(32, 32), sigma=5.0).min()), 0.0)
-
-    def test_uniform_collapses_near_zero(self):
-        img = np.ones((32, 32, 3), dtype=np.float32) * 500.0
-        out = astro.local_normalize(img, sigma=5.0)
-        self.assertLess(float(out.max()), 1.0 + 1e-3)
-
-
 class TestReduceChromaNoise(unittest.TestCase):
     def test_shape(self):
         self.assertEqual(
@@ -1000,10 +984,6 @@ class TestSafePrint(unittest.TestCase):
 class TestConfigConstants(unittest.TestCase):
     def test_hot_pixel_threshold_positive(self):
         self.assertGreater(astro.Config.HOT_PIXEL_THRESHOLD, 0)
-
-    def test_max_shift_fraction(self):
-        self.assertGreater(astro.Config.MAX_SHIFT_FRACTION, 0)
-        self.assertLess(astro.Config.MAX_SHIFT_FRACTION, 1.0)
 
     def test_crop_margin_nonneg(self):
         self.assertGreaterEqual(astro.Config.CROP_MARGIN, 0)

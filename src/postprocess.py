@@ -14,14 +14,16 @@ from scipy import ndimage
 
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, format_time
-from src.quality import generate_star_mask, _detect_stars_multi_fwhm
+from src.quality import generate_star_mask, _detect_stars_multi_fwhm, _sep_detect_stars
 from src.background import (apply_background_extraction, remove_sky_residual,
-                            sky_floor_normalize, dynamic_background_extraction)
+                            sky_floor_normalize, dynamic_background_extraction,
+                            _border_pixels, _sigma_sky)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
-                           bilateral_denoise, local_normalize, reduce_chroma_noise,
+                           bilateral_denoise, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
                            multiscale_local_contrast, mmt_denoise, acdnr_denoise,
-                           bm3d_denoise, anisotropic_diffusion, scnr, adaptive_mtf)
+                           bm3d_denoise, anisotropic_diffusion, scnr,
+                           remove_star_halos, radial_renormalize, larson_sekanina)
 from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
                                     richardson_lucy_deconvolve,
                                     estimate_psf_blind, tv_regularized_deconvolve)
@@ -149,6 +151,29 @@ def _graxpert_background_extraction(img: np.ndarray,
     Falls back to DBE on failure.
     """
     from astropy.io import fits as _fits
+
+    # Prefer the graxpert Python package over the subprocess CLI when available.
+    try:
+        from graxpert.background_extraction import extract_background as _gx_extract
+        img_max = float(img.max()) or 1.0
+        img_norm = (img / img_max).astype(np.float32)
+        result = _gx_extract(
+            img_norm,
+            bg_pts=None,
+            correction_type='Subtraction',
+            smoothing='medium',
+            kernel_size=50,
+        )
+        if verbose:
+            safe_print("  [GraXpert] Background extracted via Python API")
+        return np.clip(
+            np.asarray(result, dtype=np.float32) * img_max, 0.0, None
+        )
+    except ImportError:
+        pass  # Python package not installed — fall through to subprocess
+    except Exception as _gx_err:
+        if verbose:
+            safe_print(f"  [GraXpert] Python API failed ({_gx_err}), trying subprocess")
 
     binary = graxpert_path or _find_graxpert_binary()
     if binary is None:
@@ -317,20 +342,33 @@ def postprocess_stack(
     # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution
     pp_star_mask = None
     _pp_sources = None
-    _ensure_photutils()
-    if DAOStarFinder is not None and sigma_clipped_stats is not None:
+    if sigma_clipped_stats is not None:
         try:
             _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
                        + 0.114 * stacked[:, :, 2])
             _, _bg_med, _bg_std = sigma_clipped_stats(_pp_lum, sigma=3.0, maxiters=5)
-            _bg_sub = _pp_lum - float(_bg_med)
-            _pp_sources = _detect_stars_multi_fwhm(_bg_sub, 5.0 * float(_bg_std))
+            _bg_noise = 5.0 * float(_bg_std)
+            _pp_sources = _sep_detect_stars(_pp_lum.astype(np.float32), float(_bg_std))
+            if _pp_sources is None or len(_pp_sources) == 0:
+                _bg_sub = _pp_lum - float(_bg_med)
+                _pp_sources = _detect_stars_multi_fwhm(_bg_sub, _bg_noise)
             if _pp_sources is not None and len(_pp_sources) > 0:
                 pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
                 if args.verbose:
                     safe_print(f"    Post-processing star mask: {len(_pp_sources)} stars")
         except Exception:
             pass
+
+    # Star halo removal (before background extraction)
+    if getattr(args, 'halo_removal', False) and _pp_sources is not None and len(_pp_sources) > 0:
+        _halo_fwhm = float(np.median(
+            [f.metrics.get('fwhm', 4.0) for f in final
+             if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
+        print(f"\n  Removing star halos (fwhm={_halo_fwhm:.1f}px)...")
+        _halo_start = time.time()
+        stacked = remove_star_halos(stacked, _pp_sources, fwhm=_halo_fwhm)
+        safe_print(f"  Star halo removal ({format_time(time.time() - _halo_start)})")
+        stacked = _sanitize(stacked, "halo removal")
 
     # Export star/galaxy masks (before any post-processing modifies them)
     if getattr(args, 'export_masks', False) and pp_star_mask is not None:
@@ -348,6 +386,26 @@ def postprocess_stack(
 
         bg_method = getattr(args, 'bg_method', 'dbe')
 
+        # Build comet coma exclusion mask to prevent background sampler from
+        # subtracting the comet itself as "background".
+        _coma_excl_mask = None
+        if getattr(args, 'comet_mode', False):
+            try:
+                from src.registration import find_comet_centroid
+                _pp_lum_comet = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                                 + 0.114 * stacked[:, :, 2])
+                _coma_cy, _coma_cx = find_comet_centroid(_pp_lum_comet)
+                _coma_radius = float(getattr(args, 'coma_mask_radius', 150))
+                _H_c, _W_c = stacked.shape[:2]
+                _yy_c, _xx_c = np.mgrid[:_H_c, :_W_c]
+                _coma_dist2 = (_yy_c - _coma_cy) ** 2 + (_xx_c - _coma_cx) ** 2
+                _coma_excl_mask = (_coma_dist2 <= _coma_radius ** 2).astype(np.float32)
+                if getattr(args, 'verbose', False):
+                    safe_print(f"    Coma exclusion mask: nucleus=({_coma_cx:.1f},{_coma_cy:.1f}), "
+                               f"radius={_coma_radius:.0f}px")
+            except Exception as _cme:
+                safe_print(f"  WARNING: coma exclusion mask failed: {_cme}")
+
         if bg_method == 'graxpert':
             graxpert_bin = getattr(args, 'graxpert_path', None)
             print(f"\n  Applying GraXpert background extraction...")
@@ -362,14 +420,16 @@ def postprocess_stack(
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
                 verbose=args.verbose, star_mask=pp_star_mask,
-                use_entropy_weights=_entropy_bg)
+                use_entropy_weights=_entropy_bg,
+                exclusion_mask=_coma_excl_mask)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
         else:
             print(f"\n  Applying background extraction "
                   f"(mesh={args.bg_mesh_size}, sigma={args.bg_clip_sigma})...")
             stacked = apply_background_extraction(
                 stacked, mesh_size=args.bg_mesh_size, filter_size=args.bg_filter_size,
-                clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=pp_star_mask)
+                clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=pp_star_mask,
+                exclusion_mask=_coma_excl_mask)
             safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
         stacked = _sanitize(stacked, "background extraction")
         # Save background map as diagnostic
@@ -383,17 +443,22 @@ def postprocess_stack(
                     from src.io_fits import save_preview_rgb
                     save_preview_rgb(bg_map, bg_path, stretch='linear')
                     safe_print(f"    Saved background map: {os.path.basename(bg_path)}")
-            except Exception:
-                pass
+            except Exception as e:
+                safe_print(f"    WARNING: could not save background map: {e}")
             del _pre_bg
 
     # 2. Chroma noise reduction
     if getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_chroma_nr')
         cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
-        print(f"\n  Applying chroma noise reduction (sigma={cnr_sigma})...")
+        cnr_large = float(getattr(args, 'chroma_nr_large_sigma', 0.0))
+        cnr_large_str = float(getattr(args, 'chroma_nr_large_strength', 0.7))
+        _large_msg = f", large={cnr_large:.0f}" if cnr_large > 0 else ""
+        print(f"\n  Applying chroma noise reduction (sigma={cnr_sigma}{_large_msg})...")
         cnr_start = time.time()
-        stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma)
+        stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma,
+                                      sigma_large=cnr_large,
+                                      large_strength=cnr_large_str)
         safe_print(f"  ✓ Chroma noise reduction ({format_time(time.time() - cnr_start)})")
         stacked = _sanitize(stacked, "chroma noise reduction")
 
@@ -408,14 +473,9 @@ def postprocess_stack(
             try:
                 smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
                 lum_smooth = ndimage.gaussian_filter(lum_s, sigma=smooth_sigma)
-                by = max(10, int(H_s * Config.BORDER_FRAC))
-                bx = max(10, int(W_s * Config.BORDER_FRAC))
-                border_pix = np.concatenate([
-                    lum_smooth[:by, :].ravel(), lum_smooth[-by:, :].ravel(),
-                    lum_smooth[by:-by, :bx].ravel(), lum_smooth[by:-by, -bx:].ravel(),
-                ])
-                sky_med_lum = float(np.median(border_pix))
-                sky_std_lum = float(np.std(border_pix))
+                _bp = _border_pixels(lum_smooth)
+                sky_med_lum = float(np.median(_bp))
+                sky_std_lum = float(np.std(_bp))
                 peak_y, peak_x = np.unravel_index(int(np.argmax(lum_smooth)), (H_s, W_s))
                 peak_val = float(lum_smooth[peak_y, peak_x])
                 detect_thresh = sky_med_lum + max(
@@ -464,15 +524,6 @@ def postprocess_stack(
         except Exception:
             pass
 
-    # 3. Local normalization
-    if getattr(args, 'local_normalize', False) and 'local_normalize' not in skip_steps:
-        _diag_save(stacked, _diag_dir, _diag_counter, 'before_local_normalize')
-        ln_sigma = getattr(args, 'local_normalize_sigma', 50.0)
-        print(f"\n  Applying local normalization (sigma={ln_sigma})...")
-        ln_start = time.time()
-        stacked = local_normalize(stacked, sigma=ln_sigma)
-        safe_print(f"  ✓ Local normalization ({format_time(time.time() - ln_start)})")
-
     # 4. Wavelet denoising
     if getattr(args, 'denoise', False) and 'wavelet' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_wavelet_denoise')
@@ -516,6 +567,23 @@ def postprocess_stack(
                                           verbose=(args.verbose and _sr_pass == 0))
         safe_print(f"  ✓ Sky residual correction ({format_time(time.time() - _sr_start)})")
         stacked = sky_floor_normalize(stacked, star_mask=pp_star_mask, verbose=args.verbose)
+
+    # Sky pedestal — lift the background off zero before the downstream
+    # non-negativity clips (Richardson-Lucy, star reduction) crush every
+    # below-zero sky pixel to a hard zero, which would leave ~half the sky as
+    # black holes (unusable linear FITS, mottled autostretch). A scalar lift
+    # preserves the noise distribution; colour neutralisation happens at the end
+    # (after photometric calibration, which re-scales the channels).
+    if args.background_extraction and 'sky_pedestal' not in skip_steps:
+        _ped_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                    + 0.114 * stacked[:, :, 2])
+        _ped_med = float(np.median(_ped_lum))
+        _ped_sigma = float(np.median(np.abs(_ped_lum - _ped_med)) * 1.4826)
+        pedestal = max(8.0 * _ped_sigma - _ped_med, 0.0)
+        if pedestal > 0:
+            stacked = stacked + np.float32(pedestal)
+            safe_print(f"  ✓ Sky pedestal: +{pedestal:.2f} "
+                       f"(sky sigma={_ped_sigma:.2f})")
 
     # 5. NLM denoising
     if getattr(args, 'denoise_nlm', False) and 'nlm' not in skip_steps:
@@ -639,8 +707,8 @@ def postprocess_stack(
         rl_model = getattr(args, 'deconvolve_psf_model', 'moffat')
         use_blind_psf = getattr(args, 'deconvolve_blind_psf', False)
         use_tv = getattr(args, 'deconvolve_tv', False)
-        tv_lambda = getattr(args, 'tv_lambda', Config.TV_LAMBDA)
-        tv_iters = getattr(args, 'tv_iterations', Config.TV_ITERATIONS)
+        tv_lambda = getattr(args, 'tv_lambda', None) or Config.TV_LAMBDA
+        tv_iters = getattr(args, 'tv_iterations', None) or Config.TV_ITERATIONS
         psf = None
 
         if rl_fwhm_override is not None:
@@ -664,6 +732,50 @@ def postprocess_stack(
             safe_print("\n  No star detections for PSF — use --deconvolve-fwhm to specify")
 
         if psf is not None:
+            # pp_star_mask (fwhm=4.0) only protects star cores from denoising.
+            # Deconvolution ringing/staircasing extends out to ~PSF half-size,
+            # so bright compact sources (saturated stars, galaxy nuclei) need a
+            # wider protection radius here to avoid visible box/ring artefacts.
+            # Richardson-Lucy rings a dark moat around every bright point source.
+            # A brightness-normalised Gaussian mask (generate_star_mask) barely
+            # protects faint stars — their normalised peak is far below 1 — so
+            # they ring. Build a flat-topped protection mask instead: mark every
+            # star centroid AND every saturated/flat-topped pixel the finder
+            # misses, dilate over the whole ringing zone (~PSF radius) so the
+            # protection is 1.0 across each star's core and moat regardless of
+            # brightness, then feather the outer edge so the blend has no seam.
+            _H_dm, _W_dm = stacked.shape[:2]
+            _pts = np.zeros((_H_dm, _W_dm), dtype=bool)
+            if _pp_sources is not None and len(_pp_sources) > 0:
+                _ys = np.round(np.asarray(_pp_sources['ycentroid'],
+                                          dtype=np.float64)).astype(int)
+                _xs = np.round(np.asarray(_pp_sources['xcentroid'],
+                                          dtype=np.float64)).astype(int)
+                _ok = ((_ys >= 0) & (_ys < _H_dm) & (_xs >= 0) & (_xs < _W_dm))
+                _pts[_ys[_ok], _xs[_ok]] = True
+            _dl = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                   + 0.114 * stacked[:, :, 2])
+            _hi = float(np.percentile(_dl, 99.7))
+            if _hi > 0:
+                _pts |= (_dl >= _hi)
+            if _pts.any():
+                # Ring radius scales with source brightness (brighter stars push
+                # flux further out), so protect generously — out to a full PSF
+                # box — and feather well beyond. Deconvolution then only sharpens
+                # the star-free extended structure (galaxy arms), which is where
+                # it helps and where it does not ring.
+                _ring_r = max(4, int(float(psf.shape[0])))
+                _core = ndimage.binary_dilation(_pts, iterations=_ring_r)
+                deconv_mask = ndimage.gaussian_filter(
+                    _core.astype(np.float32),
+                    sigma=max(3.0, float(psf.shape[0]) * 0.45))
+                _dmx = float(deconv_mask.max())
+                if _dmx > 0:
+                    deconv_mask /= _dmx
+                np.clip(deconv_mask, 0.0, 1.0, out=deconv_mask)
+            else:
+                deconv_mask = pp_star_mask
+
             deconv_start = time.time()
             if use_tv:
                 safe_print(f"  Total Variation deconvolution "
@@ -671,12 +783,12 @@ def postprocess_stack(
                 stacked = tv_regularized_deconvolve(stacked, psf,
                                                      iterations=tv_iters,
                                                      lambda_tv=tv_lambda,
-                                                     star_mask=pp_star_mask)
+                                                     star_mask=deconv_mask)
                 safe_print(f"  ✓ TV deconvolution ({format_time(time.time() - deconv_start)})")
             else:
                 safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
                 stacked = richardson_lucy_deconvolve(stacked, psf, iterations=rl_iters,
-                                                      star_mask=pp_star_mask)
+                                                      star_mask=deconv_mask)
                 safe_print(f"  ✓ Richardson-Lucy deconvolution "
                            f"({format_time(time.time() - deconv_start)})")
             stacked = _sanitize(stacked, "deconvolution")
@@ -717,6 +829,85 @@ def postprocess_stack(
         )
         safe_print(f"  ✓ Star removal ({format_time(time.time() - sr_start)})")
         stacked = _sanitize(stacked, "star removal")
+
+    # 11. Comet: radial renormalization (reveals jets by flattening coma gradient)
+    if (getattr(args, 'comet_mode', False)
+            and getattr(args, 'comet_radial_renorm', False)
+            and 'comet_radial_renorm' not in skip_steps):
+        print(f"\n  Applying comet radial renormalization...")
+        _rr_start = time.time()
+        try:
+            from src.registration import find_comet_centroid
+            _rr_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                       + 0.114 * stacked[:, :, 2])
+            _rr_cy, _rr_cx = find_comet_centroid(_rr_lum)
+            renormed = radial_renormalize(stacked, _rr_cy, _rr_cx)
+            # Save as sidecar FITS
+            _output_path_rr = getattr(args, 'output', None)
+            if _output_path_rr:
+                _save_sidecar_fits(renormed, _output_path_rr, '_comet_renorm')
+            safe_print(f"  ✓ Comet radial renormalization ({format_time(time.time() - _rr_start)})")
+        except Exception as _rre:
+            safe_print(f"  WARNING: radial renormalization failed: {_rre}")
+
+    # 12. Comet: Larson-Sekanina rotational difference filter (reveals jet structure)
+    if (getattr(args, 'comet_mode', False)
+            and getattr(args, 'comet_larson_sekanina', False)
+            and 'comet_larson_sekanina' not in skip_steps):
+        ls_rot = float(getattr(args, 'comet_ls_rotation', 15.0))
+        print(f"\n  Applying Larson-Sekanina filter (rotation={ls_rot:.1f} deg)...")
+        _ls_start = time.time()
+        try:
+            from src.registration import find_comet_centroid
+            _ls_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                       + 0.114 * stacked[:, :, 2])
+            _ls_cy, _ls_cx = find_comet_centroid(_ls_lum)
+            ls_img = larson_sekanina(stacked, _ls_cy, _ls_cx, rotation_deg=ls_rot)
+            # Save as sidecar FITS
+            _output_path_ls = getattr(args, 'output', None)
+            if _output_path_ls:
+                _save_sidecar_fits(ls_img, _output_path_ls, '_comet_ls')
+            safe_print(f"  ✓ Larson-Sekanina filter ({format_time(time.time() - _ls_start)})")
+        except Exception as _lse:
+            safe_print(f"  WARNING: Larson-Sekanina filter failed: {_lse}")
+
+    # Final sky flattening + neutralisation. Runs last so nothing (photometric
+    # calibration, deconvolution) can re-introduce a cast afterwards. Two parts:
+    #   1. Per-channel large-scale background flattening over MASKED sky —
+    #      removes residual low-frequency luminance gradient AND the colour
+    #      blotches (walking chroma noise) that a global offset cannot touch.
+    #      Only the smooth sky model is subtracted, so stars/galaxy structure
+    #      (high frequency) is untouched; bright objects are masked out of the
+    #      model and interpolated across, exactly like background extraction.
+    #   2. Equalise the per-channel floors to a common target (neutral grey).
+    # Add-only final lift keeps every pixel non-negative (no new clipped holes).
+    if args.background_extraction and 'sky_neutralize' not in skip_steps:
+        _lum_sn = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                   + 0.114 * stacked[:, :, 2])
+        # Sky mask: exclude bright objects and star cores from the model.
+        _obj_hi = float(np.percentile(_lum_sn, 80.0))
+        _skym = (_lum_sn < _obj_hi).astype(np.float32)
+        if pp_star_mask is not None:
+            _skym *= (1.0 - np.clip(pp_star_mask.astype(np.float32), 0.0, 1.0))
+        _sig_sn = max(64.0, float(min(stacked.shape[:2])) / 8.0)
+        _den = ndimage.gaussian_filter(_skym, sigma=_sig_sn)
+        _gm = []
+        for c in range(3):
+            _ch = stacked[:, :, c]
+            _num = ndimage.gaussian_filter(_ch * _skym, sigma=_sig_sn)
+            _model = _num / (_den + 1e-6)          # smooth sky level per pixel
+            _cmed = float(np.median(_ch))
+            stacked[:, :, c] = _ch - (_model - _cmed)   # subtract deviation only
+            _gm.append(_cmed)
+        # Equalise floors to a common neutral target (add-only).
+        _target = max(_gm)
+        for c in range(3):
+            _add = _target - _gm[c]
+            if _add > 0:
+                stacked[:, :, c] += np.float32(_add)
+        np.clip(stacked, 0.0, None, out=stacked)
+        safe_print(f"  ✓ Sky flattened + neutralised to grey (floor={_target:.1f}, "
+                   f"was R{_gm[0]:.1f} G{_gm[1]:.1f} B{_gm[2]:.1f})")
 
     stacked = _sanitize(stacked, "final post-processing")
     return stacked

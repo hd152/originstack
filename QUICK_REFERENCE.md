@@ -26,7 +26,22 @@ python astro_stack.py -d lights/ --health-check
 
 # Dry run — see resolved parameters without processing
 python astro_stack.py -d lights/ -o stacked.fits --dry-run
+
+# Iterate fast on the SAME output — re-runs skip Phases 1-3 (redo post only)
+python astro_stack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
 ```
+
+### Optional native (Rust) acceleration
+Stacking combines (~4–100×), the Lanczos alignment warp (~5×) and anisotropic
+diffusion (~37×) run in Rust when the `astro_native` module is built; otherwise
+a numpy fallback is used. Build once:
+
+```bash
+cd ext/astro_native && maturin develop --release           # into a venv
+# or (system Python): python -m maturin build --release && pip install --force-reinstall target/wheels/astro_native-*.whl
+```
+
+The startup banner shows `Native accel: … ACTIVE`; accelerated steps log `[rust] …`.
 
 ---
 
@@ -115,8 +130,9 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Bilateral denoising | ❌ | `--denoise-bilateral` |
 | MMT denoising | ❌ | `--denoise-mmt` |
 | ACDNR denoising | ❌ | `--denoise-acdnr` |
-| Richardson-Lucy deconvolution | ❌ | `--deconvolve` |
-| Local normalisation | ❌ | `--local-normalize` |
+| Richardson-Lucy deconvolution | ❌ | `--deconvolve` (GPU with `--use-gpu`) |
+| Coarse chroma-NR (colour blotches) | auto | `--chroma-nr-large-sigma 50` |
+| Preview black point (sky-σ) | auto | `--preview-black-sigma 3` |
 | Drizzle super-resolution | ❌ | `--drizzle-scale 2.0` |
 | Plate solving | ❌ | `--plate-solve` |
 | Star removal | ❌ | `--star-remove` |

@@ -20,6 +20,78 @@ try:
 except Exception:
     HAS_SKIMAGE_RESTORATION = False
 
+try:
+    from photutils.psf import EPSFBuilder
+    from photutils.psf import extract_stars as _phot_extract_stars
+    from astropy.nddata import NDData as _NDData
+    from astropy.table import Table as _AstroTable
+    HAS_PHOTUTILS_PSF = True
+except Exception:
+    HAS_PHOTUTILS_PSF = False
+
+
+def _estimate_psf_epsf(img: np.ndarray, star_positions,
+                       psf_size: int) -> Tuple[Optional[np.ndarray], float]:
+    """Empirical PSF via photutils EPSFBuilder.
+
+    Stacks oversampled star cutouts without assuming any parametric model,
+    producing a more accurate kernel than the Moffat/Gaussian fitting approach
+    when stars are well-sampled (typical for stacked deep-sky images).
+    Returns (psf_kernel, fwhm_px) or (None, 0.0) on failure.
+    """
+    if not HAS_PHOTUTILS_PSF:
+        return None, 0.0
+    if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
+        return None, 0.0
+
+    lum = (img if img.ndim == 2
+           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+
+    try:
+        # Sort by flux, take brightest unsaturated stars
+        try:
+            order = np.argsort(star_positions['flux'])[::-1][:Config.RL_PSF_MAX_STARS]
+        except (KeyError, TypeError):
+            order = range(min(Config.RL_PSF_MAX_STARS, len(star_positions)))
+
+        xs = [float(star_positions[i]['xcentroid']) for i in order]
+        ys = [float(star_positions[i]['ycentroid']) for i in order]
+
+        tbl = _AstroTable()
+        tbl['x'] = xs
+        tbl['y'] = ys
+
+        stars = _phot_extract_stars(
+            _NDData(data=lum.astype(np.float64)), tbl, size=psf_size
+        )
+        if len(stars) < Config.RL_PSF_MIN_STARS:
+            return None, 0.0
+
+        oversampling = 2
+        epsf, _ = EPSFBuilder(oversampling=oversampling, maxiters=10,
+                               progress_bar=False)(stars)
+
+        kernel = np.array(epsf.data, dtype=np.float64)
+        kernel = np.maximum(kernel, 0.0)
+        total = kernel.sum()
+        if total <= 0.0:
+            return None, 0.0
+        kernel /= total
+
+        # Estimate FWHM from the area above half-maximum.  epsf.data lives on an
+        # oversampled grid (oversampling× finer than the detector), so the
+        # above-half-max pixel count is an area in oversampled pixels: the linear
+        # FWHM must be divided by the oversampling factor to return detector px.
+        half_max = kernel.max() / 2.0
+        fwhm = float(np.sqrt(np.sum(kernel >= half_max) / np.pi) * 2.0 / oversampling)
+
+        logging.info("PSF estimated via EPSFBuilder: FWHM=%.2f px, "
+                     "from %d stars", fwhm, len(stars))
+        return kernel, fwhm
+    except Exception as exc:
+        logging.debug("EPSFBuilder failed: %s", exc)
+        return None, 0.0
+
 
 def estimate_psf(img: np.ndarray, star_positions,
                  cutout_radius: int = None, psf_size: int = None,
@@ -32,12 +104,21 @@ def estimate_psf(img: np.ndarray, star_positions,
     Returns (psf_kernel, fwhm_pixels).  Returns (None, 0.0) if too few stars
     are successfully fit.
     """
-    if not HAS_CURVE_FIT:
-        logging.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
-        return None, 0.0
     if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
         logging.warning("Too few stars for PSF estimation "
                         f"({0 if star_positions is None else len(star_positions)} < {Config.RL_PSF_MIN_STARS})")
+        return None, 0.0
+
+    if psf_size is None:
+        psf_size = Config.RL_PSF_SIZE
+
+    # Prefer photutils EPSFBuilder (empirical, model-free) when available
+    epsf_kernel, epsf_fwhm = _estimate_psf_epsf(img, star_positions, psf_size)
+    if epsf_kernel is not None:
+        return epsf_kernel, epsf_fwhm
+
+    if not HAS_CURVE_FIT:
+        logging.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
         return None, 0.0
 
     if cutout_radius is None:
@@ -286,6 +367,28 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
         psf = np.maximum(psf_est, 0.0)
         psf /= psf.sum()
 
+    # Radial apodization — force the kernel to zero at its edge.
+    # An empirical PSF from stacked star cutouts retains non-zero energy in the
+    # square corners (star wings, residual noise), and blind RL refinement can
+    # inject blocky off-centre structure. FFT deconvolution with such a
+    # hard-edged square kernel produces square ringing ("boxes") around every
+    # point source. A Tukey (flat-core, cosine-taper) radial window keeps the
+    # PSF core/wings intact while tapering the outer edge smoothly to zero,
+    # yielding circular support and eliminating the box artefacts.
+    yy, xx = np.mgrid[0:psf_size, 0:psf_size]
+    r = np.sqrt((yy - half) ** 2 + (xx - half) ** 2) / float(max(half, 1))
+    taper_start = 0.6                       # inner 60% radius: unwindowed
+    w = np.ones_like(r)
+    edge = r >= 1.0
+    taper = (r >= taper_start) & (~edge)
+    w[taper] = 0.5 * (1.0 + np.cos(np.pi * (r[taper] - taper_start)
+                                   / (1.0 - taper_start)))
+    w[edge] = 0.0
+    psf = psf * w
+    _s = psf.sum()
+    if _s > 1e-12:
+        psf /= _s
+
     # Estimate FWHM from the median PSF
     half_max = psf.max() * 0.5
     above = int(np.sum(psf > half_max))
@@ -386,6 +489,24 @@ def tv_regularized_deconvolve(img: np.ndarray, psf: np.ndarray,
     return result.astype(np.float32)
 
 
+def _rl_deconvolve_xp(image, psf, iterations, xp, xsignal):
+    """Richardson-Lucy iteration on an arbitrary array backend (numpy or cupy).
+
+    Mirrors skimage.restoration.richardson_lucy (clip=False): start from a flat
+    0.5 estimate and iterate im *= conv(image / conv(im, psf), psf_mirror) using
+    FFT convolutions. With xp=cupy/xsignal=cupyx this runs on the GPU.
+    """
+    image = xp.asarray(image, dtype=xp.float32)
+    psf = xp.asarray(psf, dtype=xp.float32)
+    im_deconv = xp.full(image.shape, 0.5, dtype=xp.float32)
+    psf_mirror = psf[::-1, ::-1]
+    for _ in range(int(iterations)):
+        conv = xsignal.fftconvolve(im_deconv, psf, mode='same')
+        relative_blur = image / conv
+        im_deconv = im_deconv * xsignal.fftconvolve(relative_blur, psf_mirror, mode='same')
+    return im_deconv
+
+
 def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
                                 iterations: int = None,
                                 star_mask: Optional[np.ndarray] = None) -> np.ndarray:
@@ -397,8 +518,15 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
     star_mask (float [0,1], 1=star core): if provided, the deconvolved
     result is blended back with the original at star positions to prevent
     ringing artifacts on bright star cores.
+
+    Runs on the GPU (cupy FFT convolution) when --use-gpu is active; otherwise
+    uses skimage's CPU implementation.
     """
-    if not HAS_SKIMAGE_RESTORATION:
+    from src.gpu_context import get_gpu
+    _gpu = get_gpu()
+    _use_gpu = _gpu.active and _gpu.xsignal is not None and hasattr(_gpu.xsignal, 'fftconvolve')
+
+    if not HAS_SKIMAGE_RESTORATION and not _use_gpu:
         logging.warning("skimage.restoration not available; skipping Richardson-Lucy deconvolution")
         return img
     if iterations is None:
@@ -416,8 +544,19 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
     pedestal = max(-y_min + 1e-6, 1e-6)
     Y_pos = Y + pedestal
 
-    Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
-    Y_deconv = Y_deconv - pedestal
+    if _use_gpu:
+        try:
+            Y_deconv = _gpu.to_host(
+                _rl_deconvolve_xp(Y_pos, psf, iterations, _gpu.xp, _gpu.xsignal))
+            logging.info("Richardson-Lucy deconvolution ran on GPU")
+        except Exception as exc:
+            if _gpu.is_oom(exc):
+                _gpu.free_pool()
+            logging.debug("GPU RL failed (%s); falling back to CPU skimage", exc)
+            Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
+    else:
+        Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
+    Y_deconv = np.asarray(Y_deconv, dtype=np.float64) - pedestal
 
     # Star protection: blend original at star cores
     if star_mask is not None:

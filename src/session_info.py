@@ -168,7 +168,7 @@ def build_wcs_keywords(si: 'SessionInfo') -> dict:
         'CD2_2':    (cd2_2,      'WCS CD matrix [2,2]'),
         'EQUINOX':  (2000.0,     'Equinox of coordinates (J2000)'),
         'ORIENTAT': (math.degrees(theta), 'Position angle of north (degrees)'),
-        'WCSORIGIN': ('session_info', 'WCS source: session info.json'),
+        'WCSORIG': ('session_info', 'WCS source: session info.json'),
     }
 
 
