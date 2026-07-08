@@ -131,6 +131,8 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 
 The startup banner reports native status (`native_status()` in `src/utils.py`); each accelerated step logs a `[rust] …` line. Separately, Richardson-Lucy deconvolution runs on the GPU (cupy FFT) when `--use-gpu` is active (`_rl_deconvolve_xp`), validated against skimage on the numpy backend.
 
+Kernel internals (why they're fast): a blocked **gather-transpose** turns the per-pixel N-sample gather (N huge-stride read streams that defeat the prefetcher/TLB) into sequential per-frame row-segment copies through an L2-resident pixel-major tile; medians use **quickselect** (`select_nth_unstable`, O(n)) instead of a full sort; the warp has a **separable fast path** for pure translation (per-image wx table + per-row wy — zero `sin()` calls per pixel) plus an interior path with no per-tap bounds checks. Measured on top of the first-generation kernels: sigma-clip ~2.6×, winsorized ~3.0×, median ~4.0×, ESD ~1.7×, fused patch combine ~2.8×, shift warp ~6.5×, affine warp ~2.8×, aniso ~4.0× ([tools/bench_native.py](tools/bench_native.py) reproduces the numbers).
+
 Build (needs a Rust toolchain + `pip install maturin`):
 ```bash
 # into a virtualenv:
@@ -139,7 +141,9 @@ cd ext/astro_native && maturin develop --release
 cd ext/astro_native && python -m maturin build --release
 pip install --force-reinstall target/wheels/astro_native-*.whl
 ```
-Parity vs the numpy reference is covered by [tests/test_native.py](tests/test_native.py) (auto-skips if the module is absent).
+Optionally set `RUSTFLAGS="-C target-cpu=native"` before building for extra auto-vectorisation — safe when the wheel stays on the machine that built it (do not redistribute such a wheel; it may use instructions older CPUs lack).
+
+Parity vs the numpy reference is covered by [tests/test_native.py](tests/test_native.py) (auto-skips if the module is absent). Benchmark with [tools/bench_native.py](tools/bench_native.py) before/after kernel changes.
 
 ### Plate solving
 Requires `astroquery` installed and `ASTROMETRY_API_KEY` environment variable set. Enable with `--plate-solve`.

@@ -10,19 +10,31 @@ use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray3, PyReadonl
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-/// Median of a slice, sorting it in place. Matches numpy: even N averages the
-/// two middle values. Returns NaN for an empty slice.
+/// Median of a slice via quickselect (O(n), vs O(n log n) full sort). Exact
+/// order statistics, so values match the numpy/sort-based reference bit-for-bit:
+/// odd N -> k-th element; even N -> mean of the two middle order statistics
+/// (the second is the max of the left partition after select_nth).
 #[inline]
 fn median_inplace(v: &mut [f32]) -> f32 {
     let n = v.len();
     if n == 0 {
         return f32::NAN;
     }
-    v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = n / 2;
+    let (_, &mut m, _) =
+        v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     if n % 2 == 1 {
-        v[n / 2]
+        m
     } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
+        // (mid-1)-th order statistic = max of the left partition, using the
+        // same comparator ordering as the select (NaN compares Equal).
+        let mut lo = f32::NEG_INFINITY;
+        for &x in v[..mid].iter() {
+            if x.partial_cmp(&lo) == Some(std::cmp::Ordering::Greater) {
+                lo = x;
+            }
+        }
+        0.5 * (lo + m)
     }
 }
 
@@ -111,8 +123,21 @@ fn percentile_sorted(sorted: &[f32], p: f64) -> f32 {
     }
 }
 
-/// Row-parallel driver: fills each pixel's N samples into `vals`, then calls
-/// `work` with per-thread `state` built once per row via `init`.
+/// Pixels per gather-transpose tile: sized so a tile (`tile * n` floats) stays
+/// L2-resident (~128 KB ceiling), with sane bounds.
+#[inline]
+fn gather_tile(n: usize) -> usize {
+    (32768 / n.max(1)).clamp(16, 256)
+}
+
+/// Row-parallel driver with a blocked gather-transpose.
+///
+/// The naive per-pixel gather reads each pixel's N samples with a stride of a
+/// whole frame (H*W*C floats — tens of MB): N concurrent read streams, which
+/// defeats the hardware prefetcher and thrashes the TLB. Instead, per tile of
+/// `T` pixels we copy each frame's contiguous row segment (sequential, one
+/// stream at a time) into an L2-resident pixel-major block, then hand `work`
+/// contiguous `&block[p*n..(p+1)*n]` slices.
 fn row_parallel<S, Init, Work>(
     arr: &numpy::ndarray::ArrayView4<'_, f32>,
     h: usize,
@@ -127,17 +152,46 @@ where
     Init: Fn() -> S + Sync,
     Work: Fn(&mut S, &[f32]) -> f32 + Sync,
 {
-    let mut out = vec![0f32; h * w * c];
-    out.par_chunks_mut(w * c).enumerate().for_each(|(row, out_row)| {
+    let row_len = w * c;
+    let frame_len = h * row_len;
+    let tile = gather_tile(n);
+    let data: Option<&[f32]> = arr.as_slice();
+
+    let mut out = vec![0f32; h * row_len];
+    out.par_chunks_mut(row_len).enumerate().for_each(|(row, out_row)| {
         let mut state = init();
-        let mut vals = vec![0f32; n];
-        for col in 0..(w * c) {
-            let wj = col / c;
-            let cj = col % c;
-            for k in 0..n {
-                vals[k] = arr[[k, row, wj, cj]];
+        let mut block = vec![0f32; tile * n];
+        match data {
+            Some(flat) => {
+                let row_base = row * row_len;
+                let mut start = 0usize;
+                while start < row_len {
+                    let t = tile.min(row_len - start);
+                    // Gather-transpose: sequential read per frame, L2 write.
+                    for k in 0..n {
+                        let src = &flat[k * frame_len + row_base + start..][..t];
+                        for (p, &v) in src.iter().enumerate() {
+                            block[p * n + k] = v;
+                        }
+                    }
+                    for p in 0..t {
+                        out_row[start + p] = work(&mut state, &block[p * n..(p + 1) * n]);
+                    }
+                    start += t;
+                }
             }
-            out_row[col] = work(&mut state, &vals);
+            None => {
+                // Non-contiguous fallback: original indexed gather.
+                let vals = &mut block[..n];
+                for col in 0..row_len {
+                    let wj = col / c;
+                    let cj = col % c;
+                    for k in 0..n {
+                        vals[k] = arr[[k, row, wj, cj]];
+                    }
+                    out_row[col] = work(&mut state, &vals[..n]);
+                }
+            }
         }
     });
     out
@@ -324,38 +378,30 @@ fn sigma_clip_combine<'py>(
     let (n, h, w, c) = (shape[0], shape[1], shape[2], shape[3]);
 
     let weights_vec: Option<Vec<f32>> = weights.map(|wa| wa.as_array().to_vec());
-
-    // Flat output buffer, filled row-parallel.
-    let mut out = vec![0f32; h * w * c];
+    let wref = weights_vec.as_deref();
 
     // Release the GIL for the compute; arr is a read-only view over the numpy
     // buffer (kept alive by `data`), safe to share across rayon threads.
-    py.allow_threads(|| {
-        out.par_chunks_mut(w * c).enumerate().for_each(|(row, out_row)| {
-            // Thread-local scratch reused across the row.
-            let mut vals = vec![0f32; n];
-            let mut active = vec![true; n];
-            let mut gather: Vec<f32> = Vec::with_capacity(n);
-            let mut scratch: Vec<f32> = Vec::with_capacity(n);
-            for col in 0..(w * c) {
-                let wj = col / c;
-                let cj = col % c;
-                for k in 0..n {
-                    vals[k] = arr[[k, row, wj, cj]];
-                }
-                out_row[col] = combine_pixel(
-                    &vals,
-                    weights_vec.as_deref(),
-                    sigma,
-                    max_iters,
-                    winsorize,
-                    use_mad,
-                    &mut active,
-                    &mut gather,
-                    &mut scratch,
-                );
-            }
-        });
+    let out = py.allow_threads(|| {
+        row_parallel(
+            &arr,
+            h,
+            w,
+            c,
+            n,
+            || {
+                (
+                    vec![true; n],
+                    Vec::<f32>::with_capacity(n),
+                    Vec::<f32>::with_capacity(n),
+                )
+            },
+            |(active, gather, scratch), vals| {
+                combine_pixel(
+                    vals, wref, sigma, max_iters, winsorize, use_mad, active, gather, scratch,
+                )
+            },
+        )
     });
 
     let out_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), out)
@@ -564,6 +610,22 @@ fn lanczos_w(x: f64, a: f64) -> f64 {
     }
 }
 
+/// Compute the 6 normalised Lanczos-3 tap weights for fractional offset `r`
+/// (taps at floor-2 .. floor+3). Same arithmetic as the original inline loop.
+#[inline]
+fn lanczos6_weights(r: f64, out: &mut [f64; 6]) {
+    let mut s = 0.0;
+    for (t, o) in out.iter_mut().enumerate() {
+        *o = lanczos_w((t as f64 - 2.0) - r, 3.0);
+        s += *o;
+    }
+    if s != 0.0 {
+        for v in out.iter_mut() {
+            *v /= s;
+        }
+    }
+}
+
 /// Affine warp with Lanczos-3 resampling, matching scipy's
 /// `affine_transform` sampling convention: `out[oy,ox] = in[M @ (oy,ox) + off]`,
 /// out-of-bounds -> `cval`. `mat` is row-major 2x2 `[[m00,m01],[m10,m11]]`
@@ -583,66 +645,138 @@ fn warp_affine_lanczos3<'py>(
     let arr = data.as_array();
     let s = arr.shape();
     let (h, w, c) = (s[0], s[1], s[2]);
-    let a = 3.0_f64;
     let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
     let (o0, o1) = (off[0], off[1]);
+    // Pure translation: iy depends only on oy and ix only on ox, so the Lanczos
+    // weights are separable — one wx table per image, one wy per row. This is
+    // the common case (rotation off) and removes ALL sin() calls plus the
+    // weight normalisation from the per-pixel loop.
+    let is_shift = m00 == 1.0 && m01 == 0.0 && m10 == 0.0 && m11 == 1.0;
+    let flat: Option<&[f32]> = arr.as_slice();
+
+    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if is_shift && flat.is_some() {
+        let mut wxs = vec![[0f64; 6]; out_w];
+        let mut bxs = vec![0isize; out_w];
+        for ox in 0..out_w {
+            let ix = ox as f64 + o1;
+            let fx = ix.floor();
+            lanczos6_weights(ix - fx, &mut wxs[ox]);
+            bxs[ox] = fx as isize - 2;
+        }
+        Some((wxs, bxs))
+    } else {
+        None
+    };
 
     let mut out = vec![0f32; out_h * out_w * c];
     py.allow_threads(|| {
         out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy, out_row)| {
             let mut wy = [0f64; 6];
             let mut wx = [0f64; 6];
-            for ox in 0..out_w {
-                // Inverse map output -> input (scipy convention).
-                let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
-                let ix = m10 * oy as f64 + m11 * ox as f64 + o1;
-                let fy = iy.floor();
-                let fx = ix.floor();
-                let ry = iy - fy;
-                let rx = ix - fx;
-                // 6-tap Lanczos-3 weights, taps at floor-2 .. floor+3.
-                let mut sy = 0.0;
-                let mut sx = 0.0;
-                for t in 0..6 {
-                    let dy = (t as f64 - 2.0) - ry;
-                    let dx = (t as f64 - 2.0) - rx;
-                    wy[t] = lanczos_w(dy, a);
-                    wx[t] = lanczos_w(dx, a);
-                    sy += wy[t];
-                    sx += wx[t];
-                }
-                if sy != 0.0 {
-                    for v in wy.iter_mut() {
-                        *v /= sy;
-                    }
-                }
-                if sx != 0.0 {
-                    for v in wx.iter_mut() {
-                        *v /= sx;
-                    }
-                }
-                let base_y = fy as isize - 2;
-                let base_x = fx as isize - 2;
-                for ch in 0..c {
-                    let mut acc = 0.0f64;
-                    let mut any = false;
-                    for ty in 0..6 {
-                        let yy = base_y + ty as isize;
-                        if yy < 0 || yy >= h as isize || wy[ty] == 0.0 {
-                            continue;
-                        }
-                        let mut row_acc = 0.0f64;
-                        for tx in 0..6 {
-                            let xx = base_x + tx as isize;
-                            if xx < 0 || xx >= w as isize || wx[tx] == 0.0 {
-                                continue;
+            match (flat, &col_tab) {
+                // ---- fast path: contiguous input ----
+                (Some(img), tab) => {
+                    let row_stride = w * c;
+                    for ox in 0..out_w {
+                        let (wyv, wxv, base_y, base_x): (&[f64; 6], &[f64; 6], isize, isize) =
+                            if let Some((wxs, bxs)) = tab {
+                                if ox == 0 {
+                                    let iy = oy as f64 + o0;
+                                    let fy = iy.floor();
+                                    lanczos6_weights(iy - fy, &mut wy);
+                                }
+                                let iy = oy as f64 + o0;
+                                (&wy, &wxs[ox], iy.floor() as isize - 2, bxs[ox])
+                            } else {
+                                let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
+                                let ix = m10 * oy as f64 + m11 * ox as f64 + o1;
+                                let fy = iy.floor();
+                                let fx = ix.floor();
+                                lanczos6_weights(iy - fy, &mut wy);
+                                lanczos6_weights(ix - fx, &mut wx);
+                                (&wy, &wx, fy as isize - 2, fx as isize - 2)
+                            };
+                        let interior = base_y >= 0
+                            && base_y + 6 <= h as isize
+                            && base_x >= 0
+                            && base_x + 6 <= w as isize;
+                        if interior {
+                            // No bounds checks, no zero-weight branches: weights
+                            // sum to 1, zero taps contribute exactly 0.0.
+                            let by = base_y as usize;
+                            let bx = base_x as usize;
+                            for ch in 0..c {
+                                let mut acc = 0.0f64;
+                                for ty in 0..6 {
+                                    let base = (by + ty) * row_stride + bx * c + ch;
+                                    let mut ra = 0.0f64;
+                                    for tx in 0..6 {
+                                        ra += wxv[tx] * img[base + tx * c] as f64;
+                                    }
+                                    acc += wyv[ty] * ra;
+                                }
+                                out_row[ox * c + ch] = acc as f32;
                             }
-                            row_acc += wx[tx] * arr[[yy as usize, xx as usize, ch]] as f64;
-                            any = true;
+                        } else {
+                            for ch in 0..c {
+                                let mut acc = 0.0f64;
+                                let mut any = false;
+                                for ty in 0..6 {
+                                    let yy = base_y + ty as isize;
+                                    if yy < 0 || yy >= h as isize || wyv[ty] == 0.0 {
+                                        continue;
+                                    }
+                                    let mut ra = 0.0f64;
+                                    for tx in 0..6 {
+                                        let xx = base_x + tx as isize;
+                                        if xx < 0 || xx >= w as isize || wxv[tx] == 0.0 {
+                                            continue;
+                                        }
+                                        ra += wxv[tx]
+                                            * img[yy as usize * row_stride + xx as usize * c + ch]
+                                                as f64;
+                                        any = true;
+                                    }
+                                    acc += wyv[ty] * ra;
+                                }
+                                out_row[ox * c + ch] = if any { acc as f32 } else { cval };
+                            }
                         }
-                        acc += wy[ty] * row_acc;
                     }
-                    out_row[ox * c + ch] = if any { acc as f32 } else { cval };
+                }
+                // ---- non-contiguous fallback: original indexed loop ----
+                (None, _) => {
+                    for ox in 0..out_w {
+                        let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
+                        let ix = m10 * oy as f64 + m11 * ox as f64 + o1;
+                        let fy = iy.floor();
+                        let fx = ix.floor();
+                        lanczos6_weights(iy - fy, &mut wy);
+                        lanczos6_weights(ix - fx, &mut wx);
+                        let base_y = fy as isize - 2;
+                        let base_x = fx as isize - 2;
+                        for ch in 0..c {
+                            let mut acc = 0.0f64;
+                            let mut any = false;
+                            for ty in 0..6 {
+                                let yy = base_y + ty as isize;
+                                if yy < 0 || yy >= h as isize || wy[ty] == 0.0 {
+                                    continue;
+                                }
+                                let mut ra = 0.0f64;
+                                for tx in 0..6 {
+                                    let xx = base_x + tx as isize;
+                                    if xx < 0 || xx >= w as isize || wx[tx] == 0.0 {
+                                        continue;
+                                    }
+                                    ra += wx[tx] * arr[[yy as usize, xx as usize, ch]] as f64;
+                                    any = true;
+                                }
+                                acc += wy[ty] * ra;
+                            }
+                            out_row[ox * c + ch] = if any { acc as f32 } else { cval };
+                        }
+                    }
                 }
             }
         });
@@ -696,16 +830,24 @@ fn anisotropic_diffusion<'py>(
                 next.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
                     let yn = (y + 1) % h; // roll(-1, axis0): north neighbour
                     let ys = (y + h - 1) % h; // roll(1, axis0): south
-                    for x in 0..w {
-                        let xe = (x + 1) % w; // roll(-1, axis1): east
-                        let xw = (x + w - 1) % w; // roll(1, axis1): west
+                    let step = |x: usize, xe: usize, xw: usize| -> f64 {
                         let ctr = buf[y * w + x];
                         let dn = buf[yn * w + x] - ctr;
                         let ds = buf[ys * w + x] - ctr;
                         let de = buf[y * w + xe] - ctr;
                         let dw = buf[y * w + xw] - ctr;
-                        out_row[x] = ctr
-                            + g * (cond(dn) * dn + cond(ds) * ds + cond(de) * de + cond(dw) * dw);
+                        ctr + g * (cond(dn) * dn + cond(ds) * ds + cond(de) * de + cond(dw) * dw)
+                    };
+                    // Periodic boundary handled at the two edge columns only —
+                    // keeps the interior loop free of `%` operations.
+                    if w >= 2 {
+                        out_row[0] = step(0, 1, w - 1);
+                        for x in 1..w - 1 {
+                            out_row[x] = step(x, x + 1, x - 1);
+                        }
+                        out_row[w - 1] = step(w - 1, 0, w - 2);
+                    } else if w == 1 {
+                        out_row[0] = step(0, 0, 0);
                     }
                 });
                 std::mem::swap(buf, &mut next);
@@ -714,14 +856,13 @@ fn anisotropic_diffusion<'py>(
     });
 
     let mut out = vec![0f64; h * w * c];
-    for ch in 0..c {
-        let buf = &chans[ch];
-        for y in 0..h {
+    out.par_chunks_mut(w * c).enumerate().for_each(|(y, orow)| {
+        for (ch, buf) in chans.iter().enumerate() {
             for x in 0..w {
-                out[(y * w + x) * c + ch] = buf[y * w + x];
+                orow[x * c + ch] = buf[y * w + x];
             }
         }
-    }
+    });
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
 }
 
@@ -748,39 +889,38 @@ fn patch_weighted_sigma_combine<'py>(
     let gw: Option<Vec<f32>> = gweights.map(|x| x.as_array().to_vec());
     let gwref = gw.as_deref();
 
+    let flat: Option<&[f32]> = arr.as_slice();
+    let row_len = w * c;
+    let frame_len = h * row_len;
+
     let mut out = vec![0f32; h * w * c];
     py.allow_threads(|| {
-        out.par_chunks_mut(w * c).enumerate().for_each(|(row, out_row)| {
-            let mut chan = vec![0f32; n]; // one channel's N samples
+        out.par_chunks_mut(row_len).enumerate().for_each(|(row, out_row)| {
             let mut active = vec![true; n];
             let mut gather: Vec<f32> = Vec::with_capacity(n);
             let mut scratch: Vec<f32> = Vec::with_capacity(n);
             let mut reject_count = vec![0u32; n]; // per-frame rejected-channel count
-            for col in 0..w {
-                for f in 0..n {
-                    reject_count[f] = 0;
+            let inv_c = 1.0f64 / c as f64;
+
+            // Per-pixel combine given contiguous per-channel sample slices in
+            // `block` (layout [(p*c + ch)*n + f]) — see gather-transpose below.
+            let combine_col = |block: &[f32], p: usize, col: usize,
+                                   active: &mut [bool], gather: &mut Vec<f32>,
+                                   scratch: &mut Vec<f32>, reject_count: &mut [u32],
+                                   out_row: &mut [f32]| {
+                for rc in reject_count.iter_mut() {
+                    *rc = 0;
                 }
-                // Sigma-clip each channel independently; tally per-frame rejections.
                 for ch in 0..c {
-                    for f in 0..n {
-                        chan[f] = arr[[f, row, col, ch]];
-                    }
-                    sigma_clip_mask(&chan, sigma, max_iters, use_mad,
-                                    &mut active, &mut gather, &mut scratch);
+                    let chan = &block[(p * c + ch) * n..][..n];
+                    sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch);
                     for f in 0..n {
                         if !active[f] {
                             reject_count[f] += 1;
                         }
                     }
                 }
-                // Frame weights = qmap * gweight * (1 - reject_fraction).
-                let inv_c = 1.0f64 / c as f64;
                 let mut wsum = 0f64;
-                // accumulate per channel
-                let base = col * c;
-                for ch in 0..c {
-                    out_row[base + ch] = 0.0;
-                }
                 let mut accs = [0f64; 8]; // supports up to 8 channels
                 for f in 0..n {
                     let rej_frac = reject_count[f] as f64 * inv_c;
@@ -791,13 +931,52 @@ fn patch_weighted_sigma_combine<'py>(
                         continue;
                     }
                     for ch in 0..c {
-                        accs[ch] += wt * arr[[f, row, col, ch]] as f64;
+                        accs[ch] += wt * block[(p * c + ch) * n + f] as f64;
                     }
                     wsum += wt;
                 }
                 let denom = if wsum > 1e-12 { wsum } else { 1e-12 };
                 for ch in 0..c {
-                    out_row[base + ch] = (accs[ch] / denom) as f32;
+                    out_row[col * c + ch] = (accs[ch] / denom) as f32;
+                }
+            };
+
+            match flat {
+                Some(data) => {
+                    // Blocked gather-transpose (same rationale as row_parallel):
+                    // sequential row-segment reads per frame instead of N huge-
+                    // stride streams per pixel.
+                    let tile_cols = (32768 / (n * c).max(1)).clamp(4, 256);
+                    let mut block = vec![0f32; tile_cols * c * n];
+                    let row_base = row * row_len;
+                    let mut start = 0usize;
+                    while start < w {
+                        let t = tile_cols.min(w - start);
+                        for k in 0..n {
+                            let src = &data[k * frame_len + row_base + start * c..][..t * c];
+                            for (i, &v) in src.iter().enumerate() {
+                                block[i * n + k] = v;
+                            }
+                        }
+                        for p in 0..t {
+                            combine_col(&block, p, start + p, &mut active, &mut gather,
+                                        &mut scratch, &mut reject_count, out_row);
+                        }
+                        start += t;
+                    }
+                }
+                None => {
+                    // Non-contiguous fallback: single-column "tile".
+                    let mut block = vec![0f32; c * n];
+                    for col in 0..w {
+                        for ch in 0..c {
+                            for f in 0..n {
+                                block[ch * n + f] = arr[[f, row, col, ch]];
+                            }
+                        }
+                        combine_col(&block, 0, col, &mut active, &mut gather,
+                                    &mut scratch, &mut reject_count, out_row);
+                    }
                 }
             }
         });

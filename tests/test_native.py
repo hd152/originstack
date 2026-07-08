@@ -147,6 +147,32 @@ def test_fused_patch_combine_matches_numpy(use_mad):
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1.0
 
 
+def test_warp_shift_fast_path():
+    """Pure-translation warp (separable fast path): an integer shift must
+    reproduce the input exactly (Lanczos at zero fractional offset is a delta),
+    and a fractional shift must track scipy order-3 closely."""
+    from scipy import ndimage
+    rng = np.random.default_rng(5)
+    img = np.ascontiguousarray(rng.normal(500, 50, (64, 80, 3)).astype(np.float32))
+    ident = [1.0, 0.0, 0.0, 1.0]
+
+    # Integer shift: out[o] = in[o + off] exactly, cval outside.
+    got = native.warp_affine_lanczos3(img, ident, [3.0, -2.0], 64, 80, 0.0)
+    assert np.array_equal(got[:-3, 2:], img[3:, :78])
+
+    # Fractional shift: compare against scipy.ndimage.shift order-3.
+    off = [-1.3, 2.7]  # in[o + off] convention -> scipy shift by -off
+    got = native.warp_affine_lanczos3(img, ident, off, 64, 80, 0.0)
+    ref = np.empty_like(img)
+    for ch in range(3):
+        ref[:, :, ch] = ndimage.shift(img[:, :, ch], shift=(1.3, -2.7), order=3,
+                                      mode='constant', cval=0.0)
+    m = 6
+    a = ref[m:-m, m:-m, :].ravel()
+    b = got[m:-m, m:-m, :].ravel()
+    assert np.corrcoef(a, b)[0, 1] > 0.999
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan
