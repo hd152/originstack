@@ -839,11 +839,23 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         print(f"  Avg FWHM:         {np.mean(fwhms):.2f} px (best: {np.min(fwhms):.2f})")
     if snrs:
         print(f"  Avg SNR:          {np.mean(snrs):.1f} (best: {np.max(snrs):.1f})")
-    print(f"  Processing time:  {format_time(stats.total_time())}")
-    print(f"    Quality+Load:   {format_time(stats.quality_time)}")
-    print(f"    Registration:   {format_time(stats.registration_time)}")
-    print(f"    Stacking:       {format_time(stats.stacking_time)}")
-    print(f"    Post-process:   {format_time(stats.post_processing_time)}")
+    # Per-phase timing with % of wall-clock so the bottleneck is obvious. The
+    # four phases rarely sum to the total — "Other" captures frame discovery,
+    # master-calibration building, plate-solve/WCS, colour calibration, and the
+    # file writes between phases. A large "Other" means the limiter is outside
+    # the four phases (usually I/O: master building or the output/memmap writes).
+    _tt = max(stats.total_time(), 1e-9)
+    _phases = [
+        ("Quality+Load", stats.quality_time),
+        ("Registration", stats.registration_time),
+        ("Stacking", stats.stacking_time),
+        ("Post-process", stats.post_processing_time),
+    ]
+    _other = max(_tt - sum(t for _, t in _phases), 0.0)
+    print(f"  Processing time:  {format_time(_tt)}")
+    for _name, _t in _phases:
+        print(f"    {_name+':':<15} {format_time(_t):>8}  ({_t / _tt * 100:4.1f}%)")
+    print(f"    {'Other (I/O):':<15} {format_time(_other):>8}  ({_other / _tt * 100:4.1f}%)")
     if HAS_PSUTIL:
         print(f"  Peak memory:      {stats.peak_memory_mb:.1f} MB")
 
