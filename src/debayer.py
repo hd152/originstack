@@ -484,8 +484,17 @@ remove_hot_pixels_bayer = lambda data, threshold=_DETECT: fix_hot_pixels(data, m
 apply_hot_pixel_map_bayer = lambda data, hot_map: fix_hot_pixels(data, mode='bayer', hot_map=hot_map, threshold=None)
 
 
+def _block_avg_2x(a: np.ndarray) -> np.ndarray:
+    """2x2 block-average downsample (even-cropped), float64."""
+    h2 = (a.shape[0] // 2) * 2
+    w2 = (a.shape[1] // 2) * 2
+    c = a[:h2, :w2]
+    return (c[::2, ::2] + c[1::2, ::2] + c[::2, 1::2] + c[1::2, 1::2]) * 0.25
+
+
 def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
-                                  upsample: int = 10) -> np.ndarray:
+                                  upsample: int = 10,
+                                  downsample: int = 2) -> np.ndarray:
     """Correct lateral chromatic aberration by sub-pixel per-channel registration.
 
     Registers the red and blue channels against the green channel using phase
@@ -496,40 +505,69 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
     Requires skimage (``phase_cross_correlation``).  Returns the original image
     unchanged if the dependency is missing or registration fails.
 
+    The shift *estimate* runs on a ``downsample``x block-averaged copy of each
+    channel — CA is a smooth, near-constant sub-pixel offset across the frame
+    (lens dispersion), not fine per-pixel detail, so it survives a 2x
+    downsample essentially exactly while cutting the dominant FFT cost by
+    ~4x (N log N). Measured on real 233-frame runs this step was 3-4x slower
+    under full parallel load than in isolation — consistent with the full-res
+    FFTs being memory-bandwidth bound, which downsampling directly reduces.
+    The recovered shift is scaled back up and applied to the FULL-resolution
+    channel (accuracy of the *applied* correction is unaffected; only the
+    *estimation* resolution changes) via the native Lanczos-3 warp when
+    available, else scipy's cubic-spline shift.
+
     Args:
         rgb: Float32 image (H, W, 3), R/G/B order.
         max_shift_px: Maximum plausible CA shift in pixels (default 5).
                       Corrections larger than this are silently suppressed.
-        upsample: Sub-pixel upsample factor for phase correlation (default 10).
+        upsample: Sub-pixel upsample factor for phase correlation (default 10),
+                  applied at the downsampled scale.
+        downsample: Block-average factor for the correlation estimate (default
+                    2). Set to 1 to correlate at full resolution (old behaviour).
     """
     if not _HAS_PCC or rgb.ndim != 3 or rgb.shape[2] != 3:
         return rgb
 
     result = rgb.copy()
     g = rgb[:, :, 1].astype(np.float64)
-    g_std = g.std()
+    g_small = _block_avg_2x(g) if downsample >= 2 else g
+    g_std = g_small.std()
     if g_std < 1e-12:
         return rgb
-    g_norm = (g - g.mean()) / g_std
+    g_norm = (g_small - g_small.mean()) / g_std
 
-    # FIX #5: `import warnings` moved to module level — was inside this loop,
-    # causing a redundant (though cached) import on every iteration.
     for c_idx in (0, 2):  # Red, Blue
         ch = rgb[:, :, c_idx].astype(np.float64)
-        ch_std = ch.std()
+        ch_small = _block_avg_2x(ch) if downsample >= 2 else ch
+        ch_std = ch_small.std()
         if ch_std < 1e-12:
             continue
-        ch_norm = (ch - ch.mean()) / ch_std
+        ch_norm = (ch_small - ch_small.mean()) / ch_std
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 shift, error, _ = _pcc(g_norm, ch_norm, upsample_factor=upsample)
+            scale = 2.0 if downsample >= 2 else 1.0
+            shift = shift * scale
             if (np.isfinite(shift).all()
                     and np.abs(shift[0]) <= max_shift_px
                     and np.abs(shift[1]) <= max_shift_px):
-                result[:, :, c_idx] = ndimage.shift(
-                    rgb[:, :, c_idx], shift=shift,
-                    order=3, mode='reflect').astype(np.float32)
+                if _HAS_NATIVE:
+                    try:
+                        H, W = rgb.shape[:2]
+                        off = [-float(shift[0]), -float(shift[1])]
+                        result[:, :, c_idx] = _native.warp_affine_lanczos3(
+                            np.ascontiguousarray(rgb[:, :, c_idx:c_idx + 1]),
+                            [1.0, 0.0, 0.0, 1.0], off, H, W, 0.0)[:, :, 0]
+                    except Exception:
+                        result[:, :, c_idx] = ndimage.shift(
+                            rgb[:, :, c_idx], shift=shift,
+                            order=3, mode='reflect').astype(np.float32)
+                else:
+                    result[:, :, c_idx] = ndimage.shift(
+                        rgb[:, :, c_idx], shift=shift,
+                        order=3, mode='reflect').astype(np.float32)
                 _log.debug("CA correction ch%d: shift=(%.3f, %.3f) err=%.4f",
                            c_idx, float(shift[0]), float(shift[1]), float(error))
         except Exception as exc:

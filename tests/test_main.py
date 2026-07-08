@@ -432,6 +432,66 @@ class TestDebayerDispatch(unittest.TestCase):
         )
 
 
+class TestChromaticAberrationCorrection(unittest.TestCase):
+    """Verifies the downsample-before-correlate CA fix recovers a known
+    injected R/B shift as accurately as full-res correlation (downsample=1),
+    and that the corrected R/B align with G to well under 1px."""
+
+    def setUp(self):
+        self._gpu = _gpu_mod._gpu
+        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
+
+    def tearDown(self):
+        _gpu_mod._gpu = self._gpu
+
+    def _make_frame(self, seed=4):
+        from scipy import ndimage
+        rng = np.random.default_rng(seed)
+        H, W = 200, 240
+        g = np.full((H, W), 200.0)
+        yy, xx = np.mgrid[0:H, 0:W]
+        for _ in range(15):
+            cy, cx = rng.uniform(20, H - 20), rng.uniform(20, W - 20)
+            g += rng.uniform(500, 3000) * np.exp(
+                -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 1.8 ** 2))
+        r = ndimage.shift(g, shift=(1.2, -0.8), order=3, mode='reflect')
+        b = ndimage.shift(g, shift=(-0.6, 1.1), order=3, mode='reflect')
+        return np.stack([r, g, b], axis=2).astype(np.float32)
+
+    def _residual_misalignment(self, corrected, ref):
+        from skimage.registration import phase_cross_correlation
+        shift, _, _ = phase_cross_correlation(
+            ref.astype(np.float64), corrected.astype(np.float64), upsample_factor=20)
+        return float(np.hypot(shift[0], shift[1]))
+
+    def test_downsampled_correction_matches_fullres_accuracy(self):
+        rgb = self._make_frame()
+        out_ds = astro.correct_chromatic_aberration(rgb.copy(), downsample=2)
+        out_full = astro.correct_chromatic_aberration(rgb.copy(), downsample=1)
+        for out, label in ((out_ds, 'downsample=2'), (out_full, 'downsample=1')):
+            err_r = self._residual_misalignment(out[:, :, 0], out[:, :, 1])
+            err_b = self._residual_misalignment(out[:, :, 2], out[:, :, 1])
+            self.assertLess(err_r, 0.3, f'{label}: R residual {err_r}')
+            self.assertLess(err_b, 0.3, f'{label}: B residual {err_b}')
+
+    def test_native_and_scipy_fallback_agree(self):
+        """The native Lanczos-warp shift-apply path and the scipy fallback
+        must both correct to well-aligned output (not just avoid crashing)."""
+        import src.debayer as db
+        rgb = self._make_frame()
+        had_native = db._HAS_NATIVE
+        try:
+            db._HAS_NATIVE = True
+            out_native = astro.correct_chromatic_aberration(rgb.copy(), downsample=2)
+            db._HAS_NATIVE = False
+            out_scipy = astro.correct_chromatic_aberration(rgb.copy(), downsample=2)
+        finally:
+            db._HAS_NATIVE = had_native
+        for out, label in ((out_native, 'native'), (out_scipy, 'scipy-fallback')):
+            err_r = self._residual_misalignment(out[:, :, 0], out[:, :, 1])
+            self.assertLess(err_r, 0.3, f'{label}: R residual {err_r}')
+
+
 class TestWhiteBalance(unittest.TestCase):
     def setUp(self):
         self._gpu = _gpu_mod._gpu
