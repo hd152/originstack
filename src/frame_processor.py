@@ -449,12 +449,40 @@ def _probe_gpu_calibration(H: int, W: int, gpu, masters: Dict) -> bool:
     return gpu_s < cpu_s
 
 
+def _pin_worker_to_single_thread() -> None:
+    """Force every internally-threaded library in this worker process down to
+    1 thread each.
+
+    Phase 1 parallelism comes from the ProcessPoolExecutor (one process per
+    worker, already using all cores). Without this, each worker ALSO lets
+    BLAS/OpenMP (numpy/scipy), rayon (our native kernels), and OpenCV (cv2
+    debayer) spin up their own internal thread pool sized to the full core
+    count — with W worker processes doing this simultaneously you get up to
+    W x cores OS threads contending for `cores` physical cores. On this
+    machine cv2 alone defaults to 16 threads per call; with ~16 concurrent
+    worker processes that is up to 256 threads fighting over 16 cores, which
+    is consistent with Quality+Load sub-steps running far slower under real
+    parallel load than in an isolated single-process benchmark. Env vars are
+    read lazily by OpenBLAS/MKL/rayon at first use, so setting them here (in
+    the pool initializer, before any task runs) takes effect correctly.
+    """
+    for var in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+               'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS', 'RAYON_NUM_THREADS'):
+        os.environ[var] = '1'
+    try:
+        import cv2
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+
+
 def _init_worker_shm(shm_specs: Dict[str, tuple]) -> None:
     """Initializer for pool workers — attach to shared-memory calibration arrays.
 
     *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
     attach (read-only view) without copying data or touching the filesystem.
     """
+    _pin_worker_to_single_thread()
     global _worker_masters
     _worker_masters = {}
     for name, (shm_name, dtype_str, shape) in shm_specs.items():
@@ -526,6 +554,7 @@ def execute_frame_processing(
     # dominates "Quality+Load" instead of leaving it as one opaque number.
     _step_totals: Dict[str, float] = {}
     _step_frames = 0
+    _worker_count_used = 1  # updated below once the real dispatch path is known
 
     def _accum(timings: Optional[dict]) -> None:
         nonlocal _step_frames
@@ -565,6 +594,7 @@ def execute_frame_processing(
         except Exception:
             pass
 
+        _worker_count_used = max(workers, 1)
         print(f"  Processing {n} frames in parallel ({workers} workers)...")
 
         # Share calibration arrays via shared memory — zero disk I/O, one copy
@@ -667,6 +697,7 @@ def execute_frame_processing(
         _qpool = ThreadPoolExecutor(max_workers=_n_cpu) if _use_qpool else None
         _qfuts: Dict[int, Any] = {}   # frame index → quality Future
 
+        _worker_count_used = max(n_workers, 1)
         safe_print(f"  Processing {n} frames: {n_workers} GPU + {_n_cpu} quality threads"
                    if _use_qpool else
                    f"  Processing {n} frames with {n_workers} threads...")
@@ -809,7 +840,7 @@ def execute_frame_processing(
         mem_rgb.flush()
         mem_lum.flush()
 
-    _print_step_breakdown(_step_totals, _step_frames)
+    _print_step_breakdown(_step_totals, _step_frames, _worker_count_used)
 
 
 _STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix_wb_extra', 'quality',
@@ -825,30 +856,38 @@ _STEP_LABELS = {
 }
 
 
-def _print_step_breakdown(step_totals: Dict[str, float], n_frames: int) -> None:
+def _print_step_breakdown(step_totals: Dict[str, float], n_frames: int,
+                          worker_count: int = 1) -> None:
     """Print which Phase-1 sub-step actually dominates "Quality+Load".
 
     Values are summed per-frame seconds across however many workers ran in
-    parallel — a proportion of total work, not wall-clock time (with W workers
-    running concurrently, wall-clock ≈ sum / W). On the GPU dispatch path this
-    is best-effort: deferred quality metrics run on a separate CPU pool and
-    are not attributable to a single frame, so they are omitted here.
+    parallel, so the raw total looks alarming (can exceed the actual wall
+    clock many times over) — an "est. wall-clock" column divides by the actual
+    worker count used for this run to give the real contribution. On the GPU
+    dispatch path this is best-effort: deferred quality metrics run on a
+    separate CPU pool and are not attributable to a single frame, so they are
+    omitted here.
     """
     if not step_totals or n_frames == 0:
         return
     total = sum(step_totals.values())
     if total <= 0:
         return
-    safe_print(f"\n  Quality+Load breakdown ({n_frames} frames, "
-               f"sum of per-frame time - divide by worker count for wall-clock):")
+    w = max(worker_count, 1)
+    # final_flush is one call in the main process after all workers finish —
+    # already wall-clock, not summed-across-workers like everything else.
+    _not_parallel = {'final_flush'}
+    safe_print(f"\n  Quality+Load breakdown ({n_frames} frames, {w} workers):")
+    safe_print(f"    {'':<38} {'sum (all workers)':>18}  {'est. wall-clock':>16}  {'':>7}")
     keys = list(_STEP_ORDER) + [k for k in step_totals if k not in _STEP_ORDER]
     for key in keys:
         t = step_totals.get(key)
         if t is None:
             continue
         label = _STEP_LABELS.get(key, key)
-        safe_print(f"    {label:<38} {format_time(t):>8}  ({t / total * 100:4.1f}%)  "
-                   f"[{t / n_frames * 1000:5.1f} ms/frame]")
+        wall = t if key in _not_parallel else t / w
+        safe_print(f"    {label:<38} {format_time(t):>18}  {format_time(wall):>16}  "
+                   f"({t / total * 100:4.1f}%)  [{t / n_frames * 1000:5.1f} ms/frame]")
 
 
 def reload_accepted_frames(
