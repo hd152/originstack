@@ -485,7 +485,9 @@ apply_hot_pixel_map_bayer = lambda data, hot_map: fix_hot_pixels(data, mode='bay
 
 
 def _block_avg_2x(a: np.ndarray) -> np.ndarray:
-    """2x2 block-average downsample (even-cropped), float64."""
+    """2x2 block-average downsample (even-cropped). Preserves input dtype —
+    call on float32 and cast to float64 afterward (on the now-small array) to
+    avoid a wasted full-resolution float64 copy."""
     h2 = (a.shape[0] // 2) * 2
     w2 = (a.shape[1] // 2) * 2
     c = a[:h2, :w2]
@@ -530,16 +532,20 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
         return rgb
 
     result = rgb.copy()
-    g = rgb[:, :, 1].astype(np.float64)
-    g_small = _block_avg_2x(g) if downsample >= 2 else g
+    # Downsample the cheap float32 data FIRST, cast to float64 only the small
+    # result. Casting the full-res channel to float64 before downsampling (the
+    # original order) wastes a 50MB copy per channel that gets thrown away
+    # immediately — exactly the memory traffic this function is trying to cut.
+    g_small = (_block_avg_2x(rgb[:, :, 1]) if downsample >= 2
+              else rgb[:, :, 1]).astype(np.float64)
     g_std = g_small.std()
     if g_std < 1e-12:
         return rgb
     g_norm = (g_small - g_small.mean()) / g_std
 
     for c_idx in (0, 2):  # Red, Blue
-        ch = rgb[:, :, c_idx].astype(np.float64)
-        ch_small = _block_avg_2x(ch) if downsample >= 2 else ch
+        ch_small = (_block_avg_2x(rgb[:, :, c_idx]) if downsample >= 2
+                   else rgb[:, :, c_idx]).astype(np.float64)
         ch_std = ch_small.std()
         if ch_std < 1e-12:
             continue
