@@ -277,6 +277,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         rgb, lum = remove_hot_pixels_rgb_with_lum(rgb)
     except Exception as e:
         return {'error': f'hot pixel removal error: {e}'}
+    timings['hotpix'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # White balance
     try:
@@ -289,18 +290,21 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
     gpu = get_gpu()
     rgb = gpu.to_host(rgb)
+    timings['white_balance'], _t = time.perf_counter() - _t, time.perf_counter()
 
     if ca_correction:
         try:
             rgb = correct_chromatic_aberration(rgb)
         except Exception:
             pass
+    timings['ca_correction'], _t = time.perf_counter() - _t, time.perf_counter()
 
     if cosmic_ray_rejection:
         try:
             rgb = lacosmic_reject(rgb)
         except Exception:
             pass
+    timings['cosmic_ray_rejection'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Recompute lum only when white balance or post-processing changed the image.
     try:
@@ -310,6 +314,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             lum = np.asarray(lum)  # ensure host numpy array
     except Exception as e:
         return {'error': f'luminance computation error: {e}'}
+    timings['lum_recompute'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Per-frame polynomial gradient removal (degree-2 background subtraction)
     if pre_gradient_removal:
@@ -337,11 +342,12 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
         except Exception:
             pass
+    timings['pre_gradient_removal'], _t = time.perf_counter() - _t, time.perf_counter()
 
     is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
-    timings['hotpix_wb_extra'], _t = time.perf_counter() - _t, time.perf_counter()
+    timings['validate'], _t = time.perf_counter() - _t, time.perf_counter()
 
     metrics = {} if skip_quality else compute_quality_metrics(
         lum, quick=quick_quality, advanced_metrics=advanced_metrics)
@@ -449,26 +455,48 @@ def _probe_gpu_calibration(H: int, W: int, gpu, masters: Dict) -> bool:
     return gpu_s < cpu_s
 
 
-def _pin_worker_to_single_thread() -> None:
-    """Force every internally-threaded library in this worker process down to
-    1 thread each.
+# Per-worker rayon thread cap — see _pin_worker_to_single_thread. Chosen from
+# measured lacosmic_reject_native scaling on this class of hardware (1/2/4/8/16
+# threads -> 3865/2150/1118/680/603 ms): 4 threads keeps ~75% of the achievable
+# speedup while bounding worst-case oversubscription to workers x 4 rather than
+# workers x cores. Not re-validated against real 16-way process contention yet —
+# the next run's Quality+Load breakdown will show whether this needs tuning.
+_RAYON_WORKER_CAP = 4
 
-    Phase 1 parallelism comes from the ProcessPoolExecutor (one process per
-    worker, already using all cores). Without this, each worker ALSO lets
-    BLAS/OpenMP (numpy/scipy), rayon (our native kernels), and OpenCV (cv2
-    debayer) spin up their own internal thread pool sized to the full core
-    count — with W worker processes doing this simultaneously you get up to
-    W x cores OS threads contending for `cores` physical cores. On this
-    machine cv2 alone defaults to 16 threads per call; with ~16 concurrent
-    worker processes that is up to 256 threads fighting over 16 cores, which
-    is consistent with Quality+Load sub-steps running far slower under real
-    parallel load than in an isolated single-process benchmark. Env vars are
-    read lazily by OpenBLAS/MKL/rayon at first use, so setting them here (in
-    the pool initializer, before any task runs) takes effect correctly.
+
+def _pin_worker_to_single_thread() -> None:
+    """Bound (not necessarily eliminate) each worker process's internal
+    threading, so Phase 1's ProcessPoolExecutor parallelism (one process per
+    worker, already using all cores) isn't multiplied by each worker ALSO
+    spinning up a full-core-count thread pool internally.
+
+    Two different libraries need two different treatments here, found by
+    measuring rather than assuming:
+
+    - cv2 (debayer) and BLAS/OpenMP (numpy/scipy) are pinned to exactly 1
+      thread. These have no per-call algorithmic dependency on parallelism in
+      our usage (small per-frame arrays), and confirmed by measurement: with
+      W worker processes each defaulting to `cores` internal threads (cv2
+      alone defaults to 16 threads/call on a 16-core box here), that's up to
+      W x cores OS threads fighting over `cores` physical cores — pinning
+      these to 1 measurably cut Calibrate/Debayer time (~25-28%).
+
+    - rayon (our own native kernels — lacosmic, median filter, etc.) is
+      capped at a small number instead of 1. Unlike cv2/BLAS, these calls ARE
+      where the real per-frame work happens, and forcing them fully serial
+      costs a lot: measured 603ms (full/no-contention) vs 3865ms (1 thread)
+      for lacosmic_reject_native on a full-res frame — 6.4x slower. Capping
+      at _RAYON_WORKER_CAP keeps most of that speedup (~3.5x back at 4
+      threads) while bounding worst-case oversubscription to
+      workers x _RAYON_WORKER_CAP instead of workers x cores.
+
+    Env vars are read lazily by OpenBLAS/MKL/rayon at first use, so setting
+    them here (in the pool initializer, before any task runs) takes effect.
     """
     for var in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-               'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS', 'RAYON_NUM_THREADS'):
+               'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
         os.environ[var] = '1'
+    os.environ['RAYON_NUM_THREADS'] = str(_RAYON_WORKER_CAP)
     try:
         import cv2
         cv2.setNumThreads(1)
@@ -843,13 +871,21 @@ def execute_frame_processing(
     _print_step_breakdown(_step_totals, _step_frames, _worker_count_used)
 
 
-_STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix_wb_extra', 'quality',
+_STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix', 'white_balance',
+              'ca_correction', 'cosmic_ray_rejection', 'lum_recompute',
+              'pre_gradient_removal', 'validate', 'quality',
               'memmap_write', 'final_flush')
 _STEP_LABELS = {
     'load': 'Load (disk read)',
     'calibrate': 'Calibrate (bias/dark/flat)',
     'debayer': 'Debayer',
-    'hotpix_wb_extra': 'Hot-pixel/WB/extras',
+    'hotpix': 'Hot-pixel removal',
+    'white_balance': 'White balance',
+    'ca_correction': 'CA correction (--ca-correction)',
+    'cosmic_ray_rejection': 'Cosmic-ray rejection (lacosmic)',
+    'lum_recompute': 'Luminance recompute',
+    'pre_gradient_removal': 'Pre-gradient removal',
+    'validate': 'Validate',
     'quality': 'Quality metrics (star detect, FWHM)',
     'memmap_write': 'Memmap write',
     'final_flush': 'Final memmap flush',
