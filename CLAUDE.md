@@ -10,6 +10,8 @@ pip install -r requirements.txt
 pip install pytest
 # Optional: GPU support (requires CUDA)
 pip install -r requirements-gpu.txt
+# Optional: native (Rust) acceleration — see "Native (Rust) acceleration" below
+pip install maturin && (cd ext/astro_native && maturin develop --release)
 ```
 
 ### Run tests
@@ -75,18 +77,24 @@ Applied in order; most steps are on by default:
 1. Per-channel hot pixel removal on stacked image
 2. Star detection (single pass; mask reused by all steps below)
 3. Dynamic Background Extraction (DBE) or legacy mesh extraction
-4. Chroma noise reduction
+4. Chroma noise reduction — fine pass; optional coarse pass for medium-scale colour blotches (`--chroma-nr-large-sigma`, object-masked)
 5. Sky floor correction (per-channel pedestal removal)
-6. Local normalisation (vignette residual removal) — `--local-normalize`
-7. Wavelet denoising (luma/chroma split, star-protected, adaptive BayesShrink by default)
-8. Sky residual correction (broad + fine passes after background extraction)
+6. Wavelet denoising (luma/chroma split, star-protected, adaptive BayesShrink by default)
+7. Sky residual correction (broad + fine passes after background extraction)
+8. Sky pedestal — scalar lift off zero before the non-negativity clips (prevents black-hole clipping); skippable via `--skip-step sky_pedestal`
 9. NLM denoising — `--denoise-nlm`
 10. Bilateral filter denoising — `--denoise-bilateral`
 11. MMT denoising (multiscale median transform) — `--denoise-mmt`
 12. ACDNR denoising (adaptive contrast-based) — `--denoise-acdnr`
-13. Richardson-Lucy deconvolution — `--deconvolve`
-14. Star reduction (halo softening) — on by default, `--no-star-reduce`
-15. Multiscale local contrast enhancement — on by default, `--no-local-contrast`
+13. Anisotropic diffusion — `--denoise-aniso` (native/Rust accelerated)
+14. Richardson-Lucy deconvolution — `--deconvolve` (GPU-accelerated via cupy FFT when `--use-gpu`)
+15. Star reduction (halo softening) — on by default, `--no-star-reduce`
+16. Multiscale local contrast enhancement — on by default, `--no-local-contrast`
+17. Final sky flattening + neutralisation — masked large-scale per-channel background removal → neutral grey; skippable via `--skip-step sky_neutralize`
+
+The old local-normalisation step (`--local-normalize`) was **removed**: it did local variance equalisation (÷ local σ), which amplifies background noise; gradient/vignette residual is handled by `--pre-gradient-removal` + DBE + sky-floor + sky-residual.
+
+The preview JPEG black point is set per target by the auto-advisor (`preview_black_sigma`, overridable with `--preview-black-sigma`); higher values (2–3) clip the sky-noise tail to black for a small target on empty sky.
 
 ### Streaming memory model
 Frames are processed one at a time: load → process → accumulate → free. Memory usage stays at ~1-2 frames regardless of total frame count. This is the core design constraint — never accumulate all frames in memory.
@@ -117,7 +125,11 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 ### Native (Rust) acceleration
 [ext/astro_native/](ext/astro_native/) is a PyO3/maturin crate of hot-path kernels, all with a numpy fallback. Coverage:
 - **Stacking combines** (`src/stacking.py`): `sigma_clip_combine` (~37×), `esd_combine` (~24×), `percentile_clip_combine` (~13×), `median_combine` (~6×), `trimmed_mean_combine` (~4×). Every `--stack-method` except drizzle. ESD's Student-t critical-value table is precomputed in Python (`_esd_lambda_table`) and passed to Rust — exact parity, no stats crate. Native path is taken when a rejection mask is not requested and the input is a C-contiguous float32 `(N,H,W,C)` array; the aligned stack memmap qualifies, so Rust views it zero-copy and the streaming memmap model is preserved.
+- **Fused patch-weighted combine** (`src/stacking.py` `run_stacking_phase`): `patch_weighted_sigma_combine` (~100×) — the consensus/patch-weighted path did two numpy passes (sigma-clip `return_mask=True` + `patch_weighted_mean_combine`); the Rust kernel fuses sigma-clip rejection + quality weighting in one pass with no `(N,H,W,C)` mask array. Used for the sigma_clip/winsorized patch methods.
 - **Per-frame warp** (`src/registration.py` `apply_transform`): `warp_affine_lanczos3`, a 2D Lanczos-3 affine/shift resample (~5×). CPU path only (GPU unchanged). This is a quality-validated change, not numeric parity: FWHM and flux match scipy order-3, and the mild Lanczos ringing is incoherent across dithered frames (averages to zero in the stack).
+- **Anisotropic diffusion** (`src/denoising.py` `anisotropic_diffusion`): native Jacobi iteration with periodic boundary (~37×), exact parity.
+
+The startup banner reports native status (`native_status()` in `src/utils.py`); each accelerated step logs a `[rust] …` line. Separately, Richardson-Lucy deconvolution runs on the GPU (cupy FFT) when `--use-gpu` is active (`_rl_deconvolve_xp`), validated against skimage on the numpy backend.
 
 Build (needs a Rust toolchain + `pip install maturin`):
 ```bash

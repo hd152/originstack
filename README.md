@@ -169,29 +169,35 @@ Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-interpolated sub-p
 - Hard rejection: blank, corrupt, or severely underexposed frames
 - Quality-weighted stacking (SNR, FWHM, star count weighting)
 
-### Post-Processing Chain (up to 20 steps)
+### Post-Processing Chain
 Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be explicitly enabled:
 
 1. ✅ Hot pixel removal on stacked image
 2. ✅ Star mask generation (protects structure in subsequent steps)
 3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh, or GraXpert AI)
-4. ✅ Chroma noise reduction
+4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches via `--chroma-nr-large-sigma`)
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
-6. ❌ Local normalisation — `--local-normalize`
-7. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
-8. ✅ Sky residual correction (second pass after denoising)
+6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
+7. ✅ Sky residual correction (second pass after denoising)
+8. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
 9. ❌ Non-local means denoising — `--denoise-nlm`
 10. ❌ Bilateral filter — `--denoise-bilateral`
 11. ❌ Multiscale Median Transform (MMT) — `--denoise-mmt`
 12. ❌ ACDNR adaptive contrast denoising — `--denoise-acdnr`
 13. ❌ BM3D collaborative filter — `--denoise-bm3d`
-14. ❌ Perona-Malik anisotropic diffusion — `--denoise-aniso`
+14. ❌ Perona-Malik anisotropic diffusion — `--denoise-aniso` (native/Rust accelerated)
 15. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
 16. ❌ Photometric colour calibration — `--photometric-calibration`
-17. ❌ Richardson-Lucy deconvolution — `--deconvolve`
+17. ❌ Richardson-Lucy deconvolution — `--deconvolve` (GPU-accelerated with `--use-gpu`)
 18. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
 19. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
 20. ❌ Star removal via Starnet++ — `--star-remove`
+21. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
+
+> The old `--local-normalize` step was **removed**: it applied local variance
+> equalisation (divide by local σ) which amplifies background noise; the gradient/
+> vignette job is already covered by `--pre-gradient-removal` + DBE + sky-floor +
+> sky-residual.
 
 ### Presets
 Eight built-in target presets tune all parameters at once:
@@ -248,6 +254,10 @@ pip install opencv-python
 
 # 7. Optional: wavelet denoising
 pip install PyWavelets
+
+# 8. Optional: native (Rust) acceleration for stacking + registration
+#    Needs a Rust toolchain + maturin. See "Native (Rust) acceleration" below.
+cd ext/astro_native && maturin develop --release   # into a venv
 ```
 
 **Optional dependencies** — all gracefully degraded when absent:
@@ -258,8 +268,9 @@ pip install PyWavelets
 | `PyWavelets` | Wavelet denoising |
 | `sep` | 5–10× faster star detection |
 | `astroquery` | Plate solving via astrometry.net |
-| `cupy-cuda*` | GPU acceleration |
+| `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
 | `reproject` | Mosaic stitching |
+| `astro_native` (Rust) | Native stacking combines, Lanczos warp, anisotropic diffusion |
 
 ---
 
@@ -356,7 +367,6 @@ python astro_stack.py -d lights/ -o best.fits \
   --debayer-method malvar \
   --denoise-nlm --denoise-bilateral --denoise-mmt --denoise-acdnr \
   --deconvolve \
-  --local-normalize \
   --stack-method sigma_clip --rejection-sigma 2.5 \
   --weight-snr 2.0 --weight-fwhm 2.0 \
   -v
@@ -568,7 +578,6 @@ Most post-processing is **on by default**. Here are the disable flags:
 | MMT denoising | ❌ off | `--denoise-mmt` |
 | ACDNR denoising | ❌ off | `--denoise-acdnr` |
 | Richardson-Lucy deconvolution | ❌ off | `--deconvolve` |
-| Local normalisation | ❌ off | `--local-normalize` |
 
 ---
 
@@ -619,6 +628,37 @@ For the full CLI reference with all flags and defaults, see [PROJECT_SPEC.md](PR
 | 500 frames (tested) | same 0.4–1.2 GB | ~10× longer |
 
 Memory usage is bounded by the streaming architecture — frames are loaded one at a time and freed immediately after accumulation.
+
+### Native (Rust) acceleration
+
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the whole Phase-2 warp + Phase-3 combine hot path plus one denoiser:
+
+| Kernel | Speedup vs numpy |
+|--------|------------------|
+| `sigma_clip_combine` (default stack method) | ~37× |
+| `esd_combine` | ~24× |
+| `percentile_clip_combine` | ~13× |
+| `median_combine` | ~6× |
+| `trimmed_mean_combine` | ~4× |
+| Fused patch-weighted + sigma-clip combine | ~100× |
+| Per-frame Lanczos-3 alignment warp | ~5× |
+| Anisotropic diffusion | ~37× |
+
+Build (needs a Rust toolchain + `pip install maturin`):
+
+```bash
+# into a virtualenv:
+cd ext/astro_native && maturin develop --release
+# system Python (no venv): build a wheel and install it
+cd ext/astro_native && python -m maturin build --release
+pip install --force-reinstall target/wheels/astro_native-*.whl
+```
+
+At runtime the startup banner reports `Native accel: astro_native vX ACTIVE …`, and each accelerated step logs a `[rust] …` line. The aligned stack is a float32 memmap that Rust views zero-copy, so the streaming memory model is preserved. GPU (`--use-gpu`) additionally accelerates the registration warp and Richardson-Lucy deconvolution via cupy.
+
+### Iterating on the same data
+
+Re-running the *same* `-o` output with `--keep-checkpoint` makes subsequent runs **skip Phases 1–3 entirely** (load the saved raw stack, redo only post-processing) — the fastest way to tune stretch/denoise settings.
 
 ---
 
