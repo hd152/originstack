@@ -78,7 +78,6 @@ class Config:
     SHIFT_OUTLIER_SIGMA = 3.5       # MAD-sigma threshold for pre-registration outlier rejection
     REG_RESIDUAL_MAX_PX = 1.5       # Max post-registration centroid RMS (px) before rejection
     ALIGNMENT_CENTRALITY_WEIGHT = 0.3   # Blend weight: 0=pure quality score, 1=pure centrality
-    REF_PYRAMID_WORKERS = 4         # Max parallel workers for cheap reference-selection pass
 
     # Patch-based local registration (lucky imaging mode)
     PATCH_GRID_SIZE = 8             # NxN grid for patch quality map (8x8 = 64 patches)

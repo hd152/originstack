@@ -763,7 +763,12 @@ def select_reference_frame(
     if centrality_weight is None:
         centrality_weight = Config.ALIGNMENT_CENTRALITY_WEIGHT
     if n_workers is None:
-        n_workers = min(Config.REF_PYRAMID_WORKERS, len(final))
+        # Uncapped (was hard-limited to Config.REF_PYRAMID_WORKERS=4) — same
+        # class of bug as the old Phase-1 8-worker cap: this pass is threaded
+        # (ThreadPoolExecutor, GIL-releasing FFT/scipy ops), so it scales with
+        # real cores. On a real 233-frame/16-core run this pass was consuming
+        # an unaccounted ~3min inside the Registration phase at only 4 workers.
+        n_workers = min(os.cpu_count() or 4, len(final))
 
     def _get_lum(orig_idx: int) -> np.ndarray:
         if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
@@ -799,6 +804,7 @@ def select_reference_frame(
         return j, 0.0, 0.0
 
     safe_print(f"  Pyramid pass for reference selection ({len(final)} frames, {n_workers} workers)...")
+    _t_pyramid = time.time()
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futs = {executor.submit(_pyramid_one, j, orig_idx): j
                 for j, orig_idx in enumerate(final_indices)}
@@ -806,6 +812,9 @@ def select_reference_frame(
                         desc="  Ref-select", unit="frame"):
             j, sy, sx = fut.result()
             pyramid_shifts[j] = (sy, sx)
+    from src.utils import format_time as _format_time
+    safe_print(f"    Pyramid pass: {_format_time(time.time() - _t_pyramid)} "
+               f"({len(final) / max(time.time() - _t_pyramid, 1e-9):.1f} frame/s)")
 
     # Geometric median of shift cloud
     shift_arr = np.array(pyramid_shifts, dtype=np.float64)  # (N, 2)
