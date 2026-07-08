@@ -71,3 +71,15 @@ htmlcov/
 # Session data files that may contain PII (GPS coords, observer info, telescope location)
 **/info.json
 sample/**/*.json
+
+# Generated run artifacts (never source)
+# effective-config dump written next to every output (<output>_config.toml)
+*_config.toml
+# resume checkpoints (raw_stack.npy, transforms.npy, ...)
+*_checkpoint/
+*.npy
+*.xisf
+
+# Native (Rust) build output
+ext/**/target/
+*.whl
