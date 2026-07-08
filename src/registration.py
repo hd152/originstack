@@ -1102,6 +1102,32 @@ def apply_optical_flow_warp(img: np.ndarray, flow: np.ndarray) -> np.ndarray:
         return img
 
 
+_REG_STEP_LABELS = {
+    'ref_star_detect': 'Reference star (re-)detection',
+    'shift_calculation': 'Shift calculation (phase-corr/RANSAC, all frames)',
+    'residual_check': 'Post-registration residual check',
+    'patch_quality_maps': 'Patch quality maps (--patch-registration)',
+    'optical_flow': 'Optical flow (--optical-flow)',
+}
+
+
+def _print_registration_breakdown(timings: Dict[str, float]) -> None:
+    """Print which Registration sub-step dominates. Unlike Phase 1, the main
+    'shift_calculation' step is itself thread-parallel across frames, so these
+    numbers are wall-clock for each sub-step directly — no worker-count math
+    needed to interpret them."""
+    total = sum(timings.values())
+    if total <= 0:
+        return
+    from src.utils import format_time
+    safe_print(f"\n  Registration breakdown (wall-clock per sub-step):")
+    for key, label in _REG_STEP_LABELS.items():
+        t = timings.get(key, 0.0)
+        if t <= 0.01 and key not in ('ref_star_detect', 'shift_calculation'):
+            continue  # skip unused optional steps (patch/optical-flow off)
+        safe_print(f"    {label:<50} {format_time(t):>8}  ({t / total * 100:4.1f}%)")
+
+
 def run_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -1122,6 +1148,9 @@ def run_registration_phase(
     shift-outlier filter is applied before the expensive full-registration pass,
     saving time on frames with catastrophic guiding failures.
     """
+    _reg_timings: Dict[str, float] = {}
+    _t = time.time()
+
     ref_stars = best.metrics.get('_star_sources')
     if ref_stars is not None and len(ref_stars) == 0:
         ref_stars = None  # treat empty array same as absent
@@ -1210,6 +1239,8 @@ def run_registration_phase(
     elif ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
         safe_print("  ⚠ No stars detected in reference frame — affine (rotation) "
                    "registration disabled, falling back to translation only")
+
+    _reg_timings['ref_star_detect'], _t = time.time() - _t, time.time()
 
     # Consensus reference frame: override the selected reference with the frame
     # whose pyramid shift is closest to the session median (most central frame).
@@ -1334,6 +1365,8 @@ def run_registration_phase(
                     safe_print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
                                f'magnitude={np.sqrt(sy**2 + sx**2):.2f} px')
 
+    _reg_timings['shift_calculation'], _t = time.time() - _t, time.time()
+
     # Shift statistics
     shift_x = [s[1] for s in shifts]
     shift_y = [s[0] for s in shifts]
@@ -1393,6 +1426,8 @@ def run_registration_phase(
             shifts = [s for s, k in zip(shifts, keep_mask) if k]
             transforms = [t for t, k in zip(transforms, keep_mask) if k]
 
+    _reg_timings['residual_check'], _t = time.time() - _t, time.time()
+
     # Patch quality maps for per-pixel lucky-imaging weighted stacking.
     quality_maps: Optional[List[np.ndarray]] = None
     if getattr(args, 'patch_registration', False) and not args.no_registration:
@@ -1416,6 +1451,8 @@ def run_registration_phase(
             qmap = compute_patch_quality_map(lum)
             quality_maps.append(qmap)
         safe_print(f"  Patch quality maps computed.")
+
+    _reg_timings['patch_quality_maps'], _t = time.time() - _t, time.time()
 
     # Optional per-frame optical flow local warp correction
     flow_fields: Optional[List[Optional[np.ndarray]]] = None
@@ -1455,6 +1492,9 @@ def run_registration_phase(
         except ImportError:
             safe_print("  WARNING: --optical-flow requires OpenCV (cv2) — skipping")
             flow_fields = None
+
+    _reg_timings['optical_flow'] = time.time() - _t
+    _print_registration_breakdown(_reg_timings)
 
     dither_info = detect_dither(shifts, verbose=False)
     dither_info['quality_maps'] = quality_maps  # carry through to stacking

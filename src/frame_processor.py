@@ -5,6 +5,7 @@ import argparse
 import os
 import queue
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,7 +14,7 @@ import numpy as np
 
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import safe_print, print_quality_table
+from src.utils import safe_print, print_quality_table, format_time
 from src.io_fits import load_fits, load_frame
 from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
                          apply_hot_pixel_map_bayer,
@@ -110,6 +111,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
     Used by both sequential and parallel paths.
     """
+    timings: Dict[str, float] = {}
+    _t = time.perf_counter()
+
     try:
         if preloaded_data is not None:
             data, hdr = preloaded_data
@@ -119,6 +123,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         return {'error': f'load error: {e}'}
     if data is None or data.size == 0:
         return {'error': 'empty data array'}
+    timings['load'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # ── GPU calibration probe: decide once per frame size whether GPU is faster ──
     _gpu_ctx = get_gpu()
@@ -248,6 +253,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                 data = remove_hot_pixels_bayer(data)
     except Exception as e:
         return {'error': f'calibration error: {e}'}
+    timings['calibrate'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Debayer
     try:
@@ -262,6 +268,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             rgb = data
     except Exception as e:
         return {'error': f'debayering error: {e}'}
+    timings['debayer'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Hot pixel removal — returns (rgb_fixed, lum) to avoid recomputing luminance.
     try:
@@ -334,10 +341,12 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
+    timings['hotpix_wb_extra'], _t = time.perf_counter() - _t, time.perf_counter()
 
     metrics = {} if skip_quality else compute_quality_metrics(
         lum, quick=quick_quality, advanced_metrics=advanced_metrics)
-    return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None}
+    timings['quality'] = time.perf_counter() - _t
+    return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None, 'timings': timings}
 
 
 # Module-level state for parallel workers (must be module-level for pickling)
@@ -456,7 +465,8 @@ def _init_worker_shm(shm_specs: Dict[str, tuple]) -> None:
         _worker_masters[f'_shm_{name}'] = shm
 
 
-def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Optional[str]]:
+def _parallel_frame_worker(
+        args_tuple: tuple) -> Tuple[int, Optional[dict], Optional[str], Optional[dict]]:
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
     (path, frame_idx, debayer_method, white_balance,
      mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
@@ -471,10 +481,12 @@ def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Opti
                                    session_bayer=session_bayer,
                                    pre_gradient_removal=pre_gradient_removal)
     if result.get('error'):
-        return (frame_idx, None, result['error'])
+        return (frame_idx, None, result['error'], None)
 
     metrics_clean = dict(result['metrics'])
+    timings = result.get('timings', {})
 
+    _t = time.perf_counter()
     try:
         mem_rgb = np.memmap(mm_rgb_path, dtype='float32', mode='r+', shape=rgb_shape)
         mem_lum = np.memmap(mm_lum_path, dtype='float32', mode='r+', shape=lum_shape)
@@ -484,9 +496,10 @@ def _parallel_frame_worker(args_tuple: tuple) -> Tuple[int, Optional[dict], Opti
         # the entire memmap on every frame causes excessive concurrent I/O.
         del mem_rgb, mem_lum
     except Exception as e:
-        return (frame_idx, None, f'memmap write error: {e}')
+        return (frame_idx, None, f'memmap write error: {e}', None)
+    timings['memmap_write'] = time.perf_counter() - _t
 
-    return (frame_idx, metrics_clean, None)
+    return (frame_idx, metrics_clean, None, timings)
 
 
 def execute_frame_processing(
@@ -508,6 +521,20 @@ def execute_frame_processing(
     Selects between ProcessPool, ThreadPool, or sequential execution.
     Mutates lights[*].metrics / .accepted and rejected_reasons in-place.
     """
+    # Aggregate per-step timing (sum of per-frame seconds) across whichever
+    # dispatch path runs below, so Phase 1 can report which sub-step actually
+    # dominates "Quality+Load" instead of leaving it as one opaque number.
+    _step_totals: Dict[str, float] = {}
+    _step_frames = 0
+
+    def _accum(timings: Optional[dict]) -> None:
+        nonlocal _step_frames
+        if not timings:
+            return
+        _step_frames += 1
+        for k, v in timings.items():
+            _step_totals[k] = _step_totals.get(k, 0.0) + v
+
     n = len(lights)
     use_process_pool = (getattr(args, 'parallel', 1) != 1
                         and not get_gpu().active
@@ -572,7 +599,8 @@ def execute_frame_processing(
                                    desc="  Processing", unit="frame",
                                    disable=args.verbose):
                     idx = futures[future]
-                    frame_idx, metrics, error = future.result()
+                    frame_idx, metrics, error, timings = future.result()
+                    _accum(timings)
                     f = lights[frame_idx]
                     if error:
                         f.accepted = False
@@ -605,8 +633,10 @@ def execute_frame_processing(
 
         # Flush memmaps once after all workers complete — per-frame flushing
         # inside workers causes excessive concurrent full-file I/O.
+        _t_flush = time.perf_counter()
         mem_rgb.flush()
         mem_lum.flush()
+        _step_totals['final_flush'] = time.perf_counter() - _t_flush
 
     elif n >= 2:
         gpu = get_gpu()
@@ -657,10 +687,10 @@ def execute_frame_processing(
                     pre_gradient_removal=_pgr,
                     skip_quality=_use_qpool)  # GPU workers skip quality
             if result.get('error'):
-                return i, None, result['error'], None
+                return i, None, result['error'], None, None
             mem_rgb[i] = result['rgb']
             mem_lum[i] = result['lum']
-            return i, result['metrics'], None, result['lum']
+            return i, result['metrics'], None, result['lum'], result.get('timings')
 
         _completed = 0
         _free_interval = Config.GPU_POOL_FREE_INTERVAL
@@ -675,7 +705,8 @@ def execute_frame_processing(
             for future in tqdm(as_completed(futures), total=n,
                                desc="  Processing", unit="frame",
                                disable=False):
-                i, metrics, error, lum_arr = future.result()
+                i, metrics, error, lum_arr, timings = future.result()
+                _accum(timings)
                 f = lights[i]
                 if error:
                     f.accepted = False
@@ -687,7 +718,11 @@ def execute_frame_processing(
                 else:
                     cached_lums[i] = lum_arr
                     if _use_qpool and lum_arr is not None:
-                        # Submit quality to CPU pool; GPU thread is already freed
+                        # Submit quality to CPU pool; GPU thread is already freed.
+                        # Its compute time runs concurrently with other frames'
+                        # GPU work and isn't attributable to a single frame here,
+                        # so it is not folded into the per-step totals below —
+                        # the GPU path's timing breakdown is best-effort.
                         _qfuts[i] = _qpool.submit(
                             compute_quality_metrics, lum_arr, advanced_metrics=_adv)
                     else:
@@ -759,6 +794,7 @@ def execute_frame_processing(
                 mem_lum[i] = result['lum']
                 cached_lums[i] = result['lum']
                 f.metrics = result['metrics']
+                _accum(result.get('timings'))
                 if args.verbose:
                     m = f.metrics
                     print(f'    {os.path.basename(f.path)}: '
@@ -772,6 +808,47 @@ def execute_frame_processing(
                           f'dynamic_range={m.get("dynamic_range",0):.0f}')
         mem_rgb.flush()
         mem_lum.flush()
+
+    _print_step_breakdown(_step_totals, _step_frames)
+
+
+_STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix_wb_extra', 'quality',
+              'memmap_write', 'final_flush')
+_STEP_LABELS = {
+    'load': 'Load (disk read)',
+    'calibrate': 'Calibrate (bias/dark/flat)',
+    'debayer': 'Debayer',
+    'hotpix_wb_extra': 'Hot-pixel/WB/extras',
+    'quality': 'Quality metrics (star detect, FWHM)',
+    'memmap_write': 'Memmap write',
+    'final_flush': 'Final memmap flush',
+}
+
+
+def _print_step_breakdown(step_totals: Dict[str, float], n_frames: int) -> None:
+    """Print which Phase-1 sub-step actually dominates "Quality+Load".
+
+    Values are summed per-frame seconds across however many workers ran in
+    parallel — a proportion of total work, not wall-clock time (with W workers
+    running concurrently, wall-clock ≈ sum / W). On the GPU dispatch path this
+    is best-effort: deferred quality metrics run on a separate CPU pool and
+    are not attributable to a single frame, so they are omitted here.
+    """
+    if not step_totals or n_frames == 0:
+        return
+    total = sum(step_totals.values())
+    if total <= 0:
+        return
+    safe_print(f"\n  Quality+Load breakdown ({n_frames} frames, "
+               f"sum of per-frame time - divide by worker count for wall-clock):")
+    keys = list(_STEP_ORDER) + [k for k in step_totals if k not in _STEP_ORDER]
+    for key in keys:
+        t = step_totals.get(key)
+        if t is None:
+            continue
+        label = _STEP_LABELS.get(key, key)
+        safe_print(f"    {label:<38} {format_time(t):>8}  ({t / total * 100:4.1f}%)  "
+                   f"[{t / n_frames * 1000:5.1f} ms/frame]")
 
 
 def reload_accepted_frames(
