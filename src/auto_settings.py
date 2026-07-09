@@ -548,6 +548,21 @@ def _apply_quality_settings(
             and not getattr(args, 'patch_registration', False)):
         _set('patch_registration', True)
 
+    # 13. Preview black point vs integration depth.
+    #     preview_black_sigma clips the sky-noise tail to black in the preview
+    #     JPEG. On deep stacks the sky noise is well averaged and the clip
+    #     yields clean black sky; on shallow stacks, residual mid-scale
+    #     structure (a few ADU at 20-60px scales) modulates which pixels cross
+    #     the clip threshold and renders as soft black splotches. Soften the
+    #     clip when the stack is shallow — only ever reducing the preset value,
+    #     so lower user/preset choices pass through untouched.
+    pbs = float(getattr(args, 'preview_black_sigma', 0.0) or 0.0)
+    if pbs > 1.0:
+        if n < 20:
+            _set('preview_black_sigma', 1.0)
+        elif n < 60 and pbs > 2.0:
+            _set('preview_black_sigma', 2.0)
+
     return changes
 
 

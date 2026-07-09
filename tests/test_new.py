@@ -949,3 +949,40 @@ class TestRunHealthCheck(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestPreviewBlackSigmaDepthScaling(unittest.TestCase):
+    """The auto-advisor softens the preview black-point clip on shallow
+    stacks: residual mid-scale background structure modulates which sky
+    pixels cross the clip threshold, rendering as soft black splotches in
+    the preview JPEG when integration is short. Deep stacks keep the
+    preset's aggressive clip; already-low presets pass through untouched."""
+
+    def _run(self, n_frames, preset):
+        import argparse
+        from src.auto_settings import _apply_quality_settings
+        args = argparse.Namespace(preview_black_sigma=preset,
+                                  stack_method='sigma_clip',
+                                  auto_denoise_strength=True)
+        sig = {'n_frames': n_frames, 'snr': 1.7, 'fwhm': 5.4,
+               'star_count': 25, 'strehl': 0.3, 'dispersion': 0.5,
+               'median_ellipticity': 0.1, 'dynamic_range': 100,
+               'concentration': 5, 'median_filling': 0.1,
+               'diffuse_excess': 0.5, 'peak_excess': 5}
+        _apply_quality_settings(sig, args, 'galaxy')
+        return args.preview_black_sigma
+
+    def test_very_shallow_caps_to_one(self):
+        self.assertEqual(self._run(12, 3.0), 1.0)
+
+    def test_shallow_caps_to_two(self):
+        self.assertEqual(self._run(35, 3.0), 2.0)
+
+    def test_deep_stack_untouched(self):
+        self.assertEqual(self._run(205, 3.0), 3.0)
+
+    def test_low_preset_untouched(self):
+        self.assertEqual(self._run(12, 1.0), 1.0)
+
+    def test_negative_preset_untouched(self):
+        self.assertEqual(self._run(12, -0.5), -0.5)
