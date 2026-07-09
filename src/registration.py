@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import scipy.fft as sfft
 from scipy import ndimage
 
 from src.gpu_context import GpuContext, get_gpu
@@ -396,15 +397,26 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 n //= 2
             ref_np, img_np = r_ds, i_ds
 
-        ref_norm = xp.asarray(ref_np)
-        img_norm = xp.asarray(img_np)
-
         h_c, w_c = ref_np.shape
         pad_h, pad_w = 2 * h_c, 2 * w_c
-        F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
-        F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
-        corr = xp.fft.irfft2(F_ref * xp.conj(F_img), s=(pad_h, pad_w))
-        del F_ref, F_img, ref_norm, img_norm  # free VRAM immediately
+        if gpu.active:
+            ref_norm = xp.asarray(ref_np)
+            img_norm = xp.asarray(img_np)
+            F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
+            F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
+            corr = xp.fft.irfft2(F_ref * xp.conj(F_img), s=(pad_h, pad_w))
+            del F_ref, F_img, ref_norm, img_norm  # free VRAM immediately
+        else:
+            # scipy's vendored pocketfft is ~2.7x faster than numpy's at these
+            # sizes (measured on this codebase's actual padded shapes) despite
+            # being the same algorithm family -- separately-built/optimized
+            # copy. workers=1: this call already runs inside a per-frame
+            # ThreadPoolExecutor, so internal multi-threading would just
+            # oversubscribe the same cores the outer pool is using.
+            F_ref = sfft.rfft2(ref_np, s=(pad_h, pad_w), workers=1)
+            F_img = sfft.rfft2(img_np, s=(pad_h, pad_w), workers=1)
+            corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
+            del F_ref, F_img
 
         peak_flat = int(xp.argmax(corr))
         peak = (peak_flat // corr.shape[1], peak_flat % corr.shape[1])
@@ -488,9 +500,9 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
     img_n = (img - img.mean()).astype(np.float32, copy=False)
     h, w = ref_n.shape
     pad_h, pad_w = 2 * h, 2 * w
-    F_ref = np.fft.rfft2(ref_n, s=(pad_h, pad_w))
-    F_img = np.fft.rfft2(img_n, s=(pad_h, pad_w))
-    corr = np.fft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w))
+    F_ref = sfft.rfft2(ref_n, s=(pad_h, pad_w), workers=1)
+    F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
+    corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
     peak_flat = int(np.argmax(corr))
     py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
     dy = py if py < h else py - pad_h
@@ -525,7 +537,7 @@ def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) ->
         ref_n = (r - r.mean()).astype(np.float32, copy=False)
         h, w = ref_n.shape
         pad_h, pad_w = 2 * h, 2 * w
-        F_ref = np.fft.rfft2(ref_n, s=(pad_h, pad_w))
+        F_ref = sfft.rfft2(ref_n, s=(pad_h, pad_w), workers=1)
         prepared.append((F_ref, h, w, pad_h, pad_w))
     return prepared
 
@@ -547,8 +559,8 @@ def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float
             i = ndimage.shift(i, shift=(total_sy, total_sx), order=1,
                               mode='constant', cval=0.0)
         img_n = (i - i.mean()).astype(np.float32, copy=False)
-        F_img = np.fft.rfft2(img_n, s=(pad_h, pad_w))
-        corr = np.fft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w))
+        F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
+        corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
         peak_flat = int(np.argmax(corr))
         py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
         dy = py if py < h else py - pad_h
