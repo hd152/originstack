@@ -860,6 +860,18 @@ def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
     if len(c) < 6:
         return _polynomial_surface(c, v, H, W, patch_size)
 
+    # Bound the extrapolation range. thin_plate_spline (and its degree-1 trend
+    # term) is globally supported and unbounded: in a region with no nearby
+    # accepted patches -- e.g. a large contiguous gap left by outlier
+    # rejection near a bright star -- it can overshoot far past any real sky
+    # value instead of leveling off. That overshoot then gets subtracted from
+    # the image, producing a visible over/under-subtracted patch (observed:
+    # a triangular near-black wedge fanning out from a star after DBE, where
+    # the pre-DBE stack was flat). Clamp to the accepted-patch value range
+    # plus a noise-scaled margin so extrapolation can't run away.
+    surf_lo = float(np.min(v)) - 3.0 * res_std
+    surf_hi = float(np.max(v)) + 3.0 * res_std
+
     # Evaluation
     # Use coarser grid for large images to keep evaluation tractable
     min_dim = min(H, W)
@@ -880,8 +892,10 @@ def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
         safe_print(f"    WARNING: RBF evaluation failed ({e}) — falling back to polynomial")
         return _polynomial_surface(c, v, H, W, patch_size)
 
+    coarse = np.clip(coarse, surf_lo, surf_hi)
     surface = zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W]
-    return ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+    surface = ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+    return np.clip(surface, surf_lo, surf_hi)
 
 
 def _polynomial_surface(coords: np.ndarray, values: np.ndarray,

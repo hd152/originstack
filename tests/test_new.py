@@ -107,6 +107,46 @@ class TestExtractBackground(unittest.TestCase):
         self.assertLess(abs(sky_with - 100.0), abs(sky_no - 100.0))
 
 
+class TestFitRbfSurfaceBounded(unittest.TestCase):
+    """Regression test: a large contiguous gap in the DBE patch samples (e.g.
+    left by outlier rejection near a bright star) once let the thin-plate-
+    spline RBF extrapolate far outside the real sky range, producing a
+    visible over/under-subtracted patch in the final image after the surface
+    was subtracted from a flat stack. The fit must stay bounded near the
+    sampled sky value everywhere, including inside the gap."""
+
+    def setUp(self):
+        import src.background as bg_mod
+        if not bg_mod.HAS_RBF:
+            self.skipTest("scipy.interpolate.RBFInterpolator not available")
+        self.fit_rbf_surface = bg_mod._fit_rbf_surface
+
+    def test_surface_bounded_across_large_sample_gap(self):
+        rng = np.random.default_rng(0)
+        sky = 5000.0
+        # Dense samples everywhere except a large contiguous wedge in one
+        # corner (mimics a star-mask/outlier-rejection gap), all at a flat
+        # sky value with small noise.
+        pts = []
+        for gy in np.linspace(0.02, 0.98, 25):
+            for gx in np.linspace(0.02, 0.98, 25):
+                if gx > 0.55 and gy > 0.55:
+                    continue  # the gap
+                pts.append((gy, gx))
+        coords = np.array(pts)
+        values = sky + rng.normal(0, 5.0, len(pts))
+
+        surface = self.fit_rbf_surface(
+            coords, values, H=256, W=256, kernel='thin_plate_spline',
+            smoothing=0.0, outlier_sigma=3.0, max_iter=3,
+            patch_size=32, verbose=False)
+
+        # Sample inside the gap (bottom-right corner in pixel space).
+        gap = surface[220:256, 220:256]
+        self.assertLess(abs(float(np.median(gap)) - sky), 200.0)
+        self.assertLess(float(np.max(np.abs(surface - sky))), 500.0)
+
+
 class TestApplyBackgroundExtraction(unittest.TestCase):
 
     def setUp(self):
