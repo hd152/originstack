@@ -455,13 +455,19 @@ def _probe_gpu_calibration(H: int, W: int, gpu, masters: Dict) -> bool:
     return gpu_s < cpu_s
 
 
-# Per-worker rayon thread cap — see _pin_worker_to_single_thread. Chosen from
-# measured lacosmic_reject_native scaling on this class of hardware (1/2/4/8/16
-# threads -> 3865/2150/1118/680/603 ms): 4 threads keeps ~75% of the achievable
-# speedup while bounding worst-case oversubscription to workers x 4 rather than
-# workers x cores. Not re-validated against real 16-way process contention yet —
-# the next run's Quality+Load breakdown will show whether this needs tuning.
-_RAYON_WORKER_CAP = 4
+# Per-worker rayon thread cap — see _pin_worker_to_single_thread. Isolated
+# lacosmic_reject_native scaling (1/2/4/8/16 threads -> 3865/2150/1118/680/603
+# ms) argued for capping at 4 rather than 1, to keep some of that speedup. But
+# a real 233-frame production run with n_workers == os.cpu_count() (Phase 1
+# already saturates every core one-frame-per-process) showed the cap=4 choice
+# was net negative: lacosmic's real per-call cost was 7955ms/frame under
+# n_workers x 4 = 64-thread oversubscription -- *worse* than the isolated
+# fully-serial 1-thread number (3865ms), let alone the 4-thread one (1118ms).
+# When workers already equal core count, any per-worker internal parallelism
+# is oversubscription by construction; there's no free core left for rayon to
+# use. 1 thread avoids that regardless of what isolated (uncontended)
+# benchmarks show.
+_RAYON_WORKER_CAP = 1
 
 
 def _pin_worker_to_single_thread() -> None:
