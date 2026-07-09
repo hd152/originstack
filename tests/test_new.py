@@ -986,3 +986,45 @@ class TestPreviewBlackSigmaDepthScaling(unittest.TestCase):
 
     def test_negative_preset_untouched(self):
         self.assertEqual(self._run(12, -0.5), -0.5)
+
+
+class TestPatchScoresPhase1Split(unittest.TestCase):
+    """compute_patch_scores (Phase 1) + patch_scores_to_map (Phase 2) must
+    reproduce compute_patch_quality_map exactly for an unshifted frame, and
+    place weight correctly after a coarse-grid shift. The old path warped the
+    full-res frame with cval=0 before scoring, so the sky->0 border step
+    inflated border-patch Brenner scores and poisoned the per-frame max
+    normalisation for strongly dithered frames; the split path scores before
+    shifting and avoids that entirely."""
+
+    def test_zero_shift_matches_legacy_exactly(self):
+        from src.registration import (compute_patch_quality_map,
+                                      compute_patch_scores, patch_scores_to_map)
+        rng = np.random.default_rng(0)
+        lum = rng.normal(1000, 50, (512, 768)).astype(np.float32)
+        legacy = compute_patch_quality_map(lum)
+        split = patch_scores_to_map(compute_patch_scores(lum), 512, 768)
+        np.testing.assert_allclose(split, legacy, rtol=0, atol=1e-6)
+
+    def test_shifted_grid_moves_weight(self):
+        from scipy import ndimage
+        from src.registration import (compute_patch_scores,
+                                      patch_scores_to_map,
+                                      _patch_grid_geometry)
+        rng = np.random.default_rng(1)
+        H, W = 512, 768
+        lum = rng.normal(1000, 5, (H, W)).astype(np.float32)
+        # One sharp textured block -> one dominant patch
+        lum[64:128, 64:128] += rng.normal(0, 400, (64, 64)).astype(np.float32)
+        grid = compute_patch_scores(lum)
+        ph, pw, _, _ = _patch_grid_geometry(H, W)
+        # Shift by exactly one patch down/right
+        g = ndimage.shift(grid.astype(np.float32), shift=(1.0, 1.0),
+                          order=1, mode='nearest')
+        m = patch_scores_to_map(g, H, W)
+        iy, ix = np.unravel_index(np.argmax(grid), grid.shape)
+        peak = np.unravel_index(np.argmax(m), m.shape)
+        # Peak of the full-res map should sit ~one patch below/right of the
+        # original patch center.
+        self.assertAlmostEqual(peak[0] / ph, iy + 1, delta=1.0)
+        self.assertAlmostEqual(peak[1] / pw, ix + 1, delta=1.0)

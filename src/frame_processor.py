@@ -351,7 +351,20 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
     metrics = {} if skip_quality else compute_quality_metrics(
         lum, quick=quick_quality, advanced_metrics=advanced_metrics)
-    timings['quality'] = time.perf_counter() - _t
+    timings['quality'], _t = time.perf_counter() - _t, time.perf_counter()
+
+    # Patch quality scores for --patch-registration, computed here while the
+    # luminance is already in worker memory. Phase 2 shifts this tiny coarse
+    # grid into aligned space instead of re-reading and re-warping the full
+    # frame per map. Computed unconditionally: whether patch registration is
+    # enabled is decided by the auto-advisor AFTER Phase 1, and one Brenner
+    # pass over an in-cache frame is trivial next to the steps above.
+    try:
+        from src.registration import compute_patch_scores
+        metrics['_patch_scores'] = compute_patch_scores(np.asarray(lum))
+    except Exception:
+        pass
+    timings['patch_scores'] = time.perf_counter() - _t
     return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None, 'timings': timings}
 
 
@@ -880,7 +893,7 @@ def execute_frame_processing(
 _STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix', 'white_balance',
               'ca_correction', 'cosmic_ray_rejection', 'lum_recompute',
               'pre_gradient_removal', 'validate', 'quality',
-              'memmap_write', 'final_flush')
+              'patch_scores', 'memmap_write', 'final_flush')
 _STEP_LABELS = {
     'load': 'Load (disk read)',
     'calibrate': 'Calibrate (bias/dark/flat)',
@@ -893,6 +906,7 @@ _STEP_LABELS = {
     'pre_gradient_removal': 'Pre-gradient removal',
     'validate': 'Validate',
     'quality': 'Quality metrics (star detect, FWHM)',
+    'patch_scores': 'Patch quality scores (for Phase 2)',
     'memmap_write': 'Memmap write',
     'final_flush': 'Final memmap flush',
 }

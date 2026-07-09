@@ -1041,6 +1041,72 @@ def score_registration_residuals(
     return residuals, passed
 
 
+def _patch_grid_geometry(H: int, W: int, grid_size: int = None) -> Tuple[int, int, int, int]:
+    """Patch height/width and grid dims for a (H, W) frame — shared by the
+    Phase-1 scorer and the Phase-2 map builder so their grids always agree."""
+    from src.models import Config
+    if grid_size is None:
+        grid_size = Config.PATCH_GRID_SIZE
+    min_patch = Config.PATCH_MIN_SIZE
+    # Enforce minimum patch size; fall back to 1x1 grid if image is tiny
+    ph = max(H // grid_size, min_patch)
+    pw = max(W // grid_size, min_patch)
+    ny = max(H // ph, 1)
+    nx = max(W // pw, 1)
+    return ph, pw, ny, nx
+
+
+def compute_patch_scores(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
+    """Per-patch Brenner sharpness on a coarse (ny, nx) grid, unnormalised.
+
+    Cheap enough to run in Phase 1 while the frame is already in worker
+    memory (one diff pass over the luminance); the tiny grid is stored in
+    the frame metrics ('_patch_scores') so Phase 2 does not have to re-read
+    and re-warp the full-resolution frame just to score it.
+    """
+    H, W = lum.shape[:2]
+    ph, pw, ny, nx = _patch_grid_geometry(H, W, grid_size)
+    patch_scores = np.zeros((ny, nx), dtype=np.float32)
+    lum_f = lum.astype(np.float64)
+    for iy in range(ny):
+        for ix in range(nx):
+            y0, y1 = iy * ph, min((iy + 1) * ph, H)
+            x0, x1 = ix * pw, min((ix + 1) * pw, W)
+            patch = lum_f[y0:y1, x0:x1]
+            if patch.size < 4:
+                continue
+            diff = patch[:, 2:] - patch[:, :-2]
+            patch_scores[iy, ix] = float(np.mean(diff * diff))
+    return patch_scores
+
+
+def patch_scores_to_map(patch_scores: np.ndarray, H: int, W: int) -> np.ndarray:
+    """Normalise a coarse patch-score grid and upsample it to (H, W)."""
+    patch_scores = patch_scores.astype(np.float32, copy=True)
+    ny, nx = patch_scores.shape
+    pmax = patch_scores.max()
+    if pmax > 1e-12:
+        patch_scores /= pmax
+    if ny == H and nx == W:
+        return patch_scores
+    zoom_y = H / ny
+    zoom_x = W / nx
+    quality_map = ndimage.zoom(patch_scores, (zoom_y, zoom_x), order=1)
+    quality_map = np.clip(quality_map, 0.0, 1.0).astype(np.float32)
+    # Ensure exact output shape (zoom can differ by 1 pixel due to rounding)
+    if quality_map.shape != (H, W):
+        from scipy.ndimage import map_coordinates
+        gy = np.linspace(0, ny - 1, H)
+        gx = np.linspace(0, nx - 1, W)
+        coords_y, coords_x = np.meshgrid(gy, gx, indexing='ij')
+        quality_map = map_coordinates(
+            patch_scores.astype(np.float64),
+            [coords_y, coords_x], order=1, mode='nearest'
+        ).astype(np.float32)
+        np.clip(quality_map, 0.0, 1.0, out=quality_map)
+    return quality_map
+
+
 def compute_patch_quality_map(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
     """Divide luminance frame into a grid and compute per-patch Brenner sharpness.
 
@@ -1481,9 +1547,34 @@ def run_registration_phase(
     if getattr(args, 'patch_registration', False) and not args.no_registration:
         safe_print(f"\n  Computing patch quality maps ({len(final)} frames)...")
         quality_maps = []
+        H_map, W_map = int(mem_lum.shape[1]), int(mem_lum.shape[2])
+        ph_g, pw_g, _, _ = _patch_grid_geometry(H_map, W_map)
+        n_from_scores = 0
         for j, orig_idx in enumerate(final_indices):
+            grid = final[j].metrics.get('_patch_scores') if final[j].metrics else None
+            if grid is not None and np.asarray(grid).ndim == 2:
+                # Fast path: Brenner patch scores were already computed in
+                # Phase 1 while the frame was in worker memory. The map is a
+                # smooth per-patch weight field (patches are hundreds of px),
+                # so translating the coarse grid by the frame's shift in
+                # patch units matches the old full-res warp+score to well
+                # under a patch width; the <=0.3deg field rotations move
+                # corner patches by <0.05 patch and are ignored.
+                if transforms[j] is not None:
+                    t_xy = transforms[j].params[:2, 2]
+                    sy, sx = float(t_xy[1]), float(t_xy[0])
+                else:
+                    sy, sx = shifts[j]
+                g = np.asarray(grid, dtype=np.float32)
+                if sy != 0.0 or sx != 0.0:
+                    g = ndimage.shift(g, shift=(sy / ph_g, sx / pw_g),
+                                      order=1, mode='nearest')
+                quality_maps.append(patch_scores_to_map(g, H_map, W_map))
+                n_from_scores += 1
+                continue
+            # Fallback (frames without Phase-1 scores, e.g. resumed
+            # checkpoints): re-read, warp, and score at full resolution.
             lum = np.array(mem_lum[orig_idx]).astype(np.float32)
-            # Apply registration so the quality map is in aligned space
             if transforms[j] is not None:
                 from scipy.ndimage import affine_transform as _aff
                 tfm = transforms[j]
@@ -1498,7 +1589,11 @@ def run_registration_phase(
                                     mode='constant', cval=0.0)
             qmap = compute_patch_quality_map(lum)
             quality_maps.append(qmap)
-        safe_print(f"  Patch quality maps computed.")
+        if n_from_scores:
+            safe_print(f"  Patch quality maps computed "
+                       f"({n_from_scores}/{len(final)} from Phase-1 scores).")
+        else:
+            safe_print(f"  Patch quality maps computed.")
 
     _reg_timings['patch_quality_maps'], _t = time.time() - _t, time.time()
 
