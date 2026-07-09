@@ -398,8 +398,8 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             ref_np, img_np = r_ds, i_ds
 
         h_c, w_c = ref_np.shape
-        pad_h, pad_w = 2 * h_c, 2 * w_c
         if gpu.active:
+            pad_h, pad_w = 2 * h_c, 2 * w_c
             ref_norm = xp.asarray(ref_np)
             img_norm = xp.asarray(img_np)
             F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
@@ -413,6 +413,13 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             # copy. workers=1: this call already runs inside a per-frame
             # ThreadPoolExecutor, so internal multi-threading would just
             # oversubscribe the same cores the outer pool is using.
+            # Padding to next_fast_len (a highly-composite size >= 2x, never
+            # smaller) instead of exactly 2x avoids landing on a dimension
+            # with a large prime factor (e.g. 2*3056=6112=2^5*191 forces
+            # Bluestein's algorithm); ~2x faster on top of the numpy->scipy
+            # switch, same correlation-peak result since it only adds extra
+            # zero margin.
+            pad_h, pad_w = sfft.next_fast_len(2 * h_c), sfft.next_fast_len(2 * w_c)
             F_ref = sfft.rfft2(ref_np, s=(pad_h, pad_w), workers=1)
             F_img = sfft.rfft2(img_np, s=(pad_h, pad_w), workers=1)
             corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
@@ -499,7 +506,7 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
     ref_n = (ref - ref.mean()).astype(np.float32, copy=False)
     img_n = (img - img.mean()).astype(np.float32, copy=False)
     h, w = ref_n.shape
-    pad_h, pad_w = 2 * h, 2 * w
+    pad_h, pad_w = sfft.next_fast_len(2 * h), sfft.next_fast_len(2 * w)
     F_ref = sfft.rfft2(ref_n, s=(pad_h, pad_w), workers=1)
     F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
     corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
@@ -536,7 +543,7 @@ def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) ->
     for r in ref_pyr:
         ref_n = (r - r.mean()).astype(np.float32, copy=False)
         h, w = ref_n.shape
-        pad_h, pad_w = 2 * h, 2 * w
+        pad_h, pad_w = sfft.next_fast_len(2 * h), sfft.next_fast_len(2 * w)
         F_ref = sfft.rfft2(ref_n, s=(pad_h, pad_w), workers=1)
         prepared.append((F_ref, h, w, pad_h, pad_w))
     return prepared
