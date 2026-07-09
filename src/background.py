@@ -1079,6 +1079,9 @@ def dynamic_background_extraction(
         safe_print(f"    DBE: dense star field detected ({_masked_pct * 100.0:.0f}% masked) "
                    f"— using sigma-clip mesh without emission mask")
 
+    if verbose and HAS_NATIVE:
+        safe_print("    [rust] DBE robust local-regression surface fit")
+
     result = np.empty_like(rgb)
     channel_names = ['Red', 'Green', 'Blue']
 
