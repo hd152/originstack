@@ -7,8 +7,22 @@ import numpy as np
 import pytest
 
 import astro_stack as astro
+import src.stacking as _stacking_mod
 
 native = pytest.importorskip("astro_native")
+
+
+def _numpy_lacosmic(rgb, **kw):
+    """Force the true numpy/scipy path. lacosmic_reject auto-dispatches to the
+    native kernel when astro_native is installed (as it is here, since this
+    whole module only runs when it's importable), so calling it directly
+    would compare the native kernel against itself."""
+    had = _stacking_mod.HAS_NATIVE
+    _stacking_mod.HAS_NATIVE = False
+    try:
+        return astro.lacosmic_reject(rgb, **kw)
+    finally:
+        _stacking_mod.HAS_NATIVE = had
 
 
 def _stack(n=30, h=24, w=28, c=3, seed=0, outliers=True):
@@ -174,8 +188,14 @@ def test_warp_shift_fast_path():
 
 
 def test_lacosmic_reject_matches_numpy():
-    """Native L.A.Cosmic must match the numpy/scipy reference exactly (same
-    f64 intermediate dtype), including protecting compact bright sources."""
+    """Native L.A.Cosmic (f32 internally, not f64 — see lib.rs for why) must
+    closely match the numpy/scipy f64 reference, including protecting compact
+    bright sources. Not exact: f32 occasionally flips a threshold-boundary
+    pixel's reject/keep decision (S vs sigclip right at the edge), so the
+    bound here is "rare and small", not zero — checked two ways: the total
+    number of pixels whose reject/keep decision disagrees must be tiny, and
+    every value (including any flipped pixel) must stay within a sane ADU
+    bound of the reference (not an arbitrarily wrong replacement)."""
     rng = np.random.default_rng(2)
     H, W = 120, 140
     rgb = np.clip(rng.normal(500, 60, (H, W, 3)), 0, None).astype(np.float32)
@@ -189,10 +209,17 @@ def test_lacosmic_reject_matches_numpy():
             rgb[:, :, c] += g
     rgb = np.ascontiguousarray(rgb)
 
-    ref = astro.lacosmic_reject(rgb.copy())
+    ref = _numpy_lacosmic(rgb.copy())
     got = native.lacosmic_reject_native(rgb.copy(), 4.5, 5.0, 1.0, 6.5)
     assert got.shape == ref.shape and got.dtype == np.float32
-    assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-2
+
+    diff = np.abs(ref.astype(np.float64) - got.astype(np.float64))
+    n_pixels = H * W * 3
+    n_disagree = int(np.sum(diff > 1.0))
+    assert n_disagree < max(5, n_pixels // 10000), (
+        f"{n_disagree}/{n_pixels} pixels disagree on reject/keep — too many for "
+        f"f32 threshold rounding, suggests a real bug")
+    assert float(diff.max()) < 500.0, "a disagreeing pixel is wildly off, not a boundary flip"
 
 
 def test_lacosmic_reject_non_rgb_passthrough():

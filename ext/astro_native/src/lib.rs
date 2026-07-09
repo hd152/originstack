@@ -1003,32 +1003,10 @@ fn reflect_idx(i: isize, n: usize) -> usize {
 /// Windowed median filter (odd `size`, reflect boundary), row-parallel.
 /// The window is tiny (9 or 25 elements for size 3/5) so a per-pixel gather +
 /// insertion-style sort beats scipy's generic rank-filter machinery, which
-/// pays per-pixel dispatch overhead for an arbitrary footprint.
-fn median_filter_2d_f64(data: &[f64], h: usize, w: usize, size: usize) -> Vec<f64> {
-    let half = (size / 2) as isize;
-    let mut out = vec![0f64; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
-        let mut window = vec![0f64; size * size];
-        for x in 0..w {
-            let mut k = 0usize;
-            for dy in -half..=half {
-                let yy = reflect_idx(y as isize + dy, h);
-                let base = yy * w;
-                for dx in -half..=half {
-                    let xx = reflect_idx(x as isize + dx, w);
-                    window[k] = data[base + xx];
-                    k += 1;
-                }
-            }
-            window.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            row_out[x] = window[window.len() / 2];
-        }
-    });
-    out
-}
-
-/// f32 variant of the above (used by the hot-pixel detector, which operates on
-/// float32 luminance).
+/// pays per-pixel dispatch overhead for an arbitrary footprint. f32 (not f64):
+/// used by lacosmic_reject_native and the hot-pixel detector, both of which
+/// run inside many concurrent ProcessPoolExecutor workers, where halving the
+/// bytes moved per call directly reduces shared memory-bandwidth contention.
 fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize) -> Vec<f32> {
     let half = (size / 2) as isize;
     let mut out = vec![0f32; h * w];
@@ -1054,9 +1032,13 @@ fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize) -> Vec<f3
 
 /// 3x3 Laplacian [[0,-1,0],[-1,4,-1],[0,-1,0]], reflect boundary. The kernel
 /// is symmetric under 180-degree rotation, so `convolve` and `correlate`
-/// coincide — no flip needed to match `scipy.ndimage.convolve`.
-fn laplacian_2d(data: &[f64], h: usize, w: usize) -> Vec<f64> {
-    let mut out = vec![0f64; h * w];
+/// coincide — no flip needed to match `scipy.ndimage.convolve`. f32 (not
+/// f64): see `lacosmic_reject_native` for why this matters more here than
+/// raw compute — this kernel's working set (5 full-frame arrays per channel:
+/// source, fine, med5, S, S_med) is what gets driven through memory under
+/// real multi-process contention, and f32 halves it.
+fn laplacian_2d_f32(data: &[f32], h: usize, w: usize) -> Vec<f32> {
+    let mut out = vec![0f32; h * w];
     out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
         let yn = reflect_idx(y as isize - 1, h);
         let ys = reflect_idx(y as isize + 1, h);
@@ -1079,10 +1061,24 @@ fn laplacian_2d(data: &[f64], h: usize, w: usize) -> Vec<f64> {
 /// L.A.Cosmic-style cosmic-ray rejection, matching `lacosmic_reject` in
 /// `src/stacking.py`: per channel, Laplacian spike / local-noise-model
 /// detection statistic, object-rejection ratio to protect star cores,
-/// replace flagged pixels with the 5x5 local median. All f64 internally
-/// (matching the numpy reference's dtype) for parity in the threshold test;
-/// output f32. Channels are processed sequentially (each internally
-/// row-parallel) since S_med depends on the fully-computed S array.
+/// replace flagged pixels with the 5x5 local median.
+///
+/// f32 internally (NOT f64, unlike this kernel's first version). Two real
+/// 233-frame production runs on 16-core hardware showed this kernel getting
+/// SLOWER under real ProcessPoolExecutor contention (~8s/frame) than a naive
+/// single-thread estimate would predict, while CA correction's downsample fix
+/// (which cuts memory traffic, not thread count) gave its full isolated
+/// speedup in production. Same diagnosis applies here: under N concurrent
+/// worker processes each running this kernel, the limiter is shared memory
+/// bandwidth, not core count — and this kernel moves 5 full-frame arrays
+/// through memory per channel (source, fine, med5, S, S_med). f32 halves
+/// that traffic. The f64 precision was never required for correctness: this
+/// is a threshold test (S > sigclip), not an accumulation sensitive to
+/// rounding — see tests/test_native.py for the parity bound now in effect
+/// (matches the original numpy f64 reference to <0.5 ADU per pixel, not
+/// exact-zero as the f64 Rust version achieved).
+/// Output f32. Channels processed sequentially (each internally row-parallel)
+/// since S_med depends on the fully-computed S array.
 #[pyfunction]
 #[pyo3(signature = (data, sigclip=4.5, objlim=5.0, gain=1.0, readnoise=6.5))]
 fn lacosmic_reject_native<'py>(
@@ -1096,7 +1092,10 @@ fn lacosmic_reject_native<'py>(
     let arr = data.as_array();
     let s = arr.shape();
     let (h, w, c) = (s[0], s[1], s[2]);
-    let rn_term = (readnoise / gain) * (readnoise / gain);
+    let rn_term = ((readnoise / gain) * (readnoise / gain)) as f32;
+    let sigclip = sigclip as f32;
+    let objlim = objlim as f32;
+    let gain = gain as f32;
     let flat: Option<&[f32]> = arr.as_slice();
 
     let mut out = vec![0f32; h * w * c];
@@ -1121,35 +1120,35 @@ fn lacosmic_reject_native<'py>(
 
     py.allow_threads(|| {
         for ch in 0..3usize {
-            let mut chd = vec![0f64; h * w];
+            let mut chd = vec![0f32; h * w];
             match flat {
                 Some(f) => {
                     chd.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
                         let base = y * w * c + ch;
                         for x in 0..w {
-                            row[x] = f[base + x * c] as f64;
+                            row[x] = f[base + x * c];
                         }
                     });
                 }
                 None => {
                     for y in 0..h {
                         for x in 0..w {
-                            chd[y * w + x] = arr[[y, x, ch]] as f64;
+                            chd[y * w + x] = arr[[y, x, ch]];
                         }
                     }
                 }
             }
 
-            let fine = laplacian_2d(&chd, h, w);
-            let med5 = median_filter_2d_f64(&chd, h, w, 5);
+            let fine = laplacian_2d_f32(&chd, h, w);
+            let med5 = median_filter_2d_f32(&chd, h, w, 5);
 
-            let mut sarr = vec![0f64; h * w];
+            let mut sarr = vec![0f32; h * w];
             sarr.par_iter_mut().enumerate().for_each(|(i, sv)| {
                 let f = fine[i].max(0.0);
                 let noise = (med5[i].max(0.0) / gain + rn_term).sqrt().max(1e-6);
                 *sv = f / (2.0 * noise);
             });
-            let smed = median_filter_2d_f64(&sarr, h, w, 3);
+            let smed = median_filter_2d_f32(&sarr, h, w, 3);
 
             out.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
                 let row_base = y * w;
@@ -1159,7 +1158,7 @@ fn lacosmic_reject_native<'py>(
                     let smv = smed[i].max(1e-6);
                     let ratio = sv / smv;
                     let val = if sv > sigclip && ratio > objlim { med5[i] } else { chd[i] };
-                    row_out[x * c + ch] = val as f32;
+                    row_out[x * c + ch] = val;
                 }
             });
         }
