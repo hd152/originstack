@@ -525,6 +525,26 @@ def _downsample_half(arr: np.ndarray) -> np.ndarray:
     return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
 
 
+def _int_shift(arr: np.ndarray, sy: int, sx: int) -> np.ndarray:
+    """Integer translation with zero fill — pyramid totals are always whole
+    pixels, so bilinear ndimage.shift is pure overhead here."""
+    out = np.zeros_like(arr)
+    h, w = arr.shape
+    ys0, ys1 = max(0, sy), min(h, h + sy)
+    xs0, xs1 = max(0, sx), min(w, w + sx)
+    if ys1 > ys0 and xs1 > xs0:
+        out[ys0:ys1, xs0:xs1] = arr[ys0 - sy:ys1 - sy, xs0 - sx:xs1 - sx]
+    return out
+
+
+# The pyramid's job is a coarse integer seed: calculate_shift's residual FFT
+# correlation re-solves the shift on top of it and tolerates seed errors of
+# several pixels (measured: 0.9px seed offset -> 0.013px final). Correlating
+# the finest (full-res) level therefore buys nothing the residual pass does
+# not redo -- and it is 4x the work of the half-res level. Stop there.
+_PYRAMID_STOP_LEVEL = 1
+
+
 def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) -> list:
     """Precompute a fixed reference's pyramid FFTs once, for reuse across many
     frames. Returns a coarsest-to-finest... no — finest-to-coarsest list matching
@@ -532,15 +552,21 @@ def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) ->
 
     When one reference is registered against N frames (reference selection, and
     the whole registration phase), this removes N-1 redundant reference-pyramid
-    builds and N-1 redundant reference FFTs per level.
+    builds and N-1 redundant reference FFTs per level. Levels below the
+    pyramid stop level hold None (never correlated — see _PYRAMID_STOP_LEVEL);
+    f32 throughout, the correlation peak is integer-precision anyway.
     """
-    ref_pyr = [ref.astype(np.float64)]
+    ref_pyr = [ref.astype(np.float32)]
     for _ in range(levels - 1):
         if min(ref_pyr[-1].shape) // 2 < min_size:
             break
         ref_pyr.append(_downsample_half(ref_pyr[-1]))
+    stop = min(_PYRAMID_STOP_LEVEL, len(ref_pyr) - 1)
     prepared = []
-    for r in ref_pyr:
+    for lvl, r in enumerate(ref_pyr):
+        if lvl < stop:
+            prepared.append(None)
+            continue
         ref_n = (r - r.mean()).astype(np.float32, copy=False)
         h, w = ref_n.shape
         pad_h, pad_w = sfft.next_fast_len(2 * h), sfft.next_fast_len(2 * w)
@@ -551,20 +577,19 @@ def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) ->
 
 def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float, float]:
     """Pyramid registration using a precomputed reference pyramid (see
-    ``prepare_ref_pyramid``). Bit-identical to ``calculate_shift_pyramid`` — only
+    ``prepare_ref_pyramid``). Matches ``calculate_shift_pyramid`` — only
     the reference-side work is hoisted out of the per-frame loop."""
     levels = len(prepared)
-    img_pyr = [img.astype(np.float64)]
-    for _ in range(levels - 1):
+    stop = next((i for i, p in enumerate(prepared) if p is not None), 0)
+    img_pyr: List[Optional[np.ndarray]] = [np.asarray(img, dtype=np.float32)]
+    for lvl in range(1, levels):
         img_pyr.append(_downsample_half(img_pyr[-1]))
-
     total_sy, total_sx = 0.0, 0.0
-    for lvl in range(levels - 1, -1, -1):
+    for lvl in range(levels - 1, stop - 1, -1):
         F_ref, h, w, pad_h, pad_w = prepared[lvl]
         i = img_pyr[lvl]
         if total_sy != 0.0 or total_sx != 0.0:
-            i = ndimage.shift(i, shift=(total_sy, total_sx), order=1,
-                              mode='constant', cval=0.0)
+            i = _int_shift(i, int(total_sy), int(total_sx))
         img_n = (i - i.mean()).astype(np.float32, copy=False)
         F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
         corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
@@ -590,9 +615,9 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
         a = arr[:h2, :w2]
         return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
 
-    # Build pyramids
-    ref_pyr = [ref.astype(np.float64)]
-    img_pyr = [img.astype(np.float64)]
+    # Build pyramids (f32: the correlation peak is integer-precision anyway)
+    ref_pyr = [np.asarray(ref, dtype=np.float32)]
+    img_pyr = [np.asarray(img, dtype=np.float32)]
     for _ in range(levels - 1):
         if min(ref_pyr[-1].shape) // 2 < min_size:
             break
@@ -602,15 +627,17 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
     actual_levels = len(ref_pyr)
     total_sy, total_sx = 0.0, 0.0
 
-    # Loop from coarsest (N-1) to finest (0)
-    for lvl in range(actual_levels - 1, -1, -1):
+    # Loop from coarsest (N-1) down to the stop level (see _PYRAMID_STOP_LEVEL:
+    # the finest level only re-derives what the caller's residual correlation
+    # solves again anyway, at 4x the cost of the half-res level).
+    stop = min(_PYRAMID_STOP_LEVEL, actual_levels - 1)
+    for lvl in range(actual_levels - 1, stop - 1, -1):
         r = ref_pyr[lvl]
         i = img_pyr[lvl]
 
-        # Apply accumulated shift (scaled to this level's resolution) then compute residual
+        # Apply accumulated (always-integer) shift, then compute the residual
         if total_sy != 0.0 or total_sx != 0.0:
-            i = ndimage.shift(i, shift=(total_sy, total_sx), order=1,
-                              mode='constant', cval=0.0)
+            i = _int_shift(i, int(total_sy), int(total_sx))
 
         sy_res, sx_res = _fft_shift_single(r, i)
         total_sy += sy_res
