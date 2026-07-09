@@ -401,12 +401,12 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         vp = float(corr[(py + 1) % pad_h, px])
         denom = 2.0 * (2.0 * vc - vm - vp)
         if abs(denom) > 1e-12:
-            sub_y = max(-0.5, min(0.5, (vm - vp) / denom))
+            sub_y = max(-0.5, min(0.5, (vp - vm) / denom))
         vm = float(corr[py, (px - 1) % pad_w])
         vp = float(corr[py, (px + 1) % pad_w])
         denom = 2.0 * (2.0 * vc - vm - vp)
         if abs(denom) > 1e-12:
-            sub_x = max(-0.5, min(0.5, (vm - vp) / denom))
+            sub_x = max(-0.5, min(0.5, (vp - vm) / denom))
         del corr  # free VRAM
 
         shift_y = float(dy + sub_y) + psy

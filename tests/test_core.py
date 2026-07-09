@@ -37,6 +37,39 @@ def test_calculate_shift_recovery():
     assert abs(sx - 2) <= 1.5
 
 
+def test_calculate_shift_fft_subpixel_refines_imperfect_seed():
+    # Regression test: the manual FFT cross-correlation branch's parabolic
+    # sub-pixel refinement (registration.py, sub_y/sub_x) once had a sign
+    # error that returned the *negative* of the correct sub-pixel offset.
+    # It was invisible when the seed was already near-exact (offset ~0, so
+    # the sign of a near-zero correction doesn't matter) but corrupted
+    # accuracy whenever the coarse seed was off by any real sub-pixel
+    # amount -- which calculate_shift_pyramid always is, since it only
+    # returns integer-pixel shifts. This is the sole source of sub-pixel
+    # accuracy on the production default path (skip_phase_cc=True).
+    from scipy import ndimage
+    rng = np.random.default_rng(42)
+    shape = (128, 160)
+    yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
+    ref = np.full(shape, 200.0)
+    for _ in range(25):
+        cy, cx = rng.uniform(15, shape[0] - 15), rng.uniform(15, shape[1] - 15)
+        amp = rng.uniform(500, 3000)
+        ref += amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.0 ** 2))
+    ref = ref.astype(np.float32)
+
+    true_shift = (2.4, -3.7)
+    want = (-true_shift[0], -true_shift[1])
+    img = ndimage.shift(ref, shift=true_shift, order=3, mode='constant', cval=0.0).astype(np.float32)
+
+    # Deliberately imperfect seed (mimics an integer-only pyramid seed).
+    seed = (round(want[0]), round(want[1]))
+    sy, sx = calculate_shift(ref, img, skip_phase_cc=True, seed_shift=seed,
+                              masked_correlation=False)
+    assert abs(sy - want[0]) < 0.1
+    assert abs(sx - want[1]) < 0.1
+
+
 def test_quality_metrics_counts_stars():
     im = make_star_image((64, 64), centers=[(20, 20), (40, 10)])
     metrics = compute_quality_metrics(im)
