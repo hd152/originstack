@@ -222,7 +222,7 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
     return out[:, :, 0] if squeeze_back else out
 
 
-def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True, seed_shift: Optional[Tuple[float, float]] = None, masked_correlation: bool = False) -> Tuple[float, float]:
+def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbose: bool = False, debug: bool = False, frame_name: str = "", skip_phase_cc: bool = False, use_pyramid: bool = True, seed_shift: Optional[Tuple[float, float]] = None, masked_correlation: bool = False, corr_downsample: int = 1) -> Tuple[float, float]:
     """Calculate the (shift_y, shift_x) needed to align ``img`` to ``ref``.
 
     Registration cascade:
@@ -379,10 +379,28 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             ref_np = (ref - np.mean(ref)).astype(np.float32)
             img_np = (img_fft - np.mean(img_fft)).astype(np.float32)
 
+        # Optional block-average downsample before correlating: the residual
+        # being solved for here is small (the pyramid/seed already removed
+        # the bulk of the shift), so a coarser grid still resolves it — and
+        # halving the side length quarters the FFT's O(N^2 log N) cost per
+        # factor of 2. The recovered (integer + parabolic) offset is in
+        # downsampled-pixel units and is scaled back up by the factor.
+        scale = 1
+        if corr_downsample > 1:
+            r_ds, i_ds = ref_np, img_np
+            n = corr_downsample
+            while n > 1 and min(r_ds.shape) >= 64:
+                r_ds = _downsample_half(r_ds)
+                i_ds = _downsample_half(i_ds)
+                scale *= 2
+                n //= 2
+            ref_np, img_np = r_ds, i_ds
+
         ref_norm = xp.asarray(ref_np)
         img_norm = xp.asarray(img_np)
 
-        pad_h, pad_w = 2 * h, 2 * w
+        h_c, w_c = ref_np.shape
+        pad_h, pad_w = 2 * h_c, 2 * w_c
         F_ref = xp.fft.rfft2(ref_norm, s=(pad_h, pad_w))
         F_img = xp.fft.rfft2(img_norm, s=(pad_h, pad_w))
         corr = xp.fft.irfft2(F_ref * xp.conj(F_img), s=(pad_h, pad_w))
@@ -390,8 +408,8 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
 
         peak_flat = int(xp.argmax(corr))
         peak = (peak_flat // corr.shape[1], peak_flat % corr.shape[1])
-        dy = peak[0] if peak[0] < h else peak[0] - pad_h
-        dx = peak[1] if peak[1] < w else peak[1] - pad_w
+        dy = peak[0] if peak[0] < h_c else peak[0] - pad_h
+        dx = peak[1] if peak[1] < w_c else peak[1] - pad_w
 
         # Parabolic subpixel refinement (wrap-safe)
         py, px = peak
@@ -409,8 +427,8 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             sub_x = max(-0.5, min(0.5, (vp - vm) / denom))
         del corr  # free VRAM
 
-        shift_y = float(dy + sub_y) + psy
-        shift_x = float(dx + sub_x) + psx
+        shift_y = float((dy + sub_y) * scale) + psy
+        shift_x = float((dx + sub_x) * scale) + psx
 
         if np.isfinite(shift_y) and np.isfinite(shift_x) and max(abs(shift_y), abs(shift_x)) < max(h, w) * 0.5:
             if verbose:
@@ -1327,7 +1345,8 @@ def run_registration_phase(
                 sy, sx = calculate_shift(ref_lum, lum, verbose=False,
                                          skip_phase_cc=args.skip_phase_correlation,
                                          seed_shift=seed,
-                                         masked_correlation=_masked_corr)
+                                         masked_correlation=_masked_corr,
+                                         corr_downsample=2)
                 affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
                                                initial_shift=(sy, sx))
                 if affine_tf is None:
@@ -1340,7 +1359,8 @@ def run_registration_phase(
                 frame_name=os.path.splitext(os.path.basename(f.path))[0],
                 skip_phase_cc=args.skip_phase_correlation,
                 seed_shift=seed,
-                masked_correlation=_masked_corr)
+                masked_correlation=_masked_corr,
+                corr_downsample=2)
             if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
                 safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
                 sx, sy = 0.0, 0.0
