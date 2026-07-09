@@ -909,7 +909,8 @@ def parse_args():
     p.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default='dbe',
                    help='Background extraction method (default: dbe). '
                         'mesh: legacy polynomial grid (fastest). '
-                        'dbe: Dynamic Background Extraction, RBF thin-plate-spline. '
+                        'dbe: Dynamic Background Extraction, robust local regression '
+                        '(native/Rust accelerated). '
                         'graxpert: AI-powered gradient removal via GraXpert subprocess '
                         '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
     p.add_argument('--graxpert-path', default=None, metavar='PATH',

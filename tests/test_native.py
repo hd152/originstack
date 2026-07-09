@@ -247,3 +247,58 @@ def test_all_nan_pixel_is_zero():
     got = native.sigma_clip_combine(d, 3.0, 3, None, False, True)
     assert np.isfinite(got).all()
     assert got[0, 0, 0] == 0.0
+
+
+def test_dbe_fit_surface_matches_numpy():
+    """Native DBE robust local-regression fit vs the numpy mirror in
+    src/background.py — same accumulators, IRLS schedule, and truncation, so
+    they should agree to float64 summation-order tolerance."""
+    from src.background import _dbe_fit_surface_numpy
+    rng = np.random.default_rng(7)
+    pts, vals = [], []
+    for gy in np.linspace(0.02, 0.98, 30):
+        for gx in np.linspace(0.02, 0.98, 40):
+            if 0.6 < gy < 0.8 and gx > 0.7:
+                continue  # a sample gap
+            pts.append((gy, gx))
+            v = 5000.0 + 300.0 * gy + rng.normal(0, 6.0)
+            if rng.random() < 0.05:
+                v += rng.uniform(200, 900)  # contaminated patches
+            vals.append(v)
+    coords = np.ascontiguousarray(pts, dtype=np.float64)
+    values = np.ascontiguousarray(vals, dtype=np.float64)
+
+    img_h, img_w, gh, gw, sigma = 1000.0, 1400.0, 40, 56, 70.0
+    got_s, got_w = native.dbe_fit_surface(coords, values, img_h, img_w,
+                                          gh, gw, sigma, 4.685, 3)
+    ref_s, ref_w = _dbe_fit_surface_numpy(coords, values, img_h, img_w,
+                                          gh, gw, sigma,
+                                          tukey_c=4.685, irls_iters=3)
+    np.testing.assert_allclose(got_w, ref_w, rtol=1e-8, atol=1e-10)
+    np.testing.assert_allclose(got_s, ref_s, rtol=1e-8, atol=1e-6)
+
+
+def test_fit_background_surface_numpy_fallback_bounded():
+    """The numpy fallback path (HAS_NATIVE forced off) must satisfy the same
+    bounded-in-gap behaviour as the native path."""
+    import src.background as bg_mod
+    rng = np.random.default_rng(0)
+    pts = []
+    for gy in np.linspace(0.02, 0.98, 25):
+        for gx in np.linspace(0.02, 0.98, 25):
+            if gx > 0.55 and gy > 0.55:
+                continue
+            pts.append((gy, gx))
+    coords = np.array(pts)
+    values = 5000.0 + rng.normal(0, 5.0, len(pts))
+    had = bg_mod.HAS_NATIVE
+    bg_mod.HAS_NATIVE = False
+    try:
+        surface = bg_mod._fit_background_surface(
+            coords, values, H=256, W=256, outlier_sigma=2.5, max_iter=3,
+            patch_size=32, verbose=False)
+    finally:
+        bg_mod.HAS_NATIVE = had
+    gap = surface[220:256, 220:256]
+    assert abs(float(np.median(gap)) - 5000.0) < 200.0
+    assert float(np.max(np.abs(surface - 5000.0))) < 500.0

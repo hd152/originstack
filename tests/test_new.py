@@ -107,19 +107,25 @@ class TestExtractBackground(unittest.TestCase):
         self.assertLess(abs(sky_with - 100.0), abs(sky_no - 100.0))
 
 
-class TestFitRbfSurfaceBounded(unittest.TestCase):
-    """Regression test: a large contiguous gap in the DBE patch samples (e.g.
-    left by outlier rejection near a bright star) once let the thin-plate-
-    spline RBF extrapolate far outside the real sky range, producing a
-    visible over/under-subtracted patch in the final image after the surface
-    was subtracted from a flat stack. The fit must stay bounded near the
-    sampled sky value everywhere, including inside the gap."""
+class TestFitBackgroundSurface(unittest.TestCase):
+    """Behavioural tests for DBE's robust local-regression surface fit.
+
+    The original thin-plate-spline RBF fit was unbounded: a large contiguous
+    gap in the patch samples (left by outlier rejection near a bright star)
+    let it extrapolate far outside the real sky range, producing a visible
+    over/under-subtracted wedge after the surface was subtracted from a flat
+    stack. The robust local fit must stay bounded near the sampled sky value
+    everywhere, follow genuine gradients, and shrug off contaminated patches.
+    """
 
     def setUp(self):
         import src.background as bg_mod
-        if not bg_mod.HAS_RBF:
-            self.skipTest("scipy.interpolate.RBFInterpolator not available")
-        self.fit_rbf_surface = bg_mod._fit_rbf_surface
+        self.fit_surface = bg_mod._fit_background_surface
+
+    def _fit(self, coords, values, H=256, W=256, patch_size=32):
+        return self.fit_surface(coords, values, H=H, W=W,
+                                outlier_sigma=2.5, max_iter=3,
+                                patch_size=patch_size, verbose=False)
 
     def test_surface_bounded_across_large_sample_gap(self):
         rng = np.random.default_rng(0)
@@ -136,15 +142,49 @@ class TestFitRbfSurfaceBounded(unittest.TestCase):
         coords = np.array(pts)
         values = sky + rng.normal(0, 5.0, len(pts))
 
-        surface = self.fit_rbf_surface(
-            coords, values, H=256, W=256, kernel='thin_plate_spline',
-            smoothing=0.0, outlier_sigma=3.0, max_iter=3,
-            patch_size=32, verbose=False)
+        surface = self._fit(coords, values)
 
         # Sample inside the gap (bottom-right corner in pixel space).
         gap = surface[220:256, 220:256]
         self.assertLess(abs(float(np.median(gap)) - sky), 200.0)
         self.assertLess(float(np.max(np.abs(surface - sky))), 500.0)
+
+    def test_recovers_linear_gradient(self):
+        """A light-pollution-style linear gradient must be followed, not
+        flattened, including at the image edges."""
+        rng = np.random.default_rng(1)
+        pts, vals = [], []
+        for gy in np.linspace(0.02, 0.98, 25):
+            for gx in np.linspace(0.02, 0.98, 25):
+                pts.append((gy, gx))
+                vals.append(5000.0 + 400.0 * gy + 250.0 * gx
+                            + rng.normal(0, 5.0))
+        surface = self._fit(np.array(pts), np.array(vals))
+
+        H = W = 256
+        gy, gx = np.mgrid[0:H, 0:W]
+        truth = 5000.0 + 400.0 * (gy / H) + 250.0 * (gx / W)
+        err = np.abs(surface - truth)
+        # Interior must track closely; edges may show slight boundary bias.
+        self.assertLess(float(np.median(err)), 15.0)
+        self.assertLess(float(err.max()), 80.0)
+
+    def test_contaminated_patches_downweighted(self):
+        """A cluster of patches inflated by a bright object must not drag
+        the fitted surface up: IRLS should suppress them."""
+        rng = np.random.default_rng(2)
+        pts, vals = [], []
+        for gy in np.linspace(0.02, 0.98, 25):
+            for gx in np.linspace(0.02, 0.98, 25):
+                pts.append((gy, gx))
+                v = 5000.0 + rng.normal(0, 5.0)
+                if 0.4 < gy < 0.6 and 0.4 < gx < 0.6:
+                    v += 800.0  # contaminated cluster
+                vals.append(v)
+        surface = self._fit(np.array(pts), np.array(vals))
+        center = surface[118:138, 118:138]
+        # Without downweighting the center would sit ~800 above sky.
+        self.assertLess(abs(float(np.median(center)) - 5000.0), 120.0)
 
 
 class TestApplyBackgroundExtraction(unittest.TestCase):

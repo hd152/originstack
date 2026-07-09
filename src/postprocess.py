@@ -415,7 +415,7 @@ def postprocess_stack(
         elif bg_method == 'dbe':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
             print(f"\n  Applying Dynamic Background Extraction "
-                  f"(patch={dbe_patch}px, RBF thin-plate-spline, sigma={args.bg_clip_sigma})...")
+                  f"(patch={dbe_patch}px, robust local regression, sigma={args.bg_clip_sigma})...")
             _entropy_bg = getattr(args, 'entropy_bg', False)
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,

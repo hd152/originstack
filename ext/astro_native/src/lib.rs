@@ -6,7 +6,10 @@
 //! per-pixel loop in native code, parallelised across image rows with rayon, so
 //! there is no per-tile float32 copy and no repeated whole-stack NaN passes.
 
-use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray3, PyReadonlyArray4};
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArray3, PyReadonlyArray4,
+};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -1188,6 +1191,226 @@ fn median_filter_native<'py>(
         .into_pyarray(py))
 }
 
+// ---------------------------------------------------------------------------
+// DBE robust background-surface fit
+// ---------------------------------------------------------------------------
+
+/// Median of an f64 slice (copies + sorts; N is small — DBE patch counts).
+fn median_f64(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mut s: Vec<f64> = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = s.len();
+    if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        0.5 * (s[n / 2 - 1] + s[n / 2])
+    }
+}
+
+/// Gaussian-weighted local accumulators at an evaluation point, for a
+/// weighted local-linear (degree-1) fit. Offsets are in units of sigma.
+/// Samples beyond `trunc_d2` sigma^2 are skipped (weight < ~4e-6 at 25).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn dbe_accum(
+    py_: f64,
+    px_: f64,
+    ys: &[f64],
+    xs: &[f64],
+    vs: &[f64],
+    wr: &[f64],
+    inv_sigma: f64,
+    trunc_d2: f64,
+) -> [f64; 9] {
+    let mut acc = [0.0f64; 9]; // sw swy swx swyy swyx swxx swv swyv swxv
+    for j in 0..ys.len() {
+        let dy = (ys[j] - py_) * inv_sigma;
+        let dx = (xs[j] - px_) * inv_sigma;
+        let d2 = dy * dy + dx * dx;
+        if d2 > trunc_d2 {
+            continue;
+        }
+        let w = wr[j] * (-0.5 * d2).exp();
+        let v = vs[j];
+        acc[0] += w;
+        acc[1] += w * dy;
+        acc[2] += w * dx;
+        acc[3] += w * dy * dy;
+        acc[4] += w * dy * dx;
+        acc[5] += w * dx * dx;
+        acc[6] += w * v;
+        acc[7] += w * dy * v;
+        acc[8] += w * dx * v;
+    }
+    acc
+}
+
+/// Solve the ridge-regularised 3x3 local-linear normal equations; returns the
+/// fitted value at the expansion center (the constant term). Falls back to
+/// the plain weighted mean when ill-conditioned, NaN when there is no weight.
+#[inline]
+fn dbe_solve(acc: &[f64; 9]) -> f64 {
+    let [sw, swy, swx, swyy, swyx, swxx, swv, swyv, swxv] = *acc;
+    if sw < 1e-12 {
+        return f64::NAN;
+    }
+    let lam = 1e-3 * sw; // ridge on the slope terms only
+    let (a11, a12, a13) = (sw, swy, swx);
+    let (a22, a23) = (swyy + lam, swyx);
+    let a33 = swxx + lam;
+    let det = a11 * (a22 * a33 - a23 * a23) - a12 * (a12 * a33 - a23 * a13)
+        + a13 * (a12 * a23 - a22 * a13);
+    let scale = (a11.abs() * a22.abs() * a33.abs()).max(1e-30);
+    if det.abs() < 1e-10 * scale {
+        return swv / sw; // Nadaraya-Watson fallback
+    }
+    let det1 = swv * (a22 * a33 - a23 * a23) - a12 * (swyv * a33 - a23 * swxv)
+        + a13 * (swyv * a23 - a22 * swxv);
+    det1 / det
+}
+
+/// Evaluate the robust local-linear fit at one point, widening the truncation
+/// radius if the point sits in a large gap with no nearby samples.
+#[inline]
+fn dbe_fit_at(
+    py_: f64,
+    px_: f64,
+    ys: &[f64],
+    xs: &[f64],
+    vs: &[f64],
+    wr: &[f64],
+    inv_sigma: f64,
+    global_mean: f64,
+) -> f64 {
+    let mut acc = dbe_accum(py_, px_, ys, xs, vs, wr, inv_sigma, 25.0);
+    if acc[0] < 1e-12 {
+        acc = dbe_accum(py_, px_, ys, xs, vs, wr, inv_sigma, f64::INFINITY);
+    }
+    let v = dbe_solve(&acc);
+    if v.is_nan() {
+        global_mean
+    } else {
+        v
+    }
+}
+
+/// Robust background-surface fit for DBE: Gaussian-weighted local-linear
+/// regression with IRLS (Tukey biweight) downweighting of contaminated
+/// patch samples. Replaces the former unbounded thin-plate-spline RBF +
+/// hard outlier-rejection loop: the local fit stays near the surrounding
+/// sample values by construction (no runaway extrapolation into sample
+/// gaps near bright stars), and IRLS downweights outliers continuously
+/// instead of carving hard gaps into the sample set.
+///
+/// `coords` are (N,2) normalized (y/H, x/W) patch centers; `values` the
+/// patch sky medians; `sigma_px` the Gaussian bandwidth in pixels. The
+/// surface is evaluated on a (grid_h, grid_w) grid spanning
+/// linspace(0,1)×linspace(0,1) in normalized coordinates (matching the
+/// caller's zoom-to-full-res convention). Returns (surface, robust_weights).
+#[pyfunction]
+#[pyo3(signature = (coords, values, img_h, img_w, grid_h, grid_w, sigma_px, tukey_c=4.685, irls_iters=3))]
+#[allow(clippy::too_many_arguments)]
+fn dbe_fit_surface<'py>(
+    py: Python<'py>,
+    coords: PyReadonlyArray2<'py, f64>,
+    values: PyReadonlyArray1<'py, f64>,
+    img_h: f64,
+    img_w: f64,
+    grid_h: usize,
+    grid_w: usize,
+    sigma_px: f64,
+    tukey_c: f64,
+    irls_iters: usize,
+) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let carr = coords.as_array();
+    let vs: Vec<f64> = values.as_array().to_vec();
+    let n = vs.len();
+    if carr.shape()[0] != n || carr.shape()[1] != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "coords must be (N,2) matching values length",
+        ));
+    }
+    let ys: Vec<f64> = (0..n).map(|i| carr[[i, 0]] * img_h).collect();
+    let xs: Vec<f64> = (0..n).map(|i| carr[[i, 1]] * img_w).collect();
+    let inv_sigma = 1.0 / sigma_px.max(1e-9);
+
+    let (surface, wrob) = py.allow_threads(|| {
+        let mut wr = vec![1.0f64; n];
+
+        // IRLS: refit each sample leave-one-out, reweight by Tukey biweight.
+        for _ in 0..irls_iters {
+            let residuals: Vec<f64> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let mut acc =
+                        dbe_accum(ys[i], xs[i], &ys, &xs, &vs, &wr, inv_sigma, 25.0);
+                    // remove self (d2 = 0 -> contributes to sw and swv only)
+                    acc[0] -= wr[i];
+                    acc[6] -= wr[i] * vs[i];
+                    let fit = dbe_solve(&acc);
+                    if fit.is_nan() {
+                        0.0
+                    } else {
+                        vs[i] - fit
+                    }
+                })
+                .collect();
+            let med_r = median_f64(&residuals);
+            let abs_dev: Vec<f64> = residuals.iter().map(|r| (r - med_r).abs()).collect();
+            let s = 1.4826 * median_f64(&abs_dev);
+            if s < 1e-9 {
+                break;
+            }
+            let cs = tukey_c * s;
+            for i in 0..n {
+                let u = (residuals[i] - med_r) / cs;
+                wr[i] = if u.abs() < 1.0 {
+                    let t = 1.0 - u * u;
+                    t * t
+                } else {
+                    0.0
+                };
+            }
+        }
+
+        let wsum: f64 = wr.iter().sum();
+        let global_mean = if wsum > 1e-12 {
+            wr.iter().zip(&vs).map(|(w, v)| w * v).sum::<f64>() / wsum
+        } else {
+            median_f64(&vs)
+        };
+
+        // Evaluate on the coarse grid (parallel over rows).
+        let mut surface = vec![0.0f64; grid_h * grid_w];
+        surface
+            .par_chunks_mut(grid_w)
+            .enumerate()
+            .for_each(|(gi, row)| {
+                let gy = if grid_h > 1 {
+                    gi as f64 / (grid_h - 1) as f64 * img_h
+                } else {
+                    0.0
+                };
+                for (gj, out) in row.iter_mut().enumerate() {
+                    let gx = if grid_w > 1 {
+                        gj as f64 / (grid_w - 1) as f64 * img_w
+                    } else {
+                        0.0
+                    };
+                    *out = dbe_fit_at(gy, gx, &ys, &xs, &vs, &wr, inv_sigma, global_mean);
+                }
+            });
+        (surface, wr)
+    });
+
+    let out = numpy::ndarray::Array2::from_shape_vec((grid_h, grid_w), surface)
+        .expect("shape mismatch building DBE surface");
+    Ok((out.into_pyarray(py), wrob.into_pyarray(py)))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -1200,6 +1423,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
     m.add_function(wrap_pyfunction!(median_filter_native, m)?)?;
+    m.add_function(wrap_pyfunction!(dbe_fit_surface, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

@@ -11,10 +11,11 @@ from scipy.interpolate import RectBivariateSpline
 from scipy.ndimage import binary_dilation, gaussian_filter, zoom
 
 try:
-    from scipy.interpolate import RBFInterpolator
-    HAS_RBF = True
-except ImportError:
-    HAS_RBF = False
+    import astro_native as _native
+    HAS_NATIVE = hasattr(_native, 'dbe_fit_surface')
+except Exception:
+    _native = None
+    HAS_NATIVE = False
 
 # Local dependencies - Added fallbacks for standalone execution or missing Config
 try:
@@ -25,12 +26,11 @@ except ImportError:
         BORDER_FRAC = 0.1
         DBE_PATCH_SIZE = 64
         DBE_MASKED_FRAC_THRESH = 0.5
-        DBE_RBF_KERNEL = "thin_plate_spline"
-        DBE_RBF_SMOOTHING = 0.0
         DBE_OUTLIER_SIGMA = 3.0
         DBE_OUTLIER_ITERS = 5
         DBE_MIN_SAMPLES = 10
         DBE_MAX_SAMPLES = 1000
+        DBE_FIT_SIGMA_PATCHES = 1.25
     Config = _MockConfig
 
 try:
@@ -826,53 +826,142 @@ def _sample_background_patches(
     return coords, values
 
 
-def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
-                     H: int, W: int,
-                     kernel: str, smoothing: float,
-                     outlier_sigma: float, max_iter: int,
-                     patch_size: int, verbose: bool) -> np.ndarray:
-    """Fit a smooth background surface via RBF."""
-    if not HAS_RBF or len(coords) < 6:
+def _dbe_solve_local_linear(acc: np.ndarray) -> np.ndarray:
+    """Solve the ridge-regularised 3x3 local-linear normal equations for a
+    batch of evaluation points. ``acc`` is (M, 9): sw swy swx swyy swyx swxx
+    swv swyv swxv. Returns the fitted value (constant term) per point, with a
+    plain weighted-mean fallback where ill-conditioned and NaN where sw~0.
+    Mirrors the native kernel's ``dbe_solve`` exactly.
+    """
+    sw, swy, swx, swyy, swyx, swxx, swv, swyv, swxv = acc.T
+    lam = 1e-3 * sw
+    a22 = swyy + lam
+    a33 = swxx + lam
+    det = (sw * (a22 * a33 - swyx * swyx) - swy * (swy * a33 - swyx * swx)
+           + swx * (swy * swyx - a22 * swx))
+    det1 = (swv * (a22 * a33 - swyx * swyx) - swy * (swyv * a33 - swyx * swxv)
+            + swx * (swyv * swyx - a22 * swxv))
+    scale = np.maximum(np.abs(sw) * np.abs(a22) * np.abs(a33), 1e-30)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        nw = swv / sw
+        ll = det1 / det
+    out = np.where(np.abs(det) < 1e-10 * scale, nw, ll)
+    return np.where(sw < 1e-12, np.nan, out)
+
+
+def _dbe_accum_batch(py_: np.ndarray, px_: np.ndarray,
+                     ys: np.ndarray, xs: np.ndarray, vs: np.ndarray,
+                     wr: np.ndarray, inv_sigma: float,
+                     trunc_d2: float) -> np.ndarray:
+    """Gaussian-weighted local-linear accumulators for a batch of evaluation
+    points against all samples. Returns (M, 9). Mirrors ``dbe_accum``."""
+    dy = (ys[None, :] - py_[:, None]) * inv_sigma
+    dx = (xs[None, :] - px_[:, None]) * inv_sigma
+    d2 = dy * dy + dx * dx
+    w = wr[None, :] * np.exp(-0.5 * d2)
+    if np.isfinite(trunc_d2):
+        w = np.where(d2 > trunc_d2, 0.0, w)
+    acc = np.empty((len(py_), 9), dtype=np.float64)
+    acc[:, 0] = w.sum(axis=1)
+    acc[:, 1] = (w * dy).sum(axis=1)
+    acc[:, 2] = (w * dx).sum(axis=1)
+    acc[:, 3] = (w * dy * dy).sum(axis=1)
+    acc[:, 4] = (w * dy * dx).sum(axis=1)
+    acc[:, 5] = (w * dx * dx).sum(axis=1)
+    acc[:, 6] = (w * vs[None, :]).sum(axis=1)
+    acc[:, 7] = (w * dy * vs[None, :]).sum(axis=1)
+    acc[:, 8] = (w * dx * vs[None, :]).sum(axis=1)
+    return acc
+
+
+def _dbe_fit_surface_numpy(coords: np.ndarray, values: np.ndarray,
+                           img_h: float, img_w: float,
+                           grid_h: int, grid_w: int, sigma_px: float,
+                           tukey_c: float = 4.685,
+                           irls_iters: int = 3) -> Tuple[np.ndarray, np.ndarray]:
+    """Numpy fallback for the native ``dbe_fit_surface`` kernel — identical
+    math (Gaussian-weighted local-linear regression, Tukey-biweight IRLS,
+    5-sigma truncation with untruncated retry for empty gaps)."""
+    n = len(values)
+    ys = coords[:, 0] * img_h
+    xs = coords[:, 1] * img_w
+    vs = values.astype(np.float64)
+    inv_sigma = 1.0 / max(sigma_px, 1e-9)
+    wr = np.ones(n, dtype=np.float64)
+    chunk = 512
+
+    for _ in range(irls_iters):
+        residuals = np.empty(n, dtype=np.float64)
+        for i0 in range(0, n, chunk):
+            i1 = min(i0 + chunk, n)
+            acc = _dbe_accum_batch(ys[i0:i1], xs[i0:i1], ys, xs, vs, wr,
+                                   inv_sigma, 25.0)
+            # leave-one-out: remove self (d2=0 -> sw and swv only)
+            idx = np.arange(i0, i1)
+            acc[:, 0] -= wr[idx]
+            acc[:, 6] -= wr[idx] * vs[idx]
+            fit = _dbe_solve_local_linear(acc)
+            residuals[i0:i1] = np.where(np.isnan(fit), 0.0, vs[idx] - fit)
+        med_r = float(np.median(residuals))
+        s = 1.4826 * float(np.median(np.abs(residuals - med_r)))
+        if s < 1e-9:
+            break
+        u = (residuals - med_r) / (tukey_c * s)
+        wr = np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+
+    wsum = float(wr.sum())
+    global_mean = (float((wr * vs).sum()) / wsum if wsum > 1e-12
+                   else float(np.median(vs)))
+
+    gy = (np.linspace(0.0, 1.0, grid_h) * img_h if grid_h > 1
+          else np.zeros(1))
+    gx = (np.linspace(0.0, 1.0, grid_w) * img_w if grid_w > 1
+          else np.zeros(1))
+    gyy, gxx = np.meshgrid(gy, gx, indexing='ij')
+    pts_y, pts_x = gyy.ravel(), gxx.ravel()
+    m = len(pts_y)
+    surface = np.empty(m, dtype=np.float64)
+    for i0 in range(0, m, chunk):
+        i1 = min(i0 + chunk, m)
+        acc = _dbe_accum_batch(pts_y[i0:i1], pts_x[i0:i1], ys, xs, vs, wr,
+                               inv_sigma, 25.0)
+        empty = acc[:, 0] < 1e-12
+        if np.any(empty):
+            acc[empty] = _dbe_accum_batch(pts_y[i0:i1][empty],
+                                          pts_x[i0:i1][empty],
+                                          ys, xs, vs, wr, inv_sigma, np.inf)
+        fit = _dbe_solve_local_linear(acc)
+        surface[i0:i1] = np.where(np.isnan(fit), global_mean, fit)
+    return surface.reshape(grid_h, grid_w), wr
+
+
+def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
+                            H: int, W: int,
+                            outlier_sigma: float, max_iter: int,
+                            patch_size: int, verbose: bool) -> np.ndarray:
+    """Fit a smooth background surface via robust local regression.
+
+    Gaussian-weighted local-linear regression with IRLS (Tukey biweight)
+    downweighting of contaminated patches. This replaced the earlier
+    thin-plate-spline RBF + hard outlier-rejection loop: the RBF was
+    globally supported and unbounded, so the large sample gaps the rejection
+    loop carved out near bright stars let it extrapolate far outside the
+    real sky range (observed as a near-black wedge fanning out from a star
+    after subtraction). The local fit stays near the surrounding sample
+    values by construction, follows genuine large-scale gradients through
+    its linear term, and downweights outliers continuously instead of
+    removing samples outright. Native (Rust) kernel when available, exact
+    numpy mirror otherwise.
+    """
+    if len(coords) < 6:
         return _polynomial_surface(coords, values, H, W, patch_size)
 
-    c, v = coords.copy(), values.copy()
+    sigma_px = Config.DBE_FIT_SIGMA_PATCHES * patch_size
+    # tukey_c=4.685 is the standard 95%-efficiency Tukey constant; scale it
+    # with the caller's outlier_sigma relative to its 2.5 default so the
+    # existing CLI knob keeps meaning "higher = more tolerant".
+    tukey_c = 4.685 * (outlier_sigma / 2.5)
 
-    for iteration in range(max_iter):
-        try:
-            rbf = RBFInterpolator(c, v, kernel=kernel, smoothing=smoothing, degree=1)
-        except Exception as e:
-            safe_print(f"    WARNING: RBF fitting failed ({e}) — falling back to polynomial")
-            return _polynomial_surface(c, v, H, W, patch_size)
-
-        residuals = v - rbf(c)
-        res_std = float(np.std(residuals))
-        if res_std < 1e-12:
-            break
-        keep = np.abs(residuals) <= outlier_sigma * res_std
-        if keep.all():
-            break
-        if verbose:
-            safe_print(f"    DBE iter {iteration + 1}: rejected {int((~keep).sum())} outlier patches")
-        c, v = c[keep], v[keep]
-        if len(c) < 6:
-            break
-
-    if len(c) < 6:
-        return _polynomial_surface(c, v, H, W, patch_size)
-
-    # Bound the extrapolation range. thin_plate_spline (and its degree-1 trend
-    # term) is globally supported and unbounded: in a region with no nearby
-    # accepted patches -- e.g. a large contiguous gap left by outlier
-    # rejection near a bright star -- it can overshoot far past any real sky
-    # value instead of leveling off. That overshoot then gets subtracted from
-    # the image, producing a visible over/under-subtracted patch (observed:
-    # a triangular near-black wedge fanning out from a star after DBE, where
-    # the pre-DBE stack was flat). Clamp to the accepted-patch value range
-    # plus a noise-scaled margin so extrapolation can't run away.
-    surf_lo = float(np.min(v)) - 3.0 * res_std
-    surf_hi = float(np.max(v)) + 3.0 * res_std
-
-    # Evaluation
     # Use coarser grid for large images to keep evaluation tractable
     min_dim = min(H, W)
     if min_dim > 4000:
@@ -881,16 +970,34 @@ def _fit_rbf_surface(coords: np.ndarray, values: np.ndarray,
         stride = max(4, patch_size // 4)
     Hc = max(4, H // stride)
     Wc = max(4, W // stride)
-    yc = np.linspace(0.0, 1.0, Hc)
-    xc = np.linspace(0.0, 1.0, Wc)
-    gyc, gxc = np.meshgrid(yc, xc, indexing='ij')
-    query_pts = np.column_stack([gyc.ravel(), gxc.ravel()])
-    
-    try:
-        coarse = rbf(query_pts).reshape(Hc, Wc).astype(np.float64)
-    except Exception as e:
-        safe_print(f"    WARNING: RBF evaluation failed ({e}) — falling back to polynomial")
-        return _polynomial_surface(c, v, H, W, patch_size)
+
+    coarse = None
+    if HAS_NATIVE:
+        try:
+            coarse, wrob = _native.dbe_fit_surface(
+                np.ascontiguousarray(coords, dtype=np.float64),
+                np.ascontiguousarray(values, dtype=np.float64),
+                float(H), float(W), Hc, Wc, float(sigma_px),
+                float(tukey_c), int(max_iter))
+        except Exception as e:
+            safe_print(f"    WARNING: native DBE fit failed ({e}) — using numpy")
+            coarse = None
+    if coarse is None:
+        coarse, wrob = _dbe_fit_surface_numpy(
+            coords, values, float(H), float(W), Hc, Wc, float(sigma_px),
+            tukey_c=tukey_c, irls_iters=max_iter)
+
+    if verbose:
+        n_down = int(np.sum(wrob < 0.5))
+        if n_down:
+            safe_print(f"    DBE robust fit: downweighted {n_down}/{len(wrob)} patches")
+
+    # The local fit is already bounded near the sample values, but zoom
+    # (order=3) can overshoot slightly at sharp coarse-grid transitions —
+    # keep a cheap clamp to the sample range plus a noise margin.
+    res_scale = 1.4826 * float(np.median(np.abs(values - np.median(values))))
+    surf_lo = float(np.min(values)) - 3.0 * res_scale
+    surf_hi = float(np.max(values)) + 3.0 * res_scale
 
     coarse = np.clip(coarse, surf_lo, surf_hi)
     surface = zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W]
@@ -933,15 +1040,14 @@ def dynamic_background_extraction(
         patch_size: int = Config.DBE_PATCH_SIZE,
         masked_frac_thresh: float = Config.DBE_MASKED_FRAC_THRESH,
         clip_sigma: float = 3.0,
-        rbf_kernel: str = Config.DBE_RBF_KERNEL,
-        rbf_smoothing: float = Config.DBE_RBF_SMOOTHING,
         outlier_sigma: float = Config.DBE_OUTLIER_SIGMA,
         outlier_iters: int = Config.DBE_OUTLIER_ITERS,
         star_mask: Optional[np.ndarray] = None,
         verbose: bool = False,
         use_entropy_weights: bool = False,
         exclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
-    """Dynamic Background Extraction (DBE) via adaptive sampling and RBF fitting."""
+    """Dynamic Background Extraction (DBE): adaptive patch sampling + robust
+    local-regression surface fit (see ``_fit_background_surface``)."""
     from concurrent.futures import ThreadPoolExecutor
 
     H, W = rgb.shape[:2]
@@ -1014,9 +1120,8 @@ def dynamic_background_extraction(
                     safe_print(f"    DBE {channel_names[c]}: subsampled to "
                                f"{len(coords)} patches")
 
-            background = _fit_rbf_surface(
+            background = _fit_background_surface(
                 coords, values, H, W,
-                kernel=rbf_kernel, smoothing=rbf_smoothing,
                 outlier_sigma=outlier_sigma, max_iter=outlier_iters,
                 patch_size=patch_size, verbose=verbose)
 

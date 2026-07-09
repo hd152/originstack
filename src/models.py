@@ -43,13 +43,14 @@ class Config:
     # Dynamic Background Extraction (DBE)
     DBE_PATCH_SIZE = 64            # Candidate background patch size in pixels
     DBE_MASKED_FRAC_THRESH = 0.30 # Max allowed emission-masked fraction per patch
-    DBE_OUTLIER_SIGMA = 2.5       # Sigma for iterative RBF residual rejection
-    DBE_OUTLIER_ITERS = 3         # Max outlier rejection passes
+    DBE_OUTLIER_SIGMA = 2.5       # Robust-fit outlier tolerance (scales the Tukey biweight cutoff)
+    DBE_OUTLIER_ITERS = 3         # IRLS reweighting passes in the surface fit
     DBE_MIN_SAMPLES = 20          # Min accepted patches before falling back to mesh
-    DBE_MAX_SAMPLES = 2000        # Cap to keep RBF O(N²) tractable on large images
+    DBE_MAX_SAMPLES = 4000        # Sample cap (local regression is O(N) per eval point)
     DBE_DENSE_FIELD_THRESH = 0.70 # Emission-mask coverage above which dense-field fallback is used
-    DBE_RBF_KERNEL = 'thin_plate_spline'
-    DBE_RBF_SMOOTHING = 0.0
+    DBE_FIT_SIGMA_PATCHES = 1.25  # Local-regression Gaussian bandwidth, in units of patch_size
+                                  # (swept 1.0-2.0 on real data: 1.0-1.25 matches the old RBF's
+                                  # large-scale flatness; larger trades flatness for smoothness)
 
     # BM3D denoising
     BM3D_SIGMA_PSD = 0.0            # 0 = auto-estimate from sky noise
