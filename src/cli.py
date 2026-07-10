@@ -800,22 +800,31 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
 
 def parse_args():
     p = argparse.ArgumentParser(description='Streaming FITS stacker')
-    p.add_argument('-d', '--directory', required=True)
-    p.add_argument('-o', '--output', default=None,
+    g_core = p.add_argument_group('Core')
+    g_frames = p.add_argument_group('Frames & calibration (Phase 1)')
+    g_stack = p.add_argument_group('Registration & stacking (Phases 2-3)')
+    g_post = p.add_argument_group('Post-processing (Phase 4)')
+    g_out = p.add_argument_group('Output, preview & plate solving')
+    g_sessions = p.add_argument_group('Multi-session, merge & checkpoint')
+    g_comet = p.add_argument_group('Comet mode')
+    g_adv = p.add_argument_group('Advanced (most are managed automatically by --auto)')
+    g_debug = p.add_argument_group('Diagnostics & debugging')
+    g_core.add_argument('-d', '--directory', required=True)
+    g_core.add_argument('-o', '--output', default=None,
                    help='Output FITS path (default: <directory>_stacked.fits)')
-    p.add_argument('--cal-dir', default=None, metavar='PATH',
+    g_core.add_argument('--cal-dir', default=None, metavar='PATH',
                    help='Directory containing calibration frames (darks, flats, bias). '
                         'Frames are classified automatically and the best-matching subset '
                         'is selected per type (by ISO, CCD temperature, exposure, filter, '
                         'and sensor dimensions). Supplements any calibration frames already '
                         'present in --directory.')
-    p.add_argument('--health-check', action='store_true',
+    g_core.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
-    p.add_argument('--config', default=None, metavar='PATH',
+    g_core.add_argument('--config', default=None, metavar='PATH',
                    help='Load parameters from a TOML configuration file. '
                         'CLI arguments override config file values. Fine-grained tuning '
                         'parameters removed from the CLI can still be set via config file.')
-    p.add_argument('--preset',
+    g_core.add_argument('--preset',
                    choices=['quick', 'quality', 'narrowband', 'galaxy', 'starfield',
                             'nebula', 'planetary', 'lunar'],
                    default=None,
@@ -828,50 +837,44 @@ def parse_args():
                         'nebula: emission/reflection nebula (GHS stretch, MMT+ACDNR denoise). '
                         'planetary: planetary targets (no background extraction, deconvolution). '
                         'lunar: lunar surface (linear stretch, no star reduction).')
-    p.add_argument('--dry-run', action='store_true',
+    g_core.add_argument('--dry-run', action='store_true',
                    help='Discover and classify frames, show calibration info, print effective '
                         'parameters, and estimate resource usage — without processing anything')
-    p.add_argument('--skip-step', action='append', default=[], metavar='STEP',
+    g_post.add_argument('--skip-step', action='append', default=[], metavar='STEP',
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
                         'wavelet, sky_residual, sky_pedestal, nlm, bilateral, mmt, '
                         'acdnr, deconvolve, star_reduce, local_contrast, sky_neutralize')
-    p.add_argument('--no-registration', action='store_true')
-    p.add_argument('--no-affine', action='store_true',
+    g_stack.add_argument('--no-registration', action='store_true')
+    g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
-    p.add_argument('--phase-correlation', action='store_false', dest='skip_phase_correlation',
-                   default=True,
-                   help='Run skimage phase cross-correlation before the FFT fallback. '
-                        'Off by default: on typical astronomical frames phase-cc almost always '
-                        'fails its error<0.1 acceptance test and the FFT cross-correlation is '
-                        'used anyway, so running it just wastes an upsampled correlation per frame.')
-    p.add_argument('--advanced-metrics', action='store_true', dest='advanced_metrics',
+    g_adv.add_argument('--advanced-metrics', action='store_true', dest='advanced_metrics',
                    default=False,
                    help='Compute expensive diagnostic-only quality metrics per frame '
                         '(Zernike PSF decomposition, Strehl proxy, atmospheric dispersion). '
                         'Off by default: these do not affect frame acceptance or stacking weights, '
                         'so they only add per-frame cost unless you want the diagnostics.')
-    p.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
+    g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
-    p.add_argument('--quality-threshold', type=float, default=50.0,
+    g_frames.add_argument('--quality-threshold', type=float, default=50.0,
                    help='Reject frames whose score falls more than this percent below the '
                         'reference score (90th-percentile of the session, default: 50). '
                         'E.g. 50 keeps every frame with score >= 50%% of the reference. '
                         'Use --no-quality-filter to disable entirely.')
-    p.add_argument('--keep-intermediates', action='store_true')
-    p.add_argument('--diagnostic', action='store_true', default=False,
+    g_debug.add_argument('--keep-intermediates', action='store_true')
+    g_debug.add_argument('--diagnostic', action='store_true', default=False,
                    help='Save a FITS snapshot before each post-processing step for '
                         'artifact troubleshooting. Files are named by step number and '
                         'step name, e.g. 01_before_hot_pixel.fits. '
                         'WARNING: ~275 MB per snapshot at 24 MP float32 RGB.')
-    p.add_argument('--diagnostic-dir', default=None, metavar='PATH',
+    g_debug.add_argument('--diagnostic-dir', default=None, metavar='PATH',
                    help='Directory for --diagnostic snapshots '
                         '(default: <output_stem>_diagnostic/ next to the output file).')
-    p.add_argument('-v', '--verbose', action='store_true')
-    p.add_argument('--debug-registration', action='store_true',
+    g_core.add_argument('-v', '--verbose', action='store_true')
+    g_debug.add_argument('--debug-registration', action='store_true',
                    help='Detailed registration diagnostics (implies -v)')
-    p.add_argument('--stack-method',
+    g_stack.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
                             'percentile', 'esd', 'trimmed_mean', 'auto'],
                    default='auto',
@@ -882,107 +885,107 @@ def parse_args():
                         'esd: Grubbs/ESD test (best for <15 frames, needs scipy). '
                         'auto: choose based on frame count (<8->percentile, else sigma_clip). '
                         'mean/median: no rejection.')
-    p.add_argument('--rejection-sigma', type=float, default=3.0,
+    g_stack.add_argument('--rejection-sigma', type=float, default=3.0,
                    help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
-    p.add_argument('--rejection-iters', type=int, default=3,
+    g_stack.add_argument('--rejection-iters', type=int, default=3,
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
-    p.add_argument('--rejection-estimator', choices=['mad', 'std'], default='mad',
+    g_stack.add_argument('--rejection-estimator', choices=['mad', 'std'], default='mad',
                    help='Spread estimator for sigma_clip/winsorized: '
                         'mad (default, robust) or std (PixInsight "Linear Clipping")')
-    p.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
+    g_frames.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
                    help='Debayering method (default: bilinear; malvar/vng require OpenCV)')
-    p.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
-    p.add_argument('--drizzle-scale', type=float, default=1.0,
+    g_frames.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
+    g_stack.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
-    p.add_argument('--patch-weighted', dest='patch_registration', action='store_true',
+    g_adv.add_argument('--patch-weighted', dest='patch_registration', action='store_true',
                    help='Enable spatially-varying (patch-weighted) stacking: each frame contributes '
                         'to each output pixel weighted by local sharpness, so sharp regions of a '
                         'frame outweigh blurry ones from the same frame.  Automatically enabled by '
                         '--auto when frame count and seeing metrics are favourable.')
-    p.add_argument('--use-gpu', action='store_true',
+    g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
-    p.add_argument('--plate-solve', action='store_true',
+    g_out.add_argument('--plate-solve', action='store_true',
                    help='Enable plate solving via astrometry.net (requires astroquery and ASTROMETRY_API_KEY)')
-    p.add_argument('--no-background-extraction', dest='background_extraction',
+    g_post.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
-    p.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default='dbe',
+    g_post.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default='dbe',
                    help='Background extraction method (default: dbe). '
                         'mesh: legacy polynomial grid (fastest). '
                         'dbe: Dynamic Background Extraction, robust local regression '
                         '(native/Rust accelerated). '
                         'graxpert: AI-powered gradient removal via GraXpert subprocess '
                         '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
-    p.add_argument('--graxpert-path', default=None, metavar='PATH',
+    g_post.add_argument('--graxpert-path', default=None, metavar='PATH',
                    help='Path to GraXpert binary (auto-detected if omitted).')
-    p.add_argument('--no-denoise', dest='denoise', action='store_false',
+    g_post.add_argument('--no-denoise', dest='denoise', action='store_false',
                    help='Disable wavelet denoising')
-    p.add_argument('--denoise-strength', type=float, default=3.0,
+    g_post.add_argument('--denoise-strength', type=float, default=3.0,
                    help='Wavelet luma denoise threshold factor (default: 3.0)')
-    p.add_argument('--no-auto-denoise-strength', dest='auto_denoise_strength',
+    g_post.add_argument('--no-auto-denoise-strength', dest='auto_denoise_strength',
                    action='store_false',
                    help='Use fixed --denoise-strength instead of auto-tuning')
-    p.add_argument('--denoise-nlm', action='store_true',
+    g_post.add_argument('--denoise-nlm', action='store_true',
                    help='Enable non-local means denoising after wavelet (requires skimage or cv2)')
-    p.add_argument('--denoise-bilateral', action='store_true',
+    g_post.add_argument('--denoise-bilateral', action='store_true',
                    help='Enable bilateral filter denoising after wavelet (requires cv2)')
-    p.add_argument('--denoise-mmt', action='store_true',
+    g_post.add_argument('--denoise-mmt', action='store_true',
                    help='Enable Multiscale Median Transform (MMT) denoising. '
                         'More robust than wavelet for Poisson + read noise; better edge '
                         'preservation in fine filaments.')
-    p.add_argument('--denoise-acdnr', action='store_true',
+    g_post.add_argument('--denoise-acdnr', action='store_true',
                    help='Enable Adaptive Contrast-based Denoising (ACDNR). '
                         'Flat sky regions are smoothed; structured pixels are preserved. '
                         'Effective as a lightweight final pass after wavelet or MMT.')
-    p.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
+    g_post.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
                    help='Use fixed global threshold factor instead of BayesShrink')
-    p.add_argument('--denoise-bm3d', action='store_true',
+    g_post.add_argument('--denoise-bm3d', action='store_true',
                    help='Apply BM3D collaborative filter denoising (luminance only). '
                         'Near-optimal noise suppression; slower than wavelet.')
-    p.add_argument('--denoise-aniso', action='store_true',
+    g_post.add_argument('--denoise-aniso', action='store_true',
                    help='Apply Perona-Malik anisotropic diffusion. Reduces noise in '
                         'uniform regions while sharpening edges and filament boundaries.')
-    p.add_argument('--deconvolve', action='store_true',
+    g_post.add_argument('--deconvolve', action='store_true',
                    help='Enable Richardson-Lucy deconvolution for sharpening '
                         '(requires scikit-image)')
-    p.add_argument('--deconvolve-tv', action='store_true',
+    g_post.add_argument('--deconvolve-tv', action='store_true',
                    help='Apply Total Variation regularized deconvolution instead of '
                         'Richardson-Lucy. Better for sharp edges; slower.')
-    p.add_argument('--deconvolve-blind-psf', action='store_true',
+    g_post.add_argument('--deconvolve-blind-psf', action='store_true',
                    help='Use empirical PSF estimated by median-stacking normalised star '
                         'cutouts instead of a parametric model.')
-    p.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
+    g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
-    p.add_argument('--chroma-nr-large-sigma', type=float, default=0.0,
+    g_post.add_argument('--chroma-nr-large-sigma', type=float, default=0.0,
                    help='Coarse chroma-NR scale in px (default: 0 = off). Smooths '
                         'medium-scale colour blotches (walking/chroma-noise mottle) '
                         'over object-masked sky. Try 40-60 for wide-field galaxy '
                         'fields. Auto sets it for the galaxy preset.')
-    p.add_argument('--chroma-nr-large-strength', type=float, default=0.7,
+    g_post.add_argument('--chroma-nr-large-strength', type=float, default=0.7,
                    help='Blend strength of the coarse chroma-NR pass [0-1] '
                         '(default: 0.7). Lower preserves more faint sky colour (IFN).')
-    p.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
+    g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
                    help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
-    p.add_argument('--ghs-b', type=float, default=8.0,
+    g_out.add_argument('--ghs-b', type=float, default=8.0,
                    help='GHS stretch factor b (default: 8.0). '
                         '0 = linear, 5 = moderate, 8–12 = galaxy-optimised.')
-    p.add_argument('--ghs-sp', type=float, default=0.15,
+    g_out.add_argument('--ghs-sp', type=float, default=0.15,
                    help='GHS symmetry point SP [0–1] (default: 0.15). Pivot of the stretch curve.')
-    p.add_argument('--ghs-hp', type=float, default=0.95,
+    g_out.add_argument('--ghs-hp', type=float, default=0.95,
                    help='GHS highlights protection HP [0–1] (default: 0.95). '
                         'Values above HP map to white, protecting bright cores from blowout.')
-    p.add_argument('--preview-black-sigma', type=float, default=0.0,
+    g_out.add_argument('--preview-black-sigma', type=float, default=0.0,
                    help='Preview black point, in sky-sigma above the sky median '
                         '(default: 0.0). Higher (e.g. 2.0) clips background noise '
                         'to black for a small target on empty sky; negative keeps '
                         'faint frame-filling nebulosity visible. Set per target by --auto.')
-    p.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
+    g_post.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
                    help='Disable star reduction')
-    p.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
+    g_post.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
                    help='Disable multiscale local contrast enhancement')
-    p.add_argument('-j', '--parallel', type=int, default=0,
+    g_core.add_argument('-j', '--parallel', type=int, default=0,
                    help='Parallel workers for frame processing (default: 0=auto, 1=sequential)')
-    p.add_argument('--merge', nargs='+', default=None, metavar='STACK.fits',
+    g_sessions.add_argument('--merge', nargs='+', default=None, metavar='STACK.fits',
                    help='Incremental stacking: merge previously saved linear stacks '
                         '(the main output FITS of earlier runs, RAWSTACK=True) into '
                         'this run. Each is registered onto the current session\'s '
@@ -993,142 +996,142 @@ def parse_args():
                         'stack. No cross-session outlier rejection (each session '
                         'already rejected internally). Not supported with '
                         '--drizzle-scale > 1.')
-    p.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
+    g_frames.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
-    p.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
+    g_frames.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
                    help='Disable per-frame cosmic ray rejection (L.A.Cosmic)')
-    p.add_argument('--cosmic-ray-rejection', dest='cosmic_ray_rejection',
+    g_frames.add_argument('--cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_true',
                    help='Force per-frame cosmic ray rejection even on deep stacks '
                         '(default: automatic — skipped when >=20 frames are stacked '
                         'with a rejection method, which removes cosmic rays per-pixel)')
-    p.add_argument('--log-level',
+    g_debug.add_argument('--log-level',
                    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='WARNING',
                    help='Minimum log severity printed to stderr (default: WARNING). '
                         'Use DEBUG for verbose diagnostic output from all modules.')
-    p.add_argument('--log-file', default=None, metavar='PATH',
+    g_debug.add_argument('--log-file', default=None, metavar='PATH',
                    help='Write a full DEBUG-level log to this file in addition to console output.')
-    p.add_argument('--output-tiff', action='store_true',
+    g_out.add_argument('--output-tiff', action='store_true',
                    help='Write a 32-bit float TIFF alongside the FITS output')
-    p.add_argument('--output-xisf', action='store_true',
+    g_out.add_argument('--output-xisf', action='store_true',
                    help='Write output in PixInsight XISF 1.0 format alongside FITS')
-    p.add_argument('--output-processed-fits', action='store_true',
+    g_out.add_argument('--output-processed-fits', action='store_true',
                    help='Write a second FITS file with post-processing applied '
                         '(suffix _processed.fits alongside the main linear FITS)')
-    p.add_argument('--quality-report', default=None, metavar='PATH',
+    g_debug.add_argument('--quality-report', default=None, metavar='PATH',
                    help='Write per-frame quality metrics CSV after Phase 1 '
                         '(columns: filename, snr, fwhm, star_count, quality_score, '
                         'accepted, rejection_reason)')
-    p.add_argument('--export-frames-dir', default=None, metavar='PATH',
+    g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
-    p.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
+    g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
                         'ASTAP recommended when the binary is installed (~1 s vs 30–120 s online).')
-    p.add_argument('--astap-path', default=None, metavar='PATH',
+    g_out.add_argument('--astap-path', default=None, metavar='PATH',
                    help='Explicit path to the ASTAP binary (auto-detected if omitted)')
-    p.add_argument('--star-remove', action='store_true',
+    g_out.add_argument('--star-remove', action='store_true',
                    help='Remove stars using Starnet++ after post-processing. '
                         'Saves <output>_starless.fits and <output>_stars.fits. '
                         'Requires Starnet++ binary on PATH or --starnet-path.')
-    p.add_argument('--starnet-path', default=None, metavar='PATH',
+    g_out.add_argument('--starnet-path', default=None, metavar='PATH',
                    help='Path to Starnet++ binary (auto-detected if omitted).')
-    p.add_argument('--comet-mode', action='store_true',
+    g_comet.add_argument('--comet-mode', action='store_true',
                    help='Enable comet nucleus tracking. Produces a second stack aligned '
                         'on the comet nucleus saved as <stem>_comet.fits.')
-    p.add_argument('--comet-blend-sigma', type=float, default=30.0, metavar='PX',
+    g_comet.add_argument('--comet-blend-sigma', type=float, default=30.0, metavar='PX',
                    help='Gaussian blend radius (pixels) for comet+star blended composite '
                         '(default: 30). Larger = more comet-stack area in the blend.')
-    p.add_argument('--comet-xy', default=None, metavar='X,Y',
+    g_comet.add_argument('--comet-xy', default=None, metavar='X,Y',
                    help='Approximate comet nucleus position in the reference frame '
                         '(pixels, comma-separated, e.g. "1024,768"). X=column, Y=row.')
-    p.add_argument('--comet-search-radius', type=float, default=50.0, metavar='PX',
+    g_comet.add_argument('--comet-search-radius', type=float, default=50.0, metavar='PX',
                    help='Search radius (pixels) around predicted nucleus position for '
                         'frame-to-frame tracking (default: 50).')
-    p.add_argument('--comet-affine', action='store_true',
+    g_comet.add_argument('--comet-affine', action='store_true',
                    help='Apply rotation+scale correction (affine) on top of nucleus '
                         'translation shift in comet registration (default: translation only).')
-    p.add_argument('--coma-mask-radius', type=int, default=150, metavar='PX',
+    g_comet.add_argument('--coma-mask-radius', type=int, default=150, metavar='PX',
                    help='Circular exclusion radius (pixels) around the comet nucleus '
                         'used to prevent background extraction from sampling the coma '
                         '(default: 150). Only active when --comet-mode is set.')
-    p.add_argument('--comet-radial-renorm', action='store_true',
+    g_comet.add_argument('--comet-radial-renorm', action='store_true',
                    help='Apply radial renormalization filter to flatten the coma gradient '
                         'and reveal jets/structure. Saves result as <stem>_comet_renorm.fits.')
-    p.add_argument('--comet-larson-sekanina', action='store_true',
+    g_comet.add_argument('--comet-larson-sekanina', action='store_true',
                    help='Apply Larson-Sekanina rotational difference filter to enhance '
                         'comet jet structure. Saves result as <stem>_comet_ls.fits.')
-    p.add_argument('--comet-ls-rotation', type=float, default=15.0, metavar='DEG',
+    g_comet.add_argument('--comet-ls-rotation', type=float, default=15.0, metavar='DEG',
                    help='Rotation angle (degrees) for the Larson-Sekanina filter '
                         '(default: 15).')
-    p.add_argument('--comet-designation', default=None, metavar='DESIG',
+    g_comet.add_argument('--comet-designation', default=None, metavar='DESIG',
                    help='JPL Horizons designation for ephemeris-aided nucleus tracking '
                         '(e.g. "C/2023 A3"). Requires astroquery.')
-    p.add_argument('--observer-site', default=None, metavar='SITE',
+    g_comet.add_argument('--observer-site', default=None, metavar='SITE',
                    help='Observer location for ephemeris queries: MPC code (e.g. "G37") '
                         'or "lon,lat,elev" in decimal degrees/metres (e.g. "-2.5,51.4,50").')
-    p.add_argument('--comet-detrail', action='store_true',
+    g_comet.add_argument('--comet-detrail', action='store_true',
                    help='Apply linear deconvolution to correct intra-frame nucleus trailing '
                         '(requires --comet-designation or consecutive centroid positions).')
-    p.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
+    g_post.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
                    help='Blend a short-exposure stack into saturated regions of the main '
                         'stack for HDR targets (e.g. Orion Nebula core, globular clusters).')
-    p.add_argument('--color-calibrate', action='store_true',
+    g_out.add_argument('--color-calibrate', action='store_true',
                    help='Apply photometric colour calibration after plate solving '
                         '(queries Gaia DR3). Requires --plate-solve and astroquery.')
-    p.add_argument('--export-masks', action='store_true',
+    g_debug.add_argument('--export-masks', action='store_true',
                    help='Save the star detection mask as <stem>_star_mask.fits')
-    p.add_argument('--keep-checkpoint', action='store_true',
+    g_sessions.add_argument('--keep-checkpoint', action='store_true',
                    help='Keep the raw pre-post-processing stack after a successful run. '
                         'Re-running skips phases 1–3 so you can iterate on post-processing '
                         'settings quickly.')
-    p.add_argument('--no-resume', action='store_true',
+    g_sessions.add_argument('--no-resume', action='store_true',
                    help='Ignore any existing checkpoint and start from scratch.')
-    p.add_argument('--combine-sessions', action='store_true',
+    g_sessions.add_argument('--combine-sessions', action='store_true',
                    help='Pool all light frames from every subfolder into a single unified '
                         'stack instead of stacking each subfolder separately.')
-    p.add_argument('--mosaic', action='store_true',
+    g_sessions.add_argument('--mosaic', action='store_true',
                    help='Stitch per-subfolder stacks into a mosaic via WCS reprojection. '
                         'Requires: pip install reproject and a working plate solver. '
                         'Automatically enables --plate-solve.')
-    p.add_argument('--auto', action='store_true',
+    g_core.add_argument('--auto', action='store_true',
                    help='Classify the target after Phase 1 and apply optimised settings '
                         'automatically. No API key required.')
-    p.add_argument('--scnr', action='store_true',
+    g_post.add_argument('--scnr', action='store_true',
                    help='Apply Subtractive Chromatic Noise Reduction to suppress green '
                         'cast artefacts common in OSC/DSLR images under light pollution.')
-    p.add_argument('--photometric-calibration', action='store_true',
+    g_post.add_argument('--photometric-calibration', action='store_true',
                    help='Apply gray-locus photometric colour calibration. '
                         'No external dependencies required.')
-    p.add_argument('--gaia-calibration', action='store_true',
+    g_post.add_argument('--gaia-calibration', action='store_true',
                    help='Extend --photometric-calibration with a Gaia DR3 catalogue query. '
                         'Requires --plate-solve and astroquery.')
 
     # New feature flags (improvements 1-9)
-    p.add_argument('--max-ellipticity', type=float, default=0.5, metavar='E',
+    g_frames.add_argument('--max-ellipticity', type=float, default=0.5, metavar='E',
                    help='Warn (but do not reject) frames with median star ellipticity above '
                         'this threshold (default: 0.5). Set 0 to disable.')
-    p.add_argument('--consensus-ref', action='store_true',
+    g_adv.add_argument('--consensus-ref', action='store_true',
                    help='Choose reference frame as the one with shift closest to the session '
                         'median (most central frame) rather than highest quality score.')
-    p.add_argument('--masked-correlation', action='store_true',
+    g_adv.add_argument('--masked-correlation', action='store_true',
                    help='Suppress bright nebula emission before cross-correlation to improve '
                         'registration accuracy on extended-emission targets.')
-    p.add_argument('--pre-gradient-removal', action='store_true',
+    g_adv.add_argument('--pre-gradient-removal', action='store_true',
                    help='Fit and subtract a degree-2 polynomial sky gradient from each frame '
                         'before quality analysis (useful for nebulae with strong gradients).')
-    p.add_argument('--trim-low', type=float, default=0.2, metavar='F',
+    g_stack.add_argument('--trim-low', type=float, default=0.2, metavar='F',
                    help='Low-fraction trim for trimmed_mean stacking (default: 0.2).')
-    p.add_argument('--trim-high', type=float, default=0.2, metavar='F',
+    g_stack.add_argument('--trim-high', type=float, default=0.2, metavar='F',
                    help='High-fraction trim for trimmed_mean stacking (default: 0.2).')
-    p.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
+    g_stack.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
                    help='Drizzle pixel fraction (tent-kernel weight; < 1.0 = sharper '
                         'at cost of noise; default: 1.0).')
-    p.add_argument('--optical-flow', action='store_true',
+    g_adv.add_argument('--optical-flow', action='store_true',
                    help='Apply per-frame Farneback optical flow local warp correction after '
                         'global shift/affine registration. Requires OpenCV (cv2).')
-    p.add_argument('--halo-removal', action='store_true',
+    g_post.add_argument('--halo-removal', action='store_true',
                    help='Fit and subtract Gaussian PSF halos from bright stars in the '
                         'stacked image (post-processing step).')
 
@@ -1179,7 +1182,11 @@ def parse_args():
         dbe_patch_size=64,
         entropy_bg=False,
         # Registration internals
-        # (skip_phase_correlation default set on the --phase-correlation argument)
+        # skimage phase cross-correlation before the FFT branch is permanently
+        # skipped: on real astro frames it almost always fails its error<0.1
+        # acceptance test, wasting an upsampled correlation per frame. Config-
+        # file override (skip_phase_correlation=false) remains for experiments.
+        skip_phase_correlation=True,
         no_alignment_centrality=False,
         no_shift_outlier_filter=False,
         no_reg_residual_check=False,
