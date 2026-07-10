@@ -840,6 +840,35 @@ def parse_args():
     g_core.add_argument('--dry-run', action='store_true',
                    help='Discover and classify frames, show calibration info, print effective '
                         'parameters, and estimate resource usage — without processing anything')
+    g_post.add_argument('--denoiser',
+                   choices=['auto', 'wavelet', 'mmt', 'bm3d', 'acdnr', 'nlm',
+                            'bilateral', 'aniso', 'none'],
+                   default='auto',
+                   help='Primary luma denoiser (default: auto — wavelet unless a '
+                        'preset/--auto selects otherwise). '
+                        'wavelet: adaptive BayesShrink DWT. '
+                        'mmt: Multiscale Median Transform, robust to Poisson+read noise. '
+                        'bm3d: collaborative filtering, near-optimal but slower. '
+                        'acdnr: contrast-gated sky smoothing. '
+                        'nlm / bilateral / aniso: alternative edge-preserving filters. '
+                        'none: disable luma denoising. Chroma noise reduction is '
+                        'separate (--no-chroma-nr). Strength via --denoise-strength; '
+                        'fine tuning via --config.')
+    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv'],
+                   default='off', dest='deconvolve_mode',
+                   help='Deconvolution: off (default), rl (Richardson-Lucy), or '
+                        'tv (Total-Variation regularised; sharper edges, slower). '
+                        'PSF options (blind PSF, iterations, model) via --config.')
+    g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
+                   help='Extra output formats alongside FITS: tiff (32-bit float), '
+                        'xisf (PixInsight). E.g. --export tiff,xisf')
+    g_debug.add_argument('--debug', default=None, metavar='KIND[,KIND]',
+                   help='Debug artefacts, comma-separated: '
+                        'registration (per-frame diagnostics, implies -v), '
+                        'diagnostic (FITS snapshot before each post-processing step; '
+                        'directory via --config diagnostic_dir), '
+                        'intermediates (keep aligned per-frame FITS), '
+                        'masks (save the star mask FITS).')
     g_post.add_argument('--skip-step', action='append', default=[], metavar='STEP',
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
@@ -848,12 +877,6 @@ def parse_args():
     g_stack.add_argument('--no-registration', action='store_true')
     g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
-    g_adv.add_argument('--advanced-metrics', action='store_true', dest='advanced_metrics',
-                   default=False,
-                   help='Compute expensive diagnostic-only quality metrics per frame '
-                        '(Zernike PSF decomposition, Strehl proxy, atmospheric dispersion). '
-                        'Off by default: these do not affect frame acceptance or stacking weights, '
-                        'so they only add per-frame cost unless you want the diagnostics.')
     g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -862,18 +885,7 @@ def parse_args():
                         'reference score (90th-percentile of the session, default: 50). '
                         'E.g. 50 keeps every frame with score >= 50%% of the reference. '
                         'Use --no-quality-filter to disable entirely.')
-    g_debug.add_argument('--keep-intermediates', action='store_true')
-    g_debug.add_argument('--diagnostic', action='store_true', default=False,
-                   help='Save a FITS snapshot before each post-processing step for '
-                        'artifact troubleshooting. Files are named by step number and '
-                        'step name, e.g. 01_before_hot_pixel.fits. '
-                        'WARNING: ~275 MB per snapshot at 24 MP float32 RGB.')
-    g_debug.add_argument('--diagnostic-dir', default=None, metavar='PATH',
-                   help='Directory for --diagnostic snapshots '
-                        '(default: <output_stem>_diagnostic/ next to the output file).')
     g_core.add_argument('-v', '--verbose', action='store_true')
-    g_debug.add_argument('--debug-registration', action='store_true',
-                   help='Detailed registration diagnostics (implies -v)')
     g_stack.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
                             'percentile', 'esd', 'trimmed_mean', 'auto'],
@@ -889,19 +901,11 @@ def parse_args():
                    help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
     g_stack.add_argument('--rejection-iters', type=int, default=3,
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
-    g_stack.add_argument('--rejection-estimator', choices=['mad', 'std'], default='mad',
-                   help='Spread estimator for sigma_clip/winsorized: '
-                        'mad (default, robust) or std (PixInsight "Linear Clipping")')
     g_frames.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
                    help='Debayering method (default: bilinear; malvar/vng require OpenCV)')
     g_frames.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     g_stack.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
-    g_adv.add_argument('--patch-weighted', dest='patch_registration', action='store_true',
-                   help='Enable spatially-varying (patch-weighted) stacking: each frame contributes '
-                        'to each output pixel weighted by local sharpness, so sharp regions of a '
-                        'frame outweigh blurry ones from the same frame.  Automatically enabled by '
-                        '--auto when frame count and seeing metrics are favourable.')
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     g_out.add_argument('--plate-solve', action='store_true',
@@ -918,62 +922,12 @@ def parse_args():
                         '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
     g_post.add_argument('--graxpert-path', default=None, metavar='PATH',
                    help='Path to GraXpert binary (auto-detected if omitted).')
-    g_post.add_argument('--no-denoise', dest='denoise', action='store_false',
-                   help='Disable wavelet denoising')
     g_post.add_argument('--denoise-strength', type=float, default=3.0,
                    help='Wavelet luma denoise threshold factor (default: 3.0)')
-    g_post.add_argument('--no-auto-denoise-strength', dest='auto_denoise_strength',
-                   action='store_false',
-                   help='Use fixed --denoise-strength instead of auto-tuning')
-    g_post.add_argument('--denoise-nlm', action='store_true',
-                   help='Enable non-local means denoising after wavelet (requires skimage or cv2)')
-    g_post.add_argument('--denoise-bilateral', action='store_true',
-                   help='Enable bilateral filter denoising after wavelet (requires cv2)')
-    g_post.add_argument('--denoise-mmt', action='store_true',
-                   help='Enable Multiscale Median Transform (MMT) denoising. '
-                        'More robust than wavelet for Poisson + read noise; better edge '
-                        'preservation in fine filaments.')
-    g_post.add_argument('--denoise-acdnr', action='store_true',
-                   help='Enable Adaptive Contrast-based Denoising (ACDNR). '
-                        'Flat sky regions are smoothed; structured pixels are preserved. '
-                        'Effective as a lightweight final pass after wavelet or MMT.')
-    g_post.add_argument('--no-denoise-adaptive', dest='denoise_adaptive', action='store_false',
-                   help='Use fixed global threshold factor instead of BayesShrink')
-    g_post.add_argument('--denoise-bm3d', action='store_true',
-                   help='Apply BM3D collaborative filter denoising (luminance only). '
-                        'Near-optimal noise suppression; slower than wavelet.')
-    g_post.add_argument('--denoise-aniso', action='store_true',
-                   help='Apply Perona-Malik anisotropic diffusion. Reduces noise in '
-                        'uniform regions while sharpening edges and filament boundaries.')
-    g_post.add_argument('--deconvolve', action='store_true',
-                   help='Enable Richardson-Lucy deconvolution for sharpening '
-                        '(requires scikit-image)')
-    g_post.add_argument('--deconvolve-tv', action='store_true',
-                   help='Apply Total Variation regularized deconvolution instead of '
-                        'Richardson-Lucy. Better for sharp edges; slower.')
-    g_post.add_argument('--deconvolve-blind-psf', action='store_true',
-                   help='Use empirical PSF estimated by median-stacking normalised star '
-                        'cutouts instead of a parametric model.')
     g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
-    g_post.add_argument('--chroma-nr-large-sigma', type=float, default=0.0,
-                   help='Coarse chroma-NR scale in px (default: 0 = off). Smooths '
-                        'medium-scale colour blotches (walking/chroma-noise mottle) '
-                        'over object-masked sky. Try 40-60 for wide-field galaxy '
-                        'fields. Auto sets it for the galaxy preset.')
-    g_post.add_argument('--chroma-nr-large-strength', type=float, default=0.7,
-                   help='Blend strength of the coarse chroma-NR pass [0-1] '
-                        '(default: 0.7). Lower preserves more faint sky colour (IFN).')
     g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
                    help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
-    g_out.add_argument('--ghs-b', type=float, default=8.0,
-                   help='GHS stretch factor b (default: 8.0). '
-                        '0 = linear, 5 = moderate, 8–12 = galaxy-optimised.')
-    g_out.add_argument('--ghs-sp', type=float, default=0.15,
-                   help='GHS symmetry point SP [0–1] (default: 0.15). Pivot of the stretch curve.')
-    g_out.add_argument('--ghs-hp', type=float, default=0.95,
-                   help='GHS highlights protection HP [0–1] (default: 0.95). '
-                        'Values above HP map to white, protecting bright cores from blowout.')
     g_out.add_argument('--preview-black-sigma', type=float, default=0.0,
                    help='Preview black point, in sky-sigma above the sky median '
                         '(default: 0.0). Higher (e.g. 2.0) clips background noise '
@@ -1012,13 +966,6 @@ def parse_args():
                         'Use DEBUG for verbose diagnostic output from all modules.')
     g_debug.add_argument('--log-file', default=None, metavar='PATH',
                    help='Write a full DEBUG-level log to this file in addition to console output.')
-    g_out.add_argument('--output-tiff', action='store_true',
-                   help='Write a 32-bit float TIFF alongside the FITS output')
-    g_out.add_argument('--output-xisf', action='store_true',
-                   help='Write output in PixInsight XISF 1.0 format alongside FITS')
-    g_out.add_argument('--output-processed-fits', action='store_true',
-                   help='Write a second FITS file with post-processing applied '
-                        '(suffix _processed.fits alongside the main linear FITS)')
     g_debug.add_argument('--quality-report', default=None, metavar='PATH',
                    help='Write per-frame quality metrics CSV after Phase 1 '
                         '(columns: filename, snr, fwhm, star_count, quality_score, '
@@ -1080,8 +1027,6 @@ def parse_args():
     g_out.add_argument('--color-calibrate', action='store_true',
                    help='Apply photometric colour calibration after plate solving '
                         '(queries Gaia DR3). Requires --plate-solve and astroquery.')
-    g_debug.add_argument('--export-masks', action='store_true',
-                   help='Save the star detection mask as <stem>_star_mask.fits')
     g_sessions.add_argument('--keep-checkpoint', action='store_true',
                    help='Keep the raw pre-post-processing stack after a successful run. '
                         'Re-running skips phases 1–3 so you can iterate on post-processing '
@@ -1109,28 +1054,9 @@ def parse_args():
                         'Requires --plate-solve and astroquery.')
 
     # New feature flags (improvements 1-9)
-    g_frames.add_argument('--max-ellipticity', type=float, default=0.5, metavar='E',
-                   help='Warn (but do not reject) frames with median star ellipticity above '
-                        'this threshold (default: 0.5). Set 0 to disable.')
-    g_adv.add_argument('--consensus-ref', action='store_true',
-                   help='Choose reference frame as the one with shift closest to the session '
-                        'median (most central frame) rather than highest quality score.')
-    g_adv.add_argument('--masked-correlation', action='store_true',
-                   help='Suppress bright nebula emission before cross-correlation to improve '
-                        'registration accuracy on extended-emission targets.')
-    g_adv.add_argument('--pre-gradient-removal', action='store_true',
-                   help='Fit and subtract a degree-2 polynomial sky gradient from each frame '
-                        'before quality analysis (useful for nebulae with strong gradients).')
-    g_stack.add_argument('--trim-low', type=float, default=0.2, metavar='F',
-                   help='Low-fraction trim for trimmed_mean stacking (default: 0.2).')
-    g_stack.add_argument('--trim-high', type=float, default=0.2, metavar='F',
-                   help='High-fraction trim for trimmed_mean stacking (default: 0.2).')
     g_stack.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
                    help='Drizzle pixel fraction (tent-kernel weight; < 1.0 = sharper '
                         'at cost of noise; default: 1.0).')
-    g_adv.add_argument('--optical-flow', action='store_true',
-                   help='Apply per-frame Farneback optical flow local warp correction after '
-                        'global shift/affine registration. Requires OpenCV (cv2).')
     g_post.add_argument('--halo-removal', action='store_true',
                    help='Fit and subtract Gaussian PSF halos from bright stars in the '
                         'stacked image (post-processing step).')
@@ -1220,6 +1146,29 @@ def parse_args():
         weight_fwhm=1.0,
         weight_stars=1.0,
         weight_noise=False,
+        # Consolidated under --denoiser / --deconvolve / --export / --debug;
+        # individually overridable via --config.
+        denoise_nlm=False,
+        denoise_bilateral=False,
+        denoise_mmt=False,
+        denoise_acdnr=False,
+        denoise_bm3d=False,
+        denoise_aniso=False,
+        deconvolve=False,
+        deconvolve_tv=False,
+        deconvolve_blind_psf=False,
+        output_tiff=False,
+        output_xisf=False,
+        keep_intermediates=False,
+        diagnostic=False,
+        diagnostic_dir=None,
+        debug_registration=False,
+        export_masks=False,
+        ghs_b=8.0,
+        ghs_sp=0.15,
+        ghs_hp=0.95,
+        rejection_estimator='mad',
+        advanced_metrics=False,
         # Improvements 1-9
         max_ellipticity=0.5,
         consensus_ref=False,
@@ -1231,7 +1180,41 @@ def parse_args():
         optical_flow=False,
         halo_removal=False,
     )
-    return p.parse_args()
+    args = p.parse_args()
+
+    # ── Map the consolidated CLI surface onto the internal per-feature flags
+    # (presets, --config, and the auto-advisor all operate on the internal
+    # attributes, so everything downstream is unchanged). ──
+    if args.denoiser != 'auto':
+        d = args.denoiser
+        args.denoise = (d == 'wavelet')
+        args.denoise_mmt = (d == 'mmt')
+        args.denoise_bm3d = (d == 'bm3d')
+        args.denoise_acdnr = (d == 'acdnr')
+        args.denoise_nlm = (d == 'nlm')
+        args.denoise_bilateral = (d == 'bilateral')
+        args.denoise_aniso = (d == 'aniso')
+    args.deconvolve = args.deconvolve_mode in ('rl', 'tv')
+    args.deconvolve_tv = (args.deconvolve_mode == 'tv')
+
+    _exp = [e.strip() for e in (args.export or '').split(',') if e.strip()]
+    for e in _exp:
+        if e not in ('tiff', 'xisf'):
+            p.error(f"--export: unknown format '{e}' (choose from: tiff, xisf)")
+    args.output_tiff = 'tiff' in _exp
+    args.output_xisf = 'xisf' in _exp
+
+    _dbg = [d.strip() for d in (args.debug or '').split(',') if d.strip()]
+    for d in _dbg:
+        if d not in ('registration', 'diagnostic', 'intermediates', 'masks'):
+            p.error(f"--debug: unknown kind '{d}' (choose from: registration, "
+                    f"diagnostic, intermediates, masks)")
+    args.debug_registration = 'registration' in _dbg
+    args.diagnostic = 'diagnostic' in _dbg
+    args.keep_intermediates = 'intermediates' in _dbg
+    args.export_masks = 'masks' in _dbg
+
+    return args
 
 
 def main():

@@ -25,7 +25,7 @@ pytest tests/test_core.py::test_calculate_shift_recovery -v
 ```bash
 python astro_stack.py -d lights/ -o stacked.fits
 python astro_stack.py -d lights/ -o stacked.fits -v
-python astro_stack.py -d session/ -o combined.fits --keep-intermediates -v
+python astro_stack.py -d session/ -o combined.fits --debug intermediates -v
 ```
 
 ### CI smoke test (generates synthetic data then stacks it)
@@ -36,7 +36,7 @@ python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits --debayer-met
 
 ### Debug registration issues
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits --debug-registration
+python astro_stack.py -d lights/ -o stacked.fits --debug registration
 # Output diagnostics go to _registration_debug/
 ```
 
@@ -77,22 +77,22 @@ Applied in order; most steps are on by default:
 1. Per-channel hot pixel removal on stacked image
 2. Star detection (single pass; mask reused by all steps below)
 3. Dynamic Background Extraction (DBE) or legacy mesh extraction
-4. Chroma noise reduction — fine pass; optional coarse pass for medium-scale colour blotches (`--chroma-nr-large-sigma`, object-masked)
+4. Chroma noise reduction — fine pass; optional coarse pass for medium-scale colour blotches (config key `chroma_nr_large_sigma`, object-masked; auto-set for galaxy targets)
 5. Sky floor correction (per-channel pedestal removal)
 6. Wavelet denoising (luma/chroma split, star-protected, adaptive BayesShrink by default)
 7. Sky residual correction (broad + fine passes after background extraction)
 8. Sky pedestal — scalar lift off zero before the non-negativity clips (prevents black-hole clipping); skippable via `--skip-step sky_pedestal`
-9. NLM denoising — `--denoise-nlm`
-10. Bilateral filter denoising — `--denoise-bilateral`
-11. MMT denoising (multiscale median transform) — `--denoise-mmt`
-12. ACDNR denoising (adaptive contrast-based) — `--denoise-acdnr`
-13. Anisotropic diffusion — `--denoise-aniso` (native/Rust accelerated)
-14. Richardson-Lucy deconvolution — `--deconvolve` (GPU-accelerated via cupy FFT when `--use-gpu`)
+9. NLM denoising — `--denoiser nlm`
+10. Bilateral filter denoising — `--denoiser bilateral`
+11. MMT denoising (multiscale median transform) — `--denoiser mmt`
+12. ACDNR denoising (adaptive contrast-based) — `--denoiser acdnr`
+13. Anisotropic diffusion — `--denoiser aniso` (native/Rust accelerated)
+14. Deconvolution — `--deconvolve rl|tv` (RL is GPU-accelerated via cupy FFT when `--use-gpu`)
 15. Star reduction (halo softening) — on by default, `--no-star-reduce`
 16. Multiscale local contrast enhancement — on by default, `--no-local-contrast`
 17. Final sky flattening + neutralisation — masked large-scale per-channel background removal → neutral grey; skippable via `--skip-step sky_neutralize`
 
-The old local-normalisation step (`--local-normalize`) was **removed**: it did local variance equalisation (÷ local σ), which amplifies background noise; gradient/vignette residual is handled by `--pre-gradient-removal` + DBE + sky-floor + sky-residual.
+The old local-normalisation step (`--local-normalize`) was **removed**: it did local variance equalisation (÷ local σ), which amplifies background noise; gradient/vignette residual is handled by pre-gradient removal (config key `pre_gradient_removal`, auto-set) + DBE + sky-floor + sky-residual.
 
 The preview JPEG black point is set per target by the auto-advisor (`preview_black_sigma`, overridable with `--preview-black-sigma`); higher values (2–3) clip the sky-noise tail to black for a small target on empty sky.
 
