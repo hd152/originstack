@@ -483,8 +483,13 @@ def _apply_quality_settings(
         elif snr > 20:
             _set('denoise_mmt_strength', 2.0)
 
-    # 6. Baseline ACDNR for unknown/noisy targets not already using it
-    if snr < 5 and snr > 0 and not getattr(args, 'denoise_acdnr', False):
+    # 6. Baseline ACDNR for unknown/noisy targets with no other luma denoiser
+    #    (rule 14 enforces a single primary; don't add one just to remove it).
+    if (snr < 5 and snr > 0
+            and not getattr(args, 'denoise_acdnr', False)
+            and not getattr(args, 'denoise_mmt', False)
+            and not getattr(args, 'denoise', False)
+            and not getattr(args, 'denoise_bm3d', False)):
         _set('denoise_acdnr', True)
 
     # 7. BM3D: enable when the bm3d package is installed and the stack has enough
@@ -562,6 +567,29 @@ def _apply_quality_settings(
             _set('preview_black_sigma', 1.0)
         elif n < 60 and pbs > 2.0:
             _set('preview_black_sigma', 2.0)
+
+    # 14. Single primary luma denoiser. Target presets and the SNR rules
+    #     above can each enable a denoiser; layering several full-frame
+    #     smoothers (wavelet + MMT + ACDNR + BM3D) compounds smoothing —
+    #     each pass erodes the faint structure the previous one preserved —
+    #     without adding selectivity, and pays for every pass. Precedence:
+    #     BM3D (enabled only when its SNR/frame-count conditions hold) >
+    #     MMT (robust to the non-Gaussian residual noise of stacked OSC
+    #     data) > wavelet > ACDNR (fallback sky smoother). Chroma-only
+    #     cleanup (chroma_nr, SCNR) is orthogonal and unaffected; explicit
+    #     extras like --denoise-aniso/-nlm/-bilateral are user intent and
+    #     also left alone.
+    if getattr(args, 'denoise_bm3d', False):
+        for attr in ('denoise_mmt', 'denoise', 'denoise_acdnr'):
+            if getattr(args, attr, False):
+                _set(attr, False)
+    elif getattr(args, 'denoise_mmt', False):
+        for attr in ('denoise', 'denoise_acdnr'):
+            if getattr(args, attr, False):
+                _set(attr, False)
+    elif getattr(args, 'denoise', False):
+        if getattr(args, 'denoise_acdnr', False):
+            _set('denoise_acdnr', False)
 
     return changes
 

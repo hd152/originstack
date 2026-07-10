@@ -1028,3 +1028,57 @@ class TestPatchScoresPhase1Split(unittest.TestCase):
         # original patch center.
         self.assertAlmostEqual(peak[0] / ph, iy + 1, delta=1.0)
         self.assertAlmostEqual(peak[1] / pw, ix + 1, delta=1.0)
+
+
+class TestSinglePrimaryLumaDenoiser(unittest.TestCase):
+    """Rule 14: the advisor must not layer multiple full-frame luma
+    denoisers. Precedence BM3D > MMT > wavelet > ACDNR; chroma-only steps
+    are unaffected."""
+
+    def _run(self, **flags):
+        import argparse
+        from src.auto_settings import _apply_quality_settings
+        defaults = dict(preview_black_sigma=0.0, stack_method='sigma_clip',
+                        auto_denoise_strength=True, denoise=False,
+                        denoise_mmt=False, denoise_acdnr=False,
+                        denoise_bm3d=False)
+        defaults.update(flags)
+        args = argparse.Namespace(**defaults)
+        # snr below the BM3D auto-enable threshold so BM3D stays out of play
+        sig = {'n_frames': 35, 'snr': 7.0, 'fwhm': 5.4, 'star_count': 25,
+               'strehl': 0.3, 'dispersion': 0.5, 'median_ellipticity': 0.1,
+               'dynamic_range': 100, 'concentration': 5, 'median_filling': 0.1,
+               'diffuse_excess': 0.5, 'peak_excess': 5}
+        _apply_quality_settings(sig, args, 'galaxy')
+        return args
+
+    def test_mmt_wins_over_acdnr_and_wavelet(self):
+        a = self._run(denoise_mmt=True, denoise_acdnr=True, denoise=True)
+        self.assertTrue(a.denoise_mmt)
+        self.assertFalse(a.denoise_acdnr)
+        self.assertFalse(a.denoise)
+
+    def test_wavelet_wins_over_acdnr(self):
+        a = self._run(denoise=True, denoise_acdnr=True)
+        self.assertTrue(a.denoise)
+        self.assertFalse(a.denoise_acdnr)
+
+    def test_acdnr_alone_survives(self):
+        a = self._run(denoise_acdnr=True)
+        self.assertTrue(a.denoise_acdnr)
+
+    def test_low_snr_acdnr_not_added_when_mmt_active(self):
+        import argparse
+        from src.auto_settings import _apply_quality_settings
+        args = argparse.Namespace(preview_black_sigma=0.0,
+                                  stack_method='sigma_clip',
+                                  auto_denoise_strength=True, denoise=False,
+                                  denoise_mmt=True, denoise_acdnr=False,
+                                  denoise_bm3d=False)
+        sig = {'n_frames': 35, 'snr': 2.0, 'fwhm': 5.4, 'star_count': 25,
+               'strehl': 0.3, 'dispersion': 0.5, 'median_ellipticity': 0.1,
+               'dynamic_range': 100, 'concentration': 5, 'median_filling': 0.1,
+               'diffuse_excess': 0.5, 'peak_excess': 5}
+        _apply_quality_settings(sig, args, 'galaxy')
+        self.assertTrue(args.denoise_mmt)
+        self.assertFalse(args.denoise_acdnr)
