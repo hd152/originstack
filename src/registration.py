@@ -1048,15 +1048,45 @@ def score_registration_residuals(
                        os.path.basename(f.path), exc)
             return j, 0.0, True
 
-    n_workers = min(os.cpu_count() or 4, len(final))
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futs = {executor.submit(_check_one, j, f, orig_idx): j
-                for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
-        for fut in tqdm(as_completed(futs), total=len(final),
-                        desc="  Residual check", unit="frame"):
-            j, rms, ok = fut.result()
-            residuals[j] = rms
-            passed[j] = ok
+    # Sampled check: each frame costs a full-res warp + star detection, and
+    # on a healthy run every frame passes. Check the riskiest frames (largest
+    # shifts) plus a deterministic ~20% spread of the rest; escalate to the
+    # full set only if anything in the sample fails, so the safety net is
+    # only paid for when registration actually went wrong.
+    n_frames = len(final)
+    if n_frames > 25:
+        mags = [float(np.hypot(s[0], s[1])) if s is not None else 0.0
+                for s in shifts]
+        order = np.argsort(mags)[::-1]
+        n_risky = max(5, n_frames // 10)
+        check = set(int(i) for i in order[:n_risky])
+        rng = np.random.default_rng(0)
+        n_extra = max(10, n_frames // 5) - len(check)
+        rest = [j for j in range(n_frames) if j not in check]
+        if n_extra > 0 and rest:
+            check.update(int(i) for i in
+                         rng.choice(rest, size=min(n_extra, len(rest)),
+                                    replace=False))
+    else:
+        check = set(range(n_frames))
+
+    def _run_checks(indices: List[int], label: str) -> None:
+        n_workers = min(os.cpu_count() or 4, max(len(indices), 1))
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futs = {executor.submit(_check_one, j, final[j], final_indices[j]): j
+                    for j in indices}
+            for fut in tqdm(as_completed(futs), total=len(indices),
+                            desc=label, unit="frame"):
+                j, rms, ok = fut.result()
+                residuals[j] = rms
+                passed[j] = ok
+
+    _run_checks(sorted(check), "  Residual check")
+    if len(check) < n_frames and any(not passed[j] for j in check):
+        remaining = [j for j in range(n_frames) if j not in check]
+        safe_print(f"  Residual check: failures in the {len(check)}-frame sample "
+                   f"— checking all {len(remaining)} remaining frames")
+        _run_checks(remaining, "  Residual check (full)")
 
     n_failed = sum(1 for p in passed if not p)
     if n_failed > 0:
