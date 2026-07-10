@@ -20,7 +20,8 @@ from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
                          apply_hot_pixel_map_bayer,
                          remove_hot_pixels_rgb, remove_hot_pixels_rgb_with_lum,
                          white_balance_grayworld, white_balance_whitepatch,
-                         correct_chromatic_aberration)
+                         correct_chromatic_aberration,
+                         measure_chromatic_aberration, apply_chromatic_aberration)
 from src.quality import validate_image_data, compute_quality_metrics
 from src.stacking import lacosmic_reject
 
@@ -105,7 +106,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           advanced_metrics: bool = True,
                           preloaded_data: Optional[tuple] = None,
                           session_bayer: Optional[str] = None,
-                          pre_gradient_removal: bool = False) -> Dict[str, Any]:
+                          pre_gradient_removal: bool = False,
+                          ca_shifts: Optional[dict] = None) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -294,7 +296,13 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
     if ca_correction:
         try:
-            rgb = correct_chromatic_aberration(rgb)
+            if ca_shifts is not None:
+                # Session-constant shifts measured once up front — CA is a
+                # property of the optics, fixed in the sensor frame; only the
+                # (cheap) warp runs per frame.
+                rgb = apply_chromatic_aberration(rgb, ca_shifts)
+            else:
+                rgb = correct_chromatic_aberration(rgb)
         except Exception:
             pass
     timings['ca_correction'], _t = time.perf_counter() - _t, time.perf_counter()
@@ -540,13 +548,76 @@ def _init_worker_shm(shm_specs: Dict[str, tuple]) -> None:
         _worker_masters[f'_shm_{name}'] = shm
 
 
+def _measure_session_ca(frames: List[FrameInfo], args) -> Optional[dict]:
+    """Median CA channel shifts from a few sample frames, or None to fall
+    back to per-frame measurement.
+
+    Lateral chromatic aberration is a property of the optics, fixed in the
+    sensor frame for a whole session (field rotation moves the sky, not the
+    lens), so measuring it on every frame re-derives the same constant ~200
+    times. Three frames spread through the session are measured (in
+    parallel) on uncalibrated debayered data — dark/flat correction shifts
+    no channel structure and the correlation is global — and the medians are
+    applied to every frame. Requires >=2 agreeing samples per channel;
+    returns None (per-frame fallback) otherwise. Skipped for short sessions
+    where the measurement overhead wouldn't pay back.
+    """
+    if not getattr(args, 'ca_correction', False) or len(frames) < 12:
+        return None
+    n = len(frames)
+    idxs = sorted({n // 6, n // 2, (5 * n) // 6})
+    _sb = getattr(args, '_session_bayer', None)
+
+    def _one(i: int):
+        data, hdr = load_frame(frames[i].path)
+        if data is None or data.size == 0:
+            return None
+        if data.ndim == 2:
+            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', _sb or 'RGGB'))
+            data = green_equalize(np.asarray(data), pattern=bayer)
+            rgb = debayer(np.asarray(data), pattern=bayer, method='bilinear')
+        else:
+            rgb = data
+        return measure_chromatic_aberration(
+            np.ascontiguousarray(rgb, dtype=np.float32))
+
+    samples = []
+    try:
+        with ThreadPoolExecutor(max_workers=len(idxs)) as ex:
+            for fut in [ex.submit(_one, i) for i in idxs]:
+                try:
+                    s = fut.result()
+                    if s is not None:
+                        samples.append(s)
+                except Exception:
+                    pass
+    except Exception:
+        return None
+
+    out: dict = {}
+    for c in (0, 2):
+        vals = [s[c] for s in samples if s.get(c) is not None]
+        if len(vals) >= 2:
+            out[c] = (float(np.median([v[0] for v in vals])),
+                      float(np.median([v[1] for v in vals])))
+        else:
+            out[c] = None
+    if out[0] is None and out[2] is None:
+        return None
+    return out
+
+
+def _fmt_ca(s: Optional[Tuple[float, float]]) -> str:
+    return f"({s[1]:+.2f}, {s[0]:+.2f})px" if s is not None else "none"
+
+
 def _parallel_frame_worker(
         args_tuple: tuple) -> Tuple[int, Optional[dict], Optional[str], Optional[dict]]:
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
     (path, frame_idx, debayer_method, white_balance,
      mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
      ca_correction, cosmic_ray_rejection, advanced_metrics, session_bayer,
-     pre_gradient_removal, skip_quality) = args_tuple
+     pre_gradient_removal, skip_quality, ca_shifts) = args_tuple
     global _worker_masters
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    ca_correction=ca_correction,
@@ -554,7 +625,8 @@ def _parallel_frame_worker(
                                    advanced_metrics=advanced_metrics,
                                    skip_quality=skip_quality,
                                    session_bayer=session_bayer,
-                                   pre_gradient_removal=pre_gradient_removal)
+                                   pre_gradient_removal=pre_gradient_removal,
+                                   ca_shifts=ca_shifts)
     if result.get('error'):
         return (frame_idx, None, result['error'], None)
 
@@ -663,8 +735,14 @@ def execute_frame_processing(
         _adv = getattr(args, 'advanced_metrics', True)
         _sb = getattr(args, '_session_bayer', None)
         _pgr = getattr(args, 'pre_gradient_removal', False)
+        _ca_shifts = _measure_session_ca(lights, args) if _ca else None
+        if _ca_shifts is not None:
+            safe_print(f"  CA correction: session-constant shifts "
+                       f"R={_fmt_ca(_ca_shifts.get(0))} B={_fmt_ca(_ca_shifts.get(2))} "
+                       f"(measured once, applied per frame)")
         tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb, _pgr, False)
+                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb, _pgr, False,
+                  _ca_shifts)
                  for i in range(n)]
 
         try:
@@ -728,6 +806,11 @@ def execute_frame_processing(
         _pgr = getattr(args, 'pre_gradient_removal', False)
         _ca  = getattr(args, 'ca_correction', False)
         _cr  = getattr(args, 'cosmic_ray_rejection', False)
+        _ca_shifts = _measure_session_ca(lights, args) if _ca else None
+        if _ca_shifts is not None:
+            safe_print(f"  CA correction: session-constant shifts "
+                       f"R={_fmt_ca(_ca_shifts.get(0))} B={_fmt_ca(_ca_shifts.get(2))} "
+                       f"(measured once, applied per frame)")
 
         # I/O prefetch pool — sized to keep GPU workers fed without thrashing the disk
         _io_workers = min(max(n_workers, 8), 32, n)
@@ -763,7 +846,8 @@ def execute_frame_processing(
                     preloaded_data=preloaded,
                     session_bayer=_sb,
                     pre_gradient_removal=_pgr,
-                    skip_quality=_use_qpool)  # GPU workers skip quality
+                    skip_quality=_use_qpool,  # GPU workers skip quality
+                    ca_shifts=_ca_shifts)
             if result.get('error'):
                 return i, None, result['error'], None, None
             mem_rgb[i] = result['rgb']
@@ -850,6 +934,12 @@ def execute_frame_processing(
         print(f"  Processing {n} frames sequentially...")
         _sb = getattr(args, '_session_bayer', None)
         _pgr = getattr(args, 'pre_gradient_removal', False)
+        _ca_shifts = (_measure_session_ca(lights, args)
+                      if getattr(args, 'ca_correction', False) else None)
+        if _ca_shifts is not None:
+            safe_print(f"  CA correction: session-constant shifts "
+                       f"R={_fmt_ca(_ca_shifts.get(0))} B={_fmt_ca(_ca_shifts.get(2))} "
+                       f"(measured once, applied per frame)")
         for i, f in tqdm(enumerate(lights), total=n,
                          desc="  Processing", unit="frame",
                          disable=args.verbose):
@@ -859,7 +949,8 @@ def execute_frame_processing(
                 cosmic_ray_rejection=getattr(args, 'cosmic_ray_rejection', False),
                 advanced_metrics=getattr(args, 'advanced_metrics', True),
                 session_bayer=_sb,
-                pre_gradient_removal=_pgr)
+                pre_gradient_removal=_pgr,
+                ca_shifts=_ca_shifts)
             if result.get('error'):
                 f.accepted = False
                 f.metrics = {'error': result['error']}
@@ -975,6 +1066,10 @@ def reload_accepted_frames(
     _cr  = getattr(args, 'cosmic_ray_rejection', False)
     _sb  = getattr(args, '_session_bayer', None)
     _pgr = getattr(args, 'pre_gradient_removal', False)
+    _ca_shifts = _measure_session_ca(final, args) if _ca else None
+    if _ca_shifts is not None:
+        safe_print(f"  CA correction: session-constant shifts "
+                   f"R={_fmt_ca(_ca_shifts.get(0))} B={_fmt_ca(_ca_shifts.get(2))}")
 
     def _worker_count_cap(n_workers: int) -> int:
         try:
@@ -1021,7 +1116,7 @@ def reload_accepted_frames(
 
         tasks = [(final[i].path, final_indices[i], args.debayer_method, args.white_balance,
                   mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
-                  _ca, _cr, False, _sb, _pgr, True)
+                  _ca, _cr, False, _sb, _pgr, True, _ca_shifts)
                  for i in range(n)]
 
         _orig_to_j = {orig: j for j, orig in enumerate(final_indices)}
@@ -1090,7 +1185,8 @@ def reload_accepted_frames(
                     skip_quality=True,
                     session_bayer=_sb,
                     pre_gradient_removal=_pgr,
-                    preloaded_data=preloaded)
+                    preloaded_data=preloaded,
+                    ca_shifts=_ca_shifts)
             if result.get('error'):
                 return j, orig_idx, None, None, result['error']
             return j, orig_idx, result['rgb'], result['lum'], None

@@ -528,10 +528,26 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
         downsample: Block-average factor for the correlation estimate (default
                     2). Set to 1 to correlate at full resolution (old behaviour).
     """
-    if not _HAS_PCC or rgb.ndim != 3 or rgb.shape[2] != 3:
-        return rgb
+    shifts = measure_chromatic_aberration(rgb, max_shift_px=max_shift_px,
+                                          upsample=upsample,
+                                          downsample=downsample)
+    return apply_chromatic_aberration(rgb, shifts)
 
-    result = rgb.copy()
+
+def measure_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
+                                 upsample: int = 10,
+                                 downsample: int = 2) -> dict:
+    """Measure the R/B channel offsets against G (see
+    ``correct_chromatic_aberration``). Returns ``{0: (sy, sx) | None,
+    2: (sy, sx) | None}`` keyed by channel index; None where measurement
+    failed or exceeded ``max_shift_px``. Measurement and application are
+    split so the session-constant CA (lens dispersion is fixed in the sensor
+    frame for a whole session) can be measured once on a few sample frames
+    and applied to every frame."""
+    shifts: dict = {0: None, 2: None}
+    if not _HAS_PCC or rgb.ndim != 3 or rgb.shape[2] != 3:
+        return shifts
+
     # Downsample the cheap float32 data FIRST, cast to float64 only the small
     # result. Casting the full-res channel to float64 before downsampling (the
     # original order) wastes a 50MB copy per channel that gets thrown away
@@ -540,7 +556,7 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
               else rgb[:, :, 1]).astype(np.float64)
     g_std = g_small.std()
     if g_std < 1e-12:
-        return rgb
+        return shifts
     g_norm = (g_small - g_small.mean()) / g_std
 
     for c_idx in (0, 2):  # Red, Blue
@@ -559,26 +575,41 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
             if (np.isfinite(shift).all()
                     and np.abs(shift[0]) <= max_shift_px
                     and np.abs(shift[1]) <= max_shift_px):
-                if _HAS_NATIVE:
-                    try:
-                        H, W = rgb.shape[:2]
-                        off = [-float(shift[0]), -float(shift[1])]
-                        result[:, :, c_idx] = _native.warp_affine_lanczos3(
-                            np.ascontiguousarray(rgb[:, :, c_idx:c_idx + 1]),
-                            [1.0, 0.0, 0.0, 1.0], off, H, W, 0.0)[:, :, 0]
-                    except Exception:
-                        result[:, :, c_idx] = ndimage.shift(
-                            rgb[:, :, c_idx], shift=shift,
-                            order=3, mode='reflect').astype(np.float32)
-                else:
-                    result[:, :, c_idx] = ndimage.shift(
-                        rgb[:, :, c_idx], shift=shift,
-                        order=3, mode='reflect').astype(np.float32)
-                _log.debug("CA correction ch%d: shift=(%.3f, %.3f) err=%.4f",
+                shifts[c_idx] = (float(shift[0]), float(shift[1]))
+                _log.debug("CA measure ch%d: shift=(%.3f, %.3f) err=%.4f",
                            c_idx, float(shift[0]), float(shift[1]), float(error))
         except Exception as exc:
-            _log.debug("CA correction ch%d failed: %s", c_idx, exc)
+            _log.debug("CA measure ch%d failed: %s", c_idx, exc)
 
+    return shifts
+
+
+def apply_chromatic_aberration(rgb: np.ndarray, shifts: dict) -> np.ndarray:
+    """Apply pre-measured CA channel shifts (see
+    ``measure_chromatic_aberration``). Returns the input unchanged when no
+    channel has a valid shift."""
+    if rgb.ndim != 3 or rgb.shape[2] != 3 or not shifts:
+        return rgb
+    if not any(shifts.get(c) is not None for c in (0, 2)):
+        return rgb
+    result = rgb.copy()
+    H, W = rgb.shape[:2]
+    for c_idx in (0, 2):
+        shift = shifts.get(c_idx)
+        if shift is None:
+            continue
+        if _HAS_NATIVE:
+            try:
+                off = [-float(shift[0]), -float(shift[1])]
+                result[:, :, c_idx] = _native.warp_affine_lanczos3(
+                    np.ascontiguousarray(rgb[:, :, c_idx:c_idx + 1]),
+                    [1.0, 0.0, 0.0, 1.0], off, H, W, 0.0)[:, :, 0]
+                continue
+            except Exception:
+                pass
+        result[:, :, c_idx] = ndimage.shift(
+            rgb[:, :, c_idx], shift=shift,
+            order=3, mode='reflect').astype(np.float32)
     return result
 
 
