@@ -998,11 +998,24 @@ def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: flo
 _PATCH_FRAME_CHUNK = 64  # frames processed per vectorised batch inside each tile worker
 
 
+def _grid_sample_axis(n_out: int, offset: float, n_grid: int,
+                      full: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Corner-aligned bilinear sample coordinates for one axis: output pixel i
+    maps to grid coordinate (i+offset)*(n_grid-1)/(full-1) — the same mapping
+    scipy zoom(order=1) uses when upsampling a grid to the full frame."""
+    scale = (n_grid - 1) / (full - 1.0) if (full > 1.0 and n_grid > 1) else 0.0
+    g = np.clip((np.arange(n_out, dtype=np.float64) + offset) * scale,
+                0.0, n_grid - 1)
+    g0 = np.minimum(g.astype(np.int64), max(n_grid - 2, 0))
+    return g0, (g - g0).astype(np.float32)
+
+
 def patch_weighted_mean_combine(
     mem_aligned: np.ndarray,
     quality_maps: List[np.ndarray],
     global_weights: Optional[np.ndarray] = None,
     rejection_mask: Optional[np.ndarray] = None,
+    grid_geom: Optional[Tuple[float, float, float, float]] = None,
 ) -> np.ndarray:
     """Quality-map-weighted mean combine for per-pixel lucky-imaging stacking.
 
@@ -1033,6 +1046,16 @@ def patch_weighted_mean_combine(
     gw = (np.asarray(global_weights, dtype=np.float32)
           if global_weights is not None else None)
 
+    # Coarse-grid mode: quality_maps are (gh, gw) patch grids; sample them
+    # bilinearly at full-frame coordinates instead of requiring full-res maps.
+    _gtabs = None
+    if grid_geom is not None and len(quality_maps) > 0:
+        h_full, w_full, top_off, left_off = grid_geom
+        gh, gw_ = quality_maps[0].shape
+        gy0, gyf = _grid_sample_axis(H, top_off, gh, h_full)
+        gx0, gxf = _grid_sample_axis(W, left_off, gw_, w_full)
+        _gtabs = (gy0, gyf, gx0, gxf, gh, gw_)
+
     result = np.zeros((H, W, C), dtype=np.float32)
 
     n_tiles_y = (H + tile_size - 1) // tile_size
@@ -1060,14 +1083,32 @@ def patch_weighted_mean_combine(
 
             # Per-frame patch weights for this tile: (F, th, tw)
             qstack = np.empty((F, th, tw), dtype=np.float32)
-            for k, j in enumerate(range(start, end)):
-                qmap = quality_maps[j]
-                if qmap.shape[0] >= ty_end and qmap.shape[1] >= tx_end:
-                    qstack[k] = qmap[ty:ty_end, tx:tx_end]
-                else:
-                    from scipy.ndimage import zoom as _zoom
-                    zoomed = _zoom(qmap, (H / qmap.shape[0], W / qmap.shape[1]), order=1)
-                    qstack[k] = np.clip(zoomed[ty:ty_end, tx:tx_end], 0.0, 1.0)
+            if _gtabs is not None:
+                gy0, gyf, gx0, gxf, gh, gw_ = _gtabs
+                y0i = gy0[ty:ty_end]
+                y1i = np.minimum(y0i + 1, gh - 1)
+                fy = gyf[ty:ty_end][:, None]
+                x0i = gx0[tx:tx_end]
+                x1i = np.minimum(x0i + 1, gw_ - 1)
+                fx = gxf[tx:tx_end][None, :]
+                for k, j in enumerate(range(start, end)):
+                    g = quality_maps[j]
+                    q00 = g[np.ix_(y0i, x0i)]
+                    q01 = g[np.ix_(y0i, x1i)]
+                    q10 = g[np.ix_(y1i, x0i)]
+                    q11 = g[np.ix_(y1i, x1i)]
+                    top_v = q00 + (q01 - q00) * fx
+                    bot_v = q10 + (q11 - q10) * fx
+                    qstack[k] = top_v + (bot_v - top_v) * fy
+            else:
+                for k, j in enumerate(range(start, end)):
+                    qmap = quality_maps[j]
+                    if qmap.shape[0] >= ty_end and qmap.shape[1] >= tx_end:
+                        qstack[k] = qmap[ty:ty_end, tx:tx_end]
+                    else:
+                        from scipy.ndimage import zoom as _zoom
+                        zoomed = _zoom(qmap, (H / qmap.shape[0], W / qmap.shape[1]), order=1)
+                        qstack[k] = np.clip(zoomed[ty:ty_end, tx:tx_end], 0.0, 1.0)
 
             w = qstack
             if gw is not None:
@@ -1228,19 +1269,15 @@ def run_stacking_phase(
         safe_print(f"    Alignment: {n_final} frames in {format_time(time.time() - _t_align)} "
                    f"({n_align} workers, {n_final / max(time.time() - _t_align, 1e-9):.1f} frame/s)")
 
-        # Patch-weighted lucky-imaging combine (if quality maps were computed in Phase 2)
+        # Patch-weighted lucky-imaging combine (if quality maps were computed in
+        # Phase 2). quality_maps holds small per-frame patch-score GRIDS in
+        # aligned space (not full-res maps): both combine paths sample them
+        # bilinearly at full-frame coordinates, so N full-resolution weight
+        # maps (~5 GB at 200+ frames) are never materialised.
         if quality_maps is not None and len(quality_maps) == n_final:
             print(f"  Patch-weighted mean combine ({n_final} frames × {top},{bottom},{left},{right} crop)...")
-            # Crop quality maps to the common region so they match mem_aligned shape
-            cropped_qmaps = []
-            for qmap in quality_maps:
-                if qmap.shape[0] >= bottom and qmap.shape[1] >= right:
-                    cropped_qmaps.append(qmap[top:bottom, left:right])
-                else:
-                    from scipy.ndimage import zoom
-                    qmap_c = zoom(qmap, ((bottom - top) / qmap.shape[0],
-                                        (right - left) / qmap.shape[1]), order=1)
-                    cropped_qmaps.append(np.clip(qmap_c, 0.0, 1.0).astype(np.float32))
+            qgrids = np.ascontiguousarray(np.stack(quality_maps), dtype=np.float32)
+            qgrid_geom = (float(H), float(W), float(top), float(left))
             # Fused native fast path: sigma-clip rejection + patch weighting in a
             # single Rust pass, no (N,H,W,C) rejection-mask array. Covers the
             # sigma_clip/winsorized methods (the mask is clip-based, identical
@@ -1250,14 +1287,12 @@ def run_stacking_phase(
                     and _native_usable(mem_aligned)):
                 try:
                     _t_fused = time.time()
-                    _qm = np.ascontiguousarray(np.stack(cropped_qmaps), dtype=np.float32)
                     _w32 = (weights.astype(np.float32, copy=False)
                             if weights is not None else None)
                     _use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
                     stacked = _native.patch_weighted_sigma_combine(
-                        mem_aligned, _qm, _w32, float(args.rejection_sigma),
-                        int(args.rejection_iters), _use_mad)
-                    del _qm
+                        mem_aligned, qgrids, _w32, float(args.rejection_sigma),
+                        int(args.rejection_iters), _use_mad, qgrid_geom)
                     safe_print(f"    [rust] fused patch-weighted + sigma-clip combine "
                                f"({format_time(time.time() - _t_fused)})")
                     _fused_done = True
@@ -1287,9 +1322,10 @@ def run_stacking_phase(
                                           weights=weights, return_mask=True)
             if not _fused_done:
                 _t_pw = time.time()
-                stacked = patch_weighted_mean_combine(mem_aligned, cropped_qmaps,
+                stacked = patch_weighted_mean_combine(mem_aligned, list(qgrids),
                                                       global_weights=weights,
-                                                      rejection_mask=rej_mask)
+                                                      rejection_mask=rej_mask,
+                                                      grid_geom=qgrid_geom)
                 safe_print(f"    Patch-weighted combine (numpy 2-pass): "
                            f"{format_time(time.time() - _t_pw)}")
             if rej_mask is not None:

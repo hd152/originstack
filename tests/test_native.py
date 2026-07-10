@@ -302,3 +302,65 @@ def test_fit_background_surface_numpy_fallback_bounded():
     gap = surface[220:256, 220:256]
     assert abs(float(np.median(gap)) - 5000.0) < 200.0
     assert float(np.max(np.abs(surface - 5000.0))) < 500.0
+
+
+def test_dbe_sample_patches_matches_numpy():
+    """Native patch sampler vs the pure-Python loop: identical patch
+    selection and coordinates; medians within f32 tolerance."""
+    import src.background as bg
+    rng = np.random.default_rng(5)
+    H, W = 480, 640
+    yy, xx = np.mgrid[0:H, 0:W]
+    channel = (5000.0 + 200.0 * (yy / H) + rng.normal(0, 60, (H, W)))
+    for _ in range(15):
+        cy, cx = rng.uniform(20, H - 20), rng.uniform(20, W - 20)
+        channel += rng.uniform(1000, 8000) * np.exp(
+            -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.0 ** 2))
+    emission = (rng.random((H, W)) < 0.02).astype(np.float32)
+
+    c1, v1 = bg._sample_background_patches(channel, emission, 48, 0.30,
+                                           5100.0, 60.0)
+    had = bg.HAS_NATIVE
+    bg.HAS_NATIVE = False
+    try:
+        c2, v2 = bg._sample_background_patches(channel, emission, 48, 0.30,
+                                               5100.0, 60.0)
+    finally:
+        bg.HAS_NATIVE = had
+    assert len(v1) == len(v2)
+    np.testing.assert_allclose(c1, c2, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(v1, v2, rtol=0, atol=1e-3)
+
+
+def test_patch_combine_grid_mode_matches_fullres():
+    """Coarse-grid qmap sampling (native kernel + numpy fallback) must match
+    the old materialise-full-res-then-crop path."""
+    from scipy.ndimage import zoom as _zoom
+    d = _stack(n=12, h=40, w=48, seed=21)
+    rng = np.random.default_rng(6)
+    H_full, W_full, top, left = 56, 64, 9, 10   # crop region 40x48 inside 56x64
+    grids = [rng.uniform(0.2, 1.0, (8, 8)).astype(np.float32) for _ in range(12)]
+    gw = rng.uniform(0.5, 1.5, 12).astype(np.float32)
+
+    # Old-style reference: upsample each grid to full res, crop, two-pass numpy.
+    full = []
+    for g in grids:
+        m = _zoom(g, (H_full / 8, W_full / 8), order=1)
+        # match patch_scores_to_map: exact-shape guard via same zoom mapping
+        full.append(np.clip(m, 0.0, 1.0).astype(np.float32)[top:top + 40, left:left + 48])
+    _, rej = astro.sigma_clip_combine(d.astype(np.float64), sigma=3.0, max_iters=3,
+                                      weights=gw, use_mad=True, return_mask=True)
+    ref = astro.patch_weighted_mean_combine(d, full, global_weights=gw,
+                                            rejection_mask=rej)
+
+    geom = (float(H_full), float(W_full), float(top), float(left))
+    qm = np.ascontiguousarray(np.stack(grids), dtype=np.float32)
+
+    got_native = native.patch_weighted_sigma_combine(d, qm, gw, 3.0, 3, True, geom)
+    got_numpy = astro.patch_weighted_mean_combine(d, list(qm), global_weights=gw,
+                                                  rejection_mask=rej,
+                                                  grid_geom=geom)
+    # Weights are smooth [0,1] fields; zoom vs direct bilinear differ at
+    # float tolerance, and the combine averages ~1000 ADU pixels.
+    assert float(np.max(np.abs(ref.astype(np.float64) - got_numpy))) < 1.0
+    assert float(np.max(np.abs(ref.astype(np.float64) - got_native))) < 2.0

@@ -1626,11 +1626,14 @@ def run_registration_phase(
                 if sy != 0.0 or sx != 0.0:
                     g = ndimage.shift(g, shift=(sy / ph_g, sx / pw_g),
                                       order=1, mode='nearest')
-                quality_maps.append(patch_scores_to_map(g, H_map, W_map))
+                gmax = float(g.max())
+                if gmax > 1e-12:
+                    g = g / gmax
+                quality_maps.append(np.clip(g, 0.0, 1.0))
                 n_from_scores += 1
                 continue
             # Fallback (frames without Phase-1 scores, e.g. resumed
-            # checkpoints): re-read, warp, and score at full resolution.
+            # checkpoints): re-read, warp, and score at coarse resolution.
             lum = np.array(mem_lum[orig_idx]).astype(np.float32)
             if transforms[j] is not None:
                 from scipy.ndimage import affine_transform as _aff
@@ -1644,8 +1647,11 @@ def run_registration_phase(
             elif shifts[j] != (0.0, 0.0):
                 lum = ndimage.shift(lum, shift=shifts[j], order=1,
                                     mode='constant', cval=0.0)
-            qmap = compute_patch_quality_map(lum)
-            quality_maps.append(qmap)
+            g = compute_patch_scores(lum).astype(np.float32)
+            gmax = float(g.max())
+            if gmax > 1e-12:
+                g = g / gmax
+            quality_maps.append(np.clip(g, 0.0, 1.0))
         if n_from_scores:
             safe_print(f"  Patch quality maps computed "
                        f"({n_from_scores}/{len(final)} from Phase-1 scores).")

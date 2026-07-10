@@ -875,8 +875,16 @@ fn anisotropic_diffusion<'py>(
 /// then patch_weighted_mean_combine): per pixel, sigma-clip each channel to get
 /// a per-frame reject fraction over channels, then weighted-mean the frames
 /// with weight = qmap * global_weight * (1 - reject_fraction).
+///
+/// `qmaps` is either (N, H, W) full-resolution weights (grid_geom = None,
+/// original behaviour), or (N, gh, gw) coarse patch grids with
+/// `grid_geom = (h_full, w_full, top, left)`: the weight at cropped pixel
+/// (row, col) is the grid sampled bilinearly at full-frame coordinates
+/// ((row+top)*(gh-1)/(h_full-1), (col+left)*(gw-1)/(w_full-1)) — the same
+/// corner-aligned mapping scipy `zoom(order=1)` uses, so it matches the old
+/// upsample-then-crop path without ever materialising N full-res maps.
 #[pyfunction]
-#[pyo3(signature = (data, qmaps, gweights=None, sigma=3.0, max_iters=3, use_mad=true))]
+#[pyo3(signature = (data, qmaps, gweights=None, sigma=3.0, max_iters=3, use_mad=true, grid_geom=None))]
 fn patch_weighted_sigma_combine<'py>(
     py: Python<'py>,
     data: PyReadonlyArray4<'py, f32>,
@@ -885,6 +893,7 @@ fn patch_weighted_sigma_combine<'py>(
     sigma: f32,
     max_iters: usize,
     use_mad: bool,
+    grid_geom: Option<(f64, f64, f64, f64)>,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
     let arr = data.as_array();
     let qm = qmaps.as_array();
@@ -893,6 +902,25 @@ fn patch_weighted_sigma_combine<'py>(
     let gw: Option<Vec<f32>> = gweights.map(|x| x.as_array().to_vec());
     let gwref = gw.as_deref();
 
+    let (qh, qw) = (qm.shape()[1], qm.shape()[2]);
+    // Per-column grid sample tables (index + fraction), computed once.
+    let col_tab: Option<(Vec<usize>, Vec<f32>)> = grid_geom.map(|(_, wf, _, left)| {
+        let sx = if wf > 1.0 && qw > 1 {
+            (qw - 1) as f64 / (wf - 1.0)
+        } else {
+            0.0
+        };
+        let mut gx0 = vec![0usize; w];
+        let mut fx = vec![0f32; w];
+        for col in 0..w {
+            let g = ((col as f64 + left) * sx).clamp(0.0, (qw - 1) as f64);
+            let g0 = (g.floor() as usize).min(qw.saturating_sub(2).max(0));
+            gx0[col] = g0;
+            fx[col] = (g - g0 as f64) as f32;
+        }
+        (gx0, fx)
+    });
+
     let flat: Option<&[f32]> = arr.as_slice();
     let row_len = w * c;
     let frame_len = h * row_len;
@@ -900,6 +928,17 @@ fn patch_weighted_sigma_combine<'py>(
     let mut out = vec![0f32; h * w * c];
     py.allow_threads(|| {
         out.par_chunks_mut(row_len).enumerate().for_each(|(row, out_row)| {
+            // Per-row grid sample coordinate (index + fraction).
+            let row_tab: Option<(usize, f32)> = grid_geom.map(|(hf, _, top, _)| {
+                let sy = if hf > 1.0 && qh > 1 {
+                    (qh - 1) as f64 / (hf - 1.0)
+                } else {
+                    0.0
+                };
+                let g = ((row as f64 + top) * sy).clamp(0.0, (qh - 1) as f64);
+                let g0 = (g.floor() as usize).min(qh.saturating_sub(2).max(0));
+                (g0, (g - g0 as f64) as f32)
+            });
             let mut active = vec![true; n];
             let mut gather: Vec<f32> = Vec::with_capacity(n);
             let mut scratch: Vec<f32> = Vec::with_capacity(n);
@@ -928,7 +967,21 @@ fn patch_weighted_sigma_combine<'py>(
                 let mut accs = [0f64; 8]; // supports up to 8 channels
                 for f in 0..n {
                     let rej_frac = reject_count[f] as f64 * inv_c;
-                    let qwt = qm[[f, row, col]] as f64;
+                    let qwt = match (&row_tab, &col_tab) {
+                        (Some((gy0, fy)), Some((gx0s, fxs))) => {
+                            let (gx0, fx) = (gx0s[col], fxs[col]);
+                            let gy1 = (gy0 + 1).min(qh - 1);
+                            let gx1 = (gx0 + 1).min(qw - 1);
+                            let q00 = qm[[f, *gy0, gx0]];
+                            let q01 = qm[[f, *gy0, gx1]];
+                            let q10 = qm[[f, gy1, gx0]];
+                            let q11 = qm[[f, gy1, gx1]];
+                            let top_v = q00 + (q01 - q00) * fx;
+                            let bot_v = q10 + (q11 - q10) * fx;
+                            (top_v + (bot_v - top_v) * fy) as f64
+                        }
+                        _ => qm[[f, row, col]] as f64,
+                    };
                     let gwt = gwref.map(|g| g[f] as f64).unwrap_or(1.0);
                     let wt = qwt * gwt * (1.0 - rej_frac);
                     if wt == 0.0 {
@@ -1521,6 +1574,153 @@ fn dbe_fit_surface<'py>(
     Ok((out.into_pyarray(py), wrob.into_pyarray(py)))
 }
 
+/// DBE background-patch sampler — the per-patch loop of
+/// `_sample_background_patches` in src/background.py: for each grid cell,
+/// reject emission-masked/bright patches, sigma-clip, and return the patch
+/// centre (normalised), clipped median, and clipped variance. The variance
+/// and entropy filters stay in Python (cheap, operate on the small result).
+/// Medians are exact order statistics, so f32 input matches the f64
+/// reference wherever the values are f32-representable.
+#[pyfunction]
+#[pyo3(signature = (channel, emission_mask, patch_size, masked_frac_thresh, sky_ref, sky_std))]
+fn dbe_sample_patches<'py>(
+    py: Python<'py>,
+    channel: PyReadonlyArray2<'py, f32>,
+    emission_mask: PyReadonlyArray2<'py, f32>,
+    patch_size: usize,
+    masked_frac_thresh: f64,
+    sky_ref: f64,
+    sky_std: f64,
+) -> PyResult<(
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
+    let ch = channel.as_array();
+    let em = emission_mask.as_array();
+    let (h, w) = (ch.shape()[0], ch.shape()[1]);
+    if em.shape() != [h, w] {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "emission_mask shape must match channel",
+        ));
+    }
+    let ch_owned: Vec<f32>;
+    let ch_flat: &[f32] = match ch.as_slice() {
+        Some(s) => s,
+        None => {
+            ch_owned = ch.iter().copied().collect();
+            &ch_owned
+        }
+    };
+    let em_owned: Vec<f32>;
+    let em_flat: &[f32] = match em.as_slice() {
+        Some(s) => s,
+        None => {
+            em_owned = em.iter().copied().collect();
+            &em_owned
+        }
+    };
+    let ny = (h / patch_size.max(1)).max(1);
+    let nx = (w / patch_size.max(1)).max(1);
+    let cell_h = h as f64 / ny as f64;
+    let cell_w = w as f64 / nx as f64;
+    let bright_cut = sky_ref + 2.0 * sky_std.max(1.0);
+
+    let rows: Vec<Vec<(f64, f64, f64, f64)>> = py.allow_threads(|| {
+        (0..ny)
+            .into_par_iter()
+            .map(|iy| {
+                // round_ties_even matches Python's banker's-rounding round()
+                let y0 = (iy as f64 * cell_h).round_ties_even() as usize;
+                let y1 = ((((iy + 1) as f64) * cell_h).round_ties_even() as usize).min(h);
+                let mut out = Vec::new();
+                let mut px: Vec<f32> = Vec::with_capacity(patch_size * patch_size * 2);
+                let mut dev: Vec<f32> = Vec::with_capacity(px.capacity());
+                for ix in 0..nx {
+                    let x0 = (ix as f64 * cell_w).round_ties_even() as usize;
+                    let x1 = ((((ix + 1) as f64) * cell_w).round_ties_even() as usize).min(w);
+                    if y1 <= y0 || x1 <= x0 {
+                        continue;
+                    }
+                    let total = (y1 - y0) * (x1 - x0);
+                    let mut masked = 0usize;
+                    px.clear();
+                    for y in y0..y1 {
+                        let base = y * w;
+                        for x in x0..x1 {
+                            if em_flat[base + x] >= 0.5 {
+                                masked += 1;
+                            } else {
+                                px.push(ch_flat[base + x]);
+                            }
+                        }
+                    }
+                    if masked > 0 && (masked as f64 / total as f64) > masked_frac_thresh {
+                        continue;
+                    }
+                    if px.len() < 10 {
+                        continue;
+                    }
+                    dev.clear();
+                    dev.extend_from_slice(&px);
+                    let patch_med = median_inplace(&mut dev) as f64;
+                    if patch_med > bright_cut {
+                        continue;
+                    }
+                    dev.clear();
+                    dev.extend(px.iter().map(|&v| (v as f64 - patch_med).abs() as f32));
+                    let mad = median_inplace(&mut dev) as f64;
+                    let sig = 1.4826 * mad;
+                    if sig > 1e-12 {
+                        let cut = (3.0 * sig) as f32;
+                        let med32 = patch_med as f32;
+                        px.retain(|&v| (v - med32).abs() <= cut);
+                    }
+                    let med_val = if px.is_empty() {
+                        patch_med
+                    } else {
+                        dev.clear();
+                        dev.extend_from_slice(&px);
+                        median_inplace(&mut dev) as f64
+                    };
+                    // Population variance (ddof=0) in f64, matching np.var.
+                    let var = if px.is_empty() {
+                        0.0
+                    } else {
+                        let m: f64 =
+                            px.iter().map(|&v| v as f64).sum::<f64>() / px.len() as f64;
+                        px.iter().map(|&v| (v as f64 - m) * (v as f64 - m)).sum::<f64>()
+                            / px.len() as f64
+                    };
+                    let cy = (y0 as f64 + (y1 - y0) as f64 * 0.5) / h as f64;
+                    let cx = (x0 as f64 + (x1 - x0) as f64 * 0.5) / w as f64;
+                    out.push((cy, cx, med_val, var));
+                }
+                out
+            })
+            .collect()
+    });
+
+    let flat: Vec<(f64, f64, f64, f64)> = rows.into_iter().flatten().collect();
+    let n = flat.len();
+    let mut coords = Vec::with_capacity(n * 2);
+    let mut values = Vec::with_capacity(n);
+    let mut variances = Vec::with_capacity(n);
+    for (cy, cx, v, var) in flat {
+        coords.push(cy);
+        coords.push(cx);
+        values.push(v);
+        variances.push(var);
+    }
+    let carr = numpy::ndarray::Array2::from_shape_vec((n, 2), coords)
+        .expect("shape mismatch building patch coords");
+    Ok((
+        carr.into_pyarray(py),
+        values.into_pyarray(py),
+        variances.into_pyarray(py),
+    ))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -1534,6 +1734,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
     m.add_function(wrap_pyfunction!(median_filter_native, m)?)?;
     m.add_function(wrap_pyfunction!(dbe_fit_surface, m)?)?;
+    m.add_function(wrap_pyfunction!(dbe_sample_patches, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
