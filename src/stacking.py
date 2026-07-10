@@ -229,6 +229,23 @@ def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
     H, W = img.shape[:2]
     C = img.shape[2] if img.ndim == 3 else 1
 
+    # Native path: the mapping is the diagonal affine
+    #   input = diag(1/scale) @ output - shift
+    # which the Rust Lanczos-3 warp handles on its separable fast path, all
+    # channels in one pass. True Lanczos-3 rather than the quintic-spline
+    # approximation below.
+    if HAS_NATIVE and lanczos_a == 3 and img.ndim == 3:
+        try:
+            inv = 1.0 / scale
+            res = _native.warp_affine_lanczos3(
+                np.ascontiguousarray(img, dtype=np.float32),
+                [inv, 0.0, 0.0, inv],
+                [-float(shift[0]), -float(shift[1])],
+                int(out_h), int(out_w), 0.0)
+            return res.astype(np.float64)
+        except Exception:
+            pass
+
     # Output coordinates -> input coordinates (inverse mapping)
     # output pixel (oy, ox) corresponds to input ((oy / scale) - shift_y, (ox / scale) - shift_x)
     oy = np.arange(out_h, dtype=np.float64)
@@ -1321,6 +1338,8 @@ def run_stacking_phase(
             out_h = int(round(crop_h * drizzle_scale))
             out_w = int(round(crop_w * drizzle_scale))
             print(f"  Drizzle: {drizzle_scale:.1f}x ({crop_h}x{crop_w} -> {out_h}x{out_w})")
+            if HAS_NATIVE:
+                print("    [rust] Lanczos-3 warp (drizzle resample)")
             acc = np.zeros((out_h, out_w, C), dtype=np.float64)
             gpu = get_gpu()
             spline_order = 5
@@ -1369,12 +1388,28 @@ def run_stacking_phase(
                     M = np.array([[inv_scale, 0.0], [0.0, inv_scale]])
                     off = crop_offset - np.array([sy, sx])
 
-                resampled = np.empty((out_h, out_w, C), dtype=np.float32)
-                for c in range(C):
-                    resampled[:, :, c] = ndimage.affine_transform(
-                        rgb[:, :, c], M, offset=off,
-                        output_shape=(out_h, out_w),
-                        order=spline_order, mode='constant', cval=0.0)
+                resampled = None
+                if HAS_NATIVE:
+                    # Rust Lanczos-3 warp: all channels in one pass; the
+                    # no-rotation case (diagonal M) takes its separable fast
+                    # path. True Lanczos-3 vs the quintic-spline
+                    # approximation of the scipy fallback.
+                    try:
+                        resampled = _native.warp_affine_lanczos3(
+                            np.ascontiguousarray(rgb, dtype=np.float32),
+                            [float(M[0, 0]), float(M[0, 1]),
+                             float(M[1, 0]), float(M[1, 1])],
+                            [float(off[0]), float(off[1])],
+                            int(out_h), int(out_w), 0.0)
+                    except Exception:
+                        resampled = None
+                if resampled is None:
+                    resampled = np.empty((out_h, out_w, C), dtype=np.float32)
+                    for c in range(C):
+                        resampled[:, :, c] = ndimage.affine_transform(
+                            rgb[:, :, c], M, offset=off,
+                            output_shape=(out_h, out_w),
+                            order=spline_order, mode='constant', cval=0.0)
 
                 resampled *= w  # in-place float32, avoids float64 temporary
                 with acc_lock:

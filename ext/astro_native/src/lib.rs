@@ -650,18 +650,19 @@ fn warp_affine_lanczos3<'py>(
     let (h, w, c) = (s[0], s[1], s[2]);
     let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
     let (o0, o1) = (off[0], off[1]);
-    // Pure translation: iy depends only on oy and ix only on ox, so the Lanczos
-    // weights are separable — one wx table per image, one wy per row. This is
-    // the common case (rotation off) and removes ALL sin() calls plus the
-    // weight normalisation from the per-pixel loop.
-    let is_shift = m00 == 1.0 && m01 == 0.0 && m10 == 0.0 && m11 == 1.0;
+    // Diagonal matrix (pure translation or axis-aligned scaling, e.g. the
+    // drizzle output grid): iy depends only on oy and ix only on ox, so the
+    // Lanczos weights are separable — one wx table per image, one wy per row.
+    // This covers the common cases (rotation off) and removes ALL sin() calls
+    // plus the weight normalisation from the per-pixel loop.
+    let is_sep = m01 == 0.0 && m10 == 0.0;
     let flat: Option<&[f32]> = arr.as_slice();
 
-    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if is_shift && flat.is_some() {
+    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if is_sep && flat.is_some() {
         let mut wxs = vec![[0f64; 6]; out_w];
         let mut bxs = vec![0isize; out_w];
         for ox in 0..out_w {
-            let ix = ox as f64 + o1;
+            let ix = m11 * ox as f64 + o1;
             let fx = ix.floor();
             lanczos6_weights(ix - fx, &mut wxs[ox]);
             bxs[ox] = fx as isize - 2;
@@ -684,11 +685,11 @@ fn warp_affine_lanczos3<'py>(
                         let (wyv, wxv, base_y, base_x): (&[f64; 6], &[f64; 6], isize, isize) =
                             if let Some((wxs, bxs)) = tab {
                                 if ox == 0 {
-                                    let iy = oy as f64 + o0;
+                                    let iy = m00 * oy as f64 + o0;
                                     let fy = iy.floor();
                                     lanczos6_weights(iy - fy, &mut wy);
                                 }
-                                let iy = oy as f64 + o0;
+                                let iy = m00 * oy as f64 + o0;
                                 (&wy, &wxs[ox], iy.floor() as isize - 2, bxs[ox])
                             } else {
                                 let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
