@@ -595,15 +595,30 @@ def _measure_session_ca(frames: List[FrameInfo], args) -> Optional[dict]:
         return None
 
     out: dict = {}
+    measured_any = False
     for c in (0, 2):
         vals = [s[c] for s in samples if s.get(c) is not None]
         if len(vals) >= 2:
-            out[c] = (float(np.median([v[0] for v in vals])),
-                      float(np.median([v[1] for v in vals])))
+            measured_any = True
+            sy = float(np.median([v[0] for v in vals]))
+            sx = float(np.median([v[1] for v in vals]))
+            # Sub-threshold skip: correcting less than a quarter pixel does
+            # more harm than good — the Lanczos resample costs time and adds
+            # mild ringing, while a <0.25px channel offset is invisible under
+            # a ~5px FWHM PSF. None here means "measured, negligible": the
+            # apply step becomes a no-op rather than falling back to
+            # per-frame measurement.
+            if max(abs(sy), abs(sx)) < Config.CA_MIN_SHIFT_PX:
+                out[c] = None
+            else:
+                out[c] = (sy, sx)
         else:
             out[c] = None
+    if not measured_any:
+        return None  # measurement failed -> per-frame fallback
     if out[0] is None and out[2] is None:
-        return None
+        safe_print("  CA correction: measured shifts below "
+                   f"{Config.CA_MIN_SHIFT_PX}px — no correction needed")
     return out
 
 
