@@ -11,6 +11,8 @@ class Config:
     HOT_PIXEL_THRESHOLD = 12.0
     HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
     CA_MIN_SHIFT_PX = 0.25           # Session CA below this: skip the correction warp entirely
+    MERGE_MIN_OVERLAP = 0.25         # --merge: min warped-footprint overlap before refusing
+    MERGE_MIN_CORRELATION = 0.15     # --merge: min aligned-vs-new luminance correlation
     WHITE_PATCH_PERCENTILE = 99.5
     CROP_MARGIN = 2
     XCORR_DOWNSCALE_TARGET = 256  # Target size for cross-correlation

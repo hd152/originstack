@@ -689,6 +689,34 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         # end: if resume_phase < 3
 
     # ======================================================================
+    # Incremental merge: fold previously saved linear stacks into this run
+    # before Phase 4, so post-processing runs once on the combined result.
+    # ======================================================================
+    merge_info = None
+    if getattr(args, 'merge', None):
+        if float(getattr(args, 'drizzle_scale', 1.0) or 1.0) > 1.0:
+            raise ValueError("--merge is not supported with --drizzle-scale > 1 "
+                             "(pixel grids differ between runs)")
+        from src.merge import merge_previous_stacks
+        safe_print(f"\n  Merging {len(args.merge)} previous stack(s)...")
+        _t_merge = time.time()
+        stacked, merge_info = merge_previous_stacks(
+            stacked, len(final), list(args.merge), verbose=args.verbose)
+        fits_stacked = stacked.copy()
+        safe_print(f"  ✓ Merge: {merge_info['total_frames']} total frames "
+                   f"({format_time(time.time() - _t_merge)})")
+        # The preview depth rule capped preview_black_sigma using tonight's
+        # frame count; the merged stack is deeper. Re-apply the rule with the
+        # combined count, restoring toward the preset value it capped.
+        _precap = getattr(args, '_preview_black_sigma_precap', None)
+        if _precap is not None:
+            _n_total = merge_info['total_frames']
+            if _n_total >= 60:
+                args.preview_black_sigma = _precap
+            elif _n_total >= 20 and _precap > 2.0:
+                args.preview_black_sigma = 2.0
+
+    # ======================================================================
     # PHASE 4: Post-processing
     # ======================================================================
     print_phase(4, "Post-processing")
@@ -737,6 +765,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stacked_shape=stacked.shape, shifts=shifts,
         masters=masters, dither_info=dither_info,
         post_processed=False)
+    if merge_info is not None:
+        from src.merge import apply_merge_header
+        apply_merge_header(hdu.header, merge_info)
     hdu.writeto(output_path, overwrite=True)
 
     # The output header already carries a WCS from the session info.json when the

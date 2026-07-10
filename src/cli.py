@@ -982,6 +982,17 @@ def parse_args():
                    help='Disable multiscale local contrast enhancement')
     p.add_argument('-j', '--parallel', type=int, default=0,
                    help='Parallel workers for frame processing (default: 0=auto, 1=sequential)')
+    p.add_argument('--merge', nargs='+', default=None, metavar='STACK.fits',
+                   help='Incremental stacking: merge previously saved linear stacks '
+                        '(the main output FITS of earlier runs, RAWSTACK=True) into '
+                        'this run. Each is registered onto the current session\'s '
+                        'grid (star-match affine, translation fallback) and combined '
+                        'as a per-pixel mean weighted by its NFRAMES header inside '
+                        'its warped footprint. Post-processing runs once on the '
+                        'merged result, and the output is itself a mergeable linear '
+                        'stack. No cross-session outlier rejection (each session '
+                        'already rejected internally). Not supported with '
+                        '--drizzle-scale > 1.')
     p.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
     p.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',

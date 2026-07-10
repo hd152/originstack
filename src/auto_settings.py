@@ -564,8 +564,12 @@ def _apply_quality_settings(
     pbs = float(getattr(args, 'preview_black_sigma', 0.0) or 0.0)
     if pbs > 1.0:
         if n < 20:
+            setattr(args, '_preview_black_sigma_precap', pbs)
             _set('preview_black_sigma', 1.0)
         elif n < 60 and pbs > 2.0:
+            # Stash the preset value so --merge can restore it when the
+            # merged frame count justifies the deeper-stack clip again.
+            setattr(args, '_preview_black_sigma_precap', pbs)
             _set('preview_black_sigma', 2.0)
 
     # 14. Single primary luma denoiser. Target presets and the SNR rules

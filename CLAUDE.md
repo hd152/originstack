@@ -96,6 +96,9 @@ The old local-normalisation step (`--local-normalize`) was **removed**: it did l
 
 The preview JPEG black point is set per target by the auto-advisor (`preview_black_sigma`, overridable with `--preview-black-sigma`); higher values (2–3) clip the sky-noise tail to black for a small target on empty sky.
 
+### Incremental stacking (`--merge`)
+The main output FITS is the linear pre-post-processing stack (`RAWSTACK=True`) with `NFRAMES`/`INTGTIME`/`TOTEXP` headers. `--merge PREV.fits [...]` processes only the new session through Phases 1-3, registers each previous stack onto the new grid (star-match affine in [src/merge.py](src/merge.py) — nights differ by arbitrary field rotation on alt-az mounts — translation fallback, hard error on failure or <25% overlap), and combines as a per-pixel `NFRAMES`-weighted mean inside each warped footprint before Phase 4 runs once on the result. Header aggregates are summed, so the output chains into future merges. There is no cross-session outlier rejection (each session already rejected internally); not supported with `--drizzle-scale > 1`.
+
 ### Streaming memory model
 Frames are processed one at a time: load → process → accumulate → free. Memory usage stays at ~1-2 frames regardless of total frame count. This is the core design constraint — never accumulate all frames in memory.
 
