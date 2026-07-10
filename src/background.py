@@ -53,6 +53,43 @@ except ImportError:
     _gf = None
 
 
+def gaussian_filter_ds(arr: np.ndarray, sigma: float,
+                       ds_threshold: float = 24.0) -> np.ndarray:
+    """Gaussian blur evaluated on a block-downsampled copy for large sigmas.
+
+    A blur of tens-to-hundreds of pixels produces a field with no content
+    anywhere near the downsampled Nyquist limit, so computing it at 1/ds
+    resolution with sigma/ds and bilinear-upsampling back is visually and
+    numerically indistinguishable (the block-average is itself a small
+    pre-filter absorbed by the huge Gaussian) at ~ds^2 less work. Below
+    ``ds_threshold`` the plain full-resolution filter runs. 2-D input only.
+    Weighted (numerator/denominator) usages stay consistent as long as both
+    halves go through the same path, which sigma alone determines.
+    """
+    sigma = float(sigma)
+    a = np.asarray(arr, dtype=np.float64)
+    if sigma < ds_threshold or a.ndim != 2:
+        return gaussian_filter(a, sigma=sigma)
+    ds = 4 if sigma < 96.0 else 8
+    H, W = a.shape
+    h2, w2 = (H // ds) * ds, (W // ds) * ds
+    if h2 < ds or w2 < ds:
+        return gaussian_filter(a, sigma=sigma)
+    coarse = a[:h2, :w2].reshape(h2 // ds, ds, w2 // ds, ds).mean(axis=(1, 3))
+    sm = gaussian_filter(coarse, sigma=sigma / ds)
+    # Centre-aligned upsample: coarse pixel j represents fine pixels
+    # [j*ds, (j+1)*ds), whose centre is j*ds + (ds-1)/2. Plain zoom is
+    # corner-aligned and would return the whole field shifted by ~ds/2 px,
+    # which multiplied by the field's gradient near bright features is the
+    # dominant error term. affine_transform with the matching offset samples
+    # the coarse grid at the true block centres.
+    off = -(ds - 1) / (2.0 * ds)
+    out = ndimage.affine_transform(
+        sm, np.array([1.0 / ds, 1.0 / ds]), offset=[off, off],
+        output_shape=(H, W), order=3, mode='nearest')
+    return out
+
+
 def _estimate_sky_sigma(img: np.ndarray) -> float:
     """Estimate per-pixel sky noise from adjacent-pixel diffs on sky-only pairs."""
     # Ensure float64 for calculations to maintain precision
@@ -358,7 +395,7 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
 
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
-        lum_smooth = gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
+        lum_smooth = gaussian_filter_ds(lum.astype(np.float64), sigma=smooth_sigma)
 
         border_pix = _border_pixels(lum_smooth)
         sky_med = float(np.median(border_pix))
@@ -443,7 +480,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     cell_excluded = np.zeros((max(1, H // mesh_size), max(1, W // mesh_size)), dtype=bool)
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
-        lum_smooth = gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
+        lum_smooth = gaussian_filter_ds(lum.astype(np.float64), sigma=smooth_sigma)
         border_pix = _border_pixels(lum_smooth)
         sky_med = float(np.median(border_pix))
         sky_std = float(np.std(border_pix))
@@ -572,7 +609,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         background = spline(np.arange(H), np.arange(W)).astype(np.float64)
         blur_sigma = (H/ny) * 0.5
         if blur_sigma > 0:
-            background = ndimage.gaussian_filter(background, sigma=blur_sigma)
+            background = gaussian_filter_ds(background, sigma=blur_sigma)
 
         result[:, :, c] = (ch - background).astype(np.float32)
         if verbose:
@@ -605,7 +642,7 @@ def sky_floor_normalize(rgb: np.ndarray, star_mask: Optional[np.ndarray] = None,
 
     # --- Mask extended sources ---
     smooth_sigma = max(5.0, min(H, W) / 200.0)
-    lum_smooth = gaussian_filter(lum.astype(np.float64), sigma=smooth_sigma)
+    lum_smooth = gaussian_filter_ds(lum.astype(np.float64), sigma=smooth_sigma)
     src_thresh = sky_med + 2.0 * max(sky_std, 1.0)
     np.clip(src_mask + (lum_smooth > src_thresh).astype(np.float32), 0, 1, out=src_mask)
 
@@ -731,6 +768,31 @@ def _sample_background_patches(
     cell_h = H / ny
     cell_w = W / nx
 
+    coords = values = variances = None
+    if HAS_NATIVE and hasattr(_native, 'dbe_sample_patches'):
+        # Native per-patch loop (rayon-parallel): same rejection cascade,
+        # medians are exact order statistics so the f32 cast is lossless for
+        # f32-representable pixel data. Variance/entropy filters below stay
+        # in Python — they operate on the small per-patch result.
+        try:
+            coords, values, variances = _native.dbe_sample_patches(
+                np.ascontiguousarray(channel, dtype=np.float32),
+                np.ascontiguousarray(emission_mask, dtype=np.float32),
+                int(patch_size), float(masked_frac_thresh),
+                float(sky_ref), float(sky_std))
+            if len(values) == 0:
+                return np.empty((0, 2)), np.empty((0,))
+        except Exception:
+            coords = values = variances = None
+
+    if coords is not None:
+        coords = np.asarray(coords, dtype=np.float64)
+        values = np.asarray(values, dtype=np.float64)
+        variances = np.asarray(variances, dtype=np.float64)
+        return _filter_sampled_patches(channel, emission_mask, patch_size,
+                                       coords, values, variances,
+                                       use_entropy_weights)
+
     coords_list = []
     values_list = []
     variances = []
@@ -782,7 +844,18 @@ def _sample_background_patches(
     coords = np.array(coords_list, dtype=np.float64)
     values = np.array(values_list, dtype=np.float64)
     variances = np.array(variances, dtype=np.float64)
+    return _filter_sampled_patches(channel, emission_mask, patch_size,
+                                   coords, values, variances,
+                                   use_entropy_weights)
 
+
+def _filter_sampled_patches(channel: np.ndarray, emission_mask: np.ndarray,
+                            patch_size: int,
+                            coords: np.ndarray, values: np.ndarray,
+                            variances: np.ndarray,
+                            use_entropy_weights: bool) -> Tuple[np.ndarray, np.ndarray]:
+    """Variance and entropy outlier filters over sampled patches — shared by
+    the native and numpy sampling paths."""
     if len(variances) >= 5:
         med_var = float(np.median(variances))
         mad_var = float(np.median(np.abs(variances - med_var)))
@@ -790,7 +863,6 @@ def _sample_background_patches(
         keep = variances <= var_thresh
         coords = coords[keep]
         values = values[keep]
-        variances = variances[keep]
 
     # Entropy filter: reject patches whose Shannon entropy is unusually high,
     # indicating residual contamination by stars or emission structure that the
@@ -1057,7 +1129,7 @@ def dynamic_background_extraction(
     lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]).astype(np.float64)
 
     smooth_sigma = max(20.0, min(H, W) / 50.0)
-    lum_smooth = gaussian_filter(lum, sigma=smooth_sigma)
+    lum_smooth = gaussian_filter_ds(lum, sigma=smooth_sigma)
 
     sky_med, sky_std = _sigma_sky(_border_pixels(lum_smooth))
 

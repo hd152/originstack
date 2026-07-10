@@ -9,7 +9,7 @@ from scipy import ndimage
 
 from src.models import Config
 from src.utils import safe_print, get_logger
-from src.background import _estimate_sky_sigma
+from src.background import _estimate_sky_sigma, gaussian_filter_ds
 _log = get_logger()
 
 # Optional native (Rust) kernels — graceful degradation to numpy if absent.
@@ -683,7 +683,7 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
     do_large = sigma_large > 0.0
     if do_large:
         weight_large = np.maximum(
-            ndimage.gaussian_filter(sky_mask, sigma=sigma_large), 1e-9)
+            gaussian_filter_ds(sky_mask, sigma=sigma_large), 1e-9)
         blend_large = np.clip(sky_mask * float(large_strength), 0.0, 1.0)
 
     for c in range(img.shape[2]):
@@ -693,8 +693,8 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
         # Stars keep original chroma; background gets smoothed chroma
         out_chroma = chroma * protect + smooth_chroma * sky_mask
         if do_large:
-            coarse = (ndimage.gaussian_filter(out_chroma * sky_mask,
-                                              sigma=sigma_large) / weight_large)
+            coarse = (gaussian_filter_ds(out_chroma * sky_mask,
+                                         sigma=sigma_large) / weight_large)
             out_chroma = out_chroma * (1.0 - blend_large) + coarse * blend_large
         result[:, :, c] = lum + out_chroma
 

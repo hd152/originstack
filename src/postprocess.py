@@ -16,6 +16,7 @@ from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, format_time
 from src.quality import generate_star_mask, _detect_stars_multi_fwhm, _sep_detect_stars
 from src.background import (apply_background_extraction, remove_sky_residual,
+                            gaussian_filter_ds,
                             sky_floor_normalize, dynamic_background_extraction,
                             _border_pixels, _sigma_sky)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
@@ -472,7 +473,7 @@ def postprocess_stack(
             sky_mask = np.ones((H_s, W_s), dtype=bool)
             try:
                 smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
-                lum_smooth = ndimage.gaussian_filter(lum_s, sigma=smooth_sigma)
+                lum_smooth = gaussian_filter_ds(lum_s, sigma=smooth_sigma)
                 _bp = _border_pixels(lum_smooth)
                 sky_med_lum = float(np.median(_bp))
                 sky_std_lum = float(np.std(_bp))
@@ -890,11 +891,11 @@ def postprocess_stack(
         if pp_star_mask is not None:
             _skym *= (1.0 - np.clip(pp_star_mask.astype(np.float32), 0.0, 1.0))
         _sig_sn = max(64.0, float(min(stacked.shape[:2])) / 8.0)
-        _den = ndimage.gaussian_filter(_skym, sigma=_sig_sn)
+        _den = gaussian_filter_ds(_skym, sigma=_sig_sn)
         _gm = []
         for c in range(3):
             _ch = stacked[:, :, c]
-            _num = ndimage.gaussian_filter(_ch * _skym, sigma=_sig_sn)
+            _num = gaussian_filter_ds(_ch * _skym, sigma=_sig_sn)
             _model = _num / (_den + 1e-6)          # smooth sky level per pixel
             _cmed = float(np.median(_ch))
             stacked[:, :, c] = _ch - (_model - _cmed)   # subtract deviation only
