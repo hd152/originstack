@@ -221,6 +221,7 @@ Eight built-in target presets tune all parameters at once:
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges
+- **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
 - **Quality CSV** — per-frame metrics exported for external analysis (`--quality-report`)
@@ -415,6 +416,23 @@ python astro_stack.py -d lights/ -o stacked.fits --debug registration
 ```
 
 Writes PNG overlay images and shift statistics to `_registration_debug/`. Use this when frames aren't aligning correctly.
+
+### Clean up a collection — flag poor lights
+
+```bash
+# Dry run: walk the whole tree, score every light, report what would be flagged
+python astro_stack.py --quality-sweep -d "G:stro\Astrophotography"
+
+# Apply: rename flagged frames to *.fits.rejected (invisible to stacking)
+python astro_stack.py --quality-sweep -d "G:stro\Astrophotography" --apply
+
+# Change your mind: restore every flagged file
+python astro_stack.py --sweep-undo -d "G:stro\Astrophotography"
+```
+
+Uses the exact same quality gate as stacking: hard failures (no stars, SNR < 0.5,
+near-zero contrast), statistical outliers vs each folder, and scores below
+`--quality-threshold`%% of the folder's 90th-percentile reference.
 
 ### Health check without stacking
 
@@ -618,6 +636,7 @@ python astro_stack.py -d <dir> -o <output.fits> [options]
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
 | `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
+| `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run by default) |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |
 | `--quality-report PATH` | Write per-frame quality metrics to CSV |
 | `--dry-run` | Discover frames, show parameters, estimate resources — no processing |

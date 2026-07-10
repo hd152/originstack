@@ -820,6 +820,20 @@ def parse_args():
                         'present in --directory.')
     g_core.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
+    g_core.add_argument('--quality-sweep', action='store_true',
+                   help='Walk the folder tree under -d, score every light frame with '
+                        'the same quality gate stacking uses (hard failures, '
+                        'statistical outliers, score below --quality-threshold%% of '
+                        'each folder\'s reference), and report poor frames. Dry run '
+                        'by default; add --apply to rename flagged files to '
+                        '*.fits.rejected (invisible to stacking, reversible with '
+                        '--sweep-undo).')
+    g_core.add_argument('--apply', action='store_true',
+                   help='With --quality-sweep: actually rename flagged files '
+                        '(default is a dry-run report)')
+    g_core.add_argument('--sweep-undo', action='store_true',
+                   help='Recursively strip the .rejected suffix applied by '
+                        '--quality-sweep --apply, restoring all flagged files')
     g_core.add_argument('--config', default=None, metavar='PATH',
                    help='Load parameters from a TOML configuration file. '
                         'CLI arguments override config file values. Fine-grained tuning '
@@ -1225,6 +1239,15 @@ def main():
         return
 
     args = parse_args()
+
+    # Collection maintenance modes: no output path, no stacking.
+    if getattr(args, 'sweep_undo', False):
+        from src.quality_sweep import undo_quality_sweep
+        sys.exit(undo_quality_sweep(args.directory))
+    if getattr(args, 'quality_sweep', False):
+        from src.quality_sweep import run_quality_sweep
+        sys.exit(run_quality_sweep(args.directory, args))
+
     # Upgrade bilinear → malvar when OpenCV is available; malvar resolves colour moiré
     # that bilinear introduces around fine star disks at no perceptible speed cost.
     if getattr(args, 'debayer_method', 'bilinear') == 'bilinear':
