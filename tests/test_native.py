@@ -231,7 +231,7 @@ def test_lacosmic_reject_non_rgb_passthrough():
     assert np.array_equal(out, img)
 
 
-@pytest.mark.parametrize("size", [3, 5])
+@pytest.mark.parametrize("size", [3, 5, 9, 17])
 def test_median_filter_native_matches_scipy(size):
     from scipy import ndimage
     rng = np.random.default_rng(3)

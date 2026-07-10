@@ -422,6 +422,17 @@ def _median_filter_fast(plane: np.ndarray, ksize: int) -> np.ndarray:
     Returns:
         Median-filtered float64 array of the same shape.
     """
+    # Native path first: rayon-parallel, interior fast path, any odd size.
+    # Median is an order statistic, so filtering the f32-cast plane selects
+    # the same sample values the f64 filter would (input images are f32;
+    # only the YCbCr mixing introduces sub-f32 bits, ~1e-7 relative).
+    if _HAS_NATIVE:
+        try:
+            return _native.median_filter_native(
+                np.ascontiguousarray(plane, dtype=np.float32),
+                int(ksize)).astype(np.float64)
+        except Exception:
+            pass
     _ensure_cv2()
     if HAS_CV2 and ksize in (3, 5):
         return cv2.medianBlur(plane.astype(np.float32), ksize).astype(np.float64)
@@ -465,6 +476,9 @@ def mmt_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 3.0,
     """
     h, w = img.shape[:2]
     src = img.astype(np.float64)
+
+    if _HAS_NATIVE:
+        safe_print(f"    [rust] MMT median cascade ({levels} levels x 3 planes)")
 
     # RGB → YCbCr (ITU-R BT.601)
     Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]

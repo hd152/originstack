@@ -1063,7 +1063,7 @@ fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize) -> Vec<f3
         };
 
         let interior_y = y >= hu && y + hu < h;
-        if !interior_y || w < size || (size != 3 && size != 5) {
+        if !interior_y || w < size {
             for x in 0..w {
                 generic(x, &mut window, row_out);
             }
@@ -1074,6 +1074,24 @@ fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize) -> Vec<f3
         }
         for x in (w - hu)..w {
             generic(x, &mut window, row_out);
+        }
+        if size != 3 && size != 5 {
+            // Any other odd size (MMT uses 9 and 17): contiguous row-segment
+            // gather + O(n) quickselect. No per-tap reflect_idx in the
+            // interior; borders take the generic path above.
+            let mid = (size * size) / 2;
+            for x in hu..w - hu {
+                for ty in 0..size {
+                    let base = (y - hu + ty) * w + x - hu;
+                    window[ty * size..(ty + 1) * size]
+                        .copy_from_slice(&data[base..base + size]);
+                }
+                let (_, &mut m, _) = window.select_nth_unstable_by(mid, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                row_out[x] = m;
+            }
+            return;
         }
         if size == 3 {
             let r0 = (y - 1) * w;
