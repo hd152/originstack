@@ -145,10 +145,11 @@ SUMMARY
 - **Parallel processing**: multi-core via `ProcessPoolExecutor`; GPU acceleration via CuPy (`--use-gpu`)
 
 ### Registration & Alignment
-- Sub-pixel phase cross-correlation (scikit-image) with FFT and centroid fallbacks
+- Coarse-to-fine pyramid seed + sub-pixel FFT residual correlation (~0.05 px accuracy)
 - **Affine registration** via star matching + RANSAC — corrects rotation, scale, and translation
 - Automatic dither detection → selects sigma-clip stacking automatically
 - Crops to the valid common region across all frames (no black borders)
+- Sampled post-registration residual verification (escalates to all frames only on failure)
 
 ### Stacking Methods (7)
 | Method | Best For |
@@ -175,29 +176,28 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 1. ✅ Hot pixel removal on stacked image
 2. ✅ Star mask generation (protects structure in subsequent steps)
 3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh, or GraXpert AI)
-4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches via `--chroma-nr-large-sigma`)
+4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches, auto-set for galaxy targets)
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
 6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
 7. ✅ Sky residual correction (second pass after denoising)
 8. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
-9. ❌ Non-local means denoising — `--denoise-nlm`
-10. ❌ Bilateral filter — `--denoise-bilateral`
-11. ❌ Multiscale Median Transform (MMT) — `--denoise-mmt`
-12. ❌ ACDNR adaptive contrast denoising — `--denoise-acdnr`
-13. ❌ BM3D collaborative filter — `--denoise-bm3d`
-14. ❌ Perona-Malik anisotropic diffusion — `--denoise-aniso` (native/Rust accelerated)
+9. ❌ Non-local means denoising — `--denoiser nlm`
+10. ❌ Bilateral filter — `--denoiser bilateral`
+11. ❌ Multiscale Median Transform (MMT) — `--denoiser mmt` (native/Rust accelerated)
+12. ❌ ACDNR adaptive contrast denoising — `--denoiser acdnr`
+13. ❌ BM3D collaborative filter — `--denoiser bm3d`
+14. ❌ Perona-Malik anisotropic diffusion — `--denoiser aniso` (native/Rust accelerated)
 15. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
 16. ❌ Photometric colour calibration — `--photometric-calibration`
-17. ❌ Richardson-Lucy deconvolution — `--deconvolve` (GPU-accelerated with `--use-gpu`)
+17. ❌ Deconvolution — `--deconvolve rl|tv` (RL is GPU-accelerated with `--use-gpu`)
 18. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
 19. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
 20. ❌ Star removal via Starnet++ — `--star-remove`
 21. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
 
-> The old `--local-normalize` step was **removed**: it applied local variance
-> equalisation (divide by local σ) which amplifies background noise; the gradient/
-> vignette job is already covered by `--pre-gradient-removal` + DBE + sky-floor +
-> sky-residual.
+> The auto-advisor enforces a **single primary luma denoiser** (precedence
+> BM3D > MMT > wavelet > ACDNR) — layering several full-frame smoothers erodes
+> faint structure without adding selectivity. Pick explicitly with `--denoiser`.
 
 ### Presets
 Eight built-in target presets tune all parameters at once:
@@ -220,8 +220,9 @@ Eight built-in target presets tune all parameters at once:
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
-- **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`)
-- **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--diagnostic`)
+- **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges
+- **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
+- **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
 - **Quality CSV** — per-frame metrics exported for external analysis (`--quality-report`)
 
 ---
@@ -269,8 +270,9 @@ cd ext/astro_native && maturin develop --release   # into a venv
 | `sep` | 5–10× faster star detection |
 | `astroquery` | Plate solving via astrometry.net |
 | `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
+| `astroalign` | Cross-night registration for `--merge` |
 | `reproject` | Mosaic stitching |
-| `astro_native` (Rust) | Native stacking combines, Lanczos warp, anisotropic diffusion |
+| `astro_native` (Rust) | 13 native kernels: stacking combines, Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion |
 
 ---
 
@@ -303,7 +305,7 @@ Analyses your frames and applies optimised settings for the detected target type
 ### Hierarchical session (multiple targets in one night)
 
 ```bash
-python astro_stack.py -d session/ -o combined.fits --keep-intermediates -v
+python astro_stack.py -d session/ -o combined.fits --debug intermediates -v
 ```
 
 Where `session/` contains one subfolder per target. Each subfolder is stacked independently with its own calibration frames, then combined into a single output.
@@ -320,20 +322,19 @@ python astro_stack.py -d lights/ -o galaxy.fits \
   --debayer-method malvar \
   --stack-method sigma_clip \
   --rejection-sigma 2.8 \
-  --deconvolve \
+  --deconvolve rl \
   -v
 ```
 
-The `galaxy` preset applies GHS stretching and star reduction. Adding `--deconvolve` sharpens fine detail in spiral arms.
+The `galaxy` preset applies GHS stretching and star reduction. Adding `--deconvolve rl` sharpens fine detail in spiral arms.
 
 ### Emission nebula (e.g., Orion, Rosette)
 
 ```bash
 python astro_stack.py -d lights/ -o nebula.fits \
   --preset nebula \
-  --denoise-mmt \
-  --denoise-acdnr \
-  --stretch ghs --ghs-b 8.0 \
+  --denoiser mmt \
+  --stretch ghs \
   -v
 ```
 
@@ -342,7 +343,7 @@ python astro_stack.py -d lights/ -o nebula.fits \
 ```bash
 python astro_stack.py -d ha_lights/ -o ha_stack.fits \
   --preset narrowband \
-  --no-white-balance \
+  --white-balance none \
   --scnr \
   --stack-method sigma_clip --rejection-sigma 3.0 \
   -v
@@ -353,31 +354,44 @@ python astro_stack.py -d ha_lights/ -o ha_stack.fits \
 ```bash
 python astro_stack.py -d frames/ -o jupiter.fits \
   --preset planetary \
-  --deconvolve --deconvolve-iterations 20 \
+  --deconvolve rl \
   --no-background-extraction \
   --no-star-reduce \
   -v
 ```
 
-### Maximum quality — everything on
+### Maximum quality
 
 ```bash
 python astro_stack.py -d lights/ -o best.fits \
   --preset quality \
   --debayer-method malvar \
-  --denoise-nlm --denoise-bilateral --denoise-mmt --denoise-acdnr \
-  --deconvolve \
+  --denoiser mmt \
+  --deconvolve rl \
   --stack-method sigma_clip --rejection-sigma 2.5 \
-  --weight-snr 2.0 --weight-fwhm 2.0 \
   -v
 ```
+
+### Incremental stacking — add tonight's frames to a saved stack
+
+```bash
+# First night: normal run; the output FITS is a mergeable linear stack
+python astro_stack.py -d night1/ -o m51.fits --auto -v
+
+# Later nights: process only the new frames, fold in the saved stack (seconds)
+python astro_stack.py -d night2/ -o m51_v2.fits --auto --merge m51.fits -v
+```
+
+Each previous stack is registered onto the new session's grid (handles
+cross-night field rotation via astroalign) and combined as a per-pixel
+`NFRAMES`-weighted mean. The output chains into future merges.
 
 ### Super-resolution drizzle (requires dithered frames)
 
 ```bash
 python astro_stack.py -d lights/ -o drizzled.fits \
   --drizzle-scale 2.0 \
-  --drizzle-drop-size 0.7 \
+  --drizzle-pixfrac 0.7 \
   -v
 ```
 
@@ -397,7 +411,7 @@ python astro_stack.py -d lights/ -o stacked.fits \
 ### Debug registration problems
 
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits --debug-registration
+python astro_stack.py -d lights/ -o stacked.fits --debug registration
 ```
 
 Writes PNG overlay images and shift statistics to `_registration_debug/`. Use this when frames aren't aligning correctly.
@@ -473,7 +487,7 @@ session/
 python astro_stack.py -d session/ -o combined.fits -v
 ```
 
-Each subfolder is stacked independently (its own calibration frames, quality analysis, and registration pass), then the per-target stacks are combined into the output FITS. Use `--keep-intermediates` to also save the individual per-target stacks alongside the combined output.
+Each subfolder is stacked independently (its own calibration frames, quality analysis, and registration pass), then the per-target stacks are combined into the output FITS. Use `--debug intermediates` to also save the individual per-target stacks alongside the combined output.
 
 **`info.json` support:** If a subfolder contains an `info.json` from the Celestron Origin app, OriginStack reads the target name, Bayer pattern, and WCS (RA/Dec/FOV/orientation) from it automatically. Each subfolder's `info.json` is loaded independently, so different subfolders can cover different sky coordinates.
 
@@ -565,19 +579,16 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Feature | Default | Disable with |
 |---------|---------|-------------|
 | Background extraction (DBE) | ✅ on | `--no-background-extraction` |
-| Wavelet denoising | ✅ on | `--no-denoise` |
+| Luma denoising (wavelet) | ✅ on | `--denoiser none` |
 | Chroma noise reduction | ✅ on | `--no-chroma-nr` |
 | Star reduction | ✅ on | `--no-star-reduce` |
 | Local contrast enhancement | ✅ on | `--no-local-contrast` |
 | Chromatic aberration correction | ✅ on | `--no-ca-correction` |
-| Cosmic ray rejection | ✅ on | `--no-cosmic-ray-rejection` |
+| Cosmic ray rejection | auto | `--cosmic-ray-rejection` / `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |
 | Quality filtering | ✅ on | `--no-quality-filter` |
 | Affine registration | ✅ on | `--no-affine` |
-| NLM denoising | ❌ off | `--denoise-nlm` |
-| Bilateral denoising | ❌ off | `--denoise-bilateral` |
-| MMT denoising | ❌ off | `--denoise-mmt` |
-| ACDNR denoising | ❌ off | `--denoise-acdnr` |
-| Richardson-Lucy deconvolution | ❌ off | `--deconvolve` |
+| Primary denoiser choice | wavelet | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,none}` |
+| Deconvolution | ❌ off | `--deconvolve {rl,tv}` |
 
 ---
 
@@ -599,18 +610,19 @@ python astro_stack.py -d <dir> -o <output.fits> [options]
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
 | `--bg-method METHOD` | Background extraction (dbe, mesh, graxpert) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
-| `--deconvolve` | Enable Richardson-Lucy PSF deconvolution |
+| `--denoiser NAME` | Primary luma denoiser (wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, none) |
+| `--deconvolve {off,rl,tv}` | Richardson-Lucy or TV-regularised deconvolution |
 | `--plate-solve` | Plate solve via astrometry.net (requires astroquery + API key) |
 | `--star-remove` | Remove stars via Starnet++ (saves _starless.fits + _stars.fits) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
+| `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |
-| `--diagnostic` | Save FITS snapshot before each post-processing step |
 | `--quality-report PATH` | Write per-frame quality metrics to CSV |
 | `--dry-run` | Discover frames, show parameters, estimate resources — no processing |
 | `--health-check` | Analyse calibration and frames without stacking |
-| `--debug-registration` | Write registration diagnostics to `_registration_debug/` |
+| `--debug KIND[,..]` | Debug artefacts: registration, diagnostic, intermediates, masks |
 | `--use-gpu` | Enable CuPy GPU acceleration |
 | `-j N, --parallel N` | Worker count (0 = auto-detect) |
 | `-v, --verbose` | Detailed per-frame output |
@@ -631,17 +643,21 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 
 ### Native (Rust) acceleration
 
-[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the whole Phase-2 warp + Phase-3 combine hot path plus one denoiser:
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 cosmic-ray/median hot paths, the Phase-2/3 warp + combine hot path, drizzle, DBE, and the MMT denoiser:
 
-| Kernel | Speedup vs numpy |
-|--------|------------------|
+| Kernel | Speedup vs numpy/scipy |
+|--------|------------------------|
 | `sigma_clip_combine` (default stack method) | ~37× |
 | `esd_combine` | ~24× |
 | `percentile_clip_combine` | ~13× |
 | `median_combine` | ~6× |
 | `trimmed_mean_combine` | ~4× |
 | Fused patch-weighted + sigma-clip combine | ~100× |
-| Per-frame Lanczos-3 alignment warp | ~5× |
+| Per-frame Lanczos-3 warp (alignment + drizzle resample) | ~5× / ~26× |
+| L.A.Cosmic cosmic-ray rejection | ~2× under real parallel load |
+| Median filter (3×3 median network / larger windows) | ~13× / ~26× |
+| MMT denoise median cascade | ~10× |
+| DBE surface fit + patch sampler | ~2.4× / ~31× |
 | Anisotropic diffusion | ~37× |
 
 Build (needs a Rust toolchain + `pip install maturin`):
@@ -711,9 +727,9 @@ python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits \
 
 ## Diagnostics & Troubleshooting
 
-**Frames not aligning?** Use `--debug-registration`:
+**Frames not aligning?** Use `--debug registration`:
 ```bash
-python astro_stack.py -d lights/ -o out.fits --debug-registration
+python astro_stack.py -d lights/ -o out.fits --debug registration
 # Diagnostics written to _registration_debug/
 ```
 

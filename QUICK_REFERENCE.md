@@ -19,7 +19,7 @@ python astro_stack.py -d lights/ -o stacked.fits --preset galaxy
 python astro_stack.py -d lights/ -o stacked.fits --no-quality-filter
 
 # Debug registration problems
-python astro_stack.py -d lights/ -o stacked.fits --debug-registration
+python astro_stack.py -d lights/ -o stacked.fits --debug registration
 
 # Health check without stacking
 python astro_stack.py -d lights/ --health-check
@@ -29,12 +29,16 @@ python astro_stack.py -d lights/ -o stacked.fits --dry-run
 
 # Iterate fast on the SAME output — re-runs skip Phases 1-3 (redo post only)
 python astro_stack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
+
+# Incremental stacking — fold a previous night's saved stack into this run
+python astro_stack.py -d tonight/ -o m51_v2.fits --auto --merge m51.fits
 ```
 
 ### Optional native (Rust) acceleration
-Stacking combines (~4–100×), the Lanczos alignment warp (~5×) and anisotropic
-diffusion (~37×) run in Rust when the `astro_native` module is built; otherwise
-a numpy fallback is used. Build once:
+13 hot-path kernels run in Rust when the `astro_native` module is built
+(stacking combines ~4–100×, Lanczos warp for alignment and drizzle ~5–26×,
+L.A.Cosmic, median filters, the MMT median cascade ~10×, DBE sampling+fit,
+anisotropic diffusion ~37×); otherwise a numpy fallback is used. Build once:
 
 ```bash
 cd ext/astro_native && maturin develop --release           # into a venv
@@ -115,23 +119,20 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Feature | On by default | Disable |
 |---------|:---:|---------|
 | Background extraction (DBE) | ✅ | `--no-background-extraction` |
-| Wavelet denoising | ✅ | `--no-denoise` |
+| Luma denoising (wavelet) | ✅ | `--denoiser none` |
 | Chroma noise reduction | ✅ | `--no-chroma-nr` |
 | Star reduction | ✅ | `--no-star-reduce` |
 | Local contrast enhancement | ✅ | `--no-local-contrast` |
 | CA correction | ✅ | `--no-ca-correction` |
-| Cosmic ray rejection | ✅ | `--no-cosmic-ray-rejection` |
+| Cosmic ray rejection | auto | `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |
 | Quality filtering | ✅ | `--no-quality-filter` |
 | Affine registration | ✅ | `--no-affine` |
 
 | Feature | Off by default | Enable |
 |---------|:---:|---------|
-| NLM denoising | ❌ | `--denoise-nlm` |
-| Bilateral denoising | ❌ | `--denoise-bilateral` |
-| MMT denoising | ❌ | `--denoise-mmt` |
-| ACDNR denoising | ❌ | `--denoise-acdnr` |
-| Richardson-Lucy deconvolution | ❌ | `--deconvolve` (GPU with `--use-gpu`) |
-| Coarse chroma-NR (colour blotches) | auto | `--chroma-nr-large-sigma 50` |
+| Alternative primary denoiser | ❌ | `--denoiser {mmt,bm3d,acdnr,nlm,bilateral,aniso}` |
+| Deconvolution | ❌ | `--deconvolve {rl,tv}` (RL on GPU with `--use-gpu`) |
+| Coarse chroma-NR (colour blotches) | auto | config key `chroma_nr_large_sigma` |
 | Preview black point (sky-σ) | auto | `--preview-black-sigma 3` |
 | Drizzle super-resolution | ❌ | `--drizzle-scale 2.0` |
 | Plate solving | ❌ | `--plate-solve` |
@@ -178,13 +179,13 @@ Run with `-v`. Each rejected frame will show `[REJECTED]` with the reason.
 Yes. Use `--keep-checkpoint` on the first run, then on subsequent runs the raw stack is loaded from the checkpoint automatically.
 
 **Q: My shifts are all > 10 px — is that a problem?**  
-Not necessarily. Registration will correct them. Large shifts only matter if they exceed the image border (> ~50 px for typical setups), which would cause the valid crop to cut off too much. Use `--debug-registration` to inspect.
+Not necessarily. Registration will correct them. Large shifts only matter if they exceed the image border (> ~50 px for typical setups), which would cause the valid crop to cut off too much. Use `--debug registration` to inspect.
 
 **Q: Why does the preview JPEG look different from the FITS?**  
 The FITS is stored as linear float32 data. The JPEG has a stretch applied (GHS by default). Load the FITS in PixInsight, Siril, or AstroImageJ and apply your own stretch.
 
 **Q: Frames look OK but post-processing is too aggressive?**  
-Try `--no-star-reduce --no-local-contrast` first to isolate which step is causing issues. Then use `--diagnostic` to get a FITS snapshot before each step.
+Try `--no-star-reduce --no-local-contrast` first to isolate which step is causing issues. Then use `--debug diagnostic` to get a FITS snapshot before each step.
 
 ---
 

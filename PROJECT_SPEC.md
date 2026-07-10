@@ -20,7 +20,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/debayer.py` | ~305 | Debayering, hot pixels, white balance, CA correction |
 | `src/quality.py` | ~375 | `compute_quality_metrics`, star detection, FWHM |
 | `src/psf_deconvolution.py` | ~215 | PSF estimation (Moffat/Gaussian), Richardson-Lucy |
-| `src/background.py` | ~1000 | DBE (RBF thin-plate spline), mesh-based sky extraction, floor normalisation |
+| `src/background.py` | ~1100 | DBE (robust local regression, Rust-accelerated), mesh-based sky extraction, floor normalisation |
 | `src/denoising.py` | ~895 | Wavelet (BayesShrink), bilateral, NLM, MMT, ACDNR, GHS/arcsinh stretch |
 | `src/registration.py` | ~685 | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase` |
 | `src/stacking.py` | ~770 | Sigma-clip, percentile, ESD, drizzle, Lanczos, `run_stacking_phase` |
@@ -36,12 +36,13 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/photometric_calibration.py` | ~300 | Gray-locus photometric colour calibration (`--photometric-calibration`) |
 | `src/mosaic.py` | ~315 | WCS-based mosaic stitching (`--mosaic`) |
 | `src/checkpoint.py` | ~225 | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
-| `src/xisf_writer.py` | ~105 | XISF 1.0 format writer (`--output-xisf`) |
+| `src/merge.py` | ~230 | Incremental stacking — register + weighted-merge previous linear stacks (`--merge`) |
+| `src/xisf_writer.py` | ~105 | XISF 1.0 format writer (`--export xisf`) |
 | `src/channel_combine.py` | ~310 | Multi-channel combination (L-RGB, OSC + narrowband workflows) |
 | `src/features.py` | ~90 | Low-level feature extraction helpers |
 | `src/cli.py` | ~685 | `process_directory`, `parse_args`, `main` |
 | `astro_stack.py` | ~170 | Backward-compatibility re-export shim |
-| `ext/astro_native/` (Rust) | — | Optional PyO3/maturin crate: native stacking combines, fused patch-weighted combine, Lanczos-3 warp, anisotropic diffusion (numpy fallback when absent) |
+| `ext/astro_native/` (Rust) | — | Optional PyO3/maturin crate (13 kernels): stacking combines, fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle), anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler (numpy fallback when absent) |
 
 **Total: ~10,800 lines** (Python). Tests in `tests/test_core.py` import symbols directly from `astro_stack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
@@ -72,8 +73,10 @@ Phase 1  ──  Frame Processing & Quality Analysis
              Parallelised via ProcessPoolExecutor / ThreadPoolExecutor
 
 Phase 2  ──  Registration
-             Calculate per-frame shifts (phase correlation + affine/RANSAC)
-             Select reference frame (highest quality score)
+             Coarse-to-fine pyramid seed (half-res) + downsampled FFT residual
+             correlation with parabolic sub-pixel refinement; optional
+             star-match affine/RANSAC for field rotation
+             Reference frame selected by quality + pyramid consensus
 
 Phase 3  ──  Stacking
              Align frames → crop to valid overlap region → accumulate → combine
@@ -129,16 +132,15 @@ Phase 4  ──  Post-Processing
 
 ### 6. Chromatic Aberration Correction
 
-- Realigns red and blue channels to the green channel
-- Uses phase cross-correlation for sub-pixel channel shift estimation
+- Realigns red and blue channels to the green channel (sub-pixel phase correlation on a 2x-downsampled estimate)
+- **Session-constant**: CA is a property of the optics, so it is measured once on three sample frames and the median shifts applied to every frame; shifts below 0.25 px skip the warp entirely
 - Enabled by default; disable with `--no-ca-correction`
 
 ### 7. Cosmic Ray Rejection (L.A.Cosmic)
 
-- Per-frame rejection using a Laplacian edge-detection noise model
+- Per-frame rejection using a Laplacian edge-detection noise model (Rust-accelerated)
 - Applied in Phase 1 before stacking accumulation
-- Tunable via `--cr-sigclip` (detection sigma) and `--cr-objlim` (object rejection ratio)
-- Enabled by default; disable with `--no-cosmic-ray-rejection`
+- **Automatic gating**: skipped when >=20 frames are stacked with a rejection method — per-pixel stack rejection removes cosmic rays statistically better than per-frame detection. Force with `--cosmic-ray-rejection`, disable with `--no-cosmic-ray-rejection`; drizzle (no per-pixel rejection) keeps it on
 
 ### 8. Quality Analysis & Frame Rejection
 
@@ -158,15 +160,17 @@ Per-frame metrics computed in Phase 1:
 - Hard rejection: brightness < 10 (blank/corrupt), contrast < 1 (flat/underexposed)
 - Rejection reason logged per frame when using `-v`
 
-**Quality-weighted stacking** (`--weight-snr`, `--weight-fwhm`, `--weight-stars`):  
+**Quality-weighted stacking** (config keys `weight_snr`, `weight_fwhm`, `weight_stars`):  
 Frames with better quality contribute more to the final stack.
 
 ### 9. Image Registration
 
 **Translation (default):**
-1. Phase cross-correlation (scikit-image) — sub-pixel accurate
-2. FFT cross-correlation on downscaled image (fallback)
-3. Centroid of thresholded bright regions (second fallback)
+1. Coarse-to-fine pyramid seed — integer-precision, computed at half resolution (the full-res level is redundant with step 2) and shared with reference selection
+2. FFT residual cross-correlation on a 2x-downsampled grid (scipy pocketfft, next-fast-length padding) with parabolic sub-pixel refinement — ~0.05 px final accuracy
+3. Centroid of thresholded bright regions (fallback)
+
+The post-registration residual check verifies alignment on the riskiest ~20% of frames (largest shifts + a deterministic sample) and escalates to all frames only if any sampled frame fails.
 
 **Affine correction (default on, `--no-affine` to disable):**
 - Star catalogue extraction with DAOStarFinder
@@ -198,15 +202,15 @@ Frames with better quality contribute more to the final stack.
 | `mean` | No rejection, fastest | Pre-calibrated data |
 
 **Drizzle super-resolution** (`--drizzle-scale 2.0`):
-- Lanczos-interpolated sub-pixel accumulation onto upsampled grid
+- Lanczos-3 sub-pixel accumulation onto the upsampled grid (native Rust warp, ~26x vs the scipy path; all channels in one pass)
 - Requires dithered frames to produce true resolution gain
-- Drop size controls the `pixfrac` parameter (`--drizzle-drop-size`)
+- `--drizzle-pixfrac` controls the tent-kernel pixel fraction (< 1.0 = sharper, noisier)
 
 ### 12. Background Extraction
 
 | Method | Description |
 |--------|-------------|
-| `dbe` (default) | Dynamic Background Extraction — RBF thin-plate spline fit to sampled patches |
+| `dbe` (default) | Dynamic Background Extraction — Gaussian-weighted robust local regression (Tukey IRLS) over sampled patches; bounded by construction (no runaway extrapolation near bright stars). Patch sampling and surface fit are Rust-accelerated |
 | `mesh` | Legacy polynomial grid (faster, less accurate) |
 | `graxpert` | AI-powered gradient removal via GraXpert subprocess |
 
@@ -217,47 +221,36 @@ Frames with better quality contribute more to the final stack.
 
 ### 13. Denoising
 
-#### Wavelet (default on)
-- Separates image into luma and chroma components
-- BayesShrink adaptive thresholding per subband (or fixed threshold)
-- Auto-tunes strength from per-frame SNR estimate
-- Star mask applied to protect stellar morphology
-- `--denoise-strength`, `--denoise-adaptive`, `--auto-denoise-strength`
+The primary luma denoiser is selected with a single flag —
+`--denoiser {auto,wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,none}` — and the
+auto-advisor enforces **one primary** (precedence BM3D > MMT > wavelet > ACDNR):
+layering several full-frame smoothers compounds smoothing without adding
+selectivity. Chroma noise reduction is separate and always available.
+Per-denoiser tuning lives in the config-file tier (see `--config`).
 
-#### Chroma Noise Reduction (default on)
-- Gaussian blur applied to chroma channels (separate from wavelet)
-- `--chroma-nr-sigma` controls blur radius
+| Denoiser | Notes | Config keys |
+|----------|-------|-------------|
+| `wavelet` (default) | BayesShrink adaptive per subband, luma/chroma split, star-protected, strength auto-tuned from SNR | `denoise_strength`, `denoise_adaptive`, `auto_denoise_strength`, `denoise_chroma_boost` |
+| `mmt` | Multiscale Median Transform — robust to Poisson+read noise, best edge preservation (Rust-accelerated median cascade, ~10x) | `denoise_mmt_levels`, `denoise_mmt_strength` |
+| `bm3d` | Collaborative filtering, near-optimal, slower (auto-enabled by the advisor when SNR/frame count justify it) | `bm3d_sigma`, `bm3d_stride`, `bm3d_search_window`, `bm3d_group_size` |
+| `acdnr` | Contrast-gated sky smoothing — flat sky smoothed, structure preserved | `denoise_acdnr_sigma`, `denoise_acdnr_k` |
+| `nlm` | Non-local means (skimage/cv2) | `denoise_nlm_strength`, `denoise_nlm_blend` |
+| `bilateral` | Edge-preserving bilateral filter (cv2) | `denoise_bilateral_sigma_color`, `denoise_bilateral_sigma_space` |
+| `aniso` | Perona-Malik anisotropic diffusion (Rust-accelerated, ~37x) | `aniso_iterations`, `aniso_kappa`, `aniso_gamma`, `aniso_option` |
+| `none` | Disable luma denoising | — |
 
-#### Non-Local Means (`--denoise-nlm`)
-- Patch-based denoising using skimage or OpenCV backend
-- `--denoise-nlm-strength`, `--denoise-nlm-blend`
+**Chroma noise reduction** (default on, `--no-chroma-nr`): Gaussian smoothing of
+the chroma channels; fine pass (`chroma_nr_sigma`) plus an optional object-masked
+coarse pass for medium-scale colour blotches (`chroma_nr_large_sigma`, auto-set
+for galaxy targets).
 
-#### Bilateral Filter (`--denoise-bilateral`, requires OpenCV)
-- Edge-preserving smoothing
-- `--denoise-bilateral-sigma-color`, `--denoise-bilateral-sigma-space`
+### 14. PSF Deconvolution (`--deconvolve {off,rl,tv}`)
 
-#### Multiscale Median Transform (`--denoise-mmt`)
-- Decomposes image into median-residual layers, thresholds each
-- `--denoise-mmt-levels`, `--denoise-mmt-strength`
-
-#### ACDNR (`--denoise-acdnr`)
-- Adaptive contrast-based denoising using local contrast maps
-- `--denoise-acdnr-sigma`, `--denoise-acdnr-k`
-
-#### BM3D (`--denoise-bm3d`)
-- Block-matching and 3D collaborative filtering (luminance only)
-
-#### Anisotropic Diffusion (`--denoise-aniso`)
-- Perona-Malik diffusion (edge-preserving smoothing)
-
-### 14. PSF Deconvolution (`--deconvolve`)
-
-- Richardson-Lucy iterative deconvolution
-- PSF model: Moffat (default) or Gaussian
-- PSF FWHM estimated automatically from detected stars or specified manually
-- TV-regularised variant (`--deconvolve-tv`) for sharper edges at the cost of speed
-- Blind PSF estimation from star median stack (`--deconvolve-blind-psf`)
-- `--deconvolve-iterations`, `--deconvolve-fwhm`, `--deconvolve-psf-model`
+- `rl` — Richardson-Lucy iterative deconvolution (GPU-accelerated via cupy FFT under `--use-gpu`)
+- `tv` — Total-Variation regularised variant, sharper edges at the cost of speed
+- PSF model: Moffat (default) or Gaussian; FWHM estimated from detected stars
+- Config keys: `deconvolve_iterations`, `deconvolve_fwhm`, `deconvolve_psf_model`, `deconvolve_blind_psf` (empirical PSF from a star median stack), `tv_lambda`, `tv_iterations`
+- Off by default; the advisor gates it on Strehl/dispersion measurements and disables it where RL ringing would hurt (undersampled wide-field stars)
 
 ### 15. Star Reduction (default on)
 
@@ -316,24 +309,33 @@ Frames with better quality contribute more to the final stack.
 - WCS-based reprojection via the `reproject` package
 - Requires plate solving to succeed for each panel
 
-### 24. Hierarchical Processing
+### 24. Incremental Stacking (`--merge`)
+
+- The main output FITS is the **linear pre-post-processing stack** (`RAWSTACK=True`) carrying `NFRAMES`/`INTGTIME`/`TOTEXP` headers
+- `--merge PREV.fits [...]` processes only the new session through Phases 1-3, registers each previous stack onto the new grid (astroalign triangle matching first — nights differ by arbitrary field rotation on alt-az mounts — star-catalog RANSAC and translation fallbacks), and combines as a per-pixel `NFRAMES`-weighted mean inside each warped footprint
+- Phase 4 runs once on the merged result; header aggregates are summed, so the output chains into future merges
+- Guards: hard error on registration failure, <25% footprint overlap, or <0.15 aligned-luminance correlation (wrong-target protection); refuses non-linear inputs and `--drizzle-scale > 1`
+- No cross-session outlier rejection (each session already rejected internally)
+- Coalesces with `--keep-checkpoint`: the checkpoint stores the session-only stack, so a resumed run re-applies the merge idempotently (~45 s post-processing iteration on a merged stack)
+
+### 25. Hierarchical Processing
 
 - **Auto-detected**: FITS in the root directory → single-folder mode; subdirectories with FITS → hierarchical mode
 - Each subfolder processed independently with its own calibration frames
 - Final combination: registered and mean-combined with crop to common valid dimensions
-- `--keep-intermediates`: saves per-subfolder stacks
+- `--debug intermediates`: saves per-subfolder stacks
 - `--combine-sessions`: pools all lights from all subfolders into one unified stack
 
-### 25. Preview & Output Formats
+### 26. Preview & Output Formats
 
 | Format | Flag | Description |
 |--------|------|-------------|
 | FITS float32 | (always) | Primary output; (3, H, W) layout for maximum compatibility |
 | Preview JPEG | (always) | GHS, arcsinh, or linear stretch; 95% quality |
-| TIFF 32-bit | `--output-tiff` | 32-bit float RGB for external tools |
-| XISF 1.0 | `--output-xisf` | PixInsight native format |
+| TIFF 32-bit | `--export tiff` | 32-bit float RGB for external tools |
+| XISF 1.0 | `--export xisf` | PixInsight native format |
 | Per-frame JPEGs | `--export-frames-dir` | Stretched preview for every accepted frame |
-| Star mask FITS | `--export-masks` | Star detection mask as `<output>_star_mask.fits` |
+| Star mask FITS | `--debug masks` | Star detection mask as `<output>_star_mask.fits` |
 
 **FITS Header metadata populated:**
 - Stacking: frame count, rejection count, method, reference frame
@@ -343,22 +345,22 @@ Frames with better quality contribute more to the final stack.
 - Timing: Phase 1/2/3 durations
 - Source metadata: telescope, instrument, observer, exposure time (from input headers)
 
-### 26. Stretch Methods (Preview JPEG)
+### 27. Stretch Methods (Preview JPEG)
 
 | Method | Flag | Description |
 |--------|------|-------------|
-| GHS *(default)* | `--stretch ghs` | Generalised Hyperbolic Stretch; tunable via `--ghs-b`, `--ghs-sp`, `--ghs-hp` |
+| GHS *(default)* | `--stretch ghs` | Generalised Hyperbolic Stretch; tunable via config keys `ghs_b`, `ghs_sp`, `ghs_hp` (auto-set per target) |
 | Arcsinh | `--stretch arcsinh` | Arcsinh stretch; good for galaxies |
 | Linear | `--stretch linear` | No stretch; useful for already-processed data |
 
-### 27. GPU Acceleration
+### 28. GPU Acceleration
 
 - CuPy backend replaces NumPy/SciPy throughout the pipeline
 - `GpuContext` provides a uniform interface: `xp` (array ops), `xndimage`, `xsignal`
 - Auto-limits parallel workers based on available VRAM
 - Enable with `--use-gpu`; requires `cupy-cuda*` installed (see `requirements-gpu.txt`)
 
-### 28. Auto Target Detection (`--auto`)
+### 29. Auto Target Detection (`--auto`)
 
 Heuristic target classifier — analyses frame metrics (star count, brightness distribution, contrast) and automatically applies optimised parameter sets for the detected target type. No external dependencies or API keys required.
 
@@ -366,195 +368,107 @@ Heuristic target classifier — analyses frame metrics (star count, brightness d
 
 ## Complete CLI Reference
 
-### Required Arguments
+The CLI exposes the decisions a user actually makes; fine-grained tuning
+parameters live in the **config-file tier** — set them in a TOML file loaded
+with `--config` (keys listed per feature above and in `parse_args`
+`set_defaults`). `--help` renders these groups with full descriptions.
+
+### Core
 
 | Flag | Description |
 |------|-------------|
-| `-d, --directory PATH` | Input directory |
-| `-o, --output PATH` | Output FITS path (not required with `--health-check` or `--dry-run`) |
-
-### Configuration & Presets
-
-| Flag | Description |
-|------|-------------|
+| `-d, --directory PATH` | Input directory (required) |
+| `-o, --output PATH` | Output FITS path (not required with `--health-check` / `--dry-run`) |
+| `--cal-dir PATH` | External calibration library; best-matching frames auto-selected |
 | `--config PATH` | Load parameters from TOML file; CLI args override |
-| `--preset NAME` | Apply named preset (quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar) |
-| `--dry-run` | Discover frames, show resolved parameters, estimate resources — no processing |
-| `--auto` | Heuristic target classifier |
+| `--preset NAME` | quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar |
+| `--auto` | Heuristic target classifier + parameter advisor |
+| `--dry-run` | Show resolved parameters and resource estimates, no processing |
+| `--health-check` | Analyse frames + calibration without stacking |
+| `-v, --verbose` | Per-frame output |
+| `-j, --parallel N` | Worker count (0 = auto, 1 = sequential) |
+| `--use-gpu` | CuPy GPU acceleration (experimental) |
 
-### Registration
-
-| Flag | Description |
-|------|-------------|
-| `--no-registration` | Disable all alignment |
-| `--no-affine` | Translation-only (disable rotation+scale) |
-| `--skip-phase-correlation` | Use fallback methods only |
-| `--debug-registration` | Write diagnostics to `_registration_debug/` |
-
-### Quality Filtering
+### Frames & calibration (Phase 1)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--quality-filter / --no-quality-filter` | on | Enable/disable frame rejection |
-| `--quality-threshold N` | 50 | Reject frames below Nth percentile |
+| `--debayer-method` | bilinear | bilinear, malvar (cv2), vng (cv2) |
+| `--white-balance` | grayworld | none, grayworld, whitepatch |
+| `--quality-threshold N` | 50 | Reject frames scoring below N% of the session reference |
+| `--no-quality-filter` | — | Keep every frame |
+| `--no-ca-correction` | — | Disable chromatic aberration correction |
+| `--cosmic-ray-rejection` / `--no-cosmic-ray-rejection` | auto | Force / disable L.A.Cosmic (auto: skipped on >=20-frame rejection stacks) |
 
-### Stacking
+### Registration & stacking (Phases 2-3)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--stack-method METHOD` | auto | mean, median, sigma_clip, winsorized, percentile, esd, auto |
+| `--stack-method` | auto | mean, median, sigma_clip, winsorized, percentile, esd, trimmed_mean, auto |
 | `--rejection-sigma N` | 3.0 | Sigma threshold for sigma_clip/winsorized |
 | `--rejection-iters N` | 3 | Clipping iterations |
-| `--rejection-estimator {mad,std}` | mad | Spread estimator |
-| `--percentile-low N` | 20 | Lower rejection percentile |
-| `--percentile-high N` | 80 | Upper rejection percentile |
-| `--esd-max-outliers N` | 0 (= N//4) | Max outliers per pixel |
-| `--esd-significance N` | 0.05 | ESD significance level |
-| `--weight-snr N` | 1.0 | SNR weight exponent (0 = disable) |
-| `--weight-fwhm N` | 1.0 | FWHM weight exponent (0 = disable) |
-| `--weight-stars N` | 1.0 | Star-count weight exponent (0 = disable) |
-| `--weight-noise` | off | Add 1/noise² weighting |
+| `--drizzle-scale N` | 1.0 | Super-resolution scale (2.0 = 2x; needs dithered frames) |
+| `--drizzle-pixfrac N` | 1.0 | Drizzle tent-kernel pixel fraction |
+| `--no-registration` | — | Disable alignment (pre-aligned frames) |
+| `--no-affine` | — | Translation-only registration |
 
-### Debayering & Colour
+### Post-processing (Phase 4)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--debayer-method METHOD` | bilinear | bilinear, malvar (requires cv2), vng (requires cv2) |
-| `--white-balance METHOD` | grayworld | none, grayworld, whitepatch |
+| `--denoiser NAME` | auto | Primary luma denoiser: wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, none |
+| `--denoise-strength N` | 3.0 | Luma denoise threshold factor |
+| `--deconvolve {off,rl,tv}` | off | Richardson-Lucy or TV-regularised deconvolution |
+| `--bg-method` | dbe | dbe, mesh, graxpert (`--graxpert-path`) |
+| `--no-background-extraction` | — | Disable background extraction |
+| `--no-chroma-nr` | — | Disable chroma noise reduction |
+| `--no-star-reduce` | — | Disable star halo softening |
+| `--no-local-contrast` | — | Disable multiscale local contrast |
+| `--scnr` | off | Subtractive green-cast removal |
+| `--photometric-calibration` | off | Gray-locus colour calibration |
+| `--gaia-calibration` | off | Gaia DR3 extension (needs `--plate-solve`) |
+| `--halo-removal` | off | Fit + subtract bright-star halos |
+| `--hdr-combine PATH` | — | Blend a short-exposure stack into saturated regions |
+| `--skip-step STEP` | — | Skip a named post-processing step (repeatable) |
 
-### Background Extraction
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--background-extraction / --no-background-extraction` | on | Enable/disable |
-| `--bg-method {mesh,dbe,graxpert}` | dbe | Extraction method |
-| `--dbe-patch-size N` | 64 | DBE sampling patch size (px) |
-| `--bg-mesh-size N` | 64 | Legacy mesh cell size (px) |
-| `--bg-filter-size N` | 3 | Mesh smoothing filter size (must be odd) |
-| `--bg-clip-sigma N` | 3.0 | Star rejection sigma |
-| `--graxpert-path PATH` | (auto) | Explicit path to GraXpert binary |
-
-### Denoising
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--denoise / --no-denoise` | on | Wavelet denoising (requires pywt) |
-| `--denoise-strength N` | 3.0 | Luma threshold factor |
-| `--denoise-adaptive / --no-denoise-adaptive` | on | BayesShrink per-subband |
-| `--auto-denoise-strength / --no-auto-denoise-strength` | on | Auto-tune from SNR |
-| `--denoise-chroma-boost N` | 2.0 | Chroma threshold multiplier |
-| `--chroma-nr / --no-chroma-nr` | on | Chroma Gaussian smoothing |
-| `--chroma-nr-sigma N` | 2.0 | Chroma blur radius (px) |
-| `--denoise-nlm` | off | Non-local means |
-| `--denoise-nlm-strength N` | 1.0 | NLM strength multiplier |
-| `--denoise-nlm-blend N` | 0.5 | NLM blend fraction 0–1 |
-| `--denoise-bilateral` | off | Bilateral filter (requires cv2) |
-| `--denoise-bilateral-sigma-color N` | (auto) | Value-similarity scale in ADU |
-| `--denoise-bilateral-sigma-space N` | 3.0 | Spatial smoothing radius (px) |
-| `--denoise-mmt` | off | Multiscale Median Transform |
-| `--denoise-mmt-levels N` | 4 | MMT decomposition depth |
-| `--denoise-mmt-strength N` | 3.0 | MMT soft-threshold multiplier |
-| `--denoise-acdnr` | off | ACDNR adaptive contrast denoising |
-| `--denoise-acdnr-sigma N` | 1.5 | ACDNR Gaussian radius (px) |
-| `--denoise-acdnr-k N` | 3.0 | ACDNR contrast threshold multiplier |
-| `--denoise-bm3d` | off | BM3D collaborative filter (luma only) |
-| `--denoise-aniso` | off | Perona-Malik anisotropic diffusion |
-
-### Deconvolution
+### Output, preview & plate solving
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--deconvolve / --no-deconvolve` | off | Richardson-Lucy deconvolution |
-| `--deconvolve-iterations N` | 15 | RL iteration count |
-| `--deconvolve-fwhm N` | (auto) | Override PSF FWHM (px) |
-| `--deconvolve-psf-model {moffat,gaussian}` | moffat | PSF model |
-| `--deconvolve-tv` | off | Total Variation regularisation |
-| `--deconvolve-blind-psf` | off | Empirical PSF from star median |
+| `--stretch` | ghs | Preview stretch: linear, arcsinh, ghs |
+| `--preview-black-sigma N` | auto | Preview black point in sky-sigma (auto-set per target and stack depth) |
+| `--export FMT[,FMT]` | — | Extra formats: tiff, xisf |
+| `--plate-solve` | off | Solve WCS (`--plate-solver astap|astrometry`, `--astap-path`) |
+| `--color-calibrate` | off | Photometric calibration from plate-solved stars |
+| `--star-remove` | off | Starnet++ star removal (`--starnet-path`) |
 
-### Other Post-Processing
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--chroma-nr-large-sigma N` | 0 (off) | Coarse chroma-NR scale (px); smooths medium-scale colour blotches over masked sky. Auto sets ~50 for galaxy |
-| `--chroma-nr-large-strength N` | 0.7 | Blend strength [0–1] of the coarse chroma-NR pass |
-| `--preview-black-sigma N` | 0.0 | Preview black point, in sky-σ above the sky median. Higher (2–3) clips background noise to black for a small target on empty sky; negative keeps faint frame-filling nebulosity. Auto sets it per target |
-| `--star-reduce / --no-star-reduce` | on | Soften star halos |
-| `--star-reduce-factor N` | 0.4 | Blend fraction 0–1 |
-| `--star-reduce-sigma N` | 1.5 | Gaussian blur radius (px) |
-| `--local-contrast / --no-local-contrast` | on | Multiscale local contrast |
-| `--local-contrast-strength N` | 0.7 | Strength 0–1 |
-| `--ca-correction / --no-ca-correction` | on | Chromatic aberration correction |
-| `--cosmic-ray-rejection / --no-cosmic-ray-rejection` | on | L.A.Cosmic per-frame |
-| `--cr-sigclip N` | 4.5 | L.A.Cosmic detection sigma |
-| `--cr-objlim N` | 5.0 | L.A.Cosmic object rejection ratio |
-| `--scnr` | off | Subtractive Chromatic Noise Reduction |
-| `--scnr-amount N` | 1.0 | SCNR amount |
-| `--scnr-target {green,cyan}` | green | SCNR target colour |
-
-### Stretch & Output
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--stretch {linear,arcsinh,ghs}` | ghs | Preview JPEG stretch |
-| `--ghs-b N` | 8.0 | GHS stretch factor |
-| `--ghs-sp N` | 0.15 | GHS symmetry point 0–1 |
-| `--ghs-hp N` | 0.95 | GHS highlights protection 0–1 |
-| `--output-tiff` | off | Write 32-bit TIFF alongside FITS |
-| `--output-xisf` | off | Write XISF 1.0 format |
-| `--export-frames-dir PATH` | off | Write per-frame JPEG previews |
-| `--export-masks` | off | Save star mask as `_star_mask.fits` |
-
-### Super-Resolution
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--drizzle-scale N` | 1.0 | Output scale (1.0 = off, 2.0 = 2×) |
-| `--drizzle-drop-size N` | 0.7 | Pixfrac 0.5–1.0 |
-
-### Advanced & External Tools
+### Multi-session, merge & checkpoint
 
 | Flag | Description |
 |------|-------------|
-| `--plate-solve` | Plate solve via astrometry.net/ASTAP |
-| `--plate-solver {astap,astrometry}` | Solver backend (default: astrometry) |
-| `--astap-path PATH` | Explicit ASTAP binary path |
-| `--color-calibrate` | Photometric colour calibration (requires `--plate-solve`) |
-| `--photometric-calibration` | Gray-locus colour calibration (no plate-solve dependency) |
-| `--gaia-calibration` | Gaia DR3 colour calibration (requires `--plate-solve`) |
-| `--star-remove` | Remove stars via Starnet++ |
-| `--starnet-path PATH` | Explicit Starnet++ binary path |
-| `--comet-mode` | Dual-register for comet tracking |
-| `--comet-blend-sigma N` | Blend transition sigma (px) |
-| `--hdr-combine PATH` | Blend short-exposure stack for HDR |
-| `--hdr-short-exptime N` | Short exposure time (s) |
-| `--hdr-long-exptime N` | Long exposure time (s) |
-| `--mosaic` | Stitch per-subfolder stacks into mosaic |
+| `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
+| `--combine-sessions` | Pool all subfolder lights into one unified stack |
+| `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
+| `--keep-checkpoint` | Persist the raw stack; re-runs skip Phases 1-3 |
+| `--no-resume` | Ignore an existing checkpoint |
 
-### Checkpointing & Diagnostics
+### Comet mode
+
+`--comet-mode` plus: `--comet-xy`, `--comet-search-radius`, `--comet-affine`,
+`--comet-blend-sigma`, `--coma-mask-radius`, `--comet-radial-renorm`,
+`--comet-larson-sekanina`, `--comet-ls-rotation`, `--comet-designation`,
+`--observer-site`, `--comet-detrail`. See `--help` for details.
+
+### Diagnostics & debugging
 
 | Flag | Description |
 |------|-------------|
-| `--keep-checkpoint` | Save raw pre-post-processing stack |
-| `--no-resume` | Ignore existing checkpoint |
-| `--skip-step STEP` | Skip a named post-processing step (repeatable) |
-| `--diagnostic` | Save FITS snapshot before each post-processing step |
-| `--diagnostic-dir PATH` | Directory for diagnostic snapshots |
-| `--quality-report PATH` | Write per-frame metrics to CSV |
+| `--debug KIND[,KIND]` | registration, diagnostic (pre-step FITS snapshots), intermediates, masks |
+| `--quality-report PATH` | Per-frame quality metrics CSV |
+| `--export-frames-dir PATH` | Stretched JPEG per accepted frame |
+| `--log-level` / `--log-file` | Logging control |
 
 Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky_floor`, `wavelet`, `sky_residual`, `sky_pedestal`, `nlm`, `bilateral`, `mmt`, `acdnr`, `bm3d`, `aniso`, `scnr`, `photo_cal`, `deconvolve`, `star_reduce`, `local_contrast`, `sky_neutralize`, `star_remove`
-
-### Infrastructure
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-j, --parallel N` | 0 (auto) | Worker count (1 = sequential) |
-| `--use-gpu` | off | CuPy GPU acceleration |
-| `-v, --verbose` | off | Detailed per-frame output |
-| `--log-level LEVEL` | WARNING | Stderr log level (DEBUG, INFO, WARNING, ERROR) |
-| `--log-file PATH` | off | Write full DEBUG log to file |
-| `--health-check` | — | Analyse frames + calibration without stacking |
-| `--keep-intermediates` | off | Save per-subfolder stacks (hierarchical mode) |
-| `--combine-sessions` | off | Pool all lights from subfolders into one stack |
 
 ---
 
@@ -564,19 +478,20 @@ Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky
 # Single folder, all defaults
 python astro_stack.py -d lights/ -o stacked.fits
 
-# Verbose with auto target detection
+# Verbose with auto target detection (recommended)
 python astro_stack.py -d lights/ -o stacked.fits -v --auto
 
-# Hierarchical session with intermediates
-python astro_stack.py -d session/ -o combined.fits --keep-intermediates -v
+# External calibration library
+python astro_stack.py --cal-dir calibration/ -d lights/ -o stacked.fits --auto -v
 
-# Galaxy preset with deconvolution
-python astro_stack.py -d lights/ -o galaxy.fits --preset galaxy --deconvolve -v
+# Incremental stacking: fold last week's stack into tonight's run
+python astro_stack.py -d tonight/ -o m51_v2.fits --auto --merge m51_v1.fits
 
-# Maximum quality
-python astro_stack.py -d lights/ -o best.fits --preset quality \
-  --denoise-nlm --denoise-bilateral --denoise-mmt --denoise-acdnr \
-  --deconvolve -v
+# Galaxy preset with RL deconvolution
+python astro_stack.py -d lights/ -o galaxy.fits --preset galaxy --deconvolve rl -v
+
+# Explicit denoiser choice
+python astro_stack.py -d lights/ -o out.fits --auto --denoiser mmt -v
 
 # Super-resolution drizzle
 python astro_stack.py -d lights/ -o drizzled.fits --drizzle-scale 2.0 -v
@@ -585,15 +500,13 @@ python astro_stack.py -d lights/ -o drizzled.fits --drizzle-scale 2.0 -v
 python astro_stack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate -v
 
 # Debug registration problems
-python astro_stack.py -d lights/ -o stacked.fits --debug-registration
+python astro_stack.py -d lights/ -o stacked.fits --debug registration
 
-# Health check only
-python astro_stack.py -d lights/ --health-check
+# Iterate on post-processing settings (re-runs skip Phases 1-3)
+python astro_stack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
 
-
-# Minimal run (turn off new-default post-processing)
-python astro_stack.py -d lights/ -o stacked.fits \
-  --no-star-reduce --no-local-contrast --no-background-extraction
+# Minimal run (turn off default post-processing)
+python astro_stack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-contrast --no-background-extraction --denoiser none
 ```
 
 ---
@@ -623,6 +536,7 @@ python astro_stack.py -d lights/ -o stacked.fits \
 | `astroquery >= 0.4.6` | Plate solving via nova.astrometry.net |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see `requirements-gpu.txt`) |
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
+| `astroalign` | Triangle-pattern registration for `--merge` (cross-night field rotation) |
 | `tifffile` | 16-bit TIFF output |
 
 ---
