@@ -407,6 +407,25 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         cached_lums: list = [None] * n
 
         try:
+            # Resolve the cosmic-ray-rejection tri-state (None = auto).
+            # Per-frame L.A.Cosmic earns its cost only when the stack cannot
+            # reject outliers itself: with >=20 frames and any rejection-based
+            # combine, per-pixel stack rejection removes cosmic rays
+            # statistically better than per-frame detection, and lacosmic is
+            # the single most expensive Phase-1 step. Drizzle has no per-pixel
+            # rejection, so it keeps lacosmic. Resolved before the resume
+            # branch so checkpoint reloads see the same setting.
+            if getattr(args, 'cosmic_ray_rejection', None) is None:
+                _method = getattr(args, 'stack_method', 'auto')
+                _drizzling = float(getattr(args, 'drizzle_scale', 1.0) or 1.0) > 1.0
+                if n >= 20 and _method != 'mean' and not _drizzling:
+                    args.cosmic_ray_rejection = False
+                    safe_print(f"  NOTE: cosmic-ray rejection skipped: {n} frames with "
+                               f"rejection stacking removes cosmic rays per-pixel "
+                               f"(force with --cosmic-ray-rejection)")
+                else:
+                    args.cosmic_ray_rejection = True
+
             # ======================================================================
             # PHASE 1: Process & Analyse
             # ======================================================================

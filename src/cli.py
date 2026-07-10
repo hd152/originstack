@@ -986,7 +986,12 @@ def parse_args():
                    help='Disable chromatic aberration correction')
     p.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
-                   help='Disable cosmic ray rejection')
+                   help='Disable per-frame cosmic ray rejection (L.A.Cosmic)')
+    p.add_argument('--cosmic-ray-rejection', dest='cosmic_ray_rejection',
+                   action='store_true',
+                   help='Force per-frame cosmic ray rejection even on deep stacks '
+                        '(default: automatic — skipped when >=20 frames are stacked '
+                        'with a rejection method, which removes cosmic rays per-pixel)')
     p.add_argument('--log-level',
                    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='WARNING',
                    help='Minimum log severity printed to stderr (default: WARNING). '
@@ -1128,7 +1133,7 @@ def parse_args():
         star_reduce=True,
         local_contrast=True,
         ca_correction=True,
-        cosmic_ray_rejection=True,
+        cosmic_ray_rejection=None,  # tri-state: None = auto (see pipeline.py)
         # Denoiser tuning
         denoise_chroma_boost=2.0,
         chroma_nr_sigma=2.0,
