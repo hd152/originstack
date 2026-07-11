@@ -38,6 +38,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/checkpoint.py` | ~225 | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
 | `src/merge.py` | ~230 | Incremental stacking — register + weighted-merge previous linear stacks (`--merge`) |
 | `src/quality_sweep.py` | ~220 | Collection quality sweep — recursive scoring + reversible flagging (`--quality-sweep`) |
+| `src/webview.py` | ~380 | Live stacking dashboard — stdlib HTTP + SSE (`--web-view`) |
 | `src/xisf_writer.py` | ~105 | XISF 1.0 format writer (`--export xisf`) |
 | `src/channel_combine.py` | ~310 | Multi-channel combination (L-RGB, OSC + narrowband workflows) |
 | `src/features.py` | ~90 | Low-level feature extraction helpers |
@@ -319,13 +320,20 @@ for galaxy targets).
 - No cross-session outlier rejection (each session already rejected internally)
 - Coalesces with `--keep-checkpoint`: the checkpoint stores the session-only stack, so a resumed run re-applies the merge idempotently (~45 s post-processing iteration on a merged stack)
 
-### 25. Collection Quality Sweep (`--quality-sweep`)
+### 25. Live Web View (`--web-view`)
+
+- Pure-stdlib local dashboard (`http.server` + Server-Sent Events, no dependencies, localhost only, default port 8765 via `--web-view-port`)
+- Live phase stepper with timings, active-loop progress bar, log stream, per-frame quality ticker, preview images at milestones (post-stack linear preview, each post-processing step, final), and a completion summary card
+- Zero overhead when the flag is absent: the singleton's publish methods are no-ops until started; preview JPEG encoding is throttled
+- Server keeps serving the final state after the run completes (Ctrl+C to exit)
+
+### 26. Collection Quality Sweep (`--quality-sweep`)
 
 - Recursively walks the tree under `-d`, scores every light frame (uncalibrated debayered luminance through `compute_quality_metrics`), and applies the pipeline's own `quality_gate` per folder — hard rejects, statistical outliers, and the folder-relative score threshold (`--quality-threshold`)
 - Dry-run report by default; `--apply` renames flagged files to `*.fits.rejected` (invisible to frame discovery, which matches only `.fit`/`.fits`); `--sweep-undo` restores them
 - `--quality-report PATH` writes the per-frame CSV; darks/flats/bias and pipeline outputs are excluded by the standard classifier
 
-### 26. Hierarchical Processing
+### 27. Hierarchical Processing
 
 - **Auto-detected**: FITS in the root directory → single-folder mode; subdirectories with FITS → hierarchical mode
 - Each subfolder processed independently with its own calibration frames
@@ -333,7 +341,7 @@ for galaxy targets).
 - `--debug intermediates`: saves per-subfolder stacks
 - `--combine-sessions`: pools all lights from all subfolders into one unified stack
 
-### 27. Preview & Output Formats
+### 28. Preview & Output Formats
 
 | Format | Flag | Description |
 |--------|------|-------------|
@@ -352,7 +360,7 @@ for galaxy targets).
 - Timing: Phase 1/2/3 durations
 - Source metadata: telescope, instrument, observer, exposure time (from input headers)
 
-### 28. Stretch Methods (Preview JPEG)
+### 29. Stretch Methods (Preview JPEG)
 
 | Method | Flag | Description |
 |--------|------|-------------|
@@ -360,14 +368,14 @@ for galaxy targets).
 | Arcsinh | `--stretch arcsinh` | Arcsinh stretch; good for galaxies |
 | Linear | `--stretch linear` | No stretch; useful for already-processed data |
 
-### 29. GPU Acceleration
+### 30. GPU Acceleration
 
 - CuPy backend replaces NumPy/SciPy throughout the pipeline
 - `GpuContext` provides a uniform interface: `xp` (array ops), `xndimage`, `xsignal`
 - Auto-limits parallel workers based on available VRAM
 - Enable with `--use-gpu`; requires `cupy-cuda*` installed (see `requirements-gpu.txt`)
 
-### 30. Auto Target Detection (`--auto`)
+### 31. Auto Target Detection (`--auto`)
 
 Heuristic target classifier — analyses frame metrics (star count, brightness distribution, contrast) and automatically applies optimised parameter sets for the detected target type. No external dependencies or API keys required.
 
@@ -394,6 +402,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--health-check` | Analyse frames + calibration without stacking |
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run default) |
 | `--sweep-undo` | Restore files flagged by a previous sweep |
+| `--web-view` | Live dashboard while stacking (`--web-view-port`, default 8765) |
 | `-v, --verbose` | Per-frame output |
 | `-j, --parallel N` | Worker count (0 = auto, 1 = sequential) |
 | `--use-gpu` | CuPy GPU acceleration (experimental) |

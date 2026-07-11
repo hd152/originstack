@@ -33,6 +33,9 @@ python astro_stack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
 # Incremental stacking — fold a previous night's saved stack into this run
 python astro_stack.py -d tonight/ -o m51_v2.fits --auto --merge m51.fits
 
+# Watch the run live in a browser (http://127.0.0.1:8765/)
+python astro_stack.py -d lights/ -o stacked.fits --auto --web-view
+
 # Clean up a collection: flag poor lights (dry run, then apply)
 python astro_stack.py --quality-sweep -d collection/
 python astro_stack.py --quality-sweep -d collection/ --apply     # renames to *.fits.rejected

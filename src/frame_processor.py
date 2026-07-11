@@ -32,6 +32,11 @@ except Exception:
         return iterable
 
 
+def _get_webview():
+    from src.webview import get_webview
+    return get_webview()
+
+
 def _get_frame_rotation(hdr: dict) -> Optional[float]:
     """Extract camera/rotator angle from FITS header. Returns degrees or None."""
     for key in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
@@ -765,6 +770,8 @@ def execute_frame_processing(
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs,)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
+                _wv = _get_webview()
+                _wv_done = 0
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Processing", unit="frame",
                                    disable=args.verbose):
@@ -772,6 +779,10 @@ def execute_frame_processing(
                     frame_idx, metrics, error, timings = future.result()
                     _accum(timings)
                     f = lights[frame_idx]
+                    _wv_done += 1
+                    _wv.progress('Processing frames', _wv_done, n)
+                    _wv.frame_metrics(os.path.basename(f.path), metrics,
+                                      accepted=error is None)
                     if error:
                         f.accepted = False
                         f.metrics = {'error': error}
@@ -916,6 +927,10 @@ def execute_frame_processing(
                                        f'contrast={m.get("contrast",0):.1f}  '
                                        f'dynamic_range={m.get("dynamic_range",0):.0f}')
                 _completed += 1
+                _wv = _get_webview()
+                _wv.progress('Processing frames', _completed, n)
+                if error is None and f.metrics:
+                    _wv.frame_metrics(os.path.basename(f.path), f.metrics)
                 # Periodically free CuPy's cached memory pool to prevent VRAM exhaustion
                 # from accumulating unused cached blocks across many completed frames.
                 if gpu.active and (_completed % _free_interval == 0):
@@ -966,6 +981,8 @@ def execute_frame_processing(
                 session_bayer=_sb,
                 pre_gradient_removal=_pgr,
                 ca_shifts=_ca_shifts)
+            _wv = _get_webview()
+            _wv.progress('Processing frames', i + 1, n)
             if result.get('error'):
                 f.accepted = False
                 f.metrics = {'error': result['error']}
@@ -978,6 +995,7 @@ def execute_frame_processing(
                 mem_lum[i] = result['lum']
                 cached_lums[i] = result['lum']
                 f.metrics = result['metrics']
+                _wv.frame_metrics(os.path.basename(f.path), f.metrics)
                 _accum(result.get('timings'))
                 if args.verbose:
                     m = f.metrics

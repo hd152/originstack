@@ -834,6 +834,15 @@ def parse_args():
     g_core.add_argument('--sweep-undo', action='store_true',
                    help='Recursively strip the .rejected suffix applied by '
                         '--quality-sweep --apply, restoring all flagged files')
+    g_core.add_argument('--web-view', action='store_true',
+                   help='Serve a live dashboard at http://127.0.0.1:<port>/ while '
+                        'stacking: phase progress, log stream, per-frame quality '
+                        'ticker, and preview images at processing milestones. '
+                        'Pure stdlib, localhost only. The server keeps running '
+                        'after completion so the final state stays viewable '
+                        '(Ctrl+C to exit).')
+    g_core.add_argument('--web-view-port', type=int, default=8765, metavar='PORT',
+                   help='Port for --web-view (default: 8765; 0 = ephemeral)')
     g_core.add_argument('--config', default=None, metavar='PATH',
                    help='Load parameters from a TOML configuration file. '
                         'CLI arguments override config file values. Fine-grained tuning '
@@ -1276,6 +1285,15 @@ def main():
     # Initialise GPU context (module-level singleton)
     from src import gpu_context as _gpu_mod
     _gpu_mod._gpu = GpuContext(use_gpu=args.use_gpu)
+
+    # Live web view (module-level singleton, no-op unless started here)
+    _wv_url = None
+    if getattr(args, 'web_view', False):
+        from src.webview import get_webview
+        _wv_url = get_webview().start(port=getattr(args, 'web_view_port', 8765))
+        if _wv_url:
+            safe_print(f"  Web view: {_wv_url}")
+
     try:
         process_directory(args.directory, args.output, args)
     except Exception as e:
@@ -1283,3 +1301,12 @@ def main():
         import traceback
         traceback.print_exc()
         raise SystemExit(1)
+
+    # Keep serving the final dashboard state until the user exits.
+    if _wv_url:
+        safe_print(f"\n  Web view still serving at {_wv_url} — Ctrl+C to exit")
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            pass

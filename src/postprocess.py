@@ -55,7 +55,18 @@ def _diag_save(img: np.ndarray, diag_dir: Optional[str], counter: list, slug: st
 
     counter is a one-element list [int] so the caller can mutate it across calls
     without a nonlocal statement. Only called when the step actually runs.
+
+    Also publishes a live preview to the web view (independent of diagnostic
+    mode; a no-op unless --web-view is active, and throttled internally).
     """
+    try:
+        from src.webview import get_webview
+        wv = get_webview()
+        if wv.active:
+            wv.preview(img, f"Post-processing: {slug.replace('_', ' ')}",
+                       args=None)
+    except Exception:
+        pass
     if not diag_dir:
         return
     try:

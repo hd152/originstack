@@ -291,6 +291,15 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     stats.total_frames = len(lights)
     n = len(lights)
 
+    try:
+        from src.webview import get_webview
+        get_webview().set_run_info(
+            target=getattr(args, '_inferred_target', None)
+                   or os.path.basename(os.path.dirname(lights[0].path)),
+            output=os.path.basename(output_path), n_frames=n)
+    except Exception:
+        pass
+
     # Check for a checkpoint from a previous interrupted run
     resume_phase = 0
     ckpt_state: Optional[Dict] = None
@@ -856,6 +865,22 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     crop_str = (f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)"
                 if stats.cropped_pixels else "(crop info not available)")
     print(f"  Output size: {out_h}x{out_w} {crop_str}")
+
+    try:
+        from src.webview import get_webview
+        _wv = get_webview()
+        if _wv.active:
+            _wv.preview(stacked, 'Final (post-processed)', args=args,
+                        min_interval=0.0)
+            _fw = [f.metrics.get('fwhm', 0) for f in final
+                   if f.metrics and f.metrics.get('fwhm', 0) > 0]
+            _wv.summary(
+                frames_stacked=f"{stats.accepted_frames} / {stats.total_frames}",
+                avg_fwhm_px=(f"{np.mean(_fw):.2f}" if _fw else "n/a"),
+                output=os.path.basename(output_path),
+                total_time=format_time(stats.total_time()))
+    except Exception:
+        pass
 
     from src.utils import print_header
     print_header("SUMMARY", "=")

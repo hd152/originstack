@@ -139,13 +139,15 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
         return np.median(np.stack(imgs, axis=0), axis=0).astype(np.float32)
 
 
-def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
-                     ghs_b: float = 8.0, ghs_sp: float = 0.15,
-                     ghs_hp: float = 0.95, black_sigma: float = 0.0) -> None:
+def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
+                         ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                         ghs_hp: float = 0.95,
+                         black_sigma: float = 0.0) -> Optional[np.ndarray]:
+    """Stretch an HWC float32 image to display uint8 (the shared core of the
+    preview JPEG file writer and the live web view). Returns None when the
+    required stretch backend is unavailable."""
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
-    if Image is None:
-        return
     if stretch == 'ghs':
         # Generalized Hyperbolic Stretch — uses unified luminance-based normalization
         # so all three channels share the same black/white reference, preserving
@@ -200,15 +202,19 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
     else:
         # Linear percentile stretch (original behaviour)
         if exposure is None:
-            return
+            return None
         out = np.zeros_like(rgb)
         for c in range(3):
             lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
             lo = max(lo, 0.0)  # Don't let negative noise expand the display range
             out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
+    return out
+
+
+def _preview_pil_image(out: np.ndarray, max_dim: int):
+    """uint8 HWC -> size-capped PIL image (shared by file and bytes paths)."""
     h, w = out.shape[:2]
-    max_dim = Config.PREVIEW_MAX_DIMENSION
     if max(h, w) > max_dim:
         # Pre-slice in numpy before PIL to avoid allocating a huge PIL Image object.
         # A full-resolution fromarray() on a large stack can OOM mid-JPEG-write,
@@ -219,7 +225,39 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
     img = Image.fromarray(out)
     if img.width > max_dim or img.height > max_dim:
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+    return img
+
+
+def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
+                     ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                     ghs_hp: float = 0.95, black_sigma: float = 0.0) -> None:
+    from src.models import Config
+    if Image is None:
+        return
+    out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                               ghs_hp=ghs_hp, black_sigma=black_sigma)
+    if out is None:
+        return
+    img = _preview_pil_image(out, Config.PREVIEW_MAX_DIMENSION)
     img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY)
+
+
+def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
+                       ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                       ghs_hp: float = 0.95, black_sigma: float = 0.0,
+                       max_dim: int = 1024) -> Optional[bytes]:
+    """Stretched preview JPEG as bytes (for the live web view)."""
+    import io as _io
+    if Image is None:
+        return None
+    out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                               ghs_hp=ghs_hp, black_sigma=black_sigma)
+    if out is None:
+        return None
+    img = _preview_pil_image(out, max_dim)
+    buf = _io.BytesIO()
+    img.save(buf, format='JPEG', quality=85)
+    return buf.getvalue()
 
 
 def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
