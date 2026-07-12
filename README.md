@@ -623,7 +623,7 @@ python astro_stack.py -d <dir> -o <output.fits> [options]
 | `-o, --output` | Output FITS path (required unless `--health-check` or `--dry-run`) |
 | `--preset NAME` | Apply named preset (quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar) |
 | `--config PATH` | Load parameters from TOML file |
-| `--auto` | Heuristic target classifier — detect and optimise automatically |
+| `--no-auto` | Disable the heuristic target classifier (on by default; detects target type and optimises settings automatically) |
 | `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized) |
 | `--debayer-method METHOD` | Debayer algorithm (bilinear, malvar, vng) |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |

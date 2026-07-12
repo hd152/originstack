@@ -1065,9 +1065,11 @@ def parse_args():
                    help='Stitch per-subfolder stacks into a mosaic via WCS reprojection. '
                         'Requires: pip install reproject and a working plate solver. '
                         'Automatically enables --plate-solve.')
-    g_core.add_argument('--auto', action='store_true',
-                   help='Classify the target after Phase 1 and apply optimised settings '
-                        'automatically. No API key required.')
+    g_core.add_argument('--no-auto', dest='auto', action='store_false', default=True,
+                   help='Disable the auto advisor: classify the target after Phase 1 and '
+                        'apply optimised settings automatically (on by default, no API key '
+                        'required). Explicit CLI flags you pass still override whatever '
+                        'the advisor would have picked.')
     g_post.add_argument('--scnr', action='store_true',
                    help='Apply Subtractive Chromatic Noise Reduction to suppress green '
                         'cast artefacts common in OSC/DSLR images under light pollution.')

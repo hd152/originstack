@@ -369,9 +369,9 @@ for galaxy targets).
 - Auto-limits parallel workers based on available VRAM
 - Enable with `--use-gpu`; requires `cupy-cuda*` installed (see `requirements-gpu.txt`)
 
-### 30. Auto Target Detection (`--auto`)
+### 30. Auto Target Detection (`--auto`, on by default; `--no-auto` to disable)
 
-Heuristic target classifier — analyses frame metrics (star count, brightness distribution, contrast) and automatically applies optimised parameter sets for the detected target type. No external dependencies or API keys required.
+Heuristic target classifier — analyses frame metrics (star count, brightness distribution, contrast) and automatically applies optimised parameter sets for the detected target type. No external dependencies or API keys required. Any explicit CLI flag you pass overrides the value the advisor would have picked.
 
 ---
 
@@ -391,7 +391,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--cal-dir PATH` | External calibration library; best-matching frames auto-selected |
 | `--config PATH` | Load parameters from TOML file; CLI args override |
 | `--preset NAME` | quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar |
-| `--auto` | Heuristic target classifier + parameter advisor |
+| `--no-auto` | Disable the heuristic target classifier + parameter advisor (on by default) |
 | `--dry-run` | Show resolved parameters and resource estimates, no processing |
 | `--health-check` | Analyse frames + calibration without stacking |
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run default) |
