@@ -1474,7 +1474,11 @@ def run_registration_phase(
 
     def _register_one(j, f, orig_idx):
         if outlier_mask[j]:
-            return j, shifts[j] or (0.0, 0.0), None
+            osy, osx = shifts[j] or (0.0, 0.0)
+            if abs(osx) > 0.1 * W or abs(osy) > 0.1 * H:
+                safe_print(f'Unrealistic pyramid shift {osx},{osy} for {f.path}, ignoring')
+                osy, osx = 0.0, 0.0
+            return j, (osy, osx), None
         if orig_idx == best_idx or args.no_registration:
             return j, (0.0, 0.0), None
         seed = seed_shifts[j] if seed_shifts is not None else None
