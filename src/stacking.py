@@ -1378,11 +1378,29 @@ def run_stacking_phase(
             crop_h, crop_w = bottom - top, right - left
             out_h = int(round(crop_h * drizzle_scale))
             out_w = int(round(crop_w * drizzle_scale))
-            print(f"  Drizzle: {drizzle_scale:.1f}x ({crop_h}x{crop_w} -> {out_h}x{out_w})")
+            pixfrac = float(getattr(args, 'drizzle_pixfrac', 1.0))
+            use_pixfrac = pixfrac < 1.0 - 1e-9
+            msg = f"  Drizzle: {drizzle_scale:.1f}x ({crop_h}x{crop_w} -> {out_h}x{out_w})"
+            if use_pixfrac:
+                msg += f", pixfrac={pixfrac:.2f}"
+            print(msg)
             if HAS_NATIVE:
                 print("    [rust] Lanczos-3 warp (drizzle resample)")
             acc = np.zeros((out_h, out_w, C), dtype=np.float64)
             gpu = get_gpu()
+
+            if use_pixfrac:
+                # Tent-kernel footprint shrink (classic drizzle pixfrac): each
+                # input pixel's contribution falls off toward the edge of its
+                # shrunken footprint instead of covering the whole output cell
+                # it lands on. half_drop is in raw (input-pixel) units, so it
+                # stays correct under rotation -- the footprint is defined in
+                # input space, independent of the output grid's orientation.
+                half_drop = max(pixfrac / 2.0, 1e-6)
+                _grid_oy, _grid_ox = np.meshgrid(
+                    np.arange(out_h, dtype=np.float64),
+                    np.arange(out_w, dtype=np.float64), indexing='ij')
+                weight_map = np.zeros((out_h, out_w, 1), dtype=np.float64)
             spline_order = 5
             inv_scale = 1.0 / drizzle_scale
 
@@ -1452,10 +1470,26 @@ def run_stacking_phase(
                             output_shape=(out_h, out_w),
                             order=spline_order, mode='constant', cval=0.0)
 
-                resampled *= w  # in-place float32, avoids float64 temporary
-                with acc_lock:
-                    np.add(acc, resampled, out=acc)  # float64 += float32 (promoted)
-                    total_weight_ref[0] += w
+                if use_pixfrac:
+                    # Map each output pixel back to the raw frame with the
+                    # same M/off used for the resample, then weight it by
+                    # how close it falls to the shrunken input-pixel footprint.
+                    raw_y = M[0, 0] * _grid_oy + M[0, 1] * _grid_ox + off[0]
+                    raw_x = M[1, 0] * _grid_oy + M[1, 1] * _grid_ox + off[1]
+                    frac_y = np.abs(raw_y - np.round(raw_y))
+                    frac_x = np.abs(raw_x - np.round(raw_x))
+                    w_y = np.maximum(0.0, 1.0 - frac_y / half_drop)
+                    w_x = np.maximum(0.0, 1.0 - frac_x / half_drop)
+                    pfw = (w_y * w_x * w)[:, :, np.newaxis]  # (out_h, out_w, 1)
+                    resampled = resampled.astype(np.float64, copy=False) * pfw
+                    with acc_lock:
+                        np.add(acc, resampled, out=acc)
+                        np.add(weight_map, pfw, out=weight_map)
+                else:
+                    resampled *= w  # in-place float32, avoids float64 temporary
+                    with acc_lock:
+                        np.add(acc, resampled, out=acc)  # float64 += float32 (promoted)
+                        total_weight_ref[0] += w
 
             total_weight_ref = [0.0]
 
@@ -1469,7 +1503,10 @@ def run_stacking_phase(
                 raw_mb = H * W * C * 4 / 1e6
                 out_mb = out_h * out_w * C * 4 / 1e6
                 affine_buf_mb = out_h * out_w * 8 / 1e6  # scipy internal float64
-                per_worker_mb = raw_mb + out_mb + affine_buf_mb + 100
+                # pixfrac path builds several out_h x out_w float64 temporaries
+                # (raw_y/raw_x/frac_y/frac_x/w_y/w_x/pfw) per call.
+                pixfrac_buf_mb = (out_h * out_w * 8 * 7 / 1e6) if use_pixfrac else 0.0
+                per_worker_mb = raw_mb + out_mb + affine_buf_mb + pixfrac_buf_mb + 100
                 safe_workers = max(1, int(avail_mb / per_worker_mb))
                 if safe_workers < n_drizzle:
                     print(f"  NOTE: limiting drizzle threads {n_drizzle}\u2192{safe_workers} "
@@ -1485,7 +1522,13 @@ def run_stacking_phase(
                                    disable=not args.verbose):
                     future.result()
 
-            stacked = (acc / max(total_weight_ref[0], 1e-12)).astype(np.float32)
+            if use_pixfrac:
+                # Pixels no dithered frame's shrunken footprint ever landed on
+                # (holes) are left at zero rather than divided by an empty sum.
+                safe_weight = np.where(weight_map <= 0.0, 1.0, weight_map)
+                stacked = (acc / safe_weight).astype(np.float32)
+            else:
+                stacked = (acc / max(total_weight_ref[0], 1e-12)).astype(np.float32)
 
         else:
             acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)

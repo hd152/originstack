@@ -481,7 +481,7 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
     header['DRIZZLE'] = (drizzle_scale > 1.0, 'Drizzle upscaling applied')
     if drizzle_scale > 1.0:
         header['DRZSCALE'] = (drizzle_scale, 'Drizzle scale factor')
-        header['DRZPIXFR'] = (getattr(args, 'drizzle_drop_size', 0.7), 'Drizzle pixel fraction')
+        header['DRZPIXFR'] = (getattr(args, 'drizzle_pixfrac', 1.0), 'Drizzle pixel fraction')
 
     # Richardson-Lucy deconvolution
     deconv_applied = post_processed and getattr(args, 'deconvolve', False)

@@ -61,7 +61,7 @@ def _make_minimal_args(**overrides) -> argparse.Namespace:
         weight_stars=1.0,
         weight_noise=False,
         drizzle_scale=1.0,
-        drizzle_drop_size=0.7,
+        drizzle_pixfrac=1.0,
         # Phase 4 post-processing  — disable everything for speed
         skip_step=[
             'hot_pixel', 'background', 'chroma_nr', 'sky_floor',
@@ -516,6 +516,72 @@ class TestE2ERegistration(unittest.TestCase):
             self.assertGreaterEqual(reg_peak, noreg_peak * 0.90,
                                     f"Registered peak ({reg_peak:.1f}) significantly "
                                     f"lower than unregistered ({noreg_peak:.1f})")
+
+
+class TestE2EDrizzlePixfrac(unittest.TestCase):
+    """drizzle_pixfrac must actually shrink each frame's footprint, not be a no-op."""
+
+    def _run_drizzle(self, tmpdir: str, paths: dict, pixfrac: float) -> np.ndarray:
+        from src.io_fits import make_master
+        from src.models import FrameInfo, ProcessingStats
+        from src.pipeline import stack_target
+
+        light_frames = [
+            FrameInfo(path=p, type='light',
+                      header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800,
+                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
+            for p in paths['light']
+        ]
+        dark_frames = [
+            FrameInfo(path=p, type='dark',
+                      header={'EXPTIME': 120.0, 'ISOSPEED': 800,
+                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
+            for p in paths['dark']
+        ]
+        flat_frames = [
+            FrameInfo(path=p, type='flat',
+                      header={'EXPTIME': 0.5, 'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
+            for p in paths['flat']
+        ]
+        masters = {
+            'dark': make_master(dark_frames, method='median'),
+            'flat': make_master(flat_frames, method='median'),
+            'bias': None,
+            'dark_exptime': 120.0,
+        }
+        output_path = os.path.join(tmpdir, f'stacked_pf{pixfrac}.fits')
+        args = _make_minimal_args(drizzle_scale=2.0, drizzle_pixfrac=pixfrac,
+                                  stack_method='mean')
+        stack_target(light_frames, output_path, args, masters, ProcessingStats())
+        if not os.path.exists(output_path):
+            self.skipTest("Output file not produced")
+        with fits.open(output_path, memmap=False) as hdul:
+            data = hdul[0].data.copy().astype(np.float64)
+        return np.transpose(data, (1, 2, 0)) if data.shape[0] == 3 else data
+
+    def test_pixfrac_changes_output(self):
+        """A shrunken footprint (pixfrac<1) must produce a different result
+        than the full-footprint default (pixfrac=1) -- this was previously a
+        dead CLI flag with zero effect on the actual drizzle path."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            paths = _create_synthetic_dataset(tmpdir, n_lights=4)
+            full = self._run_drizzle(tmpdir, paths, pixfrac=1.0)
+            shrunk = self._run_drizzle(tmpdir, paths, pixfrac=0.3)
+            self.assertFalse(np.allclose(full, shrunk, atol=1e-6),
+                             "drizzle_pixfrac had no effect on the output")
+
+    def test_small_pixfrac_leaves_more_uncovered_pixels(self):
+        """Shrinking the footprint below the dither spacing should leave more
+        output pixels with zero coverage (holes) than the full-footprint case."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            paths = _create_synthetic_dataset(tmpdir, n_lights=4)
+            full = self._run_drizzle(tmpdir, paths, pixfrac=1.0)
+            shrunk = self._run_drizzle(tmpdir, paths, pixfrac=0.2)
+            holes_full = float(np.mean(full.sum(axis=2) == 0.0))
+            holes_shrunk = float(np.mean(shrunk.sum(axis=2) == 0.0))
+            self.assertGreater(holes_shrunk, holes_full,
+                               f"Small pixfrac ({holes_shrunk:.3f} zero-frac) should leave "
+                               f"more holes than pixfrac=1 ({holes_full:.3f} zero-frac)")
 
 
 if __name__ == '__main__':
