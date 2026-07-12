@@ -869,6 +869,9 @@ def select_reference_frame(
 
     safe_print(f"  Pyramid pass for reference selection ({len(final)} frames, {n_workers} workers)...")
     _t_pyramid = time.time()
+    from src.webview import get_webview as _get_wv
+    _wv = _get_wv()
+    _wv_done = 0
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futs = {executor.submit(_pyramid_one, j, orig_idx): j
                 for j, orig_idx in enumerate(final_indices)}
@@ -876,6 +879,8 @@ def select_reference_frame(
                         desc="  Ref-select", unit="frame"):
             j, sy, sx = fut.result()
             pyramid_shifts[j] = (sy, sx)
+            _wv_done += 1
+            _wv.progress('Reference selection (pyramid pass)', _wv_done, len(final))
     from src.utils import format_time as _format_time
     safe_print(f"    Pyramid pass: {_format_time(time.time() - _t_pyramid)} "
                f"({len(final) / max(time.time() - _t_pyramid, 1e-9):.1f} frame/s)")
@@ -1071,6 +1076,9 @@ def score_registration_residuals(
         check = set(range(n_frames))
 
     def _run_checks(indices: List[int], label: str) -> None:
+        from src.webview import get_webview as _get_wv
+        _wv = _get_wv()
+        _done = 0
         n_workers = min(os.cpu_count() or 4, max(len(indices), 1))
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futs = {executor.submit(_check_one, j, final[j], final_indices[j]): j
@@ -1080,6 +1088,8 @@ def score_registration_residuals(
                 j, rms, ok = fut.result()
                 residuals[j] = rms
                 passed[j] = ok
+                _done += 1
+                _wv.progress('Residual check', _done, len(indices))
 
     _run_checks(sorted(check), "  Residual check")
     if len(check) < n_frames and any(not passed[j] for j in check):
@@ -1528,6 +1538,9 @@ def run_registration_phase(
     else:
         n_workers = min(os.cpu_count() or 4, len(final))
         
+    from src.webview import get_webview as _get_wv
+    _wv = _get_wv()
+    _wv_done = 0
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_register_one, j, f, orig_idx): j
                    for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
@@ -1537,6 +1550,8 @@ def run_registration_phase(
             shifts[j] = shift_val
             transforms[j] = transform_val
             final[j].shift = shift_val
+            _wv_done += 1
+            _wv.progress('Registering frames', _wv_done, len(final))
             if args.verbose:
                 f = final[j]
                 if transform_val is not None:

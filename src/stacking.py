@@ -1260,11 +1260,16 @@ def run_stacking_phase(
         if _reg_native:
             safe_print("    [rust] Lanczos-3 warp (per-frame alignment)")
         _t_align = time.time()
+        from src.webview import get_webview as _get_wv
+        _wv = _get_wv()
+        _wv_done = 0
         with ThreadPoolExecutor(max_workers=n_align) as executor:
             futures = {executor.submit(_align_one, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
                                desc="  Aligning", unit="frame", disable=not args.verbose):
                 future.result()
+                _wv_done += 1
+                _wv.progress('Aligning frames', _wv_done, n_final)
         mem_aligned.flush()
         safe_print(f"    Alignment: {n_final} frames in {format_time(time.time() - _t_align)} "
                    f"({n_align} workers, {n_final / max(time.time() - _t_align, 1e-9):.1f} frame/s)")
@@ -1508,6 +1513,12 @@ def run_stacking_phase(
 
     # Save a pre-post-processing copy for FITS output (preserves high sky SNR)
     fits_stacked = stacked.copy()
+    try:
+        from src.webview import get_webview
+        get_webview().preview(stacked, 'Linear stack (pre-post-processing)',
+                              args=args, min_interval=0.0)
+    except Exception:
+        pass
     return stacked, fits_stacked, top, bottom, left, right
 
 

@@ -58,6 +58,12 @@ def get_logger() -> logging.Logger:
 
 def safe_print(text: str):
     """Print text with fallback for unicode characters on Windows."""
+    # Tee into the live web view's log buffer (no-op unless --web-view).
+    try:
+        from src.webview import get_webview
+        get_webview().log(text)
+    except Exception:
+        pass
     try:
         print(text)
     except UnicodeEncodeError:
@@ -135,6 +141,13 @@ def print_quality_table(frames, show_all: bool = False):
 
 def print_phase(phase_num: int, title: str):
     """Print a phase header."""
+    try:
+        from src.webview import get_webview
+        wv = get_webview()
+        wv.phase(phase_num, title)
+        wv.log(f"PHASE {phase_num}: {title.upper()}")
+    except Exception:
+        pass
     print(f"\n{'=' * 70}")
     print(f"PHASE {phase_num}: {title.upper()}")
     print(f"{'=' * 70}")

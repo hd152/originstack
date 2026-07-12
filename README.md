@@ -222,6 +222,7 @@ Eight built-in target presets tune all parameters at once:
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges
+- **Live web dashboard** — `--web-view` serves a local page with phase progress, log stream, per-frame quality ticker, and milestone previews while stacking (pure stdlib, localhost only)
 - **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
@@ -638,6 +639,7 @@ python astro_stack.py -d <dir> -o <output.fits> [options]
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
 | `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run by default) |
+| `--web-view` | Live dashboard at http://127.0.0.1:8765/ while stacking |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |
 | `--quality-report PATH` | Write per-frame quality metrics to CSV |
 | `--dry-run` | Discover frames, show parameters, estimate resources — no processing |
