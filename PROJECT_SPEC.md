@@ -180,7 +180,9 @@ The post-registration residual check verifies alignment on the riskiest ~20% of 
 - Handles field rotation from polar alignment error and differential refraction
 
 **Validation and dither detection:**
-- Shifts > 10% of image dimension are rejected as unrealistic
+- Shifts > 10% of image dimension are rejected as unrealistic (translation fallback path)
+- The affine fit is independently sanity-checked (shift > 10% of frame size, or rotation > `Config.AFFINE_MAX_ROTATION_DEG` = 5deg) before being accepted; a bad RANSAC star match can converge on a wildly wrong but internally-consistent transform, so this can't be caught by the translation-only guard. Falls back to translation-only registration on failure.
+- Post-registration residual check re-detects stars in each aligned frame and measures RMS centroid error (sampled ~20% + riskiest-by-shift frames, escalating to all frames if any sample fails). Frames exceeding `Config.REG_RESIDUAL_MAX_PX` (1.5px) are dropped from the stack by default -- `--no-reg-residual-reject` to keep them (still annotated via `reg_residual_px` in metrics); `--no-reg-residual-check` skips the check entirely.
 - Dither pattern detection → auto-selects sigma-clip stacking method
 
 ### 10. Anti-Black-Border Cropping
@@ -420,6 +422,8 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--drizzle-pixfrac N` | 1.0 | Drizzle tent-kernel pixel fraction |
 | `--no-registration` | — | Disable alignment (pre-aligned frames) |
 | `--no-affine` | — | Translation-only registration |
+| `--no-reg-residual-reject` | — | Keep frames failing the post-registration residual check (dropped by default) |
+| `--no-reg-residual-check` | — | Skip the post-registration residual check entirely |
 
 ### Post-processing (Phase 4)
 

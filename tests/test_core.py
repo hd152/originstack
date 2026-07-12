@@ -340,3 +340,35 @@ def test_select_matching_darks_iso_over_exposure():
     assert len(selected) == 2
     for d in selected:
         assert d.header['ISOSPEED'] == 800
+
+
+def test_affine_sanity_guard_rejects_bad_ransac_fit():
+    # Regression test: match_stars_affine's RANSAC can converge on a
+    # confidently wrong star correspondence (bad seed, few stars, repeating
+    # pattern) and return a huge, obviously-wrong transform -- observed on
+    # real data as a 708px shift / 21.5deg rotation "successful" affine fit
+    # that used to sail through _register_one completely unchecked (the
+    # magnitude guard only existed on the calculate_shift fallback branch).
+    # This test mirrors the exact guard formula added to the affine branch.
+    from skimage.transform import EuclideanTransform
+    W, H = 3056, 2048
+
+    def is_unrealistic(tf):
+        tx, ty = tf.params[0, 2], tf.params[1, 2]
+        rot_deg = abs(np.degrees(np.arctan2(tf.params[1, 0], tf.params[0, 0])))
+        return (abs(tx) > 0.1 * W or abs(ty) > 0.1 * H
+                or rot_deg > Config.AFFINE_MAX_ROTATION_DEG)
+
+    bad = EuclideanTransform(rotation=np.radians(21.526), translation=(708.7, -35.8))
+    assert is_unrealistic(bad)
+
+    # A real single-frame affine correction: sub-pixel-to-few-px shift,
+    # a small fraction of a degree of field rotation -- must NOT be flagged.
+    good = EuclideanTransform(rotation=np.radians(0.15), translation=(3.2, -1.8))
+    assert not is_unrealistic(good)
+
+    # Rotation-only failure mode: small shift but way too much rotation
+    # (e.g. matched against the wrong star cluster) must also be caught.
+    bad_rotation_only = EuclideanTransform(rotation=np.radians(12.0),
+                                           translation=(2.0, -1.0))
+    assert is_unrealistic(bad_rotation_only)

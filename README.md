@@ -149,7 +149,8 @@ SUMMARY
 - **Affine registration** via star matching + RANSAC — corrects rotation, scale, and translation
 - Automatic dither detection → selects sigma-clip stacking automatically
 - Crops to the valid common region across all frames (no black borders)
-- Sampled post-registration residual verification (escalates to all frames only on failure)
+- Sampled post-registration residual verification, escalating to all frames on failure; frames whose measured alignment error still exceeds threshold are dropped by default (`--no-reg-residual-reject` to keep them)
+- The affine fit itself is sanity-checked (shift/rotation bounds) before use, falling back to translation-only registration on a bad RANSAC match instead of applying it uncorrected
 
 ### Stacking Methods (7)
 | Method | Best For |

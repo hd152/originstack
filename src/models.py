@@ -31,6 +31,7 @@ class Config:
     STAR_MASK_MAX_STARS = 500  # Max stars for mask generation
     AFFINE_MAX_STARS = 80  # Max stars for affine matching
     AFFINE_MATCH_RADIUS = 10.0  # Max pixel distance for star matching
+    AFFINE_MAX_ROTATION_DEG = 5.0  # Reject an affine fit rotating more than this (bad RANSAC match)
     GPU_PHASE1_WORKER_MB = 450.0   # VRAM per thread: raw+cal+green_eq+debayer+hotpix+wb peak
     GPU_FFT_WORKER_MB = 800.0      # VRAM per thread for padded complex128 FFT
     GPU_ALIGN_WORKER_MB = 250.0    # VRAM per thread for ndimage.shift on 3-ch image

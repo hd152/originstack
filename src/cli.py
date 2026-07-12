@@ -891,6 +891,17 @@ def parse_args():
     g_stack.add_argument('--no-registration', action='store_true')
     g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
+    g_stack.add_argument('--no-reg-residual-reject', dest='reg_residual_reject',
+                   action='store_false', default=True,
+                   help='Disable dropping frames whose post-registration star-position '
+                        'RMS residual exceeds %.1fpx (on by default: this catches frames '
+                        'a bad affine/FFT registration passed through undetected -- an '
+                        'actual measured alignment error, not a heuristic). Rejected '
+                        'frames still count in the summary; reg_residual_px is recorded '
+                        'in each frame\'s metrics either way.' % Config.REG_RESIDUAL_MAX_PX)
+    g_stack.add_argument('--no-reg-residual-check', action='store_true',
+                   help='Skip the post-registration residual check entirely (no '
+                        'diagnostic, no rejection) -- faster but no safety net')
     g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -1129,8 +1140,8 @@ def parse_args():
         skip_phase_correlation=True,
         no_alignment_centrality=False,
         no_shift_outlier_filter=False,
-        no_reg_residual_check=False,
-        reg_residual_reject=False,
+        # no_reg_residual_check / reg_residual_reject are real CLI flags now
+        # (--no-reg-residual-check / --no-reg-residual-reject above).
         patch_registration=False,
         # Stacking internals
         percentile_low=20.0,

@@ -1494,7 +1494,17 @@ def run_registration_phase(
                 if affine_tf is None:
                     affine_tf = _astroalign_transform(ref_lum, lum)
                 if affine_tf is not None:
-                    return j, (affine_tf.params[1, 2], affine_tf.params[0, 2]), affine_tf
+                    tf_tx, tf_ty = affine_tf.params[0, 2], affine_tf.params[1, 2]
+                    tf_rot_deg = abs(np.degrees(np.arctan2(
+                        affine_tf.params[1, 0], affine_tf.params[0, 0])))
+                    if (abs(tf_tx) > 0.1 * W or abs(tf_ty) > 0.1 * H
+                            or tf_rot_deg > Config.AFFINE_MAX_ROTATION_DEG):
+                        safe_print(
+                            f'Unrealistic affine fit shift=({tf_tx:.1f},{tf_ty:.1f})px '
+                            f'rotation={tf_rot_deg:.1f}deg for {f.path}, '
+                            f'falling back to translation-only')
+                    else:
+                        return j, (tf_ty, tf_tx), affine_tf
             sy, sx = calculate_shift(
                 ref_lum, lum, verbose=args.verbose,
                 debug=args.debug_registration,
