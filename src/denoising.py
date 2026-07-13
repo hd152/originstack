@@ -616,7 +616,8 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
 
 def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
                         sigma_large: float = 0.0,
-                        large_strength: float = 0.7) -> np.ndarray:
+                        large_strength: float = 0.7,
+                        star_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Remove chroma (color) noise from sky background using luminance-protected smoothing.
 
     Stars and bright objects are masked out before the blur so their chroma
@@ -631,45 +632,58 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
          blurred(sky_mask) - this is a masked/weighted Gaussian that cannot
          receive contamination from bright pixels.
       4. Reconstruct: sky pixels use smooth chroma, bright pixels use original.
+
+    ``star_mask`` (optional): a real per-pixel star-PSF mask (e.g. from
+    ``generate_star_mask``, 1 = star core, smooth falloff). When given, this
+    replaces the luminance-threshold heuristic for what counts as "protected"
+    -- the heuristic flags *any* pixel brighter than sky+3sigma, which for a
+    galaxy or bright nebula target means the entire object is treated as one
+    giant protected star and never receives chroma smoothing at all (visible
+    as an under-denoised speckled/mottled texture across the whole target,
+    while the surrounding sky is clean). A real star mask only protects
+    actual point sources, so extended structure still gets smoothed.
     """
     lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
            + 0.114 * img[:, :, 2]).astype(np.float64)
 
-    # Sky statistics: sigma-clipped to exclude stars, so protect ramp is
-    # correctly calibrated even when background extraction has clipped the
-    # sky to >=0 (which makes lum[lum <= median] a list of exact zeros ->
-    # std=0 -> protect_range~epsilon -> every non-zero pixel treated as a star ->
-    # chroma NR silently disabled for all sky pixels).
-    if sigma_clipped_stats is not None:
-        try:
-            _, sky_med, sky_std = sigma_clipped_stats(lum.ravel(), sigma=3.0, maxiters=5)
-            sky_med = float(sky_med)
-            sky_std = float(sky_std)
-        except Exception:
+    if star_mask is not None:
+        protect = np.clip(np.asarray(star_mask, dtype=np.float64), 0.0, 1.0)
+    else:
+        # Sky statistics: sigma-clipped to exclude stars, so protect ramp is
+        # correctly calibrated even when background extraction has clipped the
+        # sky to >=0 (which makes lum[lum <= median] a list of exact zeros ->
+        # std=0 -> protect_range~epsilon -> every non-zero pixel treated as a star ->
+        # chroma NR silently disabled for all sky pixels).
+        if sigma_clipped_stats is not None:
+            try:
+                _, sky_med, sky_std = sigma_clipped_stats(lum.ravel(), sigma=3.0, maxiters=5)
+                sky_med = float(sky_med)
+                sky_std = float(sky_std)
+            except Exception:
+                sky_med = float(np.median(lum))
+                sky_std = 0.0
+        else:
             sky_med = float(np.median(lum))
             sky_std = 0.0
-    else:
-        sky_med = float(np.median(lum))
-        sky_std = 0.0
-    # If std is still near zero (e.g., all sky is exactly 0), estimate from
-    # the non-zero pixels which represent the positive half of the noise dist.
-    # Their std ~= 0.603*sigma_sky, so scale up to recover the true noise level.
-    if sky_std < 0.5:
-        pos = lum[lum > 0]
-        if pos.size > 100:
-            try:
-                if sigma_clipped_stats is not None:
-                    _, _, sky_std = sigma_clipped_stats(pos, sigma=3.0, maxiters=3)
-                else:
-                    sky_std = float(np.std(pos))
-                sky_std = float(sky_std) / 0.603  # half-normal correction
-            except Exception:
-                pass
+        # If std is still near zero (e.g., all sky is exactly 0), estimate from
+        # the non-zero pixels which represent the positive half of the noise dist.
+        # Their std ~= 0.603*sigma_sky, so scale up to recover the true noise level.
+        if sky_std < 0.5:
+            pos = lum[lum > 0]
+            if pos.size > 100:
+                try:
+                    if sigma_clipped_stats is not None:
+                        _, _, sky_std = sigma_clipped_stats(pos, sigma=3.0, maxiters=3)
+                    else:
+                        sky_std = float(np.std(pos))
+                    sky_std = float(sky_std) / 0.603  # half-normal correction
+                except Exception:
+                    pass
 
-    # protect = 0 -> sky (smooth), protect = 1 -> star (leave alone)
-    # Ramp from sky_med to sky_med + 3*sky_std
-    protect_range = max(3.0 * sky_std, np.finfo(np.float64).eps)
-    protect = np.clip((lum - sky_med) / protect_range, 0.0, 1.0)
+        # protect = 0 -> sky (smooth), protect = 1 -> star (leave alone)
+        # Ramp from sky_med to sky_med + 3*sky_std
+        protect_range = max(3.0 * sky_std, np.finfo(np.float64).eps)
+        protect = np.clip((lum - sky_med) / protect_range, 0.0, 1.0)
     sky_mask = 1.0 - protect  # float [0,1]
 
     result = np.empty_like(img, dtype=np.float64)

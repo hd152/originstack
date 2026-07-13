@@ -470,7 +470,8 @@ def postprocess_stack(
         cnr_start = time.time()
         stacked = reduce_chroma_noise(stacked, sigma=cnr_sigma,
                                       sigma_large=cnr_large,
-                                      large_strength=cnr_large_str)
+                                      large_strength=cnr_large_str,
+                                      star_mask=pp_star_mask)
         safe_print(f"  ✓ Chroma noise reduction ({format_time(time.time() - cnr_start)})")
         stacked = _sanitize(stacked, "chroma noise reduction")
 
