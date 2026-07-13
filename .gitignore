@@ -1,6 +1,7 @@
 # Test data directories
 orion-live/
 synthetic_data/
+synthetic_data_mixed/
 
 # Claude Code directories
 .claude/

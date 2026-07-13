@@ -49,7 +49,11 @@ The pipeline is split across `src/` modules. [astro_stack.py](astro_stack.py) is
 | [src/gpu_context.py](src/gpu_context.py) | `GpuContext`, `get_gpu()` singleton |
 | [src/models.py](src/models.py) | `Config`, `FrameInfo`, `ProcessingStats` |
 | [src/utils.py](src/utils.py) | Print helpers, `format_time`, `get_memory_usage_mb` |
-| [src/io_fits.py](src/io_fits.py) | FITS load/save, `make_master`, `populate_fits_header` |
+| [src/io_fits.py](src/io_fits.py) | FITS load/save, `load_frame` (format dispatcher), `make_master`, `populate_fits_header` |
+| [src/io_raw.py](src/io_raw.py) | Camera RAW load (rawpy) — CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ |
+| [src/io_tiff.py](src/io_tiff.py) | TIFF load (tifffile) — 16/32-bit linear TIFF lights |
+| [src/io_xisf.py](src/io_xisf.py) | XISF 1.0 load — counterpart to `xisf_writer.py`'s output writer |
+| [src/io_ser.py](src/io_ser.py) | SER (planetary/lucky-imaging video) load — one file expands to many virtual frames |
 | [src/frame_discovery.py](src/frame_discovery.py) | `discover_frames`, `classify_frame`, `select_matching_darks` |
 | [src/debayer.py](src/debayer.py) | Debayering, hot pixels, white balance |
 | [src/quality.py](src/quality.py) | `compute_quality_metrics`, star detection, FWHM |
@@ -123,7 +127,25 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 - `cv2` (OpenCV) — advanced debayer methods (Malvar, VNG), bilateral filter denoising
 - `pywt` — wavelet denoising
 - `astroquery` — plate solving via nova.astrometry.net (`--plate-solve`)
+- `rawpy` — camera RAW input (CR2/CR3/NEF/ARW/DNG/…, `src/io_raw.py`); RAW files are silently excluded from discovery when absent
+- `tifffile` — TIFF input (`src/io_tiff.py`) and `--export tiff` output
 - `astro_native` — optional Rust hot-path kernels (see below); numpy fallback when absent
+
+### Input formats
+Besides FITS, the pipeline reads camera RAW (`src/io_raw.py`, needs `rawpy`), TIFF
+(`src/io_tiff.py`, needs `tifffile`), XISF 1.0 (`src/io_xisf.py`, no dependency — hand-rolled
+reader, counterpart to `xisf_writer.py`'s writer; covers uncompressed/attached float32/
+uint16/uint32 mono or RGB data, raises a clear error on compressed or embedded-block XISF),
+and SER planetary/lucky-imaging video (`src/io_ser.py`, no dependency). All formats route
+through `src/io_fits.py::load_frame`, the single dispatcher every loader (including
+`make_master`) uses. A `.ser` file holds many frames; `discover_frames` expands it into one
+virtual `FrameInfo` per frame (`path::index`, e.g. `Jupiter_2024.ser::1042`) — `::` isn't a
+filesystem separator, so it flows through filename-based classification, logging, and
+checkpointing unmodified. Mono SER/XISF frames (unambiguous — never a raw Bayer mosaic) are
+replicated to 3 channels at load time to skip debayering; a mono TIFF is inherently ambiguous
+(could be a real mono capture or an undemosaiced Bayer export) and falls through to the same
+session-Bayer/RGGB default a headerless FITS Bayer frame would — supply a `.json` sidecar
+with `bayerPattern` to override.
 
 ### Native (Rust) acceleration
 [ext/astro_native/](ext/astro_native/) is a PyO3/maturin crate of hot-path kernels, all with a numpy fallback. Coverage:

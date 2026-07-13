@@ -15,7 +15,11 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/gpu_context.py` | ~160 | `GpuContext`, CUDA stream contexts, `get_gpu()` singleton |
 | `src/models.py` | ~90 | `Config`, `FrameInfo`, `ProcessingStats` |
 | `src/utils.py` | ~160 | Print helpers, `format_time`, `get_memory_usage_mb` |
-| `src/io_fits.py` | ~315 | FITS load/save, `make_master`, `populate_fits_header` |
+| `src/io_fits.py` | ~315 | FITS load/save, `load_frame` (format dispatcher), `make_master`, `populate_fits_header` |
+| `src/io_raw.py` | ~170 | Camera RAW load (rawpy) — CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ |
+| `src/io_tiff.py` | ~90 | TIFF load (tifffile) |
+| `src/io_xisf.py` | ~200 | XISF 1.0 load (hand-rolled, no dependency) |
+| `src/io_ser.py` | ~190 | SER (planetary video) load — one file expands to many virtual frames |
 | `src/frame_discovery.py` | ~140 | `discover_frames`, `classify_frame`, `select_matching_darks` |
 | `src/debayer.py` | ~305 | Debayering, hot pixels, white balance, CA correction |
 | `src/quality.py` | ~375 | `compute_quality_metrics`, star detection, FWHM |
@@ -99,6 +103,16 @@ Phase 4  ──  Post-Processing
 - Header keywords: `IMAGETYP`, `FRAME`
 - Heuristic: zero-exposure frames classified as bias
 - Default: unidentified files treated as lights
+- **Input formats**: FITS (`.fit`/`.fits`, always), camera RAW (`.cr2`/`.cr3`/`.nef`/`.arw`/
+  `.dng`/`.orf`/`.rw2`/`.raf`/`.pef`/`.3fr`/`.mrw`/`.x3f`/`.iiq`, needs `rawpy`), TIFF
+  (`.tif`/`.tiff`, needs `tifffile`), XISF (`.xisf`, no dependency), SER (`.ser`, no
+  dependency) — freely mixable within one directory. All formats route through
+  `src/io_fits.py::load_frame`, the single load dispatcher `make_master` and every other
+  loader use. RAW/TIFF/XISF-without-header-info fall back to filename-substring
+  classification (`IMAGETYP` has no equivalent in those formats); a `.json` sidecar
+  (`_merge_json_sidecar`) can backfill `EXPTIME`/`ISOSPEED`/`GAIN`/`CCD-TEMP`/`BAYERPAT` for
+  any format. A `.ser` file's frames are expanded into one virtual `FrameInfo` per frame
+  (`path::index`) since a single SER file can hold thousands of frames — see feature 33 below
 
 ### 2. Calibration
 
@@ -392,6 +406,16 @@ Corrects spatially-varying distortion a single global affine per frame can't fix
 - Works under `--drizzle-scale > 1` too (`_drizzle_one` subtracts the sampled field from its per-output-pixel coordinate mapping) — unlike the old feature, which silently dropped correction there.
 - Falls back to the frame's existing unmodified affine/translation warp when fewer than `Config.LOCAL_WARP_MIN_STARS` (12) stars matched. Fitted displacement clamped to `Config.LOCAL_WARP_MAX_DISPLACEMENT_PX` (8px), which also expands `calc_common_crop`'s safety margin by the actual observed max fitted magnitude.
 - Off by default (opt-in, higher-risk correction; not auto-enabled by `--auto`). Forces the residual-check star-match pass to run even under `--no-reg-residual-check` (needs the correspondences; the RMS-reject gate itself stays off).
+
+### 33. Multi-Format Input (RAW, TIFF, XISF, SER)
+
+Extends the FITS-only loader to camera RAW, TIFF, XISF, and SER — all dispatched through a single `src/io_fits.py::load_frame`, including `make_master`, so calibration masters can be built from any mix of formats.
+
+- **RAW** (`src/io_raw.py`, rawpy) — reads the undemosaiced sensor mosaic (`raw.raw_image_visible`, not rawpy's own demosaic), per-channel black-level subtraction, white-level normalisation to [0,1]. Bayer pattern derived from `raw.color_desc`/`raw.raw_pattern`. EXIF (`EXPTIME`/`ISO`/`INSTRUME`/`TELESCOP`) via Pillow, best-effort.
+- **TIFF** (`src/io_tiff.py`, tifffile) — integer sample values are *not* rescaled (cast to float32 as-is, same convention as `load_fits`), so a TIFF light stays on the same ADU-count scale as sibling FITS/RAW calibration frames. A 3-channel TIFF is treated as already-debayered RGB and passed through untouched; a 2-D (mono) TIFF is genuinely ambiguous (real mono capture vs. undemosaiced Bayer export — no TIFF tag distinguishes them) and falls through to the existing session-Bayer/RGGB default, same as a headerless FITS Bayer frame. A `.json` sidecar with `bayerPattern` overrides this.
+- **XISF** (`src/io_xisf.py`, no dependency) — hand-rolled reader, the read-side counterpart to `xisf_writer.py`. Covers uncompressed, attached (not embedded/inline) pixel data, Float32/UInt16/UInt32/UInt8 sample format, mono or RGB, planar or normal pixel storage — sufficient to round-trip this codebase's own writer output and straightforward external exports. Compressed or embedded-block XISF raises a clear, specific error rather than silently misreading. `FITSKeywords` the writer embedded are recovered back into the header dict. Mono XISF is replicated to 3 channels at load time (XISF is a processed/calibrated format, never a raw Bayer mosaic, so it must never be routed through the debayer step).
+- **SER** (`src/io_ser.py`, no dependency) — FireCapture/SharpCap planetary/lucky-imaging video. A single `.ser` file holds many frames, breaking the "one file = one frame" assumption everywhere else — `discover_frames` runs a pre-pass (`expand_ser_files`) that parses the 178-byte header once per file (`lru_cache`d) and synthesises one virtual `FrameInfo.path` per frame (`"<real_path>::<index>"`). `::` isn't a filesystem separator, so filename-substring classification, dict/set keys, logging, and checkpoint JSON serialisation all work unmodified on virtual paths. Per-frame pixel reads use `np.memmap` for O(1) offset seeking, always copied out of the memmap before returning (mutated in place downstream — a bare memmap view would corrupt the source file). `ColorID` maps to `BAYERPAT` for the 4 standard Bayer patterns; `MONO` is replicated to 3 channels (same reasoning as XISF); `RGB`/`BGR` are 3-channel-per-frame with a channel-order fix for BGR; the rare CMY-filter Bayer variants (`ColorID` 16-19) aren't supported by this pipeline's 4-pattern debayer and raise a clear error instead of silently mismapping. `--quality-sweep --apply`'s reject-rename step skips SER virtual paths (not real, renameable filesystem entries) with a warning rather than erroring.
+- No CLI flags — format is detected purely by extension (or the `::` marker for SER), matching how FITS/RAW have always worked.
 
 ---
 

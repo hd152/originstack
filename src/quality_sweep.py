@@ -157,6 +157,10 @@ def run_quality_sweep(root: str, args) -> int:
 
             if apply_renames:
                 for f in flagged:
+                    from src.io_ser import is_ser_virtual_path
+                    if is_ser_virtual_path(f.path):
+                        safe_print(f"    SKIP (SER frame, cannot rename in-place): {f.path}")
+                        continue
                     dst = f.path + REJECT_SUFFIX
                     if os.path.exists(dst):
                         safe_print(f"    SKIP (exists): {os.path.basename(dst)}")

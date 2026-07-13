@@ -2,7 +2,7 @@
 
 **Streaming FITS stacker for astrophotography — runs on ordinary hardware, scales to any frame count.**
 
-OriginStack is a full-featured Python pipeline for stacking and processing astronomical FITS images. It was designed for the Celestron Origin smart telescope but works with FITS files from any OSC/DSLR/mirrorless camera. The core design principle is a **streaming architecture**: frames are loaded, processed, and freed one at a time, so memory usage stays constant regardless of how many frames you have.
+OriginStack is a full-featured Python pipeline for stacking and processing astronomical images. It was designed for the Celestron Origin smart telescope but works with any OSC/DSLR/mirrorless camera. Reads FITS, camera RAW (CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ — needs `rawpy`), TIFF (needs `tifffile`), XISF, and SER (planetary/lucky-imaging video) — mix and match formats freely within one input directory. The core design principle is a **streaming architecture**: frames are loaded, processed, and freed one at a time, so memory usage stays constant regardless of how many frames you have.
 
 ---
 
@@ -144,6 +144,14 @@ SUMMARY
 - **Automatic calibration**: bias, dark, and flat master frames built and applied automatically
 - **Parallel processing**: multi-core via `ProcessPoolExecutor`; GPU acceleration via CuPy (`--use-gpu`)
 
+### Input Formats
+- **FITS** — always supported, no extra dependencies
+- **Camera RAW** (CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, PEF, 3FR, MRW, X3F, IIQ) — needs `pip install rawpy`; reads the undemosaiced sensor mosaic, so RAW lights go through the same debayer step as OSC FITS
+- **TIFF** (16/32-bit) — needs `pip install tifffile`; common intermediate/export format from N.I.N.A., SharpCap, PixInsight, DeepSkyStacker
+- **XISF** (PixInsight's native format) — no extra dependency; OriginStack can also write XISF (`--export xisf`)
+- **SER** (FireCapture/SharpCap planetary/lucky-imaging video) — no extra dependency; each `.ser` file's frames are treated as individual lights
+- Formats can be freely mixed within one input directory — calibration matching, quality filtering, and stacking don't care what format a frame came from
+
 ### Registration & Alignment
 - Coarse-to-fine pyramid seed + sub-pixel FFT residual correlation (~0.05 px accuracy)
 - **Affine registration** via star matching + RANSAC — corrects rotation, scale, and translation
@@ -274,6 +282,8 @@ cd ext/astro_native && maturin develop --release   # into a venv
 | `sep` | 5–10× faster star detection |
 | `astroquery` | Plate solving via astrometry.net |
 | `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
+| `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
+| `tifffile` | TIFF input and `--export tiff` output |
 | `astroalign` | Cross-night registration for `--merge` |
 | `reproject` | Mosaic stitching |
 | `astro_native` (Rust) | 13 native kernels: stacking combines, Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion |

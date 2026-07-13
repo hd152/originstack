@@ -63,6 +63,7 @@ def write_xisf(img: np.ndarray, output_path: str,
         "geometry": f"{W}:{H}:3",
         "sampleFormat": "Float32",
         "colorSpace": "RGB",
+        "pixelStorage": "Planar",
         "location": f"attachment:{data_offset}:{data_len}",
     })
 

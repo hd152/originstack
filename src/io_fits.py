@@ -37,11 +37,32 @@ def _read_fits_header(path: str) -> dict:
 
 
 def load_frame(path: str) -> Tuple[np.ndarray, dict]:
-    """Load a FITS or camera RAW file; dispatches on file extension."""
+    """Load a FITS, camera RAW, TIFF, XISF, or SER (virtual-path) file;
+    dispatches on file extension (SER's ``path::index`` marker is checked
+    first, since a virtual path's extension via splitext is meaningless)."""
+    try:
+        from src.io_ser import is_ser_virtual_path, read_ser_frame
+        if is_ser_virtual_path(path):
+            return read_ser_frame(path)
+    except Exception:
+        pass
+    ext = os.path.splitext(path)[1].lower()
     try:
         from src.io_raw import RAW_EXTENSIONS, read_raw
-        if os.path.splitext(path)[1].lower() in RAW_EXTENSIONS:
+        if ext in RAW_EXTENSIONS:
             return read_raw(path)
+    except Exception:
+        pass
+    try:
+        from src.io_tiff import TIFF_EXTENSIONS, read_tiff
+        if ext in TIFF_EXTENSIONS:
+            return read_tiff(path)
+    except Exception:
+        pass
+    try:
+        from src.io_xisf import XISF_EXTENSIONS, read_xisf
+        if ext in XISF_EXTENSIONS:
+            return read_xisf(path)
     except Exception:
         pass
     return load_fits(path)
@@ -71,7 +92,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
         return None
     # Probe first frame for shape
     try:
-        first_data, _ = load_fits(frames[0].path)
+        first_data, _ = load_frame(frames[0].path)
         shape = first_data.shape
     except Exception:
         return None
@@ -82,7 +103,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
         count = 0
         for f in frames:
             try:
-                data, _ = load_fits(f.path)
+                data, _ = load_frame(f.path)
                 acc += data.astype(np.float64)
                 count += 1
             except Exception:
@@ -106,7 +127,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
         count = 0
         for i, f in enumerate(frames):
             try:
-                data, _ = load_fits(f.path)
+                data, _ = load_frame(f.path)
                 mem[count] = data.astype(np.float32)
                 count += 1
             except Exception:
@@ -130,7 +151,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
         imgs = []
         for f in frames:
             try:
-                data, _ = load_fits(f.path)
+                data, _ = load_frame(f.path)
                 imgs.append(data.astype(np.float32))
             except Exception:
                 continue

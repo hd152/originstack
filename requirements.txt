@@ -11,8 +11,14 @@ psutil>=5.9
 
 # Optional dependencies (install separately as needed):
 #
-#   Camera RAW support (CR2, NEF, ARW, DNG, …):
-#     rawpy              — read DSLR/mirrorless RAW files as Bayer mosaics
+#   Camera RAW support (CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, PEF, 3FR, MRW, X3F, IIQ, …):
+#     rawpy>=0.19        — read DSLR/mirrorless RAW files as Bayer mosaics
+#
+#   TIFF input support (16/32-bit linear TIFF lights, e.g. from N.I.N.A./SharpCap/PixInsight):
+#     tifffile>=2023.1   — read TIFF images; also used to write --export tiff output
+#
+#   XISF input (PixInsight's native format) and SER (FireCapture/SharpCap planetary
+#   video) support need no extra packages — both are read with a built-in parser.
 #
 #   Improved registration:
 #     astroalign         — triangle-pattern star matching; fallback when RANSAC fails

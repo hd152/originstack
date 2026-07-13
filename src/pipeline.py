@@ -14,7 +14,7 @@ import numpy as np
 
 from src.models import FrameInfo, ProcessingStats
 from src.utils import safe_print, print_phase, format_time, get_memory_usage_mb
-from src.io_fits import load_fits, save_preview_rgb, populate_fits_header
+from src.io_fits import load_fits, load_frame, save_preview_rgb, populate_fits_header
 from src.debayer import debayer
 from src.plate_solve import solve_plate
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
@@ -337,7 +337,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         safe_print(f"  Session info: no info.json found in {os.path.basename(_directory)!r}")
 
     # Probe first frame for dimensions
-    first_data, first_hdr = load_fits(lights[0].path)
+    first_data, first_hdr = load_frame(lights[0].path)
     if first_data.ndim == 2:
         _probe_bayer = first_hdr.get('BAYERPAT',
                                      first_hdr.get('COLORTYP', args._session_bayer or 'RGGB'))

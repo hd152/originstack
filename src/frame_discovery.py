@@ -13,25 +13,51 @@ from src.utils import safe_print
 
 
 def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
-    """Discover FITS and RAW files and classify them by heuristics and headers."""
+    """Discover FITS, RAW, TIFF, XISF, and SER files and classify them by
+    heuristics and headers. A .ser file is expanded into one virtual
+    ``path::frame_index`` entry per frame it contains (see src/io_ser.py)."""
     try:
         from src.io_raw import RAW_EXTENSIONS, read_raw_header, HAS_RAWPY
         _raw_exts: tuple = RAW_EXTENSIONS if HAS_RAWPY else ()
     except Exception:
         _raw_exts = ()
+    try:
+        from src.io_tiff import TIFF_EXTENSIONS, read_tiff_header, HAS_TIFFFILE
+        _tiff_exts: tuple = TIFF_EXTENSIONS if HAS_TIFFFILE else ()
+    except Exception:
+        _tiff_exts = ()
+    try:
+        from src.io_xisf import XISF_EXTENSIONS, read_xisf_header
+        _xisf_exts: tuple = XISF_EXTENSIONS
+    except Exception:
+        _xisf_exts = ()
+    try:
+        from src.io_ser import is_ser_virtual_path, read_ser_frame_header, expand_ser_files
+        _ser_files = expand_ser_files(directory)
+    except Exception:
+        def is_ser_virtual_path(path: str) -> bool:  # type: ignore[misc]
+            return False
+        _ser_files = []
 
-    _all_exts = ('.fit', '.fits') + _raw_exts
+    _all_exts = ('.fit', '.fits') + _raw_exts + _tiff_exts + _xisf_exts
 
     files = sorted(
         os.path.join(directory, f)
         for f in os.listdir(directory)
         if f.lower().endswith(_all_exts)
     )
+    files += _ser_files
     frames = {'light': [], 'dark': [], 'flat': [], 'bias': []}
 
     def _read_header(path: str) -> dict:
+        if is_ser_virtual_path(path):
+            return read_ser_frame_header(path)
         if _raw_exts and path.lower().endswith(_raw_exts):
             return read_raw_header(path)
+        if _tiff_exts and path.lower().endswith(_tiff_exts):
+            return read_tiff_header(path)
+        if _xisf_exts and path.lower().endswith(_xisf_exts):
+            return read_xisf_header(path)
         return _read_fits_header(path)
 
     with ThreadPoolExecutor() as ex:
