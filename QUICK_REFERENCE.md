@@ -143,6 +143,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Coarse chroma-NR (colour blotches) | auto | config key `chroma_nr_large_sigma` |
 | Preview black point (sky-σ) | auto | `--preview-black-sigma 3` |
 | Drizzle super-resolution | ❌ | `--drizzle-scale 2.0` |
+| Elastic (non-rigid) local registration | ❌ | `--elastic-registration` |
 | Plate solving | ❌ | `--plate-solve` |
 | Star removal | ❌ | `--star-remove` |
 

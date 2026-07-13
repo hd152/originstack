@@ -974,6 +974,19 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         )
         score = snr_factor * star_factor * fwhm_factor * 100.0
 
+    # Star positions were detected on the downsampled img_s_stars grid;
+    # rescale to full-resolution pixel coordinates before returning. FWHM is
+    # already rescaled above (line ~890); strehl/dispersion/ellipticity/
+    # zernike consumers above this point used the still-downsampled sources_s
+    # against the still-downsampled img_s_stars, so they stay internally
+    # consistent -- this rescale only affects what callers outside this
+    # function see (match_stars_affine, score_registration_residuals), which
+    # need full-res coordinates to compare against full-res shifts/images.
+    if sources_s is not None and _star_ds > 1:
+        sources_s = sources_s.copy()
+        sources_s['xcentroid'] = sources_s['xcentroid'] * _star_ds
+        sources_s['ycentroid'] = sources_s['ycentroid'] * _star_ds
+
     return {
         'brightness': brightness,
         'mean': mean,

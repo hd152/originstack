@@ -594,6 +594,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     ref_lum, mem_lum, cached_lums, H, W, args, stats,
                     pyramid_shifts=pyramid_shifts)
 
+                # The post-registration residual check (--reg-residual-reject)
+                # can drop frames here, on top of Phase 1's quality gate --
+                # keep the frame counts the summary reports in sync.
+                stats.accepted_frames = len(final)
+                stats.rejected_frames = stats.total_frames - len(final)
+
                 stats.registration_time = time.time() - phase_start
                 del cached_lums
 
@@ -619,12 +625,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             phase_start = time.time()
 
             quality_maps = dither_info.pop('quality_maps', None)
-            flow_fields = dither_info.pop('flow_fields', None)
+            displacement_fields = dither_info.pop('displacement_fields', None)
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
                 shifts, transforms, H, W, C, args, stats,
                 quality_maps=quality_maps,
-                flow_fields=flow_fields)
+                displacement_fields=displacement_fields)
 
             stats.stacking_time = time.time() - phase_start
 

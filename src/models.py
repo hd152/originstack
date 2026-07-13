@@ -88,6 +88,24 @@ class Config:
     PATCH_GRID_SIZE = 8             # NxN grid for patch quality map (8x8 = 64 patches)
     PATCH_MIN_SIZE = 64             # Minimum patch dimension in pixels
 
+    # Elastic (non-rigid, per-patch) local registration -- corrects spatially-varying
+    # distortion (differential atmospheric refraction, field rotation, tube flexure) a
+    # single global affine per frame can't fix. Provisional/unvalidated against real
+    # data (unlike DBE_FIT_SIGMA_PATCHES's real-data sweep) -- revisit after testing.
+    LOCAL_WARP_MIN_STARS = 12           # Min matched stars to attempt a per-frame fit;
+                                         # below this, fall back to affine-only unchanged
+    LOCAL_WARP_MAX_DISPLACEMENT_PX = 8.0  # Clamp on fitted displacement magnitude (px);
+                                           # also drives calc_common_crop's safety margin
+    LOCAL_WARP_GRID_SIZE = 24           # Coarse (Gc,Gc) field grid, sampled on demand by
+                                         # consumers -- never materialised at full res
+    LOCAL_WARP_BANDWIDTH_FRAC = 0.35    # Gaussian local-regression bandwidth as a fraction
+                                         # of min(H,W) -- displacement varies on far larger
+                                         # spatial scales than DBE's background patches,
+                                         # from far sparser samples (dozens of stars vs
+                                         # thousands of patches)
+    LOCAL_WARP_OUTLIER_SIGMA = 2.5      # Tukey-biweight IRLS outlier tolerance
+    LOCAL_WARP_OUTLIER_ITERS = 3        # IRLS reweighting passes
+
     # Comet tracking / nucleus detection
     COMET_DOG_SIGMA_SMALL = 2.0     # DoG small sigma (suppresses point sources)
     COMET_DOG_SIGMA_LARGE = 10.0    # DoG large sigma (enhances diffuse coma core)

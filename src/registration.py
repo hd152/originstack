@@ -135,11 +135,21 @@ def _astroalign_transform(ref_lum: np.ndarray,
 
 
 def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
-                    transform: Optional[Any] = None) -> np.ndarray:
+                    transform: Optional[Any] = None,
+                    local_field: Optional[np.ndarray] = None) -> np.ndarray:
     """Apply translation or affine transform to a multi-channel image.
 
     Uses cubic spline interpolation (order=3) for subpixel accuracy.
     Dispatches to GPU (cupyx.scipy.ndimage) when available.
+
+    ``local_field`` (optional): a coarse (Gc, Gc, 2) elastic displacement
+    field from ``fit_displacement_field``, composed into the SAME resample
+    pass as the affine/shift warp (source coordinate = affine_src(o) -
+    R @ D(o), sampled via ``map_coordinates``) rather than a second warp —
+    two independent interpolation passes would compound blur/ringing.
+    Bypasses the native Rust Lanczos-3 fast path (matrix+offset only, no
+    per-pixel coordinate grid); falls through to scipy/cupyx cubic
+    ``map_coordinates`` instead, only for frames actually using it.
     """
     # Ensure 3D shape for consistent channel processing (H, W, 1) for grayscale
     original_ndim = img.ndim
@@ -152,6 +162,34 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
     gpu = get_gpu()
 
     def _run(xp, _ndimage, img_arr):
+        if local_field is not None:
+            H_i, W_i = img_arr.shape[:2]
+            oy, ox = np.mgrid[0:H_i, 0:W_i].astype(np.float64)
+            if transform is not None:
+                matrix = transform.params
+                R = matrix[:2, :2]
+                t_xy = matrix[:2, 2]
+                t_rowcol = np.array([t_xy[1], t_xy[0]])
+                offset = -R @ t_rowcol
+                base_y = R[0, 0] * oy + R[0, 1] * ox + offset[0]
+                base_x = R[1, 0] * oy + R[1, 1] * ox + offset[1]
+            elif shift is not None:
+                R = np.eye(2)
+                base_y = oy - shift[0]
+                base_x = ox - shift[1]
+            else:
+                R = np.eye(2)
+                base_y, base_x = oy, ox
+            dy, dx = sample_displacement_field(local_field, H_i, W_i, oy, ox)
+            src_y = base_y - (R[0, 0] * dy + R[0, 1] * dx)
+            src_x = base_x - (R[1, 0] * dy + R[1, 1] * dx)
+            coords = xp.asarray(np.stack([src_y, src_x], axis=0))
+            result = xp.empty_like(img_arr)
+            for c in range(img_arr.shape[2]):
+                result[:, :, c] = _ndimage.map_coordinates(
+                    img_arr[:, :, c], coords, order=3, mode='constant', cval=0.0
+                )
+            return result
         if transform is not None:
             matrix = transform.params
             R = matrix[:2, :2]
@@ -177,7 +215,7 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
             return result
         return img_arr
 
-    if transform is None and shift is None:
+    if transform is None and shift is None and local_field is None:
         if squeeze_back:
             img = img[:, :, 0]
         return img
@@ -197,7 +235,8 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
     # star FWHM and flux identical to scipy order-3, its mild per-frame ringing
     # averages out across dithered frames (validated), and it is multithreaded.
     img_cpu = np.asarray(img)
-    if HAS_NATIVE and img_cpu.dtype == np.float32 and img_cpu.flags['C_CONTIGUOUS']:
+    if (local_field is None and HAS_NATIVE
+            and img_cpu.dtype == np.float32 and img_cpu.flags['C_CONTIGUOUS']):
         try:
             H_i, W_i = img_cpu.shape[:2]
             if transform is not None:
@@ -656,8 +695,16 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
 
 
 def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
-                     transforms: Optional[List[Optional[Any]]] = None) -> Tuple[int, int, int, int]:
-    """Compute the largest axis-aligned crop valid in all aligned frames."""
+                     transforms: Optional[List[Optional[Any]]] = None,
+                     extra_margin_px: float = 0.0) -> Tuple[int, int, int, int]:
+    """Compute the largest axis-aligned crop valid in all aligned frames.
+
+    ``extra_margin_px``: additional trim on all four sides, on top of
+    ``Config.CROP_MARGIN``. Used by elastic registration to keep the crop
+    safely inside the region every frame's local displacement field could
+    have pulled pixels from — the corner-based rectangle otherwise has no way
+    to know about a spatially-varying (non-rigid) warp.
+    """
     H, W = shape
     transforms = transforms or [None] * len(shifts)
     top_vals, bottom_vals, left_vals, right_vals = [], [], [], []
@@ -683,10 +730,11 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
             left_vals.append(max(0.0, sx))
             right_vals.append(min(float(W), W + sx))
 
-    top = int(np.ceil(max(top_vals))) + Config.CROP_MARGIN
-    bottom = int(np.floor(min(bottom_vals))) - Config.CROP_MARGIN
-    left = int(np.ceil(max(left_vals))) + Config.CROP_MARGIN
-    right = int(np.floor(min(right_vals))) - Config.CROP_MARGIN
+    margin = Config.CROP_MARGIN + int(np.ceil(extra_margin_px))
+    top = int(np.ceil(max(top_vals))) + margin
+    bottom = int(np.floor(min(bottom_vals))) - margin
+    left = int(np.ceil(max(left_vals))) + margin
+    right = int(np.floor(min(right_vals))) - margin
     
     if top >= bottom or left >= right:
         return 0, H, 0, W
@@ -963,6 +1011,57 @@ def _filter_shift_outliers(
     return outlier_mask
 
 
+def _match_frame_stars(
+    lum: np.ndarray,
+    shift: Tuple[float, float],
+    transform,
+    ref_tree,
+    ref_xy: np.ndarray,
+    noise_val: float,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Warp ``lum`` into aligned space with the frame's shift/transform,
+    re-detect stars, and KDTree-match them to the reference catalog.
+
+    Shared by ``score_registration_residuals`` (RMS check) and
+    ``fit_displacement_field`` (elastic registration) so both spend exactly
+    one detect+match pass per frame instead of two.
+
+    Returns (ref_xy_matched, frame_xy_matched) — both (N, 2) arrays of matched
+    star pairs in (x, y) order — or None if fewer than 3 stars matched.
+    """
+    from src.quality import _sep_detect_stars, _detect_stars_multi_fwhm, _ensure_photutils
+
+    aligned_lum = ndimage.shift(
+        lum, shift=shift, order=1, mode='constant', cval=0.0
+    ) if transform is None else ndimage.affine_transform(
+        lum.astype(np.float64),
+        transform.params[:2, :2],
+        offset=-(transform.params[:2, :2] @ np.array([shift[0], shift[1]])),
+        order=1, mode='constant', cval=0.0
+    )
+    frame_stars = _sep_detect_stars(aligned_lum.astype(np.float32), noise_val)
+    if frame_stars is None or len(frame_stars) < 3:
+        _ensure_photutils()
+        from src.quality import DAOStarFinder
+        if DAOStarFinder is not None:
+            bg = float(np.median(aligned_lum))
+            std = max(noise_val, 1e-6)
+            frame_stars = _detect_stars_multi_fwhm(
+                aligned_lum - bg, threshold=5.0 * std
+            )
+    if frame_stars is None or len(frame_stars) < 3:
+        return None
+    frame_xy = np.array(
+        [(float(s['xcentroid']), float(s['ycentroid'])) for s in frame_stars],
+        dtype=np.float64
+    )
+    dists, idx = ref_tree.query(frame_xy, k=1, distance_upper_bound=10.0)
+    valid = np.isfinite(dists) & (dists < 10.0)
+    if valid.sum() < 3:
+        return None
+    return ref_xy[idx[valid]], frame_xy[valid]
+
+
 def score_registration_residuals(
     final: List[FrameInfo],
     shifts: List[Tuple[float, float]],
@@ -974,16 +1073,27 @@ def score_registration_residuals(
     best_lights_idx: int,
     max_residual_px: float = None,
     cached_lums: Optional[List[Optional[np.ndarray]]] = None,
-) -> Tuple[List[float], List[bool]]:
+    return_correspondences: bool = False,
+    force_full_check: bool = False,
+) -> Tuple[List[float], List[bool], Optional[List[Optional[Tuple[np.ndarray, np.ndarray]]]]]:
     """Post-registration centroid residual check.
 
     After registration, re-detects stars in each registered luminance frame
     and matches them to the reference star catalog.  Frames whose RMS centroid
     displacement exceeds ``max_residual_px`` are flagged as misaligned.
 
+    Args:
+        return_correspondences: also return the per-frame matched (ref_xy,
+            frame_xy) star pairs (needed by elastic registration's field fit).
+        force_full_check: check every frame instead of the risky/random sample
+            used for >25 frames (elastic registration needs a field for every
+            frame, not just the sampled RMS-check subset).
+
     Returns:
-        residuals   – per-frame RMS centroid displacement in pixels.
-        passed      – per-frame bool (True = within tolerance).
+        residuals       – per-frame RMS centroid displacement in pixels.
+        passed          – per-frame bool (True = within tolerance).
+        correspondences – per-frame (ref_xy, frame_xy) matched pairs, or None
+                          for frames with no match / when not requested.
     """
     from src.models import Config
     from src.quality import _sep_detect_stars, _detect_stars_multi_fwhm, _ensure_photutils
@@ -993,9 +1103,12 @@ def score_registration_residuals(
 
     residuals: List[float] = [0.0] * len(final)
     passed: List[bool] = [True] * len(final)
+    correspondences: Optional[List[Optional[Tuple[np.ndarray, np.ndarray]]]] = (
+        [None] * len(final) if return_correspondences else None
+    )
 
     if ref_stars is None or len(ref_stars) == 0:
-        return residuals, passed
+        return residuals, passed, correspondences
 
     try:
         ref_xy = np.array(
@@ -1003,55 +1116,33 @@ def score_registration_residuals(
             dtype=np.float64
         )
     except Exception:
-        return residuals, passed
+        return residuals, passed, correspondences
 
     from scipy.spatial import cKDTree
     ref_tree = cKDTree(ref_xy)
 
-    def _check_one(j: int, f: FrameInfo, orig_idx: int) -> Tuple[int, float, bool]:
+    def _check_one(j: int, f: FrameInfo, orig_idx: int) -> Tuple[int, float, bool, Optional[Tuple[np.ndarray, np.ndarray]]]:
         if orig_idx == best_lights_idx:
-            return j, 0.0, True
+            return j, 0.0, True, None
         try:
             if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
                 lum = np.asarray(cached_lums[orig_idx], dtype=np.float32)
             else:
                 lum = np.array(mem_lum[orig_idx], dtype=np.float32)
-            aligned_lum = ndimage.shift(
-                lum, shift=shifts[j], order=1, mode='constant', cval=0.0
-            ) if transforms[j] is None else ndimage.affine_transform(
-                lum.astype(np.float64),
-                transforms[j].params[:2, :2],
-                offset=-(transforms[j].params[:2, :2] @
-                         np.array([shifts[j][0], shifts[j][1]])),
-                order=1, mode='constant', cval=0.0
-            )
             noise_val = float(f.metrics.get('noise', 1.0)) if f.metrics else 1.0
-            frame_stars = _sep_detect_stars(aligned_lum.astype(np.float32), noise_val)
-            if frame_stars is None or len(frame_stars) < 3:
-                _ensure_photutils()
-                from src.quality import DAOStarFinder
-                if DAOStarFinder is not None:
-                    bg = float(np.median(aligned_lum))
-                    std = max(noise_val, 1e-6)
-                    frame_stars = _detect_stars_multi_fwhm(
-                        aligned_lum - bg, threshold=5.0 * std
-                    )
-            if frame_stars is None or len(frame_stars) < 3:
-                return j, 0.0, True
-            frame_xy = np.array(
-                [(float(s['xcentroid']), float(s['ycentroid'])) for s in frame_stars],
-                dtype=np.float64
-            )
-            dists, _ = ref_tree.query(frame_xy, k=1, distance_upper_bound=10.0)
-            valid = np.isfinite(dists) & (dists < 10.0)
-            if valid.sum() < 3:
-                return j, 0.0, True
-            rms = float(np.sqrt(np.mean(dists[valid] ** 2)))
-            return j, rms, rms <= max_residual_px
+            match = _match_frame_stars(lum, shifts[j], transforms[j], ref_tree,
+                                       ref_xy, noise_val)
+            if match is None:
+                return j, 0.0, True, None
+            matched_ref_xy, matched_frame_xy = match
+            dists = np.hypot(matched_ref_xy[:, 0] - matched_frame_xy[:, 0],
+                             matched_ref_xy[:, 1] - matched_frame_xy[:, 1])
+            rms = float(np.sqrt(np.mean(dists ** 2)))
+            return j, rms, rms <= max_residual_px, match
         except Exception as exc:
             _log.debug("Residual check failed for frame %s: %s",
                        os.path.basename(f.path), exc)
-            return j, 0.0, True
+            return j, 0.0, True, None
 
     # Sampled check: each frame costs a full-res warp + star detection, and
     # on a healthy run every frame passes. Check the riskiest frames (largest
@@ -1059,7 +1150,7 @@ def score_registration_residuals(
     # full set only if anything in the sample fails, so the safety net is
     # only paid for when registration actually went wrong.
     n_frames = len(final)
-    if n_frames > 25:
+    if n_frames > 25 and not force_full_check:
         mags = [float(np.hypot(s[0], s[1])) if s is not None else 0.0
                 for s in shifts]
         order = np.argsort(mags)[::-1]
@@ -1085,9 +1176,11 @@ def score_registration_residuals(
                     for j in indices}
             for fut in tqdm(as_completed(futs), total=len(indices),
                             desc=label, unit="frame"):
-                j, rms, ok = fut.result()
+                j, rms, ok, match = fut.result()
                 residuals[j] = rms
                 passed[j] = ok
+                if correspondences is not None:
+                    correspondences[j] = match
                 _done += 1
                 _wv.progress('Residual check', _done, len(indices))
 
@@ -1105,7 +1198,7 @@ def score_registration_residuals(
             f"exceeded {max_residual_px:.1f} px RMS threshold"
         )
 
-    return residuals, passed
+    return residuals, passed, correspondences
 
 
 def _patch_grid_geometry(H: int, W: int, grid_size: int = None) -> Tuple[int, int, int, int]:
@@ -1237,48 +1330,91 @@ def compute_patch_quality_map(lum: np.ndarray, grid_size: int = None) -> np.ndar
     return quality_map
 
 
-def compute_optical_flow_warp(ref_lum: np.ndarray, frame_lum: np.ndarray) -> Optional[np.ndarray]:
-    """Compute dense optical flow from frame_lum to ref_lum using Farneback method.
+def fit_displacement_field(ref_xy: np.ndarray, frame_xy: np.ndarray,
+                           H: int, W: int) -> Optional[np.ndarray]:
+    """Fit a smooth (Gc, Gc, 2) local displacement field (dy, dx) from sparse
+    matched-star correspondences.
 
-    Returns flow array (H, W, 2) or None if cv2 unavailable.
+    Reuses DBE's Gaussian-weighted local-linear regression + Tukey-biweight
+    IRLS kernel (``src.background``'s ``_dbe_fit_surface_numpy`` / the native
+    Rust ``dbe_fit_surface``), repurposed for two scalar channels (row/col
+    residual) instead of brightness. Calls the low-level kernel directly
+    rather than the ``_fit_background_surface`` wrapper: that wrapper forces a
+    full-resolution ``zoom`` output (this field stays coarse, sampled on
+    demand — same rationale as the ``quality_maps`` grids) and falls back to
+    an unbounded polynomial extrapolation below 6 samples, which is exactly
+    wrong for a displacement correction (an unbounded low-sample extrapolation
+    on a background *brightness* surface is a subtle blemish; on a pixel
+    *displacement* it can misregister the whole frame). ``ref_xy``/``frame_xy``
+    are (x, y) matched star pairs in the same aligned (reference) coordinate
+    space as returned by ``_match_frame_stars``.
+
+    Returns None below ``Config.LOCAL_WARP_MIN_STARS`` matches — caller must
+    fall back to the frame's existing unmodified affine/translation warp.
     """
-    try:
-        import cv2 as _cv2
-    except ImportError:
-        return None
-    try:
-        ref_u8 = np.clip(ref_lum / (ref_lum.max() + 1e-12) * 255, 0, 255).astype(np.uint8)
-        frm_u8 = np.clip(frame_lum / (frame_lum.max() + 1e-12) * 255, 0, 255).astype(np.uint8)
-        flow = _cv2.calcOpticalFlowFarneback(
-            frm_u8, ref_u8, None,
-            pyr_scale=0.5, levels=3, winsize=15,
-            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
-        return flow  # (H, W, 2): flow[y, x] = (dx, dy) displacement
-    except Exception:
+    n = len(ref_xy)
+    if n < Config.LOCAL_WARP_MIN_STARS:
         return None
 
-
-def apply_optical_flow_warp(img: np.ndarray, flow: np.ndarray) -> np.ndarray:
-    """Apply optical flow warp to image using cv2.remap."""
+    from src.background import _dbe_fit_surface_numpy
     try:
-        import cv2 as _cv2
-        H, W = img.shape[:2]
-        flow_map_x = (np.arange(W, dtype=np.float32)[np.newaxis, :]
-                      + flow[:, :, 0]).astype(np.float32)
-        flow_map_y = (np.arange(H, dtype=np.float32)[:, np.newaxis]
-                      + flow[:, :, 1]).astype(np.float32)
-        if img.ndim == 3:
-            result = np.stack([
-                _cv2.remap(img[:, :, c], flow_map_x, flow_map_y,
-                           _cv2.INTER_CUBIC, borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
-                for c in range(img.shape[2])
-            ], axis=2)
-        else:
-            result = _cv2.remap(img, flow_map_x, flow_map_y,
-                                _cv2.INTER_CUBIC, borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
-        return result.astype(img.dtype)
+        import astro_native as _dbe_native
+        has_dbe_native = hasattr(_dbe_native, 'dbe_fit_surface')
     except Exception:
-        return img
+        _dbe_native = None
+        has_dbe_native = False
+
+    # coords[:,0] = row fraction (y/H), coords[:,1] = col fraction (x/W) --
+    # matches _dbe_fit_surface_numpy's own convention (background.py:958-959).
+    coords = np.column_stack([ref_xy[:, 1] / H, ref_xy[:, 0] / W])
+    dy = ref_xy[:, 1] - frame_xy[:, 1]
+    dx = ref_xy[:, 0] - frame_xy[:, 0]
+
+    Gc = Config.LOCAL_WARP_GRID_SIZE
+    sigma_px = Config.LOCAL_WARP_BANDWIDTH_FRAC * min(H, W)
+    tukey_c = 4.685 * (Config.LOCAL_WARP_OUTLIER_SIGMA / 2.5)
+    iters = Config.LOCAL_WARP_OUTLIER_ITERS
+
+    def _fit(values: np.ndarray) -> np.ndarray:
+        coarse = None
+        if has_dbe_native:
+            try:
+                coarse, _ = _dbe_native.dbe_fit_surface(
+                    np.ascontiguousarray(coords, dtype=np.float64),
+                    np.ascontiguousarray(values, dtype=np.float64),
+                    float(H), float(W), Gc, Gc, float(sigma_px),
+                    float(tukey_c), int(iters))
+            except Exception:
+                coarse = None
+        if coarse is None:
+            coarse, _ = _dbe_fit_surface_numpy(
+                coords, values, float(H), float(W), Gc, Gc, float(sigma_px),
+                tukey_c=tukey_c, irls_iters=iters)
+        return coarse
+
+    field_y = _fit(dy)
+    field_x = _fit(dx)
+    field = np.stack([field_y, field_x], axis=-1).astype(np.float32)
+
+    mag = np.hypot(field[..., 0], field[..., 1])
+    clamp = Config.LOCAL_WARP_MAX_DISPLACEMENT_PX
+    scale = np.minimum(1.0, clamp / np.maximum(mag, 1e-9))
+    field *= scale[..., None]
+    return field
+
+
+def sample_displacement_field(field: np.ndarray, H: int, W: int,
+                              y: np.ndarray, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Bilinearly sample a coarse (Gc, Gc, 2) displacement field at full-res
+    reference-space coordinates ``(y, x)`` (may be a dense meshgrid or
+    fractional drizzle-space coordinates). Returns (dy, dx) matching the
+    input arrays' shape."""
+    Gc = field.shape[0]
+    gi = np.clip(np.asarray(y, dtype=np.float64) / max(H - 1, 1) * (Gc - 1), 0, Gc - 1)
+    gj = np.clip(np.asarray(x, dtype=np.float64) / max(W - 1, 1) * (Gc - 1), 0, Gc - 1)
+    dy = ndimage.map_coordinates(field[..., 0], [gi, gj], order=1, mode='nearest')
+    dx = ndimage.map_coordinates(field[..., 1], [gi, gj], order=1, mode='nearest')
+    return dy, dx
 
 
 _REG_STEP_LABELS = {
@@ -1286,7 +1422,7 @@ _REG_STEP_LABELS = {
     'shift_calculation': 'Shift calculation (phase-corr/RANSAC, all frames)',
     'residual_check': 'Post-registration residual check',
     'patch_quality_maps': 'Patch quality maps (--patch-registration)',
-    'optical_flow': 'Optical flow (--optical-flow)',
+    'displacement_fields': 'Local displacement fields (--elastic-registration)',
 }
 
 
@@ -1600,21 +1736,33 @@ def run_registration_phase(
 
     # Post-registration centroid residual check: verify alignment quality by
     # re-detecting stars in each registered frame and measuring RMS star position error.
-    if (not getattr(args, 'no_reg_residual_check', False)
+    # Elastic registration reuses this same detect+match pass for its field fit,
+    # forcing it to run (full coverage, not the sampled subset) even if the
+    # RMS-reject gate itself was disabled via --no-reg-residual-check.
+    elastic_on = getattr(args, 'elastic_registration', False) and not args.no_registration
+    correspondences: Optional[List[Optional[Tuple[np.ndarray, np.ndarray]]]] = None
+    if ((not getattr(args, 'no_reg_residual_check', False) or elastic_on)
             and ref_stars is not None
             and len(ref_stars) >= 5
             and not args.no_registration):
+        if elastic_on and getattr(args, 'no_reg_residual_check', False):
+            safe_print("  --elastic-registration needs the residual-check star match "
+                       "pass; running it despite --no-reg-residual-check "
+                       "(RMS-reject gate stays disabled)")
         safe_print(f"  Post-registration residual check ({len(final)} frames)...")
-        residuals, res_passed = score_registration_residuals(
+        residuals, res_passed, correspondences = score_registration_residuals(
             final, shifts, transforms, ref_lum, ref_stars,
             mem_lum, final_indices, best_idx,
             cached_lums=cached_lums,
+            return_correspondences=elastic_on,
+            force_full_check=elastic_on,
         )
         n_res_failed = sum(1 for p in res_passed if not p)
         for j, (f, passed, rms) in enumerate(zip(final, res_passed, residuals)):
             if f.metrics is not None:
                 f.metrics['reg_residual_px'] = round(rms, 3)
-        if n_res_failed > 0 and getattr(args, 'reg_residual_reject', False):
+        if (n_res_failed > 0 and not getattr(args, 'no_reg_residual_check', False)
+                and getattr(args, 'reg_residual_reject', False)):
             rejected_by_residual = [j for j, p in enumerate(res_passed) if not p]
             safe_print(
                 f"  Residual rejection (--reg-residual-reject): "
@@ -1625,8 +1773,33 @@ def run_registration_phase(
             final_indices = [i for i, k in zip(final_indices, keep_mask) if k]
             shifts = [s for s, k in zip(shifts, keep_mask) if k]
             transforms = [t for t, k in zip(transforms, keep_mask) if k]
+            if correspondences is not None:
+                correspondences = [c for c, k in zip(correspondences, keep_mask) if k]
 
     _reg_timings['residual_check'], _t = time.time() - _t, time.time()
+
+    # Elastic (non-rigid) local displacement fields, fit from the matched-star
+    # residuals collected above. Frames with too few matched stars fall back
+    # to unmodified affine-only warping (None field).
+    displacement_fields: Optional[List[Optional[np.ndarray]]] = None
+    if elastic_on and correspondences is not None:
+        safe_print(f"  Fitting local displacement fields ({len(final)} frames)...")
+        displacement_fields = []
+        n_fit = 0
+        for j in range(len(final)):
+            corr = correspondences[j]
+            if corr is None:
+                displacement_fields.append(None)
+                continue
+            ref_m, frame_m = corr
+            field = fit_displacement_field(ref_m, frame_m, H, W)
+            displacement_fields.append(field)
+            if field is not None:
+                n_fit += 1
+        safe_print(f"  Local displacement fields: {n_fit}/{len(final)} frames "
+                   f"(others fall back to affine-only: too few matched stars)")
+
+    _reg_timings['displacement_fields'], _t = time.time() - _t, time.time()
 
     # Patch quality maps for per-pixel lucky-imaging weighted stacking.
     quality_maps: Optional[List[np.ndarray]] = None
@@ -1687,54 +1860,13 @@ def run_registration_phase(
         else:
             safe_print(f"  Patch quality maps computed.")
 
-    _reg_timings['patch_quality_maps'], _t = time.time() - _t, time.time()
-
-    # Optional per-frame optical flow local warp correction
-    flow_fields: Optional[List[Optional[np.ndarray]]] = None
-    if getattr(args, 'optical_flow', False) and not args.no_registration:
-        try:
-            import cv2 as _cv2_check  # noqa: F401
-            safe_print(f"  Computing optical flow fields ({len(final)} frames)...")
-            flow_fields = []
-            for j, orig_idx in enumerate(final_indices):
-                if orig_idx == best_idx:
-                    flow_fields.append(None)
-                    continue
-                try:
-                    lum = (cached_lums[orig_idx] if cached_lums is not None
-                           and orig_idx < len(cached_lums)
-                           and cached_lums[orig_idx] is not None
-                           else np.array(mem_lum[orig_idx]))
-                    lum = np.asarray(lum, dtype=np.float32)
-                    # Pre-apply shift/transform to bring lum into alignment space
-                    if transforms[j] is not None:
-                        from scipy.ndimage import affine_transform as _aff2
-                        tfm = transforms[j]
-                        R = tfm.params[:2, :2]
-                        t_xy = tfm.params[:2, 2]
-                        t_rc = np.array([t_xy[1], t_xy[0]])
-                        off = -R @ t_rc
-                        lum = _aff2(lum.astype(np.float64), R, offset=off,
-                                    order=1, mode='constant', cval=0.0).astype(np.float32)
-                    elif shifts[j] and shifts[j] != (0.0, 0.0):
-                        lum = ndimage.shift(lum, shift=shifts[j], order=1,
-                                            mode='constant', cval=0.0)
-                    flow = compute_optical_flow_warp(ref_lum, lum)
-                    flow_fields.append(flow)
-                except Exception:
-                    flow_fields.append(None)
-            safe_print(f"  Optical flow fields computed.")
-        except ImportError:
-            safe_print("  WARNING: --optical-flow requires OpenCV (cv2) — skipping")
-            flow_fields = None
-
-    _reg_timings['optical_flow'] = time.time() - _t
+    _reg_timings['patch_quality_maps'] = time.time() - _t
     _print_registration_breakdown(_reg_timings)
 
     dither_info = detect_dither(shifts, verbose=False)
     dither_info['quality_maps'] = quality_maps  # carry through to stacking
-    if flow_fields is not None:
-        dither_info['flow_fields'] = flow_fields
+    if displacement_fields is not None:
+        dither_info['displacement_fields'] = displacement_fields
     if not args.no_registration and len(shifts) > 2:
         labels = {'dithered': 'Dithered (random offsets)',
                   'tracking_drift': 'Tracking drift (systematic trend)',

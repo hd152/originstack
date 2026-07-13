@@ -62,6 +62,7 @@ def _make_minimal_args(**overrides) -> argparse.Namespace:
         weight_noise=False,
         drizzle_scale=1.0,
         drizzle_pixfrac=1.0,
+        elastic_registration=False,
         # Phase 4 post-processing  — disable everything for speed
         skip_step=[
             'hot_pixel', 'background', 'chroma_nr', 'sky_floor',
@@ -216,6 +217,86 @@ def _create_synthetic_dataset(tmpdir: str,
         'H': H,
         'W': W,
     }
+
+
+def _make_synthetic_bayer_piecewise(shape, base_cy, base_cx,
+                                    group_a_offset=(0.0, 0.0),
+                                    group_b_offset=(0.0, 0.0),
+                                    amp=4000.0, bg=200.0, noise_sigma=6.0,
+                                    rng: np.random.Generator | None = None) -> np.ndarray:
+    """Synthetic Bayer frame with two independently-offsettable star groups
+    (left half / right half of the frame). A single global affine/translation
+    transform cannot null both groups' residuals simultaneously when their
+    offsets differ -- this is what elastic (non-rigid) registration exists
+    to correct. 16 stars total, well above LOCAL_WARP_MIN_STARS."""
+    if rng is None:
+        rng = np.random.default_rng(0)
+    H, W = shape
+    yy, xx = np.indices(shape)
+    raw = np.zeros(shape, dtype=np.float32)
+    raw[0::2, 0::2] = bg * 1.0
+    raw[0::2, 1::2] = bg * 1.3
+    raw[1::2, 0::2] = bg * 1.3
+    raw[1::2, 1::2] = bg * 0.7
+
+    group_a_base = [(-80, -80), (-80, -20), (80, -80), (80, -20),
+                    (-20, -60), (20, -60), (0, -100), (-40, -40)]
+    group_b_base = [(-80, 20), (-80, 80), (80, 20), (80, 80),
+                    (-20, 60), (20, 60), (0, 100), (40, 40)]
+
+    for base, offset in ((group_a_base, group_a_offset), (group_b_base, group_b_offset)):
+        for dy, dx in base:
+            cy = base_cy + dy + offset[0]
+            cx = base_cx + dx + offset[1]
+            raw += (amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2)
+                                  / (2 * 3.0 ** 2))).astype(np.float32)
+
+    raw += rng.normal(0.0, noise_sigma, shape).astype(np.float32)
+    return np.clip(raw, 0.0, None)
+
+
+def _create_piecewise_dataset(tmpdir: str, n_lights: int = 8) -> dict:
+    """Write a synthetic dataset where each frame's two star groups carry a
+    different (alternating-sign) residual offset -- a genuinely non-rigid
+    distortion no single per-frame affine transform can correct for both
+    groups at once."""
+    H, W = 256, 256
+    rng = np.random.default_rng(7)
+
+    dark_files = []
+    for i in range(3):
+        d = rng.normal(50.0, 1.5, (H, W)).astype(np.float32)
+        p = os.path.join(tmpdir, f'pw_dark_{i:03d}.fits')
+        _write_fits(p, d, {'EXPTIME': 120.0, 'ISOSPEED': 800})
+        dark_files.append(p)
+
+    flat_files = []
+    for i in range(2):
+        f = np.ones((H, W), dtype=np.float32) * 8000.0
+        yy, xx = np.indices((H, W))
+        r = np.sqrt((yy - H // 2) ** 2 + (xx - W // 2) ** 2)
+        f *= np.clip(1.0 - 0.0002 * r, 0.85, 1.0)
+        p = os.path.join(tmpdir, f'pw_flat_{i:03d}.fits')
+        _write_fits(p, f, {'EXPTIME': 0.5})
+        flat_files.append(p)
+
+    shifts_yx = [(0, 0), (2, -1), (-1, 2), (1, 1),
+                (-2, -1), (2, 1), (-1, -2), (1, -1)][:n_lights]
+    light_files = []
+    for i, (dy, dx) in enumerate(shifts_yx):
+        sign = 1.0 if i % 2 == 0 else -1.0
+        group_a_offset = (1.5 * sign, 1.5 * sign)
+        group_b_offset = (-1.5 * sign, -1.5 * sign)
+        raw = _make_synthetic_bayer_piecewise(
+            shape=(H, W), base_cy=H // 2 + dy, base_cx=W // 2 + dx,
+            group_a_offset=group_a_offset, group_b_offset=group_b_offset,
+            rng=rng,
+        )
+        p = os.path.join(tmpdir, f'pw_light_{i:03d}.fits')
+        _write_fits(p, raw, {'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800})
+        light_files.append(p)
+
+    return {'dark': dark_files, 'flat': flat_files, 'light': light_files, 'H': H, 'W': W}
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +663,99 @@ class TestE2EDrizzlePixfrac(unittest.TestCase):
             self.assertGreater(holes_shrunk, holes_full,
                                f"Small pixfrac ({holes_shrunk:.3f} zero-frac) should leave "
                                f"more holes than pixfrac=1 ({holes_full:.3f} zero-frac)")
+
+
+class TestE2EElasticRegistration(unittest.TestCase):
+    """--elastic-registration must correct a genuinely non-rigid distortion
+    (two star groups with different residual offsets per frame) that a
+    single global affine/translation transform can't null for both groups
+    at once -- and must survive --drizzle-scale > 1, unlike the old
+    --optical-flow feature it replaces (silently dropped under drizzle)."""
+
+    def _run(self, tmpdir: str, paths: dict, **overrides) -> np.ndarray:
+        from src.io_fits import make_master
+        from src.models import FrameInfo, ProcessingStats
+        from src.pipeline import stack_target
+
+        light_frames = [
+            FrameInfo(path=p, type='light',
+                      header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800,
+                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
+            for p in paths['light']
+        ]
+        dark_frames = [
+            FrameInfo(path=p, type='dark',
+                      header={'EXPTIME': 120.0, 'ISOSPEED': 800,
+                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
+            for p in paths['dark']
+        ]
+        flat_frames = [
+            FrameInfo(path=p, type='flat',
+                      header={'EXPTIME': 0.5, 'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
+            for p in paths['flat']
+        ]
+        masters = {
+            'dark': make_master(dark_frames, method='median'),
+            'flat': make_master(flat_frames, method='median'),
+            'bias': None,
+            'dark_exptime': 120.0,
+        }
+        suffix = 'on' if overrides.get('elastic_registration') else 'off'
+        suffix += f"_dz{overrides.get('drizzle_scale', 1.0)}"
+        output_path = os.path.join(tmpdir, f'stacked_elastic_{suffix}.fits')
+        args = _make_minimal_args(stack_method='mean', **overrides)
+        stack_target(light_frames, output_path, args, masters, ProcessingStats())
+        if not os.path.exists(output_path):
+            self.skipTest("Output file not produced")
+        with fits.open(output_path, memmap=False) as hdul:
+            data = hdul[0].data.copy().astype(np.float64)
+        return np.transpose(data, (1, 2, 0)) if data.shape[0] == 3 else data
+
+    @staticmethod
+    def _group_peaks(img: np.ndarray) -> tuple[float, float]:
+        lum = img.mean(axis=2) if img.ndim == 3 else img
+        w = lum.shape[1]
+        return float(lum[:, :w // 2].max()), float(lum[:, w // 2:].max())
+
+    def test_elastic_registration_changes_output(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            paths = _create_piecewise_dataset(tmpdir, n_lights=8)
+            off = self._run(tmpdir, paths, elastic_registration=False)
+            on = self._run(tmpdir, paths, elastic_registration=True)
+            # A fitted field adds crop margin (calc_common_crop's
+            # extra_margin_px), so the two outputs are usually different
+            # shapes too -- that alone already proves the flag did something.
+            changed = off.shape != on.shape or not np.allclose(off, on, atol=1e-6)
+            self.assertTrue(changed, "--elastic-registration had no effect on the output")
+
+    def test_elastic_registration_sharpens_both_groups(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            paths = _create_piecewise_dataset(tmpdir, n_lights=8)
+            off = self._run(tmpdir, paths, elastic_registration=False)
+            on = self._run(tmpdir, paths, elastic_registration=True)
+            peak_a_off, peak_b_off = self._group_peaks(off)
+            peak_a_on, peak_b_on = self._group_peaks(on)
+            # A misaligned (smeared) star has a lower peak than a sharp one;
+            # neither group should get measurably worse, and at least one
+            # (both groups carry an equal-and-opposite offset, so a global
+            # affine/translation can at best split the difference) should
+            # measurably improve.
+            self.assertGreaterEqual(peak_a_on, peak_a_off * 0.95)
+            self.assertGreaterEqual(peak_b_on, peak_b_off * 0.95)
+            self.assertTrue(peak_a_on > peak_a_off * 1.02 or peak_b_on > peak_b_off * 1.02,
+                            f"Neither group sharpened: A {peak_a_off:.1f}->{peak_a_on:.1f}, "
+                            f"B {peak_b_off:.1f}->{peak_b_on:.1f}")
+
+    def test_elastic_registration_survives_drizzle(self):
+        """Unlike the old --optical-flow feature (silently dropped under any
+        --drizzle-scale > 1), elastic correction must still take effect."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            paths = _create_piecewise_dataset(tmpdir, n_lights=8)
+            off = self._run(tmpdir, paths, elastic_registration=False, drizzle_scale=2.0)
+            on = self._run(tmpdir, paths, elastic_registration=True, drizzle_scale=2.0)
+            changed = off.shape != on.shape or not np.allclose(off, on, atol=1e-6)
+            self.assertTrue(changed,
+                            "--elastic-registration had no effect under --drizzle-scale 2.0")
 
 
 if __name__ == '__main__':

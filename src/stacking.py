@@ -1158,14 +1158,14 @@ def run_stacking_phase(
     args: argparse.Namespace,
     stats: ProcessingStats,
     quality_maps: Optional[List[np.ndarray]] = None,
-    flow_fields: Optional[List[Optional[Any]]] = None,
+    displacement_fields: Optional[List[Optional[np.ndarray]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
     """Align and combine frames into a stacked image.
 
     Returns (stacked, fits_stacked, top, bottom, left, right).
     fits_stacked is the pre-post-processing copy saved in the FITS file.
     """
-    from src.registration import apply_transform, calc_common_crop
+    from src.registration import apply_transform, calc_common_crop, sample_displacement_field
 
     n_final = len(final)
     print(f"  Method: {args.stack_method}")
@@ -1211,7 +1211,12 @@ def run_stacking_phase(
         print(f"  Quality weights: min={weights.min():.3f}, max={weights.max():.3f}, "
               f"mean={weights.mean():.3f} (sqrt-compressed)")
 
-    top, bottom, left, right = calc_common_crop(shifts, (H, W), transforms=transforms)
+    extra_margin_px = 0.0
+    if displacement_fields is not None:
+        mags = [float(np.abs(f).max()) for f in displacement_fields if f is not None]
+        extra_margin_px = max(mags) if mags else 0.0
+    top, bottom, left, right = calc_common_crop(shifts, (H, W), transforms=transforms,
+                                                extra_margin_px=extra_margin_px)
     stats.output_shape = (bottom - top, right - left)
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
@@ -1230,13 +1235,11 @@ def run_stacking_phase(
         def _align_one(j):
             with gpu.stream_context():
                 rgb = np.array(mem_rgb[final_indices[j]])
-                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j])
-                if flow_fields is not None and j < len(flow_fields) and flow_fields[j] is not None:
-                    try:
-                        from src.registration import apply_optical_flow_warp
-                        aligned = apply_optical_flow_warp(aligned, flow_fields[j])
-                    except Exception:
-                        pass
+                lf = (displacement_fields[j]
+                      if displacement_fields is not None and j < len(displacement_fields)
+                      else None)
+                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j],
+                                         local_field=lf)
                 mem_aligned[j] = aligned[top:bottom, left:right, :]
 
         n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
@@ -1389,7 +1392,8 @@ def run_stacking_phase(
             acc = np.zeros((out_h, out_w, C), dtype=np.float64)
             gpu = get_gpu()
 
-            if use_pixfrac:
+            use_elastic = displacement_fields is not None
+            if use_pixfrac or use_elastic:
                 # Tent-kernel footprint shrink (classic drizzle pixfrac): each
                 # input pixel's contribution falls off toward the edge of its
                 # shrunken footprint instead of covering the whole output cell
@@ -1400,7 +1404,8 @@ def run_stacking_phase(
                 _grid_oy, _grid_ox = np.meshgrid(
                     np.arange(out_h, dtype=np.float64),
                     np.arange(out_w, dtype=np.float64), indexing='ij')
-                weight_map = np.zeros((out_h, out_w, 1), dtype=np.float64)
+                if use_pixfrac:
+                    weight_map = np.zeros((out_h, out_w, 1), dtype=np.float64)
             spline_order = 5
             inv_scale = 1.0 / drizzle_scale
 
@@ -1429,6 +1434,8 @@ def run_stacking_phase(
                 w = float(weights[j])
                 shift_j = shifts[j]
                 transform_j = transforms[j]
+                lf = (displacement_fields[j]
+                      if use_elastic and j < len(displacement_fields) else None)
 
                 crop_offset = np.array([float(top), float(left)])
 
@@ -1447,35 +1454,59 @@ def run_stacking_phase(
                     M = np.array([[inv_scale, 0.0], [0.0, inv_scale]])
                     off = crop_offset - np.array([sy, sx])
 
-                resampled = None
-                if HAS_NATIVE:
-                    # Rust Lanczos-3 warp: all channels in one pass; the
-                    # no-rotation case (diagonal M) takes its separable fast
-                    # path. True Lanczos-3 vs the quintic-spline
-                    # approximation of the scipy fallback.
-                    try:
-                        resampled = _native.warp_affine_lanczos3(
-                            np.ascontiguousarray(rgb, dtype=np.float32),
-                            [float(M[0, 0]), float(M[0, 1]),
-                             float(M[1, 0]), float(M[1, 1])],
-                            [float(off[0]), float(off[1])],
-                            int(out_h), int(out_w), 0.0)
-                    except Exception:
-                        resampled = None
-                if resampled is None:
+                raw_y = raw_x = None
+                if lf is not None:
+                    # Elastic correction: bypass the native/scipy affine fast
+                    # path (matrix+offset only) for a per-pixel coordinate
+                    # grid instead -- sample the field at reference-space
+                    # (pre-crop, pre-upscale) coordinates, then subtract the
+                    # rotated displacement from the affine source coordinate
+                    # (same composition as apply_transform's local_field).
+                    raw_y = M[0, 0] * _grid_oy + M[0, 1] * _grid_ox + off[0]
+                    raw_x = M[1, 0] * _grid_oy + M[1, 1] * _grid_ox + off[1]
+                    aligned_y = _grid_oy * inv_scale + top
+                    aligned_x = _grid_ox * inv_scale + left
+                    dy, dx = sample_displacement_field(lf, H, W, aligned_y, aligned_x)
+                    R_ = transform_j.params[:2, :2] if transform_j is not None else np.eye(2)
+                    raw_y = raw_y - (R_[0, 0] * dy + R_[0, 1] * dx)
+                    raw_x = raw_x - (R_[1, 0] * dy + R_[1, 1] * dx)
                     resampled = np.empty((out_h, out_w, C), dtype=np.float32)
                     for c in range(C):
-                        resampled[:, :, c] = ndimage.affine_transform(
-                            rgb[:, :, c], M, offset=off,
-                            output_shape=(out_h, out_w),
-                            order=spline_order, mode='constant', cval=0.0)
+                        resampled[:, :, c] = ndimage.map_coordinates(
+                            rgb[:, :, c], [raw_y, raw_x], order=spline_order,
+                            mode='constant', cval=0.0)
+                else:
+                    resampled = None
+                    if HAS_NATIVE:
+                        # Rust Lanczos-3 warp: all channels in one pass; the
+                        # no-rotation case (diagonal M) takes its separable fast
+                        # path. True Lanczos-3 vs the quintic-spline
+                        # approximation of the scipy fallback.
+                        try:
+                            resampled = _native.warp_affine_lanczos3(
+                                np.ascontiguousarray(rgb, dtype=np.float32),
+                                [float(M[0, 0]), float(M[0, 1]),
+                                 float(M[1, 0]), float(M[1, 1])],
+                                [float(off[0]), float(off[1])],
+                                int(out_h), int(out_w), 0.0)
+                        except Exception:
+                            resampled = None
+                    if resampled is None:
+                        resampled = np.empty((out_h, out_w, C), dtype=np.float32)
+                        for c in range(C):
+                            resampled[:, :, c] = ndimage.affine_transform(
+                                rgb[:, :, c], M, offset=off,
+                                output_shape=(out_h, out_w),
+                                order=spline_order, mode='constant', cval=0.0)
 
                 if use_pixfrac:
                     # Map each output pixel back to the raw frame with the
-                    # same M/off used for the resample, then weight it by
+                    # same M/off used for the resample (or the elastic-
+                    # corrected raw_y/raw_x above, if set), then weight it by
                     # how close it falls to the shrunken input-pixel footprint.
-                    raw_y = M[0, 0] * _grid_oy + M[0, 1] * _grid_ox + off[0]
-                    raw_x = M[1, 0] * _grid_oy + M[1, 1] * _grid_ox + off[1]
+                    if raw_y is None:
+                        raw_y = M[0, 0] * _grid_oy + M[0, 1] * _grid_ox + off[0]
+                        raw_x = M[1, 0] * _grid_oy + M[1, 1] * _grid_ox + off[1]
                     frac_y = np.abs(raw_y - np.round(raw_y))
                     frac_x = np.abs(raw_x - np.round(raw_x))
                     w_y = np.maximum(0.0, 1.0 - frac_y / half_drop)
@@ -1538,8 +1569,11 @@ def run_stacking_phase(
             def _align_crop(j):
                 with gpu.stream_context():
                     rgb = np.array(mem_rgb[final_indices[j]])
-                    return j, apply_transform(rgb, shift=shifts[j],
-                                             transform=transforms[j])[top:bottom, left:right, :]
+                    lf = (displacement_fields[j]
+                          if displacement_fields is not None and j < len(displacement_fields)
+                          else None)
+                    return j, apply_transform(rgb, shift=shifts[j], transform=transforms[j],
+                                             local_field=lf)[top:bottom, left:right, :]
 
             n_workers = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                                   Config.GPU_VRAM_RESERVE_MB), n_final)

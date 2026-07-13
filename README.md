@@ -151,6 +151,7 @@ SUMMARY
 - Crops to the valid common region across all frames (no black borders)
 - Sampled post-registration residual verification, escalating to all frames on failure; frames whose measured alignment error still exceeds threshold are dropped by default (`--no-reg-residual-reject` to keep them)
 - The affine fit itself is sanity-checked (shift/rotation bounds) before use, falling back to translation-only registration on a bad RANSAC match instead of applying it uncorrected
+- **Elastic (non-rigid) local registration** (`--elastic-registration`, off by default) — fits a smooth per-frame local displacement field from matched-star residuals, correcting spatially-varying distortion (differential atmospheric refraction, field rotation, tube flexure) a single global affine can't. Composed into the same single resample pass as the affine warp (no extra blur pass), and works under `--drizzle-scale` too
 
 ### Stacking Methods (7)
 | Method | Best For |
@@ -607,6 +608,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Cosmic ray rejection | auto | `--cosmic-ray-rejection` / `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |
 | Quality filtering | ✅ on | `--no-quality-filter` |
 | Affine registration | ✅ on | `--no-affine` |
+| Elastic local registration | ⬜ off | `--elastic-registration` |
 | Primary denoiser choice | wavelet | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,none}` |
 | Deconvolution | ❌ off | `--deconvolve {rl,tv}` |
 
@@ -630,6 +632,7 @@ python astro_stack.py -d <dir> -o <output.fits> [options]
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
 | `--bg-method METHOD` | Background extraction (dbe, mesh, graxpert) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
+| `--elastic-registration` | Local (non-rigid) displacement correction on top of the global affine (off by default) |
 | `--denoiser NAME` | Primary luma denoiser (wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, none) |
 | `--deconvolve {off,rl,tv}` | Richardson-Lucy or TV-regularised deconvolution |
 | `--plate-solve` | Plate solve via astrometry.net (requires astroquery + API key) |

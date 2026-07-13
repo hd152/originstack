@@ -911,6 +911,19 @@ def parse_args():
     g_stack.add_argument('--no-reg-residual-check', action='store_true',
                    help='Skip the post-registration residual check entirely (no '
                         'diagnostic, no rejection) -- faster but no safety net')
+    g_stack.add_argument('--elastic-registration', action='store_true',
+                   help='Fit a smooth per-frame local (non-rigid) displacement field '
+                        'from matched-star residuals after global affine registration, '
+                        'correcting spatially-varying distortion (differential '
+                        'atmospheric refraction, field rotation across the frame, tube '
+                        'flexure) that a single affine transform per frame cannot fix. '
+                        'Composed into the same single resampling pass as the affine '
+                        'warp (no extra blur pass), and honoured by both plain and '
+                        '--drizzle-scale stacking. Requires >= %d matched stars per '
+                        'frame (falls back to affine-only otherwise) and clamps the '
+                        'fitted displacement to %.1fpx. Off by default -- opt-in, '
+                        'higher-risk correction.' % (Config.LOCAL_WARP_MIN_STARS,
+                                                      Config.LOCAL_WARP_MAX_DISPLACEMENT_PX))
     g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -1213,7 +1226,6 @@ def parse_args():
         trim_low=0.2,
         trim_high=0.2,
         drizzle_pixfrac=1.0,
-        optical_flow=False,
         halo_removal=False,
     )
     args = p.parse_args()

@@ -22,7 +22,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/psf_deconvolution.py` | ~215 | PSF estimation (Moffat/Gaussian), Richardson-Lucy |
 | `src/background.py` | ~1100 | DBE (robust local regression, Rust-accelerated), mesh-based sky extraction, floor normalisation |
 | `src/denoising.py` | ~895 | Wavelet (BayesShrink), bilateral, NLM, MMT, ACDNR, GHS/arcsinh stretch |
-| `src/registration.py` | ~685 | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase` |
+| `src/registration.py` | ~685 | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase`, `fit_displacement_field` (`--elastic-registration`) |
 | `src/stacking.py` | ~770 | Sigma-clip, percentile, ESD, drizzle, Lanczos, `run_stacking_phase` |
 | `src/plate_solve.py` | ~160 | Astrometry.net + ASTAP + SIMBAD identification |
 | `src/pipeline.py` | ~265 | Four-phase orchestrator, `stack_target` |
@@ -184,6 +184,7 @@ The post-registration residual check verifies alignment on the riskiest ~20% of 
 - Shifts > 10% of image dimension are rejected as unrealistic (translation fallback path)
 - The affine fit is independently sanity-checked (shift > 10% of frame size, or rotation > `Config.AFFINE_MAX_ROTATION_DEG` = 5deg) before being accepted; a bad RANSAC star match can converge on a wildly wrong but internally-consistent transform, so this can't be caught by the translation-only guard. Falls back to translation-only registration on failure.
 - Post-registration residual check re-detects stars in each aligned frame and measures RMS centroid error (sampled ~20% + riskiest-by-shift frames, escalating to all frames if any sample fails). Frames exceeding `Config.REG_RESIDUAL_MAX_PX` (1.5px) are dropped from the stack by default -- `--no-reg-residual-reject` to keep them (still annotated via `reg_residual_px` in metrics); `--no-reg-residual-check` skips the check entirely.
+- Optional elastic (non-rigid) local correction extends this further — see feature 32 below.
 - Dither pattern detection → auto-selects sigma-clip stacking method
 
 ### 10. Anti-Black-Border Cropping
@@ -381,6 +382,17 @@ for galaxy targets).
 
 Heuristic target classifier — analyses frame metrics (star count, brightness distribution, contrast) and automatically applies optimised parameter sets for the detected target type. No external dependencies or API keys required. Any explicit CLI flag you pass overrides the value the advisor would have picked.
 
+### 32. Elastic (Non-Rigid) Local Registration (`--elastic-registration`)
+
+Corrects spatially-varying distortion a single global affine per frame can't fix — differential atmospheric refraction, field rotation across the frame, tube flexure. Replaces an earlier `--optical-flow` feature that was architecturally broken (dense Farneback optical flow on empty sky, a second separate `cv2.remap` pass that compounded blur instead of composing with the affine warp, and silently dropped under `--drizzle-scale > 1`/`--stack-method mean`) and was never wired up as a real CLI flag, documented, or tested.
+
+- Reuses star catalogues already computed in Phase 1 and the post-registration residual check's star-matching to get per-frame matched (reference, aligned) star correspondences.
+- Fits a smooth per-frame local displacement field (dy, dx) from those sparse correspondences via DBE's Gaussian-weighted local-linear regression + Tukey-biweight IRLS kernel (`src/background.py`, already Rust-accelerated and parity-tested), repurposed for a 2-channel displacement instead of a scalar brightness surface. Stored as a small coarse grid, sampled on demand — never materialised at full resolution.
+- Composed into the *same* single resampling pass as the affine warp (`apply_transform`'s `local_field` parameter: source coordinate = affine source coordinate minus the rotated sampled displacement, one `map_coordinates` call) rather than a second warp — this is the fix for the old feature's double-warp blur.
+- Works under `--drizzle-scale > 1` too (`_drizzle_one` subtracts the sampled field from its per-output-pixel coordinate mapping) — unlike the old feature, which silently dropped correction there.
+- Falls back to the frame's existing unmodified affine/translation warp when fewer than `Config.LOCAL_WARP_MIN_STARS` (12) stars matched. Fitted displacement clamped to `Config.LOCAL_WARP_MAX_DISPLACEMENT_PX` (8px), which also expands `calc_common_crop`'s safety margin by the actual observed max fitted magnitude.
+- Off by default (opt-in, higher-risk correction; not auto-enabled by `--auto`). Forces the residual-check star-match pass to run even under `--no-reg-residual-check` (needs the correspondences; the RMS-reject gate itself stays off).
+
 ---
 
 ## Complete CLI Reference
@@ -433,6 +445,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--no-affine` | — | Translation-only registration |
 | `--no-reg-residual-reject` | — | Keep frames failing the post-registration residual check (dropped by default) |
 | `--no-reg-residual-check` | — | Skip the post-registration residual check entirely |
+| `--elastic-registration` | off | Fit + apply a per-frame local (non-rigid) displacement field on top of the global affine |
 
 ### Post-processing (Phase 4)
 
