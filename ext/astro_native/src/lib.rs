@@ -579,6 +579,15 @@ fn esd_combine<'py>(
                     if (max_dev as f64) > lam && idx != usize::MAX {
                         active[idx] = false; // m >= 3 -> m-1 >= 2 survive
                     }
+                    // NOTE: intentionally no early-break on a non-rejecting
+                    // iteration. The numpy reference (`_esd_clip_tile`) breaks
+                    // the loop *per tile* when no pixel rejects; in a large
+                    // production tile that keeps some pixel active it therefore
+                    // re-tests every pixel through all `max_outliers` iterations
+                    // — which this per-pixel "run all iterations" loop matches.
+                    // A per-pixel break here would instead match numpy's
+                    // degenerate single-pixel-tile case and diverge on real
+                    // tiles (see tests/test_native.py::test_esd_matches_numpy).
                 }
                 let mut acc = 0f64;
                 let mut wsum = 0f64;

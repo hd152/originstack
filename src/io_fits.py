@@ -39,32 +39,42 @@ def _read_fits_header(path: str) -> dict:
 def load_frame(path: str) -> Tuple[np.ndarray, dict]:
     """Load a FITS, camera RAW, TIFF, XISF, or SER (virtual-path) file;
     dispatches on file extension (SER's ``path::index`` marker is checked
-    first, since a virtual path's extension via splitext is meaningless)."""
+    first, since a virtual path's extension via splitext is meaningless).
+
+    Only import failures (optional dependency missing) fall through to the
+    next format / to FITS -- errors raised while actually reading a matched
+    file (corrupt data, unsupported variant, bad frame index, ...) propagate
+    to the caller instead of being masked by a confusing downstream FITS-open
+    failure on a path that was never a FITS file."""
     try:
         from src.io_ser import is_ser_virtual_path, read_ser_frame
+    except ImportError:
+        pass
+    else:
         if is_ser_virtual_path(path):
             return read_ser_frame(path)
-    except Exception:
-        pass
     ext = os.path.splitext(path)[1].lower()
     try:
         from src.io_raw import RAW_EXTENSIONS, read_raw
+    except ImportError:
+        pass
+    else:
         if ext in RAW_EXTENSIONS:
             return read_raw(path)
-    except Exception:
-        pass
     try:
         from src.io_tiff import TIFF_EXTENSIONS, read_tiff
+    except ImportError:
+        pass
+    else:
         if ext in TIFF_EXTENSIONS:
             return read_tiff(path)
-    except Exception:
-        pass
     try:
         from src.io_xisf import XISF_EXTENSIONS, read_xisf
+    except ImportError:
+        pass
+    else:
         if ext in XISF_EXTENSIONS:
             return read_xisf(path)
-    except Exception:
-        pass
     return load_fits(path)
 
 
@@ -529,3 +539,22 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
                 header['AVGFWHM'] = (round(float(np.mean(fwhms)), 2), 'Average star FWHM in pixels')
                 header['MINFWHM'] = (round(float(np.min(fwhms)), 2), 'Minimum star FWHM in pixels')
                 header['MAXFWHM'] = (round(float(np.max(fwhms)), 2), 'Maximum star FWHM in pixels')
+
+    # Field aberration inspector summary (--aberration-report)
+    _ab = getattr(args, '_aberration', None)
+    if _ab is not None:
+        header['ABFWHM'] = (round(float(_ab.get('fwhm_median', 0.0)), 2),
+                            'Field-median star FWHM (aberration report)')
+        header['ABSPREAD'] = (round(float(_ab.get('fwhm_spread_pct', 0.0)), 1),
+                              'FWHM spread across field (percent)')
+        header['ABELLIP'] = (round(float(_ab.get('ellipticity_median', 0.0)), 3),
+                             'Field-median star ellipticity')
+        if _ab.get('tilt_direction'):
+            header['ABTILT'] = (str(_ab['tilt_direction'])[:8], 'Sensor-tilt soft-side direction')
+            header['ABTILTPX'] = (round(float(_ab.get('tilt_gradient_px', 0.0)), 2),
+                                  'FWHM gradient across field (px)')
+        header['ABCURV'] = (round(float(_ab.get('curvature_corr', 0.0)), 3),
+                            'FWHM-vs-radius correlation (field curvature)')
+        _diag = _ab.get('diagnosis') or []
+        if _diag:
+            header['ABDIAG'] = (str(_diag[0])[:68], 'Aberration diagnosis')

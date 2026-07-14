@@ -5,7 +5,7 @@ Siril, and other XISF-aware tools can open.
 
 XISF layout:
   Bytes 0-7:   signature  "XISF0100"
-  Bytes 8-11:  uint32 LE  length of XML header block (including the 16-byte preamble up to here)
+  Bytes 8-11:  uint32 LE  length of XML header block (NOT including the 16-byte preamble)
   Bytes 12-15: uint32 LE  reserved (0)
   Bytes 16-N:  XML header (UTF-8, no BOM)
   Bytes N-4095: zero padding to 4096-byte boundary

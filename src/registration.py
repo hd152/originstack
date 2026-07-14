@@ -2206,13 +2206,8 @@ def run_comet_registration_phase(
     print(f"  [Comet] Tracking nucleus in {len(final)} frames...")
     # Process sequentially to allow linear seed extrapolation
     for j, orig_idx in enumerate(tqdm(
-            list(enumerate(final_indices)),
-            total=len(final), desc="  Comet tracking", unit="frame",
-            disable=getattr(args, 'verbose', False))):
-        j_idx, orig_idx = j, orig_idx
-        break  # tqdm wrapping doesn't work cleanly with enumerate; just iterate below
-
-    for j, orig_idx in enumerate(final_indices):
+            final_indices, total=len(final), desc="  Comet tracking",
+            unit="frame", disable=getattr(args, 'verbose', False))):
         j_result, shift_val, centroid_val = _register_comet(j, orig_idx)
         shifts[j] = shift_val
         centroids[j] = centroid_val

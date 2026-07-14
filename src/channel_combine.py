@@ -192,6 +192,108 @@ def narrowband_combine(mode: str = "sho",
     return np.stack([R, G, B], axis=2).astype(np.float32)
 
 
+def scnr_green(rgb: np.ndarray, amount: float = 1.0) -> np.ndarray:
+    """Subtractive chromatic noise reduction on green (average-neutral).
+
+    The SHO/Hubble palette maps Hα (the brightest line) to green, leaving a
+    heavy green cast over the whole field. SCNR clips green to at most the
+    average of red and blue: ``G = G - amount * max(0, G - (R+B)/2)`` — the
+    standard PixInsight "average neutral" protection. Applied to the RGB image
+    in [0, 1]."""
+    out = rgb.astype(np.float32, copy=True)
+    r, g, b = out[:, :, 0], out[:, :, 1], out[:, :, 2]
+    neutral = 0.5 * (r + b)
+    excess = np.maximum(0.0, g - neutral)
+    out[:, :, 1] = g - float(np.clip(amount, 0.0, 1.0)) * excess
+    return np.clip(out, 0.0, 1.0)
+
+
+def _peak_sources(lum: np.ndarray, k: float = 5.0):
+    """Numpy fallback star detector: local maxima above median + k*MAD.
+    Returns a structured array with xcentroid/ycentroid/flux, or None."""
+    try:
+        from scipy.ndimage import maximum_filter
+    except Exception:
+        return None
+    med = float(np.median(lum))
+    sig = 1.4826 * float(np.median(np.abs(lum - med)))
+    if sig <= 0:
+        sig = float(np.std(lum)) or 1e-6
+    thresh = med + k * sig
+    peaks = (lum >= maximum_filter(lum, size=5)) & (lum > thresh)
+    ys, xs = np.nonzero(peaks)
+    if ys.size == 0:
+        return None
+    dt = np.dtype([('xcentroid', np.float64), ('ycentroid', np.float64),
+                   ('flux', np.float64)])
+    out = np.zeros(ys.size, dtype=dt)
+    out['xcentroid'] = xs
+    out['ycentroid'] = ys
+    out['flux'] = lum[ys, xs]
+    return out
+
+
+def _star_mask_for(rgb: np.ndarray, fwhm: float = 3.5) -> Optional[np.ndarray]:
+    """Detect stars on the RGB luminance and return a soft [0,1] star mask.
+    Uses SEP when it finds sources, else a numpy local-maxima fallback (SEP's
+    Background can misbehave on small/low-amplitude frames)."""
+    try:
+        from src.quality import generate_star_mask
+        try:
+            from src.quality import _sep_detect_stars
+        except Exception:
+            _sep_detect_stars = None
+    except Exception:
+        return None
+    lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
+           + 0.114 * rgb[:, :, 2]).astype(np.float32)
+    src = None
+    if _sep_detect_stars is not None:
+        med = float(np.median(lum))
+        noise = 1.4826 * float(np.median(np.abs(lum - med))) or 1e-3
+        try:
+            src = _sep_detect_stars(lum, noise)
+        except Exception:
+            src = None
+    if src is None or len(src) == 0:
+        src = _peak_sources(lum)
+    if src is None or len(src) == 0:
+        return None
+    return generate_star_mask(lum.shape, src, fwhm=fwhm)
+
+
+def fix_narrowband_stars(rgb: np.ndarray, mode: str = "desaturate",
+                         rgb_stars: Optional[np.ndarray] = None,
+                         strength: float = 1.0) -> np.ndarray:
+    """Fix the magenta/technicolour stars typical of SHO narrowband combines.
+
+    ``mode='desaturate'``: blend star pixels toward their own luminance
+    (removes the colour cast, keeps brightness). ``mode='rgb'``: transplant the
+    *chrominance* of a real broadband RGB-star image (``rgb_stars``) onto the
+    narrowband star luminance, so stars show natural colours while nebulosity
+    keeps the narrowband palette. Only star-core pixels are altered."""
+    mask = _star_mask_for(rgb)
+    if mask is None:
+        return rgb
+    m = np.clip(mask, 0.0, 1.0)[:, :, np.newaxis] * float(np.clip(strength, 0.0, 1.0))
+    out = rgb.astype(np.float32, copy=True)
+    lum = (0.299 * out[:, :, 0] + 0.587 * out[:, :, 1]
+           + 0.114 * out[:, :, 2])[:, :, np.newaxis]
+
+    if mode == "rgb" and rgb_stars is not None:
+        ref = _resize_to(_normalise(rgb_stars), rgb.shape[0], rgb.shape[1]) \
+            if rgb_stars.shape[:2] != rgb.shape[:2] else _normalise(rgb_stars)
+        ref_lum = (0.299 * ref[:, :, 0] + 0.587 * ref[:, :, 1]
+                   + 0.114 * ref[:, :, 2])[:, :, np.newaxis]
+        # NB luminance * broadband colour ratio -> natural star colour.
+        recolored = np.clip(lum * (ref / np.maximum(ref_lum, 1e-4)), 0.0, 1.0)
+        out = out * (1.0 - m) + recolored * m
+    else:  # desaturate toward luminance
+        neutral = np.repeat(lum, 3, axis=2)
+        out = out * (1.0 - m) + neutral * m
+    return np.clip(out, 0.0, 1.0)
+
+
 # ---------------------------------------------------------------------------
 # Save helper
 # ---------------------------------------------------------------------------
@@ -260,6 +362,15 @@ def run_combine_cli(argv=None) -> None:
                         "hos: Ha->R, OIII->G, SII->B.")
     p.add_argument("--saturation-boost", type=float, default=1.0,
                    help="Saturation multiplier applied after LRGB combination (default: 1.0)")
+    p.add_argument("--scnr", type=float, default=0.0, metavar="AMOUNT",
+                   help="Average-neutral SCNR green removal for narrowband palettes "
+                        "(0=off, 1=full; recommended ~1.0 for SHO to kill the green cast)")
+    p.add_argument("--star-recolor", choices=["none", "desaturate", "rgb"], default="none",
+                   help="Fix magenta narrowband stars: 'desaturate' neutralises star "
+                        "colour; 'rgb' transplants colours from --rgb-stars.")
+    p.add_argument("--rgb-stars", metavar="RGB.fits",
+                   help="Broadband RGB image whose star colours are transplanted onto "
+                        "the narrowband stars when --star-recolor rgb is used.")
     p.add_argument("--stretch", choices=["linear", "arcsinh", "ghs"], default="ghs",
                    help="Preview JPEG stretch (default: ghs)")
     p.add_argument("-o", "--output", required=True,
@@ -303,6 +414,18 @@ def run_combine_cli(argv=None) -> None:
         combined = narrowband_combine(
             mode=args.mode, ha=ha_arr, oiii=oiii_arr, sii=sii_arr
         )
+
+        if args.scnr > 0.0:
+            print(f"  SCNR green removal (amount={args.scnr:.2f})...")
+            combined = scnr_green(combined, amount=args.scnr)
+
+        if args.star_recolor != "none":
+            rgb_stars = _load_rgb(args.rgb_stars) if args.rgb_stars else None
+            if args.star_recolor == "rgb" and rgb_stars is None:
+                p.error("--star-recolor rgb requires --rgb-stars")
+            print(f"  Fixing narrowband star colours ({args.star_recolor})...")
+            combined = fix_narrowband_stars(combined, mode=args.star_recolor,
+                                            rgb_stars=rgb_stars)
 
     _save_combined(combined, args.output, preview_stretch=args.stretch)
     print(f"\n  Done!")

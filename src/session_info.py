@@ -149,10 +149,17 @@ def build_wcs_keywords(si: 'SessionInfo') -> dict:
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
 
-    # TAN CD matrix: RA increases westward (negative pixel-X), Dec northward (+Y)
+    # TAN CD matrix: RA increases westward (negative pixel-X), Dec northward (+Y).
+    # Standard FITS CROTA->CD mapping (Greisen & Calabretta) with CDELT1=-psx,
+    # CDELT2=+psy and rotation theta:
+    #   CD1_1 =  CDELT1 cos  CD1_2 = -CDELT2 sin
+    #   CD2_1 =  CDELT1 sin  CD2_2 =  CDELT2 cos
+    # This keeps CD a true scale*rotation (constant determinant -psx*psy). The
+    # previous form mixed psx/psy into the off-diagonals with the wrong signs,
+    # producing a skew that went singular at theta=45deg instead of a rotation.
     cd1_1 = -psx * cos_t
-    cd1_2 =  psx * sin_t
-    cd2_1 = -psy * sin_t
+    cd1_2 = -psy * sin_t
+    cd2_1 = -psx * sin_t
     cd2_2 =  psy * cos_t
 
     return {

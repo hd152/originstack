@@ -372,8 +372,11 @@ def _apply_target_settings(
 ) -> List[str]:
     """Apply per-target settings to args.  Returns list of change strings."""
     changes: List[str] = []
+    _explicit = getattr(args, '_explicit_cli_dests', set())
 
     def _set(attr: str, val: object) -> None:
+        if attr in _explicit:
+            return  # user set this flag explicitly on the CLI — it wins over auto
         old = getattr(args, attr, None)
         if old != val:
             setattr(args, attr, val)
@@ -403,8 +406,11 @@ def _apply_quality_settings(
 ) -> List[str]:
     """Apply frame-count, SNR, FWHM, Strehl, and dispersion adjustments."""
     changes: List[str] = []
+    _explicit = getattr(args, '_explicit_cli_dests', set())
 
     def _set(attr: str, val: object) -> None:
+        if attr in _explicit:
+            return  # user set this flag explicitly on the CLI — it wins over auto
         old = getattr(args, attr, None)
         if old != val:
             setattr(args, attr, val)

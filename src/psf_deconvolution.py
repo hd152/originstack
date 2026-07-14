@@ -570,3 +570,128 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
     np.clip(result, 0.0, None, out=result)
 
     return result.astype(np.float32)
+
+
+def _shift_sources(sources, dx: float, dy: float):
+    """Return a copy of a star catalogue with centroids shifted by (-dx, -dy)
+    (into a sub-image whose top-left is at (dx, dy) in the full frame)."""
+    out = np.array(sources).copy()
+    out['xcentroid'] = np.asarray(sources['xcentroid'], dtype=np.float64) - dx
+    out['ycentroid'] = np.asarray(sources['ycentroid'], dtype=np.float64) - dy
+    return out
+
+
+def _feather_window(h: int, w: int, my: int, mx: int) -> np.ndarray:
+    """Raised-cosine blend weight: 1.0 across the core, ramping to ~0 over the
+    ``my``/``mx``-pixel margins so overlapping tiles sum seamlessly."""
+    def ramp(n: int, m: int) -> np.ndarray:
+        v = np.ones(n, dtype=np.float64)
+        if m > 0:
+            t = np.linspace(0.0, np.pi, 2 * m)
+            edge = 0.5 * (1.0 - np.cos(t[:m]))          # 0 -> 1 over m px
+            v[:m] = edge
+            v[-m:] = edge[::-1]
+        return v
+    wy = ramp(h, min(my, h // 2))
+    wx = ramp(w, min(mx, w // 2))
+    return np.outer(wy, wx)
+
+
+def richardson_lucy_svpsf(img: np.ndarray, sources, iterations: int = 15,
+                          n_tiles: int = 3, model: str = 'moffat',
+                          overlap: float = 0.35, star_mask: Optional[np.ndarray] = None,
+                          verbose: bool = False) -> np.ndarray:
+    """Spatially-variant Richardson-Lucy deconvolution.
+
+    A single global PSF over-sharpens the frame centre and rings the corners
+    when the optics' PSF varies across the field (off-axis aberration, tilt,
+    field curvature). This fits a *separate* PSF from the local stars of each
+    tile in an ``n_tiles x n_tiles`` grid, deconvolves each tile's luminance
+    with its own PSF, and blends the overlapping tiles with a raised-cosine
+    window so there is no seam. Chrominance is preserved (luminance-only
+    deconvolution, YCbCr recombination), matching ``richardson_lucy_deconvolve``.
+
+    Tiles with too few stars fall back to the global PSF, so the result is never
+    worse than the single-PSF path. Returns a new (H, W, 3) float32 image.
+    """
+    from src.gpu_context import get_gpu
+    _gpu = get_gpu()
+    _use_gpu = _gpu.active and _gpu.xsignal is not None and hasattr(_gpu.xsignal, 'fftconvolve')
+    if not HAS_SKIMAGE_RESTORATION and not _use_gpu:
+        logging.warning("skimage.restoration unavailable; skipping SV-PSF deconvolution")
+        return img
+    if sources is None or len(sources) == 0:
+        return img
+
+    src = img.astype(np.float64)
+    Y = 0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr = 0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+    H, W = Y.shape
+
+    # Global PSF as the per-tile fallback; abort if even that fails.
+    global_psf, _gf = estimate_psf(img, sources, model=model)
+    if global_psf is None:
+        logging.info("SV-PSF: global PSF estimation failed — no deconvolution")
+        return img
+
+    from scipy import signal as _sig
+    xs_all = np.asarray(sources['xcentroid'], dtype=np.float64)
+    ys_all = np.asarray(sources['ycentroid'], dtype=np.float64)
+
+    th = int(np.ceil(H / n_tiles))
+    tw = int(np.ceil(W / n_tiles))
+    my = int(overlap * th)
+    mx = int(overlap * tw)
+
+    Y_acc = np.zeros((H, W), dtype=np.float64)
+    W_acc = np.zeros((H, W), dtype=np.float64)
+    n_local = 0
+    for ty in range(n_tiles):
+        for tx in range(n_tiles):
+            cy0, cy1 = ty * th, min((ty + 1) * th, H)
+            cx0, cx1 = tx * tw, min((tx + 1) * tw, W)
+            # Expanded (with-margin) region for PSF context + feather.
+            ey0, ey1 = max(0, cy0 - my), min(H, cy1 + my)
+            ex0, ex1 = max(0, cx0 - mx), min(W, cx1 + mx)
+
+            in_tile = ((xs_all >= ex0) & (xs_all < ex1)
+                       & (ys_all >= ey0) & (ys_all < ey1))
+            psf = global_psf
+            if int(in_tile.sum()) >= Config.RL_PSF_MIN_STARS:
+                sub_src = _shift_sources(sources[in_tile], ex0, ey0)
+                sub_img = Y[ey0:ey1, ex0:ex1]
+                local_psf, _lf = estimate_psf(sub_img, sub_src, model=model)
+                if local_psf is not None:
+                    psf = local_psf
+                    n_local += 1
+
+            tileY = Y[ey0:ey1, ex0:ex1]
+            pedestal = max(-float(tileY.min()) + 1e-6, 1e-6)
+            tileY_pos = tileY + pedestal
+            if _use_gpu:
+                try:
+                    dec = _gpu.to_host(_rl_deconvolve_xp(tileY_pos, psf, iterations,
+                                                         _gpu.xp, _gpu.xsignal))
+                except Exception:
+                    dec = richardson_lucy(tileY_pos, psf, num_iter=iterations, clip=False)
+            else:
+                dec = richardson_lucy(tileY_pos, psf, num_iter=iterations, clip=False)
+            dec = np.asarray(dec, dtype=np.float64) - pedestal
+
+            wwin = _feather_window(ey1 - ey0, ex1 - ex0, my, mx)
+            Y_acc[ey0:ey1, ex0:ex1] += dec * wwin
+            W_acc[ey0:ey1, ex0:ex1] += wwin
+
+    Y_deconv = Y_acc / np.maximum(W_acc, 1e-9)
+    if star_mask is not None:
+        Y_deconv = Y_deconv * (1.0 - star_mask) + Y * star_mask
+    if verbose:
+        logging.info(f"SV-PSF: {n_local}/{n_tiles * n_tiles} tiles used a local PSF")
+
+    R = Y_deconv + 1.40200 * Cr
+    G = Y_deconv - 0.34414 * Cb - 0.71414 * Cr
+    B = Y_deconv + 1.77200 * Cb
+    result = np.stack([R, G, B], axis=2)
+    np.clip(result, 0.0, None, out=result)
+    return result.astype(np.float32)

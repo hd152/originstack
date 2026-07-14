@@ -31,6 +31,12 @@ def _transforms_path(ckpt_dir: str) -> str:
     return os.path.join(ckpt_dir, 'transforms.npy')
 
 
+def _field_list_path(ckpt_dir: str, name: str) -> str:
+    """Path for a per-frame ndarray-list checkpoint (displacement fields,
+    patch quality maps) that cannot be JSON-serialised inside dither_info."""
+    return os.path.join(ckpt_dir, f'{name}.npy')
+
+
 def save_raw_stack(output_path: str, stacked: np.ndarray) -> None:
     """Save the pre-post-processing stacked array to the checkpoint directory."""
     ckpt_dir = _checkpoint_dir(output_path)
@@ -103,6 +109,17 @@ def save_checkpoint(output_path: str, phase: int,
         state['has_transforms'] = True
 
     if dither_info is not None:
+        # Persist the per-frame ndarray lists that JSON can't hold (elastic
+        # displacement fields, patch quality maps) as .npy so a phase-2 resume
+        # stacks with them, reproducing the uninterrupted result.
+        for _field_name in ('displacement_fields', 'quality_maps'):
+            _flds = dither_info.get(_field_name)
+            if _flds is not None:
+                try:
+                    _save_field_list(ckpt_dir, _field_name, list(_flds))
+                except Exception as _e:
+                    safe_print(f"  WARNING: could not checkpoint {_field_name} ({_e})")
+
         def _to_json(v):
             """Recursively convert v to a JSON-safe Python value, or return _SKIP."""
             if v is None or isinstance(v, (bool, str)):
@@ -173,6 +190,40 @@ def _save_transforms(ckpt_dir: str, transforms: List) -> None:
         else:
             arr[i] = np.array(t, dtype=np.float64)
     np.save(_transforms_path(ckpt_dir), arr, allow_pickle=True)
+
+
+def _save_field_list(ckpt_dir: str, name: str, fields: List) -> None:
+    """Serialize a per-frame list of ndarrays (or None) to <name>.npy.
+
+    Used for displacement fields (--elastic-registration) and patch quality
+    maps (--patch-registration): both are lists of small ndarrays that live in
+    dither_info but are dropped by the JSON serialiser, so without this a
+    phase-2 resume would silently stack without them (a different result than
+    an uninterrupted run)."""
+    arr = np.empty(len(fields), dtype=object)
+    for i, fld in enumerate(fields):
+        arr[i] = None if fld is None else np.asarray(fld)
+    np.save(_field_list_path(ckpt_dir, name), arr, allow_pickle=True)
+
+
+def load_field_list(output_path: str, name: str, n_frames: int) -> Optional[List]:
+    """Load a per-frame ndarray-list checkpoint saved by ``_save_field_list``.
+
+    Returns None when the file is absent (feature was off or not checkpointed)
+    or on a length mismatch, so callers cleanly fall back to no fields."""
+    path = _field_list_path(_checkpoint_dir(output_path), name)
+    if not os.path.exists(path):
+        return None
+    try:
+        arr = np.load(path, allow_pickle=True)
+        if len(arr) != n_frames:
+            safe_print(f"  WARNING: {name} checkpoint length mismatch "
+                       f"({len(arr)} vs {n_frames}) — skipped")
+            return None
+        return [None if a is None else np.asarray(a) for a in arr]
+    except Exception as e:
+        safe_print(f"  WARNING: Could not load {name} from checkpoint ({e}) — skipped")
+        return None
 
 
 def load_transforms(output_path: str, n_frames: int) -> List:

@@ -112,7 +112,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           preloaded_data: Optional[tuple] = None,
                           session_bayer: Optional[str] = None,
                           pre_gradient_removal: bool = False,
-                          ca_shifts: Optional[dict] = None) -> Dict[str, Any]:
+                          ca_shifts: Optional[dict] = None,
+                          trail_reject: bool = False) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -319,6 +320,17 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             pass
     timings['cosmic_ray_rejection'], _t = time.perf_counter() - _t, time.perf_counter()
 
+    # Satellite / aircraft trail rejection — erase long straight streaks before
+    # the frame enters the stack (robust even at low frame counts, where
+    # sigma-clip can't reject them).
+    if trail_reject:
+        try:
+            from src.trail_reject import reject_trails
+            rgb, _ = reject_trails(rgb, verbose=False)
+        except Exception:
+            pass
+    timings['trail_reject'], _t = time.perf_counter() - _t, time.perf_counter()
+
     # Recompute lum only when white balance or post-processing changed the image.
     try:
         if white_balance != 'none' or ca_correction or cosmic_ray_rejection:
@@ -383,6 +395,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
 # Module-level state for parallel workers (must be module-level for pickling)
 _worker_masters: Dict[str, Any] = {}
+_worker_trail_reject: bool = False  # per-session trail-rejection flag for pool workers
 _warned_dark_scales: set = set()  # dedup dark-scale mismatch warnings across frames
 
 # GPU calibration probe cache — probed once per unique frame size per session
@@ -536,14 +549,17 @@ def _pin_worker_to_single_thread() -> None:
         pass
 
 
-def _init_worker_shm(shm_specs: Dict[str, tuple]) -> None:
+def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False) -> None:
     """Initializer for pool workers — attach to shared-memory calibration arrays.
 
     *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
     attach (read-only view) without copying data or touching the filesystem.
+    *trail_reject* is a per-session flag stashed in a module global so it need
+    not be threaded through the per-frame task tuple.
     """
     _pin_worker_to_single_thread()
-    global _worker_masters
+    global _worker_masters, _worker_trail_reject
+    _worker_trail_reject = bool(trail_reject)
     _worker_masters = {}
     for name, (shm_name, dtype_str, shape) in shm_specs.items():
         shm = SharedMemory(name=shm_name, create=False)
@@ -646,7 +662,8 @@ def _parallel_frame_worker(
                                    skip_quality=skip_quality,
                                    session_bayer=session_bayer,
                                    pre_gradient_removal=pre_gradient_removal,
-                                   ca_shifts=ca_shifts)
+                                   ca_shifts=ca_shifts,
+                                   trail_reject=_worker_trail_reject)
     if result.get('error'):
         return (frame_idx, None, result['error'], None)
 
@@ -755,6 +772,7 @@ def execute_frame_processing(
         _adv = getattr(args, 'advanced_metrics', True)
         _sb = getattr(args, '_session_bayer', None)
         _pgr = getattr(args, 'pre_gradient_removal', False)
+        _tr = getattr(args, 'trail_reject', False)
         _ca_shifts = _measure_session_ca(lights, args) if _ca else None
         if _ca_shifts is not None:
             safe_print(f"  CA correction: session-constant shifts "
@@ -768,7 +786,7 @@ def execute_frame_processing(
         try:
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_init_worker_shm,
-                                     initargs=(shm_specs,)) as pool:
+                                     initargs=(shm_specs, _tr)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 _wv = _get_webview()
                 _wv_done = 0
@@ -862,7 +880,7 @@ def execute_frame_processing(
             try:
                 preloaded = _load_futures[i].result()
             except Exception as e:
-                return i, None, f'load error: {e}', None
+                return i, None, f'load error: {e}', None, None
             with gpu.stream_context():
                 result = _process_single_frame(
                     f.path, f.header, masters, args.debayer_method, args.white_balance,
@@ -873,7 +891,8 @@ def execute_frame_processing(
                     session_bayer=_sb,
                     pre_gradient_removal=_pgr,
                     skip_quality=_use_qpool,  # GPU workers skip quality
-                    ca_shifts=_ca_shifts)
+                    ca_shifts=_ca_shifts,
+                    trail_reject=getattr(args, 'trail_reject', False))
             if result.get('error'):
                 return i, None, result['error'], None, None
             mem_rgb[i] = result['rgb']
@@ -980,7 +999,8 @@ def execute_frame_processing(
                 advanced_metrics=getattr(args, 'advanced_metrics', True),
                 session_bayer=_sb,
                 pre_gradient_removal=_pgr,
-                ca_shifts=_ca_shifts)
+                ca_shifts=_ca_shifts,
+                trail_reject=getattr(args, 'trail_reject', False))
             _wv = _get_webview()
             _wv.progress('Processing frames', i + 1, n)
             if result.get('error'):
@@ -1099,6 +1119,7 @@ def reload_accepted_frames(
     _cr  = getattr(args, 'cosmic_ray_rejection', False)
     _sb  = getattr(args, '_session_bayer', None)
     _pgr = getattr(args, 'pre_gradient_removal', False)
+    _tr  = getattr(args, 'trail_reject', False)
     _ca_shifts = _measure_session_ca(final, args) if _ca else None
     if _ca_shifts is not None:
         safe_print(f"  CA correction: session-constant shifts "
@@ -1157,12 +1178,12 @@ def reload_accepted_frames(
         try:
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_init_worker_shm,
-                                     initargs=(shm_specs,)) as pool:
+                                     initargs=(shm_specs, _tr)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",
                                    disable=args.verbose):
-                    orig_idx, _, error = future.result()
+                    orig_idx, _, error, _ = future.result()
                     if error:
                         j = _orig_to_j.get(orig_idx, -1)
                         fname = (os.path.basename(final[j].path)
@@ -1219,7 +1240,8 @@ def reload_accepted_frames(
                     session_bayer=_sb,
                     pre_gradient_removal=_pgr,
                     preloaded_data=preloaded,
-                    ca_shifts=_ca_shifts)
+                    ca_shifts=_ca_shifts,
+                    trail_reject=_tr)
             if result.get('error'):
                 return j, orig_idx, None, None, result['error']
             return j, orig_idx, result['rgb'], result['lum'], None

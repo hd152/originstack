@@ -85,8 +85,9 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
         _protected = {'directory', 'output', 'config', 'health_check', 'dry_run',
                       'verbose', 'debug_registration', 'keep_intermediates',
                       'preset', 'diagnostic', 'diagnostic_dir'}
+        _explicit = getattr(args, '_explicit_cli_dests', set())
         for key, value in flat.items():
-            if key in _protected:
+            if key in _protected or key in _explicit:
                 continue
             if hasattr(args, key):
                 setattr(args, key, value)
@@ -244,11 +245,11 @@ def apply_preset(args: argparse.Namespace) -> list:
         },
     }
 
+    explicit = getattr(args, '_explicit_cli_dests', set())
     preset_values = presets.get(args.preset, {})
     for key, value in preset_values.items():
-        current = getattr(args, key, None)
-        # Only apply if the user hasn't changed it from the parser default
-        # This is a best-effort check -- we apply the preset value
+        if key in explicit:
+            continue  # user explicitly passed this flag on the command line
         setattr(args, key, value)
         changes.append(f"{key}={value}")
 
@@ -877,10 +878,12 @@ def parse_args():
                         'none: disable luma denoising. Chroma noise reduction is '
                         'separate (--no-chroma-nr). Strength via --denoise-strength; '
                         'fine tuning via --config.')
-    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv'],
+    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv'],
                    default='off', dest='deconvolve_mode',
-                   help='Deconvolution: off (default), rl (Richardson-Lucy), or '
-                        'tv (Total-Variation regularised; sharper edges, slower). '
+                   help='Deconvolution: off (default), rl (Richardson-Lucy), '
+                        'tv (Total-Variation regularised; sharper edges, slower), or '
+                        'rl-sv (spatially-variant RL: a separate PSF per field tile, '
+                        'corrects off-axis aberration/tilt the corners suffer). '
                         'PSF options (blind PSF, iterations, model) via --config.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
@@ -980,6 +983,10 @@ def parse_args():
                         '(default: 0.0). Higher (e.g. 2.0) clips background noise '
                         'to black for a small target on empty sky; negative keeps '
                         'faint frame-filling nebulosity visible. Set per target by --auto.')
+    g_post.add_argument('--repair-stars', action='store_true',
+                   help='Rebuild saturated (flat-top) star cores from their unsaturated '
+                        'wings via a per-channel Moffat fit — restores a natural peak and '
+                        'star colour instead of a clipped white disk.')
     g_post.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
                    help='Disable star reduction')
     g_post.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
@@ -999,6 +1006,17 @@ def parse_args():
                         '--drizzle-scale > 1.')
     g_frames.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
+    g_frames.add_argument('--trail-reject', action='store_true',
+                   help='Detect and erase satellite/aircraft trails per frame before '
+                        'stacking (Hough line detection + local-background inpaint). '
+                        'Robust even at low frame counts where sigma-clip cannot reject '
+                        'a trail seen in only one or two subs.')
+    g_stack.add_argument('--local-normalize', action='store_true',
+                   help='Additively match every frame background to the per-frame median '
+                        'before the rejection combine (removes per-frame gradients from '
+                        'moonlight / light-pollution drift / thin cloud, and sharpens '
+                        'sigma-clip). Applies to rejection stack methods (not plain mean '
+                        'or drizzle).')
     g_frames.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
                    help='Disable per-frame cosmic ray rejection (L.A.Cosmic)')
@@ -1065,15 +1083,16 @@ def parse_args():
     g_comet.add_argument('--observer-site', default=None, metavar='SITE',
                    help='Observer location for ephemeris queries: MPC code (e.g. "G37") '
                         'or "lon,lat,elev" in decimal degrees/metres (e.g. "-2.5,51.4,50").')
-    g_comet.add_argument('--comet-detrail', action='store_true',
-                   help='Apply linear deconvolution to correct intra-frame nucleus trailing '
-                        '(requires --comet-designation or consecutive centroid positions).')
     g_post.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
                    help='Blend a short-exposure stack into saturated regions of the main '
                         'stack for HDR targets (e.g. Orion Nebula core, globular clusters).')
     g_out.add_argument('--color-calibrate', action='store_true',
                    help='Apply photometric colour calibration after plate solving '
                         '(queries Gaia DR3). Requires --plate-solve and astroquery.')
+    g_out.add_argument('--aberration-report', action='store_true',
+                   help='Analyse star FWHM/elongation across the field and diagnose '
+                        'sensor tilt, field curvature, and backfocus (spacing) errors. '
+                        'Writes <stem>_aberration.png and FITS header keywords.')
     g_sessions.add_argument('--keep-checkpoint', action='store_true',
                    help='Keep the raw pre-post-processing stack after a successful run. '
                         'Re-running skips phases 1–3 so you can iterate on post-processing '
@@ -1190,7 +1209,6 @@ def parse_args():
         comet_ls_rotation=15.0,
         comet_designation=None,
         observer_site=None,
-        comet_detrail=False,
         weight_snr=1.0,
         weight_fwhm=1.0,
         weight_stars=1.0,
@@ -1205,6 +1223,8 @@ def parse_args():
         denoise_aniso=False,
         deconvolve=False,
         deconvolve_tv=False,
+        deconvolve_svpsf=False,
+        deconvolve_sv_tiles=3,
         deconvolve_blind_psf=False,
         output_tiff=False,
         output_xisf=False,
@@ -1228,7 +1248,19 @@ def parse_args():
         drizzle_pixfrac=1.0,
         halo_removal=False,
     )
+    # Record which dests the user actually typed a flag for, before parsing
+    # fills in defaults -- apply_preset/load_config_file need this to honour
+    # "explicit CLI flags win over preset/config values" (they can't tell an
+    # explicit flag from a default by inspecting the parsed value alone, since
+    # a user might explicitly pass the same value as the default).
+    _argv = sys.argv[1:]
+    def _passed_on_cli(action) -> bool:
+        return any(a == opt or a.startswith(opt + '=')
+                   for a in _argv for opt in action.option_strings)
+    _explicit_dests = {a.dest for a in p._actions if _passed_on_cli(a)}
+
     args = p.parse_args()
+    args._explicit_cli_dests = _explicit_dests
 
     # ── Map the consolidated CLI surface onto the internal per-feature flags
     # (presets, --config, and the auto-advisor all operate on the internal
@@ -1242,8 +1274,21 @@ def parse_args():
         args.denoise_nlm = (d == 'nlm')
         args.denoise_bilateral = (d == 'bilateral')
         args.denoise_aniso = (d == 'aniso')
-    args.deconvolve = args.deconvolve_mode in ('rl', 'tv')
+    args.deconvolve = args.deconvolve_mode in ('rl', 'tv', 'rl-sv')
     args.deconvolve_tv = (args.deconvolve_mode == 'tv')
+    args.deconvolve_svpsf = (args.deconvolve_mode == 'rl-sv')
+
+    # The consolidated flags above (--denoiser, --deconvolve) are user-facing
+    # aliases whose dests (denoiser, deconvolve_mode) differ from the internal
+    # per-feature attributes that presets / --config / the auto-advisor read.
+    # Propagate "explicit" status onto those derived attrs so an explicit
+    # --denoiser / --deconvolve wins over preset & auto just like a direct flag.
+    if 'denoiser' in _explicit_dests:
+        _explicit_dests.update({
+            'denoise', 'denoise_mmt', 'denoise_bm3d', 'denoise_acdnr',
+            'denoise_nlm', 'denoise_bilateral', 'denoise_aniso'})
+    if 'deconvolve_mode' in _explicit_dests:
+        _explicit_dests.update({'deconvolve', 'deconvolve_tv'})
 
     _exp = [e.strip() for e in (args.export or '').split(',') if e.strip()]
     for e in _exp:

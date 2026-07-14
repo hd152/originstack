@@ -23,7 +23,7 @@ from src.stacking import run_stacking_phase
 from src.postprocess import postprocess_stack
 from src.checkpoint import (save_checkpoint, save_raw_stack, load_raw_stack,
                             can_resume, restore_frame_state, cleanup_checkpoint,
-                            load_transforms)
+                            load_transforms, load_field_list)
 from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
 
 
@@ -558,8 +558,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 transforms = load_transforms(output_path, len(final))
                 n_affine = sum(1 for t in transforms if t is not None)
                 dither_info = ckpt_state.get('dither_info', {})
+                # Displacement fields (--elastic-registration) and patch quality
+                # maps (--patch-registration) are ndarray lists saved separately
+                # as .npy (JSON can't hold them); restore so phase-3 stacking
+                # reproduces the uninterrupted result rather than silently
+                # dropping the elastic/patch-weighted correction.
+                _df = load_field_list(output_path, 'displacement_fields', len(final))
+                if _df is not None:
+                    dither_info['displacement_fields'] = _df
+                _qm = load_field_list(output_path, 'quality_maps', len(final))
+                if _qm is not None:
+                    dither_info['quality_maps'] = _qm
+                n_disp = sum(1 for d in (_df or []) if d is not None)
                 safe_print(f"  Restored {len(shifts)} frame shifts"
                            + (f", {n_affine} affine transforms" if n_affine else "")
+                           + (f", {n_disp} displacement fields" if n_disp else "")
                            + " from checkpoint")
                 stats.registration_time = 0.0
                 del cached_lums

@@ -1277,6 +1277,22 @@ def run_stacking_phase(
         safe_print(f"    Alignment: {n_final} frames in {format_time(time.time() - _t_align)} "
                    f"({n_align} workers, {n_final / max(time.time() - _t_align, 1e-9):.1f} frame/s)")
 
+        # Local Normalization: additively match every frame's background to the
+        # per-frame median before the rejection combine, so per-frame gradients
+        # (moonlight, LP drift, thin cloud) don't tilt the stack or skew
+        # sigma-clip. Operates in place on the aligned stack.
+        if getattr(args, 'local_normalize', False):
+            _t_ln = time.time()
+            try:
+                from src.local_normalize import local_normalize_stack
+                _nln = local_normalize_stack(mem_aligned, verbose=args.verbose)
+                if _nln:
+                    mem_aligned.flush()
+                    safe_print(f"    Local normalization: {_nln} frames "
+                               f"({format_time(time.time() - _t_ln)})")
+            except Exception as _lnexc:
+                safe_print(f"    WARNING: local normalization failed: {_lnexc}")
+
         # Patch-weighted lucky-imaging combine (if quality maps were computed in
         # Phase 2). quality_maps holds small per-frame patch-score GRIDS in
         # aligned space (not full-res maps): both combine paths sample them

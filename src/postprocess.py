@@ -371,6 +371,30 @@ def postprocess_stack(
         except Exception:
             pass
 
+    # Field aberration / optical-tilt inspector (on the linear stack, before any
+    # denoise/deconvolution reshapes the stars). Runs on the shared _pp_sources.
+    if (getattr(args, 'aberration_report', False) or getattr(args, 'diagnostic', False)) \
+            and _pp_sources is not None and len(_pp_sources) > 0:
+        try:
+            from src.aberration import analyze_field_aberration
+            _ab_out = getattr(args, 'output', None)
+            _ab_png = (os.path.splitext(_ab_out)[0] + '_aberration.png') if _ab_out else None
+            _ab = analyze_field_aberration(_pp_lum, _pp_sources, output_png=_ab_png,
+                                           verbose=args.verbose)
+            if _ab is not None:
+                args._aberration = _ab  # picked up by the FITS header writer
+        except Exception as _abe:
+            safe_print(f"  WARNING: aberration report failed: {_abe}")
+
+    # Saturated star core repair (before background/denoise reshape the stars)
+    if getattr(args, 'repair_stars', False) and 'repair_stars' not in skip_steps:
+        _sr_start = time.time()
+        from src.star_repair import repair_saturated_stars
+        stacked = repair_saturated_stars(stacked, verbose=args.verbose)
+        stacked = _sanitize(stacked, "saturated star repair")
+        if args.verbose:
+            safe_print(f"    ({format_time(time.time() - _sr_start)})")
+
     # Star halo removal (before background extraction)
     if getattr(args, 'halo_removal', False) and _pp_sources is not None and len(_pp_sources) > 0:
         _halo_fwhm = float(np.median(
@@ -447,7 +471,6 @@ def postprocess_stack(
         # Save background map as diagnostic
         if _pre_bg is not None:
             try:
-                import os
                 output_path = getattr(args, 'output', None)
                 if output_path:
                     bg_map = np.clip(_pre_bg - stacked, 0, None)
@@ -790,7 +813,18 @@ def postprocess_stack(
                 deconv_mask = pp_star_mask
 
             deconv_start = time.time()
-            if use_tv:
+            if getattr(args, 'deconvolve_svpsf', False) and _pp_sources is not None:
+                from src.psf_deconvolution import richardson_lucy_svpsf
+                _svn = int(getattr(args, 'deconvolve_sv_tiles', 3))
+                safe_print(f"  Spatially-variant Richardson-Lucy "
+                           f"({_svn}x{_svn} field tiles, iters={rl_iters})...")
+                stacked = richardson_lucy_svpsf(stacked, _pp_sources,
+                                                iterations=rl_iters, n_tiles=_svn,
+                                                model=rl_model, star_mask=deconv_mask,
+                                                verbose=args.verbose)
+                safe_print(f"  ✓ SV-PSF deconvolution "
+                           f"({format_time(time.time() - deconv_start)})")
+            elif use_tv:
                 safe_print(f"  Total Variation deconvolution "
                            f"(λ={tv_lambda:.4f}, iters={tv_iters})...")
                 stacked = tv_regularized_deconvolve(stacked, psf,

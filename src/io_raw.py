@@ -45,11 +45,42 @@ def is_raw_file(path: str) -> bool:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _margin_phase(raw) -> Tuple[int, int]:
+    """(top_margin, left_margin) mod 2 for the visible-area crop.
+
+    ``raw_pattern`` / ``raw_color`` are defined "relative to the full RAW
+    size" (rawpy docs), but ``read_raw`` returns ``raw_image_visible``, which
+    is cropped by those margins. When a margin is odd the CFA phase of the
+    visible top-left pixel differs from ``raw_pattern[0, 0]``, so the pattern
+    must be shifted to visible-image coordinates. Returns (0, 0) when the
+    margins are unavailable (e.g. a test mock)."""
+    try:
+        return int(raw.sizes.top_margin) % 2, int(raw.sizes.left_margin) % 2
+    except Exception:
+        return 0, 0
+
+
+def _visible_raw_pattern(raw) -> np.ndarray:
+    """2×2 CFA colour-index tile as seen at ``raw_image_visible[0, 0]``.
+
+    Phase-shifts the full-frame ``raw_pattern`` by the (odd) crop margins so the
+    black-level channel assignment and BAYERPAT string stay correct on sensors
+    whose visible area starts on an odd row/column. For any standard 2×2 CFA
+    this equals ``raw_colors_visible[:2, :2]`` but uses metadata only, so it
+    never forces a pixel unpack in the header-only scan path."""
+    pattern = np.asarray(raw.raw_pattern)
+    tm, lm = _margin_phase(raw)
+    if tm or lm:
+        pattern = np.roll(pattern, shift=(-tm, -lm), axis=(0, 1))
+    return pattern.astype(int)
+
+
 def _bayer_pattern_str(raw) -> str:
-    """Convert rawpy's raw_pattern matrix + color_desc to 'RGGB' / 'BGGR' etc."""
+    """Convert rawpy's raw_pattern matrix + color_desc to 'RGGB' / 'BGGR' etc.,
+    in visible-image coordinates (margin-corrected)."""
     try:
         desc = raw.color_desc.decode('ascii')   # e.g. b'RGBG' → 'RGBG'
-        pattern = raw.raw_pattern               # 2×2 int array
+        pattern = _visible_raw_pattern(raw)      # 2×2 int array (visible origin)
         return ''.join(desc[int(pattern[r, c])] for r in range(2) for c in range(2))
     except Exception:
         return 'RGGB'
@@ -148,9 +179,12 @@ def read_raw(path: str) -> tuple:
         # Raw Bayer mosaic as float32
         bayer = raw.raw_image_visible.copy().astype(np.float32)
 
-        # Per-channel black-level subtraction
+        # Per-channel black-level subtraction. Use the visible-origin CFA
+        # pattern so each sub-grid gets its own channel's black level even when
+        # the sensor's visible area starts on an odd row/column (raw_pattern is
+        # full-frame; raw_image_visible is margin-cropped).
         bl_per_ch = raw.black_level_per_channel  # list of 4 ints [R, G1, G2, B]
-        pattern = raw.raw_pattern
+        pattern = _visible_raw_pattern(raw)
         if bl_per_ch is not None:
             for row in range(2):
                 for col in range(2):
