@@ -835,6 +835,14 @@ def parse_args():
     g_core.add_argument('--sweep-undo', action='store_true',
                    help='Recursively strip the .rejected suffix applied by '
                         '--quality-sweep --apply, restoring all flagged files')
+    g_core.add_argument('--live', action='store_true',
+                   help='Real-time (live) stacking: watch the directory and fold each new '
+                        'sub into a running stack as it lands, pushing the growing result '
+                        'and a running SNR to the web view. Runs until Ctrl-C.')
+    g_core.add_argument('--live-interval', type=float, default=4.0, metavar='SEC',
+                   help='Live stacking directory poll interval in seconds (default: 4).')
+    g_core.add_argument('--live-duration', type=float, default=None, metavar='MIN',
+                   help='Optional live stacking time limit in minutes (default: until Ctrl-C).')
     g_core.add_argument('--web-view', action='store_true',
                    help='Serve a live dashboard at http://127.0.0.1:<port>/ while '
                         'stacking: phase progress, log stream, per-frame quality '
@@ -1355,6 +1363,20 @@ def main():
     # Initialise GPU context (module-level singleton)
     from src import gpu_context as _gpu_mod
     _gpu_mod._gpu = GpuContext(use_gpu=args.use_gpu)
+
+    # Real-time (live) stacking: watch the directory and stack subs as they land.
+    if getattr(args, 'live', False):
+        from src.live_stack import run_live_stack
+        from src.webview import get_webview
+        _rc = run_live_stack(args)
+        if _rc == 0 and get_webview().active:
+            safe_print("\n  Live web view still serving — Ctrl+C to exit")
+            try:
+                while True:
+                    time.sleep(1.0)
+            except KeyboardInterrupt:
+                pass
+        raise SystemExit(_rc)
 
     # Live web view (module-level singleton, no-op unless started here)
     _wv_url = None

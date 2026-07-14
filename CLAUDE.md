@@ -69,6 +69,7 @@ The pipeline is split across `src/` modules. [astro_stack.py](astro_stack.py) is
 | [src/star_repair.py](src/star_repair.py) | Saturated star core repair (`--repair-stars`): per-channel Moffat wing fit refills clipped cores |
 | [src/trail_reject.py](src/trail_reject.py) | Satellite/aircraft trail rejection (`--trail-reject`): per-frame Hough line detect + local-background inpaint, Phase 1 |
 | [src/local_normalize.py](src/local_normalize.py) | Per-frame Local Normalization (`--local-normalize`): additive background-match to the per-frame median before rejection combine |
+| [src/live_stack.py](src/live_stack.py) | Real-time stacking (`--live`): watches the capture directory and folds each new sub into a running weighted-mean stack, pushing the growing result + running SNR to the web view |
 | [src/channel_combine.py](src/channel_combine.py) | `combine` subcommand: LRGB + narrowband palettes (SHO/HOO), SCNR green removal (`--scnr`), magenta-star fix (`--star-recolor`) |
 | [src/auto_settings.py](src/auto_settings.py) | Heuristic target classifier and parameter advisor (`--auto`) |
 | [src/plate_solve.py](src/plate_solve.py) | Astrometry.net plate solving |
