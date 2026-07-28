@@ -1029,7 +1029,7 @@ def _match_frame_stars(
     Returns (ref_xy_matched, frame_xy_matched) — both (N, 2) arrays of matched
     star pairs in (x, y) order — or None if fewer than 3 stars matched.
     """
-    from src.quality import _sep_detect_stars, _detect_stars_multi_fwhm, _ensure_photutils
+    from src.quality import detect_stars_auto
 
     aligned_lum = ndimage.shift(
         lum, shift=shift, order=1, mode='constant', cval=0.0
@@ -1039,16 +1039,7 @@ def _match_frame_stars(
         offset=-(transform.params[:2, :2] @ np.array([shift[0], shift[1]])),
         order=1, mode='constant', cval=0.0
     )
-    frame_stars = _sep_detect_stars(aligned_lum.astype(np.float32), noise_val)
-    if frame_stars is None or len(frame_stars) < 3:
-        _ensure_photutils()
-        from src.quality import DAOStarFinder
-        if DAOStarFinder is not None:
-            bg = float(np.median(aligned_lum))
-            std = max(noise_val, 1e-6)
-            frame_stars = _detect_stars_multi_fwhm(
-                aligned_lum - bg, threshold=5.0 * std
-            )
+    frame_stars = detect_stars_auto(aligned_lum, noise_val)
     if frame_stars is None or len(frame_stars) < 3:
         return None
     frame_xy = np.array(
@@ -1096,7 +1087,6 @@ def score_registration_residuals(
                           for frames with no match / when not requested.
     """
     from src.models import Config
-    from src.quality import _sep_detect_stars, _detect_stars_multi_fwhm, _ensure_photutils
 
     if max_residual_px is None:
         max_residual_px = Config.REG_RESIDUAL_MAX_PX
@@ -1472,42 +1462,22 @@ def run_registration_phase(
 
     # If star sources are missing (lost from checkpoint JSON serialisation, or
     # detection unavailable in Phase 1), attempt re-detection now using the
-    # reference luminance already in memory.  Try in order: SEP (fastest, no
-    # extra deps), DAOStarFinder (photutils), local-maxima fallback (scipy only).
+    # reference luminance already in memory.  Try in order: detect_stars_auto
+    # (matched-filter by default, or SEP per --star-detector), then a pure
+    # local-maxima fallback (scipy only, no dependency at all).
     if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
         noise_val = float(best.metrics.get('noise', 1.0)) if best.metrics else 1.0
         _redet_tried: list = []
         try:
-            # 1. SEP — handles high-pedestal images well via local background mesh
-            from src.quality import _sep_detect_stars
-            _redet_tried.append('SEP')
-            ref_stars = _sep_detect_stars(ref_lum.astype(np.float32), noise_val)
+            from src.quality import detect_stars_auto
+            _redet_tried.append('detect_stars_auto')
+            ref_stars = detect_stars_auto(ref_lum, noise_val)
             if ref_stars is not None and len(ref_stars) > 0:
-                safe_print(f"  Re-detected {len(ref_stars)} stars via SEP")
+                safe_print(f"  Re-detected {len(ref_stars)} stars")
             else:
                 ref_stars = None
         except Exception as e:
-            _log.debug("SEP re-detection failed: %s", e)
-
-        if ref_stars is None:
-            try:
-                # 2. DAOStarFinder with sigma-clipped background estimate
-                from src.quality import _detect_stars_multi_fwhm, _ensure_photutils, DAOStarFinder
-                from astropy.stats import sigma_clipped_stats
-                _ensure_photutils()
-                if DAOStarFinder is not None and sigma_clipped_stats is not None:
-                    _redet_tried.append('DAOStarFinder')
-                    _, bg_med, bg_std = sigma_clipped_stats(ref_lum, sigma=3.0, maxiters=5)
-                    bg_std_f = float(bg_std) if bg_std else 0.0
-                    if bg_std_f > 0:
-                        bg_sub = ref_lum - float(bg_med)
-                        ref_stars = _detect_stars_multi_fwhm(bg_sub, threshold=5.0 * bg_std_f)
-                        if ref_stars is not None and len(ref_stars) > 0:
-                            safe_print(f"  Re-detected {len(ref_stars)} stars via DAOStarFinder")
-                        else:
-                            ref_stars = None
-            except Exception as e:
-                _log.debug("DAOStarFinder re-detection failed: %s", e)
+            _log.debug("Star re-detection failed: %s", e)
 
         if ref_stars is None:
             try:
@@ -1577,6 +1547,16 @@ def run_registration_phase(
                     ref_lum = np.asarray(cached_lums[best_idx], dtype=np.float32)
                 else:
                     ref_lum = np.array(mem_lum[best_idx], dtype=np.float32)
+                # Swapping the reference frame without also swapping its star
+                # catalog leaves ref_stars pointing at the OLD reference: every
+                # frame then gets (correctly) affine-matched/warped against the
+                # new ref_lum, but the residual check re-detects stars in that
+                # correctly-warped frame and compares them against the old
+                # reference's star positions -- adding the old-vs-new reference
+                # offset as a constant spurious residual on every single frame.
+                new_ref_stars = best.metrics.get('_star_sources')
+                if new_ref_stars is not None and len(new_ref_stars) > 0:
+                    ref_stars = new_ref_stars
                 safe_print(f"  Consensus reference: {os.path.basename(best.path)} "
                            f"(shift closest to median)")
         except Exception as _ce:
@@ -1749,10 +1729,31 @@ def run_registration_phase(
             safe_print("  --elastic-registration needs the residual-check star match "
                        "pass; running it despite --no-reg-residual-check "
                        "(RMS-reject gate stays disabled)")
+        # Star-centroid RMS noise scales with FWHM/SNR (sigma ~ FWHM / (2*SNR)):
+        # a flat px threshold rejects good frames on centroid noise alone when
+        # subs are undersampled/noisy (large FWHM, low SNR), not because they're
+        # actually misaligned. Scale the gate to the reference frame's measured
+        # FWHM/SNR, floored at the old flat default and capped so a genuinely
+        # bad registration still gets caught.
+        ref_fwhm = float(best.metrics.get('fwhm') or 0.0)
+        ref_snr = float(best.metrics.get('snr') or 0.0)
+        if ref_fwhm > 0.0 and ref_snr > 0.0:
+            centroid_sigma = ref_fwhm / (2.0 * max(ref_snr, 0.5))
+            max_residual_px = min(
+                Config.REG_RESIDUAL_MAX_PX_CAP,
+                max(Config.REG_RESIDUAL_MAX_PX,
+                    Config.REG_RESIDUAL_SIGMA_MULT * centroid_sigma)
+            )
+            if max_residual_px > Config.REG_RESIDUAL_MAX_PX:
+                safe_print(f"  Residual RMS threshold: {max_residual_px:.1f}px "
+                           f"(adaptive: ref FWHM={ref_fwhm:.1f}px, SNR={ref_snr:.1f})")
+        else:
+            max_residual_px = Config.REG_RESIDUAL_MAX_PX
         safe_print(f"  Post-registration residual check ({len(final)} frames)...")
         residuals, res_passed, correspondences = score_registration_residuals(
             final, shifts, transforms, ref_lum, ref_stars,
             mem_lum, final_indices, best_idx,
+            max_residual_px=max_residual_px,
             cached_lums=cached_lums,
             return_correspondences=elastic_on,
             force_full_check=elastic_on,
@@ -2223,9 +2224,8 @@ def run_comet_registration_phase(
         safe_print(f"  [Comet] Computing affine (rotation+scale) corrections per frame...")
         ref_stars = None
         try:
-            ref_lum_np = ref_lum.astype(np.float32)
-            from src.quality import _sep_detect_stars
-            ref_stars = _sep_detect_stars(ref_lum_np, float(np.std(ref_lum_np)))
+            from src.quality import detect_stars_auto
+            ref_stars = detect_stars_auto(ref_lum, float(np.std(ref_lum)))
         except Exception:
             pass
 
@@ -2235,8 +2235,8 @@ def run_comet_registration_phase(
                     continue
                 try:
                     lum = np.array(mem_lum[orig_idx]).astype(np.float32)
-                    from src.quality import _sep_detect_stars
-                    frame_stars = _sep_detect_stars(lum, float(np.std(lum)))
+                    from src.quality import detect_stars_auto
+                    frame_stars = detect_stars_auto(lum, float(np.std(lum)))
                     if frame_stars is not None and len(frame_stars) >= 3:
                         sy, sx = shifts[j]
                         affine_tf = match_stars_affine(ref_stars, frame_stars,

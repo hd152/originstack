@@ -2,14 +2,11 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from typing import Dict, Tuple, Optional
 
 import numpy as np
 
 from src.models import Config
-
-DAOStarFinder = None
 
 try:
     import sep as _sep_module
@@ -19,22 +16,12 @@ except ImportError:
     _SEP_AVAILABLE = False
 
 
-def _ensure_photutils():
-    global DAOStarFinder
-    if DAOStarFinder is None:
-        try:
-            from photutils.detection import DAOStarFinder as _dao
-            if callable(_dao):
-                DAOStarFinder = _dao
-        except Exception:
-            pass
-    return DAOStarFinder
-
-
 def _sep_detect_stars(img_2d: np.ndarray, noise: float) -> Optional[object]:
-    """SEP (SourceExtractor) star detection — ~5-10x faster than DAOStarFinder.
+    """SEP (SourceExtractor) star detection. Optional dependency -- returns
+    None (letting the caller's own fallback take over) when the ``sep``
+    package isn't installed.
 
-    Returns a photutils-compatible structured array or None on failure/unavailable.
+    Returns a structured array (see _SOURCES_DTYPE) or None on failure/unavailable.
     """
     if not _SEP_AVAILABLE:
         return None
@@ -78,6 +65,67 @@ def _sep_detect_stars(img_2d: np.ndarray, noise: float) -> Optional[object]:
     return filtered if len(filtered) > 0 else None
 
 
+_STAR_DETECTOR_METHOD = 'matched-filter'
+
+
+def configure_star_detector(method: str) -> None:
+    """Set the process-wide star-detection backend: 'matched-filter' (default
+    -- native/numpy, no external dependency, see src/star_detect.py) or 'sep'
+    (optional -- the ``sep`` package; falls through to matched-filter if not
+    installed or it finds nothing). Called once from cli.py based on
+    --star-detector.
+
+    DAOStarFinder/photutils was removed entirely from the detection path
+    (2026-07): matched-filter is faster than SEP and at least as accurate as
+    DAOStarFinder was, on real archive data (see src/star_detect.py
+    docstring for the validation), so there was no longer a reason to carry
+    photutils as a detection dependency -- it's still used independently for
+    empirical PSF estimation in psf_deconvolution.py.
+
+    Every star-detection call site across quality.py/registration.py routes
+    through `detect_stars_auto` below rather than calling a backend
+    directly, so this one setting applies everywhere consistently -- a
+    reference frame detected with one backend and a residual-check
+    re-detection with another would silently corrupt the affine-matching /
+    residual-RMS machinery that compares the two.
+    """
+    global _STAR_DETECTOR_METHOD
+    if method not in ('matched-filter', 'sep'):
+        raise ValueError(f"unknown star detector method: {method!r}")
+    _STAR_DETECTOR_METHOD = method
+
+
+def detect_stars_auto(lum: np.ndarray, noise: float,
+                      background: Optional[float] = None,
+                      method: Optional[str] = None) -> Optional[np.ndarray]:
+    """Unified star-detection dispatcher -- see `configure_star_detector`.
+
+    method=None uses the process-wide setting (default 'matched-filter').
+    Returns a structured array (SEP/matched-filter share the same
+    xcentroid/ycentroid/flux/peak/roundness/... dtype) or None if nothing
+    was detected / the backend is unavailable -- callers already carry their
+    own final local-maxima fallback (pure scipy, no dependency at all) for
+    that case, unchanged here.
+    """
+    m = method or _STAR_DETECTOR_METHOD
+
+    if m == 'sep':
+        sources = _sep_detect_stars(lum.astype(np.float32), noise)
+        if sources is not None and len(sources) > 0:
+            return sources
+        # sep not installed / found nothing -- matched-filter has no
+        # external dependency, so it's a strictly-available next attempt
+        # rather than a silent failure.
+
+    from src.star_detect import detect_stars_matched_filter
+    try:
+        sources = detect_stars_matched_filter(lum.astype(np.float64))
+        return sources if sources is not None and len(sources) > 0 else None
+    except Exception as e:
+        logging.debug(f"matched-filter detection failed: {type(e).__name__}: {e}")
+        return None
+
+
 _SOURCES_DTYPE = np.dtype([
     ('xcentroid', np.float64), ('ycentroid', np.float64),
     ('flux', np.float64), ('peak', np.float64),
@@ -85,36 +133,6 @@ _SOURCES_DTYPE = np.dtype([
     ('sharpness', np.float64),
     ('a', np.float64), ('b', np.float64), ('theta', np.float64),
 ])
-
-
-def _table_to_sources(table) -> np.ndarray:
-    """Convert a photutils DAOStarFinder Table to a plain numpy structured array.
-
-    Reads the non-deprecated column names (x_centroid / y_centroid, available
-    since photutils 3.0) when present, falls back to the old names for older
-    installs.  This prevents AstropyDeprecationWarning from propagating to the
-    user on every frame.
-    """
-    n = len(table)
-    out = np.zeros(n, dtype=_SOURCES_DTYPE)
-
-    def _col(new, old):
-        try:
-            return np.asarray(table[new], dtype=np.float64)
-        except (KeyError, AttributeError):
-            return np.asarray(table[old], dtype=np.float64)
-
-    out['xcentroid'] = _col('x_centroid', 'xcentroid')
-    out['ycentroid'] = _col('y_centroid', 'ycentroid')
-    out['flux']      = np.asarray(table['flux'],       dtype=np.float64)
-    out['peak']      = np.asarray(table['peak'],       dtype=np.float64)
-    out['roundness1'] = np.asarray(table['roundness1'], dtype=np.float64)
-    out['roundness2'] = np.asarray(table['roundness2'], dtype=np.float64)
-    out['sharpness']  = np.asarray(table['sharpness'],  dtype=np.float64)
-    # DAOStarFinder doesn't provide semi-axes; set neutral values.
-    out['a'] = 1.0
-    out['b'] = 1.0
-    return out
 
 
 # Module-level imports for scipy — avoids repeated sys.modules lookups and
@@ -284,75 +302,6 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
     return True, None
 
 
-def _detect_stars_multi_fwhm(bg_sub: np.ndarray, threshold: float) -> Optional[object]:
-    """Run DAOStarFinder at FWHM 2, 3, 5, 8 and return the best quality-filtered table.
-
-    Short-circuits as soon as a trial yields >=20 quality stars.  If the strict
-    roundness/sharpness filter rejects everything, retries with relaxed thresholds.
-    Returns None when DAOStarFinder is unavailable or no sources are found at all.
-
-    Performance improvements vs original:
-    - Roundness filter fused into a single np.maximum(|r1|, |r2|) pass instead
-      of two separate np.abs calls with independent boolean arrays.
-    - Relaxed fallback recomputes the same fused roundness on all_raw_sources
-      once, not twice as in the original duplicated mask logic.
-    """
-    _ensure_photutils()
-    if DAOStarFinder is None:
-        return None
-
-    best_sources = None
-    best_quality_count = 0
-    all_raw_sources = None
-
-    for trial_fwhm in (3.0, 5.0, 2.0, 8.0):  # 3px most common seeing; short-circuits early
-        daof = DAOStarFinder(fwhm=trial_fwhm, threshold=threshold)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            trial_sources = daof(bg_sub)
-        if trial_sources is None or len(trial_sources) == 0:
-            continue
-        if all_raw_sources is None or len(trial_sources) > len(all_raw_sources):
-            all_raw_sources = trial_sources
-
-        # Fused roundness: one np.maximum call instead of two np.abs + two comparisons.
-        max_roundness = np.maximum(
-            np.abs(trial_sources['roundness1']),
-            np.abs(trial_sources['roundness2'])
-        )
-        sharpness = trial_sources['sharpness']
-        quality_mask = (max_roundness < 0.5) & (sharpness > 0.3) & (sharpness < 0.9)
-        quality_count = int(np.sum(quality_mask))
-        if quality_count > best_quality_count:
-            best_quality_count = quality_count
-            best_sources = trial_sources[quality_mask]
-        if best_quality_count >= 20:
-            break
-
-    # Strict filter found nothing — retry with relaxed thresholds.
-    if best_sources is None and all_raw_sources is not None and len(all_raw_sources) > 0:
-        max_roundness_relaxed = np.maximum(
-            np.abs(all_raw_sources['roundness1']),
-            np.abs(all_raw_sources['roundness2'])
-        )
-        sharpness_relaxed = all_raw_sources['sharpness']
-        relaxed_mask = (
-            (max_roundness_relaxed < 0.7) &
-            (sharpness_relaxed > 0.1) &
-            (sharpness_relaxed < 1.0)
-        )
-        if np.sum(relaxed_mask) > 0:
-            best_sources = all_raw_sources[relaxed_mask]
-            logging.debug(
-                f"DAOStarFinder: strict filter found 0 stars, "
-                f"relaxed filter found {len(best_sources)}"
-            )
-
-    if best_sources is None:
-        return None
-    return _table_to_sources(best_sources)
-
-
 def estimate_strehl_ratio(img: np.ndarray, star_positions,
                            fwhm: float = 0.0) -> float:
     """Estimate a Strehl-proxy metric from bright star PSF profiles.
@@ -374,7 +323,7 @@ def estimate_strehl_ratio(img: np.ndarray, star_positions,
 
     Args:
         img:            Float32 stacked image (H, W, 3).
-        star_positions: Source table (DAOStarFinder output).
+        star_positions: Source table (detect_stars_auto output).
         fwhm:           Pre-measured median FWHM in pixels; if 0 it is
                         re-estimated from cutouts.
 
@@ -462,7 +411,7 @@ def measure_atmospheric_dispersion(img: np.ndarray, star_positions,
 
     Args:
         img:            Float32 stacked image (H, W, 3).
-        star_positions: Source table (DAOStarFinder).
+        star_positions: Source table (detect_stars_auto output).
         cutout_radius:  Half-size of extraction window (default
                         Config.DISP_CUTOUT_RADIUS = 10 px).
 
@@ -812,8 +761,8 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     # Cast to float32 once — shared by stats, percentile, and laplace below.
     img_s = (img[::_ds, ::_ds] if _ds > 1 else img).astype(np.float32)
 
-    # Star detection on a 2x-downsampled image — DAOStarFinder runs an FFT
-    # matched filter over the whole frame; half-res cuts that cost by 4x.
+    # Star detection on a 2x-downsampled image -- the matched-filter/SEP
+    # convolution runs over the whole frame; half-res cuts that cost by 4x.
     # Coordinates are scaled back to full-res after detection.
     _star_ds = 2 if _min_dim >= 1500 else 1
     img_s_stars = img[::_star_ds, ::_star_ds] if _star_ds > 1 else img
@@ -840,27 +789,20 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     fwhm = 0.0
 
     if not quick:
-        # Try SEP first (C backend, ~5-10x faster than DAOStarFinder).
-        sources_s = _sep_detect_stars(img_s_stars, noise)
+        # matched-filter by default, or SEP if selected via --star-detector
+        # (falling through to matched-filter if sep isn't installed / finds
+        # nothing) -- see configure_star_detector() for why this must be the
+        # single dispatch point rather than each call site picking its own
+        # backend.
+        sources_s = detect_stars_auto(img_s_stars, noise, background=background)
         if sources_s is not None and len(sources_s) > 0:
             star_count = len(sources_s)
             star_snr = float(np.median(sources_s['peak'])) / (noise + 1e-12)
-        else:
-            # DAOStarFinder fallback.
-            _ensure_photutils()
-            if DAOStarFinder is not None:
-                try:
-                    threshold = 5.0 * noise
-                    bg_sub = img_s_stars - background
-                    sources_s = _detect_stars_multi_fwhm(bg_sub, threshold)
-                    if sources_s is not None and len(sources_s) > 0:
-                        star_count = len(sources_s)
-                        star_snr = float(np.median(sources_s['peak'])) / (noise + 1e-12)
-                except Exception as e:
-                    logging.debug(f"DAOStarFinder failed: {type(e).__name__}: {e}")
-                    sources_s = None
 
-        # Fallback: local-maxima detection when photutils/SEP are unavailable.
+        # Last-resort fallback: pure-scipy local-maxima detection, no
+        # dependency at all -- essentially unreachable now that
+        # matched-filter (also no external dependency) is itself the
+        # detect_stars_auto default, kept as a final safety net.
         if star_count == 0 and maximum_filter is not None:
             try:
                 threshold = background + 5.0 * noise

@@ -307,12 +307,16 @@ def _load_calibration_dir(args: argparse.Namespace) -> dict:
     return extra
 
 
-def _build_masters(frames: dict, stats: "ProcessingStats | None" = None) -> dict:
+def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
+                   args: "argparse.Namespace | None" = None) -> dict:
     """Build, filter, and smooth master bias/dark/flat from the frame lists in *frames*.
 
     Mutates ``frames['dark']`` and ``frames['flat']`` in-place via
     ``select_matching_darks`` / ``select_matching_flats`` so the caller sees
     the filtered counts.  Returns a fully populated ``masters`` dict.
+
+    Also loads ``masters['vignette']`` from ``args.vignette_map`` when given
+    (single spot so single-folder, pooled-session, and --live all pick it up).
     """
     lights = frames.get('light', [])
     cal_needed = frames.get('dark') or frames.get('flat') or frames.get('bias')
@@ -396,6 +400,16 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None) -> dict
     if cal_needed and cal_start is not None and stats is not None:
         stats.calibration_time = time.time() - cal_start
 
+    masters['vignette'] = None
+    vignette_path = getattr(args, 'vignette_map', None) if args is not None else None
+    if vignette_path:
+        from src.vignette_calib import load_vignette_map
+        vmap = load_vignette_map(vignette_path)
+        if vmap is not None:
+            masters['vignette'] = vmap
+            safe_print(f"  ✓ Vignette map: {os.path.basename(vignette_path)} "
+                       f"({vmap.shape[1]}×{vmap.shape[0]})")
+
     return masters
 
 
@@ -459,7 +473,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         print('  ERROR: No light frames found across sessions', file=sys.stderr)
         raise SystemExit('No light frames found')
 
-    masters = _build_masters(combined, stats)
+    masters = _build_masters(combined, stats, args)
 
     # Use the first subfolder that has an info.json so pipeline can populate
     # the FITS header with session metadata (bayer pattern, WCS, target name).
@@ -556,7 +570,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             safe_print(f"  Directory: {os.path.abspath(d)}")
 
         # Create master calibration frames
-        masters = _build_masters(frames, stats)
+        masters = _build_masters(frames, stats, args)
 
         # Validate calibration frame dimensions match light frames
         if frames['light']:
@@ -819,6 +833,28 @@ def parse_args():
                         'is selected per type (by ISO, CCD temperature, exposure, filter, '
                         'and sensor dimensions). Supplements any calibration frames already '
                         'present in --directory.')
+    g_core.add_argument('--vignette-map', default=None, metavar='PATH',
+                   help='Per-instrument vignetting/background calibration map (FITS, '
+                        'H x W x 3) built offline by tools/build_vignette_map.py from '
+                        'many past sessions of this same telescope+camera. Subtracted '
+                        'per-frame right after debayer, before registration -- reduces '
+                        'the gradient DBE/--bg-method wavelet has to guess at from one '
+                        'session\'s sparse sky samples alone.')
+    g_core.add_argument('--star-detector', choices=['matched-filter', 'sep'], default='matched-filter',
+                   help='Star detection backend (default: matched-filter). matched-filter: '
+                        'native/numpy Gaussian-PSF matched filter (src/star_detect.py), no '
+                        'external dependency -- validated F1 0.78-0.86 vs SEP and faster '
+                        '(~1.7-2.1x) on real archive data across dense/sparse/held-out fields. '
+                        'sep: the optional `sep` package (SourceExtractor C backend); falls '
+                        'through to matched-filter if not installed or it finds nothing. '
+                        'DAOStarFinder/photutils was removed from the detection path entirely '
+                        '(photutils remains, independently, for empirical PSF estimation in '
+                        '--deconvolve rl). Applies to every detection call site consistently '
+                        '(Phase 1 quality analysis, reference-frame/residual-check '
+                        'registration, --merge, post-process star masking) -- star detection '
+                        'is foundational enough that mixing backends across stages would '
+                        'silently corrupt the affine-matching / residual-RMS machinery that '
+                        'compares catalogs from different stages against each other.')
     g_core.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
     g_core.add_argument('--quality-sweep', action='store_true',
@@ -846,12 +882,17 @@ def parse_args():
     g_core.add_argument('--web-view', action='store_true',
                    help='Serve a live dashboard at http://127.0.0.1:<port>/ while '
                         'stacking: phase progress, log stream, per-frame quality '
-                        'ticker, and preview images at processing milestones. '
-                        'Pure stdlib, localhost only. The server keeps running '
-                        'after completion so the final state stays viewable '
-                        '(Ctrl+C to exit).')
+                        'ticker, and an interactive preview (zoom/pan, live '
+                        're-stretch, before/after wipe compare, per-frame '
+                        'thumbnails). Pure stdlib, localhost only. The server '
+                        'keeps running after completion so the final state stays '
+                        'viewable (Ctrl+C to exit).')
     g_core.add_argument('--web-view-port', type=int, default=8765, metavar='PORT',
                    help='Port for --web-view (default: 8765; 0 = ephemeral)')
+    g_core.add_argument('--web-view-frame-every', type=int, default=5, metavar='N',
+                   help='Publish a per-frame thumbnail to --web-view every Nth '
+                        'processed light in Phase 1 (default: 5; 0 = off). The '
+                        'first frame is always shown.')
     g_core.add_argument('--config', default=None, metavar='PATH',
                    help='Load parameters from a TOML configuration file. '
                         'CLI arguments override config file values. Fine-grained tuning '
@@ -914,11 +955,13 @@ def parse_args():
     g_stack.add_argument('--no-reg-residual-reject', dest='reg_residual_reject',
                    action='store_false', default=True,
                    help='Disable dropping frames whose post-registration star-position '
-                        'RMS residual exceeds %.1fpx (on by default: this catches frames '
-                        'a bad affine/FFT registration passed through undetected -- an '
-                        'actual measured alignment error, not a heuristic). Rejected '
-                        'frames still count in the summary; reg_residual_px is recorded '
-                        'in each frame\'s metrics either way.' % Config.REG_RESIDUAL_MAX_PX)
+                        'RMS residual exceeds an adaptive threshold (%.1f-%.1fpx, scaled to '
+                        'the reference frame\'s measured FWHM/SNR; on by default: this '
+                        'catches frames a bad affine/FFT registration passed through '
+                        'undetected -- an actual measured alignment error, not a '
+                        'heuristic). Rejected frames still count in the summary; '
+                        'reg_residual_px is recorded in each frame\'s metrics either way.'
+                        % (Config.REG_RESIDUAL_MAX_PX, Config.REG_RESIDUAL_MAX_PX_CAP))
     g_stack.add_argument('--no-reg-residual-check', action='store_true',
                    help='Skip the post-registration residual check entirely (no '
                         'diagnostic, no rejection) -- faster but no safety net')
@@ -971,13 +1014,24 @@ def parse_args():
     g_post.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
-    g_post.add_argument('--bg-method', choices=['mesh', 'dbe', 'graxpert'], default='dbe',
+    g_post.add_argument('--bg-method', choices=['mesh', 'dbe', 'wavelet', 'graxpert'], default='dbe',
                    help='Background extraction method (default: dbe). '
                         'mesh: legacy polynomial grid (fastest). '
                         'dbe: Dynamic Background Extraction, robust local regression '
                         '(native/Rust accelerated). '
+                        'wavelet: starlet (a-trous) low-pass fit on the same sky-patch '
+                        'samples as dbe -- a hard pixel-scale cutoff instead of a blur '
+                        'radius, better at leaving faint extended nebulosity alone while '
+                        'still flattening the sky (see --bg-wavelet-scales). '
                         'graxpert: AI-powered gradient removal via GraXpert subprocess '
                         '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
+    g_post.add_argument('--bg-wavelet-scales', type=int, default=6, metavar='N',
+                   help='wavelet bg-method only: starlet scale count -- background is '
+                        'the coarsest approximation after N dyadic scales, i.e. structure '
+                        'smaller than roughly 2**N sample-grid cells is treated as sky and '
+                        'removed, anything larger is left alone (default: 6). Lower = '
+                        'more aggressive/smaller-scale gradient removal, risks eating '
+                        'broad nebulosity; higher = leaves more large-scale gradient in.')
     g_post.add_argument('--graxpert-path', default=None, metavar='PATH',
                    help='Path to GraXpert binary (auto-detected if omitted).')
     g_post.add_argument('--denoise-strength', type=float, default=3.0,
@@ -1334,6 +1388,9 @@ def main():
     if getattr(args, 'quality_sweep', False):
         from src.quality_sweep import run_quality_sweep
         sys.exit(run_quality_sweep(args.directory, args))
+
+    from src.quality import configure_star_detector
+    configure_star_detector(getattr(args, 'star_detector', 'matched-filter'))
 
     # Upgrade bilinear → malvar when OpenCV is available; malvar resolves colour moiré
     # that bilinear introduces around fine star disks at no perceptible speed cost.

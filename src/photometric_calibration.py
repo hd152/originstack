@@ -145,7 +145,7 @@ def photometric_color_calibrate(img: np.ndarray,
 
     Args:
         img:            Float32 stacked image (H, W, 3).
-        star_positions: Source table from DAOStarFinder.
+        star_positions: Source table from detect_stars_auto.
         aperture_r:     Aperture radius in pixels for flux integration.
         sigma_clip:     Sigma threshold for gray-locus sigma-clipping.
         verbose:        Print calibration diagnostics.
@@ -198,7 +198,7 @@ def try_gaia_calibration(img: np.ndarray,
 
     Args:
         img:            Float32 stacked image (H, W, 3).
-        star_positions: Source table from DAOStarFinder.
+        star_positions: Source table from detect_stars_auto.
         wcs:            Astropy WCS object from plate solve (or None).
         verbose:        Verbosity flag.
 

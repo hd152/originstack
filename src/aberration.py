@@ -15,7 +15,7 @@ astrophotographer chases:
 
 Everything here is measured directly from the luminance image + a star
 centroid catalogue (no dependency on the detector's shape columns), so it works
-with either the SEP or DAOStarFinder catalogues the pipeline produces. Output is
+with any catalogue detect_stars_auto produces (matched-filter or SEP). Output is
 a printed summary, a returned dict (for the FITS header / JSON), and — when
 Pillow is available — an annotated PNG with one ellipse per populated cell,
 sized by FWHM and coloured green→red worst-to-best.

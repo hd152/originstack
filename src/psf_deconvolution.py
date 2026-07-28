@@ -270,7 +270,7 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
 
     Args:
         img:            Float32 stacked image (H, W, 3).
-        star_positions: Source table from DAOStarFinder / detect_stars.
+        star_positions: Source table from detect_stars_auto.
         psf_size:       Output kernel side length (default Config.RL_PSF_SIZE).
         iterations:     RL blind update iterations (0 = median stack only).
 

@@ -110,6 +110,11 @@ def classify_frame(path: str, header: dict) -> str:
     # Skip files produced by this pipeline (stacked outputs)
     if header.get('COMBINED') or header.get('CREATOR', '').startswith('astro_stack'):
         return 'skip'
+    # Skip the Celestron Origin app's own onboard live-stacked master preview
+    # (already stacked + stretched) that it writes into the session folder
+    # alongside the raw subs -- must not be treated as another light frame.
+    if name in ('finalstackedmaster.tif', 'finalstackedmaster.tiff'):
+        return 'skip'
     if 'dark' in name or header.get('IMAGETYP', '').lower() == 'dark':
         return 'dark'
     if 'flat' in name or header.get('IMAGETYP', '').lower() == 'flat':
