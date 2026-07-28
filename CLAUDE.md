@@ -126,7 +126,8 @@ Auto-detected at runtime:
 
 ### Optional dependencies (graceful degradation)
 Each `src/` module wraps its optional imports in `try/except`. Features degrade gracefully when packages are absent:
-- `photutils` — star detection in quality analysis
+- `photutils` — empirical PSF estimation (`photutils.psf.EPSFBuilder`) for `--deconvolve rl`; falls back to parametric Moffat/Gaussian PSF fitting when absent. No longer used for star detection (see `--star-detector`).
+- `sep` — optional secondary star-detection backend (`--star-detector sep`); the default (`matched-filter`, `src/star_detect.py`) needs no extra package and is faster on real data
 - `tqdm` — progress bars (falls back to plain iterator)
 - `Pillow` — preview JPEG generation
 - `psutil` — memory usage reporting

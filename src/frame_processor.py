@@ -37,6 +37,25 @@ def _get_webview():
     return get_webview()
 
 
+def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
+    """Publish a per-frame thumbnail every Nth accepted frame (Phase 1).
+
+    counter is a one-element list [int] of accepted frames seen so far, mutated
+    in place. `every` comes from --web-view-frame-every (0 disables); the first
+    frame is always shown so the viewer lights up immediately.
+    """
+    every = int(getattr(args, 'web_view_frame_every', 5) or 0)
+    if every <= 0 or not wv.active or rgb is None:
+        return
+    counter[0] += 1
+    c = counter[0]
+    if c == 1 or c % every == 0:
+        try:
+            wv.frame_preview(name, np.asarray(rgb), args=args)
+        except Exception:
+            pass
+
+
 def _get_frame_rotation(hdr: dict) -> Optional[float]:
     """Extract camera/rotator angle from FITS header. Returns degrees or None."""
     for key in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
@@ -286,6 +305,24 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     except Exception as e:
         return {'error': f'hot pixel removal error: {e}'}
     timings['hotpix'], _t = time.perf_counter() - _t, time.perf_counter()
+
+    # Vignetting/background calibration map (--vignette-map): must run here,
+    # in native per-frame sensor space before registration warps this frame
+    # to some session-specific orientation, and before white balance (which
+    # would rescale channels by a different per-frame factor than whatever
+    # the map was built under) -- see src/vignette_calib.py. rgb may still
+    # be a CuPy array at this point (GPU calibration path keeps it on-device
+    # through debayer); the map itself is always host numpy, so force host
+    # here rather than requiring apply_vignette_correction to be GPU-aware.
+    vignette_map = masters.get('vignette')
+    if vignette_map is not None:
+        try:
+            from src.vignette_calib import apply_vignette_correction
+            rgb = get_gpu().to_host(rgb)
+            rgb = apply_vignette_correction(rgb, vignette_map)
+        except Exception as e:
+            return {'error': f'vignette correction error: {e}'}
+    timings['vignette'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # White balance
     try:
@@ -711,6 +748,7 @@ def execute_frame_processing(
     _step_totals: Dict[str, float] = {}
     _step_frames = 0
     _worker_count_used = 1  # updated below once the real dispatch path is known
+    _wv_thumb_count = [0]   # accepted frames seen, for per-frame thumbnails
 
     def _accum(timings: Optional[dict]) -> None:
         nonlocal _step_frames
@@ -810,6 +848,9 @@ def execute_frame_processing(
                             print(f'  REJECT {os.path.basename(f.path)}: {error}')
                     else:
                         f.metrics = metrics
+                        _publish_frame_thumb(_wv, args,
+                                             os.path.basename(f.path),
+                                             mem_rgb[frame_idx], _wv_thumb_count)
                         if args.verbose:
                             m = f.metrics
                             safe_print(f'    {os.path.basename(f.path)}: '
@@ -950,6 +991,9 @@ def execute_frame_processing(
                 _wv.progress('Processing frames', _completed, n)
                 if error is None and f.metrics:
                     _wv.frame_metrics(os.path.basename(f.path), f.metrics)
+                if error is None:
+                    _publish_frame_thumb(_wv, args, os.path.basename(f.path),
+                                         mem_rgb[i], _wv_thumb_count)
                 # Periodically free CuPy's cached memory pool to prevent VRAM exhaustion
                 # from accumulating unused cached blocks across many completed frames.
                 if gpu.active and (_completed % _free_interval == 0):
@@ -1016,6 +1060,8 @@ def execute_frame_processing(
                 cached_lums[i] = result['lum']
                 f.metrics = result['metrics']
                 _wv.frame_metrics(os.path.basename(f.path), f.metrics)
+                _publish_frame_thumb(_wv, args, os.path.basename(f.path),
+                                     result['rgb'], _wv_thumb_count)
                 _accum(result.get('timings'))
                 if args.verbose:
                     m = f.metrics
@@ -1034,7 +1080,7 @@ def execute_frame_processing(
     _print_step_breakdown(_step_totals, _step_frames, _worker_count_used)
 
 
-_STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix', 'white_balance',
+_STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix', 'vignette', 'white_balance',
               'ca_correction', 'cosmic_ray_rejection', 'lum_recompute',
               'pre_gradient_removal', 'validate', 'quality',
               'patch_scores', 'memmap_write', 'final_flush')
@@ -1043,6 +1089,7 @@ _STEP_LABELS = {
     'calibrate': 'Calibrate (bias/dark/flat)',
     'debayer': 'Debayer',
     'hotpix': 'Hot-pixel removal',
+    'vignette': 'Vignette map (--vignette-map)',
     'white_balance': 'White balance',
     'ca_correction': 'CA correction (--ca-correction)',
     'cosmic_ray_rejection': 'Cosmic-ray rejection (lacosmic)',

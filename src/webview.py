@@ -3,8 +3,12 @@
 A pure-stdlib local dashboard: a ``ThreadingHTTPServer`` daemon thread in the
 main process serves one self-contained HTML page with live phase progress,
 the log stream, a per-frame quality ticker, and preview images published at
-processing milestones. Server-Sent Events push state snapshots; the preview
-image is fetched by version.
+processing milestones. Server-Sent Events push state snapshots; images are
+fetched by version.
+
+The viewer is interactive: zoom/pan the preview, re-stretch it live from the
+retained float source, compare any two milestone previews with a wipe slider,
+and page through per-frame thumbnails published during Phase 1.
 
 Inactive by default: every publish method is a no-op until ``start()`` is
 called, so the pipeline instrumentation costs nothing on normal runs.
@@ -13,12 +17,37 @@ Mirrors the ``get_gpu()`` module-level singleton pattern.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 _MAX_LOG_LINES = 500
 _MAX_FRAME_ROWS = 60
+_MAX_FRAME_THUMBS = 24     # per-frame preview ring
+_MAX_NAMED = 16            # retained milestone previews (with float source)
+_SRC_MAX_DIM = 1000        # downsized float source kept for re-stretch
+
+
+def _slugify(text: str) -> str:
+    s = re.sub(r'[^a-z0-9]+', '-', str(text).lower()).strip('-')
+    return s or 'preview'
+
+
+def _downsize_f16(rgb, max_dim: int):
+    """Decimate an HWC float image to <= max_dim and store as float16 to bound
+    the memory kept for on-demand re-stretch. Aliasing is acceptable for a
+    preview source."""
+    import numpy as np
+    a = np.asarray(rgb)
+    if a.ndim == 2:
+        a = a[:, :, None]
+    h, w = a.shape[:2]
+    step = max(1, int(max(h, w) // max_dim))
+    if step > 1:
+        a = a[::step, ::step]
+    return a.astype(np.float16)
 
 
 class WebView:
@@ -27,10 +56,19 @@ class WebView:
         self._lock = threading.Lock()
         self._server = None
         self._version = 0          # bumped on every state change (SSE trigger)
+        # latest preview (back-compat single slot)
         self._preview_version = 0
         self._preview_bytes: Optional[bytes] = None
         self._preview_caption = ""
         self._last_preview_time = 0.0
+        # named milestone previews: slug -> {caption, ver, jpeg, src(f16), kw}
+        self._named: "OrderedDict[str, dict]" = OrderedDict()
+        self._named_version = 0
+        self._latest_slug = ""
+        # per-frame thumbnails (ring)
+        self._frame_thumbs: "OrderedDict[int, dict]" = OrderedDict()
+        self._frame_thumb_seq = 0
+        self._frame_thumbs_version = 0
         self._state: Dict[str, Any] = {
             'run': {},                 # target/output/frame counts
             'phase': 0,
@@ -109,35 +147,86 @@ class WebView:
                 del rows[:len(rows) - _MAX_FRAME_ROWS]
             self._bump()
 
-    def preview(self, rgb, caption: str, args=None,
+    @staticmethod
+    def _stretch_kw(args) -> dict:
+        """Extract stretch parameters from an args namespace (or defaults)."""
+        if args is None:
+            return dict(stretch='ghs', ghs_b=8.0, ghs_sp=0.15, ghs_hp=0.95,
+                        black_sigma=0.0)
+        return dict(
+            stretch=getattr(args, 'stretch', 'ghs'),
+            ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+            ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+            ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
+            black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0))
+
+    def preview(self, rgb, caption: str, args=None, slot: Optional[str] = None,
                 min_interval: float = 2.0) -> None:
         """Publish a stretched preview of an HWC float32 image. Encoding is
-        throttled so frequent milestones don't spend time on JPEG encodes."""
+        throttled so frequent milestones don't spend time on JPEG encodes.
+        The float source is retained (downsized) so the viewer can re-stretch
+        it on demand, and the preview is registered as a named slot so it can
+        be picked for before/after compare."""
         if not self.active:
             return
         now = time.time()
         if now - self._last_preview_time < min_interval:
             return
+        kw = self._stretch_kw(args)
         try:
             from src.io_fits import preview_jpeg_bytes
-            kw = {}
-            if args is not None:
-                kw = dict(stretch=getattr(args, 'stretch', 'ghs'),
-                          ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-                          ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                          ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-                          black_sigma=float(getattr(args, 'preview_black_sigma',
-                                                    0.0) or 0.0))
             data = preview_jpeg_bytes(rgb, max_dim=1024, **kw)
         except Exception:
             return
         if not data:
             return
+        try:
+            src = _downsize_f16(rgb, _SRC_MAX_DIM)
+        except Exception:
+            src = None
+        slug = _slugify(slot or caption)
         with self._lock:
             self._preview_bytes = data
             self._preview_caption = caption
             self._preview_version += 1
             self._last_preview_time = now
+            # register / update the named slot
+            self._named_version += 1
+            self._named[slug] = {'caption': caption, 'ver': self._named_version,
+                                 'jpeg': data, 'src': src, 'kw': kw}
+            self._named.move_to_end(slug)
+            self._latest_slug = slug
+            # evict oldest sources beyond the cap (keep 'final' + newest)
+            while len(self._named) > _MAX_NAMED:
+                for k in list(self._named.keys()):
+                    if k != 'final' and k != self._latest_slug:
+                        del self._named[k]
+                        break
+                else:
+                    break
+            self._bump()
+
+    def frame_preview(self, name: str, rgb, args=None,
+                      max_dim: int = 512) -> None:
+        """Publish a small thumbnail of a single processed light (Phase 1).
+        Stored in a bounded ring; the viewer can page through them."""
+        if not self.active:
+            return
+        kw = self._stretch_kw(args)
+        try:
+            from src.io_fits import preview_jpeg_bytes
+            data = preview_jpeg_bytes(rgb, max_dim=max_dim, **kw)
+        except Exception:
+            return
+        if not data:
+            return
+        with self._lock:
+            self._frame_thumb_seq += 1
+            fid = self._frame_thumb_seq
+            self._frame_thumbs[fid] = {'id': fid, 'name': name, 'jpeg': data}
+            while len(self._frame_thumbs) > _MAX_FRAME_THUMBS:
+                self._frame_thumbs.popitem(last=False)
+            self._frame_thumbs_version += 1
             self._bump()
 
     def summary(self, **fields: Any) -> None:
@@ -148,6 +237,28 @@ class WebView:
             self._state['done'] = True
             self._bump()
 
+    # ── re-stretch (on-demand, from retained float source) ────────────────
+
+    def restretch(self, slug: str, params: dict) -> Optional[bytes]:
+        with self._lock:
+            slot = self._named.get(slug)
+            src = slot['src'] if slot else None
+        if src is None:
+            return None
+        try:
+            import numpy as np
+            from src.io_fits import preview_jpeg_bytes
+            f = np.asarray(src, dtype=np.float32)
+            return preview_jpeg_bytes(
+                f, max_dim=_SRC_MAX_DIM,
+                stretch=params.get('stretch', 'ghs'),
+                ghs_b=float(params.get('b', 8.0)),
+                ghs_sp=float(params.get('sp', 0.15)),
+                ghs_hp=float(params.get('hp', 0.95)),
+                black_sigma=float(params.get('black', 0.0)))
+        except Exception:
+            return None
+
     # ── snapshot for SSE ──────────────────────────────────────────────────
 
     def _snapshot(self) -> Dict[str, Any]:
@@ -156,17 +267,36 @@ class WebView:
             snap['version'] = self._version
             snap['preview_version'] = self._preview_version
             snap['preview_caption'] = self._preview_caption
+            snap['latest_slug'] = self._latest_slug
+            snap['named_version'] = self._named_version
+            snap['named'] = [{'slug': k, 'caption': v['caption'],
+                              'ver': v['ver'], 'src': v['src'] is not None}
+                             for k, v in self._named.items()]
+            snap['frames_img_version'] = self._frame_thumbs_version
+            snap['frames_img'] = [{'id': v['id'], 'name': v['name']}
+                                  for v in self._frame_thumbs.values()]
             return snap
 
     def _preview(self):
         with self._lock:
             return self._preview_bytes
 
+    def _named_jpeg(self, slug: str):
+        with self._lock:
+            slot = self._named.get(slug)
+            return slot['jpeg'] if slot else None
+
+    def _frame_jpeg(self, fid: int):
+        with self._lock:
+            slot = self._frame_thumbs.get(fid)
+            return slot['jpeg'] if slot else None
+
     # ── server ────────────────────────────────────────────────────────────
 
     def start(self, port: int = 8765) -> Optional[str]:
         """Start the dashboard server; returns the URL (None on failure)."""
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs, urlparse
 
         view = self
 
@@ -185,7 +315,9 @@ class WebView:
                 self.wfile.write(body)
 
             def do_GET(self):
-                path = self.path.split('?')[0]
+                parsed = urlparse(self.path)
+                path = parsed.path
+                q = parse_qs(parsed.query)
                 if path == '/':
                     self._send(200, 'text/html; charset=utf-8',
                                _PAGE.encode('utf-8'))
@@ -193,6 +325,36 @@ class WebView:
                     data = view._preview()
                     if data is None:
                         self._send(404, 'text/plain', b'no preview yet')
+                    else:
+                        self._send(200, 'image/jpeg', data)
+                elif path == '/named.jpg':
+                    data = view._named_jpeg((q.get('slug') or [''])[0])
+                    if data is None:
+                        self._send(404, 'text/plain', b'no such preview')
+                    else:
+                        self._send(200, 'image/jpeg', data)
+                elif path == '/frame.jpg':
+                    try:
+                        fid = int((q.get('id') or ['0'])[0])
+                    except ValueError:
+                        fid = 0
+                    data = view._frame_jpeg(fid)
+                    if data is None:
+                        self._send(404, 'text/plain', b'no such frame')
+                    else:
+                        self._send(200, 'image/jpeg', data)
+                elif path == '/restretch':
+                    def _f(key, dflt):
+                        try:
+                            return float((q.get(key) or [dflt])[0])
+                        except (TypeError, ValueError):
+                            return float(dflt)
+                    params = {'stretch': (q.get('stretch') or ['ghs'])[0],
+                              'b': _f('b', 8.0), 'sp': _f('sp', 0.15),
+                              'hp': _f('hp', 0.95), 'black': _f('black', 0.0)}
+                    data = view.restretch((q.get('slug') or [''])[0], params)
+                    if data is None:
+                        self._send(404, 'text/plain', b'no source for slot')
                     else:
                         self._send(200, 'image/jpeg', data)
                 elif path == '/events':
@@ -263,8 +425,8 @@ _PAGE = """<!DOCTYPE html>
            align-items: baseline; gap: 14px; }
   header h1 { font-size: 17px; margin: 0; color: #e8edf4; }
   header .run { color: #8b949e; font-size: 13px; }
-  main { display: grid; grid-template-columns: minmax(380px, 1fr) minmax(420px, 1.2fr);
-         gap: 16px; padding: 16px 22px; max-width: 1500px; }
+  main { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(460px, 1.3fr);
+         gap: 16px; padding: 16px 22px; max-width: 1600px; }
   section { background: #161b22; border: 1px solid #2a313c;
             border-radius: 8px; padding: 14px 16px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
@@ -280,16 +442,61 @@ _PAGE = """<!DOCTYPE html>
   .bar div { height: 100%; background: linear-gradient(90deg, #1f6feb, #58a6ff);
              width: 0%; transition: width .3s; }
   .plabel { margin-top: 6px; font-size: 12px; color: #8b949e; }
-  #log { height: 300px; overflow-y: auto; background: #0d1117;
+  #log { height: 260px; overflow-y: auto; background: #0d1117;
          border-radius: 6px; padding: 10px 12px; font: 12px/1.5 Consolas,
          monospace; white-space: pre-wrap; color: #9aa4b2; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid #21262d; }
   th:first-child, td:first-child { text-align: left; }
   td.bad { color: #f85149; }
-  #previewImg { width: 100%; border-radius: 6px; background: #000;
-                min-height: 200px; }
+  /* viewer */
+  .vtools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+            margin-bottom: 10px; }
+  .vtools select, .vtools button { background: #0d1117; color: #d5dae2;
+      border: 1px solid #2a313c; border-radius: 6px; padding: 5px 9px;
+      font-size: 12px; cursor: pointer; }
+  .vtools button:hover, .vtools select:hover { border-color: #58a6ff; }
+  .vtools button.on { border-color: #58a6ff; color: #e8edf4; }
+  .vtools .spacer { flex: 1; }
+  .vtools .z { color: #6e7883; font-size: 12px; min-width: 46px;
+               text-align: right; }
+  #viewport { position: relative; width: 100%; height: 460px; overflow: hidden;
+              background: #000; border-radius: 6px; border: 1px solid #2a313c;
+              cursor: grab; touch-action: none; }
+  #viewport.drag { cursor: grabbing; }
+  #viewport img { position: absolute; top: 0; left: 0; transform-origin: 0 0;
+                  image-rendering: auto; user-select: none;
+                  -webkit-user-drag: none; max-width: none; }
+  #cmpImg { display: none; }
+  #wipe { position: absolute; top: 0; bottom: 0; width: 2px; background: #58a6ff;
+          display: none; cursor: ew-resize; z-index: 5; }
+  #wipe::after { content: '\\21d4'; position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%,-50%); background: #58a6ff; color: #0d1117;
+      border-radius: 50%; width: 22px; height: 22px; line-height: 22px;
+      text-align: center; font-size: 12px; }
   .cap { margin-top: 6px; font-size: 12px; color: #8b949e; }
+  /* stretch panel */
+  .sgrid { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px;
+           align-items: center; font-size: 12px; }
+  .sgrid label { color: #8b949e; }
+  .sgrid input[type=range] { width: 100%; }
+  .sgrid .val { color: #d5dae2; min-width: 42px; text-align: right;
+                font-variant-numeric: tabular-nums; }
+  .srow { display: flex; gap: 8px; margin-top: 10px; }
+  .srow button { flex: 1; background: #1f6feb; color: #fff; border: 0;
+      border-radius: 6px; padding: 7px; font-size: 12px; cursor: pointer; }
+  .srow button.ghost { background: #0d1117; color: #8b949e;
+      border: 1px solid #2a313c; }
+  .snote { color: #6e7883; font-size: 11px; margin-top: 8px; }
+  /* frame strip */
+  #strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  #strip figure { margin: 0; flex: 0 0 auto; width: 96px; cursor: pointer;
+                  text-align: center; }
+  #strip img { width: 96px; height: 72px; object-fit: cover; border-radius: 4px;
+               border: 1px solid #2a313c; background: #000; }
+  #strip figure:hover img { border-color: #58a6ff; }
+  #strip figcaption { font-size: 10px; color: #6e7883; margin-top: 3px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #summary { display: none; border-color: #3fb950; }
   #summary dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px;
                 margin: 0; font-size: 13px; }
@@ -318,6 +525,25 @@ _PAGE = """<!DOCTYPE html>
         <th>FWHM</th></tr></thead><tbody id="frames"></tbody></table>
     </section>
     <section style="margin-top:16px">
+      <h2>Stretch</h2>
+      <div class="sgrid">
+        <label>Black σ</label><input type="range" id="s_black" min="-1" max="4"
+          step="0.05" value="0"><span class="val" id="v_black">0.00</span>
+        <label>GHS b</label><input type="range" id="s_b" min="0" max="20"
+          step="0.1" value="8"><span class="val" id="v_b">8.0</span>
+        <label>GHS sp</label><input type="range" id="s_sp" min="0" max="1"
+          step="0.005" value="0.15"><span class="val" id="v_sp">0.15</span>
+        <label>GHS hp</label><input type="range" id="s_hp" min="0" max="1"
+          step="0.005" value="0.95"><span class="val" id="v_hp">0.95</span>
+      </div>
+      <div class="srow">
+        <button id="applyStretch">Apply to view</button>
+        <button id="resetStretch" class="ghost">Reset</button>
+      </div>
+      <div class="snote" id="snote">Adjusts the currently viewed milestone
+        preview, re-stretched from its retained linear source.</div>
+    </section>
+    <section style="margin-top:16px">
       <h2>Log</h2>
       <div id="log"></div>
     </section>
@@ -325,8 +551,25 @@ _PAGE = """<!DOCTYPE html>
   <div>
     <section>
       <h2>Preview</h2>
-      <img id="previewImg" alt="waiting for first preview…">
+      <div class="vtools">
+        <select id="viewSel" title="Which image to show"></select>
+        <button id="cmpBtn" title="Compare two milestones">Compare</button>
+        <select id="cmpSel" style="display:none" title="Compare against"></select>
+        <div class="spacer"></div>
+        <button id="fitBtn">Fit</button>
+        <button id="oneBtn">1:1</button>
+        <span class="z" id="zlabel">100%</span>
+      </div>
+      <div id="viewport">
+        <img id="mainImg" alt="waiting for first preview…">
+        <img id="cmpImg" alt="">
+        <div id="wipe"></div>
+      </div>
       <div class="cap" id="previewCap">Waiting for the first stack…</div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>Frames</h2>
+      <div id="strip"></div>
     </section>
     <section style="margin-top:16px" id="summary">
       <h2>Complete</h2>
@@ -335,7 +578,203 @@ _PAGE = """<!DOCTYPE html>
   </div>
 </main>
 <script>
-let pv = -1;
+"use strict";
+// ── viewer transform state ───────────────────────────────────────────────
+const vp = document.getElementById('viewport');
+const mainImg = document.getElementById('mainImg');
+const cmpImg = document.getElementById('cmpImg');
+const wipe = document.getElementById('wipe');
+let scale = 1, tx = 0, ty = 0, natW = 0, natH = 0, fitScale = 1;
+let follow = true;          // main view follows the latest live preview
+let curSlug = '';           // slug currently shown in main view
+let manualStretch = false;  // a re-stretch overrides live updates
+let cmpOn = false, wipeFrac = 0.5;
+
+function applyTransform() {
+  const t = `translate(${tx}px, ${ty}px) scale(${scale})`;
+  mainImg.style.transform = t;
+  cmpImg.style.transform = t;
+  document.getElementById('zlabel').textContent =
+    Math.round(scale / fitScale * 100) + '%';
+  updateWipe();
+}
+function computeFit() {
+  if (!natW || !natH) return;
+  fitScale = Math.min(vp.clientWidth / natW, vp.clientHeight / natH);
+  scale = fitScale;
+  tx = (vp.clientWidth - natW * scale) / 2;
+  ty = (vp.clientHeight - natH * scale) / 2;
+  applyTransform();
+}
+function setOneToOne() {
+  const cx = vp.clientWidth / 2, cy = vp.clientHeight / 2;
+  const ix = (cx - tx) / scale, iy = (cy - ty) / scale;
+  scale = 1;
+  tx = cx - ix * scale; ty = cy - iy * scale;
+  applyTransform();
+}
+mainImg.onload = () => {
+  const firstLoad = (natW === 0);
+  natW = mainImg.naturalWidth; natH = mainImg.naturalHeight;
+  mainImg.style.width = natW + 'px'; mainImg.style.height = natH + 'px';
+  cmpImg.style.width = natW + 'px'; cmpImg.style.height = natH + 'px';
+  if (firstLoad || scale === 0) computeFit();
+  else applyTransform();
+};
+// wheel zoom toward cursor
+vp.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const r = vp.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const ix = (mx - tx) / scale, iy = (my - ty) / scale;
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  scale = Math.max(fitScale * 0.5, Math.min(scale * factor, 40));
+  tx = mx - ix * scale; ty = my - iy * scale;
+  applyTransform();
+}, { passive: false });
+// drag to pan (or move wipe when grabbing near it)
+let dragging = false, wipeDrag = false, lx = 0, ly = 0;
+vp.addEventListener('pointerdown', (e) => {
+  vp.setPointerCapture(e.pointerId);
+  if (cmpOn) {
+    const r = vp.getBoundingClientRect();
+    if (Math.abs((e.clientX - r.left) - wipeFrac * vp.clientWidth) < 14) {
+      wipeDrag = true; return;
+    }
+  }
+  dragging = true; vp.classList.add('drag'); lx = e.clientX; ly = e.clientY;
+});
+vp.addEventListener('pointermove', (e) => {
+  if (wipeDrag) {
+    const r = vp.getBoundingClientRect();
+    wipeFrac = Math.max(0, Math.min(1, (e.clientX - r.left) / vp.clientWidth));
+    updateWipe(); return;
+  }
+  if (!dragging) return;
+  tx += e.clientX - lx; ty += e.clientY - ly; lx = e.clientX; ly = e.clientY;
+  applyTransform();
+});
+function endDrag() { dragging = false; wipeDrag = false; vp.classList.remove('drag'); }
+vp.addEventListener('pointerup', endDrag);
+vp.addEventListener('pointercancel', endDrag);
+function updateWipe() {
+  if (!cmpOn) { wipe.style.display = 'none'; cmpImg.style.display = 'none'; return; }
+  const px = wipeFrac * vp.clientWidth;
+  wipe.style.display = 'block'; wipe.style.left = px + 'px';
+  cmpImg.style.display = 'block';
+  // cmpImg (B) shows on the right of the wipe; mainImg (A) fully drawn beneath
+  cmpImg.style.clipPath = `inset(0 0 0 ${px}px)`;
+}
+document.getElementById('fitBtn').onclick = computeFit;
+document.getElementById('oneBtn').onclick = setOneToOne;
+window.addEventListener('resize', () => { if (natW) applyTransform(); });
+
+// ── source selection ─────────────────────────────────────────────────────
+const viewSel = document.getElementById('viewSel');
+const cmpSel = document.getElementById('cmpSel');
+let namedVer = -1, framesVer = -1;
+let lastPreviewVer = -1, latestSlug = '';
+
+function loadMain(url, slug) {
+  curSlug = slug || '';
+  const keep = (natW !== 0);
+  if (!keep) scale = 0;   // force fit on first image
+  mainImg.src = url;
+}
+function loadCmp(slug) {
+  cmpImg.src = '/named.jpg?slug=' + encodeURIComponent(slug);
+}
+viewSel.onchange = () => {
+  manualStretch = false;
+  const v = viewSel.value;
+  if (v === '__live__') { follow = true; if (latestSlug) loadMain('/preview.jpg?v=' + lastPreviewVer, latestSlug); }
+  else if (v.startsWith('f:')) { follow = false; loadMain('/frame.jpg?id=' + v.slice(2), ''); }
+  else { follow = false; loadMain('/named.jpg?slug=' + encodeURIComponent(v), v); }
+  refreshStretchNote();
+};
+document.getElementById('cmpBtn').onclick = () => {
+  cmpOn = !cmpOn;
+  document.getElementById('cmpBtn').classList.toggle('on', cmpOn);
+  cmpSel.style.display = cmpOn ? '' : 'none';
+  if (cmpOn && cmpSel.value) loadCmp(cmpSel.value);
+  updateWipe();
+};
+cmpSel.onchange = () => { if (cmpOn) loadCmp(cmpSel.value); };
+
+function rebuildViewOptions(named, frames) {
+  const cur = viewSel.value || '__live__';
+  let html = '<option value="__live__">Live (latest)</option>';
+  named.forEach(n => { html += `<option value="${n.slug}">${esc(n.caption)}</option>`; });
+  frames.slice().reverse().forEach(f => {
+    html += `<option value="f:${f.id}">frame · ${esc(f.name)}</option>`; });
+  viewSel.innerHTML = html;
+  viewSel.value = [...viewSel.options].some(o => o.value === cur) ? cur : '__live__';
+  // compare dropdown: named slots only
+  const curB = cmpSel.value;
+  cmpSel.innerHTML = named.map(n =>
+    `<option value="${n.slug}">${esc(n.caption)}</option>`).join('');
+  if ([...cmpSel.options].some(o => o.value === curB)) cmpSel.value = curB;
+  else if (named.length) cmpSel.value = named[0].slug;
+}
+
+// ── stretch controls ─────────────────────────────────────────────────────
+const sl = { black: g('s_black'), b: g('s_b'), sp: g('s_sp'), hp: g('s_hp') };
+function g(id){ return document.getElementById(id); }
+function fmt(id, x, d){ g(id).textContent = (+x).toFixed(d); }
+function syncLabels() {
+  fmt('v_black', sl.black.value, 2); fmt('v_b', sl.b.value, 1);
+  fmt('v_sp', sl.sp.value, 3); fmt('v_hp', sl.hp.value, 3);
+}
+Object.values(sl).forEach(s => s.addEventListener('input', syncLabels));
+syncLabels();
+function stretchSlug() {
+  if (curSlug) return curSlug;
+  if (follow && latestSlug) return latestSlug;
+  return '';
+}
+function refreshStretchNote() {
+  const slug = stretchSlug();
+  const ok = slug && namedHas(slug);
+  g('applyStretch').disabled = !ok;
+  g('snote').textContent = ok
+    ? 'Re-stretches “' + slug + '” from its retained linear source.'
+    : 'Select a milestone preview to re-stretch (frame thumbnails have no linear source).';
+}
+let curNamed = [];
+function namedHas(slug){ return curNamed.some(n => n.slug === slug && n.src); }
+g('applyStretch').onclick = () => {
+  const slug = stretchSlug();
+  if (!slug || !namedHas(slug)) return;
+  manualStretch = true; follow = false;
+  const u = `/restretch?slug=${encodeURIComponent(slug)}&stretch=ghs`
+    + `&black=${sl.black.value}&b=${sl.b.value}&sp=${sl.sp.value}&hp=${sl.hp.value}`
+    + `&_=${Date.now()}`;
+  loadMain(u, slug);
+};
+g('resetStretch').onclick = () => {
+  sl.black.value = 0; sl.b.value = 8; sl.sp.value = 0.15; sl.hp.value = 0.95;
+  syncLabels();
+  manualStretch = false; follow = true; viewSel.value = '__live__';
+  if (latestSlug) loadMain('/preview.jpg?v=' + lastPreviewVer, latestSlug);
+};
+
+// ── frame strip ──────────────────────────────────────────────────────────
+function rebuildStrip(frames) {
+  const el = document.getElementById('strip');
+  el.innerHTML = frames.slice().reverse().map(f =>
+    `<figure data-id="${f.id}"><img src="/frame.jpg?id=${f.id}" loading="lazy">`
+    + `<figcaption>${esc(f.name)}</figcaption></figure>`).join('');
+  el.querySelectorAll('figure').forEach(fig => fig.onclick = () => {
+    follow = false; manualStretch = false;
+    viewSel.value = 'f:' + fig.dataset.id;
+    loadMain('/frame.jpg?id=' + fig.dataset.id, '');
+    refreshStretchNote();
+  });
+}
+
+// ── SSE ──────────────────────────────────────────────────────────────────
+function esc(s){ return String(s).replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 const es = new EventSource('/events');
 es.onmessage = (ev) => {
   const s = JSON.parse(ev.data);
@@ -359,15 +798,28 @@ es.onmessage = (ev) => {
     `${p.label}: ${p.done} / ${p.total}` : (s.phase_title || '\\u00a0');
   const tb = document.getElementById('frames');
   tb.innerHTML = (s.frames || []).slice(-12).reverse().map(f =>
-    `<tr><td${f.ok ? '' : ' class="bad"'}>${f.name}</td><td>${f.score}</td>` +
+    `<tr><td${f.ok ? '' : ' class="bad"'}>${esc(f.name)}</td><td>${f.score}</td>` +
     `<td>${f.snr}</td><td>${f.stars}</td><td>${f.fwhm}</td></tr>`).join('');
   const log = document.getElementById('log');
   const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
   log.textContent = (s.log || []).join('\\n');
   if (stick) log.scrollTop = log.scrollHeight;
-  if (s.preview_version !== pv && s.preview_version > 0) {
-    pv = s.preview_version;
-    document.getElementById('previewImg').src = '/preview.jpg?v=' + pv;
+
+  latestSlug = s.latest_slug || latestSlug;
+  lastPreviewVer = s.preview_version;
+  curNamed = s.named || [];
+  // rebuild selectors / strip only when their versions change
+  if (s.named_version !== namedVer || s.frames_img_version !== framesVer) {
+    namedVer = s.named_version; framesVer = s.frames_img_version;
+    rebuildViewOptions(s.named || [], s.frames_img || []);
+    rebuildStrip(s.frames_img || []);
+    refreshStretchNote();
+  }
+  // live-follow the latest preview unless the user took control
+  if (follow && !manualStretch && s.preview_version > 0
+      && mainImg.dataset.pv !== String(s.preview_version)) {
+    mainImg.dataset.pv = String(s.preview_version);
+    loadMain('/preview.jpg?v=' + s.preview_version, latestSlug);
     document.getElementById('previewCap').textContent = s.preview_caption || '';
   }
   if (s.done && s.summary) {
@@ -375,7 +827,7 @@ es.onmessage = (ev) => {
     el.style.display = 'block';
     document.getElementById('summarydl').innerHTML =
       Object.entries(s.summary).map(([k, v]) =>
-        `<dt>${k.replace(/_/g, ' ')}</dt><dd>${v}</dd>`).join('');
+        `<dt>${esc(k.replace(/_/g, ' '))}</dt><dd>${esc(v)}</dd>`).join('');
   }
 };
 </script>

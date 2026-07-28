@@ -14,10 +14,11 @@ from scipy import ndimage
 
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, format_time
-from src.quality import generate_star_mask, _detect_stars_multi_fwhm, _sep_detect_stars
+from src.quality import generate_star_mask, detect_stars_auto
 from src.background import (apply_background_extraction, remove_sky_residual,
                             gaussian_filter_ds,
                             sky_floor_normalize, dynamic_background_extraction,
+                            wavelet_background_extraction,
                             _border_pixels, _sigma_sky)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
                            bilateral_denoise, reduce_chroma_noise,
@@ -29,20 +30,6 @@ from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
                                     richardson_lucy_deconvolve,
                                     estimate_psf_blind, tv_regularized_deconvolve)
 from src.photometric_calibration import photometric_color_calibrate, try_gaia_calibration
-
-DAOStarFinder = None
-
-
-def _ensure_photutils() -> Optional[Any]:
-    global DAOStarFinder
-    if DAOStarFinder is None:
-        try:
-            from photutils.detection import DAOStarFinder as _dao
-            if callable(_dao):
-                DAOStarFinder = _dao
-        except Exception:
-            pass
-    return DAOStarFinder
 
 try:
     from astropy.stats import sigma_clipped_stats
@@ -359,11 +346,7 @@ def postprocess_stack(
             _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
                        + 0.114 * stacked[:, :, 2])
             _, _bg_med, _bg_std = sigma_clipped_stats(_pp_lum, sigma=3.0, maxiters=5)
-            _bg_noise = 5.0 * float(_bg_std)
-            _pp_sources = _sep_detect_stars(_pp_lum.astype(np.float32), float(_bg_std))
-            if _pp_sources is None or len(_pp_sources) == 0:
-                _bg_sub = _pp_lum - float(_bg_med)
-                _pp_sources = _detect_stars_multi_fwhm(_bg_sub, _bg_noise)
+            _pp_sources = detect_stars_auto(_pp_lum, float(_bg_std), background=float(_bg_med))
             if _pp_sources is not None and len(_pp_sources) > 0:
                 pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
                 if args.verbose:
@@ -459,6 +442,18 @@ def postprocess_stack(
                 use_entropy_weights=_entropy_bg,
                 exclusion_mask=_coma_excl_mask)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
+        elif bg_method == 'wavelet':
+            dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
+            wavelet_scales = getattr(args, 'bg_wavelet_scales', 6)
+            print(f"\n  Applying starlet wavelet-band background extraction "
+                  f"(patch={dbe_patch}px, scales={wavelet_scales}, sigma={args.bg_clip_sigma})...")
+            _entropy_bg = getattr(args, 'entropy_bg', False)
+            stacked = wavelet_background_extraction(
+                stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
+                n_scales=wavelet_scales, verbose=args.verbose, star_mask=pp_star_mask,
+                use_entropy_weights=_entropy_bg,
+                exclusion_mask=_coma_excl_mask)
+            safe_print(f"  ✓ Wavelet-band background extraction ({format_time(time.time() - bg_start)})")
         else:
             print(f"\n  Applying background extraction "
                   f"(mesh={args.bg_mesh_size}, sigma={args.bg_clip_sigma})...")

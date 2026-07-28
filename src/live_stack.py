@@ -188,7 +188,7 @@ class LiveStacker:
             self.wv.frame_metrics(name, metrics, accepted=True)
             self.wv.progress('Live stacking', self.n, self.n)
             self.wv.preview(stack, f"{self.n} frames — SNR {snr:.1f}",
-                            args=self.args, min_interval=1.0)
+                            args=self.args, slot='live', min_interval=1.0)
 
     # ── watch loop ─────────────────────────────────────────────────────────
 
@@ -286,7 +286,7 @@ def run_live_stack(args) -> int:
     extra = _load_calibration_dir(args)
     for k in ('dark', 'flat', 'bias'):
         frames[k] = (frames.get(k) or []) + extra.get(k, [])
-    masters = _build_masters(frames)
+    masters = _build_masters(frames, args=args)
     from src.frame_processor import _build_flat_norm
     _build_flat_norm(masters, frames.get('light', []))
 

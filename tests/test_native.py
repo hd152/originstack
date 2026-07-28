@@ -364,3 +364,74 @@ def test_patch_combine_grid_mode_matches_fullres():
     # float tolerance, and the combine averages ~1000 ADU pixels.
     assert float(np.max(np.abs(ref.astype(np.float64) - got_numpy))) < 1.0
     assert float(np.max(np.abs(ref.astype(np.float64) - got_native))) < 2.0
+
+
+def _synthetic_starfield(h=300, w=400, n_stars=25, seed=0):
+    """Deterministic synthetic star field: flat sky + Gaussian PSF stars +
+    Poisson-like noise, for a controlled (not just real-data) parity check."""
+    rng = np.random.default_rng(seed)
+    img = rng.normal(1000.0, 15.0, (h, w)).astype(np.float64)
+    yy, xx = np.mgrid[0:h, 0:w]
+    for _ in range(n_stars):
+        cy = rng.uniform(20, h - 20)
+        cx = rng.uniform(20, w - 20)
+        amp = rng.uniform(200, 5000)
+        sigma = rng.uniform(1.5, 3.0)
+        img += amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma ** 2))
+    return img.astype(np.float32)
+
+
+def test_detect_stars_matched_filter_matches_numpy_synthetic():
+    """Native matched-filter star detector vs the numpy mirror in
+    src/star_detect.py on a synthetic field -- same mesh construction,
+    convolution, and two-pass centroid refinement, so results should match
+    to float64 summation-order tolerance (not just "close")."""
+    from src.star_detect import _detect_stars_matched_filter_numpy
+
+    img = _synthetic_starfield()
+    got = native.detect_stars_matched_filter(img, 5.5, 22.0, 64, 0.5, 2)
+    ref = _detect_stars_matched_filter_numpy(img.astype(np.float64), 5.5, 22.0, 64, 0.5, 2)
+
+    assert got.shape[0] == len(ref)
+    assert got.shape[0] > 0  # sanity: the synthetic field should yield detections
+    got_sorted = got[np.argsort(got[:, 0])]
+    ref_sorted = np.sort(ref, order='xcentroid')
+    np.testing.assert_allclose(got_sorted[:, 0], ref_sorted['xcentroid'], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(got_sorted[:, 1], ref_sorted['ycentroid'], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(got_sorted[:, 2], ref_sorted['flux'], rtol=1e-6, atol=1e-3)
+
+
+def test_detect_stars_matched_filter_empty_field_no_detections():
+    """Pure noise, no stars -- both paths should return zero detections,
+    not spurious noise-driven candidates (this exact failure mode -- a
+    mesh-interpolation edge artifact producing false positives -- was a
+    real bug caught during development, see src/star_detect.py docstring)."""
+    from src.star_detect import _detect_stars_matched_filter_numpy
+
+    rng = np.random.default_rng(1)
+    img = rng.normal(1000.0, 15.0, (200, 250)).astype(np.float32)
+    got = native.detect_stars_matched_filter(img, 5.5, 22.0, 64, 0.5, 2)
+    ref = _detect_stars_matched_filter_numpy(img.astype(np.float64), 5.5, 22.0, 64, 0.5, 2)
+    assert got.shape[0] == 0
+    assert len(ref) == 0
+
+
+def test_detect_stars_matched_filter_speedup():
+    """Native path should be meaningfully faster than the numpy mirror on a
+    real-sized field -- not a strict regression gate (timing is
+    environment-dependent), just a sanity check that the native path is
+    actually doing the heavy lifting."""
+    import time
+
+    from src.star_detect import _detect_stars_matched_filter_numpy
+
+    img = _synthetic_starfield(h=800, w=1000, n_stars=80)
+    t0 = time.time()
+    native.detect_stars_matched_filter(img, 5.5, 22.0, 64, 0.5, 2)
+    t_native = time.time() - t0
+
+    t0 = time.time()
+    _detect_stars_matched_filter_numpy(img.astype(np.float64), 5.5, 22.0, 64, 0.5, 2)
+    t_numpy = time.time() - t0
+
+    assert t_native < t_numpy

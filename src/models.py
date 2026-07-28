@@ -81,7 +81,9 @@ class Config:
 
     # Registration enhancements
     SHIFT_OUTLIER_SIGMA = 3.5       # MAD-sigma threshold for pre-registration outlier rejection
-    REG_RESIDUAL_MAX_PX = 1.5       # Max post-registration centroid RMS (px) before rejection
+    REG_RESIDUAL_MAX_PX = 1.5       # Floor for the post-registration centroid RMS reject threshold (px)
+    REG_RESIDUAL_SIGMA_MULT = 3.0   # Threshold = max(floor, this * expected centroid noise sigma)
+    REG_RESIDUAL_MAX_PX_CAP = 6.0   # Ceiling: never waive the check past this, even on very noisy subs
     ALIGNMENT_CENTRALITY_WEIGHT = 0.3   # Blend weight: 0=pure quality score, 1=pure centrality
 
     # Patch-based local registration (lucky imaging mode)

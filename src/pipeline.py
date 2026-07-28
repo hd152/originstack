@@ -890,7 +890,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         _wv = get_webview()
         if _wv.active:
             _wv.preview(stacked, 'Final (post-processed)', args=args,
-                        min_interval=0.0)
+                        slot='final', min_interval=0.0)
             _fw = [f.metrics.get('fwhm', 0) for f in final
                    if f.metrics and f.metrics.get('fwhm', 0) > 0]
             _wv.summary(

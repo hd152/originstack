@@ -4,7 +4,6 @@ numpy>=1.20
 astropy>=5.0
 scipy>=1.7
 scikit-image>=0.21
-photutils>=1.5
 tqdm>=4.65
 Pillow>=9.0
 psutil>=5.9
@@ -26,7 +25,6 @@ psutil>=5.9
 #   Denoising:
 #     bm3d               — fast BM3D collaborative-filter (--denoise-bm3d); replaces
 #                          the built-in pure-scipy DCT fallback (~5-10× faster)
-#     sep                — fast C-backend source extraction (~5-10× faster than DAOStarFinder)
 #     opencv-python      — malvar/vng debayer, bilateral denoising
 #     PyWavelets         — wavelet denoising (--denoise)
 #
@@ -34,9 +32,17 @@ psutil>=5.9
 #     graxpert           — AI-powered gradient removal via Python API (--bg-method graxpert);
 #                          if not installed falls back to the GraXpert CLI subprocess
 #
+#   Star detection (--star-detector):
+#     sep                — optional secondary backend (SourceExtractor C library); the
+#                          default (matched-filter, src/star_detect.py) needs no extra
+#                          package and is faster than sep on real data (~1.7-2.1x) --
+#                          see --star-detector help. DAOStarFinder/photutils is no
+#                          longer used for detection at all.
+#
 #   PSF / deconvolution:
-#     photutils.psf      — EPSFBuilder for empirical PSF estimation (already in photutils>=1.5);
-#                          used automatically when photutils is installed
+#     photutils          — photutils.psf.EPSFBuilder for empirical PSF estimation
+#                          (--deconvolve rl); falls back to parametric Moffat/Gaussian
+#                          fitting when not installed
 #
 #   GPU acceleration:
 #     cupy-cudaXXx       — GPU acceleration (--use-gpu); see requirements-gpu.txt

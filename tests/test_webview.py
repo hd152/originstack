@@ -98,6 +98,69 @@ class TestServer(unittest.TestCase):
         self.assertGreater(len(data), 1000)
         self.assertEqual(data[:2], b'\xff\xd8')  # JPEG magic
 
+    def test_named_slot_and_snapshot(self):
+        """A published preview registers a named slot fetchable by slug and
+        listed in the SSE snapshot for the compare dropdown."""
+        self.wv.preview(_synth_rgb(), "Final (post-processed)", slot='final',
+                        min_interval=0.0)
+        # snapshot lists the slot
+        resp = self._get('/events')
+        line = resp.readline().decode('utf-8')
+        while not line.startswith('data:'):
+            line = resp.readline().decode('utf-8')
+        snap = json.loads(line[5:].strip())
+        resp.close()
+        slugs = [n['slug'] for n in snap['named']]
+        self.assertIn('final', slugs)
+        self.assertTrue(snap['named'][0]['src'])  # linear source retained
+        self.assertEqual(snap['latest_slug'], 'final')
+        # slot jpeg is fetchable
+        data = self._get('/named.jpg?slug=final').read()
+        self.assertEqual(data[:2], b'\xff\xd8')
+
+    def test_frame_thumbnail_endpoint(self):
+        self.wv.frame_preview("light_001.fits", _synth_rgb())
+        resp = self._get('/events')
+        line = resp.readline().decode('utf-8')
+        while not line.startswith('data:'):
+            line = resp.readline().decode('utf-8')
+        snap = json.loads(line[5:].strip())
+        resp.close()
+        self.assertEqual(len(snap['frames_img']), 1)
+        fid = snap['frames_img'][0]['id']
+        data = self._get('/frame.jpg?id=%d' % fid).read()
+        self.assertEqual(data[:2], b'\xff\xd8')
+
+    def test_restretch_from_source(self):
+        """Re-stretch re-encodes the retained linear source with new params."""
+        self.wv.preview(_synth_rgb(), "Final", slot='final', min_interval=0.0)
+        data = self._get('/restretch?slug=final&stretch=ghs&b=3&sp=0.2'
+                         '&hp=0.9&black=1.0').read()
+        self.assertEqual(data[:2], b'\xff\xd8')
+        # unknown slot -> 404
+        r404 = None
+        try:
+            self._get('/restretch?slug=nope')
+        except urllib.error.HTTPError as e:
+            r404 = e.code
+        self.assertEqual(r404, 404)
+
+    def test_page_has_interactive_controls(self):
+        body = self._get('/').read().decode('utf-8')
+        for marker in ('viewport', 'applyStretch', 'cmpBtn', 'restretch',
+                       'strip'):
+            self.assertIn(marker, body)
+
+
+class TestFrameThumbRing(unittest.TestCase):
+    def test_ring_is_bounded(self):
+        from src.webview import _MAX_FRAME_THUMBS
+        wv = WebView()
+        wv.active = True  # publish without a server
+        for i in range(_MAX_FRAME_THUMBS + 5):
+            wv.frame_preview("f%d" % i, _synth_rgb())
+        self.assertEqual(len(wv._frame_thumbs), _MAX_FRAME_THUMBS)
+
 
 if __name__ == '__main__':
     unittest.main()

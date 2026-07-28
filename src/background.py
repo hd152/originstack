@@ -685,6 +685,38 @@ def sky_floor_normalize(rgb: np.ndarray, star_mask: Optional[np.ndarray] = None,
     return result
 
 
+def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
+                               exclusion_mask: Optional[np.ndarray],
+                               verbose: bool, label: str) -> Tuple[np.ndarray, float, float, bool]:
+    """Shared emission-mask setup for DBE-family background extractors
+    (dynamic_background_extraction, wavelet_background_extraction).
+    Returns (emission_mask, sky_med, sky_std, dense_field)."""
+    H, W = rgb.shape[:2]
+    lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]).astype(np.float64)
+    smooth_sigma = max(20.0, min(H, W) / 50.0)
+    lum_smooth = gaussian_filter_ds(lum, sigma=smooth_sigma)
+    sky_med, sky_std = _sigma_sky(_border_pixels(lum_smooth))
+
+    emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
+    if exclusion_mask is not None:
+        try:
+            excl = np.asarray(exclusion_mask, dtype=np.float32)
+            if excl.shape == emission_mask.shape:
+                np.clip(emission_mask + excl, 0.0, 1.0, out=emission_mask)
+        except Exception:
+            pass
+
+    masked_pct = float(np.mean(emission_mask >= 0.5))
+    dense_field = masked_pct > Config.DBE_DENSE_FIELD_THRESH
+    if verbose:
+        safe_print(f"    {label}: emission mask covers {masked_pct * 100.0:.1f}% of image"
+                   + (" (dense star field — sigma-clip mesh fallback)" if dense_field else ""))
+    elif dense_field:
+        safe_print(f"    {label}: dense star field detected ({masked_pct * 100.0:.0f}% masked) "
+                   f"— using sigma-clip mesh without emission mask")
+    return emission_mask, sky_med, sky_std, dense_field
+
+
 # ============ Dynamic Background Extraction (DBE) =========
 
 
@@ -1007,41 +1039,26 @@ def _dbe_fit_surface_numpy(coords: np.ndarray, values: np.ndarray,
     return surface.reshape(grid_h, grid_w), wr
 
 
-def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
-                            H: int, W: int,
-                            outlier_sigma: float, max_iter: int,
-                            patch_size: int, verbose: bool) -> np.ndarray:
-    """Fit a smooth background surface via robust local regression.
+def _dbe_regression_coarse_grid(coords: np.ndarray, values: np.ndarray,
+                                H: int, W: int, outlier_sigma: float, max_iter: int,
+                                sigma_px: float, Hc: int, Wc: int, verbose: bool,
+                                label: str = "DBE") -> Tuple[np.ndarray, float, float]:
+    """Shared robust local-regression core (Gaussian-weighted local-linear,
+    Tukey-biweight IRLS; native/Rust when available, exact numpy mirror
+    otherwise), evaluated onto a (Hc, Wc) coarse grid. Returns
+    ``(coarse_grid, surf_lo, surf_hi)`` -- the finishing step (how that grid
+    gets turned into a full-res surface: Gaussian tail for DBE, starlet hard
+    cutoff for the wavelet background) is left to the caller.
 
-    Gaussian-weighted local-linear regression with IRLS (Tukey biweight)
-    downweighting of contaminated patches. This replaced the earlier
-    thin-plate-spline RBF + hard outlier-rejection loop: the RBF was
-    globally supported and unbounded, so the large sample gaps the rejection
-    loop carved out near bright stars let it extrapolate far outside the
-    real sky range (observed as a near-black wedge fanning out from a star
-    after subtraction). The local fit stays near the surrounding sample
-    values by construction, follows genuine large-scale gradients through
-    its linear term, and downweights outliers continuously instead of
-    removing samples outright. Native (Rust) kernel when available, exact
-    numpy mirror otherwise.
+    This replaced the earlier thin-plate-spline RBF + hard outlier-rejection
+    loop: the RBF was globally supported and unbounded, so the large sample
+    gaps the rejection loop carved out near bright stars let it extrapolate
+    far outside the real sky range (observed as a near-black wedge fanning
+    out from a star after subtraction). The local fit stays near the
+    surrounding sample values by construction and downweights outliers
+    continuously instead of removing samples outright.
     """
-    if len(coords) < 6:
-        return _polynomial_surface(coords, values, H, W, patch_size)
-
-    sigma_px = Config.DBE_FIT_SIGMA_PATCHES * patch_size
-    # tukey_c=4.685 is the standard 95%-efficiency Tukey constant; scale it
-    # with the caller's outlier_sigma relative to its 2.5 default so the
-    # existing CLI knob keeps meaning "higher = more tolerant".
     tukey_c = 4.685 * (outlier_sigma / 2.5)
-
-    # Use coarser grid for large images to keep evaluation tractable
-    min_dim = min(H, W)
-    if min_dim > 4000:
-        stride = max(8, patch_size // 2)
-    else:
-        stride = max(4, patch_size // 4)
-    Hc = max(4, H // stride)
-    Wc = max(4, W // stride)
 
     coarse = None
     if HAS_NATIVE:
@@ -1052,7 +1069,7 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
                 float(H), float(W), Hc, Wc, float(sigma_px),
                 float(tukey_c), int(max_iter))
         except Exception as e:
-            safe_print(f"    WARNING: native DBE fit failed ({e}) — using numpy")
+            safe_print(f"    WARNING: native {label} fit failed ({e}) — using numpy")
             coarse = None
     if coarse is None:
         coarse, wrob = _dbe_fit_surface_numpy(
@@ -1062,7 +1079,7 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
     if verbose:
         n_down = int(np.sum(wrob < 0.5))
         if n_down:
-            safe_print(f"    DBE robust fit: downweighted {n_down}/{len(wrob)} patches")
+            safe_print(f"    {label} robust fit: downweighted {n_down}/{len(wrob)} patches")
 
     # The local fit is already bounded near the sample values, but zoom
     # (order=3) can overshoot slightly at sharp coarse-grid transitions —
@@ -1070,8 +1087,33 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
     res_scale = 1.4826 * float(np.median(np.abs(values - np.median(values))))
     surf_lo = float(np.min(values)) - 3.0 * res_scale
     surf_hi = float(np.max(values)) + 3.0 * res_scale
-
     coarse = np.clip(coarse, surf_lo, surf_hi)
+    return coarse, surf_lo, surf_hi
+
+
+def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
+                            H: int, W: int,
+                            outlier_sigma: float, max_iter: int,
+                            patch_size: int, verbose: bool) -> np.ndarray:
+    """Fit a smooth background surface via robust local regression, finished
+    with a Gaussian blur tail (see ``_dbe_regression_coarse_grid``)."""
+    if len(coords) < 6:
+        return _polynomial_surface(coords, values, H, W, patch_size)
+
+    sigma_px = Config.DBE_FIT_SIGMA_PATCHES * patch_size
+
+    # Use coarser grid for large images to keep evaluation tractable
+    min_dim = min(H, W)
+    if min_dim > 4000:
+        stride = max(8, patch_size // 2)
+    else:
+        stride = max(4, patch_size // 4)
+    Hc = max(4, H // stride)
+    Wc = max(4, W // stride)
+
+    coarse, surf_lo, surf_hi = _dbe_regression_coarse_grid(
+        coords, values, H, W, outlier_sigma, max_iter, sigma_px, Hc, Wc, verbose)
+
     surface = zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W]
     surface = ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
     return np.clip(surface, surf_lo, surf_hi)
@@ -1126,30 +1168,8 @@ def dynamic_background_extraction(
     if H == 0 or W == 0:
         return rgb.copy()
         
-    lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]).astype(np.float64)
-
-    smooth_sigma = max(20.0, min(H, W) / 50.0)
-    lum_smooth = gaussian_filter_ds(lum, sigma=smooth_sigma)
-
-    sky_med, sky_std = _sigma_sky(_border_pixels(lum_smooth))
-
-    emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
-    # Merge optional caller-supplied exclusion mask (e.g. comet coma region)
-    if exclusion_mask is not None:
-        try:
-            excl = np.asarray(exclusion_mask, dtype=np.float32)
-            if excl.shape == emission_mask.shape:
-                np.clip(emission_mask + excl, 0.0, 1.0, out=emission_mask)
-        except Exception:
-            pass
-    _masked_pct = float(np.mean(emission_mask >= 0.5))
-    _dense_field = _masked_pct > Config.DBE_DENSE_FIELD_THRESH
-    if verbose:
-        safe_print(f"    DBE: emission mask covers {_masked_pct * 100.0:.1f}% of image"
-                   + (" (dense star field — sigma-clip mesh fallback)" if _dense_field else ""))
-    elif _dense_field:
-        safe_print(f"    DBE: dense star field detected ({_masked_pct * 100.0:.0f}% masked) "
-                   f"— using sigma-clip mesh without emission mask")
+    emission_mask, sky_med, sky_std, _dense_field = _dbe_prepare_emission_mask(
+        rgb, star_mask, exclusion_mask, verbose, "DBE")
 
     if verbose and HAS_NATIVE:
         safe_print("    [rust] DBE robust local-regression surface fit")
@@ -1199,6 +1219,190 @@ def dynamic_background_extraction(
                 coords, values, H, W,
                 outlier_sigma=outlier_sigma, max_iter=outlier_iters,
                 patch_size=patch_size, verbose=verbose)
+
+        subtracted = channel - background
+        if verbose:
+            safe_print(f"    {channel_names[c]}: bg_median="
+                       f"{float(np.median(background)):.1f}, "
+                       f"subtracted_median={float(np.median(subtracted)):.1f}")
+        return c, subtracted.astype(np.float32)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        for c, ch_result in executor.map(_process_channel, range(3)):
+            result[:, :, c] = ch_result
+
+    return result
+
+
+# ============ Wavelet-band (starlet) Background Extraction =========
+#
+# DBE's surface fit (_fit_background_surface) is a Gaussian-weighted local
+# regression: its scale is set by one blur-radius-like sigma, and Gaussian
+# tails mean sample points well outside a patch can still tug on it, which
+# is what the final large Gaussian blur (patch_size*0.5) is there to hide.
+# A starlet (a trous wavelet) decomposition gives a genuine multiresolution
+# low-pass instead: convolving with dilated B3-spline kernels at doubling
+# scales, then keeping only the coarsest approximation plane, discards *all*
+# structure below a hard pixel-scale cutoff by construction -- no long tails,
+# and the cutoff is specified directly in "reject anything smaller than N
+# pixels" terms rather than a sigma to be reasoned about indirectly. Same
+# sky-patch sampling (emission mask + robust per-patch rejection) as DBE;
+# only the samples-to-surface fit differs.
+
+_B3_SPLINE_KERNEL = np.array([1.0, 4.0, 6.0, 4.0, 1.0]) / 16.0
+
+
+def _atrous_convolve(img: np.ndarray, step: int) -> np.ndarray:
+    """Separable a-trous convolution: the B3-spline kernel with ``step - 1``
+    zero-holes inserted between taps (step = 2**scale), applied along both
+    axes. step=1 is the plain 5-tap kernel."""
+    if step <= 1:
+        kernel = _B3_SPLINE_KERNEL
+    else:
+        kernel = np.zeros((len(_B3_SPLINE_KERNEL) - 1) * step + 1, dtype=np.float64)
+        kernel[::step] = _B3_SPLINE_KERNEL
+    out = ndimage.convolve1d(img, kernel, axis=0, mode='reflect')
+    out = ndimage.convolve1d(out, kernel, axis=1, mode='reflect')
+    return out
+
+
+def _starlet_transform(img: np.ndarray, n_scales: int) -> Tuple[List[np.ndarray], np.ndarray]:
+    """Isotropic undecimated wavelet (starlet / a-trous B3-spline) decomposition.
+
+    Returns ``(detail_planes, coarse_approximation)`` such that
+    ``img == sum(detail_planes) + coarse_approximation``. Detail plane j
+    captures structure at spatial scale ~2**(j+1) px; the coarse
+    approximation after ``n_scales`` levels has (by construction, not
+    approximately) no structure finer than ~2**n_scales px.
+    """
+    c = img.astype(np.float64)
+    details = []
+    for j in range(n_scales):
+        c_next = _atrous_convolve(c, step=1 << j)
+        details.append(c - c_next)
+        c = c_next
+    return details, c
+
+
+def _wavelet_background_surface(coords: np.ndarray, values: np.ndarray,
+                                H: int, W: int, patch_size: int,
+                                n_scales: int, outlier_sigma: float = 2.5,
+                                max_iter: int = 5, verbose: bool = False) -> np.ndarray:
+    """Background surface via starlet low-pass instead of a Gaussian blur tail.
+
+    Reuses the exact same robust local-linear regression as DBE
+    (``_dbe_regression_coarse_grid``) to reconstruct a smooth field from the
+    sparse sky-patch samples -- a naive linear interpolation between ~50-200
+    sparse patches (the alternative) can't be decomposed into meaningful
+    sub-patch-scale wavelet planes, since it has no real information at that
+    resolution to begin with. Only the finishing step differs from DBE:
+    instead of one Gaussian blur (soft tail, some sample influence leaks
+    past its nominal radius), a starlet decomposition of the regression
+    grid keeps just the coarsest approximation -- a hard, construction-time
+    guarantee that nothing below ~2**n_scales grid cells survives, so a
+    compact-ish nebula sampled as "background" by mistake bleeds less into
+    neighbouring genuine sky than a Gaussian tail would.
+    """
+    if len(coords) < 6:
+        return _polynomial_surface(coords, values, H, W, patch_size)
+
+    sigma_px = Config.DBE_FIT_SIGMA_PATCHES * patch_size
+
+    # Finer grid than DBE's own (which is coarse by design -- its Gaussian
+    # support does the smoothing): a starlet needs enough cells for
+    # n_scales dyadic levels to mean something below the image size.
+    min_dim = min(H, W)
+    target_dim = 768 if min_dim > 3000 else 512
+    stride = max(1, int(round(min_dim / float(target_dim))))
+    Hc = max(64, H // stride)
+    Wc = max(64, W // stride)
+
+    coarse, surf_lo, surf_hi = _dbe_regression_coarse_grid(
+        coords, values, H, W, outlier_sigma, max_iter, sigma_px, Hc, Wc,
+        verbose, label="Wavelet BG")
+
+    # Clamp so the coarsest plane still spans several grid cells -- otherwise
+    # it collapses to one constant value.
+    max_scales = max(1, int(np.log2(max(Hc, Wc))) - 2)
+    scales = int(np.clip(n_scales, 1, max_scales))
+
+    _, coarse_approx = _starlet_transform(coarse, scales)
+
+    if verbose:
+        safe_print(f"    Wavelet BG: {scales} scales on {Hc}x{Wc} regression grid "
+                   f"(cutoff ~{(1 << scales) * stride}px)")
+
+    coarse_approx = np.clip(coarse_approx, surf_lo, surf_hi)
+    surface = zoom(coarse_approx, (H / Hc, W / Wc), order=3)[:H, :W]
+    return np.clip(surface, surf_lo, surf_hi)
+
+
+def wavelet_background_extraction(
+        rgb: np.ndarray,
+        patch_size: int = Config.DBE_PATCH_SIZE,
+        masked_frac_thresh: float = Config.DBE_MASKED_FRAC_THRESH,
+        clip_sigma: float = 3.0,
+        n_scales: int = 6,
+        star_mask: Optional[np.ndarray] = None,
+        verbose: bool = False,
+        use_entropy_weights: bool = False,
+        exclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Background extraction via starlet (a-trous wavelet) low-pass fit.
+
+    Reuses DBE's sky-patch sampling (star/nebula-safe emission mask, robust
+    per-patch sigma-clip and entropy rejection) unchanged -- only the fit
+    that turns those samples into a smooth 2-D surface differs from
+    ``dynamic_background_extraction``. See ``_wavelet_background_surface``.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    H, W = rgb.shape[:2]
+    if H == 0 or W == 0:
+        return rgb.copy()
+
+    emission_mask, sky_med, sky_std, _dense_field = _dbe_prepare_emission_mask(
+        rgb, star_mask, exclusion_mask, verbose, "Wavelet BG")
+
+    result = np.empty_like(rgb)
+    channel_names = ['Red', 'Green', 'Blue']
+
+    def _process_channel(c):
+        channel = rgb[:, :, c].astype(np.float64)
+        coords, values = _sample_background_patches(
+            channel, emission_mask, patch_size, masked_frac_thresh,
+            sky_ref=sky_med, sky_std=sky_std,
+            use_entropy_weights=use_entropy_weights)
+
+        n = len(coords)
+        if verbose:
+            safe_print(f"    Wavelet BG {channel_names[c]}: {n} background patches accepted")
+
+        if n < Config.DBE_MIN_SAMPLES:
+            if verbose:
+                safe_print(f"    Wavelet BG {channel_names[c]}: insufficient samples ({n}), "
+                           f"falling back to "
+                           f"{'sigma-clip mesh (no emission mask)' if _dense_field else 'mesh extraction'}")
+            if _dense_field:
+                background = extract_background(
+                    channel, mesh_size=patch_size * 2,
+                    clip_sigma=clip_sigma,
+                    star_mask=None).astype(np.float64)
+            else:
+                background = extract_background(channel, mesh_size=patch_size,
+                                                clip_sigma=clip_sigma,
+                                                star_mask=emission_mask).astype(np.float64)
+        else:
+            if n > Config.DBE_MAX_SAMPLES:
+                step = max(1, n // Config.DBE_MAX_SAMPLES)
+                coords = coords[::step]
+                values = values[::step]
+                if verbose:
+                    safe_print(f"    Wavelet BG {channel_names[c]}: subsampled to "
+                               f"{len(coords)} patches")
+
+            background = _wavelet_background_surface(
+                coords, values, H, W, patch_size=patch_size,
+                n_scales=n_scales, verbose=verbose)
 
         subtracted = channel - background
         if verbose:

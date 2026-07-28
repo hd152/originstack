@@ -35,11 +35,11 @@ def _lum(rgb: np.ndarray) -> np.ndarray:
 
 def _detect_stars(lum: np.ndarray) -> Optional[Any]:
     """Star catalog for affine matching; robust noise estimate from MAD."""
-    from src.quality import _sep_detect_stars
+    from src.quality import detect_stars_auto
     med = float(np.median(lum))
     noise = 1.4826 * float(np.median(np.abs(lum - med)))
     try:
-        return _sep_detect_stars(lum, max(noise, 1e-3))
+        return detect_stars_auto(lum, max(noise, 1e-3), background=med)
     except Exception:
         return None
 
