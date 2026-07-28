@@ -129,10 +129,14 @@ def run_quality_sweep(root: str, args) -> int:
                     f.metrics = metrics
 
             # The pipeline's own gate: hard rejects + statistical outliers +
-            # relative score threshold, folder-relative.
+            # relative score threshold, folder-relative. The sweep runs the
+            # statistical-outlier stage tighter (2.0 sigma vs the stacking
+            # pipeline's default 2.5) since it's an advisory pass reviewed by
+            # a human before --apply renames anything, not a silent stacking
+            # decision — worth catching more marginal frames.
             rejected_reasons: Dict[str, str] = {}
             stats = ProcessingStats()
-            quality_gate(lights, args, rejected_reasons, stats)
+            quality_gate(lights, args, rejected_reasons, stats, outlier_sigma=2.0)
 
             flagged = [f for f in lights if not f.accepted]
             n_flagged_total += len(flagged)

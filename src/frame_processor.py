@@ -1279,11 +1279,15 @@ def quality_gate(
     args: argparse.Namespace,
     rejected_reasons: dict,
     stats: ProcessingStats,
+    outlier_sigma: float = 2.5,
 ) -> List[FrameInfo]:
     """Apply hard-limit, statistical-outlier, and percentile quality filters.
 
     Mutates lights[*].accepted and rejected_reasons in-place.
     Updates stats.accepted_frames / rejected_frames.
+    ``outlier_sigma`` controls the statistical-outlier stage's z-score cutoff
+    (default 2.5, matching the main stacking pipeline); callers that want a
+    more sensitive sweep-only pass can tighten it.
     Returns the list of accepted FrameInfo objects.
     """
     n = len(lights)
@@ -1326,7 +1330,7 @@ def quality_gate(
         star_cnts = np.array([f.metrics['star_count']  for f in accepted])
         contrasts = np.array([f.metrics['contrast']    for f in accepted])
 
-        def _is_inlier(values, threshold=2.5):
+        def _is_inlier(values, threshold=outlier_sigma):
             if len(values) < 3:
                 return np.ones(len(values), dtype=bool)
             m, s = np.mean(values), np.std(values)
