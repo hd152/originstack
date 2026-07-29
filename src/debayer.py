@@ -193,37 +193,98 @@ def debayer_bilinear(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bili
     return out
 
 
+# Malvar-He-Cutler (2004) kernels -- "High-Quality Linear Interpolation for
+# Demosaicing of Bayer-Patterned Color Images". Coefficients as published
+# (Table 1), normalised by 8; verified against the reference implementation
+# in the `colour-demosaicing` package (bit-exact on interior pixels, see
+# tests/test_debayer_malvar.py). The old cv2-EA path required 16-bit
+# requantization (real precision loss) and only ran when cv2 was installed;
+# this operates directly on the native float32 data and has no dependency.
+_MALVAR_G_AT_RB = np.array([
+    [0.0, 0.0, -1.0, 0.0, 0.0],
+    [0.0, 0.0,  2.0, 0.0, 0.0],
+    [-1.0, 2.0, 4.0, 2.0, -1.0],
+    [0.0, 0.0,  2.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0, 0.0, 0.0],
+], dtype=np.float64) / 8.0
+
+# R at green in an R row / B column (and B at green in a B row / R column).
+_MALVAR_RG_RB_BG_BR = np.array([
+    [0.0, 0.0, 0.5, 0.0, 0.0],
+    [0.0, -1.0, 0.0, -1.0, 0.0],
+    [-1.0, 4.0, 5.0, 4.0, -1.0],
+    [0.0, -1.0, 0.0, -1.0, 0.0],
+    [0.0, 0.0, 0.5, 0.0, 0.0],
+], dtype=np.float64) / 8.0
+
+# R at green in a B row / R column (and B at green in an R row / B column) --
+# the transpose of the kernel above.
+_MALVAR_RG_BR_BG_RB = _MALVAR_RG_RB_BG_BR.T
+
+# R at B (and B at R).
+_MALVAR_R_AT_B = np.array([
+    [0.0, 0.0, -1.5, 0.0, 0.0],
+    [0.0, 2.0, 0.0, 2.0, 0.0],
+    [-1.5, 0.0, 6.0, 0.0, -1.5],
+    [0.0, 2.0, 0.0, 2.0, 0.0],
+    [0.0, 0.0, -1.5, 0.0, 0.0],
+], dtype=np.float64) / 8.0
+
+
+def _debayer_malvar_numpy(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+    """Malvar-He-Cutler demosaicing, pure numpy (native Rust dispatch happens
+    one level up in ``debayer_malvar``)."""
+    offsets = _PATTERN_OFFSETS.get(pattern.upper())
+    if offsets is None:
+        raise ValueError(f"Unknown Bayer pattern '{pattern}'. "
+                         f"Expected one of {list(_PATTERN_OFFSETS)}")
+    (r_r, r_c), _, _, (b_r, b_c) = offsets
+    raw64 = np.asarray(raw, dtype=np.float64)
+    H, W = raw64.shape
+
+    row = np.arange(H) % 2
+    col = np.arange(W) % 2
+    r_row = (row == r_r)[:, None]
+    r_col = (col == r_c)[None, :]
+    b_row = (row == b_r)[:, None]
+    b_col = (col == b_c)[None, :]
+
+    g_at_rb = ndimage.convolve(raw64, _MALVAR_G_AT_RB, mode='mirror')
+    rg_rb_bg_br = ndimage.convolve(raw64, _MALVAR_RG_RB_BG_BR, mode='mirror')
+    rg_br_bg_rb = ndimage.convolve(raw64, _MALVAR_RG_BR_BG_RB, mode='mirror')
+    r_at_b = ndimage.convolve(raw64, _MALVAR_R_AT_B, mode='mirror')
+
+    is_r = r_row & r_col
+    is_b = b_row & b_col
+
+    R = np.where(is_r, raw64, 0.0)
+    R = np.where(r_row & b_col, rg_rb_bg_br, R)
+    R = np.where(b_row & r_col, rg_br_bg_rb, R)
+    R = np.where(is_b, r_at_b, R)
+
+    B = np.where(is_b, raw64, 0.0)
+    B = np.where(b_row & r_col, rg_rb_bg_br, B)
+    B = np.where(r_row & b_col, rg_br_bg_rb, B)
+    B = np.where(is_r, r_at_b, B)
+
+    G = np.where(is_r | is_b, g_at_rb, raw64)
+
+    return np.stack([R, G, B], axis=-1).astype(np.float32)
+
+
 def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
-    """Malvar-He-Cutler demosaicing.
-
-    Uses OpenCV's edge-aware (EA) implementation when cv2 is available —
-    this is the correct Malvar-He-Cutler algorithm.  Falls back to bilinear
-    when cv2 is absent; the old simplified difference-kernel approach is NOT
-    used because its kR/kB kernels sum to zero, which destroys R and B signal
-    whenever the per-channel sky background levels differ (e.g. after flat
-    calibration normalises a colour-imbalanced sensor like the IMX178).
-    """
-    _ensure_cv2()
-    if HAS_CV2:
-        pat_map = {
-            'RGGB': getattr(cv2, 'COLOR_BAYER_RG2BGR_EA', None),
-            'BGGR': getattr(cv2, 'COLOR_BAYER_BG2BGR_EA', None),
-            'GRBG': getattr(cv2, 'COLOR_BAYER_GR2BGR_EA', None),
-            'GBRG': getattr(cv2, 'COLOR_BAYER_GB2BGR_EA', None),
-        }
-        code = pat_map.get(pattern.upper())
-        if code is not None:
-            raw_np = np.asarray(raw, dtype=np.float32)
-            max_val = raw_np.max()
-            if max_val <= 0:
-                return np.zeros((*raw_np.shape, 3), dtype=np.float32)
-            raw_u16 = np.clip(raw_np / max_val * 65535, 0, 65535).astype(np.uint16)
-            bgr = cv2.cvtColor(raw_u16, code)
-            result = bgr[:, :, ::-1].astype(np.float32) / 65535.0 * max_val
-            return _equalize_bayer_grid(result)
-
-    # Fallback: bilinear (correct, though lower quality than Malvar)
-    return debayer_bilinear(raw, pattern)
+    """Malvar-He-Cutler demosaicing (native Rust kernel with a numpy
+    fallback -- see ``_debayer_malvar_numpy`` for the algorithm/validation
+    notes). No longer depends on cv2."""
+    if _HAS_NATIVE and hasattr(_native, 'debayer_malvar'):
+        raw_np = np.ascontiguousarray(raw, dtype=np.float32)
+        try:
+            out = _native.debayer_malvar(raw_np, pattern.upper())
+        except Exception:
+            out = None
+        if out is not None:
+            return _equalize_bayer_grid(out)
+    return _equalize_bayer_grid(_debayer_malvar_numpy(raw, pattern))
 
 
 def debayer_vng(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:

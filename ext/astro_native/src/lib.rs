@@ -2371,6 +2371,181 @@ fn fit_rigid_ransac<'py>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Malvar-He-Cutler (2004) Bayer demosaicing
+// ---------------------------------------------------------------------------
+//
+// Kernels and per-position selection mirror src/debayer.py's
+// _debayer_malvar_numpy exactly (validated bit-exact against it there, which
+// is itself validated against the `colour-demosaicing` reference package —
+// see tests/test_debayer_malvar.py). Expressed as sparse (dy, dx, weight)
+// tap lists rather than dense 5x5 convolution passes: each output pixel
+// needs at most 2 of the 4 kernels (its own channel is the raw sample), so a
+// per-pixel gather is less work than 4 whole-image convolutions, and this
+// kernel is already a per-pixel loop (unlike the numpy reference, where 4
+// vectorised scipy convolutions is the natural expression). Weights bake in
+// the /8 normalisation from the published coefficients.
+
+const MALVAR_G_AT_RB: [(isize, isize, f64); 9] = [
+    (-2, 0, -1.0 / 8.0), (-1, 0, 2.0 / 8.0),
+    (0, -2, -1.0 / 8.0), (0, -1, 2.0 / 8.0), (0, 0, 4.0 / 8.0), (0, 1, 2.0 / 8.0), (0, 2, -1.0 / 8.0),
+    (1, 0, 2.0 / 8.0), (2, 0, -1.0 / 8.0),
+];
+
+// R at green in an R row / B column (and B at green in a B row / R column).
+const MALVAR_RG_RB_BG_BR: [(isize, isize, f64); 11] = [
+    (-2, 0, 0.5 / 8.0),
+    (-1, -1, -1.0 / 8.0), (-1, 1, -1.0 / 8.0),
+    (0, -2, -1.0 / 8.0), (0, -1, 4.0 / 8.0), (0, 0, 5.0 / 8.0), (0, 1, 4.0 / 8.0), (0, 2, -1.0 / 8.0),
+    (1, -1, -1.0 / 8.0), (1, 1, -1.0 / 8.0),
+    (2, 0, 0.5 / 8.0),
+];
+
+// R at green in a B row / R column (and B at green in an R row / B column) --
+// transpose of the kernel above.
+const MALVAR_RG_BR_BG_RB: [(isize, isize, f64); 11] = [
+    (0, -2, 0.5 / 8.0),
+    (-1, -1, -1.0 / 8.0), (1, -1, -1.0 / 8.0),
+    (-2, 0, -1.0 / 8.0), (-1, 0, 4.0 / 8.0), (0, 0, 5.0 / 8.0), (1, 0, 4.0 / 8.0), (2, 0, -1.0 / 8.0),
+    (-1, 1, -1.0 / 8.0), (1, 1, -1.0 / 8.0),
+    (0, 2, 0.5 / 8.0),
+];
+
+// R at B (and B at R).
+const MALVAR_R_AT_B: [(isize, isize, f64); 9] = [
+    (-2, 0, -1.5 / 8.0),
+    (-1, -1, 2.0 / 8.0), (-1, 1, 2.0 / 8.0),
+    (0, -2, -1.5 / 8.0), (0, 0, 6.0 / 8.0), (0, 2, -1.5 / 8.0),
+    (1, -1, 2.0 / 8.0), (1, 1, 2.0 / 8.0),
+    (2, 0, -1.5 / 8.0),
+];
+
+/// scipy `mode='mirror'` boundary index (reflects without duplicating the
+/// edge sample, period `2*(n-1)`) -- matches the mode the numpy counterpart
+/// (`_debayer_malvar_numpy`) passes to `scipy.ndimage.convolve`. Distinct
+/// from `reflect_idx` above, which implements scipy's `mode='reflect'`
+/// (duplicates the edge sample) for the *other* kernels in this file whose
+/// own numpy mirrors use that convention instead -- each kernel only needs
+/// to agree with its own Python counterpart, not with every other kernel.
+#[inline]
+fn mirror_idx(i: isize, n: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    let period = 2 * (n as isize - 1);
+    let mut idx = i.rem_euclid(period);
+    if idx >= n as isize {
+        idx = period - idx;
+    }
+    idx as usize
+}
+
+#[inline]
+fn malvar_tap(data: &[f32], h: usize, w: usize, y: usize, x: usize, taps: &[(isize, isize, f64)]) -> f32 {
+    let mut acc = 0.0f64;
+    for &(dy, dx, wt) in taps {
+        let yy = mirror_idx(y as isize + dy, h);
+        let xx = mirror_idx(x as isize + dx, w);
+        acc += data[yy * w + xx] as f64 * wt;
+    }
+    acc as f32
+}
+
+/// Same as `malvar_tap` but for interior pixels only (2-pixel margin from
+/// every edge already guaranteed by the caller) -- direct indexing, no
+/// per-tap `mirror_idx` modulo/branch.
+#[inline]
+fn malvar_tap_interior(data: &[f32], w: usize, base: usize, taps: &[(isize, isize, f64)]) -> f32 {
+    let mut acc = 0.0f64;
+    for &(dy, dx, wt) in taps {
+        let off = dy * w as isize + dx;
+        acc += data[(base as isize + off) as usize] as f64 * wt;
+    }
+    acc as f32
+}
+
+fn malvar_pattern_offsets(pattern: &str) -> PyResult<(usize, usize, usize, usize)> {
+    match pattern {
+        "RGGB" => Ok((0, 0, 1, 1)),
+        "BGGR" => Ok((1, 1, 0, 0)),
+        "GRBG" => Ok((0, 1, 1, 0)),
+        "GBRG" => Ok((1, 0, 0, 1)),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown Bayer pattern '{pattern}'"
+        ))),
+    }
+}
+
+#[pyfunction]
+fn debayer_malvar<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray2<'py, f32>,
+    pattern: &str,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let (r_r, r_c, b_r, b_c) = malvar_pattern_offsets(pattern)?;
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w) = (s[0], s[1]);
+    let owned: Vec<f32>;
+    let flat: &[f32] = match arr.as_slice() {
+        Some(sl) => sl,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+
+    let mut out = vec![0f32; h * w * 3];
+    py.allow_threads(|| {
+        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row_out)| {
+            let is_r_row = y % 2 == r_r;
+            let is_b_row = y % 2 == b_r;
+            let interior_y = y >= 2 && y + 2 < h;
+            for x in 0..w {
+                let is_r_col = x % 2 == r_c;
+                let is_b_col = x % 2 == b_c;
+                let raw = flat[y * w + x];
+                let (r, g, b) = if interior_y && x >= 2 && x + 2 < w {
+                    let base = y * w + x;
+                    if is_r_row && is_r_col {
+                        (raw, malvar_tap_interior(flat, w, base, &MALVAR_G_AT_RB),
+                         malvar_tap_interior(flat, w, base, &MALVAR_R_AT_B))
+                    } else if is_b_row && is_b_col {
+                        (malvar_tap_interior(flat, w, base, &MALVAR_R_AT_B),
+                         malvar_tap_interior(flat, w, base, &MALVAR_G_AT_RB), raw)
+                    } else if is_r_row && is_b_col {
+                        (malvar_tap_interior(flat, w, base, &MALVAR_RG_RB_BG_BR), raw,
+                         malvar_tap_interior(flat, w, base, &MALVAR_RG_BR_BG_RB))
+                    } else {
+                        (malvar_tap_interior(flat, w, base, &MALVAR_RG_BR_BG_RB), raw,
+                         malvar_tap_interior(flat, w, base, &MALVAR_RG_RB_BG_BR))
+                    }
+                } else if is_r_row && is_r_col {
+                    (raw, malvar_tap(flat, h, w, y, x, &MALVAR_G_AT_RB),
+                     malvar_tap(flat, h, w, y, x, &MALVAR_R_AT_B))
+                } else if is_b_row && is_b_col {
+                    (malvar_tap(flat, h, w, y, x, &MALVAR_R_AT_B),
+                     malvar_tap(flat, h, w, y, x, &MALVAR_G_AT_RB), raw)
+                } else if is_r_row && is_b_col {
+                    (malvar_tap(flat, h, w, y, x, &MALVAR_RG_RB_BG_BR), raw,
+                     malvar_tap(flat, h, w, y, x, &MALVAR_RG_BR_BG_RB))
+                } else {
+                    // is_b_row && is_r_col
+                    (malvar_tap(flat, h, w, y, x, &MALVAR_RG_BR_BG_RB), raw,
+                     malvar_tap(flat, h, w, y, x, &MALVAR_RG_RB_BG_BR))
+                };
+                row_out[x * 3] = r;
+                row_out[x * 3 + 1] = g;
+                row_out[x * 3 + 2] = b;
+            }
+        });
+    });
+
+    let arr3 = numpy::ndarray::Array3::from_shape_vec((h, w, 3), out)
+        .expect("shape mismatch building debayer_malvar output");
+    Ok(arr3.into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -2387,6 +2562,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dbe_sample_patches, m)?)?;
     m.add_function(wrap_pyfunction!(detect_stars_matched_filter, m)?)?;
     m.add_function(wrap_pyfunction!(fit_rigid_ransac, m)?)?;
+    m.add_function(wrap_pyfunction!(debayer_malvar, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

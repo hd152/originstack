@@ -83,6 +83,11 @@ small = np.ascontiguousarray(np.clip(rng.normal(300, 40, (1024, 1528, 3)), 0, No
 results["aniso"] = bench(
     "aniso (15 iters)", lambda: nat.anisotropic_diffusion(small, 15, 30.0, 0.1, 2))
 
+# --- Malvar debayer: full-size raw mosaic ---
+raw_mosaic = np.ascontiguousarray(rng.uniform(0, 65535, (2822, 4144)).astype(np.float32))
+results["debayer_malvar"] = bench(
+    "debayer_malvar (RGGB)", lambda: nat.debayer_malvar(raw_mosaic, "RGGB"))
+
 out = sys.argv[1] if len(sys.argv) > 1 else "bench_results.json"
 with open(out, "w") as f:
     json.dump(results, f, indent=1)

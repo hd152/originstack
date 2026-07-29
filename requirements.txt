@@ -25,7 +25,8 @@ psutil>=5.9
 #   Denoising:
 #     bm3d               — fast BM3D collaborative-filter (--denoise-bm3d); replaces
 #                          the built-in pure-scipy DCT fallback (~5-10× faster)
-#     opencv-python      — malvar/vng debayer, bilateral denoising
+#     opencv-python      — vng debayer, bilateral/NLM denoising (malvar debayer is a
+#                          native Rust kernel now, no opencv needed)
 #     PyWavelets         — wavelet denoising (--denoise)
 #
 #   Background extraction:

@@ -132,7 +132,7 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 - `Pillow` — preview JPEG generation
 - `psutil` — memory usage reporting
 - `cupy` — GPU acceleration (`--use-gpu`)
-- `cv2` (OpenCV) — advanced debayer methods (Malvar, VNG), bilateral filter denoising
+- `cv2` (OpenCV) — VNG debayer, bilateral filter denoising, NLM denoising. Malvar debayer no longer needs it (native Rust kernel, see below)
 - `pywt` — wavelet denoising
 - `astroquery` — plate solving via nova.astrometry.net (`--plate-solve`)
 - `rawpy` — camera RAW input (CR2/CR3/NEF/ARW/DNG/…, `src/io_raw.py`); RAW files are silently excluded from discovery when absent
@@ -165,6 +165,7 @@ with `bayerPattern` to override.
 - **DBE surface fit + patch sampler** (`src/background.py`): `dbe_fit_surface`, Gaussian-weighted local-linear regression with Tukey-biweight IRLS (~2.4× over the scipy RBF it replaced), and `dbe_sample_patches`, the per-patch rejection cascade (~31×). Not just a speedup — the RBF (thin-plate spline + hard outlier-rejection loop) was unbounded and could extrapolate wildly into rejected-sample gaps near bright stars; the local fit is bounded near the sample values by construction. Numpy mirror in `_dbe_fit_surface_numpy`, parity-tested.
 - **Cosmic-ray rejection** (`src/stacking.py` `lacosmic_reject`): `lacosmic_reject_native`, L.A.Cosmic-style Laplacian spike detection + 5×5 median replacement, f32 internally (~2×+ vs numpy; the memory-traffic halving matters more than raw compute under 16-way ProcessPool contention).
 - **Median filter** (`median_filter_native`): windowed median (reflect boundary) used by lacosmic and the hot-pixel detectors. Interior fast path with contiguous reads; 3×3 uses Paeth's 19-op branchless median network (~13×), 5×5 quickselect (~1.6×).
+- **Malvar-He-Cutler debayer** (`src/debayer.py` `debayer_malvar`, `--debayer-method malvar`): the true published algorithm (Malvar, He & Cutler 2004), not an approximation — sparse per-pixel tap gather (each output pixel needs at most 2 of the 4 kernels; its own channel is the raw sample) rather than 4 whole-image convolutions, with an interior fast path (no per-tap boundary-index modulo) for all but a 2px border (~2×). Replaces the old cv2 `COLOR_BAYER_*_EA` path, which required requantizing to uint16 first (real precision loss) and only worked when cv2 was installed; this runs on the native float32 data with no dependency. Numpy mirror (`_debayer_malvar_numpy`) validated bit-exact against the `colour-demosaicing` package's reference Malvar2004 implementation across all 4 Bayer patterns (validation-only dependency, not required at runtime — see `tests/test_debayer_malvar.py`).
 
 The startup banner reports native status (`native_status()` in `src/utils.py`); each accelerated step logs a `[rust] …` line. Separately, Richardson-Lucy deconvolution runs on the GPU (cupy FFT) when `--use-gpu` is active (`_rl_deconvolve_xp`), validated against skimage on the numpy backend.
 
@@ -187,7 +188,7 @@ Requires `astroquery` installed and `ASTROMETRY_API_KEY` environment variable se
 
 ### Debayering options
 - `bilinear` (default, pure numpy)
-- `malvar` (higher quality, requires cv2)
+- `malvar` (higher quality; native Rust kernel with a numpy fallback, no external dependency — see "Native (Rust) acceleration" above)
 - `vng` (requires cv2)
 
 ### Parallelism
