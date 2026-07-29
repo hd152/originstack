@@ -2546,6 +2546,100 @@ fn debayer_malvar<'py>(
     Ok(arr3.into_pyarray(py))
 }
 
+// ---------------------------------------------------------------------------
+// Joint (colour-space) bilateral filter -- replaces cv2.bilateralFilter
+// ---------------------------------------------------------------------------
+//
+// Mirrors src/denoising.py's _bilateral_filter_numpy exactly: same
+// mirror_idx boundary convention (matches its np.pad(mode='reflect'), which
+// -- despite the name -- is numpy's non-edge-duplicating reflection, the
+// same convention scipy calls 'mirror') for bit-exact native/numpy parity.
+// The colour-similarity weight uses the joint Euclidean distance across all
+// 3 channels per neighbour (matching cv2.bilateralFilter's multi-channel
+// behaviour), not independent per-channel weights, so it doesn't introduce
+// colour fringing at edges.
+
+#[pyfunction]
+fn bilateral_filter<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    sigma_color: f64,
+    sigma_space: f64,
+    radius: usize,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let owned: Vec<f32>;
+    let flat: &[f32] = match arr.as_slice() {
+        Some(sl) => sl,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+
+    let inv_2s2 = 1.0 / (2.0 * sigma_space * sigma_space);
+    let inv_2c2 = 1.0 / (2.0 * sigma_color * sigma_color);
+    let r = radius as isize;
+
+    // Precompute the spatial weight table (radius is small, <=10) so the
+    // per-pixel loop only evaluates the colour-distance exponential.
+    let mut spatial_w = vec![0f64; (2 * radius + 1) * (2 * radius + 1)];
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let idx = ((dy + r) as usize) * (2 * radius + 1) + (dx + r) as usize;
+            spatial_w[idx] = (-((dy * dy + dx * dx) as f64) * inv_2s2).exp();
+        }
+    }
+
+    let mut out = vec![0f32; h * w * c];
+    py.allow_threads(|| {
+        out.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
+            let interior_y = y >= radius && y + radius < h;
+            let mut center = [0f64; 8];
+            let mut neighbor = [0f64; 8];
+            for x in 0..w {
+                let base = y * w * c + x * c;
+                for ch in 0..c {
+                    center[ch] = flat[base + ch] as f64;
+                }
+                let mut acc = [0f64; 8];
+                let mut wsum = 0f64;
+                let interior = interior_y && x >= radius && x + radius < w;
+                for dy in -r..=r {
+                    let yy = if interior { (y as isize + dy) as usize } else { mirror_idx(y as isize + dy, h) };
+                    for dx in -r..=r {
+                        let xx = if interior { (x as isize + dx) as usize } else { mirror_idx(x as isize + dx, w) };
+                        let nbase = yy * w * c + xx * c;
+                        let mut color_dist2 = 0f64;
+                        for ch in 0..c {
+                            let v = flat[nbase + ch] as f64;
+                            neighbor[ch] = v;
+                            let d = v - center[ch];
+                            color_dist2 += d * d;
+                        }
+                        let sw = spatial_w[((dy + r) as usize) * (2 * radius + 1) + (dx + r) as usize];
+                        let w_total = sw * (-color_dist2 * inv_2c2).exp();
+                        for ch in 0..c {
+                            acc[ch] += neighbor[ch] * w_total;
+                        }
+                        wsum += w_total;
+                    }
+                }
+                let wsum = wsum.max(1e-12);
+                for ch in 0..c {
+                    row_out[x * c + ch] = (acc[ch] / wsum) as f32;
+                }
+            }
+        });
+    });
+
+    let arr3 = numpy::ndarray::Array3::from_shape_vec((h, w, c), out)
+        .expect("shape mismatch building bilateral_filter output");
+    Ok(arr3.into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -2563,6 +2657,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_stars_matched_filter, m)?)?;
     m.add_function(wrap_pyfunction!(fit_rigid_ransac, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_malvar, m)?)?;
+    m.add_function(wrap_pyfunction!(bilateral_filter, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

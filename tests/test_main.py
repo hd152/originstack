@@ -142,7 +142,7 @@ for _m in [
     "photutils", "photutils.detection",
     "tqdm", "psutil",
     "astroquery", "astroquery.astrometry_net",
-    "pywt", "cv2", "cupy",
+    "pywt", "cupy",
     "skimage.restoration",
 ]:
     sys.modules.setdefault(_m, types.ModuleType(_m))
@@ -159,18 +159,6 @@ _sk_reg.phase_cross_correlation = (
     lambda r, i, upsample_factor=1: (np.array([0.0, 0.0]), 0.0, 0.0)
 )
 sys.modules.setdefault("skimage.registration", _sk_reg)
-
-# cv2 stub needs constants for debayer_vng
-_cv2_stub = sys.modules["cv2"]
-_cv2_stub.COLOR_BAYER_RG2RGB_VNG = 0
-_cv2_stub.COLOR_BAYER_BG2RGB_VNG = 1
-_cv2_stub.COLOR_BAYER_GR2RGB_VNG = 2
-_cv2_stub.COLOR_BAYER_GB2RGB_VNG = 3
-def _fake_cvtColor(img, code):
-    if img.ndim == 2:
-        return np.zeros((*img.shape, 3), dtype=img.dtype)
-    return img
-_cv2_stub.cvtColor = _fake_cvtColor
 
 _pil = types.ModuleType("PIL")
 _pil_img = types.ModuleType("PIL.Image")

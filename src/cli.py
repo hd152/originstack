@@ -1392,14 +1392,11 @@ def main():
     from src.quality import configure_star_detector
     configure_star_detector(getattr(args, 'star_detector', 'matched-filter'))
 
-    # Upgrade bilinear → malvar when OpenCV is available; malvar resolves colour moiré
-    # that bilinear introduces around fine star disks at no perceptible speed cost.
+    # Upgrade bilinear → malvar (native Rust kernel, no dependency); malvar resolves
+    # colour moiré that bilinear introduces around fine star disks at no perceptible
+    # speed cost.
     if getattr(args, 'debayer_method', 'bilinear') == 'bilinear':
-        try:
-            import cv2 as _cv2  # noqa: F401
-            args.debayer_method = 'malvar'
-        except ImportError:
-            pass
+        args.debayer_method = 'malvar'
     if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
         dir_name = os.path.basename(os.path.abspath(args.directory))
         args.output = f"{dir_name}_stacked.fits"

@@ -22,8 +22,6 @@ except Exception:
 
 pywt = None
 HAS_PYWT = False
-cv2 = None
-HAS_CV2 = False
 denoise_nl_means = None
 HAS_SKIMAGE_RESTORATION = False
 
@@ -46,19 +44,6 @@ def _ensure_pywt():
         except Exception:
             pass
     return pywt
-
-
-def _ensure_cv2():
-    global cv2, HAS_CV2
-    if not HAS_CV2:
-        try:
-            import cv2 as _cv2
-            if hasattr(_cv2, 'bilateralFilter'):
-                cv2 = _cv2
-                HAS_CV2 = True
-        except Exception:
-            pass
-    return cv2
 
 
 def _ensure_skimage_restoration():
@@ -307,11 +292,6 @@ def bilateral_denoise(img: np.ndarray, sigma_color: Optional[float] = None,
     sigma_space:  Spatial smoothing radius in pixels (default 3.0).  Larger
                   values smooth over bigger areas but are slower.
     """
-    _ensure_cv2()
-    if not HAS_CV2:
-        _log.warning("Bilateral denoising requires cv2; skipping")
-        return img
-
     img_max = float(img.max())
     if img_max < 1e-12:
         return img
@@ -320,16 +300,51 @@ def bilateral_denoise(img: np.ndarray, sigma_color: Optional[float] = None,
         sigma_color = _estimate_sky_sigma(img)
     sigma_color = float(sigma_color)
 
-    # cv2.bilateralFilter accepts float32 and operates in ADU space directly.
-    # d=-1 tells cv2 to derive the pixel neighbourhood diameter from sigma_space.
-    # We clamp d to avoid extreme runtimes on large sigma_space values.
-    d = min(int(round(6.0 * sigma_space + 1)) | 1, 21)  # odd, max 21 px
+    # Neighbourhood radius derived from sigma_space (was cv2's d=-1 auto rule);
+    # clamped to avoid extreme runtimes on large sigma_space values.
+    radius = min(int(round(3.0 * sigma_space)), 10)  # max 21x21 window
 
     img_f32 = img.astype(np.float32)
-    result = cv2.bilateralFilter(img_f32, d=d,
-                                 sigmaColor=sigma_color,
-                                 sigmaSpace=float(sigma_space))
-    return result.astype(np.float32)
+    if _HAS_NATIVE and hasattr(_native, 'bilateral_filter'):
+        try:
+            return np.asarray(_native.bilateral_filter(
+                np.ascontiguousarray(img_f32), sigma_color, float(sigma_space), radius))
+        except Exception:
+            pass
+    return _bilateral_filter_numpy(img_f32, sigma_color, float(sigma_space), radius)
+
+
+def _bilateral_filter_numpy(img: np.ndarray, sigma_color: float, sigma_space: float,
+                            radius: int) -> np.ndarray:
+    """Joint (colour-space) bilateral filter, pure numpy -- native Rust dispatch
+    happens one level up in ``bilateral_denoise``. Vectorised over the whole
+    image per kernel tap ((2*radius+1)^2 iterations, each an O(H*W*C) numpy op)
+    rather than a per-pixel python loop -- the same tap-loop pattern as the
+    Malvar debayer's numpy fallback, just with a runtime-sized window instead
+    of a fixed 5x5. The colour-similarity weight uses the joint Euclidean
+    distance across all 3 channels per neighbour (like cv2.bilateralFilter's
+    multi-channel mode), not independent per-channel weights, so it doesn't
+    introduce colour fringing at edges.
+    """
+    H, W, C = img.shape
+    img64 = img.astype(np.float64)
+    padded = np.pad(img64, ((radius, radius), (radius, radius), (0, 0)), mode='reflect')
+
+    acc = np.zeros((H, W, C), dtype=np.float64)
+    wsum = np.zeros((H, W), dtype=np.float64)
+    inv_2s2 = 1.0 / (2.0 * sigma_space * sigma_space)
+    inv_2c2 = 1.0 / (2.0 * sigma_color * sigma_color)
+
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            neighbor = padded[radius + dy:radius + dy + H, radius + dx:radius + dx + W, :]
+            spatial_w = np.exp(-(dy * dy + dx * dx) * inv_2s2)
+            color_dist2 = np.sum((neighbor - img64) ** 2, axis=-1)
+            w = spatial_w * np.exp(-color_dist2 * inv_2c2)
+            acc += neighbor * w[:, :, np.newaxis]
+            wsum += w
+
+    return (acc / np.maximum(wsum[:, :, np.newaxis], 1e-12)).astype(np.float32)
 
 
 def nlm_denoise(img: np.ndarray, h: float = 1.0,
@@ -342,7 +357,7 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
     sharp edges like galaxy arms and star-forming filaments.
 
     Uses skimage.restoration.denoise_nl_means (operates on float, no quantisation
-    loss) when available, with cv2.fastNlMeansDenoisingColored as fallback.
+    loss); skipped with a warning if skimage isn't installed.
 
     h:               Filter strength multiplier relative to auto-estimated noise
                      sigma.  1.0 is conservative; 2-3 for heavy sky noise.
@@ -379,7 +394,6 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
     img_f64 = img.astype(np.float64)
 
     _ensure_skimage_restoration()
-    _ensure_cv2()
     if HAS_SKIMAGE_RESTORATION:
         img_norm = img_ped.astype(np.float32) / ped_max
         h_norm = h * sky_sigma / ped_max
@@ -391,29 +405,12 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
         result = blend * nlm_result + (1.0 - blend) * img_f64
         return result.astype(np.float32)
 
-    if HAS_CV2:
-        img8 = np.clip(img_ped / ped_max * 255, 0, 255).astype(np.uint8)
-        bgr = cv2.cvtColor(img8, cv2.COLOR_RGB2BGR)
-        h_cv = max(1, int(round(h * sky_sigma / ped_max * 255)))
-        tw = patch_size * 2 + 1
-        sw = patch_distance * 2 + 1
-        denoised_bgr = cv2.fastNlMeansDenoisingColored(bgr, None, h_cv, h_cv, tw, sw)
-        denoised_rgb = cv2.cvtColor(denoised_bgr, cv2.COLOR_BGR2RGB)
-        nlm_result = denoised_rgb.astype(np.float64) / 255.0 * ped_max - pedestal
-        result = blend * nlm_result + (1.0 - blend) * img_f64
-        return result.astype(np.float32)
-
-    _log.warning("NLM denoising requires skimage.restoration or cv2; skipping")
+    _log.warning("NLM denoising requires skimage.restoration; skipping")
     return img
 
 
 def _median_filter_fast(plane: np.ndarray, ksize: int) -> np.ndarray:
-    """Median filter with cv2 float32 fast-path and scipy fallback.
-
-    cv2.medianBlur supports float32 input for ksize 3 and 5 (SIMD-accelerated).
-    For ksize > 5, cv2 only accepts uint8, which is insufficient precision for
-    astrophoto data; scipy.ndimage.median_filter (C-based histogram algorithm)
-    is used instead and handles arbitrary odd kernel sizes on float64 directly.
+    """Median filter: native Rust fast path (any odd size), scipy fallback.
 
     Args:
         plane: 2-D float64 array.
@@ -433,9 +430,6 @@ def _median_filter_fast(plane: np.ndarray, ksize: int) -> np.ndarray:
                 int(ksize)).astype(np.float64)
         except Exception:
             pass
-    _ensure_cv2()
-    if HAS_CV2 and ksize in (3, 5):
-        return cv2.medianBlur(plane.astype(np.float32), ksize).astype(np.float64)
     return ndimage.median_filter(plane, size=ksize)
 
 

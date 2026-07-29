@@ -287,7 +287,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', session_bayer or 'RGGB'))
             data = green_equalize(data, pattern=bayer)
-            # Malvar/VNG use cv2 which requires numpy — transfer D→H if data is on GPU
+            # Malvar/VNG run on native/numpy, not cupy — transfer D→H if data is on GPU
             if debayer_method != 'bilinear' and hasattr(data, 'get'):
                 data = data.get()
             rgb = debayer(data, pattern=bayer, method=debayer_method)
@@ -555,22 +555,21 @@ def _pin_worker_to_single_thread() -> None:
     Two different libraries need two different treatments here, found by
     measuring rather than assuming:
 
-    - cv2 (debayer) and BLAS/OpenMP (numpy/scipy) are pinned to exactly 1
-      thread. These have no per-call algorithmic dependency on parallelism in
-      our usage (small per-frame arrays), and confirmed by measurement: with
-      W worker processes each defaulting to `cores` internal threads (cv2
-      alone defaults to 16 threads/call on a 16-core box here), that's up to
+    - BLAS/OpenMP (numpy/scipy) is pinned to exactly 1 thread. It has no
+      per-call algorithmic dependency on parallelism in our usage (small
+      per-frame arrays), and confirmed by measurement: with W worker
+      processes each defaulting to `cores` internal threads, that's up to
       W x cores OS threads fighting over `cores` physical cores — pinning
-      these to 1 measurably cut Calibrate/Debayer time (~25-28%).
+      to 1 measurably cut Calibrate/Debayer time (~25-28%).
 
-    - rayon (our own native kernels — lacosmic, median filter, etc.) is
-      capped at a small number instead of 1. Unlike cv2/BLAS, these calls ARE
-      where the real per-frame work happens, and forcing them fully serial
-      costs a lot: measured 603ms (full/no-contention) vs 3865ms (1 thread)
-      for lacosmic_reject_native on a full-res frame — 6.4x slower. Capping
-      at _RAYON_WORKER_CAP keeps most of that speedup (~3.5x back at 4
-      threads) while bounding worst-case oversubscription to
-      workers x _RAYON_WORKER_CAP instead of workers x cores.
+    - rayon (our own native kernels — lacosmic, median filter, debayer,
+      etc.) is capped at a small number instead of 1. Unlike BLAS, these
+      calls ARE where the real per-frame work happens, and forcing them
+      fully serial costs a lot: measured 603ms (full/no-contention) vs
+      3865ms (1 thread) for lacosmic_reject_native on a full-res frame —
+      6.4x slower. Capping at _RAYON_WORKER_CAP keeps most of that speedup
+      (~3.5x back at 4 threads) while bounding worst-case oversubscription
+      to workers x _RAYON_WORKER_CAP instead of workers x cores.
 
     Env vars are read lazily by OpenBLAS/MKL/rayon at first use, so setting
     them here (in the pool initializer, before any task runs) takes effect.
@@ -579,11 +578,6 @@ def _pin_worker_to_single_thread() -> None:
                'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
         os.environ[var] = '1'
     os.environ['RAYON_NUM_THREADS'] = str(_RAYON_WORKER_CAP)
-    try:
-        import cv2
-        cv2.setNumThreads(1)
-    except Exception:
-        pass
 
 
 def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False) -> None:

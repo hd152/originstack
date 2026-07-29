@@ -21,22 +21,6 @@ except Exception:
     _native = None
     _HAS_NATIVE = False
 
-cv2 = None
-HAS_CV2 = False
-
-
-def _ensure_cv2():
-    global cv2, HAS_CV2
-    if not HAS_CV2:
-        try:
-            import cv2 as _cv2
-            if hasattr(_cv2, 'cvtColor'):
-                cv2 = _cv2
-                HAS_CV2 = True
-        except Exception:
-            pass
-    return cv2
-
 try:
     from skimage.registration import phase_cross_correlation as _pcc
     _HAS_PCC = True
@@ -288,28 +272,11 @@ def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
 
 
 def debayer_vng(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
-    """VNG (Variable Number of Gradients) debayering via OpenCV."""
-    _ensure_cv2()
-    if not HAS_CV2:
-        return debayer_malvar(raw, pattern)
-    pat_map = {
-        'RGGB': getattr(cv2, 'COLOR_BAYER_RG2BGR_VNG', None),
-        'BGGR': getattr(cv2, 'COLOR_BAYER_BG2BGR_VNG', None),
-        'GRBG': getattr(cv2, 'COLOR_BAYER_GR2BGR_VNG', None),
-        'GBRG': getattr(cv2, 'COLOR_BAYER_GB2BGR_VNG', None),
-    }
-    code = pat_map.get(pattern.upper())
-    if code is None:
-        return debayer_malvar(raw, pattern)
-    raw_np = np.asarray(raw, dtype=np.float32)
-    max_val = raw_np.max()
-    if max_val <= 0:
-        return np.zeros((*raw_np.shape, 3), dtype=np.float32)
-    # VNG requires uint8 input in OpenCV >= 4.x
-    raw_u8 = np.clip(raw_np / max_val * 255, 0, 255).astype(np.uint8)
-    bgr = cv2.cvtColor(raw_u8, code)
-    result = bgr[:, :, ::-1].astype(np.float32) / 255.0 * max_val
-    return _equalize_bayer_grid(result)
+    """VNG (Variable Number of Gradients) debayering. Was cv2-only; now that
+    cv2 is no longer a dependency of this codebase, this aliases to
+    ``debayer_malvar`` (equal-or-better quality, no dependency) rather than
+    dropping the ``--debayer-method vng`` option outright."""
+    return debayer_malvar(raw, pattern)
 
 
 def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:

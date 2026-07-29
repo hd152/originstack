@@ -88,6 +88,12 @@ raw_mosaic = np.ascontiguousarray(rng.uniform(0, 65535, (2822, 4144)).astype(np.
 results["debayer_malvar"] = bench(
     "debayer_malvar (RGGB)", lambda: nat.debayer_malvar(raw_mosaic, "RGGB"))
 
+# --- bilateral filter: full-size RGB stack image ---
+rgb_full = np.ascontiguousarray(rng.uniform(0, 1000, (2000, 3000, 3)).astype(np.float32))
+results["bilateral_filter"] = bench(
+    "bilateral_filter (sigma_space=3)",
+    lambda: nat.bilateral_filter(rgb_full, 50.0, 3.0, 9))
+
 out = sys.argv[1] if len(sys.argv) > 1 else "bench_results.json"
 with open(out, "w") as f:
     json.dump(results, f, indent=1)

@@ -262,13 +262,10 @@ pip install -r requirements-gpu.txt
 # 5. Optional: plate solving
 pip install -r requirements-astrometry.txt
 
-# 6. Optional: higher-quality debayer and bilateral denoising
-pip install opencv-python
-
-# 7. Optional: wavelet denoising
+# 6. Optional: wavelet denoising
 pip install PyWavelets
 
-# 8. Optional: native (Rust) acceleration for stacking + registration
+# 7. Optional: native (Rust) acceleration for stacking + registration
 #    Needs a Rust toolchain + maturin. See "Native (Rust) acceleration" below.
 cd ext/astro_native && maturin develop --release   # into a venv
 ```
@@ -277,16 +274,17 @@ cd ext/astro_native && maturin develop --release   # into a venv
 
 | Package | Feature |
 |---------|---------|
-| `opencv-python` | Malvar/VNG debayer, bilateral filter |
 | `PyWavelets` | Wavelet denoising |
-| `sep` | 5–10× faster star detection |
+| `sep` | Alternate star-detection backend (default `matched-filter` needs no extra package and is faster on real data) |
 | `astroquery` | Plate solving via astrometry.net |
 | `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
 | `tifffile` | TIFF input and `--export tiff` output |
 | `astroalign` | Cross-night registration for `--merge` |
 | `reproject` | Mosaic stitching |
-| `astro_native` (Rust) | 13 native kernels: stacking combines, Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion |
+| `astro_native` (Rust) | 16 native kernels: stacking combines, Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC |
+
+`opencv-python` is not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built).
 
 ---
 

@@ -129,8 +129,8 @@ Phase 4  ──  Post-Processing
 - **Supported patterns**: RGGB, BGGR, GRBG, GBRG (default: RGGB)
 - **Algorithms**:
   - `bilinear` — pure NumPy, fast, default
-  - `malvar` — Malvar-He-Cutler algorithm, higher quality, requires OpenCV
-  - `vng` — Variable Number of Gradients, requires OpenCV
+  - `malvar` — Malvar-He-Cutler algorithm, higher quality; native Rust kernel with a numpy fallback, no external dependency
+  - `vng` — alias for `malvar` (was OpenCV's Variable Number of Gradients; OpenCV is no longer a dependency of this codebase)
 - **Green equalization**: corrects G1/G2 channel mismatch in CMOS sensors
 - **Output**: RGB images in (H, W, 3) float32 format
 
@@ -253,8 +253,8 @@ Per-denoiser tuning lives in the config-file tier (see `--config`).
 | `mmt` | Multiscale Median Transform — robust to Poisson+read noise, best edge preservation (Rust-accelerated median cascade, ~10x) | `denoise_mmt_levels`, `denoise_mmt_strength` |
 | `bm3d` | Collaborative filtering, near-optimal, slower (auto-enabled by the advisor when SNR/frame count justify it) | `bm3d_sigma`, `bm3d_stride`, `bm3d_search_window`, `bm3d_group_size` |
 | `acdnr` | Contrast-gated sky smoothing — flat sky smoothed, structure preserved | `denoise_acdnr_sigma`, `denoise_acdnr_k` |
-| `nlm` | Non-local means (skimage/cv2) | `denoise_nlm_strength`, `denoise_nlm_blend` |
-| `bilateral` | Edge-preserving bilateral filter (cv2) | `denoise_bilateral_sigma_color`, `denoise_bilateral_sigma_space` |
+| `nlm` | Non-local means (skimage.restoration) | `denoise_nlm_strength`, `denoise_nlm_blend` |
+| `bilateral` | Edge-preserving bilateral filter, joint colour-space weighting (Rust-accelerated) | `denoise_bilateral_sigma_color`, `denoise_bilateral_sigma_space` |
 | `aniso` | Perona-Malik anisotropic diffusion (Rust-accelerated, ~37x) | `aniso_iterations`, `aniso_kappa`, `aniso_gamma`, `aniso_option` |
 | `none` | Disable luma denoising | — |
 
@@ -449,7 +449,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--debayer-method` | bilinear | bilinear, malvar (cv2), vng (cv2) |
+| `--debayer-method` | bilinear | bilinear, malvar (native Rust), vng (alias for malvar) |
 | `--white-balance` | grayworld | none, grayworld, whitepatch |
 | `--quality-threshold N` | 50 | Reject frames scoring below N% of the session reference |
 | `--no-quality-filter` | — | Keep every frame |
@@ -589,14 +589,15 @@ python astro_stack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 
 | Package | Feature Unlocked |
 |---------|-----------------|
-| `opencv-python` | Malvar/VNG debayer, bilateral filter, some NLM paths |
 | `PyWavelets` | Wavelet denoising (`--denoise`) |
-| `sep` | 5–10× faster star detection than DAOStarFinder |
+| `sep` | Alternate star-detection backend (default `matched-filter` needs no extra package and is faster on real data) |
 | `astroquery >= 0.4.6` | Plate solving via nova.astrometry.net |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see `requirements-gpu.txt`) |
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
 | `astroalign` | Triangle-pattern registration for `--merge` (cross-night field rotation) |
 | `tifffile` | 16-bit TIFF output |
+
+`opencv-python` is not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built).
 
 ---
 
@@ -607,7 +608,7 @@ python astro_stack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 - Use `--no-registration` for pre-aligned frames
 
 **Debayering:**
-- Bilinear (default) can produce colour fringing; use `--debayer-method malvar` for better quality (requires OpenCV)
+- Bilinear (default) can produce colour fringing; use `--debayer-method malvar` for better quality (native Rust kernel, no extra dependency)
 
 **Hierarchical mode:**
 - Targets with very different crop amounts produce shape mismatches — handled by resizing to minimum common dimensions (minor quality trade-off)
