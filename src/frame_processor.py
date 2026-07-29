@@ -898,7 +898,7 @@ def execute_frame_processing(
                          for i, f in enumerate(lights)}
 
         # When GPU is active, quality metrics (CPU-bound: star detection, FWHM) run
-        # in a dedicated CPU pool so GPU workers are never idle waiting for photutils.
+        # in a dedicated CPU pool so GPU workers are never idle waiting for them.
         # GPU workers skip quality (skip_quality=True) and return immediately after
         # writing to memmap, keeping VRAM freed as quickly as possible.
         _use_qpool = gpu.active

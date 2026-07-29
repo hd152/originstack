@@ -262,7 +262,7 @@ pip install -r requirements-gpu.txt
 # 5. Optional: plate solving
 pip install -r requirements-astrometry.txt
 
-# 6. Optional: wavelet denoising
+# 6. Optional: multiscale-entropy seeing-quality metric
 pip install PyWavelets
 
 # 7. Optional: native (Rust) acceleration for stacking + registration
@@ -274,17 +274,15 @@ cd ext/astro_native && maturin develop --release   # into a venv
 
 | Package | Feature |
 |---------|---------|
-| `PyWavelets` | Wavelet denoising |
-| `sep` | Alternate star-detection backend (default `matched-filter` needs no extra package and is faster on real data) |
+| `PyWavelets` | Multiscale-entropy seeing-quality metric (db4 wavelet). Wavelet denoising (bior1.3) no longer needs it |
 | `astroquery` | Plate solving via astrometry.net |
 | `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
 | `tifffile` | TIFF input and `--export tiff` output |
-| `astroalign` | Cross-night registration for `--merge` |
 | `reproject` | Mosaic stitching |
 | `astro_native` (Rust) | 16 native kernels: stacking combines, Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC |
 
-`opencv-python` is not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built).
+`opencv-python` and `astroalign` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built), and `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`, native/numpy, no dependency.
 
 ---
 
@@ -395,8 +393,9 @@ python astro_stack.py -d night2/ -o m51_v2.fits --auto --merge m51.fits -v
 ```
 
 Each previous stack is registered onto the new session's grid (handles
-cross-night field rotation via astroalign) and combined as a per-pixel
-`NFRAMES`-weighted mean. The output chains into future merges.
+cross-night field rotation via a blind rigid star-pattern match, no
+assumption about the angle) and combined as a per-pixel `NFRAMES`-weighted
+mean. The output chains into future merges.
 
 ### Super-resolution drizzle (requires dithered frames)
 

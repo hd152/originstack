@@ -17,10 +17,14 @@ try:
 except Exception:
     Image = None
 
-try:
-    from skimage import exposure
-except Exception:
-    exposure = None
+
+def _rescale_intensity(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Linearly rescale ``x`` from [lo, hi] to [0, 1], clipping outside that
+    range -- equivalent to skimage.exposure.rescale_intensity(x, in_range=(lo,
+    hi)) with its default out_range for a float array."""
+    if hi <= lo:
+        return np.zeros_like(x, dtype=np.float64)
+    return np.clip((x.astype(np.float64) - lo) / (hi - lo), 0.0, 1.0)
 
 
 def _read_fits_header(path: str) -> dict:
@@ -232,13 +236,11 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
     else:
         # Linear percentile stretch (original behaviour)
-        if exposure is None:
-            return None
         out = np.zeros_like(rgb)
         for c in range(3):
             lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
             lo = max(lo, 0.0)  # Don't let negative noise expand the display range
-            out[:, :, c] = exposure.rescale_intensity(rgb[:, :, c], in_range=(lo, hi))
+            out[:, :, c] = _rescale_intensity(rgb[:, :, c], lo, hi)
         out = np.clip(out * 255, 0, 255).astype(np.uint8)
     return out
 

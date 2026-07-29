@@ -139,7 +139,6 @@ sys.modules.setdefault("astropy.io.fits", _fits_stub)
 sys.modules.setdefault("astropy.stats", _stats_stub)
 
 for _m in [
-    "photutils", "photutils.detection",
     "tqdm", "psutil",
     "astroquery", "astroquery.astrometry_net",
     "pywt", "cupy",
@@ -149,16 +148,6 @@ for _m in [
 
 _sk = sys.modules.get("skimage") or types.ModuleType("skimage")
 sys.modules.setdefault("skimage", _sk)
-
-_sk_exp = types.ModuleType("skimage.exposure")
-_sk_exp.rescale_intensity = lambda img, in_range=None, out_range=(0, 1): img
-sys.modules.setdefault("skimage.exposure", _sk_exp)
-
-_sk_reg = types.ModuleType("skimage.registration")
-_sk_reg.phase_cross_correlation = (
-    lambda r, i, upsample_factor=1: (np.array([0.0, 0.0]), 0.0, 0.0)
-)
-sys.modules.setdefault("skimage.registration", _sk_reg)
 
 _pil = types.ModuleType("PIL")
 _pil_img = types.ModuleType("PIL.Image")
@@ -445,7 +434,7 @@ class TestChromaticAberrationCorrection(unittest.TestCase):
         return np.stack([r, g, b], axis=2).astype(np.float32)
 
     def _residual_misalignment(self, corrected, ref):
-        from skimage.registration import phase_cross_correlation
+        from src.phase_correlate import phase_cross_correlation
         shift, _, _ = phase_cross_correlation(
             ref.astype(np.float64), corrected.astype(np.float64), upsample_factor=20)
         return float(np.hypot(shift[0], shift[1]))

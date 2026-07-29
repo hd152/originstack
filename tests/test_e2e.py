@@ -128,7 +128,7 @@ def _make_synthetic_bayer(shape=(128, 128), star_cy=64, star_cx=64,
     """Return a synthetic Bayer (RGGB) frame with a primary star and 5 secondary stars.
 
     Multiple stars are placed so the quality gate's hard minimum of 3 detected
-    stars is reliably satisfied even under varying photutils thresholds.
+    stars is reliably satisfied even under varying detection thresholds.
     """
     if rng is None:
         rng = np.random.default_rng(0)

@@ -63,20 +63,24 @@ def _embed_to_shape(arr: np.ndarray, H: int, W: int) -> np.ndarray:
 def _register_stack(new_lum: np.ndarray, prev_lum: np.ndarray,
                     new_stars: Optional[Any]) -> Tuple[Optional[Any],
                                                        Optional[Tuple[float, float]]]:
-    """Transform aligning ``prev`` onto ``new``: star-match affine first
-    (rotation between nights is arbitrary), translation-only fallback.
+    """Transform aligning ``prev`` onto ``new``: blind (unknown-rotation)
+    star-pattern match first (rotation between nights is arbitrary),
+    translation-seeded star-match affine and translation-only fallbacks.
     Returns (transform, shift) — exactly one is non-None on success,
     both None on failure."""
-    from src.registration import (calculate_shift, match_stars_affine,
-                                  _astroalign_transform)
+    from src.registration import calculate_shift, match_stars_affine, _blind_match_transform
 
-    # astroalign first: its triangle-pattern matching handles the arbitrary
-    # field rotation between nights. The nearest-neighbour+RANSAC star
-    # matcher assumes rotation ~ 0 after translation (an in-session tool) and
-    # can return a confidently wrong model on rotated fields.
-    tf = _astroalign_transform(new_lum, prev_lum)
-    if tf is not None:
-        return tf, None
+    prev_stars = _detect_stars(prev_lum)
+
+    # Blind match first: it makes no assumption about rotation, handling the
+    # arbitrary field rotation between nights. The nearest-neighbour+RANSAC
+    # star matcher (match_stars_affine, below) assumes rotation ~ 0 after
+    # translation (an in-session tool) and can return a confidently wrong
+    # model on rotated fields.
+    if new_stars is not None and prev_stars is not None:
+        tf = _blind_match_transform(new_stars, prev_stars)
+        if tf is not None:
+            return tf, None
 
     shift = None
     try:
@@ -88,7 +92,6 @@ def _register_stack(new_lum: np.ndarray, prev_lum: np.ndarray,
     except Exception as exc:
         _log.debug("merge: translation estimate failed: %s", exc)
 
-    prev_stars = _detect_stars(prev_lum)
     if new_stars is not None and prev_stars is not None:
         tf = match_stars_affine(new_stars, prev_stars,
                                 initial_shift=shift or (0.0, 0.0))
@@ -175,15 +178,23 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                 f"same target?")
 
         # Negligible transform (already-aligned grids, registration jitter
-        # only): skip the warp — resampling costs more than a <0.05px /
-        # <0.001deg correction is worth (same principle as the CA
-        # sub-threshold skip).
+        # only): skip the warp — resampling costs more than a <0.05px
+        # correction is worth (same principle as the CA sub-threshold skip),
+        # and (measured) an unnecessary Lanczos-3 resample of a near-identity
+        # transform can itself introduce more error near sharp star cores
+        # than the correction it applies. A rotation's worst-case pixel
+        # displacement scales with distance from the rotation origin, so the
+        # bound is evaluated at the frame's farthest corner rather than as a
+        # fixed radian constant -- a fixed-radian threshold is either too
+        # loose on large frames or (as measured) tighter than real
+        # star-centroid noise can reliably clear on any frame size.
         if shift is not None:
             negligible = max(abs(shift[0]), abs(shift[1])) < 0.05
         else:
             _rot = float(np.arctan2(tf.params[1, 0], tf.params[0, 0]))
             _t = np.abs(tf.params[:2, 2]).max()
-            negligible = abs(_rot) < 2e-5 and _t < 0.05
+            _rot_px = abs(_rot) * float(np.hypot(H, W))
+            negligible = _rot_px < 0.05 and _t < 0.05
 
         if negligible:
             aligned = prev

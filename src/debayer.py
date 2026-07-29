@@ -21,12 +21,7 @@ except Exception:
     _native = None
     _HAS_NATIVE = False
 
-try:
-    from skimage.registration import phase_cross_correlation as _pcc
-    _HAS_PCC = True
-except Exception:
-    _pcc = None
-    _HAS_PCC = False
+from src.phase_correlate import phase_cross_correlation as _pcc
 
 # FIX #10: Module-level constant — avoids reallocating the kernel on every
 # upsample() call inside debayer_bilinear().
@@ -532,8 +527,7 @@ def correct_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
     Correction is intentionally limited to ``max_shift_px`` pixels to avoid
     over-correcting in frames where phase correlation fails.
 
-    Requires skimage (``phase_cross_correlation``).  Returns the original image
-    unchanged if the dependency is missing or registration fails.
+    Returns the original image unchanged if registration fails.
 
     The shift *estimate* runs on a ``downsample``x block-averaged copy of each
     channel — CA is a smooth, near-constant sub-pixel offset across the frame
@@ -573,7 +567,7 @@ def measure_chromatic_aberration(rgb: np.ndarray, max_shift_px: float = 5.0,
     frame for a whole session) can be measured once on a few sample frames
     and applied to every frame."""
     shifts: dict = {0: None, 2: None}
-    if not _HAS_PCC or rgb.ndim != 3 or rgb.shape[2] != 3:
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
         return shifts
 
     # Downsample the cheap float32 data FIRST, cast to float64 only the small

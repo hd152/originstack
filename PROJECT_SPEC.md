@@ -166,7 +166,7 @@ Per-frame metrics computed in Phase 1:
 |--------|-------------|
 | Brightness | Median pixel value |
 | Contrast | Standard deviation |
-| Star count | DAOStarFinder (photutils) or SEP C-backend |
+| Star count | matched-filter (native Rust/numpy, src/star_detect.py) |
 | FWHM | Median Full Width at Half Maximum of detected stars |
 | SNR | Signal-to-noise estimate |
 | Quality score | Composite weighted score |
@@ -331,7 +331,7 @@ for galaxy targets).
 ### 24. Incremental Stacking (`--merge`)
 
 - The main output FITS is the **linear pre-post-processing stack** (`RAWSTACK=True`) carrying `NFRAMES`/`INTGTIME`/`TOTEXP` headers
-- `--merge PREV.fits [...]` processes only the new session through Phases 1-3, registers each previous stack onto the new grid (astroalign triangle matching first — nights differ by arbitrary field rotation on alt-az mounts — star-catalog RANSAC and translation fallbacks), and combines as a per-pixel `NFRAMES`-weighted mean inside each warped footprint
+- `--merge PREV.fits [...]` processes only the new session through Phases 1-3, registers each previous stack onto the new grid (blind rigid star-pattern match first, `src/blind_match.py` — nights differ by arbitrary field rotation on alt-az mounts, and this makes no assumption about the angle — translation-seeded star-catalog RANSAC and translation-only fallbacks), and combines as a per-pixel `NFRAMES`-weighted mean inside each warped footprint
 - Phase 4 runs once on the merged result; header aggregates are summed, so the output chains into future merges
 - Guards: hard error on registration failure, <25% footprint overlap, or <0.15 aligned-luminance correlation (wrong-target protection); refuses non-linear inputs and `--drizzle-scale > 1`
 - No cross-session outlier rejection (each session already rejected internally)
@@ -579,8 +579,6 @@ python astro_stack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 | `numpy >= 1.20` | Array operations |
 | `astropy >= 5.0` | FITS I/O |
 | `scipy >= 1.7` | Shifting, interpolation, Gaussian filters |
-| `scikit-image >= 0.21` | Phase cross-correlation, morphology |
-| `photutils >= 1.5` | Star detection (degrades gracefully without it) |
 | `tqdm >= 4.65` | Progress bars (falls back to plain iterator) |
 | `Pillow >= 9.0` | Preview JPEG generation |
 | `psutil >= 5.9` | Memory usage reporting |
@@ -589,15 +587,14 @@ python astro_stack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 
 | Package | Feature Unlocked |
 |---------|-----------------|
-| `PyWavelets` | Wavelet denoising (`--denoise`) |
-| `sep` | Alternate star-detection backend (default `matched-filter` needs no extra package and is faster on real data) |
+| `PyWavelets` | Multiscale-entropy seeing-quality metric (db4 wavelet). Wavelet denoising (`--denoise`, bior1.3) is native/numpy now, no dependency |
+| `scikit-image` | NLM denoising, Richardson-Lucy CPU fallback, satellite-trail Hough detection |
 | `astroquery >= 0.4.6` | Plate solving via nova.astrometry.net |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see `requirements-gpu.txt`) |
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
-| `astroalign` | Triangle-pattern registration for `--merge` (cross-night field rotation) |
 | `tifffile` | 16-bit TIFF output |
 
-`opencv-python` is not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built).
+`opencv-python` and `astroalign` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built), and `--merge`'s cross-night registration is `src/blind_match.py`, native/numpy, no dependency.
 
 ---
 

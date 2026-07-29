@@ -235,26 +235,20 @@ def _peak_sources(lum: np.ndarray, k: float = 5.0):
 
 def _star_mask_for(rgb: np.ndarray, fwhm: float = 3.5) -> Optional[np.ndarray]:
     """Detect stars on the RGB luminance and return a soft [0,1] star mask.
-    Uses SEP when it finds sources, else a numpy local-maxima fallback (SEP's
-    Background can misbehave on small/low-amplitude frames)."""
+    Uses the matched-filter detector (src/star_detect.py) when it finds
+    sources, else a crude numpy local-maxima fallback."""
     try:
-        from src.quality import generate_star_mask
-        try:
-            from src.quality import _sep_detect_stars
-        except Exception:
-            _sep_detect_stars = None
+        from src.quality import generate_star_mask, detect_stars_auto
     except Exception:
         return None
     lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
            + 0.114 * rgb[:, :, 2]).astype(np.float32)
-    src = None
-    if _sep_detect_stars is not None:
-        med = float(np.median(lum))
-        noise = 1.4826 * float(np.median(np.abs(lum - med))) or 1e-3
-        try:
-            src = _sep_detect_stars(lum, noise)
-        except Exception:
-            src = None
+    med = float(np.median(lum))
+    noise = 1.4826 * float(np.median(np.abs(lum - med))) or 1e-3
+    try:
+        src = detect_stars_auto(lum, noise, background=med)
+    except Exception:
+        src = None
     if src is None or len(src) == 0:
         src = _peak_sources(lum)
     if src is None or len(src) == 0:

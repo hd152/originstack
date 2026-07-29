@@ -18,19 +18,24 @@ psutil>=5.9
 #   XISF input (PixInsight's native format) and SER (FireCapture/SharpCap planetary
 #   video) support need no extra packages — both are read with a built-in parser.
 #
+#   astroalign is NOT used anywhere in this codebase -- --merge's cross-night registration
+#   (arbitrary field rotation between nights) is src/blind_match.py, native/numpy, no
+#   dependency.
+#
 #   Improved registration:
-#     astroalign         — triangle-pattern star matching; fallback when RANSAC fails
-#     scikit-image       — sub-pixel phase cross-correlation refinement (registration.py,
-#                          debayer.py), NLM denoising, Richardson-Lucy deconvolution,
-#                          preview stretch (exposure), satellite-trail Hough detection.
-#                          Rigid-transform RANSAC fitting no longer needs it (native Rust
-#                          kernel in src/affine_fit.py) -- every remaining use degrades
+#     scikit-image       — NLM denoising, Richardson-Lucy deconvolution (CPU fallback --
+#                          GPU path has its own native implementation), satellite-trail
+#                          Hough detection. Rigid-transform RANSAC (src/affine_fit.py) and
+#                          phase cross-correlation (src/phase_correlate.py) are both native/
+#                          numpy now, no dependency -- every remaining skimage use degrades
 #                          gracefully when absent
 #
 #   Denoising:
 #     bm3d               — fast BM3D collaborative-filter (--denoise-bm3d); replaces
 #                          the built-in pure-scipy DCT fallback (~5-10× faster)
-#     PyWavelets         — wavelet denoising (--denoise)
+#     PyWavelets         — multiscale-entropy seeing-quality metric (compute_multiscale_entropy,
+#                          src/quality.py, db4). Wavelet denoising (--denoise, bior1.3) is a
+#                          native/numpy implementation now, no dependency (src/wavelet.py)
 #
 #   opencv-python is NOT used anywhere in this codebase. Bilateral filter and Malvar
 #   debayer are native Rust kernels (numpy fallback if astro_native isn't built); VNG
@@ -40,17 +45,14 @@ psutil>=5.9
 #     graxpert           — AI-powered gradient removal via Python API (--bg-method graxpert);
 #                          if not installed falls back to the GraXpert CLI subprocess
 #
-#   Star detection (--star-detector):
-#     sep                — optional secondary backend (SourceExtractor C library); the
-#                          default (matched-filter, src/star_detect.py) needs no extra
-#                          package and is faster than sep on real data (~1.7-2.1x) --
-#                          see --star-detector help. DAOStarFinder/photutils is no
-#                          longer used for detection at all.
+#   Star detection: matched-filter (src/star_detect.py) is the only backend -- no extra
+#   package needed. SEP and DAOStarFinder/photutils were both removed from the detection
+#   path (2026-07): matched-filter is faster than SEP and at least as accurate on real
+#   archive data.
 #
-#   PSF / deconvolution:
-#     photutils          — photutils.psf.EPSFBuilder for empirical PSF estimation
-#                          (--deconvolve rl); falls back to parametric Moffat/Gaussian
-#                          fitting when not installed
+#   PSF / deconvolution (--deconvolve rl): parametric Moffat/Gaussian fitting via
+#   scipy.optimize.curve_fit, no extra package needed. photutils.psf.EPSFBuilder (empirical
+#   PSF) was removed (2026-07) along with its dependency.
 #
 #   GPU acceleration:
 #     cupy-cudaXXx       — GPU acceleration (--use-gpu); see requirements-gpu.txt

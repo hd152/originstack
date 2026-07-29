@@ -8,79 +8,18 @@ import numpy as np
 
 from src.models import Config
 
-try:
-    import sep as _sep_module
-    _SEP_AVAILABLE = True
-except ImportError:
-    _sep_module = None
-    _SEP_AVAILABLE = False
-
-
-def _sep_detect_stars(img_2d: np.ndarray, noise: float) -> Optional[object]:
-    """SEP (SourceExtractor) star detection. Optional dependency -- returns
-    None (letting the caller's own fallback take over) when the ``sep``
-    package isn't installed.
-
-    Returns a structured array (see _SOURCES_DTYPE) or None on failure/unavailable.
-    """
-    if not _SEP_AVAILABLE:
-        return None
-    try:
-        data = np.ascontiguousarray(img_2d, dtype=np.float64)
-        bkg = _sep_module.Background(data, bw=64, bh=64, fw=3, fh=3)
-        bkg_sub = np.ascontiguousarray(data - bkg, dtype=np.float64)
-        thresh = max(3.0 * float(bkg.globalrms), 5.0 * noise, 1e-6)
-        raw = _sep_module.extract(bkg_sub, thresh, minarea=9)
-    except Exception:
-        return None
-    if raw is None or len(raw) == 0:
-        return None
-
-    dt = np.dtype([
-        ('xcentroid', np.float64), ('ycentroid', np.float64),
-        ('flux', np.float64), ('peak', np.float64),
-        ('roundness1', np.float64), ('roundness2', np.float64),
-        ('sharpness', np.float64),
-        ('a', np.float64), ('b', np.float64), ('theta', np.float64),
-    ])
-    out = np.zeros(len(raw), dtype=dt)
-    out['xcentroid'] = raw['x']
-    out['ycentroid'] = raw['y']
-    out['flux'] = raw['flux']
-    out['peak'] = raw['peak']
-    a = np.maximum(raw['a'], 1e-6)
-    b = np.maximum(raw['b'], 1e-6)
-    roundness = 1.0 - np.minimum(b, a) / np.maximum(b, a)  # 0=circular, 1=linear
-    out['roundness1'] = roundness
-    out['roundness2'] = roundness
-    out['sharpness'] = 0.5  # neutral; passes the (0.3, 0.9) quality filter
-    out['a'] = a
-    out['b'] = b
-    out['theta'] = raw['theta']  # position angle in radians (SEP convention)
-
-    quality_mask = roundness < 0.5
-    if np.sum(quality_mask) == 0:
-        quality_mask = roundness < 0.7
-    filtered = out[quality_mask]
-    return filtered if len(filtered) > 0 else None
-
-
 _STAR_DETECTOR_METHOD = 'matched-filter'
 
 
 def configure_star_detector(method: str) -> None:
-    """Set the process-wide star-detection backend: 'matched-filter' (default
-    -- native/numpy, no external dependency, see src/star_detect.py) or 'sep'
-    (optional -- the ``sep`` package; falls through to matched-filter if not
-    installed or it finds nothing). Called once from cli.py based on
-    --star-detector.
-
-    DAOStarFinder/photutils was removed entirely from the detection path
-    (2026-07): matched-filter is faster than SEP and at least as accurate as
-    DAOStarFinder was, on real archive data (see src/star_detect.py
-    docstring for the validation), so there was no longer a reason to carry
-    photutils as a detection dependency -- it's still used independently for
-    empirical PSF estimation in psf_deconvolution.py.
+    """Set the process-wide star-detection backend. 'matched-filter' is the
+    only backend now (native/numpy, no external dependency -- see
+    src/star_detect.py); the ``sep`` (SourceExtractor) backend was removed
+    (2026-07) since matched-filter is faster and at least as accurate on
+    real archive data. DAOStarFinder/photutils was removed from the
+    detection path earlier, and its EPSFBuilder use for empirical PSF
+    estimation in psf_deconvolution.py was dropped in the same 2026-07
+    pass -- photutils is no longer used anywhere in this codebase.
 
     Every star-detection call site across quality.py/registration.py routes
     through `detect_stars_auto` below rather than calling a backend
@@ -90,33 +29,19 @@ def configure_star_detector(method: str) -> None:
     residual-RMS machinery that compares the two.
     """
     global _STAR_DETECTOR_METHOD
-    if method not in ('matched-filter', 'sep'):
+    if method != 'matched-filter':
         raise ValueError(f"unknown star detector method: {method!r}")
     _STAR_DETECTOR_METHOD = method
 
 
 def detect_stars_auto(lum: np.ndarray, noise: float,
-                      background: Optional[float] = None,
-                      method: Optional[str] = None) -> Optional[np.ndarray]:
+                      background: Optional[float] = None) -> Optional[np.ndarray]:
     """Unified star-detection dispatcher -- see `configure_star_detector`.
 
-    method=None uses the process-wide setting (default 'matched-filter').
-    Returns a structured array (SEP/matched-filter share the same
-    xcentroid/ycentroid/flux/peak/roundness/... dtype) or None if nothing
-    was detected / the backend is unavailable -- callers already carry their
-    own final local-maxima fallback (pure scipy, no dependency at all) for
-    that case, unchanged here.
+    Returns a structured array (see _SOURCES_DTYPE) or None if nothing was
+    detected -- callers already carry their own final local-maxima fallback
+    (pure scipy, no dependency at all) for that case, unchanged here.
     """
-    m = method or _STAR_DETECTOR_METHOD
-
-    if m == 'sep':
-        sources = _sep_detect_stars(lum.astype(np.float32), noise)
-        if sources is not None and len(sources) > 0:
-            return sources
-        # sep not installed / found nothing -- matched-filter has no
-        # external dependency, so it's a strictly-available next attempt
-        # rather than a silent failure.
-
     from src.star_detect import detect_stars_matched_filter
     try:
         sources = detect_stars_matched_filter(lum.astype(np.float64))
@@ -490,10 +415,10 @@ def compute_brenner_sharpness(img: np.ndarray) -> float:
 
 
 def measure_psf_anisotropy(sources) -> Tuple[float, float, str]:
-    """Compute PSF ellipticity and position-angle scatter from SEP source catalog.
+    """Compute PSF ellipticity and position-angle scatter from a source catalog.
 
     Uses the semi-major/minor axes (a, b) and orientation angle (theta) stored
-    in the extended SEP source array returned by _sep_detect_stars.
+    in the source array returned by detect_stars_auto (see _SOURCES_DTYPE).
 
     Returns:
         median_ellipticity: median (a²-b²)/(a²+b²) across sources; 0=circular.
@@ -789,11 +714,9 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     fwhm = 0.0
 
     if not quick:
-        # matched-filter by default, or SEP if selected via --star-detector
-        # (falling through to matched-filter if sep isn't installed / finds
-        # nothing) -- see configure_star_detector() for why this must be the
-        # single dispatch point rather than each call site picking its own
-        # backend.
+        # matched-filter (the only detector) -- see configure_star_detector()
+        # for why this must be the single dispatch point rather than each
+        # call site picking its own backend.
         sources_s = detect_stars_auto(img_s_stars, noise, background=background)
         if sources_s is not None and len(sources_s) > 0:
             star_count = len(sources_s)

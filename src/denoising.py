@@ -10,6 +10,7 @@ from scipy import ndimage
 from src.models import Config
 from src.utils import safe_print, get_logger
 from src.background import _estimate_sky_sigma, gaussian_filter_ds
+from src import wavelet
 _log = get_logger()
 
 # Optional native (Rust) kernels — graceful degradation to numpy if absent.
@@ -20,8 +21,6 @@ except Exception:
     _native = None
     _HAS_NATIVE = False
 
-pywt = None
-HAS_PYWT = False
 denoise_nl_means = None
 HAS_SKIMAGE_RESTORATION = False
 
@@ -31,19 +30,6 @@ try:
 except Exception:
     _bm3d_pkg = None  # type: ignore[assignment]
     HAS_BM3D_PKG = False
-
-
-def _ensure_pywt():
-    global pywt, HAS_PYWT
-    if not HAS_PYWT:
-        try:
-            import pywt as _pywt
-            if hasattr(_pywt, 'dwt_max_level'):
-                pywt = _pywt
-                HAS_PYWT = True
-        except Exception:
-            pass
-    return pywt
 
 
 def _ensure_skimage_restoration():
@@ -129,8 +115,7 @@ def _bayesshrink_threshold(coeffs: np.ndarray, sigma_noise: float) -> float:
     return sigma_noise ** 2 / np.sqrt(sigma_sq_s)
 
 
-def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
-                              levels: int = 4,
+def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
                               chroma_factor: float = 2.0,
                               star_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Adaptive multi-scale wavelet denoising using BayesShrink thresholds.
@@ -147,7 +132,6 @@ def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
 
     Args:
         img: Float32 stacked image (H, W, 3).
-        wavelet: Wavelet family (default ``'bior1.3'``).
         levels: Maximum decomposition depth (default 4).
         chroma_factor: Multiplier applied to the noise estimate for the Cb/Cr
                        chroma channels (default 2.0).  Higher values remove more
@@ -158,11 +142,6 @@ def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     Returns:
         Denoised float32 image (H, W, 3).
     """
-    _ensure_pywt()
-    if not HAS_PYWT:
-        _log.warning("pywt not installed, skipping adaptive wavelet denoise")
-        return img
-
     h, w = img.shape[0], img.shape[1]
     src = img.astype(np.float64)
 
@@ -172,12 +151,12 @@ def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
 
     def _adaptive_denoise_plane(plane: np.ndarray, chroma_mult: float) -> np.ndarray:
-        max_level = pywt.dwt_max_level(min(plane.shape), pywt.Wavelet(wavelet).dec_len)
+        max_level = wavelet.dwt_max_level(min(plane.shape))
         use_levels = min(levels, max_level)
         if use_levels < 1:
             return plane
 
-        coeffs = pywt.wavedec2(plane, wavelet, level=use_levels)
+        coeffs = wavelet.wavedec2(plane, use_levels)
 
         # Global noise estimate from finest-level HH subband (standard MAD estimator)
         sigma_noise = np.median(np.abs(coeffs[-1][-1])) / 0.6745
@@ -188,10 +167,10 @@ def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
             new_detail = []
             for d in detail_level:
                 threshold = _bayesshrink_threshold(d, sigma_noise)
-                new_detail.append(pywt.threshold(d, threshold, mode='soft'))
+                new_detail.append(wavelet.soft_threshold(d, threshold))
             new_coeffs.append(tuple(new_detail))
 
-        return pywt.waverec2(new_coeffs, wavelet)[:h, :w]
+        return wavelet.waverec2(new_coeffs)[:h, :w]
 
     Y_d  = _adaptive_denoise_plane(Y,  1.0)
     Cb_d = _adaptive_denoise_plane(Cb, chroma_factor)
@@ -210,8 +189,7 @@ def adaptive_wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     return result.astype(np.float32)
 
 
-def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
-                    levels: int = 4, threshold_factor: float = 3.0,
+def wavelet_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 3.0,
                     chroma_factor: float = 2.0,
                     star_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Multi-scale wavelet denoising with luma/chroma split and star protection.
@@ -225,11 +203,6 @@ def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     blended back with the original at star positions so that star cores are not
     softened and their colours are preserved.
     """
-    _ensure_pywt()
-    if not HAS_PYWT:
-        _log.warning("pywt not installed, skipping wavelet denoise")
-        return img
-
     h, w = img.shape[0], img.shape[1]
     src = img.astype(np.float64)
 
@@ -239,20 +212,20 @@ def wavelet_denoise(img: np.ndarray, wavelet: str = 'bior1.3',
     Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
 
     def _denoise_plane(plane, factor):
-        max_level = pywt.dwt_max_level(min(plane.shape), pywt.Wavelet(wavelet).dec_len)
+        max_level = wavelet.dwt_max_level(min(plane.shape))
         use_levels = min(levels, max_level)
         if use_levels < 1:
             return plane
-        coeffs = pywt.wavedec2(plane, wavelet, level=use_levels)
+        coeffs = wavelet.wavedec2(plane, use_levels)
         detail_hh = coeffs[-1][-1]
         sigma_noise = np.median(np.abs(detail_hh)) / 0.6745
         threshold = factor * sigma_noise
         new_coeffs = [coeffs[0]]
         for detail_level in coeffs[1:]:
             new_coeffs.append(tuple(
-                pywt.threshold(d, threshold, mode='soft') for d in detail_level
+                wavelet.soft_threshold(d, threshold) for d in detail_level
             ))
-        return pywt.waverec2(new_coeffs, wavelet)[:h, :w]
+        return wavelet.waverec2(new_coeffs)[:h, :w]
 
     chroma_thresh = threshold_factor * chroma_factor
     Y_d  = _denoise_plane(Y,  threshold_factor)

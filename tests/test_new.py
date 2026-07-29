@@ -314,9 +314,8 @@ class TestBayesShrinkThreshold(unittest.TestCase):
 class TestWaveletDenoise(unittest.TestCase):
 
     def setUp(self):
-        from src.denoising import wavelet_denoise, HAS_PYWT
+        from src.denoising import wavelet_denoise
         self.denoise = wavelet_denoise
-        self.has_pywt = HAS_PYWT
 
     def test_shape_preserved(self):
         rgb = _star_rgb(64, 64)
@@ -328,10 +327,7 @@ class TestWaveletDenoise(unittest.TestCase):
         result = self.denoise(rgb)
         self.assertEqual(result.dtype, np.float32)
 
-    @unittest.skipUnless(True, "always run — graceful pass-through when pywt absent")
     def test_noisy_image_noise_reduced(self):
-        if not self.has_pywt:
-            self.skipTest("pywt not installed")
         rng = np.random.default_rng(8)
         clean = _star_rgb(64, 64, amp=300.0, bg=50.0)
         noisy = (clean + rng.normal(0, 20, clean.shape)).astype(np.float32)
@@ -341,8 +337,6 @@ class TestWaveletDenoise(unittest.TestCase):
         self.assertLess(noise_after, noise_before)
 
     def test_star_mask_restores_star_cores(self):
-        if not self.has_pywt:
-            self.skipTest("pywt not installed")
         rng = np.random.default_rng(9)
         rgb = _star_rgb(64, 64, centers=[(32, 32)], amp=2000.0, bg=50.0)
         noisy = (rgb + rng.normal(0, 30, rgb.shape)).astype(np.float32)
@@ -360,9 +354,8 @@ class TestWaveletDenoise(unittest.TestCase):
 class TestAdaptiveWaveletDenoise(unittest.TestCase):
 
     def setUp(self):
-        from src.denoising import adaptive_wavelet_denoise, HAS_PYWT
+        from src.denoising import adaptive_wavelet_denoise
         self.denoise = adaptive_wavelet_denoise
-        self.has_pywt = HAS_PYWT
 
     def test_shape_and_dtype(self):
         rgb = _star_rgb(64, 64)
@@ -370,17 +363,7 @@ class TestAdaptiveWaveletDenoise(unittest.TestCase):
         self.assertEqual(result.shape, rgb.shape)
         self.assertEqual(result.dtype, np.float32)
 
-    def test_passthrough_without_pywt(self):
-        """If pywt is absent the function must return the input unchanged."""
-        if self.has_pywt:
-            self.skipTest("pywt is installed — testing degraded path not needed")
-        rgb = _star_rgb(64, 64)
-        result = self.denoise(rgb)
-        np.testing.assert_array_equal(result, rgb)
-
     def test_noise_reduction_quality(self):
-        if not self.has_pywt:
-            self.skipTest("pywt not installed")
         rng = np.random.default_rng(10)
         clean = _star_rgb(64, 64, amp=300.0, bg=50.0)
         noisy = (clean + rng.normal(0, 20, clean.shape)).astype(np.float32)
@@ -477,7 +460,7 @@ class TestGenerateStarMask(unittest.TestCase):
         self.generate_star_mask = generate_star_mask
 
     def _mock_sources(self, positions):
-        """Return a minimal photutils-style table substitute."""
+        """Return a minimal _SOURCES_DTYPE-compatible structured array."""
         import numpy.lib.recfunctions as rf
         yc = np.array([p[0] for p in positions], dtype=np.float64)
         xc = np.array([p[1] for p in positions], dtype=np.float64)
@@ -636,63 +619,6 @@ class TestComputeQualityMetricsAdvanced(unittest.TestCase):
             self.assertIn(k, m)
         self.assertEqual(m['star_count'], 0)
         self.assertEqual(m['fwhm'], 0.0)
-
-
-class TestSepDetectStars(unittest.TestCase):
-    """Tests for the _sep_detect_stars() fast-path function."""
-
-    def setUp(self):
-        from src.quality import _sep_detect_stars, _SEP_AVAILABLE
-        self.detect = _sep_detect_stars
-        self.sep_available = _SEP_AVAILABLE
-
-    def _star_image(self, shape=(128, 128), n_stars=10, bg=100.0, amp=800.0):
-        rng = np.random.default_rng(42)
-        img = rng.normal(bg, 5.0, shape).astype(np.float32)
-        yy, xx = np.indices(shape)
-        for _ in range(n_stars):
-            cy = rng.integers(20, shape[0] - 20)
-            cx = rng.integers(20, shape[1] - 20)
-            img += amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.5 ** 2))
-        return img.clip(0)
-
-    def test_returns_none_when_sep_unavailable(self):
-        """When SEP is not installed, _sep_detect_stars must return None gracefully."""
-        if self.sep_available:
-            self.skipTest("SEP is installed — testing unavailable path is not needed")
-        result = self.detect(self._star_image(), noise=5.0)
-        self.assertIsNone(result)
-
-    @unittest.skipUnless(True, "always run; guarded internally by sep_available")
-    def test_returns_compatible_structured_array_when_sep_available(self):
-        if not self.sep_available:
-            self.skipTest("SEP not installed")
-        result = self.detect(self._star_image(), noise=5.0)
-        self.assertIsNotNone(result)
-        for field in ('xcentroid', 'ycentroid', 'flux', 'peak', 'roundness1', 'sharpness'):
-            self.assertIn(field, result.dtype.names)
-
-    def test_elongated_sources_filtered_out(self):
-        """Very elongated sources (streaks) should be removed by the roundness filter."""
-        if not self.sep_available:
-            self.skipTest("SEP not installed")
-        img = np.full((128, 128), 100.0, dtype=np.float32)
-        # Inject a horizontal streak (elongated in x)
-        img[64, 20:108] = 5000.0
-        result = self.detect(img, noise=5.0)
-        # Either no sources or only filtered (round) ones
-        if result is not None and len(result) > 0:
-            roundness = result['roundness1']
-            self.assertTrue(np.all(roundness < 0.75),
-                            f"Elongated source not filtered: max roundness={roundness.max():.2f}")
-
-    def test_empty_image_returns_none(self):
-        """Flat image with no sources should return None or empty result."""
-        img = np.full((128, 128), 100.0, dtype=np.float32)
-        if not self.sep_available:
-            self.skipTest("SEP not installed")
-        result = self.detect(img, noise=5.0)
-        self.assertTrue(result is None or len(result) == 0)
 
 
 class TestProcessSingleFramePreload(unittest.TestCase):

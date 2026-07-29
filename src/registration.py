@@ -32,11 +32,7 @@ except Exception:
     _native = None
     HAS_NATIVE = False
 
-try:
-    from skimage.registration import phase_cross_correlation
-except Exception:
-    phase_cross_correlation = None
-
+from src.phase_correlate import phase_cross_correlation
 from src.affine_fit import fit_rigid_ransac, RigidTransform
 
 # Always available now (fit_rigid_ransac has no external dependency -- native
@@ -50,12 +46,7 @@ try:
 except Exception:
     Image = None
 
-try:
-    import astroalign as _astroalign
-    HAS_ASTROALIGN = True
-except Exception:
-    _astroalign = None  # type: ignore[assignment]
-    HAS_ASTROALIGN = False
+from src.blind_match import match_rigid_unknown_rotation
 
 
 def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
@@ -107,26 +98,17 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     return None
 
 
-def _astroalign_transform(ref_lum: np.ndarray,
-                          img_lum: np.ndarray) -> Optional[Any]:
-    """Use astroalign triangle-pattern matching to find a Euclidean transform.
-
-    Called as a fallback when star-catalog RANSAC matching fails (e.g. too few
-    detected stars, large rotation, or significant scale mismatch between panels).
-    Returns a RigidTransform compatible with apply_transform (same `.params`
-    interface skimage's EuclideanTransform had), or None.
+def _blind_match_transform(ref_stars: Optional[Any], img_stars: Optional[Any]) -> Optional[Any]:
+    """Find a rigid (rotation+translation) transform between two star
+    catalogs with no assumption about the rotation angle -- see
+    src/blind_match.py. Called as a fallback when the near-zero-rotation
+    RANSAC match in match_stars_affine fails (e.g. too few detected stars,
+    or genuinely large rotation between the two frames -- cross-night
+    --merge on an alt-az mount is the main case). Returns a RigidTransform
+    (same `.params` interface skimage's EuclideanTransform had), or None.
     """
-    if not HAS_ASTROALIGN or not HAS_SKIMAGE_TRANSFORM:
-        return None
     try:
-        transform, _ = _astroalign.find_transform(
-            img_lum.astype(np.float32),
-            ref_lum.astype(np.float32),
-        )
-        return RigidTransform.from_rotation_translation(
-            transform.rotation,
-            (transform.translation[0], transform.translation[1]),
-        )
+        return match_rigid_unknown_rotation(img_stars, ref_stars)
     except Exception:
         return None
 
@@ -264,7 +246,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
 
     Registration cascade:
       1. Multi-scale pyramid (coarse-to-fine) — handles large shifts reliably
-      2. Phase cross-correlation (skimage) — sub-pixel accurate when error < 0.1.
+      2. Phase cross-correlation (src/phase_correlate.py) — sub-pixel accurate when error < 0.1.
       3. FFT cross-correlation at full resolution — fallback for phase-cc failure.
       4. Centroid difference — last resort for featureless or very noisy frames.
 
@@ -341,8 +323,8 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         except Exception:
             pass
 
-    # Use phase cross correlation for subpixel shifts when available
-    if not skip_phase_cc and phase_cross_correlation is not None:
+    # Use phase cross correlation for subpixel shifts
+    if not skip_phase_cc:
         try:
             img_pre = img_shifted
 
@@ -1616,10 +1598,11 @@ def run_registration_phase(
                                          seed_shift=seed,
                                          masked_correlation=_masked_corr,
                                          corr_downsample=2)
-                affine_tf = match_stars_affine(ref_stars, f.metrics.get('_star_sources'),
+                img_stars = f.metrics.get('_star_sources')
+                affine_tf = match_stars_affine(ref_stars, img_stars,
                                                initial_shift=(sy, sx))
                 if affine_tf is None:
-                    affine_tf = _astroalign_transform(ref_lum, lum)
+                    affine_tf = _blind_match_transform(ref_stars, img_stars)
                 if affine_tf is not None:
                     tf_tx, tf_ty = affine_tf.params[0, 2], affine_tf.params[1, 2]
                     tf_rot_deg = abs(np.degrees(np.arctan2(

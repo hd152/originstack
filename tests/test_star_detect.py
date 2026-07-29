@@ -176,40 +176,18 @@ class TestDetectStarsAutoDispatcher:
         with pytest.raises(ValueError):
             configure_star_detector('not-a-real-method')
         with pytest.raises(ValueError):
+            configure_star_detector('sep')  # removed (2026-07) -- matched-filter only now
+        with pytest.raises(ValueError):
             configure_star_detector('auto')  # removed -- no more SEP->DAO chain
 
     def test_matched_filter_is_default(self):
         from src.quality import _STAR_DETECTOR_METHOD
         assert _STAR_DETECTOR_METHOD == 'matched-filter'
 
-    def test_configure_changes_global_default(self):
-        from src.quality import configure_star_detector
-        import src.quality as quality_mod
-        configure_star_detector('sep')
-        assert quality_mod._STAR_DETECTOR_METHOD == 'sep'
-
-    def test_explicit_method_overrides_global_default(self):
-        from src.quality import configure_star_detector, detect_stars_auto
-        configure_star_detector('sep')
-        img, _ = _synthetic_starfield_for_dispatch()
-        # explicit method='matched-filter' should win over the global 'sep' setting
-        out = detect_stars_auto(img, noise=15.0, method='matched-filter')
-        assert out is not None
-
-    def test_sep_method_falls_through_to_matched_filter(self):
-        # 'sep' without the sep package installed (or that finds nothing)
-        # must still detect via matched-filter, not silently return None --
-        # sep is optional now, never a hard requirement.
-        from src.quality import detect_stars_auto
-        img, _ = _synthetic_starfield_for_dispatch()
-        out = detect_stars_auto(img, noise=15.0, method='sep')
-        assert out is not None
-        assert len(out) > 0
-
     def test_matched_filter_dispatch_finds_synthetic_stars(self):
         from src.quality import detect_stars_auto
         img, stars = _synthetic_starfield_for_dispatch()
-        out = detect_stars_auto(img, noise=15.0, method='matched-filter')
+        out = detect_stars_auto(img, noise=15.0)
         assert out is not None
         assert len(out) > 0
 
@@ -217,7 +195,7 @@ class TestDetectStarsAutoDispatcher:
         from src.quality import detect_stars_auto
         rng = np.random.default_rng(9)
         img = rng.normal(1000.0, 15.0, (200, 250))
-        out = detect_stars_auto(img, noise=15.0, method='matched-filter')
+        out = detect_stars_auto(img, noise=15.0)
         assert out is None
 
 
