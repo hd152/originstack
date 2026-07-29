@@ -1441,6 +1441,12 @@ def main():
 
     try:
         process_directory(args.directory, args.output, args)
+    except KeyboardInterrupt:
+        safe_print("\n  Interrupted (Ctrl-C).")
+        if not getattr(args, 'no_resume', False):
+            safe_print("  Progress through the last completed phase was checkpointed "
+                      "— rerun the same command to resume.")
+        raise SystemExit(130)  # 128 + SIGINT, standard convention
     except Exception as e:
         print(f'ERROR: {str(e)}', file=sys.stderr)
         import traceback
