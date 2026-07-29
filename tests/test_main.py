@@ -159,8 +159,6 @@ _sk_reg.phase_cross_correlation = (
     lambda r, i, upsample_factor=1: (np.array([0.0, 0.0]), 0.0, 0.0)
 )
 sys.modules.setdefault("skimage.registration", _sk_reg)
-sys.modules.setdefault("skimage.transform", types.ModuleType("skimage.transform"))
-sys.modules.setdefault("skimage.measure", types.ModuleType("skimage.measure"))
 
 # cv2 stub needs constants for debayer_vng
 _cv2_stub = sys.modules["cv2"]

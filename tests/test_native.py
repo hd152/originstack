@@ -435,3 +435,40 @@ def test_detect_stars_matched_filter_speedup():
     t_numpy = time.time() - t0
 
     assert t_native < t_numpy
+
+
+def test_fit_rigid_ransac_matches_numpy_mirror_on_shared_seed():
+    """Native RANSAC-rigid-transform fit vs the numpy mirror in
+    src/affine_fit.py -- same Umeyama closed-form solve, same RANSAC loop
+    semantics; for a shared seed both should converge to the same fit
+    (verified, not assumed -- see src/affine_fit.py docstring for why
+    parity with skimage itself is a different, statistical question)."""
+    from src.affine_fit import _ransac_rigid_numpy
+
+    rng = np.random.default_rng(11)
+    n_inliers, n_outliers = 35, 12
+    theta = np.radians(2.3)
+    t = np.array([8.0, -4.5])
+    R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    src_in = rng.uniform(0, 400, (n_inliers, 2))
+    dst_in = (R @ src_in.T).T + t + rng.normal(0, 0.1, (n_inliers, 2))
+    src_out = rng.uniform(0, 400, (n_outliers, 2))
+    dst_out = rng.uniform(0, 400, (n_outliers, 2))
+    src = np.vstack([src_in, src_out])
+    dst = np.vstack([dst_in, dst_out])
+
+    params_native, inliers_native = native.fit_rigid_ransac(
+        np.ascontiguousarray(src), np.ascontiguousarray(dst), 3, 2.0, 1000, 13)
+    model_numpy, inliers_numpy = _ransac_rigid_numpy(
+        src, dst, min_samples=3, residual_threshold=2.0, max_trials=1000,
+        rng=np.random.default_rng(13))
+
+    assert params_native is not None
+    assert int(np.sum(inliers_native)) == int(inliers_numpy.sum())
+    np.testing.assert_allclose(np.asarray(params_native), model_numpy.params, atol=1e-8)
+
+
+def test_fit_rigid_ransac_too_few_points_returns_none():
+    src = np.array([[0.0, 0.0], [1.0, 1.0]])
+    params, inliers = native.fit_rigid_ransac(src, src, 3, 2.0, 100, -1)
+    assert params is None and inliers is None

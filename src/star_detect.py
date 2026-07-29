@@ -225,7 +225,7 @@ def _detect_stars_matched_filter_numpy(img: np.ndarray, fwhm: float, k_confirm: 
 
 
 def detect_stars_matched_filter(img: np.ndarray, fwhm: float = 5.5, k_confirm: float = 22.0,
-                                cell: int = 64, roundness_max: float = 0.5,
+                                cell: Optional[int] = None, roundness_max: float = 0.5,
                                 min_pixels: int = 2) -> np.ndarray:
     """Detect point sources via matched (Gaussian-PSF) filtering.
 
@@ -236,9 +236,17 @@ def detect_stars_matched_filter(img: np.ndarray, fwhm: float = 5.5, k_confirm: f
     Returns a structured array (same dtype as src.quality's SEP/DAO
     wrappers: xcentroid, ycentroid, flux, peak, roundness1/2, sharpness,
     a, b, theta) so it's a drop-in alternative source table.
+
+    cell=None (default) scales the mesh size to the image, capped at 64 (the
+    validated value, unchanged for anything with min(H,W) >= 512): a fixed
+    64px cell that's fine on real ~2000-3000px frames is too coarse on much
+    smaller images (a real regression this caught: a 256x320 registration
+    test lost ~30% of detectable stars at a flat cell=64 vs SEP).
     """
     if img.ndim != 2:
         raise ValueError("detect_stars_matched_filter expects a 2D luminance array")
+    if cell is None:
+        cell = max(8, min(64, min(img.shape) // 8))
 
     if HAS_NATIVE:
         try:

@@ -350,7 +350,7 @@ def test_affine_sanity_guard_rejects_bad_ransac_fit():
     # that used to sail through _register_one completely unchecked (the
     # magnitude guard only existed on the calculate_shift fallback branch).
     # This test mirrors the exact guard formula added to the affine branch.
-    from skimage.transform import EuclideanTransform
+    from src.affine_fit import RigidTransform
     W, H = 3056, 2048
 
     def is_unrealistic(tf):
@@ -359,16 +359,16 @@ def test_affine_sanity_guard_rejects_bad_ransac_fit():
         return (abs(tx) > 0.1 * W or abs(ty) > 0.1 * H
                 or rot_deg > Config.AFFINE_MAX_ROTATION_DEG)
 
-    bad = EuclideanTransform(rotation=np.radians(21.526), translation=(708.7, -35.8))
+    bad = RigidTransform.from_rotation_translation(np.radians(21.526), (708.7, -35.8))
     assert is_unrealistic(bad)
 
     # A real single-frame affine correction: sub-pixel-to-few-px shift,
     # a small fraction of a degree of field rotation -- must NOT be flagged.
-    good = EuclideanTransform(rotation=np.radians(0.15), translation=(3.2, -1.8))
+    good = RigidTransform.from_rotation_translation(np.radians(0.15), (3.2, -1.8))
     assert not is_unrealistic(good)
 
     # Rotation-only failure mode: small shift but way too much rotation
     # (e.g. matched against the wrong star cluster) must also be caught.
-    bad_rotation_only = EuclideanTransform(rotation=np.radians(12.0),
-                                           translation=(2.0, -1.0))
+    bad_rotation_only = RigidTransform.from_rotation_translation(np.radians(12.0),
+                                                                  (2.0, -1.0))
     assert is_unrealistic(bad_rotation_only)

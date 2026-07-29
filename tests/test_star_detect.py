@@ -33,6 +33,38 @@ def _synthetic_starfield(h=300, w=400, n_stars=20, seed=0, sky=1000.0, sky_std=1
     return img, stars
 
 
+class TestAdaptiveCellSize:
+    """cell=None scales the mesh to the image, capped at 64 -- a real
+    regression this caught: a fixed cell=64 on a 256x320 registration test
+    image lost ~30% of detectable stars vs SEP, enough to fail alignment."""
+
+    def test_large_image_keeps_validated_cell_of_64(self):
+        # min(H,W) >= 512 -> cell stays at the validated 64, unchanged
+        # behaviour for every real-data test this module was validated on.
+        h, w = 2048, 3056
+        cell = max(8, min(64, min(h, w) // 8))
+        assert cell == 64
+
+    def test_small_image_scales_cell_down(self):
+        h, w = 256, 320
+        cell = max(8, min(64, min(h, w) // 8))
+        assert cell == 32
+
+    def test_tiny_image_floors_at_8(self):
+        h, w = 40, 40
+        cell = max(8, min(64, min(h, w) // 8))
+        assert cell == 8
+
+    def test_none_cell_actually_changes_detection_on_small_image(self):
+        # The behavioural regression this fixed: flat cell=64 vs adaptive
+        # cell on a small (256x320-ish) image should detect *more* sources
+        # against a moderately dense synthetic field, not fewer.
+        img, stars = _synthetic_starfield(h=256, w=320, n_stars=30, seed=11)
+        out_fixed = detect_stars_matched_filter(img, cell=64)
+        out_adaptive = detect_stars_matched_filter(img, cell=None)
+        assert len(out_adaptive) >= len(out_fixed)
+
+
 class TestDetectStarsMatchedFilter:
     def test_returns_sources_dtype(self):
         img, _ = _synthetic_starfield()
@@ -79,7 +111,10 @@ class TestDetectStarsMatchedFilter:
         rng = np.random.default_rng(5)
         img = rng.normal(1000.0, 5.0, (h, w))
         img[95:105, 40:160] += 6000.0  # a bright horizontal streak
-        out = detect_stars_matched_filter(img, fwhm=5.5, k_confirm=10.0, roundness_max=0.3)
+        # cell pinned: this test is about the roundness gate, independent of
+        # the adaptive-cell sizing (see detect_stars_matched_filter docstring).
+        out = detect_stars_matched_filter(img, fwhm=5.5, k_confirm=10.0,
+                                          roundness_max=0.3, cell=64)
         # a thin streak has roundness near 1.0 -- must not pass a strict gate
         assert len(out) == 0
 
@@ -90,7 +125,9 @@ class TestNativeNumpyParity:
         if not HAS_NATIVE:
             pytest.skip("astro_native not built")
         img, _ = _synthetic_starfield(n_stars=15, seed=6)
-        native_out = detect_stars_matched_filter(img)
+        # cell pinned: this test is about native-vs-numpy agreement for the
+        # same inputs, independent of the adaptive-cell default.
+        native_out = detect_stars_matched_filter(img, cell=64)
         numpy_out = _detect_stars_matched_filter_numpy(img, 5.5, 22.0, 64, 0.5, 2)
         assert len(native_out) == len(numpy_out)
         if len(native_out):

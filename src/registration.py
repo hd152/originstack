@@ -37,12 +37,13 @@ try:
 except Exception:
     phase_cross_correlation = None
 
-try:
-    from skimage.transform import EuclideanTransform
-    from skimage.measure import ransac
-    HAS_SKIMAGE_TRANSFORM = True
-except Exception:
-    HAS_SKIMAGE_TRANSFORM = False
+from src.affine_fit import fit_rigid_ransac, RigidTransform
+
+# Always available now (fit_rigid_ransac has no external dependency -- native
+# Rust kernel with an exact numpy fallback, see src/affine_fit.py). Kept as a
+# named flag rather than inlining `True` everywhere it's checked below, both
+# for minimal diff against the pre-rewrite code and as a single toggle point.
+HAS_SKIMAGE_TRANSFORM = True
 
 try:
     from PIL import Image
@@ -97,13 +98,8 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     dst = ref_pts[indices[good]]
 
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', message='No inliers found',
-                                    category=UserWarning)
-            model, inliers = ransac(
-                (src, dst), EuclideanTransform,
-                min_samples=3, residual_threshold=2.0, max_trials=1000
-            )
+        model, inliers = fit_rigid_ransac(
+            src, dst, min_samples=3, residual_threshold=2.0, max_trials=1000)
         if inliers is not None and inliers.sum() >= 3:
             return model
     except Exception:
@@ -117,7 +113,8 @@ def _astroalign_transform(ref_lum: np.ndarray,
 
     Called as a fallback when star-catalog RANSAC matching fails (e.g. too few
     detected stars, large rotation, or significant scale mismatch between panels).
-    Returns a skimage EuclideanTransform compatible with apply_transform, or None.
+    Returns a RigidTransform compatible with apply_transform (same `.params`
+    interface skimage's EuclideanTransform had), or None.
     """
     if not HAS_ASTROALIGN or not HAS_SKIMAGE_TRANSFORM:
         return None
@@ -126,9 +123,9 @@ def _astroalign_transform(ref_lum: np.ndarray,
             img_lum.astype(np.float32),
             ref_lum.astype(np.float32),
         )
-        return EuclideanTransform(
-            rotation=transform.rotation,
-            translation=(transform.translation[0], transform.translation[1]),
+        return RigidTransform.from_rotation_translation(
+            transform.rotation,
+            (transform.translation[0], transform.translation[1]),
         )
     except Exception:
         return None
