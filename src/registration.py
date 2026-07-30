@@ -1593,16 +1593,33 @@ def run_registration_phase(
             _masked_corr = getattr(args, 'masked_correlation', False)
             use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
             if use_affine:
-                sy, sx = calculate_shift(ref_lum, lum, verbose=False,
-                                         skip_phase_cc=args.skip_phase_correlation,
-                                         seed_shift=seed,
-                                         masked_correlation=_masked_corr,
-                                         corr_downsample=2)
                 img_stars = f.metrics.get('_star_sources')
-                affine_tf = match_stars_affine(ref_stars, img_stars,
-                                               initial_shift=(sy, sx))
+                # Cheap catalog-only paths first: nearest-neighbor star
+                # matching seeded with the pyramid shift already computed
+                # during reference selection (seed_shifts[j] -- effectively
+                # free, computed once and shared across the pipeline, see
+                # the seed_shifts comment above), then blind/unknown-rotation
+                # matching (also seed-free). Both work on a few dozen to a
+                # few hundred star centroids rather than full images, so
+                # they're much cheaper than the image-domain pyramid+FFT
+                # search below -- only fall back to that (paying for a
+                # second, expensive shift estimate just to re-seed the star
+                # match) when neither cheap path finds a confident match
+                # (too few stars, cloud-affected sub, or a seed too far off
+                # AFFINE_MATCH_RADIUS to matter).
+                affine_tf = None
+                if seed is not None:
+                    affine_tf = match_stars_affine(ref_stars, img_stars, initial_shift=seed)
                 if affine_tf is None:
                     affine_tf = _blind_match_transform(ref_stars, img_stars)
+                if affine_tf is None:
+                    sy, sx = calculate_shift(ref_lum, lum, verbose=False,
+                                             skip_phase_cc=args.skip_phase_correlation,
+                                             seed_shift=seed,
+                                             masked_correlation=_masked_corr,
+                                             corr_downsample=2)
+                    affine_tf = match_stars_affine(ref_stars, img_stars,
+                                                   initial_shift=(sy, sx))
                 if affine_tf is not None:
                     tf_tx, tf_ty = affine_tf.params[0, 2], affine_tf.params[1, 2]
                     tf_rot_deg = abs(np.degrees(np.arctan2(
