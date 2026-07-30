@@ -6,7 +6,7 @@ still passes in a pure-Python environment.
 import numpy as np
 import pytest
 
-import astro_stack as astro
+import originstack as astro
 import src.stacking as _stacking_mod
 
 native = pytest.importorskip("astro_native")

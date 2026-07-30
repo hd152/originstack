@@ -248,7 +248,7 @@ class LiveStacker:
         from astropy.io import fits
         data_out = np.transpose(stack, (2, 0, 1)).astype(np.float32)
         hdu = fits.PrimaryHDU(data=data_out)
-        hdu.header['CREATOR'] = 'astro_stack.py live'
+        hdu.header['CREATOR'] = 'originstack.py live'
         hdu.header['COMBINED'] = (True, 'Live-stacked image')
         hdu.header['RAWSTACK'] = (True, 'Linear pre-post-processing live stack')
         hdu.header['NFRAMES'] = (self.n, 'Frames in live stack')

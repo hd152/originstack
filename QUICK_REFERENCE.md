@@ -4,42 +4,42 @@
 
 ```bash
 # Basic stack with all defaults
-python astro_stack.py -d lights/ -o stacked.fits
+python originstack.py -d lights/ -o stacked.fits
 
 # With verbose per-frame output
-python astro_stack.py -d lights/ -o stacked.fits -v
+python originstack.py -d lights/ -o stacked.fits -v
 
 # Auto target detection (no API key needed)
-python astro_stack.py -d lights/ -o stacked.fits -v --auto
+python originstack.py -d lights/ -o stacked.fits -v --auto
 
 # Specific target preset
-python astro_stack.py -d lights/ -o stacked.fits --preset galaxy
+python originstack.py -d lights/ -o stacked.fits --preset galaxy
 
 # Keep all frames (disable quality filter)
-python astro_stack.py -d lights/ -o stacked.fits --no-quality-filter
+python originstack.py -d lights/ -o stacked.fits --no-quality-filter
 
 # Debug registration problems
-python astro_stack.py -d lights/ -o stacked.fits --debug registration
+python originstack.py -d lights/ -o stacked.fits --debug registration
 
 # Health check without stacking
-python astro_stack.py -d lights/ --health-check
+python originstack.py -d lights/ --health-check
 
 # Dry run — see resolved parameters without processing
-python astro_stack.py -d lights/ -o stacked.fits --dry-run
+python originstack.py -d lights/ -o stacked.fits --dry-run
 
 # Iterate fast on the SAME output — re-runs skip Phases 1-3 (redo post only)
-python astro_stack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
+python originstack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
 
 # Incremental stacking — fold a previous night's saved stack into this run
-python astro_stack.py -d tonight/ -o m51_v2.fits --auto --merge m51.fits
+python originstack.py -d tonight/ -o m51_v2.fits --auto --merge m51.fits
 
 # Watch the run live in a browser (http://127.0.0.1:8765/)
-python astro_stack.py -d lights/ -o stacked.fits --auto --web-view
+python originstack.py -d lights/ -o stacked.fits --auto --web-view
 
 # Clean up a collection: flag poor lights (dry run, then apply)
-python astro_stack.py --quality-sweep -d collection/
-python astro_stack.py --quality-sweep -d collection/ --apply     # renames to *.fits.rejected
-python astro_stack.py --sweep-undo -d collection/                # restore everything
+python originstack.py --quality-sweep -d collection/
+python originstack.py --quality-sweep -d collection/ --apply     # renames to *.fits.rejected
+python originstack.py --sweep-undo -d collection/                # restore everything
 ```
 
 ### Optional native (Rust) acceleration
@@ -167,7 +167,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 ## Collecting a Diagnostic Log
 
 ```bash
-python astro_stack.py -d lights/ -o out.fits -v 2>&1 | tee diagnostic.log
+python originstack.py -d lights/ -o out.fits -v 2>&1 | tee diagnostic.log
 ```
 
 The `diagnostic.log` file contains:

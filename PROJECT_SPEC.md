@@ -47,10 +47,10 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/channel_combine.py` | ~310 | Multi-channel combination (L-RGB, OSC + narrowband workflows) |
 | `src/features.py` | ~90 | Low-level feature extraction helpers |
 | `src/cli.py` | ~685 | `process_directory`, `parse_args`, `main` |
-| `astro_stack.py` | ~170 | Backward-compatibility re-export shim |
+| `originstack.py` | ~170 | Backward-compatibility re-export shim |
 | `ext/astro_native/` (Rust) | — | Optional PyO3/maturin crate (13 kernels): stacking combines, fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle), anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler (numpy fallback when absent) |
 
-**Total: ~10,800 lines** (Python). Tests in `tests/test_core.py` import symbols directly from `astro_stack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
+**Total: ~10,800 lines** (Python). Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
 ---
 
@@ -527,37 +527,37 @@ Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky
 
 ```bash
 # Single folder, all defaults
-python astro_stack.py -d lights/ -o stacked.fits
+python originstack.py -d lights/ -o stacked.fits
 
 # Verbose with auto target detection (recommended)
-python astro_stack.py -d lights/ -o stacked.fits -v --auto
+python originstack.py -d lights/ -o stacked.fits -v --auto
 
 # External calibration library
-python astro_stack.py --cal-dir calibration/ -d lights/ -o stacked.fits --auto -v
+python originstack.py --cal-dir calibration/ -d lights/ -o stacked.fits --auto -v
 
 # Incremental stacking: fold last week's stack into tonight's run
-python astro_stack.py -d tonight/ -o m51_v2.fits --auto --merge m51_v1.fits
+python originstack.py -d tonight/ -o m51_v2.fits --auto --merge m51_v1.fits
 
 # Galaxy preset with RL deconvolution
-python astro_stack.py -d lights/ -o galaxy.fits --preset galaxy --deconvolve rl -v
+python originstack.py -d lights/ -o galaxy.fits --preset galaxy --deconvolve rl -v
 
 # Explicit denoiser choice
-python astro_stack.py -d lights/ -o out.fits --auto --denoiser mmt -v
+python originstack.py -d lights/ -o out.fits --auto --denoiser mmt -v
 
 # Super-resolution drizzle
-python astro_stack.py -d lights/ -o drizzled.fits --drizzle-scale 2.0 -v
+python originstack.py -d lights/ -o drizzled.fits --drizzle-scale 2.0 -v
 
 # Plate solve + colour calibration
-python astro_stack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate -v
+python originstack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate -v
 
 # Debug registration problems
-python astro_stack.py -d lights/ -o stacked.fits --debug registration
+python originstack.py -d lights/ -o stacked.fits --debug registration
 
 # Iterate on post-processing settings (re-runs skip Phases 1-3)
-python astro_stack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
+python originstack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
 
 # Minimal run (turn off default post-processing)
-python astro_stack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-contrast --no-background-extraction --denoiser none
+python originstack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-contrast --no-background-extraction --denoiser none
 ```
 
 ---

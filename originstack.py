@@ -1,9 +1,9 @@
-"""Astro FITS Stream Stacker
+"""OriginStack -- Astro FITS Stream Stacker
 
 Features:
 - Streaming processing (constant memory)
 - Calibration (bias/dark/flat)
-- Debayering (bilinear, Malvar, VNG via OpenCV)
+- Debayering (bilinear, Malvar, VNG -- native Rust, no OpenCV dependency)
 - Quality analysis (brightness, contrast, star count, FWHM)
 - Registration (sub-pixel phase correlation, FFT cross-correlation, affine/star-matching)
 - Automatic cropping, hierarchical processing, preview generation
@@ -16,17 +16,17 @@ Features:
 - Lanczos-interpolated drizzle for sub-pixel super-resolution
 - White balance, hot pixel removal, gradient removal
 
-Usage: python astro_stack.py -d INPUT_DIR -o OUTPUT.fits [options]
+Usage: python originstack.py -d INPUT_DIR -o OUTPUT.fits [options]
 
-NOTE: This file is a thin backward-compatibility shim.
-      All implementation lives under src/.
+NOTE: This file is a thin entry-point shim; all implementation lives
+      under src/.
 """
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
 # Re-export everything from the src sub-modules so that:
-#   from astro_stack import X
-# continues to work exactly as before the refactor.
+#   from originstack import X
+# works without reaching into src/ directly.
 # ---------------------------------------------------------------------------
 
 # gpu_context

@@ -280,7 +280,7 @@ def stitch_mosaic_panels(
             except Exception:
                 pass
     out_hdr['NPANELS'] = (len(panels), 'Number of mosaic panels')
-    out_hdr['CREATOR'] = 'astro_stack.py'
+    out_hdr['CREATOR'] = 'originstack.py'
     out_hdr['COMBINED'] = True
 
     # Panel source paths (truncated to 68 chars each — FITS header limit)

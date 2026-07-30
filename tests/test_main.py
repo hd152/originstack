@@ -1,12 +1,12 @@
 """
-Comprehensive test suite for astro_stack.py
+Comprehensive test suite for originstack.py
 ============================================
 Requires: numpy, scipy  (both ship in this environment)
 Optional: pytest (falls back to unittest if absent)
 
 Run with:
-    python test_astro_stack.py            # unittest runner
-    pytest test_astro_stack.py -v         # if pytest is installed
+    python test_main.py            # unittest runner
+    pytest test_main.py -v         # if pytest is installed
 
 Test classes
 ------------
@@ -158,14 +158,14 @@ sys.stdout = _devnull
 try:
     import importlib.util
     _candidates = [
-        Path(__file__).parent / "astro_stack.py",
-        Path(__file__).parent.parent / "astro_stack.py",
-        Path("/mnt/user-data/uploads/astro_stack.py"),
+        Path(__file__).parent / "originstack.py",
+        Path(__file__).parent.parent / "originstack.py",
+        Path("/mnt/user-data/uploads/originstack.py"),
     ]
     _src = next(p for p in _candidates if p.exists())
-    _spec = importlib.util.spec_from_file_location("astro_stack", str(_src))
+    _spec = importlib.util.spec_from_file_location("originstack", str(_src))
     astro = importlib.util.module_from_spec(_spec)
-    sys.modules["astro_stack"] = astro
+    sys.modules["originstack"] = astro
     _spec.loader.exec_module(astro)
 finally:
     sys.stdout = _orig_stdout
@@ -234,7 +234,12 @@ class TestClassifyFrame(unittest.TestCase):
         self.assertEqual(astro.classify_frame("frame.fit", {"COMBINED": True}), "skip")
 
     def test_skip_creator(self):
+        # Pre-rename prefix (astro_stack.py -> originstack.py) -- outputs
+        # from older runs must still be recognized.
         self.assertEqual(astro.classify_frame("x.fit", {"CREATOR": "astro_stack v2"}), "skip")
+
+    def test_skip_creator_current_name(self):
+        self.assertEqual(astro.classify_frame("x.fit", {"CREATOR": "originstack.py"}), "skip")
 
     def test_case_insensitive_filename(self):
         self.assertEqual(astro.classify_frame("DARK_001.FIT", {}), "dark")

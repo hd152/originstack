@@ -23,26 +23,26 @@ pytest tests/test_core.py::test_calculate_shift_recovery -v
 
 ### Run the stacker
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits
-python astro_stack.py -d lights/ -o stacked.fits -v
-python astro_stack.py -d session/ -o combined.fits --debug intermediates -v
+python originstack.py -d lights/ -o stacked.fits
+python originstack.py -d lights/ -o stacked.fits -v
+python originstack.py -d session/ -o combined.fits --debug intermediates -v
 ```
 
 ### CI smoke test (generates synthetic data then stacks it)
 ```bash
 python tools/create_synthetic.py
-python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits --debayer-method malvar --white-balance grayworld --stack-method median
+python originstack.py -d synthetic_data -o ci_synthetic_stack.fits --debayer-method malvar --white-balance grayworld --stack-method median
 ```
 
 ### Debug registration issues
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits --debug registration
+python originstack.py -d lights/ -o stacked.fits --debug registration
 # Output diagnostics go to _registration_debug/
 ```
 
 ## Architecture
 
-The pipeline is split across `src/` modules. [astro_stack.py](astro_stack.py) is a thin backward-compatibility shim that re-exports all public symbols. Tests import directly from `astro_stack`. The source modules are:
+The pipeline is split across `src/` modules. [originstack.py](originstack.py) is a thin entry-point shim that re-exports all public symbols. Tests import directly from `originstack`. The source modules are:
 
 | Module | Contents |
 |--------|----------|

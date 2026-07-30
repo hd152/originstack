@@ -53,10 +53,15 @@ class TestClassifyFrame(unittest.TestCase):
         self.assertEqual(self.classify('any.fits', {'COMBINED': True}), 'skip')
 
     def test_creator_header_skipped(self):
+        # Pre-rename prefix (astro_stack.py -> originstack.py) -- outputs
+        # from older runs must still be recognized.
         self.assertEqual(self.classify('any.fits', {'CREATOR': 'astro_stack.py v1.0'}), 'skip')
 
     def test_creator_substring_skipped(self):
         self.assertEqual(self.classify('any.fits', {'CREATOR': 'astro_stack/pipeline'}), 'skip')
+
+    def test_creator_header_skipped_current_name(self):
+        self.assertEqual(self.classify('any.fits', {'CREATOR': 'originstack.py v1.0'}), 'skip')
 
     # --- Dark detection ---
 

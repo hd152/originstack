@@ -85,7 +85,7 @@ def _save_sidecar_fits(img: np.ndarray, output_path: str, suffix: str) -> None:
     else:
         data_out = img.astype(np.float32)
     hdu = _fits.PrimaryHDU(data=data_out)
-    hdu.header["CREATOR"] = "astro_stack.py postprocess"
+    hdu.header["CREATOR"] = "originstack.py postprocess"
     hdu.header["COMBINED"] = (True, "Sidecar output")
     hdu.writeto(path, overwrite=True)
     safe_print(f"  Saved: {os.path.basename(path)}")

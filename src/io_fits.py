@@ -335,7 +335,7 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
     header['NAXIS3'] = stacked_shape[2]  # Channels (3 for RGB)
 
     # Processing software and version
-    header['CREATOR'] = ('astro_stack.py', 'Software that created this file')
+    header['CREATOR'] = ('originstack.py', 'Software that created this file')
     header['DATE'] = (datetime.now(timezone.utc).isoformat(), 'UTC date/time of file creation')
 
     # Calibration info

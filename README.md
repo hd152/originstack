@@ -284,7 +284,7 @@ cd ext/astro_native && maturin develop --release   # into a venv
 ### Single folder of lights
 
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits
+python originstack.py -d lights/ -o stacked.fits
 ```
 
 OriginStack will automatically detect any calibration frames (`dark_*.fit`, `flat_*.fit`, `bias_*.fit`) in the same directory, build master frames, stack the lights, and write a FITS file and a preview JPEG.
@@ -292,7 +292,7 @@ OriginStack will automatically detect any calibration frames (`dark_*.fit`, `fla
 ### Verbose output with quality metrics
 
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits -v
+python originstack.py -d lights/ -o stacked.fits -v
 ```
 
 Shows per-frame brightness, contrast, star count, SNR, and shift magnitude as each frame is processed.
@@ -300,7 +300,7 @@ Shows per-frame brightness, contrast, star count, SNR, and shift magnitude as ea
 ### Auto target detection
 
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits --auto
+python originstack.py -d lights/ -o stacked.fits --auto
 ```
 
 Analyses your frames and applies optimised settings for the detected target type (galaxy, nebula, star field, etc.) — no manual tuning required.
@@ -308,7 +308,7 @@ Analyses your frames and applies optimised settings for the detected target type
 ### Hierarchical session (multiple targets in one night)
 
 ```bash
-python astro_stack.py -d session/ -o combined.fits --debug intermediates -v
+python originstack.py -d session/ -o combined.fits --debug intermediates -v
 ```
 
 Where `session/` contains one subfolder per target. Each subfolder is stacked independently with its own calibration frames, then combined into a single output.
@@ -320,7 +320,7 @@ Where `session/` contains one subfolder per target. Each subfolder is stacked in
 ### Galaxy (e.g., M51, M81)
 
 ```bash
-python astro_stack.py -d lights/ -o galaxy.fits \
+python originstack.py -d lights/ -o galaxy.fits \
   --preset galaxy \
   --debayer-method malvar \
   --stack-method sigma_clip \
@@ -334,7 +334,7 @@ The `galaxy` preset applies GHS stretching and star reduction. Adding `--deconvo
 ### Emission nebula (e.g., Orion, Rosette)
 
 ```bash
-python astro_stack.py -d lights/ -o nebula.fits \
+python originstack.py -d lights/ -o nebula.fits \
   --preset nebula \
   --denoiser mmt \
   --stretch ghs \
@@ -344,7 +344,7 @@ python astro_stack.py -d lights/ -o nebula.fits \
 ### Narrow-band (Ha/OIII/SII)
 
 ```bash
-python astro_stack.py -d ha_lights/ -o ha_stack.fits \
+python originstack.py -d ha_lights/ -o ha_stack.fits \
   --preset narrowband \
   --white-balance none \
   --scnr \
@@ -355,7 +355,7 @@ python astro_stack.py -d ha_lights/ -o ha_stack.fits \
 ### Planetary / lunar
 
 ```bash
-python astro_stack.py -d frames/ -o jupiter.fits \
+python originstack.py -d frames/ -o jupiter.fits \
   --preset planetary \
   --deconvolve rl \
   --no-background-extraction \
@@ -366,7 +366,7 @@ python astro_stack.py -d frames/ -o jupiter.fits \
 ### Maximum quality
 
 ```bash
-python astro_stack.py -d lights/ -o best.fits \
+python originstack.py -d lights/ -o best.fits \
   --preset quality \
   --debayer-method malvar \
   --denoiser mmt \
@@ -379,10 +379,10 @@ python astro_stack.py -d lights/ -o best.fits \
 
 ```bash
 # First night: normal run; the output FITS is a mergeable linear stack
-python astro_stack.py -d night1/ -o m51.fits --auto -v
+python originstack.py -d night1/ -o m51.fits --auto -v
 
 # Later nights: process only the new frames, fold in the saved stack (seconds)
-python astro_stack.py -d night2/ -o m51_v2.fits --auto --merge m51.fits -v
+python originstack.py -d night2/ -o m51_v2.fits --auto --merge m51.fits -v
 ```
 
 Each previous stack is registered onto the new session's grid (handles
@@ -393,7 +393,7 @@ mean. The output chains into future merges.
 ### Super-resolution drizzle (requires dithered frames)
 
 ```bash
-python astro_stack.py -d lights/ -o drizzled.fits \
+python originstack.py -d lights/ -o drizzled.fits \
   --drizzle-scale 2.0 \
   --drizzle-pixfrac 0.7 \
   -v
@@ -406,7 +406,7 @@ python astro_stack.py -d lights/ -o drizzled.fits \
 export ASTROMETRY_API_KEY=your_key_here   # Linux/macOS
 set ASTROMETRY_API_KEY=your_key_here      # Windows
 
-python astro_stack.py -d lights/ -o stacked.fits \
+python originstack.py -d lights/ -o stacked.fits \
   --plate-solve \
   --color-calibrate \
   -v
@@ -415,7 +415,7 @@ python astro_stack.py -d lights/ -o stacked.fits \
 ### Debug registration problems
 
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits --debug registration
+python originstack.py -d lights/ -o stacked.fits --debug registration
 ```
 
 Writes PNG overlay images and shift statistics to `_registration_debug/`. Use this when frames aren't aligning correctly.
@@ -424,13 +424,13 @@ Writes PNG overlay images and shift statistics to `_registration_debug/`. Use th
 
 ```bash
 # Dry run: walk the whole tree, score every light, report what would be flagged
-python astro_stack.py --quality-sweep -d "G:stro\Astrophotography"
+python originstack.py --quality-sweep -d "G:stro\Astrophotography"
 
 # Apply: rename flagged frames to *.fits.rejected (invisible to stacking)
-python astro_stack.py --quality-sweep -d "G:stro\Astrophotography" --apply
+python originstack.py --quality-sweep -d "G:stro\Astrophotography" --apply
 
 # Change your mind: restore every flagged file
-python astro_stack.py --sweep-undo -d "G:stro\Astrophotography"
+python originstack.py --sweep-undo -d "G:stro\Astrophotography"
 ```
 
 Uses the exact same quality gate as stacking: hard failures (no stars, SNR < 0.5,
@@ -440,7 +440,7 @@ near-zero contrast), statistical outliers vs each folder, and scores below
 ### Health check without stacking
 
 ```bash
-python astro_stack.py -d lights/ --health-check
+python originstack.py -d lights/ --health-check
 ```
 
 Analyses calibration quality (bias noise, dark thermal current, flat vignetting) and reports any ISO or dimension mismatches — without actually stacking anything.
@@ -449,10 +449,10 @@ Analyses calibration quality (bias noise, dark thermal current, flat vignetting)
 
 ```bash
 # First run with --dry-run to see resolved parameters
-python astro_stack.py -d lights/ -o stacked.fits --preset galaxy --deconvolve --dry-run
+python originstack.py -d lights/ -o stacked.fits --preset galaxy --deconvolve --dry-run
 
 # Then use --config to reapply the same settings
-python astro_stack.py -d lights/ -o stacked.fits --config my_settings.toml
+python originstack.py -d lights/ -o stacked.fits --config my_settings.toml
 ```
 
 ---
@@ -478,7 +478,7 @@ lights/
 ```
 
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits
+python originstack.py -d lights/ -o stacked.fits
 ```
 
 OriginStack builds master calibration frames from any bias/dark/flat files it finds, then processes and stacks all light frames into a single output FITS.
@@ -505,7 +505,7 @@ session/
 ```
 
 ```bash
-python astro_stack.py -d session/ -o combined.fits -v
+python originstack.py -d session/ -o combined.fits -v
 ```
 
 Each subfolder is stacked independently (its own calibration frames, quality analysis, and registration pass), then the per-target stacks are combined into the output FITS. Use `--debug intermediates` to also save the individual per-target stacks alongside the combined output.
@@ -534,7 +534,7 @@ m51_sessions/
 ```
 
 ```bash
-python astro_stack.py -d m51_sessions/ -o m51_deep.fits --combine-sessions -v
+python originstack.py -d m51_sessions/ -o m51_deep.fits --combine-sessions -v
 ```
 
 All calibration frames across all subfolders are merged into shared masters, then every light frame is quality-analysed, registered, and stacked together as if they came from a single session. This is the best approach for maximising integration time on a single target.
@@ -570,7 +570,7 @@ panels/
 ```
 
 ```bash
-python astro_stack.py -d panels/ -o mosaic.fits --mosaic -v
+python originstack.py -d panels/ -o mosaic.fits --mosaic -v
 ```
 
 Each subfolder is first stacked independently (phases 1–4), then all panel stacks are reprojected onto a common optimal WCS grid and blended with distance-weighted feathering to eliminate seams. Overlap zones are background-matched automatically.
@@ -617,7 +617,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 ## CLI Reference (Abridged)
 
 ```
-python astro_stack.py -d <dir> -o <output.fits> [options]
+python originstack.py -d <dir> -o <output.fits> [options]
 ```
 
 | Flag | Description |
@@ -705,7 +705,7 @@ Re-running the *same* `-o` output with `--keep-checkpoint` makes subsequent runs
 ## Architecture Overview
 
 ```
-astro_stack.py                  ← thin backward-compatibility entry point
+originstack.py                  ← thin backward-compatibility entry point
 └── src/
     ├── cli.py                  ← argument parsing, process_directory(), main()
     ├── pipeline.py             ← four-phase orchestrator (stack_target)
@@ -743,7 +743,7 @@ pytest tests/test_core.py::test_calculate_shift_recovery -v
 
 # CI smoke test (generates synthetic data, then stacks it)
 python tools/create_synthetic.py
-python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits \
+python originstack.py -d synthetic_data -o ci_synthetic_stack.fits \
   --debayer-method malvar --white-balance grayworld --stack-method median
 ```
 
@@ -753,18 +753,18 @@ python astro_stack.py -d synthetic_data -o ci_synthetic_stack.fits \
 
 **Frames not aligning?** Use `--debug registration`:
 ```bash
-python astro_stack.py -d lights/ -o out.fits --debug registration
+python originstack.py -d lights/ -o out.fits --debug registration
 # Diagnostics written to _registration_debug/
 ```
 
 **Want shift and quality data per frame?** Run with `-v`:
 ```bash
-python astro_stack.py -d lights/ -o out.fits -v 2>&1 | tee run.log
+python originstack.py -d lights/ -o out.fits -v 2>&1 | tee run.log
 ```
 
 **Not sure what's happening?** Run with `--dry-run` first:
 ```bash
-python astro_stack.py -d lights/ -o out.fits --dry-run
+python originstack.py -d lights/ -o out.fits --dry-run
 ```
 
 See [QUICK_REFERENCE.md](QUICK_REFERENCE.md) for guidance on interpreting shift patterns and quality metrics.
@@ -778,14 +778,14 @@ Requires a free API key from [nova.astrometry.net](https://nova.astrometry.net/a
 ```bash
 export ASTROMETRY_API_KEY=your_key_here
 
-python astro_stack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate
+python originstack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate
 ```
 
 When plate solving succeeds, WCS keywords (CRVAL, CRPIX, CD matrix) are written to the FITS header and the field's primary object is identified via the SIMBAD database. The output FITS will then display coordinate grids in DS9, AstroImageJ, PixInsight, and similar tools.
 
 Alternatively, use the ASTAP solver:
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits --plate-solve --plate-solver astap
+python originstack.py -d lights/ -o stacked.fits --plate-solve --plate-solver astap
 ```
 
 ## GPU Acceleration
@@ -800,7 +800,7 @@ This project supports GPU acceleration using CuPy. To enable GPU acceleration:
 
 ### Example Workflow with GPU Acceleration
 ```bash
-python astro_stack.py -d lights/ -o stacked.fits --use-gpu
+python originstack.py -d lights/ -o stacked.fits --use-gpu
 ```
 
 ### Notes

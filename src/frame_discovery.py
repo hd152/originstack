@@ -107,8 +107,11 @@ def _merge_json_sidecar(fits_path: str, hdr: dict) -> None:
 
 def classify_frame(path: str, header: dict) -> str:
     name = os.path.basename(path).lower()
-    # Skip files produced by this pipeline (stacked outputs)
-    if header.get('COMBINED') or header.get('CREATOR', '').startswith('astro_stack'):
+    # Skip files produced by this pipeline (stacked outputs). Matches both
+    # the current CREATOR prefix and the pre-rename one (astro_stack.py ->
+    # originstack.py) so outputs from older runs are still recognized.
+    _creator = header.get('CREATOR', '')
+    if header.get('COMBINED') or _creator.startswith(('astro_stack', 'originstack')):
         return 'skip'
     # Skip the Celestron Origin app's own onboard live-stacked master preview
     # (already stacked + stretched) that it writes into the session folder

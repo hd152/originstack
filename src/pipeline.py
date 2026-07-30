@@ -668,7 +668,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     data=np.transpose(comet_stacked.astype(np.float32), (2, 0, 1))
                 )
                 comet_hdu.header['COMET'] = (True, 'Nucleus-aligned comet stack')
-                comet_hdu.header['CREATOR'] = 'astro_stack.py comet_mode'
+                comet_hdu.header['CREATOR'] = 'originstack.py comet_mode'
                 comet_hdu.writeto(comet_out, overwrite=True)
                 comet_prev = os.path.splitext(comet_out)[0] + '.jpg'
                 save_preview_rgb(comet_stacked, comet_prev,
@@ -692,7 +692,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     data=np.transpose(blended.astype(np.float32), (2, 0, 1))
                 )
                 blended_hdu.header['COMET'] = (True, 'Blended comet+star stack')
-                blended_hdu.header['CREATOR'] = 'astro_stack.py comet_mode'
+                blended_hdu.header['CREATOR'] = 'originstack.py comet_mode'
                 if tail_pa is not None:
                     blended_hdu.header['TAIL_PA'] = (round(tail_pa, 1), 'Estimated tail PA (deg)')
                 blended_hdu.writeto(blended_out, overwrite=True)

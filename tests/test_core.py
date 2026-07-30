@@ -4,7 +4,7 @@ import numpy as np
 from astropy.io import fits
 from scipy.signal import fftconvolve
 
-from astro_stack import (debayer_bilinear, calculate_shift, compute_quality_metrics,
+from originstack import (debayer_bilinear, calculate_shift, compute_quality_metrics,
                          estimate_psf, make_synthetic_psf, richardson_lucy_deconvolve,
                          drizzle_combine, _lanczos_resample_frame, Config,
                          select_matching_darks, FrameInfo)

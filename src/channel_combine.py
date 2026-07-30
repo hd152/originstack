@@ -8,7 +8,7 @@ Combines separately stacked FITS files into a colour image:
   - HSO:   Ha→R, SII→G, OIII→B   (uncommon but supported)
   - Custom: any per-channel mapping via --mapping R=<file> G=<file> B=<file>
 
-CLI entry point: ``python astro_stack.py combine ...``
+CLI entry point: ``python originstack.py combine ...``
 """
 from __future__ import annotations
 
@@ -300,7 +300,7 @@ def _save_combined(img: np.ndarray, output_path: str,
     data_out = np.transpose(img.astype(np.float32), (2, 0, 1))
     hdu = fits.PrimaryHDU(data=data_out)
     hdu.header["COMBINED"] = (True, "Channel-combined image")
-    hdu.header["CREATOR"] = "astro_stack.py channel_combine"
+    hdu.header["CREATOR"] = "originstack.py channel_combine"
     hdu.writeto(output_path, overwrite=True)
     print(f"  Saved: {output_path}")
 
@@ -321,7 +321,7 @@ def _save_combined(img: np.ndarray, output_path: str,
 def run_combine_cli(argv=None) -> None:
     """Parse argv and run channel combination.  Called from main()."""
     p = argparse.ArgumentParser(
-        prog="astro_stack.py combine",
+        prog="originstack.py combine",
         description="Combine separately stacked channel FITS files into a colour image.",
     )
 
