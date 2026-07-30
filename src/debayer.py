@@ -76,7 +76,14 @@ def green_equalize(raw, pattern: str = 'RGGB'):
     try:
         import cupy as _cp
         xp = _cp.get_array_module(raw)
-    except ImportError:
+    except Exception:
+        # Broad on purpose: a present-but-broken cupy install (partial,
+        # mismatched CUDA build, or -- as originally caught this in CI --
+        # a fake/stub module a test left in sys.modules) must fall back to
+        # numpy the same as cupy being absent entirely, not crash
+        # debayering. Narrower ImportError-only handling let
+        # AttributeError (e.g. a stub with no get_array_module) escape
+        # uncaught.
         xp = np
     (_, _), (g1_r, g1_c), (g2_r, g2_c), (_, _) = offsets
     raw_f = xp.array(raw, dtype=xp.float32)
