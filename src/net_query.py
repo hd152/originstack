@@ -69,8 +69,14 @@ def _ssl_context() -> ssl.SSLContext:
 # ---------------------------------------------------------------------------
 
 def _http_get(url: str, timeout: float = _DEFAULT_TIMEOUT) -> bytes:
+    # Every caller in this module passes a hardcoded https:// constant (or
+    # one with only a server-assigned numeric id interpolated into the
+    # path, e.g. a job id this module itself received from the service's
+    # own JSON response) -- never a user-supplied URL/scheme, so the
+    # file:/custom-scheme risk bandit's blanket urlopen audit warns about
+    # doesn't apply here.
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:  # nosec B310
         return resp.read()
 
 
@@ -78,7 +84,7 @@ def _http_post_form(url: str, fields: Dict[str, str],
                     timeout: float = _DEFAULT_TIMEOUT) -> bytes:
     body = urllib.parse.urlencode(fields).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:  # nosec B310
         return resp.read()
 
 
@@ -104,7 +110,7 @@ def _http_post_multipart(url: str, fields: Dict[str, str], file_field: str,
         "User-Agent": _USER_AGENT,
         "Content-Type": f"multipart/form-data; boundary={boundary}",
     })
-    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:  # nosec B310
         return resp.read()
 
 
@@ -161,10 +167,15 @@ def gaia_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
     if require_not_null:
         conds = " AND ".join(f"{c} IS NOT NULL" for c in require_not_null)
         where_extra = f" AND {conds}"
+    # ADQL sent to Gaia's TAP HTTP service, not a local SQL database (bandit's
+    # generic SELECT/FROM heuristic doesn't distinguish the two). The only
+    # interpolated values here are float()-cast coordinates/radius (can
+    # never carry a string payload) and `cols`/`catalog`, which come from
+    # this codebase's own call sites, not external input.
     adql = (
-        f"SELECT TOP {int(max_rows)} {cols} FROM gaiadr3.gaia_source "
+        f"SELECT TOP {int(max_rows)} {cols} FROM gaiadr3.gaia_source "  # nosec B608
         f"WHERE 1=CONTAINS(POINT('ICRS',ra,dec),"
-        f"CIRCLE('ICRS',{ra_deg},{dec_deg},{radius_deg})){where_extra}"
+        f"CIRCLE('ICRS',{float(ra_deg)},{float(dec_deg)},{float(radius_deg)})){where_extra}"
     )
     return tap_query(_GAIA_TAP, adql)
 
@@ -174,10 +185,12 @@ def vizier_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
     """VizieR catalogue cone search (e.g. catalog='II/246/out' for 2MASS PSC).
     Returns an astropy Table or None."""
     cols = ", ".join(columns)
+    # See gaia_cone_search: ADQL over HTTP, not local SQL; coordinates are
+    # float()-cast, catalog/cols come from this codebase's own call sites.
     adql = (
-        f'SELECT TOP {int(max_rows)} {cols} FROM "{catalog}" '
+        f'SELECT TOP {int(max_rows)} {cols} FROM "{catalog}" '  # nosec B608
         f"WHERE 1=CONTAINS(POINT('ICRS',RAJ2000,DEJ2000),"
-        f"CIRCLE('ICRS',{ra_deg},{dec_deg},{radius_deg}))"
+        f"CIRCLE('ICRS',{float(ra_deg)},{float(dec_deg)},{float(radius_deg)}))"
     )
     return tap_query(_VIZIER_TAP, adql)
 
@@ -185,10 +198,12 @@ def vizier_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
 def simbad_cone_search(ra_deg: float, dec_deg: float, radius_deg: float = 0.5):
     """SIMBAD cone search for the nearest catalogued object. Returns an
     astropy Table with (main_id, otype) columns, or None."""
+    # See gaia_cone_search: ADQL over HTTP, not local SQL; coordinates are
+    # float()-cast.
     adql = (
-        "SELECT main_id, otype FROM basic "
+        "SELECT main_id, otype FROM basic "  # nosec B608
         f"WHERE 1=CONTAINS(POINT('ICRS',ra,dec),"
-        f"CIRCLE('ICRS',{ra_deg},{dec_deg},{radius_deg}))"
+        f"CIRCLE('ICRS',{float(ra_deg)},{float(dec_deg)},{float(radius_deg)}))"
     )
     return tap_query(_SIMBAD_TAP, adql)
 
@@ -196,9 +211,14 @@ def simbad_cone_search(ra_deg: float, dec_deg: float, radius_deg: float = 0.5):
 def simbad_name_lookup(name: str):
     """Resolve a SIMBAD identifier/alias to its (main_id, otype). Returns
     an astropy Table with (main_id, otype) columns, or None."""
+    # See gaia_cone_search: ADQL over HTTP, not local SQL. `name` is the
+    # one free-text value in this module and IS externally-influenced (a
+    # target/object name), so it gets real ADQL string-literal escaping
+    # (doubling embedded single quotes -- the standard SQL/ADQL escape)
+    # rather than just a float() cast.
     escaped = name.replace("'", "''")
     adql = (
-        "SELECT basic.main_id, basic.otype FROM ident "
+        "SELECT basic.main_id, basic.otype FROM ident "  # nosec B608
         "JOIN basic ON ident.oidref = basic.oid "
         f"WHERE ident.id = '{escaped}'"
     )

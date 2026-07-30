@@ -69,7 +69,13 @@ def _parse_xisf_preamble(fh) -> Tuple[ET.Element, int]:
         )
     header_length, _reserved = struct.unpack('<II', preamble[8:16])
     xml_bytes = fh.read(header_length)
-    root = ET.fromstring(xml_bytes)
+    # XISF headers come from local capture-software output (same trust
+    # boundary as the FITS files this pipeline already processes, see
+    # SECURITY.md), not attacker-supplied network input; stdlib
+    # ElementTree's entity-expansion risk doesn't apply to a bounded local
+    # astro file header, and adding defusedxml as a dependency for it would
+    # cut against this codebase's stdlib-only-where-reasonable stance.
+    root = ET.fromstring(xml_bytes)  # nosec B314
     image_el = _find_image_element(root)
     return image_el, 16 + header_length
 
