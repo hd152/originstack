@@ -864,15 +864,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if getattr(args, 'output_xisf', False):
         _save_xisf(stacked, output_path, hdu.header)
 
-    # Post-processed FITS export (always written alongside the raw linear stack)
-    proc_path = os.path.splitext(output_path)[0] + '_processed.fits'
-    proc_hdu = fits.PrimaryHDU()
-    proc_hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))
-    proc_hdu.header.update(hdu.header)
-    proc_hdu.header['POSTPROC'] = (True, 'Post-processing applied to this FITS')
-    proc_hdu.writeto(proc_path, overwrite=True)
-    safe_print(f"  ✓ Processed FITS: {os.path.basename(proc_path)}")
-
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     stretch_method = getattr(args, 'stretch', 'linear')
     save_preview_rgb(stacked, preview_path, stretch=stretch_method,
@@ -924,7 +915,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             int_str = f"{total_integration:.0f} seconds"
         print(f"  Integration time: {int_str}")
     print(f"  Output:           {os.path.basename(output_path)} ({out_h}x{out_w}x3)")
-    print(f"  Processed:        {os.path.basename(proc_path)} (DBE+denoise+deconv applied)")
     print(f"  Preview:          {os.path.basename(preview_path)} ({stretch_method} stretch)")
     # Stack quality summary
     fwhms = [f.metrics.get('fwhm', 0) for f in final if f.metrics and f.metrics.get('fwhm', 0) > 0]

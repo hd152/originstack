@@ -1,2 +1,5 @@
-# Optional dependencies for plate solving (astrometry)
-astroquery>=0.4.6
+# Plate solving (astrometry.net) and all other network catalogue lookups
+# (Gaia, VizieR, SIMBAD, JPL Horizons) are direct HTTP via the Python
+# standard library (src/net_query.py) -- no extra package needed. This file
+# is kept (empty) so existing `pip install -r requirements-astrometry.txt`
+# invocations don't break.

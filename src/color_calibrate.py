@@ -2,8 +2,11 @@
 
 Requires:
   * The stacked image to have been plate-solved (WCS keywords in header).
-  * astroquery  (``pip install astroquery``)
   * astropy     (already a core dependency)
+
+Gaia/2MASS catalogue access is direct HTTP (src/net_query.py, stdlib
+urllib) against the Gaia and VizieR TAP services -- no astroquery
+dependency.
 
 Workflow
 --------
@@ -15,12 +18,11 @@ Workflow
    colour ratios match the Gaia G_BP − G_RP → B−V relationship.
 5. Apply the scale factors multiplicatively to the image.
 
-If plate solving failed, astroquery is unavailable, or too few stars are
+If plate solving failed, the catalogue query failed, or too few stars are
 matched, a warning is printed and the image is returned unchanged.
 """
 from __future__ import annotations
 
-import warnings
 from typing import Optional, Tuple
 
 import numpy as np
@@ -44,17 +46,7 @@ try:
 except Exception:
     HAS_SIGMA_CLIP = False
 
-try:
-    from astroquery.gaia import Gaia
-    HAS_GAIA = True
-except Exception:
-    HAS_GAIA = False
-
-try:
-    from astroquery.vizier import Vizier
-    HAS_VIZIER = True
-except Exception:
-    HAS_VIZIER = False
+from src import net_query
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +80,7 @@ def query_gaia_stars(header, max_stars: int = 500):
     Returns an astropy Table with columns: ra, dec, phot_g_mean_mag,
     phot_bp_mean_mag, phot_rp_mean_mag.  Returns None on failure.
     """
-    if not HAS_GAIA or not HAS_ASTROPY_WCS:
+    if not HAS_ASTROPY_WCS:
         return None
     if "CRVAL1" not in header or "CRVAL2" not in header:
         return None
@@ -97,37 +89,20 @@ def query_gaia_stars(header, max_stars: int = 500):
     dec = float(header["CRVAL2"])
     radius_deg = _field_radius_deg(header)
 
-    coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-    radius = u.Quantity(radius_deg, unit=u.deg)
-
-    try:
-        Gaia.ROW_LIMIT = max_stars
-        Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            job = Gaia.cone_search_async(
-                coord, radius,
-                columns=["ra", "dec",
-                         "phot_g_mean_mag",
-                         "phot_bp_mean_mag",
-                         "phot_rp_mean_mag"],
-                verbose=False,
-            )
-            table = job.get_results()
-        if table is None or len(table) == 0:
-            return None
-        # Filter out stars without colour info
-        mask = (table["phot_bp_mean_mag"].mask == False if hasattr(table["phot_bp_mean_mag"], "mask")
-                else np.ones(len(table), dtype=bool))
-        table = table[mask]
-        return table if len(table) >= 10 else None
-    except Exception:
+    table = net_query.gaia_cone_search(
+        ra, dec, radius_deg,
+        columns=["ra", "dec", "phot_g_mean_mag",
+                 "phot_bp_mean_mag", "phot_rp_mean_mag"],
+        max_rows=max_stars,
+        require_not_null=["phot_bp_mean_mag", "phot_rp_mean_mag"])
+    if table is None or len(table) == 0:
         return None
+    return table if len(table) >= 10 else None
 
 
 def query_2mass_stars(header, max_stars: int = 500):
     """Fallback: query 2MASS PSC via VizieR for J/H/K magnitudes."""
-    if not HAS_VIZIER or not HAS_ASTROPY_WCS:
+    if not HAS_ASTROPY_WCS:
         return None
     if "CRVAL1" not in header or "CRVAL2" not in header:
         return None
@@ -136,19 +111,13 @@ def query_2mass_stars(header, max_stars: int = 500):
     dec = float(header["CRVAL2"])
     radius_deg = _field_radius_deg(header)
 
-    coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-
-    try:
-        viz = Vizier(columns=["RAJ2000", "DEJ2000", "Jmag", "Hmag", "Kmag"],
-                     row_limit=max_stars)
-        result = viz.query_region(coord, radius=radius_deg * u.deg,
-                                  catalog="II/246/out")
-        if not result or len(result) == 0:
-            return None
-        table = result[0]
-        return table if len(table) >= 10 else None
-    except Exception:
+    table = net_query.vizier_cone_search(
+        ra, dec, radius_deg, catalog="II/246/out",
+        columns=["RAJ2000", "DEJ2000", "Jmag", "Hmag", "Kmag"],
+        max_rows=max_stars)
+    if table is None or len(table) == 0:
         return None
+    return table if len(table) >= 10 else None
 
 
 # ---------------------------------------------------------------------------
@@ -370,11 +339,10 @@ def run_photometric_calibration(img: np.ndarray, header,
     catalog = None
     catalog_type = "gaia"
 
-    if HAS_GAIA:
-        catalog = query_gaia_stars(header)
-        catalog_type = "gaia"
+    catalog = query_gaia_stars(header)
+    catalog_type = "gaia"
 
-    if catalog is None and HAS_VIZIER:
+    if catalog is None:
         if verbose:
             print("  [colour cal] Gaia query failed — trying 2MASS via VizieR")
         catalog = query_2mass_stars(header)

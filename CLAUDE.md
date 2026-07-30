@@ -60,7 +60,7 @@ The pipeline is split across `src/` modules. [astro_stack.py](astro_stack.py) is
 | [src/psf_deconvolution.py](src/psf_deconvolution.py) | PSF estimation, Richardson-Lucy deconvolution |
 | [src/background.py](src/background.py) | Mesh-based sky extraction, DBE, residual removal |
 | [src/denoising.py](src/denoising.py) | Wavelet, MMT, ACDNR, bilateral, NLM, star reduction, local contrast |
-| [src/wavelet.py](src/wavelet.py) | `wavedec2`/`waverec2`: native bior1.3 2D wavelet transform used by `denoising.py`'s wavelet denoisers |
+| [src/wavelet.py](src/wavelet.py) | `wavedec2`/`waverec2`: native 2D wavelet transform. bior1.3 (forward+inverse) used by `denoising.py`'s wavelet denoisers; db4 (forward-only) used by `quality.py`'s `compute_multiscale_entropy` |
 | [src/registration.py](src/registration.py) | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase`, `fit_displacement_field` |
 | [src/affine_fit.py](src/affine_fit.py) | `fit_rigid_ransac`: 2D rigid-transform RANSAC fit (native Rust + numpy mirror), used by `match_stars_affine` |
 | [src/phase_correlate.py](src/phase_correlate.py) | `phase_cross_correlation`: subpixel FFT registration (Guizar-Sicairos matrix-multiply-DFT upsampling) |
@@ -78,6 +78,7 @@ The pipeline is split across `src/` modules. [astro_stack.py](astro_stack.py) is
 | [src/channel_combine.py](src/channel_combine.py) | `combine` subcommand: LRGB + narrowband palettes (SHO/HOO), SCNR green removal (`--scnr`), magenta-star fix (`--star-recolor`) |
 | [src/auto_settings.py](src/auto_settings.py) | Heuristic target classifier and parameter advisor (`--auto`) |
 | [src/plate_solve.py](src/plate_solve.py) | Astrometry.net plate solving |
+| [src/net_query.py](src/net_query.py) | Direct-HTTP replacements for every astroquery service used (Gaia, VizieR, SIMBAD TAP queries; astrometry.net upload/solve; JPL Horizons ephemeris) — stdlib urllib, no dependency |
 | [src/pipeline.py](src/pipeline.py) | Thin orchestrator: `stack_target` wires all four phases |
 | [src/health_check.py](src/health_check.py) | `run_health_check` |
 | [src/cli.py](src/cli.py) | `process_directory`, `parse_args`, `main` |
@@ -135,8 +136,6 @@ Each `src/` module wraps its optional imports in `try/except`. Features degrade 
 - `Pillow` — preview JPEG generation
 - `psutil` — memory usage reporting
 - `cupy` — GPU acceleration (`--use-gpu`)
-- `pywt` — multiscale-entropy seeing-quality metric (`compute_multiscale_entropy`, `src/quality.py`, db4 wavelet). Wavelet denoising (bior1.3) no longer needs it (native/numpy, `src/wavelet.py`)
-- `astroquery` — plate solving via nova.astrometry.net (`--plate-solve`)
 - `rawpy` — camera RAW input (CR2/CR3/NEF/ARW/DNG/…, `src/io_raw.py`); RAW files are silently excluded from discovery when absent
 - `tifffile` — TIFF input (`src/io_tiff.py`) and `--export tiff` output
 - `astro_native` — optional Rust hot-path kernels (see below); numpy fallback when absent
@@ -170,7 +169,7 @@ with `bayerPattern` to override.
 - **Malvar-He-Cutler debayer** (`src/debayer.py` `debayer_malvar`, `--debayer-method malvar`, also aliased by `vng`): the true published algorithm (Malvar, He & Cutler 2004), not an approximation — sparse per-pixel tap gather (each output pixel needs at most 2 of the 4 kernels; its own channel is the raw sample) rather than 4 whole-image convolutions, with an interior fast path (no per-tap boundary-index modulo) for all but a 2px border (~2×). Replaces the old cv2 `COLOR_BAYER_*_EA` path, which required requantizing to uint16 first (real precision loss) and only worked when cv2 was installed; this runs on the native float32 data with no dependency. Numpy mirror (`_debayer_malvar_numpy`) validated bit-exact against the `colour-demosaicing` package's reference Malvar2004 implementation across all 4 Bayer patterns (validation-only dependency, not required at runtime — see `tests/test_debayer_malvar.py`).
 - **Bilateral filter** (`src/denoising.py` `bilateral_denoise`, `--denoiser bilateral`): joint (colour-space) bilateral filter — per-pixel Gaussian-weighted average over a `2*radius+1` window, weight = spatial Gaussian x colour-similarity Gaussian, colour distance computed jointly across all 3 channels (matches cv2.bilateralFilter's multi-channel behaviour, avoids colour fringing at edges independent per-channel weighting would cause). Replaces cv2.bilateralFilter, the last cv2-only feature with no fallback — this codebase has no cv2 dependency left at all. Numpy fallback (`_bilateral_filter_numpy`) validated bit-exact against the native kernel (same boundary convention: numpy's `np.pad(mode='reflect')`, despite the name, is a non-edge-duplicating reflection — the same convention scipy calls `'mirror'`, which is what the Rust kernel's `mirror_idx` implements).
 
-The startup banner reports native status (`native_status()` in `src/utils.py`); each accelerated step logs a `[rust] …` line. Separately, Richardson-Lucy deconvolution runs on the GPU (cupy FFT) when `--use-gpu` is active (`_rl_deconvolve_xp`), validated against skimage on the numpy backend.
+The startup banner reports native status (`native_status()` in `src/utils.py`); each accelerated step logs a `[rust] …` line. Separately, Richardson-Lucy deconvolution's FFT iteration (`_rl_deconvolve_xp`) runs on the GPU (cupy FFT) when `--use-gpu` is active and on CPU (numpy/scipy FFT) otherwise — the same xp-generic function either way, validated against skimage's `richardson_lucy` on the numpy backend before skimage was dropped as a dependency entirely (2026-07).
 
 Kernel internals (why they're fast): a blocked **gather-transpose** turns the per-pixel N-sample gather (N huge-stride read streams that defeat the prefetcher/TLB) into sequential per-frame row-segment copies through an L2-resident pixel-major tile; medians use **quickselect** (`select_nth_unstable`, O(n)) instead of a full sort; the warp has a **separable fast path** for pure translation (per-image wx table + per-row wy — zero `sin()` calls per pixel) plus an interior path with no per-tap bounds checks. Measured on top of the first-generation kernels: sigma-clip ~2.6×, winsorized ~3.0×, median ~4.0×, ESD ~1.7×, fused patch combine ~2.8×, shift warp ~6.5×, affine warp ~2.8×, aniso ~4.0× ([tools/bench_native.py](tools/bench_native.py) reproduces the numbers).
 
@@ -187,7 +186,7 @@ Optionally set `RUSTFLAGS="-C target-cpu=native"` before building for extra auto
 Parity vs the numpy reference is covered by [tests/test_native.py](tests/test_native.py) (auto-skips if the module is absent). Benchmark with [tools/bench_native.py](tools/bench_native.py) before/after kernel changes.
 
 ### Plate solving
-Requires `astroquery` installed and `ASTROMETRY_API_KEY` environment variable set. Enable with `--plate-solve`.
+Requires `ASTROMETRY_API_KEY` environment variable set (nova.astrometry.net's REST API, direct HTTP via `src/net_query.py` — no extra package). Enable with `--plate-solve`.
 
 ### Debayering options
 - `bilinear` (default, pure numpy)

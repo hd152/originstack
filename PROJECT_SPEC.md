@@ -231,7 +231,6 @@ The post-registration residual check verifies alignment on the riskiest ~20% of 
 |--------|-------------|
 | `dbe` (default) | Dynamic Background Extraction — Gaussian-weighted robust local regression (Tukey IRLS) over sampled patches; bounded by construction (no runaway extrapolation near bright stars). Patch sampling and surface fit are Rust-accelerated |
 | `mesh` | Legacy polynomial grid (faster, less accurate) |
-| `graxpert` | AI-powered gradient removal via GraXpert subprocess |
 
 **DBE details:**
 - Star mask applied to sampling patches to avoid fitting to sources
@@ -253,7 +252,7 @@ Per-denoiser tuning lives in the config-file tier (see `--config`).
 | `mmt` | Multiscale Median Transform — robust to Poisson+read noise, best edge preservation (Rust-accelerated median cascade, ~10x) | `denoise_mmt_levels`, `denoise_mmt_strength` |
 | `bm3d` | Collaborative filtering, near-optimal, slower (auto-enabled by the advisor when SNR/frame count justify it) | `bm3d_sigma`, `bm3d_stride`, `bm3d_search_window`, `bm3d_group_size` |
 | `acdnr` | Contrast-gated sky smoothing — flat sky smoothed, structure preserved | `denoise_acdnr_sigma`, `denoise_acdnr_k` |
-| `nlm` | Non-local means (skimage.restoration) | `denoise_nlm_strength`, `denoise_nlm_blend` |
+| `nlm` | Non-local means (native/numpy fast NL-means, box-filter accelerated) | `denoise_nlm_strength`, `denoise_nlm_blend` |
 | `bilateral` | Edge-preserving bilateral filter, joint colour-space weighting (Rust-accelerated) | `denoise_bilateral_sigma_color`, `denoise_bilateral_sigma_space` |
 | `aniso` | Perona-Malik anisotropic diffusion (Rust-accelerated, ~37x) | `aniso_iterations`, `aniso_kappa`, `aniso_gamma`, `aniso_option` |
 | `none` | Disable luma denoising | — |
@@ -298,17 +297,11 @@ for galaxy targets).
 
 ### 19. Plate Solving
 
-- **nova.astrometry.net** (default): cloud-based, requires `astroquery` and `ASTROMETRY_API_KEY`
+- **nova.astrometry.net** (default): cloud-based, requires `ASTROMETRY_API_KEY` (direct HTTP, `src/net_query.py`, no extra package)
 - **ASTAP** (`--plate-solver astap`): local solver, no API key required
 - On success: writes WCS (CRVAL, CRPIX, CD matrix) to FITS header
 - Object identification via SIMBAD database
 - Unlocks `--color-calibrate` and `--gaia-calibration`
-
-### 20. Star Removal (`--star-remove`)
-
-- Invokes Starnet++ binary (auto-detected on PATH or via `--starnet-path`)
-- Saves `<output>_starless.fits` and `<output>_stars.fits`
-- Useful for separate nebula/star processing workflows
 
 ### 21. Comet Mode (`--comet-mode`)
 
@@ -478,7 +471,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--denoiser NAME` | auto | Primary luma denoiser: wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, none |
 | `--denoise-strength N` | 3.0 | Luma denoise threshold factor |
 | `--deconvolve {off,rl,tv}` | off | Richardson-Lucy or TV-regularised deconvolution |
-| `--bg-method` | dbe | dbe, mesh, graxpert (`--graxpert-path`) |
+| `--bg-method` | dbe | dbe, mesh, wavelet |
 | `--no-background-extraction` | — | Disable background extraction |
 | `--no-chroma-nr` | — | Disable chroma noise reduction |
 | `--no-star-reduce` | — | Disable star halo softening |
@@ -499,7 +492,6 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--export FMT[,FMT]` | — | Extra formats: tiff, xisf |
 | `--plate-solve` | off | Solve WCS (`--plate-solver astap|astrometry`, `--astap-path`) |
 | `--color-calibrate` | off | Photometric calibration from plate-solved stars |
-| `--star-remove` | off | Starnet++ star removal (`--starnet-path`) |
 
 ### Multi-session, merge & checkpoint
 
@@ -587,14 +579,11 @@ python astro_stack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 
 | Package | Feature Unlocked |
 |---------|-----------------|
-| `PyWavelets` | Multiscale-entropy seeing-quality metric (db4 wavelet). Wavelet denoising (`--denoise`, bior1.3) is native/numpy now, no dependency |
-| `scikit-image` | NLM denoising, Richardson-Lucy CPU fallback, satellite-trail Hough detection |
-| `astroquery >= 0.4.6` | Plate solving via nova.astrometry.net |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see `requirements-gpu.txt`) |
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
 | `tifffile` | 16-bit TIFF output |
 
-`opencv-python` and `astroalign` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built), and `--merge`'s cross-night registration is `src/blind_match.py`, native/numpy, no dependency.
+`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration is `src/blind_match.py`; NLM denoising, Richardson-Lucy's CPU fallback, satellite-trail detection, and the multiscale-entropy seeing metric's db4 wavelet are all native/numpy now; every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — none of them need an external dependency.
 
 ---
 

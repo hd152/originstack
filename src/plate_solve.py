@@ -14,16 +14,13 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Optional
 
 import numpy as np
 from astropy.io import fits
 
-try:
-    from astroquery.astrometry_net import AstrometryNet
-    HAS_ASTROMETRY_NET = True
-except Exception:
-    HAS_ASTROMETRY_NET = False
+from src import net_query
 
 
 # ---------------------------------------------------------------------------
@@ -164,17 +161,12 @@ def _try_simbad_identification(header: fits.Header, verbose: bool = False) -> No
     if "CRVAL1" not in header or "CRVAL2" not in header:
         return
     try:
-        from astroquery.simbad import Simbad
         ra  = float(header["CRVAL1"])
         dec = float(header["CRVAL2"])
-        custom_simbad = Simbad()
-        custom_simbad.add_votable_fields("otype")
-        result = custom_simbad.query_region(
-            f"{ra} {dec}", radius="0d30m0s", frame="icrs"
-        )
-        if result and len(result) > 0:
-            obj_name = result[0]["MAIN_ID"]
-            obj_type = result[0]["OTYPE"]
+        result = net_query.simbad_cone_search(ra, dec, radius_deg=0.5)
+        if result is not None and len(result) > 0:
+            obj_name = result["main_id"][0]
+            obj_type = result["otype"][0]
             if verbose:
                 print(f"  [Plate solving] Identified object: {obj_name} ({obj_type})")
             header["OBJECT"]  = (str(obj_name), "Object identified via SIMBAD")
@@ -226,11 +218,6 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
         if verbose:
             print("  [Plate solving] ASTAP failed — falling back to astrometry.net")
 
-    if not HAS_ASTROMETRY_NET:
-        if verbose:
-            print("  [Plate solving] astroquery not available - skipping")
-        return False
-
     try:
         # Create temporary FITS file with luminance for submission
         with tempfile.NamedTemporaryFile(suffix='.fits', delete=False) as tmp:
@@ -248,9 +235,6 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
             if verbose:
                 print("  [Plate solving] Submitting to astrometry.net...")
 
-            # Initialize astrometry.net client
-            ast = AstrometryNet()
-
             # Check for API key in environment or config
             api_key = os.environ.get('ASTROMETRY_API_KEY')
             if not api_key:
@@ -258,8 +242,6 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
                     print("  [Plate solving] No API key found. Set ASTROMETRY_API_KEY environment variable.")
                     print("  [Plate solving] Get a key from: https://nova.astrometry.net/api_help")
                 return False
-
-            ast.api_key = api_key
 
             # Estimate scale from header if available
             scale_units = 'arcsecperpix'
@@ -285,15 +267,25 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
 
             def _solve():
                 try:
-                    solve_result[0] = ast.solve_from_image(
-                        tmp_path,
-                        force_image_upload=True,
-                        solve_timeout=300,
+                    session = net_query.astrometry_net_login(api_key)
+                    if session is None:
+                        solve_error[0] = RuntimeError("astrometry.net login failed")
+                        return
+                    subid = net_query.astrometry_net_upload(
+                        session, tmp_path,
                         scale_units=scale_units,
                         scale_lower=scale_lower,
-                        scale_upper=scale_upper,
-                        publicly_visible='n'
-                    )
+                        scale_upper=scale_upper)
+                    if subid is None:
+                        solve_error[0] = RuntimeError("astrometry.net upload failed")
+                        return
+                    deadline = time.time() + 300  # solve budget
+                    job_id = net_query.astrometry_net_poll_submission(subid, deadline)
+                    if job_id is None:
+                        return  # no job yet -> treated as unsolved below
+                    ok = net_query.astrometry_net_poll_job(job_id, deadline)
+                    if ok:
+                        solve_result[0] = net_query.astrometry_net_fetch_wcs(job_id)
                 except Exception as e:
                     solve_error[0] = e
 

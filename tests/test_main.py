@@ -140,14 +140,9 @@ sys.modules.setdefault("astropy.stats", _stats_stub)
 
 for _m in [
     "tqdm", "psutil",
-    "astroquery", "astroquery.astrometry_net",
-    "pywt", "cupy",
-    "skimage.restoration",
+    "cupy",
 ]:
     sys.modules.setdefault(_m, types.ModuleType(_m))
-
-_sk = sys.modules.get("skimage") or types.ModuleType("skimage")
-sys.modules.setdefault("skimage", _sk)
 
 _pil = types.ModuleType("PIL")
 _pil_img = types.ModuleType("PIL.Image")

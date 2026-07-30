@@ -185,7 +185,7 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 
 1. ✅ Hot pixel removal on stacked image
 2. ✅ Star mask generation (protects structure in subsequent steps)
-3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh, or GraXpert AI)
+3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh)
 4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches, auto-set for galaxy targets)
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
 6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
@@ -202,8 +202,7 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 17. ❌ Deconvolution — `--deconvolve rl|tv` (RL is GPU-accelerated with `--use-gpu`)
 18. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
 19. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
-20. ❌ Star removal via Starnet++ — `--star-remove`
-21. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
+20. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
 
 > The auto-advisor enforces a **single primary luma denoiser** (precedence
 > BM3D > MMT > wavelet > ACDNR) — layering several full-frame smoothers erodes
@@ -226,7 +225,6 @@ Eight built-in target presets tune all parameters at once:
 ### Advanced Features
 - **Plate solving** via ASTAP or nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
 - **Photometric colour calibration** — gray-locus method, optional Gaia DR3 extension
-- **Star removal** via Starnet++ — saves `_starless.fits` and `_stars.fits`
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
@@ -262,10 +260,7 @@ pip install -r requirements-gpu.txt
 # 5. Optional: plate solving
 pip install -r requirements-astrometry.txt
 
-# 6. Optional: multiscale-entropy seeing-quality metric
-pip install PyWavelets
-
-# 7. Optional: native (Rust) acceleration for stacking + registration
+# 6. Optional: native (Rust) acceleration for stacking + registration
 #    Needs a Rust toolchain + maturin. See "Native (Rust) acceleration" below.
 cd ext/astro_native && maturin develop --release   # into a venv
 ```
@@ -274,15 +269,13 @@ cd ext/astro_native && maturin develop --release   # into a venv
 
 | Package | Feature |
 |---------|---------|
-| `PyWavelets` | Multiscale-entropy seeing-quality metric (db4 wavelet). Wavelet denoising (bior1.3) no longer needs it |
-| `astroquery` | Plate solving via astrometry.net |
 | `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
 | `tifffile` | TIFF input and `--export tiff` output |
 | `reproject` | Mosaic stitching |
 | `astro_native` (Rust) | 16 native kernels: stacking combines, Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC |
 
-`opencv-python` and `astroalign` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built), and `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`, native/numpy, no dependency.
+`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`; NLM denoising, Richardson-Lucy's CPU fallback, satellite-trail detection, and the multiscale-entropy seeing metric's db4 wavelet are all native/numpy now; every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — no dependency for any of them.
 
 ---
 
@@ -637,13 +630,12 @@ python astro_stack.py -d <dir> -o <output.fits> [options]
 | `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized) |
 | `--debayer-method METHOD` | Debayer algorithm (bilinear, malvar, vng) |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
-| `--bg-method METHOD` | Background extraction (dbe, mesh, graxpert) |
+| `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
 | `--elastic-registration` | Local (non-rigid) displacement correction on top of the global affine (off by default) |
 | `--denoiser NAME` | Primary luma denoiser (wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, none) |
 | `--deconvolve {off,rl,tv}` | Richardson-Lucy or TV-regularised deconvolution |
-| `--plate-solve` | Plate solve via astrometry.net (requires astroquery + API key) |
-| `--star-remove` | Remove stars via Starnet++ (saves _starless.fits + _stars.fits) |
+| `--plate-solve` | Plate solve via astrometry.net (requires API key) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
@@ -781,10 +773,9 @@ See [QUICK_REFERENCE.md](QUICK_REFERENCE.md) for guidance on interpreting shift 
 
 ## Plate Solving
 
-Requires `astroquery` and a free API key from [nova.astrometry.net](https://nova.astrometry.net/api_help).
+Requires a free API key from [nova.astrometry.net](https://nova.astrometry.net/api_help) — no extra package (direct HTTP via `src/net_query.py`).
 
 ```bash
-pip install astroquery
 export ASTROMETRY_API_KEY=your_key_here
 
 python astro_stack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate

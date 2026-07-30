@@ -5,12 +5,8 @@ import numpy as np
 import pytest
 
 from src.psf_deconvolution import (richardson_lucy_svpsf, _feather_window,
-                                   _shift_sources, HAS_SKIMAGE_RESTORATION,
-                                   estimate_psf)
+                                   _shift_sources, estimate_psf)
 from src.models import Config
-
-pytestmark = pytest.mark.skipif(not HAS_SKIMAGE_RESTORATION,
-                                reason="skimage.restoration not installed")
 
 
 def _sources(xs, ys, flux):

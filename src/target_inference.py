@@ -4,7 +4,7 @@ Priority order (highest to lowest confidence):
   1. FITS OBJECT keyword  — written by capture software; most reliable.
   2. Folder name          — strip trailing date/time, replace underscores → spaces.
   3. File names           — catalogue-ID regex only; common abbreviations are ignored.
-  4. Simbad query         — optional network fallback via astroquery.
+  4. Simbad query         — optional network fallback (direct HTTP, src/net_query.py).
 
 Public API
 ----------
@@ -552,14 +552,12 @@ def _simbad_type_to_internal(otype: str) -> str:
 def _simbad_lookup(name: str) -> Optional[Tuple[str, str, float]]:
     """Query Simbad for *name*; returns (canonical_name, object_type, 0.85) or None."""
     try:
-        from astroquery.simbad import Simbad
-        simbad = Simbad()
-        simbad.add_votable_fields('otype', 'ids')
-        result = simbad.query_object(name)
+        from src import net_query
+        result = net_query.simbad_name_lookup(name)
         if result is None or len(result) == 0:
             return None
-        otype = str(result['OTYPE'][0])
-        main_id = str(result['MAIN_ID'][0]).strip()
+        otype = str(result['otype'][0])
+        main_id = str(result['main_id'][0]).strip()
         obj_type = _simbad_type_to_internal(otype)
         if obj_type == 'unknown':
             return None
@@ -586,7 +584,7 @@ def infer_target_from_metadata(
       1. FITS OBJECT header keyword across accepted frames.
       2. Input directory name (date/time suffix stripped).
       3. Individual file name stems.
-      4. Simbad query (if *use_simbad* is True and astroquery is installed).
+      4. Simbad query (if *use_simbad* is True).
 
     Returns
     -------

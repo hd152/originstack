@@ -1009,11 +1009,11 @@ def parse_args():
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     g_out.add_argument('--plate-solve', action='store_true',
-                   help='Enable plate solving via astrometry.net (requires astroquery and ASTROMETRY_API_KEY)')
+                   help='Enable plate solving via astrometry.net (requires ASTROMETRY_API_KEY)')
     g_post.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
-    g_post.add_argument('--bg-method', choices=['mesh', 'dbe', 'wavelet', 'graxpert'], default='dbe',
+    g_post.add_argument('--bg-method', choices=['mesh', 'dbe', 'wavelet'], default='dbe',
                    help='Background extraction method (default: dbe). '
                         'mesh: legacy polynomial grid (fastest). '
                         'dbe: Dynamic Background Extraction, robust local regression '
@@ -1021,9 +1021,7 @@ def parse_args():
                         'wavelet: starlet (a-trous) low-pass fit on the same sky-patch '
                         'samples as dbe -- a hard pixel-scale cutoff instead of a blur '
                         'radius, better at leaving faint extended nebulosity alone while '
-                        'still flattening the sky (see --bg-wavelet-scales). '
-                        'graxpert: AI-powered gradient removal via GraXpert subprocess '
-                        '(best quality; requires GraXpert binary on PATH or --graxpert-path).')
+                        'still flattening the sky (see --bg-wavelet-scales).')
     g_post.add_argument('--bg-wavelet-scales', type=int, default=6, metavar='N',
                    help='wavelet bg-method only: starlet scale count -- background is '
                         'the coarsest approximation after N dyadic scales, i.e. structure '
@@ -1031,8 +1029,6 @@ def parse_args():
                         'removed, anything larger is left alone (default: 6). Lower = '
                         'more aggressive/smaller-scale gradient removal, risks eating '
                         'broad nebulosity; higher = leaves more large-scale gradient in.')
-    g_post.add_argument('--graxpert-path', default=None, metavar='PATH',
-                   help='Path to GraXpert binary (auto-detected if omitted).')
     g_post.add_argument('--denoise-strength', type=float, default=3.0,
                    help='Wavelet luma denoise threshold factor (default: 3.0)')
     g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
@@ -1104,12 +1100,6 @@ def parse_args():
                         'ASTAP recommended when the binary is installed (~1 s vs 30–120 s online).')
     g_out.add_argument('--astap-path', default=None, metavar='PATH',
                    help='Explicit path to the ASTAP binary (auto-detected if omitted)')
-    g_out.add_argument('--star-remove', action='store_true',
-                   help='Remove stars using Starnet++ after post-processing. '
-                        'Saves <output>_starless.fits and <output>_stars.fits. '
-                        'Requires Starnet++ binary on PATH or --starnet-path.')
-    g_out.add_argument('--starnet-path', default=None, metavar='PATH',
-                   help='Path to Starnet++ binary (auto-detected if omitted).')
     g_comet.add_argument('--comet-mode', action='store_true',
                    help='Enable comet nucleus tracking. Produces a second stack aligned '
                         'on the comet nucleus saved as <stem>_comet.fits.')
@@ -1140,7 +1130,7 @@ def parse_args():
                         '(default: 15).')
     g_comet.add_argument('--comet-designation', default=None, metavar='DESIG',
                    help='JPL Horizons designation for ephemeris-aided nucleus tracking '
-                        '(e.g. "C/2023 A3"). Requires astroquery.')
+                        '(e.g. "C/2023 A3").')
     g_comet.add_argument('--observer-site', default=None, metavar='SITE',
                    help='Observer location for ephemeris queries: MPC code (e.g. "G37") '
                         'or "lon,lat,elev" in decimal degrees/metres (e.g. "-2.5,51.4,50").')
@@ -1149,7 +1139,7 @@ def parse_args():
                         'stack for HDR targets (e.g. Orion Nebula core, globular clusters).')
     g_out.add_argument('--color-calibrate', action='store_true',
                    help='Apply photometric colour calibration after plate solving '
-                        '(queries Gaia DR3). Requires --plate-solve and astroquery.')
+                        '(queries Gaia DR3). Requires --plate-solve.')
     g_out.add_argument('--aberration-report', action='store_true',
                    help='Analyse star FWHM/elongation across the field and diagnose '
                         'sensor tilt, field curvature, and backfocus (spacing) errors. '
@@ -1180,7 +1170,7 @@ def parse_args():
                         'No external dependencies required.')
     g_post.add_argument('--gaia-calibration', action='store_true',
                    help='Extend --photometric-calibration with a Gaia DR3 catalogue query. '
-                        'Requires --plate-solve and astroquery.')
+                        'Requires --plate-solve.')
 
     # New feature flags (improvements 1-9)
     g_stack.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',

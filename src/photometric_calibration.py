@@ -139,7 +139,7 @@ def photometric_color_calibrate(img: np.ndarray,
     - Residual atmospheric extinction colour gradients.
     - Incorrect or absent flat-field colour response correction.
 
-    Optionally queries the Gaia DR3 catalogue via ``astroquery`` for
+    Optionally queries the Gaia DR3 catalogue via direct HTTP for
     photometrically calibrated BP-RP colour indices to refine the gray-locus
     selection, falling back to the internal sigma-clip method if unavailable.
 
@@ -184,17 +184,19 @@ def try_gaia_calibration(img: np.ndarray,
                           wcs=None,
                           verbose: bool = False
                           ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Attempt Gaia DR3-based photometric calibration (requires astroquery + WCS).
+    """Attempt Gaia DR3-based photometric calibration (requires WCS).
 
     Queries the Gaia DR3 catalogue for sources in the image field, matches
     them to detected stars, and uses the Gaia BP-RP colour index to predict
     expected R/G/B ratios for each star.  Computes the per-channel scale
     factor that minimises the residual between observed and predicted colours.
+    Catalogue access is direct HTTP against Gaia's TAP service
+    (src/net_query.py) -- no astroquery dependency.
 
     Falls back to the gray-locus method if:
-    - ``astroquery`` is not installed.
     - The image has no WCS information (no plate solve was run).
     - Fewer than 10 Gaia matches are found.
+    - The catalogue query fails (network error, etc).
 
     Args:
         img:            Float32 stacked image (H, W, 3).
@@ -210,13 +212,8 @@ def try_gaia_calibration(img: np.ndarray,
         _log.debug("Gaia calibration: no WCS — falling back to gray locus")
         return photometric_color_calibrate(img, star_positions, verbose=verbose)
 
-    try:
-        from astroquery.gaia import Gaia
-        from astropy.coordinates import SkyCoord
-        import astropy.units as u
-    except ImportError:
-        _log.debug("Gaia calibration: astroquery not installed — falling back")
-        return photometric_color_calibrate(img, star_positions, verbose=verbose)
+    from astropy.coordinates import SkyCoord
+    from src import net_query
 
     try:
         H, W = img.shape[:2]
@@ -225,14 +222,15 @@ def try_gaia_calibration(img: np.ndarray,
         corner_sky = wcs.pixel_to_world(0.0, 0.0)
         radius_deg = float(centre_sky.separation(corner_sky).deg) * 1.1
 
-        Gaia.ROW_LIMIT = 2000
-        result = Gaia.cone_search_async(
-            centre_sky, radius=u.Quantity(radius_deg, u.deg),
+        result = net_query.gaia_cone_search(
+            float(centre_sky.ra.deg), float(centre_sky.dec.deg), radius_deg,
             columns=['source_id', 'ra', 'dec', 'phot_bp_mean_mag',
-                     'phot_rp_mean_mag', 'phot_g_mean_mag']).get_results()
+                     'phot_rp_mean_mag', 'phot_g_mean_mag'],
+            max_rows=2000)
 
-        if len(result) < 10:
-            _log.debug("Gaia calibration: only %d sources — falling back", len(result))
+        if result is None or len(result) < 10:
+            _log.debug("Gaia calibration: only %d sources — falling back",
+                       0 if result is None else len(result))
             return photometric_color_calibrate(img, star_positions, verbose=verbose)
 
         # Match Gaia to detected stars via pixel coordinates

@@ -5,6 +5,7 @@ import logging
 from typing import Optional, Tuple
 
 import numpy as np
+from scipy import signal as _scipy_signal
 
 from src.models import Config
 
@@ -13,12 +14,6 @@ try:
     HAS_CURVE_FIT = True
 except Exception:
     HAS_CURVE_FIT = False
-
-try:
-    from skimage.restoration import denoise_nl_means, estimate_sigma, richardson_lucy
-    HAS_SKIMAGE_RESTORATION = True
-except Exception:
-    HAS_SKIMAGE_RESTORATION = False
 
 def estimate_psf(img: np.ndarray, star_positions,
                  cutout_radius: int = None, psf_size: int = None,
@@ -264,8 +259,8 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
     psf = np.maximum(psf, 0.0)
     psf /= psf.sum()
 
-    # Optional blind RL refinement
-    if iterations > 0 and HAS_SKIMAGE_RESTORATION:
+    # Optional blind RL refinement (pure scipy.signal, no skimage involved)
+    if iterations > 0:
         from scipy.signal import fftconvolve
         lum_pos = lum - lum.min() + 1e-6
         psf_est = psf.copy()
@@ -442,15 +437,12 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
     ringing artifacts on bright star cores.
 
     Runs on the GPU (cupy FFT convolution) when --use-gpu is active; otherwise
-    uses skimage's CPU implementation.
+    runs the same FFT-based iteration on the numpy/scipy CPU backend.
     """
     from src.gpu_context import get_gpu
     _gpu = get_gpu()
     _use_gpu = _gpu.active and _gpu.xsignal is not None and hasattr(_gpu.xsignal, 'fftconvolve')
 
-    if not HAS_SKIMAGE_RESTORATION and not _use_gpu:
-        logging.warning("skimage.restoration not available; skipping Richardson-Lucy deconvolution")
-        return img
     if iterations is None:
         iterations = Config.RL_DEFAULT_ITERATIONS
 
@@ -474,10 +466,10 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
         except Exception as exc:
             if _gpu.is_oom(exc):
                 _gpu.free_pool()
-            logging.debug("GPU RL failed (%s); falling back to CPU skimage", exc)
-            Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
+            logging.debug("GPU RL failed (%s); falling back to CPU", exc)
+            Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal)
     else:
-        Y_deconv = richardson_lucy(Y_pos, psf, num_iter=iterations, clip=False)
+        Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal)
     Y_deconv = np.asarray(Y_deconv, dtype=np.float64) - pedestal
 
     # Star protection: blend original at star cores
@@ -539,9 +531,6 @@ def richardson_lucy_svpsf(img: np.ndarray, sources, iterations: int = 15,
     from src.gpu_context import get_gpu
     _gpu = get_gpu()
     _use_gpu = _gpu.active and _gpu.xsignal is not None and hasattr(_gpu.xsignal, 'fftconvolve')
-    if not HAS_SKIMAGE_RESTORATION and not _use_gpu:
-        logging.warning("skimage.restoration unavailable; skipping SV-PSF deconvolution")
-        return img
     if sources is None or len(sources) == 0:
         return img
 
@@ -596,9 +585,9 @@ def richardson_lucy_svpsf(img: np.ndarray, sources, iterations: int = 15,
                     dec = _gpu.to_host(_rl_deconvolve_xp(tileY_pos, psf, iterations,
                                                          _gpu.xp, _gpu.xsignal))
                 except Exception:
-                    dec = richardson_lucy(tileY_pos, psf, num_iter=iterations, clip=False)
+                    dec = _rl_deconvolve_xp(tileY_pos, psf, iterations, np, _sig)
             else:
-                dec = richardson_lucy(tileY_pos, psf, num_iter=iterations, clip=False)
+                dec = _rl_deconvolve_xp(tileY_pos, psf, iterations, np, _sig)
             dec = np.asarray(dec, dtype=np.float64) - pedestal
 
             wwin = _feather_window(ey1 - ey0, ex1 - ex0, my, mx)

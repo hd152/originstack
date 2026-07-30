@@ -764,6 +764,24 @@ def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
             # Blank out processed source
             remaining_lum[emission > 0.5] = float(np.min(remaining_lum))
 
+    # Diffuse extended emission: large, low-contrast nebulosity that never
+    # reaches the compact-source 5-sigma bar above (real signal, but under
+    # ~1 sigma above sky per pixel) is otherwise invisible to the detector
+    # above -- DBE then samples it as "background" and fits/subtracts it,
+    # silently erasing the nebula from the output. lum_smooth is already
+    # smoothed at a scale (sigma = max(20, min(H,W)/50)) large enough that
+    # pixel noise averages down far below sky_std, so a modest absolute
+    # threshold against the *unsmoothed* sky_std reliably separates real
+    # large-scale signal from residual smoothed noise without needing
+    # per-pixel significance. pre_gradient_removal already runs before DBE,
+    # so most smooth optical vignetting/gradient is gone by this point --
+    # what's left this broad is far more likely real extended emission than
+    # gradient residual.
+    diffuse_thresh = sky_med + 1.0 * max(sky_std, 1.0)
+    diffuse_binary = (lum_smooth > diffuse_thresh).astype(np.float32)
+    if diffuse_binary.any():
+        np.clip(emission + diffuse_binary, 0.0, 1.0, out=emission)
+
     return emission
 
 

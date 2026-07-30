@@ -472,13 +472,11 @@ def compute_multiscale_entropy(img: np.ndarray, levels: int = None) -> float:
     coarser scales.  The ratio of finest-scale entropy to coarsest-scale
     entropy is therefore a seeing-quality indicator independent of SNR.
 
-    Requires pywt.  Returns 0.0 when pywt is unavailable or the image is too
-    small for the requested decomposition depth.
+    Native/numpy db4 decomposition (src/wavelet.py, no external dependency).
+    Returns 0.0 when the image is too small for the requested decomposition
+    depth.
     """
-    try:
-        import pywt as _pywt
-    except ImportError:
-        return 0.0
+    from src import wavelet
 
     if levels is None:
         from src.models import Config
@@ -488,8 +486,17 @@ def compute_multiscale_entropy(img: np.ndarray, levels: int = None) -> float:
            else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
     lum = lum.astype(np.float32)
 
+    # Clamp to what the image actually supports -- pywt.wavedec2 does this
+    # silently (with a warning) rather than decomposing past the point where
+    # the signal is too short for the filter; wavelet.wavedec2 has no such
+    # guard itself, so it's the caller's job here.
+    max_level = wavelet.dwt_max_level(min(lum.shape), wavelet='db4')
+    levels = min(levels, max_level)
+    if levels < 1:
+        return 0.0
+
     try:
-        coeffs = _pywt.wavedec2(lum, 'db4', level=levels)
+        coeffs = wavelet.wavedec2(lum, levels, wavelet='db4')
     except Exception:
         return 0.0
 

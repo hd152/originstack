@@ -23,6 +23,38 @@ class TestDwtMaxLevel:
         pywt = pytest.importorskip("pywt")
         assert dwt_max_level(data_len) == pywt.dwt_max_level(data_len, 6)
 
+    @pytest.mark.parametrize('data_len', [1, 2, 5, 6, 7, 8, 15, 16, 33, 64, 100, 257, 3000])
+    def test_db4_matches_pywt(self, data_len):
+        pywt = pytest.importorskip("pywt")
+        assert dwt_max_level(data_len, wavelet='db4') == pywt.dwt_max_level(data_len, 8)
+
+
+class TestWavedec2Db4VsPywt:
+    """db4 is forward-only (src/quality.py's compute_multiscale_entropy never
+    reconstructs) -- validate wavedec2 coefficients bit-exact against real
+    pywt.wavedec2(img, 'db4', ...)."""
+
+    @pytest.mark.parametrize('h,w', [
+        (32, 32), (33, 45), (64, 65), (100, 129), (127, 100), (200, 150),
+    ])
+    @pytest.mark.parametrize('level', [1, 2, 3])
+    def test_coeffs_match_pywt(self, h, w, level):
+        pywt = pytest.importorskip("pywt")
+        rng = np.random.default_rng(0)
+        img = rng.standard_normal((h, w))
+        ml = dwt_max_level(min(h, w), wavelet='db4')
+        lvl = min(level, ml)
+        if lvl < 1:
+            pytest.skip("image too small for this level")
+
+        ref_coeffs = pywt.wavedec2(img, 'db4', level=lvl, mode='symmetric')
+        my_coeffs = wavedec2(img, lvl, wavelet='db4')
+        np.testing.assert_allclose(my_coeffs[0], ref_coeffs[0], atol=1e-9)
+        for (mh, mv, md), (rh, rv, rd) in zip(my_coeffs[1:], ref_coeffs[1:]):
+            np.testing.assert_allclose(mh, rh, atol=1e-9)
+            np.testing.assert_allclose(mv, rv, atol=1e-9)
+            np.testing.assert_allclose(md, rd, atol=1e-9)
+
 
 class TestWavedec2Waverec2VsPywt:
     @pytest.mark.parametrize('h,w', [

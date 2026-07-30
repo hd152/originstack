@@ -76,44 +76,6 @@ def _diag_save(img: np.ndarray, diag_dir: Optional[str], counter: list, slug: st
 # External tool helpers
 # ---------------------------------------------------------------------------
 
-def _find_binary(names: list) -> Optional[str]:
-    """Search PATH and common install locations for any of the given binary names."""
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
-
-
-def _write_u16_tiff(img: np.ndarray, path: str) -> None:
-    """Write (H, W, 3) float32 image as 16-bit RGB TIFF for external tools."""
-    arr16 = (np.clip(img, 0.0, 1.0) * 65535).astype(np.uint16)
-    try:
-        import tifffile
-        tifffile.imwrite(path, arr16, photometric="rgb")
-    except ImportError:
-        try:
-            from PIL import Image
-            Image.fromarray(arr16).save(path)
-        except Exception as e:
-            raise RuntimeError(f"Cannot write TIFF: tifffile and Pillow both unavailable ({e})")
-
-
-def _read_tiff_as_float(path: str) -> np.ndarray:
-    """Read a TIFF and return (H, W, 3) float32 in [0, 1]."""
-    try:
-        import tifffile
-        arr = tifffile.imread(path)
-    except ImportError:
-        from PIL import Image
-        arr = np.array(Image.open(path))
-    if arr.dtype == np.uint16:
-        return arr.astype(np.float32) / 65535.0
-    if arr.dtype == np.uint8:
-        return arr.astype(np.float32) / 255.0
-    return arr.astype(np.float32)
-
-
 def _save_sidecar_fits(img: np.ndarray, output_path: str, suffix: str) -> None:
     """Save a (H, W, 3) or (H, W) float32 array as a sidecar FITS file."""
     from astropy.io import fits as _fits
@@ -127,172 +89,6 @@ def _save_sidecar_fits(img: np.ndarray, output_path: str, suffix: str) -> None:
     hdu.header["COMBINED"] = (True, "Sidecar output")
     hdu.writeto(path, overwrite=True)
     safe_print(f"  Saved: {os.path.basename(path)}")
-
-
-# ---------------------------------------------------------------------------
-# GraXpert background extraction
-# ---------------------------------------------------------------------------
-
-def _find_graxpert_binary() -> Optional[str]:
-    return _find_binary([
-        "graxpert", "GraXpert",
-        "/usr/local/bin/graxpert",
-        r"C:\Program Files\GraXpert\graxpert.exe",
-        "/Applications/GraXpert.app/Contents/MacOS/GraXpert",
-    ])
-
-
-def _graxpert_background_extraction(img: np.ndarray,
-                                     graxpert_path: Optional[str] = None,
-                                     verbose: bool = False) -> np.ndarray:
-    """Call the GraXpert CLI for AI-powered gradient removal.
-
-    Falls back to DBE on failure.
-    """
-    from astropy.io import fits as _fits
-
-    # Prefer the graxpert Python package over the subprocess CLI when available.
-    try:
-        from graxpert.background_extraction import extract_background as _gx_extract
-        img_max = float(img.max()) or 1.0
-        img_norm = (img / img_max).astype(np.float32)
-        result = _gx_extract(
-            img_norm,
-            bg_pts=None,
-            correction_type='Subtraction',
-            smoothing='medium',
-            kernel_size=50,
-        )
-        if verbose:
-            safe_print("  [GraXpert] Background extracted via Python API")
-        return np.clip(
-            np.asarray(result, dtype=np.float32) * img_max, 0.0, None
-        )
-    except ImportError:
-        pass  # Python package not installed — fall through to subprocess
-    except Exception as _gx_err:
-        if verbose:
-            safe_print(f"  [GraXpert] Python API failed ({_gx_err}), trying subprocess")
-
-    binary = graxpert_path or _find_graxpert_binary()
-    if binary is None:
-        safe_print("  WARNING: GraXpert binary not found — falling back to DBE")
-        return dynamic_background_extraction(img, verbose=verbose)
-
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            in_fits = os.path.join(td, "graxpert_in.fits")
-            out_fits = os.path.join(td, "graxpert_out.fits")
-
-            # Write (3, H, W) float32 FITS
-            data_out = np.transpose(img.astype(np.float32), (2, 0, 1))
-            _fits.PrimaryHDU(data=data_out).writeto(in_fits, overwrite=True)
-
-            cmd = [binary, "-i", in_fits, "-o", out_fits, "background_extraction"]
-            if verbose:
-                print(f"  [GraXpert] Running: {' '.join(cmd)}")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode != 0:
-                safe_print(f"  WARNING: GraXpert exited with code {result.returncode} "
-                           "— falling back to DBE")
-                if verbose and result.stderr:
-                    print(f"    GraXpert stderr: {result.stderr[:200]}")
-                return dynamic_background_extraction(img, verbose=verbose)
-
-            if not os.path.exists(out_fits):
-                safe_print("  WARNING: GraXpert produced no output — falling back to DBE")
-                return dynamic_background_extraction(img, verbose=verbose)
-
-            with _fits.open(out_fits) as hdul:
-                out_data = hdul[0].data.astype(np.float32)
-            if out_data.ndim == 3 and out_data.shape[0] == 3:
-                return np.transpose(out_data, (1, 2, 0))
-            return out_data
-    except subprocess.TimeoutExpired:
-        safe_print("  WARNING: GraXpert timed out — falling back to DBE")
-        return dynamic_background_extraction(img, verbose=verbose)
-    except Exception as e:
-        safe_print(f"  WARNING: GraXpert error ({e}) — falling back to DBE")
-        return dynamic_background_extraction(img, verbose=verbose)
-
-
-# ---------------------------------------------------------------------------
-# Starnet++ star removal
-# ---------------------------------------------------------------------------
-
-def _find_starnet_binary(hint: Optional[str] = None) -> Optional[str]:
-    if hint and os.path.isfile(hint):
-        return hint
-    return _find_binary([
-        "starnet++", "starnet", "StarNet++",
-        "/usr/local/bin/starnet++",
-        r"C:\Program Files\StarNet++\starnet++.exe",
-        r"C:\Program Files\StarNet\starnet++.exe",
-    ])
-
-
-def apply_starnet(img: np.ndarray,
-                  output_path: str,
-                  binary_path: Optional[str] = None,
-                  verbose: bool = False) -> np.ndarray:
-    """Remove stars from the image using the Starnet++ binary.
-
-    Saves:
-      <stem>_starless.fits  — star-removed image
-      <stem>_stars.fits     — stars-only layer (img − starless)
-
-    Returns the starless image (or the original if Starnet++ fails).
-    The caller continues post-processing on the returned starless image.
-    Stars can be re-added later with: final = starless + stars_only
-    """
-    binary = _find_starnet_binary(binary_path)
-    if binary is None:
-        safe_print(
-            "  WARNING: Starnet++ binary not found — star removal skipped.\n"
-            "  Install from https://www.starnetastro.com/ and ensure it is on PATH."
-        )
-        return img
-
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            in_tiff  = os.path.join(td, "sn_input.tif")
-            out_tiff = os.path.join(td, "sn_output.tif")
-
-            # Starnet++ requires 16-bit RGB TIFF
-            _write_u16_tiff(img, in_tiff)
-
-            cmd = [binary, in_tiff, out_tiff]
-            if verbose:
-                print(f"  [Starnet++] Running: {' '.join(cmd)}")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode != 0 or not os.path.exists(out_tiff):
-                safe_print(f"  WARNING: Starnet++ failed (code {result.returncode}) "
-                           "— star removal skipped")
-                if verbose and result.stderr:
-                    print(f"    stderr: {result.stderr[:200]}")
-                return img
-
-            starless = _read_tiff_as_float(out_tiff)
-            if starless.shape != img.shape:
-                safe_print("  WARNING: Starnet++ output shape mismatch — star removal skipped")
-                return img
-
-        stars_only = np.clip(img - starless, 0.0, None)
-        if output_path:
-            _save_sidecar_fits(starless,   output_path, "_starless")
-            _save_sidecar_fits(stars_only, output_path, "_stars")
-
-        safe_print(f"  ✓ Star removal complete (starless + stars layers saved)")
-        return starless
-
-    except subprocess.TimeoutExpired:
-        safe_print("  WARNING: Starnet++ timed out (600 s) — star removal skipped")
-        return img
-    except Exception as e:
-        safe_print(f"  WARNING: Starnet++ error ({e}) — star removal skipped")
-        return img
 
 
 def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
@@ -395,7 +191,7 @@ def postprocess_stack(
         if _output_path:
             _save_sidecar_fits(pp_star_mask.astype(np.float32), _output_path, "_star_mask")
 
-    # 1. Background extraction (GraXpert / DBE / legacy mesh)
+    # 1. Background extraction (DBE / wavelet / legacy mesh)
     _pre_bg = None
     if getattr(args, 'keep_intermediates', False) and args.background_extraction:
         _pre_bg = stacked.copy()
@@ -425,13 +221,7 @@ def postprocess_stack(
             except Exception as _cme:
                 safe_print(f"  WARNING: coma exclusion mask failed: {_cme}")
 
-        if bg_method == 'graxpert':
-            graxpert_bin = getattr(args, 'graxpert_path', None)
-            print(f"\n  Applying GraXpert background extraction...")
-            stacked = _graxpert_background_extraction(
-                stacked, graxpert_path=graxpert_bin, verbose=args.verbose)
-            safe_print(f"  ✓ GraXpert background extraction ({format_time(time.time() - bg_start)})")
-        elif bg_method == 'dbe':
+        if bg_method == 'dbe':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
             print(f"\n  Applying Dynamic Background Extraction "
                   f"(patch={dbe_patch}px, robust local regression, sigma={args.bg_clip_sigma})...")
@@ -741,9 +531,11 @@ def postprocess_stack(
         tv_lambda = getattr(args, 'tv_lambda', None) or Config.TV_LAMBDA
         tv_iters = getattr(args, 'tv_iterations', None) or Config.TV_ITERATIONS
         psf = None
+        psf_fwhm = 0.0
 
         if rl_fwhm_override is not None:
             psf = make_synthetic_psf(rl_fwhm_override, model=rl_model)
+            psf_fwhm = float(rl_fwhm_override)
             safe_print(f"\n  Deconvolution: synthetic PSF FWHM={rl_fwhm_override:.2f}px...")
         elif use_blind_psf and _pp_sources is not None and len(_pp_sources) > 0:
             safe_print(f"\n  Estimating PSF (blind star-stacking, no model fitting)...")
@@ -795,11 +587,21 @@ def postprocess_stack(
                 # box — and feather well beyond. Deconvolution then only sharpens
                 # the star-free extended structure (galaxy arms), which is where
                 # it helps and where it does not ring.
-                _ring_r = max(4, int(float(psf.shape[0])))
+                #
+                # Sized off psf_fwhm (not just the PSF array's fixed side length):
+                # a parametric Moffat/Gaussian fit and an empirical blind-stacked
+                # PSF both come back as the same Config.RL_PSF_SIZE array, but the
+                # blind estimate can have much broader wings (real seeing/tracking
+                # spread, not an idealised model) -- its ringing extends well past
+                # a radius sized only for the narrower parametric case, leaving a
+                # visible dark moat around every star. 5x FWHM covers the ringing
+                # zone for both; the array-size floor keeps prior behaviour as a
+                # minimum.
+                _ring_r = max(4, int(float(psf.shape[0])), int(np.ceil(psf_fwhm * 5.0)))
                 _core = ndimage.binary_dilation(_pts, iterations=_ring_r)
                 deconv_mask = ndimage.gaussian_filter(
                     _core.astype(np.float32),
-                    sigma=max(3.0, float(psf.shape[0]) * 0.45))
+                    sigma=max(3.0, float(_ring_r) * 0.45))
                 _dmx = float(deconv_mask.max())
                 if _dmx > 0:
                     deconv_mask /= _dmx
@@ -856,21 +658,6 @@ def postprocess_stack(
         stacked = multiscale_local_contrast(stacked, strength=lc_strength,
                                             star_mask=pp_star_mask)
         safe_print(f"  ✓ Local contrast enhancement ({format_time(time.time() - lc_start)})")
-
-    # 10. Star removal via Starnet++
-    if getattr(args, 'star_remove', False) and 'star_remove' not in skip_steps:
-        _diag_save(stacked, _diag_dir, _diag_counter, 'before_star_remove')
-        print(f"\n  Applying star removal (Starnet++)...")
-        sr_start = time.time()
-        _output_path = getattr(args, 'output', None) or ''
-        stacked = apply_starnet(
-            stacked,
-            output_path=_output_path,
-            binary_path=getattr(args, 'starnet_path', None),
-            verbose=args.verbose,
-        )
-        safe_print(f"  ✓ Star removal ({format_time(time.time() - sr_start)})")
-        stacked = _sanitize(stacked, "star removal")
 
     # 11. Comet: radial renormalization (reveals jets by flattening coma gradient)
     if (getattr(args, 'comet_mode', False)

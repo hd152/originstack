@@ -1,7 +1,9 @@
-"""2D biorthogonal wavelet transform (bior1.3) -- replaces PyWavelets for
-src/denoising.py's wavelet_denoise/adaptive_wavelet_denoise, the only wavelet
-family either function ever uses (the `wavelet` parameter defaults to
-'bior1.3' and nothing in this codebase overrides it).
+"""2D wavelet transform (bior1.3, db4) -- replaces PyWavelets everywhere it
+was used in this codebase: src/denoising.py's wavelet_denoise/
+adaptive_wavelet_denoise (bior1.3, forward+inverse) and
+src/quality.py's compute_multiscale_entropy (db4, forward-only -- entropy
+is computed directly on the decomposition coefficients, nothing is ever
+reconstructed, so db4 only needs wavedec2/dwt_max_level, not waverec2).
 
 Native/from-scratch implementation of the standard Mallat-algorithm 2D DWT
 (separable: 1D DWT along rows, then along columns), 'symmetric' boundary
@@ -14,11 +16,19 @@ depths, including the exact length semantics needed for a correct
 multi-level reconstruction on odd-sized inputs (see module docstring notes
 below and the test file for how that was reverse-engineered).
 
-The bior1.3 filter coefficients themselves are pywt's own published values
-(``pywt.Wavelet('bior1.3').filter_bank``) -- not re-derived, just copied
+The filter coefficients themselves are pywt's own published values
+(``pywt.Wavelet(name).filter_bank``) -- not re-derived, just copied
 verbatim, since transcription of published filter coefficients from memory
 would be needless risk for zero benefit (these are wavelet family
-constants, not something to "port" in any meaningful sense).
+constants, not something to "port" in any meaningful sense). Each family's
+convolution-alignment convention (whether the decomposition kernel needs
+reversing before a `mode='valid'` correlation, and the output-slice offset)
+was found the same way: brute-force search over {reversed, unreversed} x
+{offset 0..filter_len-1} until the result matched real pywt.dwt output
+exactly, since neither convention is standardized/guessable from theory
+alone. bior1.3 needs its low-pass kernel reversed but not its high-pass;
+db4 (orthogonal, not biorthogonal like bior1.3 -- no linear-phase symmetry)
+needs neither reversed. Both use offset=1.
 
 Length semantics note: a single-level 1D DWT of a length-n signal is
 unambiguous (output length = (n + filter_len - 1) // 2), but the inverse
@@ -32,11 +42,13 @@ every intermediate reconstruction level naturally produces a
 result is cropped to match the true next-level detail-coefficient length
 during the reconstruction cascade, and only the very final 2D output needs
 a final crop to the original (H, W) -- never an intermediate one beyond
-matching the next detail array's shape.
+matching the next detail array's shape. (Reconstruction is only
+implemented for bior1.3 -- the only family anything in this codebase ever
+inverts.)
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 
@@ -53,33 +65,57 @@ _FLEN = len(_DEC_LO)
 _OFFSET = 1
 _IDWT_OFFSET = 4
 
+# db4 filter bank -- pywt.Wavelet('db4').filter_bank, verbatim. Decomposition
+# only (see module docstring): no _REC_LO/_REC_HI needed.
+_DB4_DEC_LO = np.array([-0.010597401785069032, 0.0328830116668852, 0.030841381835560764,
+                        -0.18703481171909309, -0.027983769416859854, 0.6308807679298589,
+                        0.7148465705529157, 0.2303778133088965])
+_DB4_DEC_HI = np.array([-0.2303778133088965, 0.7148465705529157, -0.6308807679298589,
+                        -0.027983769416859854, 0.18703481171909309, 0.030841381835560764,
+                        -0.0328830116668852, -0.010597401785069032])
 
-def dwt_max_level(data_len: int) -> int:
-    """Exact port of pywt.dwt_max_level(data_len, filter_len) for bior1.3's
-    filter length (6): floor(log2(data_len / (filter_len - 1)))."""
+
+class _FilterBank(NamedTuple):
+    lo_kernel: np.ndarray   # correlation kernel for cA (mode='valid'), already oriented
+    hi_kernel: np.ndarray   # correlation kernel for cD (mode='valid'), already oriented
+    flen: int
+    offset: int
+
+
+_FILTER_BANKS: Dict[str, _FilterBank] = {
+    'bior1.3': _FilterBank(_DEC_LO[::-1], _DEC_HI, _FLEN, _OFFSET),
+    'db4': _FilterBank(_DB4_DEC_LO, _DB4_DEC_HI, len(_DB4_DEC_LO), 1),
+}
+
+
+def dwt_max_level(data_len: int, wavelet: str = 'bior1.3') -> int:
+    """Exact port of pywt.dwt_max_level(data_len, filter_len):
+    floor(log2(data_len / (filter_len - 1)))."""
+    flen = _FILTER_BANKS[wavelet].flen
     if data_len <= 0:
         return 0
-    ratio = data_len / (_FLEN - 1)
+    ratio = data_len / (flen - 1)
     if ratio < 1:
         return 0
     return int(np.floor(np.log2(ratio)))
 
 
-def _dwt_1d(x: np.ndarray, axis: int) -> Tuple[np.ndarray, np.ndarray]:
+def _dwt_1d(x: np.ndarray, axis: int, bank: _FilterBank) -> Tuple[np.ndarray, np.ndarray]:
     """Single-level 1D DWT along `axis`. Returns (cA, cD)."""
     n = x.shape[axis]
+    flen = bank.flen
     pad_width = [(0, 0)] * x.ndim
-    pad_width[axis] = (_FLEN - 1, _FLEN - 1)
+    pad_width[axis] = (flen - 1, flen - 1)
     xp = np.pad(x, pad_width, mode='symmetric')
-    out_len = (n + _FLEN - 1) // 2
+    out_len = (n + flen - 1) // 2
 
     def _conv(arr: np.ndarray, h: np.ndarray) -> np.ndarray:
         return np.apply_along_axis(lambda m: np.convolve(m, h, mode='valid'), axis, arr)
 
-    cA = _conv(xp, _DEC_LO[::-1])
-    cD = _conv(xp, _DEC_HI)
+    cA = _conv(xp, bank.lo_kernel)
+    cD = _conv(xp, bank.hi_kernel)
     sl = [slice(None)] * x.ndim
-    sl[axis] = slice(_OFFSET, None, 2)
+    sl[axis] = slice(bank.offset, None, 2)
     cA, cD = cA[tuple(sl)], cD[tuple(sl)]
     crop = [slice(None)] * x.ndim
     crop[axis] = slice(0, out_len)
@@ -121,10 +157,10 @@ def _idwt_1d(cA: np.ndarray, cD: np.ndarray, axis: int,
 Coeffs2D = List[Union[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]]
 
 
-def _dwt2(img: np.ndarray) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    La, Lh = _dwt_1d(img, axis=0)
-    cA, cV = _dwt_1d(La, axis=1)
-    cH, cD = _dwt_1d(Lh, axis=1)
+def _dwt2(img: np.ndarray, bank: _FilterBank) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    La, Lh = _dwt_1d(img, axis=0, bank=bank)
+    cA, cV = _dwt_1d(La, axis=1, bank=bank)
+    cH, cD = _dwt_1d(Lh, axis=1, bank=bank)
     return cA, (cH, cV, cD)
 
 
@@ -141,14 +177,15 @@ def _idwt2(cA: np.ndarray, detail: Tuple[np.ndarray, np.ndarray, np.ndarray],
     return _idwt_1d(La, Lh, axis=0, out_len=row_out_len)
 
 
-def wavedec2(img: np.ndarray, level: int) -> Coeffs2D:
+def wavedec2(img: np.ndarray, level: int, wavelet: str = 'bior1.3') -> Coeffs2D:
     """Multi-level 2D DWT -- same coefficient structure as
-    pywt.wavedec2(img, 'bior1.3', level=level):
+    pywt.wavedec2(img, wavelet, level=level):
     [cA_n, (cH_n, cV_n, cD_n), ..., (cH_1, cV_1, cD_1)]."""
+    bank = _FILTER_BANKS[wavelet]
     coeffs: Coeffs2D = []
     a = img
     for _ in range(level):
-        a, detail = _dwt2(a)
+        a, detail = _dwt2(a, bank)
         coeffs.append(detail)
     coeffs.append(a)
     return coeffs[::-1]

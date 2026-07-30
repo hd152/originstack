@@ -4,10 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.trail_reject import detect_trail_mask, reject_trails, _HAS_SKIMAGE
-
-pytestmark = pytest.mark.skipif(not _HAS_SKIMAGE,
-                                reason="scikit-image not installed")
+from src.trail_reject import detect_trail_mask, reject_trails, _bresenham_line
 
 
 def _sky(H, W, level=100.0, noise=3.0, seed=0):
@@ -86,3 +83,20 @@ def test_area_guard_aborts_on_huge_detection():
     img[:] += 5000.0  # everything bright
     mask, n = detect_trail_mask(img, max_area_frac=0.08)
     assert mask is None
+
+
+class TestBresenhamVsSkimage:
+    """_bresenham_line replaced skimage.draw.line -- verify bit-exact pixel
+    agreement against the real implementation wherever it's installed."""
+
+    @pytest.mark.parametrize("r0,c0,r1,c1", [
+        (0, 0, 0, 10), (0, 0, 10, 0), (0, 0, 10, 10), (0, 0, 10, 3),
+        (0, 0, 3, 10), (5, 5, 5, 5), (10, 3, 0, 17), (20, 40, 22, 5),
+        (-5, -5, 5, 5), (0, 0, -8, -3),
+    ])
+    def test_matches_skimage_draw_line(self, r0, c0, r1, c1):
+        skdraw = pytest.importorskip("skimage.draw")
+        rr_sk, cc_sk = skdraw.line(r0, c0, r1, c1)
+        rr, cc = _bresenham_line(r0, c0, r1, c1)
+        np.testing.assert_array_equal(rr, rr_sk)
+        np.testing.assert_array_equal(cc, cc_sk)

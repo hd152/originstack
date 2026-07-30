@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -31,6 +31,33 @@ except Exception:
         return iterable
 
 REJECT_SUFFIX = '.rejected'
+
+
+def _prefetch_one(path: str) -> None:
+    """Read a file fully to warm the OS page cache; result is discarded."""
+    try:
+        with open(path, 'rb') as fh:
+            while fh.read(1 << 20):
+                pass
+    except OSError:
+        pass
+
+
+def _prefetch_files(lights: List[FrameInfo], pool: ThreadPoolExecutor) -> None:
+    """Fire-and-forget: warm the OS page cache for a folder's files ahead of
+    the CPU-bound ProcessPoolExecutor workers, so a slow or network drive's
+    read latency overlaps with scoring instead of stalling it. SER virtual
+    frames (``path::index``) share one real file -- dedupe so a folder of
+    many sub-frames doesn't re-read the same video repeatedly."""
+    from src.io_ser import is_ser_virtual_path, _split_vpath
+
+    seen = set()
+    for f in lights:
+        real = _split_vpath(f.path)[0] if is_ser_virtual_path(f.path) else f.path
+        if real in seen:
+            continue
+        seen.add(real)
+        pool.submit(_prefetch_one, real)
 
 
 def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
@@ -50,7 +77,7 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
             data = green_equalize(np.asarray(data), pattern=bayer)
-            rgb = debayer(np.asarray(data), pattern=bayer, method='bilinear')
+            rgb = debayer(np.asarray(data), pattern=bayer, method='malvar')
         else:
             rgb = data
         lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
@@ -108,11 +135,20 @@ def run_quality_sweep(root: str, args) -> int:
     n_renamed = 0
     csv_rows: List[str] = []
 
+    prefetch_workers = max(4, min(16, workers * 2))
     with ProcessPoolExecutor(max_workers=workers,
-                             initializer=_pin_worker_to_single_thread) as pool:
-        for dirpath, lights in folders:
+                             initializer=_pin_worker_to_single_thread) as pool, \
+         ThreadPoolExecutor(max_workers=prefetch_workers) as prefetch_pool:
+        if folders:
+            _prefetch_files(folders[0][1], prefetch_pool)
+
+        for idx, (dirpath, lights) in enumerate(folders):
             rel = os.path.relpath(dirpath, root)
             futs = {pool.submit(_score_one, f.path): f for f in lights}
+            # Overlap the next folder's disk I/O with this folder's CPU-bound
+            # scoring instead of waiting on it at the top of the next iteration.
+            if idx + 1 < len(folders):
+                _prefetch_files(folders[idx + 1][1], prefetch_pool)
             n_err = 0
             for fut in tqdm(as_completed(futs), total=len(lights),
                             desc=f"  {rel}", unit="frame",

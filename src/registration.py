@@ -2003,11 +2003,7 @@ def fetch_comet_ephemeris(designation: str, obs_times: List[str],
     Returns:
         List of (ra_deg, dec_deg) tuples per obs_time, or None on failure.
     """
-    try:
-        from astroquery.jplhorizons import Horizons
-    except ImportError:
-        safe_print("  [Comet] WARNING: astroquery not installed — ephemeris tracking disabled")
-        return None
+    from src import net_query
 
     try:
         # Parse observer location
@@ -2026,13 +2022,8 @@ def fetch_comet_ephemeris(designation: str, obs_times: List[str],
         results = []
         for t in obs_times:
             try:
-                obj = Horizons(id=designation, location=location,
-                               epochs={'start': t, 'stop': t, 'step': '1m'})
-                eph = obj.ephemerides()
-                if eph is not None and len(eph) > 0:
-                    results.append((float(eph['RA'][0]), float(eph['DEC'][0])))
-                else:
-                    results.append(None)
+                radec = net_query.horizons_ephemeris(designation, t, location=location)
+                results.append(radec)
             except Exception as _e:
                 _log.debug("Horizons query failed for %s at %s: %s", designation, t, _e)
                 results.append(None)

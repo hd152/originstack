@@ -21,28 +21,12 @@ except Exception:
     _native = None
     _HAS_NATIVE = False
 
-denoise_nl_means = None
-HAS_SKIMAGE_RESTORATION = False
-
 try:
     import bm3d as _bm3d_pkg
     HAS_BM3D_PKG = True
 except Exception:
     _bm3d_pkg = None  # type: ignore[assignment]
     HAS_BM3D_PKG = False
-
-
-def _ensure_skimage_restoration():
-    global denoise_nl_means, HAS_SKIMAGE_RESTORATION
-    if not HAS_SKIMAGE_RESTORATION:
-        try:
-            from skimage.restoration import denoise_nl_means as _dnlm
-            if callable(_dnlm):
-                denoise_nl_means = _dnlm
-                HAS_SKIMAGE_RESTORATION = True
-        except Exception:
-            pass
-    return HAS_SKIMAGE_RESTORATION
 
 try:
     from astropy.stats import sigma_clipped_stats
@@ -320,6 +304,86 @@ def _bilateral_filter_numpy(img: np.ndarray, sigma_color: float, sigma_space: fl
     return (acc / np.maximum(wsum[:, :, np.newaxis], 1e-12)).astype(np.float32)
 
 
+def _nlm_patch_distance(diff2_outer: np.ndarray, patch_size: int, H: int, W: int,
+                        m: int) -> np.ndarray:
+    """Sum of a per-pixel squared-difference map over a ``patch_size x
+    patch_size`` window, for every pixel of the central (H, W) region.
+
+    ``diff2_outer`` must already be the (H+2m, W+2m) map (m = patch_size//2)
+    so the box filter never needs its own boundary handling: any of
+    scipy's filter modes agree exactly once cropped back to the central
+    (H, W) region, since the crop removes precisely the filter_radius-wide
+    border where boundary mode would otherwise matter."""
+    boxed = ndimage.uniform_filter(diff2_outer, size=patch_size, mode='nearest')
+    return boxed[m:m + H, m:m + W] * (patch_size * patch_size)
+
+
+def _nlm_denoise_numpy(img: np.ndarray, h: float, patch_size: int,
+                       patch_distance: int) -> np.ndarray:
+    """Fast non-local means, jointly across channels -- Darbon et al.'s
+    box-filter acceleration of the Buades-Coll-Morel NL-means algorithm
+    (the same algorithm family skimage.restoration.denoise_nl_means's own
+    docstring cites for its fast_mode). This is a faithful reimplementation
+    of the *published* algorithm, not a bit-exact port of skimage's fast
+    path: that path is a compiled Cython kernel with no .pyx source shipped
+    in the installed package (only a compiled .pyd), so there was nothing
+    to port literally, unlike phase_correlate.py/wavelet.py where the
+    reference math is fully specified. Validated for equivalent denoising
+    *behaviour* against real skimage instead (comparable noise reduction,
+    edge preservation, and monotonic response to h) -- see
+    tests/test_denoising.py.
+
+    Patch distance is the mean squared per-pixel-per-channel difference
+    over a (patch_size x patch_size) window (via a box filter, computed
+    once per candidate shift rather than per pixel -- the source of the
+    "fast" complexity class: image.size * patch_distance**2). The exact
+    self-match (zero shift) is excluded from the main weighted sum and
+    re-added with weight = the max weight of every other candidate for
+    that pixel, the standard NL-means fix (Buades, Coll & Morel, IPOL
+    2011) for the degenerate case where the trivial self-distance-0 match
+    would otherwise always win outright (weight=1, the maximum possible)
+    and suppress denoising.
+    """
+    H, W, C = img.shape
+    m = patch_size // 2
+    d = int(patch_distance)
+    pad = d + m
+    img64 = img.astype(np.float64)
+    padded = np.pad(img64, ((pad, pad), (pad, pad), (0, 0)), mode='reflect')
+
+    base = pad - m
+    a_outer = padded[base:base + H + 2 * m, base:base + W + 2 * m, :]
+
+    patch_area = patch_size * patch_size
+    h2 = max(h, 1e-12) ** 2
+    norm = C * h2
+
+    acc = np.zeros((H, W, C), dtype=np.float64)
+    wsum = np.zeros((H, W), dtype=np.float64)
+    wmax = np.zeros((H, W), dtype=np.float64)
+
+    for dy in range(-d, d + 1):
+        for dx in range(-d, d + 1):
+            if dy == 0 and dx == 0:
+                continue
+            b_outer = padded[base + dy:base + dy + H + 2 * m,
+                             base + dx:base + dx + W + 2 * m, :]
+            diff2_outer = np.sum((a_outer - b_outer) ** 2, axis=-1)
+            dist = _nlm_patch_distance(diff2_outer, patch_size, H, W, m) / patch_area
+            w = np.exp(-dist / norm)
+            neighbor = padded[pad + dy:pad + dy + H, pad + dx:pad + dx + W, :]
+            acc += neighbor * w[:, :, np.newaxis]
+            wsum += w
+            np.maximum(wmax, w, out=wmax)
+
+    # Re-add the excluded self-match with the standard max-weight fix.
+    center = padded[pad:pad + H, pad:pad + W, :]
+    acc += center * wmax[:, :, np.newaxis]
+    wsum += wmax
+
+    return (acc / np.maximum(wsum[:, :, np.newaxis], 1e-12)).astype(np.float32)
+
+
 def nlm_denoise(img: np.ndarray, h: float = 1.0,
                 patch_size: int = 5, patch_distance: int = 7,
                 blend: float = 0.5) -> np.ndarray:
@@ -329,8 +393,8 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
     smooths large featureless sky and faint nebula regions while preserving
     sharp edges like galaxy arms and star-forming filaments.
 
-    Uses skimage.restoration.denoise_nl_means (operates on float, no quantisation
-    loss); skipped with a warning if skimage isn't installed.
+    Native/numpy fast NL-means (_nlm_denoise_numpy, no external dependency --
+    see its docstring for the algorithm and validation notes).
 
     h:               Filter strength multiplier relative to auto-estimated noise
                      sigma.  1.0 is conservative; 2-3 for heavy sky noise.
@@ -366,20 +430,13 @@ def nlm_denoise(img: np.ndarray, h: float = 1.0,
     blend = float(np.clip(blend, 0.0, 1.0))
     img_f64 = img.astype(np.float64)
 
-    _ensure_skimage_restoration()
-    if HAS_SKIMAGE_RESTORATION:
-        img_norm = img_ped.astype(np.float32) / ped_max
-        h_norm = h * sky_sigma / ped_max
-        denoised = denoise_nl_means(
-            img_norm, h=h_norm, fast_mode=True,
-            patch_size=patch_size, patch_distance=patch_distance,
-            channel_axis=-1)
-        nlm_result = denoised.astype(np.float64) * ped_max - pedestal
-        result = blend * nlm_result + (1.0 - blend) * img_f64
-        return result.astype(np.float32)
-
-    _log.warning("NLM denoising requires skimage.restoration; skipping")
-    return img
+    img_norm = img_ped.astype(np.float32) / ped_max
+    h_norm = h * sky_sigma / ped_max
+    denoised = _nlm_denoise_numpy(
+        img_norm, h=h_norm, patch_size=patch_size, patch_distance=patch_distance)
+    nlm_result = denoised.astype(np.float64) * ped_max - pedestal
+    result = blend * nlm_result + (1.0 - blend) * img_f64
+    return result.astype(np.float32)
 
 
 def _median_filter_fast(plane: np.ndarray, ksize: int) -> np.ndarray:

@@ -8,6 +8,7 @@ from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 from astropy.io import fits
+from astropy.stats import sigma_clipped_stats
 
 from src.models import FrameInfo, ProcessingStats
 from src.utils import safe_print
@@ -25,6 +26,16 @@ def _rescale_intensity(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     if hi <= lo:
         return np.zeros_like(x, dtype=np.float64)
     return np.clip((x.astype(np.float64) - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _sky_stats(lum: np.ndarray) -> Tuple[float, float]:
+    """Robust (median, sigma) of the sky background via 2.5-sigma /
+    3-iteration clipping -- shared by the ghs and arcsinh preview stretch
+    branches below."""
+    _, med, sigma = sigma_clipped_stats(lum, sigma=2.5, maxiters=3)
+    med = float(med)
+    sigma = float(sigma) if np.isfinite(sigma) and sigma > 0 else 1.0
+    return med, sigma
 
 
 def _read_fits_header(path: str) -> dict:
@@ -190,16 +201,7 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
         # per-channel sky statistics.
         out = np.zeros_like(rgb)
         lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
-        flat_lum = lum.ravel().astype(np.float64)
-        _med = float(np.median(flat_lum))
-        for _ in range(3):
-            _mad = float(np.median(np.abs(flat_lum - _med)))
-            _sig = 1.4826 * _mad
-            flat_lum = flat_lum[np.abs(flat_lum - _med) < 2.5 * _sig]
-            if len(flat_lum) < 100:
-                break
-            _med = float(np.median(flat_lum))
-        _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
+        _med, _bg_sigma = _sky_stats(lum)
         # Black point relative to the sky median in units of sky sigma.
         # black_sigma < 0 keeps sky noise visible (good for frame-filling faint
         # nebulae); black_sigma > 0 clips the noise floor to black (good for a
@@ -207,7 +209,16 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
         # point turns the whole background into a colour-noise storm). The
         # target-type advisor sets an appropriate value per preset.
         unified_black = _med + black_sigma * _bg_sigma
-        unified_white = float(np.percentile(lum, 99.9))
+        # 99.5th, not 99.9th: on a starry frame the top 0.1% of pixels is
+        # saturated-star cores, which pushes the white point far above any
+        # extended structure (nebulosity, galaxy arms). Since GHS's shadow
+        # boost operates on the *normalized* (black..white) range, a white
+        # point set that high buries genuine low-contrast diffuse signal
+        # deep in the heavily-compressed shadow region of the curve --
+        # visually indistinguishable from sky even though the pixel data
+        # is fine. 99.5 keeps stars comfortably white while giving diffuse
+        # signal several times more of the normalized range to live in.
+        unified_white = float(np.percentile(lum, 99.5))
         for c in range(3):
             out[:, :, c] = generalized_hyperbolic_stretch(
                 rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
@@ -217,18 +228,12 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
         # Arcsinh stretch — unified luminance-based normalization to preserve color
         out = np.zeros_like(rgb)
         lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
-        flat_lum = lum.ravel().astype(np.float64)
-        _med = float(np.median(flat_lum))
-        for _ in range(3):
-            _mad = float(np.median(np.abs(flat_lum - _med)))
-            _sig = 1.4826 * _mad
-            flat_lum = flat_lum[np.abs(flat_lum - _med) < 2.5 * _sig]
-            if len(flat_lum) < 100:
-                break
-            _med = float(np.median(flat_lum))
-        _bg_sigma = float(np.std(flat_lum)) if len(flat_lum) > 1 else 1.0
+        _med, _bg_sigma = _sky_stats(lum)
         unified_black = _med + black_sigma * _bg_sigma
-        unified_white = float(np.percentile(lum, 99.8))
+        # See the 'ghs' branch above for why 99.5 rather than a higher
+        # percentile: saturated-star pixels otherwise set a white point far
+        # above any extended structure, burying diffuse signal near-black.
+        unified_white = float(np.percentile(lum, 99.5))
         for c in range(3):
             out[:, :, c] = arcsinh_stretch(rgb[:, :, c],
                                            black_point=unified_black,
