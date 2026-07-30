@@ -19,7 +19,7 @@ from src.background import (apply_background_extraction, remove_sky_residual,
                             gaussian_filter_ds,
                             sky_floor_normalize, dynamic_background_extraction,
                             wavelet_background_extraction,
-                            _border_pixels, _sigma_sky)
+                            _border_pixels, _sigma_sky, _dbe_prepare_emission_mask)
 from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
                            bilateral_denoise, reduce_chroma_noise,
                            estimate_denoise_strength, reduce_stars,
@@ -480,8 +480,8 @@ def postprocess_stack(
         aniso_kappa = getattr(args, 'aniso_kappa', 30.0)
         aniso_gamma = getattr(args, 'aniso_gamma', 0.1)
         aniso_opt = getattr(args, 'aniso_option', 1)
-        print(f"\n  Applying anisotropic diffusion "
-              f"(iters={aniso_iters}, κ={aniso_kappa:.1f}, γ={aniso_gamma:.2f})...")
+        safe_print(f"\n  Applying anisotropic diffusion "
+                  f"(iters={aniso_iters}, κ={aniso_kappa:.1f}, γ={aniso_gamma:.2f})...")
         aniso_start = time.time()
         stacked = anisotropic_diffusion(stacked, iterations=aniso_iters,
                                         kappa=aniso_kappa, gamma=aniso_gamma,
@@ -711,13 +711,21 @@ def postprocess_stack(
     #   2. Equalise the per-channel floors to a common target (neutral grey).
     # Add-only final lift keeps every pixel non-negative (no new clipped holes).
     if args.background_extraction and 'sky_neutralize' not in skip_steps:
-        _lum_sn = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                   + 0.114 * stacked[:, :, 2])
-        # Sky mask: exclude bright objects and star cores from the model.
-        _obj_hi = float(np.percentile(_lum_sn, 80.0))
-        _skym = (_lum_sn < _obj_hi).astype(np.float32)
-        if pp_star_mask is not None:
-            _skym *= (1.0 - np.clip(pp_star_mask.astype(np.float32), 0.0, 1.0))
+        # Sky mask: exclude stars AND extended emission from the model, via
+        # the same emission-mask logic DBE uses (src/background.py) --
+        # not a fixed brightness percentile. A percentile-only mask (e.g.
+        # "anything below the 80th percentile is sky") misclassifies large,
+        # only-modestly-brighter-than-sky diffuse nebulosity as background
+        # once it covers much more than ~20% of the frame, and this step
+        # would then flatten the nebula's own glow away as if it were a
+        # gradient -- this being the *last* step in the chain, with nothing
+        # after it to restore what got subtracted. Reusing DBE's emission
+        # mask (already fixed for exactly this failure mode) keeps this
+        # step consistent with it instead of re-introducing the same bug
+        # through an independent, cruder mask.
+        _skym, _, _, _ = _dbe_prepare_emission_mask(
+            stacked, pp_star_mask, None, False, "Sky neutralize")
+        _skym = 1.0 - _skym
         _sig_sn = max(64.0, float(min(stacked.shape[:2])) / 8.0)
         _den = gaussian_filter_ds(_skym, sigma=_sig_sn)
         _gm = []

@@ -80,6 +80,8 @@ def safe_print(text: str):
         text = text.replace('–', '-')
         text = text.replace('—', '--')
         text = text.replace('σ', 'sigma')
+        text = text.replace('κ', 'kappa')
+        text = text.replace('γ', 'gamma')
         try:
             print(text)
         except UnicodeEncodeError:

@@ -21,6 +21,7 @@ import numpy as np
 from astropy.io import fits
 
 from src import net_query
+from src.utils import safe_print
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +307,7 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
 
             if wcs_header:
                 if verbose:
-                    print("  [Plate solving] ✓ Success! Adding WCS to header...")
+                    safe_print("  [Plate solving] ✓ Success! Adding WCS to header...")
 
                 # Copy WCS keywords to main header
                 wcs_keywords = ['CTYPE1', 'CTYPE2', 'CRVAL1', 'CRVAL2', 'CRPIX1', 'CRPIX2',
