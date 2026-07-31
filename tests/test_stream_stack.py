@@ -10,6 +10,7 @@ import pytest
 from src.stream_stack import (
     FrameRecord, survey, select_reference, fold, run_stream_stack, _HAS_SCIPY,
 )
+from src.pipeline import _MemmapManager
 
 pytestmark = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
 
@@ -78,26 +79,32 @@ def test_survey_applies_hard_limit_gate_only(tmp_path):
         starless_path, overwrite=True)
 
     args = _stream_args(tmp_path, tmp_path / 'out.fits')
-    records = survey(args, str(tmp_path), _masters())
+    with _MemmapManager() as mm:
+        records, rgb_cache = survey(args, str(tmp_path), _masters(), mm)
 
-    assert len(records) == 6
-    starless_rec = [r for r in records if r.path == starless_path][0]
-    assert starless_rec.accepted is False
-    assert starless_rec.metrics.get('star_count', 0) == 0
-    assert sum(1 for r in records if r.accepted) == 5
+        assert len(records) == 6
+        starless_rec = [r for r in records if r.path == starless_path][0]
+        assert starless_rec.accepted is False
+        assert starless_rec.metrics.get('star_count', 0) == 0
+        assert sum(1 for r in records if r.accepted) == 5
 
 
 def test_survey_discards_full_res_data(tmp_path):
     _write_star_frame(str(tmp_path / 'L0.fits'), seed=0)
     args = _stream_args(tmp_path, tmp_path / 'out.fits')
-    records = survey(args, str(tmp_path), _masters())
-    assert len(records) == 1
-    # FrameRecord has no pixel-array field at all -- discarding is structural,
-    # not just "happens to be None".
-    assert not hasattr(records[0], 'rgb')
-    assert not hasattr(records[0], 'lum')
-    assert isinstance(records[0].metrics, dict)
-    assert 'score' in records[0].metrics
+    with _MemmapManager() as mm:
+        records, rgb_cache = survey(args, str(tmp_path), _masters(), mm)
+        assert len(records) == 1
+        # FrameRecord has no pixel-array field at all -- discarding is
+        # structural, not just "happens to be None". The calibrated pixel
+        # data lives on disk (rgb_cache), addressed by cache_index.
+        assert not hasattr(records[0], 'rgb')
+        assert not hasattr(records[0], 'lum')
+        assert isinstance(records[0].metrics, dict)
+        assert 'score' in records[0].metrics
+        assert records[0].cache_index == 0
+        assert rgb_cache is not None
+        assert rgb_cache.shape[0] == 1
 
 
 def test_select_reference_picks_highest_score():
@@ -120,17 +127,19 @@ def test_fold_produces_registered_stack(tmp_path):
         _write_star_frame(str(tmp_path / f'L{i:04d}.fits'), shift=s, seed=i)
 
     args = _stream_args(tmp_path, tmp_path / 'out.fits')
-    records = survey(args, str(tmp_path), _masters())
-    reference = select_reference(records)
-    stacked, frame_infos, out_shifts, total_exp, n_rej = fold(
-        args, reference, records, _masters(), burn_in=3, sigma=3.0)
+    with _MemmapManager() as mm:
+        records, rgb_cache = survey(args, str(tmp_path), _masters(), mm)
+        reference = select_reference(records)
+        stacked, frame_infos, out_shifts, total_exp, n_rej = fold(
+            args, reference, records, _masters(), burn_in=3, sigma=3.0,
+            rgb_cache=rgb_cache)
 
-    assert len(frame_infos) == len(shifts)
-    assert total_exp == pytest.approx(len(shifts) * 30.0)
-    lum = 0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1] + 0.114 * stacked[:, :, 2]
-    # Registration coherence: aligned stars stay sharp (a mis-stack smears
-    # the peak toward the background level).
-    assert lum.max() > 1000.0 + 1500.0
+        assert len(frame_infos) == len(shifts)
+        assert total_exp == pytest.approx(len(shifts) * 30.0)
+        lum = 0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1] + 0.114 * stacked[:, :, 2]
+        # Registration coherence: aligned stars stay sharp (a mis-stack smears
+        # the peak toward the background level).
+        assert lum.max() > 1000.0 + 1500.0
 
 
 def test_fold_rejects_outlier_pixels(tmp_path):
@@ -146,17 +155,72 @@ def test_fold_rejects_outlier_pixels(tmp_path):
         _write_star_frame(str(tmp_path / f'L{i:04d}.fits'), seed=i, hit=hit)
 
     args = _stream_args(tmp_path, tmp_path / 'out.fits')
-    records = survey(args, str(tmp_path), _masters())
-    reference = select_reference(records)
-    stacked, frame_infos, shifts, total_exp, n_rej = fold(
-        args, reference, records, _masters(), burn_in=10, sigma=3.0)
+    with _MemmapManager() as mm:
+        records, rgb_cache = survey(args, str(tmp_path), _masters(), mm)
+        reference = select_reference(records)
+        stacked, frame_infos, shifts, total_exp, n_rej = fold(
+            args, reference, records, _masters(), burn_in=10, sigma=3.0,
+            rgb_cache=rgb_cache)
 
-    assert len(frame_infos) == n_frames
-    # Plain mean would show ~8000/14 ~= 571 ADU excess at the hit pixel over
-    # the ~1000 ADU background; sigma-clip should suppress almost all of it.
-    excess = float(stacked[hit_yx[0], hit_yx[1], 0]) - 1000.0
-    assert excess < 200.0
-    assert n_rej > 0
+        assert len(frame_infos) == n_frames
+        # Plain mean would show ~8000/14 ~= 571 ADU excess at the hit pixel
+        # over the ~1000 ADU background; sigma-clip should suppress almost
+        # all of it.
+        excess = float(stacked[hit_yx[0], hit_yx[1], 0]) - 1000.0
+        assert excess < 200.0
+        assert n_rej > 0
+
+
+def test_fold_uses_disk_cache_not_reload(tmp_path, monkeypatch):
+    """Once a frame's calibrated RGB is cached during survey, fold() must
+    not call _process_single_frame for it again -- the whole point of the
+    disk-cache middle ground (avoid re-load/re-calibrate/re-debayer)."""
+    for i in range(5):
+        _write_star_frame(str(tmp_path / f'L{i:04d}.fits'), seed=i)
+
+    args = _stream_args(tmp_path, tmp_path / 'out.fits')
+    with _MemmapManager() as mm:
+        records, rgb_cache = survey(args, str(tmp_path), _masters(), mm)
+        assert all(r.cache_index is not None for r in records)  # uniform shape -> all cached
+        reference = select_reference(records)
+
+        import src.frame_processor as fp_mod
+        original = fp_mod._process_single_frame
+        calls = []
+
+        def _counting(*a, **kw):
+            calls.append(a[0])
+            return original(*a, **kw)
+
+        monkeypatch.setattr(fp_mod, '_process_single_frame', _counting)
+
+        stacked, frame_infos, shifts, total_exp, n_rej = fold(
+            args, reference, records, _masters(), burn_in=3, sigma=3.0,
+            rgb_cache=rgb_cache)
+
+        assert len(calls) == 0  # fully served from cache, zero reloads
+        assert len(frame_infos) == 5
+
+
+def test_fold_falls_back_to_reload_without_cache(tmp_path):
+    """rgb_cache=None (or a record with cache_index=None) must still work
+    correctly -- the pre-caching fallback path stays intact."""
+    for i in range(5):
+        _write_star_frame(str(tmp_path / f'L{i:04d}.fits'), seed=i)
+
+    args = _stream_args(tmp_path, tmp_path / 'out.fits')
+    with _MemmapManager() as mm:
+        records, rgb_cache = survey(args, str(tmp_path), _masters(), mm)
+        reference = select_reference(records)
+        # Force every record to look uncached.
+        for r in records:
+            r.cache_index = None
+
+        stacked, frame_infos, shifts, total_exp, n_rej = fold(
+            args, reference, records, _masters(), burn_in=3, sigma=3.0,
+            rgb_cache=rgb_cache)
+
+        assert len(frame_infos) == 5
 
 
 def test_run_stream_stack_writes_fits_and_preview(tmp_path):

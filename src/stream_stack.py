@@ -4,15 +4,28 @@ Sibling to ``--live`` (src/live_stack.py) for an ALREADY-COMPLETE directory
 instead of watching a growing one. Two passes:
 
   Pass A (survey): load/calibrate/debayer/quality-analyze each frame once,
-    apply the hard-limit-only quality gate, then discard the full-resolution
-    pixel data -- only a lightweight FrameRecord (path, header, metrics
-    including the star catalog) is retained.
+    apply the hard-limit-only quality gate. The calibrated+debayered RGB
+    (post hot-pixel-removal -- the expensive part of a load) is written to
+    a disk-backed memmap (``_MemmapManager``, reused from src/pipeline.py)
+    instead of being discarded; only a lightweight FrameRecord (path,
+    header, metrics including the star catalog, and the frame's slot index
+    in that memmap) stays resident in RAM.
 
-  Pass B (fold): reload each accepted frame, register it against the fixed
-    reference, warp, and fold into a running Welford (mean, M2, n_acc)
-    accumulator via the online sigma-clip kernels
-    (``online_sigma_clip_seed_burnin`` / ``online_sigma_clip_fold_frame`` in
-    src/stacking.py).
+  Pass B (fold): for each accepted frame, read its calibrated RGB back from
+    the disk cache (no re-load/re-calibrate/re-debayer -- `lum` is cheaply
+    re-derived from the cached RGB) or, for the rare frame whose cache
+    write failed (shape mismatch, first-frame-before-cache-existed), fall
+    back to a full reload. Register against the fixed reference, warp, and
+    fold into a running Welford (mean, M2, n_acc) accumulator via the
+    online sigma-clip kernels (``online_sigma_clip_seed_burnin`` /
+    ``online_sigma_clip_fold_frame`` in src/stacking.py).
+
+This keeps RAM at O(1) in frame count (same as before) while avoiding the
+double load+calibrate+debayer cost a naive two-pass design would pay twice
+per frame -- at the cost of real disk space: the cache memmap is the same
+size class as the batch pipeline's own ``mem_rgb``/``mem_aligned``
+intermediates (one (N,H,W,C) float32 file). Not a RAM-vs-disk-free lunch,
+an explicit trade the batch pipeline already makes for its own memmaps.
 
 v1 scope (documented, not silently dropped):
   - Reference selection is argmax(quality score) -- the same fallback
@@ -23,11 +36,9 @@ v1 scope (documented, not silently dropped):
     -- both need population-wide stats this pass doesn't retain).
   - No ``--elastic-registration``, no drizzle, no patch-weighted-quality
     combine.
-  - Two full disk loads per accepted frame (survey + fold) -- an explicit
-    I/O-for-memory tradeoff.
   - Sequential, no prefetch-while-folding threading.
   - Burn-in window (default 10 frames) held fully in RAM -- bounded, not
-    O(N).
+    O(N) -- on top of the disk cache.
 """
 from __future__ import annotations
 
@@ -58,16 +69,28 @@ except Exception:
 @dataclass
 class FrameRecord:
     """Lightweight per-frame record retained after Pass A discards the
-    full-resolution pixel data."""
+    full-resolution pixel data from RAM (but see ``cache_index`` -- the
+    calibrated RGB itself lives on disk, not gone)."""
     path: str
     header: dict
     metrics: dict
     accepted: bool = True
+    cache_index: Optional[int] = None
 
 
-def survey(args, directory: str, masters: Dict) -> List[FrameRecord]:
+def survey(args, directory: str, masters: Dict, mem_mgr
+          ) -> Tuple[List[FrameRecord], Optional[np.memmap]]:
     """Pass A: load/calibrate/analyze every light frame once, apply the
-    hard-limit-only quality gate, retain only lightweight metadata."""
+    hard-limit-only quality gate, retain lightweight metadata plus a disk
+    cache of each frame's calibrated RGB (see module docstring).
+
+    ``mem_mgr``: a ``src.pipeline._MemmapManager`` the caller owns and
+    cleans up after Pass B is done with the cache (this function only
+    creates the memmap; it does not close/delete it).
+
+    Returns ``(records, rgb_cache)`` -- ``rgb_cache`` is ``None`` if no
+    frame loaded successfully (nothing to cache).
+    """
     from src.frame_discovery import discover_frames
     from src.frame_processor import _process_single_frame, quality_gate
 
@@ -77,9 +100,13 @@ def survey(args, directory: str, masters: Dict) -> List[FrameRecord]:
     verbose = getattr(args, 'verbose', False)
 
     light_infos: List[FrameInfo] = []
+    cache_indices: List[Optional[int]] = []  # parallel to light_infos, by position
+    rgb_cache: Optional[np.memmap] = None
+    cache_shape: Optional[Tuple[int, int, int]] = None
+
     t_start = time.time()
-    for fi in tqdm(lights, desc='  STREAM survey', unit='frame',
-                   disable=verbose or not lights):
+    for i, fi in enumerate(tqdm(lights, desc='  STREAM survey', unit='frame',
+                                disable=verbose or not lights)):
         t0 = time.time()
         try:
             res = _process_single_frame(
@@ -97,9 +124,22 @@ def survey(args, directory: str, masters: Dict) -> List[FrameRecord]:
         if res.get('error'):
             safe_print(f"  STREAM survey skip {os.path.basename(fi.path)}: {res['error']}")
             continue
+
+        rgb = np.asarray(res['rgb'], dtype=np.float32)
+        cache_idx: Optional[int] = None
+        if rgb_cache is None:
+            cache_shape = rgb.shape
+            rgb_cache = mem_mgr.create('stream_rgb_', 'float32', (len(lights),) + cache_shape)
+        if rgb.shape == cache_shape:
+            rgb_cache[i] = rgb
+            cache_idx = i
+        else:
+            safe_print(f"  STREAM survey: {os.path.basename(fi.path)} shape {rgb.shape} "
+                       f"!= session shape {cache_shape}; will reload in fold")
+
         light_infos.append(FrameInfo(path=fi.path, type='light', header=fi.header,
                                       accepted=True, metrics=res.get('metrics') or {}))
-        # res['rgb']/res['lum'] intentionally not retained past this point.
+        cache_indices.append(cache_idx)
         if verbose:
             m = light_infos[-1].metrics
             safe_print(f"    [{len(light_infos)}/{len(lights)}] {os.path.basename(fi.path)}: "
@@ -112,8 +152,10 @@ def survey(args, directory: str, masters: Dict) -> List[FrameRecord]:
     stats.total_frames = len(lights)
     quality_gate(light_infos, args, rejected_reasons, stats, stages=('hard_limit',))
 
-    return [FrameRecord(path=info.path, header=info.header, metrics=info.metrics,
-                        accepted=info.accepted) for info in light_infos]
+    records = [FrameRecord(path=info.path, header=info.header, metrics=info.metrics,
+                           accepted=info.accepted, cache_index=cidx)
+               for info, cidx in zip(light_infos, cache_indices)]
+    return records, rgb_cache
 
 
 def select_reference(records: List[FrameRecord]) -> FrameRecord:
@@ -193,10 +235,15 @@ def _coverage_mask(H: int, W: int, shift: Tuple[float, float],
 
 
 def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict,
-        burn_in: int = 10, sigma: float = 3.0
+        burn_in: int = 10, sigma: float = 3.0,
+        rgb_cache: Optional[np.memmap] = None
         ) -> Tuple[np.ndarray, List[FrameInfo], List[Tuple[float, float]], float, int]:
-    """Pass B: reload each accepted frame, register against ``reference``,
-    warp, and fold into a running Welford accumulator.
+    """Pass B: for each accepted frame, read its calibrated RGB back from
+    ``rgb_cache`` (Pass A's disk-backed memmap -- no re-load/re-calibrate/
+    re-debayer) via ``rec.cache_index``, or fall back to a full reload for
+    the rare frame that wasn't cached (shape mismatch during survey).
+    Register against ``reference``, warp, and fold into a running Welford
+    accumulator.
 
     Returns (linear_stack, frame_infos, shifts, total_exposure, n_rejected_pixels).
     """
@@ -218,7 +265,17 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
             pre_gradient_removal=getattr(args, 'pre_gradient_removal', False),
             trail_reject=getattr(args, 'trail_reject', False))
 
-    ref_res = _load(reference)
+    def _get_rgb_lum(rec: FrameRecord):
+        """Cache hit: read RGB back from disk, re-derive lum cheaply (no
+        re-calibration/re-debayer). Cache miss: full reload, same as before
+        caching existed."""
+        if rec.cache_index is not None and rgb_cache is not None:
+            rgb = np.array(rgb_cache[rec.cache_index], dtype=np.float32)
+            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+            return {'rgb': rgb, 'lum': lum, 'error': None}
+        return _load(rec)
+
+    ref_res = _get_rgb_lum(reference)
     if ref_res.get('error'):
         raise ValueError(f"reference frame failed to reload: {ref_res['error']}")
     ref_lum = np.asarray(ref_res['lum'], dtype=np.float32)
@@ -240,7 +297,7 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
         if rec.path == reference.path:
             res, sy, sx, tf, method = ref_res, 0.0, 0.0, None, 'reference'
         else:
-            res = _load(rec)
+            res = _get_rgb_lum(rec)
             if res.get('error'):
                 safe_print(f"  STREAM reject {os.path.basename(rec.path)}: {res['error']}")
                 continue
@@ -329,30 +386,35 @@ def run_stream_stack(args) -> int:
         return 1
 
     from src.live_stack import build_session_masters
+    from src.pipeline import _MemmapManager
     masters, _frames = build_session_masters(args, directory)
 
     t0 = time.time()
     safe_print(f"\n  STREAM: surveying {directory} ...")
-    records = survey(args, directory, masters)
-    n_total = len(records)
-    n_accepted = sum(1 for r in records if r.accepted)
-    safe_print(f"  STREAM survey: {n_accepted}/{n_total} frames accepted "
-               f"({format_time(time.time() - t0)})")
-    if n_accepted == 0:
-        safe_print("  ERROR: no frames survived the streaming quality gate")
-        return 1
+    with _MemmapManager() as mem_mgr:
+        records, rgb_cache = survey(args, directory, masters, mem_mgr)
+        n_total = len(records)
+        n_accepted = sum(1 for r in records if r.accepted)
+        safe_print(f"  STREAM survey: {n_accepted}/{n_total} frames accepted "
+                   f"({format_time(time.time() - t0)})")
+        if n_accepted == 0:
+            safe_print("  ERROR: no frames survived the streaming quality gate")
+            return 1
 
-    reference = select_reference(records)
-    safe_print(f"  STREAM reference: {os.path.basename(reference.path)} "
-               f"(score={reference.metrics.get('score', 0.0):.1f})")
+        reference = select_reference(records)
+        safe_print(f"  STREAM reference: {os.path.basename(reference.path)} "
+                   f"(score={reference.metrics.get('score', 0.0):.1f})")
 
-    burn_in = int(getattr(args, 'stream_burnin', 10) or 10)
-    sigma = float(getattr(args, 'stream_sigma', None) or getattr(args, 'rejection_sigma', None) or 3.0)
-    t1 = time.time()
-    stacked, frame_infos, shifts, total_exposure, n_rej = fold(
-        args, reference, records, masters, burn_in=burn_in, sigma=sigma)
-    safe_print(f"  STREAM fold: {len(frame_infos)} frames combined "
-               f"({format_time(time.time() - t1)}, peak {get_memory_usage_mb():.0f} MB)")
+        burn_in = int(getattr(args, 'stream_burnin', 10) or 10)
+        sigma = float(getattr(args, 'stream_sigma', None) or getattr(args, 'rejection_sigma', None) or 3.0)
+        t1 = time.time()
+        stacked, frame_infos, shifts, total_exposure, n_rej = fold(
+            args, reference, records, masters, burn_in=burn_in, sigma=sigma,
+            rgb_cache=rgb_cache)
+        safe_print(f"  STREAM fold: {len(frame_infos)} frames combined "
+                   f"({format_time(time.time() - t1)}, peak {get_memory_usage_mb():.0f} MB)")
+        # mem_mgr.cleanup() (via __exit__) removes the disk cache here --
+        # everything past this point works from `stacked` (in RAM) only.
 
     stats = ProcessingStats()
     stats.total_frames = n_total
