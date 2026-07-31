@@ -412,6 +412,129 @@ fn sigma_clip_combine<'py>(
     Ok(out_arr.into_pyarray(py))
 }
 
+/// Per-pixel online sigma-clip: a MAD-rejected burn-in window (first `k =
+/// min(burn_in, n)` samples) seeds a running (mean, M2) Welford state; each
+/// remaining sample is tested against that running estimate before being
+/// folded in. Exact port of tools/prototype_online_sigma_clip.py's
+/// `online_sigma_clip_combine` per-pixel math (same clamp/update formulas),
+/// done in f64 to match numpy's float64 accumulation. Returns (combined,
+/// rejected_sample_count).
+#[inline]
+fn online_sigma_clip_pixel(
+    vals: &[f32],
+    sigma: f32,
+    burn_in: usize,
+    scratch: &mut Vec<f32>,
+) -> (f32, usize) {
+    let n = vals.len();
+    let k = burn_in.min(n).max(1);
+    let burn = &vals[..k];
+    let sigma = sigma as f64;
+
+    scratch.clear();
+    scratch.extend_from_slice(burn);
+    let med = median_inplace(scratch) as f64;
+    scratch.clear();
+    scratch.extend(burn.iter().map(|&x| (x as f64 - med).abs() as f32));
+    let mad = median_inplace(scratch) as f64;
+    let robust_sigma = (1.4826 * mad).max(1e-6);
+    let thresh0 = sigma * robust_sigma;
+
+    let mut accepted_in_burn = 0usize;
+    let mut sum_acc = 0f64;
+    for &x in burn {
+        if (x as f64 - med).abs() <= thresh0 {
+            accepted_in_burn += 1;
+            sum_acc += x as f64;
+        }
+    }
+    // n_acc is clamped to >=1 and carried forward as persistent state (not
+    // just at the point of division) -- matches the numpy reference, where
+    // an all-rejected burn-in window still yields a defined (phantom-count)
+    // running estimate rather than a divide-by-zero.
+    let mut n_acc = (accepted_in_burn as f64).max(1.0);
+    let mut running_mean = sum_acc / n_acc;
+    let mut m2 = 0f64;
+    for &x in burn {
+        if (x as f64 - med).abs() <= thresh0 {
+            let d = x as f64 - running_mean;
+            m2 += d * d;
+        }
+    }
+
+    let mut n_rejected = k - accepted_in_burn;
+
+    for &v in &vals[k..] {
+        let x = v as f64;
+        let var_est = m2 / n_acc;
+        let std_est = var_est.max(1e-12).sqrt();
+        if (x - running_mean).abs() <= sigma * std_est {
+            let n_acc_new = n_acc + 1.0;
+            let delta = x - running_mean;
+            let new_mean = running_mean + delta / n_acc_new;
+            let delta2 = x - new_mean;
+            m2 += delta * delta2;
+            running_mean = new_mean;
+            n_acc = n_acc_new;
+        } else {
+            n_rejected += 1;
+        }
+    }
+
+    (running_mean as f32, n_rejected)
+}
+
+/// Online (single-pass) sigma-clip combine of an `(N,H,W,C)` float32 stack --
+/// native port of `tools/prototype_online_sigma_clip.py`'s
+/// `online_sigma_clip_combine`, for throughput comparison against the batch
+/// `sigma_clip_combine` above and the pure-Python prototype. Still takes the
+/// whole `(N,H,W,C)` array (reuses the same gather-transpose row-parallel
+/// driver as the batch kernels), so this measures compute cost only -- it
+/// does not exercise the frame-at-a-time streaming I/O the prototype is
+/// actually being evaluated for. Exploratory (see tools/prototype_*.py
+/// precedent); not called from the production stacking path.
+///
+/// Returns `(combined, n_rejected, n_total)` where `n_rejected` is a
+/// pixel-*sample* count (summed over all pixels and frames) and `n_total`
+/// is the frame count -- matching the prototype's return convention.
+#[pyfunction]
+#[pyo3(signature = (data, sigma=3.0, burn_in=10))]
+fn online_sigma_clip_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    sigma: f32,
+    burn_in: usize,
+) -> PyResult<(Bound<'py, PyArray3<f32>>, usize, usize)> {
+    let arr = data.as_array();
+    let shape = arr.shape();
+    let (n, h, w, c) = (shape[0], shape[1], shape[2], shape[3]);
+    let n_rejected = std::sync::atomic::AtomicUsize::new(0);
+
+    let out = py.allow_threads(|| {
+        row_parallel(
+            &arr,
+            h,
+            w,
+            c,
+            n,
+            || Vec::<f32>::with_capacity(n),
+            |scratch, vals| {
+                let (combined, rejected) = online_sigma_clip_pixel(vals, sigma, burn_in, scratch);
+                n_rejected.fetch_add(rejected, std::sync::atomic::Ordering::Relaxed);
+                combined
+            },
+        )
+    });
+
+    let out_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), out)
+        .expect("shape mismatch building output");
+    Ok((
+        out_arr.into_pyarray(py),
+        n_rejected.load(std::sync::atomic::Ordering::Relaxed),
+        n,
+    ))
+}
+
 /// Median combine of an `(N,H,W,C)` float32 stack (even N averages the two
 /// middle values, matching `np.median`).
 #[pyfunction]
@@ -2643,6 +2766,7 @@ fn bilateral_filter<'py>(
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(online_sigma_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine, m)?)?;
     m.add_function(wrap_pyfunction!(median_combine, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
