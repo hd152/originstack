@@ -43,6 +43,65 @@ _PATTERN_OFFSETS: dict[str, tuple[tuple[int, int], ...]] = {
     'GBRG': ((1, 0), (0, 0), (1, 1), (0, 1)),  # R G1 G2 B (shifted)
 }
 
+# Each pattern's row-flipped counterpart: swapping which sensor row is "row 0"
+# turns RGGB<->GBRG and BGGR<->GRBG (green moves from the anti-diagonal to the
+# main diagonal or back -- a column flip or 180 deg rotation would not do this,
+# only a single-axis row flip). See autodetect_bayer_orientation below.
+_ROW_FLIP_ALTERNATE: dict[str, str] = {
+    'RGGB': 'GBRG', 'GBRG': 'RGGB', 'BGGR': 'GRBG', 'GRBG': 'BGGR',
+}
+
+
+def autodetect_bayer_orientation(raw, pattern: str, imbalance_threshold: float = 1.2) -> str:
+    """Sanity-check a declared Bayer pattern against the actual raw mosaic and
+    correct for a single-axis row-orientation mismatch some capture software
+    gets wrong (observed on Celestron Origin FITS: BAYERPAT declares a pattern
+    whose green positions don't match the row order the pixel data was
+    actually written in).
+
+    A genuine G1/G2 sub-pixel sensitivity mismatch -- what green_equalize
+    corrects for -- is capped there at +-20% (`imbalance_threshold`'s default
+    matches that same boundary). Real correctly-labeled data measured well
+    inside it (Rosette Nebula/RGGB: ~0.4%); the real mislabeled case this
+    guards against (Trifid Nebula/Celestron Origin, declared GBRG) measured
+    ~25% on the declared pattern, dropping to ~0.4% on the row-flipped
+    alternate -- so the declared pattern's G1/G2 ratio exceeding this bound
+    is a reliable, non-arbitrary tell that green is actually on the OTHER
+    diagonal, not a sensor characteristic. Returns `pattern` unchanged when
+    the declared pattern already looks correct (the normal case) or the
+    requested pattern isn't a plain 4-letter CFA name.
+    """
+    pattern = pattern.upper()
+    offsets = _PATTERN_OFFSETS.get(pattern)
+    alt = _ROW_FLIP_ALTERNATE.get(pattern)
+    if offsets is None or alt is None:
+        return pattern
+    try:
+        import cupy as _cp
+        xp = _cp.get_array_module(raw)
+    except Exception:
+        xp = np
+    (_, _), (g1_r, g1_c), (g2_r, g2_c), (_, _) = offsets
+    g1 = raw[g1_r::2, g1_c::2]
+    g2 = raw[g2_r::2, g2_c::2]
+    if xp is np:
+        m1 = _sigma_clipped_median(g1, xp=xp)
+        m2 = _sigma_clipped_median(g2, xp=xp)
+    else:
+        m1 = float(xp.median(g1))
+        m2 = float(xp.median(g2))
+    if min(m1, m2) < 1e-6:
+        return pattern
+    ratio = max(m1, m2) / min(m1, m2)
+    if ratio > imbalance_threshold:
+        _log.warning(
+            "Bayer pattern %s: G1/G2 medians differ %.2fx (>%.1fx sensor-noise "
+            "range) -- using row-flipped %s instead; the declared BAYERPAT "
+            "likely doesn't match this file's row orientation",
+            pattern, ratio, imbalance_threshold, alt)
+        return alt
+    return pattern
+
 
 def _sigma_clipped_median(arr, sigma: float = 3.0, iters: int = 3, xp=np) -> float:
     x = arr.ravel()

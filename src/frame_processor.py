@@ -21,7 +21,8 @@ from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
                          remove_hot_pixels_rgb, remove_hot_pixels_rgb_with_lum,
                          white_balance_grayworld, white_balance_whitepatch,
                          correct_chromatic_aberration,
-                         measure_chromatic_aberration, apply_chromatic_aberration)
+                         measure_chromatic_aberration, apply_chromatic_aberration,
+                         autodetect_bayer_orientation)
 from src.quality import validate_image_data, compute_quality_metrics
 from src.stacking import lacosmic_reject
 
@@ -286,6 +287,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     try:
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', session_bayer or 'RGGB'))
+            bayer = autodetect_bayer_orientation(data, bayer)
             data = green_equalize(data, pattern=bayer)
             # Malvar/VNG run on native/numpy, not cupy — transfer D→H if data is on GPU
             if debayer_method != 'bilinear' and hasattr(data, 'get'):
@@ -626,6 +628,7 @@ def _measure_session_ca(frames: List[FrameInfo], args) -> Optional[dict]:
             return None
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', _sb or 'RGGB'))
+            bayer = autodetect_bayer_orientation(np.asarray(data), bayer)
             data = green_equalize(np.asarray(data), pattern=bayer)
             rgb = debayer(np.asarray(data), pattern=bayer, method='bilinear')
         else:
