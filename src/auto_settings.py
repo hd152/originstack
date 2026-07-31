@@ -199,8 +199,14 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
         ('local_contrast_strength', 0.75),
-        ('ghs_b',                   7.0),
-        ('ghs_sp',                  0.18),
+        # Toned down from (7.0, 0.18): a real Trifid Nebula render at the old
+        # values looked oversaturated/punchy (deep magenta emission region,
+        # not hard-clipped -- only ~0.4% of nebula pixels hit 255 -- just a
+        # much more vivid curve than the source data needs). (5.0, 0.10)
+        # verified side-by-side on the same stack: visibly softer/more
+        # natural color, nebula structure and star field equally clear.
+        ('ghs_b',                   5.0),
+        ('ghs_sp',                  0.10),
         # Emission nebula fills the frame — keep the black point below the sky
         # so faint outer nebulosity is not clipped to black.
         ('preview_black_sigma',    -0.5),
