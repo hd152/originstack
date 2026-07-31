@@ -183,7 +183,16 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'emission_nebula': [
         ('masked_correlation',      True),
         ('pre_gradient_removal',    True),
-        ('deconvolve',              True),
+        # Deconvolution OFF by default. Same RL-ringing problem documented
+        # for galaxy/globular_cluster below, confirmed on a real Trifid
+        # Nebula session: unregularized RL with a blind-PSF estimate rings
+        # every star and most nebula edges (iteration count gets pushed
+        # well past this list's default 20 by the FWHM-based bump in
+        # _apply_quality_settings on soft-seeing data, making it worse).
+        # Star-core blending only protects the tight core, not the
+        # extended ring radius. Re-enable with --deconvolve for
+        # well-sampled data / a target that tolerates the tradeoff.
+        ('deconvolve',              False),
         ('deconvolve_iterations',   20),
         # Empirical PSF captures asymmetric shapes from atmospheric turbulence
         # better than a parametric Gaussian/Moffat for filamentary nebulae.
@@ -313,7 +322,10 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'reflection_nebula': [
         ('masked_correlation',      True),
         ('pre_gradient_removal',    True),
-        ('deconvolve',              True),
+        # Deconvolution OFF by default -- see emission_nebula above (same
+        # RL-ringing issue, confirmed on a real Trifid Nebula session,
+        # which has a strong reflection component).
+        ('deconvolve',              False),
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
