@@ -107,6 +107,57 @@ def test_survey_discards_full_res_data(tmp_path):
         assert rgb_cache.shape[0] == 1
 
 
+def test_auto_advisor_noop_when_auto_not_set(tmp_path, monkeypatch):
+    """--auto not passed: must not touch args at all (existing behavior)."""
+    from src.stream_stack import _run_auto_advisor_for_stream
+    import src.auto_settings as auto_mod
+
+    calls = []
+    monkeypatch.setattr(auto_mod, 'apply_auto_settings',
+                        lambda *a, **kw: calls.append((a, kw)) or
+                        ('unknown', 'Unknown', {}, []))
+
+    _write_star_frame(str(tmp_path / 'L0.fits'), seed=0)
+    args = _stream_args(tmp_path, tmp_path / 'out.fits')
+    args.auto = False
+    with _MemmapManager() as mm:
+        records, _ = survey(args, str(tmp_path), _masters(), mm)
+    _run_auto_advisor_for_stream(records, args, str(tmp_path))
+    assert calls == []
+
+
+def test_auto_advisor_applies_settings_when_auto_set(tmp_path, monkeypatch):
+    """--auto passed: apply_auto_settings must be invoked with the accepted
+    frames' metrics, and its returned changes must land on args (proven via
+    a stub that flips a real args attribute, avoiding a dependency on the
+    real pixel-signal classifier's behavior on tiny synthetic data)."""
+    from src.stream_stack import _run_auto_advisor_for_stream
+    import src.auto_settings as auto_mod
+
+    def _stub(final, args, prior_type=None, prior_confidence=0.0):
+        assert len(final) >= 1
+        assert final[0].metrics is not None
+        args.deconvolve = False
+        args.ghs_b = 42.0
+        return 'emission_nebula', 'Emission Nebula', {'n_frames': len(final)}, [
+            'deconvolve  True -> False', 'ghs_b  8.0 -> 42.0']
+
+    monkeypatch.setattr(auto_mod, 'apply_auto_settings', _stub)
+
+    for i in range(3):
+        _write_star_frame(str(tmp_path / f'L{i:04d}.fits'), seed=i)
+    args = _stream_args(tmp_path, tmp_path / 'out.fits')
+    args.auto = True
+    args.deconvolve = True
+    args.ghs_b = 8.0
+    with _MemmapManager() as mm:
+        records, _ = survey(args, str(tmp_path), _masters(), mm)
+    _run_auto_advisor_for_stream(records, args, str(tmp_path))
+
+    assert args.deconvolve is False
+    assert args.ghs_b == 42.0
+
+
 def test_select_reference_picks_highest_score():
     good = FrameRecord(path='good.fits', header={}, metrics={'score': 90.0}, accepted=True)
     bad = FrameRecord(path='bad.fits', header={}, metrics={'score': 10.0}, accepted=True)

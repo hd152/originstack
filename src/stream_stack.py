@@ -158,6 +158,38 @@ def survey(args, directory: str, masters: Dict, mem_mgr
     return records, rgb_cache
 
 
+def _run_auto_advisor_for_stream(records: List[FrameRecord], args, directory: str) -> None:
+    """--auto support for --stream: classify the target from the accepted
+    frames' metadata/metrics and apply the same heuristic presets
+    (deconvolve, denoise, SCNR, photometric calibration, etc.) the batch
+    pipeline's _run_auto_advisor applies -- reusing that exact function
+    rather than reimplementing it, so a preset change (like disabling
+    deconvolve by default for nebula targets) only needs to happen once.
+
+    Mirrors pipeline.py's normal-path call: must run BEFORE fold() since
+    the presets affect registration (masked_correlation,
+    pre_gradient_removal) as well as Phase 4 post-processing. No-ops if
+    --auto wasn't passed (checked inside _run_auto_advisor itself).
+    """
+    if not getattr(args, 'auto', False):
+        return
+    from src.pipeline import _run_auto_advisor
+    from src.target_inference import infer_target_from_metadata
+
+    accepted = [r for r in records if r.accepted]
+    final = [FrameInfo(path=r.path, type='light', header=r.header,
+                       accepted=True, metrics=r.metrics) for r in accepted]
+
+    session_info = getattr(args, '_session_info', None)
+    name, target_type, confidence, source = infer_target_from_metadata(
+        directory, final, use_simbad=True,
+        session_name=session_info.object_name if session_info else None)
+    if name and target_type and target_type != 'unknown':
+        safe_print(f"\n  Target: {name} [{target_type.replace('_', ' ').title()}]  "
+                   f"conf={confidence:.0%}  source={source}")
+    _run_auto_advisor(final, args, prior_type=target_type, prior_confidence=confidence)
+
+
 def select_reference(records: List[FrameRecord]) -> FrameRecord:
     """v1: argmax(quality score) -- the same fallback
     ``--no-alignment-centrality`` uses in the batch pipeline. Full
@@ -400,6 +432,8 @@ def run_stream_stack(args) -> int:
         if n_accepted == 0:
             safe_print("  ERROR: no frames survived the streaming quality gate")
             return 1
+
+        _run_auto_advisor_for_stream(records, args, directory)
 
         reference = select_reference(records)
         safe_print(f"  STREAM reference: {os.path.basename(reference.path)} "
