@@ -126,7 +126,9 @@ def _register_frame_to_reference(ref_lum: np.ndarray, ref_stars, img_lum: np.nda
     starts at the seed-free blind match -- see registration.py's own
     handling of a None seed.
 
-    Returns (shift_y, shift_x, transform_or_None).
+    Returns (shift_y, shift_x, transform_or_None, method) where ``method`` is
+    one of 'blind_match', 'blind_match+seed', 'pyramid_fft' -- which tier of
+    the cascade actually produced the result (for -v per-frame logging).
     """
     from src.registration import (
         match_stars_affine, _blind_match_transform, calculate_shift, HAS_SKIMAGE_TRANSFORM,
@@ -136,6 +138,7 @@ def _register_frame_to_reference(ref_lum: np.ndarray, ref_stars, img_lum: np.nda
                   and ref_stars is not None and img_stars is not None)
     if use_affine:
         affine_tf = _blind_match_transform(ref_stars, img_stars)
+        method = 'blind_match'
         if affine_tf is None:
             sy, sx = calculate_shift(
                 ref_lum, img_lum, verbose=False,
@@ -143,20 +146,21 @@ def _register_frame_to_reference(ref_lum: np.ndarray, ref_stars, img_lum: np.nda
                 masked_correlation=getattr(args, 'masked_correlation', False),
                 corr_downsample=2)
             affine_tf = match_stars_affine(ref_stars, img_stars, initial_shift=(sy, sx))
+            method = 'blind_match+seed'
         if affine_tf is not None:
             tf_tx, tf_ty = affine_tf.params[0, 2], affine_tf.params[1, 2]
             tf_rot_deg = abs(np.degrees(np.arctan2(
                 affine_tf.params[1, 0], affine_tf.params[0, 0])))
             if not (abs(tf_tx) > 0.1 * W or abs(tf_ty) > 0.1 * H
                     or tf_rot_deg > Config.AFFINE_MAX_ROTATION_DEG):
-                return tf_ty, tf_tx, affine_tf
+                return tf_ty, tf_tx, affine_tf, method
             # Unrealistic affine fit -- fall through to translation-only.
 
     sy, sx = calculate_shift(
         ref_lum, img_lum, verbose=getattr(args, 'verbose', False),
         skip_phase_cc=getattr(args, 'skip_phase_correlation', False),
         masked_correlation=getattr(args, 'masked_correlation', False))
-    return sy, sx, None
+    return sy, sx, None, 'pyramid_fft'
 
 
 def _coverage_mask(H: int, W: int, shift: Tuple[float, float],
@@ -214,10 +218,11 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
     burn_covs: List[np.ndarray] = []
     mean = m2 = n_acc = None
 
+    verbose = getattr(args, 'verbose', False)
     t_start = time.time()
     for i, rec in enumerate(accepted):
         if rec.path == reference.path:
-            res, sy, sx, tf = ref_res, 0.0, 0.0, None
+            res, sy, sx, tf, method = ref_res, 0.0, 0.0, None, 'reference'
         else:
             res = _load(rec)
             if res.get('error'):
@@ -229,7 +234,7 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
                            f"{lum.shape} != reference {(H, W)}")
                 continue
             img_stars = rec.metrics.get('_star_sources')
-            sy, sx, tf = _register_frame_to_reference(
+            sy, sx, tf, method = _register_frame_to_reference(
                 ref_lum, ref_stars, lum, img_stars, H, W, args)
             if not (np.isfinite(sy) and np.isfinite(sx)) or abs(sy) > 0.3 * H or abs(sx) > 0.3 * W:
                 safe_print(f"  STREAM reject {os.path.basename(rec.path)}: bad shift "
@@ -248,6 +253,13 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
         except (TypeError, ValueError):
             pass
 
+        if verbose:
+            cov_pct = 100.0 * float(cov.mean())
+            safe_print(f"    [{len(shifts)}/{len(accepted)}] {os.path.basename(rec.path)}: "
+                       f"method={method} shift=({sx:+.2f}, {sy:+.2f})px "
+                       f"transform={'affine' if tf is not None else 'translation'} "
+                       f"coverage={cov_pct:.1f}%")
+
         if mean is None:
             burn_frames.append(aligned)
             burn_covs.append(cov)
@@ -259,12 +271,15 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
                 burn_stack, cov_stack, sigma=sigma)
             n_rejected_pixels += n_rej
             burn_frames, burn_covs = [], []  # free -- state now lives in mean/m2/n_acc
-            safe_print(f"  STREAM burn-in seeded from {len(shifts)} frames")
+            safe_print(f"  STREAM burn-in seeded from {len(shifts)} frames "
+                       f"({n_rej} pixel-samples rejected)")
             continue
 
         mean, m2, n_acc, n_rej = online_sigma_clip_fold_frame(
             mean, m2, n_acc, aligned, cov, sigma=sigma)
         n_rejected_pixels += n_rej
+        if verbose:
+            safe_print(f"    -> folded, {n_rej} pixel-samples rejected this frame")
         if (i + 1) % 5 == 0 or i == len(accepted) - 1:
             safe_print(f"  STREAM folded {len(shifts)}/{len(accepted)} "
                        f"({format_time(time.time() - t_start)}, "
