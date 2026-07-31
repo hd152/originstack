@@ -856,9 +856,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         except Exception as e:
             safe_print(f"  WARNING: colour calibration failed: {e}")
 
-    # TIFF export
-    if getattr(args, 'output_tiff', False):
-        _save_tiff(stacked, output_path)
+    # TIFF export (always written alongside FITS+JPG; --export tiff is now a no-op kept
+    # for backward compatibility with existing scripts/configs)
+    _save_tiff(stacked, output_path)
 
     # XISF export
     if getattr(args, 'output_xisf', False):
