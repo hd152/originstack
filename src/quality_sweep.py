@@ -68,7 +68,7 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
     """
     try:
         from src.io_fits import load_frame
-        from src.debayer import debayer, green_equalize
+        from src.debayer import debayer, green_equalize, autodetect_bayer_orientation
         from src.quality import compute_quality_metrics
 
         data, hdr = load_frame(path)
@@ -76,6 +76,7 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
             return path, None, 'empty data array'
         if data.ndim == 2:
             bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
+            bayer = autodetect_bayer_orientation(np.asarray(data), bayer)
             data = green_equalize(np.asarray(data), pattern=bayer)
             rgb = debayer(np.asarray(data), pattern=bayer, method='malvar')
         else:
