@@ -426,6 +426,7 @@ def run_stream_stack(args) -> int:
 
     from src.postprocess import postprocess_stack
     from src.io_fits import populate_fits_header, save_preview_rgb
+    from src.pipeline import _save_tiff
     from astropy.io import fits
 
     fits_stacked = stacked.copy()
@@ -446,6 +447,8 @@ def run_stream_stack(args) -> int:
     hdu.header['STREAMED'] = (True, 'Produced by --stream (frame-at-a-time)')
     hdu.writeto(output_path, overwrite=True)
 
+    _save_tiff(processed, output_path)
+
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     save_preview_rgb(processed, preview_path, stretch=getattr(args, 'stretch', 'ghs'),
                      ghs_b=float(getattr(args, 'ghs_b', 8.0)),
@@ -456,5 +459,6 @@ def run_stream_stack(args) -> int:
     safe_print(f"\n  STREAM complete: {len(frame_infos)}/{n_total} frames, "
               f"{n_rej} pixel-samples rejected, total {format_time(time.time() - t0)}")
     safe_print(f"  Output: {output_path}")
+    safe_print(f"  TIFF: {os.path.splitext(output_path)[0] + '.tiff'}")
     safe_print(f"  Preview: {preview_path}")
     return 0

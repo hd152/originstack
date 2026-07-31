@@ -237,6 +237,9 @@ def test_run_stream_stack_writes_fits_and_preview(tmp_path):
     jpg_path = out_path.with_suffix('.jpg')
     assert jpg_path.exists()
 
+    tiff_path = out_path.with_suffix('.tiff')
+    assert tiff_path.exists()
+
     from astropy.io import fits
     with fits.open(str(out_path)) as hdul:
         hdr = hdul[0].header
