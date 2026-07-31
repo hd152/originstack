@@ -195,8 +195,20 @@ def _run_auto_advisor(final: List[FrameInfo], args,
 
 
 def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
-    """Save (H, W, 3) float32 image as TIFF alongside the FITS output."""
+    """Save (H, W, 3) float32 image as TIFF alongside the FITS output.
+
+    Normalized to [0, 1] by the frame's own peak before writing (a pure
+    scale factor -- stays linear, no stretch). 32-bit float TIFF
+    conventionally holds display-range values, which the Pillow fallback
+    below already assumed (`np.clip(..., 0, 1)`) -- but the primary
+    tifffile path never actually normalized, writing raw linear ADU
+    counts (thousands) straight through. With ~99.9% of pixels above 1.0,
+    most readers either clip the whole image to solid white or refuse to
+    render it sensibly.
+    """
     tiff_path = os.path.splitext(output_path)[0] + '.tiff'
+    peak = float(np.nanmax(stacked)) if stacked.size else 0.0
+    normalized = stacked / peak if peak > 1e-6 else stacked
     try:
         import tifffile
         # Planar (3, H, W) byte layout -- must be tagged 'separate', not
@@ -204,13 +216,13 @@ def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
         # isn't; a reader that trusts the tag over the bytes -- which is
         # the point of the tag -- decodes garbage or refuses the file
         # outright ("More samples per pixel than can be decoded")).
-        data = np.ascontiguousarray(np.transpose(stacked.astype(np.float32), (2, 0, 1)))
+        data = np.ascontiguousarray(np.transpose(normalized.astype(np.float32), (2, 0, 1)))
         tifffile.imwrite(tiff_path, data, photometric='rgb', planarconfig='separate',
                          imagej=False)
     except ImportError:
         try:
             from PIL import Image
-            arr16 = (np.clip(stacked, 0, 1) * 65535).astype(np.uint16)
+            arr16 = (np.clip(normalized, 0, 1) * 65535).astype(np.uint16)
             Image.fromarray(arr16).save(tiff_path)
             safe_print("  NOTE: tifffile not installed; saved 16-bit TIFF via Pillow")
         except Exception as e:
