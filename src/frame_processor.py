@@ -1321,6 +1321,7 @@ def quality_gate(
     rejected_reasons: dict,
     stats: ProcessingStats,
     outlier_sigma: float = 2.5,
+    stages: Tuple[str, ...] = ('hard_limit', 'statistical', 'percentile'),
 ) -> List[FrameInfo]:
     """Apply hard-limit, statistical-outlier, and percentile quality filters.
 
@@ -1329,6 +1330,12 @@ def quality_gate(
     ``outlier_sigma`` controls the statistical-outlier stage's z-score cutoff
     (default 2.5, matching the main stacking pipeline); callers that want a
     more sensitive sweep-only pass can tighten it.
+    ``stages`` selects which of the three filters run (default: all three,
+    matching every existing caller's behavior unchanged). The statistical and
+    percentile stages need population-wide stats (mean/std or percentile of
+    quality scores across all accepted frames) and so can't run on a partial
+    frame set — a streaming caller that only has hard-limit-safe per-frame
+    data available passes ``stages=('hard_limit',)``.
     Returns the list of accepted FrameInfo objects.
     """
     n = len(lights)
@@ -1337,6 +1344,9 @@ def quality_gate(
     accepted = []
     for f in lights:
         if not f.accepted or not f.metrics or 'score' not in f.metrics:
+            continue
+        if 'hard_limit' not in stages:
+            accepted.append(f)
             continue
         m = f.metrics
         reject_reason = None
@@ -1366,7 +1376,7 @@ def quality_gate(
             accepted.append(f)
 
     # Statistical outlier detection
-    if len(accepted) > 3:
+    if 'statistical' in stages and len(accepted) > 3:
         snrs      = np.array([f.metrics['snr']         for f in accepted])
         star_cnts = np.array([f.metrics['star_count']  for f in accepted])
         contrasts = np.array([f.metrics['contrast']    for f in accepted])
@@ -1409,7 +1419,7 @@ def quality_gate(
     # would set an unreachable threshold if we used the raw maximum.  The 90th
     # percentile is much more robust while still reflecting the top tier of the
     # session.
-    if args.quality_filter and accepted:
+    if 'percentile' in stages and args.quality_filter and accepted:
         valid = [f for f in accepted if f.accepted]
         if valid:
             scores = np.array([f.metrics['score'] for f in valid])

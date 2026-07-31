@@ -138,6 +138,8 @@ from src.stacking import (
     _lanczos_resample_frame,
     _sigma_clip_tile,
     sigma_clip_combine,
+    online_sigma_clip_seed_burnin,
+    online_sigma_clip_fold_frame,
     median_combine,
     percentile_clip_combine,
     trimmed_mean_combine,
