@@ -199,9 +199,13 @@ def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
     tiff_path = os.path.splitext(output_path)[0] + '.tiff'
     try:
         import tifffile
-        # Planar (3, H, W) is the most widely compatible layout for 32-bit float
+        # Planar (3, H, W) byte layout -- must be tagged 'separate', not
+        # 'contig' ('contig' asserts interleaved/chunky RGB, which this
+        # isn't; a reader that trusts the tag over the bytes -- which is
+        # the point of the tag -- decodes garbage or refuses the file
+        # outright ("More samples per pixel than can be decoded")).
         data = np.ascontiguousarray(np.transpose(stacked.astype(np.float32), (2, 0, 1)))
-        tifffile.imwrite(tiff_path, data, photometric='rgb', planarconfig='contig',
+        tifffile.imwrite(tiff_path, data, photometric='rgb', planarconfig='separate',
                          imagej=False)
     except ImportError:
         try:
