@@ -42,6 +42,12 @@ from src.utils import safe_print, format_time, get_memory_usage_mb
 from src.models import Config, FrameInfo, ProcessingStats
 
 try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(iterable, **kwargs):
+        return iterable
+
+try:
     from scipy import ndimage as _ndi
     _HAS_SCIPY = True
 except Exception:
@@ -68,9 +74,13 @@ def survey(args, directory: str, masters: Dict) -> List[FrameRecord]:
     frames = discover_frames(directory)
     lights = frames.get('light', [])
     sb = getattr(args, '_session_bayer', None)
+    verbose = getattr(args, 'verbose', False)
 
     light_infos: List[FrameInfo] = []
-    for fi in lights:
+    t_start = time.time()
+    for fi in tqdm(lights, desc='  STREAM survey', unit='frame',
+                   disable=verbose or not lights):
+        t0 = time.time()
         try:
             res = _process_single_frame(
                 fi.path, fi.header, masters,
@@ -90,6 +100,12 @@ def survey(args, directory: str, masters: Dict) -> List[FrameRecord]:
         light_infos.append(FrameInfo(path=fi.path, type='light', header=fi.header,
                                       accepted=True, metrics=res.get('metrics') or {}))
         # res['rgb']/res['lum'] intentionally not retained past this point.
+        if verbose:
+            m = light_infos[-1].metrics
+            safe_print(f"    [{len(light_infos)}/{len(lights)}] {os.path.basename(fi.path)}: "
+                       f"score={m.get('score', 0.0):.1f} stars={m.get('star_count', 0)} "
+                       f"snr={m.get('snr', 0.0):.2f} ({time.time() - t0:.1f}s, "
+                       f"total {format_time(time.time() - t_start)})")
 
     rejected_reasons: dict = {}
     stats = ProcessingStats()
