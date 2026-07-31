@@ -419,8 +419,15 @@ def _rl_deconvolve_xp(image, psf, iterations, xp, xsignal):
     psf_mirror = psf[::-1, ::-1]
     for _ in range(int(iterations)):
         conv = xsignal.fftconvolve(im_deconv, psf, mode='same')
+        # FFT convolution of nonnegative inputs can still ring to ~0 (or
+        # slightly negative) at float32 precision; an unguarded division
+        # here blows one such pixel up to Inf/NaN, which fftconvolve's
+        # global support then spreads to the entire frame on the very next
+        # iteration. Floor the denominator instead of dividing raw.
+        conv = xp.clip(conv, 1e-6, None)
         relative_blur = image / conv
         im_deconv = im_deconv * xsignal.fftconvolve(relative_blur, psf_mirror, mode='same')
+        im_deconv = xp.clip(im_deconv, 0.0, None)
     return im_deconv
 
 
