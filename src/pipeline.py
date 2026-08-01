@@ -888,6 +888,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)))
 
+    if getattr(args, 'annotate', False):
+        if _wcs_available:
+            try:
+                from src.annotation import run_annotation
+                run_annotation(stacked, hdu.header, output_path, args)
+            except Exception as e:
+                safe_print(f"  WARNING: annotation failed: {e}")
+        else:
+            safe_print("  Annotate: no WCS available (needs --plate-solve or a "
+                       "session solve) -- skipping")
+
     crop_str = (f"(cropped {stats.cropped_pixels[0]}x{stats.cropped_pixels[1]} pixels)"
                 if stats.cropped_pixels else "(crop info not available)")
     print(f"  Output size: {out_h}x{out_w} {crop_str}")

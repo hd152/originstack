@@ -1027,6 +1027,16 @@ def parse_args():
                    help='Use CuPy for available operations (experimental)')
     g_out.add_argument('--plate-solve', action='store_true',
                    help='Enable plate solving via astrometry.net (requires ASTROMETRY_API_KEY)')
+    g_out.add_argument('--annotate', action='store_true',
+                   help='Circle and label bright stars and named deep-sky objects '
+                        '(galaxies, nebulae, clusters) on a copy of the preview, via live '
+                        'SIMBAD queries. Needs a WCS solution (--plate-solve, or a session '
+                        'info.json that already has one) -- skipped with a message '
+                        'otherwise. Writes <output>_annotated.jpg; the main FITS/TIFF/JPG '
+                        'are untouched.')
+    g_out.add_argument('--annotate-mag-limit', type=float, default=9.0, metavar='MAG',
+                   help='--annotate: only label stars brighter than this V magnitude '
+                        '(default: 9.0; lower = fewer, brighter-only stars)')
     g_post.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
