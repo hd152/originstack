@@ -659,8 +659,17 @@ def online_sigma_clip_seed_burnin(burn_stack: np.ndarray, coverage: np.ndarray,
     thresh0 = sigma * robust_sigma
     accept = valid & (np.abs(burn_arr - med) <= thresh0)
 
-    n_acc = np.maximum(accept.sum(axis=0).astype(np.float64), 1.0)
-    running_mean = np.where(accept, burn_arr, 0.0).sum(axis=0) / n_acc
+    # A pixel with zero accepted samples (no burn-in frame covered it — large
+    # or drifting dithers can leave 100+ px borders uncovered) is left
+    # unseeded (n_acc=0 sentinel) rather than clamped to a phantom
+    # (mean=0, n_acc=1) state: `online_sigma_clip_fold_frame` special-cases
+    # n_acc<=0 to initialize directly from the first real covered sample
+    # instead of accept-testing it against a fabricated near-zero-variance
+    # estimate (which would reject every real sample forever).
+    accept_count = accept.sum(axis=0).astype(np.float64)
+    n_acc = np.where(accept_count > 0, accept_count, 0.0)
+    divisor = np.maximum(n_acc, 1.0)
+    running_mean = np.where(accept, burn_arr, 0.0).sum(axis=0) / divisor
     m2 = np.where(accept, (burn_arr - running_mean) ** 2, 0.0).sum(axis=0)
     n_rejected = int(np.size(accept) - accept.sum())
     return running_mean, m2, n_acc, n_rejected
@@ -668,8 +677,7 @@ def online_sigma_clip_seed_burnin(burn_stack: np.ndarray, coverage: np.ndarray,
 
 def online_sigma_clip_fold_frame(mean: np.ndarray, m2: np.ndarray, n_acc: np.ndarray,
                                   frame: np.ndarray, coverage: np.ndarray,
-                                  sigma: float = 3.0
-                                  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+                                  sigma: float = 3.0) -> int:
     """Fold ONE new frame into a running Welford (mean, M2, n_acc) state.
 
     Elementwise accept-test + update — no N-samples-per-pixel gather, unlike
@@ -680,36 +688,55 @@ def online_sigma_clip_fold_frame(mean: np.ndarray, m2: np.ndarray, n_acc: np.nda
     fill from within the frame pass through unchanged — not a sample, not a
     rejection either.
 
-    Returns fresh ``(mean, m2, n_acc)`` arrays plus the rejected-pixel count
-    for this frame (among covered pixels only).
+    Mutates ``mean``/``m2``/``n_acc`` IN PLACE and returns just the
+    rejected-pixel count for this frame (among covered pixels only) — a
+    ``--stream`` session calls this once per accepted frame, and at full
+    sensor resolution allocating+copying three fresh (H,W,C) float64 arrays
+    every time (the previous alloc-and-return contract) was ~1.7GB of
+    allocator churn per frame, most of it a pure copy-through of pixels
+    the frame doesn't even cover. Caller must not hold another reference to
+    ``mean``/``m2``/``n_acc`` expecting the pre-call value.
     """
     if (HAS_NATIVE and mean.ndim == 3 and frame.ndim == 3 and coverage.ndim == 2
-            and mean.dtype == np.float64 and frame.dtype == np.float32):
+            and mean.dtype == np.float64 and m2.dtype == np.float64
+            and n_acc.dtype == np.float64 and frame.dtype == np.float32
+            and mean.flags['C_CONTIGUOUS'] and m2.flags['C_CONTIGUOUS']
+            and n_acc.flags['C_CONTIGUOUS']):
         try:
-            new_mean, new_m2, new_n_acc, n_rej = _native.online_sigma_clip_fold_frame(
-                np.ascontiguousarray(mean), np.ascontiguousarray(m2),
-                np.ascontiguousarray(n_acc), np.ascontiguousarray(frame, dtype=np.float32),
+            n_rej = _native.online_sigma_clip_fold_frame(
+                mean, m2, n_acc, np.ascontiguousarray(frame, dtype=np.float32),
                 np.ascontiguousarray(coverage, dtype=np.float32), float(sigma))
-            return np.asarray(new_mean), np.asarray(new_m2), np.asarray(new_n_acc), int(n_rej)
+            return int(n_rej)
         except Exception as exc:
             _log.debug("native online_sigma_clip_fold_frame failed (%s); using numpy", exc)
 
     x = frame.astype(np.float64)
+    covered = (coverage >= 0.5)[:, :, None]
+    # n_acc<=0 marks a pixel the burn-in window never covered (see
+    # `online_sigma_clip_seed_burnin`); its first real covered sample seeds
+    # the state directly instead of being accept-tested against a fabricated
+    # zero-variance estimate, which would reject it (and every sample after
+    # it) forever.
+    unseeded = (n_acc <= 0.0) & covered
+
     var_est = m2 / np.maximum(n_acc, 1.0)
     std_est = np.sqrt(np.maximum(var_est, 1e-12))
-    covered = (coverage >= 0.5)[:, :, None]
-    accept = (np.abs(x - mean) <= sigma * std_est) & covered
+    accept = covered & (unseeded | (np.abs(x - mean) <= sigma * std_est))
 
-    n_acc_new = n_acc + accept
+    n_acc_new = np.where(unseeded, 1.0, n_acc + accept)
     delta = x - mean
     inv_n = 1.0 / np.maximum(n_acc_new, 1.0)
-    new_mean = np.where(accept, mean + delta * inv_n, mean)
+    new_mean = np.where(unseeded, x, np.where(accept, mean + delta * inv_n, mean))
     delta2 = x - new_mean
-    new_m2 = np.where(accept, m2 + delta * delta2, m2)
+    new_m2 = np.where(unseeded, 0.0, np.where(accept, m2 + delta * delta2, m2))
 
     covered_count = int(np.broadcast_to(covered, mean.shape).sum())
     n_rejected = covered_count - int(accept.sum())
-    return new_mean, new_m2, n_acc_new, n_rejected
+
+    mean[...] = new_mean
+    m2[...] = new_m2
+    n_acc[...] = n_acc_new
+    return n_rejected
 
 
 def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:

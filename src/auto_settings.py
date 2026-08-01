@@ -357,7 +357,7 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('aniso_iterations',        15),
     ],
     'star_field': [
-        # deconvolve is conditional — set in _apply_target_settings
+        # deconvolve is conditional — set in _apply_dynamic_settings
         ('star_reduce',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),

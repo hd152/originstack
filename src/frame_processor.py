@@ -286,8 +286,14 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # Debayer
     try:
         if data.ndim == 2:
-            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', session_bayer or 'RGGB'))
-            bayer = autodetect_bayer_orientation(data, bayer)
+            if session_bayer:
+                # Orientation already resolved once for the whole session
+                # (see pipeline.py's probe step) -- trust it instead of
+                # re-running detection per frame.
+                bayer = session_bayer
+            else:
+                bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
+                bayer = autodetect_bayer_orientation(data, bayer)
             data = green_equalize(data, pattern=bayer)
             # Malvar/VNG run on native/numpy, not cupy — transfer D→H if data is on GPU
             if debayer_method != 'bilinear' and hasattr(data, 'get'):
@@ -627,8 +633,11 @@ def _measure_session_ca(frames: List[FrameInfo], args) -> Optional[dict]:
         if data is None or data.size == 0:
             return None
         if data.ndim == 2:
-            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', _sb or 'RGGB'))
-            bayer = autodetect_bayer_orientation(np.asarray(data), bayer)
+            if _sb:
+                bayer = _sb
+            else:
+                bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
+                bayer = autodetect_bayer_orientation(np.asarray(data), bayer)
             data = green_equalize(np.asarray(data), pattern=bayer)
             rgb = debayer(np.asarray(data), pattern=bayer, method='bilinear')
         else:

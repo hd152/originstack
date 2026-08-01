@@ -285,10 +285,23 @@ def build_session_masters(args, directory: str) -> Tuple[Dict, Dict]:
     from src.frame_processor import _build_flat_norm
     _build_flat_norm(masters, frames.get('light', []))
 
-    # Session Bayer pattern from the first light header (headerless -> default).
+    # Session Bayer pattern from the first light header (headerless -> default),
+    # resolved once (row-orientation autodetect on the first frame's actual
+    # pixel data) so every subsequent frame trusts this single decision
+    # instead of each re-running detection independently.
     lights = frames.get('light', [])
     if lights and getattr(args, '_session_bayer', None) is None:
-        args._session_bayer = lights[0].header.get('BAYERPAT') or lights[0].header.get('COLORTYP')
+        _sb = lights[0].header.get('BAYERPAT') or lights[0].header.get('COLORTYP')
+        if _sb and getattr(args, 'bayer_autodetect', True):
+            try:
+                from src.io_fits import load_frame
+                from src.debayer import autodetect_bayer_orientation
+                _probe_data, _ = load_frame(lights[0].path)
+                if _probe_data is not None and _probe_data.ndim == 2:
+                    _sb = autodetect_bayer_orientation(_probe_data, _sb)
+            except Exception:
+                pass
+        args._session_bayer = _sb
 
     return masters, frames
 

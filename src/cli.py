@@ -886,9 +886,9 @@ def parse_args():
                         "limitations vs the default pipeline: reference frame is picked "
                         "by quality score alone (no shift-centrality blend), hard-limit "
                         "quality gating only (no statistical/percentile stages), no "
-                        "--elastic-registration, no drizzle, no patch-weighted combine. "
-                        "Incompatible with --live (one watches a growing directory "
-                        "forever, the other expects a closed one).")
+                        "--elastic-registration, no drizzle, no patch-weighted combine, "
+                        "no --merge. Incompatible with --live (one watches a growing "
+                        "directory forever, the other expects a closed one).")
     g_core.add_argument('--stream-burnin', type=int, default=10, metavar='N',
                    help='--stream: number of frames MAD-rejected as a batch to seed the '
                         'running sigma-clip state before streaming begins (default: 10).')
@@ -1021,6 +1021,14 @@ def parse_args():
     g_frames.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
                    help='Debayering method (default: bilinear; malvar/vng require OpenCV)')
     g_frames.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
+    g_frames.add_argument('--no-bayer-autodetect', dest='bayer_autodetect', action='store_false',
+                   default=True,
+                   help='Disable Bayer row-orientation autodetection (see autodetect_bayer_orientation '
+                        'in src/debayer.py): some capture software writes a BAYERPAT header that '
+                        'does not match the actual row orientation of the pixel data, and by default '
+                        'the session\'s reference frame is checked once and corrected if the G1/G2 '
+                        'green sub-pixel imbalance exceeds the sensor-noise range. Disable if this '
+                        'heuristic misfires on a legitimately imbalanced sensor/target.')
     g_stack.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
     g_core.add_argument('--use-gpu', action='store_true',
@@ -1428,6 +1436,12 @@ def main():
         safe_print("  ERROR: --live and --stream are mutually exclusive "
                    "(--live watches a growing directory forever; --stream "
                    "expects an already-complete one)")
+        raise SystemExit(1)
+
+    if getattr(args, 'stream', False) and getattr(args, 'merge', None):
+        safe_print("  ERROR: --stream does not support --merge "
+                   "(the streaming two-pass stacker has no cross-session combine "
+                   "step yet; run a normal stack with --merge instead)")
         raise SystemExit(1)
 
     # Real-time (live) stacking: watch the directory and stack subs as they land.

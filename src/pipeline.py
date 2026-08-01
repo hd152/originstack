@@ -15,7 +15,7 @@ import numpy as np
 from src.models import FrameInfo, ProcessingStats
 from src.utils import safe_print, print_phase, format_time, get_memory_usage_mb
 from src.io_fits import load_fits, load_frame, save_preview_rgb, populate_fits_header
-from src.debayer import debayer
+from src.debayer import debayer, autodetect_bayer_orientation
 from src.plate_solve import solve_plate
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
 from src.registration import run_registration_phase, select_reference_frame
@@ -364,6 +364,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if first_data.ndim == 2:
         _probe_bayer = first_hdr.get('BAYERPAT',
                                      first_hdr.get('COLORTYP', args._session_bayer or 'RGGB'))
+        # Resolve the Bayer row-orientation once for the whole session (on the
+        # reference/first frame) rather than re-running detection on every
+        # frame -- avoids per-frame noise flipping the decision inconsistently
+        # within one session. All per-frame debayer call sites use this
+        # resolved args._session_bayer directly instead of re-detecting.
+        if getattr(args, 'bayer_autodetect', True):
+            _probe_bayer = autodetect_bayer_orientation(first_data, _probe_bayer)
+        args._session_bayer = _probe_bayer
         first_rgb = debayer(first_data, pattern=_probe_bayer, method=args.debayer_method)
         H_rgb, W_rgb, C = first_rgb.shape
     else:
@@ -879,9 +887,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         except Exception as e:
             safe_print(f"  WARNING: colour calibration failed: {e}")
 
-    # TIFF export (always written alongside FITS+JPG; --export tiff is now a no-op kept
-    # for backward compatibility with existing scripts/configs)
-    _save_tiff(stacked, output_path)
+    # TIFF export
+    if getattr(args, 'output_tiff', False):
+        _save_tiff(stacked, output_path)
 
     # XISF export
     if getattr(args, 'output_xisf', False):

@@ -526,7 +526,11 @@ def test_online_sigma_clip_seed_burnin_matches_numpy():
 def test_online_sigma_clip_fold_frame_matches_numpy():
     """Seed via burn-in, then fold several frames one at a time; native and
     numpy must agree at EVERY step, not just the final one, to catch
-    accumulation-order bugs."""
+    accumulation-order bugs.
+
+    Both kernels mutate mean/m2/n_acc IN PLACE (returning only the rejected
+    count), so each side needs its own contiguous float64 copy of the seeded
+    state to mutate across the loop."""
     d = _stack(n=20, seed=22)
     burn, rest = d[:10], d[10:]
     burn_cov = _full_coverage(burn)
@@ -534,13 +538,18 @@ def test_online_sigma_clip_fold_frame_matches_numpy():
     mean_r, m2_r, nacc_r, _ = native.online_sigma_clip_seed_burnin(burn, burn_cov, 3.0)
     np.testing.assert_allclose(mean_r, mean_n, atol=1e-6)
 
+    mean_n = np.ascontiguousarray(mean_n, dtype=np.float64)
+    m2_n = np.ascontiguousarray(m2_n, dtype=np.float64)
+    nacc_n = np.ascontiguousarray(nacc_n, dtype=np.float64)
+    mean_r = np.ascontiguousarray(mean_r, dtype=np.float64)
+    m2_r = np.ascontiguousarray(m2_r, dtype=np.float64)
+    nacc_r = np.ascontiguousarray(nacc_r, dtype=np.float64)
+
     H, W, C = d.shape[1:]
     coverage = np.ones((H, W), dtype=np.float32)
     for frame in rest:
-        mean_n, m2_n, nacc_n, rej_n = _numpy_fold_frame(
-            mean_n, m2_n, nacc_n, frame, coverage, sigma=3.0)
-        mean_r, m2_r, nacc_r, rej_r = native.online_sigma_clip_fold_frame(
-            mean_r, m2_r, nacc_r, frame, coverage, 3.0)
+        rej_n = _numpy_fold_frame(mean_n, m2_n, nacc_n, frame, coverage, sigma=3.0)
+        rej_r = native.online_sigma_clip_fold_frame(mean_r, m2_r, nacc_r, frame, coverage, 3.0)
         np.testing.assert_allclose(mean_r, mean_n, atol=1e-6)
         np.testing.assert_allclose(m2_r, m2_n, atol=1e-3)
         np.testing.assert_allclose(nacc_r, nacc_n, atol=1e-9)
@@ -580,23 +589,29 @@ def test_online_sigma_clip_seed_burnin_excludes_uncovered_samples():
 
 def test_online_sigma_clip_fold_frame_respects_coverage():
     """A frame with a coverage mask False over part of the image must leave
-    the running state untouched in the uncovered region."""
+    the running state untouched in the uncovered region.
+
+    fold_frame mutates mean/m2/n_acc in place, so the pre-call state is
+    snapshotted first to compare against."""
     d = _stack(n=12, seed=23)
     burn, frame = d[:10], d[10]
     mean, m2, n_acc, _ = native.online_sigma_clip_seed_burnin(burn, _full_coverage(burn), 3.0)
+    mean = np.ascontiguousarray(mean, dtype=np.float64)
+    m2 = np.ascontiguousarray(m2, dtype=np.float64)
+    n_acc = np.ascontiguousarray(n_acc, dtype=np.float64)
+    orig_mean, orig_m2, orig_nacc = mean.copy(), m2.copy(), n_acc.copy()
 
     H, W, C = d.shape[1:]
     coverage = np.ones((H, W), dtype=np.float32)
     coverage[:, : W // 2] = 0.0  # left half not covered by this frame's shift
 
-    new_mean, new_m2, new_nacc, n_rej = native.online_sigma_clip_fold_frame(
-        mean, m2, n_acc, frame, coverage, 3.0)
+    n_rej = native.online_sigma_clip_fold_frame(mean, m2, n_acc, frame, coverage, 3.0)
 
-    np.testing.assert_array_equal(new_mean[:, : W // 2], mean[:, : W // 2])
-    np.testing.assert_array_equal(new_m2[:, : W // 2], m2[:, : W // 2])
-    np.testing.assert_array_equal(new_nacc[:, : W // 2], n_acc[:, : W // 2])
+    np.testing.assert_array_equal(mean[:, : W // 2], orig_mean[:, : W // 2])
+    np.testing.assert_array_equal(m2[:, : W // 2], orig_m2[:, : W // 2])
+    np.testing.assert_array_equal(n_acc[:, : W // 2], orig_nacc[:, : W // 2])
     # Right half (covered) should generally change.
-    assert not np.array_equal(new_mean[:, W // 2:], mean[:, W // 2:])
+    assert not np.array_equal(mean[:, W // 2:], orig_mean[:, W // 2:])
     assert n_rej <= (H * (W - W // 2) * C)
 
 
@@ -614,11 +629,13 @@ def test_online_sigma_clip_streaming_matches_whole_array_kernel():
 
     mean, m2, n_acc, n_rej_split = native.online_sigma_clip_seed_burnin(
         d[:burn_in], _full_coverage(d[:burn_in]), 3.0)
+    mean = np.ascontiguousarray(mean, dtype=np.float64)
+    m2 = np.ascontiguousarray(m2, dtype=np.float64)
+    n_acc = np.ascontiguousarray(n_acc, dtype=np.float64)
     H, W, C = d.shape[1:]
     coverage = np.ones((H, W), dtype=np.float32)
     for frame in d[burn_in:]:
-        mean, m2, n_acc, rej = native.online_sigma_clip_fold_frame(
-            mean, m2, n_acc, frame, coverage, 3.0)
+        rej = native.online_sigma_clip_fold_frame(mean, m2, n_acc, frame, coverage, 3.0)
         n_rej_split += rej
 
     assert n_tot_whole == d.shape[0]

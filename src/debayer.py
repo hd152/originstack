@@ -9,7 +9,7 @@ from scipy import ndimage
 
 from src.gpu_context import get_gpu
 from src.models import Config
-from src.utils import get_logger
+from src.utils import get_logger, safe_print
 
 _log = get_logger()
 
@@ -94,11 +94,12 @@ def autodetect_bayer_orientation(raw, pattern: str, imbalance_threshold: float =
         return pattern
     ratio = max(m1, m2) / min(m1, m2)
     if ratio > imbalance_threshold:
-        _log.warning(
-            "Bayer pattern %s: G1/G2 medians differ %.2fx (>%.1fx sensor-noise "
-            "range) -- using row-flipped %s instead; the declared BAYERPAT "
-            "likely doesn't match this file's row orientation",
-            pattern, ratio, imbalance_threshold, alt)
+        msg = (f"Bayer pattern {pattern}: G1/G2 medians differ {ratio:.2f}x "
+               f"(>{imbalance_threshold:.1f}x sensor-noise range) -- using "
+               f"row-flipped {alt} instead; the declared BAYERPAT likely "
+               f"doesn't match this file's row orientation")
+        _log.warning(msg)
+        safe_print(f"  NOTE: {msg}")
         return alt
     return pattern
 

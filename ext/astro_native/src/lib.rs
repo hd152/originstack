@@ -8,7 +8,7 @@
 
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
-    PyReadonlyArray3, PyReadonlyArray4,
+    PyReadonlyArray3, PyReadonlyArray4, PyReadwriteArray3,
 };
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -429,7 +429,12 @@ fn sigma_clip_combine<'py>(
 /// since a burn-in window mixes several frames' warps at once. If every
 /// sample at a pixel is invalid (never happens for the whole-array kernel,
 /// which always passes all-true), there's no defined signal yet: return the
-/// same phantom (mean=0, n_acc=1) convention as an all-rejected window.
+/// same `n_acc=0` sentinel `fold_pixel` uses for "never seeded" -- NOT a
+/// phantom `(mean=0, n_acc=1)` state, which would make the first real sample
+/// to arrive fail the accept-test against a fabricated near-zero-variance
+/// estimate and get rejected forever (the pixel would stay frozen at 0 for
+/// the rest of the stream). `fold_pixel` special-cases `n_acc<=0` to
+/// initialize directly from that first real sample instead.
 #[inline]
 fn burnin_seed_pixel(
     burn: &[f32],
@@ -445,7 +450,7 @@ fn burnin_seed_pixel(
         }
     }
     if scratch.is_empty() {
-        return (0.0, 0.0, 1.0, k);
+        return (0.0, 0.0, 0.0, k);
     }
     let med = median_inplace(scratch) as f64;
     scratch.clear();
@@ -487,8 +492,17 @@ fn burnin_seed_pixel(
 /// updated state, `true`) or leave the state unchanged (returns it as-is,
 /// `false`). Shared by `online_sigma_clip_pixel` and
 /// `online_sigma_clip_fold_frame`.
+///
+/// `n_acc<=0` is the "unseeded" sentinel `burnin_seed_pixel` returns for a
+/// pixel no burn-in frame covered (large/drifting dithers can leave 100+ px
+/// borders uncovered). Running the accept-test against that fabricated state
+/// would reject the first real sample forever; instead initialize directly
+/// from it.
 #[inline]
 fn fold_pixel(mean: f64, m2: f64, n_acc: f64, x: f64, sigma: f64) -> (f64, f64, f64, bool) {
+    if n_acc <= 0.0 {
+        return (x, 0.0, 1.0, true);
+    }
     let var_est = m2 / n_acc;
     let std_est = var_est.max(1e-12).sqrt();
     if (x - mean).abs() <= sigma * std_est {
@@ -506,10 +520,8 @@ fn fold_pixel(mean: f64, m2: f64, n_acc: f64, x: f64, sigma: f64) -> (f64, f64, 
 /// Per-pixel online sigma-clip: a MAD-rejected burn-in window (first `k =
 /// min(burn_in, n)` samples) seeds a running (mean, M2) Welford state; each
 /// remaining sample is tested against that running estimate before being
-/// folded in. Exact port of tools/prototype_online_sigma_clip.py's
-/// `online_sigma_clip_combine` per-pixel math (same clamp/update formulas),
-/// done in f64 to match numpy's float64 accumulation. Returns (combined,
-/// rejected_sample_count).
+/// folded in, done in f64 to match numpy's float64 accumulation. Returns
+/// (combined, rejected_sample_count).
 #[inline]
 fn online_sigma_clip_pixel(
     vals: &[f32],
@@ -538,19 +550,18 @@ fn online_sigma_clip_pixel(
     (mean as f32, n_rejected)
 }
 
-/// Online (single-pass) sigma-clip combine of an `(N,H,W,C)` float32 stack --
-/// native port of `tools/prototype_online_sigma_clip.py`'s
-/// `online_sigma_clip_combine`, for throughput comparison against the batch
-/// `sigma_clip_combine` above and the pure-Python prototype. Still takes the
-/// whole `(N,H,W,C)` array (reuses the same gather-transpose row-parallel
-/// driver as the batch kernels), so this measures compute cost only -- it
-/// does not exercise the frame-at-a-time streaming I/O the prototype is
-/// actually being evaluated for. Exploratory (see tools/prototype_*.py
-/// precedent); not called from the production stacking path.
+/// Online (single-pass) sigma-clip combine of an `(N,H,W,C)` float32 stack,
+/// for throughput comparison against the batch `sigma_clip_combine` above.
+/// Still takes the whole `(N,H,W,C)` array (reuses the same gather-transpose
+/// row-parallel driver as the batch kernels), so this measures compute cost
+/// only -- it does not exercise the frame-at-a-time streaming I/O the
+/// production `--stream` path (`online_sigma_clip_seed_burnin` +
+/// `online_sigma_clip_fold_frame` below) actually uses. Exploratory /
+/// benchmark-only; not called from the production stacking path.
 ///
 /// Returns `(combined, n_rejected, n_total)` where `n_rejected` is a
 /// pixel-*sample* count (summed over all pixels and frames) and `n_total`
-/// is the frame count -- matching the prototype's return convention.
+/// is the frame count.
 #[pyfunction]
 #[pyo3(signature = (data, sigma=3.0, burn_in=10))]
 fn online_sigma_clip_combine<'py>(
@@ -699,69 +710,68 @@ fn online_sigma_clip_seed_burnin<'py>(
 /// `(H,W,C)` float32 frame plus an `(H,W)` float32 coverage mask (>=0.5 =
 /// covered; matches `LiveStacker`'s shift-coverage mask semantics), test
 /// each covered pixel against the running estimate and fold it in if
-/// accepted. Uncovered pixels pass through unchanged -- not treated as a
+/// accepted. Uncovered pixels are left untouched -- not treated as a
 /// sample, not rejected either. Plain rayon `par_chunks_mut` over rows; no
 /// gather-transpose, since there's no "N samples per pixel" axis here, just
 /// three same-shaped state arrays and one frame.
 ///
-/// Returns fresh `(mean, m2, n_acc)` arrays (alloc-and-return, matching
-/// every other kernel's `PyReadonlyArray`-in / `PyArray`-out convention in
-/// this file -- no in-place-mutation precedent exists here) plus the
-/// rejected-pixel count for this frame.
+/// Updates `mean`/`m2`/`n_acc` IN PLACE (unlike every other kernel in this
+/// file, which is alloc-and-return) -- this runs once per accepted frame in
+/// a `--stream` session, so at full resolution the alloc-and-copy-through
+/// version this replaced was ~1.7GB of allocator churn per frame (3 fresh
+/// (H,W,C) f64 arrays, including a full copy-through of every untouched
+/// uncovered pixel) for work that only actually changes the covered
+/// fraction of the image. Caller (`online_sigma_clip_fold_frame` in
+/// `src/stacking.py`) must pass arrays it holds no other alias to expecting
+/// the old value, and must not rely on numpy `ascontiguousarray` silently
+/// falling back to a copy -- see the Python wrapper's contiguity check.
+/// Returns just the rejected-pixel count for this frame.
 #[pyfunction]
 #[pyo3(signature = (mean, m2, n_acc, frame, coverage, sigma=3.0))]
 fn online_sigma_clip_fold_frame<'py>(
     py: Python<'py>,
-    mean: PyReadonlyArray3<'py, f64>,
-    m2: PyReadonlyArray3<'py, f64>,
-    n_acc: PyReadonlyArray3<'py, f64>,
+    mut mean: PyReadwriteArray3<'py, f64>,
+    mut m2: PyReadwriteArray3<'py, f64>,
+    mut n_acc: PyReadwriteArray3<'py, f64>,
     frame: PyReadonlyArray3<'py, f32>,
     coverage: PyReadonlyArray2<'py, f32>,
     sigma: f32,
-) -> PyResult<(
-    Bound<'py, PyArray3<f64>>,
-    Bound<'py, PyArray3<f64>>,
-    Bound<'py, PyArray3<f64>>,
-    usize,
-)> {
-    let mean_arr = mean.as_array();
-    let m2_arr = m2.as_array();
-    let nacc_arr = n_acc.as_array();
+) -> PyResult<usize> {
+    let shape = mean.as_array().shape().to_vec();
+    let (w, c) = (shape[1], shape[2]);
     let frame_arr = frame.as_array();
     let cov_arr = coverage.as_array();
-    let shape = mean_arr.shape();
-    let (h, w, c) = (shape[0], shape[1], shape[2]);
     let sigma_f64 = sigma as f64;
     let row_len = w * c;
+
+    let mean_slice = mean.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("mean must be C-contiguous for in-place fold")
+    })?;
+    let m2_slice = m2.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("m2 must be C-contiguous for in-place fold")
+    })?;
+    let nacc_slice = n_acc.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("n_acc must be C-contiguous for in-place fold")
+    })?;
     let n_rejected = std::sync::atomic::AtomicUsize::new(0);
 
-    let (mean_out, m2_out, nacc_out) = py.allow_threads(|| {
-        let mut mean_flat = vec![0f64; h * row_len];
-        let mut m2_flat = vec![0f64; h * row_len];
-        let mut nacc_flat = vec![0f64; h * row_len];
-
-        mean_flat
+    py.allow_threads(|| {
+        mean_slice
             .par_chunks_mut(row_len)
-            .zip(m2_flat.par_chunks_mut(row_len))
-            .zip(nacc_flat.par_chunks_mut(row_len))
+            .zip(m2_slice.par_chunks_mut(row_len))
+            .zip(nacc_slice.par_chunks_mut(row_len))
             .enumerate()
             .for_each(|(y, ((mean_row, m2_row), nacc_row))| {
                 let mut row_rejected = 0usize;
                 for x in 0..w {
-                    let covered = cov_arr[[y, x]] >= 0.5;
+                    if cov_arr[[y, x]] < 0.5 {
+                        continue;
+                    }
                     for ch in 0..c {
                         let col = x * c + ch;
-                        let m0 = mean_arr[[y, x, ch]];
-                        let v0 = m2_arr[[y, x, ch]];
-                        let n0 = nacc_arr[[y, x, ch]];
-                        if !covered {
-                            mean_row[col] = m0;
-                            m2_row[col] = v0;
-                            nacc_row[col] = n0;
-                            continue;
-                        }
                         let xf = frame_arr[[y, x, ch]] as f64;
-                        let (nm, nv, nn, accepted) = fold_pixel(m0, v0, n0, xf, sigma_f64);
+                        let (nm, nv, nn, accepted) =
+                            fold_pixel(mean_row[col], m2_row[col], nacc_row[col], xf, sigma_f64);
                         mean_row[col] = nm;
                         m2_row[col] = nv;
                         nacc_row[col] = nn;
@@ -772,21 +782,9 @@ fn online_sigma_clip_fold_frame<'py>(
                 }
                 n_rejected.fetch_add(row_rejected, std::sync::atomic::Ordering::Relaxed);
             });
-        (mean_flat, m2_flat, nacc_flat)
     });
 
-    let mean_out_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), mean_out)
-        .expect("shape mismatch building output");
-    let m2_out_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), m2_out)
-        .expect("shape mismatch building output");
-    let nacc_out_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), nacc_out)
-        .expect("shape mismatch building output");
-    Ok((
-        mean_out_arr.into_pyarray(py),
-        m2_out_arr.into_pyarray(py),
-        nacc_out_arr.into_pyarray(py),
-        n_rejected.load(std::sync::atomic::Ordering::Relaxed),
-    ))
+    Ok(n_rejected.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Median combine of an `(N,H,W,C)` float32 stack (even N averages the two

@@ -115,7 +115,7 @@ def test_auto_advisor_noop_when_auto_not_set(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(auto_mod, 'apply_auto_settings',
                         lambda *a, **kw: calls.append((a, kw)) or
-                        ('unknown', 'Unknown', {}, []))
+                        ('unknown', 'Unknown', {}, [], {}))
 
     _write_star_frame(str(tmp_path / 'L0.fits'), seed=0)
     args = _stream_args(tmp_path, tmp_path / 'out.fits')
@@ -140,7 +140,7 @@ def test_auto_advisor_applies_settings_when_auto_set(tmp_path, monkeypatch):
         args.deconvolve = False
         args.ghs_b = 42.0
         return 'emission_nebula', 'Emission Nebula', {'n_frames': len(final)}, [
-            'deconvolve  True -> False', 'ghs_b  8.0 -> 42.0']
+            'deconvolve  True -> False', 'ghs_b  8.0 -> 42.0'], {}
 
     monkeypatch.setattr(auto_mod, 'apply_auto_settings', _stub)
 

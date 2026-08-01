@@ -380,8 +380,7 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
                        f"({n_rej} pixel-samples rejected)")
             continue
 
-        mean, m2, n_acc, n_rej = online_sigma_clip_fold_frame(
-            mean, m2, n_acc, aligned, cov, sigma=sigma)
+        n_rej = online_sigma_clip_fold_frame(mean, m2, n_acc, aligned, cov, sigma=sigma)
         n_rejected_pixels += n_rej
         if verbose:
             safe_print(f"    -> folded, {n_rej} pixel-samples rejected this frame")
