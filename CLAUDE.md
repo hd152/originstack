@@ -80,6 +80,7 @@ The pipeline is split across `src/` modules. [originstack.py](originstack.py) is
 | [src/auto_settings.py](src/auto_settings.py) | Heuristic target classifier and parameter advisor (`--auto`). Settings are continuously blended across 8 target-type presets by signal-space proximity (inverse-distance weighting against each preset's anchor point), not a single bucket lookup — a target between two types (e.g. mixed emission/reflection) gets a smooth mix of both instead of a hard jump at a classification threshold. `_classify()`/`TARGET_LABELS` still pick a single label for the printed "detected 'X'" message and the SIMBAD/header prior-type override, but no longer drive the settings themselves |
 | [src/plate_solve.py](src/plate_solve.py) | Astrometry.net plate solving |
 | [src/net_query.py](src/net_query.py) | Direct-HTTP replacements for every astroquery service used (Gaia, VizieR, SIMBAD TAP queries; astrometry.net upload/solve; JPL Horizons ephemeris) — stdlib urllib, no dependency |
+| [src/annotation.py](src/annotation.py) | Object annotation (`--annotate`): circles + labels bright stars and named deep-sky objects (galaxies, nebulae, clusters) on a copy of the preview, via the header's WCS and live SIMBAD cone-search queries. Needs a WCS (`--plate-solve` or a session solve); fails soft otherwise |
 | [src/pipeline.py](src/pipeline.py) | Thin orchestrator: `stack_target` wires all four phases |
 | [src/health_check.py](src/health_check.py) | `run_health_check` |
 | [src/cli.py](src/cli.py) | `process_directory`, `parse_args`, `main` |
@@ -189,6 +190,9 @@ Parity vs the numpy reference is covered by [tests/test_native.py](tests/test_na
 
 ### Plate solving
 Requires `ASTROMETRY_API_KEY` environment variable set (nova.astrometry.net's REST API, direct HTTP via `src/net_query.py` — no extra package). Enable with `--plate-solve`.
+
+### Object annotation
+`--annotate` circles and labels bright stars and named deep-sky objects (galaxies, nebulae, clusters) on a copy of the preview (`<output>_annotated.jpg`; the main FITS/TIFF/JPG are untouched), via the FITS header's WCS and live SIMBAD cone-search queries (`src/net_query.py`, `src/annotation.py`). Needs a WCS solution — `--plate-solve`, or a session `info.json` that already provided one — skipped with a message otherwise. Two separate SIMBAD queries (stars via a `basic`+`flux` V-magnitude join, capped by `--annotate-mag-limit`; DSOs via `basic` restricted to a curated object-type set *and* a Messier/NGC/IC name prefix, to avoid flooding a rich field with SIMBAD's thousands of obscure catalog entries) rather than one combined query, since an inner join on `flux` would silently drop extended objects that lack a clean V-magnitude entry.
 
 ### Debayering options
 - `bilinear` (default, pure numpy)
