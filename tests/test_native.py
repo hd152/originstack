@@ -472,3 +472,155 @@ def test_fit_rigid_ransac_too_few_points_returns_none():
     src = np.array([[0.0, 0.0], [1.0, 1.0]])
     params, inliers = native.fit_rigid_ransac(src, src, 3, 2.0, 100, -1)
     assert params is None and inliers is None
+
+
+# ---------------------------------------------------------------------------
+# Online (streaming) sigma-clip: burn-in seed + per-frame fold kernels.
+# These back --stream: a genuine frame-at-a-time stacker (as opposed to
+# online_sigma_clip_combine above, which takes the whole (N,H,W,C) array at
+# once purely to benchmark algorithm cost).
+# ---------------------------------------------------------------------------
+
+def _full_coverage(burn_stack):
+    """(K,H,W) all-covered mask matching a (K,H,W,C) burn-in stack."""
+    k, h, w = burn_stack.shape[:3]
+    return np.ones((k, h, w), dtype=np.float32)
+
+
+def _numpy_seed_burnin(burn_stack, coverage=None, sigma=3.0):
+    """Force the numpy path (HAS_NATIVE off) for online_sigma_clip_seed_burnin."""
+    if coverage is None:
+        coverage = _full_coverage(burn_stack)
+    had = _stacking_mod.HAS_NATIVE
+    _stacking_mod.HAS_NATIVE = False
+    try:
+        return astro.online_sigma_clip_seed_burnin(burn_stack, coverage, sigma=sigma)
+    finally:
+        _stacking_mod.HAS_NATIVE = had
+
+
+def _numpy_fold_frame(mean, m2, n_acc, frame, coverage, sigma=3.0):
+    """Force the numpy path (HAS_NATIVE off) for online_sigma_clip_fold_frame."""
+    had = _stacking_mod.HAS_NATIVE
+    _stacking_mod.HAS_NATIVE = False
+    try:
+        return astro.online_sigma_clip_fold_frame(mean, m2, n_acc, frame, coverage, sigma=sigma)
+    finally:
+        _stacking_mod.HAS_NATIVE = had
+
+
+def test_online_sigma_clip_seed_burnin_matches_numpy():
+    d = _stack(n=10, seed=21)  # (K,H,W,C) burn-in window, with injected outliers
+    cov = _full_coverage(d)
+    mean_n, m2_n, nacc_n, rej_n = _numpy_seed_burnin(d, cov, sigma=3.0)
+    mean_r, m2_r, nacc_r, rej_r = native.online_sigma_clip_seed_burnin(d, cov, 3.0)
+
+    assert mean_r.shape == mean_n.shape == d.shape[1:]
+    assert mean_r.dtype == np.float64
+    np.testing.assert_allclose(mean_r, mean_n, atol=1e-6)
+    np.testing.assert_allclose(m2_r, m2_n, atol=1e-3)
+    np.testing.assert_allclose(nacc_r, nacc_n, atol=1e-9)
+    assert rej_r == rej_n
+
+
+def test_online_sigma_clip_fold_frame_matches_numpy():
+    """Seed via burn-in, then fold several frames one at a time; native and
+    numpy must agree at EVERY step, not just the final one, to catch
+    accumulation-order bugs."""
+    d = _stack(n=20, seed=22)
+    burn, rest = d[:10], d[10:]
+    burn_cov = _full_coverage(burn)
+    mean_n, m2_n, nacc_n, _ = _numpy_seed_burnin(burn, burn_cov, sigma=3.0)
+    mean_r, m2_r, nacc_r, _ = native.online_sigma_clip_seed_burnin(burn, burn_cov, 3.0)
+    np.testing.assert_allclose(mean_r, mean_n, atol=1e-6)
+
+    H, W, C = d.shape[1:]
+    coverage = np.ones((H, W), dtype=np.float32)
+    for frame in rest:
+        mean_n, m2_n, nacc_n, rej_n = _numpy_fold_frame(
+            mean_n, m2_n, nacc_n, frame, coverage, sigma=3.0)
+        mean_r, m2_r, nacc_r, rej_r = native.online_sigma_clip_fold_frame(
+            mean_r, m2_r, nacc_r, frame, coverage, 3.0)
+        np.testing.assert_allclose(mean_r, mean_n, atol=1e-6)
+        np.testing.assert_allclose(m2_r, m2_n, atol=1e-3)
+        np.testing.assert_allclose(nacc_r, nacc_n, atol=1e-9)
+        assert rej_r == rej_n
+
+
+def test_online_sigma_clip_seed_burnin_excludes_uncovered_samples():
+    """Each burn-in frame has its own out-of-frame zero-fill region (a real
+    concern: this session's actual Rosette Nebula run reported shifts up to
+    132px). A pixel covered by only some of the K burn-in frames must seed
+    its state from the covered samples alone -- zero-fill must not drag the
+    median toward zero."""
+    d = _stack(n=10, seed=25, outliers=False)
+    H, W, C = d.shape[1:]
+    coverage = np.ones((d.shape[0], H, W), dtype=np.float32)
+    # Left half uncovered by every OTHER burn-in frame (only frame 0 covers
+    # it) -- if zero-fill weren't excluded, the median there would collapse
+    # toward 0 instead of the real ~1000 ADU background.
+    coverage[1:, :, : W // 2] = 0.0
+    d_masked = d.copy()
+    d_masked[1:, :, : W // 2, :] = 0.0  # simulate the warp's zero-fill
+
+    mean_r, m2_r, nacc_r, rej_r = native.online_sigma_clip_seed_burnin(d_masked, coverage, 3.0)
+    mean_n, m2_n, nacc_n, rej_n = _numpy_seed_burnin(d_masked, coverage, sigma=3.0)
+
+    # Native and numpy must agree...
+    np.testing.assert_allclose(mean_r, mean_n, atol=1e-6)
+    np.testing.assert_allclose(nacc_r, nacc_n, atol=1e-9)
+    assert rej_r == rej_n
+    # ...and the left-half mean must reflect the real background (~1000),
+    # NOT be dragged toward the 9 zero-filled samples.
+    assert mean_r[:, : W // 2, :].mean() > 500.0
+    # Every pixel in that region only had 1 valid sample (frame 0) -- n_acc
+    # there must be 1, not up to 10.
+    np.testing.assert_allclose(nacc_r[:, : W // 2, :], 1.0)
+
+
+def test_online_sigma_clip_fold_frame_respects_coverage():
+    """A frame with a coverage mask False over part of the image must leave
+    the running state untouched in the uncovered region."""
+    d = _stack(n=12, seed=23)
+    burn, frame = d[:10], d[10]
+    mean, m2, n_acc, _ = native.online_sigma_clip_seed_burnin(burn, _full_coverage(burn), 3.0)
+
+    H, W, C = d.shape[1:]
+    coverage = np.ones((H, W), dtype=np.float32)
+    coverage[:, : W // 2] = 0.0  # left half not covered by this frame's shift
+
+    new_mean, new_m2, new_nacc, n_rej = native.online_sigma_clip_fold_frame(
+        mean, m2, n_acc, frame, coverage, 3.0)
+
+    np.testing.assert_array_equal(new_mean[:, : W // 2], mean[:, : W // 2])
+    np.testing.assert_array_equal(new_m2[:, : W // 2], m2[:, : W // 2])
+    np.testing.assert_array_equal(new_nacc[:, : W // 2], n_acc[:, : W // 2])
+    # Right half (covered) should generally change.
+    assert not np.array_equal(new_mean[:, W // 2:], mean[:, W // 2:])
+    assert n_rej <= (H * (W - W // 2) * C)
+
+
+def test_online_sigma_clip_streaming_matches_whole_array_kernel():
+    """The split burn-in+fold kernels, run frame-at-a-time, must reproduce
+    the already-validated whole-array online_sigma_clip_combine kernel
+    (validated against synthetic ground truth + production batch
+    sigma_clip_combine earlier) on the same stack -- a regression guard
+    proving the split doesn't silently change the algorithm."""
+    d = _stack(n=25, seed=24)
+    burn_in = 10
+
+    combined_whole, n_rej_whole, n_tot_whole = native.online_sigma_clip_combine(
+        d, sigma=3.0, burn_in=burn_in)
+
+    mean, m2, n_acc, n_rej_split = native.online_sigma_clip_seed_burnin(
+        d[:burn_in], _full_coverage(d[:burn_in]), 3.0)
+    H, W, C = d.shape[1:]
+    coverage = np.ones((H, W), dtype=np.float32)
+    for frame in d[burn_in:]:
+        mean, m2, n_acc, rej = native.online_sigma_clip_fold_frame(
+            mean, m2, n_acc, frame, coverage, 3.0)
+        n_rej_split += rej
+
+    assert n_tot_whole == d.shape[0]
+    np.testing.assert_allclose(mean.astype(np.float32), combined_whole, atol=1e-3)
+    assert n_rej_split == n_rej_whole

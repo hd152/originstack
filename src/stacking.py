@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -614,6 +615,101 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     if return_mask:
         return result, rej_mask_full
     return result
+
+
+def online_sigma_clip_seed_burnin(burn_stack: np.ndarray, coverage: np.ndarray,
+                                   sigma: float = 3.0
+                                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Seed a running Welford (mean, M2, n_acc) state from a small ``(K,H,W,C)``
+    burn-in stack via one MAD-reject pass over the whole window.
+
+    ``K`` is expected small and bounded (e.g. 10 — the streaming stacker's
+    burn-in size), not the full session frame count. Part of the online
+    (single-pass, frame-at-a-time) sigma-clip combine used by ``--stream``;
+    see ``online_sigma_clip_fold_frame`` for the per-frame update this seeds.
+
+    ``coverage`` is ``(K,H,W)`` (>=0.5 = that frame's warp covers this pixel;
+    one mask per burn-in frame). A burn-in window mixes several frames' own
+    out-of-frame zero-fill regions (large dithers easily reach 100+ px), so
+    uncovered samples are excluded from the median/MAD/mean/M2 computation
+    entirely — otherwise zero-fill pixels masquerade as real (very dark)
+    samples at every frame's border.
+
+    Returns ``(mean, m2, n_acc)`` each ``(H, W, C)`` float64, plus the
+    rejected-sample count (summed over all pixels in the burn-in window;
+    uncovered samples count as rejected too, since they never became a
+    sample).
+    """
+    if _native_usable(burn_stack):
+        try:
+            mean, m2, n_acc, n_rej = _native.online_sigma_clip_seed_burnin(
+                burn_stack, np.ascontiguousarray(coverage, dtype=np.float32), float(sigma))
+            return np.asarray(mean), np.asarray(m2), np.asarray(n_acc), int(n_rej)
+        except Exception as exc:
+            _log.debug("native online_sigma_clip_seed_burnin failed (%s); using numpy", exc)
+
+    burn_arr = burn_stack.astype(np.float64)
+    valid = (coverage >= 0.5)[:, :, :, None]  # (K,H,W,1) -> broadcasts over C
+    masked = np.where(valid, burn_arr, np.nan)
+    with np.errstate(invalid='ignore'), warnings.catch_warnings():
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        med = np.nan_to_num(np.nanmedian(masked, axis=0), nan=0.0)
+        mad = np.nan_to_num(np.nanmedian(np.abs(masked - med), axis=0), nan=0.0)
+    robust_sigma = np.maximum(1.4826 * mad, 1e-6)
+    thresh0 = sigma * robust_sigma
+    accept = valid & (np.abs(burn_arr - med) <= thresh0)
+
+    n_acc = np.maximum(accept.sum(axis=0).astype(np.float64), 1.0)
+    running_mean = np.where(accept, burn_arr, 0.0).sum(axis=0) / n_acc
+    m2 = np.where(accept, (burn_arr - running_mean) ** 2, 0.0).sum(axis=0)
+    n_rejected = int(np.size(accept) - accept.sum())
+    return running_mean, m2, n_acc, n_rejected
+
+
+def online_sigma_clip_fold_frame(mean: np.ndarray, m2: np.ndarray, n_acc: np.ndarray,
+                                  frame: np.ndarray, coverage: np.ndarray,
+                                  sigma: float = 3.0
+                                  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Fold ONE new frame into a running Welford (mean, M2, n_acc) state.
+
+    Elementwise accept-test + update — no N-samples-per-pixel gather, unlike
+    the batch combine kernels; this is the per-frame step a true streaming
+    (one-frame-in-memory-at-a-time) stack calls once per accepted frame.
+    ``coverage`` (H,W), >=0.5 = covered, matches the shift-coverage mask
+    ``LiveStacker`` already computes (live_stack.py): pixels a shift didn't
+    fill from within the frame pass through unchanged — not a sample, not a
+    rejection either.
+
+    Returns fresh ``(mean, m2, n_acc)`` arrays plus the rejected-pixel count
+    for this frame (among covered pixels only).
+    """
+    if (HAS_NATIVE and mean.ndim == 3 and frame.ndim == 3 and coverage.ndim == 2
+            and mean.dtype == np.float64 and frame.dtype == np.float32):
+        try:
+            new_mean, new_m2, new_n_acc, n_rej = _native.online_sigma_clip_fold_frame(
+                np.ascontiguousarray(mean), np.ascontiguousarray(m2),
+                np.ascontiguousarray(n_acc), np.ascontiguousarray(frame, dtype=np.float32),
+                np.ascontiguousarray(coverage, dtype=np.float32), float(sigma))
+            return np.asarray(new_mean), np.asarray(new_m2), np.asarray(new_n_acc), int(n_rej)
+        except Exception as exc:
+            _log.debug("native online_sigma_clip_fold_frame failed (%s); using numpy", exc)
+
+    x = frame.astype(np.float64)
+    var_est = m2 / np.maximum(n_acc, 1.0)
+    std_est = np.sqrt(np.maximum(var_est, 1e-12))
+    covered = (coverage >= 0.5)[:, :, None]
+    accept = (np.abs(x - mean) <= sigma * std_est) & covered
+
+    n_acc_new = n_acc + accept
+    delta = x - mean
+    inv_n = 1.0 / np.maximum(n_acc_new, 1.0)
+    new_mean = np.where(accept, mean + delta * inv_n, mean)
+    delta2 = x - new_mean
+    new_m2 = np.where(accept, m2 + delta * delta2, m2)
+
+    covered_count = int(np.broadcast_to(covered, mean.shape).sum())
+    n_rejected = covered_count - int(accept.sum())
+    return new_mean, new_m2, n_acc_new, n_rejected
 
 
 def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:

@@ -269,17 +269,12 @@ class LiveStacker:
             pass
 
 
-def run_live_stack(args) -> int:
-    """Entry point for ``--live``: build masters, then watch + stack."""
-    if not _HAS_SCIPY:
-        safe_print("  ERROR: live stacking requires scipy")
-        return 1
-    directory = args.directory
-    if not os.path.isdir(directory):
-        safe_print(f"  ERROR: not a directory: {directory}")
-        return 1
-
-    # Build calibration masters from whatever darks/flats/bias exist now.
+def build_session_masters(args, directory: str) -> Tuple[Dict, Dict]:
+    """Build calibration masters from whatever darks/flats/bias exist in
+    *directory* (plus any ``--dark-dir``/``--flat-dir``/``--bias-dir``), and
+    set ``args._session_bayer`` from the first light frame's header. Shared
+    by ``--live`` and ``--stream`` so the two streaming modes can't silently
+    drift on calibration setup. Returns ``(masters, frames)``."""
     from src.frame_discovery import discover_frames
     from src.cli import _build_masters, _load_calibration_dir
     frames = discover_frames(directory)
@@ -294,6 +289,21 @@ def run_live_stack(args) -> int:
     lights = frames.get('light', [])
     if lights and getattr(args, '_session_bayer', None) is None:
         args._session_bayer = lights[0].header.get('BAYERPAT') or lights[0].header.get('COLORTYP')
+
+    return masters, frames
+
+
+def run_live_stack(args) -> int:
+    """Entry point for ``--live``: build masters, then watch + stack."""
+    if not _HAS_SCIPY:
+        safe_print("  ERROR: live stacking requires scipy")
+        return 1
+    directory = args.directory
+    if not os.path.isdir(directory):
+        safe_print(f"  ERROR: not a directory: {directory}")
+        return 1
+
+    masters, frames = build_session_masters(args, directory)
 
     wv = None
     if getattr(args, 'web_view', False) or getattr(args, 'live_web', True):

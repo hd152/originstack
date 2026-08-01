@@ -878,6 +878,23 @@ def parse_args():
                    help='Live stacking directory poll interval in seconds (default: 4).')
     g_core.add_argument('--live-duration', type=float, default=None, metavar='MIN',
                    help='Optional live stacking time limit in minutes (default: until Ctrl-C).')
+    g_core.add_argument('--stream', action='store_true',
+                   help="Two-pass streaming stack of an ALREADY-COMPLETE directory: "
+                        "O(1) full-resolution memory via an online (single-pass) "
+                        "sigma-clip Welford accumulator, instead of materializing the "
+                        "whole (N,H,W,C) aligned stack --stack-method needs. v1 "
+                        "limitations vs the default pipeline: reference frame is picked "
+                        "by quality score alone (no shift-centrality blend), hard-limit "
+                        "quality gating only (no statistical/percentile stages), no "
+                        "--elastic-registration, no drizzle, no patch-weighted combine. "
+                        "Incompatible with --live (one watches a growing directory "
+                        "forever, the other expects a closed one).")
+    g_core.add_argument('--stream-burnin', type=int, default=10, metavar='N',
+                   help='--stream: number of frames MAD-rejected as a batch to seed the '
+                        'running sigma-clip state before streaming begins (default: 10).')
+    g_core.add_argument('--stream-sigma', type=float, default=None, metavar='SIGMA',
+                   help='--stream: sigma-clip rejection threshold (default: '
+                        '--rejection-sigma).')
     g_core.add_argument('--web-view', action='store_true',
                    help='Serve a live dashboard at http://127.0.0.1:<port>/ while '
                         'stacking: phase progress, log stream, per-frame quality '
@@ -1407,6 +1424,12 @@ def main():
     from src import gpu_context as _gpu_mod
     _gpu_mod._gpu = GpuContext(use_gpu=args.use_gpu)
 
+    if getattr(args, 'live', False) and getattr(args, 'stream', False):
+        safe_print("  ERROR: --live and --stream are mutually exclusive "
+                   "(--live watches a growing directory forever; --stream "
+                   "expects an already-complete one)")
+        raise SystemExit(1)
+
     # Real-time (live) stacking: watch the directory and stack subs as they land.
     if getattr(args, 'live', False):
         from src.live_stack import run_live_stack
@@ -1420,6 +1443,11 @@ def main():
             except KeyboardInterrupt:
                 pass
         raise SystemExit(_rc)
+
+    # Two-pass streaming stack of an already-complete directory.
+    if getattr(args, 'stream', False):
+        from src.stream_stack import run_stream_stack
+        raise SystemExit(run_stream_stack(args))
 
     # Live web view (module-level singleton, no-op unless started here)
     _wv_url = None
