@@ -1,15 +1,18 @@
 """Pure-heuristic auto parameter advisor.
 
 No API calls required.  Runs after Phase 1 quality analysis, classifies the
-likely target type from per-frame metrics, and applies optimised processing
-settings to the args namespace in-place.
+likely target type from per-frame metrics (for display), and applies
+processing settings to the args namespace in-place -- continuously blended
+across 8 target-type presets by signal-space proximity (_blend_weights /
+_apply_dynamic_settings), not a single bucket lookup. See the comment block
+above _TYPE_ANCHORS for the design.
 
 Public API
 ----------
-apply_auto_settings(final, args) -> (target_type, label, signals, changes)
+apply_auto_settings(final, args) -> (target_type, label, signals, changes, weights)
     final   : list[FrameInfo]  — accepted frames with .metrics populated
     args    : argparse.Namespace  — modified in-place
-    returns : (str, str, dict, list[str])
+    returns : (str, str, dict, list[str], dict[str, float])
 """
 from __future__ import annotations
 
@@ -385,10 +388,114 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
 }
 
 
-def _apply_target_settings(
-    target_type: str, sig: dict, args
+# ---------------------------------------------------------------------------
+# Continuous blend: replaces _classify()-then-lookup with an inverse-distance
+# blend across the 8 preset rows above, so a target that's genuinely between
+# two types (e.g. a nebula mixing emission and reflection character) gets a
+# smooth mix of both types' tuning instead of being forced into one bucket
+# with a hard jump in every parameter at the classification boundary.
+# ---------------------------------------------------------------------------
+
+# One representative interior point per type, in the same signal space
+# _classify() partitions. Not arbitrary: each point satisfies that type's
+# own _classify() inequality while failing every higher-priority type's
+# inequality too (_classify() is a sequential if/elif chain, so a type's
+# true region excludes any earlier type's overlap) -- these are literal
+# points inside _classify()'s partition for that type, not threshold edges.
+_TYPE_ANCHORS: Dict[str, Dict[str, float]] = {
+    # sc>60, pe>15, conc>2.5, dr>150
+    'globular_cluster':  {'median_filling': 0.05, 'diffuse_excess': 7.1,
+                          'peak_excess': 25.0, 'concentration': 3.5,
+                          'star_count': 120.0, 'dynamic_range': 220.0},
+    # sc>200 (and not globular: pe kept low)
+    'wide_field':        {'median_filling': 0.8, 'diffuse_excess': 5.0,
+                          'peak_excess': 5.0, 'concentration': 1.0,
+                          'star_count': 350.0, 'dynamic_range': 80.0},
+    # pe>10, mf<0.3, sc<30, conc>2.0, dr>60
+    'planetary_nebula':  {'median_filling': 0.1, 'diffuse_excess': 5.0,
+                          'peak_excess': 15.0, 'concentration': 3.0,
+                          'star_count': 10.0, 'dynamic_range': 100.0},
+    # sc>80, mf<1 (and not globular: dr/pe kept below its thresholds)
+    'star_field':        {'median_filling': 0.5, 'diffuse_excess': 5.3,
+                          'peak_excess': 8.0, 'concentration': 1.5,
+                          'star_count': 120.0, 'dynamic_range': 100.0},
+    # mf>1, sc<100
+    'emission_nebula':   {'median_filling': 1.5, 'diffuse_excess': 3.0,
+                          'peak_excess': 3.5, 'concentration': 1.17,
+                          'star_count': 50.0, 'dynamic_range': 80.0},
+    # pe>8, mf<0.5, dr>100 (and not planetary: mf kept >=0.3)
+    'galaxy':            {'median_filling': 0.35, 'diffuse_excess': 6.7,
+                          'peak_excess': 12.0, 'concentration': 1.8,
+                          'star_count': 15.0, 'dynamic_range': 140.0},
+    # de>2, sc<100 (and not galaxy/planetary: pe/conc kept at their edges)
+    'reflection_nebula': {'median_filling': 0.5, 'diffuse_excess': 3.0,
+                          'peak_excess': 6.0, 'concentration': 2.0,
+                          'star_count': 40.0, 'dynamic_range': 90.0},
+    # fails every rule above -- genuinely weak/ambiguous signal
+    'unknown':           {'median_filling': 0.1, 'diffuse_excess': 1.0,
+                          'peak_excess': 3.0, 'concentration': 3.0,
+                          'star_count': 5.0, 'dynamic_range': 40.0},
+}
+
+_BLEND_AXES = ('median_filling', 'diffuse_excess', 'peak_excess',
+              'concentration', 'star_count', 'dynamic_range')
+
+# Per-axis normalization so star_count (0-hundreds) doesn't dominate
+# concentration/median_filling (0-20ish) in the distance metric purely by
+# units -- scaled by each axis's spread across the 8 anchors above.
+_AXIS_SCALES: Dict[str, float] = {
+    axis: max(
+        max(a[axis] for a in _TYPE_ANCHORS.values())
+        - min(a[axis] for a in _TYPE_ANCHORS.values()),
+        1e-6,
+    )
+    for axis in _BLEND_AXES
+}
+
+
+def _blend_weights(sig: dict, prior_type: Optional[str] = None,
+                   prior_confidence: float = 0.0) -> Dict[str, float]:
+    """Continuous replacement for _classify(): an inverse-distance weight
+    per type based on how close the measured signals are to that type's
+    anchor point, instead of picking exactly one bucket. Normalized to sum
+    to 1. A high-confidence prior_type (SIMBAD/header, via
+    infer_target_from_metadata) boosts that type's raw weight before
+    normalizing -- same "prior wins when confident" behavior
+    apply_auto_settings already had (>=0.85 hard override), applied
+    continuously instead of a hard switch.
+    """
+    raw: Dict[str, float] = {}
+    for t, anchor in _TYPE_ANCHORS.items():
+        d2 = 0.0
+        for axis in _BLEND_AXES:
+            diff = (sig.get(axis, 0.0) - anchor[axis]) / _AXIS_SCALES[axis]
+            d2 += diff * diff
+        dist = d2 ** 0.5
+        # eps=0.05 caps the weight at a near-exact anchor match instead of
+        # diverging to infinity.
+        raw[t] = 1.0 / (dist + 0.05) ** 2
+
+    if prior_type in raw and prior_confidence > 0:
+        boost = 1.0 + 20.0 * max(prior_confidence, 0.0) ** 2
+        raw[prior_type] *= boost
+
+    total = sum(raw.values()) or 1.0
+    return {t: w / total for t, w in raw.items()}
+
+
+def _apply_dynamic_settings(
+    sig: dict, weights: Dict[str, float], args
 ) -> List[str]:
-    """Apply per-target settings to args.  Returns list of change strings."""
+    """Continuous replacement for _apply_target_settings(): every parameter
+    is blended across all 8 presets weighted by _blend_weights, instead of
+    looking up one bucket's fixed table. Numeric parameters get a weighted
+    average (renormalized over just the presets that define that
+    parameter); boolean/string parameters -- which can't be fractionally
+    blended -- take the value from whichever contributing preset has the
+    single highest weight (nearest-neighbor-in-signal-space), so the
+    decision still shifts continuously with the signals even though the
+    final choice at any instant is binary.
+    """
     changes: List[str] = []
     _explicit = getattr(args, '_explicit_cli_dests', set())
 
@@ -400,17 +507,40 @@ def _apply_target_settings(
             setattr(args, attr, val)
             changes.append(f"{attr}  {old!r} -> {val!r}")
 
-    # Star field: deconvolution only when seeing is poor
-    if target_type == 'star_field':
-        fwhm = sig['fwhm']
-        if fwhm > 4.0:
-            _set('deconvolve', True)
-            _set('deconvolve_iterations', 10)
-        else:
-            _set('deconvolve', False)
+    # Union of every attr any preset defines, first-seen order for a stable,
+    # readable change-list.
+    all_attrs: List[str] = []
+    seen = set()
+    for rows in _TARGET_SETTINGS.values():
+        for attr, _ in rows:
+            if attr not in seen:
+                seen.add(attr)
+                all_attrs.append(attr)
 
-    for attr, val in _TARGET_SETTINGS.get(target_type, []):
-        _set(attr, val)
+    for attr in all_attrs:
+        contributors = [(t, val) for t, rows in _TARGET_SETTINGS.items()
+                        for a, val in rows if a == attr]
+        w_sum = sum(weights.get(t, 0.0) for t, _ in contributors)
+        if w_sum <= 0:
+            continue
+        sample_val = contributors[0][1]
+        if isinstance(sample_val, (bool, str)):
+            best_t, best_val = max(contributors, key=lambda tv: weights.get(tv[0], 0.0))
+            _set(attr, best_val)
+        else:
+            blended = sum(weights.get(t, 0.0) * val for t, val in contributors) / w_sum
+            if isinstance(sample_val, int):
+                blended = int(round(blended))
+            else:
+                blended = round(float(blended), 4)
+            _set(attr, blended)
+
+    # star_field's poor-seeing deconvolve exception: previously gated on
+    # target_type == 'star_field'; now a direct threshold on how
+    # star-field-like the blend is, weighted rather than a bucket check.
+    if weights.get('star_field', 0.0) > 0.3 and sig['fwhm'] > 4.0:
+        _set('deconvolve', True)
+        _set('deconvolve_iterations', 10)
 
     return changes
 
@@ -420,7 +550,8 @@ def _apply_target_settings(
 # ---------------------------------------------------------------------------
 
 def _apply_quality_settings(
-    sig: dict, args, target_type: str = 'unknown'
+    sig: dict, args, target_type: str = 'unknown',
+    weights: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """Apply frame-count, SNR, FWHM, Strehl, and dispersion adjustments."""
     changes: List[str] = []
@@ -516,15 +647,20 @@ def _apply_quality_settings(
     #    SNR for block-matching to outperform median-based methods.  Thresholds are
     #    lower when the package is available (hardware-accelerated C backend) vs
     #    absent (pure-scipy DCT fallback which is ~5-10x slower and less effective).
+    #    BM3D-suitable-ness is now a weighted sum over these 4 types instead of
+    #    exact bucket membership -- a session that's mostly (but not entirely)
+    #    one of these types can still qualify.
     _bm3d_targets = ('galaxy', 'globular_cluster', 'emission_nebula', 'reflection_nebula')
     _bm3d_snr_min = 8 if HAS_BM3D_PKG else 12
     _bm3d_n_min   = 12 if HAS_BM3D_PKG else 20
-    if (target_type in _bm3d_targets
+    _w = weights or {}
+    _bm3d_weight = sum(_w.get(t, 0.0) for t in _bm3d_targets)
+    if (_bm3d_weight > 0.5
             and snr >= _bm3d_snr_min
             and n >= _bm3d_n_min
             and not getattr(args, 'denoise_bm3d', False)):
         _set('denoise_bm3d', True)
-        if target_type == 'globular_cluster' or snr > 20:
+        if _w.get('globular_cluster', 0.0) > 0.5 or snr > 20:
             _set('bm3d_stride', 4)
 
     # 8. TV deconvolution iteration count scaled to stack SNR.
@@ -627,8 +763,10 @@ def apply_auto_settings(
     args,
     prior_type: Optional[str] = None,
     prior_confidence: float = 0.0,
-) -> Tuple[str, str, dict, List[str]]:
-    """Classify the target and apply heuristic settings to args in-place.
+) -> Tuple[str, str, dict, List[str], Dict[str, float]]:
+    """Classify the target (for display) and apply continuously-blended
+    heuristic settings to args in-place (see _blend_weights /
+    _apply_dynamic_settings module docs above _TYPE_ANCHORS).
 
     Parameters
     ----------
@@ -637,32 +775,41 @@ def apply_auto_settings(
     args : argparse.Namespace
         Modified in-place.
     prior_type : str or None
-        Object type inferred from metadata (folder/header/Simbad).  When
-        confidence is high enough this overrides the pixel-signal classifier.
+        Object type inferred from metadata (folder/header/Simbad). Used both
+        for the displayed label (>=0.85 confidence overrides the
+        pixel-signal classifier outright, >=0.70 wins when the heuristic
+        returns 'unknown' -- unchanged from before) and to boost that type's
+        weight in the continuous blend that actually drives settings.
     prior_confidence : float
-        Confidence of *prior_type* in the range 0–1.
-        ≥ 0.85 → prior overrides the heuristic classifier outright.
-        ≥ 0.70 → prior wins when heuristic returns 'unknown'.
+        Confidence of *prior_type* in the range 0-1.
 
     Returns
     -------
     target_type : str
-        Internal type key (e.g. ``'emission_nebula'``).
+        Internal type key (e.g. ``'emission_nebula'``) -- the single
+        best-match label for display; NOT what drives settings anymore
+        (see ``weights``).
     label : str
         Human-readable label (e.g. ``'Emission Nebula'``).
     signals : dict
         Classification signals, useful for diagnostics.
     changes : list[str]
         Every setting that was changed, as ``"attr  old -> new"`` strings.
+    weights : dict[str, float]
+        The continuous blend weight per type (sums to 1) that actually
+        produced ``changes`` -- e.g. ``{'emission_nebula': 0.72,
+        'reflection_nebula': 0.21, ...}``. Useful for a "72% Emission
+        Nebula, 21% Reflection Nebula" style diagnostic print.
     """
     if not final:
-        return 'unknown', TARGET_LABELS['unknown'], {}, []
+        return 'unknown', TARGET_LABELS['unknown'], {}, [], {}
 
     agg = _aggregate(final)
     sig = _compute_signals(agg)
     heuristic_type = _classify(sig)
 
-    # Resolve final classification
+    # Resolve the DISPLAYED classification (unchanged from before this
+    # module went continuous -- this is a label, not a settings lookup key).
     valid_prior = (prior_type and prior_type in TARGET_LABELS
                    and prior_type != 'unknown')
     if valid_prior and prior_confidence >= 0.85:
@@ -674,8 +821,10 @@ def apply_auto_settings(
 
     label = TARGET_LABELS[target_type]
 
-    changes: List[str] = []
-    changes.extend(_apply_target_settings(target_type, sig, args))
-    changes.extend(_apply_quality_settings(sig, args, target_type=target_type))
+    weights = _blend_weights(sig, prior_type=prior_type, prior_confidence=prior_confidence)
 
-    return target_type, label, sig, changes
+    changes: List[str] = []
+    changes.extend(_apply_dynamic_settings(sig, weights, args))
+    changes.extend(_apply_quality_settings(sig, args, target_type=target_type, weights=weights))
+
+    return target_type, label, sig, changes, weights

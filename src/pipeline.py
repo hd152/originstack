@@ -176,9 +176,16 @@ def _run_auto_advisor(final: List[FrameInfo], args,
     if not getattr(args, 'auto', False):
         return
     from src.auto_settings import apply_auto_settings
-    _target_type, label, signals, changes = apply_auto_settings(
+    _target_type, label, signals, changes, weights = apply_auto_settings(
         final, args, prior_type=prior_type, prior_confidence=prior_confidence)
     print(f"\n  Auto Advisor: detected '{label}'")
+    if weights:
+        top = sorted(weights.items(), key=lambda kv: -kv[1])[:3]
+        from src.auto_settings import TARGET_LABELS
+        blend_str = ", ".join(f"{w * 100:.0f}% {TARGET_LABELS.get(t, t)}"
+                              for t, w in top if w > 0.01)
+        if blend_str:
+            safe_print(f"    Blend: {blend_str}")
     if signals:
         print(f"    median_filling={signals.get('median_filling', 0):.2f}  "
               f"diffuse_excess={signals.get('diffuse_excess', 0):.2f}  "
