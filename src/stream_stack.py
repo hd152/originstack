@@ -480,7 +480,8 @@ def run_stream_stack(args) -> int:
     hdu.header['STREAMED'] = (True, 'Produced by --stream (frame-at-a-time)')
     hdu.writeto(output_path, overwrite=True)
 
-    _save_tiff(processed, output_path)
+    if getattr(args, 'output_tiff', False):
+        _save_tiff(processed, output_path)
 
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     save_preview_rgb(processed, preview_path, stretch=getattr(args, 'stretch', 'ghs'),

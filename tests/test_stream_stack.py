@@ -280,7 +280,7 @@ def test_run_stream_stack_writes_fits_and_preview(tmp_path):
         _write_star_frame(str(tmp_path / f'L{i:04d}.fits'), shift=s, seed=i)
 
     out_path = tmp_path / 'out.fits'
-    args = _stream_args(tmp_path, out_path, stream_burnin=3)
+    args = _stream_args(tmp_path, out_path, stream_burnin=3, output_tiff=True)
     rc = run_stream_stack(args)
     assert rc == 0
     assert out_path.exists()

@@ -229,9 +229,16 @@ def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
     except ImportError:
         try:
             from PIL import Image
-            arr16 = (np.clip(normalized, 0, 1) * 65535).astype(np.uint16)
-            Image.fromarray(arr16).save(tiff_path)
-            safe_print("  NOTE: tifffile not installed; saved 16-bit TIFF via Pillow")
+            # Pillow's Image.fromarray has no mode for (H,W,3) uint16 -- TIFF
+            # itself supports 16-bit RGB, but Pillow can only construct that
+            # via a real TIFF writer (tifffile), not fromarray/merge. This
+            # fallback-of-a-fallback (only reached when tifffile isn't
+            # installed) drops to 8-bit RGB, which Image.fromarray(..., 'RGB')
+            # does support directly.
+            arr8 = (np.clip(normalized, 0, 1) * 255).astype(np.uint8)
+            Image.fromarray(arr8, mode='RGB').save(tiff_path)
+            safe_print("  NOTE: tifffile not installed; saved 8-bit TIFF via Pillow "
+                       "(install tifffile for 16-bit)")
         except Exception as e:
             safe_print(f"  WARNING: TIFF export failed: {e}")
             return
