@@ -621,10 +621,6 @@ def _apply_quality_settings(
         if new_iters != current_iters:
             _set('deconvolve_iterations', new_iters)
 
-    # 4. Debayer upgrade: bilinear -> malvar (native Rust kernel, no dependency)
-    if getattr(args, 'debayer_method', 'bilinear') == 'bilinear':
-        _set('debayer_method', 'malvar')
-
     # 5. MMT strength scaled to SNR
     if getattr(args, 'denoise_mmt', False) and snr > 0:
         if snr < 5:

@@ -128,22 +128,6 @@ class GpuContext:
                 or 'outofmemory' in name
                 or 'cudaruntimeerror' in name)
 
-    def safe_compute(self, gpu_func, cpu_func, *args, **kwargs):
-        """Try GPU computation; fall back to CPU on OOM."""
-        if self.active:
-            try:
-                return gpu_func(*args, **kwargs)
-            except Exception as exc:
-                if self.is_oom(exc):
-                    logging.warning("GPU out of memory — falling back to CPU for this operation")
-                    self.disable()
-                    cpu_args = tuple(self.to_host(a) if hasattr(a, 'get') else a for a in args)
-                    cpu_kwargs = {k: self.to_host(v) if hasattr(v, 'get') else v
-                                  for k, v in kwargs.items()}
-                    return cpu_func(*cpu_args, **cpu_kwargs)
-                raise
-        return cpu_func(*args, **kwargs)
-
     def print_status(self):
         if self.active:
             safe_print(f"  GPU: {self.device_name}")

@@ -3,7 +3,7 @@
 Features:
 - Streaming processing (constant memory)
 - Calibration (bias/dark/flat)
-- Debayering (bilinear, Malvar, VNG -- native Rust, no OpenCV dependency)
+- Debayering (bilinear, Malvar -- native Rust, no OpenCV dependency)
 - Quality analysis (brightness, contrast, star count, FWHM)
 - Registration (sub-pixel phase correlation, FFT cross-correlation, affine/star-matching)
 - Automatic cropping, hierarchical processing, preview generation
@@ -76,7 +76,6 @@ from src.frame_discovery import (
 from src.debayer import (
     debayer_bilinear,
     debayer_malvar,
-    debayer_vng,
     debayer,
     white_balance_grayworld,
     white_balance_whitepatch,
@@ -145,6 +144,8 @@ from src.stacking import (
     trimmed_mean_combine,
     esd_combine,
     _esd_lambda_table,
+    linear_fit_clip_combine,
+    ivw_combine,
     patch_weighted_mean_combine,
     lacosmic_reject,
 )

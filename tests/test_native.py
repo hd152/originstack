@@ -95,6 +95,68 @@ def test_esd_matches_numpy(n, weighted):
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
 
 
+@pytest.mark.parametrize("weighted", [False, True])
+def test_linear_fit_clip_matches_numpy(weighted):
+    d = _stack(seed=17)
+    n = d.shape[0]
+    w = (np.random.default_rng(5).uniform(0.5, 1.5, n).astype(np.float32)
+         if weighted else None)
+    ref = astro.linear_fit_clip_combine(
+        d.astype(np.float64), sigma_low=4.0, sigma_high=2.0, max_iters=5, weights=w)
+    got = native.linear_fit_clip_combine(d, 4.0, 2.0, 5, w)
+    assert got.shape == ref.shape
+    assert got.dtype == np.float32
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
+
+
+def test_linear_fit_clip_rejects_injected_outliers():
+    """A single wild sample per pixel (cosmic-ray-like) must not survive into
+    the combined result -- the whole point of the algorithm. An unrejected
+    +5000 spike in 1 of 20 frames would shift the mean by 5000/20=250 ADU;
+    correct rejection keeps the combine within the stack's own sampling
+    noise (sigma/sqrt(N) ~ 20/sqrt(19) ~ 4.6) of the true 1000 ADU signal."""
+    rng = np.random.default_rng(21)
+    n, h, w, c = 20, 16, 16, 3
+    clean = rng.normal(1000.0, 20.0, (n, h, w, c)).astype(np.float32)
+    spiked = clean.copy()
+    spiked[5] += 5000.0  # every pixel in one frame is a huge spike
+    got = native.linear_fit_clip_combine(spiked, 4.0, 2.0, 5, None)
+    assert float(np.abs(got.mean() - 1000.0)) < 20.0
+    assert float(np.max(np.abs(got.astype(np.float64) - 1000.0))) < 60.0
+
+
+@pytest.mark.parametrize("with_gain,weighted", [(False, False), (True, False), (False, True)])
+def test_ivw_matches_numpy(with_gain, weighted):
+    d = _stack(seed=23, outliers=False)
+    n = d.shape[0]
+    rng = np.random.default_rng(6)
+    noise = rng.uniform(10.0, 40.0, n).astype(np.float32)
+    sky = np.full(n, 1000.0, dtype=np.float32) if with_gain else None
+    gain = 2.0 if with_gain else None
+    w = rng.uniform(0.5, 1.5, n).astype(np.float32) if weighted else None
+    ref = astro.ivw_combine(d.astype(np.float64), noise, sky, gain, w)
+    got = native.ivw_combine(d, noise, sky, gain, w)
+    assert got.shape == ref.shape
+    assert got.dtype == np.float32
+    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
+
+
+def test_ivw_downweights_noisier_frames():
+    """A frame with much higher noise should contribute less to the combined
+    result than an equally-sized low-noise frame -- the core inverse-variance
+    property, not just a smoke test that it runs."""
+    n, h, w, c = 2, 8, 8, 3
+    rng = np.random.default_rng(9)
+    quiet = np.full((h, w, c), 1000.0, dtype=np.float32)
+    noisy = np.full((h, w, c), 1000.0, dtype=np.float32) + 500.0  # way off
+    stack = np.stack([quiet, noisy]).astype(np.float32)
+    noise = np.array([5.0, 500.0], dtype=np.float32)  # noisy frame is 100x noisier
+    got = native.ivw_combine(stack, noise, None, None, None)
+    # inverse-variance weight ratio is 100^2 = 10000:1 in favour of "quiet" --
+    # combined result should sit almost exactly at the quiet frame's value.
+    assert float(np.abs(got.mean() - 1000.0)) < 1.0
+
+
 def test_warp_preserves_fwhm_and_matches_scipy():
     """Native Lanczos-3 warp must hold star FWHM and agree closely with scipy."""
     from scipy import ndimage

@@ -397,9 +397,6 @@ class TestDebayerDispatch(unittest.TestCase):
     def test_malvar(self):
         self.assertEqual(astro.debayer(self.raw, method="malvar").shape, (64, 64, 3))
 
-    def test_vng_fallback(self):
-        self.assertEqual(astro.debayer(self.raw, method="vng").shape, (64, 64, 3))
-
     def test_default_equals_bilinear(self):
         np.testing.assert_array_equal(
             astro.debayer(self.raw),

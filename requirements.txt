@@ -52,7 +52,7 @@ psutil>=5.9
 #
 #   opencv-python is NOT used anywhere in this codebase. Bilateral filter and Malvar
 #   debayer are native Rust kernels (numpy fallback if astro_native isn't built); VNG
-#   debayer aliases to Malvar.
+#   debayer was removed once it became a pure alias for Malvar.
 #
 #   Star detection: matched-filter (src/star_detect.py) is the only backend -- no extra
 #   package needed. SEP and DAOStarFinder/photutils were both removed from the detection
@@ -71,7 +71,7 @@ psutil>=5.9
 #   (src/net_query.py, stdlib urllib, no dependency):
 #     - astrometry.net plate solving (--plate-solve): upload/poll/fetch-WCS
 #       against nova.astrometry.net's REST API
-#     - Gaia DR3 (--color-calibrate, --gaia-calibration) and VizieR 2MASS
+#     - Gaia DR3 (--color-calibrate) and VizieR 2MASS
 #       fallback (color/photometric calibration): IVOA TAP queries
 #     - SIMBAD (plate-solve object ID, target-name inference): IVOA TAP
 #       queries

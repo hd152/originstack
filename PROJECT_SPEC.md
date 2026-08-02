@@ -86,7 +86,8 @@ Phase 2  ──  Registration
 
 Phase 3  ──  Stacking
              Align frames → crop to valid overlap region → accumulate → combine
-             7 methods: mean, median, sigma_clip, winsorized, percentile, esd, drizzle
+             9 methods: mean, median, sigma_clip, winsorized, percentile, esd,
+             trimmed_mean, linear_fit, ivw, plus drizzle
 
 Phase 4  ──  Post-Processing
              up to 20-step chain: background → denoising → deconvolution → contrast
@@ -127,10 +128,7 @@ Phase 4  ──  Post-Processing
 
 - **Auto-detection**: from FITS headers (`BAYERPAT`, `COLORTYP`)
 - **Supported patterns**: RGGB, BGGR, GRBG, GBRG (default: RGGB)
-- **Algorithms**:
-  - `bilinear` — pure NumPy, fast, default
-  - `malvar` — Malvar-He-Cutler algorithm, higher quality; native Rust kernel with a numpy fallback, no external dependency
-  - `vng` — alias for `malvar` (was OpenCV's Variable Number of Gradients; OpenCV is no longer a dependency of this codebase)
+- **Algorithm**: `malvar` — Malvar-He-Cutler, the only `--debayer-method` choice; native Rust kernel with a numpy fallback, no external dependency. (`bilinear` — pure NumPy — still exists internally as the base function but isn't CLI-reachable; `vng`, formerly OpenCV's Variable Number of Gradients, was removed once it became a pure alias for `malvar`.)
 - **Green equalization**: corrects G1/G2 channel mismatch in CMOS sensors
 - **Output**: RGB images in (H, W, 3) float32 format
 
@@ -292,8 +290,7 @@ for galaxy targets).
 ### 18. Photometric Colour Calibration
 
 - **Gray-locus method** (`--photometric-calibration`): calibrates colours by fitting to a neutral gray locus
-- **Gaia DR3 extension** (`--gaia-calibration`): extends calibration using Gaia stellar colours (requires `--plate-solve`)
-- **Astrometry-based** (`--color-calibrate`): full photometric calibration using field stars
+- **Astrometry-based** (`--color-calibrate`): full photometric calibration using field stars (Gaia DR3)
 
 ### 19. Plate Solving
 
@@ -301,7 +298,7 @@ for galaxy targets).
 - **ASTAP** (`--plate-solver astap`): local solver, no API key required
 - On success: writes WCS (CRVAL, CRPIX, CD matrix) to FITS header
 - Object identification via SIMBAD database
-- Unlocks `--color-calibrate` and `--gaia-calibration`
+- Unlocks `--color-calibrate`
 
 ### 21. Comet Mode (`--comet-mode`)
 
@@ -442,7 +439,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--debayer-method` | bilinear | bilinear, malvar (native Rust), vng (alias for malvar) |
+| `--debayer-method` | malvar | malvar (native Rust) -- only choice |
 | `--white-balance` | grayworld | none, grayworld, whitepatch |
 | `--quality-threshold N` | 50 | Reject frames scoring below N% of the session reference |
 | `--no-quality-filter` | — | Keep every frame |
@@ -453,7 +450,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--stack-method` | auto | mean, median, sigma_clip, winsorized, percentile, esd, trimmed_mean, auto |
+| `--stack-method` | auto | mean, median, sigma_clip, winsorized, percentile, esd, trimmed_mean, linear_fit, ivw, auto |
 | `--rejection-sigma N` | 3.0 | Sigma threshold for sigma_clip/winsorized |
 | `--rejection-iters N` | 3 | Clipping iterations |
 | `--drizzle-scale N` | 1.0 | Super-resolution scale (2.0 = 2x; needs dithered frames) |
@@ -478,7 +475,6 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--no-local-contrast` | — | Disable multiscale local contrast |
 | `--scnr` | off | Subtractive green-cast removal |
 | `--photometric-calibration` | off | Gray-locus colour calibration |
-| `--gaia-calibration` | off | Gaia DR3 extension (needs `--plate-solve`) |
 | `--halo-removal` | off | Fit + subtract bright-star halos |
 | `--hdr-combine PATH` | — | Blend a short-exposure stack into saturated regions |
 | `--skip-step STEP` | — | Skip a named post-processing step (repeatable) |

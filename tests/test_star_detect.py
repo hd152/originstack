@@ -162,27 +162,10 @@ class TestDetectStarsAutoDispatcher:
     """The dispatcher in src/quality.py that every detection call site
     (Phase 1 quality analysis, registration reference/residual detection,
     --merge, post-process star masking) routes through -- see
-    configure_star_detector's docstring for why a single dispatch point
-    matters here (mixing backends across stages would silently corrupt the
+    detect_stars_auto's docstring for why a single dispatch point matters
+    here (mixing backends across stages would silently corrupt the
     affine-matching / residual-RMS machinery that compares catalogs from
     different stages against each other)."""
-
-    def teardown_method(self):
-        from src.quality import configure_star_detector
-        configure_star_detector('matched-filter')  # don't leak state across tests
-
-    def test_rejects_unknown_method(self):
-        from src.quality import configure_star_detector
-        with pytest.raises(ValueError):
-            configure_star_detector('not-a-real-method')
-        with pytest.raises(ValueError):
-            configure_star_detector('sep')  # removed (2026-07) -- matched-filter only now
-        with pytest.raises(ValueError):
-            configure_star_detector('auto')  # removed -- no more SEP->DAO chain
-
-    def test_matched_filter_is_default(self):
-        from src.quality import _STAR_DETECTOR_METHOD
-        assert _STAR_DETECTOR_METHOD == 'matched-filter'
 
     def test_matched_filter_dispatch_finds_synthetic_stars(self):
         from src.quality import detect_stars_auto

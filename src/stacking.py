@@ -202,30 +202,16 @@ def _adaptive_tile_size(N: int, C: int) -> int:
         return default
 
 
-def _lanczos_kernel(x: np.ndarray, a: int = 3) -> np.ndarray:
-    """Lanczos interpolation kernel.
-
-    L(x) = sinc(x) * sinc(x/a)   for |x| < a
-    L(x) = 0                      for |x| >= a
-    """
-    result = np.zeros_like(x, dtype=np.float64)
-    mask = np.abs(x) < a
-    xm = x[mask]
-    # sinc(x) = sin(pi*x) / (pi*x), numpy's sinc already includes the pi
-    result[mask] = np.sinc(xm) * np.sinc(xm / a)
-    return result
-
-
 def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
                             scale: float, out_h: int, out_w: int,
                             lanczos_a: int = 3) -> np.ndarray:
     """Resample a single frame onto an upscaled output grid using Lanczos interpolation.
 
     Maps each output pixel back to fractional input coordinates (accounting for
-    the sub-pixel shift), then applies a separable Lanczos-a kernel.  Uses
-    scipy.ndimage.map_coordinates with order=5 (quintic B-spline, closely
-    approximating Lanczos-3) for efficiency, with a pure Lanczos kernel
-    available via lanczos_a parameter.
+    the sub-pixel shift), then applies a separable Lanczos-a kernel. The native
+    path (HAS_NATIVE, lanczos_a==3, RGB input) uses the true Lanczos-3 Rust
+    kernel; otherwise falls back to scipy.ndimage.map_coordinates with
+    order=5 (quintic B-spline, closely approximating Lanczos-3).
     """
     H, W = img.shape[:2]
     C = img.shape[2] if img.ndim == 3 else 1
@@ -1071,6 +1057,281 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
     return result
 
 
+def _linear_fit_clip_tile(tile: np.ndarray, sigma_low: float, sigma_high: float,
+                          max_iters: int, weights: Optional[np.ndarray]) -> np.ndarray:
+    """Linear Fit Clipping rejection for a single tile (PixInsight's algorithm).
+
+    Sorts each pixel's per-frame stack ascending (order statistics) and fits
+    a straight line to value-vs-rank by least squares. Unlike sigma-clip
+    (which compares each sample to the mean/std of the *whole* stack), this
+    compares each sample to where it falls on the otherwise near-linear
+    sorted-value curve -- real outliers (cosmic rays, satellite trails, a
+    single badly-aligned frame) show up as a sudden jump away from that
+    curve, which is a robust signal indpendent of whether the per-pixel
+    distribution across frames is exactly Gaussian.
+
+    Iterates: refit the line using only currently-accepted ranks, recompute
+    the residual sigma from just those points, re-test, repeat up to
+    max_iters (or until nothing new is rejected, or until rejecting further
+    would leave fewer than 2 survivors at a pixel -- at which point that
+    pixel's accepted set is frozen for the rest of the iterations).
+    """
+    N = tile.shape[0]
+    order = np.argsort(tile, axis=0)
+    sorted_y = np.take_along_axis(tile, order, axis=0).astype(np.float64)
+    x = np.arange(N, dtype=np.float64).reshape((N,) + (1,) * (tile.ndim - 1))
+
+    accepted = ~np.isnan(sorted_y)
+
+    for _ in range(max(1, max_iters)):
+        n_acc = accepted.sum(axis=0)
+        can_fit = n_acc >= 2
+        n_acc_safe = np.maximum(n_acc, 1).astype(np.float64)
+
+        x_masked = np.where(accepted, x, 0.0)
+        y_masked = np.where(accepted, sorted_y, 0.0)
+        x_mean = x_masked.sum(axis=0) / n_acc_safe
+        y_mean = y_masked.sum(axis=0) / n_acc_safe
+
+        dx = np.where(accepted, x - x_mean[np.newaxis], 0.0)
+        dy = np.where(accepted, sorted_y - y_mean[np.newaxis], 0.0)
+        sxx = np.sum(dx * dx, axis=0)
+        sxx = np.where(sxx <= 1e-12, 1.0, sxx)
+        sxy = np.sum(dx * dy, axis=0)
+        slope = np.where(can_fit, sxy / sxx, 0.0)
+        intercept = y_mean - slope * x_mean
+
+        fit = intercept[np.newaxis] + slope[np.newaxis] * x
+        resid = sorted_y - fit
+
+        ss = np.where(accepted, resid * resid, 0.0).sum(axis=0)
+        denom = np.maximum(n_acc.astype(np.float64) - 1.0, 1.0)
+        sigma = np.maximum(np.sqrt(ss / denom), 1e-6)
+
+        violates = accepted & ((resid < -sigma_low * sigma[np.newaxis]) |
+                                (resid > sigma_high * sigma[np.newaxis]))
+        n_violate = violates.sum(axis=0)
+        would_survive = n_acc - n_violate
+        apply = can_fit & (n_violate > 0) & (would_survive >= 2)
+        if not np.any(apply):
+            break
+        accepted = accepted & ~(apply[np.newaxis] & violates)
+
+    accepted_orig = np.zeros_like(accepted)
+    np.put_along_axis(accepted_orig, order, accepted, axis=0)
+
+    masked_final = np.where(accepted_orig, tile, np.nan)
+    if weights is not None:
+        w = np.where(accepted_orig, weights[:, np.newaxis, np.newaxis, np.newaxis], 0.0)
+        with np.errstate(all='ignore'):
+            total_w = np.sum(w, axis=0)
+            total_w[total_w == 0] = 1.0
+            result = np.nansum(masked_final * w, axis=0) / total_w
+    else:
+        with np.errstate(all='ignore'):
+            result = np.nanmean(masked_final, axis=0)
+    np.nan_to_num(result, copy=False, nan=0.0)
+    return result.astype(np.float32)
+
+
+def linear_fit_clip_combine(data: np.ndarray, sigma_low: float = 4.0, sigma_high: float = 2.0,
+                            max_iters: int = 5,
+                            weights: Optional[np.ndarray] = None,
+                            verbose: bool = False,
+                            return_mask: bool = False):
+    """Combine frames using Linear Fit Clipping rejection (PixInsight's algorithm).
+
+    See `_linear_fit_clip_tile` for the algorithm. Asymmetric thresholds
+    (sigma_high tighter than sigma_low by default) match PixInsight's own
+    default bias towards rejecting bright outliers (satellite trails, cosmic
+    rays, plane trails) more readily than faint ones.
+
+    Args:
+        data: Array of shape ``(N, H, W, C)``.
+        sigma_low: Rejection threshold for samples *below* the fitted line.
+        sigma_high: Rejection threshold for samples *above* the fitted line.
+        max_iters: Maximum refit/re-test iterations (default: 5).
+        weights: Optional 1-D per-frame quality weights.
+        verbose: Print summary.
+    """
+    N, H, W, C = data.shape
+
+    if not return_mask and _native_usable(data):
+        w32 = weights.astype(np.float32, copy=False) if weights is not None else None
+        try:
+            result = _native.linear_fit_clip_combine(
+                data, float(sigma_low), float(sigma_high), int(max_iters), w32)
+            safe_print(f"    [rust] linear-fit-clip combine "
+                       f"(sigma=[{sigma_low}, {sigma_high}], iters={max_iters})")
+            return result
+        except Exception as exc:
+            _log.debug("native linear_fit_clip_combine failed (%s); using numpy", exc)
+
+    tile_size = _adaptive_tile_size(N, C)
+    result = np.zeros((H, W, C), dtype=np.float32)
+    rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
+
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    tile_coords = [
+        (ty * tile_size, min((ty + 1) * tile_size, H),
+         tx * tile_size, min((tx + 1) * tile_size, W))
+        for ty in range(n_tiles_y)
+        for tx in range(n_tiles_x)
+    ]
+
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        tile_result = _linear_fit_clip_tile(tile, sigma_low, sigma_high, max_iters, weights)
+        if return_mask:
+            order = np.argsort(tile, axis=0)
+            sorted_y = np.take_along_axis(tile, order, axis=0)
+            # Cheap proxy mask for the caller's diagnostics: same rank-based
+            # comparison, single-pass (no iteration) -- exact iterated mask
+            # isn't recomputed here, matching esd_combine's return_mask note.
+            n = tile.shape[0]
+            x = np.arange(n, dtype=np.float64).reshape((n,) + (1,) * (tile.ndim - 1))
+            y64 = sorted_y.astype(np.float64)
+            x_mean = (n - 1) / 2.0
+            sxx = np.sum((np.arange(n, dtype=np.float64) - x_mean) ** 2)
+            y_mean = y64.mean(axis=0)
+            slope = np.sum((x - x_mean) * (y64 - y_mean[np.newaxis]), axis=0) / sxx
+            intercept = y_mean - slope * x_mean
+            resid = y64 - (intercept[np.newaxis] + slope[np.newaxis] * x)
+            sigma = np.maximum(resid.std(axis=0), 1e-6)
+            sorted_mask = (resid < -sigma_low * sigma[np.newaxis]) | (resid > sigma_high * sigma[np.newaxis])
+            tile_mask = np.zeros_like(sorted_mask)
+            np.put_along_axis(tile_mask, order, sorted_mask, axis=0)
+            return coords, tile_result, tile_mask
+        return coords, tile_result, None
+
+    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
+            if return_mask and tile_mask is not None:
+                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
+
+    if verbose:
+        safe_print(f"    Linear fit clip: sigma=[{sigma_low}, {sigma_high}], "
+                   f"iters={max_iters}, {n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+    if return_mask:
+        return result, rej_mask_full
+    return result
+
+
+def _ivw_tile(tile: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray],
+             gain: Optional[float], weights: Optional[np.ndarray]) -> np.ndarray:
+    """Inverse-variance-weighted combine for a single tile.
+
+    Per-frame-per-pixel weight = 1 / variance, where variance is the
+    per-frame measured background noise (constant across that frame) plus
+    an optional per-pixel shot-noise term if a calibrated gain (e-/ADU) is
+    supplied. This is the minimum-variance linear unbiased estimator
+    (Gauss-Markov) under that noise model -- distinct from the ad-hoc
+    multiplicative SNR/FWHM/star-count heuristic in ``--weight-snr`` etc.,
+    which has no such optimality property.
+    """
+    tile64 = tile.astype(np.float64)
+    noise2 = (noise.astype(np.float64) ** 2)[:, np.newaxis, np.newaxis, np.newaxis]
+    if gain is not None and sky is not None:
+        sky_b = sky.astype(np.float64)[:, np.newaxis, np.newaxis, np.newaxis]
+        shot = np.maximum(tile64 - sky_b, 0.0) / float(gain)
+        var = noise2 + shot
+    else:
+        var = np.broadcast_to(noise2, tile64.shape)
+    var = np.maximum(var, 1e-12)
+    w = 1.0 / var
+    if weights is not None:
+        w = w * weights.astype(np.float64)[:, np.newaxis, np.newaxis, np.newaxis]
+    wsum = w.sum(axis=0)
+    wsum = np.where(wsum <= 0, 1.0, wsum)
+    result = (w * tile64).sum(axis=0) / wsum
+    return result.astype(np.float32)
+
+
+def ivw_combine(data: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray] = None,
+                gain: Optional[float] = None, weights: Optional[np.ndarray] = None,
+                verbose: bool = False) -> np.ndarray:
+    """Combine frames using inverse-noise-variance weighting (Gauss-Markov
+    optimal linear combiner, i.e. the "Bayesian" weighted-mean stacking
+    method).
+
+    Each frame's contribution to every pixel is weighted by 1/variance
+    rather than a fixed per-frame heuristic score. With ``gain`` unset, this
+    is a per-frame-constant weight (1/noise^2, ``noise`` from each frame's
+    already-measured Phase 1 background sigma) -- still the statistically
+    optimal combiner under a per-frame-homoscedastic noise model, and a real
+    improvement over ``--weight-noise``'s ad-hoc heuristic. With ``gain``
+    (electrons/ADU) and ``sky`` (each frame's background level) both
+    supplied, adds a per-pixel Poisson shot-noise term so brighter regions
+    (galaxy cores, bright stars) are correctly down-weighted relative to sky
+    background in frames where they carry more shot noise -- the fully
+    heteroscedastic version.
+
+    This method does not reject outliers -- cosmic rays and satellite/plane
+    trails get a (small but nonzero) weight like everything else. Pair it
+    with this pipeline's existing per-frame pre-filters
+    (``--cosmic-ray-rejection``, ``--trail-reject``), which already run
+    before combine, rather than expecting this to substitute for rejection.
+
+    Args:
+        data: Array of shape ``(N, H, W, C)``.
+        noise: (N,) per-frame background noise sigma (ADU).
+        sky: Optional (N,) per-frame background level (ADU); required
+            together with ``gain`` for the shot-noise term.
+        gain: Optional detector gain (electrons/ADU) for the shot-noise term.
+        weights: Optional 1-D per-frame quality multiplier, composed
+            multiplicatively with the inverse-variance weight.
+        verbose: Print summary.
+    """
+    N, H, W, C = data.shape
+    noise32 = np.asarray(noise, dtype=np.float32)
+    sky32 = np.asarray(sky, dtype=np.float32) if sky is not None else None
+    w32 = weights.astype(np.float32, copy=False) if weights is not None else None
+
+    if _native_usable(data):
+        try:
+            result = _native.ivw_combine(
+                data, noise32, sky32, gain if gain is not None else None, w32)
+            safe_print(f"    [rust] inverse-variance-weighted combine"
+                       f"{' (+shot noise)' if gain is not None else ''}")
+            return result
+        except Exception as exc:
+            _log.debug("native ivw_combine failed (%s); using numpy", exc)
+
+    tile_size = _adaptive_tile_size(N, C)
+    result = np.zeros((H, W, C), dtype=np.float32)
+
+    n_tiles_y = (H + tile_size - 1) // tile_size
+    n_tiles_x = (W + tile_size - 1) // tile_size
+    tile_coords = [
+        (ty * tile_size, min((ty + 1) * tile_size, H),
+         tx * tile_size, min((tx + 1) * tile_size, W))
+        for ty in range(n_tiles_y)
+        for tx in range(n_tiles_x)
+    ]
+
+    def _process_tile(coords):
+        ty, ty_end, tx, tx_end = coords
+        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        return coords, _ivw_tile(tile, noise32, sky32, gain, weights)
+
+    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for coords, tile_result in executor.map(_process_tile, tile_coords):
+            ty, ty_end, tx, tx_end = coords
+            result[ty:ty_end, tx:tx_end, :] = tile_result
+
+    if verbose:
+        safe_print(f"    Inverse-variance-weighted: "
+                   f"{'per-pixel shot noise' if gain is not None else 'per-frame constant'}, "
+                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+    return result
+
+
 def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: float = 0.2,
                          weights: Optional[np.ndarray] = None,
                          verbose: bool = False) -> np.ndarray:
@@ -1346,7 +1607,8 @@ def run_stacking_phase(
     drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
     use_aligned_memmap = (drizzle_scale <= 1.0 and
                           args.stack_method in ('median', 'sigma_clip', 'winsorized',
-                                                'percentile', 'esd', 'trimmed_mean'))
+                                                'percentile', 'esd', 'trimmed_mean',
+                                                'linear_fit', 'ivw'))
     if use_aligned_memmap:
         mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
         crop_h, crop_w = bottom - top, right - left
@@ -1506,6 +1768,23 @@ def run_stacking_phase(
             print(f"  Trimmed mean: trim_low={tl}, trim_high={th}")
             stacked = trimmed_mean_combine(mem_aligned, trim_low=tl, trim_high=th,
                                            weights=weights, verbose=args.verbose)
+        elif args.stack_method == 'linear_fit':
+            sig_lo = getattr(args, 'linear_fit_sigma_low', 4.0)
+            sig_hi = getattr(args, 'linear_fit_sigma_high', 2.0)
+            lf_iters = getattr(args, 'linear_fit_iters', 5)
+            print(f"  Linear fit clip: sigma=[{sig_lo}, {sig_hi}], iters={lf_iters}")
+            stacked = linear_fit_clip_combine(mem_aligned, sigma_low=sig_lo, sigma_high=sig_hi,
+                                              max_iters=lf_iters, weights=weights,
+                                              verbose=args.verbose)
+        elif args.stack_method == 'ivw':
+            noise_arr = np.array([f.metrics.get('noise', 10.0) for f in final], dtype=np.float32)
+            gain = getattr(args, 'ivw_gain', None)
+            sky_arr = (np.array([f.metrics.get('background', 0.0) for f in final], dtype=np.float32)
+                      if gain is not None else None)
+            print(f"  Inverse-variance-weighted combine"
+                  f"{f' (gain={gain} e-/ADU, +shot noise)' if gain is not None else ' (per-frame noise only)'}")
+            stacked = ivw_combine(mem_aligned, noise=noise_arr, sky=sky_arr, gain=gain,
+                                 weights=weights, verbose=args.verbose)
         else:
             stacked = median_combine(mem_aligned, verbose=args.verbose)
 

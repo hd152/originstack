@@ -984,6 +984,210 @@ fn esd_combine<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
 }
 
+// ---------------------------------------------------------------------------
+// Linear Fit Clipping (PixInsight's algorithm)
+// ---------------------------------------------------------------------------
+//
+// Mirrors src/stacking.py's `_linear_fit_clip_tile` exactly: sort each
+// pixel's per-frame stack ascending, fit a line to value-vs-rank, reject
+// samples whose residual from that fit exceeds sigma_low/sigma_high times
+// the residual scale, refit on survivors, iterate. See that function's
+// docstring for why this is more robust to non-Gaussian tails than
+// mean/std-based sigma-clip.
+
+#[pyfunction]
+#[pyo3(signature = (data, sigma_low, sigma_high, max_iters, weights=None))]
+fn linear_fit_clip_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    sigma_low: f64,
+    sigma_high: f64,
+    max_iters: usize,
+    weights: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+    let wv: Option<Vec<f32>> = weights.map(|x| x.as_array().to_vec());
+    let wref = wv.as_deref();
+    let iters = max_iters.max(1);
+
+    let out = py.allow_threads(|| {
+        row_parallel(
+            &arr,
+            h,
+            w,
+            c,
+            n,
+            || {
+                (
+                    (0..n).collect::<Vec<usize>>(),      // order (reused scratch)
+                    vec![0.0f64; n],                      // y_sorted
+                    vec![true; n],                        // accepted
+                    Vec::<usize>::with_capacity(n),       // newly-rejected scratch
+                )
+            },
+            |(order, y_sorted, accepted, newly_rejected), vals| {
+                for i in 0..n {
+                    order[i] = i;
+                }
+                order.sort_unstable_by(|&a, &b| {
+                    vals[a].partial_cmp(&vals[b]).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for r in 0..n {
+                    y_sorted[r] = vals[order[r]] as f64;
+                    accepted[r] = !y_sorted[r].is_nan();
+                }
+
+                for _ in 0..iters {
+                    let mut n_acc = 0usize;
+                    let mut sum_x = 0f64;
+                    let mut sum_y = 0f64;
+                    for r in 0..n {
+                        if accepted[r] {
+                            sum_x += r as f64;
+                            sum_y += y_sorted[r];
+                            n_acc += 1;
+                        }
+                    }
+                    if n_acc < 2 {
+                        break;
+                    }
+                    let x_mean = sum_x / n_acc as f64;
+                    let y_mean = sum_y / n_acc as f64;
+                    let mut sxx = 0f64;
+                    let mut sxy = 0f64;
+                    for r in 0..n {
+                        if accepted[r] {
+                            let dx = r as f64 - x_mean;
+                            sxx += dx * dx;
+                            sxy += dx * (y_sorted[r] - y_mean);
+                        }
+                    }
+                    if sxx <= 1e-12 {
+                        sxx = 1.0;
+                    }
+                    let slope = sxy / sxx;
+                    let intercept = y_mean - slope * x_mean;
+
+                    let mut ss = 0f64;
+                    for r in 0..n {
+                        if accepted[r] {
+                            let e = y_sorted[r] - (intercept + slope * r as f64);
+                            ss += e * e;
+                        }
+                    }
+                    let sigma = ((ss / (n_acc as f64 - 1.0).max(1.0)).sqrt()).max(1e-6);
+
+                    newly_rejected.clear();
+                    for r in 0..n {
+                        if accepted[r] {
+                            let e = y_sorted[r] - (intercept + slope * r as f64);
+                            if e < -sigma_low * sigma || e > sigma_high * sigma {
+                                newly_rejected.push(r);
+                            }
+                        }
+                    }
+                    if newly_rejected.is_empty() {
+                        break;
+                    }
+                    if n_acc - newly_rejected.len() < 2 {
+                        // Applying this iteration's rejections would leave
+                        // fewer than 2 survivors -- freeze this pixel's
+                        // accepted set instead (matches the numpy reference's
+                        // per-pixel `apply` gate).
+                        break;
+                    }
+                    for &r in newly_rejected.iter() {
+                        accepted[r] = false;
+                    }
+                }
+
+                let mut acc = 0f64;
+                let mut wsum = 0f64;
+                for r in 0..n {
+                    if accepted[r] {
+                        let orig_idx = order[r];
+                        let wt = wref.map(|wv| wv[orig_idx] as f64).unwrap_or(1.0);
+                        acc += y_sorted[r] * wt;
+                        wsum += wt;
+                    }
+                }
+                if wsum <= 0.0 {
+                    0.0
+                } else {
+                    (acc / wsum) as f32
+                }
+            },
+        )
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// Inverse-variance-weighted combine ("Bayesian" / Gauss-Markov optimal mean)
+// ---------------------------------------------------------------------------
+//
+// Mirrors src/stacking.py's `_ivw_tile` exactly. No iteration/sorting needed
+// (unlike every other kernel in this file) -- still routed through
+// `row_parallel` for the gather-transpose + parallelism, since the per-pixel
+// weight is data-dependent (varies with each frame's own pixel value when
+// `gain` is supplied) and so isn't reducible to a single static-weight numpy
+// broadcast the way a per-frame-constant weighted mean would be.
+
+#[pyfunction]
+#[pyo3(signature = (data, noise, sky=None, gain=None, weights=None))]
+fn ivw_combine<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    noise: PyReadonlyArray1<'py, f32>,
+    sky: Option<PyReadonlyArray1<'py, f32>>,
+    gain: Option<f64>,
+    weights: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+
+    let noise2: Vec<f64> = noise.as_array().iter().map(|&v| (v as f64) * (v as f64)).collect();
+    let sky_v: Option<Vec<f64>> = sky.map(|x| x.as_array().iter().map(|&v| v as f64).collect());
+    let wv: Option<Vec<f32>> = weights.map(|x| x.as_array().to_vec());
+    let wref = wv.as_deref();
+    let shot_model = match (&sky_v, gain) {
+        (Some(sk), Some(g)) if g > 0.0 => Some((sk, g)),
+        _ => None,
+    };
+
+    let out = py.allow_threads(|| {
+        row_parallel(&arr, h, w, c, n, || (), |_, vals| {
+            let mut acc = 0f64;
+            let mut wsum = 0f64;
+            for k in 0..n {
+                let var = match shot_model {
+                    Some((sk, g)) => {
+                        let shot = ((vals[k] as f64) - sk[k]).max(0.0) / g;
+                        noise2[k] + shot
+                    }
+                    None => noise2[k],
+                };
+                let var = var.max(1e-12);
+                let mut wt = 1.0 / var;
+                if let Some(qw) = wref {
+                    wt *= qw[k] as f64;
+                }
+                acc += wt * vals[k] as f64;
+                wsum += wt;
+            }
+            if wsum <= 0.0 {
+                0.0
+            } else {
+                (acc / wsum) as f32
+            }
+        })
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
 /// Lanczos-a windowed-sinc kernel weight for offset `x` (a = support radius).
 #[inline]
 fn lanczos_w(x: f64, a: f64) -> f64 {
@@ -2922,6 +3126,331 @@ fn debayer_malvar<'py>(
 }
 
 // ---------------------------------------------------------------------------
+// Menon (2007) DDFAPD Bayer demosaicing
+// ---------------------------------------------------------------------------
+//
+// Direct staged port of src/debayer.py's _debayer_menon2007_numpy (itself
+// validated bit-exact against the `colour-demosaicing` reference package --
+// see tests/test_debayer_menon2007.py). Unlike debayer_malvar above, whose
+// per-pixel output depends only on a fixed set of nearby taps (fusible into
+// one gather per pixel), Menon's per-pixel direction decision (`use_h`)
+// depends on a 5x5-diffused colour-difference gradient built from a
+// shifted-by-2 difference of a *different* directional green estimate --
+// genuinely sequential stages, each needing the whole previous stage
+// materialized first. Ported as the same staged full-array passes the numpy
+// reference uses (each stage parallelised across rows with rayon), rather
+// than one fused gather.
+//
+// f64 throughout (matching the numpy reference's internal precision, since
+// scipy promotes to float64 for these convolutions) with f32 in/out only at
+// the native/Python boundary.
+
+/// Combined green-at-R/B directional filter (h_0 + h_1 from the paper,
+/// pre-summed since both are applied to the same input and immediately
+/// added -- see _MENON_H0/_MENON_H1 in src/debayer.py for the two separately).
+const MENON_G_TAPS: [(isize, f64); 5] =
+    [(-2, -0.25), (-1, 0.5), (0, 0.5), (1, 0.5), (2, -0.25)];
+
+/// R/B <-> G colour-difference averaging filter ([0.5, 0, 0.5]; the centre
+/// tap is zero so it's omitted).
+const MENON_KB_TAPS: [(isize, f64); 2] = [(-1, 0.5), (1, 0.5)];
+
+/// Refining-step 3-tap box filter (FIR = [1/3, 1/3, 1/3]).
+const MENON_FIR_TAPS: [(isize, f64); 3] =
+    [(-1, 1.0 / 3.0), (0, 1.0 / 3.0), (1, 1.0 / 3.0)];
+
+/// 5x5 gradient-diffusion kernel (horizontal direction), sparse taps only --
+/// see _MENON_DIFFUSION_K in src/debayer.py for the dense matrix this comes
+/// from. Zero-padded boundary (scipy `mode='constant'`, cval=0), unlike the
+/// mirror boundary every other Menon convolution here uses.
+///
+/// `_MENON_DIFFUSION_K` is *not* 180-degree symmetric (unlike every other
+/// Menon kernel in this file), so unlike those, this one is sensitive to the
+/// convolve-vs-correlate distinction: `scipy.ndimage.convolve` flips the
+/// kernel before applying it, so a tap at dense-matrix offset (dy, dx) is
+/// read from input position (y - dy, x - dx), not (y + dy, x + dx). These
+/// taps are pre-negated ((-dy, -dx) of the dense matrix's own offsets) so
+/// the direct-gather loop below can read (y + dy, x + dx) as usual.
+const MENON_DIFF_K: [(isize, isize, f64); 8] = [
+    (2, 0, 1.0), (2, -2, 1.0),
+    (1, -1, 1.0),
+    (0, 0, 3.0), (0, -2, 3.0),
+    (-1, -1, 1.0),
+    (-2, 0, 1.0), (-2, -2, 1.0),
+];
+
+/// Transpose of MENON_DIFF_K (vertical direction) -- each tap's (dy, dx) swapped.
+const MENON_DIFF_KT: [(isize, isize, f64); 8] = [
+    (0, 2, 1.0), (-2, 2, 1.0),
+    (-1, 1, 1.0),
+    (0, 0, 3.0), (-2, 0, 3.0),
+    (-1, -1, 1.0),
+    (0, -2, 1.0), (-2, -2, 1.0),
+];
+
+/// 1D horizontal convolution, scipy `mode='mirror'` boundary (reuses `mirror_idx`).
+fn menon_conv_h(data: &[f64], h: usize, w: usize, taps: &[(isize, f64)]) -> Vec<f64> {
+    let mut out = vec![0.0f64; h * w];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+        let base = y * w;
+        for x in 0..w {
+            let mut acc = 0.0f64;
+            for &(dx, wt) in taps {
+                acc += data[base + mirror_idx(x as isize + dx, w)] * wt;
+            }
+            row_out[x] = acc;
+        }
+    });
+    out
+}
+
+/// 1D vertical convolution, scipy `mode='mirror'` boundary.
+fn menon_conv_v(data: &[f64], h: usize, w: usize, taps: &[(isize, f64)]) -> Vec<f64> {
+    let mut out = vec![0.0f64; h * w];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+        for x in 0..w {
+            let mut acc = 0.0f64;
+            for &(dy, wt) in taps {
+                acc += data[mirror_idx(y as isize + dy, h) * w + x] * wt;
+            }
+            row_out[x] = acc;
+        }
+    });
+    out
+}
+
+/// 2D sparse convolution, scipy `mode='constant'` (cval=0) boundary --
+/// out-of-range taps contribute nothing, matching the reference's
+/// `scipy.ndimage.convolve(..., mode='constant')` used only for the 5x5
+/// gradient-diffusion pass.
+fn menon_diffuse(data: &[f64], h: usize, w: usize, taps: &[(isize, isize, f64)]) -> Vec<f64> {
+    let mut out = vec![0.0f64; h * w];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+        for x in 0..w {
+            let mut acc = 0.0f64;
+            for &(dy, dx, wt) in taps {
+                let yy = y as isize + dy;
+                let xx = x as isize + dx;
+                if yy >= 0 && xx >= 0 && (yy as usize) < h && (xx as usize) < w {
+                    acc += data[yy as usize * w + xx as usize] * wt;
+                }
+            }
+            row_out[x] = acc;
+        }
+    });
+    out
+}
+
+#[pyfunction]
+fn debayer_menon2007<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray2<'py, f32>,
+    pattern: &str,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let (r_r, r_c, b_r, b_c) = malvar_pattern_offsets(pattern)?;
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w) = (s[0], s[1]);
+    let n = h * w;
+    let owned: Vec<f32>;
+    let flat: &[f32] = match arr.as_slice() {
+        Some(sl) => sl,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+    let raw: Vec<f64> = flat.iter().map(|&v| v as f64).collect();
+
+    let is_r_row: Vec<bool> = (0..h).map(|y| y % 2 == r_r).collect();
+    let is_b_row: Vec<bool> = (0..h).map(|y| y % 2 == b_r).collect();
+    let is_r_col: Vec<bool> = (0..w).map(|x| x % 2 == r_c).collect();
+    let is_b_col: Vec<bool> = (0..w).map(|x| x % 2 == b_c).collect();
+
+    let (r_final, g_final, b_final) = py.allow_threads(|| {
+        let is_r: Vec<bool> = (0..n).map(|i| is_r_row[i / w] && is_r_col[i % w]).collect();
+        let is_b: Vec<bool> = (0..n).map(|i| is_b_row[i / w] && is_b_col[i % w]).collect();
+        let is_g: Vec<bool> = (0..n).map(|i| !is_r[i] && !is_b[i]).collect();
+
+        let g_h_conv = menon_conv_h(&raw, h, w, &MENON_G_TAPS);
+        let g_v_conv = menon_conv_v(&raw, h, w, &MENON_G_TAPS);
+        let g_h: Vec<f64> = (0..n).map(|i| if is_g[i] { raw[i] } else { g_h_conv[i] }).collect();
+        let g_v: Vec<f64> = (0..n).map(|i| if is_g[i] { raw[i] } else { g_v_conv[i] }).collect();
+
+        let c_h: Vec<f64> = (0..n)
+            .map(|i| if is_r[i] || is_b[i] { raw[i] - g_h[i] } else { 0.0 })
+            .collect();
+        let c_v: Vec<f64> = (0..n)
+            .map(|i| if is_r[i] || is_b[i] { raw[i] - g_v[i] } else { 0.0 })
+            .collect();
+
+        let mut d_h = vec![0.0f64; n];
+        d_h.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            let base = y * w;
+            for x in 0..w {
+                row[x] = (c_h[base + x] - c_h[base + mirror_idx(x as isize + 2, w)]).abs();
+            }
+        });
+        let mut d_v = vec![0.0f64; n];
+        d_v.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                row[x] = (c_v[y * w + x] - c_v[mirror_idx(y as isize + 2, h) * w + x]).abs();
+            }
+        });
+
+        let dd_h = menon_diffuse(&d_h, h, w, &MENON_DIFF_K);
+        let dd_v = menon_diffuse(&d_v, h, w, &MENON_DIFF_KT);
+        let use_h: Vec<bool> = (0..n).map(|i| dd_v[i] >= dd_h[i]).collect();
+
+        let g: Vec<f64> = (0..n)
+            .map(|i| if is_g[i] { raw[i] } else if use_h[i] { g_h[i] } else { g_v[i] })
+            .collect();
+
+        let mut r: Vec<f64> = (0..n).map(|i| if is_r[i] { raw[i] } else { 0.0 }).collect();
+        let mut b: Vec<f64> = (0..n).map(|i| if is_b[i] { raw[i] } else { 0.0 }).collect();
+
+        // Green sites: fill R and B from the just-finalised G, in row-parity
+        // order matching the reference exactly (each step reads the *current*
+        // r/g/b state, so order and in-place mutation both matter).
+        let g_ch = menon_conv_h(&g, h, w, &MENON_KB_TAPS);
+        let g_cv = menon_conv_v(&g, h, w, &MENON_KB_TAPS);
+
+        {
+            let r_ch = menon_conv_h(&r, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_g[i] && is_r_row[i / w] {
+                    r[i] = g[i] + r_ch[i] - g_ch[i];
+                }
+            }
+        }
+        {
+            let r_cv = menon_conv_v(&r, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_g[i] && is_b_row[i / w] {
+                    r[i] = g[i] + r_cv[i] - g_cv[i];
+                }
+            }
+        }
+        {
+            let b_ch = menon_conv_h(&b, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_g[i] && is_b_row[i / w] {
+                    b[i] = g[i] + b_ch[i] - g_ch[i];
+                }
+            }
+        }
+        {
+            let b_cv = menon_conv_v(&b, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_g[i] && is_r_row[i / w] {
+                    b[i] = g[i] + b_cv[i] - g_cv[i];
+                }
+            }
+        }
+
+        // Opposite-colour sites (R at B, B at R), direction-selected.
+        {
+            let r_ch = menon_conv_h(&r, h, w, &MENON_KB_TAPS);
+            let b_ch = menon_conv_h(&b, h, w, &MENON_KB_TAPS);
+            let r_cv = menon_conv_v(&r, h, w, &MENON_KB_TAPS);
+            let b_cv = menon_conv_v(&b, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_b_row[i / w] && is_b[i] {
+                    r[i] = if use_h[i] { b[i] + r_ch[i] - b_ch[i] } else { b[i] + r_cv[i] - b_cv[i] };
+                }
+            }
+        }
+        {
+            let r_ch = menon_conv_h(&r, h, w, &MENON_KB_TAPS);
+            let b_ch = menon_conv_h(&b, h, w, &MENON_KB_TAPS);
+            let r_cv = menon_conv_v(&r, h, w, &MENON_KB_TAPS);
+            let b_cv = menon_conv_v(&b, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_r_row[i / w] && is_r[i] {
+                    b[i] = if use_h[i] { r[i] + b_ch[i] - r_ch[i] } else { r[i] + b_cv[i] - r_cv[i] };
+                }
+            }
+        }
+
+        let mut g = g;
+        // Refining step (matches src/debayer.py's refining_step=True default).
+        {
+            let r_g: Vec<f64> = (0..n).map(|i| r[i] - g[i]).collect();
+            let b_g: Vec<f64> = (0..n).map(|i| b[i] - g[i]).collect();
+            let r_g_ch = menon_conv_h(&r_g, h, w, &MENON_FIR_TAPS);
+            let r_g_cv = menon_conv_v(&r_g, h, w, &MENON_FIR_TAPS);
+            let b_g_ch = menon_conv_h(&b_g, h, w, &MENON_FIR_TAPS);
+            let b_g_cv = menon_conv_v(&b_g, h, w, &MENON_FIR_TAPS);
+            for i in 0..n {
+                if is_r[i] {
+                    g[i] = r[i] - if use_h[i] { r_g_ch[i] } else { r_g_cv[i] };
+                }
+            }
+            for i in 0..n {
+                if is_b[i] {
+                    g[i] = b[i] - if use_h[i] { b_g_ch[i] } else { b_g_cv[i] };
+                }
+            }
+
+            let r_g2: Vec<f64> = (0..n).map(|i| r[i] - g[i]).collect();
+            let b_g2: Vec<f64> = (0..n).map(|i| b[i] - g[i]).collect();
+            let r_g2_cv = menon_conv_v(&r_g2, h, w, &MENON_KB_TAPS);
+            let r_g2_ch = menon_conv_h(&r_g2, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_g[i] && is_b_row[i / w] {
+                    r[i] = g[i] + r_g2_cv[i];
+                }
+            }
+            for i in 0..n {
+                if is_g[i] && is_b_col[i % w] {
+                    r[i] = g[i] + r_g2_ch[i];
+                }
+            }
+
+            let b_g2_cv = menon_conv_v(&b_g2, h, w, &MENON_KB_TAPS);
+            let b_g2_ch = menon_conv_h(&b_g2, h, w, &MENON_KB_TAPS);
+            for i in 0..n {
+                if is_g[i] && is_r_row[i / w] {
+                    b[i] = g[i] + b_g2_cv[i];
+                }
+            }
+            for i in 0..n {
+                if is_g[i] && is_r_col[i % w] {
+                    b[i] = g[i] + b_g2_ch[i];
+                }
+            }
+
+            let r_b: Vec<f64> = (0..n).map(|i| r[i] - b[i]).collect();
+            let r_b_ch = menon_conv_h(&r_b, h, w, &MENON_FIR_TAPS);
+            let r_b_cv = menon_conv_v(&r_b, h, w, &MENON_FIR_TAPS);
+            for i in 0..n {
+                if is_b[i] {
+                    r[i] = b[i] + if use_h[i] { r_b_ch[i] } else { r_b_cv[i] };
+                }
+            }
+            for i in 0..n {
+                if is_r[i] {
+                    b[i] = r[i] - if use_h[i] { r_b_ch[i] } else { r_b_cv[i] };
+                }
+            }
+        }
+
+        (r, g, b)
+    });
+
+    let mut out = vec![0f32; n * 3];
+    out.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
+        px[0] = r_final[i] as f32;
+        px[1] = g_final[i] as f32;
+        px[2] = b_final[i] as f32;
+    });
+
+    let arr3 = numpy::ndarray::Array3::from_shape_vec((h, w, 3), out)
+        .expect("shape mismatch building debayer_menon2007 output");
+    Ok(arr3.into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
 // Joint (colour-space) bilateral filter -- replaces cv2.bilateralFilter
 // ---------------------------------------------------------------------------
 //
@@ -3026,6 +3555,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(trimmed_mean_combine, m)?)?;
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(linear_fit_clip_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(ivw_combine, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
@@ -3035,6 +3566,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_stars_matched_filter, m)?)?;
     m.add_function(wrap_pyfunction!(fit_rigid_ransac, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_malvar, m)?)?;
+    m.add_function(wrap_pyfunction!(debayer_menon2007, m)?)?;
     m.add_function(wrap_pyfunction!(bilateral_filter, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

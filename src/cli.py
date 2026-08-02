@@ -840,20 +840,6 @@ def parse_args():
                         'per-frame right after debayer, before registration -- reduces '
                         'the gradient DBE/--bg-method wavelet has to guess at from one '
                         'session\'s sparse sky samples alone.')
-    g_core.add_argument('--star-detector', choices=['matched-filter'], default='matched-filter',
-                   help='Star detection backend. matched-filter (the only backend): '
-                        'native/numpy Gaussian-PSF matched filter (src/star_detect.py), no '
-                        'external dependency -- validated F1 0.78-0.86 vs SEP and faster '
-                        '(~1.7-2.1x) on real archive data across dense/sparse/held-out fields. '
-                        'SEP and DAOStarFinder/photutils were both removed from the detection '
-                        'path entirely (photutils is no longer used anywhere -- PSF estimation '
-                        'in --deconvolve rl is parametric Moffat/Gaussian fitting via '
-                        'scipy.optimize.curve_fit). Applies to every detection call site '
-                        'consistently (Phase 1 quality analysis, reference-frame/residual-check '
-                        'registration, --merge, post-process star masking) -- star detection '
-                        'is foundational enough that mixing backends across stages would '
-                        'silently corrupt the affine-matching / residual-RMS machinery that '
-                        'compares catalogs from different stages against each other.')
     g_core.add_argument('--health-check', action='store_true',
                    help='Analyse input frames and calibration quality without stacking')
     g_core.add_argument('--quality-sweep', action='store_true',
@@ -1005,21 +991,41 @@ def parse_args():
     g_core.add_argument('-v', '--verbose', action='store_true')
     g_stack.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
-                            'percentile', 'esd', 'trimmed_mean', 'auto'],
+                            'percentile', 'esd', 'trimmed_mean', 'linear_fit',
+                            'ivw', 'auto'],
                    default='auto',
                    help='Stacking/rejection method. '
                         'sigma_clip: MAD-based iterative rejection (default for dithered data). '
                         'winsorized: like sigma_clip but clips to boundary instead of rejecting. '
                         'percentile: reject outside [low,high] percentile (good for <8 frames). '
                         'esd: Grubbs/ESD test (best for <15 frames, needs scipy). '
+                        'linear_fit: PixInsight-style Linear Fit Clipping -- sorts each pixel\'s '
+                        'per-frame stack ascending and fits a line to value-vs-rank, rejecting '
+                        'samples whose residual from that fit exceeds sigma_low/sigma_high; '
+                        'more robust to non-Gaussian tails than sigma-clip\'s mean/std test '
+                        '(tune via --config: linear_fit_sigma_low/_sigma_high/_iters). '
+                        'ivw: inverse-noise-variance-weighted mean (the Gauss-Markov-optimal '
+                        'linear combiner) -- weights each frame by 1/noise^2 from its own '
+                        'measured Phase 1 background sigma; no rejection, pair with '
+                        '--cosmic-ray-rejection/--trail-reject (tune gain via --config '
+                        'ivw_gain for an added per-pixel shot-noise term). '
                         'auto: choose based on frame count (<8->percentile, else sigma_clip). '
                         'mean/median: no rejection.')
     g_stack.add_argument('--rejection-sigma', type=float, default=3.0,
                    help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
     g_stack.add_argument('--rejection-iters', type=int, default=3,
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
-    g_frames.add_argument('--debayer-method', choices=['bilinear', 'malvar', 'vng'], default='bilinear',
-                   help='Debayering method (default: bilinear; malvar/vng require OpenCV)')
+    g_frames.add_argument('--debayer-method', choices=['malvar', 'menon2007'], default='malvar',
+                   help='Debayering method (default: malvar; both are native '
+                        'Rust kernels, no external dependency). menon2007 '
+                        '(DDFAPD directional filtering) is higher fidelity '
+                        'than malvar on fine periodic photographic detail in '
+                        'general, but on this codebase\'s synthetic astro '
+                        'benchmark (tools/bench_debayer_quality.py) the gain '
+                        'is modest (~14%% lower MAE on a synthetic starfield) '
+                        'and it is meaningfully slower -- most astro frames '
+                        'are smooth sky + point sources, not fine texture, so '
+                        'malvar remains the default.')
     g_frames.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     g_frames.add_argument('--no-bayer-autodetect', dest='bayer_autodetect', action='store_false',
                    default=True,
@@ -1203,9 +1209,6 @@ def parse_args():
     g_post.add_argument('--photometric-calibration', action='store_true',
                    help='Apply gray-locus photometric colour calibration. '
                         'No external dependencies required.')
-    g_post.add_argument('--gaia-calibration', action='store_true',
-                   help='Extend --photometric-calibration with a Gaia DR3 catalogue query. '
-                        'Requires --plate-solve.')
 
     # New feature flags (improvements 1-9)
     g_stack.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
@@ -1277,8 +1280,12 @@ def parse_args():
         percentile_high=80.0,
         esd_max_outliers=0,
         esd_significance=0.05,
+        linear_fit_sigma_low=4.0,
+        linear_fit_sigma_high=2.0,
+        linear_fit_iters=5,
+        ivw_gain=None,  # electrons/ADU; None = per-frame-constant noise weight (no shot-noise term)
         # Quality
-        # (advanced_metrics default set on the --advanced-metrics argument)
+        # (advanced_metrics has no CLI flag -- set via --config only)
         # Per-feature tuning
         star_reduce_factor=0.4,
         star_reduce_sigma=1.5,
@@ -1413,14 +1420,6 @@ def main():
         from src.quality_sweep import run_quality_sweep
         sys.exit(run_quality_sweep(args.directory, args))
 
-    from src.quality import configure_star_detector
-    configure_star_detector(getattr(args, 'star_detector', 'matched-filter'))
-
-    # Upgrade bilinear → malvar (native Rust kernel, no dependency); malvar resolves
-    # colour moiré that bilinear introduces around fine star disks at no perceptible
-    # speed cost.
-    if getattr(args, 'debayer_method', 'bilinear') == 'bilinear':
-        args.debayer_method = 'malvar'
     if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
         dir_name = os.path.basename(os.path.abspath(args.directory))
         args.output = f"{dir_name}_stacked.fits"

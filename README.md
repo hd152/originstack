@@ -227,7 +227,7 @@ Eight built-in target presets tune all parameters at once:
 
 ### Advanced Features
 - **Plate solving** via ASTAP or nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
-- **Photometric colour calibration** — gray-locus method, optional Gaia DR3 extension
+- **Photometric colour calibration** — gray-locus method (`--photometric-calibration`), or full field-star calibration via Gaia DR3 (`--color-calibrate`)
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
@@ -656,8 +656,8 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--preset NAME` | Apply named preset (quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar) |
 | `--config PATH` | Load parameters from TOML file |
 | `--no-auto` | Disable the heuristic target classifier (on by default; detects target type and optimises settings automatically) |
-| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized) |
-| `--debayer-method METHOD` | Debayer algorithm (bilinear, malvar, vng) |
+| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, trimmed_mean, linear_fit, ivw) |
+| `--debayer-method METHOD` | Debayer algorithm (malvar — only choice) |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
 | `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
@@ -835,3 +835,9 @@ python originstack.py -d lights/ -o stacked.fits --use-gpu
 ### Notes
 - GPU acceleration is experimental and may not cover all code paths.
 - Fallback to CPU occurs automatically if GPU is unavailable.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Third-party dependency licenses (including one
+non-permissive optional dependency, `bm3d`) are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

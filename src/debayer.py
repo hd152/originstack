@@ -165,7 +165,7 @@ def green_equalize(raw, pattern: str = 'RGGB'):
 def _equalize_bayer_grid(rgb: np.ndarray) -> np.ndarray:
     """Remove 2×2 position-dependent green bias introduced by edge-aware CFA interpolation.
 
-    Malvar/VNG debayering produces systematically different green values at
+    Malvar debayering produces systematically different green values at
     interpolated positions (R and B cells) vs source positions (G1 and G2 cells).
     After stacking many frames, this coherent per-pixel offset survives noise
     averaging and becomes a visible checkerboard in the sky background.
@@ -333,20 +333,167 @@ def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     return _equalize_bayer_grid(_debayer_malvar_numpy(raw, pattern))
 
 
-def debayer_vng(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
-    """VNG (Variable Number of Gradients) debayering. Was cv2-only; now that
-    cv2 is no longer a dependency of this codebase, this aliases to
-    ``debayer_malvar`` (equal-or-better quality, no dependency) rather than
-    dropping the ``--debayer-method vng`` option outright."""
-    return debayer_malvar(raw, pattern)
+# Menon (2007) DDFAPD 5x5 gradient-diffusion kernel: weights how far the
+# horizontal/vertical colour-difference-gradient signal (D_H/D_V) spreads
+# before the two are compared to pick a per-pixel green interpolation
+# direction. Exact values from Menon, Andriani & Calvagno 2007 (and the
+# colour-demosaicing reference this was validated against).
+_MENON_DIFFUSION_K = np.array([
+    [0.0, 0.0, 1.0, 0.0, 1.0],
+    [0.0, 0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 3.0, 0.0, 3.0],
+    [0.0, 0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0, 1.0],
+], dtype=np.float64)
+
+# Green interpolation at R/B sites: h_0 samples the two nearest green
+# neighbours, h_1 is a 2nd-derivative correction term using the R/B samples
+# two positions further out (same directional-filter pair the reference uses
+# for both the horizontal and vertical passes).
+_MENON_H0 = np.array([0.0, 0.5, 0.0, 0.5, 0.0], dtype=np.float64)
+_MENON_H1 = np.array([-0.25, 0.0, 0.5, 0.0, -0.25], dtype=np.float64)
+_MENON_KB = np.array([0.5, 0.0, 0.5], dtype=np.float64)
+_MENON_FIR = np.full(3, 1.0 / 3.0, dtype=np.float64)
+
+
+def _debayer_menon2007_numpy(raw: np.ndarray, pattern: str = 'RGGB',
+                             refining_step: bool = True) -> np.ndarray:
+    """DDFAPD - Menon (2007) directional-filtering demosaicing, pure numpy.
+
+    Port of Menon, Andriani & Calvagno 2007 ("Demosaicing With Directional
+    Filtering and a posteriori Decision"), validated bit-exact (float32
+    rounding only) against the `colour-demosaicing` package's reference
+    implementation across all 4 Bayer patterns -- see
+    tests/test_debayer_menon2007.py. Native Rust dispatch happens one level
+    up in ``debayer_menon2007``.
+
+    Green is interpolated in both directions (h_0/h_1 directional filters),
+    then a horizontal/vertical colour-difference gradient (diffused through
+    ``_MENON_DIFFUSION_K``) decides, per pixel, which direction's green
+    estimate to keep. Red/blue are then filled in at green sites and at the
+    opposite colour's sites using the same per-pixel direction. An optional
+    refining pass (on by default, matching the reference) re-derives green
+    from the now-complete R-G/B-G colour differences and touches up R/B at
+    green sites and at each other's sites for a final consistency pass.
+    """
+    offsets = _PATTERN_OFFSETS.get(pattern.upper())
+    if offsets is None:
+        raise ValueError(f"Unknown Bayer pattern '{pattern}'. "
+                         f"Expected one of {list(_PATTERN_OFFSETS)}")
+    (r_r, r_c), _, _, (b_r, b_c) = offsets
+    raw64 = np.asarray(raw, dtype=np.float64)
+    H, W = raw64.shape
+
+    def cnv_h(x, k):
+        return ndimage.convolve1d(x, k, axis=1, mode='mirror')
+
+    def cnv_v(x, k):
+        return ndimage.convolve1d(x, k, axis=0, mode='mirror')
+
+    row = (np.arange(H) % 2)[:, None]
+    col = (np.arange(W) % 2)[None, :]
+    R_m = (row == r_r) & (col == r_c)
+    B_m = (row == b_r) & (col == b_c)
+    G_m = ~R_m & ~B_m
+    R_r_rows = np.broadcast_to(row == r_r, (H, W))  # rows containing an R sample
+    B_r_rows = np.broadcast_to(row == b_r, (H, W))  # rows containing a B sample
+
+    R = np.where(R_m, raw64, 0.0)
+    G = np.where(G_m, raw64, 0.0)
+    B = np.where(B_m, raw64, 0.0)
+
+    G_H = np.where(~G_m, cnv_h(raw64, _MENON_H0) + cnv_h(raw64, _MENON_H1), G)
+    G_V = np.where(~G_m, cnv_v(raw64, _MENON_H0) + cnv_v(raw64, _MENON_H1), G)
+
+    C_H = np.where(R_m, R - G_H, 0.0)
+    C_H = np.where(B_m, B - G_H, C_H)
+    C_V = np.where(R_m, R - G_V, 0.0)
+    C_V = np.where(B_m, B - G_V, C_V)
+
+    # |C(i) - C(i+2)| along each axis, reflecting at the far boundary --
+    # matches np.pad(..., mode='reflect')[..., 2:] in the reference exactly.
+    D_H = np.abs(C_H - np.pad(C_H, ((0, 0), (0, 2)), mode='reflect')[:, 2:])
+    D_V = np.abs(C_V - np.pad(C_V, ((0, 2), (0, 0)), mode='reflect')[2:, :])
+
+    d_H = ndimage.convolve(D_H, _MENON_DIFFUSION_K, mode='constant', cval=0.0)
+    d_V = ndimage.convolve(D_V, _MENON_DIFFUSION_K.T, mode='constant', cval=0.0)
+
+    use_h = d_V >= d_H  # True where the horizontal green estimate wins
+    G = np.where(use_h, G_H, G_V)
+
+    R = np.where(G_m & R_r_rows, G + cnv_h(R, _MENON_KB) - cnv_h(G, _MENON_KB), R)
+    R = np.where(G_m & B_r_rows, G + cnv_v(R, _MENON_KB) - cnv_v(G, _MENON_KB), R)
+    B = np.where(G_m & B_r_rows, G + cnv_h(B, _MENON_KB) - cnv_h(G, _MENON_KB), B)
+    B = np.where(G_m & R_r_rows, G + cnv_v(B, _MENON_KB) - cnv_v(G, _MENON_KB), B)
+
+    R = np.where(B_r_rows & B_m,
+                np.where(use_h, B + cnv_h(R, _MENON_KB) - cnv_h(B, _MENON_KB),
+                                B + cnv_v(R, _MENON_KB) - cnv_v(B, _MENON_KB)), R)
+    B = np.where(R_r_rows & R_m,
+                np.where(use_h, R + cnv_h(B, _MENON_KB) - cnv_h(R, _MENON_KB),
+                                R + cnv_v(B, _MENON_KB) - cnv_v(R, _MENON_KB)), B)
+
+    if refining_step:
+        R_G = R - G
+        B_G = B - G
+        B_G_m = np.where(B_m, np.where(use_h, cnv_h(B_G, _MENON_FIR), cnv_v(B_G, _MENON_FIR)), 0.0)
+        R_G_m = np.where(R_m, np.where(use_h, cnv_h(R_G, _MENON_FIR), cnv_v(R_G, _MENON_FIR)), 0.0)
+        G = np.where(R_m, R - R_G_m, G)
+        G = np.where(B_m, B - B_G_m, G)
+
+        col_b = np.broadcast_to(col == r_c, (H, W))  # columns containing an R sample
+        colB_b = np.broadcast_to(col == b_c, (H, W))  # columns containing a B sample
+
+        R_G = R - G
+        B_G = B - G
+        R_G_m = np.where(G_m & B_r_rows, cnv_v(R_G, _MENON_KB), R_G_m)
+        R = np.where(G_m & B_r_rows, G + R_G_m, R)
+        R_G_m = np.where(G_m & colB_b, cnv_h(R_G, _MENON_KB), R_G_m)
+        R = np.where(G_m & colB_b, G + R_G_m, R)
+
+        B_G_m = np.where(G_m & R_r_rows, cnv_v(B_G, _MENON_KB), B_G_m)
+        B = np.where(G_m & R_r_rows, G + B_G_m, B)
+        B_G_m = np.where(G_m & col_b, cnv_h(B_G, _MENON_KB), B_G_m)
+        B = np.where(G_m & col_b, G + B_G_m, B)
+
+        R_B = R - B
+        R_B_m = np.where(B_m, np.where(use_h, cnv_h(R_B, _MENON_FIR), cnv_v(R_B, _MENON_FIR)), 0.0)
+        R = np.where(B_m, B + R_B_m, R)
+        R_B_m = np.where(R_m, np.where(use_h, cnv_h(R_B, _MENON_FIR), cnv_v(R_B, _MENON_FIR)), 0.0)
+        B = np.where(R_m, R - R_B_m, B)
+
+    return np.stack([R, G, B], axis=-1).astype(np.float32)
+
+
+def debayer_menon2007(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+    """DDFAPD - Menon (2007) directional-filtering demosaicing (native Rust
+    kernel with a numpy fallback -- see ``_debayer_menon2007_numpy`` for the
+    algorithm/validation notes).
+
+    Higher fidelity than Malvar on fine periodic photographic detail in
+    general, but on this codebase's synthetic astro benchmark
+    (tools/bench_debayer_quality.py) the gain over Malvar is modest (~14%
+    lower MAE on a synthetic starfield) and it isn't the default -- most
+    astro frames are smooth sky + point sources, not fine texture, and
+    multi-frame dithered stacking further dilutes any single-frame demosaic
+    residual either algorithm leaves behind."""
+    if _HAS_NATIVE and hasattr(_native, 'debayer_menon2007'):
+        raw_np = np.ascontiguousarray(raw, dtype=np.float32)
+        try:
+            out = _native.debayer_menon2007(raw_np, pattern.upper())
+        except Exception:
+            out = None
+        if out is not None:
+            return _equalize_bayer_grid(out)
+    return _equalize_bayer_grid(_debayer_menon2007_numpy(raw, pattern))
 
 
 def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
     """Dispatch to the appropriate debayering method."""
-    if method == 'vng':
-        return debayer_vng(raw, pattern)
-    elif method == 'malvar':
+    if method == 'malvar':
         return debayer_malvar(raw, pattern)
+    elif method == 'menon2007':
+        return debayer_menon2007(raw, pattern)
     else:
         return debayer_bilinear(raw, pattern, method)
 

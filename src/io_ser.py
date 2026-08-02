@@ -49,7 +49,6 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-SER_EXTENSIONS: Tuple[str, ...] = ('.ser',)
 SER_HEADER_SIZE = 178
 
 _VPATH_RE = re.compile(r'^(.*\.ser)::(\d+)$', re.IGNORECASE)

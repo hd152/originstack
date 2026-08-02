@@ -1442,8 +1442,8 @@ def run_registration_phase(
     # If star sources are missing (lost from checkpoint JSON serialisation, or
     # detection unavailable in Phase 1), attempt re-detection now using the
     # reference luminance already in memory.  Try in order: detect_stars_auto
-    # (matched-filter by default, or SEP per --star-detector), then a pure
-    # local-maxima fallback (scipy only, no dependency at all).
+    # (matched-filter, the only backend), then a pure local-maxima fallback
+    # (scipy only, no dependency at all).
     if ref_stars is None and HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False):
         noise_val = float(best.metrics.get('noise', 1.0)) if best.metrics else 1.0
         _redet_tried: list = []

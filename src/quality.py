@@ -8,35 +8,18 @@ import numpy as np
 
 from src.models import Config
 
-_STAR_DETECTOR_METHOD = 'matched-filter'
-
-
-def configure_star_detector(method: str) -> None:
-    """Set the process-wide star-detection backend. 'matched-filter' is the
-    only backend now (native/numpy, no external dependency -- see
-    src/star_detect.py); the ``sep`` (SourceExtractor) backend was removed
-    (2026-07) since matched-filter is faster and at least as accurate on
-    real archive data. DAOStarFinder/photutils was removed from the
-    detection path earlier, and its EPSFBuilder use for empirical PSF
-    estimation in psf_deconvolution.py was dropped in the same 2026-07
-    pass -- photutils is no longer used anywhere in this codebase.
-
-    Every star-detection call site across quality.py/registration.py routes
-    through `detect_stars_auto` below rather than calling a backend
-    directly, so this one setting applies everywhere consistently -- a
-    reference frame detected with one backend and a residual-check
-    re-detection with another would silently corrupt the affine-matching /
-    residual-RMS machinery that compares the two.
-    """
-    global _STAR_DETECTOR_METHOD
-    if method != 'matched-filter':
-        raise ValueError(f"unknown star detector method: {method!r}")
-    _STAR_DETECTOR_METHOD = method
-
-
 def detect_stars_auto(lum: np.ndarray, noise: float,
                       background: Optional[float] = None) -> Optional[np.ndarray]:
-    """Unified star-detection dispatcher -- see `configure_star_detector`.
+    """Unified star-detection dispatcher: every call site across
+    quality.py/registration.py routes through here rather than calling a
+    backend directly, so the same backend applies everywhere consistently --
+    a reference frame detected with one backend and a residual-check
+    re-detection with another would silently corrupt the affine-matching /
+    residual-RMS machinery that compares the two. 'matched-filter'
+    (native/numpy, no external dependency -- see src/star_detect.py) is the
+    only backend; sep and DAOStarFinder/photutils were both removed
+    (2026-07) since matched-filter is faster and at least as accurate on
+    real archive data.
 
     Returns a structured array (see _SOURCES_DTYPE) or None if nothing was
     detected -- callers already carry their own final local-maxima fallback
@@ -721,9 +704,9 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     fwhm = 0.0
 
     if not quick:
-        # matched-filter (the only detector) -- see configure_star_detector()
-        # for why this must be the single dispatch point rather than each
-        # call site picking its own backend.
+        # matched-filter (the only detector) -- see detect_stars_auto's
+        # docstring for why this must be the single dispatch point rather
+        # than each call site picking its own backend.
         sources_s = detect_stars_auto(img_s_stars, noise, background=background)
         if sources_s is not None and len(sources_s) > 0:
             star_count = len(sources_s)

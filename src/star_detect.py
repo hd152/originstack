@@ -27,8 +27,8 @@ and smoothed. Detections are local SNR maxima above threshold, each
 refined with a two-pass windowed centroid and a second-moment shape
 (roundness) filter.
 
-This is the only detector as of the --star-detector rollout (2026-07):
-DAOStarFinder/photutils and SEP were both removed from the detection path
+This is the only detector, as of the 2026-07 pass that removed the
+alternatives: DAOStarFinder/photutils and SEP were both removed from the detection path
 entirely, on the strength of the validation above plus this kernel's
 real-data speed win over SEP -- there was no longer a reason to carry
 either as a detection dependency. Star detection is foundational

@@ -29,7 +29,7 @@ from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denois
 from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
                                     richardson_lucy_deconvolve,
                                     estimate_psf_blind, tv_regularized_deconvolve)
-from src.photometric_calibration import photometric_color_calibrate, try_gaia_calibration
+from src.photometric_calibration import photometric_color_calibrate
 
 try:
     from astropy.stats import sigma_clipped_stats
@@ -504,14 +504,8 @@ def postprocess_stack(
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_photo_cal')
         print(f"\n  Applying photometric color calibration (gray-locus method)...")
         pc_start = time.time()
-        use_gaia = getattr(args, 'gaia_calibration', False)
-        wcs_obj = getattr(args, '_wcs', None)
-        if use_gaia and wcs_obj is not None:
-            stacked, _pc_scales = try_gaia_calibration(
-                stacked, _pp_sources, wcs=wcs_obj, verbose=args.verbose)
-        else:
-            stacked, _pc_scales = photometric_color_calibrate(
-                stacked, _pp_sources, verbose=args.verbose)
+        stacked, _pc_scales = photometric_color_calibrate(
+            stacked, _pp_sources, verbose=args.verbose)
         if _pc_scales is not None:
             safe_print(f"  ✓ Photometric calibration "
                        f"(R×{_pc_scales[0]:.3f} G×{_pc_scales[1]:.3f} B×{_pc_scales[2]:.3f}, "
