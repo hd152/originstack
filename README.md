@@ -6,11 +6,14 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 
 ---
 
-## Sample Result
+## Sample Results
 
-![Whirlpool Galaxy (M51)](sample/whirlz1.jpg)
+| Galaxy | Emission Nebula |
+|:---:|:---:|
+| ![Whirlpool Galaxy (M51)](sample/whirlz1.jpg) | ![Flaming Star Nebula (IC 405)](sample/flamingstar1.jpg) |
+| *Whirlpool Galaxy (M51)* | *Flaming Star Nebula (IC 405)* |
 
-*Whirlpool Galaxy (M51) — stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames.*
+Both stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames (`--preset galaxy` and `--preset nebula` respectively — see [Usage Examples](#usage-examples)).
 
 ---
 
@@ -362,6 +365,32 @@ python originstack.py -d frames/ -o jupiter.fits \
   --no-star-reduce \
   -v
 ```
+
+### Star field / open cluster (e.g., Pleiades, double cluster)
+
+```bash
+python originstack.py -d lights/ -o starfield.fits \
+  --preset starfield \
+  --stack-method sigma_clip \
+  -v
+```
+
+The `starfield` preset skips star reduction (the whole point of the target)
+and keeps post-processing minimal so points stay sharp and colour-true.
+
+### Globular cluster (e.g., M13, M4) / reflection nebula (e.g., M78)
+
+```bash
+python originstack.py -d lights/ -o cluster.fits \
+  --preset starfield \
+  --auto \
+  -v
+```
+
+Neither has a dedicated preset — `starfield` (no star reduction) plus
+`--auto` gets you the rest: the classifier detects `globular_cluster` or
+`reflection_nebula` from the frame's star density/colour signature and
+blends in matching denoise/stretch settings on top.
 
 ### Maximum quality
 
