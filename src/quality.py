@@ -8,6 +8,7 @@ import numpy as np
 
 from src.models import Config
 
+
 def detect_stars_auto(lum: np.ndarray, noise: float,
                       background: Optional[float] = None) -> Optional[np.ndarray]:
     """Unified star-detection dispatcher: every call site across

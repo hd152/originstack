@@ -1474,12 +1474,21 @@ fn std_pop_f64(v: &[f64]) -> f64 {
 fn sigma_clipped_median_native(data: PyReadonlyArray1<'_, f32>, sigma: f64, iters: usize) -> f64 {
     let orig: Vec<f64> = data.as_array().iter().map(|&v| v as f64).collect();
     let mut x = orig.clone();
+    // Reused across iterations instead of `x.clone()`-ing fresh every time:
+    // median_f64_scratch's quickselect is destructive, so it still needs its
+    // own copy of `x` each iteration, but reusing one buffer (clear + refill)
+    // avoids a malloc/free round-trip per iteration on top of the copy that's
+    // unavoidable either way -- `x` itself must stay unpartitioned for the
+    // std-dev and sigma-clip retain() below.
+    let mut scratch: Vec<f64> = Vec::with_capacity(x.len());
 
     for _ in 0..iters {
         if x.is_empty() {
             break;
         }
-        let med = median_f64_scratch(&mut x.clone());
+        scratch.clear();
+        scratch.extend_from_slice(&x);
+        let med = median_f64_scratch(&mut scratch);
         let std = std_pop_f64(&x);
         if std < 1e-12 {
             break;
