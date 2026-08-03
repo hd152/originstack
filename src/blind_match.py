@@ -51,12 +51,19 @@ is caught, not silently corrupted.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 from src.affine_fit import RigidTransform, _umeyama_2d
+
+try:
+    import astro_native as _native
+    _HAS_NATIVE = hasattr(_native, 'blind_match_hypotheses')
+except Exception:
+    _native = None
+    _HAS_NATIVE = False
 
 _MAX_HYPOTHESES = 20000
 
@@ -94,36 +101,22 @@ def _rigid_from_two_points(p_i: np.ndarray, p_j: np.ndarray,
     return RigidTransform(params)
 
 
-def match_rigid_unknown_rotation(src_stars, dst_stars,
-                                 max_stars: int = 40,
-                                 pixel_tol: float = 3.0,
-                                 dist_rel_tol: float = 0.01,
-                                 min_inliers: int = 6) -> Optional[RigidTransform]:
-    """Find the rigid (rotation+translation) transform mapping src_stars onto
-    dst_stars with no assumption about the rotation angle. Returns None if
-    fewer than `min_inliers` points achieve consensus.
-
-    src_stars/dst_stars: _SOURCES_DTYPE-compatible structured arrays (or
-    anything indexable with 'flux'/'xcentroid'/'ycentroid' fields).
-    """
-    src = _extract_xy(src_stars, max_stars)
-    dst = _extract_xy(dst_stars, max_stars)
+def _match_hypotheses_numpy(src: np.ndarray, dst: np.ndarray, pixel_tol: float,
+                            dist_rel_tol: float, min_sep: float, target_inliers: int,
+                            max_hypotheses: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], int]:
+    """Pure-numpy hypothesis search -- see match_rigid_unknown_rotation's
+    module docstring for the algorithm. Returns (R, t, best_inliers); R/t are
+    None if no hypothesis was tested."""
     n, m = len(src), len(dst)
-    if n < 4 or m < 4:
-        return None
-
     src_i, src_j = np.triu_indices(n, k=1)
     src_d = np.hypot(src[src_i, 0] - src[src_j, 0], src[src_i, 1] - src[src_j, 1])
     dst_i, dst_j = np.triu_indices(m, k=1)
     dst_d = np.hypot(dst[dst_i, 0] - dst[dst_j, 0], dst[dst_i, 1] - dst[dst_j, 1])
 
-    # Drop pairs too short to give a well-conditioned rotation estimate --
-    # a tiny separation amplifies centroid noise into a large angle error.
-    min_sep = max(pixel_tol * 4.0, 10.0)
     keep = src_d >= min_sep
     src_i, src_j, src_d = src_i[keep], src_j[keep], src_d[keep]
     if len(src_d) == 0 or len(dst_d) == 0:
-        return None
+        return None, None, 0
 
     order = np.argsort(dst_d)
     dst_d_sorted = dst_d[order]
@@ -133,12 +126,12 @@ def match_rigid_unknown_rotation(src_stars, dst_stars,
     dst_tree = cKDTree(dst)
 
     best_inliers = 0
-    best_transform: Optional[RigidTransform] = None
+    best_R: Optional[np.ndarray] = None
+    best_t: Optional[np.ndarray] = None
     tested = 0
-    target_inliers = int(np.ceil(0.9 * min(n, m)))
 
     for k in range(len(src_d)):
-        if tested >= _MAX_HYPOTHESES:
+        if tested >= max_hypotheses:
             break
         d = src_d[k]
         tol = max(pixel_tol * 2.0, d * dist_rel_tol)
@@ -163,18 +156,66 @@ def match_rigid_unknown_rotation(src_stars, dst_stars,
                 n_in = int(np.count_nonzero(dists < pixel_tol))
                 if n_in > best_inliers:
                     best_inliers = n_in
-                    best_transform = transform
+                    best_R, best_t = R, t
                     if best_inliers >= target_inliers:
                         break
-                if tested >= _MAX_HYPOTHESES:
+                if tested >= max_hypotheses:
                     break
-            if tested >= _MAX_HYPOTHESES or best_inliers >= target_inliers:
+            if tested >= max_hypotheses or best_inliers >= target_inliers:
                 break
         if best_inliers >= target_inliers:
             break
 
-    if best_transform is None or best_inliers < min_inliers:
+    return best_R, best_t, best_inliers
+
+
+def match_rigid_unknown_rotation(src_stars, dst_stars,
+                                 max_stars: int = 40,
+                                 pixel_tol: float = 3.0,
+                                 dist_rel_tol: float = 0.01,
+                                 min_inliers: int = 6) -> Optional[RigidTransform]:
+    """Find the rigid (rotation+translation) transform mapping src_stars onto
+    dst_stars with no assumption about the rotation angle. Returns None if
+    fewer than `min_inliers` points achieve consensus.
+
+    src_stars/dst_stars: _SOURCES_DTYPE-compatible structured arrays (or
+    anything indexable with 'flux'/'xcentroid'/'ycentroid' fields).
+    """
+    src = _extract_xy(src_stars, max_stars)
+    dst = _extract_xy(dst_stars, max_stars)
+    n, m = len(src), len(dst)
+    if n < 4 or m < 4:
         return None
+
+    # Drop pairs too short to give a well-conditioned rotation estimate --
+    # a tiny separation amplifies centroid noise into a large angle error.
+    min_sep = max(pixel_tol * 4.0, 10.0)
+    target_inliers = int(np.ceil(0.9 * min(n, m)))
+
+    best_R = best_t = None
+    best_inliers = 0
+    if _HAS_NATIVE:
+        try:
+            best_R, best_t, best_inliers = _native.blind_match_hypotheses(
+                np.ascontiguousarray(src, dtype=np.float64),
+                np.ascontiguousarray(dst, dtype=np.float64),
+                float(pixel_tol), float(dist_rel_tol), float(min_sep),
+                int(target_inliers), int(_MAX_HYPOTHESES))
+        except Exception:
+            best_R = best_t = None
+            best_inliers = 0
+    if best_R is None:
+        best_R, best_t, best_inliers = _match_hypotheses_numpy(
+            src, dst, pixel_tol, dist_rel_tol, min_sep, target_inliers, _MAX_HYPOTHESES)
+
+    if best_R is None or best_inliers < min_inliers:
+        return None
+
+    params = np.eye(3)
+    params[:2, :2] = best_R
+    params[:2, 2] = best_t
+    best_transform = RigidTransform(params)
+    dst_tree = cKDTree(dst)
 
     # Final least-squares refit over all inliers of the winning hypothesis,
     # not just its minimal 2-point seed.

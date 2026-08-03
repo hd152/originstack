@@ -1580,7 +1580,7 @@ def run_registration_phase(
     def _register_one(j, f, orig_idx):
         if outlier_mask[j]:
             osy, osx = shifts[j] or (0.0, 0.0)
-            if abs(osx) > 0.1 * W or abs(osy) > 0.1 * H:
+            if abs(osx) > Config.MAX_REALISTIC_SHIFT_FRAC * W or abs(osy) > Config.MAX_REALISTIC_SHIFT_FRAC * H:
                 safe_print(f'Unrealistic pyramid shift {osx},{osy} for {f.path}, ignoring')
                 osy, osx = 0.0, 0.0
             return j, (osy, osx), None
@@ -1624,7 +1624,8 @@ def run_registration_phase(
                     tf_tx, tf_ty = affine_tf.params[0, 2], affine_tf.params[1, 2]
                     tf_rot_deg = abs(np.degrees(np.arctan2(
                         affine_tf.params[1, 0], affine_tf.params[0, 0])))
-                    if (abs(tf_tx) > 0.1 * W or abs(tf_ty) > 0.1 * H
+                    if (abs(tf_tx) > Config.MAX_REALISTIC_SHIFT_FRAC * W
+                            or abs(tf_ty) > Config.MAX_REALISTIC_SHIFT_FRAC * H
                             or tf_rot_deg > Config.AFFINE_MAX_ROTATION_DEG):
                         safe_print(
                             f'Unrealistic affine fit shift=({tf_tx:.1f},{tf_ty:.1f})px '
@@ -1640,7 +1641,7 @@ def run_registration_phase(
                 seed_shift=seed,
                 masked_correlation=_masked_corr,
                 corr_downsample=2)
-            if abs(sx) > 0.1 * W or abs(sy) > 0.1 * H:
+            if abs(sx) > Config.MAX_REALISTIC_SHIFT_FRAC * W or abs(sy) > Config.MAX_REALISTIC_SHIFT_FRAC * H:
                 safe_print(f'Unrealistic shift {sx},{sy} for {f.path}, ignoring')
                 sx, sy = 0.0, 0.0
             return j, (sy, sx), None

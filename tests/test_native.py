@@ -8,6 +8,10 @@ import pytest
 
 import originstack as astro
 import src.stacking as _stacking_mod
+import src.wavelet as _wavelet_mod
+import src.blind_match as _blind_match_mod
+import src.denoising as _denoising_mod
+import src.debayer as _debayer_mod
 
 native = pytest.importorskip("astro_native")
 
@@ -155,6 +159,252 @@ def test_ivw_downweights_noisier_frames():
     # inverse-variance weight ratio is 100^2 = 10000:1 in favour of "quiet" --
     # combined result should sit almost exactly at the quiet frame's value.
     assert float(np.abs(got.mean() - 1000.0)) < 1.0
+
+
+def _numpy_wavedec2(*a, **kw):
+    """Force the pure-Python apply_along_axis path (native dispatch happens
+    inside _dwt2/_idwt2, so calling wavedec2/waverec2 directly with native
+    installed would compare the native kernel against itself)."""
+    had = _wavelet_mod._HAS_NATIVE
+    _wavelet_mod._HAS_NATIVE = False
+    try:
+        return _wavelet_mod.wavedec2(*a, **kw)
+    finally:
+        _wavelet_mod._HAS_NATIVE = had
+
+
+def _numpy_waverec2(*a, **kw):
+    had = _wavelet_mod._HAS_NATIVE
+    _wavelet_mod._HAS_NATIVE = False
+    try:
+        return _wavelet_mod.waverec2(*a, **kw)
+    finally:
+        _wavelet_mod._HAS_NATIVE = had
+
+
+@pytest.mark.parametrize("h,w", [(32, 32), (33, 45), (64, 65), (101, 100)])
+@pytest.mark.parametrize("level", [1, 2, 3])
+def test_wavedec2_bior13_matches_numpy(h, w, level):
+    rng = np.random.default_rng(hash((h, w, level)) & 0xFFFF)
+    img = rng.uniform(0, 1000, (h, w))
+    ref_coeffs = _numpy_wavedec2(img, level, wavelet='bior1.3')
+    got_coeffs = _wavelet_mod.wavedec2(img, level, wavelet='bior1.3')
+    assert _wavelet_mod._HAS_NATIVE  # sanity: this run actually used native
+    for ref, got in zip(ref_coeffs, got_coeffs):
+        ref_arrs = ref if isinstance(ref, tuple) else (ref,)
+        got_arrs = got if isinstance(got, tuple) else (got,)
+        for r, g in zip(ref_arrs, got_arrs):
+            np.testing.assert_allclose(r, g, atol=1e-9)
+
+
+@pytest.mark.parametrize("h,w", [(32, 32), (33, 45), (100, 129)])
+@pytest.mark.parametrize("level", [1, 2, 3])
+def test_wavedec2_db4_matches_numpy(h, w, level):
+    rng = np.random.default_rng(hash((h, w, level, 'db4')) & 0xFFFF)
+    img = rng.uniform(0, 1000, (h, w))
+    ref_coeffs = _numpy_wavedec2(img, level, wavelet='db4')
+    got_coeffs = _wavelet_mod.wavedec2(img, level, wavelet='db4')
+    for ref, got in zip(ref_coeffs, got_coeffs):
+        ref_arrs = ref if isinstance(ref, tuple) else (ref,)
+        got_arrs = got if isinstance(got, tuple) else (got,)
+        for r, g in zip(ref_arrs, got_arrs):
+            np.testing.assert_allclose(r, g, atol=1e-9)
+
+
+@pytest.mark.parametrize("h,w", [(32, 32), (33, 45), (64, 65), (101, 100), (200, 150)])
+@pytest.mark.parametrize("level", [1, 2, 4])
+def test_waverec2_roundtrip_matches_numpy_and_reconstructs(h, w, level):
+    rng = np.random.default_rng(hash((h, w, level, 'rt')) & 0xFFFF)
+    img = rng.uniform(0, 1000, (h, w))
+    coeffs = _wavelet_mod.wavedec2(img, level, wavelet='bior1.3')
+    ref_rec = _numpy_waverec2(coeffs)
+    got_rec = _wavelet_mod.waverec2(coeffs)
+    np.testing.assert_allclose(ref_rec, got_rec, atol=1e-9)
+    np.testing.assert_allclose(got_rec[:h, :w], img, atol=1e-6)
+
+
+_STAR_DT = np.dtype([('xcentroid', np.float64), ('ycentroid', np.float64), ('flux', np.float64)])
+
+
+def _blind_match_catalog(n, w=3000, h=2000, seed=0):
+    rng = np.random.default_rng(seed)
+    out = np.zeros(n, dtype=_STAR_DT)
+    out['xcentroid'] = rng.uniform(50, w - 50, n)
+    out['ycentroid'] = rng.uniform(50, h - 50, n)
+    out['flux'] = rng.uniform(500, 50000, n)
+    return out
+
+
+def _blind_match_rotate(cat, theta_deg, tx, ty, w=3000, h=2000, seed=1):
+    rng = np.random.default_rng(seed)
+    theta = np.radians(theta_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    cx, cy = w / 2, h / 2
+    x = cat['xcentroid'] - cx
+    y = cat['ycentroid'] - cy
+    out = np.zeros(len(cat), dtype=_STAR_DT)
+    out['xcentroid'] = c * x - s * y + cx + tx + rng.normal(0, 0.2, len(cat))
+    out['ycentroid'] = s * x + c * y + cy + ty + rng.normal(0, 0.2, len(cat))
+    out['flux'] = cat['flux']
+    return out
+
+
+def _numpy_match_rigid(*a, **kw):
+    """Force the pure-numpy hypothesis search (native dispatch happens
+    inside match_rigid_unknown_rotation, so calling it directly with native
+    installed would compare the native kernel against itself)."""
+    had = _blind_match_mod._HAS_NATIVE
+    _blind_match_mod._HAS_NATIVE = False
+    try:
+        return _blind_match_mod.match_rigid_unknown_rotation(*a, **kw)
+    finally:
+        _blind_match_mod._HAS_NATIVE = had
+
+
+@pytest.mark.parametrize("theta,tx,ty", [
+    (5.0, 12.3, -8.7), (37.0, 100.5, -50.2), (91.0, -30.0, 40.0), (-45.0, -20.1, 60.4),
+])
+def test_blind_match_hypotheses_matches_numpy(theta, tx, ty):
+    src_cat = _blind_match_catalog(40, seed=hash((theta, tx, ty)) & 0xFFFF)
+    dst_cat = _blind_match_rotate(src_cat, theta, tx, ty, seed=7)
+    src = _blind_match_mod._extract_xy(src_cat, 40)
+    dst = _blind_match_mod._extract_xy(dst_cat, 40)
+    min_sep = max(3.0 * 4.0, 10.0)
+    target_inliers = int(np.ceil(0.9 * min(len(src), len(dst))))
+
+    ref_r, ref_t, ref_n = _blind_match_mod._match_hypotheses_numpy(
+        src, dst, 3.0, 0.01, min_sep, target_inliers, 20000)
+    got_r, got_t, got_n = native.blind_match_hypotheses(
+        np.ascontiguousarray(src), np.ascontiguousarray(dst),
+        3.0, 0.01, min_sep, target_inliers, 20000)
+
+    assert got_n == ref_n
+    np.testing.assert_allclose(got_r, ref_r, atol=1e-9)
+    np.testing.assert_allclose(got_t, ref_t, atol=1e-9)
+
+
+@pytest.mark.parametrize('theta,tx,ty,seed', [
+    (5.0, 12.3, -8.7, 0), (37.0, 100.5, -50.2, 1), (91.0, -30.0, 40.0, 2), (178.0, 5.0, 5.0, 3),
+])
+def test_match_rigid_unknown_rotation_matches_numpy_end_to_end(theta, tx, ty, seed):
+    src_cat = _blind_match_catalog(45, seed=seed)
+    dst_cat = _blind_match_rotate(src_cat, theta, tx, ty, seed=seed + 100)
+    ref = _numpy_match_rigid(src_cat, dst_cat, max_stars=45)
+    got = _blind_match_mod.match_rigid_unknown_rotation(src_cat, dst_cat, max_stars=45)
+    assert ref is not None and got is not None
+    np.testing.assert_allclose(got.params, ref.params, atol=1e-6)
+
+
+def test_dct2_ortho_matches_scipy():
+    scipy_fft = pytest.importorskip("scipy.fft")
+    rng = np.random.default_rng(5)
+    x = rng.uniform(0, 1000, (8, 8))
+    ref = scipy_fft.dctn(x, axes=(0, 1), norm='ortho')
+    got = native.dct2_ortho_native(np.ascontiguousarray(x, dtype=np.float64))
+    np.testing.assert_allclose(got, ref, atol=1e-9)
+
+    ref_i = scipy_fft.idctn(ref, axes=(0, 1), norm='ortho')
+    got_i = native.idct2_ortho_native(np.ascontiguousarray(ref, dtype=np.float64))
+    np.testing.assert_allclose(got_i, ref_i, atol=1e-9)
+    np.testing.assert_allclose(got_i, x, atol=1e-9)  # roundtrip recovers input exactly
+
+
+def test_bm3d_denoise_native_matches_numpy():
+    scipy_fft = pytest.importorskip("scipy.fft")
+    rng = np.random.default_rng(11)
+    h, w = 40, 40
+    clean = 500.0 + 200.0 * np.sin(np.mgrid[0:h, 0:w][0] / 5.0)
+    y = clean + rng.normal(0, 15.0, (h, w))
+    sigma_psd = 15.0
+    bs, stride, sw, group_size = 8, 4, 16, 8
+
+    ref = _denoising_mod._bm3d_step12_numpy(
+        y, bs, stride, sw, group_size, sigma_psd, scipy_fft.dctn, scipy_fft.idctn)
+    got = native.bm3d_denoise_native(
+        np.ascontiguousarray(y, dtype=np.float64), bs, stride, sw, group_size, sigma_psd)
+
+    np.testing.assert_allclose(got, ref, atol=1e-6)
+    # Sanity: denoising actually reduces noise vs the raw noisy input.
+    assert np.abs(got - clean).mean() < np.abs(y - clean).mean()
+
+
+def _numpy_sigma_clipped_median(*a, **kw):
+    """Force the pure-numpy iterative sigma-clip path."""
+    had = _debayer_mod._HAS_NATIVE
+    _debayer_mod._HAS_NATIVE = False
+    try:
+        return _debayer_mod._sigma_clipped_median(*a, **kw)
+    finally:
+        _debayer_mod._HAS_NATIVE = had
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_sigma_clipped_median_matches_numpy(seed):
+    rng = np.random.default_rng(seed)
+    arr = rng.uniform(400.0, 700.0, 2000).astype(np.float32)
+    idx = rng.integers(0, 2000, 20)
+    arr[idx] += rng.uniform(500.0, 2000.0, 20)
+    ref = _numpy_sigma_clipped_median(arr)
+    got = _debayer_mod._sigma_clipped_median(arr)
+    assert abs(ref - got) < 1e-3
+
+
+def test_sigma_clipped_median_rejects_outliers():
+    rng = np.random.default_rng(5)
+    clean = rng.normal(500.0, 5.0, 2000).astype(np.float32)
+    spiked = clean.copy()
+    spiked[rng.integers(0, 2000, 40)] += 5000.0
+    got = _debayer_mod._sigma_clipped_median(spiked)
+    assert abs(got - 500.0) < 5.0  # unrejected spikes would shift this far more
+
+
+def test_fix_hot_bayer_matches_reference():
+    """_fix_hot_bayer now routes its per-sub-channel median through the
+    native 3x3 kernel (via a contiguous copy of the strided Bayer view) --
+    confirm it still matches scipy's ndimage.median_filter on the same data."""
+    from scipy import ndimage as _nd
+    rng = np.random.default_rng(6)
+    data = rng.uniform(400.0, 700.0, (64, 80)).astype(np.float32)
+    idx = rng.integers(0, data.size, 30)
+    data.ravel()[idx] += rng.uniform(1000.0, 3000.0, 30)
+
+    got = _debayer_mod._fix_hot_bayer(data.copy(), threshold=5.0)
+
+    # Reference: same algorithm, scipy median_filter directly on each
+    # strided sub-channel (the pre-fix code path).
+    ref = data.astype(np.float32, copy=True)
+    for dy in range(2):
+        for dx in range(2):
+            sub = ref[dy::2, dx::2]
+            med = _nd.median_filter(sub, size=3)
+            diff = sub - med
+            mad = np.median(np.abs(diff))
+            sigma = mad * 1.4826
+            if sigma < 1e-6:
+                continue
+            stat_mask = diff > 5.0 * sigma
+            sub[stat_mask] = med[stat_mask]
+
+    np.testing.assert_allclose(got, ref, atol=1e-3)
+
+
+@pytest.mark.parametrize("with_mono", [False, True])
+def test_hot_pixel_box_replace_matches_scipy(with_mono):
+    from scipy import ndimage as _nd
+    rng = np.random.default_rng(7)
+    h, w, c = 48, 56, 3
+    rgb = rng.uniform(400.0, 700.0, (h, w, c)).astype(np.float32)
+    mask = rng.random((h, w)) < 0.08
+
+    ref = rgb.copy()
+    for ch in range(c):
+        filt = _nd.uniform_filter(rgb[:, :, ch], size=3)
+        ref[:, :, ch] = np.where(mask, filt, rgb[:, :, ch])
+
+    got = native.hot_pixel_box_replace_native(
+        np.ascontiguousarray(rgb), np.ascontiguousarray(mask, dtype=np.uint8))
+    np.testing.assert_allclose(got, ref, atol=1e-3)
+    np.testing.assert_allclose(got[~mask], rgb[~mask])  # unmasked pixels untouched
 
 
 def test_warp_preserves_fwhm_and_matches_scipy():

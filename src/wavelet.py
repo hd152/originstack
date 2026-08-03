@@ -52,6 +52,13 @@ from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE = True
+except Exception:
+    _native = None
+    _HAS_NATIVE = False
+
 # bior1.3 filter bank -- pywt.Wavelet('bior1.3').filter_bank, verbatim.
 _DEC_LO = np.array([-0.08838834764831845, 0.08838834764831845, 0.7071067811865476,
                     0.7071067811865476, 0.08838834764831845, -0.08838834764831845])
@@ -158,6 +165,14 @@ Coeffs2D = List[Union[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]]
 
 
 def _dwt2(img: np.ndarray, bank: _FilterBank) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    if _HAS_NATIVE:
+        try:
+            c_a, c_h, c_v, c_d = _native.dwt2_native(
+                np.ascontiguousarray(img, dtype=np.float64),
+                bank.lo_kernel, bank.hi_kernel, bank.offset)
+            return c_a, (c_h, c_v, c_d)
+        except Exception:
+            pass
     La, Lh = _dwt_1d(img, axis=0, bank=bank)
     cA, cV = _dwt_1d(La, axis=1, bank=bank)
     cH, cD = _dwt_1d(Lh, axis=1, bank=bank)
@@ -170,10 +185,23 @@ def _idwt2(cA: np.ndarray, detail: Tuple[np.ndarray, np.ndarray, np.ndarray],
     # Mirrors _dwt2's order (axis=0/rows first, then axis=1/cols) in reverse:
     # reconstruct along axis=1 (cols) first -- target column count is
     # out_shape[1] -- then axis=0 (rows) -- target row count out_shape[0].
-    col_out_len = None if out_shape is None else out_shape[1]
+    # Natural (no explicit out_shape) length resolved up front so both the
+    # native and numpy paths below get concrete lengths.
+    col_out_len = out_shape[1] if out_shape is not None else (2 * cA.shape[1] - (_FLEN - 2))
+    row_out_len = out_shape[0] if out_shape is not None else (2 * cA.shape[0] - (_FLEN - 2))
+
+    if _HAS_NATIVE:
+        try:
+            return _native.idwt2_native(
+                np.ascontiguousarray(cA, dtype=np.float64),
+                np.ascontiguousarray(cH, dtype=np.float64),
+                np.ascontiguousarray(cV, dtype=np.float64),
+                np.ascontiguousarray(cD, dtype=np.float64),
+                _REC_LO, _REC_HI, _IDWT_OFFSET, row_out_len, col_out_len)
+        except Exception:
+            pass
     La = _idwt_1d(cA, cV, axis=1, out_len=col_out_len)
     Lh = _idwt_1d(cH, cD, axis=1, out_len=col_out_len)
-    row_out_len = None if out_shape is None else out_shape[0]
     return _idwt_1d(La, Lh, axis=0, out_len=row_out_len)
 
 

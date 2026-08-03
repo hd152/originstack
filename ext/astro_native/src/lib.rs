@@ -1188,6 +1188,903 @@ fn ivw_combine<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
 }
 
+// ---------------------------------------------------------------------------
+// 2D separable wavelet transform (bior1.3 / db4)
+// ---------------------------------------------------------------------------
+//
+// Mirrors src/wavelet.py's _dwt_1d/_idwt_1d + _dwt2/_idwt2 exactly, but as a
+// direct closed-form tap sum per output sample instead of
+// pad-then-np.apply_along_axis-then-np.convolve (which loops in pure Python
+// over every row/column -- see that module's docstring for why the exact
+// convolve-vs-correlate orientation of each kernel matters and how it was
+// determined). No padded array is ever materialised: `wavelet_symmetric_idx`
+// computes the symmetric ("whole-point", edge-duplicating -- numpy's
+// mode='symmetric') boundary index directly.
+
+#[inline]
+fn wavelet_symmetric_idx(i: isize, n: usize) -> usize {
+    let n_i = n as isize;
+    let period = 2 * n_i;
+    let mut m = i.rem_euclid(period);
+    if m >= n_i {
+        m = period - 1 - m;
+    }
+    m as usize
+}
+
+/// Forward 1D DWT of one length-`n` line, accessed via `get`. Exact port of
+/// `_dwt_1d`: `cA[j] = sum_k lo[k] * x[symmetric_idx(offset+2j-k, n)]`, `cD`
+/// analogous with `hi` -- the direct closed form of
+/// `np.convolve(padded, kernel, mode='valid')[offset::2]` with no padding
+/// materialised (derivation in the Rust module's own commit notes: convolve
+/// flips one operand, so `valid[i] = sum_k kernel[k] * padded[i+flen-1-k]`,
+/// and substituting the padding offset collapses to this form).
+fn dwt_1d_line(
+    get: impl Fn(usize) -> f64,
+    n: usize,
+    lo: &[f64],
+    hi: &[f64],
+    offset: usize,
+    out_len: usize,
+    ca_out: &mut [f64],
+    cd_out: &mut [f64],
+) {
+    let flen = lo.len();
+    for j in 0..out_len {
+        let base = offset as isize + 2 * j as isize;
+        let mut a = 0.0f64;
+        let mut d = 0.0f64;
+        for k in 0..flen {
+            let v = get(wavelet_symmetric_idx(base - k as isize, n));
+            a += lo[k] * v;
+            d += hi[k] * v;
+        }
+        ca_out[j] = a;
+        cd_out[j] = d;
+    }
+}
+
+/// Inverse 1D DWT of one line. Exact port of `_idwt_1d`: rather than
+/// zero-stuffing `cA`/`cD` to length `2n` and running a full convolution,
+/// only the even-position (nonzero) upsampled taps are summed directly --
+/// `out[oi] = sum_k rec_lo[k]*cA[j] + rec_hi[k]*cD[j]` where
+/// `j = (idwt_offset+oi-k)/2`, only when that quantity is a nonnegative
+/// even integer within range.
+fn idwt_1d_line(
+    ca: &[f64],
+    cd: &[f64],
+    rec_lo: &[f64],
+    rec_hi: &[f64],
+    idwt_offset: usize,
+    out_len: usize,
+    out: &mut [f64],
+) {
+    let flen = rec_lo.len();
+    let n_c = ca.len();
+    for oi in 0..out_len {
+        let n_pos = idwt_offset as isize + oi as isize;
+        let mut acc = 0.0f64;
+        for k in 0..flen {
+            let m = n_pos - k as isize;
+            if m >= 0 && m % 2 == 0 {
+                let j = (m / 2) as usize;
+                if j < n_c {
+                    acc += rec_lo[k] * ca[j] + rec_hi[k] * cd[j];
+                }
+            }
+        }
+        out[oi] = acc;
+    }
+}
+
+#[pyfunction]
+fn dwt2_native<'py>(
+    py: Python<'py>,
+    img: PyReadonlyArray2<'py, f64>,
+    dec_lo: PyReadonlyArray1<'py, f64>,
+    dec_hi: PyReadonlyArray1<'py, f64>,
+    offset: usize,
+) -> PyResult<(
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray2<f64>>,
+)> {
+    let arr = img.as_array();
+    let s = arr.shape();
+    let (h, w) = (s[0], s[1]);
+    let lo: Vec<f64> = dec_lo.as_array().to_vec();
+    let hi: Vec<f64> = dec_hi.as_array().to_vec();
+    let flen = lo.len();
+    let out_h = (h + flen - 1) / 2;
+    let out_w = (w + flen - 1) / 2;
+    // Kept in f64 throughout (unlike every other kernel in this file, which
+    // downcast to f32): multi-level wavedec2/waverec2 chains many of these
+    // calls together, and the numpy reference this is validated bit-exact
+    // against (itself validated bit-exact against real pywt) runs entirely
+    // in float64 -- rounding to f32 at each level's Python/Rust boundary
+    // compounds across levels and breaks that bit-exact parity.
+    let img64: Vec<f64> = arr.iter().copied().collect();
+
+    let (c_a, c_h, c_v, c_d) = py.allow_threads(|| {
+        // Pass 1: axis=0 (per-column) -> La, Lh, each (out_h, w).
+        let cols: Vec<(Vec<f64>, Vec<f64>)> = (0..w)
+            .into_par_iter()
+            .map(|c| {
+                let get = |i: usize| img64[i * w + c];
+                let mut ca_col = vec![0.0f64; out_h];
+                let mut cd_col = vec![0.0f64; out_h];
+                dwt_1d_line(get, h, &lo, &hi, offset, out_h, &mut ca_col, &mut cd_col);
+                (ca_col, cd_col)
+            })
+            .collect();
+        let mut la = vec![0.0f64; out_h * w];
+        let mut lh = vec![0.0f64; out_h * w];
+        for (c, (ca_col, cd_col)) in cols.into_iter().enumerate() {
+            for j in 0..out_h {
+                la[j * w + c] = ca_col[j];
+                lh[j * w + c] = cd_col[j];
+            }
+        }
+
+        // Pass 2: axis=1 (per-row) on La -> cA, cV; on Lh -> cH, cD.
+        let mut c_a = vec![0.0f64; out_h * out_w];
+        let mut c_v = vec![0.0f64; out_h * out_w];
+        c_a.par_chunks_mut(out_w)
+            .zip(c_v.par_chunks_mut(out_w))
+            .enumerate()
+            .for_each(|(r, (ca_row, cv_row))| {
+                let get = |i: usize| la[r * w + i];
+                dwt_1d_line(get, w, &lo, &hi, offset, out_w, ca_row, cv_row);
+            });
+        let mut c_h = vec![0.0f64; out_h * out_w];
+        let mut c_d = vec![0.0f64; out_h * out_w];
+        c_h.par_chunks_mut(out_w)
+            .zip(c_d.par_chunks_mut(out_w))
+            .enumerate()
+            .for_each(|(r, (ch_row, cd_row))| {
+                let get = |i: usize| lh[r * w + i];
+                dwt_1d_line(get, w, &lo, &hi, offset, out_w, ch_row, cd_row);
+            });
+        (c_a, c_h, c_v, c_d)
+    });
+
+    let mk = |v: Vec<f64>| -> PyResult<Bound<'py, PyArray2<f64>>> {
+        Ok(numpy::ndarray::Array2::from_shape_vec((out_h, out_w), v)
+            .unwrap()
+            .into_pyarray(py))
+    };
+    Ok((mk(c_a)?, mk(c_h)?, mk(c_v)?, mk(c_d)?))
+}
+
+#[pyfunction]
+fn idwt2_native<'py>(
+    py: Python<'py>,
+    ca: PyReadonlyArray2<'py, f64>,
+    ch: PyReadonlyArray2<'py, f64>,
+    cv: PyReadonlyArray2<'py, f64>,
+    cd: PyReadonlyArray2<'py, f64>,
+    rec_lo: PyReadonlyArray1<'py, f64>,
+    rec_hi: PyReadonlyArray1<'py, f64>,
+    idwt_offset: usize,
+    out_h: usize,
+    out_w: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let ca_arr = ca.as_array();
+    let ch_arr = ch.as_array();
+    let cv_arr = cv.as_array();
+    let cd_arr = cd.as_array();
+    let s = ca_arr.shape();
+    let (in_h, in_w) = (s[0], s[1]);
+    let rlo: Vec<f64> = rec_lo.as_array().to_vec();
+    let rhi: Vec<f64> = rec_hi.as_array().to_vec();
+
+    let ca64: Vec<f64> = ca_arr.iter().copied().collect();
+    let ch64: Vec<f64> = ch_arr.iter().copied().collect();
+    let cv64: Vec<f64> = cv_arr.iter().copied().collect();
+    let cd64: Vec<f64> = cd_arr.iter().copied().collect();
+
+    let out = py.allow_threads(|| {
+        // Pass 1: axis=1 (per-row) reconstruction -- La = idwt(cA,cV), Lh = idwt(cH,cD).
+        // Both natural-length inputs have in_h rows, out_w columns.
+        let mut la = vec![0.0f64; in_h * out_w];
+        let mut lh = vec![0.0f64; in_h * out_w];
+        la.par_chunks_mut(out_w)
+            .zip(lh.par_chunks_mut(out_w))
+            .enumerate()
+            .for_each(|(r, (la_row, lh_row))| {
+                let ca_row = &ca64[r * in_w..(r + 1) * in_w];
+                let cv_row = &cv64[r * in_w..(r + 1) * in_w];
+                idwt_1d_line(ca_row, cv_row, &rlo, &rhi, idwt_offset, out_w, la_row);
+                let ch_row = &ch64[r * in_w..(r + 1) * in_w];
+                let cd_row = &cd64[r * in_w..(r + 1) * in_w];
+                idwt_1d_line(ch_row, cd_row, &rlo, &rhi, idwt_offset, out_w, lh_row);
+            });
+
+        // Pass 2: axis=0 (per-column) reconstruction on (La, Lh) -> final (out_h, out_w).
+        let cols: Vec<Vec<f64>> = (0..out_w)
+            .into_par_iter()
+            .map(|c| {
+                let la_col: Vec<f64> = (0..in_h).map(|r| la[r * out_w + c]).collect();
+                let lh_col: Vec<f64> = (0..in_h).map(|r| lh[r * out_w + c]).collect();
+                let mut out_col = vec![0.0f64; out_h];
+                idwt_1d_line(&la_col, &lh_col, &rlo, &rhi, idwt_offset, out_h, &mut out_col);
+                out_col
+            })
+            .collect();
+        let mut result = vec![0.0f64; out_h * out_w];
+        for (c, col) in cols.into_iter().enumerate() {
+            for r in 0..out_h {
+                result[r * out_w + c] = col[r];
+            }
+        }
+        result
+    });
+
+    Ok(numpy::ndarray::Array2::from_shape_vec((out_h, out_w), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// Iterative sigma-clipped median (src/debayer.py's _sigma_clipped_median)
+// ---------------------------------------------------------------------------
+//
+// Used by green_equalize (G1/G2 sub-channel balance) and _equalize_bayer_grid
+// (per-Bayer-position sky level) -- both call this on quarter-resolution
+// strided views (every other row/col), several times per frame, and both
+// showed up as a real chunk of Quality+Load's sequential-profile cost.
+// f64 throughout (this returns a single scalar, no coefficient-chaining
+// precision concern like the wavelet kernel), matching numpy's internal
+// promotion for median/std of a float32 input.
+
+#[inline]
+fn median_f64_scratch(v: &mut [f64]) -> f64 {
+    let n = v.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mid = n / 2;
+    let (_, &mut m, _) =
+        v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if n % 2 == 1 {
+        m
+    } else {
+        let mut lo = f64::NEG_INFINITY;
+        for &x in v[..mid].iter() {
+            if x > lo {
+                lo = x;
+            }
+        }
+        0.5 * (lo + m)
+    }
+}
+
+#[inline]
+fn std_pop_f64(v: &[f64]) -> f64 {
+    let n = v.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let m: f64 = v.iter().sum::<f64>() / n as f64;
+    (v.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / n as f64).sqrt()
+}
+
+#[pyfunction]
+fn sigma_clipped_median_native(data: PyReadonlyArray1<'_, f32>, sigma: f64, iters: usize) -> f64 {
+    let orig: Vec<f64> = data.as_array().iter().map(|&v| v as f64).collect();
+    let mut x = orig.clone();
+
+    for _ in 0..iters {
+        if x.is_empty() {
+            break;
+        }
+        let med = median_f64_scratch(&mut x.clone());
+        let std = std_pop_f64(&x);
+        if std < 1e-12 {
+            break;
+        }
+        let thresh = sigma * std;
+        x.retain(|&v| (v - med).abs() < thresh);
+    }
+
+    if !x.is_empty() {
+        median_f64_scratch(&mut x)
+    } else {
+        median_f64_scratch(&mut orig.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sparse hot-pixel box-mean replacement (src/debayer.py's
+// _fix_hot_rgb_impl/_fix_hot_mono_impl replacement step)
+// ---------------------------------------------------------------------------
+//
+// The numpy reference computes `scipy.ndimage.uniform_filter(ch, size=3)`
+// over the *entire* channel and then keeps only the masked positions via
+// `np.where` -- wasteful when hot pixels are a small fraction of the frame
+// (the normal case), since the box mean is computed everywhere but used
+// almost nowhere. This computes the 3x3 box mean only at masked positions.
+// Boundary convention is scipy.ndimage's default `mode='reflect'` for
+// uniform_filter/median_filter, which (confusingly) is the *duplicate-edge*
+// reflection -- the same convention as `wavelet_symmetric_idx` above (numpy
+// `pad(mode='symmetric')`), reused here rather than redefined.
+
+#[pyfunction]
+fn hot_pixel_box_replace_native<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    mask: PyReadonlyArray2<'py, u8>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let data_flat: Vec<f32> = arr.iter().copied().collect();
+    let mask_flat: Vec<u8> = mask.as_array().iter().copied().collect();
+
+    let out = py.allow_threads(|| {
+        let mut result = data_flat.clone();
+        result.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
+            for x in 0..w {
+                if mask_flat[y * w + x] == 0 {
+                    continue;
+                }
+                for ch in 0..c {
+                    let mut acc = 0.0f64;
+                    for dy in -1isize..=1 {
+                        let yy = wavelet_symmetric_idx(y as isize + dy, h);
+                        for dx in -1isize..=1 {
+                            let xx = wavelet_symmetric_idx(x as isize + dx, w);
+                            acc += data_flat[(yy * w + xx) * c + ch] as f64;
+                        }
+                    }
+                    row_out[x * c + ch] = (acc / 9.0) as f32;
+                }
+            }
+        });
+        result
+    });
+
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// BM3D pure-scipy-DCT fallback: block-matching + Step1/Step2 core loop
+// ---------------------------------------------------------------------------
+//
+// Mirrors src/denoising.py's bm3d_denoise pure-scipy-DCT path (the fallback
+// used when the `bm3d` pip package -- non-commercial-licensed, see
+// THIRD_PARTY_NOTICES.md -- isn't installed) exactly: same reference-block
+// grid, same DCT-domain block-matching distance/threshold, same Step1
+// hard-threshold + Step2 Wiener passes, same weighted overlap-add. The
+// outer per-reference-block loop (ny*nx iterations, each previously calling
+// scipy.fft.dctn/idctn on a tiny array) is where the real cost was: Python
+// loop + repeated small-FFT call overhead, not the underlying arithmetic,
+// which is trivial at block_size~8/group_size~8. Two of the Python
+// reference's local variables (`Yp`, `pilot_dcts`) are computed but never
+// read again anywhere in that function -- confirmed dead, not ported here.
+//
+// DCT-II/DCT-III here are direct O(n^2) sums (orthonormal, `norm='ortho'`
+// convention, self-inverse pair) -- fine at block_size/group_size's small
+// scale, and simpler to get bit-exact right than an FFT-based DCT. Validated
+// directly against scipy.fft.dctn/idctn in tests/test_native.py before
+// trusting it inside the full block-matching loop.
+
+#[inline]
+fn dct1d_ortho(x: &[f64], out: &mut [f64]) {
+    let n = x.len();
+    let nf = n as f64;
+    let s0 = (1.0 / nf).sqrt();
+    let sk = (2.0 / nf).sqrt();
+    for k in 0..n {
+        let scale = if k == 0 { s0 } else { sk };
+        let mut acc = 0.0f64;
+        for i in 0..n {
+            acc += x[i] * (std::f64::consts::PI / nf * (i as f64 + 0.5) * k as f64).cos();
+        }
+        out[k] = scale * acc;
+    }
+}
+
+#[inline]
+fn idct1d_ortho(x: &[f64], out: &mut [f64]) {
+    let n = x.len();
+    let nf = n as f64;
+    let s0 = (1.0 / nf).sqrt();
+    let sk = (2.0 / nf).sqrt();
+    for i in 0..n {
+        let mut acc = 0.0f64;
+        for k in 0..n {
+            let scale = if k == 0 { s0 } else { sk };
+            acc += scale * x[k] * (std::f64::consts::PI / nf * (i as f64 + 0.5) * k as f64).cos();
+        }
+        out[i] = acc;
+    }
+}
+
+/// Separable 2D DCT-II (ortho), in place semantics via fresh output: `data`
+/// is `rows x cols` row-major.
+fn dct2d_ortho(data: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut tmp = vec![0.0f64; rows * cols];
+    // Pass 1: along columns (axis=1, per-row).
+    for r in 0..rows {
+        dct1d_ortho(&data[r * cols..(r + 1) * cols], &mut tmp[r * cols..(r + 1) * cols]);
+    }
+    // Pass 2: along rows (axis=0, per-column).
+    let mut out = vec![0.0f64; rows * cols];
+    let mut col_in = vec![0.0f64; rows];
+    let mut col_out = vec![0.0f64; rows];
+    for c in 0..cols {
+        for r in 0..rows {
+            col_in[r] = tmp[r * cols + c];
+        }
+        dct1d_ortho(&col_in, &mut col_out);
+        for r in 0..rows {
+            out[r * cols + c] = col_out[r];
+        }
+    }
+    out
+}
+
+fn idct2d_ortho(data: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut tmp = vec![0.0f64; rows * cols];
+    let mut col_in = vec![0.0f64; rows];
+    let mut col_out = vec![0.0f64; rows];
+    for c in 0..cols {
+        for r in 0..rows {
+            col_in[r] = data[r * cols + c];
+        }
+        idct1d_ortho(&col_in, &mut col_out);
+        for r in 0..rows {
+            tmp[r * cols + c] = col_out[r];
+        }
+    }
+    let mut out = vec![0.0f64; rows * cols];
+    for r in 0..rows {
+        idct1d_ortho(&tmp[r * cols..(r + 1) * cols], &mut out[r * cols..(r + 1) * cols]);
+    }
+    out
+}
+
+/// 3D separable DCT-II (ortho) over a `(g, bs, bs)` group -- axis 0 (group),
+/// then the 2D spatial transform per group-member. Mirrors
+/// `scipy.fft.dctn(group, axes=(0,1,2), norm='ortho')`: order among
+/// independent separable axes doesn't affect the result.
+fn dct3d_ortho(data: &[f64], g: usize, bs: usize) -> Vec<f64> {
+    let plane = bs * bs;
+    // Axis 0 (group axis): for each spatial position, DCT across the group.
+    let mut after_axis0 = vec![0.0f64; g * plane];
+    let mut col_in = vec![0.0f64; g];
+    let mut col_out = vec![0.0f64; g];
+    for p in 0..plane {
+        for gi in 0..g {
+            col_in[gi] = data[gi * plane + p];
+        }
+        dct1d_ortho(&col_in, &mut col_out);
+        for gi in 0..g {
+            after_axis0[gi * plane + p] = col_out[gi];
+        }
+    }
+    // Spatial 2D DCT per group member.
+    let mut out = vec![0.0f64; g * plane];
+    for gi in 0..g {
+        let plane_dct = dct2d_ortho(&after_axis0[gi * plane..(gi + 1) * plane], bs, bs);
+        out[gi * plane..(gi + 1) * plane].copy_from_slice(&plane_dct);
+    }
+    out
+}
+
+fn idct3d_ortho(data: &[f64], g: usize, bs: usize) -> Vec<f64> {
+    let plane = bs * bs;
+    let mut after_spatial = vec![0.0f64; g * plane];
+    for gi in 0..g {
+        let plane_idct = idct2d_ortho(&data[gi * plane..(gi + 1) * plane], bs, bs);
+        after_spatial[gi * plane..(gi + 1) * plane].copy_from_slice(&plane_idct);
+    }
+    let mut out = vec![0.0f64; g * plane];
+    let mut col_in = vec![0.0f64; g];
+    let mut col_out = vec![0.0f64; g];
+    for p in 0..plane {
+        for gi in 0..g {
+            col_in[gi] = after_spatial[gi * plane + p];
+        }
+        idct1d_ortho(&col_in, &mut col_out);
+        for gi in 0..g {
+            out[gi * plane + p] = col_out[gi];
+        }
+    }
+    out
+}
+
+#[pyfunction]
+fn dct2_ortho_native<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (rows, cols) = (s[0], s[1]);
+    let flat: Vec<f64> = arr.iter().copied().collect();
+    let out = dct2d_ortho(&flat, rows, cols);
+    Ok(numpy::ndarray::Array2::from_shape_vec((rows, cols), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+#[pyfunction]
+fn idct2_ortho_native<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (rows, cols) = (s[0], s[1]);
+    let flat: Vec<f64> = arr.iter().copied().collect();
+    let out = idct2d_ortho(&flat, rows, cols);
+    Ok(numpy::ndarray::Array2::from_shape_vec((rows, cols), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+/// Find similar blocks to reference `(iy, ix)` within the search window,
+/// mirroring the Python reference's block-matching exactly, including its
+/// literal "always include self" fallback: when nothing beats
+/// `dist_threshold`, it keeps whatever candidate is *first in raster order
+/// within the (possibly window-clipped) search box* -- not necessarily the
+/// true reference block itself. Replicated as-is for bit-for-bit parity,
+/// not "fixed".
+fn bm3d_similar_blocks(
+    iy: usize,
+    ix: usize,
+    ny: usize,
+    nx: usize,
+    max_dy: usize,
+    max_dx: usize,
+    all_dcts_flat: &[f64],
+    plane: usize,
+    dist_threshold: f64,
+    group_size: usize,
+) -> Vec<usize> {
+    let iy_lo = iy.saturating_sub(max_dy);
+    let iy_hi = (iy + max_dy).min(ny - 1);
+    let ix_lo = ix.saturating_sub(max_dx);
+    let ix_hi = (ix + max_dx).min(nx - 1);
+
+    let ref_dct = &all_dcts_flat[(iy * nx + ix) * plane..(iy * nx + ix + 1) * plane];
+
+    let mut cand_idx: Vec<usize> = Vec::with_capacity((iy_hi - iy_lo + 1) * (ix_hi - ix_lo + 1));
+    for cy in iy_lo..=iy_hi {
+        for cx in ix_lo..=ix_hi {
+            cand_idx.push(cy * nx + cx);
+        }
+    }
+
+    let mut scored: Vec<(f64, usize)> = Vec::with_capacity(cand_idx.len());
+    for &idx in &cand_idx {
+        let cand_dct = &all_dcts_flat[idx * plane..(idx + 1) * plane];
+        let mut d2 = 0.0f64;
+        for p in 0..plane {
+            let diff = cand_dct[p] - ref_dct[p];
+            d2 += diff * diff;
+        }
+        if d2 < dist_threshold {
+            scored.push((d2, idx));
+        }
+    }
+
+    if scored.is_empty() {
+        return vec![cand_idx[0]];
+    }
+    if scored.len() > group_size {
+        // Stable sort by distance ascending, matching np.argsort's role
+        // here (ties broken by original -- i.e. raster -- order, same as
+        // numpy's default stable-enough behaviour for this use since
+        // `scored` was built in raster order).
+        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(group_size);
+    }
+    scored.into_iter().map(|(_, idx)| idx).collect()
+}
+
+#[pyfunction]
+fn bm3d_denoise_native<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray2<'py, f64>,
+    block_size: usize,
+    stride: usize,
+    search_window: usize,
+    group_size: usize,
+    sigma_psd: f64,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let arr = y.as_array();
+    let s = arr.shape();
+    let (h, w) = (s[0], s[1]);
+    let y_flat: Vec<f64> = arr.iter().copied().collect();
+    let bs = block_size;
+    let plane = bs * bs;
+
+    let out = py.allow_threads(|| {
+        let ref_ys: Vec<usize> = (0..=(h - bs)).step_by(stride).collect();
+        let ref_xs: Vec<usize> = (0..=(w - bs)).step_by(stride).collect();
+        let ny = ref_ys.len();
+        let nx = ref_xs.len();
+
+        let get_block = |yr: usize, xr: usize| -> Vec<f64> {
+            let mut b = vec![0.0f64; plane];
+            for r in 0..bs {
+                for c in 0..bs {
+                    b[r * bs + c] = y_flat[(yr + r) * w + (xr + c)];
+                }
+            }
+            b
+        };
+
+        let all_ref: Vec<Vec<f64>> = ref_ys
+            .iter()
+            .flat_map(|&yr| ref_xs.iter().map(move |&xr| (yr, xr)))
+            .map(|(yr, xr)| get_block(yr, xr))
+            .collect();
+        let all_dcts_flat: Vec<f64> = all_ref
+            .iter()
+            .flat_map(|blk| dct2d_ortho(blk, bs, bs))
+            .collect();
+
+        let ht_threshold = sigma_psd * (2.0 * (plane as f64).ln()).sqrt();
+        let dist_threshold = (ht_threshold * 0.5).powi(2) * plane as f64;
+        let max_dy = (search_window / stride).max(1);
+        let max_dx = max_dy;
+
+        let mut acc1 = vec![0.0f64; h * w];
+        let mut wgt1 = vec![0.0f64; h * w];
+        let mut acc2 = vec![0.0f64; h * w];
+        let mut wgt2 = vec![0.0f64; h * w];
+
+        // --- Step 1: hard-thresholding ---
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let similar = bm3d_similar_blocks(
+                    iy, ix, ny, nx, max_dy, max_dx, &all_dcts_flat, plane, dist_threshold, group_size,
+                );
+                let n_g = similar.len();
+                let group: Vec<f64> = similar.iter().flat_map(|&idx| all_ref[idx].clone()).collect();
+                let spec3 = dct3d_ortho(&group, n_g, bs);
+                let mut ht = vec![0.0f64; spec3.len()];
+                let mut n_nz = 0usize;
+                for (i, &v) in spec3.iter().enumerate() {
+                    if v.abs() >= ht_threshold {
+                        ht[i] = v;
+                        n_nz += 1;
+                    }
+                }
+                let n_nz = n_nz.max(1);
+                let w1 = 1.0 / n_nz as f64;
+                let denoised1 = idct3d_ortho(&ht, n_g, bs);
+
+                for (k, &idx) in similar.iter().enumerate() {
+                    let gi = idx / nx;
+                    let gj = idx % nx;
+                    let (yr2, xr2) = (ref_ys[gi], ref_xs[gj]);
+                    for r in 0..bs {
+                        for c in 0..bs {
+                            let p = (yr2 + r) * w + (xr2 + c);
+                            acc1[p] += w1 * denoised1[k * plane + r * bs + c];
+                            wgt1[p] += w1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let pilot: Vec<f64> = (0..h * w)
+            .map(|i| if wgt1[i] > 0.0 { acc1[i] / wgt1[i] } else { y_flat[i] })
+            .collect();
+
+        // --- Step 2: Wiener filter using the Step-1 pilot estimate ---
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let similar = bm3d_similar_blocks(
+                    iy, ix, ny, nx, max_dy, max_dx, &all_dcts_flat, plane, dist_threshold, group_size,
+                );
+                let n_g = similar.len();
+                let noisy_group: Vec<f64> = similar.iter().flat_map(|&idx| all_ref[idx].clone()).collect();
+                let pilot_group: Vec<f64> = similar
+                    .iter()
+                    .flat_map(|&idx| {
+                        let gi = idx / nx;
+                        let gj = idx % nx;
+                        let (yr2, xr2) = (ref_ys[gi], ref_xs[gj]);
+                        (0..bs).flat_map(move |r| (0..bs).map(move |c| (yr2 + r, xr2 + c)))
+                            .map(|(rr, cc)| pilot[rr * w + cc])
+                            .collect::<Vec<f64>>()
+                    })
+                    .collect();
+
+                let spec_noisy = dct3d_ortho(&noisy_group, n_g, bs);
+                let spec_pilot = dct3d_ortho(&pilot_group, n_g, bs);
+                let mut spec_filt = vec![0.0f64; spec_noisy.len()];
+                let mut wiener_sq_sum = 0.0f64;
+                for i in 0..spec_noisy.len() {
+                    let pilot_sq = spec_pilot[i] * spec_pilot[i];
+                    let wiener = pilot_sq / (pilot_sq + sigma_psd * sigma_psd + 1e-30);
+                    spec_filt[i] = wiener * spec_noisy[i];
+                    wiener_sq_sum += wiener * wiener;
+                }
+                let wiener_w = wiener_sq_sum / (n_g.max(1) as f64);
+                let w2 = 1.0 / wiener_w.max(1e-12);
+                let denoised2 = idct3d_ortho(&spec_filt, n_g, bs);
+
+                for (k, &idx) in similar.iter().enumerate() {
+                    let gi = idx / nx;
+                    let gj = idx % nx;
+                    let (yr2, xr2) = (ref_ys[gi], ref_xs[gj]);
+                    for r in 0..bs {
+                        for c in 0..bs {
+                            let p = (yr2 + r) * w + (xr2 + c);
+                            acc2[p] += w2 * denoised2[k * plane + r * bs + c];
+                            wgt2[p] += w2;
+                        }
+                    }
+                }
+            }
+        }
+
+        (0..h * w)
+            .map(|i| if wgt2[i] > 0.0 { acc2[i] / wgt2[i] } else { pilot[i] })
+            .collect::<Vec<f64>>()
+    });
+
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// Blind (unknown-rotation) rigid star-pattern match hypothesis search
+// ---------------------------------------------------------------------------
+//
+// Mirrors src/blind_match.py's match_rigid_unknown_rotation exactly (same
+// iteration order over src pairs, same sorted-distance binary search into
+// dst pairs, same early-exit conditions) -- see that module's docstring for
+// the algorithm rationale (distance-matched pair-of-pairs hypotheses,
+// RANSAC-style consensus scoring). n/m are capped small (max_stars, default
+// 40) by the caller, so nearest-neighbour queries are brute-force here
+// rather than a KDTree -- the cost this kernel actually removes is the
+// per-hypothesis Python-level loop + scipy KDTree.query call overhead (up
+// to _MAX_HYPOTHESES of them), not the underlying O(n*m) query cost, which
+// is trivial at this scale either way. Only searches for the best
+// hypothesis and returns its (R, t, inlier_count) -- the final
+// all-inliers Umeyama refit stays in Python (src/affine_fit.py's
+// _umeyama_2d), called once, not per-hypothesis.
+
+#[pyfunction]
+fn blind_match_hypotheses<'py>(
+    py: Python<'py>,
+    src: numpy::PyReadonlyArray2<'py, f64>,
+    dst: numpy::PyReadonlyArray2<'py, f64>,
+    pixel_tol: f64,
+    dist_rel_tol: f64,
+    min_sep: f64,
+    target_inliers: usize,
+    max_hypotheses: usize,
+) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, usize)> {
+    let src_arr = src.as_array();
+    let dst_arr = dst.as_array();
+    let n = src_arr.shape()[0];
+    let m = dst_arr.shape()[0];
+    let src_pts: Vec<(f64, f64)> = (0..n).map(|i| (src_arr[[i, 0]], src_arr[[i, 1]])).collect();
+    let dst_pts: Vec<(f64, f64)> = (0..m).map(|i| (dst_arr[[i, 0]], dst_arr[[i, 1]])).collect();
+
+    let (best_r, best_t, best_inliers) = py.allow_threads(|| {
+        // Sorted dst pairwise distances (ascending), with original indices --
+        // mirrors `order = np.argsort(dst_d)` in the Python reference.
+        let mut dst_pairs: Vec<(f64, usize, usize)> = Vec::with_capacity(m * m / 2);
+        for i in 0..m {
+            for j in (i + 1)..m {
+                let dx = dst_pts[i].0 - dst_pts[j].0;
+                let dy = dst_pts[i].1 - dst_pts[j].1;
+                dst_pairs.push(((dx * dx + dy * dy).sqrt(), i, j));
+            }
+        }
+        dst_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let dst_d_sorted: Vec<f64> = dst_pairs.iter().map(|p| p.0).collect();
+
+        let mut best_inliers = 0usize;
+        let mut best_r = [[1.0f64, 0.0], [0.0, 1.0]];
+        let mut best_t = [0.0f64, 0.0];
+        let mut tested = 0usize;
+
+        'outer: for i in 0..n {
+            for j in (i + 1)..n {
+                if tested >= max_hypotheses {
+                    break 'outer;
+                }
+                let (pix, piy) = src_pts[i];
+                let (pjx, pjy) = src_pts[j];
+                let dx = pjx - pix;
+                let dy = pjy - piy;
+                let d = (dx * dx + dy * dy).sqrt();
+                if d < min_sep {
+                    continue;
+                }
+                let tol = (pixel_tol * 2.0).max(d * dist_rel_tol);
+                let lo = dst_d_sorted.partition_point(|&x| x < d - tol);
+                let hi = dst_d_sorted.partition_point(|&x| x <= d + tol);
+                if lo >= hi {
+                    continue;
+                }
+                let v_src_angle = dy.atan2(dx);
+
+                for cand in lo..hi {
+                    let (_, ci, cj) = dst_pairs[cand];
+                    for &(a_idx, b_idx) in &[(ci, cj), (cj, ci)] {
+                        tested += 1;
+                        let (qax, qay) = dst_pts[a_idx];
+                        let (qbx, qby) = dst_pts[b_idx];
+                        let vdx = qbx - qax;
+                        let vdy = qby - qay;
+                        // NOTE: the Python reference (_rigid_from_two_points)
+                        // only guards the *src* pair's length (already
+                        // enforced by min_sep above, unreachable in
+                        // practice) -- it has no dst-side degeneracy check.
+                        // A near-zero v_dst just yields atan2(0,0)=0 (same
+                        // in Rust as numpy) and a hypothesis that will
+                        // naturally lose on inlier count. Replicated as-is,
+                        // not "fixed", to stay bit-for-bit faithful.
+                        let theta = vdy.atan2(vdx) - v_src_angle;
+                        let (c, s) = (theta.cos(), theta.sin());
+                        let r = [[c, -s], [s, c]];
+                        let t = [qax - (r[0][0] * pix + r[0][1] * piy),
+                                qay - (r[1][0] * pix + r[1][1] * piy)];
+
+                        let mut n_in = 0usize;
+                        for &(sx, sy) in &src_pts {
+                            let px = r[0][0] * sx + r[0][1] * sy + t[0];
+                            let py = r[1][0] * sx + r[1][1] * sy + t[1];
+                            let mut best_d2 = f64::INFINITY;
+                            for &(dxp, dyp) in &dst_pts {
+                                let ddx = px - dxp;
+                                let ddy = py - dyp;
+                                let d2 = ddx * ddx + ddy * ddy;
+                                if d2 < best_d2 {
+                                    best_d2 = d2;
+                                }
+                            }
+                            if best_d2 < pixel_tol * pixel_tol {
+                                n_in += 1;
+                            }
+                        }
+                        if n_in > best_inliers {
+                            best_inliers = n_in;
+                            best_r = r;
+                            best_t = t;
+                            if best_inliers >= target_inliers {
+                                break;
+                            }
+                        }
+                        if tested >= max_hypotheses {
+                            break;
+                        }
+                    }
+                    if tested >= max_hypotheses || best_inliers >= target_inliers {
+                        break;
+                    }
+                }
+                if best_inliers >= target_inliers {
+                    break 'outer;
+                }
+            }
+        }
+        (best_r, best_t, best_inliers)
+    });
+
+    let r_flat: Vec<f64> = best_r.iter().flatten().copied().collect();
+    let r_arr = numpy::ndarray::Array2::from_shape_vec((2, 2), r_flat).unwrap();
+    let t_arr = numpy::ndarray::Array1::from_vec(best_t.to_vec());
+    Ok((r_arr.into_pyarray(py), t_arr.into_pyarray(py), best_inliers))
+}
+
 /// Lanczos-a windowed-sinc kernel weight for offset `x` (a = support radius).
 #[inline]
 fn lanczos_w(x: f64, a: f64) -> f64 {
@@ -3557,6 +4454,14 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
     m.add_function(wrap_pyfunction!(linear_fit_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(ivw_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(dwt2_native, m)?)?;
+    m.add_function(wrap_pyfunction!(idwt2_native, m)?)?;
+    m.add_function(wrap_pyfunction!(sigma_clipped_median_native, m)?)?;
+    m.add_function(wrap_pyfunction!(hot_pixel_box_replace_native, m)?)?;
+    m.add_function(wrap_pyfunction!(blind_match_hypotheses, m)?)?;
+    m.add_function(wrap_pyfunction!(dct2_ortho_native, m)?)?;
+    m.add_function(wrap_pyfunction!(idct2_ortho_native, m)?)?;
+    m.add_function(wrap_pyfunction!(bm3d_denoise_native, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;

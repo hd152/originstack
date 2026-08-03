@@ -1035,9 +1035,43 @@ def bm3d_denoise(img: np.ndarray, sigma_psd: float = 0.0,
     bs = block_size
     sw = search_window
 
-    # Reflective padding avoids border artefacts
-    pad = sw + bs
-    Yp = np.pad(Y, pad, mode='reflect')
+    Y_d = None
+    if _HAS_NATIVE and hasattr(_native, 'bm3d_denoise_native'):
+        try:
+            Y_d = np.asarray(_native.bm3d_denoise_native(
+                np.ascontiguousarray(Y, dtype=np.float64),
+                int(bs), int(stride), int(sw), int(group_size), float(sigma_psd)))
+        except Exception:
+            Y_d = None
+
+    if Y_d is None:
+        Y_d = _bm3d_step12_numpy(Y, bs, stride, sw, group_size, sigma_psd, dctn, idctn)
+
+    # Chroma: Gaussian proportional to noise level (fast, avoids colour noise)
+    img_scale = float(np.percentile(img, 95)) + 1e-9
+    chroma_sigma_px = float(np.clip(sigma_psd / img_scale * 3.0, 0.5, 4.0))
+    Cb_d = ndimage.gaussian_filter(Cb, sigma=chroma_sigma_px)
+    Cr_d = ndimage.gaussian_filter(Cr, sigma=chroma_sigma_px)
+
+    R = Y_d + 1.40200 * Cr_d
+    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+    B = Y_d + 1.77200 * Cb_d
+    result = np.stack([R, G, B], axis=2)
+
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return result.astype(np.float32)
+
+
+def _bm3d_step12_numpy(Y: np.ndarray, bs: int, stride: int, sw: int, group_size: int,
+                       sigma_psd: float, dctn, idctn) -> np.ndarray:
+    """Pure-scipy-DCT Step1 (hard-threshold) + Step2 (Wiener) BM3D core --
+    the numpy fallback for bm3d_denoise when the native kernel is
+    unavailable. See bm3d_denoise_native in ext/astro_native/src/lib.rs for
+    the ported version (same algorithm, no behaviour change)."""
+    H, W = Y.shape
 
     # Reference block grid on the original (unpadded) image
     ref_ys = np.arange(0, H - bs + 1, stride)
@@ -1169,24 +1203,7 @@ def bm3d_denoise(img: np.ndarray, sigma_psd: float = 0.0,
                 acc2[yr2:yr2 + bs, xr2:xr2 + bs] += w2 * denoised2[k]
                 wgt2[yr2:yr2 + bs, xr2:xr2 + bs] += w2
 
-    Y_d = np.where(wgt2 > 0, acc2 / wgt2, pilot)
-
-    # Chroma: Gaussian proportional to noise level (fast, avoids colour noise)
-    img_scale = float(np.percentile(img, 95)) + 1e-9
-    chroma_sigma_px = float(np.clip(sigma_psd / img_scale * 3.0, 0.5, 4.0))
-    Cb_d = ndimage.gaussian_filter(Cb, sigma=chroma_sigma_px)
-    Cr_d = ndimage.gaussian_filter(Cr, sigma=chroma_sigma_px)
-
-    R = Y_d + 1.40200 * Cr_d
-    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
-    B = Y_d + 1.77200 * Cb_d
-    result = np.stack([R, G, B], axis=2)
-
-    if star_mask is not None:
-        mask3 = star_mask[:, :, np.newaxis]
-        result = result * (1.0 - mask3) + src * mask3
-
-    return result.astype(np.float32)
+    return np.where(wgt2 > 0, acc2 / wgt2, pilot)
 
 
 def anisotropic_diffusion(img: np.ndarray, iterations: int = 20,

@@ -356,7 +356,8 @@ def test_affine_sanity_guard_rejects_bad_ransac_fit():
     def is_unrealistic(tf):
         tx, ty = tf.params[0, 2], tf.params[1, 2]
         rot_deg = abs(np.degrees(np.arctan2(tf.params[1, 0], tf.params[0, 0])))
-        return (abs(tx) > 0.1 * W or abs(ty) > 0.1 * H
+        return (abs(tx) > Config.MAX_REALISTIC_SHIFT_FRAC * W
+                or abs(ty) > Config.MAX_REALISTIC_SHIFT_FRAC * H
                 or rot_deg > Config.AFFINE_MAX_ROTATION_DEG)
 
     bad = RigidTransform.from_rotation_translation(np.radians(21.526), (708.7, -35.8))
@@ -369,6 +370,9 @@ def test_affine_sanity_guard_rejects_bad_ransac_fit():
 
     # Rotation-only failure mode: small shift but way too much rotation
     # (e.g. matched against the wrong star cluster) must also be caught.
-    bad_rotation_only = RigidTransform.from_rotation_translation(np.radians(12.0),
+    # Rotation value kept comfortably above AFFINE_MAX_ROTATION_DEG (raised
+    # from 5 to 20 deg after real alt-az sessions showed genuine field
+    # rotation up to ~13 deg was being wrongly rejected as "bad RANSAC").
+    bad_rotation_only = RigidTransform.from_rotation_translation(np.radians(25.0),
                                                                   (2.0, -1.0))
     assert is_unrealistic(bad_rotation_only)

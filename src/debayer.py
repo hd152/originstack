@@ -105,6 +105,12 @@ def autodetect_bayer_orientation(raw, pattern: str, imbalance_threshold: float =
 
 
 def _sigma_clipped_median(arr, sigma: float = 3.0, iters: int = 3, xp=np) -> float:
+    if xp is np and _HAS_NATIVE and hasattr(_native, 'sigma_clipped_median_native'):
+        try:
+            flat = np.ascontiguousarray(arr.ravel(), dtype=np.float32)
+            return float(_native.sigma_clipped_median_native(flat, float(sigma), int(iters)))
+        except Exception:
+            pass
     x = arr.ravel()
     for _ in range(iters):
         med = float(xp.median(x))
@@ -602,7 +608,11 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
         for dx in range(2):
             sub = result[dy::2, dx::2]
             # Compute median once; used for both map application and statistics.
-            med = ndimage.median_filter(sub, size=3)
+            # sub is a strided view (every other row/col) -- _median_filter3's
+            # native fast path requires a C-contiguous array, so route through
+            # a contiguous copy rather than falling through to scipy's much
+            # slower generic ndimage.median_filter for every sub-channel.
+            med = _median_filter3(np.ascontiguousarray(sub), np, ndimage)
 
             if has_map:
                 map_mask = hot_map[dy::2, dx::2]
@@ -654,6 +664,17 @@ def _fix_hot_rgb_impl(rgb, threshold, xp, _nd):
     mask = diff > threshold * sigma
     if not bool(xp.any(mask)):
         return rgb, lum
+
+    if xp is np and _HAS_NATIVE and hasattr(_native, 'hot_pixel_box_replace_native'):
+        try:
+            result = _native.hot_pixel_box_replace_native(
+                np.ascontiguousarray(rgb, dtype=np.float32),
+                np.ascontiguousarray(mask, dtype=np.uint8))
+            lum_fixed = 0.299 * result[:, :, 0] + 0.587 * result[:, :, 1] + 0.114 * result[:, :, 2]
+            return result, lum_fixed
+        except Exception:
+            pass
+
     result = xp.empty_like(rgb)
     for c in range(rgb.shape[2]):
         ch = rgb[:, :, c]
@@ -696,6 +717,16 @@ def _fix_hot_mono_impl(img, threshold, xp, _nd):
     mask = diff > threshold * sigma
     if not bool(xp.any(mask)):
         return img
+
+    if xp is np and _HAS_NATIVE and hasattr(_native, 'hot_pixel_box_replace_native'):
+        try:
+            img3 = np.ascontiguousarray(img, dtype=np.float32)[:, :, np.newaxis]
+            result = _native.hot_pixel_box_replace_native(
+                img3, np.ascontiguousarray(mask, dtype=np.uint8))
+            return result[:, :, 0]
+        except Exception:
+            pass
+
     return xp.where(mask, _nd.uniform_filter(img, size=3), img)
 
 
