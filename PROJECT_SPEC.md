@@ -48,9 +48,9 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/features.py` | ~90 | Low-level feature extraction helpers |
 | `src/cli.py` | ~685 | `process_directory`, `parse_args`, `main` |
 | `originstack.py` | ~170 | Backward-compatibility re-export shim |
-| `ext/astro_native/` (Rust) | — | Optional PyO3/maturin crate (13 kernels): stacking combines, fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle), anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler (numpy fallback when absent) |
+| `ext/astro_native/` (Rust) | — | Optional PyO3/maturin crate (31 kernels): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle), anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind (unknown-rotation) star-pattern match, 2D wavelet transform, BM3D block-matching fallback, hot-pixel fix/replace (numpy fallback when absent) |
 
-**Total: ~10,800 lines** (Python). Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
+**Total: ~25,000+ lines** (Python, `src/` alone). Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
 ---
 
@@ -579,7 +579,7 @@ python originstack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
 | `tifffile` | 16-bit TIFF output |
 
-`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration is `src/blind_match.py`; NLM denoising, Richardson-Lucy's CPU fallback, satellite-trail detection, and the multiscale-entropy seeing metric's db4 wavelet are all native/numpy now; every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — none of them need an external dependency.
+`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/Menon2007 debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration is `src/blind_match.py`, also native; NLM denoising and Richardson-Lucy's CPU fallback are native/numpy now; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — none of them need an external dependency.
 
 ---
 

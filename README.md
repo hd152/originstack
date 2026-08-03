@@ -276,9 +276,9 @@ cd ext/astro_native && maturin develop --release   # into a venv
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
 | `tifffile` | TIFF input and `--export tiff` output |
 | `reproject` | Mosaic stitching |
-| `astro_native` (Rust) | 16 native kernels: stacking combines, Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC |
+| `astro_native` (Rust) | 31 native kernels: stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted), Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, 2D wavelet transform, blind (unknown-rotation) star-pattern match, BM3D block-matching fallback, hot-pixel fix/replace |
 
-`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/VNG debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`; NLM denoising, Richardson-Lucy's CPU fallback, satellite-trail detection, and the multiscale-entropy seeing metric's db4 wavelet are all native/numpy now; every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — no dependency for any of them.
+`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/Menon2007 debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`, also native; NLM denoising, Richardson-Lucy's CPU fallback, and satellite-trail detection are native/numpy now; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — no dependency for any of them.
 
 ---
 
