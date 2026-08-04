@@ -126,7 +126,15 @@ class GpuContext:
         return ('out of memory' in msg
                 or 'cudaerrormemoryal' in msg
                 or 'outofmemory' in name
-                or 'cudaruntimeerror' in name)
+                or 'cudaruntimeerror' in name
+                # cupy_backends.cuda.api.driver.CUDADriverError -- a distinct
+                # exception class from CUDARuntimeError (driver API vs
+                # runtime API), raised e.g. by cuModuleUnload/cuMemFree
+                # under VRAM pressure. Previously only matched via the
+                # message-content check above, which happened to work for
+                # this exact error text but isn't guaranteed to for every
+                # driver-level OOM variant.
+                or 'cudadrivererror' in name)
 
     def print_status(self):
         if self.active:

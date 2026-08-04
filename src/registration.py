@@ -206,7 +206,16 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
             return out[:, :, 0] if squeeze_back else out
         except Exception as exc:
             if gpu.is_oom(exc):
-                gpu.free_pool()
+                # Permanent fallback, not just free_pool(): a single freed
+                # pool essentially never resolves a real capacity OOM (the
+                # workload just doesn't fit in this card's VRAM), so retrying
+                # the GPU on every subsequent frame here (this runs once per
+                # frame) just repeats the same OOM each time -- observed in
+                # the wild as a long cascade of CUDA errors, some from
+                # exception classes is_oom() doesn't recognize, escaping
+                # uncaught. Matches the disable() convention debayer.py's
+                # GPU call sites already use.
+                gpu.disable()
             else:
                 raise
 

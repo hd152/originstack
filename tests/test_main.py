@@ -873,6 +873,68 @@ class TestGpuContext(unittest.TestCase):
     def test_max_workers_at_least_1(self):
         self.assertGreaterEqual(self.ctx.max_gpu_workers(per_worker_mb=500.0), 1)
 
+    def test_is_oom_matches_cuda_runtime_error_by_name(self):
+        # Real class: cupy_backends.cuda.api.runtime.CUDARuntimeError.
+        class CUDARuntimeError(Exception):
+            pass
+        self.assertTrue(self.ctx.is_oom(CUDARuntimeError("some other message")))
+
+    def test_is_oom_matches_cuda_driver_error_by_name(self):
+        # Real class: cupy_backends.cuda.api.driver.CUDADriverError, raised
+        # e.g. by cuModuleUnload/cuMemFree under VRAM pressure -- distinct
+        # from CUDARuntimeError (driver API vs runtime API). Regression test
+        # for a real crash: this class wasn't matched by name at all before,
+        # only coincidentally by message content for one specific wording.
+        class CUDADriverError(Exception):
+            pass
+        self.assertTrue(self.ctx.is_oom(CUDADriverError("CUDA_ERROR_UNKNOWN: unknown error")))
+
+    def test_is_oom_matches_out_of_memory_message(self):
+        self.assertTrue(self.ctx.is_oom(RuntimeError("out of memory")))
+        self.assertTrue(self.ctx.is_oom(RuntimeError("cudaErrorMemoryAllocation: out of memory")))
+
+    def test_is_oom_rejects_unrelated_error(self):
+        self.assertFalse(self.ctx.is_oom(ValueError("shape mismatch")))
+
+
+class TestApplyTransformGpuOomFallback(unittest.TestCase):
+    """Regression test: apply_transform's GPU OOM handler used to call only
+    free_pool(), leaving gpu.active True -- a real capacity OOM (workload
+    doesn't fit in this card's VRAM) doesn't resolve itself by freeing the
+    pool once, so every subsequent per-frame call kept retrying the GPU and
+    re-OOMing, observed in the wild as a long cascade of CUDA errors. Must
+    call disable() instead, matching debayer.py's GPU call sites."""
+
+    def setUp(self):
+        self._real_gpu = _gpu_mod._gpu
+
+        class _CUDARuntimeError(Exception):
+            pass
+        self._oom_exc_cls = _CUDARuntimeError
+
+        fake = astro.GpuContext(use_gpu=False)
+        fake.active = True  # pretend GPU is live without needing real CUDA
+        fake.to_device = lambda arr: arr
+        fake.to_host = lambda arr: np.asarray(arr)
+
+        class _FakeXndimage:
+            def shift(_self, *a, **kw):
+                raise _CUDARuntimeError("cudaErrorMemoryAllocation: out of memory")
+
+        fake.xndimage = _FakeXndimage()
+        fake.xp = np
+        self.fake = fake
+        _gpu_mod._gpu = fake
+
+    def tearDown(self):
+        _gpu_mod._gpu = self._real_gpu
+
+    def test_oom_falls_back_to_cpu_and_disables_gpu(self):
+        img = np.zeros((8, 8, 3), dtype=np.float32)
+        result = astro.apply_transform(img, shift=(1.0, 2.0))
+        self.assertEqual(result.shape, img.shape)
+        self.assertFalse(self.fake.active, "GPU must be permanently disabled after a real OOM")
+
 
 class TestFrameInfo(unittest.TestCase):
     def test_defaults(self):

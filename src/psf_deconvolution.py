@@ -472,7 +472,12 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
             logging.info("Richardson-Lucy deconvolution ran on GPU")
         except Exception as exc:
             if _gpu.is_oom(exc):
-                _gpu.free_pool()
+                # Permanent fallback (matches debayer.py's GPU call sites),
+                # not just free_pool(): a capacity OOM won't resolve itself
+                # by freeing the pool once, and richardson_lucy_svpsf calls
+                # this once per tile, so leaving the GPU "active" here would
+                # just repeat the same OOM on every remaining tile.
+                _gpu.disable()
             logging.debug("GPU RL failed (%s); falling back to CPU", exc)
             Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal)
     else:
