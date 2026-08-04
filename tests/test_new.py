@@ -621,6 +621,35 @@ class TestComputeQualityMetricsAdvanced(unittest.TestCase):
         self.assertEqual(m['fwhm'], 0.0)
 
 
+class TestEstimateBortle(unittest.TestCase):
+    """Tests for the heuristic Bortle-bucket estimate from sky background."""
+
+    def setUp(self):
+        from src.quality import estimate_bortle
+        self.estimate_bortle = estimate_bortle
+
+    def test_none_without_exptime(self):
+        self.assertIsNone(self.estimate_bortle(500.0, 0.0, 100.0))
+
+    def test_none_without_background(self):
+        self.assertIsNone(self.estimate_bortle(0.0, 30.0, 100.0))
+
+    def test_brighter_background_gives_higher_bortle(self):
+        dark = self.estimate_bortle(50.0, 30.0, 100.0)
+        bright = self.estimate_bortle(5000.0, 30.0, 100.0)
+        self.assertLess(dark, bright)
+
+    def test_result_clamped_to_1_through_9(self):
+        self.assertGreaterEqual(self.estimate_bortle(1.0, 30.0, 100.0), 1)
+        self.assertLessEqual(self.estimate_bortle(1e9, 30.0, 100.0), 9)
+
+    def test_higher_gain_normalises_down(self):
+        """Same ADU at higher ISO/gain implies dimmer real sky (more amplified)."""
+        low_gain = self.estimate_bortle(500.0, 30.0, 100.0)
+        high_gain = self.estimate_bortle(500.0, 30.0, 800.0)
+        self.assertLessEqual(high_gain, low_gain)
+
+
 class TestProcessSingleFramePreload(unittest.TestCase):
     """Tests for the preloaded_data and advanced_metrics paths in _process_single_frame."""
 

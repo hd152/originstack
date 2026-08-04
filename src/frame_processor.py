@@ -23,7 +23,7 @@ from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
                          correct_chromatic_aberration,
                          measure_chromatic_aberration, apply_chromatic_aberration,
                          autodetect_bayer_orientation)
-from src.quality import validate_image_data, compute_quality_metrics
+from src.quality import validate_image_data, compute_quality_metrics, estimate_bortle
 from src.stacking import lacosmic_reject
 
 try:
@@ -421,6 +421,13 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
     metrics = {} if skip_quality else compute_quality_metrics(
         lum, quick=quick_quality, advanced_metrics=advanced_metrics)
+    if metrics:
+        try:
+            _exptime = float(header.get('EXPTIME', 0) or 0)
+            _gain = float(header.get('ISOSPEED') or header.get('ISO') or header.get('GAIN') or 100.0)
+            metrics['bortle_estimate'] = estimate_bortle(metrics.get('background', 0.0), _exptime, _gain)
+        except (ValueError, TypeError):
+            metrics['bortle_estimate'] = None
     timings['quality'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Patch quality scores for --patch-registration, computed here while the

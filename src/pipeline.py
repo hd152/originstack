@@ -972,6 +972,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         print(f"  Avg FWHM:         {np.mean(fwhms):.2f} px (best: {np.min(fwhms):.2f})")
     if snrs:
         print(f"  Avg SNR:          {np.mean(snrs):.1f} (best: {np.max(snrs):.1f})")
+    bortles = [f.metrics.get('bortle_estimate') for f in final
+               if f.metrics and f.metrics.get('bortle_estimate') is not None]
+    if bortles:
+        print(f"  Sky (Bortle est): ~{int(round(np.median(bortles)))} "
+              f"(rough, same-equipment-only estimate from background level)")
     # Per-phase timing with % of wall-clock so the bottleneck is obvious. The
     # four phases rarely sum to the total — "Other" captures frame discovery,
     # master-calibration building, plate-solve/WCS, colour calibration, and the

@@ -56,7 +56,7 @@ The pipeline is split across `src/` modules. [originstack.py](originstack.py) is
 | [src/io_ser.py](src/io_ser.py) | SER (planetary/lucky-imaging video) load — one file expands to many virtual frames |
 | [src/frame_discovery.py](src/frame_discovery.py) | `discover_frames`, `classify_frame`, `select_matching_darks` |
 | [src/debayer.py](src/debayer.py) | Debayering, hot pixels, white balance |
-| [src/quality.py](src/quality.py) | `compute_quality_metrics`, star detection, FWHM |
+| [src/quality.py](src/quality.py) | `compute_quality_metrics`, star detection, FWHM, `estimate_bortle` (heuristic sky-glow bucket) |
 | [src/psf_deconvolution.py](src/psf_deconvolution.py) | PSF estimation, Richardson-Lucy deconvolution |
 | [src/background.py](src/background.py) | Mesh-based sky extraction, DBE, residual removal |
 | [src/denoising.py](src/denoising.py) | Wavelet, MMT, ACDNR, bilateral, NLM, star reduction, local contrast |

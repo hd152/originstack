@@ -9,6 +9,31 @@ import numpy as np
 from src.models import Config
 
 
+def estimate_bortle(background: float, exptime_s: float, gain: float = 100.0) -> Optional[int]:
+    """Rough, uncalibrated Bortle-scale bucket (1-9) from measured sky background.
+
+    Not survey-grade photometry: there is no photometric zero-point or pixel
+    scale here, so this is a sky-glow *rate* (background ADU/s, normalised to
+    an assumed gain/ISO-100 equivalent) bucketed against arbitrary log-spaced
+    thresholds -- comparable across frames/sessions with the *same*
+    telescope+camera (aperture and pixel scale held fixed), not an absolute
+    measurement transferable across different equipment. Returns None when
+    there isn't enough header info (exptime/background) to normalise.
+    """
+    if exptime_s <= 0 or background <= 0:
+        return None
+    gain_norm = max(gain, 1.0) / 100.0
+    rate = background / (exptime_s * gain_norm)
+    edges = (0.5, 1.2, 3.0, 7.0, 16.0, 35.0, 80.0, 180.0)
+    bortle = 1
+    for edge in edges:
+        if rate > edge:
+            bortle += 1
+        else:
+            break
+    return min(bortle, 9)
+
+
 def detect_stars_auto(lum: np.ndarray, noise: float,
                       background: Optional[float] = None) -> Optional[np.ndarray]:
     """Unified star-detection dispatcher: every call site across
