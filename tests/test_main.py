@@ -896,6 +896,44 @@ class TestGpuContext(unittest.TestCase):
     def test_is_oom_rejects_unrelated_error(self):
         self.assertFalse(self.ctx.is_oom(ValueError("shape mismatch")))
 
+    def test_stream_context_survives_stream_creation_oom(self):
+        """Regression test: gpu.stream_context() used to have zero OOM
+        protection -- every GPU call site enters it via
+        `with gpu.stream_context():` before doing any real work, and a
+        failure creating the CUDA stream itself (a real failure mode under
+        severe VRAM pressure) propagated uncaught straight through all of
+        them. Must disable the GPU and degrade to a no-op instead of
+        raising."""
+        # module-level `sys.modules.setdefault("cupy", types.ModuleType("cupy"))`
+        # near the top of this file means _gpu_mod.cp is a bare fake module
+        # with no real `.cuda` submodule -- attach one directly rather than
+        # `import cupy.cuda` (which needs a real package, not this stub).
+        ctx = astro.GpuContext(use_gpu=False)
+        ctx.active = True  # pretend GPU is live without needing real CUDA
+
+        class _CUDARuntimeError(Exception):
+            pass
+
+        fake_cuda = types.ModuleType("cupy.cuda")
+        fake_cuda.Stream = mock.Mock(
+            side_effect=_CUDARuntimeError("cudaErrorMemoryAllocation: out of memory"))
+        with mock.patch.object(_gpu_mod.cp, 'cuda', fake_cuda, create=True):
+            with ctx.stream_context() as stream:
+                self.assertIsNone(stream)  # degraded to no-op, didn't raise
+        self.assertFalse(ctx.active, "GPU must be disabled after a stream-creation OOM")
+
+    def test_stream_context_reraises_non_oom_error(self):
+        ctx = astro.GpuContext(use_gpu=False)
+        ctx.active = True
+
+        fake_cuda = types.ModuleType("cupy.cuda")
+        fake_cuda.Stream = mock.Mock(side_effect=ValueError("unrelated"))
+        with mock.patch.object(_gpu_mod.cp, 'cuda', fake_cuda, create=True):
+            with self.assertRaises(ValueError):
+                with ctx.stream_context():
+                    pass
+        self.assertTrue(ctx.active, "a non-OOM error must not disable the GPU")
+
 
 class TestApplyTransformGpuOomFallback(unittest.TestCase):
     """Regression test: apply_transform's GPU OOM handler used to call only
