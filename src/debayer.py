@@ -504,13 +504,42 @@ def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') ->
         return debayer_bilinear(raw, pattern, method)
 
 
+def _desaturate_near_clipped_highlights(xp, img: np.ndarray, scaled: np.ndarray) -> np.ndarray:
+    """Blend WB output back towards neutral grey for pixels near this frame's own peak.
+
+    A genuinely saturated star core is clipped at the sensor's full-well
+    ceiling equally across R/G/B (the physical clip doesn't care which
+    colour filter sits over the photosite) -- but white balance's
+    per-channel gain is fit to the whole-frame *mean*, which is dominated
+    by unsaturated background, so it has no notion of this. Applying that
+    gain uniformly to an already-clipped pixel scales its (accidentally
+    equal, not really representative of colour) channels apart, and since
+    typical OSC sensors need a much larger R/B gain than G, this produces a
+    magenta/purple halo squarely on bright stars even though the
+    background comes out perfectly neutral (observed in the wild on a
+    real Pleiades session: bright star cores at R/G ~2.1, B/G ~1.25 while
+    the sky background measured ~0.99 on both ratios).
+
+    Ramps smoothly from 0 (no effect) at 80% of the frame's own pre-WB
+    peak to full neutralisation at the peak itself, so ordinary bright
+    (but not clipped) stars are unaffected -- only pixels actually close
+    to this frame's own ceiling get pulled back towards grey.
+    """
+    pixel_peak = img.max(axis=-1, keepdims=True)
+    ceiling = img.max()
+    sat_frac = xp.clip((pixel_peak / (ceiling + 1e-12) - 0.8) / 0.2, 0.0, 1.0)
+    neutral = xp.broadcast_to(pixel_peak, scaled.shape)
+    return scaled * (1 - sat_frac) + neutral * sat_frac
+
+
 def white_balance_grayworld(rgb: np.ndarray) -> np.ndarray:
     gpu = get_gpu()
     xp = gpu.xp
     img = xp.asarray(rgb, dtype=xp.float32)
     mean = img.mean(axis=(0, 1))
     scale = mean.mean() / (mean + 1e-12)
-    return xp.clip(img * scale, 0, None)
+    out = _desaturate_near_clipped_highlights(xp, img, img * scale)
+    return xp.clip(out, 0, None)
 
 
 def white_balance_whitepatch(rgb: np.ndarray, pct: Optional[float] = None) -> np.ndarray:
@@ -528,7 +557,8 @@ def white_balance_whitepatch(rgb: np.ndarray, pct: Optional[float] = None) -> np
     bad     = (scales >= img_max * 0.999) | (scales < 1e-12)
     scales  = xp.where(bad, means + 1e-12, scales)
     scales  = scales / (scales.mean() + 1e-12)
-    return xp.clip(img / scales[None, None, :], 0, None)
+    out = _desaturate_near_clipped_highlights(xp, img, img / scales[None, None, :])
+    return xp.clip(out, 0, None)
 
 
 def build_hot_pixel_map(dark: np.ndarray, sigma_threshold: float = 5.0) -> np.ndarray:

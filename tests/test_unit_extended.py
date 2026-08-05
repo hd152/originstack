@@ -292,6 +292,36 @@ class TestWhiteBalance(unittest.TestCase):
         result = self.grayworld(rgb)
         self.assertEqual(result.dtype, np.float32)
 
+    def test_grayworld_saturated_star_stays_white(self):
+        """A clipped (equal-valued) star core must not be scaled into a colour cast.
+
+        Reproduces a real-world bug: a background with a non-neutral raw
+        colour cast (needing per-channel gains > 1x apart) plus a small
+        fully-saturated (equal R=G=B) star region. Grayworld's gain is fit
+        to the whole-frame mean (background-dominated), and without
+        highlight-aware handling that gain gets applied uniformly to the
+        already-clipped star too, scaling its equal channels apart into a
+        magenta/purple halo even though the background comes out neutral.
+        """
+        shape = (256, 256)
+        rgb = np.zeros((*shape, 3), dtype=np.float32)
+        rgb[:, :, 0] = 3000.0
+        rgb[:, :, 1] = 1000.0
+        rgb[:, :, 2] = 1500.0
+        rgb[124:128, 124:128, :] = 50000.0  # fully clipped "star": equal in all channels,
+        # a realistic (small) area fraction of the frame -- same as a real bright star
+        result = self.grayworld(rgb)
+        star = result[124:128, 124:128, :]
+        r_mean, g_mean, b_mean = star[:, :, 0].mean(), star[:, :, 1].mean(), star[:, :, 2].mean()
+        self.assertLess(abs(r_mean - g_mean) / g_mean, 0.15)
+        self.assertLess(abs(b_mean - g_mean) / g_mean, 0.15)
+        # Background must still be properly white-balanced (the fix must not
+        # regress normal, unsaturated colour-cast correction).
+        bg = result[0:8, 0:8, :]
+        bg_r, bg_g, bg_b = bg[:, :, 0].mean(), bg[:, :, 1].mean(), bg[:, :, 2].mean()
+        self.assertLess(abs(bg_r - bg_g) / bg_g, 0.10)
+        self.assertLess(abs(bg_b - bg_g) / bg_g, 0.10)
+
     def test_whitepatch_max_is_close_to_reference(self):
         """White patch should scale so that channel maximums are similar."""
         rgb = self._unbalanced_rgb()
