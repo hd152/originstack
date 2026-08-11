@@ -113,6 +113,11 @@ class Config:
     COMET_DOG_SIGMA_SMALL = 2.0     # DoG small sigma (suppresses point sources)
     COMET_DOG_SIGMA_LARGE = 10.0    # DoG large sigma (enhances diffuse coma core)
 
+    # astrollm (external defect/quality/category classifier, --astrollm)
+    ASTROLLM_TIMEOUT_S = 60.0       # Per-frame subprocess timeout for infer.py
+    ASTROLLM_OUTLIER_SIGMA = 2.0    # Session-relative quality_score flag threshold
+                                     # (advisory logging only -- see src/astrollm.py)
+
 
 @dataclass
 class FrameInfo:

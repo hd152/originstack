@@ -824,6 +824,7 @@ def parse_args():
     g_comet = p.add_argument_group('Comet mode')
     g_adv = p.add_argument_group('Advanced (most are managed automatically by --auto)')
     g_debug = p.add_argument_group('Diagnostics & debugging')
+    g_astrollm = p.add_argument_group('astrollm scoring (advisory)')
     g_core.add_argument('-d', '--directory', required=True)
     g_core.add_argument('-o', '--output', default=None,
                    help='Output FITS path (default: <directory>_stacked.fits)')
@@ -1135,6 +1136,37 @@ def parse_args():
                         'accepted, rejection_reason)')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
+    g_astrollm.add_argument('--astrollm', action='store_true',
+                   help='Score light frames and the final stacked master with astrollm '
+                        '(separately-trained defect/quality/category classifier), run as '
+                        'a per-image subprocess. Advisory/logging only for now (this model '
+                        'is still finishing its first training run) -- results are logged '
+                        'and stored in the quality report, never used to auto-reject or '
+                        'down-weight a frame. Needs --astrollm-dir (or the individual '
+                        '--astrollm-python/-script/-checkpoint overrides).')
+    g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'), metavar='DIR',
+                   help='astrollm repo root. Derives --astrollm-python '
+                        '(DIR\\.venv\\Scripts\\python.exe), --astrollm-script (DIR\\infer.py), '
+                        'and --astrollm-checkpoint (DIR\\checkpoints\\model.pt) from astrollm\'s '
+                        'standard layout -- the three overrides below only need to be passed '
+                        'individually if your layout differs. Defaults to the ASTROLLM_DIR '
+                        'environment variable if set.')
+    g_astrollm.add_argument('--astrollm-python', default=None, metavar='PATH',
+                   help='Path to the astrollm venv\'s python.exe (override; default: derived '
+                        'from --astrollm-dir)')
+    g_astrollm.add_argument('--astrollm-script', default=None, metavar='PATH',
+                   help='Path to astrollm\'s infer.py (override; default: derived from '
+                        '--astrollm-dir)')
+    g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
+                   help='Path to the astrollm model checkpoint (override; default: '
+                        'DIR\\checkpoints\\model.pt from --astrollm-dir). A relative path is '
+                        'resolved against --astrollm-script\'s directory')
+    g_astrollm.add_argument('--astrollm-workers', type=int, default=2, metavar='N',
+                   help='Thread-pool size for per-frame astrollm scoring calls (default: 2). '
+                        'Subprocess-bound (model load + inference in a separate process), '
+                        'not CPU-bound, so a thread pool is used rather than ProcessPoolExecutor.')
+    g_astrollm.add_argument('--astrollm-timeout', type=float, default=60.0, metavar='SEC',
+                   help='Per-call subprocess timeout in seconds (default: 60)')
     g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
@@ -1399,6 +1431,37 @@ def parse_args():
     args.diagnostic = 'diagnostic' in _dbg
     args.keep_intermediates = 'intermediates' in _dbg
     args.export_masks = 'masks' in _dbg
+
+    if args.astrollm:
+        # --astrollm-dir derives the three individual paths from astrollm's
+        # standard repo layout; an explicit --astrollm-python/-script/
+        # -checkpoint always wins over the derived value.
+        if args.astrollm_dir:
+            if not args.astrollm_python:
+                args.astrollm_python = os.path.join(args.astrollm_dir, '.venv', 'Scripts', 'python.exe')
+            if not args.astrollm_script:
+                args.astrollm_script = os.path.join(args.astrollm_dir, 'infer.py')
+            if not args.astrollm_checkpoint:
+                args.astrollm_checkpoint = os.path.join(args.astrollm_dir, 'checkpoints', 'model.pt')
+        if args.astrollm_checkpoint and args.astrollm_script and not os.path.isabs(args.astrollm_checkpoint):
+            args.astrollm_checkpoint = os.path.join(
+                os.path.dirname(args.astrollm_script), args.astrollm_checkpoint)
+        missing = [name for name, val in (
+            ('--astrollm-python', args.astrollm_python),
+            ('--astrollm-script', args.astrollm_script),
+            ('--astrollm-checkpoint', args.astrollm_checkpoint),
+        ) if not val]
+        bad_paths = [name for name, val in (
+            ('--astrollm-python', args.astrollm_python),
+            ('--astrollm-script', args.astrollm_script),
+            ('--astrollm-checkpoint', args.astrollm_checkpoint),
+        ) if val and not os.path.exists(val)]
+        if missing:
+            safe_print(f"  WARNING: --astrollm requires {', '.join(missing)} -- disabling astrollm scoring")
+            args.astrollm = False
+        elif bad_paths:
+            safe_print(f"  WARNING: --astrollm path(s) not found: {', '.join(bad_paths)} -- disabling astrollm scoring")
+            args.astrollm = False
 
     return args
 
