@@ -24,9 +24,66 @@ class TestInactiveNoOp(unittest.TestCase):
         wv.frame_metrics("f.fits", {'score': 1})
         wv.preview(_synth_rgb(), "cap")
         wv.summary(a=1)
+        wv.run_started()
+        wv.run_finished('error', 'boom')
         self.assertEqual(wv._state['log'], [])
         self.assertEqual(wv._state['phase'], 0)
         self.assertIsNone(wv._preview_bytes)
+        self.assertEqual(wv._state['run_status'], 'idle')
+        self.assertIsNone(wv._state['run_error'])
+
+
+class TestRunState(unittest.TestCase):
+    """WebView.run_started()/run_finished(): the desktop app's run_status
+    signal, separate from summary()/done which fire once per stack_target
+    call (multiple times in one hierarchical/mosaic run)."""
+
+    def setUp(self):
+        self.wv = WebView()
+        self.wv.active = True
+
+    def test_run_started_sets_running_and_clears_prior_state(self):
+        self.wv.log("stale log line")
+        self.wv.frame_metrics("f.fits", {'score': 1})
+        self.wv.summary(output='old.fits')
+        self.wv.phase(2, "Registration")
+        self.wv.progress("Registering", 3, 10)
+        before_version = self.wv._version
+
+        self.wv.run_started()
+
+        self.assertEqual(self.wv._state['run_status'], 'running')
+        self.assertIsNone(self.wv._state['run_error'])
+        self.assertEqual(self.wv._state['log'], [])
+        self.assertEqual(self.wv._state['frames'], [])
+        self.assertIsNone(self.wv._state['summary'])
+        self.assertFalse(self.wv._state['done'])
+        self.assertEqual(self.wv._state['phase'], 0)
+        self.assertEqual(self.wv._state['phases'], {})
+        self.assertEqual(self.wv._state['progress'], {'label': '', 'done': 0, 'total': 0})
+        self.assertGreater(self.wv._version, before_version)
+
+    def test_run_finished_ok(self):
+        self.wv.run_started()
+        self.wv.run_finished('ok')
+        self.assertEqual(self.wv._state['run_status'], 'ok')
+        self.assertIsNone(self.wv._state['run_error'])
+
+    def test_run_finished_error_carries_message(self):
+        self.wv.run_started()
+        self.wv.run_finished('error', 'directory not found')
+        self.assertEqual(self.wv._state['run_status'], 'error')
+        self.assertEqual(self.wv._state['run_error'], 'directory not found')
+
+    def test_summary_done_unaffected_by_run_state(self):
+        """summary()/done still mean 'a target just finished' -- run_started
+        resets them (new run), but run_finished must not touch them, since a
+        hierarchical run's last stack_target() call already set them."""
+        self.wv.run_started()
+        self.wv.summary(output='final.fits')
+        self.wv.run_finished('ok')
+        self.assertTrue(self.wv._state['done'])
+        self.assertEqual(self.wv._state['summary'], {'output': 'final.fits'})
 
 
 class TestPreviewBytes(unittest.TestCase):
@@ -150,6 +207,86 @@ class TestServer(unittest.TestCase):
         for marker in ('viewport', 'applyStretch', 'cmpBtn', 'restretch',
                        'strip'):
             self.assertIn(marker, body)
+
+    def test_api_schema_served(self):
+        body = json.loads(self._get('/api/schema').read())
+        self.assertIn('Core', body)
+        dests = {f['dest'] for fields in body.values() for f in fields}
+        self.assertIn('directory', dests)
+        self.assertIn('stack_method', dests)
+
+    def _post(self, path, body, headers=None, timeout=5):
+        hdrs = {'Content-Type': 'application/json'}
+        hdrs.update(headers or {})
+        req = urllib.request.Request(
+            self.url.rstrip('/') + path,
+            data=json.dumps(body).encode('utf-8'),
+            headers=hdrs, method='POST')
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    def test_api_start_happy_path(self):
+        """POST /api/start accepts a valid form and returns 202 without
+        actually running the pipeline (process_directory patched out) --
+        this exercises do_POST's full dispatch to RunManager.start()."""
+        from unittest.mock import patch
+        import src.webview_control as wc
+        wc._run_manager = wc.RunManager()  # isolate from other tests
+        try:
+            with patch('src.cli.process_directory') as mock_pd:
+                resp = self._post('/api/start',
+                                  {'directory': 'nonexistent_dir_for_test',
+                                   'output': 'out.fits'})
+                self.assertEqual(resp.status, 202)
+                result = json.loads(resp.read())
+                self.assertTrue(result['ok'])
+                self.assertIsNotNone(wc._run_manager.thread)
+                wc._run_manager.thread.join(timeout=5)
+                mock_pd.assert_called_once()
+                self.assertEqual(mock_pd.call_args[0][0], 'nonexistent_dir_for_test')
+        finally:
+            wc._run_manager = wc.RunManager()  # restore a clean singleton
+
+    def test_api_start_rejects_non_json_content_type(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post('/api/start', {'directory': 'x'},
+                       headers={'Content-Type': 'text/plain'})
+        self.assertEqual(ctx.exception.code, 415)
+
+    def test_api_start_rejects_mismatched_origin(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post('/api/start', {'directory': 'x'},
+                       headers={'Origin': 'http://evil.example'})
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_api_start_rejects_malformed_body(self):
+        req = urllib.request.Request(
+            self.url.rstrip('/') + '/api/start', data=b'{not json',
+            headers={'Content-Type': 'application/json'}, method='POST')
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_api_start_rejects_oversized_body(self):
+        from src.webview import _MAX_POST_BODY
+        req = urllib.request.Request(
+            self.url.rstrip('/') + '/api/start',
+            data=b'{"directory": "' + b'x' * _MAX_POST_BODY + b'"}',
+            headers={'Content-Type': 'application/json'}, method='POST')
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 413)
+
+    def test_api_start_concurrent_returns_409(self):
+        import src.webview_control as wc
+        rm = wc.RunManager()
+        rm.status = 'running'  # simulate an in-progress run
+        wc._run_manager = rm
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                self._post('/api/start', {'directory': 'x'})
+            self.assertEqual(ctx.exception.code, 409)
+        finally:
+            wc._run_manager = wc.RunManager()
 
 
 class TestFrameThumbRing(unittest.TestCase):

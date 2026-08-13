@@ -150,6 +150,7 @@ class RunManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.status = 'idle'
+        self.thread: Optional[threading.Thread] = None
 
     def start(self, form: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
@@ -160,37 +161,36 @@ class RunManager:
             except Exception as e:
                 return {'ok': False, 'error': f'invalid form: {e}'}
             self.status = 'running'
-        t = threading.Thread(target=self._run, args=(argv,),
-                             name='desktop-run', daemon=True)
-        t.start()
+        self.thread = threading.Thread(target=self._run, args=(argv,),
+                                       name='desktop-run', daemon=True)
+        self.thread.start()
         return {'ok': True}
 
     def _run(self, argv: List[str]) -> None:
         import os
-        from src.cli import parse_args, process_directory, apply_preset, load_config_file
-        from src.utils import safe_print, setup_logging
+        import tempfile
+        from src.cli import parse_args, process_directory, apply_post_parse_setup
+        from src.utils import get_logger, safe_print
         from src.webview import get_webview
-        from src.gpu_context import GpuContext
-        from src import gpu_context as _gpu_mod
 
         wv = get_webview()
         status, error = 'ok', None
         try:
             args = parse_args(argv)
 
-            # Mirror main()'s post-parse setup (config/preset/logging/GPU) --
-            # RunManager calls process_directory() directly, bypassing main().
-            if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
-                dir_name = os.path.basename(os.path.abspath(args.directory))
-                args.output = f"{dir_name}_stacked.fits"
-            if getattr(args, 'config', None):
-                load_config_file(args.config, args)
-            apply_preset(args)
-            if getattr(args, 'debug_registration', False):
-                args.verbose = True
-            setup_logging(level=getattr(args, 'log_level', 'WARNING'),
-                          log_file=getattr(args, 'log_file', None))
-            _gpu_mod._gpu = GpuContext(use_gpu=getattr(args, 'use_gpu', False))
+            # Default a durable log file for GUI-triggered runs specifically
+            # (not in apply_post_parse_setup, which is also the plain CLI's
+            # path and shouldn't start writing files a CLI user never asked
+            # for) -- a desktop-app run has no attached console, so without
+            # this the only record of a failure is the ephemeral in-memory
+            # WebView state, lost on the next run or when the window closes.
+            if not getattr(args, 'log_file', None):
+                args.log_file = os.path.join(tempfile.gettempdir(), 'originstack_desktop_app.log')
+
+            # Same post-parse setup main() applies (output default, --config,
+            # --preset, logging, GPU context) -- RunManager calls
+            # process_directory() directly, bypassing main() itself.
+            apply_post_parse_setup(args)
 
             wv.run_started()
             process_directory(args.directory, args.output, args)
@@ -198,17 +198,24 @@ class RunManager:
             status = 'error'
             error = str(e) or e.__class__.__name__
             safe_print(f"  ERROR: run failed: {error}")
+            get_logger().exception(f"desktop app run failed: {error}")
         finally:
             wv.run_finished(status, error)
             with self._lock:
                 self.status = status
 
 
-_run_manager: Optional[RunManager] = None
+# Constructed eagerly at import time, not lazily on first call: unlike
+# get_gpu()/get_webview() (only ever first-called from a single main
+# thread), get_run_manager() is first reached from do_POST on
+# ThreadingHTTPServer's per-request threads -- two near-simultaneous
+# POST /api/start calls could otherwise both observe a None singleton and
+# each construct their own RunManager, defeating the one-run-at-a-time lock
+# entirely (two pipeline runs racing against the same GpuContext/checkpoint
+# files). RunManager() has no expensive setup, so eager construction costs
+# nothing.
+_run_manager: RunManager = RunManager()
 
 
 def get_run_manager() -> RunManager:
-    global _run_manager
-    if _run_manager is None:
-        _run_manager = RunManager()
     return _run_manager

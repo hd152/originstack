@@ -250,3 +250,21 @@ def get_gpu() -> GpuContext:
     if _gpu is None:
         _gpu = GpuContext(use_gpu=False)
     return _gpu
+
+
+def reset_gpu(use_gpu: bool = False) -> GpuContext:
+    """Replace the module-level ``GpuContext`` singleton with a fresh one,
+    freeing the outgoing instance's cupy memory pool first.
+
+    A one-shot CLI process never needs this -- it exits right after its one
+    ``GpuContext`` is created. A long-lived caller that can run the pipeline
+    more than once per process (the desktop app) does: without freeing the
+    outgoing context's pool first, each run's cupy allocations would pile up
+    unfreed on top of the last, hitting VRAM limits sooner than an equivalent
+    sequence of one-shot CLI invocations ever would.
+    """
+    global _gpu
+    if _gpu is not None:
+        _gpu.free_pool()
+    _gpu = GpuContext(use_gpu=use_gpu)
+    return _gpu

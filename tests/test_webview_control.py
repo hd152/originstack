@@ -68,6 +68,17 @@ class TestBuildArgvFromForm(unittest.TestCase):
         argv = build_argv_from_form({'merge': 'a.fits, b.fits'})
         self.assertEqual(argv, ['--merge', 'a.fits', 'b.fits'])
 
+    def test_append_action_repeats_flag_per_token(self):
+        """--skip-step is action='append' (one value per occurrence), a
+        distinct code path from nargs='+' (--merge, one flag then all
+        tokens) -- must produce a separate --skip-step per token, not a
+        single one followed by bare values (which argparse would reject)."""
+        argv = build_argv_from_form({'skip_step': 'sky_pedestal, sky_neutralize'})
+        self.assertEqual(argv, ['--skip-step', 'sky_pedestal',
+                                '--skip-step', 'sky_neutralize'])
+        args = parse_args(['-d', 'x', '-o', 'y.fits'] + argv)
+        self.assertEqual(args.skip_step, ['sky_pedestal', 'sky_neutralize'])
+
     def test_unsupported_dest_ignored(self):
         self.assertEqual(build_argv_from_form({'live': True}), [])
 
@@ -106,6 +117,39 @@ class TestRunManager(unittest.TestCase):
         result = rm.start({'directory': 'foo', 'output': 'bar.fits'})
         self.assertFalse(result['ok'])
         self.assertIn('already in progress', result['error'])
+
+    def test_start_runs_in_background_thread_and_transitions_to_ok(self):
+        """The happy path RunManager.start() -> idle -> running -> ok, as
+        actually exercised by a real (mocked-pipeline) background thread --
+        distinct from test_rejects_concurrent_start (which never spawns a
+        thread) and test_run_catches_systemexit_... (which calls _run()
+        directly, synchronously, bypassing start() entirely)."""
+        from unittest.mock import patch
+        rm = RunManager()
+        self.assertEqual(rm.status, 'idle')
+        # Keep the patch active for the join too -- it must still be in
+        # effect when the background thread reaches its own
+        # `from src.cli import process_directory` (a fresh call-time import,
+        # per RunManager._run's design), which can happen anytime after
+        # start() returns, not necessarily before this `with` block would
+        # otherwise exit.
+        with patch('src.cli.process_directory') as mock_pd:
+            result = rm.start({'directory': 'foo', 'output': 'bar.fits'})
+            self.assertTrue(result['ok'])
+            self.assertIsNotNone(rm.thread)
+            rm.thread.join(timeout=5)
+            self.assertFalse(rm.thread.is_alive())
+            mock_pd.assert_called_once_with('foo', 'bar.fits', mock_pd.call_args[0][2])
+        self.assertEqual(rm.status, 'ok')
+
+    def test_start_transitions_to_error_on_pipeline_exception(self):
+        from unittest.mock import patch
+        rm = RunManager()
+        with patch('src.cli.process_directory', side_effect=RuntimeError('boom')):
+            result = rm.start({'directory': 'foo', 'output': 'bar.fits'})
+            self.assertTrue(result['ok'])
+            rm.thread.join(timeout=5)
+        self.assertEqual(rm.status, 'error')
 
     def test_run_catches_systemexit_from_missing_required_directory(self):
         # 'directory' is required by the parser -- parse_args([]) raises

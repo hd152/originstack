@@ -28,6 +28,7 @@ _MAX_FRAME_ROWS = 60
 _MAX_FRAME_THUMBS = 24     # per-frame preview ring
 _MAX_NAMED = 16            # retained milestone previews (with float source)
 _SRC_MAX_DIM = 1000        # downsized float source kept for re-stretch
+_MAX_POST_BODY = 64 * 1024  # cap on POST /api/start body size (bytes)
 
 
 def _slugify(text: str) -> str:
@@ -422,8 +423,38 @@ class WebView:
                 if self.path != '/api/start':
                     self._send(404, 'text/plain', b'not found')
                     return
+                # CSRF hardening: a browser can only send a strict
+                # application/json body via fetch(), which is a non-simple
+                # request -- it triggers a CORS preflight, and since this
+                # server never answers OPTIONS with CORS headers, the browser
+                # refuses to send the real request cross-origin. A classic
+                # <form> POST (the no-preflight CSRF vector) can only set
+                # Content-Type to x-www-form-urlencoded/multipart/text-plain,
+                # never application/json, so it's rejected here regardless.
+                ctype = (self.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+                if ctype != 'application/json':
+                    self._send(415, 'application/json',
+                               json.dumps({'ok': False,
+                                          'error': 'Content-Type must be application/json'})
+                               .encode('utf-8'))
+                    return
+                # Defense in depth: if a browser sent an Origin header, it
+                # must match the Host this server is actually bound to.
+                origin = self.headers.get('Origin')
+                if origin:
+                    from urllib.parse import urlparse as _urlparse
+                    if _urlparse(origin).netloc != (self.headers.get('Host') or ''):
+                        self._send(403, 'application/json',
+                                   json.dumps({'ok': False, 'error': 'origin not allowed'})
+                                   .encode('utf-8'))
+                        return
                 try:
                     length = int(self.headers.get('Content-Length') or 0)
+                    if length > _MAX_POST_BODY:
+                        self._send(413, 'application/json',
+                                   json.dumps({'ok': False, 'error': 'request body too large'})
+                                   .encode('utf-8'))
+                        return
                     raw = self.rfile.read(length) if length else b'{}'
                     form = json.loads(raw.decode('utf-8')) if raw else {}
                 except Exception as e:
@@ -546,6 +577,20 @@ _PAGE = """<!DOCTYPE html>
   .srow button.ghost { background: #0d1117; color: #8b949e;
       border: 1px solid #2a313c; }
   .snote { color: #6e7883; font-size: 11px; margin-top: 8px; }
+  /* setup panel: quick bools + advanced accordion */
+  .quick-bool { display: flex; align-items: center; gap: 6px; font-size: 12px;
+                color: #d5dae2; }
+  .adv-group-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+                 color: #6e7883; margin: 10px 0 4px; }
+  .adv-row { display: grid; grid-template-columns: 180px 1fr auto; gap: 8px;
+             align-items: center; margin-bottom: 6px; font-size: 12px; }
+  .adv-label { color: #8b949e; }
+  .adv-input { background: #0d1117; color: #d5dae2; border: 1px solid #2a313c;
+               border-radius: 4px; padding: 3px 6px; width: 100%; }
+  .adv-browse { background: #0d1117; color: #d5dae2; border: 1px solid #2a313c;
+                border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+  .adv-browse:hover { border-color: #58a6ff; }
+  .adv-summary { cursor: pointer; color: #8b949e; font-size: 12px; }
   /* frame strip */
   #strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
   #strip figure { margin: 0; flex: 0 0 auto; width: 96px; cursor: pointer;
@@ -598,7 +643,7 @@ _PAGE = """<!DOCTYPE html>
       </div>
       <div class="srow" style="flex-wrap:wrap;margin-top:12px" id="quickBools"></div>
       <details style="margin-top:12px" id="advancedDetails">
-        <summary style="cursor:pointer;color:#8b949e;font-size:12px">Advanced (everything else)</summary>
+        <summary class="adv-summary">Advanced (everything else)</summary>
         <div id="advancedFields" style="margin-top:10px"></div>
       </details>
       <div class="srow" style="margin-top:14px">
@@ -958,6 +1003,15 @@ function fieldValue(dest, kind, el) {
   return el.value;
 }
 
+function populateOptions(selectEl, choices, dflt) {
+  for (const c of (choices || [])) {
+    const opt = document.createElement('option');
+    opt.value = c; opt.textContent = c;
+    if (c === dflt) opt.selected = true;
+    selectEl.appendChild(opt);
+  }
+}
+
 function buildQuickBools() {
   const wrap = document.getElementById('quickBools');
   wrap.innerHTML = '';
@@ -965,7 +1019,7 @@ function buildQuickBools() {
     const f = schemaByDest[dest];
     const id = 'f_' + dest;
     const lbl = document.createElement('label');
-    lbl.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;color:#d5dae2;';
+    lbl.className = 'quick-bool';
     const cb = document.createElement('input');
     cb.type = 'checkbox'; cb.id = id;
     cb.checked = !!(f && f.default);
@@ -980,23 +1034,19 @@ function populateSelect(dest) {
   const f = schemaByDest[dest];
   const el = document.getElementById('f_' + dest);
   if (!f || !el) return;
-  for (const c of (f.choices || [])) {
-    const opt = document.createElement('option');
-    opt.value = c; opt.textContent = c;
-    if (c === f.default) opt.selected = true;
-    el.appendChild(opt);
-  }
+  populateOptions(el, f.choices, f.default);
   el.onchange = () => markTouched(dest);
 }
 
+const advancedBrowseBtns = [];  // {btn, el, widget, dest} -- revealed by enablePywebviewPickers()
+
 function renderAdvancedField(f) {
   const row = document.createElement('div');
-  row.style.cssText = 'display:grid;grid-template-columns:180px 1fr;gap:8px;' +
-    'align-items:center;margin-bottom:6px;font-size:12px;';
+  row.className = 'adv-row';
   const lbl = document.createElement('label');
+  lbl.className = 'adv-label';
   lbl.textContent = f.flag;
   lbl.title = f.help || '';
-  lbl.style.color = '#8b949e';
   row.appendChild(lbl);
   let el;
   if (f.kind === 'bool_true' || f.kind === 'bool_false') {
@@ -1004,24 +1054,25 @@ function renderAdvancedField(f) {
     el.type = 'checkbox'; el.checked = !!f.default;
   } else if (f.kind === 'select') {
     el = document.createElement('select');
-    for (const c of (f.choices || [])) {
-      const opt = document.createElement('option');
-      opt.value = c; opt.textContent = c;
-      if (c === f.default) opt.selected = true;
-      el.appendChild(opt);
-    }
+    populateOptions(el, f.choices, f.default);
   } else {
     el = document.createElement('input');
     el.type = (f.kind === 'number') ? 'number' : 'text';
     if (f.kind === 'number' && f.default != null) el.placeholder = String(f.default);
     if (f.kind === 'text' && f.default != null && f.default !== '') el.placeholder = String(f.default);
-    el.style.cssText = 'background:#0d1117;color:#d5dae2;border:1px solid #2a313c;' +
-      'border-radius:4px;padding:3px 6px;width:100%;';
+    el.className = 'adv-input';
   }
   el.title = f.help || '';
   el.oninput = el.onchange = () => markTouched(f.dest);
   el._kind = f.kind; el._dest = f.dest;
   row.appendChild(el);
+  if (f.widget) {
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.textContent = 'Browse…'; btn.className = 'adv-browse';
+    btn.style.display = 'none';
+    row.appendChild(btn);
+    advancedBrowseBtns.push({ btn, el, widget: f.widget, dest: f.dest });
+  }
   return { row, el };
 }
 
@@ -1034,8 +1085,7 @@ function buildAdvanced(schema) {
     const shown = fields.filter(f => !QUICK_DESTS.has(f.dest));
     if (!shown.length) continue;
     const h = document.createElement('div');
-    h.style.cssText = 'font-size:11px;text-transform:uppercase;letter-spacing:.06em;' +
-      'color:#6e7883;margin:10px 0 4px;';
+    h.className = 'adv-group-h';
     h.textContent = group;
     wrap.appendChild(h);
     for (const f of shown) {
@@ -1056,6 +1106,7 @@ async function loadSchema() {
   for (const dest of QUICK_SELECTS) populateSelect(dest);
   buildQuickBools();
   buildAdvanced(schema);
+  enablePywebviewPickers();
 }
 
 function collectForm() {
@@ -1126,6 +1177,16 @@ function enablePywebviewPickers() {
     const p = await window.pywebview.api.browse_output_path();
     if (p) { document.getElementById('f_output').value = p; markTouched('output'); }
   };
+  // Advanced-panel path fields (populated by buildAdvanced() -- may run
+  // before or after pywebview becomes ready, so this is called again at
+  // the end of loadSchema() to cover either ordering).
+  for (const { btn, el, widget, dest } of advancedBrowseBtns) {
+    btn.style.display = '';
+    btn.onclick = async () => {
+      const p = await window.pywebview.api.browse_path(widget);
+      if (p) { el.value = p; markTouched(dest); }
+    };
+  }
 }
 // window.pywebview is injected asynchronously -- it may not exist yet at
 // script-load time even inside the native window. pywebview fires

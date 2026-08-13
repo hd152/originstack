@@ -19,7 +19,7 @@ except Exception:
     def tqdm(iterable, **kwargs):
         return iterable
 
-from src.gpu_context import GpuContext, get_gpu
+from src.gpu_context import get_gpu, reset_gpu
 from src.models import Config, ProcessingStats
 from src.utils import safe_print, print_header, format_time, setup_logging
 from src.io_fits import make_master, save_preview_rgb
@@ -296,7 +296,6 @@ def _load_calibration_dir(args: argparse.Namespace) -> dict:
     if not cal_dir:
         return extra
     if not os.path.isdir(cal_dir):
-        print(f'  WARNING: --cal-dir path does not exist: {cal_dir}', file=sys.stderr)
         safe_print(f'  WARNING: --cal-dir path does not exist: {cal_dir}')
         return extra
     discovered = discover_frames(cal_dir)
@@ -471,7 +470,6 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
               f"{len(combined['bias'])} bias)")
 
     if not n_lights:
-        print('  ERROR: No light frames found across sessions', file=sys.stderr)
         safe_print('  ERROR: No light frames found across sessions')
         raise SystemExit('No light frames found')
 
@@ -505,7 +503,6 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
 
     # Detect hierarchical mode
     if not os.path.isdir(directory):
-        print(f'\n  ERROR: Input directory {directory} does not exist', file=sys.stderr)
         safe_print(f'\n  ERROR: Input directory {directory} does not exist')
         raise SystemExit(1)
 
@@ -535,15 +532,12 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         safe_print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
         # final combined output will be combined from tmp_stacks
     else:
-        print('  ERROR: No FITS files found', file=sys.stderr)
         safe_print('  ERROR: No FITS files found')
         raise SystemExit('No FITS files found')
 
     # Mosaic mode requires hierarchical layout (one subfolder per panel)
     if getattr(args, 'mosaic', False):
         if len(targets) < 2:
-            print('  ERROR: --mosaic requires subfolders (one per panel); '
-                  'only a single target was found', file=sys.stderr)
             safe_print('  ERROR: --mosaic requires subfolders (one per panel); '
                       'only a single target was found')
             raise SystemExit('--mosaic requires subfolders')
@@ -1423,6 +1417,41 @@ def parse_args(argv=None):
     return args
 
 
+def apply_post_parse_setup(args: argparse.Namespace) -> None:
+    """Everything ``main()`` does between ``parse_args()`` and calling
+    ``process_directory()``: default the output path, load ``--config``,
+    apply ``--preset``, initialise logging, and (re)initialise the GPU
+    context. Shared by ``main()`` (the CLI entry point) and
+    ``src.webview_control.RunManager._run`` (the desktop app's GUI-triggered
+    runs), which calls ``process_directory()`` directly and therefore needs
+    this same setup without going through ``main()`` itself. Kept as one
+    function specifically so the two callers can't drift apart the way they
+    already had (the desktop app was silently missing the "no output path
+    specified" notice before this was extracted)."""
+    if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
+        dir_name = os.path.basename(os.path.abspath(args.directory))
+        args.output = f"{dir_name}_stacked.fits"
+        safe_print(f"  No output path specified — writing to {args.output}")
+    # Load config file (before preset, so preset can override config)
+    if getattr(args, 'config', None):
+        config_changes = load_config_file(args.config, args)
+        if config_changes:
+            safe_print(f"  Config loaded: {len(config_changes)} settings from {args.config}")
+    # Apply preset (before any other processing)
+    apply_preset(args)
+    # debug_registration implies verbose
+    if args.debug_registration:
+        args.verbose = True
+    # Initialise structured logging before anything else
+    setup_logging(level=getattr(args, 'log_level', 'WARNING'),
+                  log_file=getattr(args, 'log_file', None))
+    # Initialise/reset the GPU context (module-level singleton). reset_gpu
+    # frees the outgoing context's cupy pool first -- a no-op for main()'s
+    # one-shot process, but load-bearing for a long-lived caller (the
+    # desktop app) that can run this more than once per process.
+    reset_gpu(use_gpu=args.use_gpu)
+
+
 def main():
     # Dispatch to the 'combine' subcommand without touching the main parser
     if len(sys.argv) > 1 and sys.argv[1] == 'combine':
@@ -1440,26 +1469,7 @@ def main():
         from src.quality_sweep import run_quality_sweep
         sys.exit(run_quality_sweep(args.directory, args))
 
-    if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
-        dir_name = os.path.basename(os.path.abspath(args.directory))
-        args.output = f"{dir_name}_stacked.fits"
-        safe_print(f"  No output path specified — writing to {args.output}")
-    # Load config file (before preset, so preset can override config)
-    if getattr(args, 'config', None):
-        config_changes = load_config_file(args.config, args)
-        if config_changes:
-            safe_print(f"  Config loaded: {len(config_changes)} settings from {args.config}")
-    # Apply preset (before any other processing)
-    preset_changes = apply_preset(args)
-    # debug_registration implies verbose
-    if args.debug_registration:
-        args.verbose = True
-    # Initialise structured logging before anything else
-    setup_logging(level=getattr(args, 'log_level', 'WARNING'),
-                  log_file=getattr(args, 'log_file', None))
-    # Initialise GPU context (module-level singleton)
-    from src import gpu_context as _gpu_mod
-    _gpu_mod._gpu = GpuContext(use_gpu=args.use_gpu)
+    apply_post_parse_setup(args)
 
     if getattr(args, 'live', False) and getattr(args, 'stream', False):
         safe_print("  ERROR: --live and --stream are mutually exclusive "
