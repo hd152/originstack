@@ -297,6 +297,7 @@ def _load_calibration_dir(args: argparse.Namespace) -> dict:
         return extra
     if not os.path.isdir(cal_dir):
         print(f'  WARNING: --cal-dir path does not exist: {cal_dir}', file=sys.stderr)
+        safe_print(f'  WARNING: --cal-dir path does not exist: {cal_dir}')
         return extra
     discovered = discover_frames(cal_dir)
     for ftype in ('dark', 'flat', 'bias'):
@@ -322,7 +323,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     cal_needed = frames.get('dark') or frames.get('flat') or frames.get('bias')
     cal_start = time.time() if cal_needed else None
     if cal_needed:
-        print("\nCreating master calibration frames...")
+        safe_print("\nCreating master calibration frames...")
 
     masters: dict = {}
 
@@ -465,12 +466,13 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
 
     n_lights = len(combined['light'])
     n_sessions = len(subdirs)
-    print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
-          f"({len(combined['dark'])} darks, {len(combined['flat'])} flats, "
-          f"{len(combined['bias'])} bias)")
+    safe_print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
+              f"({len(combined['dark'])} darks, {len(combined['flat'])} flats, "
+              f"{len(combined['bias'])} bias)")
 
     if not n_lights:
         print('  ERROR: No light frames found across sessions', file=sys.stderr)
+        safe_print('  ERROR: No light frames found across sessions')
         raise SystemExit('No light frames found')
 
     masters = _build_masters(combined, stats, args)
@@ -493,28 +495,29 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
 def process_directory(directory: str, output: str, args: argparse.Namespace):
     # Print banner
     print_header("Astrophotography FITS Stacker", "=")
-    print(f"Input:  {directory}")
-    print(f"Output: {output}")
+    safe_print(f"Input:  {directory}")
+    safe_print(f"Output: {output}")
     if getattr(args, 'preset', None):
-        print(f"  Preset: {args.preset}")
+        safe_print(f"  Preset: {args.preset}")
     get_gpu().print_status()
     from src.utils import native_status
-    print(native_status())
+    safe_print(native_status())
 
     # Detect hierarchical mode
     if not os.path.isdir(directory):
         print(f'\n  ERROR: Input directory {directory} does not exist', file=sys.stderr)
+        safe_print(f'\n  ERROR: Input directory {directory} does not exist')
         raise SystemExit(1)
 
     overall_start = time.time()
     subdirs = [os.path.join(directory, d) for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
     targets = []
 
-    print("\nDiscovering frames...")
+    safe_print("\nDiscovering frames...")
     if any(os.listdir(directory)) and any(f.lower().endswith(('.fit', '.fits')) for f in os.listdir(directory)):
         # single folder
         targets = [(directory, output)]
-        print(f"  Mode: Single folder")
+        safe_print(f"  Mode: Single folder")
     elif subdirs and getattr(args, 'combine_sessions', False):
         # Combined-sessions mode: pool all lights from all subfolders into one stack
         safe_print(f"  Mode: Combined sessions ({len(subdirs)} subfolders -> single unified stack)")
@@ -529,10 +532,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             targets.append((d, outp))
             tmp_stacks.append(outp)
             _cleanup_register(outp)
-        print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
+        safe_print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
         # final combined output will be combined from tmp_stacks
     else:
         print('  ERROR: No FITS files found', file=sys.stderr)
+        safe_print('  ERROR: No FITS files found')
         raise SystemExit('No FITS files found')
 
     # Mosaic mode requires hierarchical layout (one subfolder per panel)
@@ -540,6 +544,8 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         if len(targets) < 2:
             print('  ERROR: --mosaic requires subfolders (one per panel); '
                   'only a single target was found', file=sys.stderr)
+            safe_print('  ERROR: --mosaic requires subfolders (one per panel); '
+                      'only a single target was found')
             raise SystemExit('--mosaic requires subfolders')
         if not getattr(args, 'plate_solve', False):
             safe_print("  NOTE: --mosaic implies --plate-solve — enabling automatically")
@@ -549,11 +555,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     produced = []
     for target_idx, (d, outp) in enumerate(targets, 1):
         if len(targets) > 1:
-            print(f'\n{"=" * 70}')
-            print(f'TARGET {target_idx}/{len(targets)}: {os.path.basename(d)}')
-            print(f'{"=" * 70}')
+            safe_print(f'\n{"=" * 70}')
+            safe_print(f'TARGET {target_idx}/{len(targets)}: {os.path.basename(d)}')
+            safe_print(f'{"=" * 70}')
         else:
-            print()
+            safe_print('')
 
         # Create stats object for this target
         stats = ProcessingStats()
@@ -563,7 +569,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         for ftype in ('dark', 'flat', 'bias'):
             frames[ftype].extend(extra_cal[ftype])
         nfiles = sum(len(v) for v in frames.values())
-        print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
+        safe_print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
 
         if getattr(args, 'health_check', False):
             print_header("HEALTH CHECK", "=")
@@ -720,7 +726,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     # If hierarchical combine
     if len(produced) > 1:
         print_header("HIERARCHICAL COMBINING", "=")
-        print(f"  Combining {len(produced)} target stacks into final output...")
+        safe_print(f"  Combining {len(produced)} target stacks into final output...")
 
         # --- Mosaic path (WCS reprojection) ---
         mosaic_done = False
@@ -739,7 +745,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             # shapes are (3,H,W)
             mins = np.min([[s[1], s[2]] for s in shapes], axis=0)
             Hm, Wm = int(mins[0]), int(mins[1])
-            print(f"  Cropping all stacks to minimum dimensions: {Hm}×{Wm}")
+            safe_print(f"  Cropping all stacks to minimum dimensions: {Hm}×{Wm}")
 
             stacks = []
             for p in tqdm(produced, desc="  Loading", unit="target", disable=args.verbose):
@@ -748,7 +754,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     stacks.append(d[:Hm, :Wm, :])
 
             # Register each stack against the first (reference) stack
-            print(f"  Registering {len(stacks) - 1} stack(s) against reference...")
+            safe_print(f"  Registering {len(stacks) - 1} stack(s) against reference...")
             ref_lum = np.mean(stacks[0], axis=2)
             shifts = [(0.0, 0.0)]
             for i in range(1, len(stacks)):
@@ -778,7 +784,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 y0, y1, x0, x1 = 0, Hm, 0, Wm
 
             Hf, Wf = y1 - y0, x1 - x0
-            print(f"  Valid overlap after registration: {Hf}×{Wf}")
+            safe_print(f"  Valid overlap after registration: {Hf}×{Wf}")
 
             acc = np.zeros((Hf, Wf, 3), dtype=np.float64)
             for img in aligned:
@@ -807,13 +813,13 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     total_time = time.time() - overall_start
     print_header("OVERALL SUMMARY", "=")
     if len(produced) > 1:
-        print(f"  Targets processed: {len(produced)}")
-    print(f"  Total time: {format_time(total_time)}")
+        safe_print(f"  Targets processed: {len(produced)}")
+    safe_print(f"  Total time: {format_time(total_time)}")
     safe_print(f"\n  ✓ All processing complete!")
-    print(f"{'=' * 70}\n")
+    safe_print(f"{'=' * 70}\n")
 
 
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description='Streaming FITS stacker')
     g_core = p.add_argument_group('Core')
     g_frames = p.add_argument_group('Frames & calibration (Phase 1)')
@@ -1341,18 +1347,32 @@ def parse_args():
         drizzle_pixfrac=1.0,
         halo_removal=False,
     )
+    return p
+
+
+def parse_args(argv=None):
+    """Parse *argv* (default: ``sys.argv[1:]``) into an args Namespace.
+
+    Accepting an explicit *argv* (rather than always reading ``sys.argv``)
+    lets a caller other than the CLI entry point -- e.g. the desktop app's
+    ``POST /api/start`` handler, building a synthetic argv from a submitted
+    form -- construct a real, fully-validated Namespace by going through the
+    same parser/preset/config/derived-flags logic every CLI invocation uses,
+    instead of re-implementing it.
+    """
+    p = build_parser()
+    _argv = sys.argv[1:] if argv is None else argv
     # Record which dests the user actually typed a flag for, before parsing
     # fills in defaults -- apply_preset/load_config_file need this to honour
     # "explicit CLI flags win over preset/config values" (they can't tell an
     # explicit flag from a default by inspecting the parsed value alone, since
     # a user might explicitly pass the same value as the default).
-    _argv = sys.argv[1:]
     def _passed_on_cli(action) -> bool:
         return any(a == opt or a.startswith(opt + '=')
                    for a in _argv for opt in action.option_strings)
     _explicit_dests = {a.dest for a in p._actions if _passed_on_cli(a)}
 
-    args = p.parse_args()
+    args = p.parse_args(_argv)
     args._explicit_cli_dests = _explicit_dests
 
     # ── Map the consolidated CLI surface onto the internal per-feature flags
