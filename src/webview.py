@@ -1114,7 +1114,8 @@ document.getElementById('startBtn').onclick = async () => {
   }
 };
 
-if (window.pywebview) {
+function enablePywebviewPickers() {
+  if (!window.pywebview) return;
   document.getElementById('browseDir').style.display = '';
   document.getElementById('browseOut').style.display = '';
   document.getElementById('browseDir').onclick = async () => {
@@ -1126,6 +1127,12 @@ if (window.pywebview) {
     if (p) { document.getElementById('f_output').value = p; markTouched('output'); }
   };
 }
+// window.pywebview is injected asynchronously -- it may not exist yet at
+// script-load time even inside the native window. pywebview fires
+// 'pywebviewready' once the API bridge is actually attached; also check
+// immediately in case it's already there (e.g. on a fast reload).
+window.addEventListener('pywebviewready', enablePywebviewPickers);
+enablePywebviewPickers();
 
 loadSchema();
 </script>
