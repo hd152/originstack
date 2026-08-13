@@ -79,6 +79,8 @@ class WebView:
             'frames': [],              # recent per-frame metric rows
             'summary': None,
             'done': False,
+            'run_status': 'idle',      # 'idle' | 'running' | 'ok' | 'error'
+            'run_error': None,
         }
 
     # ── publish API (no-ops while inactive) ──────────────────────────────
@@ -237,6 +239,36 @@ class WebView:
             self._state['done'] = True
             self._bump()
 
+    def run_started(self) -> None:
+        """Mark the start of a GUI-triggered pipeline run and clear state left
+        over from a previous run. ``summary``/``done`` track per-*target*
+        completion (set once per ``stack_target`` call, so they can fire
+        several times in one hierarchical/mosaic run) -- ``run_status`` tracks
+        the whole ``process_directory()`` call instead, which is what a
+        long-lived desktop app session actually needs to know."""
+        if not self.active:
+            return
+        with self._lock:
+            self._state['log'] = []
+            self._state['frames'] = []
+            self._state['summary'] = None
+            self._state['done'] = False
+            self._state['phase'] = 0
+            self._state['phase_title'] = ''
+            self._state['phases'] = {}
+            self._state['progress'] = {'label': '', 'done': 0, 'total': 0}
+            self._state['run_status'] = 'running'
+            self._state['run_error'] = None
+            self._bump()
+
+    def run_finished(self, status: str, error: Optional[str] = None) -> None:
+        if not self.active:
+            return
+        with self._lock:
+            self._state['run_status'] = status
+            self._state['run_error'] = error
+            self._bump()
+
     # ── re-stretch (on-demand, from retained float source) ────────────────
 
     def restretch(self, slug: str, params: dict) -> Optional[bytes]:
@@ -357,6 +389,14 @@ class WebView:
                         self._send(404, 'text/plain', b'no source for slot')
                     else:
                         self._send(200, 'image/jpeg', data)
+                elif path == '/api/schema':
+                    from src.webview_control import get_form_schema
+                    try:
+                        body = json.dumps(get_form_schema()).encode('utf-8')
+                        self._send(200, 'application/json', body)
+                    except Exception as e:
+                        self._send(500, 'application/json',
+                                   json.dumps({'error': str(e)}).encode('utf-8'))
                 elif path == '/events':
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/event-stream')
@@ -377,6 +417,24 @@ class WebView:
                         return
                 else:
                     self._send(404, 'text/plain', b'not found')
+
+            def do_POST(self):
+                if self.path != '/api/start':
+                    self._send(404, 'text/plain', b'not found')
+                    return
+                try:
+                    length = int(self.headers.get('Content-Length') or 0)
+                    raw = self.rfile.read(length) if length else b'{}'
+                    form = json.loads(raw.decode('utf-8')) if raw else {}
+                except Exception as e:
+                    self._send(400, 'application/json',
+                               json.dumps({'ok': False, 'error': f'bad request: {e}'})
+                               .encode('utf-8'))
+                    return
+                from src.webview_control import get_run_manager
+                result = get_run_manager().start(form)
+                code = 202 if result.get('ok') else 409
+                self._send(code, 'application/json', json.dumps(result).encode('utf-8'))
 
         try:
             self._server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
@@ -508,7 +566,47 @@ _PAGE = """<!DOCTYPE html>
 <header><h1>OriginStack</h1><span class="run" id="runinfo">connecting…</span></header>
 <main>
   <div>
-    <section>
+    <section id="setupSection">
+      <h2>Setup</h2>
+      <div class="sgrid" id="quickFields">
+        <label>Directory</label>
+        <input type="text" id="f_directory" placeholder="C:\\path\\to\\lights">
+        <button id="browseDir" style="display:none">Browse…</button>
+        <label>Output</label>
+        <input type="text" id="f_output" placeholder="(default: &lt;directory&gt;_stacked.fits)">
+        <button id="browseOut" style="display:none">Browse…</button>
+        <label>Preset</label>
+        <select id="f_preset"><option value="">(none)</option></select>
+        <span></span>
+        <label>Stack method</label>
+        <select id="f_stack_method"></select>
+        <span></span>
+        <label>Denoiser</label>
+        <select id="f_denoiser"></select>
+        <span></span>
+        <label>Deconvolution</label>
+        <select id="f_deconvolve_mode"></select>
+        <span></span>
+        <label>Drizzle scale</label>
+        <select id="f_drizzle_scale">
+          <option value="1.0">Off</option>
+          <option value="1.5">1.5x</option>
+          <option value="2.0">2x</option>
+          <option value="3.0">3x</option>
+        </select>
+        <span></span>
+      </div>
+      <div class="srow" style="flex-wrap:wrap;margin-top:12px" id="quickBools"></div>
+      <details style="margin-top:12px" id="advancedDetails">
+        <summary style="cursor:pointer;color:#8b949e;font-size:12px">Advanced (everything else)</summary>
+        <div id="advancedFields" style="margin-top:10px"></div>
+      </details>
+      <div class="srow" style="margin-top:14px">
+        <button id="startBtn">Start</button>
+      </div>
+      <div class="snote" id="startStatus">Idle.</div>
+    </section>
+    <section style="margin-top:16px">
       <h2>Pipeline</h2>
       <div class="phases" id="phases">
         <div class="ph" data-n="1">1 · Quality<span class="t"></span></div>
@@ -829,7 +927,214 @@ es.onmessage = (ev) => {
       Object.entries(s.summary).map(([k, v]) =>
         `<dt>${esc(k.replace(/_/g, ' '))}</dt><dd>${esc(v)}</dd>`).join('');
   }
+  updateRunStatus(s.run_status || 'idle', s.run_error || null);
 };
+
+// ── Setup panel: form schema, submission, run status ─────────────────────
+const QUICK_SELECTS = ['preset', 'stack_method', 'denoiser', 'deconvolve_mode'];
+const QUICK_BOOLS = [
+  ['auto', 'Auto advisor'],
+  ['trail_reject', 'Trail reject'],
+  ['local_normalize', 'Local normalize'],
+  ['repair_stars', 'Repair stars'],
+  ['elastic_registration', 'Elastic registration'],
+  ['use_gpu', 'Use GPU'],
+  ['no_resume', 'Start fresh (ignore checkpoint)'],
+  ['verbose', 'Verbose'],
+];
+const QUICK_DESTS = new Set([
+  'directory', 'output', 'drizzle_scale',
+  ...QUICK_SELECTS, ...QUICK_BOOLS.map(b => b[0]),
+]);
+const touched = new Set();
+let schemaByDest = {};
+let lastRunStatus = 'idle';
+
+function markTouched(dest) { touched.add(dest); }
+
+function fieldValue(dest, kind, el) {
+  if (kind === 'bool_true' || kind === 'bool_false') return el.checked;
+  if (kind === 'number') return el.value === '' ? null : Number(el.value);
+  return el.value;
+}
+
+function buildQuickBools() {
+  const wrap = document.getElementById('quickBools');
+  wrap.innerHTML = '';
+  for (const [dest, label] of QUICK_BOOLS) {
+    const f = schemaByDest[dest];
+    const id = 'f_' + dest;
+    const lbl = document.createElement('label');
+    lbl.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;color:#d5dae2;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.id = id;
+    cb.checked = !!(f && f.default);
+    cb.onchange = () => markTouched(dest);
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(label));
+    wrap.appendChild(lbl);
+  }
+}
+
+function populateSelect(dest) {
+  const f = schemaByDest[dest];
+  const el = document.getElementById('f_' + dest);
+  if (!f || !el) return;
+  for (const c of (f.choices || [])) {
+    const opt = document.createElement('option');
+    opt.value = c; opt.textContent = c;
+    if (c === f.default) opt.selected = true;
+    el.appendChild(opt);
+  }
+  el.onchange = () => markTouched(dest);
+}
+
+function renderAdvancedField(f) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:grid;grid-template-columns:180px 1fr;gap:8px;' +
+    'align-items:center;margin-bottom:6px;font-size:12px;';
+  const lbl = document.createElement('label');
+  lbl.textContent = f.flag;
+  lbl.title = f.help || '';
+  lbl.style.color = '#8b949e';
+  row.appendChild(lbl);
+  let el;
+  if (f.kind === 'bool_true' || f.kind === 'bool_false') {
+    el = document.createElement('input');
+    el.type = 'checkbox'; el.checked = !!f.default;
+  } else if (f.kind === 'select') {
+    el = document.createElement('select');
+    for (const c of (f.choices || [])) {
+      const opt = document.createElement('option');
+      opt.value = c; opt.textContent = c;
+      if (c === f.default) opt.selected = true;
+      el.appendChild(opt);
+    }
+  } else {
+    el = document.createElement('input');
+    el.type = (f.kind === 'number') ? 'number' : 'text';
+    if (f.kind === 'number' && f.default != null) el.placeholder = String(f.default);
+    if (f.kind === 'text' && f.default != null && f.default !== '') el.placeholder = String(f.default);
+    el.style.cssText = 'background:#0d1117;color:#d5dae2;border:1px solid #2a313c;' +
+      'border-radius:4px;padding:3px 6px;width:100%;';
+  }
+  el.title = f.help || '';
+  el.oninput = el.onchange = () => markTouched(f.dest);
+  el._kind = f.kind; el._dest = f.dest;
+  row.appendChild(el);
+  return { row, el };
+}
+
+const advancedEls = {};
+
+function buildAdvanced(schema) {
+  const wrap = document.getElementById('advancedFields');
+  wrap.innerHTML = '';
+  for (const [group, fields] of Object.entries(schema)) {
+    const shown = fields.filter(f => !QUICK_DESTS.has(f.dest));
+    if (!shown.length) continue;
+    const h = document.createElement('div');
+    h.style.cssText = 'font-size:11px;text-transform:uppercase;letter-spacing:.06em;' +
+      'color:#6e7883;margin:10px 0 4px;';
+    h.textContent = group;
+    wrap.appendChild(h);
+    for (const f of shown) {
+      const { row, el } = renderAdvancedField(f);
+      advancedEls[f.dest] = { el, kind: f.kind };
+      wrap.appendChild(row);
+    }
+  }
+}
+
+async function loadSchema() {
+  const resp = await fetch('/api/schema');
+  const schema = await resp.json();
+  schemaByDest = {};
+  for (const fields of Object.values(schema)) {
+    for (const f of fields) schemaByDest[f.dest] = f;
+  }
+  for (const dest of QUICK_SELECTS) populateSelect(dest);
+  buildQuickBools();
+  buildAdvanced(schema);
+}
+
+function collectForm() {
+  const form = {};
+  const dir = document.getElementById('f_directory').value.trim();
+  if (dir) form.directory = dir;
+  const out = document.getElementById('f_output').value.trim();
+  if (out) form.output = out;
+  for (const dest of QUICK_SELECTS) {
+    if (touched.has(dest)) form[dest] = document.getElementById('f_' + dest).value;
+  }
+  if (touched.has('drizzle_scale')) {
+    form.drizzle_scale = Number(document.getElementById('f_drizzle_scale').value);
+  }
+  for (const [dest] of QUICK_BOOLS) {
+    if (touched.has(dest)) form[dest] = document.getElementById('f_' + dest).checked;
+  }
+  for (const [dest, { el, kind }] of Object.entries(advancedEls)) {
+    if (touched.has(dest)) form[dest] = fieldValue(dest, kind, el);
+  }
+  return form;
+}
+
+function updateRunStatus(status, error) {
+  lastRunStatus = status;
+  const btn = document.getElementById('startBtn');
+  const note = document.getElementById('startStatus');
+  btn.disabled = (status === 'running');
+  if (status === 'running') note.textContent = 'Running…';
+  else if (status === 'ok') note.textContent = 'Complete.';
+  else if (status === 'error') note.textContent = 'Error: ' + (error || 'unknown error');
+  else note.textContent = 'Idle.';
+}
+
+document.getElementById('startBtn').onclick = async () => {
+  const form = collectForm();
+  if (!form.directory) {
+    document.getElementById('startStatus').textContent = 'Directory is required.';
+    return;
+  }
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('startStatus').textContent = 'Starting…';
+  try {
+    const resp = await fetch('/api/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(form),
+    });
+    const result = await resp.json();
+    if (!result.ok) {
+      document.getElementById('startStatus').textContent = 'Error: ' + result.error;
+      document.getElementById('startBtn').disabled = false;
+    }
+  } catch (e) {
+    document.getElementById('startStatus').textContent = 'Error: ' + e;
+    document.getElementById('startBtn').disabled = false;
+  }
+};
+
+function enablePywebviewPickers() {
+  if (!window.pywebview) return;
+  document.getElementById('browseDir').style.display = '';
+  document.getElementById('browseOut').style.display = '';
+  document.getElementById('browseDir').onclick = async () => {
+    const p = await window.pywebview.api.browse_directory();
+    if (p) { document.getElementById('f_directory').value = p; markTouched('directory'); }
+  };
+  document.getElementById('browseOut').onclick = async () => {
+    const p = await window.pywebview.api.browse_output_path();
+    if (p) { document.getElementById('f_output').value = p; markTouched('output'); }
+  };
+}
+// window.pywebview is injected asynchronously -- it may not exist yet at
+// script-load time even inside the native window. pywebview fires
+// 'pywebviewready' once the API bridge is actually attached; also check
+// immediately in case it's already there (e.g. on a fast reload).
+window.addEventListener('pywebviewready', enablePywebviewPickers);
+enablePywebviewPickers();
+
+loadSchema();
 </script>
 </body>
 </html>
