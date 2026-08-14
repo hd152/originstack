@@ -56,6 +56,33 @@ a = Analysis(
     noarchive=False,
 )
 
+# astropy_iers_data (Earth-rotation/leap-second tables, ~8.5MB): nothing in
+# src/ touches astropy.time.Time/EarthLocation/AltAz or any other frame that
+# needs Earth-orientation parameters -- confirmed by grepping every astropy
+# import in src/ (only astropy.io.fits, astropy.stats, astropy.wcs.WCS,
+# astropy.coordinates.SkyCoord(frame='icrs'), astropy.units, astropy.table --
+# none of which are IERS-dependent) and empirically, by running the exact
+# WCS.wcs_pix2world + SkyCoord ICRS separation calls annotation.py/
+# color_calibrate.py make with warnings promoted to errors and network
+# access disabled: zero IERS access. pyinstaller-hooks-contrib's astropy
+# hook bundles it unconditionally just because `astropy` is imported at all.
+a.datas = [d for d in a.datas if 'astropy_iers_data' not in d[0]]
+
+# TRIED AND REVERTED: numpy.libs/ and scipy.libs/ both contain a byte-
+# identical libscipy_openblas64_-*.dll (numpy 2.x vendors the same
+# scipy-openblas64 wheel scipy does) -- looked like a free ~19.5MB dedup by
+# dropping numpy's copy on the assumption PyInstaller registers every
+# collected <pkg>.libs/ directory as a global DLL search path up front. It
+# doesn't: numpy's own loader only searches its own numpy.libs/, so removing
+# it broke numpy entirely ("DLL load failed while importing
+# _multiarray_umath") -- caught by packaging/verify_build.ps1 (a real
+# packaged-exe run) before this ever shipped, not by pytest, since pytest
+# runs against the dev venv's own separate numpy/scipy install and can't see
+# a packaging-only DLL layout bug. Left here so this specific "looks
+# byte-identical, must be safe to dedupe" idea isn't re-attempted blind --
+# a real fix would need to point numpy's own loader at scipy.libs/, not just
+# delete the file it expects to find in its own directory.
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
