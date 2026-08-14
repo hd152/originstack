@@ -28,7 +28,11 @@ windows-x64.zip` for distribution.
 
 Verify the build actually works (launches the real exe, confirms the
 dashboard server responds, confirms `astro_native` loaded rather than
-silently falling back to numpy, confirms clean shutdown):
+silently falling back to numpy, runs a real stack with multiple parallel
+workers and confirms no extra GUI windows open -- regression guard for a
+real bug that shipped once: a frozen ProcessPoolExecutor worker without
+`multiprocessing.freeze_support()` re-launches the whole app instead of
+running as a worker -- confirms clean shutdown):
 
 ```powershell
 .\packaging\verify_build.ps1

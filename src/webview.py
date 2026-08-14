@@ -17,6 +17,7 @@ Mirrors the ``get_gpu()`` module-level singleton pattern.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -430,6 +431,19 @@ class WebView:
                     body = json.dumps({'native': has_native,
                                        'version': view._app_version}).encode('utf-8')
                     self._send(200, 'application/json', body)
+                elif path == '/api/frame_count':
+                    directory = (q.get('dir') or [''])[0]
+                    try:
+                        from src.frame_discovery import discover_frames
+                        if not directory or not os.path.isdir(directory):
+                            raise NotADirectoryError(directory)
+                        frames = discover_frames(directory)
+                        counts = {k: len(v) for k, v in frames.items()}
+                        body = json.dumps({'ok': True, 'counts': counts}).encode('utf-8')
+                        self._send(200, 'application/json', body)
+                    except Exception as e:
+                        body = json.dumps({'ok': False, 'error': str(e)}).encode('utf-8')
+                        self._send(200, 'application/json', body)
                 elif path == '/events':
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/event-stream')
@@ -537,105 +551,178 @@ _PAGE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <title>OriginStack</title>
 <style>
-  :root { color-scheme: dark; }
+  /* ---------------------------------------------------------------------
+     OriginStack control panel. Token system grounded in the subject: this
+     runs unattended overnight next to a telescope, so the palette borrows
+     from the imaging domain itself rather than a generic app accent --
+     Ha/OIII/SII are the three narrowband channels this pipeline's own SHO
+     palette combiner maps to red/teal/gold (src/channel_combine.py), reused
+     here as the UI's own signal colors instead of an arbitrary blue.
+  --------------------------------------------------------------------- */
+  :root {
+    color-scheme: dark;
+    --bg:        #08090c;   /* true dark-sky black, not GitHub navy-black */
+    --well:      #030304;   /* recessed data wells: log, viewport, inputs */
+    --panel:     #0f1117;
+    --line:      #23262f;
+    --line-soft: #1a1c22;
+    --text:      #e8e6df;   /* warm off-white -- phosphor afterglow, not pure white */
+    --text-dim:  #7c8090;
+    --text-faint:#4c505e;
+    --accent:    #ff6a3d;   /* H-alpha -- primary: active state, primary actions */
+    --accent-2:  #3ecbe0;   /* O-III -- secondary: compare/info accents */
+    --accent-3:  #ffc857;   /* S-II -- tertiary: in-progress / warm highlight */
+    --phosphor:  #ffb454;   /* amber CRT-readout glow, log panel signature */
+    --success:   #5cd98f;
+    --danger:    #ff4757;
+    --mono: "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace;
+    --sans: "Segoe UI", system-ui, sans-serif;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #0d1117; color: #d5dae2;
-         font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
-  header { padding: 14px 22px; background: #161b22;
-           border-bottom: 1px solid #2a313c; display: flex;
+  *:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--well); }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+  header { padding: 13px 22px; background: var(--panel);
+           border-bottom: 1px solid var(--line); display: flex;
            align-items: baseline; gap: 14px; }
-  header h1 { font-size: 17px; margin: 0; color: #e8edf4; }
-  header .run { color: #8b949e; font-size: 13px; }
+  header h1 { font: 700 13px/1 var(--mono); margin: 0; color: var(--text);
+              text-transform: uppercase; letter-spacing: .16em; }
+  header h1::before { content: '\25c6'; color: var(--accent); margin-right: 10px;
+                       font-size: 12px; }
+  header .run { color: var(--text-dim); font: 12px var(--mono); }
+
   main { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(460px, 1.3fr);
          gap: 16px; padding: 16px 22px; max-width: 1600px; }
-  section { background: #161b22; border: 1px solid #2a313c;
-            border-radius: 8px; padding: 14px 16px; }
-  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
-       color: #8b949e; margin: 0 0 10px; }
+  section { background: var(--panel); border: 1px solid var(--line);
+            border-radius: 3px; padding: 14px 16px; }
+  h2 { font: 700 11px var(--mono); text-transform: uppercase; letter-spacing: .12em;
+       color: var(--text-dim); margin: 0 0 12px; display: flex; align-items: center; }
+  h2::before { content: ''; width: 6px; height: 6px; background: var(--accent);
+               margin-right: 9px; flex: 0 0 auto; }
+
+  /* pipeline phase gauges */
   .phases { display: flex; gap: 8px; }
-  .ph { flex: 1; padding: 8px 10px; border-radius: 6px; background: #0d1117;
-        border: 1px solid #2a313c; font-size: 12px; color: #8b949e; }
-  .ph.active { border-color: #58a6ff; color: #e8edf4; }
-  .ph.done { border-color: #3fb950; color: #b9c4d0; }
-  .ph .t { display: block; font-size: 11px; margin-top: 2px; color: #6e7883; }
-  .bar { height: 10px; background: #0d1117; border-radius: 5px;
-         overflow: hidden; margin-top: 10px; border: 1px solid #2a313c; }
-  .bar div { height: 100%; background: linear-gradient(90deg, #1f6feb, #58a6ff);
+  .ph { position: relative; flex: 1; padding: 9px 10px 8px; border-radius: 2px;
+        background: var(--well); border: 1px solid var(--line);
+        border-top: 2px solid var(--line); font: 12px var(--sans); color: var(--text-dim);
+        overflow: hidden; transition: border-color .25s, color .25s; }
+  .ph.active { border-color: var(--line); border-top-color: var(--accent); color: var(--text); }
+  .ph.active::after { content: ''; position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,106,61,.12), transparent);
+      animation: sweep 2.2s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .ph.active::after { animation: none; } }
+  @keyframes sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+  .ph.done { border-top-color: var(--success); color: var(--text-dim); }
+  .ph .t { display: block; font: 11px var(--mono); margin-top: 3px; color: var(--text-faint); }
+  .bar { height: 4px; background: var(--well); overflow: hidden; margin-top: 12px;
+         border-radius: 2px; }
+  .bar div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-3));
              width: 0%; transition: width .3s; }
-  .plabel { margin-top: 6px; font-size: 12px; color: #8b949e; }
-  #log { height: 260px; overflow-y: auto; background: #0d1117;
-         border-radius: 6px; padding: 10px 12px; font: 12px/1.5 Consolas,
-         monospace; white-space: pre-wrap; color: #9aa4b2; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid #21262d; }
-  th:first-child, td:first-child { text-align: left; }
-  td.bad { color: #f85149; }
+  .plabel { margin-top: 7px; font: 12px var(--mono); color: var(--text-dim); }
+
+  /* log: amber-phosphor telemetry readout -- the one signature element */
+  #log { height: 260px; overflow-y: auto; background: var(--well);
+         border: 1px solid var(--line-soft); border-radius: 2px; padding: 10px 12px;
+         font: 12px/1.6 var(--mono); white-space: pre-wrap; color: var(--phosphor);
+         text-shadow: 0 0 5px rgba(255,180,84,.18);
+         background-image: repeating-linear-gradient(
+             to bottom, rgba(255,255,255,.012) 0px, rgba(255,255,255,.012) 1px,
+             transparent 1px, transparent 3px); }
+
+  table { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+  th { text-align: right; padding: 3px 8px 7px; color: var(--text-faint);
+       font-weight: 400; text-transform: uppercase; letter-spacing: .06em; font-size: 10px; }
+  td { text-align: right; padding: 4px 8px; border-top: 1px solid var(--line-soft);
+       font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-family: var(--sans); }
+  td.bad { color: var(--danger); }
+
   /* viewer */
   .vtools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
             margin-bottom: 10px; }
-  .vtools select, .vtools button { background: #0d1117; color: #d5dae2;
-      border: 1px solid #2a313c; border-radius: 6px; padding: 5px 9px;
-      font-size: 12px; cursor: pointer; }
-  .vtools button:hover, .vtools select:hover { border-color: #58a6ff; }
-  .vtools button.on { border-color: #58a6ff; color: #e8edf4; }
+  .vtools select, .vtools button { background: var(--well); color: var(--text);
+      border: 1px solid var(--line); border-radius: 2px; padding: 5px 9px;
+      font: 12px var(--sans); cursor: pointer; }
+  .vtools button:hover, .vtools select:hover { border-color: var(--accent); }
+  .vtools button.on { border-color: var(--accent); color: var(--text);
+      box-shadow: inset 0 0 0 1px var(--accent); }
   .vtools .spacer { flex: 1; }
-  .vtools .z { color: #6e7883; font-size: 12px; min-width: 46px;
+  .vtools .z { color: var(--text-dim); font: 12px var(--mono); min-width: 46px;
                text-align: right; }
   #viewport { position: relative; width: 100%; height: 460px; overflow: hidden;
-              background: #000; border-radius: 6px; border: 1px solid #2a313c;
+              background: #000; border-radius: 2px; border: 1px solid var(--line);
               cursor: grab; touch-action: none; }
   #viewport.drag { cursor: grabbing; }
   #viewport img { position: absolute; top: 0; left: 0; transform-origin: 0 0;
                   image-rendering: auto; user-select: none;
                   -webkit-user-drag: none; max-width: none; }
   #cmpImg { display: none; }
-  #wipe { position: absolute; top: 0; bottom: 0; width: 2px; background: #58a6ff;
+  #wipe { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent-2);
           display: none; cursor: ew-resize; z-index: 5; }
   #wipe::after { content: '\\21d4'; position: absolute; top: 50%; left: 50%;
-      transform: translate(-50%,-50%); background: #58a6ff; color: #0d1117;
+      transform: translate(-50%,-50%); background: var(--accent-2); color: #04262b;
       border-radius: 50%; width: 22px; height: 22px; line-height: 22px;
       text-align: center; font-size: 12px; }
-  .cap { margin-top: 6px; font-size: 12px; color: #8b949e; }
+  .cap { margin-top: 7px; font: 12px var(--mono); color: var(--text-dim); }
+
   /* stretch panel */
-  .sgrid { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px;
+  .sgrid { display: grid; grid-template-columns: auto 1fr auto; gap: 8px 10px;
            align-items: center; font-size: 12px; }
-  .sgrid label { color: #8b949e; }
-  .sgrid input[type=range] { width: 100%; }
-  .sgrid .val { color: #d5dae2; min-width: 42px; text-align: right;
-                font-variant-numeric: tabular-nums; }
+  .sgrid label { color: var(--text-dim); }
+  .sgrid input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=checkbox] { accent-color: var(--accent); }
+  .sgrid .val { color: var(--text); min-width: 42px; text-align: right;
+                font: 12px var(--mono); font-variant-numeric: tabular-nums; }
   .srow { display: flex; gap: 8px; margin-top: 10px; }
-  .srow button { flex: 1; background: #1f6feb; color: #fff; border: 0;
-      border-radius: 6px; padding: 7px; font-size: 12px; cursor: pointer; }
-  .srow button.ghost { background: #0d1117; color: #8b949e;
-      border: 1px solid #2a313c; }
-  .snote { color: #6e7883; font-size: 11px; margin-top: 8px; }
+  .srow button { flex: 1; background: var(--accent); color: #1a0a04; border: 0;
+      border-radius: 2px; padding: 8px; font: 700 12px var(--sans); cursor: pointer;
+      letter-spacing: .01em; }
+  .srow button:hover { filter: brightness(1.08); }
+  .srow button.ghost { background: transparent; color: var(--text-dim);
+      border: 1px solid var(--line); font-weight: 400; }
+  .srow button.ghost:hover { border-color: var(--text-faint); color: var(--text); }
+  .snote { color: var(--text-faint); font-size: 11px; margin-top: 8px; }
+
   /* setup panel: quick bools + advanced accordion */
+  #f_directory, #f_output, .adv-input {
+      font: 12px var(--mono); }
+  input[type=text], select {
+      background: var(--well); color: var(--text); border: 1px solid var(--line);
+      border-radius: 2px; padding: 5px 7px; }
+  input[type=text]:hover, select:hover { border-color: var(--text-faint); }
   .quick-bool { display: flex; align-items: center; gap: 6px; font-size: 12px;
-                color: #d5dae2; }
-  .adv-group-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
-                 color: #6e7883; margin: 10px 0 4px; }
+                color: var(--text); }
+  .adv-group-h { font: 10px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+                 color: var(--text-faint); margin: 12px 0 5px; }
   .adv-row { display: grid; grid-template-columns: 180px 1fr auto; gap: 8px;
              align-items: center; margin-bottom: 6px; font-size: 12px; }
-  .adv-label { color: #8b949e; }
-  .adv-input { background: #0d1117; color: #d5dae2; border: 1px solid #2a313c;
-               border-radius: 4px; padding: 3px 6px; width: 100%; }
-  .adv-browse { background: #0d1117; color: #d5dae2; border: 1px solid #2a313c;
-                border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
-  .adv-browse:hover { border-color: #58a6ff; }
-  .adv-summary { cursor: pointer; color: #8b949e; font-size: 12px; }
+  .adv-label { color: var(--text-dim); font: 11px var(--mono); }
+  .adv-input { background: var(--well); color: var(--text); border: 1px solid var(--line);
+               border-radius: 2px; padding: 3px 6px; width: 100%; }
+  .adv-browse { background: var(--well); color: var(--text-dim); border: 1px solid var(--line);
+                border-radius: 2px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+  .adv-browse:hover { border-color: var(--accent); color: var(--text); }
+  .adv-summary { cursor: pointer; color: var(--text-dim); font: 12px var(--mono); }
+
   /* frame strip */
   #strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
   #strip figure { margin: 0; flex: 0 0 auto; width: 96px; cursor: pointer;
                   text-align: center; }
-  #strip img { width: 96px; height: 72px; object-fit: cover; border-radius: 4px;
-               border: 1px solid #2a313c; background: #000; }
-  #strip figure:hover img { border-color: #58a6ff; }
-  #strip figcaption { font-size: 10px; color: #6e7883; margin-top: 3px;
+  #strip img { width: 96px; height: 72px; object-fit: cover; border-radius: 2px;
+               border: 1px solid var(--line); background: #000; }
+  #strip figure:hover img { border-color: var(--accent); }
+  #strip figcaption { font: 10px var(--mono); color: var(--text-faint); margin-top: 4px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #summary { display: none; border-color: #3fb950; }
-  #summary dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px;
-                margin: 0; font-size: 13px; }
-  #summary dt { color: #8b949e; } #summary dd { margin: 0; color: #e8edf4; }
+
+  #summary { display: none; border-color: var(--success); }
+  #summary h2::before { background: var(--success); }
+  #summary dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 16px;
+                margin: 0; font: 13px var(--mono); }
+  #summary dt { color: var(--text-dim); } #summary dd { margin: 0; color: var(--text); }
   @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -645,13 +732,22 @@ _PAGE = """<!DOCTYPE html>
   <div>
     <section id="setupSection">
       <h2>Setup</h2>
+      <!-- browseDir/browseOut start hidden via visibility (not display) --
+           quickFields is one shared CSS grid across every row below, and a
+           display:none child is removed from grid auto-placement entirely,
+           which shifts every later row's cells left by one -- silently
+           misaligning the whole form in a plain-browser (--web-view)
+           session, where these buttons never become visible at all. -->
       <div class="sgrid" id="quickFields">
         <label>Directory</label>
         <input type="text" id="f_directory" placeholder="C:\\path\\to\\lights">
-        <button id="browseDir" style="display:none">Browse…</button>
+        <button id="browseDir" style="visibility:hidden">Browse…</button>
+        <span></span>
+        <span id="dirFrameCount" style="grid-column: 2 / 3; font-size: 11px; color: #8b949e;"></span>
+        <span></span>
         <label>Output</label>
         <input type="text" id="f_output" placeholder="(default: &lt;directory&gt;_stacked.fits)">
-        <button id="browseOut" style="display:none">Browse…</button>
+        <button id="browseOut" style="visibility:hidden">Browse…</button>
         <label>Preset</label>
         <select id="f_preset"><option value="">(none)</option></select>
         <span></span>
@@ -1030,6 +1126,37 @@ let lastRunStatus = 'idle';
 
 function markTouched(dest) { touched.add(dest); }
 
+// ── Directory frame count (how many lights/darks/flats/bias actually sit
+// in the chosen folder, before committing to a run) ───────────────────────
+let frameCountToken = 0;
+async function refreshFrameCount() {
+  const dir = document.getElementById('f_directory').value.trim();
+  const el = document.getElementById('dirFrameCount');
+  if (!dir) { el.textContent = ''; return; }
+  const token = ++frameCountToken;  // stale-response guard, no debounce lib needed
+  el.textContent = 'Scanning…';
+  try {
+    const resp = await fetch('/api/frame_count?dir=' + encodeURIComponent(dir));
+    const result = await resp.json();
+    if (token !== frameCountToken) return;  // a newer request has since started
+    if (!result.ok) { el.textContent = 'No frames found (' + result.error + ')'; return; }
+    const c = result.counts;
+    const total = (c.light || 0) + (c.dark || 0) + (c.flat || 0) + (c.bias || 0);
+    if (total === 0) { el.textContent = 'No FITS/RAW/TIFF/XISF/SER frames found in this folder.'; return; }
+    const parts = [];
+    if (c.light) parts.push(c.light + ' light' + (c.light === 1 ? '' : 's'));
+    if (c.dark) parts.push(c.dark + ' dark' + (c.dark === 1 ? '' : 's'));
+    if (c.flat) parts.push(c.flat + ' flat' + (c.flat === 1 ? '' : 's'));
+    if (c.bias) parts.push(c.bias + ' bias');
+    el.textContent = parts.join(', ') + ' found';
+  } catch (e) {
+    if (token === frameCountToken) el.textContent = '';
+  }
+}
+document.getElementById('f_directory').addEventListener('change', refreshFrameCount);
+document.getElementById('f_directory').addEventListener('blur', refreshFrameCount);
+if (document.getElementById('f_directory').value.trim()) refreshFrameCount();
+
 function fieldValue(dest, kind, el) {
   if (kind === 'bool_true' || kind === 'bool_false') return el.checked;
   if (kind === 'number') return el.value === '' ? null : Number(el.value);
@@ -1207,11 +1334,15 @@ document.getElementById('startBtn').onclick = async () => {
 
 function enablePywebviewPickers() {
   if (!window.pywebview) return;
-  document.getElementById('browseDir').style.display = '';
-  document.getElementById('browseOut').style.display = '';
+  document.getElementById('browseDir').style.visibility = 'visible';
+  document.getElementById('browseOut').style.visibility = 'visible';
   document.getElementById('browseDir').onclick = async () => {
     const p = await window.pywebview.api.browse_directory();
-    if (p) { document.getElementById('f_directory').value = p; markTouched('directory'); }
+    if (p) {
+      document.getElementById('f_directory').value = p;
+      markTouched('directory');
+      refreshFrameCount();
+    }
   };
   document.getElementById('browseOut').onclick = async () => {
     const p = await window.pywebview.api.browse_output_path();

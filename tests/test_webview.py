@@ -215,6 +215,40 @@ class TestServer(unittest.TestCase):
         self.assertIn('directory', dests)
         self.assertIn('stack_method', dests)
 
+    def test_api_health_served(self):
+        body = json.loads(self._get('/api/health').read())
+        self.assertIn('native', body)
+        self.assertIn('version', body)
+        self.assertIsInstance(body['native'], bool)
+
+    def test_api_frame_count_missing_dir_param(self):
+        body = json.loads(self._get('/api/frame_count').read())
+        self.assertFalse(body['ok'])
+
+    def test_api_frame_count_nonexistent_dir(self):
+        body = json.loads(self._get('/api/frame_count?dir=' + 'no_such_dir_xyz').read())
+        self.assertFalse(body['ok'])
+
+    def test_api_frame_count_real_directory(self):
+        """--web-view's 'how many lights are actually in this folder' check
+        (user-reported desktop-app gap): counts must match discover_frames()
+        exactly, since that's what Phase 1 will actually see."""
+        import os
+        import tempfile
+        from astropy.io import fits
+        with tempfile.TemporaryDirectory() as td:
+            for i, kind in enumerate(['light', 'light', 'light', 'dark', 'flat']):
+                hdu = fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32))
+                hdu.writeto(os.path.join(td, f'{kind}_{i:03d}.fit'), overwrite=True)
+            import urllib.parse
+            body = json.loads(self._get(
+                '/api/frame_count?dir=' + urllib.parse.quote(td)).read())
+        self.assertTrue(body['ok'])
+        self.assertEqual(body['counts']['light'], 3)
+        self.assertEqual(body['counts']['dark'], 1)
+        self.assertEqual(body['counts']['flat'], 1)
+        self.assertEqual(body['counts']['bias'], 0)
+
     def _post(self, path, body, headers=None, timeout=5):
         hdrs = {'Content-Type': 'application/json'}
         hdrs.update(headers or {})
