@@ -1,0 +1,86 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller spec for OriginStack's desktop app.
+
+Build via packaging/build_windows.ps1 (which sets up the packaging venv,
+builds ext/astro_native as a real wheel, and invokes PyInstaller against this
+spec) rather than running `pyinstaller` directly against this file.
+"""
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all
+
+block_cipher = None
+ROOT = Path(SPECPATH).parent  # packaging/ -> repo root
+
+# Defense-in-depth collect_all() for packages whose own PyInstaller hooks
+# already handle most of this (pywebview 6.x and pythonnet both self-register
+# hooks that pull in the WebView2 loader DLLs / .NET interop assemblies) --
+# kept explicit so the build doesn't silently regress if a pinned version
+# drops its self-registered hook. rawpy is the one *verified* real risk:
+# it ships sibling DLLs (raw_r.dll, vcomp140.dll) next to its .pyd that
+# PyInstaller's binary walker may or may not follow depending on version.
+datas, binaries, hiddenimports = [], [], []
+for pkg in ('webview', 'pythonnet', 'clr_loader', 'rawpy'):
+    d, b, h = collect_all(pkg)
+    datas += d
+    binaries += b
+    hiddenimports += h
+
+datas += [(str(ROOT / 'VERSION'), '.')]
+
+a = Analysis(
+    [str(ROOT / 'desktop_app.py')],
+    pathex=[str(ROOT)],
+    binaries=binaries,
+    datas=datas,
+    # Deliberately NOT listing numpy/astropy/scipy/tqdm/PIL/psutil/rawpy/
+    # tifffile/astro_native here -- every import in src/ (including all 10
+    # try/except-wrapped `import astro_native` sites) is a plain static
+    # `import x` statement, which PyInstaller's AST-based modulegraph finds
+    # on its own. numpy self-registers its own hook; scipy/astropy don't,
+    # which is what `pyinstaller-hooks-contrib` (installed by
+    # build_windows.ps1) covers -- their curated hooks handle astropy's
+    # IERS/leap-second/units data files and scipy's non-statically-visible
+    # compiled submodules better than a blind collect_all would.
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[str(ROOT / 'packaging' / 'runtime_hook_stdout.py')],
+    excludes=['cupy', 'tkinter.test', 'matplotlib.tests'],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='OriginStack',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,     # UPX + numpy/scipy .pyd files is a known source of both
+                    # AV false positives and occasional load failures.
+    console=False,  # windowed -- this is why runtime_hook_stdout.py and
+                     # src/desktop_app.py's _fatal() dialog exist: there is
+                     # no console for a bare print()/traceback to reach.
+    icon=str(ROOT / 'packaging' / 'icon.ico'),
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='OriginStack',   # -> dist/OriginStack/ (onedir -- see build_windows.ps1
+                            # for why: onefile re-extracts the whole numpy/
+                            # scipy/astropy payload to a temp dir on every
+                            # launch, multi-second delay each time).
+)

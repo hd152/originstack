@@ -155,6 +155,27 @@ def print_phase(phase_num: int, title: str):
     print(f"{'=' * 70}")
 
 
+def read_version() -> str:
+    """Reads the app VERSION file. Checks sys._MEIPASS first (PyInstaller's
+    onedir frozen-bundle root, where the spec copies VERSION alongside the
+    exe), then the repo root, for a source checkout / `python desktop_app.py`
+    dev run. Returns 'dev' if neither exists, so a plain checkout with no
+    VERSION file (the pre-packaging state) keeps working unchanged."""
+    import sys
+    from pathlib import Path
+    candidates = []
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        candidates.append(Path(meipass) / 'VERSION')
+    candidates.append(Path(__file__).resolve().parent.parent / 'VERSION')
+    for p in candidates:
+        try:
+            return p.read_text(encoding='utf-8').strip()
+        except OSError:
+            continue
+    return 'dev'
+
+
 def native_status() -> str:
     """One-line status of the optional native (Rust) acceleration."""
     try:

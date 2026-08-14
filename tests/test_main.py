@@ -1122,6 +1122,36 @@ class TestSafePrint(unittest.TestCase):
             self.assertIn("[OK]", calls[-1])
 
 
+class TestReadVersion(unittest.TestCase):
+    def test_reads_repo_root_version_file(self):
+        # tests/../VERSION -- the real repo-root file, not a mock. Confirms
+        # the fallback candidate path resolves correctly from src/utils.py.
+        version = astro.read_version()
+        self.assertNotEqual(version, 'dev')
+        self.assertRegex(version, r'^\d+\.\d+\.\d+$')
+
+    def test_prefers_meipass_when_set(self):
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'VERSION').write_text('9.9.9', encoding='utf-8')
+            sys._MEIPASS = d
+            try:
+                self.assertEqual(astro.read_version(), '9.9.9')
+            finally:
+                del sys._MEIPASS
+
+    def test_returns_dev_when_nothing_found(self):
+        import sys
+        from unittest import mock
+        with mock.patch('pathlib.Path.read_text', side_effect=OSError("missing")):
+            sys._MEIPASS = '/nonexistent'
+            try:
+                self.assertEqual(astro.read_version(), 'dev')
+            finally:
+                del sys._MEIPASS
+
+
 class TestConfigConstants(unittest.TestCase):
     def test_hot_pixel_threshold_positive(self):
         self.assertGreater(astro.Config.HOT_PIXEL_THRESHOLD, 0)

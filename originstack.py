@@ -54,6 +54,7 @@ from src.utils import (
     get_memory_usage_mb,
     setup_logging,
     get_logger,
+    read_version,
 )
 
 # io_fits

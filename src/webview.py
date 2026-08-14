@@ -83,6 +83,11 @@ class WebView:
             'run_status': 'idle',      # 'idle' | 'running' | 'ok' | 'error'
             'run_error': None,
         }
+        # Static for the process lifetime -- computed once rather than on
+        # every _snapshot() call, unlike the other snap fields above which
+        # genuinely change per-run.
+        from src.utils import read_version
+        self._app_version = read_version()
 
     # ── publish API (no-ops while inactive) ──────────────────────────────
 
@@ -269,6 +274,23 @@ class WebView:
             self._state['run_status'] = status
             self._state['run_error'] = error
             self._bump()
+        self._notify(status, error)
+
+    def _notify(self, status: str, error: Optional[str]) -> None:
+        """Best-effort native OS notification -- cosmetic, so a failure here
+        must never affect run state. Useful because a long stacking run is
+        exactly the kind of thing a user tabs away from."""
+        try:
+            from src.notify import notify_windows
+            if status == 'ok':
+                msg = 'Stacking run complete.'
+            elif status == 'error':
+                msg = f'Run failed: {error or "unknown error"}'
+            else:
+                return
+            notify_windows('OriginStack', msg)
+        except Exception:
+            pass
 
     # ── re-stretch (on-demand, from retained float source) ────────────────
 
@@ -298,6 +320,7 @@ class WebView:
         with self._lock:
             snap = json.loads(json.dumps(self._state))
             snap['version'] = self._version
+            snap['app_version'] = self._app_version
             snap['preview_version'] = self._preview_version
             snap['preview_caption'] = self._preview_caption
             snap['latest_slug'] = self._latest_slug
@@ -398,6 +421,15 @@ class WebView:
                     except Exception as e:
                         self._send(500, 'application/json',
                                    json.dumps({'error': str(e)}).encode('utf-8'))
+                elif path == '/api/health':
+                    try:
+                        import astro_native
+                        has_native = True
+                    except Exception:
+                        has_native = False
+                    body = json.dumps({'native': has_native,
+                                       'version': view._app_version}).encode('utf-8')
+                    self._send(200, 'application/json', body)
                 elif path == '/events':
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/event-stream')
@@ -503,7 +535,7 @@ _PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OriginStack — live</title>
+<title>OriginStack</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -921,6 +953,7 @@ function esc(s){ return String(s).replace(/[&<>"]/g, c =>
 const es = new EventSource('/events');
 es.onmessage = (ev) => {
   const s = JSON.parse(ev.data);
+  window.__appVersion = s.app_version;
   const r = s.run || {};
   document.getElementById('runinfo').textContent =
     (r.target ? r.target + ' — ' : '') + (r.output || '') +
@@ -1139,6 +1172,13 @@ function updateRunStatus(status, error) {
   else if (status === 'ok') note.textContent = 'Complete.';
   else if (status === 'error') note.textContent = 'Error: ' + (error || 'unknown error');
   else note.textContent = 'Idle.';
+
+  const suffix = status === 'running' ? ' — running…'
+               : status === 'ok' ? ' — done'
+               : status === 'error' ? ' — error'
+               : '';
+  const ver = window.__appVersion ? ' v' + window.__appVersion : '';
+  document.title = 'OriginStack' + ver + suffix;
 }
 
 document.getElementById('startBtn').onclick = async () => {
