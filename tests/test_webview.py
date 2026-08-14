@@ -214,6 +214,17 @@ class TestServer(unittest.TestCase):
                        'aboutVersion', 'MIT License'):
             self.assertIn(marker, body)
 
+    def test_help_is_comprehensive_with_working_toc(self):
+        """Every modal-toc entry's data-goto target must actually exist as an
+        id in the page -- a broken anchor would silently no-op on click."""
+        import re
+        body = self._get('/').read().decode('utf-8')
+        for topic in ('h-quick-start', 'h-folders', 'h-calibration', 'h-setup',
+                      'h-pipeline', 'h-monitoring', 'h-preview', 'h-finish',
+                      'h-gpu', 'h-troubleshooting', 'h-more'):
+            self.assertIn(f'data-goto="{topic}"', body)
+            self.assertIn(f'id="{topic}"', body)
+
     def test_api_schema_served(self):
         body = json.loads(self._get('/api/schema').read())
         self.assertIn('Core', body)

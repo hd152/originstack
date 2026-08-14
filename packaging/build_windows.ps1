@@ -61,19 +61,38 @@ Push-Location "$Root\ext\astro_native"
 try {
     & cargo --version
     if ($LASTEXITCODE -ne 0) { throw "Rust toolchain not found (cargo --version failed)" }
+    # target\wheels\ accumulates one file per version ever built here across
+    # this repo's whole history (14+ stale wheels observed in the wild) --
+    # Get-ChildItem's default enumeration order is NOT chronological, so
+    # picking "the" wheel afterward without clearing old ones first silently
+    # installs an arbitrary past version instead of the one just built. Real
+    # bug, caught only by actually checking astro_native.__version__ against
+    # Cargo.toml after install, not by anything build-time output shows.
+    Remove-Item "target\wheels\astro_native-*.whl" -Force -ErrorAction SilentlyContinue
     & $py -m maturin build --release
     if ($LASTEXITCODE -ne 0) { throw "maturin build failed" }
-    $wheel = Get-ChildItem "target\wheels\astro_native-*.whl" | Select-Object -First 1
-    if (-not $wheel) { throw "maturin build produced no wheel in target\wheels\" }
+    $wheels = Get-ChildItem "target\wheels\astro_native-*.whl"
+    if ($wheels.Count -ne 1) { throw "expected exactly 1 wheel in target\wheels\ after a clean build, found $($wheels.Count)" }
+    $wheel = $wheels[0]
     & $py -m pip install --force-reinstall $wheel.FullName
+    if ($LASTEXITCODE -ne 0) { throw "pip install of $($wheel.Name) failed" }
 } finally {
     Pop-Location
 }
 
-# 4. Sanity: fail loudly now if astro_native silently fell back to numpy,
-#    rather than shipping the numpy-fallback perf profile by accident.
-& $py -c "import astro_native; print('astro_native OK:', astro_native.__version__)"
+# 4. Sanity: fail loudly now if astro_native silently fell back to numpy
+#    (rather than shipping the numpy-fallback perf profile by accident), AND
+#    if the installed version doesn't match what Cargo.toml says -- the
+#    exact class of bug the target\wheels\ cleanup above fixes, verified
+#    here so a future regression in that logic fails the build instead of
+#    silently shipping a stale wheel again.
+$cargoVersion = (Select-String -Path "$Root\ext\astro_native\Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+$installedVersion = & $py -c "import astro_native; print(astro_native.__version__)"
 if ($LASTEXITCODE -ne 0) { throw "astro_native failed to import after packaging install" }
+Write-Host "astro_native OK: $installedVersion"
+if ($installedVersion -ne $cargoVersion) {
+    throw "astro_native version mismatch: Cargo.toml says $cargoVersion, installed module reports $installedVersion"
+}
 
 # 5. Invoke PyInstaller from the packaging venv, so its own hook-discovery
 #    entry-point scan sees the exact same site-packages the app will ship.

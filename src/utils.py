@@ -181,7 +181,11 @@ def native_status() -> str:
     try:
         import astro_native
         ver = getattr(astro_native, '__version__', '?')
-        n_fns = len([f for f in dir(astro_native) if not f.startswith('_')])
+        # dir() on the compiled extension module includes non-kernel noise
+        # (a self-referential 'astro_native' entry among them) -- count only
+        # actual callables, not every non-underscore attribute name.
+        n_fns = len([f for f in dir(astro_native)
+                    if not f.startswith('_') and callable(getattr(astro_native, f, None))])
         return (f"Native accel: astro_native v{ver} ACTIVE - {n_fns} Rust kernels "
                 f"(stacking combine, Lanczos warp, aniso diffusion)")
     except Exception:

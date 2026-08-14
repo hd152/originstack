@@ -611,7 +611,7 @@ _PAGE = """<!DOCTYPE html>
            align-items: baseline; gap: 14px; }
   header h1 { font: 700 13px/1 var(--mono); margin: 0; color: var(--text);
               text-transform: uppercase; letter-spacing: .16em; }
-  header h1::before { content: '\25c6'; color: var(--accent); margin-right: 10px;
+  header h1::before { content: '\\25c6'; color: var(--accent); margin-right: 10px;
                        font-size: 12px; }
   header .run { color: var(--text-dim); font: 12px var(--mono); }
   header .header-spacer { flex: 1; }
@@ -625,6 +625,15 @@ _PAGE = """<!DOCTYPE html>
   .modal-overlay.show { display: flex; }
   .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
       max-width: 640px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 20px 26px 24px; }
+  .modal.modal-lg { max-width: 760px; }
+  .modal-toc { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 14px 0 4px;
+      padding: 10px 12px; background: var(--well); border: 1px solid var(--line-soft);
+      border-radius: 2px; }
+  .modal-toc a { font: 11px var(--mono); color: var(--text-dim); cursor: pointer;
+      white-space: nowrap; }
+  .modal-toc a:hover { color: var(--accent-2); }
+  .modal-toc a::after { content: ' \\00b7'; color: var(--text-faint); }
+  .modal-toc a:last-child::after { content: ''; }
   .modal-head { display: flex; align-items: center; justify-content: space-between;
       margin-bottom: 4px; }
   .modal h2 { margin-bottom: 4px; }
@@ -650,6 +659,12 @@ _PAGE = """<!DOCTYPE html>
        color: var(--text-dim); margin: 0 0 12px; display: flex; align-items: center; }
   h2::before { content: ''; width: 6px; height: 6px; background: var(--accent);
                margin-right: 9px; flex: 0 0 auto; }
+  summary.h2-summary { font: 700 11px var(--mono); text-transform: uppercase;
+      letter-spacing: .12em; color: var(--text-dim); cursor: pointer;
+      display: flex; align-items: center; }
+  summary.h2-summary:hover { color: var(--text); }
+  summary.h2-summary .h2-dot { width: 6px; height: 6px; background: var(--accent);
+      margin: 0 9px 0 4px; flex: 0 0 auto; display: inline-block; }
 
   /* pipeline phase gauges */
   .phases { display: flex; gap: 8px; }
@@ -786,11 +801,25 @@ _PAGE = """<!DOCTYPE html>
 </header>
 
 <div class="modal-overlay" id="helpModal">
-  <div class="modal">
+  <div class="modal modal-lg">
     <div class="modal-head"><h2>Help</h2><button class="modal-close" data-close="helpModal">&times;</button></div>
-    <p class="modal-sub">A quick guide to running a stack from this dashboard.</p>
+    <p class="modal-sub">Everything this dashboard does, in one place.</p>
 
-    <h3>Quick start</h3>
+    <nav class="modal-toc" id="helpToc">
+      <a data-goto="h-quick-start">Quick start</a>
+      <a data-goto="h-folders">Folder layouts</a>
+      <a data-goto="h-calibration">Calibration frames</a>
+      <a data-goto="h-setup">Setup options</a>
+      <a data-goto="h-pipeline">The Pipeline panel</a>
+      <a data-goto="h-monitoring">Watching a run</a>
+      <a data-goto="h-preview">The Preview panel</a>
+      <a data-goto="h-finish">When a run finishes</a>
+      <a data-goto="h-gpu">GPU acceleration</a>
+      <a data-goto="h-troubleshooting">Troubleshooting</a>
+      <a data-goto="h-more">More information</a>
+    </nav>
+
+    <h3 id="h-quick-start">Quick start</h3>
     <ol>
       <li>Set <b>Directory</b> to your folder of light frames (type a path, or click Browse…). The line under it shows how many lights/darks/flats/bias frames were found.</li>
       <li>Leave <b>Output</b> blank to save next to the input as <code>&lt;directory&gt;_stacked.fits</code>, or set your own path.</li>
@@ -798,28 +827,69 @@ _PAGE = """<!DOCTYPE html>
       <li>Click <b>Start</b>. Progress, the live log, and per-frame quality all update in the Pipeline/Log/Recent frames panels as the run proceeds.</li>
     </ol>
 
-    <h3>Folder layouts</h3>
+    <h3 id="h-folders">Folder layouts</h3>
     <ul>
       <li><b>Single folder</b>: lights (and optionally darks/flats/bias) directly inside the chosen directory.</li>
-      <li><b>Multiple sessions</b>: a folder of subfolders, one per night/session. By default each session is stacked separately and the results combined; check <b>Combine sessions</b> to instead pool every light from every session into one unified stack.</li>
+      <li><b>Multiple sessions</b>: a folder of subfolders, one per night/session, with no frames directly in the top-level folder. By default each session is stacked separately and the results combined into a mosaic-style output; check <b>Combine sessions</b> to instead pool every light from every session into one unified stack (best when every session points at the same target).</li>
     </ul>
 
-    <h3>The Pipeline panel</h3>
-    <p>Four phases run in order: <b>1 · Quality</b> (load, calibrate, and score every frame), <b>2 · Registration</b> (align frames to a reference), <b>3 · Stacking</b> (combine the aligned frames), <b>4 · Post-process</b> (background extraction, denoising, and the final stretch). The active phase is highlighted; hover a completed one to see how long it took.</p>
+    <h3 id="h-calibration">Calibration frames</h3>
+    <p>Darks, flats, and bias frames found alongside your lights (or in a separate calibration folder via the Advanced panel's calibration options) are matched automatically and combined into master calibration frames before your lights are processed. If none are found, calibration is simply skipped for that step rather than failing the run.</p>
 
-    <h3>The Preview panel</h3>
+    <h3 id="h-setup">Setup options</h3>
     <ul>
-      <li>The <b>view</b> dropdown picks which saved milestone to look at; <b>Compare</b> wipes between two milestones side by side.</li>
+      <li><b>Preset / Auto advisor</b> &mdash; a preset applies a fixed set of tuned defaults for a target type. <b>Auto advisor</b> instead measures the actual stacked signal and continuously blends settings across target-type profiles (galaxy, nebula, star field, ...), so a target that's genuinely between two types gets a proportional mix rather than a hard jump. Any field you touch yourself always overrides what auto/preset would have chosen.</li>
+      <li><b>Stack method</b> &mdash; how aligned frames are combined: <code>auto</code> picks a sensible method for your frame count, or choose sigma-clip, median, percentile, ESD, linear-fit, inverse-variance-weighted, or drizzle directly. Hover the field in the Advanced panel for the full description of each.</li>
+      <li><b>Denoiser</b> &mdash; which noise-reduction algorithm runs in post-processing (wavelet, MMT, BM3D, ACDNR, NLM, bilateral, or anisotropic diffusion). <code>auto</code> lets the advisor pick.</li>
+      <li><b>Deconvolution</b> &mdash; optional sharpening (Richardson-Lucy or Total Variation) using an estimated or fitted point-spread function. Off by default for most targets since it can ring bright stars if the PSF estimate is imperfect.</li>
+      <li><b>Drizzle scale</b> &mdash; sub-pixel super-resolution stacking; only helps if your frames are dithered (the sub-pixel offset the log's dither warning refers to).</li>
+      <li><b>Trail reject</b> &mdash; detects and inpaints satellite/aircraft streaks per frame before stacking, independent of whatever rejection method Stack method uses.</li>
+      <li><b>Local normalize</b> &mdash; matches each frame's background level to the others before combining, to reduce blotching from sky-glow differences between subs.</li>
+      <li><b>Repair stars</b> &mdash; rebuilds saturated (flat-topped) star cores from their unsaturated wings, restoring a natural peak and color instead of a clipped white disk.</li>
+      <li><b>Elastic registration</b> &mdash; fits a smooth per-frame local (non-rigid) distortion correction on top of ordinary alignment, for optics with field-dependent distortion a single global transform can't fully correct.</li>
+      <li><b>Start fresh</b> &mdash; ignores a saved checkpoint from a previous run on this folder and reprocesses everything from the beginning.</li>
+    </ul>
+
+    <h3 id="h-pipeline">The Pipeline panel</h3>
+    <p>Four phases run in order:</p>
+    <ul>
+      <li><b>1 &middot; Quality</b> &mdash; loads, calibrates, debayers, and scores every frame in parallel; frames that fail quality thresholds are rejected here and won't appear in the final stack.</li>
+      <li><b>2 &middot; Registration</b> &mdash; aligns every accepted frame to a reference frame (translation, then optional rotation/scale, then optional elastic distortion correction).</li>
+      <li><b>3 &middot; Stacking</b> &mdash; combines the aligned frames using the selected Stack method, cropping to the region every frame actually covers.</li>
+      <li><b>4 &middot; Post-process</b> &mdash; background extraction, denoising, optional deconvolution and star reduction, and the final stretch that produces the preview JPEG.</li>
+    </ul>
+    <p>The active phase is highlighted with a moving glow; hover a completed one to see how long it took.</p>
+
+    <h3 id="h-monitoring">Watching a run</h3>
+    <ul>
+      <li><b>Recent frames</b> lists the last several frames scored in Phase 1 &mdash; Score, SNR, star count, and FWHM (a smaller FWHM means tighter, sharper stars). A frame shown in red was rejected and won't be stacked.</li>
+      <li><b>Log</b> streams the same output you'd see running this from the command line, including which frames were rejected and why.</li>
+    </ul>
+
+    <h3 id="h-preview">The Preview panel</h3>
+    <ul>
+      <li>The view dropdown picks which saved milestone to look at (e.g. the linear pre-post-processing stack vs. the final result); <b>Compare</b> wipes between two milestones side by side &mdash; drag the divider to reveal before/after.</li>
       <li><b>Fit</b>/<b>1:1</b> and drag-to-pan control zoom; scroll to zoom under the cursor.</li>
-      <li>The <b>Stretch</b> panel re-renders the currently viewed milestone from its retained linear source — safe to experiment with, it never touches the saved output file.</li>
+      <li><b>Frames</b> below it shows per-frame thumbnails published during Phase 1 &mdash; click one to inspect it individually.</li>
+      <li>The <b>Stretch</b> panel re-renders the currently viewed milestone from its retained linear source (Black &sigma;, and the GHS b/sp/hp Generalized Hyperbolic Stretch parameters) &mdash; safe to experiment with, it only affects what you're looking at and never touches the saved output file.</li>
     </ul>
 
-    <h3>Tips</h3>
+    <h3 id="h-finish">When a run finishes</h3>
+    <p>A <b>Complete</b> panel appears with a summary (frames stacked, average FWHM, total time, output path). The main output is a linear FITS file plus a stretched preview JPEG next to it; some features add their own sidecar files alongside it (for example a <code>_starless.fits</code> if star removal was active). If you're running the packaged desktop app, a native notification also fires so you don't have to keep the window in view during a long run.</p>
+
+    <h3 id="h-gpu">GPU acceleration</h3>
+    <p><b>Use GPU</b> only helps if you have an NVIDIA card with enough free VRAM for the frame size you're stacking; worker count is auto-limited based on available VRAM, and the pipeline falls back to CPU automatically (per-frame, not aborting the run) if a frame doesn't fit.</p>
+
+    <h3 id="h-troubleshooting">Troubleshooting</h3>
     <ul>
-      <li>Every field in <b>Advanced (everything else)</b> mirrors a command-line flag — hover a label for what it does.</li>
-      <li><b>Use GPU</b> only helps if you have an NVIDIA card with enough free VRAM; the pipeline falls back to CPU automatically if it doesn't fit.</li>
-      <li>A run in progress keeps going even if you close this window's tab; the dashboard just reconnects to it.</li>
+      <li><b>"No FITS files found"</b> &mdash; the chosen folder has no light frames directly in it and no subfolders that do either; double-check the path and the frame-count line under Directory.</li>
+      <li><b>Large shifts / dither warnings</b> in the log are informational, not errors &mdash; they describe how far frames had to be aligned, not a failure.</li>
+      <li>A run in progress keeps going even if you close this window's tab; the dashboard just reconnects to it. In the packaged desktop app, closing the window while a run is active asks you to confirm first.</li>
+      <li>If the desktop app's window fails to open at all, it's almost always a missing Microsoft Edge WebView2 Runtime &mdash; the error dialog says so directly.</li>
     </ul>
+
+    <h3 id="h-more">More information</h3>
+    <p>Every field under <b>Advanced (everything else)</b> mirrors a command-line flag and has its full description in a hover tooltip. For anything not covered here, see the <a href="https://github.com/hd152/originstack" target="_blank" rel="noopener">project repository</a>.</p>
   </div>
 </div>
 
@@ -901,27 +971,10 @@ _PAGE = """<!DOCTYPE html>
         <th>FWHM</th></tr></thead><tbody id="frames"></tbody></table>
     </section>
     <section style="margin-top:16px">
-      <h2>Stretch</h2>
-      <div class="sgrid">
-        <label>Black σ</label><input type="range" id="s_black" min="-1" max="4"
-          step="0.05" value="0"><span class="val" id="v_black">0.00</span>
-        <label>GHS b</label><input type="range" id="s_b" min="0" max="20"
-          step="0.1" value="8"><span class="val" id="v_b">8.0</span>
-        <label>GHS sp</label><input type="range" id="s_sp" min="0" max="1"
-          step="0.005" value="0.15"><span class="val" id="v_sp">0.15</span>
-        <label>GHS hp</label><input type="range" id="s_hp" min="0" max="1"
-          step="0.005" value="0.95"><span class="val" id="v_hp">0.95</span>
-      </div>
-      <div class="srow">
-        <button id="applyStretch">Apply to view</button>
-        <button id="resetStretch" class="ghost">Reset</button>
-      </div>
-      <div class="snote" id="snote">Adjusts the currently viewed milestone
-        preview, re-stretched from its retained linear source.</div>
-    </section>
-    <section style="margin-top:16px">
-      <h2>Log</h2>
-      <div id="log"></div>
+      <details open id="logDetails">
+        <summary class="h2-summary"><span class="h2-dot"></span>Log</summary>
+        <div id="log" style="margin-top:12px"></div>
+      </details>
     </section>
   </div>
   <div>
@@ -954,6 +1007,25 @@ _PAGE = """<!DOCTYPE html>
     <section style="margin-top:16px">
       <h2>Frames</h2>
       <div id="strip"></div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>Stretch</h2>
+      <div class="sgrid">
+        <label>Black σ</label><input type="range" id="s_black" min="-1" max="4"
+          step="0.05" value="0"><span class="val" id="v_black">0.00</span>
+        <label>GHS b</label><input type="range" id="s_b" min="0" max="20"
+          step="0.1" value="8"><span class="val" id="v_b">8.0</span>
+        <label>GHS sp</label><input type="range" id="s_sp" min="0" max="1"
+          step="0.005" value="0.15"><span class="val" id="v_sp">0.15</span>
+        <label>GHS hp</label><input type="range" id="s_hp" min="0" max="1"
+          step="0.005" value="0.95"><span class="val" id="v_hp">0.95</span>
+      </div>
+      <div class="srow">
+        <button id="applyStretch">Apply to view</button>
+        <button id="resetStretch" class="ghost">Reset</button>
+      </div>
+      <div class="snote" id="snote">Adjusts the currently viewed milestone
+        preview, re-stretched from its retained linear source.</div>
     </section>
     <section style="margin-top:16px" id="summary">
       <h2>Complete</h2>
@@ -1506,6 +1578,12 @@ document.getElementById('aboutBtn').onclick = () => {
 };
 document.querySelectorAll('.modal-close').forEach(btn => {
   btn.onclick = () => closeModal(btn.dataset.close);
+});
+document.querySelectorAll('.modal-toc a').forEach(link => {
+  link.onclick = () => {
+    const target = document.getElementById(link.dataset.goto);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 });
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
   overlay.addEventListener('click', (e) => {
