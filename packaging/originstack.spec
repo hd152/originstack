@@ -46,7 +46,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(ROOT / 'packaging' / 'runtime_hook_stdout.py')],
-    excludes=['cupy', 'tkinter.test', 'matplotlib.tests'],
+    # tkinter: desktop_app.py's dialogs are src/native_dialog.py's ctypes
+    # MessageBoxW wrapper now, not tkinter -- excluding it explicitly saves
+    # ~7-8MB of bundled Tcl/Tk runtime that nothing in this app uses.
+    excludes=['cupy', 'tkinter', 'tkinter.test', 'matplotlib.tests'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

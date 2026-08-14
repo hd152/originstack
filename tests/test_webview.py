@@ -249,6 +249,45 @@ class TestServer(unittest.TestCase):
         self.assertEqual(body['counts']['flat'], 1)
         self.assertEqual(body['counts']['bias'], 0)
 
+    def test_api_frame_count_hierarchical_directory(self):
+        """A folder with no FITS directly in it but subfolders each holding
+        a session (the --combine-sessions / hierarchical-mode layout) must
+        report the pooled totals and a per-session breakdown, not a false
+        'no frames found' -- the exact desktop-app gap reported by a user
+        selecting this kind of folder."""
+        import os
+        import tempfile
+        import urllib.parse
+        from astropy.io import fits
+        with tempfile.TemporaryDirectory() as td:
+            for session, lights in [('night1', 3), ('night2', 2)]:
+                sdir = os.path.join(td, session)
+                os.makedirs(sdir)
+                for i in range(lights):
+                    hdu = fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32))
+                    hdu.writeto(os.path.join(sdir, f'light_{i:03d}.fit'), overwrite=True)
+            body = json.loads(self._get(
+                '/api/frame_count?dir=' + urllib.parse.quote(td)).read())
+        self.assertTrue(body['ok'])
+        self.assertEqual(body['counts']['light'], 5)
+        self.assertIn('sessions', body)
+        names = sorted(s['name'] for s in body['sessions'])
+        self.assertEqual(names, ['night1', 'night2'])
+
+    def test_api_frame_count_empty_subfolders_reports_no_frames(self):
+        """Subfolders that exist but hold no FITS/RAW/etc must still report
+        a plain 'no frames' result, not a hierarchical session list."""
+        import os
+        import tempfile
+        import urllib.parse
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, 'empty_subdir'))
+            body = json.loads(self._get(
+                '/api/frame_count?dir=' + urllib.parse.quote(td)).read())
+        self.assertTrue(body['ok'])
+        self.assertEqual(sum(body['counts'].values()), 0)
+        self.assertEqual(body.get('sessions'), [])
+
     def _post(self, path, body, headers=None, timeout=5):
         hdrs = {'Content-Type': 'application/json'}
         hdrs.update(headers or {})

@@ -25,8 +25,7 @@ from pathlib import Path
 
 
 def _fatal(title: str, message: str) -> int:
-    """Last-resort error surface: log full details, show a native dialog via
-    tkinter (stdlib, works even if pywebview itself is what's broken)."""
+    """Last-resort error surface: log full details, show a native dialog."""
     log_dir = Path(os.environ.get('LOCALAPPDATA', '.')) / 'OriginStack' / 'logs'
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -35,15 +34,8 @@ def _fatal(title: str, message: str) -> int:
             f.write(traceback.format_exc() + '\n')
     except OSError:
         pass
-    try:
-        import tkinter
-        from tkinter import messagebox
-        root = tkinter.Tk()
-        root.withdraw()
-        messagebox.showerror(title, message)
-        root.destroy()
-    except Exception:
-        pass  # tkinter itself failing is the true last resort -- nothing left to try
+    from src.native_dialog import show_error
+    show_error(title, message)
     return 1
 
 
@@ -118,17 +110,12 @@ def main() -> int:
         treats any handler returning False as should_cancel=True)."""
         if not rm.is_running():
             return True
-        try:
-            import tkinter
-            from tkinter import messagebox
-            root = tkinter.Tk()
-            root.withdraw()
-            ok = messagebox.askyesno(
-                "OriginStack", "A stacking run is still in progress. Quit anyway?")
-            root.destroy()
-            return bool(ok)
-        except Exception:
-            return True  # can't ask -- don't trap the user in an unclosable window
+        from src.native_dialog import ask_yes_no
+        # default=True (allow close) -- never trap the user behind a dialog
+        # that failed to show.
+        return ask_yes_no("OriginStack",
+                          "A stacking run is still in progress. Quit anyway?",
+                          default=True)
 
     try:
         window = webview.create_window('OriginStack', url, js_api=Api(),

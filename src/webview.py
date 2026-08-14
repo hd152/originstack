@@ -437,9 +437,29 @@ class WebView:
                         from src.frame_discovery import discover_frames
                         if not directory or not os.path.isdir(directory):
                             raise NotADirectoryError(directory)
-                        frames = discover_frames(directory)
-                        counts = {k: len(v) for k, v in frames.items()}
-                        body = json.dumps({'ok': True, 'counts': counts}).encode('utf-8')
+                        counts = {k: len(v) for k, v in discover_frames(directory).items()}
+                        sessions = None
+                        if sum(counts.values()) == 0:
+                            # No frames directly in this folder -- check for a
+                            # hierarchical layout (one subfolder per session),
+                            # the same structure process_directory's own
+                            # single-folder-vs-hierarchical auto-detection and
+                            # --combine-sessions both work from.
+                            subdirs = sorted(
+                                os.path.join(directory, d) for d in os.listdir(directory)
+                                if os.path.isdir(os.path.join(directory, d)))
+                            sessions = []
+                            for d in subdirs:
+                                sub_counts = {k: len(v) for k, v in discover_frames(d).items()}
+                                if sum(sub_counts.values()) > 0:
+                                    sessions.append({'name': os.path.basename(d),
+                                                     'counts': sub_counts})
+                            for k in counts:
+                                counts[k] = sum(s['counts'].get(k, 0) for s in sessions)
+                        result = {'ok': True, 'counts': counts}
+                        if sessions is not None:
+                            result['sessions'] = sessions
+                        body = json.dumps(result).encode('utf-8')
                         self._send(200, 'application/json', body)
                     except Exception as e:
                         body = json.dumps({'ok': False, 'error': str(e)}).encode('utf-8')
@@ -743,7 +763,7 @@ _PAGE = """<!DOCTYPE html>
         <input type="text" id="f_directory" placeholder="C:\\path\\to\\lights">
         <button id="browseDir" style="visibility:hidden">Browse…</button>
         <span></span>
-        <span id="dirFrameCount" style="grid-column: 2 / 3; font-size: 11px; color: #8b949e;"></span>
+        <span id="dirFrameCount" style="grid-column: 2 / -1; font-size: 11px; color: var(--text-dim);"></span>
         <span></span>
         <label>Output</label>
         <input type="text" id="f_output" placeholder="(default: &lt;directory&gt;_stacked.fits)">
@@ -1108,6 +1128,7 @@ es.onmessage = (ev) => {
 const QUICK_SELECTS = ['preset', 'stack_method', 'denoiser', 'deconvolve_mode'];
 const QUICK_BOOLS = [
   ['auto', 'Auto advisor'],
+  ['combine_sessions', 'Combine sessions'],
   ['trail_reject', 'Trail reject'],
   ['local_normalize', 'Local normalize'],
   ['repair_stars', 'Repair stars'],
@@ -1148,7 +1169,17 @@ async function refreshFrameCount() {
     if (c.dark) parts.push(c.dark + ' dark' + (c.dark === 1 ? '' : 's'));
     if (c.flat) parts.push(c.flat + ' flat' + (c.flat === 1 ? '' : 's'));
     if (c.bias) parts.push(c.bias + ' bias');
-    el.textContent = parts.join(', ') + ' found';
+    // No frames directly in the chosen folder, but subfolders each hold a
+    // session -- same layout --combine-sessions / hierarchical mode expect.
+    if (result.sessions && result.sessions.length) {
+      el.textContent = result.sessions.length + ' session' +
+        (result.sessions.length === 1 ? '' : 's') + ' found (subfolders): ' +
+        parts.join(', ') + ' total. Stacked per-session and combined by ' +
+        'default -- check "Combine sessions" to pool all lights into one ' +
+        'stack instead.';
+    } else {
+      el.textContent = parts.join(', ') + ' found';
+    }
   } catch (e) {
     if (token === frameCountToken) el.textContent = '';
   }
