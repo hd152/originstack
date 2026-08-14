@@ -904,10 +904,15 @@ class TestGpuContext(unittest.TestCase):
         severe VRAM pressure) propagated uncaught straight through all of
         them. Must disable the GPU and degrade to a no-op instead of
         raising."""
-        # module-level `sys.modules.setdefault("cupy", types.ModuleType("cupy"))`
-        # near the top of this file means _gpu_mod.cp is a bare fake module
-        # with no real `.cuda` submodule -- attach one directly rather than
-        # `import cupy.cuda` (which needs a real package, not this stub).
+        # _gpu_mod.cp is whatever `import cupy as cp` resolved to at
+        # gpu_context.py's own first import -- a real cupy package if one
+        # happens to be installed, or plain `None` when it's genuinely
+        # absent (e.g. CI, which only installs requirements.txt, not
+        # requirements-gpu.txt). Either way, patch the module-level `cp`
+        # *name* on _gpu_mod itself to a fresh fake module rather than
+        # mutating an attribute on whatever `cp` currently is -- mutating
+        # fails outright when `cp` is None, and would clobber a real cupy
+        # install's actual `.cuda` submodule otherwise.
         ctx = astro.GpuContext(use_gpu=False)
         ctx.active = True  # pretend GPU is live without needing real CUDA
 
@@ -917,7 +922,9 @@ class TestGpuContext(unittest.TestCase):
         fake_cuda = types.ModuleType("cupy.cuda")
         fake_cuda.Stream = mock.Mock(
             side_effect=_CUDARuntimeError("cudaErrorMemoryAllocation: out of memory"))
-        with mock.patch.object(_gpu_mod.cp, 'cuda', fake_cuda, create=True):
+        fake_cp = types.ModuleType("cupy")
+        fake_cp.cuda = fake_cuda
+        with mock.patch.object(_gpu_mod, 'cp', fake_cp):
             with ctx.stream_context() as stream:
                 self.assertIsNone(stream)  # degraded to no-op, didn't raise
         self.assertFalse(ctx.active, "GPU must be disabled after a stream-creation OOM")
@@ -928,7 +935,9 @@ class TestGpuContext(unittest.TestCase):
 
         fake_cuda = types.ModuleType("cupy.cuda")
         fake_cuda.Stream = mock.Mock(side_effect=ValueError("unrelated"))
-        with mock.patch.object(_gpu_mod.cp, 'cuda', fake_cuda, create=True):
+        fake_cp = types.ModuleType("cupy")
+        fake_cp.cuda = fake_cuda
+        with mock.patch.object(_gpu_mod, 'cp', fake_cp):
             with self.assertRaises(ValueError):
                 with ctx.stream_context():
                     pass
