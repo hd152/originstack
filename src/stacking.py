@@ -263,6 +263,264 @@ def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
     return result
 
 
+def _build_wiener_sharpen_kernel(psf: np.ndarray, halo: int,
+                                 k: float = Config.DRIZZLE_PSF_WIENER_K,
+                                 pad: int = 64) -> np.ndarray:
+    """Build a small deconvolution-flavoured resample kernel from a PSF via
+    a windowed Wiener inverse filter, instead of using the raw PSF shape.
+
+    Using the raw PSF as a resample/interpolation kernel is wrong: convolving
+    an already-PSF-blurred star with the PSF *again* broadens it further
+    (two Gaussians of width sigma combine to sigma*sqrt(2)) -- measured
+    directly (a synthetic sigma=2px star came out sigma=2.7px through the raw
+    PSF, vs sigma=2.0px through Lanczos-3), not just a theoretical concern.
+    The frequency-domain Wiener inverse filter ``conj(H)/(|H|^2 + k)``
+    (``H`` = PSF's OTF) is the standard regularized approach to (partially)
+    undo a known blur; ``k`` controls the aggressiveness/noise tradeoff
+    (smaller = sharper but more prone to ringing/noise amplification). The
+    inverse filter has unbounded spatial support in principle, so it's
+    cropped to the small ``halo`` resample radius and Hann-windowed to tame
+    the truncation ringing that a hard crop alone introduces.
+    """
+    ps = psf.shape[0]
+    center_pad = pad // 2
+    big = np.zeros((pad, pad))
+    half = ps // 2
+    big[center_pad - half:center_pad - half + ps,
+        center_pad - half:center_pad - half + ps] = psf
+    big = np.fft.ifftshift(big)
+    H_otf = np.fft.fft2(big)
+    W_otf = np.conj(H_otf) / (np.abs(H_otf) ** 2 + k)
+    w_spatial = np.fft.fftshift(np.fft.ifft2(W_otf).real)
+
+    taps = 2 * halo + 1
+    lo = center_pad - halo
+    kernel = w_spatial[lo:lo + taps, lo:lo + taps].copy()
+    win1d = np.hanning(taps + 2)[1:-1]  # zero only just past the edge, not at tap 0/taps-1
+    kernel *= np.outer(win1d, win1d)
+    total = kernel.sum()
+    if abs(total) > 1e-9:
+        kernel /= total
+    return kernel
+
+
+def build_drizzle_psf_table(psf: np.ndarray, halo: Optional[int] = None,
+                            phases: int = Config.DRIZZLE_PSF_PHASES,
+                            wiener_k: float = Config.DRIZZLE_PSF_WIENER_K) -> Tuple[np.ndarray, int]:
+    """Build a subpixel tap-weight table for ``--drizzle-kernel psf`` from an
+    estimated PSF kernel (``src.psf_deconvolution.estimate_psf``'s output).
+
+    The table is built from a Wiener-regularized inverse filter of the PSF
+    (``_build_wiener_sharpen_kernel``), not the raw PSF shape -- see that
+    function's docstring for why. For each of ``phases x phases`` subpixel
+    offsets, bilinearly resamples the small sharpening kernel at that shift
+    (``scipy.ndimage.map_coordinates``) and renormalizes the tap set to sum
+    to 1, matching ``warp_affine_kernel_table``'s expected flat
+    ``(phases, phases, taps, taps)`` layout.
+
+    Returns ``(flat_table, halo)``.
+    """
+    if halo is None:
+        halo = Config.DRIZZLE_PSF_KERNEL_SIZE // 2
+    taps = 2 * halo + 1
+    psf = np.asarray(psf, dtype=np.float64)
+    cropped = _build_wiener_sharpen_kernel(psf, halo, k=wiener_k)
+
+    table = np.zeros((phases, phases, taps, taps), dtype=np.float64)
+    tap_idx = np.arange(taps, dtype=np.float64)
+    for py in range(phases):
+        gy = tap_idx - py / phases
+        for px in range(phases):
+            gx = tap_idx - px / phases
+            grid_y, grid_x = np.meshgrid(gy, gx, indexing='ij')
+            tap = ndimage.map_coordinates(cropped, [grid_y, grid_x], order=1,
+                                          mode='constant', cval=0.0)
+            tsum = tap.sum()
+            table[py, px] = tap / tsum if tsum > 1e-12 else tap
+    return table.ravel(), halo
+
+
+def _warp_affine_kernel_table_numpy(data: np.ndarray, mat, off, out_h: int, out_w: int,
+                                    table: np.ndarray, halo: int, phases: int,
+                                    cval: float = 0.0) -> np.ndarray:
+    """Numpy mirror of the native ``warp_affine_kernel_table`` Rust kernel --
+    per-tap loop vectorised over the whole output image (same pattern as this
+    file's other native-kernel numpy fallbacks, e.g. the bilateral filter's).
+    Boundary convention matches the Rust kernel exactly: out-of-range taps
+    are skipped (not renormalised); ``cval`` only where no in-bounds tap in
+    the window had nonzero weight.
+    """
+    H, W, C = data.shape
+    taps = 2 * halo + 1
+    tab = np.asarray(table, dtype=np.float64).reshape(phases, phases, taps, taps)
+    m00, m01, m10, m11 = mat
+    o0, o1 = off
+
+    oy, ox = np.meshgrid(np.arange(out_h, dtype=np.float64),
+                         np.arange(out_w, dtype=np.float64), indexing='ij')
+    iy = m00 * oy + m01 * ox + o0
+    ix = m10 * oy + m11 * ox + o1
+    fy, fx = np.floor(iy), np.floor(ix)
+    phase_y = np.clip(((iy - fy) * phases).astype(np.int64), 0, phases - 1)
+    phase_x = np.clip(((ix - fx) * phases).astype(np.int64), 0, phases - 1)
+    base_y = (fy - halo).astype(np.int64)
+    base_x = (fx - halo).astype(np.int64)
+
+    acc = np.zeros((out_h, out_w, C), dtype=np.float64)
+    any_valid = np.zeros((out_h, out_w), dtype=bool)
+    data64 = data.astype(np.float64, copy=False)
+    for ty in range(taps):
+        yy = base_y + ty
+        valid_y = (yy >= 0) & (yy < H)
+        yy_c = np.clip(yy, 0, H - 1)
+        for tx in range(taps):
+            xx = base_x + tx
+            valid = valid_y & (xx >= 0) & (xx < W)
+            xx_c = np.clip(xx, 0, W - 1)
+            w = tab[phase_y, phase_x, ty, tx]
+            any_valid |= valid & (w != 0.0)
+            wv = np.where(valid, w, 0.0)
+            acc += wv[..., np.newaxis] * data64[yy_c, xx_c, :]
+
+    out = np.where(any_valid[..., np.newaxis], acc, cval)
+    return out.astype(np.float32)
+
+
+def warp_affine_psf(data: np.ndarray, mat, off, out_h: int, out_w: int,
+                    table: np.ndarray, halo: int, phases: int,
+                    cval: float = 0.0) -> np.ndarray:
+    """Dispatch to the native ``warp_affine_kernel_table`` kernel, falling
+    back to the numpy mirror on any failure (module absent, bad input)."""
+    if HAS_NATIVE:
+        try:
+            return np.asarray(_native.warp_affine_kernel_table(
+                np.ascontiguousarray(data, dtype=np.float32),
+                [float(mat[0]), float(mat[1]), float(mat[2]), float(mat[3])],
+                [float(off[0]), float(off[1])],
+                int(out_h), int(out_w),
+                np.ascontiguousarray(table, dtype=np.float64),
+                int(halo), int(phases), float(cval)))
+        except Exception:
+            _log.debug("native warp_affine_kernel_table failed; using numpy", exc_info=True)
+    return _warp_affine_kernel_table_numpy(data, mat, off, out_h, out_w, table, halo, phases, cval)
+
+
+def _drizzle_matrix(transform_j: Optional[Any], shift_j: Optional[Tuple[float, float]],
+                    top: float, left: float, inv_scale: float) -> Tuple[np.ndarray, np.ndarray]:
+    """The affine (matrix, offset) drizzle uses to resample one frame:
+    ``output[o] = raw[M @ o + off]`` for a drizzle-grid output coordinate
+    ``o`` (scipy ``affine_transform``'s convention). Shared by the drizzle
+    resample loop and ``iterative_back_projection`` (which also needs the
+    *inverse* of this same mapping) -- extracted so both stay exactly in
+    sync, no risk of the two independently-derived versions drifting apart.
+    """
+    crop_offset = np.array([float(top), float(left)])
+    if transform_j is not None:
+        R = transform_j.params[:2, :2]
+        t_xy = transform_j.params[:2, 2]
+        t_rowcol = np.array([t_xy[1], t_xy[0]])
+        align_offset = -R @ t_rowcol
+        M = R * inv_scale
+        off = R @ crop_offset + align_offset
+    else:
+        sy, sx = shift_j if shift_j is not None else (0.0, 0.0)
+        M = np.array([[inv_scale, 0.0], [0.0, inv_scale]])
+        off = crop_offset - np.array([sy, sx])
+    return M, off
+
+
+def iterative_back_projection(stacked: np.ndarray, mem_rgb: np.ndarray,
+                              final_indices: List[int],
+                              shifts: List[Tuple[float, float]],
+                              transforms: List[Optional[Any]],
+                              weights: Optional[np.ndarray],
+                              top: float, left: float, drizzle_scale: float,
+                              psf: np.ndarray, H: int, W: int, C: int,
+                              iters: int = 5, relax: float = 0.5,
+                              verbose: bool = False) -> np.ndarray:
+    """Refine a drizzle output via iterative back-projection (Irani & Peleg
+    1991): forward-simulate what each original frame *should* look like
+    given the current super-res estimate, compare to what was actually
+    observed, and back-project the residual to correct the estimate.
+
+    Reuses ``_drizzle_matrix`` for the exact same per-frame affine mapping
+    drizzle itself used, so the forward-simulate step is a literal inverse of
+    the resample that built ``stacked`` in the first place -- not an
+    independently-derived approximation of it. PSF blur (``scipy.signal.
+    fftconvolve``, same primitive ``psf_deconvolution.py`` uses for
+    Richardson-Lucy) is applied identically in both directions since the
+    estimated PSF (Moffat/Gaussian) is radially symmetric, so no separate
+    transpose kernel is needed.
+
+    Not a replacement for drizzle -- refines its output in place, starting
+    from it as the initial estimate.
+    """
+    from scipy.signal import fftconvolve
+
+    inv_scale = 1.0 / drizzle_scale
+    out_h, out_w = stacked.shape[:2]
+    n_final = len(final_indices)
+    estimate = stacked.astype(np.float64).copy()
+    n_workers = min(os.cpu_count() or 4, n_final)
+    acc_lock = threading.Lock()
+
+    for it in range(iters):
+        accum = np.zeros((out_h, out_w, C), dtype=np.float64)
+        weight_accum = np.zeros((out_h, out_w), dtype=np.float64)
+
+        def _backproject_one(j: int) -> None:
+            M, off = _drizzle_matrix(transforms[j], shifts[j], top, left, inv_scale)
+            w = float(weights[j]) if weights is not None else 1.0
+
+            # Forward-simulate: current estimate (drizzle grid) -> frame j's
+            # raw geometry, via the exact inverse of drizzle's own mapping.
+            # Reads `estimate` only (fixed for the whole iteration) -- safe
+            # to run across frames concurrently.
+            M_inv = np.linalg.inv(M)
+            off_inv = -M_inv @ off
+            sim = np.empty((H, W, C), dtype=np.float64)
+            for c in range(C):
+                sim[:, :, c] = ndimage.affine_transform(
+                    estimate[:, :, c], M_inv, offset=off_inv,
+                    output_shape=(H, W), order=3, mode='constant', cval=0.0)
+                sim[:, :, c] = fftconvolve(sim[:, :, c], psf, mode='same')
+
+            raw = np.asarray(mem_rgb[final_indices[j]], dtype=np.float64)
+            residual = raw - sim
+
+            # Back-project: blur the residual, then warp it forward into the
+            # drizzle grid using drizzle's own (raw -> drizzle-grid) mapping.
+            back = np.empty((out_h, out_w, C), dtype=np.float64)
+            coverage = ndimage.affine_transform(
+                np.ones((H, W), dtype=np.float64), M, offset=off,
+                output_shape=(out_h, out_w), order=1, mode='constant', cval=0.0)
+            for c in range(C):
+                blurred = fftconvolve(residual[:, :, c], psf, mode='same')
+                back[:, :, c] = ndimage.affine_transform(
+                    blurred, M, offset=off, output_shape=(out_h, out_w),
+                    order=3, mode='constant', cval=0.0)
+
+            # accum/weight_accum are shared across frames -- same acc_lock +
+            # np.add(..., out=...) pattern _drizzle_one uses for its
+            # accumulator (in-place, not `+=`: `+=` inside a closure rebinds
+            # the name as a new local instead of mutating the outer one).
+            with acc_lock:
+                np.add(accum, back * w, out=accum)
+                np.add(weight_accum, coverage * w, out=weight_accum)
+
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            list(executor.map(_backproject_one, range(n_final)))
+
+        safe_w = np.where(weight_accum > 1e-6, weight_accum, 1.0)
+        update = accum / safe_w[..., np.newaxis]
+        estimate += relax * update
+        if verbose:
+            safe_print(f"    IBP iter {it + 1}/{iters}: "
+                      f"mean|update|={float(np.mean(np.abs(update))):.4f}")
+
+    return estimate.astype(np.float32)
+
+
 def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, float]],
                     scale: float = 1.0, weights: Optional[np.ndarray] = None,
                     drop_size: float = 0.7, pixfrac: float = 1.0) -> np.ndarray:
@@ -1530,6 +1788,126 @@ def patch_weighted_mean_combine(
     return result
 
 
+def _sigma_clip_subband(data: np.ndarray, sigma: float, max_iters: int,
+                        weights: Optional[np.ndarray], use_mad: bool) -> np.ndarray:
+    """Sigma-clip combine one wavelet subband's (N, sh, sw, 1) coefficient
+    stack. Calls the native kernel directly (bypassing ``sigma_clip_combine``'s
+    per-call ``[rust] ...`` status print, which would otherwise fire once per
+    subband -- tens of times per channel); falls back to the full
+    ``sigma_clip_combine`` (numpy path included) on any native failure.
+    """
+    if _native_usable(data):
+        w32 = weights.astype(np.float32, copy=False) if weights is not None else None
+        try:
+            return np.asarray(_native.sigma_clip_combine(
+                data, float(sigma), int(max_iters), w32, False, bool(use_mad)))
+        except Exception as exc:
+            _log.debug("native sigma_clip_combine (subband) failed (%s); using numpy", exc)
+    return sigma_clip_combine(data, sigma=sigma, max_iters=max_iters,
+                              weights=weights, winsorize=False, use_mad=use_mad)
+
+
+def wavelet_combine(mem_aligned: np.ndarray, levels: int = 4, sigma: float = 3.0,
+                    max_iters: int = 3, weights: Optional[np.ndarray] = None,
+                    use_mad: bool = True, verbose: bool = False) -> np.ndarray:
+    """Combine an aligned ``(N, H, W, C)`` stack in the wavelet domain instead
+    of pixel space: decompose every frame, sigma-clip-combine each subband's
+    coefficients *across frames* (reusing the native ``sigma_clip_combine``
+    kernel -- it doesn't care whether its input is pixel values or wavelet
+    coefficients), then reconstruct.
+
+    Preserves faint fine-scale structure (nebula filaments) that a
+    pixel-domain outlier test can shave off at an aggressive threshold, while
+    genuine outliers (cosmic rays, satellite trails) still show up as strong,
+    rejectable coefficient spikes at the appropriate subband/position.
+
+    Real cost: decomposes every one of the N frames individually (N wavelet
+    transforms per channel, vs. a single transform on the final stack the way
+    ``--denoiser wavelet`` post-processing does it) -- slower than the
+    pixel-domain combine methods; not a v1 drop-in replacement for them.
+    """
+    from src import wavelet
+
+    n, h, w, c = mem_aligned.shape
+    result = np.zeros((h, w, c), dtype=np.float32)
+
+    for ch in range(c):
+        if verbose:
+            safe_print(f"  Wavelet combine: channel {ch + 1}/{c}, decomposing {n} frames...")
+
+        # Probe frame 0 to learn this channel's subband structure/shapes
+        # (coarsest cA, then (cH,cV,cD) coarsest -> finest -- see
+        # wavelet.wavedec2's docstring for the exact ordering; this function
+        # only needs internal consistency between the fill and reassembly
+        # loops below, not the absolute level numbering).
+        probe = wavelet.wavedec2(np.asarray(mem_aligned[0, :, :, ch], dtype=np.float64), levels)
+        subband_shapes = [('A', -1, probe[0].shape)]
+        for lvl_idx, detail in enumerate(probe[1:]):
+            for name, arr in zip(('H', 'V', 'D'), detail):
+                subband_shapes.append((name, lvl_idx, arr.shape))
+
+        mmap_paths = []
+        mmaps: Dict[Tuple[str, int], np.memmap] = {}
+        try:
+            for name, lvl_idx, shp in subband_shapes:
+                path = os.path.join(tempfile.gettempdir(),
+                                    f'wavelet_combine_{os.getpid()}_{ch}_{name}_{lvl_idx}.dat')
+                mmap_paths.append(path)
+                mmaps[(name, lvl_idx)] = np.memmap(path, dtype='float32', mode='w+',
+                                                   shape=(n, shp[0], shp[1]))
+
+            # Decompose every frame once; scatter each subband's coefficients
+            # into its (N, sh, sw) memmap column. Each thread writes only its
+            # own frame index i across all subband memmaps -- disjoint writes,
+            # no lock needed, same reasoning as the drizzle/alignment loops
+            # elsewhere in this file.
+            def _decompose_one(i: int) -> None:
+                plane = np.asarray(mem_aligned[i, :, :, ch], dtype=np.float64)
+                coeffs = wavelet.wavedec2(plane, levels)
+                mmaps[('A', -1)][i] = coeffs[0]
+                for lvl_idx, detail in enumerate(coeffs[1:]):
+                    for name, arr in zip(('H', 'V', 'D'), detail):
+                        mmaps[(name, lvl_idx)][i] = arr
+
+            n_decompose_workers = min(os.cpu_count() or 4, n)
+            with ThreadPoolExecutor(max_workers=n_decompose_workers) as executor:
+                list(executor.map(_decompose_one, range(n)))
+
+            # Sigma-clip-combine each subband across frames (native kernel,
+            # reused as-is -- a wavelet coefficient array is just another
+            # (N, sh, sw, 1) stack to it). Independent per subband -- each
+            # worker owns a distinct dict key, combined[] assembled back on
+            # the main thread from the (key, array) results.
+            def _combine_one(key: Tuple[str, int]) -> Tuple[Tuple[str, int], np.ndarray]:
+                mm = mmaps[key]
+                data32 = np.ascontiguousarray(mm[:], dtype=np.float32)[..., np.newaxis]
+                comb = _sigma_clip_subband(data32, sigma, max_iters, weights, use_mad)
+                return key, np.asarray(comb)[..., 0].astype(np.float64)
+
+            combined: Dict[Tuple[str, int], np.ndarray] = {}
+            n_combine_workers = min(os.cpu_count() or 4, len(mmaps))
+            with ThreadPoolExecutor(max_workers=n_combine_workers) as executor:
+                for key, arr in executor.map(_combine_one, list(mmaps.keys())):
+                    combined[key] = arr
+
+            new_coeffs: wavelet.Coeffs2D = [combined[('A', -1)]]
+            for lvl_idx in range(levels):
+                new_coeffs.append((combined[('H', lvl_idx)],
+                                   combined[('V', lvl_idx)],
+                                   combined[('D', lvl_idx)]))
+            recon = wavelet.waverec2(new_coeffs)[:h, :w]
+            result[:, :, ch] = recon.astype(np.float32)
+        finally:
+            mmaps.clear()
+            for path in mmap_paths:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+    return result
+
+
 def run_stacking_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -1543,11 +1921,21 @@ def run_stacking_phase(
     stats: ProcessingStats,
     quality_maps: Optional[List[np.ndarray]] = None,
     displacement_fields: Optional[List[Optional[np.ndarray]]] = None,
+    psf_kernel_table: Optional[Tuple[np.ndarray, int, int]] = None,
+    psf: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
     """Align and combine frames into a stacked image.
 
     Returns (stacked, fits_stacked, top, bottom, left, right).
     fits_stacked is the pre-post-processing copy saved in the FITS file.
+
+    ``psf_kernel_table``: optional ``(flat_table, halo, phases)`` from
+    ``build_drizzle_psf_table``, used by drizzle (``drizzle_scale > 1``) when
+    ``args.drizzle_kernel == 'psf'``. ``None`` (default, or PSF estimation
+    failed upstream) keeps the standard Lanczos-3 drizzle kernel.
+
+    ``psf``: the raw estimated PSF array (not the tap table), used by
+    ``iterative_back_projection`` when ``args.super_res_iters > 0``.
     """
     from src.registration import apply_transform, calc_common_crop, sample_displacement_field
 
@@ -1608,7 +1996,13 @@ def run_stacking_phase(
     use_aligned_memmap = (drizzle_scale <= 1.0 and
                           args.stack_method in ('median', 'sigma_clip', 'winsorized',
                                                 'percentile', 'esd', 'trimmed_mean',
-                                                'linear_fit', 'ivw'))
+                                                'linear_fit', 'ivw', 'wavelet'))
+    if args.stack_method == 'wavelet' and drizzle_scale > 1.0:
+        safe_print("  WARNING: --stack-method wavelet is not compatible with "
+                   "--drizzle-scale > 1 (v1 limitation -- wavelet combine needs the "
+                   "batch aligned-stack array drizzle's per-frame resample path "
+                   "doesn't build); falling back to sigma_clip for this run.")
+        args.stack_method = 'sigma_clip'
     if use_aligned_memmap:
         mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
         crop_h, crop_w = bottom - top, right - left
@@ -1785,6 +2179,14 @@ def run_stacking_phase(
                   f"{f' (gain={gain} e-/ADU, +shot noise)' if gain is not None else ' (per-frame noise only)'}")
             stacked = ivw_combine(mem_aligned, noise=noise_arr, sky=sky_arr, gain=gain,
                                  weights=weights, verbose=args.verbose)
+        elif args.stack_method == 'wavelet':
+            wv_levels = getattr(args, 'wavelet_combine_levels', 4)
+            use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
+            print(f"  Wavelet-domain combine: levels={wv_levels}, sigma={args.rejection_sigma}, "
+                  f"iters={args.rejection_iters}, estimator={'MAD' if use_mad else 'std'}")
+            stacked = wavelet_combine(mem_aligned, levels=wv_levels, sigma=args.rejection_sigma,
+                                     max_iters=args.rejection_iters, weights=weights,
+                                     use_mad=use_mad, verbose=args.verbose)
         else:
             stacked = median_combine(mem_aligned, verbose=args.verbose)
 
@@ -1805,7 +2207,14 @@ def run_stacking_phase(
             if use_pixfrac:
                 msg += f", pixfrac={pixfrac:.2f}"
             print(msg)
-            if HAS_NATIVE:
+            if psf_kernel_table is not None:
+                _psf_halo = psf_kernel_table[1]
+                print(f"    [rust] PSF-matched warp (drizzle resample, "
+                      f"{2 * _psf_halo + 1}x{2 * _psf_halo + 1} taps)"
+                      if HAS_NATIVE else
+                      f"    PSF-matched warp (numpy, drizzle resample, "
+                      f"{2 * _psf_halo + 1}x{2 * _psf_halo + 1} taps)")
+            elif HAS_NATIVE:
                 print("    [rust] Lanczos-3 warp (drizzle resample)")
             acc = np.zeros((out_h, out_w, C), dtype=np.float64)
             gpu = get_gpu()
@@ -1855,22 +2264,7 @@ def run_stacking_phase(
                 lf = (displacement_fields[j]
                       if use_elastic and j < len(displacement_fields) else None)
 
-                crop_offset = np.array([float(top), float(left)])
-
-                if transform_j is not None:
-                    R = transform_j.params[:2, :2]
-                    t_xy = transform_j.params[:2, 2]
-                    t_rowcol = np.array([t_xy[1], t_xy[0]])
-                    align_offset = -R @ t_rowcol
-                    # Compose: M = R * inv_scale, off = R @ crop_offset + align_offset
-                    M = R * inv_scale
-                    off = R @ crop_offset + align_offset
-                else:
-                    sy, sx = shift_j if shift_j is not None else (0.0, 0.0)
-                    # shift case: raw = aligned - shift
-                    # M = I * inv_scale, off = crop_offset - shift
-                    M = np.array([[inv_scale, 0.0], [0.0, inv_scale]])
-                    off = crop_offset - np.array([sy, sx])
+                M, off = _drizzle_matrix(transform_j, shift_j, top, left, inv_scale)
 
                 raw_y = raw_x = None
                 if lf is not None:
@@ -1893,6 +2287,15 @@ def run_stacking_phase(
                         resampled[:, :, c] = ndimage.map_coordinates(
                             rgb[:, :, c], [raw_y, raw_x], order=spline_order,
                             mode='constant', cval=0.0)
+                elif psf_kernel_table is not None:
+                    # Matched-filter drizzle kernel (--drizzle-kernel psf):
+                    # not separable like Lanczos, so always the full 2D
+                    # tap-table path (native, with a numpy fallback).
+                    psf_table, psf_halo, psf_phases = psf_kernel_table
+                    resampled = warp_affine_psf(
+                        rgb, [M[0, 0], M[0, 1], M[1, 0], M[1, 1]],
+                        [off[0], off[1]], out_h, out_w,
+                        psf_table, psf_halo, psf_phases, 0.0)
                 else:
                     resampled = None
                     if HAS_NATIVE:
@@ -1978,6 +2381,25 @@ def run_stacking_phase(
                 stacked = (acc / safe_weight).astype(np.float32)
             else:
                 stacked = (acc / max(total_weight_ref[0], 1e-12)).astype(np.float32)
+
+            ibp_iters = int(getattr(args, 'super_res_iters', 0) or 0)
+            if ibp_iters > 0:
+                if psf is None:
+                    safe_print("  WARNING: --super-res-iters requires a PSF estimate "
+                               "(same as --drizzle-kernel psf) which failed upstream -- "
+                               "skipping iterative back-projection")
+                elif use_elastic:
+                    safe_print("  WARNING: --super-res-iters is not compatible with "
+                               "--elastic-registration yet (IBP's forward model doesn't "
+                               "account for the local displacement field) -- skipping")
+                else:
+                    ibp_relax = getattr(args, 'ibp_relax', Config.IBP_RELAX)
+                    safe_print(f"  Iterative back-projection: {ibp_iters} iterations "
+                              f"(relax={ibp_relax})")
+                    stacked = iterative_back_projection(
+                        stacked, mem_rgb, final_indices, shifts, transforms, weights,
+                        top, left, drizzle_scale, psf, H, W, C,
+                        iters=ibp_iters, relax=ibp_relax, verbose=args.verbose)
 
         else:
             acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)

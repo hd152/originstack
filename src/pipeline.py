@@ -677,11 +677,52 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
             quality_maps = dither_info.pop('quality_maps', None)
             displacement_fields = dither_info.pop('displacement_fields', None)
+
+            psf_kernel_table = None
+            psf_estimate = None
+            drizzle_scale_val = getattr(args, 'drizzle_scale', 1.0)
+            want_psf_kernel = (getattr(args, 'drizzle_kernel', 'lanczos3') == 'psf'
+                               and drizzle_scale_val > 1.0)
+            want_ibp = (int(getattr(args, 'super_res_iters', 0) or 0) > 0
+                       and drizzle_scale_val > 1.0)
+            if want_psf_kernel or want_ibp:
+                try:
+                    from src.psf_deconvolution import estimate_psf
+                    from src.stacking import build_drizzle_psf_table
+                    from src.models import Config as _Config
+                    star_positions = best.metrics.get('_star_sources') if best.metrics else None
+                    psf_estimate, psf_fwhm = estimate_psf(ref_lum, star_positions)
+                    if psf_estimate is not None:
+                        safe_print(f"  PSF estimate: FWHM={psf_fwhm:.2f}px "
+                                   f"(used by{' --drizzle-kernel psf' if want_psf_kernel else ''}"
+                                   f"{' and' if want_psf_kernel and want_ibp else ''}"
+                                   f"{' --super-res-iters' if want_ibp else ''})")
+                        if want_psf_kernel:
+                            wiener_k = getattr(args, 'drizzle_psf_wiener_k',
+                                               _Config.DRIZZLE_PSF_WIENER_K)
+                            psf_table, psf_halo = build_drizzle_psf_table(
+                                psf_estimate, wiener_k=wiener_k)
+                            psf_kernel_table = (psf_table, psf_halo, _Config.DRIZZLE_PSF_PHASES)
+                            safe_print(f"    drizzle kernel: {2 * psf_halo + 1}x{2 * psf_halo + 1} "
+                                      f"taps, wiener_k={wiener_k:.3f}")
+                    else:
+                        safe_print("  PSF estimation failed (too few reference stars) -- "
+                                   f"{'--drizzle-kernel psf falls back to lanczos3' if want_psf_kernel else ''}"
+                                   f"{'; ' if want_psf_kernel and want_ibp else ''}"
+                                   f"{'--super-res-iters skipped' if want_ibp else ''}")
+                except Exception as exc:
+                    safe_print(f"  PSF estimation failed ({exc}) -- "
+                               f"{'--drizzle-kernel psf falls back to lanczos3' if want_psf_kernel else ''}"
+                               f"{'; ' if want_psf_kernel and want_ibp else ''}"
+                               f"{'--super-res-iters skipped' if want_ibp else ''}")
+
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
                 shifts, transforms, H, W, C, args, stats,
                 quality_maps=quality_maps,
-                displacement_fields=displacement_fields)
+                displacement_fields=displacement_fields,
+                psf_kernel_table=psf_kernel_table,
+                psf=psf_estimate)
 
             stats.stacking_time = time.time() - phase_start
 

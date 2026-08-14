@@ -2282,6 +2282,141 @@ fn warp_affine_lanczos3<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((out_h, out_w, c), out).unwrap().into_pyarray(py))
 }
 
+/// Affine warp with an arbitrary precomputed tap-weight table instead of the
+/// fixed Lanczos-3 formula (`warp_affine_lanczos3` above, left untouched) --
+/// lets drizzle resample with a frame's own estimated PSF as a matched
+/// filter (`--drizzle-kernel psf`). The table is not assumed separable (a
+/// general Moffat/Gaussian PSF isn't X/Y-separable like Lanczos), so there
+/// is no fast-path branch: every output pixel gathers the full
+/// `(2*halo+1)^2` neighbourhood. `table` is a flat
+/// `phases*phases*taps*taps` array (`taps = 2*halo+1`), row-major over
+/// `[phase_y, phase_x, tap_y, tap_x]`, built in Python by resampling the
+/// discrete PSF kernel at `phases` subpixel offsets per axis (each phase's
+/// taps already normalised to sum to 1). Same boundary convention as
+/// `warp_affine_lanczos3`: out-of-range taps are skipped (not renormalised);
+/// `cval` is only used where *no* tap in the window was in-bounds.
+#[pyfunction]
+#[pyo3(signature = (data, mat, off, out_h, out_w, table, halo, phases, cval=0.0))]
+fn warp_affine_kernel_table<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    mat: [f64; 4],
+    off: [f64; 2],
+    out_h: usize,
+    out_w: usize,
+    table: PyReadonlyArray1<'py, f64>,
+    halo: usize,
+    phases: usize,
+    cval: f32,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
+    let (o0, o1) = (off[0], off[1]);
+    let taps = 2 * halo + 1;
+    let tab = table.as_slice()?;
+    if tab.len() != phases * phases * taps * taps {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "table length must be phases*phases*taps*taps",
+        ));
+    }
+    let flat: Option<&[f32]> = arr.as_slice();
+    let phases_f = phases as f64;
+
+    let mut out = vec![0f32; out_h * out_w * c];
+    py.allow_threads(|| {
+        out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy, out_row)| {
+            for ox in 0..out_w {
+                let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
+                let ix = m10 * oy as f64 + m11 * ox as f64 + o1;
+                let fy = iy.floor();
+                let fx = ix.floor();
+                let phase_y = (((iy - fy) * phases_f) as usize).min(phases - 1);
+                let phase_x = (((ix - fx) * phases_f) as usize).min(phases - 1);
+                let weights = &tab[(phase_y * phases + phase_x) * taps * taps
+                    ..(phase_y * phases + phase_x + 1) * taps * taps];
+                let base_y = fy as isize - halo as isize;
+                let base_x = fx as isize - halo as isize;
+                let interior = base_y >= 0
+                    && base_y + taps as isize <= h as isize
+                    && base_x >= 0
+                    && base_x + taps as isize <= w as isize;
+
+                if let Some(img) = flat {
+                    let row_stride = w * c;
+                    if interior {
+                        let by = base_y as usize;
+                        let bx = base_x as usize;
+                        for ch in 0..c {
+                            let mut acc = 0.0f64;
+                            for ty in 0..taps {
+                                let row_base = (by + ty) * row_stride + bx * c + ch;
+                                for tx in 0..taps {
+                                    acc += weights[ty * taps + tx]
+                                        * img[row_base + tx * c] as f64;
+                                }
+                            }
+                            out_row[ox * c + ch] = acc as f32;
+                        }
+                    } else {
+                        for ch in 0..c {
+                            let mut acc = 0.0f64;
+                            let mut any = false;
+                            for ty in 0..taps {
+                                let yy = base_y + ty as isize;
+                                if yy < 0 || yy >= h as isize {
+                                    continue;
+                                }
+                                for tx in 0..taps {
+                                    let xx = base_x + tx as isize;
+                                    if xx < 0 || xx >= w as isize {
+                                        continue;
+                                    }
+                                    let wgt = weights[ty * taps + tx];
+                                    if wgt == 0.0 {
+                                        continue;
+                                    }
+                                    acc += wgt
+                                        * img[yy as usize * row_stride + xx as usize * c + ch]
+                                            as f64;
+                                    any = true;
+                                }
+                            }
+                            out_row[ox * c + ch] = if any { acc as f32 } else { cval };
+                        }
+                    }
+                } else {
+                    for ch in 0..c {
+                        let mut acc = 0.0f64;
+                        let mut any = false;
+                        for ty in 0..taps {
+                            let yy = base_y + ty as isize;
+                            if yy < 0 || yy >= h as isize {
+                                continue;
+                            }
+                            for tx in 0..taps {
+                                let xx = base_x + tx as isize;
+                                if xx < 0 || xx >= w as isize {
+                                    continue;
+                                }
+                                let wgt = weights[ty * taps + tx];
+                                if wgt == 0.0 {
+                                    continue;
+                                }
+                                acc += wgt * arr[[yy as usize, xx as usize, ch]] as f64;
+                                any = true;
+                            }
+                        }
+                        out_row[ox * c + ch] = if any { acc as f32 } else { cval };
+                    }
+                }
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((out_h, out_w, c), out).unwrap().into_pyarray(py))
+}
+
 /// Perona-Malik anisotropic diffusion, `iterations` Jacobi steps with a
 /// periodic (np.roll) boundary. Matches the numpy reference; returns the
 /// diffused float64 image (H,W,C) BEFORE the Python-side star-mask blend/clip.
@@ -4450,6 +4585,114 @@ fn bilateral_filter<'py>(
     Ok(arr3.into_pyarray(py))
 }
 
+/// Gram matrix `D @ D.T` for a wide `(N, P)` matrix (N small, P huge -- the
+/// robust-PCA calibration-stack shape: N frames, P = flattened pixels).
+/// Parallel over the `N*(N+1)/2` upper-triangle `(i,j)` pairs (rayon), each a
+/// length-P dot product. Lower triangle mirrored from the upper (symmetric
+/// by construction).
+///
+/// This exists because `D @ D.T` (thin-SVD-via-Gram-matrix, i.e. eigh on the
+/// small N x N Gram matrix instead of SVD-ing the full N x P matrix) is
+/// ~2.3x faster than calling `np.linalg.svd` directly on a wide matrix in
+/// the first place -- and on measurement, numpy's own `@` for this exact
+/// shape got zero benefit from this machine's 16 cores (8.1s with default
+/// threading vs 8.9s forced single-threaded), leaving real headroom for a
+/// rayon-parallel version.
+#[pyfunction]
+fn gram_matrix_wide<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let arr = data.as_array();
+    let shape = arr.shape();
+    let (n, p) = (shape[0], shape[1]);
+    let flat: Option<&[f64]> = arr.as_slice();
+    let flat = flat.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("data must be C-contiguous")
+    })?;
+
+    let pairs: Vec<(usize, usize)> =
+        (0..n).flat_map(|i| (i..n).map(move |j| (i, j))).collect();
+
+    let mut out = vec![0f64; n * n];
+    py.allow_threads(|| {
+        let results: Vec<((usize, usize), f64)> = pairs
+            .par_iter()
+            .map(|&(i, j)| {
+                let row_i = &flat[i * p..(i + 1) * p];
+                let row_j = &flat[j * p..(j + 1) * p];
+                let dot = row_i.iter().zip(row_j.iter()).fold(0.0f64, |acc, (&a, &b)| {
+                    acc + a * b
+                });
+                ((i, j), dot)
+            })
+            .collect();
+        for ((i, j), dot) in results {
+            out[i * n + j] = dot;
+            out[j * n + i] = dot;
+        }
+    });
+
+    let arr2 = numpy::ndarray::Array2::from_shape_vec((n, n), out)
+        .expect("shape mismatch building gram_matrix_wide output");
+    Ok(arr2.into_pyarray(py))
+}
+
+/// `small @ data` for a small `(N, N)` left operand and a wide `(N, P)`
+/// right operand -- the `U.T @ D` back-projection step of the Gram-matrix
+/// thin-SVD trick (`gram_matrix_wide` above computes the other GEMM in that
+/// same trick). Parallel over the N output rows; each row is a
+/// length-N-term linear combination of `data`'s N rows.
+#[pyfunction]
+fn small_times_wide<'py>(
+    py: Python<'py>,
+    small: PyReadonlyArray2<'py, f64>,
+    data: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let small_arr = small.as_array();
+    let data_arr = data.as_array();
+    let n = small_arr.shape()[0];
+    if small_arr.shape()[1] != n || data_arr.shape()[0] != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "small must be (N,N) and data must be (N,P) with matching N",
+        ));
+    }
+    let p = data_arr.shape()[1];
+    let small_flat: Option<&[f64]> = small_arr.as_slice();
+    let data_flat: Option<&[f64]> = data_arr.as_slice();
+    let (small_flat, data_flat) = match (small_flat, data_flat) {
+        (Some(s), Some(d)) => (s, d),
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "small and data must both be C-contiguous",
+            ))
+        }
+    };
+
+    // Loop order matters: accumulate axpy-style (out_row += w[i] * data_row_i)
+    // so the inner loop over `col` reads each data row sequentially. The
+    // naive col-outer/i-inner order would stride by P between consecutive
+    // reads -- exactly the huge-stride-read-stream antipattern this file's
+    // gather-transpose driver (`row_parallel`) exists to avoid elsewhere.
+    let mut out = vec![0f64; n * p];
+    py.allow_threads(|| {
+        out.par_chunks_mut(p).enumerate().for_each(|(k, out_row)| {
+            let weights = &small_flat[k * n..(k + 1) * n];
+            for i in 0..n {
+                let w = weights[i];
+                let data_row = &data_flat[i * p..(i + 1) * p];
+                for (o, &d) in out_row.iter_mut().zip(data_row.iter()) {
+                    *o += w * d;
+                }
+            }
+        });
+    });
+
+    let arr2 = numpy::ndarray::Array2::from_shape_vec((n, p), out)
+        .expect("shape mismatch building small_times_wide output");
+    Ok(arr2.into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -4482,6 +4725,9 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(debayer_malvar, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_menon2007, m)?)?;
     m.add_function(wrap_pyfunction!(bilateral_filter, m)?)?;
+    m.add_function(wrap_pyfunction!(warp_affine_kernel_table, m)?)?;
+    m.add_function(wrap_pyfunction!(gram_matrix_wide, m)?)?;
+    m.add_function(wrap_pyfunction!(small_times_wide, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
