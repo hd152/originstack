@@ -681,6 +681,11 @@ _PAGE = """<!DOCTYPE html>
                   image-rendering: auto; user-select: none;
                   -webkit-user-drag: none; max-width: none; }
   #cmpImg { display: none; }
+  #viewerPlaceholder { position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 10px; pointer-events: none; }
+  #viewerPlaceholder .vp-word { font: 700 15px var(--mono); letter-spacing: .18em;
+      color: #2b2f38; }
+  #viewerPlaceholder .vp-note { font: 12px var(--sans); color: #3a3f4a; }
   #wipe { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent-2);
           display: none; cursor: ew-resize; z-index: 5; }
   #wipe::after { content: '\\21d4'; position: absolute; top: 50%; left: 50%;
@@ -761,13 +766,12 @@ _PAGE = """<!DOCTYPE html>
       <div class="sgrid" id="quickFields">
         <label>Directory</label>
         <input type="text" id="f_directory" placeholder="C:\\path\\to\\lights">
-        <button id="browseDir" style="visibility:hidden">Browse…</button>
+        <button id="browseDir" class="adv-browse" style="visibility:hidden">Browse…</button>
         <span></span>
         <span id="dirFrameCount" style="grid-column: 2 / -1; font-size: 11px; color: var(--text-dim);"></span>
-        <span></span>
         <label>Output</label>
         <input type="text" id="f_output" placeholder="(default: &lt;directory&gt;_stacked.fits)">
-        <button id="browseOut" style="visibility:hidden">Browse…</button>
+        <button id="browseOut" class="adv-browse" style="visibility:hidden">Browse…</button>
         <label>Preset</label>
         <select id="f_preset"><option value="">(none)</option></select>
         <span></span>
@@ -852,7 +856,15 @@ _PAGE = """<!DOCTYPE html>
         <span class="z" id="zlabel">100%</span>
       </div>
       <div id="viewport">
-        <img id="mainImg" alt="waiting for first preview…">
+        <div id="viewerPlaceholder">
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="32" y="8" width="34" height="34" rx="4" transform="rotate(45 32 32)"
+                  stroke="#3a3f4a" stroke-width="2"/>
+          </svg>
+          <div class="vp-word">ORIGINSTACK</div>
+          <div class="vp-note">Waiting for the first stack preview…</div>
+        </div>
+        <img id="mainImg" alt="">
         <img id="cmpImg" alt="">
         <div id="wipe"></div>
       </div>
@@ -970,6 +982,7 @@ function loadMain(url, slug) {
   curSlug = slug || '';
   const keep = (natW !== 0);
   if (!keep) scale = 0;   // force fit on first image
+  document.getElementById('viewerPlaceholder').style.display = 'none';
   mainImg.src = url;
 }
 function loadCmp(slug) {
