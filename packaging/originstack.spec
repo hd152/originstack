@@ -68,20 +68,30 @@ a = Analysis(
 # hook bundles it unconditionally just because `astropy` is imported at all.
 a.datas = [d for d in a.datas if 'astropy_iers_data' not in d[0]]
 
-# TRIED AND REVERTED: numpy.libs/ and scipy.libs/ both contain a byte-
-# identical libscipy_openblas64_-*.dll (numpy 2.x vendors the same
-# scipy-openblas64 wheel scipy does) -- looked like a free ~19.5MB dedup by
-# dropping numpy's copy on the assumption PyInstaller registers every
-# collected <pkg>.libs/ directory as a global DLL search path up front. It
-# doesn't: numpy's own loader only searches its own numpy.libs/, so removing
-# it broke numpy entirely ("DLL load failed while importing
-# _multiarray_umath") -- caught by packaging/verify_build.ps1 (a real
-# packaged-exe run) before this ever shipped, not by pytest, since pytest
-# runs against the dev venv's own separate numpy/scipy install and can't see
-# a packaging-only DLL layout bug. Left here so this specific "looks
-# byte-identical, must be safe to dedupe" idea isn't re-attempted blind --
-# a real fix would need to point numpy's own loader at scipy.libs/, not just
-# delete the file it expects to find in its own directory.
+# TRIED TWICE AND REVERTED: numpy.libs/ and scipy.libs/ both contain a
+# byte-identical libscipy_openblas64_-*.dll (numpy 2.x vendors the same
+# scipy-openblas64 wheel scipy does), ~19.5MB -- looked like a free dedup.
+#
+# Attempt 1: filter a.binaries to drop numpy.libs' copy. Broke numpy outright
+# ("DLL load failed while importing _multiarray_umath") -- numpy's own
+# loader only searches its own numpy.libs/, not scipy.libs/, just because
+# the bytes happen to match.
+#
+# Attempt 2: added a runtime hook (os.add_dll_directory + SetDllDirectoryW +
+# PATH, all three) registering scipy.libs/ as a search directory before
+# numpy imports. Still broke, and a debug-logged run of the actual packaged
+# exe revealed why the first theory was wrong: scipy.libs/ itself was left
+# holding only the *non*-64 openblas variant once a.binaries was filtered at
+# all -- even though the filter only ever matched 'numpy.libs' destination
+# paths. So this isn't a DLL-search-path problem: something in PyInstaller's
+# own binary-collection merge silently drops the file from scipy.libs/ the
+# moment a.binaries is edited post-Analysis, in a way not understood from
+# here without much deeper PyInstaller-internals digging than a ~4-5MB
+# compressed-zip win justifies. Left unfiltered. Do not re-attempt this
+# without first understanding *why* editing a.binaries perturbs scipy.libs/
+# -- both prior attempts were caught by packaging/verify_build.ps1 (a real
+# packaged-exe run) before shipping, not by pytest, which runs against the
+# dev venv's separate numpy/scipy install and can't see this class of bug.
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
