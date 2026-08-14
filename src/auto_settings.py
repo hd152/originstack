@@ -201,6 +201,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # better than a parametric Gaussian/Moffat for filamentary nebulae.
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
+        ('remove_stars',            True),
+        ('galaxy_mode',             False),
         ('local_contrast_strength', 0.75),
         # Toned down from (7.0, 0.18): a real Trifid Nebula render at the old
         # values looked oversaturated/punchy (deep magenta emission region,
@@ -247,6 +249,14 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_tv',           False),
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
+        ('remove_stars',            True),
+        # The galaxy's own broad, smooth halo tapers with no hard edge, so a
+        # per-pixel significance mask can't reliably tell it apart from
+        # residual gradient at the object's edge -- the smooth background fit
+        # still tracks (and subtracts) much of it. A generous fixed exclusion
+        # disk around the detected nucleus (same mechanism --comet-mode uses
+        # for the coma) keeps the fit's boundary out in real sky instead.
+        ('galaxy_mode',             True),
         ('local_contrast_strength', 0.85),
         ('ghs_b',                   10.0),
         ('ghs_sp',                  0.12),
@@ -279,8 +289,11 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_iterations',   20),
         ('deconvolve_blind_psf',    True),
         ('deconvolve_tv',           False),
-        # Stars are the target — never soften them.
+        # Stars are the target — never soften them, and never produce a
+        # starless sidecar (it would erase the target itself).
         ('star_reduce',             False),
+        ('remove_stars',            False),
+        ('galaxy_mode',             False),
         ('local_contrast',          True),
         ('local_contrast_strength', 0.80),
         # Higher SP lifts faint outer halo stars relative to the saturated core.
@@ -307,6 +320,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # Reduce background stars so the compact nebula is not dominated by halos.
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
+        ('remove_stars',            True),
+        ('galaxy_mode',             False),
         ('local_contrast',          True),
         ('local_contrast_strength', 0.80),
         # Aggressive stretch to lift the faint outer halo and jets.
@@ -338,6 +353,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
+        ('remove_stars',            True),
+        ('galaxy_mode',             False),
         ('local_contrast_strength', 0.70),
         ('ghs_b',                   8.0),
         ('ghs_sp',                  0.15),
@@ -359,6 +376,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'star_field': [
         # deconvolve is conditional — set in _apply_dynamic_settings
         ('star_reduce',             False),
+        ('remove_stars',            False),
+        ('galaxy_mode',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
         # Stars on empty sky — clip sky noise tail to black (stars sit above).
@@ -371,6 +390,8 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'wide_field': [
         ('deconvolve',              False),
         ('star_reduce',             False),
+        ('remove_stars',            False),
+        ('galaxy_mode',             False),
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),
         ('ghs_sp',                  0.20),

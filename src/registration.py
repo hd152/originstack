@@ -1973,6 +1973,109 @@ def find_comet_centroid(lum: np.ndarray,
     return lum.shape[0] / 2.0, lum.shape[1] / 2.0
 
 
+def find_extended_source_ellipse(
+        lum: np.ndarray, smooth_sigma: Optional[float] = None,
+        thresh_sigma: float = 1.0, margin: float = 1.3,
+        moment_scale: float = 3.0, max_axis_frac: float = 0.48,
+        ) -> Optional[Tuple[float, float, float, float, np.ndarray]]:
+    """Locate the brightest extended (diffuse) source in a luminance frame
+    and fit a generous covering ellipse to it via weighted second moments.
+
+    Used to build a background-extraction exclusion mask (``--galaxy-mode``):
+    a smooth-surface background model cannot tell a large object's own
+    tapering halo apart from residual gradient at its edge, so the fit needs
+    to be kept out of the object entirely rather than relying on a per-pixel
+    significance test. An ellipse (vs a fixed circle) tracks real objects'
+    elongation -- galaxies in particular are often 2-3x longer on one axis,
+    and a circular exclusion sized for the minor axis leaves the major-axis
+    tips exposed to being fit away as "background".
+
+    Args:
+        lum: 2-D luminance frame.
+        thresh_sigma: detection threshold, in sky sigma above sky median on
+            the smoothed frame, used only to find the object's extent -- not
+            a photometric measurement.
+        margin: safety multiplier applied on top of moment_scale so the
+            fitted ellipse sits comfortably outside the visible signal.
+        moment_scale: converts the RMS second-moment radius to a covering
+            radius (a uniform disk's variance is R^2/4, i.e. R = 2*sqrt(var);
+            3.0 is a deliberately generous multiple of that for a
+            centrally-concentrated real profile, not a rigorous aperture).
+        max_axis_frac: caps the semi-major axis at this fraction of
+            max(H, W) so a runaway fit can never swallow the whole frame and
+            starve background extraction of real sky samples.
+
+    Returns (cy, cx, semi_major, semi_minor, axes) where ``axes`` is a (2, 2)
+    array whose columns are the (major, minor) unit eigenvectors in (dy, dx)
+    order -- or None if no extended source cleared the detection threshold.
+    """
+    H, W = lum.shape[:2]
+    lum64 = lum.astype(np.float64)
+    if smooth_sigma is None:
+        smooth_sigma = max(20.0, min(H, W) / 50.0)
+    lum_smooth = ndimage.gaussian_filter(lum64, sigma=smooth_sigma)
+
+    border = max(4, int(min(H, W) * 0.05))
+    edge = np.concatenate([
+        lum_smooth[:border, :].ravel(), lum_smooth[-border:, :].ravel(),
+        lum_smooth[:, :border].ravel(), lum_smooth[:, -border:].ravel(),
+    ])
+    sky_med = float(np.median(edge))
+    sky_std = float(np.std(edge)) or 1.0
+
+    binary = lum_smooth > (sky_med + thresh_sigma * sky_std)
+    if not binary.any():
+        return None
+
+    labeled, n = ndimage.label(binary)
+    if n == 0:
+        return None
+    py, px = np.unravel_index(int(np.argmax(lum_smooth)), (H, W))
+    peak_label = int(labeled[py, px])
+    if peak_label == 0:
+        # Peak pixel didn't land in its own thresholded blob (shouldn't
+        # normally happen) -- fall back to the largest connected component.
+        sizes = ndimage.sum(binary, labeled, index=range(1, n + 1))
+        peak_label = int(np.argmax(sizes)) + 1
+    blob = labeled == peak_label
+
+    # A handful of pixels clearing the threshold by chance (shot noise, a
+    # single hot pixel surviving the smooth) isn't an extended source --
+    # require a size floor before trusting the moment fit.
+    min_pixels = max(30, int(0.0005 * H * W))
+    if int(blob.sum()) < min_pixels:
+        return None
+
+    ys, xs = np.nonzero(blob)
+    w = np.clip(lum_smooth[blob] - sky_med, 0.0, None)
+    wsum = float(w.sum())
+    if wsum <= 0:
+        return None
+    cy = float((w * ys).sum() / wsum)
+    cx = float((w * xs).sum() / wsum)
+    dy = ys - cy
+    dx = xs - cx
+    ixx = float((w * dy * dy).sum() / wsum)
+    iyy = float((w * dx * dx).sum() / wsum)
+    ixy = float((w * dy * dx).sum() / wsum)
+
+    evals, evecs = np.linalg.eigh(np.array([[ixx, ixy], [ixy, iyy]]))
+    evals = np.clip(evals, 1e-6, None)
+    order = np.argsort(evals)[::-1]  # major axis first
+    axes = evecs[:, order]
+
+    scale = moment_scale * margin
+    a = float(np.sqrt(evals[order[0]]) * scale)
+    b = float(np.sqrt(evals[order[1]]) * scale)
+    max_a = max_axis_frac * max(H, W)
+    if a > max_a:
+        shrink = max_a / a
+        a *= shrink
+        b *= shrink
+    b = min(b, a)
+    return cy, cx, a, b, axes
+
+
 def find_comet_tail_pa(lum: np.ndarray, nucleus_y: float, nucleus_x: float,
                        sample_radius: float = 50.0) -> float:
     """Estimate the position angle (degrees, N through E) of the comet tail.

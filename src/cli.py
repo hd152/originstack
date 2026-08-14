@@ -950,7 +950,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
                         'wavelet, sky_residual, sky_pedestal, nlm, bilateral, mmt, '
-                        'acdnr, deconvolve, star_reduce, local_contrast, sky_neutralize')
+                        'acdnr, deconvolve, star_reduce, local_contrast, sky_neutralize, '
+                        'remove_stars')
     g_stack.add_argument('--no-registration', action='store_true')
     g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
@@ -1217,6 +1218,29 @@ def build_parser() -> argparse.ArgumentParser:
     g_post.add_argument('--halo-removal', action='store_true',
                    help='Fit and subtract Gaussian PSF halos from bright stars in the '
                         'stacked image (post-processing step).')
+    g_post.add_argument('--galaxy-mode', action='store_true',
+                   help='Exclude a generous ellipse around the detected galaxy/extended '
+                        'source from background extraction sampling, so its broad, '
+                        'low-contrast halo is not fit and subtracted as a background '
+                        'gradient (a smooth-surface model cannot otherwise tell a '
+                        'tapering galaxy halo apart from real gradient at its edge). The '
+                        'ellipse is fit to the object\'s own second-moment shape, so it '
+                        'tracks real elongation instead of assuming a circle. '
+                        'Auto-enabled by --auto for galaxy-leaning targets; pass this '
+                        'explicitly under --no-auto.')
+    g_post.add_argument('--galaxy-mask-radius', type=float, default=None, metavar='PX',
+                   help='Overrides the fitted ellipse\'s semi-major axis length (pixels); '
+                        'the semi-minor axis and orientation still come from the fit. '
+                        'Default: sized automatically from the detected object. Only '
+                        'active with --galaxy-mode.')
+    g_post.add_argument('--no-remove-stars', dest='remove_stars', action='store_false',
+                   help='Disable star removal. By default, detected stars are '
+                        'inpainted with local background (normalised-convolution '
+                        'fill, per-star radius scaled to brightness) and saved as a '
+                        '<output>_starless.fits sidecar. The main output is '
+                        'untouched; the sidecar is for downstream nebula/background '
+                        'work (aggressive stretch, external star recombination). '
+                        'Computed last, on the fully post-processed image.')
 
     # Defaults for parameters that are tunable via config file but not exposed on the CLI.
     # Set these in a TOML config with --config to override them.
@@ -1340,6 +1364,8 @@ def build_parser() -> argparse.ArgumentParser:
         trim_high=0.2,
         drizzle_pixfrac=1.0,
         halo_removal=False,
+        remove_stars=True,
+        galaxy_mode=False,
     )
     return p
 

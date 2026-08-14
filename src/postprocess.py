@@ -193,6 +193,12 @@ def postprocess_stack(
 
     # 1. Background extraction (DBE / wavelet / legacy mesh)
     _pre_bg = None
+    # Set inside the block below when background extraction runs; carried
+    # forward (still None otherwise) so the final sky-neutralise step -- which
+    # rebuilds its own emission mask independently, much later in this
+    # function -- reuses the same comet/galaxy exclusion instead of silently
+    # re-flattening the object it was built to protect.
+    _bg_excl_mask = None
     if getattr(args, 'keep_intermediates', False) and args.background_extraction:
         _pre_bg = stacked.copy()
     if args.background_extraction and 'background' not in skip_steps:
@@ -221,6 +227,55 @@ def postprocess_stack(
             except Exception as _cme:
                 safe_print(f"  WARNING: coma exclusion mask failed: {_cme}")
 
+        # Extended-source (galaxy) exclusion mask: the DBE emission mask's
+        # per-pixel significance test can't reliably separate a galaxy's own
+        # broad, smooth halo (no hard edge -- it tapers asymptotically into
+        # sky) from residual gradient at the object's edge, so the smooth
+        # background surface still tracks and subtracts much of it. A
+        # generous exclusion ellipse (fit to the object's own second-moment
+        # shape, so it tracks real galaxies' elongation instead of assuming a
+        # circle) around the detected nucleus keeps the fit's boundary out in
+        # real sky instead -- same underlying mechanism as --comet-mode's
+        # coma exclusion mask, sized to the object rather than a fixed radius.
+        _galaxy_excl_mask = None
+        if getattr(args, 'galaxy_mode', False):
+            try:
+                from src.registration import find_extended_source_ellipse
+                _pp_lum_gal = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                               + 0.114 * stacked[:, :, 2])
+                _gal_fit = find_extended_source_ellipse(_pp_lum_gal)
+                if _gal_fit is not None:
+                    _gal_cy, _gal_cx, _gal_a, _gal_b, _gal_axes = _gal_fit
+                    _radius_override = getattr(args, 'galaxy_mask_radius', None)
+                    if _radius_override:
+                        # Explicit override: scale the fitted ellipse uniformly
+                        # so it still tracks the object's orientation/aspect
+                        # ratio, but its major axis matches the requested size.
+                        _scale = float(_radius_override) / max(_gal_a, 1e-6)
+                        _gal_a *= _scale
+                        _gal_b *= _scale
+                    _H_g, _W_g = stacked.shape[:2]
+                    _yy_g, _xx_g = np.mgrid[:_H_g, :_W_g]
+                    _dy_g = _yy_g - _gal_cy
+                    _dx_g = _xx_g - _gal_cx
+                    _proj_major = _dy_g * _gal_axes[0, 0] + _dx_g * _gal_axes[1, 0]
+                    _proj_minor = _dy_g * _gal_axes[0, 1] + _dx_g * _gal_axes[1, 1]
+                    _ellipse = ((_proj_major / max(_gal_a, 1e-6)) ** 2
+                               + (_proj_minor / max(_gal_b, 1e-6)) ** 2) <= 1.0
+                    _galaxy_excl_mask = _ellipse.astype(np.float32)
+                    if getattr(args, 'verbose', False):
+                        safe_print(f"    Galaxy exclusion mask: center=({_gal_cx:.1f},{_gal_cy:.1f}), "
+                                   f"semi-axes={_gal_a:.0f}x{_gal_b:.0f}px")
+                elif getattr(args, 'verbose', False):
+                    safe_print("    Galaxy exclusion mask: no extended source detected")
+            except Exception as _ge:
+                safe_print(f"  WARNING: galaxy exclusion mask failed: {_ge}")
+
+        if _coma_excl_mask is not None and _galaxy_excl_mask is not None:
+            _bg_excl_mask = np.clip(_coma_excl_mask + _galaxy_excl_mask, 0.0, 1.0).astype(np.float32)
+        else:
+            _bg_excl_mask = _coma_excl_mask if _coma_excl_mask is not None else _galaxy_excl_mask
+
         if bg_method == 'dbe':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
             print(f"\n  Applying Dynamic Background Extraction "
@@ -230,7 +285,7 @@ def postprocess_stack(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
                 verbose=args.verbose, star_mask=pp_star_mask,
                 use_entropy_weights=_entropy_bg,
-                exclusion_mask=_coma_excl_mask)
+                exclusion_mask=_bg_excl_mask)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
         elif bg_method == 'wavelet':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
@@ -242,7 +297,7 @@ def postprocess_stack(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
                 n_scales=wavelet_scales, verbose=args.verbose, star_mask=pp_star_mask,
                 use_entropy_weights=_entropy_bg,
-                exclusion_mask=_coma_excl_mask)
+                exclusion_mask=_bg_excl_mask)
             safe_print(f"  ✓ Wavelet-band background extraction ({format_time(time.time() - bg_start)})")
         else:
             print(f"\n  Applying background extraction "
@@ -250,7 +305,7 @@ def postprocess_stack(
             stacked = apply_background_extraction(
                 stacked, mesh_size=args.bg_mesh_size, filter_size=args.bg_filter_size,
                 clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=pp_star_mask,
-                exclusion_mask=_coma_excl_mask)
+                exclusion_mask=_bg_excl_mask)
             safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
         stacked = _sanitize(stacked, "background extraction")
         # Save background map as diagnostic
@@ -718,7 +773,7 @@ def postprocess_stack(
         # step consistent with it instead of re-introducing the same bug
         # through an independent, cruder mask.
         _skym, _, _, _ = _dbe_prepare_emission_mask(
-            stacked, pp_star_mask, None, False, "Sky neutralize")
+            stacked, pp_star_mask, _bg_excl_mask, False, "Sky neutralize")
         _skym = 1.0 - _skym
         _sig_sn = max(64.0, float(min(stacked.shape[:2])) / 8.0)
         _den = gaussian_filter_ds(_skym, sigma=_sig_sn)
@@ -739,6 +794,31 @@ def postprocess_stack(
         np.clip(stacked, 0.0, None, out=stacked)
         safe_print(f"  ✓ Sky flattened + neutralised to grey (floor={_target:.1f}, "
                    f"was R{_gm[0]:.1f} G{_gm[1]:.1f} B{_gm[2]:.1f})")
+
+    # Star removal (starless sidecar) — computed last, on the fully
+    # post-processed image, so it reflects the actual final look. Saved as a
+    # sidecar rather than replacing the main output: this pipeline's
+    # deliverable keeps stars, the starless image is for downstream
+    # nebula/background work.
+    if getattr(args, 'remove_stars', False) and 'remove_stars' not in skip_steps:
+        if _pp_sources is not None and len(_pp_sources) > 0:
+            _rs_fwhm = float(np.median(
+                [f.metrics.get('fwhm', 4.0) for f in final
+                 if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
+            print(f"\n  Removing stars (fwhm={_rs_fwhm:.1f}px)...")
+            _rs_start = time.time()
+            from src.star_removal import remove_stars
+            starless, n_removed = remove_stars(stacked, _pp_sources, _rs_fwhm,
+                                               verbose=args.verbose)
+            if n_removed > 0:
+                _output_path_rs = getattr(args, 'output', None)
+                if _output_path_rs:
+                    _save_sidecar_fits(starless, _output_path_rs, '_starless')
+                safe_print(f"  ✓ Star removal ({format_time(time.time() - _rs_start)})")
+            else:
+                safe_print("  ⚠ Star removal: no stars removed (mask empty or tripped safety cap)")
+        else:
+            safe_print("\n  No star detections for star removal — skipping")
 
     stacked = _sanitize(stacked, "final post-processing")
     return stacked
