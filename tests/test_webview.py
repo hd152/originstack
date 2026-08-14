@@ -208,6 +208,12 @@ class TestServer(unittest.TestCase):
                        'strip'):
             self.assertIn(marker, body)
 
+    def test_page_has_help_and_about(self):
+        body = self._get('/').read().decode('utf-8')
+        for marker in ('helpBtn', 'aboutBtn', 'helpModal', 'aboutModal',
+                       'aboutVersion', 'MIT License'):
+            self.assertIn(marker, body)
+
     def test_api_schema_served(self):
         body = json.loads(self._get('/api/schema').read())
         self.assertIn('Core', body)

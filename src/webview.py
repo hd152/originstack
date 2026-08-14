@@ -614,6 +614,33 @@ _PAGE = """<!DOCTYPE html>
   header h1::before { content: '\25c6'; color: var(--accent); margin-right: 10px;
                        font-size: 12px; }
   header .run { color: var(--text-dim); font: 12px var(--mono); }
+  header .header-spacer { flex: 1; }
+  .hdr-btn { background: transparent; border: 1px solid var(--line); color: var(--text-dim);
+             border-radius: 2px; padding: 4px 12px; font: 11px var(--sans); cursor: pointer; }
+  .hdr-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  /* about / help modals */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65);
+      display: none; align-items: center; justify-content: center; z-index: 100; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
+      max-width: 640px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 20px 26px 24px; }
+  .modal-head { display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 4px; }
+  .modal h2 { margin-bottom: 4px; }
+  .modal-close { background: transparent; border: none; color: var(--text-dim);
+      font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 6px; }
+  .modal-close:hover { color: var(--text); }
+  .modal h3 { font: 700 12px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+      color: var(--accent-2); margin: 18px 0 8px; }
+  .modal h3:first-of-type { margin-top: 14px; }
+  .modal p, .modal li { font-size: 13px; line-height: 1.6; color: var(--text); }
+  .modal ol, .modal ul { margin: 0; padding-left: 20px; }
+  .modal li { margin-bottom: 4px; }
+  .modal code { font: 12px var(--mono); background: var(--well); color: var(--accent-3);
+      padding: 1px 5px; border-radius: 2px; }
+  .modal a { color: var(--accent-2); }
+  .modal .modal-sub { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
 
   main { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(460px, 1.3fr);
          gap: 16px; padding: 16px 22px; max-width: 1600px; }
@@ -752,7 +779,61 @@ _PAGE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<header><h1>OriginStack</h1><span class="run" id="runinfo">connecting…</span></header>
+<header><h1>OriginStack</h1><span class="run" id="runinfo">connecting…</span>
+  <div class="header-spacer"></div>
+  <button class="hdr-btn" id="helpBtn">Help</button>
+  <button class="hdr-btn" id="aboutBtn">About</button>
+</header>
+
+<div class="modal-overlay" id="helpModal">
+  <div class="modal">
+    <div class="modal-head"><h2>Help</h2><button class="modal-close" data-close="helpModal">&times;</button></div>
+    <p class="modal-sub">A quick guide to running a stack from this dashboard.</p>
+
+    <h3>Quick start</h3>
+    <ol>
+      <li>Set <b>Directory</b> to your folder of light frames (type a path, or click Browse…). The line under it shows how many lights/darks/flats/bias frames were found.</li>
+      <li>Leave <b>Output</b> blank to save next to the input as <code>&lt;directory&gt;_stacked.fits</code>, or set your own path.</li>
+      <li>Pick a <b>Preset</b> if you know your target type, or leave <b>Auto advisor</b> checked to let the pipeline classify the target and tune settings itself.</li>
+      <li>Click <b>Start</b>. Progress, the live log, and per-frame quality all update in the Pipeline/Log/Recent frames panels as the run proceeds.</li>
+    </ol>
+
+    <h3>Folder layouts</h3>
+    <ul>
+      <li><b>Single folder</b>: lights (and optionally darks/flats/bias) directly inside the chosen directory.</li>
+      <li><b>Multiple sessions</b>: a folder of subfolders, one per night/session. By default each session is stacked separately and the results combined; check <b>Combine sessions</b> to instead pool every light from every session into one unified stack.</li>
+    </ul>
+
+    <h3>The Pipeline panel</h3>
+    <p>Four phases run in order: <b>1 · Quality</b> (load, calibrate, and score every frame), <b>2 · Registration</b> (align frames to a reference), <b>3 · Stacking</b> (combine the aligned frames), <b>4 · Post-process</b> (background extraction, denoising, and the final stretch). The active phase is highlighted; hover a completed one to see how long it took.</p>
+
+    <h3>The Preview panel</h3>
+    <ul>
+      <li>The <b>view</b> dropdown picks which saved milestone to look at; <b>Compare</b> wipes between two milestones side by side.</li>
+      <li><b>Fit</b>/<b>1:1</b> and drag-to-pan control zoom; scroll to zoom under the cursor.</li>
+      <li>The <b>Stretch</b> panel re-renders the currently viewed milestone from its retained linear source — safe to experiment with, it never touches the saved output file.</li>
+    </ul>
+
+    <h3>Tips</h3>
+    <ul>
+      <li>Every field in <b>Advanced (everything else)</b> mirrors a command-line flag — hover a label for what it does.</li>
+      <li><b>Use GPU</b> only helps if you have an NVIDIA card with enough free VRAM; the pipeline falls back to CPU automatically if it doesn't fit.</li>
+      <li>A run in progress keeps going even if you close this window's tab; the dashboard just reconnects to it.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="modal-overlay" id="aboutModal">
+  <div class="modal">
+    <div class="modal-head"><h2>About</h2><button class="modal-close" data-close="aboutModal">&times;</button></div>
+    <p><b>OriginStack</b> <span id="aboutVersion" class="modal-sub"></span></p>
+    <p>An astrophotography image-stacking pipeline: calibration, registration, stacking, and post-processing for deep-sky light frames, with optional native (Rust) and GPU acceleration.</p>
+    <h3>Project</h3>
+    <p><a href="https://github.com/hd152/originstack" target="_blank" rel="noopener">github.com/hd152/originstack</a></p>
+    <h3>License</h3>
+    <p class="modal-sub">MIT License &mdash; Copyright (c) 2026 Hans Davenport.</p>
+  </div>
+</div>
 <main>
   <div>
     <section id="setupSection">
@@ -1409,6 +1490,34 @@ function enablePywebviewPickers() {
 // immediately in case it's already there (e.g. on a fast reload).
 window.addEventListener('pywebviewready', enablePywebviewPickers);
 enablePywebviewPickers();
+
+// ── Help / About modals ────────────────────────────────────────────────
+function openModal(id) {
+  document.getElementById(id).classList.add('show');
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('show');
+}
+document.getElementById('helpBtn').onclick = () => openModal('helpModal');
+document.getElementById('aboutBtn').onclick = () => {
+  document.getElementById('aboutVersion').textContent =
+    window.__appVersion ? 'v' + window.__appVersion : '';
+  openModal('aboutModal');
+};
+document.querySelectorAll('.modal-close').forEach(btn => {
+  btn.onclick = () => closeModal(btn.dataset.close);
+});
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.classList.remove('show');
+  });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-overlay.show').forEach(
+      overlay => overlay.classList.remove('show'));
+  }
+});
 
 loadSchema();
 </script>
