@@ -685,6 +685,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                and drizzle_scale_val > 1.0)
             want_ibp = (int(getattr(args, 'super_res_iters', 0) or 0) > 0
                        and drizzle_scale_val > 1.0)
+            def _psf_fallback_suffix() -> str:
+                return (f"{'--drizzle-kernel psf falls back to lanczos3' if want_psf_kernel else ''}"
+                        f"{'; ' if want_psf_kernel and want_ibp else ''}"
+                        f"{'--super-res-iters skipped' if want_ibp else ''}")
+
             if want_psf_kernel or want_ibp:
                 try:
                     from src.psf_deconvolution import estimate_psf
@@ -707,14 +712,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                       f"taps, wiener_k={wiener_k:.3f}")
                     else:
                         safe_print("  PSF estimation failed (too few reference stars) -- "
-                                   f"{'--drizzle-kernel psf falls back to lanczos3' if want_psf_kernel else ''}"
-                                   f"{'; ' if want_psf_kernel and want_ibp else ''}"
-                                   f"{'--super-res-iters skipped' if want_ibp else ''}")
+                                   f"{_psf_fallback_suffix()}")
                 except Exception as exc:
-                    safe_print(f"  PSF estimation failed ({exc}) -- "
-                               f"{'--drizzle-kernel psf falls back to lanczos3' if want_psf_kernel else ''}"
-                               f"{'; ' if want_psf_kernel and want_ibp else ''}"
-                               f"{'--super-res-iters skipped' if want_ibp else ''}")
+                    safe_print(f"  PSF estimation failed ({exc}) -- {_psf_fallback_suffix()}")
 
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,

@@ -1,6 +1,6 @@
 [package]
 name = "astro_native"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
 

@@ -2314,6 +2314,11 @@ fn warp_affine_kernel_table<'py>(
     let (h, w, c) = (s[0], s[1], s[2]);
     let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
     let (o0, o1) = (off[0], off[1]);
+    if phases == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "phases must be > 0",
+        ));
+    }
     let taps = 2 * halo + 1;
     let tab = table.as_slice()?;
     if tab.len() != phases * phases * taps * taps {
@@ -2346,18 +2351,29 @@ fn warp_affine_kernel_table<'py>(
                 if let Some(img) = flat {
                     let row_stride = w * c;
                     if interior {
+                        // All taps are in-bounds here by construction, but a
+                        // degenerate (e.g. ill-conditioned Wiener) phase can
+                        // still have every weight exactly zero -- match the
+                        // numpy mirror's "any valid & nonzero-weight tap"
+                        // rule instead of unconditionally emitting acc (which
+                        // would silently return 0.0 instead of cval).
                         let by = base_y as usize;
                         let bx = base_x as usize;
                         for ch in 0..c {
                             let mut acc = 0.0f64;
+                            let mut any = false;
                             for ty in 0..taps {
                                 let row_base = (by + ty) * row_stride + bx * c + ch;
                                 for tx in 0..taps {
-                                    acc += weights[ty * taps + tx]
-                                        * img[row_base + tx * c] as f64;
+                                    let wgt = weights[ty * taps + tx];
+                                    if wgt == 0.0 {
+                                        continue;
+                                    }
+                                    acc += wgt * img[row_base + tx * c] as f64;
+                                    any = true;
                                 }
                             }
-                            out_row[ox * c + ch] = acc as f32;
+                            out_row[ox * c + ch] = if any { acc as f32 } else { cval };
                         }
                     } else {
                         for ch in 0..c {

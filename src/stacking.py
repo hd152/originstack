@@ -436,7 +436,7 @@ def iterative_back_projection(stacked: np.ndarray, mem_rgb: np.ndarray,
                               weights: Optional[np.ndarray],
                               top: float, left: float, drizzle_scale: float,
                               psf: np.ndarray, H: int, W: int, C: int,
-                              iters: int = 5, relax: float = 0.5,
+                              iters: int = 5, relax: float = Config.IBP_RELAX,
                               verbose: bool = False) -> np.ndarray:
     """Refine a drizzle output via iterative back-projection (Irani & Peleg
     1991): forward-simulate what each original frame *should* look like
@@ -464,20 +464,33 @@ def iterative_back_projection(stacked: np.ndarray, mem_rgb: np.ndarray,
     n_workers = min(os.cpu_count() or 4, n_final)
     acc_lock = threading.Lock()
 
+    # Per-frame geometry (M/off/M_inv/off_inv/weight/coverage) depends only on
+    # each frame's fixed registration transform, not on the evolving estimate
+    # -- compute it once here rather than inside the iteration loop below.
+    frame_geom: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]] = []
+    weight_accum = np.zeros((out_h, out_w), dtype=np.float64)
+    for j in range(n_final):
+        M, off = _drizzle_matrix(transforms[j], shifts[j], top, left, inv_scale)
+        M_inv = np.linalg.inv(M)
+        off_inv = -M_inv @ off
+        w = float(weights[j]) if weights is not None else 1.0
+        coverage = ndimage.affine_transform(
+            np.ones((H, W), dtype=np.float64), M, offset=off,
+            output_shape=(out_h, out_w), order=1, mode='constant', cval=0.0)
+        frame_geom.append((M, off, M_inv, off_inv, w))
+        weight_accum += coverage * w
+    safe_w = np.where(weight_accum > 1e-6, weight_accum, 1.0)
+
     for it in range(iters):
         accum = np.zeros((out_h, out_w, C), dtype=np.float64)
-        weight_accum = np.zeros((out_h, out_w), dtype=np.float64)
 
         def _backproject_one(j: int) -> None:
-            M, off = _drizzle_matrix(transforms[j], shifts[j], top, left, inv_scale)
-            w = float(weights[j]) if weights is not None else 1.0
+            M, off, M_inv, off_inv, w = frame_geom[j]
 
             # Forward-simulate: current estimate (drizzle grid) -> frame j's
             # raw geometry, via the exact inverse of drizzle's own mapping.
             # Reads `estimate` only (fixed for the whole iteration) -- safe
             # to run across frames concurrently.
-            M_inv = np.linalg.inv(M)
-            off_inv = -M_inv @ off
             sim = np.empty((H, W, C), dtype=np.float64)
             for c in range(C):
                 sim[:, :, c] = ndimage.affine_transform(
@@ -491,27 +504,22 @@ def iterative_back_projection(stacked: np.ndarray, mem_rgb: np.ndarray,
             # Back-project: blur the residual, then warp it forward into the
             # drizzle grid using drizzle's own (raw -> drizzle-grid) mapping.
             back = np.empty((out_h, out_w, C), dtype=np.float64)
-            coverage = ndimage.affine_transform(
-                np.ones((H, W), dtype=np.float64), M, offset=off,
-                output_shape=(out_h, out_w), order=1, mode='constant', cval=0.0)
             for c in range(C):
                 blurred = fftconvolve(residual[:, :, c], psf, mode='same')
                 back[:, :, c] = ndimage.affine_transform(
                     blurred, M, offset=off, output_shape=(out_h, out_w),
                     order=3, mode='constant', cval=0.0)
 
-            # accum/weight_accum are shared across frames -- same acc_lock +
+            # accum is shared across frames -- same acc_lock +
             # np.add(..., out=...) pattern _drizzle_one uses for its
             # accumulator (in-place, not `+=`: `+=` inside a closure rebinds
             # the name as a new local instead of mutating the outer one).
             with acc_lock:
                 np.add(accum, back * w, out=accum)
-                np.add(weight_accum, coverage * w, out=weight_accum)
 
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             list(executor.map(_backproject_one, range(n_final)))
 
-        safe_w = np.where(weight_accum > 1e-6, weight_accum, 1.0)
         update = accum / safe_w[..., np.newaxis]
         estimate += relax * update
         if verbose:

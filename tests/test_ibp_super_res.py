@@ -31,9 +31,17 @@ def _gaussian_psf(size: int = 15, sigma: float = 1.0) -> np.ndarray:
 
 
 def _build_synthetic_scenario(seed=0, n_final=8, out_hw=64, raw_hw=32,
-                              drizzle_scale=2.0, psf_sigma=1.0, read_noise=0.5):
+                              drizzle_scale=2.0, psf_sigma=1.0, read_noise=0.5,
+                              channels=1):
     """Known high-res truth -> N synthetic low-res raw frames (via the same
-    affine mapping IBP itself uses) -> naive initial drizzle estimate."""
+    affine mapping IBP itself uses) -> naive initial drizzle estimate.
+
+    ``channels`` > 1 gives each channel a distinctly-scaled copy of the same
+    Gaussian truth (rather than replicating one channel three times), so a
+    channel-indexing bug (wrong axis, one channel silently reusing another's
+    data) would break the per-channel RMSE check even though a C=1 test
+    would never exercise that code path.
+    """
     rng = np.random.default_rng(seed)
     out_h = out_w = out_hw
     H = W = raw_hw
@@ -41,13 +49,15 @@ def _build_synthetic_scenario(seed=0, n_final=8, out_hw=64, raw_hw=32,
     top, left = 0.0, 0.0
 
     yy, xx = np.mgrid[0:out_h, 0:out_w].astype(np.float64)
-    truth = 50.0 + 200.0 * np.exp(-((yy - out_h / 2) ** 2 + (xx - out_w / 2) ** 2)
-                                  / (2 * 3.0 ** 2))
+    base = 50.0 + 200.0 * np.exp(-((yy - out_h / 2) ** 2 + (xx - out_w / 2) ** 2)
+                                 / (2 * 3.0 ** 2))
+    chan_scales = [1.0, 0.5, 1.8][:channels] if channels > 1 else [1.0]
+    truth = np.stack([base * s for s in chan_scales], axis=-1)  # (out_h, out_w, channels)
     psf = _gaussian_psf(sigma=psf_sigma)
 
     shifts = []
     transforms = [None] * n_final
-    mem_rgb = np.zeros((n_final, H, W, 1), dtype=np.float32)
+    mem_rgb = np.zeros((n_final, H, W, channels), dtype=np.float32)
     final_indices = list(range(n_final))
     weights = np.ones(n_final, dtype=np.float64)
 
@@ -55,30 +65,33 @@ def _build_synthetic_scenario(seed=0, n_final=8, out_hw=64, raw_hw=32,
         dy, dx = rng.uniform(-1.5, 1.5), rng.uniform(-1.5, 1.5)
         shifts.append((dy, dx))
         M, off = _drizzle_matrix(None, (dy, dx), top, left, inv_scale)
-        raw = ndimage.affine_transform(truth, M, offset=off, output_shape=(H, W),
-                                       order=3, mode='constant', cval=0.0)
-        raw = fftconvolve(raw, psf, mode='same')
-        raw = raw + rng.normal(0, read_noise, raw.shape)
-        mem_rgb[j, :, :, 0] = raw
+        for ch in range(channels):
+            raw = ndimage.affine_transform(truth[:, :, ch], M, offset=off,
+                                           output_shape=(H, W),
+                                           order=3, mode='constant', cval=0.0)
+            raw = fftconvolve(raw, psf, mode='same')
+            raw = raw + rng.normal(0, read_noise, raw.shape)
+            mem_rgb[j, :, :, ch] = raw
 
-    acc = np.zeros((out_h, out_w, 1))
+    acc = np.zeros((out_h, out_w, channels))
     wsum = np.zeros((out_h, out_w))
     for j in range(n_final):
         M, off = _drizzle_matrix(None, shifts[j], top, left, inv_scale)
-        warped = ndimage.affine_transform(mem_rgb[j, :, :, 0], M, offset=off,
-                                          output_shape=(out_h, out_w), order=3,
-                                          mode='constant', cval=0.0)
         cov = ndimage.affine_transform(np.ones((H, W)), M, offset=off,
                                        output_shape=(out_h, out_w), order=1,
                                        mode='constant', cval=0.0)
-        acc[:, :, 0] += warped * cov
+        for ch in range(channels):
+            warped = ndimage.affine_transform(mem_rgb[j, :, :, ch], M, offset=off,
+                                              output_shape=(out_h, out_w), order=3,
+                                              mode='constant', cval=0.0)
+            acc[:, :, ch] += warped * cov
         wsum += cov
-    stacked0 = (acc[:, :, 0] / np.maximum(wsum, 1e-9))[..., np.newaxis].astype(np.float32)
+    stacked0 = (acc / np.maximum(wsum, 1e-9)[..., np.newaxis]).astype(np.float32)
 
     return dict(truth=truth, psf=psf, mem_rgb=mem_rgb, final_indices=final_indices,
                shifts=shifts, transforms=transforms, weights=weights,
                stacked0=stacked0, top=top, left=left, drizzle_scale=drizzle_scale,
-               H=H, W=W)
+               H=H, W=W, channels=channels)
 
 
 class TestIterativeBackProjection(unittest.TestCase):
@@ -130,6 +143,22 @@ class TestIterativeBackProjection(unittest.TestCase):
             sc['transforms'], sc['weights'], sc['top'], sc['left'], sc['drizzle_scale'],
             sc['psf'], sc['H'], sc['W'], 1, iters=0, relax=0.15)
         np.testing.assert_allclose(refined, sc['stacked0'], atol=1e-5)
+
+    def test_reduces_error_per_channel_rgb(self):
+        # C=1 (above) can't catch a channel-indexing bug -- each channel here
+        # is a distinctly-scaled copy of the same truth, so RMSE must drop
+        # independently on every channel.
+        sc = _build_synthetic_scenario(seed=3, channels=3)
+        refined = iterative_back_projection(
+            sc['stacked0'], sc['mem_rgb'], sc['final_indices'], sc['shifts'],
+            sc['transforms'], sc['weights'], sc['top'], sc['left'], sc['drizzle_scale'],
+            sc['psf'], sc['H'], sc['W'], 3, iters=5, relax=0.15)
+
+        self.assertEqual(refined.shape, sc['stacked0'].shape)
+        for ch in range(3):
+            rmse0 = float(np.sqrt(np.mean((sc['stacked0'][:, :, ch] - sc['truth'][:, :, ch]) ** 2)))
+            rmse1 = float(np.sqrt(np.mean((refined[:, :, ch] - sc['truth'][:, :, ch]) ** 2)))
+            self.assertLess(rmse1, rmse0, f"channel {ch}: IBP should reduce RMSE")
 
 
 if __name__ == '__main__':

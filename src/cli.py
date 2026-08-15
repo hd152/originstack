@@ -349,29 +349,40 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
 
     masters: dict = {}
 
+    def _method_tag(method: str) -> str:
+        # Auto-upgrade to robust_pca is a silent behavior change (slower,
+        # heavier on memory) unless the run output actually says it happened.
+        return f" ({method})" if method != 'median' else ""
+
     if frames.get('bias'):
-        masters['bias'] = make_master(frames['bias'], method=_method_for(len(frames['bias'])))
+        _bias_method = _method_for(len(frames['bias']))
+        masters['bias'] = make_master(frames['bias'], method=_bias_method)
         if masters['bias'] is not None:
             safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> "
-                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
+                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}"
+                       f"{_method_tag(_bias_method)}")
     else:
         masters['bias'] = None
 
     if frames.get('dark'):
         frames['dark'] = select_matching_darks(lights, frames['dark'])
-        masters['dark'] = make_master(frames['dark'], method=_method_for(len(frames['dark'])))
+        _dark_method = _method_for(len(frames['dark']))
+        masters['dark'] = make_master(frames['dark'], method=_dark_method)
         if masters['dark'] is not None:
             safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> "
-                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}"
+                       f"{_method_tag(_dark_method)}")
     else:
         masters['dark'] = None
 
     if frames.get('flat'):
         frames['flat'] = select_matching_flats(lights, frames['flat'])
-        masters['flat'] = make_master(frames['flat'], method=_method_for(len(frames['flat'])))
+        _flat_method = _method_for(len(frames['flat']))
+        masters['flat'] = make_master(frames['flat'], method=_flat_method)
         if masters['flat'] is not None:
             safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> "
-                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}"
+                       f"{_method_tag(_flat_method)}")
         _flat_rots = []
         for _ff in frames['flat']:
             for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):

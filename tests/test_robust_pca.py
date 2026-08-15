@@ -100,6 +100,45 @@ class TestRobustPcaMaster(unittest.TestCase):
                      for i in range(Config.ROBUST_PCA_MIN_FRAMES - 1)]
             self.assertIsNone(robust_pca_master(frames, shape))
 
+    def test_skips_shape_mismatched_frame_instead_of_crashing(self):
+        # A mixed-binning/ROI calibration set can reach robust_pca_master with
+        # one frame whose shape doesn't match the rest (the caller's
+        # homogeneity fast-path doesn't check dimensions) -- must not crash
+        # np.stack, just skip the offending frame.
+        shape = (24, 24)
+        with tempfile.TemporaryDirectory() as d:
+            frames = [self._write_frame(d, f'f{i}.fits',
+                                        np.full(shape, float(100 + i), dtype=np.float32))
+                     for i in range(Config.ROBUST_PCA_MIN_FRAMES + 1)]
+            frames.append(self._write_frame(d, 'bad_shape.fits',
+                                             np.full((12, 12), 999.0, dtype=np.float32)))
+            master = robust_pca_master(frames, shape)
+            self.assertIsNotNone(master)
+            self.assertEqual(master.shape, shape)
+
+    def test_falls_back_on_non_finite_values(self):
+        shape = (24, 24)
+        with tempfile.TemporaryDirectory() as d:
+            frames = []
+            for i in range(Config.ROBUST_PCA_MIN_FRAMES + 1):
+                data = np.full(shape, float(100 + i), dtype=np.float32)
+                if i == 0:
+                    data[0, 0] = np.nan
+                frames.append(self._write_frame(d, f'f{i}.fits', data))
+            self.assertIsNone(robust_pca_master(frames, shape))
+
+    def test_falls_back_when_memory_insufficient(self):
+        from unittest import mock
+        shape = (24, 24)
+        with tempfile.TemporaryDirectory() as d:
+            frames = [self._write_frame(d, f'f{i}.fits',
+                                        np.full(shape, float(100 + i), dtype=np.float32))
+                     for i in range(Config.ROBUST_PCA_MIN_FRAMES + 1)]
+            fake_mem = mock.MagicMock()
+            fake_mem.available = 1  # forces the memory guard to trip
+            with mock.patch('psutil.virtual_memory', return_value=fake_mem):
+                self.assertIsNone(robust_pca_master(frames, shape))
+
 
 class TestMakeMasterRobustPcaFallback(unittest.TestCase):
     """make_master(method='robust_pca') dispatch and graceful fallback."""

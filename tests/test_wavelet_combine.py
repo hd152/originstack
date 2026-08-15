@@ -54,6 +54,29 @@ class TestWaveletCombineBasics(unittest.TestCase):
         expected = noise_sigma / np.sqrt(n)
         self.assertLess(rmse, expected * 2.5)
 
+    def test_recovers_ground_truth_per_channel_rgb(self):
+        # C=1 (above) can't catch a channel-indexing bug in the `for ch in
+        # range(c)` loop -- give each channel a distinctly-scaled copy of the
+        # same truth so a swapped/reused channel breaks this per-channel check.
+        rng = np.random.default_rng(4)
+        n, h, w = 10, 48, 48
+        base = _synthetic_truth(h, w)
+        noise_sigma = 3.0
+        chan_scales = [1.0, 0.5, 1.8]
+        truth = np.stack([base * s for s in chan_scales], axis=-1)  # (h, w, 3)
+
+        mem = np.empty((n, h, w, 3), dtype=np.float32)
+        for i in range(n):
+            for ch in range(3):
+                mem[i, :, :, ch] = truth[:, :, ch] + rng.normal(0, noise_sigma, (h, w))
+
+        out = wavelet_combine(mem, levels=3, sigma=3.0, max_iters=3)
+        self.assertEqual(out.shape, (h, w, 3))
+        expected = noise_sigma / np.sqrt(n)
+        for ch in range(3):
+            rmse = float(np.sqrt(np.mean((out[:, :, ch] - truth[:, :, ch]) ** 2)))
+            self.assertLess(rmse, expected * 2.5, f"channel {ch}")
+
 
 class TestWaveletCombineOutlierRejection(unittest.TestCase):
 

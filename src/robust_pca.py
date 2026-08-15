@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from src.models import Config, FrameInfo
-from src.utils import get_logger
+from src.utils import get_logger, safe_print
 
 try:
     import astro_native as _native
@@ -151,28 +151,73 @@ def robust_pca_master(frames: List[FrameInfo], shape: Tuple[int, ...]) -> Option
     Returns the per-pixel median of the recovered low-rank component ``L``
     (which should already be near rank-1 once converged, so its median
     column is essentially the clean master), or ``None`` if too few frames
-    loaded successfully -- caller should fall back to a plain median.
+    loaded successfully, the stack won't fit in available memory, or any
+    loaded frame is non-finite -- caller should fall back to a plain median
+    in every ``None`` case.
     """
     from src.io_fits import load_frame
 
     imgs = []
+    skipped = 0
     for f in frames:
         try:
             data, _ = load_frame(f.path)
-            imgs.append(data.astype(np.float64))
         except Exception:
             continue
+        if data.shape != shape:
+            # Mixed binning/ROI within one calibration type -- np.stack below
+            # requires uniform shape, and the caller's homogeneity fast-path
+            # (select_matching_darks/flats) doesn't check dimensions, so a
+            # mismatched frame can genuinely reach here.
+            skipped += 1
+            continue
+        imgs.append(data.astype(np.float64))
+
+    if skipped:
+        _log.warning(
+            "robust_pca_master: skipped %d frame(s) with shape mismatched to "
+            "the reference frame (expected %s)", skipped, shape)
 
     if len(imgs) < Config.ROBUST_PCA_MIN_FRAMES:
         _log.warning(
             "robust_pca_master: only %d frames loaded (need >= %d for a "
-            "meaningful low-rank/sparse split); caller should fall back to median",
+            "meaningful low-rank/sparse split); falling back to median",
             len(imgs), Config.ROBUST_PCA_MIN_FRAMES)
+        safe_print(f"  robust_pca: only {len(imgs)} usable frames "
+                   f"(need >= {Config.ROBUST_PCA_MIN_FRAMES}) -- falling back to median")
+        return None
+
+    n = len(imgs)
+    p = int(np.prod(shape))
+    # IALM keeps ~7 live (n, p) float64 arrays alive at once (D, L, S, Y, temp,
+    # residual, plus the SVD's working copies) -- guard against OOM the same
+    # way make_master's median path guards its memmap threshold, since --auto
+    # can route here with no awareness of sensor resolution.
+    estimated_bytes = n * p * 8 * 7
+    try:
+        import psutil
+        avail = psutil.virtual_memory().available
+    except Exception:
+        avail = None
+    if avail is not None and estimated_bytes > avail // 2:
+        _log.warning(
+            "robust_pca_master: estimated memory use (%.1f GB) exceeds half of "
+            "available RAM (%.1f GB); falling back to median",
+            estimated_bytes / 1e9, avail / 1e9)
+        safe_print(f"  robust_pca: stack too large for available memory "
+                   f"(~{estimated_bytes/1e9:.1f} GB needed) -- falling back to median")
         return None
 
     stack = np.stack(imgs, axis=0)
-    n = stack.shape[0]
+    imgs = None  # drop the per-frame list before the decomposition's own peak usage
     D = stack.reshape(n, -1)
+
+    if not np.all(np.isfinite(D)):
+        _log.warning(
+            "robust_pca_master: non-finite pixel values in calibration stack; "
+            "falling back to median")
+        safe_print("  robust_pca: non-finite pixel values detected -- falling back to median")
+        return None
 
     L, _S = robust_pca_decompose(D)
     master = np.median(L, axis=0).reshape(shape)

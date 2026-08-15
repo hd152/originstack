@@ -150,6 +150,45 @@ def test_gaussian_psf_kernel_sharpens_matched_star_not_broadens():
     assert sigma_out >= sigma_true * 0.7   # sharpening stays controlled, not degenerate
 
 
+def test_native_matches_numpy_mirror_degenerate_zero_weight_phase():
+    """A pathological (e.g. ill-conditioned Wiener) table can have a phase
+    whose taps are all exactly zero. The native kernel's interior fast path
+    must still fall back to cval there, matching the numpy mirror's uniform
+    'valid & nonzero-weight' rule -- not silently return 0.0 for every
+    interior pixel landing in that phase (a real native/numpy parity bug
+    this test guards against)."""
+    H = W = 12
+    halo = 1
+    phases = 2
+    taps = 2 * halo + 1
+    data = (np.arange(H * W, dtype=np.float32).reshape(H, W, 1) + 1.0)
+
+    table4 = np.zeros((phases, phases, taps, taps), dtype=np.float64)
+    table4[1, 1] = 1.0 / (taps * taps)  # only phase (1,1) has nonzero weight
+    table = table4.ravel()
+
+    mat = [1.0, 0.0, 0.0, 1.0]
+    off = [0.2, 0.3]  # frac (0.2, 0.3) -> phase (0, 0) for every output pixel
+    cval = 7.5
+
+    got_native = np.asarray(native.warp_affine_kernel_table(
+        np.ascontiguousarray(data), mat, off, H, W, table, halo, phases, cval))
+    got_numpy = _warp_affine_kernel_table_numpy(data, mat, off, H, W, table, halo, phases, cval)
+
+    np.testing.assert_allclose(got_native, got_numpy)
+    np.testing.assert_allclose(got_native, cval)
+
+
+def test_phases_zero_raises_value_error():
+    H = W = 8
+    data = np.zeros((H, W, 1), dtype=np.float32)
+    table = np.zeros((0,), dtype=np.float64)
+    with pytest.raises(ValueError):
+        native.warp_affine_kernel_table(
+            np.ascontiguousarray(data), [1.0, 0.0, 0.0, 1.0], [0.0, 0.0],
+            H, W, table, 1, 0, 0.0)
+
+
 def test_flat_noise_is_not_amplified():
     """The real risk of any inverse-filter-flavoured kernel: noise gain.
     Resampling white noise through the table should not increase its std."""
