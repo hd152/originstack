@@ -324,31 +324,65 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     if cal_needed:
         safe_print("\nCreating master calibration frames...")
 
+    # master_method defaults to 'median' and is opt-in only for 'robust_pca' at
+    # real scale -- benchmarked robust_pca_decompose directly (2000x3000x3, 20
+    # frames): 2910s (~48.5 min) pre-optimization, 1264s (~21 min) after
+    # src/robust_pca.py's Gram-matrix-trick SVD (native gram_matrix_wide/
+    # small_times_wide kernels, ~9x over a direct SVD call on this shape,
+    # ~2.3x end-to-end -- the non-SVD per-iteration ops don't benefit and now
+    # dominate more of the budget). Still too slow to silently default for a
+    # real-sized calibration library. Below ROBUST_PCA_AUTO_MAX_FRAMES,
+    # though, cost scales down enough (~5min at N=10) to be a reasonable
+    # --auto default -- gated per calibration type (bias/dark/flat counts
+    # often differ) below, not globally, so one small type doesn't drag a
+    # large one into robust_pca too.
+    master_method = getattr(args, 'master_method', 'median') or 'median'
+    _auto_master = (getattr(args, 'auto', False)
+                    and master_method == 'median'
+                    and 'master_method' not in getattr(args, '_explicit_cli_dests', set()))
+
+    def _method_for(n_frames: int) -> str:
+        if (_auto_master and Config.ROBUST_PCA_MIN_FRAMES <= n_frames
+                <= Config.ROBUST_PCA_AUTO_MAX_FRAMES):
+            return 'robust_pca'
+        return master_method
+
     masters: dict = {}
 
+    def _method_tag(method: str) -> str:
+        # Auto-upgrade to robust_pca is a silent behavior change (slower,
+        # heavier on memory) unless the run output actually says it happened.
+        return f" ({method})" if method != 'median' else ""
+
     if frames.get('bias'):
-        masters['bias'] = make_master(frames['bias'], method='median')
+        _bias_method = _method_for(len(frames['bias']))
+        masters['bias'] = make_master(frames['bias'], method=_bias_method)
         if masters['bias'] is not None:
             safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> "
-                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
+                       f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}"
+                       f"{_method_tag(_bias_method)}")
     else:
         masters['bias'] = None
 
     if frames.get('dark'):
         frames['dark'] = select_matching_darks(lights, frames['dark'])
-        masters['dark'] = make_master(frames['dark'], method='median')
+        _dark_method = _method_for(len(frames['dark']))
+        masters['dark'] = make_master(frames['dark'], method=_dark_method)
         if masters['dark'] is not None:
             safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> "
-                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}"
+                       f"{_method_tag(_dark_method)}")
     else:
         masters['dark'] = None
 
     if frames.get('flat'):
         frames['flat'] = select_matching_flats(lights, frames['flat'])
-        masters['flat'] = make_master(frames['flat'], method='median')
+        _flat_method = _method_for(len(frames['flat']))
+        masters['flat'] = make_master(frames['flat'], method=_flat_method)
         if masters['flat'] is not None:
             safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> "
-                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
+                       f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}"
+                       f"{_method_tag(_flat_method)}")
         _flat_rots = []
         for _ff in frames['flat']:
             for _rkey in ('ROTATANG', 'ROTANGLE', 'POSANGLE', 'PA', 'ANGLE', 'ROTATOR'):
@@ -981,6 +1015,17 @@ def build_parser() -> argparse.ArgumentParser:
                         'fitted displacement to %.1fpx. Off by default -- opt-in, '
                         'higher-risk correction.' % (Config.LOCAL_WARP_MIN_STARS,
                                                       Config.LOCAL_WARP_MAX_DISPLACEMENT_PX))
+    g_frames.add_argument('--master-method', choices=['median', 'mean', 'robust_pca'],
+                   default='median',
+                   help='Master bias/dark/flat combine method (default: median). '
+                        'robust_pca: Principal Component Pursuit low-rank + sparse '
+                        'decomposition -- separates the true shared pattern (flat-field '
+                        'vignetting, fixed dark current) from sparse outliers (dust motes '
+                        'that shifted between sessions, transient hot pixels) more '
+                        'explicitly than median\'s per-pixel order statistic. Needs >= %d '
+                        'frames per calibration type (falls back to median otherwise); '
+                        'loads the full stack into memory and is slower than median/mean.'
+                        % Config.ROBUST_PCA_MIN_FRAMES)
     g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -993,7 +1038,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_stack.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
                             'percentile', 'esd', 'trimmed_mean', 'linear_fit',
-                            'ivw', 'auto'],
+                            'ivw', 'wavelet', 'auto'],
                    default='auto',
                    help='Stacking/rejection method. '
                         'sigma_clip: MAD-based iterative rejection (default for dithered data). '
@@ -1010,6 +1055,13 @@ def build_parser() -> argparse.ArgumentParser:
                         'measured Phase 1 background sigma; no rejection, pair with '
                         '--cosmic-ray-rejection/--trail-reject (tune gain via --config '
                         'ivw_gain for an added per-pixel shot-noise term). '
+                        'wavelet: decompose every frame and sigma-clip-combine each wavelet '
+                        'subband across frames (reuses --rejection-sigma/-iters/-estimator), '
+                        'then reconstruct -- preserves faint fine-scale structure a pixel-domain '
+                        'outlier test can shave off, at the cost of N wavelet transforms per '
+                        'channel (slower than the pixel-domain methods). Not compatible with '
+                        '--drizzle-scale > 1 (v1 limitation); tune depth via --config '
+                        'wavelet_combine_levels (default 4). '
                         'auto: choose based on frame count (<8->percentile, else sigma_clip). '
                         'mean/median: no rejection.')
     g_stack.add_argument('--rejection-sigma', type=float, default=3.0,
@@ -1038,6 +1090,40 @@ def build_parser() -> argparse.ArgumentParser:
                         'heuristic misfires on a legitimately imbalanced sensor/target.')
     g_stack.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
+    g_stack.add_argument('--super-res-iters', type=int, default=0, metavar='N',
+                   help='Iterative back-projection (IBP, Irani & Peleg 1991) super-resolution '
+                        'refinement passes after drizzle (default: 0 = off; only meaningful '
+                        'with --drizzle-scale > 1). Each iteration forward-simulates what '
+                        'every original frame should look like given the current estimate '
+                        '(inverse-warp + PSF blur), compares to what was actually observed, '
+                        'and back-projects the residual correction. Genuine resolution gain '
+                        'beyond drizzle\'s one-shot linear resample -- but like any inverse-'
+                        'problem iteration, more isn\'t always better: it converges then '
+                        'starts amplifying noise past a scene-dependent point (measured on '
+                        'synthetic data: RMSE bottoms out around 5 iterations, then rises '
+                        'again by ~10). 5 is a reasonable starting point; watch the output '
+                        'rather than maximising N. '
+                        'Needs a PSF estimate (same estimator as --drizzle-kernel psf/'
+                        '--deconvolve rl) -- skipped with a warning if that fails. Not yet '
+                        'compatible with --elastic-registration (tune step size via --config '
+                        'ibp_relax, default %.1f).' % Config.IBP_RELAX)
+    g_stack.add_argument('--drizzle-kernel', choices=['lanczos3', 'psf'], default='lanczos3',
+                   help='Drizzle resample kernel (default: lanczos3; only matters when '
+                        '--drizzle-scale > 1). psf: build the resample kernel from the '
+                        'session\'s own estimated PSF (Moffat fit to reference-frame stars, '
+                        'same estimator as --deconvolve rl) via a windowed Wiener inverse '
+                        'filter -- mild built-in sharpening during resample (tune '
+                        'aggressiveness via --config drizzle_psf_wiener_k, default %.3f; '
+                        'lower = sharper but more prone to ringing/noise gain). NOT simply '
+                        'the raw PSF shape as the kernel -- that measurably broadens stars '
+                        '(convolving an already-blurred profile with itself again), which '
+                        'was verified and corrected during development. Cropped to a small '
+                        '%dx%d tap radius (a resample kernel, not a full deconvolution pass '
+                        '-- pair with --deconvolve for a bigger correction). Falls back to '
+                        'lanczos3 if PSF estimation fails (too few reference stars) or with '
+                        '--elastic-registration (the elastic warp path doesn\'t use this '
+                        'kernel).' % (Config.DRIZZLE_PSF_WIENER_K, Config.DRIZZLE_PSF_KERNEL_SIZE,
+                                      Config.DRIZZLE_PSF_KERNEL_SIZE))
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     g_out.add_argument('--plate-solve', action='store_true',
@@ -1308,6 +1394,9 @@ def build_parser() -> argparse.ArgumentParser:
         linear_fit_sigma_high=2.0,
         linear_fit_iters=5,
         ivw_gain=None,  # electrons/ADU; None = per-frame-constant noise weight (no shot-noise term)
+        drizzle_psf_wiener_k=Config.DRIZZLE_PSF_WIENER_K,  # used only with --drizzle-kernel psf
+        wavelet_combine_levels=4,  # used only with --stack-method wavelet
+        ibp_relax=Config.IBP_RELAX,  # used only with --super-res-iters
         # Quality
         # (advanced_metrics has no CLI flag -- set via --config only)
         # Per-feature tuning

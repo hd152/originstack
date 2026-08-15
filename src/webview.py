@@ -17,6 +17,7 @@ Mirrors the ``get_gpu()`` module-level singleton pattern.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -83,6 +84,11 @@ class WebView:
             'run_status': 'idle',      # 'idle' | 'running' | 'ok' | 'error'
             'run_error': None,
         }
+        # Static for the process lifetime -- computed once rather than on
+        # every _snapshot() call, unlike the other snap fields above which
+        # genuinely change per-run.
+        from src.utils import read_version
+        self._app_version = read_version()
 
     # ── publish API (no-ops while inactive) ──────────────────────────────
 
@@ -269,6 +275,23 @@ class WebView:
             self._state['run_status'] = status
             self._state['run_error'] = error
             self._bump()
+        self._notify(status, error)
+
+    def _notify(self, status: str, error: Optional[str]) -> None:
+        """Best-effort native OS notification -- cosmetic, so a failure here
+        must never affect run state. Useful because a long stacking run is
+        exactly the kind of thing a user tabs away from."""
+        try:
+            from src.notify import notify_windows
+            if status == 'ok':
+                msg = 'Stacking run complete.'
+            elif status == 'error':
+                msg = f'Run failed: {error or "unknown error"}'
+            else:
+                return
+            notify_windows('OriginStack', msg)
+        except Exception:
+            pass
 
     # ── re-stretch (on-demand, from retained float source) ────────────────
 
@@ -298,6 +321,7 @@ class WebView:
         with self._lock:
             snap = json.loads(json.dumps(self._state))
             snap['version'] = self._version
+            snap['app_version'] = self._app_version
             snap['preview_version'] = self._preview_version
             snap['preview_caption'] = self._preview_caption
             snap['latest_slug'] = self._latest_slug
@@ -398,6 +422,48 @@ class WebView:
                     except Exception as e:
                         self._send(500, 'application/json',
                                    json.dumps({'error': str(e)}).encode('utf-8'))
+                elif path == '/api/health':
+                    try:
+                        import astro_native
+                        has_native = True
+                    except Exception:
+                        has_native = False
+                    body = json.dumps({'native': has_native,
+                                       'version': view._app_version}).encode('utf-8')
+                    self._send(200, 'application/json', body)
+                elif path == '/api/frame_count':
+                    directory = (q.get('dir') or [''])[0]
+                    try:
+                        from src.frame_discovery import discover_frames
+                        if not directory or not os.path.isdir(directory):
+                            raise NotADirectoryError(directory)
+                        counts = {k: len(v) for k, v in discover_frames(directory).items()}
+                        sessions = None
+                        if sum(counts.values()) == 0:
+                            # No frames directly in this folder -- check for a
+                            # hierarchical layout (one subfolder per session),
+                            # the same structure process_directory's own
+                            # single-folder-vs-hierarchical auto-detection and
+                            # --combine-sessions both work from.
+                            subdirs = sorted(
+                                os.path.join(directory, d) for d in os.listdir(directory)
+                                if os.path.isdir(os.path.join(directory, d)))
+                            sessions = []
+                            for d in subdirs:
+                                sub_counts = {k: len(v) for k, v in discover_frames(d).items()}
+                                if sum(sub_counts.values()) > 0:
+                                    sessions.append({'name': os.path.basename(d),
+                                                     'counts': sub_counts})
+                            for k in counts:
+                                counts[k] = sum(s['counts'].get(k, 0) for s in sessions)
+                        result = {'ok': True, 'counts': counts}
+                        if sessions is not None:
+                            result['sessions'] = sessions
+                        body = json.dumps(result).encode('utf-8')
+                        self._send(200, 'application/json', body)
+                    except Exception as e:
+                        body = json.dumps({'ok': False, 'error': str(e)}).encode('utf-8')
+                        self._send(200, 'application/json', body)
                 elif path == '/events':
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/event-stream')
@@ -503,123 +569,360 @@ _PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OriginStack — live</title>
+<title>OriginStack</title>
 <style>
-  :root { color-scheme: dark; }
+  /* ---------------------------------------------------------------------
+     OriginStack control panel. Token system grounded in the subject: this
+     runs unattended overnight next to a telescope, so the palette borrows
+     from the imaging domain itself rather than a generic app accent --
+     Ha/OIII/SII are the three narrowband channels this pipeline's own SHO
+     palette combiner maps to red/teal/gold (src/channel_combine.py), reused
+     here as the UI's own signal colors instead of an arbitrary blue.
+  --------------------------------------------------------------------- */
+  :root {
+    color-scheme: dark;
+    --bg:        #08090c;   /* true dark-sky black, not GitHub navy-black */
+    --well:      #030304;   /* recessed data wells: log, viewport, inputs */
+    --panel:     #0f1117;
+    --line:      #23262f;
+    --line-soft: #1a1c22;
+    --text:      #e8e6df;   /* warm off-white -- phosphor afterglow, not pure white */
+    --text-dim:  #7c8090;
+    --text-faint:#4c505e;
+    --accent:    #ff6a3d;   /* H-alpha -- primary: active state, primary actions */
+    --accent-2:  #3ecbe0;   /* O-III -- secondary: compare/info accents */
+    --accent-3:  #ffc857;   /* S-II -- tertiary: in-progress / warm highlight */
+    --phosphor:  #ffb454;   /* amber CRT-readout glow, log panel signature */
+    --success:   #5cd98f;
+    --danger:    #ff4757;
+    --mono: "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace;
+    --sans: "Segoe UI", system-ui, sans-serif;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #0d1117; color: #d5dae2;
-         font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
-  header { padding: 14px 22px; background: #161b22;
-           border-bottom: 1px solid #2a313c; display: flex;
+  *:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--well); }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+  header { padding: 13px 22px; background: var(--panel);
+           border-bottom: 1px solid var(--line); display: flex;
            align-items: baseline; gap: 14px; }
-  header h1 { font-size: 17px; margin: 0; color: #e8edf4; }
-  header .run { color: #8b949e; font-size: 13px; }
+  header h1 { font: 700 13px/1 var(--mono); margin: 0; color: var(--text);
+              text-transform: uppercase; letter-spacing: .16em; }
+  header h1::before { content: '\\25c6'; color: var(--accent); margin-right: 10px;
+                       font-size: 12px; }
+  header .run { color: var(--text-dim); font: 12px var(--mono); }
+  header .header-spacer { flex: 1; }
+  .hdr-btn { background: transparent; border: 1px solid var(--line); color: var(--text-dim);
+             border-radius: 2px; padding: 4px 12px; font: 11px var(--sans); cursor: pointer; }
+  .hdr-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  /* about / help modals */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65);
+      display: none; align-items: center; justify-content: center; z-index: 100; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
+      max-width: 640px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 20px 26px 24px; }
+  .modal.modal-lg { max-width: 760px; }
+  .modal-toc { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 14px 0 4px;
+      padding: 10px 12px; background: var(--well); border: 1px solid var(--line-soft);
+      border-radius: 2px; }
+  .modal-toc a { font: 11px var(--mono); color: var(--text-dim); cursor: pointer;
+      white-space: nowrap; }
+  .modal-toc a:hover { color: var(--accent-2); }
+  .modal-toc a::after { content: ' \\00b7'; color: var(--text-faint); }
+  .modal-toc a:last-child::after { content: ''; }
+  .modal-head { display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 4px; }
+  .modal h2 { margin-bottom: 4px; }
+  .modal-close { background: transparent; border: none; color: var(--text-dim);
+      font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 6px; }
+  .modal-close:hover { color: var(--text); }
+  .modal h3 { font: 700 12px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+      color: var(--accent-2); margin: 18px 0 8px; }
+  .modal h3:first-of-type { margin-top: 14px; }
+  .modal p, .modal li { font-size: 13px; line-height: 1.6; color: var(--text); }
+  .modal ol, .modal ul { margin: 0; padding-left: 20px; }
+  .modal li { margin-bottom: 4px; }
+  .modal code { font: 12px var(--mono); background: var(--well); color: var(--accent-3);
+      padding: 1px 5px; border-radius: 2px; }
+  .modal a { color: var(--accent-2); }
+  .modal .modal-sub { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
   main { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(460px, 1.3fr);
          gap: 16px; padding: 16px 22px; max-width: 1600px; }
-  section { background: #161b22; border: 1px solid #2a313c;
-            border-radius: 8px; padding: 14px 16px; }
-  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
-       color: #8b949e; margin: 0 0 10px; }
+  section { background: var(--panel); border: 1px solid var(--line);
+            border-radius: 3px; padding: 14px 16px; }
+  h2 { font: 700 11px var(--mono); text-transform: uppercase; letter-spacing: .12em;
+       color: var(--text-dim); margin: 0 0 12px; display: flex; align-items: center; }
+  h2::before { content: ''; width: 6px; height: 6px; background: var(--accent);
+               margin-right: 9px; flex: 0 0 auto; }
+  summary.h2-summary { font: 700 11px var(--mono); text-transform: uppercase;
+      letter-spacing: .12em; color: var(--text-dim); cursor: pointer;
+      display: flex; align-items: center; }
+  summary.h2-summary:hover { color: var(--text); }
+  summary.h2-summary .h2-dot { width: 6px; height: 6px; background: var(--accent);
+      margin: 0 9px 0 4px; flex: 0 0 auto; display: inline-block; }
+
+  /* pipeline phase gauges */
   .phases { display: flex; gap: 8px; }
-  .ph { flex: 1; padding: 8px 10px; border-radius: 6px; background: #0d1117;
-        border: 1px solid #2a313c; font-size: 12px; color: #8b949e; }
-  .ph.active { border-color: #58a6ff; color: #e8edf4; }
-  .ph.done { border-color: #3fb950; color: #b9c4d0; }
-  .ph .t { display: block; font-size: 11px; margin-top: 2px; color: #6e7883; }
-  .bar { height: 10px; background: #0d1117; border-radius: 5px;
-         overflow: hidden; margin-top: 10px; border: 1px solid #2a313c; }
-  .bar div { height: 100%; background: linear-gradient(90deg, #1f6feb, #58a6ff);
+  .ph { position: relative; flex: 1; padding: 9px 10px 8px; border-radius: 2px;
+        background: var(--well); border: 1px solid var(--line);
+        border-top: 2px solid var(--line); font: 12px var(--sans); color: var(--text-dim);
+        overflow: hidden; transition: border-color .25s, color .25s; }
+  .ph.active { border-color: var(--line); border-top-color: var(--accent); color: var(--text); }
+  .ph.active::after { content: ''; position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,106,61,.12), transparent);
+      animation: sweep 2.2s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .ph.active::after { animation: none; } }
+  @keyframes sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+  .ph.done { border-top-color: var(--success); color: var(--text-dim); }
+  .ph .t { display: block; font: 11px var(--mono); margin-top: 3px; color: var(--text-faint); }
+  .bar { height: 4px; background: var(--well); overflow: hidden; margin-top: 12px;
+         border-radius: 2px; }
+  .bar div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-3));
              width: 0%; transition: width .3s; }
-  .plabel { margin-top: 6px; font-size: 12px; color: #8b949e; }
-  #log { height: 260px; overflow-y: auto; background: #0d1117;
-         border-radius: 6px; padding: 10px 12px; font: 12px/1.5 Consolas,
-         monospace; white-space: pre-wrap; color: #9aa4b2; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid #21262d; }
-  th:first-child, td:first-child { text-align: left; }
-  td.bad { color: #f85149; }
+  .plabel { margin-top: 7px; font: 12px var(--mono); color: var(--text-dim); }
+
+  /* log: amber-phosphor telemetry readout -- the one signature element */
+  #log { height: 260px; overflow-y: auto; background: var(--well);
+         border: 1px solid var(--line-soft); border-radius: 2px; padding: 10px 12px;
+         font: 12px/1.6 var(--mono); white-space: pre-wrap; color: var(--phosphor);
+         text-shadow: 0 0 5px rgba(255,180,84,.18);
+         background-image: repeating-linear-gradient(
+             to bottom, rgba(255,255,255,.012) 0px, rgba(255,255,255,.012) 1px,
+             transparent 1px, transparent 3px); }
+
+  table { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+  th { text-align: right; padding: 3px 8px 7px; color: var(--text-faint);
+       font-weight: 400; text-transform: uppercase; letter-spacing: .06em; font-size: 10px; }
+  td { text-align: right; padding: 4px 8px; border-top: 1px solid var(--line-soft);
+       font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-family: var(--sans); }
+  td.bad { color: var(--danger); }
+
   /* viewer */
   .vtools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
             margin-bottom: 10px; }
-  .vtools select, .vtools button { background: #0d1117; color: #d5dae2;
-      border: 1px solid #2a313c; border-radius: 6px; padding: 5px 9px;
-      font-size: 12px; cursor: pointer; }
-  .vtools button:hover, .vtools select:hover { border-color: #58a6ff; }
-  .vtools button.on { border-color: #58a6ff; color: #e8edf4; }
+  .vtools select, .vtools button { background: var(--well); color: var(--text);
+      border: 1px solid var(--line); border-radius: 2px; padding: 5px 9px;
+      font: 12px var(--sans); cursor: pointer; }
+  .vtools button:hover, .vtools select:hover { border-color: var(--accent); }
+  .vtools button.on { border-color: var(--accent); color: var(--text);
+      box-shadow: inset 0 0 0 1px var(--accent); }
   .vtools .spacer { flex: 1; }
-  .vtools .z { color: #6e7883; font-size: 12px; min-width: 46px;
+  .vtools .z { color: var(--text-dim); font: 12px var(--mono); min-width: 46px;
                text-align: right; }
   #viewport { position: relative; width: 100%; height: 460px; overflow: hidden;
-              background: #000; border-radius: 6px; border: 1px solid #2a313c;
+              background: #000; border-radius: 2px; border: 1px solid var(--line);
               cursor: grab; touch-action: none; }
   #viewport.drag { cursor: grabbing; }
   #viewport img { position: absolute; top: 0; left: 0; transform-origin: 0 0;
                   image-rendering: auto; user-select: none;
                   -webkit-user-drag: none; max-width: none; }
   #cmpImg { display: none; }
-  #wipe { position: absolute; top: 0; bottom: 0; width: 2px; background: #58a6ff;
+  #viewerPlaceholder { position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 10px; pointer-events: none; }
+  #viewerPlaceholder .vp-word { font: 700 15px var(--mono); letter-spacing: .18em;
+      color: #2b2f38; }
+  #viewerPlaceholder .vp-note { font: 12px var(--sans); color: #3a3f4a; }
+  #wipe { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent-2);
           display: none; cursor: ew-resize; z-index: 5; }
   #wipe::after { content: '\\21d4'; position: absolute; top: 50%; left: 50%;
-      transform: translate(-50%,-50%); background: #58a6ff; color: #0d1117;
+      transform: translate(-50%,-50%); background: var(--accent-2); color: #04262b;
       border-radius: 50%; width: 22px; height: 22px; line-height: 22px;
       text-align: center; font-size: 12px; }
-  .cap { margin-top: 6px; font-size: 12px; color: #8b949e; }
+  .cap { margin-top: 7px; font: 12px var(--mono); color: var(--text-dim); }
+
   /* stretch panel */
-  .sgrid { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px;
+  .sgrid { display: grid; grid-template-columns: auto 1fr auto; gap: 8px 10px;
            align-items: center; font-size: 12px; }
-  .sgrid label { color: #8b949e; }
-  .sgrid input[type=range] { width: 100%; }
-  .sgrid .val { color: #d5dae2; min-width: 42px; text-align: right;
-                font-variant-numeric: tabular-nums; }
+  .sgrid label { color: var(--text-dim); }
+  .sgrid input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=checkbox] { accent-color: var(--accent); }
+  .sgrid .val { color: var(--text); min-width: 42px; text-align: right;
+                font: 12px var(--mono); font-variant-numeric: tabular-nums; }
   .srow { display: flex; gap: 8px; margin-top: 10px; }
-  .srow button { flex: 1; background: #1f6feb; color: #fff; border: 0;
-      border-radius: 6px; padding: 7px; font-size: 12px; cursor: pointer; }
-  .srow button.ghost { background: #0d1117; color: #8b949e;
-      border: 1px solid #2a313c; }
-  .snote { color: #6e7883; font-size: 11px; margin-top: 8px; }
+  .srow button { flex: 1; background: var(--accent); color: #1a0a04; border: 0;
+      border-radius: 2px; padding: 8px; font: 700 12px var(--sans); cursor: pointer;
+      letter-spacing: .01em; }
+  .srow button:hover { filter: brightness(1.08); }
+  .srow button.ghost { background: transparent; color: var(--text-dim);
+      border: 1px solid var(--line); font-weight: 400; }
+  .srow button.ghost:hover { border-color: var(--text-faint); color: var(--text); }
+  .snote { color: var(--text-faint); font-size: 11px; margin-top: 8px; }
+
   /* setup panel: quick bools + advanced accordion */
+  #f_directory, #f_output, .adv-input {
+      font: 12px var(--mono); }
+  input[type=text], select {
+      background: var(--well); color: var(--text); border: 1px solid var(--line);
+      border-radius: 2px; padding: 5px 7px; }
+  input[type=text]:hover, select:hover { border-color: var(--text-faint); }
   .quick-bool { display: flex; align-items: center; gap: 6px; font-size: 12px;
-                color: #d5dae2; }
-  .adv-group-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
-                 color: #6e7883; margin: 10px 0 4px; }
+                color: var(--text); }
+  .adv-group-h { font: 10px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+                 color: var(--text-faint); margin: 12px 0 5px; }
   .adv-row { display: grid; grid-template-columns: 180px 1fr auto; gap: 8px;
              align-items: center; margin-bottom: 6px; font-size: 12px; }
-  .adv-label { color: #8b949e; }
-  .adv-input { background: #0d1117; color: #d5dae2; border: 1px solid #2a313c;
-               border-radius: 4px; padding: 3px 6px; width: 100%; }
-  .adv-browse { background: #0d1117; color: #d5dae2; border: 1px solid #2a313c;
-                border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
-  .adv-browse:hover { border-color: #58a6ff; }
-  .adv-summary { cursor: pointer; color: #8b949e; font-size: 12px; }
+  .adv-label { color: var(--text-dim); font: 11px var(--mono); }
+  .adv-input { background: var(--well); color: var(--text); border: 1px solid var(--line);
+               border-radius: 2px; padding: 3px 6px; width: 100%; }
+  .adv-browse { background: var(--well); color: var(--text-dim); border: 1px solid var(--line);
+                border-radius: 2px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+  .adv-browse:hover { border-color: var(--accent); color: var(--text); }
+  .adv-summary { cursor: pointer; color: var(--text-dim); font: 12px var(--mono); }
+
   /* frame strip */
   #strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
   #strip figure { margin: 0; flex: 0 0 auto; width: 96px; cursor: pointer;
                   text-align: center; }
-  #strip img { width: 96px; height: 72px; object-fit: cover; border-radius: 4px;
-               border: 1px solid #2a313c; background: #000; }
-  #strip figure:hover img { border-color: #58a6ff; }
-  #strip figcaption { font-size: 10px; color: #6e7883; margin-top: 3px;
+  #strip img { width: 96px; height: 72px; object-fit: cover; border-radius: 2px;
+               border: 1px solid var(--line); background: #000; }
+  #strip figure:hover img { border-color: var(--accent); }
+  #strip figcaption { font: 10px var(--mono); color: var(--text-faint); margin-top: 4px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #summary { display: none; border-color: #3fb950; }
-  #summary dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px;
-                margin: 0; font-size: 13px; }
-  #summary dt { color: #8b949e; } #summary dd { margin: 0; color: #e8edf4; }
+
+  #summary { display: none; border-color: var(--success); }
+  #summary h2::before { background: var(--success); }
+  #summary dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 16px;
+                margin: 0; font: 13px var(--mono); }
+  #summary dt { color: var(--text-dim); } #summary dd { margin: 0; color: var(--text); }
   @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
-<header><h1>OriginStack</h1><span class="run" id="runinfo">connecting…</span></header>
+<header><h1>OriginStack</h1><span class="run" id="runinfo">connecting…</span>
+  <div class="header-spacer"></div>
+  <button class="hdr-btn" id="helpBtn">Help</button>
+  <button class="hdr-btn" id="aboutBtn">About</button>
+</header>
+
+<div class="modal-overlay" id="helpModal">
+  <div class="modal modal-lg">
+    <div class="modal-head"><h2>Help</h2><button class="modal-close" data-close="helpModal">&times;</button></div>
+    <p class="modal-sub">Everything this dashboard does, in one place.</p>
+
+    <nav class="modal-toc" id="helpToc">
+      <a data-goto="h-quick-start">Quick start</a>
+      <a data-goto="h-folders">Folder layouts</a>
+      <a data-goto="h-calibration">Calibration frames</a>
+      <a data-goto="h-setup">Setup options</a>
+      <a data-goto="h-pipeline">The Pipeline panel</a>
+      <a data-goto="h-monitoring">Watching a run</a>
+      <a data-goto="h-preview">The Preview panel</a>
+      <a data-goto="h-finish">When a run finishes</a>
+      <a data-goto="h-gpu">GPU acceleration</a>
+      <a data-goto="h-troubleshooting">Troubleshooting</a>
+      <a data-goto="h-more">More information</a>
+    </nav>
+
+    <h3 id="h-quick-start">Quick start</h3>
+    <ol>
+      <li>Set <b>Directory</b> to your folder of light frames (type a path, or click Browse…). The line under it shows how many lights/darks/flats/bias frames were found.</li>
+      <li>Leave <b>Output</b> blank to save next to the input as <code>&lt;directory&gt;_stacked.fits</code>, or set your own path.</li>
+      <li>Pick a <b>Preset</b> if you know your target type, or leave <b>Auto advisor</b> checked to let the pipeline classify the target and tune settings itself.</li>
+      <li>Click <b>Start</b>. Progress, the live log, and per-frame quality all update in the Pipeline/Log/Recent frames panels as the run proceeds.</li>
+    </ol>
+
+    <h3 id="h-folders">Folder layouts</h3>
+    <ul>
+      <li><b>Single folder</b>: lights (and optionally darks/flats/bias) directly inside the chosen directory.</li>
+      <li><b>Multiple sessions</b>: a folder of subfolders, one per night/session, with no frames directly in the top-level folder. By default each session is stacked separately and the results combined into a mosaic-style output; check <b>Combine sessions</b> to instead pool every light from every session into one unified stack (best when every session points at the same target).</li>
+    </ul>
+
+    <h3 id="h-calibration">Calibration frames</h3>
+    <p>Darks, flats, and bias frames found alongside your lights (or in a separate calibration folder via the Advanced panel's calibration options) are matched automatically and combined into master calibration frames before your lights are processed. If none are found, calibration is simply skipped for that step rather than failing the run.</p>
+
+    <h3 id="h-setup">Setup options</h3>
+    <ul>
+      <li><b>Preset / Auto advisor</b> &mdash; a preset applies a fixed set of tuned defaults for a target type. <b>Auto advisor</b> instead measures the actual stacked signal and continuously blends settings across target-type profiles (galaxy, nebula, star field, ...), so a target that's genuinely between two types gets a proportional mix rather than a hard jump. Any field you touch yourself always overrides what auto/preset would have chosen.</li>
+      <li><b>Stack method</b> &mdash; how aligned frames are combined: <code>auto</code> picks a sensible method for your frame count, or choose sigma-clip, median, percentile, ESD, linear-fit, inverse-variance-weighted, or drizzle directly. Hover the field in the Advanced panel for the full description of each.</li>
+      <li><b>Denoiser</b> &mdash; which noise-reduction algorithm runs in post-processing (wavelet, MMT, BM3D, ACDNR, NLM, bilateral, or anisotropic diffusion). <code>auto</code> lets the advisor pick.</li>
+      <li><b>Deconvolution</b> &mdash; optional sharpening (Richardson-Lucy or Total Variation) using an estimated or fitted point-spread function. Off by default for most targets since it can ring bright stars if the PSF estimate is imperfect.</li>
+      <li><b>Drizzle scale</b> &mdash; sub-pixel super-resolution stacking; only helps if your frames are dithered (the sub-pixel offset the log's dither warning refers to).</li>
+      <li><b>Trail reject</b> &mdash; detects and inpaints satellite/aircraft streaks per frame before stacking, independent of whatever rejection method Stack method uses.</li>
+      <li><b>Local normalize</b> &mdash; matches each frame's background level to the others before combining, to reduce blotching from sky-glow differences between subs.</li>
+      <li><b>Repair stars</b> &mdash; rebuilds saturated (flat-topped) star cores from their unsaturated wings, restoring a natural peak and color instead of a clipped white disk.</li>
+      <li><b>Elastic registration</b> &mdash; fits a smooth per-frame local (non-rigid) distortion correction on top of ordinary alignment, for optics with field-dependent distortion a single global transform can't fully correct.</li>
+      <li><b>Start fresh</b> &mdash; ignores a saved checkpoint from a previous run on this folder and reprocesses everything from the beginning.</li>
+    </ul>
+
+    <h3 id="h-pipeline">The Pipeline panel</h3>
+    <p>Four phases run in order:</p>
+    <ul>
+      <li><b>1 &middot; Quality</b> &mdash; loads, calibrates, debayers, and scores every frame in parallel; frames that fail quality thresholds are rejected here and won't appear in the final stack.</li>
+      <li><b>2 &middot; Registration</b> &mdash; aligns every accepted frame to a reference frame (translation, then optional rotation/scale, then optional elastic distortion correction).</li>
+      <li><b>3 &middot; Stacking</b> &mdash; combines the aligned frames using the selected Stack method, cropping to the region every frame actually covers.</li>
+      <li><b>4 &middot; Post-process</b> &mdash; background extraction, denoising, optional deconvolution and star reduction, and the final stretch that produces the preview JPEG.</li>
+    </ul>
+    <p>The active phase is highlighted with a moving glow; hover a completed one to see how long it took.</p>
+
+    <h3 id="h-monitoring">Watching a run</h3>
+    <ul>
+      <li><b>Recent frames</b> lists the last several frames scored in Phase 1 &mdash; Score, SNR, star count, and FWHM (a smaller FWHM means tighter, sharper stars). A frame shown in red was rejected and won't be stacked.</li>
+      <li><b>Log</b> streams the same output you'd see running this from the command line, including which frames were rejected and why.</li>
+    </ul>
+
+    <h3 id="h-preview">The Preview panel</h3>
+    <ul>
+      <li>The view dropdown picks which saved milestone to look at (e.g. the linear pre-post-processing stack vs. the final result); <b>Compare</b> wipes between two milestones side by side &mdash; drag the divider to reveal before/after.</li>
+      <li><b>Fit</b>/<b>1:1</b> and drag-to-pan control zoom; scroll to zoom under the cursor.</li>
+      <li><b>Frames</b> below it shows per-frame thumbnails published during Phase 1 &mdash; click one to inspect it individually.</li>
+      <li>The <b>Stretch</b> panel re-renders the currently viewed milestone from its retained linear source (Black &sigma;, and the GHS b/sp/hp Generalized Hyperbolic Stretch parameters) &mdash; safe to experiment with, it only affects what you're looking at and never touches the saved output file.</li>
+    </ul>
+
+    <h3 id="h-finish">When a run finishes</h3>
+    <p>A <b>Complete</b> panel appears with a summary (frames stacked, average FWHM, total time, output path). The main output is a linear FITS file plus a stretched preview JPEG next to it; some features add their own sidecar files alongside it (for example a <code>_starless.fits</code> if star removal was active). If you're running the packaged desktop app, a native notification also fires so you don't have to keep the window in view during a long run.</p>
+
+    <h3 id="h-gpu">GPU acceleration</h3>
+    <p><b>Use GPU</b> only helps if you have an NVIDIA card with enough free VRAM for the frame size you're stacking; worker count is auto-limited based on available VRAM, and the pipeline falls back to CPU automatically (per-frame, not aborting the run) if a frame doesn't fit.</p>
+
+    <h3 id="h-troubleshooting">Troubleshooting</h3>
+    <ul>
+      <li><b>"No FITS files found"</b> &mdash; the chosen folder has no light frames directly in it and no subfolders that do either; double-check the path and the frame-count line under Directory.</li>
+      <li><b>Large shifts / dither warnings</b> in the log are informational, not errors &mdash; they describe how far frames had to be aligned, not a failure.</li>
+      <li>A run in progress keeps going even if you close this window's tab; the dashboard just reconnects to it. In the packaged desktop app, closing the window while a run is active asks you to confirm first.</li>
+      <li>If the desktop app's window fails to open at all, it's almost always a missing Microsoft Edge WebView2 Runtime &mdash; the error dialog says so directly.</li>
+    </ul>
+
+    <h3 id="h-more">More information</h3>
+    <p>Every field under <b>Advanced (everything else)</b> mirrors a command-line flag and has its full description in a hover tooltip. For anything not covered here, see the <a href="https://github.com/hd152/originstack" target="_blank" rel="noopener">project repository</a>.</p>
+  </div>
+</div>
+
+<div class="modal-overlay" id="aboutModal">
+  <div class="modal">
+    <div class="modal-head"><h2>About</h2><button class="modal-close" data-close="aboutModal">&times;</button></div>
+    <p><b>OriginStack</b> <span id="aboutVersion" class="modal-sub"></span></p>
+    <p>An astrophotography image-stacking pipeline: calibration, registration, stacking, and post-processing for deep-sky light frames, with optional native (Rust) and GPU acceleration.</p>
+    <h3>Project</h3>
+    <p><a href="https://github.com/hd152/originstack" target="_blank" rel="noopener">github.com/hd152/originstack</a></p>
+    <h3>License</h3>
+    <p class="modal-sub">MIT License &mdash; Copyright (c) 2026 Hans Davenport.</p>
+  </div>
+</div>
 <main>
   <div>
     <section id="setupSection">
       <h2>Setup</h2>
+      <!-- browseDir/browseOut start hidden via visibility (not display) --
+           quickFields is one shared CSS grid across every row below, and a
+           display:none child is removed from grid auto-placement entirely,
+           which shifts every later row's cells left by one -- silently
+           misaligning the whole form in a plain-browser (--web-view)
+           session, where these buttons never become visible at all. -->
       <div class="sgrid" id="quickFields">
         <label>Directory</label>
         <input type="text" id="f_directory" placeholder="C:\\path\\to\\lights">
-        <button id="browseDir" style="display:none">Browse…</button>
+        <button id="browseDir" class="adv-browse" style="visibility:hidden">Browse…</button>
+        <span></span>
+        <span id="dirFrameCount" style="grid-column: 2 / -1; font-size: 11px; color: var(--text-dim);"></span>
         <label>Output</label>
         <input type="text" id="f_output" placeholder="(default: &lt;directory&gt;_stacked.fits)">
-        <button id="browseOut" style="display:none">Browse…</button>
+        <button id="browseOut" class="adv-browse" style="visibility:hidden">Browse…</button>
         <label>Preset</label>
         <select id="f_preset"><option value="">(none)</option></select>
         <span></span>
@@ -668,6 +971,44 @@ _PAGE = """<!DOCTYPE html>
         <th>FWHM</th></tr></thead><tbody id="frames"></tbody></table>
     </section>
     <section style="margin-top:16px">
+      <details open id="logDetails">
+        <summary class="h2-summary"><span class="h2-dot"></span>Log</summary>
+        <div id="log" style="margin-top:12px"></div>
+      </details>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Preview</h2>
+      <div class="vtools">
+        <select id="viewSel" title="Which image to show"></select>
+        <button id="cmpBtn" title="Compare two milestones">Compare</button>
+        <select id="cmpSel" style="display:none" title="Compare against"></select>
+        <div class="spacer"></div>
+        <button id="fitBtn">Fit</button>
+        <button id="oneBtn">1:1</button>
+        <span class="z" id="zlabel">100%</span>
+      </div>
+      <div id="viewport">
+        <div id="viewerPlaceholder">
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="32" y="8" width="34" height="34" rx="4" transform="rotate(45 32 32)"
+                  stroke="#3a3f4a" stroke-width="2"/>
+          </svg>
+          <div class="vp-word">ORIGINSTACK</div>
+          <div class="vp-note">Waiting for the first stack preview…</div>
+        </div>
+        <img id="mainImg" alt="">
+        <img id="cmpImg" alt="">
+        <div id="wipe"></div>
+      </div>
+      <div class="cap" id="previewCap">Waiting for the first stack…</div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>Frames</h2>
+      <div id="strip"></div>
+    </section>
+    <section style="margin-top:16px">
       <h2>Stretch</h2>
       <div class="sgrid">
         <label>Black σ</label><input type="range" id="s_black" min="-1" max="4"
@@ -685,34 +1026,6 @@ _PAGE = """<!DOCTYPE html>
       </div>
       <div class="snote" id="snote">Adjusts the currently viewed milestone
         preview, re-stretched from its retained linear source.</div>
-    </section>
-    <section style="margin-top:16px">
-      <h2>Log</h2>
-      <div id="log"></div>
-    </section>
-  </div>
-  <div>
-    <section>
-      <h2>Preview</h2>
-      <div class="vtools">
-        <select id="viewSel" title="Which image to show"></select>
-        <button id="cmpBtn" title="Compare two milestones">Compare</button>
-        <select id="cmpSel" style="display:none" title="Compare against"></select>
-        <div class="spacer"></div>
-        <button id="fitBtn">Fit</button>
-        <button id="oneBtn">1:1</button>
-        <span class="z" id="zlabel">100%</span>
-      </div>
-      <div id="viewport">
-        <img id="mainImg" alt="waiting for first preview…">
-        <img id="cmpImg" alt="">
-        <div id="wipe"></div>
-      </div>
-      <div class="cap" id="previewCap">Waiting for the first stack…</div>
-    </section>
-    <section style="margin-top:16px">
-      <h2>Frames</h2>
-      <div id="strip"></div>
     </section>
     <section style="margin-top:16px" id="summary">
       <h2>Complete</h2>
@@ -822,6 +1135,7 @@ function loadMain(url, slug) {
   curSlug = slug || '';
   const keep = (natW !== 0);
   if (!keep) scale = 0;   // force fit on first image
+  document.getElementById('viewerPlaceholder').style.display = 'none';
   mainImg.src = url;
 }
 function loadCmp(slug) {
@@ -921,6 +1235,7 @@ function esc(s){ return String(s).replace(/[&<>"]/g, c =>
 const es = new EventSource('/events');
 es.onmessage = (ev) => {
   const s = JSON.parse(ev.data);
+  window.__appVersion = s.app_version;
   const r = s.run || {};
   document.getElementById('runinfo').textContent =
     (r.target ? r.target + ' — ' : '') + (r.output || '') +
@@ -979,6 +1294,7 @@ es.onmessage = (ev) => {
 const QUICK_SELECTS = ['preset', 'stack_method', 'denoiser', 'deconvolve_mode'];
 const QUICK_BOOLS = [
   ['auto', 'Auto advisor'],
+  ['combine_sessions', 'Combine sessions'],
   ['trail_reject', 'Trail reject'],
   ['local_normalize', 'Local normalize'],
   ['repair_stars', 'Repair stars'],
@@ -996,6 +1312,47 @@ let schemaByDest = {};
 let lastRunStatus = 'idle';
 
 function markTouched(dest) { touched.add(dest); }
+
+// ── Directory frame count (how many lights/darks/flats/bias actually sit
+// in the chosen folder, before committing to a run) ───────────────────────
+let frameCountToken = 0;
+async function refreshFrameCount() {
+  const dir = document.getElementById('f_directory').value.trim();
+  const el = document.getElementById('dirFrameCount');
+  if (!dir) { el.textContent = ''; return; }
+  const token = ++frameCountToken;  // stale-response guard, no debounce lib needed
+  el.textContent = 'Scanning…';
+  try {
+    const resp = await fetch('/api/frame_count?dir=' + encodeURIComponent(dir));
+    const result = await resp.json();
+    if (token !== frameCountToken) return;  // a newer request has since started
+    if (!result.ok) { el.textContent = 'No frames found (' + result.error + ')'; return; }
+    const c = result.counts;
+    const total = (c.light || 0) + (c.dark || 0) + (c.flat || 0) + (c.bias || 0);
+    if (total === 0) { el.textContent = 'No FITS/RAW/TIFF/XISF/SER frames found in this folder.'; return; }
+    const parts = [];
+    if (c.light) parts.push(c.light + ' light' + (c.light === 1 ? '' : 's'));
+    if (c.dark) parts.push(c.dark + ' dark' + (c.dark === 1 ? '' : 's'));
+    if (c.flat) parts.push(c.flat + ' flat' + (c.flat === 1 ? '' : 's'));
+    if (c.bias) parts.push(c.bias + ' bias');
+    // No frames directly in the chosen folder, but subfolders each hold a
+    // session -- same layout --combine-sessions / hierarchical mode expect.
+    if (result.sessions && result.sessions.length) {
+      el.textContent = result.sessions.length + ' session' +
+        (result.sessions.length === 1 ? '' : 's') + ' found (subfolders): ' +
+        parts.join(', ') + ' total. Stacked per-session and combined by ' +
+        'default -- check "Combine sessions" to pool all lights into one ' +
+        'stack instead.';
+    } else {
+      el.textContent = parts.join(', ') + ' found';
+    }
+  } catch (e) {
+    if (token === frameCountToken) el.textContent = '';
+  }
+}
+document.getElementById('f_directory').addEventListener('change', refreshFrameCount);
+document.getElementById('f_directory').addEventListener('blur', refreshFrameCount);
+if (document.getElementById('f_directory').value.trim()) refreshFrameCount();
 
 function fieldValue(dest, kind, el) {
   if (kind === 'bool_true' || kind === 'bool_false') return el.checked;
@@ -1139,6 +1496,13 @@ function updateRunStatus(status, error) {
   else if (status === 'ok') note.textContent = 'Complete.';
   else if (status === 'error') note.textContent = 'Error: ' + (error || 'unknown error');
   else note.textContent = 'Idle.';
+
+  const suffix = status === 'running' ? ' — running…'
+               : status === 'ok' ? ' — done'
+               : status === 'error' ? ' — error'
+               : '';
+  const ver = window.__appVersion ? ' v' + window.__appVersion : '';
+  document.title = 'OriginStack' + ver + suffix;
 }
 
 document.getElementById('startBtn').onclick = async () => {
@@ -1167,11 +1531,15 @@ document.getElementById('startBtn').onclick = async () => {
 
 function enablePywebviewPickers() {
   if (!window.pywebview) return;
-  document.getElementById('browseDir').style.display = '';
-  document.getElementById('browseOut').style.display = '';
+  document.getElementById('browseDir').style.visibility = 'visible';
+  document.getElementById('browseOut').style.visibility = 'visible';
   document.getElementById('browseDir').onclick = async () => {
     const p = await window.pywebview.api.browse_directory();
-    if (p) { document.getElementById('f_directory').value = p; markTouched('directory'); }
+    if (p) {
+      document.getElementById('f_directory').value = p;
+      markTouched('directory');
+      refreshFrameCount();
+    }
   };
   document.getElementById('browseOut').onclick = async () => {
     const p = await window.pywebview.api.browse_output_path();
@@ -1194,6 +1562,40 @@ function enablePywebviewPickers() {
 // immediately in case it's already there (e.g. on a fast reload).
 window.addEventListener('pywebviewready', enablePywebviewPickers);
 enablePywebviewPickers();
+
+// ── Help / About modals ────────────────────────────────────────────────
+function openModal(id) {
+  document.getElementById(id).classList.add('show');
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('show');
+}
+document.getElementById('helpBtn').onclick = () => openModal('helpModal');
+document.getElementById('aboutBtn').onclick = () => {
+  document.getElementById('aboutVersion').textContent =
+    window.__appVersion ? 'v' + window.__appVersion : '';
+  openModal('aboutModal');
+};
+document.querySelectorAll('.modal-close').forEach(btn => {
+  btn.onclick = () => closeModal(btn.dataset.close);
+});
+document.querySelectorAll('.modal-toc a').forEach(link => {
+  link.onclick = () => {
+    const target = document.getElementById(link.dataset.goto);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+});
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.classList.remove('show');
+  });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-overlay.show').forEach(
+      overlay => overlay.classList.remove('show'));
+  }
+});
 
 loadSchema();
 </script>

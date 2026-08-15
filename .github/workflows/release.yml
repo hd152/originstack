@@ -1,0 +1,42 @@
+name: Release (Windows desktop app build)
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify VERSION matches tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $ver = (Get-Content VERSION -Raw).Trim()
+          if ($tag -ne $ver) { throw "Tag v$tag does not match VERSION file ($ver)" }
+
+      - name: Build
+        shell: pwsh
+        run: .\packaging\build_windows.ps1 -PythonVersion '3.12'
+
+      - name: Verify packaged exe launches
+        shell: pwsh
+        run: .\packaging\verify_build.ps1
+
+      - name: Attach zip to existing GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem "packaging\dist\OriginStack-*-windows-x64.zip" | Select-Object -First 1
+          gh release upload "${{ github.ref_name }}" $zip.FullName --clobber

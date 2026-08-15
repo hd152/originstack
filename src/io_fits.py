@@ -112,7 +112,8 @@ def load_fits(path: str) -> Tuple[np.ndarray, dict]:
 
 
 def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.ndarray]:
-    """Create master calibration frame using streaming (mean) or memmap (median)."""
+    """Create master calibration frame using streaming (mean), memmap (median),
+    or robust PCA (low-rank + sparse decomposition, ``method='robust_pca'``)."""
     if not frames:
         return None
     # Probe first frame for shape
@@ -121,6 +122,13 @@ def make_master(frames: List[FrameInfo], method: str = 'median') -> Optional[np.
         shape = first_data.shape
     except Exception:
         return None
+
+    if method == 'robust_pca':
+        from src.robust_pca import robust_pca_master
+        master = robust_pca_master(frames, shape)
+        if master is not None:
+            return master
+        method = 'median'  # too few frames for RPCA -- fall back
 
     if method != 'median':
         # Streaming mean — O(1) memory per frame

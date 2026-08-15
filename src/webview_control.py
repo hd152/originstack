@@ -152,6 +152,9 @@ class RunManager:
         self.status = 'idle'
         self.thread: Optional[threading.Thread] = None
 
+    def is_running(self) -> bool:
+        return self.status == 'running'
+
     def start(self, form: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
             if self.status == 'running':

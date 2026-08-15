@@ -208,12 +208,102 @@ class TestServer(unittest.TestCase):
                        'strip'):
             self.assertIn(marker, body)
 
+    def test_page_has_help_and_about(self):
+        body = self._get('/').read().decode('utf-8')
+        for marker in ('helpBtn', 'aboutBtn', 'helpModal', 'aboutModal',
+                       'aboutVersion', 'MIT License'):
+            self.assertIn(marker, body)
+
+    def test_help_is_comprehensive_with_working_toc(self):
+        """Every modal-toc entry's data-goto target must actually exist as an
+        id in the page -- a broken anchor would silently no-op on click."""
+        import re
+        body = self._get('/').read().decode('utf-8')
+        for topic in ('h-quick-start', 'h-folders', 'h-calibration', 'h-setup',
+                      'h-pipeline', 'h-monitoring', 'h-preview', 'h-finish',
+                      'h-gpu', 'h-troubleshooting', 'h-more'):
+            self.assertIn(f'data-goto="{topic}"', body)
+            self.assertIn(f'id="{topic}"', body)
+
     def test_api_schema_served(self):
         body = json.loads(self._get('/api/schema').read())
         self.assertIn('Core', body)
         dests = {f['dest'] for fields in body.values() for f in fields}
         self.assertIn('directory', dests)
         self.assertIn('stack_method', dests)
+
+    def test_api_health_served(self):
+        body = json.loads(self._get('/api/health').read())
+        self.assertIn('native', body)
+        self.assertIn('version', body)
+        self.assertIsInstance(body['native'], bool)
+
+    def test_api_frame_count_missing_dir_param(self):
+        body = json.loads(self._get('/api/frame_count').read())
+        self.assertFalse(body['ok'])
+
+    def test_api_frame_count_nonexistent_dir(self):
+        body = json.loads(self._get('/api/frame_count?dir=' + 'no_such_dir_xyz').read())
+        self.assertFalse(body['ok'])
+
+    def test_api_frame_count_real_directory(self):
+        """--web-view's 'how many lights are actually in this folder' check
+        (user-reported desktop-app gap): counts must match discover_frames()
+        exactly, since that's what Phase 1 will actually see."""
+        import os
+        import tempfile
+        from astropy.io import fits
+        with tempfile.TemporaryDirectory() as td:
+            for i, kind in enumerate(['light', 'light', 'light', 'dark', 'flat']):
+                hdu = fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32))
+                hdu.writeto(os.path.join(td, f'{kind}_{i:03d}.fit'), overwrite=True)
+            import urllib.parse
+            body = json.loads(self._get(
+                '/api/frame_count?dir=' + urllib.parse.quote(td)).read())
+        self.assertTrue(body['ok'])
+        self.assertEqual(body['counts']['light'], 3)
+        self.assertEqual(body['counts']['dark'], 1)
+        self.assertEqual(body['counts']['flat'], 1)
+        self.assertEqual(body['counts']['bias'], 0)
+
+    def test_api_frame_count_hierarchical_directory(self):
+        """A folder with no FITS directly in it but subfolders each holding
+        a session (the --combine-sessions / hierarchical-mode layout) must
+        report the pooled totals and a per-session breakdown, not a false
+        'no frames found' -- the exact desktop-app gap reported by a user
+        selecting this kind of folder."""
+        import os
+        import tempfile
+        import urllib.parse
+        from astropy.io import fits
+        with tempfile.TemporaryDirectory() as td:
+            for session, lights in [('night1', 3), ('night2', 2)]:
+                sdir = os.path.join(td, session)
+                os.makedirs(sdir)
+                for i in range(lights):
+                    hdu = fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32))
+                    hdu.writeto(os.path.join(sdir, f'light_{i:03d}.fit'), overwrite=True)
+            body = json.loads(self._get(
+                '/api/frame_count?dir=' + urllib.parse.quote(td)).read())
+        self.assertTrue(body['ok'])
+        self.assertEqual(body['counts']['light'], 5)
+        self.assertIn('sessions', body)
+        names = sorted(s['name'] for s in body['sessions'])
+        self.assertEqual(names, ['night1', 'night2'])
+
+    def test_api_frame_count_empty_subfolders_reports_no_frames(self):
+        """Subfolders that exist but hold no FITS/RAW/etc must still report
+        a plain 'no frames' result, not a hierarchical session list."""
+        import os
+        import tempfile
+        import urllib.parse
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, 'empty_subdir'))
+            body = json.loads(self._get(
+                '/api/frame_count?dir=' + urllib.parse.quote(td)).read())
+        self.assertTrue(body['ok'])
+        self.assertEqual(sum(body['counts'].values()), 0)
+        self.assertEqual(body.get('sessions'), [])
 
     def _post(self, path, body, headers=None, timeout=5):
         hdrs = {'Content-Type': 'application/json'}

@@ -12,6 +12,7 @@ import src.wavelet as _wavelet_mod
 import src.blind_match as _blind_match_mod
 import src.denoising as _denoising_mod
 import src.debayer as _debayer_mod
+import src.robust_pca as _robust_pca_mod
 
 native = pytest.importorskip("astro_native")
 
@@ -953,3 +954,75 @@ def test_online_sigma_clip_streaming_matches_whole_array_kernel():
     assert n_tot_whole == d.shape[0]
     np.testing.assert_allclose(mean.astype(np.float32), combined_whole, atol=1e-3)
     assert n_rej_split == n_rej_whole
+
+
+# ---------------------------------------------------------------------------
+# Gram-matrix thin-SVD trick: gram_matrix_wide / small_times_wide (robust-PCA
+# master calibration). _thin_svd_wide auto-dispatches to these with a bare
+# try/except numpy fallback on any native failure -- without a forced
+# native-vs-numpy comparison here, a broken kernel silently falls back and
+# goes undetected by the rest of the suite (confirmed true before this test
+# existed: monkeypatching the native call to raise produced zero failures).
+# ---------------------------------------------------------------------------
+
+def _numpy_thin_svd_wide(M):
+    had = _robust_pca_mod._HAS_NATIVE
+    _robust_pca_mod._HAS_NATIVE = False
+    try:
+        return _robust_pca_mod._thin_svd_wide(M)
+    finally:
+        _robust_pca_mod._HAS_NATIVE = had
+
+
+def test_thin_svd_wide_native_matches_numpy_reconstruction():
+    assert _robust_pca_mod._HAS_NATIVE  # sanity: this run actually has native available
+    rng = np.random.default_rng(5)
+    n, p = 9, 500  # wide (n << p), the real robust-PCA calibration-stack shape
+    M = rng.normal(0.0, 5.0, (n, p))
+
+    U_n, s_n, Vt_n = _robust_pca_mod._thin_svd_wide(M)
+    recon_native = (U_n * s_n) @ Vt_n
+
+    U_p, s_p, Vt_p = _numpy_thin_svd_wide(M)
+    recon_numpy = (U_p * s_p) @ Vt_p
+
+    # Singular vector signs aren't uniquely defined (see _thin_svd_wide's own
+    # docstring), so compare the reconstruction and singular values, not U/Vt
+    # directly.
+    np.testing.assert_allclose(recon_native, recon_numpy, atol=1e-6, rtol=1e-6)
+    np.testing.assert_allclose(recon_native, M, atol=1e-6, rtol=1e-6)  # thin SVD is exact
+    np.testing.assert_allclose(np.sort(s_n)[::-1], np.sort(s_p)[::-1], atol=1e-6, rtol=1e-6)
+
+
+def test_gram_matrix_wide_matches_numpy():
+    rng = np.random.default_rng(6)
+    M = np.ascontiguousarray(rng.normal(0.0, 3.0, (7, 300)))
+    got = np.asarray(native.gram_matrix_wide(M))
+    want = M @ M.T
+    np.testing.assert_allclose(got, want, atol=1e-6, rtol=1e-6)
+
+
+def test_gram_matrix_wide_rejects_non_contiguous():
+    rng = np.random.default_rng(7)
+    M = rng.normal(0.0, 1.0, (300, 7)).T  # transpose view -- not C-contiguous
+    assert not M.flags['C_CONTIGUOUS']
+    with pytest.raises(ValueError):
+        native.gram_matrix_wide(M)
+
+
+def test_small_times_wide_matches_numpy():
+    rng = np.random.default_rng(8)
+    n, p = 6, 250
+    small = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, n)))
+    data = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, p)))
+    got = np.asarray(native.small_times_wide(small, data))
+    want = small @ data
+    np.testing.assert_allclose(got, want, atol=1e-6, rtol=1e-6)
+
+
+def test_small_times_wide_rejects_shape_mismatch():
+    rng = np.random.default_rng(9)
+    small = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 5)))
+    data = np.ascontiguousarray(rng.normal(0.0, 1.0, (6, 250)))  # N mismatch
+    with pytest.raises(ValueError):
+        native.small_times_wide(small, data)

@@ -8,8 +8,35 @@ page is a native file/folder picker, exposed to the page's JS as
 ``window.pywebview.api.browse_directory()`` / ``browse_output_path()`` --
 everything else (the Setup form, ``POST /api/start``, live progress) works
 identically whether the page is opened here or in an ordinary browser.
+
+Every failure path below routes through ``_fatal()``: a packaged PyInstaller
+build runs windowed (no console), so a bare ``print()`` is invisible to a
+double-click user -- it must show a native dialog and log to a location
+that's writable regardless of install directory (Program Files is often
+read-only for a non-admin install).
 """
 from __future__ import annotations
+
+import os
+import datetime
+import traceback
+import webbrowser
+from pathlib import Path
+
+
+def _fatal(title: str, message: str) -> int:
+    """Last-resort error surface: log full details, show a native dialog."""
+    log_dir = Path(os.environ.get('LOCALAPPDATA', '.')) / 'OriginStack' / 'logs'
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / 'desktop_app_crash.log', 'a', encoding='utf-8') as f:
+            f.write(f"\n[{datetime.datetime.now().isoformat()}] {title}\n{message}\n")
+            f.write(traceback.format_exc() + '\n')
+    except OSError:
+        pass
+    from src.native_dialog import show_error
+    show_error(title, message)
+    return 1
 
 
 class Api:
@@ -46,25 +73,27 @@ class Api:
 
 def main() -> int:
     from src.webview import get_webview
+    from src.webview_control import get_run_manager
 
     wv = get_webview()
     url = wv.start(port=8765)
     if url is None:
-        print("ERROR: could not start the local dashboard server "
-              "(port 8765 in use?)")
-        return 1
+        return _fatal("OriginStack",
+                      "Could not start the local dashboard server "
+                      "(port 8765 in use?).")
 
     try:
         import webview
     except ImportError:
+        webbrowser.open(url)
         print(f"pywebview is not installed (pip install pywebview). "
-              f"The dashboard server is running at {url} -- open it in a "
+              f"The dashboard server is running at {url} -- opened in your "
               f"browser instead. Ctrl+C to stop.")
         # The HTTP server runs on a daemon thread (WebView.start()) -- it
         # dies the instant this process's main thread exits, which would
         # happen immediately after printing the URL above with nothing
         # keeping it alive. Block here instead, same as --live's fallback
-        # in cli.py's main(), so the just-printed URL stays reachable.
+        # in cli.py's main(), so the dashboard stays reachable.
         import time
         try:
             while True:
@@ -74,10 +103,32 @@ def main() -> int:
         wv.stop()
         return 0
 
-    webview.create_window('OriginStack', url, js_api=Api(),
-                          width=1400, height=900, min_size=(900, 600))
-    webview.start()
-    wv.stop()
+    rm = get_run_manager()
+
+    def on_closing() -> bool:
+        """Returning False here cancels the close (pywebview's Event.set()
+        treats any handler returning False as should_cancel=True)."""
+        if not rm.is_running():
+            return True
+        from src.native_dialog import ask_yes_no
+        # default=True (allow close) -- never trap the user behind a dialog
+        # that failed to show.
+        return ask_yes_no("OriginStack",
+                          "A stacking run is still in progress. Quit anyway?",
+                          default=True)
+
+    try:
+        window = webview.create_window('OriginStack', url, js_api=Api(),
+                                       width=1400, height=900, min_size=(900, 600))
+        window.events.closing += on_closing
+        webview.start()
+    except Exception as e:
+        return _fatal("OriginStack",
+                      f"Failed to open the app window: {e}\n\n"
+                      f"This usually means the Microsoft Edge WebView2 "
+                      f"Runtime is not installed.")
+    finally:
+        wv.stop()
     return 0
 
 

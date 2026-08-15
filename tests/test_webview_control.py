@@ -111,6 +111,15 @@ class TestRunManager(unittest.TestCase):
     def test_singleton(self):
         self.assertIs(get_run_manager(), get_run_manager())
 
+    def test_is_running_reflects_status(self):
+        rm = RunManager()
+        self.assertFalse(rm.is_running())
+        rm.status = 'running'
+        self.assertTrue(rm.is_running())
+        for s in ('idle', 'ok', 'error'):
+            rm.status = s
+            self.assertFalse(rm.is_running())
+
     def test_rejects_concurrent_start(self):
         rm = RunManager()
         rm.status = 'running'
