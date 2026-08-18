@@ -265,7 +265,11 @@ def synthetic_channel_flux(teff_k: float, channel_response=None) -> Tuple[float,
     wl = _SPCC_WAVELENGTHS_NM
     spec = _blackbody_spectrum(float(teff_k), wl)
     resp_fn = channel_response or _default_channel_response
-    _integrate = getattr(np, 'trapezoid', np.trapz)  # trapezoid: numpy >= 2.0
+    # getattr(np, 'trapezoid', np.trapz) would eagerly evaluate np.trapz as
+    # the default arg even when trapezoid exists -- crashes outright on any
+    # numpy build that's fully removed trapz (not just deprecated it),
+    # which is exactly what broke CI here.
+    _integrate = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
     fluxes = []
     for ch in ('R', 'G', 'B'):
         resp = resp_fn(ch, wl)
@@ -289,7 +293,11 @@ def _synthetic_channel_flux_batch(teff_k: np.ndarray, channel_response=None
     teff_arr = np.asarray(teff_k, dtype=np.float64)
     spec = _blackbody_spectrum(teff_arr[:, None], wl[None, :])  # (n_stars, n_wl)
     resp_fn = channel_response or _default_channel_response
-    _integrate = getattr(np, 'trapezoid', np.trapz)
+    # getattr(np, 'trapezoid', np.trapz) would eagerly evaluate np.trapz as
+    # the default arg even when trapezoid exists -- crashes outright on any
+    # numpy build that's fully removed trapz (not just deprecated it),
+    # which is exactly what broke CI here.
+    _integrate = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
     fluxes = []
     for ch in ('R', 'G', 'B'):
         resp = resp_fn(ch, wl)  # (n_wl,)
