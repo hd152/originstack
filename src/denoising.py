@@ -101,7 +101,8 @@ def _bayesshrink_threshold(coeffs: np.ndarray, sigma_noise: float) -> float:
 
 def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
                               chroma_factor: float = 2.0,
-                              star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                              star_mask: Optional[np.ndarray] = None,
+                              variance_stabilize: bool = False) -> np.ndarray:
     """Adaptive multi-scale wavelet denoising using BayesShrink thresholds.
 
     Unlike ``wavelet_denoise`` which applies a single global
@@ -156,7 +157,16 @@ def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
 
         return wavelet.waverec2(new_coeffs)[:h, :w]
 
-    Y_d  = _adaptive_denoise_plane(Y,  1.0)
+    if variance_stabilize:
+        # See wavelet_denoise's identical guard for why luma only: it's the
+        # plane whose noise is genuinely photon-limited, which is what the
+        # generalized Anscombe transform's Poisson+Gaussian model assumes.
+        gain, sigma = _estimate_noise_level_function(Y)
+        Y_stab = _generalized_anscombe(np.maximum(Y, 0.0), gain, sigma)
+        Y_d = _inverse_generalized_anscombe(
+            _adaptive_denoise_plane(Y_stab, 1.0), gain, sigma)
+    else:
+        Y_d = _adaptive_denoise_plane(Y, 1.0)
     Cb_d = _adaptive_denoise_plane(Cb, chroma_factor)
     Cr_d = _adaptive_denoise_plane(Cr, chroma_factor)
 
@@ -173,9 +183,188 @@ def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
     return result.astype(np.float32)
 
 
+def _structure_tensor_coherence(plane: np.ndarray, sigma: float = 1.5) -> np.ndarray:
+    """Local structure-tensor coherence, ``(lambda1-lambda2)/(lambda1+lambda2)``
+    of the Gaussian-windowed gradient outer-product tensor. Near 1 on a
+    straight edge/filament (one dominant local gradient direction), near 0
+    on isotropic structure (noise, point-like blobs, flat sky) -- the
+    standard anisotropy measure ``anisotropic_diffusion`` doesn't compute
+    explicitly (it diffuses by a conductance function of gradient
+    *magnitude* alone, not orientation coherence).
+    """
+    gy, gx = np.gradient(plane.astype(np.float64))
+    jxx = ndimage.gaussian_filter(gx * gx, sigma)
+    jyy = ndimage.gaussian_filter(gy * gy, sigma)
+    jxy = ndimage.gaussian_filter(gx * gy, sigma)
+    trace = jxx + jyy
+    disc = np.sqrt(np.maximum((jxx - jyy) ** 2 + 4 * jxy ** 2, 0.0))
+    lam1 = 0.5 * (trace + disc)
+    lam2 = 0.5 * (trace - disc)
+    denom = lam1 + lam2
+    coherence = np.where(denom > 1e-12, (lam1 - lam2) / np.maximum(denom, 1e-12), 0.0)
+    return np.clip(coherence, 0.0, 1.0)
+
+
+def _resize_to(arr: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
+    if arr.shape == shape:
+        return arr
+    zy, zx = shape[0] / arr.shape[0], shape[1] / arr.shape[1]
+    return ndimage.zoom(arr, (zy, zx), order=1)
+
+
+def directional_wavelet_denoise(img: np.ndarray, levels: int = 4,
+                                chroma_factor: float = 2.0,
+                                star_mask: Optional[np.ndarray] = None,
+                                protect_strength: float = 0.6,
+                                coherence_sigma: float = 1.5) -> np.ndarray:
+    """Directional (curvelet/shearlet-*inspired*) adaptive wavelet
+    denoising -- ``--denoiser curvelet``.
+
+    Plain BayesShrink (``adaptive_wavelet_denoise``) applies one threshold
+    per wavelet subband uniformly across the whole plane: isotropic in
+    space. Curvelets/shearlets instead use genuinely directional basis
+    functions, so elongated structure (nebula filaments, galaxy arms)
+    survives thresholding better than an isotropic wavelet basis naturally
+    allows. This function approximates that practical benefit WITHOUT
+    implementing a full ridgelet/Radon-based transform or a perfect-
+    reconstruction directional filter bank: it computes a per-pixel
+    structure-tensor coherence map (``_structure_tensor_coherence`` -- near
+    1 on a straight edge/filament, near 0 on isotropic noise or point-like
+    blobs), resizes it to match each decomposition level's detail-subband
+    resolution, and locally *reduces* the BayesShrink threshold wherever
+    coherence is high -- still this project's own validated wavelet
+    transform and per-subband noise estimate (``_bayesshrink_threshold``),
+    just made spatially adaptive instead of one scalar per subband.
+
+    Deliberately NOT named a claim of implementing curvelets/shearlets
+    themselves -- named for the practical goal it approximates. Applied to
+    luma only (chroma channels get the same uniform BayesShrink
+    ``adaptive_wavelet_denoise`` already uses -- chroma structure isn't
+    what this is meant to protect).
+
+    ``protect_strength``: 0 = falls back to plain uniform BayesShrink
+    (protection off); clamped to at most 0.95 so even maximally-coherent
+    pixels retain a little thresholding (a thin linear artifact -- a
+    satellite trail sliver, a hot column -- is also "coherent" by this
+    measure, and shouldn't pass through completely untouched).
+    """
+    h, w = img.shape[0], img.shape[1]
+    src = img.astype(np.float64)
+    protect_strength = float(np.clip(protect_strength, 0.0, 0.95))
+
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    coherence = _structure_tensor_coherence(Y, sigma=coherence_sigma)
+
+    def _denoise_plane(plane, chroma_mult, use_coherence):
+        max_level = wavelet.dwt_max_level(min(plane.shape))
+        use_levels = min(levels, max_level)
+        if use_levels < 1:
+            return plane
+        coeffs = wavelet.wavedec2(plane, use_levels)
+        sigma_noise = np.median(np.abs(coeffs[-1][-1])) / 0.6745
+        sigma_noise = max(sigma_noise * chroma_mult, 1e-12)
+
+        new_coeffs = [coeffs[0]]
+        for detail_level in coeffs[1:]:
+            new_detail = []
+            for d in detail_level:
+                base_threshold = _bayesshrink_threshold(d, sigma_noise)
+                if use_coherence and np.isfinite(base_threshold):
+                    coh = _resize_to(coherence, d.shape)
+                    local_threshold = np.maximum(
+                        base_threshold * (1.0 - protect_strength * coh), 0.0)
+                else:
+                    local_threshold = base_threshold
+                new_detail.append(wavelet.soft_threshold(d, local_threshold))
+            new_coeffs.append(tuple(new_detail))
+        return wavelet.waverec2(new_coeffs)[:h, :w]
+
+    Y_d  = _denoise_plane(Y,  1.0, True)
+    Cb_d = _denoise_plane(Cb, chroma_factor, False)
+    Cr_d = _denoise_plane(Cr, chroma_factor, False)
+
+    R = Y_d + 1.40200 * Cr_d
+    G = Y_d - 0.34414 * Cb_d - 0.71414 * Cr_d
+    B = Y_d + 1.77200 * Cb_d
+    result = np.stack([R, G, B], axis=2)
+
+    if star_mask is not None:
+        mask3 = star_mask[:, :, np.newaxis]
+        result = result * (1.0 - mask3) + src * mask3
+
+    return result.astype(np.float32)
+
+
+def _estimate_noise_level_function(plane: np.ndarray, tile: int = 16) -> Tuple[float, float]:
+    """Estimate an approximate (gain, read_noise_sigma) pair from the
+    plane's own local mean-variance relationship (a lightweight photon
+    transfer curve fit), so the generalized Anscombe transform below
+    doesn't need the caller to supply exact sensor calibration data.
+
+    Splits the plane into tiles, takes each tile's (mean, variance) as one
+    sample, and fits ``variance ~= (1/gain) * mean + read_noise_sigma^2`` by
+    least squares restricted to the lower half of tiles by mean brightness
+    -- background-dominated tiles follow the shot-noise relationship;
+    star/nebula-structure tiles have inflated variance from real signal,
+    not noise, and would bias the fit if included.
+    """
+    h, w = plane.shape
+    ny, nx = h // tile, w // tile
+    if ny * nx < 10:
+        return 1.0, 0.0  # too few tiles to fit -- identity-ish transform
+
+    # Vectorized block-reduce: crop to the largest exact-multiple-of-tile
+    # region (a trailing partial-tile strip, if any, is dropped -- same
+    # effect as the plain Python double loop this replaced, which skipped
+    # any undersized trailing patch via a size check), then reshape to
+    # (ny, tile, nx, tile) and reduce over the two tile axes in one call --
+    # no per-tile Python loop over what can be thousands of tiles on a
+    # full-resolution frame.
+    cropped = plane[:ny * tile, :nx * tile]
+    blocks = cropped.reshape(ny, tile, nx, tile)
+    means_arr = blocks.mean(axis=(1, 3)).ravel()
+    varis_arr = blocks.var(axis=(1, 3)).ravel()
+    order = np.argsort(means_arr)
+    means_arr, varis_arr = means_arr[order], varis_arr[order]
+    cut = max(10, len(means_arr) // 2)
+    m_bg, v_bg = means_arr[:cut], varis_arr[:cut]
+    if np.ptp(m_bg) < 1e-6:
+        return 1.0, float(max(np.median(v_bg), 0.0))
+
+    slope, intercept = np.polyfit(m_bg, v_bg, 1)
+    gain = 1.0 / max(slope, 1e-6)
+    read_var = max(intercept, 0.0)
+    return gain, float(np.sqrt(read_var))
+
+
+def _generalized_anscombe(x: np.ndarray, gain: float, sigma: float) -> np.ndarray:
+    """Forward generalized Anscombe transform: maps a Poisson(shot noise,
+    scaled by ``gain``) + Gaussian(``sigma``) signal to one with
+    approximately unit variance everywhere, regardless of brightness --
+    the assumption BayesShrink's single per-subband threshold estimate
+    (from the finest detail subband's MAD) actually needs to hold.
+    """
+    return (2.0 / gain) * np.sqrt(np.maximum(gain * x + 0.375 * gain ** 2 + sigma ** 2, 0.0))
+
+
+def _inverse_generalized_anscombe(z: np.ndarray, gain: float, sigma: float) -> np.ndarray:
+    """Algebraic (exact-inverse-of-the-forward-map) inverse of
+    ``_generalized_anscombe``. Not the "optimal unbiased inverse" (Makitalo
+    & Foi 2011), which needs a precomputed correction table -- the plain
+    algebraic inverse is a standard, simpler approximation, adequate at
+    the moderate-to-high SNR this pipeline's stacked images sit at, with a
+    small known bias only at very low counts (per the same literature).
+    """
+    return ((z * gain / 2.0) ** 2 - 0.375 * gain ** 2 - sigma ** 2) / gain
+
+
 def wavelet_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 3.0,
                     chroma_factor: float = 2.0,
-                    star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                    star_mask: Optional[np.ndarray] = None,
+                    variance_stabilize: bool = False) -> np.ndarray:
     """Multi-scale wavelet denoising with luma/chroma split and star protection.
 
     Operates in YCbCr colour space so that chroma channels (Cb, Cr) can receive
@@ -212,7 +401,18 @@ def wavelet_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 
         return wavelet.waverec2(new_coeffs)[:h, :w]
 
     chroma_thresh = threshold_factor * chroma_factor
-    Y_d  = _denoise_plane(Y,  threshold_factor)
+    if variance_stabilize:
+        # Only luma: it's the plane whose noise is genuinely photon-limited
+        # (shot noise from the actual signal), which is what the generalized
+        # Anscombe transform's Poisson+Gaussian model assumes. Cb/Cr are
+        # differences of positive quantities, not counts, so GAT doesn't
+        # have the same physical grounding there -- left as-is.
+        gain, sigma = _estimate_noise_level_function(Y)
+        Y_stab = _generalized_anscombe(np.maximum(Y, 0.0), gain, sigma)
+        Y_d = _inverse_generalized_anscombe(
+            _denoise_plane(Y_stab, threshold_factor), gain, sigma)
+    else:
+        Y_d = _denoise_plane(Y, threshold_factor)
     Cb_d = _denoise_plane(Cb, chroma_thresh)
     Cr_d = _denoise_plane(Cr, chroma_thresh)
 

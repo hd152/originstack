@@ -223,11 +223,16 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # residual green cast that survives flat-field correction.
         ('scnr',                    True),
         ('photometric_calibration', True),
-        # Denoising: MMT edge-preserving median cascade for Ha filaments,
-        # ACDNR for residual sky noise, then a gentle Perona-Malik pass
-        # with option=2 (soft roll-off) to further protect filament edges.
+        # Denoising: directional (curvelet-inspired) wavelet denoising
+        # instead of MMT as primary -- its structure-tensor coherence map
+        # is a more targeted mechanism for exactly what this target has a
+        # lot of (elongated Ha filaments) than MMT's general median
+        # cascade. ACDNR for residual sky noise, then a gentle Perona-Malik
+        # pass with option=2 (soft roll-off) to further protect filament
+        # edges.
         ('denoise',                 False),
-        ('denoise_mmt',             True),
+        ('denoise_mmt',             False),
+        ('denoise_curvelet',        True),
         ('denoise_acdnr',           True),
         ('denoise_aniso',           True),
         ('aniso_option',            2),
@@ -363,11 +368,14 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('entropy_bg',              True),
         ('scnr',                    True),
         ('photometric_calibration', True),
-        # Same MMT + ACDNR + anisotropic diffusion combination as emission
-        # nebulae; dust structure in reflection nebulae responds well to the
-        # PDE edge preservation.
+        # Same directional (curvelet-inspired) + ACDNR + anisotropic
+        # diffusion combination as emission nebulae; dust structure in
+        # reflection nebulae is elongated/filamentary too and responds
+        # well to both the coherence-protected thresholding and the PDE
+        # edge preservation.
         ('denoise',                 False),
-        ('denoise_mmt',             True),
+        ('denoise_mmt',             False),
+        ('denoise_curvelet',        True),
         ('denoise_acdnr',           True),
         ('denoise_aniso',           True),
         ('aniso_option',            2),
@@ -747,26 +755,75 @@ def _apply_quality_settings(
 
     # 14. Single primary luma denoiser. Target presets and the SNR rules
     #     above can each enable a denoiser; layering several full-frame
-    #     smoothers (wavelet + MMT + ACDNR + BM3D) compounds smoothing —
-    #     each pass erodes the faint structure the previous one preserved —
-    #     without adding selectivity, and pays for every pass. Precedence:
-    #     BM3D (enabled only when its SNR/frame-count conditions hold) >
-    #     MMT (robust to the non-Gaussian residual noise of stacked OSC
-    #     data) > wavelet > ACDNR (fallback sky smoother). Chroma-only
-    #     cleanup (chroma_nr, SCNR) is orthogonal and unaffected; explicit
-    #     extras like --denoise-aniso/-nlm/-bilateral are user intent and
-    #     also left alone.
+    #     smoothers (wavelet + MMT + curvelet + ACDNR + BM3D) compounds
+    #     smoothing — each pass erodes the faint structure the previous one
+    #     preserved — without adding selectivity, and pays for every pass.
+    #     Precedence: BM3D (enabled only when its SNR/frame-count
+    #     conditions hold) > MMT (robust to the non-Gaussian residual noise
+    #     of stacked OSC data) > curvelet (directional/coherence-adaptive
+    #     wavelet -- ranked below MMT since MMT's median cascade is the
+    #     more battle-tested default when both would otherwise apply) >
+    #     wavelet > ACDNR (fallback sky smoother). Chroma-only cleanup
+    #     (chroma_nr, SCNR) is orthogonal and unaffected; explicit extras
+    #     like --denoise-aniso/-nlm/-bilateral are user intent and also
+    #     left alone.
     if getattr(args, 'denoise_bm3d', False):
-        for attr in ('denoise_mmt', 'denoise', 'denoise_acdnr'):
+        for attr in ('denoise_mmt', 'denoise_curvelet', 'denoise', 'denoise_acdnr'):
             if getattr(args, attr, False):
                 _set(attr, False)
     elif getattr(args, 'denoise_mmt', False):
+        for attr in ('denoise_curvelet', 'denoise', 'denoise_acdnr'):
+            if getattr(args, attr, False):
+                _set(attr, False)
+    elif getattr(args, 'denoise_curvelet', False):
         for attr in ('denoise', 'denoise_acdnr'):
             if getattr(args, attr, False):
                 _set(attr, False)
     elif getattr(args, 'denoise', False):
         if getattr(args, 'denoise_acdnr', False):
             _set('denoise_acdnr', False)
+
+    # 15. Variance-stabilize the luma plane (generalized Anscombe transform)
+    #     ahead of whichever wavelet-family denoiser ended up primary --
+    #     wavelet and curvelet both threshold via a single per-subband
+    #     noise estimate that's only strictly valid under uniform Gaussian
+    #     noise; the transform makes that assumption closer to true
+    #     everywhere in the frame, not just near the sky background level.
+    #     A closer match to the true noise model, not a target-type
+    #     tradeoff, so applied whenever one of those two denoisers is
+    #     active rather than blended per preset.
+    if getattr(args, 'denoise', False) or getattr(args, 'denoise_curvelet', False):
+        if not getattr(args, 'variance_stabilize', False):
+            _set('variance_stabilize', True)
+
+    # 16. Prefer the ringing-free Magic Kernel over the default Lanczos-3
+    #     drizzle resample kernel once drizzling is actually active --
+    #     Lanczos-3's negative sidelobes are a real, visible artifact on
+    #     bright star cores; the Magic Kernel is softer by construction but
+    #     provably non-negative. Only when the PSF-matched kernel wasn't
+    #     already explicitly requested.
+    if (float(getattr(args, 'drizzle_scale', 1.0) or 1.0) > 1.0
+            and getattr(args, 'drizzle_kernel', 'lanczos3') == 'lanczos3'):
+        _set('drizzle_kernel', 'magic')
+
+    # 17. Prefer Mertens exposure fusion over the original sigmoid-threshold
+    #     HDR blend once the user has supplied a short-exposure stack to
+    #     blend in -- avoids the seam a hard/sigmoid threshold can leave at
+    #     the transition band. --auto can't conjure the short stack itself
+    #     (--hdr-combine still needs an explicit path), only upgrade the
+    #     blend method once one's been given.
+    if (getattr(args, 'hdr_combine', None)
+            and getattr(args, 'hdr_blend_mode', 'threshold') == 'threshold'):
+        _set('hdr_blend_mode', 'fusion')
+
+    # 18. Prefer spectrophotometric (blackbody-Teff) colour calibration over
+    #     the fixed colour-index formula once the user has enabled
+    #     --color-calibrate -- same "auto can upgrade a method, not turn on
+    #     a feature that needs its own prerequisite (--plate-solve)" shape
+    #     as rule 17.
+    if (getattr(args, 'color_calibrate', False)
+            and getattr(args, 'color_calibrate_method', 'colorindex') == 'colorindex'):
+        _set('color_calibrate_method', 'spcc')
 
     return changes
 

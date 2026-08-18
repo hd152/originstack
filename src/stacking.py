@@ -340,6 +340,58 @@ def build_drizzle_psf_table(psf: np.ndarray, halo: Optional[int] = None,
     return table.ravel(), halo
 
 
+def _magic_kernel_1d(x: np.ndarray) -> np.ndarray:
+    """Costella's base Magic Kernel: the quadratic B-spline that results
+    from convolving a box filter with itself twice more (box*box*box),
+    support radius 1.5px. Provably non-negative everywhere (unlike
+    Lanczos-3's negative sidelobes), so genuinely ringing-free -- at the
+    cost of being softer than Lanczos-3 by construction.
+
+    This is the *base* Magic Kernel, not the sharpened "Magic Kernel Sharp"
+    variant -- MKS adds a further small sharpening convolution pass whose
+    published coefficients aren't reproduced here; implementing those from
+    memory risked a subtly-wrong kernel that looks plausible but isn't the
+    real filter, whereas the base kernel's quadratic-B-spline closed form is
+    unambiguous and directly verifiable (its taps sum to 1 and match the
+    B-spline's own recurrence by construction).
+    """
+    ax = np.abs(x)
+    out = np.zeros_like(ax)
+    m1 = ax < 0.5
+    m2 = (ax >= 0.5) & (ax < 1.5)
+    out[m1] = 0.75 - ax[m1] ** 2
+    out[m2] = 0.5 * (1.5 - ax[m2]) ** 2
+    return out
+
+
+def build_magic_kernel_table(halo: int = 2,
+                             phases: int = Config.DRIZZLE_PSF_PHASES) -> Tuple[np.ndarray, int]:
+    """Build a subpixel tap-weight table for ``--drizzle-kernel magic`` from
+    the base Magic Kernel (see ``_magic_kernel_1d``) -- a third fixed-formula
+    resample kernel alongside Lanczos-3 (``warp_affine_lanczos3``) and the
+    PSF-matched path (``build_drizzle_psf_table``), dispatched through the
+    same ``warp_affine_kernel_table`` machinery the PSF-matched path uses
+    since a closed-form fixed kernel is exactly the ``phases x phases x taps
+    x taps`` shape that machinery already expects -- no new native kernel
+    needed. Separable (``wy outer wx``), unlike the PSF-matched table.
+
+    Returns ``(flat_table, halo)``, same layout as ``build_drizzle_psf_table``.
+    """
+    taps = 2 * halo + 1
+    table = np.zeros((phases, phases, taps, taps), dtype=np.float64)
+    tap_idx = np.arange(taps, dtype=np.float64)
+    for py in range(phases):
+        frac_y = py / phases
+        wy = _magic_kernel_1d(tap_idx - halo - frac_y)
+        for px in range(phases):
+            frac_x = px / phases
+            wx = _magic_kernel_1d(tap_idx - halo - frac_x)
+            tap = np.outer(wy, wx)
+            tsum = tap.sum()
+            table[py, px] = tap / tsum if tsum > 1e-12 else tap
+    return table.ravel(), halo
+
+
 def _warp_affine_kernel_table_numpy(data: np.ndarray, mat, off, out_h: int, out_w: int,
                                     table: np.ndarray, halo: int, phases: int,
                                     cval: float = 0.0) -> np.ndarray:
@@ -1489,7 +1541,8 @@ def linear_fit_clip_combine(data: np.ndarray, sigma_low: float = 4.0, sigma_high
 
 
 def _ivw_tile(tile: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray],
-             gain: Optional[float], weights: Optional[np.ndarray]) -> np.ndarray:
+             gain: Optional[float], weights: Optional[np.ndarray],
+             return_wsum: bool = False):
     """Inverse-variance-weighted combine for a single tile.
 
     Per-frame-per-pixel weight = 1 / variance, where variance is the
@@ -1499,6 +1552,11 @@ def _ivw_tile(tile: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray],
     (Gauss-Markov) under that noise model -- distinct from the ad-hoc
     multiplicative SNR/FWHM/star-count heuristic in ``--weight-snr`` etc.,
     which has no such optimality property.
+
+    ``return_wsum``: also return the per-pixel summed weight (H,W,C) --
+    the Gauss-Markov estimator's own variance is exactly ``1/wsum``, so this
+    is the quantity ``ivw_combine(..., return_sigma=True)`` turns into a
+    per-pixel uncertainty map.
     """
     tile64 = tile.astype(np.float64)
     noise2 = (noise.astype(np.float64) ** 2)[:, np.newaxis, np.newaxis, np.newaxis]
@@ -1515,12 +1573,14 @@ def _ivw_tile(tile: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray],
     wsum = w.sum(axis=0)
     wsum = np.where(wsum <= 0, 1.0, wsum)
     result = (w * tile64).sum(axis=0) / wsum
+    if return_wsum:
+        return result.astype(np.float32), wsum.astype(np.float64)
     return result.astype(np.float32)
 
 
 def ivw_combine(data: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray] = None,
                 gain: Optional[float] = None, weights: Optional[np.ndarray] = None,
-                verbose: bool = False) -> np.ndarray:
+                verbose: bool = False, return_sigma: bool = False):
     """Combine frames using inverse-noise-variance weighting (Gauss-Markov
     optimal linear combiner, i.e. the "Bayesian" weighted-mean stacking
     method).
@@ -1552,11 +1612,62 @@ def ivw_combine(data: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray] =
         weights: Optional 1-D per-frame quality multiplier, composed
             multiplicatively with the inverse-variance weight.
         verbose: Print summary.
+        return_sigma: When True, also return a per-pixel uncertainty map
+            (H, W) -- the Gauss-Markov estimator's own standard error,
+            ``1/sqrt(sum_i 1/var_i)``, collapsed across channels by
+            averaging their weight sums (one confidence map, not three).
+            Tries the native ``ivw_combine_with_sigma`` kernel first (a
+            sibling of the plain combine kernel that also emits the
+            per-pixel weight sum), falling back to the numpy tiled path
+            only on failure -- same dispatch shape as every other kernel in
+            this file.
     """
     N, H, W, C = data.shape
     noise32 = np.asarray(noise, dtype=np.float32)
     sky32 = np.asarray(sky, dtype=np.float32) if sky is not None else None
     w32 = weights.astype(np.float32, copy=False) if weights is not None else None
+
+    if return_sigma:
+        if _native_usable(data):
+            try:
+                result, wsum = _native.ivw_combine_with_sigma(
+                    data, noise32, sky32, gain if gain is not None else None, w32)
+                wsum_px = np.asarray(wsum).mean(axis=-1)  # one confidence map, not per-channel
+                sigma = (1.0 / np.sqrt(np.maximum(wsum_px, 1e-12))).astype(np.float32)
+                safe_print(f"    [rust] inverse-variance-weighted combine + uncertainty map")
+                return np.asarray(result), sigma
+            except Exception as exc:
+                _log.debug("native ivw_combine_with_sigma failed (%s); using numpy", exc)
+
+        tile_size = _adaptive_tile_size(N, C)
+        result = np.zeros((H, W, C), dtype=np.float32)
+        sigma = np.zeros((H, W), dtype=np.float32)
+        n_tiles_y = (H + tile_size - 1) // tile_size
+        n_tiles_x = (W + tile_size - 1) // tile_size
+        tile_coords = [
+            (ty * tile_size, min((ty + 1) * tile_size, H),
+             tx * tile_size, min((tx + 1) * tile_size, W))
+            for ty in range(n_tiles_y) for tx in range(n_tiles_x)
+        ]
+
+        def _process_tile_sigma(coords):
+            ty, ty_end, tx, tx_end = coords
+            tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+            combined, wsum = _ivw_tile(tile, noise32, sky32, gain, weights, return_wsum=True)
+            wsum_px = wsum.mean(axis=-1)  # one confidence map, not per-channel
+            sig = (1.0 / np.sqrt(np.maximum(wsum_px, 1e-12))).astype(np.float32)
+            return coords, combined, sig
+
+        n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            for coords, combined, sig in executor.map(_process_tile_sigma, tile_coords):
+                ty, ty_end, tx, tx_end = coords
+                result[ty:ty_end, tx:tx_end, :] = combined
+                sigma[ty:ty_end, tx:tx_end] = sig
+        if verbose:
+            safe_print(f"    Inverse-variance-weighted: uncertainty map computed "
+                       f"({n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size})")
+        return result, sigma
 
     if _native_usable(data):
         try:
@@ -1931,6 +2042,7 @@ def run_stacking_phase(
     displacement_fields: Optional[List[Optional[np.ndarray]]] = None,
     psf_kernel_table: Optional[Tuple[np.ndarray, int, int]] = None,
     psf: Optional[np.ndarray] = None,
+    sigma_out: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
     """Align and combine frames into a stacked image.
 
@@ -1944,6 +2056,13 @@ def run_stacking_phase(
 
     ``psf``: the raw estimated PSF array (not the tap table), used by
     ``iterative_back_projection`` when ``args.super_res_iters > 0``.
+
+    ``sigma_out``: optional dict this function populates in place with
+    ``{'sigma': <(H,W) float32 array>}`` when ``args.stack_method == 'ivw'``
+    and ``args.uncertainty_map`` is set -- an out-of-band side channel
+    (matching the existing ``stats`` object's role) rather than a 7th
+    return value, so the two existing call sites in ``pipeline.py`` (main
+    and comet-mode) don't both need updating for a feature only one needs.
     """
     from src.registration import apply_transform, calc_common_crop, sample_displacement_field
 
@@ -2185,8 +2304,15 @@ def run_stacking_phase(
                       if gain is not None else None)
             print(f"  Inverse-variance-weighted combine"
                   f"{f' (gain={gain} e-/ADU, +shot noise)' if gain is not None else ' (per-frame noise only)'}")
-            stacked = ivw_combine(mem_aligned, noise=noise_arr, sky=sky_arr, gain=gain,
-                                 weights=weights, verbose=args.verbose)
+            want_sigma = sigma_out is not None and getattr(args, 'uncertainty_map', False)
+            if want_sigma:
+                stacked, sigma_map = ivw_combine(mem_aligned, noise=noise_arr, sky=sky_arr,
+                                                 gain=gain, weights=weights,
+                                                 verbose=args.verbose, return_sigma=True)
+                sigma_out['sigma'] = sigma_map
+            else:
+                stacked = ivw_combine(mem_aligned, noise=noise_arr, sky=sky_arr, gain=gain,
+                                     weights=weights, verbose=args.verbose)
         elif args.stack_method == 'wavelet':
             wv_levels = getattr(args, 'wavelet_combine_levels', 4)
             use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')

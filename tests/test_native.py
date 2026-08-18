@@ -13,6 +13,7 @@ import src.blind_match as _blind_match_mod
 import src.denoising as _denoising_mod
 import src.debayer as _debayer_mod
 import src.robust_pca as _robust_pca_mod
+import src.channel_combine as _channel_combine_mod
 
 native = pytest.importorskip("astro_native")
 
@@ -1026,3 +1027,72 @@ def test_small_times_wide_rejects_shape_mismatch():
     data = np.ascontiguousarray(rng.normal(0.0, 1.0, (6, 250)))  # N mismatch
     with pytest.raises(ValueError):
         native.small_times_wide(small, data)
+
+
+# ---------------------------------------------------------------------------
+# continuum_scale_moments: single-pass central moments backing
+# optimal_continuum_scale's closed-form skewness-vs-scale polynomial
+# (src/channel_combine.py). Two-stage (mean, then central moments) design
+# mirrors the numpy fallback exactly -- parity is checked directly against
+# that fallback, not re-derived independently.
+# ---------------------------------------------------------------------------
+
+def test_continuum_scale_moments_matches_numpy():
+    rng = np.random.default_rng(10)
+    a = rng.normal(100.0, 20.0, 5000)
+    b = rng.normal(50.0, 10.0, 5000)
+    got = native.continuum_scale_moments(a, b)
+    want = _channel_combine_mod._continuum_scale_moments_numpy(a, b)
+    assert got[0] == want[0]  # n
+    np.testing.assert_allclose(got[1:], want[1:], atol=1e-6, rtol=1e-6)
+
+
+def test_continuum_scale_moments_reproduces_scipy_skew_at_several_scales():
+    from scipy.stats import skew
+    rng = np.random.default_rng(11)
+    a = rng.normal(100.0, 20.0, 3000)
+    b = rng.normal(50.0, 10.0, 3000)
+    moments = native.continuum_scale_moments(a, b)
+    scales = np.array([0.0, 0.5, 1.0, 1.7, 2.3, 3.0])
+    got = _channel_combine_mod._skewness_from_moments(moments, scales)
+    for s, g in zip(scales, got):
+        want = skew(a - s * b, bias=False)
+        assert abs(g - want) < 1e-6
+
+
+def _numpy_ivw_combine_with_sigma(data, noise, sky=None, gain=None, weights=None):
+    """Force the numpy tiled path for ivw_combine(..., return_sigma=True)."""
+    had = _stacking_mod.HAS_NATIVE
+    _stacking_mod.HAS_NATIVE = False
+    try:
+        return astro.ivw_combine(data, noise=noise, sky=sky, gain=gain,
+                                 weights=weights, return_sigma=True)
+    finally:
+        _stacking_mod.HAS_NATIVE = had
+
+
+def test_ivw_combine_with_sigma_native_matches_numpy():
+    d = _stack(n=10, seed=30, outliers=False)
+    noise = np.random.default_rng(31).uniform(2.0, 8.0, d.shape[0]).astype(np.float32)
+    result_native, sigma_native = astro.ivw_combine(d, noise=noise, return_sigma=True)
+    result_numpy, sigma_numpy = _numpy_ivw_combine_with_sigma(d, noise)
+    np.testing.assert_allclose(result_native, result_numpy, atol=1e-3)
+    np.testing.assert_allclose(sigma_native, sigma_numpy, atol=1e-4)
+
+
+def test_ivw_combine_with_sigma_native_matches_analytic_wsum():
+    n, h, w, c = 4, 12, 12, 1
+    noise = np.array([2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+    rng = np.random.default_rng(32)
+    data = rng.normal(1000.0, 5.0, (n, h, w, c)).astype(np.float32)
+    result, wsum = native.ivw_combine_with_sigma(data, noise, None, None, None)
+    expected_wsum = sum(1.0 / nn ** 2 for nn in noise)
+    np.testing.assert_allclose(np.asarray(wsum), expected_wsum, rtol=1e-5)
+
+
+def test_continuum_scale_moments_rejects_length_mismatch():
+    rng = np.random.default_rng(12)
+    a = rng.normal(0.0, 1.0, 100)
+    b = rng.normal(0.0, 1.0, 50)
+    with pytest.raises(ValueError):
+        native.continuum_scale_moments(a, b)

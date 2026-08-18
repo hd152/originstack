@@ -19,6 +19,13 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE = True
+except Exception:
+    _native = None
+    _HAS_NATIVE = False
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -137,6 +144,166 @@ def lrgb_combine(L: np.ndarray, R: np.ndarray,
         B_out = np.clip(L_out + saturation_boost * (B_out - L_out), 0.0, 1.0)
 
     return np.stack([R_out, G_out, B_out], axis=2)
+
+
+def _continuum_scale_moments_numpy(a: np.ndarray, b: np.ndarray) -> tuple:
+    """Numpy fallback / reference for the fused single-pass moment
+    computation ``optimal_continuum_scale`` needs -- see its docstring.
+    Returns ``(n, mu20, mu11, mu02, mu30, mu21, mu12, mu03)``, the sample
+    size and the central second/third-order (co)moments of ``a``/``b``.
+    """
+    n = a.size
+    mean_a, mean_b = float(a.mean()), float(b.mean())
+    ap, bp = a - mean_a, b - mean_b
+    mu20 = float(np.mean(ap * ap))
+    mu11 = float(np.mean(ap * bp))
+    mu02 = float(np.mean(bp * bp))
+    mu30 = float(np.mean(ap * ap * ap))
+    mu21 = float(np.mean(ap * ap * bp))
+    mu12 = float(np.mean(ap * bp * bp))
+    mu03 = float(np.mean(bp * bp * bp))
+    return (n, mu20, mu11, mu02, mu30, mu21, mu12, mu03)
+
+
+def _continuum_scale_moments(a: np.ndarray, b: np.ndarray) -> tuple:
+    """Dispatch to the native single-pass kernel (fuses what the numpy
+    fallback computes as ~9 separate full-array passes/temporaries --
+    ap*bp, ap*ap*bp, ap*bp*bp, etc. -- into one), falling back to numpy on
+    any failure (module absent, bad input)."""
+    if _HAS_NATIVE:
+        try:
+            return _native.continuum_scale_moments(
+                np.ascontiguousarray(a, dtype=np.float64),
+                np.ascontiguousarray(b, dtype=np.float64))
+        except Exception:
+            pass
+    return _continuum_scale_moments_numpy(a, b)
+
+
+def _skewness_from_moments(moments: tuple, scales: np.ndarray) -> np.ndarray:
+    """Evaluate the bias-corrected skewness of ``narrowband - s*continuum``
+    at every ``s`` in ``scales`` from the 7 central moments
+    ``_continuum_scale_moments`` returns -- a closed-form polynomial in
+    ``s`` (see ``optimal_continuum_scale``'s docstring for the derivation),
+    not a re-scan of the pixel data per scale.
+    """
+    n, mu20, mu11, mu02, mu30, mu21, mu12, mu03 = moments
+    if n <= 2:
+        return np.full(scales.shape, np.nan)
+    s = scales
+    m2 = mu20 - 2.0 * s * mu11 + s ** 2 * mu02
+    m3 = mu30 - 3.0 * s * mu21 + 3.0 * s ** 2 * mu12 - s ** 3 * mu03
+    with np.errstate(invalid='ignore', divide='ignore'):
+        g1 = m3 / np.power(np.maximum(m2, 0.0), 1.5)
+        bias_correction = np.sqrt(n * (n - 1)) / (n - 2)
+        g1_corrected = bias_correction * g1
+    # m2 <= 0 means a degenerate/near-constant residual at that scale --
+    # skewness is undefined there, matching scipy.stats.skew's own NaN.
+    return np.where(m2 > 1e-300, g1_corrected, np.nan)
+
+
+def optimal_continuum_scale(narrowband: np.ndarray, continuum: np.ndarray,
+                            scale_range: Tuple[float, float] = (0.0, 3.0),
+                            n_steps: int = 60,
+                            sky_percentile: float = 50.0):
+    """Quantitative narrowband continuum-subtraction scale factor: sweep
+    candidate scale factors, compute the residual (``narrowband -
+    scale*continuum``) pixel skewness restricted to background-dominated
+    pixels, and find the scale that **maximises** that skewness.
+
+    Verified against synthetic ground truth (star field shared between both
+    images at a known scale, plus a smooth positive-only "emission" signal
+    only the narrowband image has -- see ``tests/test_continuum_subtraction
+    .py``): skewness peaks sharply at the true subtraction scale, not at a
+    zero-crossing. At the correct scale the shared star-continuum signal
+    (whose over/under-subtraction residual is small and roughly symmetric
+    around each star) cancels out of the selected background-ish pixels,
+    leaving only the genuinely one-sided (positive-only) emission structure
+    to dominate the skewness measurement; any other scale mixes in a
+    partially-cancelled star-residual term that dilutes that one-sidedness
+    in both directions. (Named after, and in the same spirit as, published
+    "skewness transition" methods for this problem -- this implementation
+    was derived and validated independently against synthetic ground truth
+    rather than reproduced from a specific paper's exact algorithm.)
+
+    Restricted to pixels at or below the narrowband image's own
+    ``sky_percentile`` (default: median) so bright saturated cores/hot
+    pixels -- which have nothing to do with continuum matching -- don't
+    dominate the skewness estimate.
+
+    Sub-step precision comes from a parabolic fit to the three skewness
+    samples around the coarse-grid peak (the same refinement idiom this
+    codebase's own FFT registration residual uses), not just the raw grid
+    step.
+
+    Implementation note: ``residual(s) = narrowband - s*continuum`` is
+    *linear* in ``s``, so its skewness at every candidate scale is a fixed
+    rational function of just 7 scalar central moments of the (masked)
+    ``(narrowband, continuum)`` pair -- computed once, not once per scale.
+    ``_continuum_scale_moments`` (native Rust with a numpy fallback) does
+    that single pass; ``_skewness_from_moments`` evaluates the resulting
+    polynomial-in-``s`` skewness formula at every swept scale for
+    approximately free. This is an algorithmic win (O(pixels) once instead
+    of O(pixels x n_steps)), not just a faster loop -- verified to
+    reproduce ``scipy.stats.skew(residual, bias=False)`` exactly (to
+    float64 precision) for a directly-computed residual at several scales
+    before replacing the original per-scale loop.
+
+    Returns ``(best_scale, diagnostics)`` where diagnostics carries the
+    swept ``scales``/``skewness`` arrays.
+    """
+    nb = np.asarray(narrowband, dtype=np.float64)
+    cont = np.asarray(continuum, dtype=np.float64)
+    if nb.shape != cont.shape:
+        raise ValueError("narrowband and continuum must share the same shape")
+
+    thresh = np.percentile(nb, sky_percentile)
+    mask = nb <= thresh
+    a = np.ascontiguousarray(nb[mask])
+    b = np.ascontiguousarray(cont[mask])
+
+    scales = np.linspace(scale_range[0], scale_range[1], n_steps)
+    if a.size > 10:
+        moments = _continuum_scale_moments(a, b)
+        skews = _skewness_from_moments(moments, scales)
+    else:
+        skews = np.full(n_steps, np.nan)
+
+    valid = np.isfinite(skews)
+    if valid.sum() < 2:
+        mid = float(np.mean(scale_range))
+        return mid, {'scales': scales, 'skewness': skews}
+
+    scales_v, skews_v = scales[valid], skews[valid]
+    best_idx = int(np.argmax(skews_v))
+    if 0 < best_idx < len(scales_v) - 1:
+        y0, y1, y2 = skews_v[best_idx - 1], skews_v[best_idx], skews_v[best_idx + 1]
+        denom = y0 - 2.0 * y1 + y2
+        delta = float(np.clip(0.5 * (y0 - y2) / denom, -1.0, 1.0)) if abs(denom) > 1e-12 else 0.0
+        step = scales_v[best_idx + 1] - scales_v[best_idx]
+        best_scale = float(scales_v[best_idx] + delta * step)
+    else:
+        best_scale = float(scales_v[best_idx])
+
+    return float(best_scale), {'scales': scales, 'skewness': skews}
+
+
+def subtract_continuum(narrowband: np.ndarray, continuum: np.ndarray,
+                       scale: Optional[float] = None) -> Tuple[np.ndarray, float, dict]:
+    """Subtract a scaled continuum reference from a narrowband image.
+    ``scale=None`` (default) fits it via ``optimal_continuum_scale``.
+
+    Returns ``(result, scale_used, diagnostics)``; ``result`` is clipped at
+    zero (continuum subtraction shouldn't drive real signal negative;
+    over-subtracted sky noise clipping to zero is the expected, harmless
+    failure mode of picking too-large a scale).
+    """
+    diagnostics: dict = {}
+    if scale is None:
+        scale, diagnostics = optimal_continuum_scale(narrowband, continuum)
+    result = np.clip(narrowband.astype(np.float64) - scale * continuum.astype(np.float64),
+                     0.0, None)
+    return result.astype(np.float32), float(scale), diagnostics
 
 
 # Narrowband palette mappings: mode → (R_src, G_src, B_src)
@@ -356,6 +523,20 @@ def run_combine_cli(argv=None) -> None:
                         "hos: Ha->R, OIII->G, SII->B.")
     p.add_argument("--saturation-boost", type=float, default=1.0,
                    help="Saturation multiplier applied after LRGB combination (default: 1.0)")
+    p.add_argument("--continuum", metavar="CONTINUUM.fits",
+                   help="Broadband/OSC continuum reference to subtract from "
+                        "--continuum-target before narrowband combination (e.g. an OSC "
+                        "stack, for a hybrid narrowband+broadband workflow).")
+    p.add_argument("--continuum-target", choices=["ha", "oiii", "sii"], default="ha",
+                   help="Which narrowband channel --continuum is subtracted from "
+                        "(default: ha).")
+    p.add_argument("--continuum-scale", type=float, default=None, metavar="SCALE",
+                   help="Manual continuum subtraction scale factor. Default: fit "
+                        "automatically (sweeps candidate scales, picks the one that "
+                        "maximises the background residual's pixel-value skewness -- "
+                        "verified against synthetic ground truth, see "
+                        "optimal_continuum_scale's docstring) instead of eyeballing a "
+                        "slider.")
     p.add_argument("--scnr", type=float, default=0.0, metavar="AMOUNT",
                    help="Average-neutral SCNR green removal for narrowband palettes "
                         "(0=off, 1=full; recommended ~1.0 for SHO to kill the green cast)")
@@ -403,6 +584,25 @@ def run_combine_cli(argv=None) -> None:
         ha_arr = _load_channel(args.ha) if args.ha else None
         oiii_arr = _load_channel(args.oiii) if args.oiii else None
         sii_arr = _load_channel(args.sii) if args.sii else None
+
+        if args.continuum:
+            print(f"  Loading continuum reference: {args.continuum}")
+            continuum_arr = _load_channel(args.continuum)
+            targets = {'ha': ha_arr, 'oiii': oiii_arr, 'sii': sii_arr}
+            target_arr = targets.get(args.continuum_target)
+            if target_arr is None:
+                p.error(f"--continuum-target {args.continuum_target} was not supplied "
+                        f"(need --{args.continuum_target})")
+            if target_arr.shape != continuum_arr.shape:
+                p.error(f"--continuum shape {continuum_arr.shape} doesn't match "
+                        f"--{args.continuum_target} shape {target_arr.shape}")
+            subtracted, scale_used, _diag = subtract_continuum(
+                target_arr, continuum_arr, scale=args.continuum_scale)
+            method = "manual" if args.continuum_scale is not None else "skewness-transition fit"
+            print(f"  Continuum-subtracted {args.continuum_target.upper()}: "
+                  f"scale={scale_used:.4f} ({method})")
+            targets[args.continuum_target] = subtracted
+            ha_arr, oiii_arr, sii_arr = targets['ha'], targets['oiii'], targets['sii']
 
         print(f"  Combining {args.mode.upper()} narrowband...")
         combined = narrowband_combine(

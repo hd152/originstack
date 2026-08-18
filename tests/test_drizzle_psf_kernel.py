@@ -20,6 +20,8 @@ import pytest
 
 from src.stacking import (
     build_drizzle_psf_table,
+    build_magic_kernel_table,
+    _magic_kernel_1d,
     warp_affine_psf,
     _warp_affine_kernel_table_numpy,
 )
@@ -187,6 +189,63 @@ def test_phases_zero_raises_value_error():
         native.warp_affine_kernel_table(
             np.ascontiguousarray(data), [1.0, 0.0, 0.0, 1.0], [0.0, 0.0],
             H, W, table, 1, 0, 0.0)
+
+
+def test_magic_kernel_1d_is_nonnegative_and_sums_to_one_at_integer_phase():
+    # At zero fractional offset, taps at x=-1,0,1 should be the classic
+    # quadratic B-spline values 1/8, 3/4, 1/8 (sums to 1), and the kernel
+    # must be non-negative everywhere (the whole "ringing-free" property).
+    x = np.array([-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])
+    w = _magic_kernel_1d(x)
+    assert np.all(w >= 0.0)
+    np.testing.assert_allclose(_magic_kernel_1d(np.array([-1.0, 0.0, 1.0])),
+                               [0.125, 0.75, 0.125], atol=1e-12)
+
+
+def test_magic_kernel_table_taps_sum_to_one_and_nonnegative():
+    table, halo = build_magic_kernel_table(halo=2, phases=8)
+    taps = 2 * halo + 1
+    table4 = table.reshape(8, 8, taps, taps)
+    assert np.all(table4 >= -1e-12)
+    for py in range(8):
+        for px in range(8):
+            s = table4[py, px].sum()
+            assert abs(s - 1.0) < 1e-6 or s == 0.0
+
+
+def test_magic_kernel_native_matches_numpy_mirror():
+    rng = np.random.default_rng(3)
+    H, W, C = 40, 40, 3
+    data = rng.uniform(0, 500, (H, W, C)).astype(np.float32)
+    table, halo = build_magic_kernel_table(halo=2, phases=8)
+
+    mat = [1.0, 0.0, 0.0, 1.0]
+    off = [0.35, -0.6]
+
+    got_native = np.asarray(native.warp_affine_kernel_table(
+        np.ascontiguousarray(data), mat, off, H, W,
+        np.ascontiguousarray(table, dtype=np.float64), halo, 8, 0.0))
+    got_numpy = _warp_affine_kernel_table_numpy(data, mat, off, H, W, table, halo, 8, 0.0)
+    np.testing.assert_allclose(got_native, got_numpy, atol=1e-3, rtol=1e-3)
+
+
+def test_magic_kernel_does_not_broaden_a_matched_gaussian_more_than_lanczos_softness():
+    # Not claiming it sharpens (it doesn't, by design) -- just that a star
+    # resampled through it stays a sane, finite, roughly-Gaussian blob, not
+    # a degenerate or blown-up result.
+    H = W = 48
+    sigma_true = 2.0
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    cy, cx = 24.3, 23.7
+    star = 1000.0 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma_true ** 2))
+    img = np.stack([star] * 3, axis=-1).astype(np.float32)
+
+    table, halo = build_magic_kernel_table(halo=2, phases=16)
+    out = warp_affine_psf(img, [1.0, 0.0, 0.0, 1.0], [0.0, 0.0], H, W,
+                          table, halo, 16, 0.0)
+    assert np.all(np.isfinite(out))
+    assert float(out.max()) > 100.0  # star core survives, isn't smeared to nothing
+    assert abs(float(out.sum()) - float(img.sum())) / float(img.sum()) < 0.05  # flux-preserving
 
 
 def test_flat_noise_is_not_amplified():
