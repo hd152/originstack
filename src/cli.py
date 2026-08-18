@@ -365,13 +365,43 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
         masters['bias'] = None
 
     if frames.get('dark'):
-        frames['dark'] = select_matching_darks(lights, frames['dark'])
-        _dark_method = _method_for(len(frames['dark']))
-        masters['dark'] = make_master(frames['dark'], method=_dark_method)
-        if masters['dark'] is not None:
-            safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> "
-                       f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}"
-                       f"{_method_tag(_dark_method)}")
+        _dark_from_model = False
+        _use_dark_model = getattr(args, 'dark_temp_model', False)
+        if not _use_dark_model and getattr(args, 'auto', False) and \
+                'dark_temp_model' not in getattr(args, '_explicit_cli_dests', set()):
+            # Only attempt (and print about) this when the library already
+            # has enough temperature spread to plausibly work -- a cheap
+            # header-only peek, so the common single-session/single-
+            # temperature dark library doesn't get a noisy "unavailable,
+            # falling back" message on every --auto run.
+            from src.dark_temp_model import _frame_temp as _peek_temp
+            _n_distinct = len(set(round(t, 1) for t in
+                                  (_peek_temp(f) for f in frames['dark']) if t is not None))
+            _use_dark_model = _n_distinct >= 3
+        if _use_dark_model:
+            from src.dark_temp_model import (build_dark_temperature_model,
+                                              sample_dark_at_temperature, _frame_temp)
+            light_temps = [t for t in (_frame_temp(f) for f in lights) if t is not None]
+            target_temp = sum(light_temps) / len(light_temps) if light_temps else None
+            model = build_dark_temperature_model(frames['dark']) if target_temp is not None else None
+            if model is not None:
+                masters['dark'] = sample_dark_at_temperature(model, target_temp)
+                _dark_from_model = True
+                safe_print(f"  ✓ Master dark:  temperature model from {model['n_frames']} "
+                           f"frames ({model['n_temps']} distinct temps, degree="
+                           f"{model['degree']}) evaluated at {target_temp:.1f}°C -> "
+                           f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
+            else:
+                safe_print("  Dark temperature model unavailable (too few distinct "
+                           "temperatures/frames) -- falling back to nearest-match selection")
+        if not _dark_from_model:
+            frames['dark'] = select_matching_darks(lights, frames['dark'])
+            _dark_method = _method_for(len(frames['dark']))
+            masters['dark'] = make_master(frames['dark'], method=_dark_method)
+            if masters['dark'] is not None:
+                safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> "
+                           f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}"
+                           f"{_method_tag(_dark_method)}")
     else:
         masters['dark'] = None
 
@@ -397,6 +427,25 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
             masters['flat_rotation'] = float(np.median(_flat_rots))
     else:
         masters['flat'] = None
+        _use_flat_from_lights = (
+            getattr(args, 'flat_from_lights', False)
+            or (getattr(args, 'auto', False)
+                and 'flat_from_lights' not in getattr(args, '_explicit_cli_dests', set())))
+        if _use_flat_from_lights and len(lights) >= Config.ROBUST_PCA_MIN_FRAMES:
+            # Cap the sample: cost is O(N^2 x pixels), and more frames past a
+            # modest count buys little extra low-rank/sparse separation quality.
+            sample = lights[:: max(1, len(lights) // Config.ROBUST_PCA_AUTO_MAX_FRAMES)]
+            sample = sample[:Config.ROBUST_PCA_AUTO_MAX_FRAMES]
+            safe_print(f"  No flat frames found -- deriving a synthetic flat from "
+                       f"{len(sample)} light frames (--flat-from-lights)...")
+            synthetic_flat = make_master(sample, method='robust_pca')
+            if synthetic_flat is not None:
+                masters['flat'] = synthetic_flat
+                safe_print(f"  ✓ Master flat:  {len(sample)} light frames (synthetic) -> "
+                           f"{synthetic_flat.shape[0]}×{synthetic_flat.shape[1]} (robust_pca)")
+            else:
+                safe_print("  Synthetic flat-from-lights failed (too few usable frames) "
+                           "-- proceeding without a flat")
 
     masters['hot_pixel_map'] = None
     if masters.get('dark') is not None:
@@ -951,7 +1000,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'parameters, and estimate resource usage — without processing anything')
     g_post.add_argument('--denoiser',
                    choices=['auto', 'wavelet', 'mmt', 'bm3d', 'acdnr', 'nlm',
-                            'bilateral', 'aniso', 'none'],
+                            'bilateral', 'aniso', 'curvelet', 'none'],
                    default='auto',
                    help='Primary luma denoiser (default: auto — wavelet unless a '
                         'preset/--auto selects otherwise). '
@@ -960,15 +1009,25 @@ def build_parser() -> argparse.ArgumentParser:
                         'bm3d: collaborative filtering, near-optimal but slower. '
                         'acdnr: contrast-gated sky smoothing. '
                         'nlm / bilateral / aniso: alternative edge-preserving filters. '
+                        'curvelet: adaptive BayesShrink DWT (like wavelet) but with the '
+                        'per-subband threshold locally reduced wherever a structure-tensor '
+                        'coherence map detects elongated structure (filaments, galaxy arms) '
+                        '-- curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet '
+                        'transform (tune via --config directional_protect_strength, default '
+                        '0.6; 0=identical to wavelet). '
                         'none: disable luma denoising. Chroma noise reduction is '
                         'separate (--no-chroma-nr). Strength via --denoise-strength; '
                         'fine tuning via --config.')
-    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv'],
+    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse'],
                    default='off', dest='deconvolve_mode',
                    help='Deconvolution: off (default), rl (Richardson-Lucy), '
-                        'tv (Total-Variation regularised; sharper edges, slower), or '
+                        'tv (Total-Variation regularised; sharper edges, slower), '
                         'rl-sv (spatially-variant RL: a separate PSF per field tile, '
-                        'corrects off-axis aberration/tilt the corners suffer). '
+                        'corrects off-axis aberration/tilt the corners suffer), or '
+                        'sparse (FISTA, L1-regularised in this project\'s own wavelet '
+                        'basis rather than TV\'s spatial-gradient basis -- a different '
+                        'sparsity prior, tune via --config deconvolve_sparse_lambda, '
+                        'default 0.01). '
                         'PSF options (blind PSF, iterations, model) via --config.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
@@ -984,8 +1043,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
                         'wavelet, sky_residual, sky_pedestal, nlm, bilateral, mmt, '
-                        'acdnr, deconvolve, star_reduce, local_contrast, sky_neutralize, '
-                        'remove_stars')
+                        'acdnr, curvelet, deconvolve, star_reduce, local_contrast, '
+                        'sky_neutralize, remove_stars')
     g_stack.add_argument('--no-registration', action='store_true')
     g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
@@ -1026,6 +1085,29 @@ def build_parser() -> argparse.ArgumentParser:
                         'frames per calibration type (falls back to median otherwise); '
                         'loads the full stack into memory and is slower than median/mean.'
                         % Config.ROBUST_PCA_MIN_FRAMES)
+    g_frames.add_argument('--dark-temp-model', action='store_true',
+                   help='Fit a per-pixel polynomial of dark signal vs. sensor temperature '
+                        'across the whole dark library, then evaluate it at the lights\' '
+                        'own temperature -- instead of select_matching_darks\' nearest-'
+                        'temperature selection. Lets a smaller dark library cover a wider '
+                        'range of session temperatures via interpolation rather than '
+                        'requiring a near-exact match. Assumes the dark library is already '
+                        'homogeneous in ISO/gain and exposure time (does not also model '
+                        'those). Needs >= 3 distinct temperatures across the dark library; '
+                        'falls back to select_matching_darks otherwise.')
+    g_frames.add_argument('--flat-from-lights', action='store_true',
+                   help='When no flat frames are available, derive a synthetic flat/'
+                        'vignetting map from the light frames themselves via robust-PCA '
+                        'low-rank/sparse decomposition (same decomposition --master-method '
+                        'robust_pca uses for real calibration frames): the low-rank '
+                        'component of the raw light stack is the shared sensor pattern '
+                        '(vignetting, dust), while stars and nebula structure -- sparse '
+                        'and slightly shifted frame-to-frame by dithering -- are separated '
+                        'out as the sparse component. Approximate (a static, undithered '
+                        'target can partially leak into the low-rank component) -- opt-in, '
+                        'not a substitute for real flats when they exist. Needs >= %d '
+                        'light frames; ignored when dedicated flat frames were discovered.'
+                        % Config.ROBUST_PCA_MIN_FRAMES)
     g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -1064,6 +1146,14 @@ def build_parser() -> argparse.ArgumentParser:
                         'wavelet_combine_levels (default 4). '
                         'auto: choose based on frame count (<8->percentile, else sigma_clip). '
                         'mean/median: no rejection.')
+    g_stack.add_argument('--uncertainty-map', action='store_true',
+                   help='With --stack-method ivw, also write a per-pixel uncertainty '
+                        '(standard error) map to <output>_sigma.fits -- the Gauss-Markov '
+                        'estimator\'s own 1/sqrt(sum of inverse-variance weights), exposing '
+                        'bookkeeping the combine already computes rather than adding new '
+                        'analysis. One confidence map (channel weights averaged), not '
+                        'per-channel. No effect with other stack methods (only ivw computes '
+                        'an exact analytic per-pixel variance).')
     g_stack.add_argument('--rejection-sigma', type=float, default=3.0,
                    help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
     g_stack.add_argument('--rejection-iters', type=int, default=3,
@@ -1107,7 +1197,7 @@ def build_parser() -> argparse.ArgumentParser:
                         '--deconvolve rl) -- skipped with a warning if that fails. Not yet '
                         'compatible with --elastic-registration (tune step size via --config '
                         'ibp_relax, default %.1f).' % Config.IBP_RELAX)
-    g_stack.add_argument('--drizzle-kernel', choices=['lanczos3', 'psf'], default='lanczos3',
+    g_stack.add_argument('--drizzle-kernel', choices=['lanczos3', 'psf', 'magic'], default='lanczos3',
                    help='Drizzle resample kernel (default: lanczos3; only matters when '
                         '--drizzle-scale > 1). psf: build the resample kernel from the '
                         'session\'s own estimated PSF (Moffat fit to reference-frame stars, '
@@ -1122,7 +1212,11 @@ def build_parser() -> argparse.ArgumentParser:
                         '-- pair with --deconvolve for a bigger correction). Falls back to '
                         'lanczos3 if PSF estimation fails (too few reference stars) or with '
                         '--elastic-registration (the elastic warp path doesn\'t use this '
-                        'kernel).' % (Config.DRIZZLE_PSF_WIENER_K, Config.DRIZZLE_PSF_KERNEL_SIZE,
+                        'kernel). magic: Costella\'s base Magic Kernel (quadratic B-spline, '
+                        'provably non-negative -- ringing-free unlike Lanczos-3\'s negative '
+                        'sidelobes, at the cost of being softer by construction). This is '
+                        'the base kernel only, not the sharpened "Magic Kernel Sharp" '
+                        'variant.' % (Config.DRIZZLE_PSF_WIENER_K, Config.DRIZZLE_PSF_KERNEL_SIZE,
                                       Config.DRIZZLE_PSF_KERNEL_SIZE))
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
@@ -1159,6 +1253,28 @@ def build_parser() -> argparse.ArgumentParser:
                         'broad nebulosity; higher = leaves more large-scale gradient in.')
     g_post.add_argument('--denoise-strength', type=float, default=3.0,
                    help='Wavelet luma denoise threshold factor (default: 3.0)')
+    g_post.add_argument('--denoise-strength-calibrate', action='store_true',
+                   help='Calibrate --denoise-strength via a Noise2Self-style self-'
+                        'supervised sweep on the stack itself instead of the default '
+                        'SNR-based heuristic: masks a small random pixel subset, denoises '
+                        'the rest, scores each candidate strength by how well it predicts '
+                        'the masked pixels\' true values, picks the minimum -- no SNR '
+                        'estimate needed, no ground truth needed. Only affects '
+                        '--denoiser wavelet (the plain, non-adaptive path); no effect on '
+                        'the default adaptive BayesShrink denoiser, which has no single '
+                        'strength parameter to calibrate.')
+    g_post.add_argument('--variance-stabilize', action='store_true',
+                   help='Apply a generalized Anscombe transform to the luma plane before '
+                        'wavelet denoising (both --denoiser wavelet and the adaptive '
+                        'BayesShrink default), inverting it after. Shot noise on bright '
+                        'pixels is Poisson, not Gaussian; BayesShrink\'s single per-subband '
+                        'threshold (from the finest detail subband\'s MAD) implicitly '
+                        'assumes uniform Gaussian noise, which the transform makes closer '
+                        'to true everywhere in the frame rather than just near the sky '
+                        'background level it was effectively tuned at. Gain/read-noise are '
+                        'estimated from the image\'s own local mean-variance relationship, '
+                        'not sensor specs. Chroma channels are untouched (not a photon-count '
+                        'quantity). No effect with other --denoiser choices.')
     g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
     g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
@@ -1265,9 +1381,77 @@ def build_parser() -> argparse.ArgumentParser:
     g_post.add_argument('--hdr-combine', default=None, metavar='SHORT_STACK.fits',
                    help='Blend a short-exposure stack into saturated regions of the main '
                         'stack for HDR targets (e.g. Orion Nebula core, globular clusters).')
+    g_post.add_argument('--hdr-blend-mode', choices=['threshold', 'fusion'], default='threshold',
+                   help='Blend algorithm for --hdr-combine (default: threshold). threshold: '
+                        'a smooth sigmoid mask centred on the long stack\'s 98th-percentile '
+                        'value (original behaviour). fusion: Mertens multiresolution exposure '
+                        'fusion (src/exposure_fusion.py) -- blends through a Laplacian pyramid '
+                        'weighted by local contrast/saturation/well-exposedness instead of a '
+                        'single spatial mask, avoiding the seam a threshold blend can leave at '
+                        'the transition band; costs more (several pyramid levels of '
+                        'Gaussian-filter passes).')
     g_out.add_argument('--color-calibrate', action='store_true',
                    help='Apply photometric colour calibration after plate solving '
                         '(queries Gaia DR3). Requires --plate-solve.')
+    g_out.add_argument('--color-calibrate-method', choices=['colorindex', 'spcc'],
+                   default='colorindex',
+                   help='Colour calibration algorithm for --color-calibrate (default: '
+                        'colorindex). colorindex: fixed Gaia BP-RP -> B-V colour-index '
+                        'formula. spcc: spectrophotometric-style -- integrates a '
+                        'blackbody spectrum at each star\'s Gaia teff_gspphot against '
+                        'per-channel response curves (falls back to colorindex per-star '
+                        'when a star has no Teff estimate). Uses generic Gaussian R/G/B '
+                        'response curves, not a measured curve for your specific camera '
+                        '+ filters -- more physically grounded than colorindex, not a '
+                        'claim of matching a specific sensor\'s real QE curve.')
+    g_out.add_argument('--fix-atmospheric-dispersion', action='store_true',
+                       help='EXPERIMENTAL: shift R/B channels back toward the green '
+                            'channel\'s position to correct chromatic atmospheric '
+                            'refraction, derived from first principles (Filippenko 1982\'s '
+                            'standard-atmosphere refractive-index formula) -- no established '
+                            'software reference implementation exists for this, unlike this '
+                            'pipeline\'s other corrections (real ADCs are physical prism '
+                            'hardware). Requires --plate-scale, --zenith-angle, and '
+                            '--parallactic-angle (all in the units noted below) -- none are '
+                            'auto-derived, since getting the geometry wrong shifts colour '
+                            'channels the WRONG way and actively worsens the image. Not '
+                            'wired into --auto. Most useful for low-altitude targets '
+                            '(zenith angle > ~40deg).')
+    g_out.add_argument('--plate-scale', type=float, default=None, metavar='ARCSEC/PX',
+                       help='Image plate scale for --fix-atmospheric-dispersion.')
+    g_out.add_argument('--zenith-angle', type=float, default=None, metavar='DEG',
+                       help='Target zenith angle (90 - altitude) at capture time, for '
+                            '--fix-atmospheric-dispersion.')
+    g_out.add_argument('--parallactic-angle', type=float, default=None, metavar='DEG',
+                       help='On-detector direction of "toward zenith" (0=up/+y, 90=right/+x), '
+                            'for --fix-atmospheric-dispersion. Depends on site latitude, '
+                            'target RA/Dec, and capture time -- not derived by this tool.')
+    g_out.add_argument('--matched-filter', action='store_true',
+                       help='Write <stem>_matched_filter.fits: the stacked image correlated '
+                            'with its own estimated PSF -- the matched filter theorem\'s '
+                            'provably SNR-optimal linear filter for detecting a known-shape '
+                            '(point) source in white noise. A per-pixel SNR map when a '
+                            'background noise estimate is available. Complementary to, not a '
+                            'replacement for, --stack-method ivw (that\'s an optimal '
+                            'per-frame combine weight; this is a post-stack detection '
+                            'filter). Diagnostic/utility output, no effect on the main stack.')
+    g_out.add_argument('--nmf-separate', action='store_true',
+                       help='Non-negative matrix factorization: split the stacked image '
+                            'into a stellar component and a nebular component (2 sources, '
+                            'each with its own per-channel spectral signature and a '
+                            'spatially-varying activation map), written as '
+                            '<stem>_star_component.fits / <stem>_nebula_component.fits. '
+                            'An alternative to --no-remove-stars\'s inpainting for use cases '
+                            'that want the star signal separated out, not discarded. '
+                            'Non-convex optimisation with no convergence guarantee -- '
+                            'inspect the output before trusting the split, especially if '
+                            'the log notes it as ambiguous.')
+    g_out.add_argument('--dither-report', action='store_true',
+                   help='Analyse how uniformly the session\'s sub-pixel dither offsets '
+                        'sample the output grid, and warn if coverage is significantly '
+                        'non-uniform (drizzle output quality is bounded by this, and '
+                        'nothing else in the pipeline measures it). Writes '
+                        '<stem>_dither.png. Diagnostic only -- no effect on the stack.')
     g_out.add_argument('--aberration-report', action='store_true',
                    help='Analyse star FWHM/elongation across the field and diagnose '
                         'sensor tilt, field curvature, and backfocus (spacing) errors. '
@@ -1396,6 +1580,8 @@ def build_parser() -> argparse.ArgumentParser:
         ivw_gain=None,  # electrons/ADU; None = per-frame-constant noise weight (no shot-noise term)
         drizzle_psf_wiener_k=Config.DRIZZLE_PSF_WIENER_K,  # used only with --drizzle-kernel psf
         wavelet_combine_levels=4,  # used only with --stack-method wavelet
+        directional_protect_strength=0.6,  # used only with --denoiser curvelet
+        deconvolve_sparse_lambda=0.01,  # used only with --deconvolve sparse
         ibp_relax=Config.IBP_RELAX,  # used only with --super-res-iters
         # Quality
         # (advanced_metrics has no CLI flag -- set via --config only)
@@ -1496,9 +1682,11 @@ def parse_args(argv=None):
         args.denoise_nlm = (d == 'nlm')
         args.denoise_bilateral = (d == 'bilateral')
         args.denoise_aniso = (d == 'aniso')
-    args.deconvolve = args.deconvolve_mode in ('rl', 'tv', 'rl-sv')
+        args.denoise_curvelet = (d == 'curvelet')
+    args.deconvolve = args.deconvolve_mode in ('rl', 'tv', 'rl-sv', 'sparse')
     args.deconvolve_tv = (args.deconvolve_mode == 'tv')
     args.deconvolve_svpsf = (args.deconvolve_mode == 'rl-sv')
+    args.deconvolve_sparse = (args.deconvolve_mode == 'sparse')
 
     # The consolidated flags above (--denoiser, --deconvolve) are user-facing
     # aliases whose dests (denoiser, deconvolve_mode) differ from the internal
@@ -1508,9 +1696,9 @@ def parse_args(argv=None):
     if 'denoiser' in _explicit_dests:
         _explicit_dests.update({
             'denoise', 'denoise_mmt', 'denoise_bm3d', 'denoise_acdnr',
-            'denoise_nlm', 'denoise_bilateral', 'denoise_aniso'})
+            'denoise_nlm', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet'})
     if 'deconvolve_mode' in _explicit_dests:
-        _explicit_dests.update({'deconvolve', 'deconvolve_tv'})
+        _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse'})
 
     _exp = [e.strip() for e in (args.export or '').split(',') if e.strip()]
     for e in _exp:

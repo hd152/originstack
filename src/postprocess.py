@@ -25,10 +25,12 @@ from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denois
                            estimate_denoise_strength, reduce_stars,
                            multiscale_local_contrast, mmt_denoise, acdnr_denoise,
                            bm3d_denoise, anisotropic_diffusion, scnr,
-                           remove_star_halos, radial_renormalize, larson_sekanina)
+                           remove_star_halos, radial_renormalize, larson_sekanina,
+                           directional_wavelet_denoise)
 from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
                                     richardson_lucy_deconvolve,
-                                    estimate_psf_blind, tv_regularized_deconvolve)
+                                    estimate_psf_blind, tv_regularized_deconvolve,
+                                    sparse_wavelet_deconvolve)
 from src.photometric_calibration import photometric_color_calibrate
 
 try:
@@ -408,21 +410,39 @@ def postprocess_stack(
         if getattr(args, 'denoise_adaptive', False):
             print(f"\n  Applying adaptive wavelet denoising "
                   f"(BayesShrink, chroma_factor={chroma_boost:.1f})...")
-            stacked = adaptive_wavelet_denoise(stacked, chroma_factor=chroma_boost,
-                                               star_mask=pp_star_mask)
+            stacked = adaptive_wavelet_denoise(
+                stacked, chroma_factor=chroma_boost, star_mask=pp_star_mask,
+                variance_stabilize=getattr(args, 'variance_stabilize', False))
         else:
-            strength = getattr(args, 'denoise_strength', 3.0)
-            if getattr(args, 'auto_denoise_strength', True):
-                fwhm_vals = [f.metrics.get('fwhm', 0.0) for f in final
-                             if f.metrics and f.metrics.get('fwhm', 0.0) > 0]
-                fwhm_mean = float(np.mean(fwhm_vals)) if fwhm_vals else 0.0
-                strength = estimate_denoise_strength(stacked, fwhm_mean=fwhm_mean)
-                fwhm_note = f', FWHM={fwhm_mean:.1f}px' if fwhm_mean > 0 else ''
-                safe_print(f"\n  Auto-denoise strength: {strength:.2f} (from stacked SNR{fwhm_note})")
+            strength = None
+            if getattr(args, 'denoise_strength_calibrate', False):
+                from src.self_supervised_calibration import calibrate_wavelet_strength
+                try:
+                    strength, _losses = calibrate_wavelet_strength(stacked)
+                    safe_print(f"\n  Self-supervised denoise strength: {strength:.2f} "
+                              f"(Noise2Self-style calibration on the stack itself, "
+                              f"no SNR estimate needed)")
+                except Exception as exc:
+                    safe_print(f"  WARNING: self-supervised calibration failed ({exc}) -- "
+                              f"falling back to SNR-based auto-tuning")
+                    strength = None
+            else:
+                strength = None
+            if strength is None:
+                strength = getattr(args, 'denoise_strength', 3.0)
+                if getattr(args, 'auto_denoise_strength', True):
+                    fwhm_vals = [f.metrics.get('fwhm', 0.0) for f in final
+                                 if f.metrics and f.metrics.get('fwhm', 0.0) > 0]
+                    fwhm_mean = float(np.mean(fwhm_vals)) if fwhm_vals else 0.0
+                    strength = estimate_denoise_strength(stacked, fwhm_mean=fwhm_mean)
+                    fwhm_note = f', FWHM={fwhm_mean:.1f}px' if fwhm_mean > 0 else ''
+                    safe_print(f"\n  Auto-denoise strength: {strength:.2f} (from stacked SNR{fwhm_note})")
             print(f"\n  Applying wavelet denoising "
                   f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f})...")
-            stacked = wavelet_denoise(stacked, threshold_factor=strength,
-                                      chroma_factor=chroma_boost, star_mask=pp_star_mask)
+            stacked = wavelet_denoise(
+                stacked, threshold_factor=strength, chroma_factor=chroma_boost,
+                star_mask=pp_star_mask,
+                variance_stabilize=getattr(args, 'variance_stabilize', False))
         safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
         stacked = _sanitize(stacked, "wavelet denoising")
 
@@ -528,6 +548,19 @@ def postprocess_stack(
         safe_print(f"  ✓ BM3D denoise ({format_time(time.time() - bm3d_start)})")
         stacked = _sanitize(stacked, "BM3D denoising")
 
+    # 6.7b. Directional (curvelet/shearlet-inspired) adaptive wavelet denoising
+    if getattr(args, 'denoise_curvelet', False) and 'curvelet' not in skip_steps:
+        _diag_save(stacked, _diag_dir, _diag_counter, 'before_curvelet_denoise')
+        curv_chroma = getattr(args, 'denoise_chroma_boost', 2.0)
+        curv_protect = getattr(args, 'directional_protect_strength', 0.6)
+        print(f"\n  Applying directional (curvelet-inspired) wavelet denoising "
+              f"(protect_strength={curv_protect:.2f}, chroma={curv_chroma:.1f})...")
+        curv_start = time.time()
+        stacked = directional_wavelet_denoise(
+            stacked, chroma_factor=curv_chroma, star_mask=pp_star_mask,
+            protect_strength=curv_protect)
+        safe_print(f"  ✓ Directional wavelet denoise ({format_time(time.time() - curv_start)})")
+
     # 6.8. Anisotropic diffusion (Perona-Malik)
     if getattr(args, 'denoise_aniso', False) and 'aniso' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_aniso_denoise')
@@ -579,6 +612,8 @@ def postprocess_stack(
         use_tv = getattr(args, 'deconvolve_tv', False)
         tv_lambda = getattr(args, 'tv_lambda', None) or Config.TV_LAMBDA
         tv_iters = getattr(args, 'tv_iterations', None) or Config.TV_ITERATIONS
+        use_sparse = getattr(args, 'deconvolve_sparse', False)
+        sparse_lambda = getattr(args, 'deconvolve_sparse_lambda', None) or 0.01
         psf = None
         psf_fwhm = 0.0
 
@@ -678,6 +713,14 @@ def postprocess_stack(
                                                      lambda_tv=tv_lambda,
                                                      star_mask=deconv_mask)
                 safe_print(f"  ✓ TV deconvolution ({format_time(time.time() - deconv_start)})")
+            elif use_sparse:
+                safe_print(f"  Sparse wavelet-domain (FISTA) deconvolution "
+                           f"(λ={sparse_lambda:.4f}, iters={tv_iters})...")
+                stacked = sparse_wavelet_deconvolve(stacked, psf,
+                                                    iterations=tv_iters,
+                                                    lam=sparse_lambda,
+                                                    star_mask=deconv_mask)
+                safe_print(f"  ✓ Sparse deconvolution ({format_time(time.time() - deconv_start)})")
             else:
                 safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
                 stacked = richardson_lucy_deconvolve(stacked, psf, iterations=rl_iters,

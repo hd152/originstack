@@ -261,12 +261,19 @@ def _save_xisf(stacked: np.ndarray, output_path: str, header) -> None:
 
 
 def _hdr_blend(long_stack: np.ndarray, short_fits_path: str,
-               verbose: bool = False) -> np.ndarray:
+               verbose: bool = False, mode: str = 'threshold') -> np.ndarray:
     """Blend a short-exposure stack into the saturated regions of the long stack.
 
-    Rescales the short stack to match the long stack's background level, then
-    blends smoothly in the regions where the long stack is near or above its
-    98th-percentile value.
+    Rescales the short stack to match the long stack's background level,
+    then blends via one of two methods:
+      - ``threshold`` (default, original behaviour): a smooth sigmoid mask
+        centred on the long stack's 98th-percentile value.
+      - ``fusion``: Mertens multiresolution exposure fusion
+        (``src/exposure_fusion.py``) -- blends through a Laplacian pyramid
+        weighted by local contrast/saturation/well-exposedness instead of a
+        single spatial mask, avoiding the seam a hard/sigmoid threshold can
+        leave at the transition band. Costs more (a handful of pyramid
+        levels of Gaussian-filter passes) for a smoother result.
     """
     try:
         short_data, _ = load_fits(short_fits_path)
@@ -299,6 +306,13 @@ def _hdr_blend(long_stack: np.ndarray, short_fits_path: str,
         sky_short = short_rgb[:, :, c][sky_mask]
         if len(sky_short) > 0 and sky_short.mean() > 0:
             short_rgb[:, :, c] *= sky_long.mean() / sky_short.mean()
+
+    if mode == 'fusion':
+        from src.exposure_fusion import fuse_exposures
+        blended = fuse_exposures([long_stack, short_rgb])
+        if verbose:
+            safe_print("  HDR blend: Mertens multiresolution exposure fusion")
+        return blended
 
     # Smooth blend mask centred around the saturation threshold
     blend_width = sat_threshold * 0.1
@@ -333,6 +347,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # Check for a checkpoint from a previous interrupted run
     resume_phase = 0
     ckpt_state: Optional[Dict] = None
+    _sigma_out: dict = {}  # populated by run_stacking_phase when --uncertainty-map
+    # applies; defined unconditionally since Phase 3 (where it's normally set)
+    # is skipped entirely on a >=phase-3 checkpoint resume below.
     if not getattr(args, 'no_resume', False):
         _ok, resume_phase, ckpt_state = can_resume(output_path, lights)
         # Drizzle must re-run phase 3: the saved raw_stack.npy is at input
@@ -685,12 +702,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                and drizzle_scale_val > 1.0)
             want_ibp = (int(getattr(args, 'super_res_iters', 0) or 0) > 0
                        and drizzle_scale_val > 1.0)
+            want_matched_filter = getattr(args, 'matched_filter', False)
             def _psf_fallback_suffix() -> str:
                 return (f"{'--drizzle-kernel psf falls back to lanczos3' if want_psf_kernel else ''}"
                         f"{'; ' if want_psf_kernel and want_ibp else ''}"
                         f"{'--super-res-iters skipped' if want_ibp else ''}")
 
-            if want_psf_kernel or want_ibp:
+            if want_psf_kernel or want_ibp or want_matched_filter:
                 try:
                     from src.psf_deconvolution import estimate_psf
                     from src.stacking import build_drizzle_psf_table
@@ -701,7 +719,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                         safe_print(f"  PSF estimate: FWHM={psf_fwhm:.2f}px "
                                    f"(used by{' --drizzle-kernel psf' if want_psf_kernel else ''}"
                                    f"{' and' if want_psf_kernel and want_ibp else ''}"
-                                   f"{' --super-res-iters' if want_ibp else ''})")
+                                   f"{' --super-res-iters' if want_ibp else ''}"
+                                   f"{' --matched-filter' if want_matched_filter else ''})")
                         if want_psf_kernel:
                             wiener_k = getattr(args, 'drizzle_psf_wiener_k',
                                                _Config.DRIZZLE_PSF_WIENER_K)
@@ -716,15 +735,29 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 except Exception as exc:
                     safe_print(f"  PSF estimation failed ({exc}) -- {_psf_fallback_suffix()}")
 
+            if getattr(args, 'drizzle_kernel', 'lanczos3') == 'magic' and drizzle_scale_val > 1.0:
+                from src.stacking import build_magic_kernel_table
+                from src.models import Config as _Config
+                magic_table, magic_halo = build_magic_kernel_table(phases=_Config.DRIZZLE_PSF_PHASES)
+                psf_kernel_table = (magic_table, magic_halo, _Config.DRIZZLE_PSF_PHASES)
+                safe_print(f"  drizzle kernel: Magic Kernel (base, not Sharp), "
+                          f"{2 * magic_halo + 1}x{2 * magic_halo + 1} taps")
+
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
                 shifts, transforms, H, W, C, args, stats,
                 quality_maps=quality_maps,
                 displacement_fields=displacement_fields,
                 psf_kernel_table=psf_kernel_table,
-                psf=psf_estimate)
+                psf=psf_estimate,
+                sigma_out=_sigma_out)
 
             stats.stacking_time = time.time() - phase_start
+
+            if getattr(args, 'dither_report', False):
+                from src.dither_report import run_dither_report
+                run_dither_report(shifts, output_path,
+                                  drizzle_scale=getattr(args, 'drizzle_scale', 1.0))
 
             # Save blink comparator frames (before memmap cleanup)
             if getattr(args, 'keep_intermediates', False):
@@ -851,7 +884,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if getattr(args, 'hdr_combine', None):
         safe_print(f"\n  Applying HDR blend from {os.path.basename(args.hdr_combine)}...")
         hdr_start = time.time()
-        stacked = _hdr_blend(stacked, args.hdr_combine, verbose=args.verbose)
+        stacked = _hdr_blend(stacked, args.hdr_combine, verbose=args.verbose,
+                            mode=getattr(args, 'hdr_blend_mode', 'threshold'))
         safe_print(f"  ✓ HDR blend ({format_time(time.time() - hdr_start)})")
 
     # ======================================================================
@@ -876,6 +910,66 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         from src.merge import apply_merge_header
         apply_merge_header(hdu.header, merge_info)
     hdu.writeto(output_path, overwrite=True)
+
+    _sigma_map = _sigma_out.get('sigma')
+    if _sigma_map is not None:
+        sigma_path = os.path.splitext(output_path)[0] + '_sigma.fits'
+        try:
+            sigma_hdu = fits.PrimaryHDU(data=_sigma_map.astype(np.float32))
+            sigma_hdu.header['COMMENT'] = ('Per-pixel uncertainty (standard error) from '
+                                           'inverse-variance-weighted combine')
+            sigma_hdu.writeto(sigma_path, overwrite=True)
+            safe_print(f"  Uncertainty map: {os.path.basename(sigma_path)}")
+        except Exception as e:
+            safe_print(f"  WARNING: could not write uncertainty map: {e}")
+
+    if getattr(args, 'nmf_separate', False):
+        from src.source_separation import run_nmf_separation_report
+        run_nmf_separation_report(stacked, output_path)
+
+    if want_matched_filter and psf_estimate is not None:
+        try:
+            from src.matched_filter import apply_matched_filter
+            from src.background import _estimate_sky_sigma
+            noise_sigma = _estimate_sky_sigma(stacked)
+            mf_result = apply_matched_filter(stacked, psf_estimate, noise_sigma=noise_sigma)
+            mf_path = os.path.splitext(output_path)[0] + '_matched_filter.fits'
+            mf_hdu = fits.PrimaryHDU(data=mf_result)
+            mf_hdu.header['COMMENT'] = ('Point-source matched filter SNR map '
+                                        '(correlated with the estimated PSF)')
+            mf_hdu.writeto(mf_path, overwrite=True)
+            safe_print(f"  Matched filter: {os.path.basename(mf_path)}")
+        except Exception as e:
+            safe_print(f"  WARNING: could not write matched filter output: {e}")
+    elif want_matched_filter:
+        safe_print("  Matched filter: skipped (PSF estimation failed)")
+
+    if getattr(args, 'fix_atmospheric_dispersion', False):
+        _ps = getattr(args, 'plate_scale', None)
+        _za = getattr(args, 'zenith_angle', None)
+        _pa = getattr(args, 'parallactic_angle', None)
+        if _ps is None or _za is None or _pa is None:
+            safe_print("  WARNING: --fix-atmospheric-dispersion needs --plate-scale, "
+                      "--zenith-angle, and --parallactic-angle -- skipping "
+                      "(none are auto-derived; see --help)")
+        else:
+            try:
+                from src.atmospheric_dispersion import correct_atmospheric_dispersion
+                corrected = correct_atmospheric_dispersion(
+                    stacked, plate_scale_arcsec_px=_ps, zenith_angle_deg=_za,
+                    parallactic_angle_deg=_pa)
+                disp_path = os.path.splitext(output_path)[0] + '_dispersion_corrected.fits'
+                disp_hdu = fits.PrimaryHDU(
+                    data=np.transpose(corrected, (2, 0, 1)).astype(np.float32))
+                disp_hdu.header['COMMENT'] = ('EXPERIMENTAL atmospheric dispersion '
+                                              'correction (standard-atmosphere model, '
+                                              'first-principles derivation -- see '
+                                              'src/atmospheric_dispersion.py)')
+                disp_hdu.writeto(disp_path, overwrite=True)
+                safe_print(f"  Atmospheric dispersion correction: "
+                          f"{os.path.basename(disp_path)} (experimental)")
+            except Exception as e:
+                safe_print(f"  WARNING: atmospheric dispersion correction failed: {e}")
 
     # The output header already carries a WCS from the session info.json when the
     # capture app (e.g. Celestron Origin) plate-solved the session — written by
@@ -916,7 +1010,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         try:
             from src.color_calibrate import run_photometric_calibration
             stacked_cc, scales = run_photometric_calibration(
-                stacked, hdu.header, verbose=args.verbose)
+                stacked, hdu.header, verbose=args.verbose,
+                method=getattr(args, 'color_calibrate_method', 'colorindex'))
             if scales != (1.0, 1.0, 1.0):
                 stacked = stacked_cc
                 hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))

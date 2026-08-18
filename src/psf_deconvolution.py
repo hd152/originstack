@@ -406,6 +406,105 @@ def tv_regularized_deconvolve(img: np.ndarray, psf: np.ndarray,
     return result.astype(np.float32)
 
 
+def sparse_wavelet_deconvolve(img: np.ndarray, psf: np.ndarray,
+                              iterations: Optional[int] = None,
+                              lam: float = 0.01, levels: int = 4,
+                              star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """FISTA-based sparse (wavelet-domain L1) deconvolution -- an
+    alternative to ``tv_regularized_deconvolve``'s spatial-gradient (TV)
+    prior. Regularises via an L1 penalty on this project's own wavelet
+    transform coefficients (``src.wavelet.wavedec2``/``waverec2``, the same
+    native-accelerated transform ``src.denoising``'s wavelet denoisers use)
+    instead of a total-variation penalty: FISTA (Beck & Teboulle 2009, "A
+    Fast Iterative Shrinkage-Thresholding Algorithm"), reusing the same
+    forward/adjoint PSF convolution and positivity-pedestal pattern as
+    ``richardson_lucy_deconvolve``/``tv_regularized_deconvolve``.
+
+    Where TV assumes the image is piecewise-smooth (sparse in its spatial
+    gradient), this assumes it's sparse in a wavelet basis -- a different
+    prior that can behave differently on textured/filamentary structure a
+    pure gradient penalty tends to flatten. Operates on luminance only, via
+    the same YCbCr split as the RL/TV paths.
+
+    Args:
+        img: (H, W, 3) float image.
+        psf: Point-spread function kernel.
+        iterations: FISTA iterations (default: ``Config.TV_ITERATIONS``).
+        lam: L1 sparsity weight -- larger values threshold more wavelet
+            coefficients (smoother, less noise); smaller values sharpen
+            more but amplify noise, same tradeoff as TV's lambda_tv.
+        levels: Wavelet decomposition depth.
+        star_mask: Optional float mask (1 = star core), blended from the
+            original to avoid ringing on bright star cores.
+
+    Returns:
+        Deconvolved float32 image (H, W, 3).
+    """
+    from src import wavelet as _wavelet
+
+    if iterations is None:
+        iterations = Config.TV_ITERATIONS
+
+    src = img.astype(np.float64)
+    Y  =  0.29900 * src[:, :, 0] + 0.58700 * src[:, :, 1] + 0.11400 * src[:, :, 2]
+    Cb = -0.16875 * src[:, :, 0] - 0.33126 * src[:, :, 1] + 0.50000 * src[:, :, 2]
+    Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
+
+    psf_d = psf.astype(np.float64)
+    psf_d = psf_d / psf_d.sum()
+    psf_flip = psf_d[::-1, ::-1]
+
+    y_min = float(Y.min())
+    pedestal = max(-y_min + 1e-6, 1e-6)
+    y_obs = Y + pedestal
+    h, w = y_obs.shape
+
+    max_level = _wavelet.dwt_max_level(min(h, w))
+    use_levels = min(levels, max_level)
+
+    # PSF is normalised to sum 1, so the forward operator's spectral norm
+    # (||H^T H||) is <= 1 -- a unit gradient step is the standard FISTA
+    # choice for a normalised-kernel forward model (mirrors tv_regularized_
+    # deconvolve's own step-size derivation from the same fact).
+    step = 1.0
+    x_k = y_obs.copy()
+    z_k = y_obs.copy()
+    t_k = 1.0
+
+    for _ in range(int(iterations)):
+        hz = _scipy_signal.fftconvolve(z_k, psf_d, mode='same')
+        grad = _scipy_signal.fftconvolve(hz - y_obs, psf_flip, mode='same')
+        x_temp = z_k - step * grad
+
+        if use_levels >= 1:
+            coeffs = _wavelet.wavedec2(x_temp, use_levels)
+            thr = step * lam
+            new_coeffs = [coeffs[0]]
+            for detail_level in coeffs[1:]:
+                new_coeffs.append(tuple(
+                    _wavelet.soft_threshold(d, thr) for d in detail_level))
+            x_next = _wavelet.waverec2(new_coeffs)[:h, :w]
+        else:
+            x_next = x_temp
+        np.clip(x_next, 1e-12, None, out=x_next)
+
+        t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_k ** 2))
+        z_k = x_next + ((t_k - 1.0) / t_next) * (x_next - x_k)
+        x_k = x_next
+        t_k = t_next
+
+    Y_d = x_k - pedestal
+    if star_mask is not None:
+        Y_d = Y_d * (1.0 - star_mask) + Y * star_mask
+
+    R = Y_d + 1.40200 * Cr
+    G = Y_d - 0.34414 * Cb - 0.71414 * Cr
+    B = Y_d + 1.77200 * Cb
+    result = np.stack([R, G, B], axis=2)
+    np.clip(result, 0.0, None, out=result)
+    return result.astype(np.float32)
+
+
 def _rl_deconvolve_xp(image, psf, iterations, xp, xsignal):
     """Richardson-Lucy iteration on an arbitrary array backend (numpy or cupy).
 

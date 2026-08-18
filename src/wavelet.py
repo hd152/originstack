@@ -239,11 +239,20 @@ def _detail_shape(detail_or_array) -> Tuple[int, int]:
     return arr.shape
 
 
-def soft_threshold(data: np.ndarray, value: float) -> np.ndarray:
+def soft_threshold(data: np.ndarray, value) -> np.ndarray:
     """Soft-threshold shrinkage -- exact equivalent of
     pywt.threshold(data, value, mode='soft'):
-    sign(x) * max(|x| - value, 0)."""
-    if value < 0:
+    sign(x) * max(|x| - value, 0).
+
+    ``value`` may be a scalar (the original, still the common case) or an
+    array broadcastable against ``data`` (e.g. a per-pixel spatially
+    adaptive threshold, as ``src.denoising.directional_wavelet_denoise``
+    uses) -- ``np.any(... < 0)`` rather than a bare ``value < 0`` so the
+    validation itself doesn't choke on a multi-element array (a bare
+    comparison there raises "truth value of an array is ambiguous" instead
+    of the intended "must be non-negative" error).
+    """
+    if np.any(np.asarray(value) < 0):
         raise ValueError("threshold value must be non-negative")
     magnitude = np.abs(data)
     return np.sign(data) * np.maximum(magnitude - value, 0.0)

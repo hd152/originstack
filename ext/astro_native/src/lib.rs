@@ -200,6 +200,77 @@ where
     out
 }
 
+/// Sibling of `row_parallel` for a `work` closure that produces two
+/// per-pixel outputs instead of one (e.g. a combined value plus its own
+/// summed weight) -- same gather-transpose driver, same tiling, just two
+/// output buffers filled together instead of one. Kept separate from
+/// `row_parallel` (rather than adding an output-count generic to it)
+/// so every existing single-output caller's signature is untouched.
+fn row_parallel_pair<S, Init, Work>(
+    arr: &numpy::ndarray::ArrayView4<'_, f32>,
+    h: usize,
+    w: usize,
+    c: usize,
+    n: usize,
+    init: Init,
+    work: Work,
+) -> (Vec<f32>, Vec<f32>)
+where
+    S: Send,
+    Init: Fn() -> S + Sync,
+    Work: Fn(&mut S, &[f32]) -> (f32, f32) + Sync,
+{
+    let row_len = w * c;
+    let frame_len = h * row_len;
+    let tile = gather_tile(n);
+    let data: Option<&[f32]> = arr.as_slice();
+
+    let mut out_a = vec![0f32; h * row_len];
+    let mut out_b = vec![0f32; h * row_len];
+    out_a.par_chunks_mut(row_len)
+        .zip(out_b.par_chunks_mut(row_len))
+        .enumerate()
+        .for_each(|(row, (out_row_a, out_row_b))| {
+            let mut state = init();
+            let mut block = vec![0f32; tile * n];
+            match data {
+                Some(flat) => {
+                    let row_base = row * row_len;
+                    let mut start = 0usize;
+                    while start < row_len {
+                        let t = tile.min(row_len - start);
+                        for k in 0..n {
+                            let src = &flat[k * frame_len + row_base + start..][..t];
+                            for (p, &v) in src.iter().enumerate() {
+                                block[p * n + k] = v;
+                            }
+                        }
+                        for p in 0..t {
+                            let (a, b) = work(&mut state, &block[p * n..(p + 1) * n]);
+                            out_row_a[start + p] = a;
+                            out_row_b[start + p] = b;
+                        }
+                        start += t;
+                    }
+                }
+                None => {
+                    let vals = &mut block[..n];
+                    for col in 0..row_len {
+                        let wj = col / c;
+                        let cj = col % c;
+                        for k in 0..n {
+                            vals[k] = arr[[k, row, wj, cj]];
+                        }
+                        let (a, b) = work(&mut state, &vals[..n]);
+                        out_row_a[col] = a;
+                        out_row_b[col] = b;
+                    }
+                }
+            }
+        });
+    (out_a, out_b)
+}
+
 /// Fill `active[i]` = survives sigma-clip (same iteration as the numpy
 /// `_sigma_clip_tile` per-pixel logic). NaN samples start rejected.
 fn sigma_clip_mask(
@@ -1186,6 +1257,74 @@ fn ivw_combine<'py>(
         })
     });
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
+}
+
+/// Sibling of `ivw_combine` that also returns the per-pixel-per-channel
+/// summed inverse-variance weight (the Gauss-Markov estimator's own
+/// variance is exactly `1/wsum`) -- backs `--uncertainty-map`
+/// (`src/stacking.py`'s `ivw_combine(..., return_sigma=True)`), which
+/// previously always fell back to the numpy tiled path because this
+/// kernel's own `wsum` was never exposed. A separate function rather than
+/// adding an output-mode flag to `ivw_combine` itself, so that already-
+/// shipped, tested kernel's signature and call sites are untouched by an
+/// opt-in diagnostic path. Necessarily duplicates `ivw_combine`'s per-pixel
+/// weighting loop (there's no cheap way to share it while also returning a
+/// second output through `row_parallel`'s single-output contract) --
+/// accepted for the same reason this file keeps native kernels and their
+/// numpy mirrors as separate, independently-readable implementations
+/// rather than forcing a shared abstraction across a codepath boundary.
+#[pyfunction]
+#[pyo3(signature = (data, noise, sky=None, gain=None, weights=None))]
+fn ivw_combine_with_sigma<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    noise: PyReadonlyArray1<'py, f32>,
+    sky: Option<PyReadonlyArray1<'py, f32>>,
+    gain: Option<f64>,
+    weights: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<(Bound<'py, PyArray3<f32>>, Bound<'py, PyArray3<f32>>)> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+
+    let noise2: Vec<f64> = noise.as_array().iter().map(|&v| (v as f64) * (v as f64)).collect();
+    let sky_v: Option<Vec<f64>> = sky.map(|x| x.as_array().iter().map(|&v| v as f64).collect());
+    let wv: Option<Vec<f32>> = weights.map(|x| x.as_array().to_vec());
+    let wref = wv.as_deref();
+    let shot_model = match (&sky_v, gain) {
+        (Some(sk), Some(g)) if g > 0.0 => Some((sk, g)),
+        _ => None,
+    };
+
+    let (result, wsum_out) = py.allow_threads(|| {
+        row_parallel_pair(&arr, h, w, c, n, || (), |_, vals| {
+            let mut acc = 0f64;
+            let mut wsum = 0f64;
+            for k in 0..n {
+                let var = match shot_model {
+                    Some((sk, g)) => {
+                        let shot = ((vals[k] as f64) - sk[k]).max(0.0) / g;
+                        noise2[k] + shot
+                    }
+                    None => noise2[k],
+                };
+                let var = var.max(1e-12);
+                let mut wt = 1.0 / var;
+                if let Some(qw) = wref {
+                    wt *= qw[k] as f64;
+                }
+                acc += wt * vals[k] as f64;
+                wsum += wt;
+            }
+            let result = if wsum <= 0.0 { 0.0 } else { (acc / wsum) as f32 };
+            (result, wsum as f32)
+        })
+    });
+    let result_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), result)
+        .expect("shape mismatch building ivw_combine_with_sigma result");
+    let wsum_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), wsum_out)
+        .expect("shape mismatch building ivw_combine_with_sigma wsum");
+    Ok((result_arr.into_pyarray(py), wsum_arr.into_pyarray(py)))
 }
 
 // ---------------------------------------------------------------------------
@@ -4709,6 +4848,67 @@ fn small_times_wide<'py>(
     Ok(arr2.into_pyarray(py))
 }
 
+/// Single-pass central moments of a masked (narrowband, continuum) pixel
+/// pair, for `optimal_continuum_scale`'s closed-form skewness-vs-scale
+/// polynomial (`src/channel_combine.py`): the subtraction residual
+/// `a - s*b` is linear in `s`, so its skewness at every candidate scale is
+/// a fixed rational function of these 7 scalars -- computed once here
+/// instead of re-scanning the full pixel array once per swept scale (the
+/// real algorithmic win; this kernel is the constant-factor win on top of
+/// that). Two passes (mean, then central moments) deliberately mirror the
+/// numpy fallback's own two-step logic instead of a single-pass raw-moment
+/// shift-formula, so there's no separate algebra to risk transcribing
+/// wrong -- the win here is fusing what the numpy path computes as ~7
+/// separate full-array elementwise-power passes (each its own temporary
+/// array) into one pass per stage. Intentionally not rayon-parallelised:
+/// called once per `optimal_continuum_scale` call (not per swept scale),
+/// so unlike this file's per-frame/per-pixel hot-path kernels there's no
+/// outer loop multiplying its cost.
+#[pyfunction]
+fn continuum_scale_moments(
+    a: PyReadonlyArray1<f64>,
+    b: PyReadonlyArray1<f64>,
+) -> PyResult<(usize, f64, f64, f64, f64, f64, f64, f64)> {
+    let a = a.as_slice()?;
+    let b = b.as_slice()?;
+    if a.len() != b.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "a and b must have the same length",
+        ));
+    }
+    let n = a.len();
+    if n == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("a and b must be non-empty"));
+    }
+
+    let (sum_a, sum_b) = a.iter().zip(b.iter())
+        .fold((0.0f64, 0.0f64), |(sa, sb), (&av, &bv)| (sa + av, sb + bv));
+    let nf = n as f64;
+    let mean_a = sum_a / nf;
+    let mean_b = sum_b / nf;
+
+    let (s20, s11, s02, s30, s21, s12, s03) = a.iter().zip(b.iter()).fold(
+        (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64),
+        |(s20, s11, s02, s30, s21, s12, s03), (&av, &bv)| {
+            let ap = av - mean_a;
+            let bp = bv - mean_b;
+            let ap2 = ap * ap;
+            let bp2 = bp * bp;
+            (
+                s20 + ap2,
+                s11 + ap * bp,
+                s02 + bp2,
+                s30 + ap2 * ap,
+                s21 + ap2 * bp,
+                s12 + ap * bp2,
+                s03 + bp2 * bp,
+            )
+        },
+    );
+
+    Ok((n, s20 / nf, s11 / nf, s02 / nf, s30 / nf, s21 / nf, s12 / nf, s03 / nf))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -4722,6 +4922,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
     m.add_function(wrap_pyfunction!(linear_fit_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(ivw_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(ivw_combine_with_sigma, m)?)?;
     m.add_function(wrap_pyfunction!(dwt2_native, m)?)?;
     m.add_function(wrap_pyfunction!(idwt2_native, m)?)?;
     m.add_function(wrap_pyfunction!(sigma_clipped_median_native, m)?)?;
@@ -4744,6 +4945,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(warp_affine_kernel_table, m)?)?;
     m.add_function(wrap_pyfunction!(gram_matrix_wide, m)?)?;
     m.add_function(wrap_pyfunction!(small_times_wide, m)?)?;
+    m.add_function(wrap_pyfunction!(continuum_scale_moments, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

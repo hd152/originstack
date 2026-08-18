@@ -78,7 +78,12 @@ def query_gaia_stars(header, max_stars: int = 500):
     """Query Gaia DR3 for stars within the image field.
 
     Returns an astropy Table with columns: ra, dec, phot_g_mean_mag,
-    phot_bp_mean_mag, phot_rp_mean_mag.  Returns None on failure.
+    phot_bp_mean_mag, phot_rp_mean_mag, teff_gspphot.  Returns None on
+    failure. ``teff_gspphot`` (GSP-Phot effective temperature estimate) is
+    deliberately not in ``require_not_null`` -- most stars in a typical
+    field lack it, and ``fit_channel_scales_spcc`` falls back to the
+    colour-index relation per-star when it's NaN rather than losing those
+    stars from the fit entirely.
     """
     if not HAS_ASTROPY_WCS:
         return None
@@ -92,7 +97,7 @@ def query_gaia_stars(header, max_stars: int = 500):
     table = net_query.gaia_cone_search(
         ra, dec, radius_deg,
         columns=["ra", "dec", "phot_g_mean_mag",
-                 "phot_bp_mean_mag", "phot_rp_mean_mag"],
+                 "phot_bp_mean_mag", "phot_rp_mean_mag", "teff_gspphot"],
         max_rows=max_stars,
         require_not_null=["phot_bp_mean_mag", "phot_rp_mean_mag"])
     if table is None or len(table) == 0:
@@ -205,6 +210,196 @@ def _bp_rp_to_bv(bp_rp: np.ndarray) -> np.ndarray:
     Valid roughly for BP-RP in [0.0, 3.0].
     """
     return 0.0895 + 0.5289 * bp_rp - 0.0991 * bp_rp ** 2
+
+
+# ---------------------------------------------------------------------------
+# Spectrophotometric calibration (SPCC-style): physically integrate a
+# per-star spectral proxy against actual channel response curves, instead of
+# fit_channel_scales' fixed "B = G+(B-V), R = G-0.5*(B-V)" colour-index
+# formula. The real differentiator of SPCC-style tools (PixInsight, Siril)
+# over simple colour-index matching is this integration step -- reproducing
+# each channel's actual spectral response instead of assuming one fixed
+# conversion works for every camera/filter combination.
+# ---------------------------------------------------------------------------
+
+def _blackbody_spectrum(teff_k: np.ndarray, wavelengths_nm: np.ndarray) -> np.ndarray:
+    """Planck blackbody spectral radiance (arbitrary units -- only used in
+    ratios, so the physical constants' units don't need to be tracked).
+    ``teff_k`` broadcasts against ``wavelengths_nm`` (either can be scalar).
+    """
+    h_planck = 6.62607015e-34
+    c_light = 2.99792458e8
+    k_boltz = 1.380649e-23
+    wl_m = np.asarray(wavelengths_nm, dtype=np.float64) * 1e-9
+    teff = np.asarray(teff_k, dtype=np.float64)
+    with np.errstate(over='ignore', divide='ignore'):
+        exponent = (h_planck * c_light) / (wl_m * k_boltz * teff)
+        radiance = (2 * h_planck * c_light ** 2) / (wl_m ** 5 * np.expm1(exponent))
+    return np.nan_to_num(radiance, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+# Generic per-channel response curves (Gaussian proxies for a typical OSC
+# Bayer sensor's R/G/B response) -- NOT a measured QE/filter curve for any
+# specific camera. This is the honest, stated fallback used when the caller
+# doesn't supply real curves; it is what makes this "SPCC-style" rather than
+# a claim of matching PixInsight/Siril's own curve libraries exactly.
+_DEFAULT_BAND_CENTERS_NM = {'R': 620.0, 'G': 540.0, 'B': 460.0}
+_DEFAULT_BAND_SIGMA_NM = 45.0
+_SPCC_WAVELENGTHS_NM = np.linspace(350.0, 950.0, 300)
+
+
+def _default_channel_response(channel: str, wavelengths_nm: np.ndarray) -> np.ndarray:
+    center = _DEFAULT_BAND_CENTERS_NM[channel]
+    return np.exp(-0.5 * ((wavelengths_nm - center) / _DEFAULT_BAND_SIGMA_NM) ** 2)
+
+
+def synthetic_channel_flux(teff_k: float, channel_response=None) -> Tuple[float, float, float]:
+    """Integrate a blackbody spectrum at ``teff_k`` against R/G/B channel
+    response curves. ``channel_response(channel: str, wavelengths_nm) ->
+    array`` lets a caller supply real sensor QE x filter transmission
+    curves; defaults to ``_default_channel_response``.
+
+    Returns (flux_R, flux_G, flux_B) in arbitrary but mutually-comparable
+    units (only ratios between channels are ever used downstream).
+    """
+    wl = _SPCC_WAVELENGTHS_NM
+    spec = _blackbody_spectrum(float(teff_k), wl)
+    resp_fn = channel_response or _default_channel_response
+    _integrate = getattr(np, 'trapezoid', np.trapz)  # trapezoid: numpy >= 2.0
+    fluxes = []
+    for ch in ('R', 'G', 'B'):
+        resp = resp_fn(ch, wl)
+        fluxes.append(float(_integrate(spec * resp, wl)))
+    return tuple(fluxes)
+
+
+def _synthetic_channel_flux_batch(teff_k: np.ndarray, channel_response=None
+                                  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized form of ``synthetic_channel_flux`` for many stars at
+    once. ``fit_channel_scales_spcc`` used to call the scalar version once
+    per matched star (up to ~500 per Gaia query) in a Python loop; the
+    blackbody spectrum and its integration against each channel response
+    both broadcast cleanly across stars, so this replaces that loop with 4
+    vectorized calls total (1 spectrum + 3 channel integrations) regardless
+    of star count. ``synthetic_channel_flux`` itself is kept as the
+    scalar, single-star API (used directly by callers that only have one
+    temperature and by its own tests) rather than folded into this.
+    """
+    wl = _SPCC_WAVELENGTHS_NM
+    teff_arr = np.asarray(teff_k, dtype=np.float64)
+    spec = _blackbody_spectrum(teff_arr[:, None], wl[None, :])  # (n_stars, n_wl)
+    resp_fn = channel_response or _default_channel_response
+    _integrate = getattr(np, 'trapezoid', np.trapz)
+    fluxes = []
+    for ch in ('R', 'G', 'B'):
+        resp = resp_fn(ch, wl)  # (n_wl,)
+        fluxes.append(_integrate(spec * resp[None, :], wl, axis=1))  # (n_stars,)
+    return fluxes[0], fluxes[1], fluxes[2]
+
+
+def fit_channel_scales_spcc(img: np.ndarray, header, catalog,
+                            channel_response=None,
+                            verbose: bool = False) -> Tuple[float, float, float]:
+    """Spectrophotometric variant of ``fit_channel_scales``: per-star
+    expected channel flux ratios come from integrating a blackbody spectrum
+    at the star's Gaia ``teff_gspphot`` against channel response curves,
+    instead of a single fixed colour-index formula. Falls back to
+    ``_bp_rp_to_bv``'s colour-index relation per-star when ``teff_gspphot``
+    is unavailable (most GSP-Phot estimates are missing for a random field
+    -- typically a minority of matched stars have one), so coverage doesn't
+    collapse to only the stars with a temperature estimate.
+
+    Returns (scale_R, scale_G, scale_B); (1.0, 1.0, 1.0) on failure --
+    same failure contract as ``fit_channel_scales``.
+    """
+    pixel_coords = _pixel_coords(catalog, header)
+    if pixel_coords is None:
+        return 1.0, 1.0, 1.0
+
+    px, py = pixel_coords[:, 0], pixel_coords[:, 1]
+    ap_radius = max(3, min(8, int(min(img.shape[:2]) / 200)))
+    fluxes = _aperture_flux(img, px, py, radius=ap_radius)
+
+    valid = np.all(np.isfinite(fluxes) & (fluxes > 0), axis=1)
+    if valid.sum() < 10:
+        if verbose:
+            print(f"  [SPCC] Too few valid stars ({valid.sum()}) — skipping")
+        return 1.0, 1.0, 1.0
+    fluxes = fluxes[valid]
+
+    try:
+        bp = np.array(catalog["phot_bp_mean_mag"][valid], dtype=float)
+        rp = np.array(catalog["phot_rp_mean_mag"][valid], dtype=float)
+        g_mag = np.array(catalog["phot_g_mean_mag"][valid], dtype=float)
+    except Exception:
+        return 1.0, 1.0, 1.0
+    if "teff_gspphot" in catalog.colnames:
+        teff = np.array(catalog["teff_gspphot"][valid], dtype=float)
+    else:
+        teff = np.full(valid.sum(), np.nan)
+
+    bv = _bp_rp_to_bv(bp - rp)
+    fallback_b = g_mag + bv
+    fallback_r = g_mag - 0.5 * bv
+    flux_g_expected = 10.0 ** (-0.4 * g_mag)
+
+    n = len(teff)
+    flux_r_expected = np.empty(n)
+    flux_b_expected = np.empty(n)
+
+    # Vectorized over all stars at once (previously a per-star Python loop
+    # calling synthetic_channel_flux individually -- up to ~500 iterations
+    # per Gaia query): _synthetic_channel_flux_batch computes the blackbody
+    # spectrum and its 3 channel integrations for every candidate star in 4
+    # calls total, independent of star count.
+    has_teff = np.isfinite(teff) & (teff >= 2000.0) & (teff <= 50000.0)
+    use_bb = np.zeros(n, dtype=bool)
+    if np.any(has_teff):
+        idx = np.flatnonzero(has_teff)
+        fr, fg, fb = _synthetic_channel_flux_batch(teff[idx], channel_response)
+        fg_ok = fg > 0
+        good = idx[fg_ok]
+        # Normalise the synthetic G-band flux to each star's actual measured
+        # Gaia G magnitude, so units match flux_g_expected's photometric
+        # scale -- fr/fg/fb are otherwise on an arbitrary blackbody-radiance
+        # scale, only their ratios are physical.
+        scale = flux_g_expected[good] / fg[fg_ok]
+        flux_r_expected[good] = fr[fg_ok] * scale
+        flux_b_expected[good] = fb[fg_ok] * scale
+        use_bb[good] = True
+    n_bb = int(np.sum(use_bb))
+
+    # Fallback: same colour-index approximation fit_channel_scales uses.
+    fallback_mask = ~use_bb
+    flux_r_expected[fallback_mask] = 10.0 ** (-0.4 * fallback_r[fallback_mask])
+    flux_b_expected[fallback_mask] = 10.0 ** (-0.4 * fallback_b[fallback_mask])
+
+    def _robust_ratio(meas: np.ndarray, expected: np.ndarray) -> float:
+        ratio = meas / np.maximum(expected, 1e-30)
+        ratio = ratio / np.median(ratio)
+        return float(np.median(ratio))
+
+    scale_r = _robust_ratio(fluxes[:, 0], flux_r_expected)
+    scale_g = _robust_ratio(fluxes[:, 1], flux_g_expected)
+    scale_b = _robust_ratio(fluxes[:, 2], flux_b_expected)
+
+    mean_scale = (scale_r + scale_g + scale_b) / 3.0
+    if mean_scale > 0:
+        scale_r /= mean_scale
+        scale_g /= mean_scale
+        scale_b /= mean_scale
+
+    lo, hi = 0.5, 2.0
+    scale_r = float(np.clip(scale_r, lo, hi))
+    scale_g = float(np.clip(scale_g, lo, hi))
+    scale_b = float(np.clip(scale_b, lo, hi))
+
+    if verbose:
+        print(f"  [SPCC] {n} stars used ({n_bb} via blackbody Teff, "
+              f"{n - n_bb} via colour-index fallback); "
+              f"scales R={scale_r:.4f} G={scale_g:.4f} B={scale_b:.4f}")
+
+    return scale_r, scale_g, scale_b
 
 
 def fit_channel_scales(img: np.ndarray, header,
@@ -322,9 +517,19 @@ def apply_photometric_calibration(img: np.ndarray,
 
 
 def run_photometric_calibration(img: np.ndarray, header,
-                                 verbose: bool = False
+                                 verbose: bool = False,
+                                 method: str = 'colorindex'
                                  ) -> Tuple[np.ndarray, Tuple[float, float, float]]:
     """Full pipeline: query catalogue → fit scales → apply.
+
+    ``method``: 'colorindex' (default -- ``fit_channel_scales``'s fixed
+    B-V-derived formula) or 'spcc' (``fit_channel_scales_spcc``'s
+    blackbody-spectrum integration against channel response curves, falling
+    back to the colour-index formula per-star when a Gaia Teff estimate
+    isn't available). 'spcc' needs 2MASS's catalogue skipped -- it's a
+    Gaia-only method (2MASS carries no Teff column) -- so on a Gaia-query
+    failure it degrades to 'colorindex' via 2MASS rather than returning
+    unscaled.
 
     Returns (calibrated_img, (scale_R, scale_G, scale_B)).
     On failure returns (original_img, (1.0, 1.0, 1.0)).
@@ -357,8 +562,11 @@ def run_photometric_calibration(img: np.ndarray, header,
         print(f"  [colour cal] Queried {len(catalog)} stars from "
               f"{'Gaia DR3' if catalog_type == 'gaia' else '2MASS'}")
 
-    scales = fit_channel_scales(img, header, catalog,
-                                catalog_type=catalog_type,
-                                verbose=verbose)
+    if method == 'spcc' and catalog_type == 'gaia':
+        scales = fit_channel_scales_spcc(img, header, catalog, verbose=verbose)
+    else:
+        scales = fit_channel_scales(img, header, catalog,
+                                    catalog_type=catalog_type,
+                                    verbose=verbose)
     calibrated = apply_photometric_calibration(img, scales)
     return calibrated, scales
