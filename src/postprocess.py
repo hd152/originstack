@@ -45,12 +45,12 @@ def _diag_save(img: np.ndarray, diag_dir: Optional[str], counter: list, slug: st
     counter is a one-element list [int] so the caller can mutate it across calls
     without a nonlocal statement. Only called when the step actually runs.
 
-    Also publishes a live preview to the web view (independent of diagnostic
-    mode; a no-op unless --web-view is active, and throttled internally).
+    Also publishes a live preview to the desktop app (independent of
+    diagnostic mode; a no-op unless attached, and throttled internally).
     """
     try:
-        from src.webview import get_webview
-        wv = get_webview()
+        from src.ui_events import get_ui_events
+        wv = get_ui_events()
         if wv.active:
             wv.preview(img, f"Post-processing: {slug.replace('_', ' ')}",
                        args=None)
@@ -242,10 +242,18 @@ def postprocess_stack(
         _galaxy_excl_mask = None
         if getattr(args, 'galaxy_mode', False):
             try:
-                from src.registration import find_extended_source_ellipse
-                _pp_lum_gal = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                               + 0.114 * stacked[:, :, 2])
-                _gal_fit = find_extended_source_ellipse(_pp_lum_gal)
+                _gal_center_override = getattr(args, 'galaxy_center', None)
+                if _gal_center_override:
+                    # Skip detection entirely -- see
+                    # parse_galaxy_center_override's docstring for why.
+                    from src.registration import parse_galaxy_center_override
+                    _gal_fit = parse_galaxy_center_override(
+                        _gal_center_override, getattr(args, 'galaxy_mask_radius', None))
+                else:
+                    from src.registration import find_extended_source_ellipse
+                    _pp_lum_gal = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                                   + 0.114 * stacked[:, :, 2])
+                    _gal_fit = find_extended_source_ellipse(_pp_lum_gal)
                 if _gal_fit is not None:
                     _gal_cy, _gal_cx, _gal_a, _gal_b, _gal_axes = _gal_fit
                     _radius_override = getattr(args, 'galaxy_mask_radius', None)
@@ -456,11 +464,13 @@ def postprocess_stack(
         _sr_start = time.time()
         stacked = remove_sky_residual(stacked, mesh_size=_sr_broad_mesh, filter_size=1,
                                       clip_sigma=args.bg_clip_sigma,
-                                      star_mask=pp_star_mask, verbose=args.verbose)
+                                      star_mask=pp_star_mask, verbose=args.verbose,
+                                      exclusion_mask=_bg_excl_mask)
         for _sr_pass in range(2):
             stacked = remove_sky_residual(stacked, mesh_size=_sr_mesh, filter_size=1,
                                           clip_sigma=args.bg_clip_sigma, star_mask=pp_star_mask,
-                                          verbose=(args.verbose and _sr_pass == 0))
+                                          verbose=(args.verbose and _sr_pass == 0),
+                                          exclusion_mask=_bg_excl_mask)
         safe_print(f"  ✓ Sky residual correction ({format_time(time.time() - _sr_start)})")
         stacked = sky_floor_normalize(stacked, star_mask=pp_star_mask, verbose=args.verbose)
 

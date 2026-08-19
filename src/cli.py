@@ -964,20 +964,11 @@ def build_parser() -> argparse.ArgumentParser:
     g_core.add_argument('--stream-sigma', type=float, default=None, metavar='SIGMA',
                    help='--stream: sigma-clip rejection threshold (default: '
                         '--rejection-sigma).')
-    g_core.add_argument('--web-view', action='store_true',
-                   help='Serve a live dashboard at http://127.0.0.1:<port>/ while '
-                        'stacking: phase progress, log stream, per-frame quality '
-                        'ticker, and an interactive preview (zoom/pan, live '
-                        're-stretch, before/after wipe compare, per-frame '
-                        'thumbnails). Pure stdlib, localhost only. The server '
-                        'keeps running after completion so the final state stays '
-                        'viewable (Ctrl+C to exit).')
-    g_core.add_argument('--web-view-port', type=int, default=8765, metavar='PORT',
-                   help='Port for --web-view (default: 8765; 0 = ephemeral)')
-    g_core.add_argument('--web-view-frame-every', type=int, default=5, metavar='N',
-                   help='Publish a per-frame thumbnail to --web-view every Nth '
-                        'processed light in Phase 1 (default: 5; 0 = off). The '
-                        'first frame is always shown.')
+    g_core.add_argument('--ui-frame-every', type=int, default=5, metavar='N',
+                   help='Publish a per-frame thumbnail to the desktop app every '
+                        'Nth processed light in Phase 1 (default: 5; 0 = off). '
+                        'The first frame is always shown. No effect on a plain '
+                        'CLI run (nothing is attached to receive it).')
     g_core.add_argument('--config', default=None, metavar='PATH',
                    help='Load parameters from a TOML configuration file. '
                         'CLI arguments override config file values. Fine-grained tuning '
@@ -1002,7 +993,7 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=['auto', 'wavelet', 'mmt', 'bm3d', 'acdnr', 'nlm',
                             'bilateral', 'aniso', 'curvelet', 'none'],
                    default='auto',
-                   help='Primary luma denoiser (default: auto — wavelet unless a '
+                   help='Primary luma denoiser (default: auto — curvelet unless a '
                         'preset/--auto selects otherwise). '
                         'wavelet: adaptive BayesShrink DWT. '
                         'mmt: Multiscale Median Transform, robust to Poisson+read noise. '
@@ -1119,13 +1110,16 @@ def build_parser() -> argparse.ArgumentParser:
     g_core.add_argument('-v', '--verbose', action='store_true')
     g_stack.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
-                            'percentile', 'esd', 'trimmed_mean', 'linear_fit',
+                            'percentile', 'esd', 'linear_fit',
                             'ivw', 'wavelet', 'auto'],
                    default='auto',
                    help='Stacking/rejection method. '
                         'sigma_clip: MAD-based iterative rejection (default for dithered data). '
                         'winsorized: like sigma_clip but clips to boundary instead of rejecting. '
-                        'percentile: reject outside [low,high] percentile (good for <8 frames). '
+                        'percentile: reject outside [low,high] percentile (good for <8 frames; '
+                        'subsumes the removed trimmed_mean method -- same reject-tails-then-'
+                        'average operation, just parameterized by percentile bounds instead of '
+                        'a trim fraction). '
                         'esd: Grubbs/ESD test (best for <15 frames, needs scipy). '
                         'linear_fit: PixInsight-style Linear Fit Clipping -- sorts each pixel\'s '
                         'per-frame stack ascending and fits a line to value-vs-rank, rejecting '
@@ -1502,7 +1496,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Overrides the fitted ellipse\'s semi-major axis length (pixels); '
                         'the semi-minor axis and orientation still come from the fit. '
                         'Default: sized automatically from the detected object. Only '
-                        'active with --galaxy-mode.')
+                        'active with --galaxy-mode. Ignored if --galaxy-center is set.')
+    g_post.add_argument('--galaxy-center', type=str, default=None, metavar='X,Y',
+                   help='Skip automatic extended-source detection entirely and center the '
+                        '--galaxy-mode exclusion on this pixel coordinate instead (comma-'
+                        'separated, e.g. "1420,930" -- X is the column, Y is the row, same '
+                        'orientation as image-viewer pixel coordinates on the stacked '
+                        'output). A circle of radius --galaxy-mask-radius (default 200px) '
+                        'is used, since there is no fitted shape to take the aspect ratio '
+                        'from. For fields where auto-detection keeps finding the wrong '
+                        'object (a brighter star, a vignetting corner, etc. -- confirmed on '
+                        'a real dense-star-field target) -- open the stacked preview, read '
+                        'off the galaxy\'s pixel position, and pin it directly.')
     g_post.add_argument('--no-remove-stars', dest='remove_stars', action='store_false',
                    help='Disable star removal. By default, detected stars are '
                         'inpainted with local background (normalised-convolution '
@@ -1517,7 +1522,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(
         # Features that are on by default (disabled via --no-* flags)
         background_extraction=True,
-        denoise=True,
+        # Primary luma denoiser when --denoiser is left at 'auto' and no
+        # preset/--auto overrides it: directional (curvelet-inspired)
+        # adaptive wavelet, not plain adaptive_wavelet_denoise. At
+        # protect_strength=0.6 it's a strict superset of plain wavelet's
+        # protection -- isotropic/noise-only regions get the same BayesShrink
+        # threshold either way, coherent/elongated structure (galaxy arms,
+        # nebula filaments) gets a reduced one. Plain wavelet erasing real
+        # galaxy detail (dust lanes, spiral structure -- low-contrast,
+        # sitting close to the noise floor) on a run with no --auto/preset
+        # was reported and reproduced; curvelet is the existing, purpose-built
+        # fix, just not previously the default. `--denoiser wavelet` still
+        # gives the plain (unprotected) behavior explicitly if ever wanted.
+        denoise=False,
+        denoise_curvelet=True,
         auto_denoise_strength=True,
         denoise_adaptive=True,
         chroma_nr=True,
@@ -1635,8 +1653,6 @@ def build_parser() -> argparse.ArgumentParser:
         consensus_ref=False,
         masked_correlation=False,
         pre_gradient_removal=False,
-        trim_low=0.2,
-        trim_high=0.2,
         drizzle_pixfrac=1.0,
         halo_removal=False,
         remove_stars=True,
@@ -1725,7 +1741,7 @@ def apply_post_parse_setup(args: argparse.Namespace) -> None:
     ``process_directory()``: default the output path, load ``--config``,
     apply ``--preset``, initialise logging, and (re)initialise the GPU
     context. Shared by ``main()`` (the CLI entry point) and
-    ``src.webview_control.RunManager._run`` (the desktop app's GUI-triggered
+    ``src.desktop_control.RunManager._run`` (the desktop app's GUI-triggered
     runs), which calls ``process_directory()`` directly and therefore needs
     this same setup without going through ``main()`` itself. Kept as one
     function specifically so the two callers can't drift apart the way they
@@ -1789,29 +1805,12 @@ def main():
     # Real-time (live) stacking: watch the directory and stack subs as they land.
     if getattr(args, 'live', False):
         from src.live_stack import run_live_stack
-        from src.webview import get_webview
-        _rc = run_live_stack(args)
-        if _rc == 0 and get_webview().active:
-            safe_print("\n  Live web view still serving — Ctrl+C to exit")
-            try:
-                while True:
-                    time.sleep(1.0)
-            except KeyboardInterrupt:
-                pass
-        raise SystemExit(_rc)
+        raise SystemExit(run_live_stack(args))
 
     # Two-pass streaming stack of an already-complete directory.
     if getattr(args, 'stream', False):
         from src.stream_stack import run_stream_stack
         raise SystemExit(run_stream_stack(args))
-
-    # Live web view (module-level singleton, no-op unless started here)
-    _wv_url = None
-    if getattr(args, 'web_view', False):
-        from src.webview import get_webview
-        _wv_url = get_webview().start(port=getattr(args, 'web_view_port', 8765))
-        if _wv_url:
-            safe_print(f"  Web view: {_wv_url}")
 
     try:
         process_directory(args.directory, args.output, args)
@@ -1826,12 +1825,3 @@ def main():
         import traceback
         traceback.print_exc()
         raise SystemExit(1)
-
-    # Keep serving the final dashboard state until the user exits.
-    if _wv_url:
-        safe_print(f"\n  Web view still serving at {_wv_url} — Ctrl+C to exit")
-        try:
-            while True:
-                time.sleep(1.0)
-        except KeyboardInterrupt:
-            pass

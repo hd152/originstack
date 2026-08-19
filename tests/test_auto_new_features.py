@@ -80,6 +80,60 @@ class TestCurveletForFilamentTargets:
         assert args.denoise_curvelet is True  # not overwritten to False
 
 
+class TestGalaxySkipsSkyResidual:
+    """remove_sky_residual's own extended-source detection is cruder than
+    --galaxy-mode's fitted exclusion ellipse (a stricter threshold, a fixed
+    circle instead of a shape-tracking ellipse) -- even with the ellipse now
+    also threaded through to it, real (patchy/irregular) galaxy structure
+    extending past it still gets partially eaten across the step's 3 passes.
+    Confirmed on real data that skipping the step entirely measurably
+    improves output quality for a galaxy target, so the auto-advisor adds
+    it to skip_step whenever the blend weight is dominated by galaxy."""
+
+    def test_galaxy_anchor_adds_sky_residual_to_skip_step(self):
+        sig = dict(a._TYPE_ANCHORS['galaxy'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=None)
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['sky_residual']
+
+    def test_non_galaxy_anchor_leaves_skip_step_untouched(self):
+        # star_field's own anchor also triggers the poor-seeing deconvolve
+        # exception a few lines below the skip_step check, which reads
+        # sig['fwhm'] -- add it, matching how test_galaxy_anchor_still_
+        # prefers_mmt above builds its own "full_sig" for the same reason.
+        sig = {**a._TYPE_ANCHORS['star_field'], 'fwhm': 2.0}
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=None)
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step is None
+
+    def test_appends_without_clobbering_existing_skip_step(self):
+        sig = dict(a._TYPE_ANCHORS['galaxy'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=['background'])
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['background', 'sky_residual']
+
+    def test_no_duplicate_on_repeated_application(self):
+        sig = dict(a._TYPE_ANCHORS['galaxy'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=None)
+        a._apply_dynamic_settings(sig, weights, args)
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['sky_residual']
+
+    def test_explicit_skip_step_flag_wins(self):
+        """A user-supplied --skip-step must not be silently extended --
+        they got exactly the list they asked for, same as any other
+        explicit flag overriding the auto-advisor."""
+        sig = dict(a._TYPE_ANCHORS['galaxy'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=['background'], _explicit_cli_dests={'skip_step'})
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['background']
+
+
 class TestVarianceStabilizeRule:
 
     def test_enabled_when_wavelet_primary(self):

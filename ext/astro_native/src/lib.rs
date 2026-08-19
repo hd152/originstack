@@ -926,41 +926,6 @@ fn percentile_clip_combine<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
 }
 
-/// Trimmed-mean combine: sort, drop floor(N*trim_low) low and floor(N*trim_high)
-/// high samples, mean the rest. Matches `trimmed_mean_combine`.
-#[pyfunction]
-#[pyo3(signature = (data, trim_low=0.2, trim_high=0.2))]
-fn trimmed_mean_combine<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray4<'py, f32>,
-    trim_low: f64,
-    trim_high: f64,
-) -> PyResult<Bound<'py, PyArray3<f32>>> {
-    let arr = data.as_array();
-    let s = arr.shape();
-    let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
-    let mut n_low = (n as f64 * trim_low).floor().max(0.0) as usize;
-    let mut n_high = (n as f64 * trim_high).floor().max(0.0) as usize;
-    let mut n_keep = n as isize - n_low as isize - n_high as isize;
-    if n_keep < 1 {
-        n_keep = 1;
-        n_low = 0;
-        n_high = 0;
-    }
-    let (n_low, n_keep) = (n_low, n_keep as usize);
-    let _ = n_high;
-    let out = py.allow_threads(|| {
-        row_parallel(&arr, h, w, c, n, || Vec::<f32>::with_capacity(n), |buf, vals| {
-            buf.clear();
-            buf.extend_from_slice(vals);
-            buf.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let slice = &buf[n_low..n_low + n_keep];
-            mean(slice)
-        })
-    });
-    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, c), out).unwrap().into_pyarray(py))
-}
-
 /// Generalized ESD (Grubbs) combine. The critical-value table `lut` (shape
 /// `(N+1, max_outliers)`, +inf where undefined) is precomputed in Python from
 /// the Student-t distribution and indexed `[n_active, iteration]`, so no
@@ -4918,7 +4883,6 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine, m)?)?;
     m.add_function(wrap_pyfunction!(median_combine, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
-    m.add_function(wrap_pyfunction!(trimmed_mean_combine, m)?)?;
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
     m.add_function(wrap_pyfunction!(linear_fit_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(ivw_combine, m)?)?;

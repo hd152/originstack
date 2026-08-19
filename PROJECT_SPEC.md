@@ -42,7 +42,9 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/checkpoint.py` | ~225 | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
 | `src/merge.py` | ~230 | Incremental stacking — register + weighted-merge previous linear stacks (`--merge`) |
 | `src/quality_sweep.py` | ~220 | Collection quality sweep — recursive scoring + reversible flagging (`--quality-sweep`) |
-| `src/webview.py` | ~380 | Live stacking dashboard — stdlib HTTP + SSE (`--web-view`) |
+| `src/ui_events.py` | ~375 | In-process UI event/state sink for the desktop app — log/phase/progress state, named milestone previews with on-demand re-stretch, per-frame thumbnail ring |
+| `src/desktop_control.py` | ~220 | Desktop-app control layer — form schema introspection, form-to-argv translation, `RunManager` |
+| `src/desktop_app.py` | ~760 | Native tkinter desktop app (`python desktop_app.py`) — Setup form, live progress/log, interactive preview (zoom/pan/re-stretch/wipe compare/thumbnail ring) |
 | `src/xisf_writer.py` | ~105 | XISF 1.0 format writer (`--export xisf`) |
 | `src/channel_combine.py` | ~310 | Multi-channel combination (L-RGB, OSC + narrowband workflows) |
 | `src/features.py` | ~90 | Low-level feature extraction helpers |
@@ -86,8 +88,8 @@ Phase 2  ──  Registration
 
 Phase 3  ──  Stacking
              Align frames → crop to valid overlap region → accumulate → combine
-             9 methods: mean, median, sigma_clip, winsorized, percentile, esd,
-             trimmed_mean, linear_fit, ivw, plus drizzle
+             8 methods: mean, median, sigma_clip, winsorized, percentile, esd,
+             linear_fit, ivw, plus drizzle
 
 Phase 4  ──  Post-Processing
              up to 20-step chain: background → denoising → deconvolution → contrast
@@ -327,12 +329,13 @@ for galaxy targets).
 - No cross-session outlier rejection (each session already rejected internally)
 - Coalesces with `--keep-checkpoint`: the checkpoint stores the session-only stack, so a resumed run re-applies the merge idempotently (~45 s post-processing iteration on a merged stack)
 
-### 25. Live Web View (`--web-view`)
+### 25. Desktop App (`python desktop_app.py`)
 
-- Pure-stdlib local dashboard (`http.server` + Server-Sent Events, no dependencies, localhost only, default port 8765 via `--web-view-port`)
-- Live phase stepper with timings, active-loop progress bar, log stream, per-frame quality ticker, preview images at milestones (post-stack linear preview, each post-processing step, final), and a completion summary card
-- Zero overhead when the flag is absent: the singleton's publish methods are no-ops until started; preview JPEG encoding is throttled
-- Server keeps serving the final state after the run completes (Ctrl+C to exit)
+- Native tkinter window (stdlib, no external UI toolkit or runtime dependency) — replaced a `pywebview`-wrapped local HTTP dashboard (2026-08)
+- Setup form auto-built from the CLI's own argument parser (one tab per argparse group), so it can't drift out of sync with the flags it exposes
+- Live phase stepper with timings, active-loop progress bar, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, live re-stretch from a retained linear source, before/after wipe-slider compare, per-frame thumbnail ring), and a completion summary card
+- Zero overhead on a plain CLI run: the underlying event-sink singleton's publish methods are no-ops until the desktop app attaches it; preview JPEG encoding is throttled
+- Closing the window mid-run asks for confirmation; a native OS notification fires on completion
 
 ### 26. Collection Quality Sweep (`--quality-sweep`)
 
@@ -430,7 +433,6 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--health-check` | Analyse frames + calibration without stacking |
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run default) |
 | `--sweep-undo` | Restore files flagged by a previous sweep |
-| `--web-view` | Live dashboard while stacking (`--web-view-port`, default 8765) |
 | `-v, --verbose` | Per-frame output |
 | `-j, --parallel N` | Worker count (0 = auto, 1 = sequential) |
 | `--use-gpu` | CuPy GPU acceleration (experimental) |
@@ -450,7 +452,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--stack-method` | auto | mean, median, sigma_clip, winsorized, percentile, esd, trimmed_mean, linear_fit, ivw, auto |
+| `--stack-method` | auto | mean, median, sigma_clip, winsorized, percentile, esd, linear_fit, ivw, auto |
 | `--rejection-sigma N` | 3.0 | Sigma threshold for sigma_clip/winsorized |
 | `--rejection-iters N` | 3 | Clipping iterations |
 | `--drizzle-scale N` | 1.0 | Super-resolution scale (2.0 = 2x; needs dithered frames) |

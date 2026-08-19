@@ -468,16 +468,63 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
 def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
                        filter_size: int = 3, clip_sigma: float = 3.0,
                        star_mask: Optional[np.ndarray] = None,
-                       verbose: bool = False) -> np.ndarray:
-    """Remove smooth sky residuals revealed by denoising."""
+                       verbose: bool = False,
+                       exclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Remove smooth sky residuals revealed by denoising.
+
+    ``exclusion_mask`` (0-1, full-resolution, e.g. postprocess.py's
+    ``--galaxy-mode``/``--comet-mode`` exclusion ellipse): this function has
+    its own independent extended-source detection below (a much stricter
+    5-sigma threshold, a fixed-radius circle rather than a shape-tracking
+    ellipse, capped at the 3 brightest peaks) -- adequate for catching a
+    bright star/galaxy core the caller didn't already know about, but not a
+    substitute for a caller-supplied mask fit to the actual object. Without
+    this parameter, a large diffuse galaxy's faint outer disk (well under
+    5-sigma) got zero protection here even when DBE's own exclusion mask
+    (this function runs right after DBE, up to 3x per postprocess_stack
+    call) correctly protected it one step earlier -- confirmed as a real
+    cause of galaxy detail/extent loss surviving the fix to
+    desktop_app.py's explicit-flag freeze.
+    """
     H, W = img.shape[:2]
     if H == 0 or W == 0:
         return img.astype(np.float32)
-        
+
     lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
 
     # --- Detect extended sources ---
     cell_excluded = np.zeros((max(1, H // mesh_size), max(1, W // mesh_size)), dtype=bool)
+    if exclusion_mask is not None:
+        ny, nx = cell_excluded.shape
+        cell_h, cell_w = H / ny, W / nx
+        for iy in range(ny):
+            y0, y1 = int(round(iy * cell_h)), min(int(round((iy + 1) * cell_h)), H)
+            for ix in range(nx):
+                x0, x1 = int(round(ix * cell_w)), min(int(round((ix + 1) * cell_w)), W)
+                # A cell counts as excluded once the caller's mask covers a
+                # real majority of it, not just a sliver at its edge.
+                if float(np.mean(exclusion_mask[y0:y1, x0:x1])) > 0.5:
+                    cell_excluded[iy, ix] = True
+
+    # Excluding a cell from the *fit* only keeps it from biasing its own
+    # sample -- the cell still gets a background *value*, interpolated from
+    # its (possibly also object-contaminated) neighbors. For a smoothly-
+    # tapering object with no hard edge (a galaxy's outer disk/arms), that
+    # interpolated value comes out inflated near the object regardless, and
+    # got subtracted right through it -- confirmed as the actual cause of
+    # galaxy loss surviving both the exclusion-mask threading and the DBE
+    # dense-field fix. The real fix isn't a better estimate of "background
+    # under the galaxy" (there isn't a clean one to have); it's to not
+    # subtract anything there at all. Feathered (not a hard cutoff) so the
+    # transition at the mask edge doesn't leave a visible seam.
+    _feather_protect = None
+    if exclusion_mask is not None:
+        try:
+            _feather_protect = np.clip(gaussian_filter_ds(
+                np.asarray(exclusion_mask, dtype=np.float64),
+                sigma=max(mesh_size * 0.5, 8.0)), 0.0, 1.0)
+        except Exception:
+            _feather_protect = None
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
         lum_smooth = gaussian_filter_ds(lum.astype(np.float64), sigma=smooth_sigma)
@@ -610,6 +657,9 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         blur_sigma = (H/ny) * 0.5
         if blur_sigma > 0:
             background = gaussian_filter_ds(background, sigma=blur_sigma)
+
+        if _feather_protect is not None:
+            background = background * (1.0 - _feather_protect)
 
         result[:, :, c] = (ch - background).astype(np.float32)
         if verbose:
@@ -1210,15 +1260,29 @@ def dynamic_background_extraction(
             if verbose:
                 safe_print(f"    DBE {channel_names[c]}: insufficient samples ({n}), "
                            f"falling back to "
-                           f"{'sigma-clip mesh (no emission mask)' if _dense_field else 'mesh extraction'}")
+                           f"{('sigma-clip mesh (no emission mask' +
+                               (', exclusion mask kept' if exclusion_mask is not None else '') +
+                               ')') if _dense_field else 'mesh extraction'}")
             if _dense_field:
-                # Ultra-dense field: emission mask would exclude too much.
-                # Sigma-clipping within each mesh cell reliably rejects bright
-                # stars without needing an explicit exclusion mask.
+                # Ultra-dense field: the full emission mask (many small
+                # stars/point sources) would exclude too much -- sigma-
+                # clipping within each mesh cell reliably rejects those
+                # without needing an explicit mask. But a caller-supplied
+                # exclusion_mask (--galaxy-mode/--comet-mode: one large,
+                # smooth, contiguous object) is a different case entirely --
+                # sigma-clip-within-a-cell cannot reject it the way it
+                # rejects point sources, since the object *is* the dominant
+                # signal over a wide contiguous area, not a per-cell
+                # outlier. Dropping it here was silently discarding the
+                # exact protection --galaxy-mode exists to provide,
+                # precisely when a large/prominent galaxy pushed the
+                # combined mask over the dense-field threshold in the first
+                # place -- confirmed as a real cause of galaxy signal loss
+                # surviving even the sky_residual exclusion-mask fix.
                 background = extract_background(
                     channel, mesh_size=patch_size * 2,
                     clip_sigma=clip_sigma,
-                    star_mask=None).astype(np.float64)
+                    star_mask=exclusion_mask).astype(np.float64)
             else:
                 background = extract_background(channel, mesh_size=patch_size,
                                                 clip_sigma=clip_sigma,
@@ -1399,12 +1463,18 @@ def wavelet_background_extraction(
             if verbose:
                 safe_print(f"    Wavelet BG {channel_names[c]}: insufficient samples ({n}), "
                            f"falling back to "
-                           f"{'sigma-clip mesh (no emission mask)' if _dense_field else 'mesh extraction'}")
+                           f"{('sigma-clip mesh (no emission mask' +
+                               (', exclusion mask kept' if exclusion_mask is not None else '') +
+                               ')') if _dense_field else 'mesh extraction'}")
             if _dense_field:
+                # See dynamic_background_extraction's identical branch for
+                # why a caller-supplied exclusion_mask (galaxy/comet) is
+                # still honored here even though the general emission mask
+                # is dropped for density reasons.
                 background = extract_background(
                     channel, mesh_size=patch_size * 2,
                     clip_sigma=clip_sigma,
-                    star_mask=None).astype(np.float64)
+                    star_mask=exclusion_mask).astype(np.float64)
             else:
                 background = extract_background(channel, mesh_size=patch_size,
                                                 clip_sigma=clip_sigma,

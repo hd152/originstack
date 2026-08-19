@@ -1709,53 +1709,6 @@ def ivw_combine(data: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray] =
     return result
 
 
-def trimmed_mean_combine(data: np.ndarray, trim_low: float = 0.2, trim_high: float = 0.2,
-                         weights: Optional[np.ndarray] = None,
-                         verbose: bool = False) -> np.ndarray:
-    """Combine frames using trimmed mean (sorted, discard low/high fractions, mean)."""
-    N, H, W, C = data.shape
-
-    if _native_usable(data):
-        try:
-            result = _native.trimmed_mean_combine(data, float(trim_low), float(trim_high))
-            safe_print(f"    [rust] trimmed-mean combine (trim=[{trim_low}, {trim_high}])")
-            return result
-        except Exception as exc:
-            _log.debug("native trimmed_mean_combine failed (%s); using numpy", exc)
-
-    tile_size = _adaptive_tile_size(N, C)
-    result = np.zeros((H, W, C), dtype=np.float32)
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    tile_coords = [(ty * tile_size, min((ty + 1) * tile_size, H),
-                    tx * tile_size, min((tx + 1) * tile_size, W))
-                   for ty in range(n_tiles_y) for tx in range(n_tiles_x)]
-
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        N_t = tile.shape[0]
-        n_low = max(0, int(np.floor(N_t * trim_low)))
-        n_high = max(0, int(np.floor(N_t * trim_high)))
-        n_keep = N_t - n_low - n_high
-        if n_keep < 1:
-            n_keep = 1
-            n_low = 0
-            n_high = 0
-        sorted_tile = np.sort(tile, axis=0)
-        trimmed = sorted_tile[n_low:n_low + n_keep]
-        return coords, np.mean(trimmed, axis=0).astype(np.float32)
-
-    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for coords, tile_result in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
-    if verbose:
-        safe_print(f"    Trimmed mean: trim_low={trim_low}, trim_high={trim_high}")
-    return result
-
-
 _PATCH_FRAME_CHUNK = 64  # frames processed per vectorised batch inside each tile worker
 
 
@@ -2122,7 +2075,7 @@ def run_stacking_phase(
     drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
     use_aligned_memmap = (drizzle_scale <= 1.0 and
                           args.stack_method in ('median', 'sigma_clip', 'winsorized',
-                                                'percentile', 'esd', 'trimmed_mean',
+                                                'percentile', 'esd',
                                                 'linear_fit', 'ivw', 'wavelet'))
     if args.stack_method == 'wavelet' and drizzle_scale > 1.0:
         safe_print("  WARNING: --stack-method wavelet is not compatible with "
@@ -2169,7 +2122,7 @@ def run_stacking_phase(
         if _reg_native:
             safe_print("    [rust] Lanczos-3 warp (per-frame alignment)")
         _t_align = time.time()
-        from src.webview import get_webview as _get_wv
+        from src.ui_events import get_ui_events as _get_wv
         _wv = _get_wv()
         _wv_done = 0
         with ThreadPoolExecutor(max_workers=n_align) as executor:
@@ -2283,12 +2236,6 @@ def run_stacking_phase(
             print(f"  ESD: max_outliers={'N//4' if max_out == 0 else max_out}, significance={sig}")
             stacked = esd_combine(mem_aligned, max_outliers=max_out, significance=sig,
                                   weights=weights, verbose=args.verbose)
-        elif args.stack_method == 'trimmed_mean':
-            tl = getattr(args, 'trim_low', 0.2)
-            th = getattr(args, 'trim_high', 0.2)
-            print(f"  Trimmed mean: trim_low={tl}, trim_high={th}")
-            stacked = trimmed_mean_combine(mem_aligned, trim_low=tl, trim_high=th,
-                                           weights=weights, verbose=args.verbose)
         elif args.stack_method == 'linear_fit':
             sig_lo = getattr(args, 'linear_fit_sigma_low', 4.0)
             sig_hi = getattr(args, 'linear_fit_sigma_high', 2.0)
@@ -2565,8 +2512,8 @@ def run_stacking_phase(
     # Save a pre-post-processing copy for FITS output (preserves high sky SNR)
     fits_stacked = stacked.copy()
     try:
-        from src.webview import get_webview
-        get_webview().preview(stacked, 'Linear stack (pre-post-processing)',
+        from src.ui_events import get_ui_events
+        get_ui_events().preview(stacked, 'Linear stack (pre-post-processing)',
                               args=args, min_interval=0.0)
     except Exception:
         pass

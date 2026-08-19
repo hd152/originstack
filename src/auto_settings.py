@@ -571,6 +571,29 @@ def _apply_dynamic_settings(
         _set('deconvolve', True)
         _set('deconvolve_iterations', 10)
 
+    # Galaxy targets skip the sky-residual correction passes entirely
+    # (--skip-step sky_residual): unlike DBE (which honors --galaxy-mode's
+    # fitted exclusion ellipse), remove_sky_residual's own extended-source
+    # detection is a much stricter, cruder fallback -- even with the ellipse
+    # now also threaded through to it, real (patchy, irregular) galaxy arms
+    # extending past a symmetric ellipse fit, or spanning a mesh cell only
+    # partially, still get partially fit away as "background" across 3
+    # residual passes. Confirmed on real data: skipping the step entirely
+    # measurably improves output quality for a galaxy -- DBE's own single
+    # protected pass already does the main background-flattening job for
+    # this target type, so the extra passes are net-negative here even
+    # though they help other targets. `skip_step` is a plain list (not
+    # blendable/settable via _set() above), and explicit-dest opt-out is
+    # honored manually since a straight append can't reuse _set()'s
+    # overwrite-if-different equality check.
+    current_skip = list(getattr(args, 'skip_step', None) or [])
+    if (weights.get('galaxy', 0.0) > 0.3
+            and 'skip_step' not in _explicit
+            and 'sky_residual' not in current_skip):
+        current_skip.append('sky_residual')
+        setattr(args, 'skip_step', current_skip)
+        changes.append("skip_step  += 'sky_residual' (galaxy target)")
+
     return changes
 
 
@@ -610,11 +633,11 @@ def _apply_quality_settings(
 
     # 1. Frame-count-based stacking method (only when still at default 'auto')
     if getattr(args, 'stack_method', 'auto') == 'auto':
-        if n < 8:
+        if n < 15:
+            # percentile: simple, robust for small-to-moderate N (also
+            # subsumes what used to be a separate 'trimmed_mean' method --
+            # same reject-tails-then-average operation).
             _set('stack_method', 'percentile')
-        elif n < 15:
-            # Trimmed mean: simple, robust alternative to ESD for moderate N.
-            _set('stack_method', 'trimmed_mean')
         elif n < 20:
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 3.0)

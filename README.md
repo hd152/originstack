@@ -232,7 +232,7 @@ Eight built-in target presets tune all parameters at once:
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges
-- **Live web dashboard** — `--web-view` serves a local page with phase progress, log stream, per-frame quality ticker, and milestone previews while stacking (pure stdlib, localhost only)
+- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`) with phase progress, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, live re-stretch, before/after wipe compare) while stacking — see [Desktop App](#desktop-app) below
 - **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
@@ -315,6 +315,25 @@ python originstack.py -d session/ -o combined.fits --debug intermediates -v
 ```
 
 Where `session/` contains one subfolder per target. Each subfolder is stacked independently with its own calibration frames, then combined into a single output.
+
+---
+
+## Desktop App
+
+A native window for anyone who'd rather not memorize CLI flags:
+
+```bash
+python desktop_app.py
+```
+
+On Windows, the packaged build (`OriginStack.exe`, see [Packaging](packaging/README.md)) needs no Python install at all — just double-click it.
+
+The window has three panels:
+- **Setup** — every CLI flag as a form, grouped into tabs (Core, Frames & calibration, Registration & stacking, Post-processing, …), auto-generated from the same argument parser the CLI uses, so it never drifts out of sync. Directory/output/config fields get a native folder/file picker; hover any field for its full description.
+- **Pipeline / Log / Recent frames** — live phase progress, the same log output you'd see on the command line, and a running table of per-frame quality (score, SNR, star count, FWHM) as Phase 1 scores each light.
+- **Preview** — the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result), and use the **Stretch** sliders to re-render the current view from its retained linear source without touching the saved output file. A thumbnail strip below shows per-frame previews published during Phase 1.
+
+Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
 
 ---
 
@@ -656,7 +675,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--preset NAME` | Apply named preset (quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar) |
 | `--config PATH` | Load parameters from TOML file |
 | `--no-auto` | Disable the heuristic target classifier (on by default; detects target type and optimises settings automatically) |
-| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, trimmed_mean, linear_fit, ivw) |
+| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, linear_fit, ivw) |
 | `--debayer-method METHOD` | Debayer algorithm (malvar — only choice) |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
 | `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
@@ -670,7 +689,6 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
 | `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run by default) |
-| `--web-view` | Live dashboard at http://127.0.0.1:8765/ while stacking |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |
 | `--quality-report PATH` | Write per-frame quality metrics to CSV |
 | `--dry-run` | Discover frames, show parameters, estimate resources — no processing |
@@ -704,7 +722,6 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 | `esd_combine` | ~24× |
 | `percentile_clip_combine` | ~13× |
 | `median_combine` | ~6× |
-| `trimmed_mean_combine` | ~4× |
 | Fused patch-weighted + sigma-clip combine | ~100× |
 | Per-frame Lanczos-3 warp (alignment + drizzle resample) | ~5× / ~26× |
 | L.A.Cosmic cosmic-ray rejection | ~2× under real parallel load |

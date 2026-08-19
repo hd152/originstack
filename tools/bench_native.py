@@ -46,7 +46,6 @@ results["sigma_clip_wt_winsor"] = bench(
 results["median"] = bench("median", lambda: nat.median_combine(d200))
 results["percentile"] = bench(
     "percentile", lambda: nat.percentile_clip_combine(d200, 20.0, 80.0, None))
-results["trimmed"] = bench("trimmed", lambda: nat.trimmed_mean_combine(d200, 0.2, 0.2))
 
 # --- ESD: small-N use case ---
 d60 = make_stack(60, 384, 512)

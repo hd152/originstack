@@ -142,7 +142,6 @@ from src.stacking import (
     online_sigma_clip_fold_frame,
     median_combine,
     percentile_clip_combine,
-    trimmed_mean_combine,
     esd_combine,
     _esd_lambda_table,
     linear_fit_clip_combine,

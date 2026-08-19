@@ -33,8 +33,8 @@ python originstack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
 # Incremental stacking — fold a previous night's saved stack into this run
 python originstack.py -d tonight/ -o m51_v2.fits --auto --merge m51.fits
 
-# Watch the run live in a browser (http://127.0.0.1:8765/)
-python originstack.py -d lights/ -o stacked.fits --auto --web-view
+# Prefer a GUI? python desktop_app.py opens a native window with live
+# progress, log, and an interactive preview instead of the command line.
 
 # Clean up a collection: flag poor lights (dry run, then apply)
 python originstack.py --quality-sweep -d collection/
