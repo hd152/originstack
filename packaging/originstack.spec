@@ -13,14 +13,11 @@ block_cipher = None
 ROOT = Path(SPECPATH).parent  # packaging/ -> repo root
 
 # Defense-in-depth collect_all() for packages whose own PyInstaller hooks
-# already handle most of this (pywebview 6.x and pythonnet both self-register
-# hooks that pull in the WebView2 loader DLLs / .NET interop assemblies) --
-# kept explicit so the build doesn't silently regress if a pinned version
-# drops its self-registered hook. rawpy is the one *verified* real risk:
-# it ships sibling DLLs (raw_r.dll, vcomp140.dll) next to its .pyd that
+# already handle most of this. rawpy is the one *verified* real risk: it
+# ships sibling DLLs (raw_r.dll, vcomp140.dll) next to its .pyd that
 # PyInstaller's binary walker may or may not follow depending on version.
 datas, binaries, hiddenimports = [], [], []
-for pkg in ('webview', 'pythonnet', 'clr_loader', 'rawpy'):
+for pkg in ('rawpy',):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -46,10 +43,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(ROOT / 'packaging' / 'runtime_hook_stdout.py')],
-    # tkinter: desktop_app.py's dialogs are src/native_dialog.py's ctypes
-    # MessageBoxW wrapper now, not tkinter -- excluding it explicitly saves
-    # ~7-8MB of bundled Tcl/Tk runtime that nothing in this app uses.
-    excludes=['cupy', 'tkinter', 'tkinter.test', 'matplotlib.tests'],
+    # tkinter is the desktop app's UI toolkit as of 2026-08 (replaced a
+    # pywebview-wrapped local HTTP dashboard) -- no longer excluded. Only
+    # its own test suite is dead weight.
+    excludes=['cupy', 'tkinter.test', 'matplotlib.tests'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

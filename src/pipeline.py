@@ -336,8 +336,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     n = len(lights)
 
     try:
-        from src.webview import get_webview
-        get_webview().set_run_info(
+        from src.ui_events import get_ui_events
+        get_ui_events().set_run_info(
             target=getattr(args, '_inferred_target', None)
                    or os.path.basename(os.path.dirname(lights[0].path)),
             output=os.path.basename(output_path), n_frames=n)
@@ -1062,8 +1062,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     print(f"  Output size: {out_h}x{out_w} {crop_str}")
 
     try:
-        from src.webview import get_webview
-        _wv = get_webview()
+        from src.ui_events import get_ui_events
+        _wv = get_ui_events()
         if _wv.active:
             _wv.preview(stacked, 'Final (post-processed)', args=args,
                         slot='final', min_interval=0.0)

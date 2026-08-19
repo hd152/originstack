@@ -1,4 +1,4 @@
-"""OriginStack desktop app -- native window over the local dashboard server.
+"""OriginStack desktop app -- a native tkinter window.
 
 Usage: python desktop_app.py
 

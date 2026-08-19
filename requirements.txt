@@ -66,10 +66,9 @@ psutil>=5.9
 #   GPU acceleration:
 #     cupy-cudaXXx       — GPU acceleration (--use-gpu); see requirements-gpu.txt
 #
-#   Desktop app (python desktop_app.py):
-#     pywebview>=5.0     — native window wrapping src/webview.py's dashboard server;
-#                          without it, run with --web-view and open the URL in a
-#                          browser instead -- the dashboard/Setup form work identically
+#   pywebview is NOT used anywhere in this codebase (2026-08). The desktop app
+#   (python desktop_app.py) is a native tkinter window (stdlib) -- no WebView2
+#   Runtime or other external UI toolkit needed.
 #
 #   astroquery is NOT used anywhere in this codebase (2026-07). Every network
 #   catalogue/service lookup it used to provide is direct HTTP now

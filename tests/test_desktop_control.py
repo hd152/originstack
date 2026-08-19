@@ -1,9 +1,9 @@
-"""Tests for src/webview_control.py -- the desktop-app control layer
+"""Tests for src/desktop_control.py -- the desktop-app control layer
 (form schema introspection, form-to-argv translation, RunManager)."""
 import unittest
 
 from src.cli import parse_args
-from src.webview_control import (get_form_schema, build_argv_from_form,
+from src.desktop_control import (get_form_schema, build_argv_from_form,
                                  RunManager, get_run_manager)
 
 

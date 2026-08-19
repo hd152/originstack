@@ -33,19 +33,19 @@ except Exception:
         return iterable
 
 
-def _get_webview():
-    from src.webview import get_webview
-    return get_webview()
+def _get_ui_events():
+    from src.ui_events import get_ui_events
+    return get_ui_events()
 
 
 def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
     """Publish a per-frame thumbnail every Nth accepted frame (Phase 1).
 
     counter is a one-element list [int] of accepted frames seen so far, mutated
-    in place. `every` comes from --web-view-frame-every (0 disables); the first
+    in place. `every` comes from --ui-frame-every (0 disables); the first
     frame is always shown so the viewer lights up immediately.
     """
-    every = int(getattr(args, 'web_view_frame_every', 5) or 0)
+    every = int(getattr(args, 'ui_frame_every', 5) or 0)
     if every <= 0 or not wv.active or rgb is None:
         return
     counter[0] += 1
@@ -839,7 +839,7 @@ def execute_frame_processing(
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
-                _wv = _get_webview()
+                _wv = _get_ui_events()
                 _wv_done = 0
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Processing", unit="frame",
@@ -1000,7 +1000,7 @@ def execute_frame_processing(
                                        f'contrast={m.get("contrast",0):.1f}  '
                                        f'dynamic_range={m.get("dynamic_range",0):.0f}')
                 _completed += 1
-                _wv = _get_webview()
+                _wv = _get_ui_events()
                 _wv.progress('Processing frames', _completed, n)
                 if error is None and f.metrics:
                     _wv.frame_metrics(os.path.basename(f.path), f.metrics)
@@ -1058,7 +1058,7 @@ def execute_frame_processing(
                 pre_gradient_removal=_pgr,
                 ca_shifts=_ca_shifts,
                 trail_reject=getattr(args, 'trail_reject', False))
-            _wv = _get_webview()
+            _wv = _get_ui_events()
             _wv.progress('Processing frames', i + 1, n)
             if result.get('error'):
                 f.accepted = False
