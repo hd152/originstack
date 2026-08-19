@@ -602,6 +602,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 mm_mgr.cleanup()
                 return None
 
+            # Runs here (not inside the branches above) so it fires exactly
+            # once regardless of whether Phase 1 just ran or was restored
+            # from a checkpoint -- lights[*].accepted is mutated in place by
+            # restore_frame_state either way.
+            if getattr(args, 'astrollm', False):
+                from src.astrollm import score_lights_with_astrollm
+                score_lights_with_astrollm(lights, args)
+
             # ======================================================================
             # PHASE 2: Registration
             # ======================================================================
@@ -1045,6 +1053,19 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)))
+
+    if getattr(args, 'astrollm', False):
+        # astrollm's FITS loader assumes a raw (undebayered) single-plane
+        # Bayer light frame -- our output FITS is an already-debayered
+        # (3, H, W) RGB cube, which trips its cv2 debayer path. Score
+        # whichever already-rendered non-FITS image is available instead:
+        # the linear TIFF export when present (--export tiff), else the
+        # preview JPEG this call just wrote (always available, stretched).
+        from src.astrollm import score_master_with_astrollm
+        _tiff_path = os.path.splitext(output_path)[0] + '.tiff'
+        _master_image = _tiff_path if getattr(args, 'output_tiff', False) else preview_path
+        score_master_with_astrollm(_master_image, args,
+                                   getattr(args, '_inferred_type', None))
 
     if getattr(args, 'annotate', False):
         if _wcs_available:

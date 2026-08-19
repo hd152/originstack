@@ -170,6 +170,11 @@ class Config:
                                      # range, so 0.02 is a conservative middle default,
                                      # not a hard optimum
 
+    # astrollm (external defect/quality/category classifier, --astrollm)
+    ASTROLLM_TIMEOUT_S = 60.0       # Per-frame subprocess timeout for infer.py
+    ASTROLLM_OUTLIER_SIGMA = 2.0    # Session-relative quality_score flag threshold
+                                     # (advisory logging only -- see src/astrollm.py)
+
 
 @dataclass
 class FrameInfo:
