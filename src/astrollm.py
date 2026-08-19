@@ -153,6 +153,111 @@ def score_lights_with_astrollm(lights: List[FrameInfo], args) -> None:
                            + (", ..." if len(below) > 5 else ""))
 
 
+# astrollm's category head is a coarse 7-bucket taxonomy (galaxy, nebula,
+# star_cluster, comet, planet, star, other) -- only two map unambiguously
+# onto one of the pipeline's own 7 target-type anchors (auto_settings.py's
+# _TYPE_ANCHORS). "nebula" alone can't distinguish emission/reflection/
+# planetary, and comet/planet/star/other aren't targets the target-type
+# blend-weight system covers at all (comet has its own separate
+# --comet-mode). A wrong guess here would misdirect --auto's whole preset
+# blend, so ambiguous categories intentionally get no mapping (no boost)
+# rather than a guessed one -- unlike score_master_with_astrollm's
+# mismatch warning above, which can afford to be fuzzy since a human reads
+# it.
+_CATEGORY_TO_TARGET_TYPE = {
+    'galaxy': 'galaxy',
+    'star_cluster': 'globular_cluster',
+}
+
+
+def map_astrollm_category(category: Optional[str]) -> Optional[str]:
+    """astrollm category -> one of auto_settings.py's target-type anchors,
+    or None if there's no unambiguous mapping (see _CATEGORY_TO_TARGET_TYPE)."""
+    if not category:
+        return None
+    return _CATEGORY_TO_TARGET_TYPE.get(str(category).lower())
+
+
+def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
+    """Fast, session-level astrollm signal for --auto: a category (fed into
+    the auto-advisor's existing prior_type/prior_confidence boost -- the
+    same mechanism SIMBAD/header metadata inference already uses) and a
+    defect flag (a defensive nudge toward --trail-reject + stronger chroma
+    denoising in _apply_quality_settings, never a frame rejection).
+
+    Deliberately scores a SMALL SAMPLE, not the whole session: one
+    astrollm subprocess call costs ~8s, dominated by Python/torch
+    startup and model load rather than the actual per-image inference --
+    scoring every accepted frame (score_lights_with_astrollm's job, a
+    separate opt-in path) would add minutes to a session with 100+
+    frames, which defeats the point of a fast pre-stacking signal. Mirrors
+    frame_processor.py's _measure_session_ca: a few frames spread through
+    the session (early/middle/late) rather than just the first one, on
+    the same "this is a fixed property of the session, not a per-frame
+    one" reasoning chromatic aberration already uses.
+
+    Returns None if astrollm isn't configured, or every sampled call
+    failed. Never touches f.accepted/f.metrics -- this is a session-level
+    signal, computed separately from (and not a replacement for)
+    score_lights_with_astrollm's own per-frame advisory scoring.
+    """
+    if not getattr(args, 'astrollm', False):
+        return None
+    paths = _astrollm_paths(args)
+    if paths is None:
+        return None
+    python_exe, script_path, checkpoint_path = paths
+    timeout = float(getattr(args, 'astrollm_timeout', Config.ASTROLLM_TIMEOUT_S))
+
+    accepted = [f for f in lights if f.accepted]
+    if not accepted:
+        return None
+    n = len(accepted)
+    idxs = sorted({n // 6, n // 2, (5 * n) // 6})
+
+    def _one(i: int):
+        return run_astrollm_infer(accepted[i].path, python_exe, script_path,
+                                  checkpoint_path, timeout=timeout)
+
+    results = []
+    try:
+        with ThreadPoolExecutor(max_workers=len(idxs)) as ex:
+            for fut in [ex.submit(_one, i) for i in idxs]:
+                try:
+                    r = fut.result()
+                    if r is not None:
+                        results.append(r)
+                except Exception:
+                    pass
+    except Exception:
+        return None
+    if not results:
+        return None
+
+    # Category: majority vote across samples, ties broken by mean confidence.
+    by_category: dict = {}
+    for r in results:
+        c = r.get('category')
+        if c:
+            by_category.setdefault(c, []).append(float(r.get('category_confidence', 0.0)))
+    category, confidence = None, 0.0
+    if by_category:
+        category = max(by_category, key=lambda c: (len(by_category[c]), np.mean(by_category[c])))
+        confidence = float(np.mean(by_category[category]))
+
+    defect_flagged = any(
+        r.get('is_defective') or r.get('stray_light_flag')
+        or float(r.get('defect_probability', 0.0)) > 0.5
+        for r in results)
+
+    safe_print(f"\n  astrollm (session sample, {len(results)}/{len(idxs)} frame(s)): "
+               f"category={category} conf={confidence:.0%}"
+               + ("  [defect signal flagged]" if defect_flagged else ""))
+
+    return {'category': category, 'category_confidence': confidence,
+            'defect_flagged': defect_flagged}
+
+
 def score_master_with_astrollm(master_image_path: str, args,
                                inferred_type: Optional[str] = None) -> None:
     """Score the final stacked master with astrollm, advisory-only (log only).

@@ -848,6 +848,22 @@ def _apply_quality_settings(
             and getattr(args, 'color_calibrate_method', 'colorindex') == 'colorindex'):
         _set('color_calibrate_method', 'spcc')
 
+    # 19. astrollm defect signal (--astrollm, fast session-sample only --
+    #     see src/astrollm.py::sample_session_priors, not the full-session
+    #     per-frame scoring) nudges settings defensively rather than
+    #     rejecting anything outright: enable trail-reject (satellite/
+    #     aircraft trail inpainting) and strengthen chroma denoising, since
+    #     a defect/stray-light flag most often means exactly what those two
+    #     settings address. astrollm is still an early/unvalidated model
+    #     (see src/astrollm.py's module docstring) -- auto-dropping frames
+    #     on its say-so would be a much bigger bet than a soft nudge.
+    if getattr(args, '_astrollm_defect_flagged', False):
+        if not getattr(args, 'trail_reject', False):
+            _set('trail_reject', True)
+        _chroma_boost = float(getattr(args, 'denoise_chroma_boost', 2.0) or 2.0)
+        if _chroma_boost < 3.0:
+            _set('denoise_chroma_boost', 3.0)
+
     return changes
 
 

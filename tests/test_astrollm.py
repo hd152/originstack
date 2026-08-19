@@ -15,7 +15,8 @@ from unittest import mock
 
 import src.astrollm as astrollm_mod
 from src.astrollm import (run_astrollm_infer, score_lights_with_astrollm,
-                          score_master_with_astrollm)
+                          score_master_with_astrollm, map_astrollm_category,
+                          sample_session_priors)
 
 
 def _completed(returncode=0, stdout='', stderr=''):
@@ -170,6 +171,103 @@ class TestScoreMasterWithAstrollm:
         with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=None):
             score_master_with_astrollm('stack.fits', _args(), 'galaxy')
         assert 'failed' in capsys.readouterr().out
+
+
+class TestMapAstrollmCategory:
+
+    def test_galaxy_maps_unambiguously(self):
+        assert map_astrollm_category('galaxy') == 'galaxy'
+
+    def test_star_cluster_maps_to_globular_cluster(self):
+        assert map_astrollm_category('star_cluster') == 'globular_cluster'
+
+    def test_ambiguous_nebula_returns_none(self):
+        # Could be emission/reflection/planetary -- no safe single mapping.
+        assert map_astrollm_category('nebula') is None
+
+    def test_unrelated_categories_return_none(self):
+        for c in ('comet', 'planet', 'star', 'other'):
+            assert map_astrollm_category(c) is None
+
+    def test_none_input_returns_none(self):
+        assert map_astrollm_category(None) is None
+
+    def test_case_insensitive(self):
+        assert map_astrollm_category('GALAXY') == 'galaxy'
+
+
+class TestSampleSessionPriors:
+
+    def test_disabled_is_noop(self):
+        lights = [_frame(f'{i}.fits') for i in range(10)]
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
+            result = sample_session_priors(lights, _args(astrollm=False))
+        assert result is None
+        m.assert_not_called()
+
+    def test_missing_config_is_noop(self):
+        lights = [_frame(f'{i}.fits') for i in range(10)]
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
+            result = sample_session_priors(lights, _args(astrollm_checkpoint=None))
+        assert result is None
+        m.assert_not_called()
+
+    def test_no_accepted_frames_is_noop(self):
+        lights = [_frame('a.fits', accepted=False)]
+        result = sample_session_priors(lights, _args())
+        assert result is None
+
+    def test_samples_a_few_frames_not_all(self):
+        """The whole point is staying fast on a large session -- must not
+        call astrollm once per frame."""
+        lights = [_frame(f'{i}.fits') for i in range(120)]
+        payload = {'category': 'galaxy', 'category_confidence': 0.9,
+                  'is_defective': False, 'stray_light_flag': False,
+                  'defect_probability': 0.1}
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=payload) as m:
+            result = sample_session_priors(lights, _args())
+        assert result is not None
+        assert m.call_count <= 3
+
+    def test_majority_category_wins(self):
+        lights = [_frame(f'{i}.fits') for i in range(12)]
+        payloads = [
+            {'category': 'galaxy', 'category_confidence': 0.9, 'defect_probability': 0.0},
+            {'category': 'galaxy', 'category_confidence': 0.8, 'defect_probability': 0.0},
+            {'category': 'nebula', 'category_confidence': 0.99, 'defect_probability': 0.0},
+        ]
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', side_effect=payloads):
+            result = sample_session_priors(lights, _args())
+        assert result['category'] == 'galaxy'
+
+    def test_defect_flagged_on_any_sample(self):
+        lights = [_frame(f'{i}.fits') for i in range(12)]
+        payloads = [
+            {'category': 'galaxy', 'category_confidence': 0.9, 'is_defective': False,
+             'defect_probability': 0.1},
+            {'category': 'galaxy', 'category_confidence': 0.9, 'is_defective': True,
+             'defect_probability': 0.9},
+            {'category': 'galaxy', 'category_confidence': 0.9, 'is_defective': False,
+             'defect_probability': 0.1},
+        ]
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', side_effect=payloads):
+            result = sample_session_priors(lights, _args())
+        assert result['defect_flagged'] is True
+
+    def test_no_defect_when_all_clean(self):
+        lights = [_frame(f'{i}.fits') for i in range(12)]
+        payload = {'category': 'galaxy', 'category_confidence': 0.9,
+                  'is_defective': False, 'stray_light_flag': False,
+                  'defect_probability': 0.05}
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=payload):
+            result = sample_session_priors(lights, _args())
+        assert result['defect_flagged'] is False
+
+    def test_all_samples_failing_returns_none(self):
+        lights = [_frame(f'{i}.fits') for i in range(12)]
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=None):
+            result = sample_session_priors(lights, _args())
+        assert result is None
 
 
 if __name__ == '__main__':

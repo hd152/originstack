@@ -592,10 +592,31 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                         f"conf={_inferred_conf:.0%}  source={_inferred_src}"
                     )
 
+                # astrollm session-level signal (--astrollm + --auto): a
+                # fast sample (src/astrollm.py::sample_session_priors, NOT
+                # the full-session score_lights_with_astrollm below) feeds
+                # the same prior_type/prior_confidence boost mechanism the
+                # metadata/SIMBAD inference above already uses -- only
+                # takes over when it's more confident than that prior (e.g.
+                # a dense star field where metadata gave nothing but
+                # astrollm still recognizes the galaxy). Also stashes a
+                # defect flag for _apply_quality_settings' defensive nudge.
+                _prior_type, _prior_conf = _inferred_type, _inferred_conf
+                if getattr(args, 'astrollm', False) and getattr(args, 'auto', False):
+                    from src.astrollm import sample_session_priors, map_astrollm_category
+                    _astrollm_result = sample_session_priors(final, args)
+                    if _astrollm_result:
+                        args._astrollm_defect_flagged = _astrollm_result.get(
+                            'defect_flagged', False)
+                        _mapped_type = map_astrollm_category(_astrollm_result.get('category'))
+                        _mapped_conf = _astrollm_result.get('category_confidence', 0.0)
+                        if _mapped_type and _mapped_conf > _prior_conf:
+                            _prior_type, _prior_conf = _mapped_type, _mapped_conf
+
                 # Heuristic auto-advisor
                 _run_auto_advisor(final, args,
-                                  prior_type=_inferred_type,
-                                  prior_confidence=_inferred_conf)
+                                  prior_type=_prior_type,
+                                  prior_confidence=_prior_conf)
 
             if not final:
                 print(f'\n  ERROR: No accepted frames after checkpoint restore!')
