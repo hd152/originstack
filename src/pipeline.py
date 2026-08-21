@@ -336,8 +336,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     n = len(lights)
 
     try:
-        from src.webview import get_webview
-        get_webview().set_run_info(
+        from src.ui_events import get_ui_events
+        get_ui_events().set_run_info(
             target=getattr(args, '_inferred_target', None)
                    or os.path.basename(os.path.dirname(lights[0].path)),
             output=os.path.basename(output_path), n_frames=n)
@@ -592,15 +592,49 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                         f"conf={_inferred_conf:.0%}  source={_inferred_src}"
                     )
 
+                # astrollm session-level signal (--astrollm + --auto): a
+                # fast sample (src/astrollm.py::sample_session_priors, NOT
+                # the full-session score_lights_with_astrollm below) feeds
+                # the same prior_type/prior_confidence boost mechanism the
+                # metadata/SIMBAD inference above already uses -- only
+                # takes over when it's more confident than that prior (e.g.
+                # a dense star field where metadata gave nothing but
+                # astrollm still recognizes the galaxy). Also stashes a
+                # defect flag for _apply_quality_settings' defensive nudge.
+                _prior_type, _prior_conf = _inferred_type, _inferred_conf
+                if getattr(args, 'astrollm', False) and getattr(args, 'auto', False):
+                    from src.astrollm import sample_session_priors, map_astrollm_category
+                    _astrollm_result = sample_session_priors(final, args)
+                    if _astrollm_result:
+                        args._astrollm_defect_flagged = _astrollm_result.get(
+                            'defect_flagged', False)
+                        _mapped_type = map_astrollm_category(_astrollm_result.get('category'))
+                        _mapped_conf = _astrollm_result.get('category_confidence', 0.0)
+                        if _mapped_type and _mapped_conf > _prior_conf:
+                            _prior_type, _prior_conf = _mapped_type, _mapped_conf
+
                 # Heuristic auto-advisor
                 _run_auto_advisor(final, args,
-                                  prior_type=_inferred_type,
-                                  prior_confidence=_inferred_conf)
+                                  prior_type=_prior_type,
+                                  prior_confidence=_prior_conf)
 
             if not final:
                 print(f'\n  ERROR: No accepted frames after checkpoint restore!')
                 mm_mgr.cleanup()
                 return None
+
+            # Runs here (not inside the branches above) so it fires exactly
+            # once regardless of whether Phase 1 just ran or was restored
+            # from a checkpoint -- lights[*].accepted is mutated in place by
+            # restore_frame_state either way. Opt-in separately from plain
+            # --astrollm (--astrollm-score-all): scoring every accepted
+            # frame costs ~8s/frame (subprocess + model-load overhead, not
+            # per-image compute), minutes on a large session -- --astrollm
+            # alone only pays that cost 3x total, via sample_session_priors
+            # above.
+            if getattr(args, 'astrollm', False) and getattr(args, 'astrollm_score_all', False):
+                from src.astrollm import score_lights_with_astrollm
+                score_lights_with_astrollm(lights, args)
 
             # ======================================================================
             # PHASE 2: Registration
@@ -1046,6 +1080,19 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)))
 
+    if getattr(args, 'astrollm', False):
+        # astrollm's FITS loader assumes a raw (undebayered) single-plane
+        # Bayer light frame -- our output FITS is an already-debayered
+        # (3, H, W) RGB cube, which trips its cv2 debayer path. Score
+        # whichever already-rendered non-FITS image is available instead:
+        # the linear TIFF export when present (--export tiff), else the
+        # preview JPEG this call just wrote (always available, stretched).
+        from src.astrollm import score_master_with_astrollm
+        _tiff_path = os.path.splitext(output_path)[0] + '.tiff'
+        _master_image = _tiff_path if getattr(args, 'output_tiff', False) else preview_path
+        score_master_with_astrollm(_master_image, args,
+                                   getattr(args, '_inferred_type', None))
+
     if getattr(args, 'annotate', False):
         if _wcs_available:
             try:
@@ -1062,8 +1109,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     print(f"  Output size: {out_h}x{out_w} {crop_str}")
 
     try:
-        from src.webview import get_webview
-        _wv = get_webview()
+        from src.ui_events import get_ui_events
+        _wv = get_ui_events()
         if _wv.active:
             _wv.preview(stacked, 'Final (post-processed)', args=args,
                         slot='final', min_interval=0.0)

@@ -1,5 +1,4 @@
-"""Desktop-app control layer on top of the read-only ``src/webview.py``
-dashboard: turns its ``/`` page into something that can also launch a run.
+"""Desktop-app control layer: turns a submitted form into a real pipeline run.
 
 ``get_form_schema()`` introspects ``cli.build_parser()`` at request time
 rather than duplicating its ~120 flags into a hand-maintained schema file --
@@ -33,8 +32,8 @@ _WIDGET_HINTS: Dict[str, str] = {
     'hdr_combine': 'file-open',
 }
 
-# Flags this session's dashboard doesn't drive a run through (they either
-# watch/loop forever with no cancel support yet, or exit without stacking).
+# Flags the desktop app doesn't drive a run through (they either watch/loop
+# forever with no cancel support yet, or exit without stacking).
 _UNSUPPORTED_DESTS = {'live', 'stream', 'quality_sweep', 'sweep_undo'}
 
 
@@ -142,10 +141,10 @@ def build_argv_from_form(form: Dict[str, Any]) -> List[str]:
 
 class RunManager:
     """Runs one pipeline job at a time on a background thread, publishing
-    progress through the existing ``WebView`` singleton -- mirrors the
-    ``--live`` precedent (``src/live_stack.py``): the HTTP server thread is
-    already running by the time a run starts, so only the pipeline work
-    itself needs to move off the request-handling thread."""
+    progress through the ``UIEvents`` singleton (``src/ui_events.py``) --
+    the desktop app attaches it before entering the tkinter mainloop, so
+    it's already active by the time a run starts; only the pipeline work
+    itself needs to move off the GUI's own (main) thread."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -174,9 +173,9 @@ class RunManager:
         import tempfile
         from src.cli import parse_args, process_directory, apply_post_parse_setup
         from src.utils import get_logger, safe_print
-        from src.webview import get_webview
+        from src.ui_events import get_ui_events
 
-        wv = get_webview()
+        wv = get_ui_events()
         status, error = 'ok', None
         try:
             args = parse_args(argv)
@@ -186,7 +185,7 @@ class RunManager:
             # path and shouldn't start writing files a CLI user never asked
             # for) -- a desktop-app run has no attached console, so without
             # this the only record of a failure is the ephemeral in-memory
-            # WebView state, lost on the next run or when the window closes.
+            # UIEvents state, lost on the next run or when the window closes.
             if not getattr(args, 'log_file', None):
                 args.log_file = os.path.join(tempfile.gettempdir(), 'originstack_desktop_app.log')
 
@@ -208,15 +207,12 @@ class RunManager:
                 self.status = status
 
 
-# Constructed eagerly at import time, not lazily on first call: unlike
-# get_gpu()/get_webview() (only ever first-called from a single main
-# thread), get_run_manager() is first reached from do_POST on
-# ThreadingHTTPServer's per-request threads -- two near-simultaneous
-# POST /api/start calls could otherwise both observe a None singleton and
-# each construct their own RunManager, defeating the one-run-at-a-time lock
-# entirely (two pipeline runs racing against the same GpuContext/checkpoint
-# files). RunManager() has no expensive setup, so eager construction costs
-# nothing.
+# Constructed eagerly at import time, matching get_gpu()/get_ui_events()'s
+# module-level singleton pattern -- Start-button clicks are serialized on
+# tkinter's own main-thread event loop, so unlike the old HTTP dashboard
+# (concurrent POST /api/start requests on separate request-handling
+# threads) there's no construction race to guard against here. Kept eager
+# anyway: RunManager() has no expensive setup, so it costs nothing.
 _run_manager: RunManager = RunManager()
 
 

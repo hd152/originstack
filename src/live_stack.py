@@ -5,8 +5,9 @@ stack as it lands — the classic "live stacking" workflow (SharpCap / ASIStudio
 that lets you watch signal build up at the telescope instead of stacking after
 the session. Each new sub is calibrated, debayered, registered to the running
 reference frame, and accumulated into a per-pixel weighted-mean stack; the
-growing result and a running SNR / integration-time readout are pushed to the
-``--web-view`` dashboard after every frame.
+growing result and a running SNR / integration-time readout are pushed to
+whatever UI is attached (``src/ui_events.py``) after every frame -- a no-op
+on a plain CLI run.
 
 Design (keeps the streaming, low-memory model):
   * The first accepted frame is the registration reference and seeds the
@@ -318,14 +319,13 @@ def run_live_stack(args) -> int:
 
     masters, frames = build_session_masters(args, directory)
 
-    wv = None
-    if getattr(args, 'web_view', False) or getattr(args, 'live_web', True):
-        from src.webview import get_webview
-        wv = get_webview()
-        if not wv.active:
-            url = wv.start(port=getattr(args, 'web_view_port', 8765))
-            if url:
-                safe_print(f"  Web view: {url}")
+    # No CLI auto-activation -- --live is console-progress-only (matching
+    # any other CLI run). This singleton is only ever active when the
+    # desktop app has attached it, which today never happens for --live
+    # ('live' is in desktop_control.py's _UNSUPPORTED_DESTS); kept as a
+    # constructor param on LiveStacker for when that changes.
+    from src.ui_events import get_ui_events
+    wv = get_ui_events()
 
     stacker = LiveStacker(args, masters, webview=wv)
     stacker.run(directory,

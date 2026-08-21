@@ -188,10 +188,10 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 
 1. ✅ Hot pixel removal on stacked image
 2. ✅ Star mask generation (protects structure in subsequent steps)
-3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh)
+3. ✅ Background extraction (DBE via Gaussian-weighted local-linear regression with Tukey-biweight IRLS, bounded by construction; or legacy mesh/wavelet)
 4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches, auto-set for galaxy targets)
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
-6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
+6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR (curvelet-inspired directional variant by default; plain `--denoiser wavelet` is opt-in)
 7. ✅ Sky residual correction (second pass after denoising)
 8. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
 9. ❌ Non-local means denoising — `--denoiser nlm`
@@ -232,11 +232,16 @@ Eight built-in target presets tune all parameters at once:
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges
-- **Live web dashboard** — `--web-view` serves a local page with phase progress, log stream, per-frame quality ticker, and milestone previews while stacking (pure stdlib, localhost only)
+- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`) with phase progress, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, live re-stretch, before/after wipe compare) while stacking — see [Desktop App](#desktop-app) below
 - **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
 - **Quality CSV** — per-frame metrics exported for external analysis (`--quality-report`)
+- **Galaxy/extended-source exclusion masking** (`--galaxy-mode`, `--galaxy-center X,Y`) — protects a galaxy's broad halo from background extraction, so it isn't fit and subtracted as gradient; auto-enabled for galaxy targets by `--auto`
+- **Robust-PCA master calibration** (`--master-method robust_pca`, `--flat-from-lights`) — separates true shared calibration pattern from session-specific outliers (dust motes, transient hot pixels) instead of a per-pixel median
+- **Real-time and streaming stacking** — `--live` folds new subs into a running stack as they land; `--stream` two-pass streams an already-complete large directory at O(1) full-resolution memory
+- **astrollm classification** (`--astrollm`) — optional external image classifier that samples a few frames to feed target-type detection and flag defective frames defensively; `--astrollm-score-all` scores every frame (slower, opt-in)
+- **Object annotation** (`--annotate`) — labels bright stars and named deep-sky objects on a copy of the preview, using a WCS solution
 
 ---
 
@@ -315,6 +320,25 @@ python originstack.py -d session/ -o combined.fits --debug intermediates -v
 ```
 
 Where `session/` contains one subfolder per target. Each subfolder is stacked independently with its own calibration frames, then combined into a single output.
+
+---
+
+## Desktop App
+
+A native window for anyone who'd rather not memorize CLI flags:
+
+```bash
+python desktop_app.py
+```
+
+On Windows, the packaged build (`OriginStack.exe`, see [Packaging](packaging/README.md)) needs no Python install at all — just double-click it.
+
+The window has three panels:
+- **Setup** — every CLI flag as a form, grouped into tabs (Core, Frames & calibration, Registration & stacking, Post-processing, …), auto-generated from the same argument parser the CLI uses, so it never drifts out of sync. Directory/output/config fields get a native folder/file picker; hover any field for its full description.
+- **Pipeline / Log / Recent frames** — live phase progress, the same log output you'd see on the command line, and a running table of per-frame quality (score, SNR, star count, FWHM) as Phase 1 scores each light.
+- **Preview** — the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result), and use the **Stretch** sliders to re-render the current view from its retained linear source without touching the saved output file. A thumbnail strip below shows per-frame previews published during Phase 1.
+
+Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
 
 ---
 
@@ -638,8 +662,8 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Quality filtering | ✅ on | `--no-quality-filter` |
 | Affine registration | ✅ on | `--no-affine` |
 | Elastic local registration | ⬜ off | `--elastic-registration` |
-| Primary denoiser choice | wavelet | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,none}` |
-| Deconvolution | ❌ off | `--deconvolve {rl,tv}` |
+| Primary denoiser choice | auto (curvelet) | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,curvelet,none}` |
+| Deconvolution | ❌ off | `--deconvolve {rl,rl-sv,tv,sparse}` |
 
 ---
 
@@ -656,21 +680,20 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--preset NAME` | Apply named preset (quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar) |
 | `--config PATH` | Load parameters from TOML file |
 | `--no-auto` | Disable the heuristic target classifier (on by default; detects target type and optimises settings automatically) |
-| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, trimmed_mean, linear_fit, ivw) |
-| `--debayer-method METHOD` | Debayer algorithm (malvar — only choice) |
+| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, linear_fit, ivw, wavelet) |
+| `--debayer-method METHOD` | Debayer algorithm (malvar (default), menon2007) |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
 | `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
 | `--elastic-registration` | Local (non-rigid) displacement correction on top of the global affine (off by default) |
-| `--denoiser NAME` | Primary luma denoiser (wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, none) |
-| `--deconvolve {off,rl,tv}` | Richardson-Lucy or TV-regularised deconvolution |
+| `--denoiser NAME` | Primary luma denoiser (auto — curvelet unless overridden —, wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, curvelet, none) |
+| `--deconvolve {off,rl,rl-sv,tv,sparse}` | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet deconvolution |
 | `--plate-solve` | Plate solve via astrometry.net (requires API key) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
 | `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run by default) |
-| `--web-view` | Live dashboard at http://127.0.0.1:8765/ while stacking |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |
 | `--quality-report PATH` | Write per-frame quality metrics to CSV |
 | `--dry-run` | Discover frames, show parameters, estimate resources — no processing |
@@ -704,7 +727,6 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 | `esd_combine` | ~24× |
 | `percentile_clip_combine` | ~13× |
 | `median_combine` | ~6× |
-| `trimmed_mean_combine` | ~4× |
 | Fused patch-weighted + sigma-clip combine | ~100× |
 | Per-frame Lanczos-3 warp (alignment + drizzle resample) | ~5× / ~26× |
 | L.A.Cosmic cosmic-ray rejection | ~2× under real parallel load |

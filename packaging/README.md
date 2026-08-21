@@ -26,13 +26,13 @@ onefile which re-extracts the whole numpy/scipy/astropy payload to a temp
 dir on every launch) and a zipped `packaging\dist\OriginStack-<version>-
 windows-x64.zip` for distribution.
 
-Verify the build actually works (launches the real exe, confirms the
-dashboard server responds, confirms `astro_native` loaded rather than
-silently falling back to numpy, runs a real stack with multiple parallel
-workers and confirms no extra GUI windows open -- regression guard for a
-real bug that shipped once: a frozen ProcessPoolExecutor worker without
-`multiprocessing.freeze_support()` re-launches the whole app instead of
-running as a worker -- confirms clean shutdown):
+Verify the build actually works (launches the real exe, confirms the window
+appears, confirms `astro_native` loaded rather than silently falling back to
+numpy, runs a real stack with multiple parallel workers and confirms no
+extra GUI windows open -- regression guard for a real bug that shipped once:
+a frozen ProcessPoolExecutor worker without `multiprocessing.freeze_support()`
+re-launches the whole app instead of running as a worker -- confirms clean
+shutdown):
 
 ```powershell
 .\packaging\verify_build.ps1
@@ -41,10 +41,10 @@ running as a worker -- confirms clean shutdown):
 ## What's bundled vs. not
 
 Bundled: numpy, astropy, scipy, tqdm, Pillow, psutil, rawpy (camera RAW),
-tifffile (TIFF I/O), pywebview, and `astro_native` (built from a real
-`maturin build --release` wheel, not the dev-mode `maturin develop` editable
-install -- see `originstack.spec`'s comments for why that distinction
-matters for PyInstaller).
+tifffile (TIFF I/O), tkinter (the desktop app's UI toolkit, stdlib), and
+`astro_native` (built from a real `maturin build --release` wheel, not the
+dev-mode `maturin develop` editable install -- see `originstack.spec`'s
+comments for why that distinction matters for PyInstaller).
 
 Not bundled: `cupy`/GPU acceleration. Not viable in a generic packaged exe
 (requires the end user's own CUDA install); the app already degrades to CPU
@@ -59,14 +59,6 @@ the packaged build.
   is submitting the built `OriginStack.exe` to Microsoft's file-submission
   portal (https://www.microsoft.com/en-us/wdsi/filesubmission) after each
   release, which reduces false-positive flagging over time.
-- **Requires the Microsoft Edge WebView2 Runtime** on the end user's
-  machine. Pre-installed on most current Windows 10/11 (it ships with Edge
-  and is pushed via Windows Update), but not guaranteed on older or
-  locked-down/enterprise images. If it's missing, the app shows a clear
-  error dialog rather than crashing silently (`src/desktop_app.py`'s
-  `_fatal()` wraps the one genuinely unguarded failure path,
-  `webview.create_window()`/`webview.start()`) -- but there's no code fix
-  for "the runtime genuinely isn't installed", only a clear diagnosis.
 - **Windows only.** No macOS/Linux packaging in this pass.
 - **No installer wizard.** Ships as a zipped folder, not an Inno
   Setup/MSI installer. A reasonable follow-up if a smoother install

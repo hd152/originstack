@@ -905,7 +905,7 @@ def select_reference_frame(
 
     safe_print(f"  Pyramid pass for reference selection ({len(final)} frames, {n_workers} workers)...")
     _t_pyramid = time.time()
-    from src.webview import get_webview as _get_wv
+    from src.ui_events import get_ui_events as _get_wv
     _wv = _get_wv()
     _wv_done = 0
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
@@ -1145,7 +1145,7 @@ def score_registration_residuals(
         check = set(range(n_frames))
 
     def _run_checks(indices: List[int], label: str) -> None:
-        from src.webview import get_webview as _get_wv
+        from src.ui_events import get_ui_events as _get_wv
         _wv = _get_wv()
         _done = 0
         n_workers = min(os.cpu_count() or 4, max(len(indices), 1))
@@ -1661,7 +1661,7 @@ def run_registration_phase(
     else:
         n_workers = min(os.cpu_count() or 4, len(final))
         
-    from src.webview import get_webview as _get_wv
+    from src.ui_events import get_ui_events as _get_wv
     _wv = _get_wv()
     _wv_done = 0
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
@@ -2030,13 +2030,46 @@ def find_extended_source_ellipse(
     labeled, n = ndimage.label(binary)
     if n == 0:
         return None
-    py, px = np.unravel_index(int(np.argmax(lum_smooth)), (H, W))
-    peak_label = int(labeled[py, px])
-    if peak_label == 0:
-        # Peak pixel didn't land in its own thresholded blob (shouldn't
-        # normally happen) -- fall back to the largest connected component.
-        sizes = ndimage.sum(binary, labeled, index=range(1, n + 1))
-        peak_label = int(np.argmax(sizes)) + 1
+    # Largest-area blob, not whichever blob contains the single brightest
+    # pixel: a bright foreground star (even after this function's own
+    # smoothing) forms a small, compact, high-peak blob that can easily
+    # out-peak a genuinely extended but comparatively low-surface-brightness
+    # object -- confirmed on a real frame (a rich Milky Way star field with
+    # a faint galaxy) where the old peak-pixel rule locked onto a star
+    # nowhere near the actual galaxy, so --galaxy-mode's exclusion mask was
+    # faithfully protecting the wrong object the whole time. Area is what
+    # "extended source" actually means here; peak brightness is not a proxy
+    # for it once there's anything brighter-but-smaller in the frame.
+    #
+    # Blobs whose *center* sits near a frame edge/corner are excluded from
+    # consideration: on a real frame, the single largest blob by area
+    # (bigger even than the actual galaxy) turned out to be a vignetting/
+    # corner-glow gradient peaking right at pixel (0,0) -- a smooth
+    # brightness falloff hugging the sensor edge, not a real object. Checking
+    # the *centroid* rather than whether the blob's extent merely touches
+    # the border matters: a deliberately-framed target that's large relative
+    # to the frame (exactly what max_axis_frac above exists to still allow)
+    # can legitimately have its thresholded extent reach or pass the edge
+    # while still being centered well within the frame -- only a center
+    # genuinely near the edge/corner is the artifact signature.
+    # Intensity-weighted centroid, not the bounding-box's geometric center:
+    # an edge/corner artifact's blob can still have a bounding box that
+    # extends far into the frame (a bright peak at the corner tapering
+    # gradually inward), which would place a geometric bbox center well away
+    # from the edge despite the blob clearly being anchored there. Weighting
+    # by brightness (same principle the moment fit below already uses)
+    # correctly keeps the centroid near the true peak regardless of how far
+    # a faint tail happens to extend.
+    edge_margin_y, edge_margin_x = 0.08 * H, 0.08 * W
+    weights = np.clip(lum_smooth - sky_med, 0.0, None)
+    centroids = ndimage.center_of_mass(weights, labeled, index=range(1, n + 1))
+    sizes = ndimage.sum(binary, labeled, index=range(1, n + 1))
+    candidates = [i for i, (center_y, center_x) in enumerate(centroids)
+                 if edge_margin_y < center_y < H - edge_margin_y
+                 and edge_margin_x < center_x < W - edge_margin_x]
+    if not candidates:
+        return None
+    peak_label = max(candidates, key=lambda i: sizes[i]) + 1
     blob = labeled == peak_label
 
     # A handful of pixels clearing the threshold by chance (shot noise, a
@@ -2074,6 +2107,31 @@ def find_extended_source_ellipse(
         b *= shrink
     b = min(b, a)
     return cy, cx, a, b, axes
+
+
+def parse_galaxy_center_override(
+        center_str: str, radius: Optional[float] = None
+        ) -> Tuple[float, float, float, float, np.ndarray]:
+    """Build a ``find_extended_source_ellipse``-shaped result
+    ``(cy, cx, a, b, axes)`` directly from a user-supplied ``--galaxy-center
+    X,Y`` pixel coordinate, bypassing detection entirely.
+
+    For fields where auto-detection keeps finding the wrong feature --
+    confirmed on a real dense-star-field target where the largest-area
+    non-border-touching blob (this module's own best-effort heuristic) still
+    wasn't the actual galaxy, having already fixed two earlier failure modes
+    (a brighter star, then a vignetting-adjacent artifact) -- a pixel
+    coordinate read off the stacked preview sidesteps the whole detection
+    question. There's no fitted shape to take an aspect ratio from, so this
+    is always a circle (identity axes); ``radius`` defaults to 200px.
+
+    Raises ``ValueError`` if ``center_str`` isn't a valid "X,Y" pair --
+    callers should catch this the same way they already handle a failed fit.
+    """
+    cx_str, cy_str = center_str.split(',')
+    cx, cy = float(cx_str), float(cy_str)
+    r = float(radius) if radius else 200.0
+    return cy, cx, r, r, np.eye(2)
 
 
 def find_comet_tail_pa(lum: np.ndarray, nucleus_y: float, nucleus_x: float,

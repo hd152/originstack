@@ -33,8 +33,8 @@ python originstack.py -d lights/ -o stacked.fits --auto --keep-checkpoint
 # Incremental stacking — fold a previous night's saved stack into this run
 python originstack.py -d tonight/ -o m51_v2.fits --auto --merge m51.fits
 
-# Watch the run live in a browser (http://127.0.0.1:8765/)
-python originstack.py -d lights/ -o stacked.fits --auto --web-view
+# Prefer a GUI? python desktop_app.py opens a native window with live
+# progress, log, and an interactive preview instead of the command line.
 
 # Clean up a collection: flag poor lights (dry run, then apply)
 python originstack.py --quality-sweep -d collection/
@@ -43,7 +43,7 @@ python originstack.py --sweep-undo -d collection/                # restore every
 ```
 
 ### Optional native (Rust) acceleration
-13 hot-path kernels run in Rust when the `astro_native` module is built
+30+ hot-path kernels run in Rust when the `astro_native` module is built
 (stacking combines ~4–100×, Lanczos warp for alignment and drizzle ~5–26×,
 L.A.Cosmic, median filters, the MMT median cascade ~10×, DBE sampling+fit,
 anisotropic diffusion ~37×); otherwise a numpy fallback is used. Build once:
@@ -127,9 +127,10 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Feature | On by default | Disable |
 |---------|:---:|---------|
 | Background extraction (DBE) | ✅ | `--no-background-extraction` |
-| Luma denoising (wavelet) | ✅ | `--denoiser none` |
+| Luma denoising (curvelet-inspired wavelet) | ✅ | `--denoiser none` |
 | Chroma noise reduction | ✅ | `--no-chroma-nr` |
 | Star reduction | ✅ | `--no-star-reduce` |
+| Star removal (`<output>_starless.fits` sidecar) | ✅ | `--no-remove-stars` |
 | Local contrast enhancement | ✅ | `--no-local-contrast` |
 | CA correction | ✅ | `--no-ca-correction` |
 | Cosmic ray rejection | auto | `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |
@@ -138,14 +139,15 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 
 | Feature | Off by default | Enable |
 |---------|:---:|---------|
-| Alternative primary denoiser | ❌ | `--denoiser {mmt,bm3d,acdnr,nlm,bilateral,aniso}` |
-| Deconvolution | ❌ | `--deconvolve {rl,tv}` (RL on GPU with `--use-gpu`) |
+| Alternative primary denoiser | ❌ | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso}` (default `auto` = curvelet) |
+| Deconvolution | ❌ | `--deconvolve {rl,rl-sv,tv,sparse}` (RL on GPU with `--use-gpu`) |
 | Coarse chroma-NR (colour blotches) | auto | config key `chroma_nr_large_sigma` |
 | Preview black point (sky-σ) | auto | `--preview-black-sigma 3` |
 | Drizzle super-resolution | ❌ | `--drizzle-scale 2.0` |
 | Elastic (non-rigid) local registration | ❌ | `--elastic-registration` |
 | Plate solving | ❌ | `--plate-solve` |
-| Star removal | ❌ | `--star-remove` |
+| Galaxy exclusion masking | auto for galaxy targets | `--galaxy-mode` / `--galaxy-center X,Y` |
+| astrollm-assisted classification | ❌ | `--astrollm` (needs `--astrollm-dir`) |
 
 ---
 

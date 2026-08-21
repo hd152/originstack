@@ -571,6 +571,29 @@ def _apply_dynamic_settings(
         _set('deconvolve', True)
         _set('deconvolve_iterations', 10)
 
+    # Galaxy targets skip the sky-residual correction passes entirely
+    # (--skip-step sky_residual): unlike DBE (which honors --galaxy-mode's
+    # fitted exclusion ellipse), remove_sky_residual's own extended-source
+    # detection is a much stricter, cruder fallback -- even with the ellipse
+    # now also threaded through to it, real (patchy, irregular) galaxy arms
+    # extending past a symmetric ellipse fit, or spanning a mesh cell only
+    # partially, still get partially fit away as "background" across 3
+    # residual passes. Confirmed on real data: skipping the step entirely
+    # measurably improves output quality for a galaxy -- DBE's own single
+    # protected pass already does the main background-flattening job for
+    # this target type, so the extra passes are net-negative here even
+    # though they help other targets. `skip_step` is a plain list (not
+    # blendable/settable via _set() above), and explicit-dest opt-out is
+    # honored manually since a straight append can't reuse _set()'s
+    # overwrite-if-different equality check.
+    current_skip = list(getattr(args, 'skip_step', None) or [])
+    if (weights.get('galaxy', 0.0) > 0.3
+            and 'skip_step' not in _explicit
+            and 'sky_residual' not in current_skip):
+        current_skip.append('sky_residual')
+        setattr(args, 'skip_step', current_skip)
+        changes.append("skip_step  += 'sky_residual' (galaxy target)")
+
     return changes
 
 
@@ -610,11 +633,11 @@ def _apply_quality_settings(
 
     # 1. Frame-count-based stacking method (only when still at default 'auto')
     if getattr(args, 'stack_method', 'auto') == 'auto':
-        if n < 8:
+        if n < 15:
+            # percentile: simple, robust for small-to-moderate N (also
+            # subsumes what used to be a separate 'trimmed_mean' method --
+            # same reject-tails-then-average operation).
             _set('stack_method', 'percentile')
-        elif n < 15:
-            # Trimmed mean: simple, robust alternative to ESD for moderate N.
-            _set('stack_method', 'trimmed_mean')
         elif n < 20:
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 3.0)
@@ -824,6 +847,22 @@ def _apply_quality_settings(
     if (getattr(args, 'color_calibrate', False)
             and getattr(args, 'color_calibrate_method', 'colorindex') == 'colorindex'):
         _set('color_calibrate_method', 'spcc')
+
+    # 19. astrollm defect signal (--astrollm, fast session-sample only --
+    #     see src/astrollm.py::sample_session_priors, not the full-session
+    #     per-frame scoring) nudges settings defensively rather than
+    #     rejecting anything outright: enable trail-reject (satellite/
+    #     aircraft trail inpainting) and strengthen chroma denoising, since
+    #     a defect/stray-light flag most often means exactly what those two
+    #     settings address. astrollm is still an early/unvalidated model
+    #     (see src/astrollm.py's module docstring) -- auto-dropping frames
+    #     on its say-so would be a much bigger bet than a soft nudge.
+    if getattr(args, '_astrollm_defect_flagged', False):
+        if not getattr(args, 'trail_reject', False):
+            _set('trail_reject', True)
+        _chroma_boost = float(getattr(args, 'denoise_chroma_boost', 2.0) or 2.0)
+        if _chroma_boost < 3.0:
+            _set('denoise_chroma_boost', 3.0)
 
     return changes
 

@@ -246,6 +246,8 @@ def _blackbody_spectrum(teff_k: np.ndarray, wavelengths_nm: np.ndarray) -> np.nd
 _DEFAULT_BAND_CENTERS_NM = {'R': 620.0, 'G': 540.0, 'B': 460.0}
 _DEFAULT_BAND_SIGMA_NM = 45.0
 _SPCC_WAVELENGTHS_NM = np.linspace(350.0, 950.0, 300)
+# hasattr, not getattr's default arg -- that eagerly evaluates np.trapz, which some numpy builds have removed entirely.
+_TRAPZ = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
 
 
 def _default_channel_response(channel: str, wavelengths_nm: np.ndarray) -> np.ndarray:
@@ -265,15 +267,10 @@ def synthetic_channel_flux(teff_k: float, channel_response=None) -> Tuple[float,
     wl = _SPCC_WAVELENGTHS_NM
     spec = _blackbody_spectrum(float(teff_k), wl)
     resp_fn = channel_response or _default_channel_response
-    # getattr(np, 'trapezoid', np.trapz) would eagerly evaluate np.trapz as
-    # the default arg even when trapezoid exists -- crashes outright on any
-    # numpy build that's fully removed trapz (not just deprecated it),
-    # which is exactly what broke CI here.
-    _integrate = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
     fluxes = []
     for ch in ('R', 'G', 'B'):
         resp = resp_fn(ch, wl)
-        fluxes.append(float(_integrate(spec * resp, wl)))
+        fluxes.append(float(_TRAPZ(spec * resp, wl)))
     return tuple(fluxes)
 
 
@@ -293,15 +290,10 @@ def _synthetic_channel_flux_batch(teff_k: np.ndarray, channel_response=None
     teff_arr = np.asarray(teff_k, dtype=np.float64)
     spec = _blackbody_spectrum(teff_arr[:, None], wl[None, :])  # (n_stars, n_wl)
     resp_fn = channel_response or _default_channel_response
-    # getattr(np, 'trapezoid', np.trapz) would eagerly evaluate np.trapz as
-    # the default arg even when trapezoid exists -- crashes outright on any
-    # numpy build that's fully removed trapz (not just deprecated it),
-    # which is exactly what broke CI here.
-    _integrate = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
     fluxes = []
     for ch in ('R', 'G', 'B'):
         resp = resp_fn(ch, wl)  # (n_wl,)
-        fluxes.append(_integrate(spec * resp[None, :], wl, axis=1))  # (n_stars,)
+        fluxes.append(_TRAPZ(spec * resp[None, :], wl, axis=1))  # (n_stars,)
     return fluxes[0], fluxes[1], fluxes[2]
 
 

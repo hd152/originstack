@@ -1,26 +1,35 @@
 <#
 .SYNOPSIS
     Proves the packaged OriginStack.exe actually works, without needing a
-    human to visually inspect the pywebview window (unreliable on headless
-    CI runners anyway, and unnecessary locally).
+    human to visually inspect the tkinter window (unreliable on headless CI
+    runners anyway, and unnecessary locally).
 
 .DESCRIPTION
-    src/webview.py's ThreadingHTTPServer starts before webview.create_window(),
-    so launching the real .exe and polling its own HTTP port proves every
-    bundled import (astropy/scipy/astro_native/rawpy/tifffile/pywebview)
-    actually resolved at runtime. /api/health additionally proves
-    astro_native loaded rather than silently falling back to numpy --
-    shipping that fallback's perf profile by accident defeats the point of
-    bundling astro_native at all, so this fails hard rather than warning.
+    The desktop app is a native tkinter window (no local HTTP server as of
+    2026-08 -- it used to be a pywebview-wrapped dashboard). This script
+    proves the packaged exe works two ways:
 
-    Also runs a real stack through the dashboard's own POST /api/start with
-    multiple parallel workers, watching for extra GUI windows -- regression
-    guard for a real bug that shipped: without multiprocessing.freeze_support()
-    as the first statement in desktop_app.py's __main__ guard, Phase 1's
-    ProcessPoolExecutor 'spawn' workers each re-executed the frozen exe from
-    scratch, opening one full GUI window per CPU core (observed in the wild:
-    a 12-core machine opened 12 windows). Worker *processes* are expected and
-    fine -- the check is for extra visible *windows*, i.e. MainWindowTitle.
+    1. A normal launch: polls for a window with the right title to appear
+       (proves every bundled import -- astropy/scipy/astro_native/rawpy/
+       tifffile/tkinter -- actually resolved at runtime and the app didn't
+       crash on startup), then reads the startup log
+       (`desktop_app.py::_log_startup_status`) to confirm astro_native
+       loaded rather than silently falling back to numpy -- shipping that
+       fallback's perf profile by accident defeats the point of bundling
+       astro_native at all, so this fails hard rather than warning.
+
+    2. A `--verify-headless` launch: runs a real stack with multiple
+       parallel workers through the exact same frozen entry point, watching
+       for extra GUI windows -- regression guard for a real bug that
+       shipped: without `multiprocessing.freeze_support()` as the first
+       statement in desktop_app.py's `__main__` guard, Phase 1's
+       ProcessPoolExecutor 'spawn' workers each re-executed the frozen exe
+       from scratch, opening one full GUI window per CPU core (observed in
+       the wild: a 12-core machine opened 12 windows). Worker *processes*
+       are expected and fine -- the check is for extra visible *windows*,
+       i.e. MainWindowTitle. `--verify-headless` itself opens no window (it
+       skips the GUI/mainloop entirely), so any window appearing during this
+       phase is the regression.
 #>
 param(
     [string]$ExePath = "$PSScriptRoot\dist\OriginStack\OriginStack.exe",
@@ -29,101 +38,86 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path $ExePath)) { throw "Build did not produce $ExePath" }
+$exeName = [System.IO.Path]::GetFileNameWithoutExtension($ExePath)
+$logPath = "$env:LOCALAPPDATA\OriginStack\logs\desktop_app.log"
+if (Test-Path $logPath) { Remove-Item $logPath -Force }
 
-# 1. Launch the packaged exe as a real child process -- not `python -m ...`,
-#    must exercise the actual frozen bootloader + bundled interpreter.
+# ── 1. Normal launch: window appears, native kernel loaded ────────────────
 $proc = Start-Process -FilePath $ExePath -PassThru
-
 try {
-    # 2. Poll the dashboard's own port until it responds.
     $ok = $false
     for ($i = 0; $i -lt 30; $i++) {
-        try {
-            $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:8765/' -UseBasicParsing -TimeoutSec 2
-            if ($resp.StatusCode -eq 200) { $ok = $true; break }
-        } catch {
-            Start-Sleep -Milliseconds 500
-        }
+        $w = Get-Process -Name $exeName -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowTitle -ne '' }
+        if ($w) { $ok = $true; break }
+        Start-Sleep -Milliseconds 500
     }
     if (-not $ok) {
-        $log = "$env:LOCALAPPDATA\OriginStack\logs\desktop_app_crash.log"
-        throw "Dashboard server never came up on :8765 -- check $log"
+        throw "OriginStack window never appeared -- check $env:LOCALAPPDATA\OriginStack\logs\desktop_app_crash.log"
     }
-    Write-Host "Dashboard server responded on :8765"
+    Write-Host "Window appeared"
 
-    # 3. Confirm astro_native (not the numpy fallback) actually loaded.
-    $health = Invoke-WebRequest -Uri 'http://127.0.0.1:8765/api/health' -UseBasicParsing
-    $healthObj = $health.Content | ConvertFrom-Json
-    if (-not $healthObj.native) {
-        throw "astro_native did not load in the packaged build -- shipping numpy fallback silently"
+    $statusOk = $false
+    for ($i = 0; $i -lt 10; $i++) {
+        if (Test-Path $logPath) {
+            $line = Get-Content $logPath -Tail 1
+            if ($line -match 'ACTIVE') { $statusOk = $true; break }
+            if ($line -match 'numpy fallback') {
+                throw "astro_native did not load in the packaged build -- shipping numpy fallback silently"
+            }
+        }
+        Start-Sleep -Milliseconds 500
     }
-    Write-Host "astro_native active (version $($healthObj.version))"
-
-    # 4. Real Phase 1 multiprocessing check -- start an actual stack with
-    #    multiple workers and watch for extra GUI windows the whole time it
-    #    runs. Total process count rising is expected and correct (that's
-    #    ProcessPoolExecutor doing its job); a second *windowed* process is
-    #    the bug.
-    if (-not (Test-Path $PythonExe)) { $PythonExe = "python" }
-    $synthDir = "$PSScriptRoot\..\synthetic_data"
-    if (-not (Test-Path $synthDir)) {
-        Push-Location "$PSScriptRoot\.."
-        & $PythonExe tools\create_synthetic.py
-        Pop-Location
-    }
-    if (-not (Test-Path $synthDir)) { throw "synthetic_data was not created -- cannot run the Phase 1 check" }
-
-    $body = @{
-        directory = (Resolve-Path $synthDir).Path
-        output = "$env:TEMP\originstack_verify_out.fits"
-        parallel = 4
-        background_extraction = $false
-        denoise = $false
-        star_reduce = $false
-        local_contrast = $false
-    } | ConvertTo-Json
-    $startResp = Invoke-WebRequest -Uri 'http://127.0.0.1:8765/api/start' -Method POST `
-        -Body $body -ContentType 'application/json' -UseBasicParsing
-    if ($startResp.StatusCode -ne 202) { throw "POST /api/start returned $($startResp.StatusCode)" }
-
-    # Deliberately NOT polling /events here: it's a Server-Sent-Events stream
-    # that never closes on its own, and Invoke-WebRequest does not reliably
-    # honor -TimeoutSec against an open streaming connection on Windows
-    # PowerShell 5.1 -- it can block for minutes instead of the requested 1s,
-    # hanging this whole script. A fixed wall-clock window is simpler and
-    # sufficient: the synthetic 6-frame run finishes in ~8s, so 30s of
-    # 1-second window-count samples comfortably covers the whole run without
-    # needing a "done" signal at all.
-    $maxWindows = 1  # the process we already launched
-    $exeName = [System.IO.Path]::GetFileNameWithoutExtension($ExePath)
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Seconds 1
-        $windowed = Get-Process -Name $exeName -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowTitle -ne '' }
-        $wCount = ($windowed | Measure-Object).Count
-        if ($wCount -gt $maxWindows) { $maxWindows = $wCount }
-    }
-    if ($maxWindows -gt 1) {
-        throw "Phase 1 opened $maxWindows GUI windows (expected 1) -- " +
-              "multiprocessing.freeze_support() regression in desktop_app.py"
-    }
-    Write-Host "Phase 1 multiprocessing check passed (no extra GUI windows)"
+    if (-not $statusOk) { throw "Startup log never confirmed astro_native active -- check $logPath" }
+    Write-Host "astro_native active ($(Get-Content $logPath -Tail 1))"
 } finally {
-    # 5. Graceful shutdown: kill every OriginStack process (main + any
-    #    workers still winding down) and confirm the port frees up.
-    Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($ExePath)) -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name $exeName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
-
 Start-Sleep -Seconds 1
-$stillUp = $true
-try {
-    Invoke-WebRequest -Uri 'http://127.0.0.1:8765/' -UseBasicParsing -TimeoutSec 2 | Out-Null
-} catch {
-    $stillUp = $false
+
+# ── 2. --verify-headless: real Phase 1 multiprocessing check ──────────────
+if (-not (Test-Path $PythonExe)) { $PythonExe = "python" }
+$synthDir = "$PSScriptRoot\..\synthetic_data"
+if (-not (Test-Path $synthDir)) {
+    Push-Location "$PSScriptRoot\.."
+    & $PythonExe tools\create_synthetic.py
+    Pop-Location
 }
+if (-not (Test-Path $synthDir)) { throw "synthetic_data was not created -- cannot run the Phase 1 check" }
+
+$outPath = "$env:TEMP\originstack_verify_out.fits"
+$headlessArgs = @('--verify-headless', '-d', (Resolve-Path $synthDir).Path, '-o', $outPath,
+                  '--parallel', '4', '--debayer-method', 'malvar',
+                  '--white-balance', 'grayworld', '--stack-method', 'median')
+$headlessProc = Start-Process -FilePath $ExePath -ArgumentList $headlessArgs -PassThru
+
+$maxWindows = 0  # --verify-headless opens no window of its own
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 1
+    if ($headlessProc.HasExited) { break }
+    $windowed = Get-Process -Name $exeName -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle -ne '' }
+    $wCount = ($windowed | Measure-Object).Count
+    if ($wCount -gt $maxWindows) { $maxWindows = $wCount }
+}
+if (-not $headlessProc.HasExited) {
+    $headlessProc.WaitForExit(30000) | Out-Null
+}
+if ($maxWindows -gt 0) {
+    throw "--verify-headless opened $maxWindows GUI window(s) (expected 0) -- " +
+          "multiprocessing.freeze_support() regression in desktop_app.py"
+}
+if (-not (Test-Path $outPath)) {
+    throw "--verify-headless did not produce $outPath -- run failed (check console/log output above)"
+}
+Write-Host "Phase 1 multiprocessing check passed (no extra GUI windows)"
+
+# ── 3. Graceful shutdown: confirm nothing is left running ─────────────────
+Get-Process -Name $exeName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+$stillUp = Get-Process -Name $exeName -ErrorAction SilentlyContinue
 if ($stillUp) {
-    throw "Port 8765 still responding after process kill -- server thread didn't die"
+    throw "OriginStack process(es) still running after cleanup"
 }
 
 Write-Host "Verification passed: $ExePath"

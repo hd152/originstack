@@ -58,10 +58,10 @@ def get_logger() -> logging.Logger:
 
 def safe_print(text: str):
     """Print text with fallback for unicode characters on Windows."""
-    # Tee into the live web view's log buffer (no-op unless --web-view).
+    # Tee into the desktop app's log pane (no-op unless attached).
     try:
-        from src.webview import get_webview
-        get_webview().log(text)
+        from src.ui_events import get_ui_events
+        get_ui_events().log(text)
     except Exception:
         pass
     try:
@@ -144,8 +144,8 @@ def print_quality_table(frames, show_all: bool = False):
 def print_phase(phase_num: int, title: str):
     """Print a phase header."""
     try:
-        from src.webview import get_webview
-        wv = get_webview()
+        from src.ui_events import get_ui_events
+        wv = get_ui_events()
         wv.phase(phase_num, title)
         wv.log(f"PHASE {phase_num}: {title.upper()}")
     except Exception:

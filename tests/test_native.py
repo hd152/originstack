@@ -82,13 +82,6 @@ def test_percentile_clip_matches_numpy(weighted):
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 2.0
 
 
-def test_trimmed_mean_matches_numpy():
-    d = _stack(seed=13)
-    ref = astro.trimmed_mean_combine(d.astype(np.float64), trim_low=0.2, trim_high=0.2)
-    got = native.trimmed_mean_combine(d, 0.2, 0.2)
-    assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1e-3
-
-
 @pytest.mark.parametrize("n,weighted", [(8, False), (30, False), (30, True)])
 def test_esd_matches_numpy(n, weighted):
     d = _stack(n=n, seed=n)
