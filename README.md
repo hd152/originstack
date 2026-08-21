@@ -188,10 +188,10 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 
 1. ✅ Hot pixel removal on stacked image
 2. ✅ Star mask generation (protects structure in subsequent steps)
-3. ✅ Background extraction (DBE via RBF thin-plate spline, or legacy mesh)
+3. ✅ Background extraction (DBE via Gaussian-weighted local-linear regression with Tukey-biweight IRLS, bounded by construction; or legacy mesh/wavelet)
 4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches, auto-set for galaxy targets)
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
-6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR
+6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR (curvelet-inspired directional variant by default; plain `--denoiser wavelet` is opt-in)
 7. ✅ Sky residual correction (second pass after denoising)
 8. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
 9. ❌ Non-local means denoising — `--denoiser nlm`
@@ -237,6 +237,11 @@ Eight built-in target presets tune all parameters at once:
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
 - **Quality CSV** — per-frame metrics exported for external analysis (`--quality-report`)
+- **Galaxy/extended-source exclusion masking** (`--galaxy-mode`, `--galaxy-center X,Y`) — protects a galaxy's broad halo from background extraction, so it isn't fit and subtracted as gradient; auto-enabled for galaxy targets by `--auto`
+- **Robust-PCA master calibration** (`--master-method robust_pca`, `--flat-from-lights`) — separates true shared calibration pattern from session-specific outliers (dust motes, transient hot pixels) instead of a per-pixel median
+- **Real-time and streaming stacking** — `--live` folds new subs into a running stack as they land; `--stream` two-pass streams an already-complete large directory at O(1) full-resolution memory
+- **astrollm classification** (`--astrollm`) — optional external image classifier that samples a few frames to feed target-type detection and flag defective frames defensively; `--astrollm-score-all` scores every frame (slower, opt-in)
+- **Object annotation** (`--annotate`) — labels bright stars and named deep-sky objects on a copy of the preview, using a WCS solution
 
 ---
 
@@ -657,8 +662,8 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Quality filtering | ✅ on | `--no-quality-filter` |
 | Affine registration | ✅ on | `--no-affine` |
 | Elastic local registration | ⬜ off | `--elastic-registration` |
-| Primary denoiser choice | wavelet | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,none}` |
-| Deconvolution | ❌ off | `--deconvolve {rl,tv}` |
+| Primary denoiser choice | auto (curvelet) | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,curvelet,none}` |
+| Deconvolution | ❌ off | `--deconvolve {rl,rl-sv,tv,sparse}` |
 
 ---
 
@@ -675,14 +680,14 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--preset NAME` | Apply named preset (quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar) |
 | `--config PATH` | Load parameters from TOML file |
 | `--no-auto` | Disable the heuristic target classifier (on by default; detects target type and optimises settings automatically) |
-| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, linear_fit, ivw) |
-| `--debayer-method METHOD` | Debayer algorithm (malvar — only choice) |
+| `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, linear_fit, ivw, wavelet) |
+| `--debayer-method METHOD` | Debayer algorithm (malvar (default), menon2007) |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
 | `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
 | `--elastic-registration` | Local (non-rigid) displacement correction on top of the global affine (off by default) |
-| `--denoiser NAME` | Primary luma denoiser (wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, none) |
-| `--deconvolve {off,rl,tv}` | Richardson-Lucy or TV-regularised deconvolution |
+| `--denoiser NAME` | Primary luma denoiser (auto — curvelet unless overridden —, wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, curvelet, none) |
+| `--deconvolve {off,rl,rl-sv,tv,sparse}` | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet deconvolution |
 | `--plate-solve` | Plate solve via astrometry.net (requires API key) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |

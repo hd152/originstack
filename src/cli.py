@@ -943,7 +943,8 @@ def build_parser() -> argparse.ArgumentParser:
     g_core.add_argument('--live', action='store_true',
                    help='Real-time (live) stacking: watch the directory and fold each new '
                         'sub into a running stack as it lands, pushing the growing result '
-                        'and a running SNR to the web view. Runs until Ctrl-C.')
+                        'and a running SNR to whatever UI is attached (console-only on a '
+                        'plain CLI run; the desktop app shows it live). Runs until Ctrl-C.')
     g_core.add_argument('--live-interval', type=float, default=4.0, metavar='SEC',
                    help='Live stacking directory poll interval in seconds (default: 4).')
     g_core.add_argument('--live-duration', type=float, default=None, metavar='MIN',
