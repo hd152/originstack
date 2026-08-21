@@ -574,41 +574,55 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         pass
 
     result = np.empty_like(img, dtype=np.float32)
-    
-    def _process_channel(c):
-        ch = img[:, :, c].astype(np.float64)
-        ny, nx = cell_excluded.shape
-        
+
+    def _mesh_median_grid_numpy(ch, ny, nx):
         bg_grid = np.full((ny, nx), np.nan, dtype=np.float64)
-        
-        # Optimization: Pre-calculate coordinates if grid is regular enough, 
-        # but for simplicity and correctness, we loop.
         for iy in range(ny):
             if cell_excluded[iy, :].all():
                 bg_grid[iy, :] = np.nan
                 continue
-                
+
             y0 = int(round(iy * (H/ny)))
             y1 = min(int(round((iy + 1) * (H/ny))), H)
-            
-            # Vectorize inner loop where possible
+
             for ix in range(nx):
                 if cell_excluded[iy, ix]:
                     bg_grid[iy, ix] = np.nan
                     continue
-                
+
                 x0 = int(round(ix * (W/nx)))
                 x1 = min(int(round((ix + 1) * (W/nx))), W)
-                
+
                 cell = ch[y0:y1, x0:x1].ravel()
                 if cell.size == 0: continue
-                
+
                 if star_mask is not None:
                     sm = star_mask[y0:y1, x0:x1].ravel()
                     cell = cell[sm < 0.5]
-                    
+
                 if len(cell) > 0:
                     bg_grid[iy, ix] = float(np.median(cell))
+        return bg_grid
+
+    def _process_channel(c):
+        ch = img[:, :, c].astype(np.float64)
+        ny, nx = cell_excluded.shape
+
+        # This loop runs 9x/stack (broad + 2 fine passes x 3 channels) on the
+        # default pipeline (also hit as a DBE/wavelet-BG fallback), and
+        # per-cell np.median call overhead -- not per-cell compute -- is what
+        # dominates at typical mesh sizes, so the native kernel fuses the
+        # whole grid into one pass instead of speeding up a single cell.
+        if HAS_NATIVE and hasattr(_native, 'mesh_median_grid'):
+            sm = star_mask if star_mask is not None else np.zeros((1, 1), dtype=np.float32)
+            bg_grid = np.asarray(_native.mesh_median_grid(
+                np.ascontiguousarray(ch, dtype=np.float64),
+                np.ascontiguousarray(sm, dtype=np.float32),
+                star_mask is not None,
+                np.ascontiguousarray(cell_excluded, dtype=np.uint8),
+                ny, nx))
+        else:
+            bg_grid = _mesh_median_grid_numpy(ch, ny, nx)
 
         # Interpolation
         if np.all(np.isnan(bg_grid)):

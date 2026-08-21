@@ -39,6 +39,20 @@ match the `VERSION` file and `v*` git tags.
   appearing + a startup log line (native-kernel check) and a new
   `--verify-headless` desktop-app flag (multiprocessing regression check),
   replacing the old HTTP-endpoint polling.
+- **Six new native (Rust) kernels** (`ext/astro_native` 0.17.0 → 0.18.0),
+  closing out the remaining Python-loop hot paths identified by a full
+  profiling pass: `fit_moffat_native` (saturated-star repair's Moffat wing
+  fit — removes scipy `curve_fit`'s per-iteration Python callback, 39x on a
+  single fit), `mesh_median_grid` (background-extraction mesh median, on
+  the default pipeline, 34x), `local_normalize_grid`
+  (`--local-normalize`'s per-frame coarse background grid, 8x),
+  `stamp_star_disks` (star-removal mask, on by default, 50x on a
+  4000-star field), `bresenham_line_native` (`--trail-reject`'s line
+  rasterization, 163x), and `radial_bin_median` (`--comet-mode`'s radial
+  profile, 39x). Every kernel keeps its original numpy/scipy path as an
+  automatic fallback when the native extension isn't built; see
+  `CLAUDE.md`'s "Native (Rust) acceleration" section for kernel-by-kernel
+  detail and `tests/test_native.py` for parity tests.
 
 ## Earlier development
 

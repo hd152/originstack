@@ -39,6 +39,13 @@ except Exception:  # pragma: no cover
     binary_dilation = gaussian_filter = None
     _HAS_SCIPY = False
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE = hasattr(_native, 'bresenham_line_native')
+except Exception:  # pragma: no cover
+    _native = None
+    _HAS_NATIVE = False
+
 # Safety cap on bright-pixel count fed into the Hough accumulator -- a frame
 # this saturated is never a clean trail-on-empty-sky case, and letting it
 # through would blow up the O(n_points * n_theta) vote pass for no benefit.
@@ -52,7 +59,14 @@ def _bresenham_line(r0: int, c0: int, r1: int, c1: int) -> Tuple[np.ndarray, np.
     Bresenham's algorithm -- matches ``skimage.draw.line`` pixel-for-pixel
     (validated in tests/test_trail_reject.py; same symmetric ``2*dr - dc``
     error-term formulation skimage's own implementation uses, which avoids
-    the tie-break ambiguity a naive ``dc // 2`` initial-error variant has)."""
+    the tie-break ambiguity a naive ``dc // 2`` initial-error variant has).
+
+    Zero-vectorization case (a sequential line-walk, no numpy call it could
+    hide behind), so the native kernel is a direct port of this same
+    algorithm rather than a redesign -- see `bresenham_line_native`."""
+    if _HAS_NATIVE:
+        rr, cc = _native.bresenham_line_native(int(r0), int(c0), int(r1), int(c1))
+        return np.asarray(rr), np.asarray(cc)
     r0, c0, r1, c1 = int(r0), int(c0), int(r1), int(c1)
     r, c = r0, c0
     dr = abs(r1 - r0)

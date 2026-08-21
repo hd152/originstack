@@ -14,6 +14,10 @@ import src.denoising as _denoising_mod
 import src.debayer as _debayer_mod
 import src.robust_pca as _robust_pca_mod
 import src.channel_combine as _channel_combine_mod
+import src.star_repair as _star_repair_mod
+import src.local_normalize as _local_normalize_mod
+import src.star_removal as _star_removal_mod
+import src.trail_reject as _trail_reject_mod
 
 native = pytest.importorskip("astro_native")
 
@@ -1089,3 +1093,248 @@ def test_continuum_scale_moments_rejects_length_mismatch():
     b = rng.normal(0.0, 1.0, 50)
     with pytest.raises(ValueError):
         native.continuum_scale_moments(a, b)
+
+
+# ---------------------------------------------------------------------------
+# fit_moffat_native (src/star_repair.py)
+# ---------------------------------------------------------------------------
+
+def _synthetic_moffat_wing(rng, amp=500.0, alpha=6.0, beta=2.5, n=120, noise=2.0):
+    r = rng.uniform(2.0, 18.0, n)
+    v = amp / np.power(1.0 + (r / alpha) ** 2, beta) + rng.normal(0.0, noise, n)
+    return r, v, (amp, alpha, beta)
+
+
+@pytest.mark.parametrize("alpha,beta", [(4.0, 2.0), (8.0, 3.5), (12.0, 1.5)])
+def test_fit_moffat_native_recovers_synthetic_params(alpha, beta):
+    """Native bounded LM must recover ground-truth Moffat params about as
+    well as scipy's curve_fit does -- not bit-exact (different algorithms),
+    just comparably close, since both are noisy nonlinear fits."""
+    rng = np.random.default_rng(hash((alpha, beta)) & 0xFFFF)
+    r, v, (amp, alpha_true, beta_true) = _synthetic_moffat_wing(rng, alpha=alpha, beta=beta)
+    native_fit = native.fit_moffat_native(r, v)
+    scipy_fit = _star_repair_mod._fit_moffat_wing_numpy(r, v)
+    assert native_fit is not None
+    assert scipy_fit is not None
+    n_amp, n_alpha, n_beta = native_fit
+    s_amp, s_alpha, s_beta = scipy_fit
+    # Both fits should land in the same neighbourhood of the true params.
+    assert abs(n_alpha - alpha_true) / alpha_true < 0.35
+    assert abs(n_beta - beta_true) / beta_true < 0.35
+    # And agree with each other's fit to within a similar tolerance.
+    assert abs(n_alpha - s_alpha) / s_alpha < 0.35
+    assert abs(n_beta - s_beta) / s_beta < 0.35
+
+
+def test_fit_moffat_native_matches_numpy_dispatch():
+    rng = np.random.default_rng(5)
+    r, v, _ = _synthetic_moffat_wing(rng)
+    had = _star_repair_mod._HAS_NATIVE
+    try:
+        _star_repair_mod._HAS_NATIVE = True
+        got = _star_repair_mod._fit_moffat_wing(r, v)
+        _star_repair_mod._HAS_NATIVE = False
+        want = _star_repair_mod._fit_moffat_wing(r, v)
+    finally:
+        _star_repair_mod._HAS_NATIVE = had
+    assert got is not None and want is not None
+
+
+def test_fit_moffat_native_none_on_too_few_samples():
+    rng = np.random.default_rng(6)
+    r = rng.uniform(2.0, 10.0, 3)
+    v = rng.uniform(1.0, 10.0, 3)
+    assert native.fit_moffat_native(r, v) is None
+
+
+def test_fit_moffat_native_none_on_nonpositive_peak():
+    rng = np.random.default_rng(7)
+    r = rng.uniform(2.0, 10.0, 20)
+    v = -np.abs(rng.uniform(0.0, 5.0, 20))
+    assert native.fit_moffat_native(r, v) is None
+
+
+# ---------------------------------------------------------------------------
+# mesh_median_grid (src/background.py's `_process_channel`)
+# ---------------------------------------------------------------------------
+
+def _numpy_mesh_median_grid(channel, star_mask, has_star_mask, cell_excluded, ny, nx):
+    H, W = channel.shape
+    bg = np.full((ny, nx), np.nan, dtype=np.float64)
+    for iy in range(ny):
+        y0 = int(round(iy * (H / ny)))
+        y1 = min(int(round((iy + 1) * (H / ny))), H)
+        for ix in range(nx):
+            if cell_excluded[iy, ix]:
+                continue
+            x0 = int(round(ix * (W / nx)))
+            x1 = min(int(round((ix + 1) * (W / nx))), W)
+            cell = channel[y0:y1, x0:x1].ravel()
+            if cell.size == 0:
+                continue
+            if has_star_mask:
+                sm = star_mask[y0:y1, x0:x1].ravel()
+                cell = cell[sm < 0.5]
+            if len(cell) > 0:
+                bg[iy, ix] = float(np.median(cell))
+    return bg
+
+
+@pytest.mark.parametrize("has_star_mask", [False, True])
+def test_mesh_median_grid_matches_numpy(has_star_mask):
+    rng = np.random.default_rng(13)
+    H, W, ny, nx = 37, 41, 5, 7  # deliberately non-power-of-2, avoids round() ties
+    channel = rng.normal(1000.0, 50.0, (H, W)).astype(np.float64)
+    star_mask = rng.uniform(0.0, 1.0, (H, W)).astype(np.float32) if has_star_mask else np.zeros((1, 1), dtype=np.float32)
+    cell_excluded = (rng.uniform(0.0, 1.0, (ny, nx)) < 0.15).astype(np.uint8)
+
+    got = np.asarray(native.mesh_median_grid(channel, star_mask, has_star_mask, cell_excluded, ny, nx))
+    want = _numpy_mesh_median_grid(channel, star_mask if has_star_mask else None, has_star_mask,
+                                    cell_excluded.astype(bool), ny, nx)
+    np.testing.assert_allclose(got, want, equal_nan=True, atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# local_normalize_grid (src/local_normalize.py's `_coarse_background`)
+# ---------------------------------------------------------------------------
+
+def test_local_normalize_grid_matches_numpy():
+    rng = np.random.default_rng(14)
+    frame = rng.normal(500.0, 40.0, (53, 47, 3)).astype(np.float32)
+    got = np.asarray(native.local_normalize_grid(frame, 9, 30.0))
+    want = _local_normalize_mod._coarse_background_numpy(frame, 9, 30.0)
+    np.testing.assert_allclose(got, want, atol=1e-3)
+
+
+def test_local_normalize_grid_dispatch_matches_numpy_fallback():
+    rng = np.random.default_rng(15)
+    frame = rng.normal(500.0, 40.0, (40, 36, 3)).astype(np.float32)
+    had = _local_normalize_mod._HAS_NATIVE
+    try:
+        _local_normalize_mod._HAS_NATIVE = True
+        got = _local_normalize_mod._coarse_background(frame, 6, 25.0)
+        _local_normalize_mod._HAS_NATIVE = False
+        want = _local_normalize_mod._coarse_background(frame, 6, 25.0)
+    finally:
+        _local_normalize_mod._HAS_NATIVE = had
+    np.testing.assert_allclose(got, want, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# stamp_star_disks (src/star_removal.py's `build_star_mask`)
+# ---------------------------------------------------------------------------
+
+def _make_sources(n, h, w, rng):
+    dtype = [('peak', 'f8'), ('ycentroid', 'f8'), ('xcentroid', 'f8')]
+    sources = np.zeros(n, dtype=dtype)
+    sources['peak'] = rng.uniform(50.0, 5000.0, n)
+    sources['ycentroid'] = rng.uniform(0, h, n)
+    sources['xcentroid'] = rng.uniform(0, w, n)
+    return sources
+
+
+def test_stamp_star_disks_dispatch_matches_numpy_fallback():
+    rng = np.random.default_rng(16)
+    h, w = 80, 96
+    sources = _make_sources(150, h, w, rng)
+    had = _star_removal_mod._HAS_NATIVE
+    try:
+        _star_removal_mod._HAS_NATIVE = True
+        mask_native, r_native = _star_removal_mod.build_star_mask((h, w), sources, fwhm=3.0)
+        _star_removal_mod._HAS_NATIVE = False
+        mask_numpy, r_numpy = _star_removal_mod.build_star_mask((h, w), sources, fwhm=3.0)
+    finally:
+        _star_removal_mod._HAS_NATIVE = had
+    assert (mask_native is None) == (mask_numpy is None)
+    if mask_native is not None:
+        np.testing.assert_array_equal(mask_native, mask_numpy)
+        assert abs(r_native - r_numpy) < 1e-9
+
+
+def test_stamp_star_disks_direct_matches_numpy_disk_math():
+    rng = np.random.default_rng(17)
+    h, w = 60, 70
+    n = 40
+    cy = rng.uniform(0, h, n)
+    cx = rng.uniform(0, w, n)
+    r = rng.uniform(2.0, 12.0, n)
+
+    mask_u8, max_r = native.stamp_star_disks(h, w, cy, cx, r)
+    got = np.asarray(mask_u8).astype(bool)
+
+    want = np.zeros((h, w), dtype=bool)
+    want_max_r = 0.0
+    for i in range(n):
+        y0, y1 = max(0, int(cy[i] - r[i])), min(h, int(cy[i] + r[i]) + 1)
+        x0, x1 = max(0, int(cx[i] - r[i])), min(w, int(cx[i] + r[i]) + 1)
+        if y1 <= y0 or x1 <= x0:
+            continue
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        disk = (yy - cy[i]) ** 2 + (xx - cx[i]) ** 2 <= r[i] * r[i]
+        want[y0:y1, x0:x1] |= disk
+        want_max_r = max(want_max_r, r[i])
+
+    np.testing.assert_array_equal(got, want)
+    assert abs(max_r - want_max_r) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# bresenham_line_native (src/trail_reject.py's `_bresenham_line`)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("r0,c0,r1,c1", [
+    (0, 0, 10, 4), (5, 5, 5, 15), (3, 3, 3, 3), (20, 2, 2, 20),
+    (0, 0, 0, 20), (12, 40, 0, 0), (-3, -3, 8, 5),
+])
+def test_bresenham_line_native_matches_numpy(r0, c0, r1, c1):
+    had = _trail_reject_mod._HAS_NATIVE
+    try:
+        _trail_reject_mod._HAS_NATIVE = True
+        rr_native, cc_native = _trail_reject_mod._bresenham_line(r0, c0, r1, c1)
+        _trail_reject_mod._HAS_NATIVE = False
+        rr_numpy, cc_numpy = _trail_reject_mod._bresenham_line(r0, c0, r1, c1)
+    finally:
+        _trail_reject_mod._HAS_NATIVE = had
+    np.testing.assert_array_equal(rr_native, rr_numpy)
+    np.testing.assert_array_equal(cc_native, cc_numpy)
+
+
+# ---------------------------------------------------------------------------
+# radial_bin_median (src/denoising.py's `radial_renormalize`)
+# ---------------------------------------------------------------------------
+
+def _numpy_radial_bin_median(radii, channel, max_radius, n_bins):
+    bin_edges = np.linspace(0.0, max_radius + 1.0, n_bins + 1)
+    profile = np.zeros(n_bins, dtype=np.float64)
+    for b in range(n_bins):
+        in_bin = (radii >= bin_edges[b]) & (radii < bin_edges[b + 1])
+        if in_bin.any():
+            profile[b] = float(np.median(channel[in_bin]))
+    return profile
+
+
+def test_radial_bin_median_matches_numpy():
+    rng = np.random.default_rng(18)
+    h, w = 90, 110
+    yy, xx = np.mgrid[:h, :w]
+    radii = np.sqrt((yy - 40.0) ** 2 + (xx - 50.0) ** 2).astype(np.float64)
+    channel = (100.0 + 0.5 * radii + rng.normal(0.0, 3.0, (h, w))).astype(np.float64)
+    max_radius = float(radii.max())
+
+    got = np.asarray(native.radial_bin_median(radii, channel, max_radius, 40))
+    want = _numpy_radial_bin_median(radii, channel, max_radius, 40)
+    np.testing.assert_allclose(got, want, atol=1e-9)
+
+
+def test_radial_renormalize_dispatch_matches_numpy_fallback():
+    rng = np.random.default_rng(19)
+    img = rng.normal(200.0, 10.0, (50, 60, 3)).astype(np.float32)
+    had = _denoising_mod._HAS_NATIVE
+    try:
+        _denoising_mod._HAS_NATIVE = True
+        got = _denoising_mod.radial_renormalize(img, 25.0, 30.0, n_bins=30)
+        _denoising_mod._HAS_NATIVE = False
+        want = _denoising_mod.radial_renormalize(img, 25.0, 30.0, n_bins=30)
+    finally:
+        _denoising_mod._HAS_NATIVE = had
+    np.testing.assert_allclose(got, want, atol=1e-2)

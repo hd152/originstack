@@ -1690,14 +1690,22 @@ def radial_renormalize(img: np.ndarray, nucleus_y: float, nucleus_x: float,
     result = np.zeros_like(img_f)
     for c in range(C):
         channel = img_f[:, :, c]
-        # Build radial profile: median per bin
-        bin_edges = np.linspace(0.0, max_radius + 1.0, n_bins + 1)
-        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        profile = np.zeros(n_bins, dtype=np.float64)
-        for b in range(n_bins):
-            in_bin = (radii >= bin_edges[b]) & (radii < bin_edges[b + 1])
-            if in_bin.any():
-                profile[b] = float(np.median(channel[in_bin]))
+        # Build radial profile: median per bin. The numpy reference rebuilds
+        # a boolean mask over the whole image once per bin (n_bins full-image
+        # passes) just to select each bin's pixels; the native kernel buckets
+        # every pixel by radial bin in one O(H*W) pass instead.
+        if _HAS_NATIVE and hasattr(_native, 'radial_bin_median'):
+            profile = np.asarray(_native.radial_bin_median(
+                np.ascontiguousarray(radii, dtype=np.float64),
+                np.ascontiguousarray(channel, dtype=np.float64),
+                max_radius, n_bins))
+        else:
+            bin_edges = np.linspace(0.0, max_radius + 1.0, n_bins + 1)
+            profile = np.zeros(n_bins, dtype=np.float64)
+            for b in range(n_bins):
+                in_bin = (radii >= bin_edges[b]) & (radii < bin_edges[b + 1])
+                if in_bin.any():
+                    profile[b] = float(np.median(channel[in_bin]))
 
         # Smooth the profile
         from scipy.ndimage import gaussian_filter1d

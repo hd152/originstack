@@ -40,13 +40,16 @@ except Exception:  # pragma: no cover
     _zoom = _gauss = None
     _HAS_SCIPY = False
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE = hasattr(_native, 'local_normalize_grid')
+except Exception:  # pragma: no cover
+    _native = None
+    _HAS_NATIVE = False
 
-def _coarse_background(frame: np.ndarray, grid: int, pct: float) -> np.ndarray:
-    """Star-rejected coarse background grid (grid, grid, C).
 
-    Per mesh cell the background is a low percentile of the cell pixels — stars
-    and bright objects sit in the high tail and are excluded, so the estimate
-    tracks the sky level without a separate star mask."""
+def _coarse_background_numpy(frame: np.ndarray, grid: int, pct: float) -> np.ndarray:
+    """numpy fallback -- see `_coarse_background`."""
     h, w, c = frame.shape
     ys = np.linspace(0, h, grid + 1).astype(int)
     xs = np.linspace(0, w, grid + 1).astype(int)
@@ -58,6 +61,24 @@ def _coarse_background(frame: np.ndarray, grid: int, pct: float) -> np.ndarray:
             cell = frame[y0:y1, x0:x1, :].reshape(-1, c)
             bg[iy, ix] = np.percentile(cell, pct, axis=0)
     return bg
+
+
+def _coarse_background(frame: np.ndarray, grid: int, pct: float) -> np.ndarray:
+    """Star-rejected coarse background grid (grid, grid, C).
+
+    Per mesh cell the background is a low percentile of the cell pixels — stars
+    and bright objects sit in the high tail and are excluded, so the estimate
+    tracks the sky level without a separate star mask.
+
+    Called once per frame, so the numpy reference's per-cell `np.percentile`
+    call overhead is multiplied by the session's frame count (e.g. 200 frames
+    x 24^2 grid = ~115k tiny percentile calls per run) -- the native kernel
+    fuses one frame's whole grid into a single pass.
+    """
+    if _HAS_NATIVE:
+        return np.asarray(_native.local_normalize_grid(
+            np.ascontiguousarray(frame, dtype=np.float32), int(grid), float(pct)))
+    return _coarse_background_numpy(frame, grid, pct)
 
 
 def _upsample(grid_bg: np.ndarray, h: int, w: int) -> np.ndarray:

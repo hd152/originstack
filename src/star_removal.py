@@ -29,6 +29,13 @@ except Exception:  # pragma: no cover
     gaussian_filter = None
     _HAS_SCIPY = False
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE = hasattr(_native, 'stamp_star_disks')
+except Exception:  # pragma: no cover
+    _native = None
+    _HAS_NATIVE = False
+
 # Safety cap, same spirit as trail_reject's max_area_frac guard: a mask this
 # large means star detection went haywire (huge galaxy core, comet coma
 # misread as a field of giant "stars") -- abort rather than gut the frame.
@@ -61,21 +68,34 @@ def build_star_mask(shape: Tuple[int, int], sources, fwhm: float,
 
     ys_c = np.asarray(sources['ycentroid'][:n], dtype=np.float64)
     xs_c = np.asarray(sources['xcentroid'][:n], dtype=np.float64)
+    radii = np.clip(radius_scale * fwhm * np.sqrt(np.maximum(peaks, 0.0) / med_peak),
+                     min_r, max_r)
 
-    mask = np.zeros((H, W), dtype=bool)
-    max_r_used = 0.0
-    for i in range(n):
-        r = radius_scale * fwhm * np.sqrt(max(peaks[i], 0.0) / med_peak)
-        r = float(np.clip(r, min_r, max_r))
-        cy, cx = ys_c[i], xs_c[i]
-        y0, y1 = max(0, int(cy - r)), min(H, int(cy + r) + 1)
-        x0, x1 = max(0, int(cx - r)), min(W, int(cx + r) + 1)
-        if y1 <= y0 or x1 <= x0:
-            continue
-        yy, xx = np.mgrid[y0:y1, x0:x1]
-        disk = (yy - cy) ** 2 + (xx - cx) ** 2 <= r * r
-        mask[y0:y1, x0:x1] |= disk
-        max_r_used = max(max_r_used, r)
+    # On by default; rich star fields hit thousands of small per-star disk
+    # stamps. The native kernel parallelizes over output rows (not stars, to
+    # avoid a shared-mutable-mask race) but applies the exact same per-pixel
+    # membership test as the loop below, so the mask matches bit-for-bit.
+    if _HAS_NATIVE:
+        mask_u8, max_r_used = _native.stamp_star_disks(
+            H, W,
+            np.ascontiguousarray(ys_c, dtype=np.float64),
+            np.ascontiguousarray(xs_c, dtype=np.float64),
+            np.ascontiguousarray(radii, dtype=np.float64))
+        mask = np.asarray(mask_u8).astype(bool)
+    else:
+        mask = np.zeros((H, W), dtype=bool)
+        max_r_used = 0.0
+        for i in range(n):
+            r = float(radii[i])
+            cy, cx = ys_c[i], xs_c[i]
+            y0, y1 = max(0, int(cy - r)), min(H, int(cy + r) + 1)
+            x0, x1 = max(0, int(cx - r)), min(W, int(cx + r) + 1)
+            if y1 <= y0 or x1 <= x0:
+                continue
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            disk = (yy - cy) ** 2 + (xx - cx) ** 2 <= r * r
+            mask[y0:y1, x0:x1] |= disk
+            max_r_used = max(max_r_used, r)
 
     if not mask.any():
         return None, 0.0

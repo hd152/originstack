@@ -33,14 +33,20 @@ except Exception:  # pragma: no cover - scipy is a hard dep in practice
     curve_fit = None
     _HAS_SCIPY = False
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE = hasattr(_native, 'fit_moffat_native')
+except Exception:  # pragma: no cover
+    _native = None
+    _HAS_NATIVE = False
+
 
 def _moffat(r: np.ndarray, amp: float, alpha: float, beta: float) -> np.ndarray:
     return amp / np.power(1.0 + (r / alpha) ** 2, beta)
 
 
-def _fit_moffat_wing(r: np.ndarray, v: np.ndarray) -> Optional[Tuple[float, float, float]]:
-    """Fit background-subtracted intensities ``v`` at radii ``r`` to a Moffat.
-    Returns (amp, alpha, beta) or None on failure."""
+def _fit_moffat_wing_numpy(r: np.ndarray, v: np.ndarray) -> Optional[Tuple[float, float, float]]:
+    """scipy.optimize.curve_fit fallback -- see `_fit_moffat_wing`."""
     if curve_fit is None or len(r) < 6:
         return None
     amp0 = float(np.max(v))
@@ -59,6 +65,30 @@ def _fit_moffat_wing(r: np.ndarray, v: np.ndarray) -> Optional[Tuple[float, floa
         return amp, alpha, beta
     except Exception:
         return None
+
+
+def _fit_moffat_wing(r: np.ndarray, v: np.ndarray) -> Optional[Tuple[float, float, float]]:
+    """Fit background-subtracted intensities ``v`` at radii ``r`` to a Moffat.
+    Returns (amp, alpha, beta) or None on failure.
+
+    Native path (`fit_moffat_native`): scipy's bounded curve_fit calls back
+    into this module's Python `_moffat` every optimizer iteration -- with up
+    to 800 stars x 3 channels per repair run, that Python-callback overhead
+    dominates, not the fit's own arithmetic. The native kernel is a
+    from-scratch bounded Levenberg-Marquardt with the Moffat model and its
+    Jacobian both inlined, so no callback ever crosses back into Python.
+    """
+    if _HAS_NATIVE:
+        res = _native.fit_moffat_native(
+            np.ascontiguousarray(r, dtype=np.float64),
+            np.ascontiguousarray(v, dtype=np.float64))
+        if res is None:
+            return None
+        amp, alpha, beta = res
+        if not (np.isfinite(amp) and np.isfinite(alpha) and np.isfinite(beta)):
+            return None
+        return float(amp), float(alpha), float(beta)
+    return _fit_moffat_wing_numpy(r, v)
 
 
 def repair_saturated_stars(

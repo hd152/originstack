@@ -4874,6 +4874,469 @@ fn continuum_scale_moments(
     Ok((n, s20 / nf, s11 / nf, s02 / nf, s30 / nf, s21 / nf, s12 / nf, s03 / nf))
 }
 
+// ---------------------------------------------------------------------------
+// Moffat wing fit (src/star_repair.py's `_fit_moffat_wing`)
+// ---------------------------------------------------------------------------
+//
+// scipy.optimize.curve_fit's bounded trust-region solver calls back into the
+// Python Moffat model every iteration -- with up to 800 saturated stars x 3
+// channels per postprocess run, that's tens of thousands of tiny Python
+// callbacks, not a large-array cost. This is a from-scratch Levenberg-
+// Marquardt fit with the Moffat model and its analytic Jacobian both inlined
+// (no numerical diff, no callback), box constraints enforced by clamping
+// each proposed step into [lower, upper] before evaluating it. Not a port of
+// scipy's TRF algorithm -- a different (simpler) bounded LM -- so parity
+// against scipy is judged by both recovering the same synthetic
+// ground-truth Moffat parameters within tolerance (tests/test_native.py),
+// not bit-exact agreement with curve_fit's own iterate path.
+
+/// Moffat value + analytic partials at squared radius `r2`.
+/// I(r) = amp * (1 + (r/alpha)^2)^-beta ; returns (I, dI/damp, dI/dalpha, dI/dbeta).
+#[inline]
+fn moffat_eval(r2: f64, amp: f64, alpha: f64, beta: f64) -> (f64, f64, f64, f64) {
+    let u = r2 / (alpha * alpha);
+    let base = 1.0 + u;
+    let pw = base.powf(-beta);
+    let i = amp * pw;
+    let d_amp = pw;
+    let d_alpha = 2.0 * beta * u / (alpha * base) * i;
+    let d_beta = -i * base.ln();
+    (i, d_amp, d_alpha, d_beta)
+}
+
+/// Cramer's-rule solve of a 3x3 linear system; `None` on a near-singular matrix.
+fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det3 = |m: &[[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let det = det3(&a);
+    if det.abs() < 1e-18 {
+        return None;
+    }
+    let mut x = [0.0f64; 3];
+    for k in 0..3 {
+        let mut m = a;
+        for row in 0..3 {
+            m[row][k] = b[row];
+        }
+        x[k] = det3(&m) / det;
+    }
+    Some(x)
+}
+
+/// Bounded Levenberg-Marquardt fit of the Moffat model to (r, v) samples.
+/// Mirrors `_fit_moffat_wing`'s p0/bounds construction exactly; `None` when
+/// there are too few samples or the peak is non-positive (same early-outs
+/// as the Python reference).
+fn fit_moffat_lm(r: &[f64], v: &[f64]) -> Option<(f64, f64, f64)> {
+    let n = r.len();
+    if n < 6 {
+        return None;
+    }
+    let amp0 = v.iter().cloned().fold(f64::MIN, f64::max);
+    if !(amp0 > 0.0) {
+        return None;
+    }
+    let mut rs: Vec<f64> = r.to_vec();
+    let alpha0 = median_f64_scratch(&mut rs).max(1.0);
+
+    let lower = [amp0 * 0.5, 0.5, 1.0];
+    let upper = [amp0 * 50.0, 50.0, 8.0];
+    let mut p = [amp0 * 2.0, alpha0, 2.5];
+    for k in 0..3 {
+        p[k] = p[k].clamp(lower[k], upper[k]);
+    }
+
+    let cost = |p: &[f64; 3]| -> f64 {
+        let mut s = 0.0;
+        for i in 0..n {
+            let (val, ..) = moffat_eval(r[i] * r[i], p[0], p[1], p[2]);
+            let res = val - v[i];
+            s += res * res;
+        }
+        s
+    };
+
+    let mut lambda = 1e-3;
+    let mut c = cost(&p);
+    for _outer in 0..100 {
+        let mut jtj = [[0.0f64; 3]; 3];
+        let mut jtr = [0.0f64; 3];
+        for i in 0..n {
+            let (val, d_amp, d_alpha, d_beta) = moffat_eval(r[i] * r[i], p[0], p[1], p[2]);
+            let res = val - v[i];
+            let j = [d_amp, d_alpha, d_beta];
+            for a in 0..3 {
+                jtr[a] += j[a] * res;
+                for b in 0..3 {
+                    jtj[a][b] += j[a] * j[b];
+                }
+            }
+        }
+        let mut improved = false;
+        for _try in 0..8 {
+            let mut a = jtj;
+            for d in 0..3 {
+                a[d][d] += lambda * jtj[d][d].max(1e-12);
+            }
+            let neg_jtr = [-jtr[0], -jtr[1], -jtr[2]];
+            let delta = match solve3(a, neg_jtr) {
+                Some(d) => d,
+                None => {
+                    lambda *= 10.0;
+                    continue;
+                }
+            };
+            let mut cand = p;
+            for k in 0..3 {
+                cand[k] = (p[k] + delta[k]).clamp(lower[k], upper[k]);
+            }
+            let cand_cost = cost(&cand);
+            if cand_cost < c {
+                p = cand;
+                c = cand_cost;
+                lambda = (lambda * 0.3).max(1e-12);
+                improved = true;
+                break;
+            } else {
+                lambda *= 10.0;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    if p.iter().all(|x| x.is_finite()) {
+        Some((p[0], p[1], p[2]))
+    } else {
+        None
+    }
+}
+
+#[pyfunction]
+fn fit_moffat_native(
+    r: PyReadonlyArray1<f64>,
+    v: PyReadonlyArray1<f64>,
+) -> PyResult<Option<(f64, f64, f64)>> {
+    let r = r.as_slice()?;
+    let v = v.as_slice()?;
+    if r.len() != v.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "r and v must have the same length",
+        ));
+    }
+    Ok(fit_moffat_lm(r, v))
+}
+
+// ---------------------------------------------------------------------------
+// Background mesh median grid (src/background.py's `_process_channel`)
+// ---------------------------------------------------------------------------
+//
+// Unconditional on the default pipeline (background extraction is on by
+// default, and this exact loop shape also runs as a DBE/wavelet-BG fallback
+// whenever patch sampling comes up short, plus the legacy `--bg-method
+// mesh` path) -- called 9x per stack (1 broad + 2 fine passes x 3
+// channels). Per-cell `np.median` call overhead dominates at the small cell
+// sizes involved (fine pass is order ~700 cells/channel), not per-cell
+// compute; this fuses the whole (ny, nx) grid into one native pass,
+// parallel over cells.
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn mesh_median_grid<'py>(
+    py: Python<'py>,
+    channel: PyReadonlyArray2<'py, f64>,
+    star_mask: PyReadonlyArray2<'py, f32>,
+    has_star_mask: bool,
+    cell_excluded: PyReadonlyArray2<'py, u8>,
+    ny: usize,
+    nx: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let channel = channel.as_array();
+    let mask = star_mask.as_array();
+    let excluded = cell_excluded.as_array();
+    let (h, w) = (channel.shape()[0], channel.shape()[1]);
+
+    let results: Vec<f64> = (0..ny * nx)
+        .into_par_iter()
+        .map(|idx| {
+            let iy = idx / nx;
+            let ix = idx % nx;
+            if excluded[[iy, ix]] != 0 {
+                return f64::NAN;
+            }
+            let y0 = ((iy as f64) * (h as f64) / (ny as f64)).round() as i64;
+            let y1 = ((((iy + 1) as f64) * (h as f64) / (ny as f64)).round() as i64).min(h as i64);
+            let x0 = ((ix as f64) * (w as f64) / (nx as f64)).round() as i64;
+            let x1 = ((((ix + 1) as f64) * (w as f64) / (nx as f64)).round() as i64).min(w as i64);
+            if y1 <= y0 || x1 <= x0 {
+                return f64::NAN;
+            }
+            let (y0, y1, x0, x1) = (y0 as usize, y1 as usize, x0 as usize, x1 as usize);
+            let mut cell: Vec<f64> = Vec::with_capacity((y1 - y0) * (x1 - x0));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if has_star_mask && mask[[y, x]] >= 0.5 {
+                        continue;
+                    }
+                    cell.push(channel[[y, x]]);
+                }
+            }
+            if cell.is_empty() {
+                f64::NAN
+            } else {
+                median_f64_scratch(&mut cell)
+            }
+        })
+        .collect();
+
+    Ok(numpy::ndarray::Array2::from_shape_vec((ny, nx), results)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// Local-normalization coarse background grid (src/local_normalize.py's
+// `_coarse_background`)
+// ---------------------------------------------------------------------------
+//
+// Called once per frame (N_frames x grid^2 small `np.percentile` calls in
+// the numpy reference -- e.g. a 200-frame session x 24^2 grid = ~115k tiny
+// percentile calls per `--local-normalize` run). Fuses the whole (grid,
+// grid, C) grid into one native pass per frame, parallel over cells.
+
+#[pyfunction]
+fn local_normalize_grid<'py>(
+    py: Python<'py>,
+    frame: PyReadonlyArray3<'py, f32>,
+    grid: usize,
+    pct: f64,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let frame = frame.as_array();
+    let (h, w, c) = (frame.shape()[0], frame.shape()[1], frame.shape()[2]);
+
+    let ys: Vec<usize> = (0..=grid)
+        .map(|i| {
+            if i == grid {
+                h
+            } else {
+                (((i as f64) * (h as f64) / (grid as f64)) as usize).min(h)
+            }
+        })
+        .collect();
+    let xs: Vec<usize> = (0..=grid)
+        .map(|i| {
+            if i == grid {
+                w
+            } else {
+                (((i as f64) * (w as f64) / (grid as f64)) as usize).min(w)
+            }
+        })
+        .collect();
+
+    let results: Vec<f32> = (0..grid * grid)
+        .into_par_iter()
+        .flat_map(|idx| {
+            let iy = idx / grid;
+            let ix = idx % grid;
+            let y0 = ys[iy];
+            let y1 = (ys[iy] + 1).max(ys[iy + 1]).min(h);
+            let x0 = xs[ix];
+            let x1 = (xs[ix] + 1).max(xs[ix + 1]).min(w);
+            let mut out = vec![0.0f32; c];
+            let mut scratch: Vec<f32> = Vec::with_capacity((y1 - y0) * (x1 - x0));
+            for ch in 0..c {
+                scratch.clear();
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        scratch.push(frame[[y, x, ch]]);
+                    }
+                }
+                scratch.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                out[ch] = percentile_sorted(&scratch, pct);
+            }
+            out
+        })
+        .collect();
+
+    Ok(numpy::ndarray::Array3::from_shape_vec((grid, grid, c), results)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// Star-disk mask stamping (src/star_removal.py's `build_star_mask`)
+// ---------------------------------------------------------------------------
+//
+// On by default (`--no-remove-stars` to disable); rich star fields hit up to
+// 4000 small per-star Python iterations building the mask. Parallel over
+// output rows rather than stars (a shared mutable mask ruled out per-star
+// parallelism) -- each row scans every star's precomputed integer bounding
+// box (a cheap O(1) reject before the per-pixel test), then applies the
+// exact same disk-membership test the numpy reference uses,
+// `(y - cy)^2 + (x - cx)^2 <= r^2`, so results match bit-for-bit. Also
+// returns the max radius actually stamped (over stars whose bbox was
+// non-empty), matching the Python reference's `max_r_used` bookkeeping.
+
+#[pyfunction]
+fn stamp_star_disks<'py>(
+    py: Python<'py>,
+    h: usize,
+    w: usize,
+    cy: PyReadonlyArray1<'py, f64>,
+    cx: PyReadonlyArray1<'py, f64>,
+    r: PyReadonlyArray1<'py, f64>,
+) -> PyResult<(Bound<'py, PyArray2<u8>>, f64)> {
+    let cy = cy.as_slice()?;
+    let cx = cx.as_slice()?;
+    let r = r.as_slice()?;
+    let n = cy.len();
+
+    let mut max_r_used = 0.0f64;
+    let bbox: Vec<(usize, usize, usize, usize)> = (0..n)
+        .map(|i| {
+            let y0f = (cy[i] - r[i]).trunc();
+            let y0 = if y0f < 0.0 { 0usize } else { (y0f as usize).min(h) };
+            let y1f = (cy[i] + r[i]).trunc() + 1.0;
+            let y1 = if y1f < 0.0 { 0usize } else { (y1f as usize).min(h) };
+            let x0f = (cx[i] - r[i]).trunc();
+            let x0 = if x0f < 0.0 { 0usize } else { (x0f as usize).min(w) };
+            let x1f = (cx[i] + r[i]).trunc() + 1.0;
+            let x1 = if x1f < 0.0 { 0usize } else { (x1f as usize).min(w) };
+            if y1 > y0 && x1 > x0 && r[i] > max_r_used {
+                max_r_used = r[i];
+            }
+            (y0, y1, x0, x1)
+        })
+        .collect();
+
+    let mut data = vec![0u8; h * w];
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for i in 0..n {
+            let (y0, y1, x0, x1) = bbox[i];
+            if y < y0 || y >= y1 {
+                continue;
+            }
+            let dy = y as f64 - cy[i];
+            let dy2 = dy * dy;
+            let rr2 = r[i] * r[i];
+            if dy2 > rr2 {
+                continue;
+            }
+            for x in x0..x1 {
+                let dx = x as f64 - cx[i];
+                if dy2 + dx * dx <= rr2 {
+                    row[x] = 1;
+                }
+            }
+        }
+    });
+
+    let arr = numpy::ndarray::Array2::from_shape_vec((h, w), data)
+        .unwrap()
+        .into_pyarray(py);
+    Ok((arr, max_r_used))
+}
+
+// ---------------------------------------------------------------------------
+// Bresenham line rasterization (src/trail_reject.py's `_bresenham_line`)
+// ---------------------------------------------------------------------------
+//
+// Textbook zero-vectorization case: a sequential line-walk with pure scalar
+// integer arithmetic, no numpy call it could hide behind. Direct port of
+// the existing (skimage-validated) symmetric error-term formulation, so
+// results match integer-for-integer.
+
+#[pyfunction]
+fn bresenham_line_native<'py>(
+    py: Python<'py>,
+    r0: i64,
+    c0: i64,
+    r1: i64,
+    c1: i64,
+) -> (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<i64>>) {
+    let mut r = r0;
+    let mut c = c0;
+    let mut dr = (r1 - r0).abs();
+    let mut dc = (c1 - c0).abs();
+    let mut sr: i64 = if r1 - r0 > 0 { 1 } else { -1 };
+    let mut sc: i64 = if c1 - c0 > 0 { 1 } else { -1 };
+    let steep = dr > dc;
+    if steep {
+        std::mem::swap(&mut r, &mut c);
+        std::mem::swap(&mut dr, &mut dc);
+        std::mem::swap(&mut sr, &mut sc);
+    }
+
+    let mut d = 2 * dr - dc;
+    let n = (dc + 1) as usize;
+    let mut rr = vec![0i64; n];
+    let mut cc = vec![0i64; n];
+    for i in 0..(dc as usize) {
+        if steep {
+            rr[i] = c;
+            cc[i] = r;
+        } else {
+            rr[i] = r;
+            cc[i] = c;
+        }
+        while d >= 0 {
+            r += sr;
+            d -= 2 * dc;
+        }
+        c += sc;
+        d += 2 * dr;
+    }
+    rr[dc as usize] = r1;
+    cc[dc as usize] = c1;
+    (rr.into_pyarray(py), cc.into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// Radial-bin median profile (src/denoising.py's `radial_renormalize`,
+// comet-mode only)
+// ---------------------------------------------------------------------------
+//
+// The numpy reference rebuilds a boolean mask over the *whole* image once
+// per bin (n_bins full-image passes) just to select each bin's pixels
+// before taking the median -- wasteful, since bin membership only needs one
+// O(H*W) bucket-assignment pass. This does exactly that: one pass buckets
+// every pixel's channel value by its radial bin (matching the numpy
+// reference's half-open `[edge[b], edge[b+1])` binning), then a native
+// quickselect median per bucket, parallel over bins.
+
+#[pyfunction]
+fn radial_bin_median<'py>(
+    py: Python<'py>,
+    radii: PyReadonlyArray2<'py, f64>,
+    channel: PyReadonlyArray2<'py, f64>,
+    max_radius: f64,
+    n_bins: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let radii = radii.as_array();
+    let channel = channel.as_array();
+    let (h, w) = (radii.shape()[0], radii.shape()[1]);
+    let bin_width = (max_radius + 1.0) / n_bins as f64;
+
+    let mut buckets: Vec<Vec<f64>> = (0..n_bins).map(|_| Vec::new()).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let rad = radii[[y, x]];
+            let b = ((rad / bin_width) as isize).clamp(0, n_bins as isize - 1) as usize;
+            buckets[b].push(channel[[y, x]]);
+        }
+    }
+
+    let profile: Vec<f64> = buckets
+        .into_par_iter()
+        .map(|mut v| if v.is_empty() { 0.0 } else { median_f64_scratch(&mut v) })
+        .collect();
+
+    Ok(profile.into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -4910,6 +5373,12 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gram_matrix_wide, m)?)?;
     m.add_function(wrap_pyfunction!(small_times_wide, m)?)?;
     m.add_function(wrap_pyfunction!(continuum_scale_moments, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_moffat_native, m)?)?;
+    m.add_function(wrap_pyfunction!(mesh_median_grid, m)?)?;
+    m.add_function(wrap_pyfunction!(local_normalize_grid, m)?)?;
+    m.add_function(wrap_pyfunction!(stamp_star_disks, m)?)?;
+    m.add_function(wrap_pyfunction!(bresenham_line_native, m)?)?;
+    m.add_function(wrap_pyfunction!(radial_bin_median, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
