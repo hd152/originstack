@@ -1258,11 +1258,13 @@ def dynamic_background_extraction(
 
         if n < Config.DBE_MIN_SAMPLES:
             if verbose:
+                if _dense_field:
+                    fallback_desc = 'sigma-clip mesh (no emission mask' + (
+                        ', exclusion mask kept' if exclusion_mask is not None else '') + ')'
+                else:
+                    fallback_desc = 'mesh extraction'
                 safe_print(f"    DBE {channel_names[c]}: insufficient samples ({n}), "
-                           f"falling back to "
-                           f"{('sigma-clip mesh (no emission mask' +
-                               (', exclusion mask kept' if exclusion_mask is not None else '') +
-                               ')') if _dense_field else 'mesh extraction'}")
+                           f"falling back to {fallback_desc}")
             if _dense_field:
                 # Ultra-dense field: the full emission mask (many small
                 # stars/point sources) would exclude too much -- sigma-
@@ -1461,11 +1463,13 @@ def wavelet_background_extraction(
 
         if n < Config.DBE_MIN_SAMPLES:
             if verbose:
+                if _dense_field:
+                    fallback_desc = 'sigma-clip mesh (no emission mask' + (
+                        ', exclusion mask kept' if exclusion_mask is not None else '') + ')'
+                else:
+                    fallback_desc = 'mesh extraction'
                 safe_print(f"    Wavelet BG {channel_names[c]}: insufficient samples ({n}), "
-                           f"falling back to "
-                           f"{('sigma-clip mesh (no emission mask' +
-                               (', exclusion mask kept' if exclusion_mask is not None else '') +
-                               ')') if _dense_field else 'mesh extraction'}")
+                           f"falling back to {fallback_desc}")
             if _dense_field:
                 # See dynamic_background_extraction's identical branch for
                 # why a caller-supplied exclusion_mask (galaxy/comet) is
