@@ -4,7 +4,7 @@ All notable user-facing changes to OriginStack are documented here. Format
 loosely follows [Keep a Changelog](https://keepachangelog.com/); versions
 match the `VERSION` file and `v*` git tags.
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-08-21
 
 ### Changed
 
