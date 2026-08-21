@@ -85,8 +85,14 @@ def score_lights_with_astrollm(lights: List[FrameInfo], args) -> None:
     stray_light_flag, and frames whose quality_score falls more than
     Config.ASTROLLM_OUTLIER_SIGMA below the session mean -- all log-only,
     matching astrollm's early/unvalidated integration status.
+
+    Gated on --astrollm-score-all, not just --astrollm: scoring every
+    accepted frame costs ~8s/frame (subprocess + model-load overhead, not
+    per-image compute) -- minutes on a large session. Checked here too,
+    not just at the call site, so calling this function directly is never
+    accidentally slow regardless of caller.
     """
-    if not getattr(args, 'astrollm', False):
+    if not (getattr(args, 'astrollm', False) and getattr(args, 'astrollm_score_all', False)):
         return
     paths = _astrollm_paths(args)
     if paths is None:

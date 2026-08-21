@@ -66,8 +66,9 @@ def _frame(path, accepted=True):
 
 
 def _args(**overrides):
-    base = dict(astrollm=True, astrollm_python='py.exe', astrollm_script='infer.py',
-               astrollm_checkpoint='model.pt', astrollm_workers=2, astrollm_timeout=60.0)
+    base = dict(astrollm=True, astrollm_score_all=True, astrollm_python='py.exe',
+               astrollm_script='infer.py', astrollm_checkpoint='model.pt',
+               astrollm_workers=2, astrollm_timeout=60.0)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -85,6 +86,17 @@ class TestScoreLightsWithAstrollm:
         lights = [_frame('a.fits')]
         with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
             score_lights_with_astrollm(lights, _args(astrollm_python=None))
+        m.assert_not_called()
+        assert 'astrollm' not in lights[0].metrics
+
+    def test_astrollm_on_but_score_all_off_is_noop(self):
+        """--astrollm alone (without --astrollm-score-all) must not trigger
+        the slow every-frame scan -- that's the whole point of the split:
+        --astrollm's fast 3-frame sample (sample_session_priors) is a
+        separate code path this function has nothing to do with."""
+        lights = [_frame('a.fits')]
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
+            score_lights_with_astrollm(lights, _args(astrollm_score_all=False))
         m.assert_not_called()
         assert 'astrollm' not in lights[0].metrics
 

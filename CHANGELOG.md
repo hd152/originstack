@@ -17,6 +17,12 @@ match the `VERSION` file and `v*` git tags.
   per-frame thumbnail ring) all carry over with the same functionality.
 - The standalone `--web-view` CLI flag (browser-tab dashboard) is removed;
   the desktop app is now the only GUI surface. The CLI itself is unchanged.
+- **`--astrollm` no longer scores every accepted light frame by default.**
+  It now samples 3 frames (fast, ~8s each) to feed the target-classification
+  prior and a defect-nudge, same as before but bounded in time regardless of
+  session size. Full per-frame scoring is still available, opt-in, via the
+  new `--astrollm-score-all` flag. `--astrollm-score-all` alone (without
+  `--astrollm`) is a no-op and now warns at startup.
 
 ### Internal
 

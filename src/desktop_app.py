@@ -223,7 +223,7 @@ class ScrollableFrame(ttk.Frame):
 # the other ~110 flags are fine-tuning most runs never need.
 _COMMON_DESTS = ['directory', 'output', 'preset', 'auto', 'stack_method',
                  'denoiser', 'deconvolve', 'drizzle_scale', 'trail_reject',
-                 'use_gpu', 'parallel']
+                 'use_gpu', 'parallel', 'astrollm']
 
 
 class SetupForm(ttk.Frame):

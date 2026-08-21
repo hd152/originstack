@@ -626,8 +626,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # Runs here (not inside the branches above) so it fires exactly
             # once regardless of whether Phase 1 just ran or was restored
             # from a checkpoint -- lights[*].accepted is mutated in place by
-            # restore_frame_state either way.
-            if getattr(args, 'astrollm', False):
+            # restore_frame_state either way. Opt-in separately from plain
+            # --astrollm (--astrollm-score-all): scoring every accepted
+            # frame costs ~8s/frame (subprocess + model-load overhead, not
+            # per-image compute), minutes on a large session -- --astrollm
+            # alone only pays that cost 3x total, via sample_session_priors
+            # above.
+            if getattr(args, 'astrollm', False) and getattr(args, 'astrollm_score_all', False):
                 from src.astrollm import score_lights_with_astrollm
                 score_lights_with_astrollm(lights, args)
 
