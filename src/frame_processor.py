@@ -16,6 +16,7 @@ from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import safe_print, print_quality_table, format_time
 from src.io_fits import load_fits, load_frame
+from src.frame_discovery import is_nebula_filter
 from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
                          apply_hot_pixel_map_bayer,
                          remove_hot_pixels_rgb, remove_hot_pixels_rgb_with_lum,
@@ -332,9 +333,16 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             return {'error': f'vignette correction error: {e}'}
     timings['vignette'], _t = time.perf_counter() - _t, time.perf_counter()
 
-    # White balance
+    # White balance -- skipped under a nebula/light-pollution filter (e.g.
+    # FILTER='Nebula'): grayworld/whitepatch both assume a neutral-color scene,
+    # which a continuum-suppressing bandpass filter breaks.
     try:
-        if white_balance == 'grayworld':
+        if is_nebula_filter(hdr.get('FILTER')):
+            if white_balance in ('grayworld', 'whitepatch') and not _warned_nebula_wb_skip:
+                _warned_nebula_wb_skip.add(True)
+                safe_print(f"  ℹ Nebula filter detected ({hdr.get('FILTER')}) -- "
+                           f"skipping {white_balance} white balance")
+        elif white_balance == 'grayworld':
             rgb = white_balance_grayworld(rgb)
         elif white_balance == 'whitepatch':
             rgb = white_balance_whitepatch(rgb)
@@ -449,6 +457,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 _worker_masters: Dict[str, Any] = {}
 _worker_trail_reject: bool = False  # per-session trail-rejection flag for pool workers
 _warned_dark_scales: set = set()  # dedup dark-scale mismatch warnings across frames
+_warned_nebula_wb_skip: set = set()  # dedup nebula-filter white-balance-skip notice
 
 # GPU calibration probe cache — probed once per unique frame size per session
 _gpu_calib_cache: Dict[Tuple[int, int], bool] = {}

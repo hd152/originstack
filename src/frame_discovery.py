@@ -248,6 +248,23 @@ def select_matching_darks(lights: List[FrameInfo], darks: List[FrameInfo]) -> Li
     return selected
 
 
+# FILTER header values (case-insensitive) that designate a broadband nebula /
+# light-pollution-suppression filter in front of an OSC sensor (still Bayer --
+# unlike a mono narrowband Ha/OIII/SII sub, this stays fully debayered) rather
+# than a plain clear/no-filter exposure. Confirmed against a real Unistellar
+# Origin FITS header (FILTER='Nebula', BAYERPAT='RGGB').
+_NEBULA_FILTER_NAMES = {'nebula'}
+
+
+def is_nebula_filter(filter_name: Optional[str]) -> bool:
+    """True when *filter_name* (a FITS FILTER header value) designates a
+    nebula/light-pollution filter rather than a clear/OSC exposure. Such a
+    filter suppresses the continuum, which breaks grayworld/whitepatch white
+    balance's neutral-scene assumption -- see the white-balance step in
+    src/frame_processor.py::_process_single_frame."""
+    return bool(filter_name) and filter_name.strip().lower() in _NEBULA_FILTER_NAMES
+
+
 def select_matching_flats(lights: List[FrameInfo], flats: List[FrameInfo]) -> List[FrameInfo]:
     """Select flat frames that best match the light frames.
 
