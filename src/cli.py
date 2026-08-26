@@ -557,7 +557,18 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         safe_print('  ERROR: No light frames found across sessions')
         raise SystemExit('No light frames found')
 
+    if getattr(args, 'dry_run', False):
+        safe_print(f"\n  --- DRY RUN ---")
+        safe_print(f"  Light frames: {n_lights} pooled from {n_sessions} sessions")
+        safe_print(f"  Stack method: {args.stack_method}")
+        return
+
     masters = _build_masters(combined, stats, args)
+
+    if getattr(args, 'health_check', False):
+        print_header("HEALTH CHECK", "=")
+        run_health_check(combined, masters, sorted(subdirs)[0])
+        return
 
     # Use the first subfolder that has an info.json so pipeline can populate
     # the FITS header with session metadata (bayer pattern, WCS, target name).
@@ -572,6 +583,21 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
     stack_target(all_frames, output, args, masters, stats)
     save_effective_config(args, output)
     safe_print(f"\n  Total elapsed: {format_time(time.time() - overall_start)}")
+
+
+def _want_combine_sessions(args: argparse.Namespace) -> bool:
+    """Multiple subfolders default to pooling into one unified stack --
+    a multi-night/multi-filter session directory is the far more common
+    case than wanting independent per-subfolder stacks stitched together
+    afterward. --mosaic needs per-subfolder targets to reproject and stitch,
+    so it always wins; otherwise an explicit --combine-sessions or
+    --hierarchical wins; absent either, the new default is combine."""
+    if getattr(args, 'mosaic', False):
+        return False
+    explicit = getattr(args, '_explicit_cli_dests', set())
+    if 'combine_sessions' in explicit:
+        return bool(args.combine_sessions)
+    return not getattr(args, 'hierarchical', False)
 
 
 def process_directory(directory: str, output: str, args: argparse.Namespace):
@@ -599,7 +625,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         # single folder
         targets = [(directory, output)]
         safe_print(f"  Mode: Single folder")
-    elif subdirs and getattr(args, 'combine_sessions', False):
+    elif subdirs and _want_combine_sessions(args):
         # Combined-sessions mode: pool all lights from all subfolders into one stack
         safe_print(f"  Mode: Combined sessions ({len(subdirs)} subfolders -> single unified stack)")
         _run_combined_sessions(subdirs, output, args)
@@ -1551,7 +1577,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Ignore any existing checkpoint and start from scratch.')
     g_sessions.add_argument('--combine-sessions', action='store_true',
                    help='Pool all light frames from every subfolder into a single unified '
-                        'stack instead of stacking each subfolder separately.')
+                        'stack instead of stacking each subfolder separately. This is now '
+                        'the default whenever subfolders are found (unless --mosaic or '
+                        '--hierarchical) -- this flag only matters to force it back on '
+                        'after an explicit --hierarchical.')
+    g_sessions.add_argument('--hierarchical', action='store_true',
+                   help='Opt back into the pre-default behavior: stack each subfolder '
+                        'separately, then combine the per-subfolder stacks by registration '
+                        '(or --mosaic, if given). Has no effect unless the input directory '
+                        'contains subfolders.')
     g_sessions.add_argument('--mosaic', action='store_true',
                    help='Stitch per-subfolder stacks into a mosaic via WCS reprojection. '
                         'Requires: pip install reproject and a working plate solver. '
