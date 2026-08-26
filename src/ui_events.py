@@ -224,13 +224,19 @@ class UIEvents:
     def frame_preview(self, name: str, rgb, args=None,
                       max_dim: int = 512) -> None:
         """Publish a small thumbnail of a single processed light (Phase 1).
-        Stored in a bounded ring; the viewer can page through them."""
+        Stored in a bounded ring; the viewer can page through them.
+
+        A single unstacked sub's per-pixel colour noise (no rejection-combine
+        averaging yet) can blow up into a misleading solid green/blue blob
+        once downsized to ring-thumbnail size -- partially desaturated here
+        (this path only) so it reads as noisy-but-legible star field instead.
+        """
         if not self.active:
             return
         kw = self._stretch_kw(args)
         try:
             from src.io_fits import preview_jpeg_bytes
-            data = preview_jpeg_bytes(rgb, max_dim=max_dim, **kw)
+            data = preview_jpeg_bytes(rgb, max_dim=max_dim, desaturate=0.6, **kw)
         except Exception:
             return
         if not data:

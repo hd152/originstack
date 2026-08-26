@@ -288,11 +288,37 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
     img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY)
 
 
+def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:
+    """Blend a stretched uint8 HWC preview toward its own per-pixel luminance.
+
+    A single unstacked sub (one Phase 1 frame, no rejection-combine averaging
+    yet) from a noisy/light-polluted session has real per-pixel photon/read
+    noise that differs randomly across R/G/B -- stretching each channel
+    independently (as ``render_preview_uint8`` does, to preserve real colour
+    ratios) amplifies that into random per-pixel colour speckle. Downsized to
+    a small ring thumbnail, that speckle averages into a solid, misleading
+    colour cast (a noisy low-SNR sub can render as a near-solid green/blue
+    blob) instead of the star field it actually is. Blending toward luminance
+    turns the speckle back into visible gray-noise texture without touching
+    the shared full-resolution stretch path other previews use."""
+    amount = float(np.clip(amount, 0.0, 1.0))
+    if amount <= 0.0 or out.ndim != 3 or out.shape[2] != 3:
+        return out
+    lum = (0.299 * out[:, :, 0] + 0.587 * out[:, :, 1]
+           + 0.114 * out[:, :, 2]).astype(np.float32)
+    blended = out.astype(np.float32) * (1.0 - amount) + lum[:, :, None] * amount
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
 def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
                        ghs_b: float = 8.0, ghs_sp: float = 0.15,
                        ghs_hp: float = 0.95, black_sigma: float = 0.0,
-                       max_dim: int = 1024) -> Optional[bytes]:
-    """Stretched preview JPEG as bytes (for the live web view)."""
+                       max_dim: int = 1024, desaturate: float = 0.0) -> Optional[bytes]:
+    """Stretched preview JPEG as bytes (for the live web view).
+
+    ``desaturate`` (0-1) blends the stretched result toward luminance -- see
+    ``_desaturate_preview_uint8``. 0 (default) preserves full colour, as
+    every non-thumbnail caller wants."""
     import io as _io
     if Image is None:
         return None
@@ -300,6 +326,7 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
                                ghs_hp=ghs_hp, black_sigma=black_sigma)
     if out is None:
         return None
+    out = _desaturate_preview_uint8(out, desaturate)
     img = _preview_pil_image(out, max_dim)
     buf = _io.BytesIO()
     img.save(buf, format='JPEG', quality=85)
