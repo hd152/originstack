@@ -663,6 +663,7 @@ class App:
         self.rm = get_run_manager()
         self._last_version = -1
         self._shown_log_lines = 0
+        self._last_run_status = 'idle'
 
         root.title('OriginStack')
         root.geometry('1400x900')
@@ -730,6 +731,11 @@ class App:
         self.status_var = tk.StringVar(value='Idle.')
         ttk.Label(run_row, textvariable=self.status_var, style='Dim.TLabel').pack(
             side='left', padx=10)
+        self.open_folder_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(run_row, text='Open folder when done',
+                        variable=self.open_folder_var).pack(side='left', padx=(10, 0))
+        ttk.Button(run_row, text='Open Folder', command=self._open_output_folder).pack(
+            side='left', padx=(6, 0))
 
         phase_frame = ttk.LabelFrame(parent, text='PIPELINE')
         phase_frame.pack(fill='x', pady=6)
@@ -913,8 +919,9 @@ class App:
 
         # phases / progress
         phase = snap['phase']
+        run_done = snap['run_status'] == 'ok'
         for i, lbl in enumerate(self.phase_labels, start=1):
-            if i < phase:
+            if run_done or i < phase:
                 lbl.configure(style='PhaseDone.TLabel')
             elif i == phase:
                 lbl.configure(style='PhaseActive.TLabel')
@@ -974,6 +981,19 @@ class App:
 
         self._refresh_run_button(snap)
 
+    def _open_output_folder(self) -> None:
+        var = self.form.vars.get('output')
+        out_path = var.get().strip() if var is not None else ''
+        if not out_path:
+            return
+        folder = os.path.dirname(out_path) or '.'
+        if not os.path.isdir(folder):
+            return
+        try:
+            os.startfile(folder)
+        except Exception:
+            pass
+
     def _refresh_run_button(self, snap: Optional[Dict[str, Any]] = None) -> None:
         running = self.rm.is_running()
         if running:
@@ -985,8 +1005,14 @@ class App:
                 done_ok = snap['run_status'] == 'ok'
                 self.status_var.set('Done.' if done_ok else f"Failed: {snap['run_error']}")
                 self.header_status_var.set('Complete' if done_ok else 'Failed')
+                # Edge-triggered (not every poll tick) so it only pops once
+                # per completed run, not repeatedly while the status holds.
+                if done_ok and self._last_run_status != 'ok' and self.open_folder_var.get():
+                    self._open_output_folder()
             elif snap is None or snap['run_status'] == 'idle':
                 self.header_status_var.set('Idle')
+        if snap is not None:
+            self._last_run_status = snap['run_status']
 
 
 def _run_headless(cli_argv: List[str]) -> int:
