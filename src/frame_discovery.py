@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional
@@ -263,6 +264,35 @@ def is_nebula_filter(filter_name: Optional[str]) -> bool:
     balance's neutral-scene assumption -- see the white-balance step in
     src/frame_processor.py::_process_single_frame."""
     return bool(filter_name) and filter_name.strip().lower() in _NEBULA_FILTER_NAMES
+
+
+def _sanitize_filter_tag(name: str) -> str:
+    """Lowercase, filesystem-safe tag for a FITS FILTER header value
+    (e.g. 'Nebula' -> 'nebula', 'H-Alpha' -> 'h_alpha')."""
+    tag = re.sub(r'[^a-zA-Z0-9]+', '_', name.strip().lower()).strip('_')
+    return tag or 'unfiltered'
+
+
+def group_lights_by_filter(lights: List[FrameInfo]) -> Dict[str, List[FrameInfo]]:
+    """Group light frames by their own FITS FILTER header value.
+
+    Stacking lights shot through different filters (e.g. a 'Clear' sub next
+    to one shot through 'Nebula') together would blindly average two
+    different spectral responses into one frame. Checked per-frame (each
+    light's own header), not by directory -- a session directory can mix
+    filters within itself. Each distinct FILTER value (case-insensitive,
+    trimmed) gets its own group, keyed by a filesystem-safe tag for the
+    output filename; frames with no FILTER header (or an empty one) share a
+    single 'unfiltered' group. Callers should check ``len(groups) > 1``
+    before treating this as a real split -- a single-filter (or all-header-
+    less) session returns one group and should stack normally.
+    """
+    groups: Dict[str, List[FrameInfo]] = {}
+    for f in lights:
+        raw = (f.header.get('FILTER') or '').strip()
+        tag = _sanitize_filter_tag(raw) if raw else 'unfiltered'
+        groups.setdefault(tag, []).append(f)
+    return groups
 
 
 def select_matching_flats(lights: List[FrameInfo], flats: List[FrameInfo]) -> List[FrameInfo]:

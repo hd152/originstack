@@ -23,7 +23,8 @@ from src.gpu_context import get_gpu, reset_gpu
 from src.models import Config, ProcessingStats
 from src.utils import safe_print, print_header, format_time, setup_logging
 from src.io_fits import make_master, save_preview_rgb
-from src.frame_discovery import discover_frames, select_matching_darks, select_matching_flats
+from src.frame_discovery import (discover_frames, select_matching_darks, select_matching_flats,
+                                 group_lights_by_filter)
 from src.debayer import build_hot_pixel_map
 from src.registration import calculate_shift, apply_transform
 from src.pipeline import stack_target
@@ -647,6 +648,52 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             frames[ftype].extend(extra_cal[ftype])
         nfiles = sum(len(v) for v in frames.values())
         safe_print(f'  Found {nfiles} FITS files: {len(frames["light"])} lights, {len(frames["dark"])} darks, {len(frames["flat"])} flats, {len(frames["bias"])} bias')
+
+        # Lights shot through different filters (per-frame FITS FILTER header,
+        # not directory-based -- a session directory can mix filters, e.g. a
+        # 'Clear' sub next to a 'Nebula'-filtered one) must not be averaged
+        # together: each gets its own masters (flat matching already keys off
+        # FILTER) and its own output file.
+        filter_groups = group_lights_by_filter(frames['light'])
+        if len(filter_groups) > 1:
+            safe_print(f"  Mode: Split by filter ({len(filter_groups)} filters: "
+                       f"{', '.join(sorted(filter_groups))}) -- stacking each separately")
+            if getattr(args, 'health_check', False) or getattr(args, 'dry_run', False):
+                for filt_tag, group_lights in sorted(filter_groups.items()):
+                    safe_print(f"    {filt_tag}: {len(group_lights)} lights (skipped -- "
+                               f"health-check/dry-run not supported per filter group yet)")
+                continue
+            base, ext = os.path.splitext(outp)
+            _orig_output = getattr(args, 'output', None)
+            for filt_tag, group_lights in sorted(filter_groups.items()):
+                safe_print(f'\n{"=" * 70}')
+                safe_print(f'FILTER GROUP: {filt_tag} ({len(group_lights)} lights)')
+                safe_print(f'{"=" * 70}')
+                group_frames = dict(frames)
+                group_frames['light'] = group_lights
+                # Fresh copies -- _build_masters mutates frames['dark']/['flat']
+                # in place (select_matching_darks/select_matching_flats), and
+                # each filter group must match against the full calibration
+                # pool independently, not whatever a previous group narrowed it to.
+                group_frames['dark'] = list(frames['dark'])
+                group_frames['flat'] = list(frames['flat'])
+                group_frames['bias'] = list(frames['bias'])
+                group_stats = ProcessingStats()
+                group_outp = f"{base}_{filt_tag}{ext}"
+                group_masters = _build_masters(group_frames, group_stats, args)
+                args._input_directory = d
+                # postprocess_stack's sidecar writers (e.g. star removal's
+                # <output>_starless.fits) key off args.output, not the
+                # output_path argument -- without this, every group would
+                # collide on the same sidecar filename and overwrite each
+                # other's.
+                args.output = group_outp
+                gres = stack_target([f for t in group_frames.values() for f in t],
+                                    group_outp, args, group_masters, group_stats)
+                if gres:
+                    save_effective_config(args, group_outp)
+            args.output = _orig_output
+            continue  # filter-split target fully handled -- not part of hierarchical combine
 
         if getattr(args, 'health_check', False):
             print_header("HEALTH CHECK", "=")
