@@ -798,6 +798,27 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _save_blink_frames(final, final_indices, mem_rgb, shifts, transforms,
                                    top, bottom, left, right, output_path)
 
+            # Per-frame differential light curves (needs the registered frames
+            # still in mem_rgb, so it runs here rather than in the post-output
+            # section; uses the session info.json WCS).
+            if getattr(args, 'photometry_timeseries', False):
+                safe_print("\n  Time-series photometry (per-frame light curves)...")
+                _ts_start = time.time()
+                try:
+                    from src.photometry_timeseries import (
+                        run_timeseries_photometry, format_timeseries_summary)
+                    _ts = run_timeseries_photometry(
+                        final, final_indices, mem_rgb, shifts, transforms,
+                        displacement_fields, (top, bottom, left, right),
+                        fits_stacked, getattr(args, '_session_info', None),
+                        args, output_path)
+                    if _ts is not None:
+                        safe_print(format_timeseries_summary(_ts))
+                        safe_print(f"  Time-series photometry "
+                                   f"({format_time(time.time() - _ts_start)})")
+                except Exception as e:
+                    safe_print(f"  WARNING: time-series photometry failed: {e}")
+
             # Comet stacking: second pass aligned on comet nucleus
             if getattr(args, 'comet_mode', False):
                 print_phase(3, "Comet Stacking (nucleus-aligned pass)")
@@ -1061,11 +1082,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                             hdu.header[f'MAGZPE_{_ch}'] = (
                                 round(_zp['zp_err'], 4),
                                 f'{_ch} zero-point uncertainty (mag)')
+                            if _phot.get('color_terms_fitted'):
+                                hdu.header[f'MAGCT_{_ch}'] = (
+                                    round(_zp['ct'], 4),
+                                    f'{_ch} colour term (mag per mag BP-RP)')
+                    if _phot.get('color_terms_fitted'):
+                        hdu.header['PHOTCREF'] = (_phot['ref_color'],
+                                                 'Colour-term reference Gaia BP-RP')
                     hdu.header['PHOTNSTR'] = (_phot['n_matched'],
                                               'Gaia stars used for photometry')
                     if _phot['airmass'] is not None:
                         hdu.header['PHOTAIRM'] = (_phot['airmass'],
                                                   'Airmass at field centre')
+                    if _phot.get('gain_e_per_adu'):
+                        hdu.header['PHOTGAIN'] = (_phot['gain_e_per_adu'],
+                                                 'Gain used for Poisson errors (e-/ADU)')
                     hdu.header['PHOTAPR'] = (_phot['aperture_px'],
                                              'Photometry aperture radius (px)')
                     hdu.writeto(output_path, overwrite=True)

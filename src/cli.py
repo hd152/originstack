@@ -484,6 +484,35 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     if cal_needed and cal_start is not None and stats is not None:
         stats.calibration_time = time.time() - cal_start
 
+    # Photon-transfer gain / read-noise from raw bias+flat pairs, for the
+    # Poisson term in --photometry. Only when photometry is requested and no
+    # gain was given explicitly.
+    masters['ptc_gain_e_per_adu'] = None
+    masters['ptc_read_noise_e'] = None
+    _want_phot = args is not None and (getattr(args, 'photometry', False)
+                                       or getattr(args, 'photometry_timeseries', False))
+    _bias_list = frames.get('bias') or []
+    _flat_list = frames.get('flat') or []
+    if (_want_phot and getattr(args, 'photometry_gain', None) is None
+            and len(_bias_list) >= 2 and len(_flat_list) >= 2):
+        try:
+            from src.gain_ptc import estimate_gain_ptc
+            _bp = [f.path for f in _bias_list[:2]]
+            _fp = [f.path for f in _flat_list[:2]]
+            _g, _rn = estimate_gain_ptc(_bp, _fp)
+            if _g:
+                masters['ptc_gain_e_per_adu'] = _g
+                masters['ptc_read_noise_e'] = _rn
+                args._ptc_gain_e_per_adu = _g
+                args._ptc_read_noise_e = _rn
+                safe_print(f"  ✓ PTC gain: {_g:.3f} e-/ADU, "
+                           f"read noise {_rn:.2f} e- (from bias+flat pairs)")
+            else:
+                safe_print("  PTC gain: estimate failed (frames not suitable) "
+                           "-- photometry Poisson term will use the header gain if any")
+        except Exception as _e:
+            safe_print(f"  PTC gain: skipped ({_e})")
+
     masters['vignette'] = None
     vignette_path = getattr(args, 'vignette_map', None) if args is not None else None
     if vignette_path:
@@ -1532,6 +1561,30 @@ def build_parser() -> argparse.ArgumentParser:
                         'by --photometry (applied to all of R/G/B). Default: nominal '
                         'R=0.09 G=0.15 B=0.23. Only matters when an airmass could be '
                         'derived.')
+    g_out.add_argument('--photometry-color-terms', action='store_true',
+                   help='--photometry: also fit a per-channel colour term (slope of '
+                        'the zero-point residual vs Gaia BP-RP) instead of a plain '
+                        'robust median. Written as MAGCT_R/G/B and applied to the '
+                        'catalogue magnitudes. Improves the OSC->passband match for '
+                        'stars far from the reference colour.')
+    g_out.add_argument('--photometry-gain', type=float, default=None, metavar='E/ADU',
+                   help='Sensor gain (electrons per ADU) for the Poisson term in the '
+                        'per-star photometric errors. Overrides both the '
+                        'photon-transfer estimate (auto, from raw bias+flat pairs when '
+                        'present) and the FITS GAIN/EGAIN header.')
+    g_out.add_argument('--photometry-timeseries', action='store_true',
+                   help='Per-frame differential photometry: aperture-photometer a '
+                        'fixed Gaia star list on every registered sub and '
+                        'ensemble-calibrate, writing <output>_lightcurves.csv (one '
+                        'row per frame x star) and <output>_lightcurve_stats.csv '
+                        '(per-star mean/rms/reduced-chi2 + a variability flag). Needs '
+                        'a session info.json WCS (Celestron Origin); --plate-solve '
+                        'runs too late for this. Differential only -- no absolute '
+                        'zero point.')
+    g_out.add_argument('--photometry-target', default=None, metavar='RA,DEC',
+                   help='--photometry-timeseries: mark one star as the target. '
+                        '"RA,DEC" in degrees, or "px:X,Y" in stacked-image pixels. '
+                        'Its light-curve stats are printed and flagged in the CSVs.')
     g_out.add_argument('--fix-atmospheric-dispersion', action='store_true',
                        help='EXPERIMENTAL: shift R/B channels back toward the green '
                             'channel\'s position to correct chromatic atmospheric '

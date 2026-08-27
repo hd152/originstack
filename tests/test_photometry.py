@@ -24,6 +24,8 @@ from src.photometry import run_photometry
 
 class _Args:
     photometry_extinction_k = None
+    photometry_color_terms = False
+    photometry_gain = None
     verbose = False
 
 
@@ -145,6 +147,56 @@ def test_run_photometry_recovers_catalog_magnitudes(synthetic_field):
         # The mean offset is the (channel-independent) aperture fraction;
         # scatter about it is what photometric quality means here.
         assert np.std(d - np.median(d)) < 0.05
+
+
+def test_color_term_fit_recovers_injected_slope(tmp_path):
+    """A colour-dependent instrumental offset is recovered by
+    --photometry-color-terms and left as scatter without it."""
+    rng = np.random.default_rng(99)
+    H = W = 320
+    hdr = _make_wcs_header(H, W)
+    wcs = WCS(hdr)
+
+    n = 45
+    xs = rng.uniform(24, W - 24, n)
+    ys = rng.uniform(24, H - 24, n)
+    g_mag = rng.uniform(10.5, 12.5, n)
+    bp = g_mag + rng.uniform(0.0, 1.4, n)      # wide colour spread
+    rp = g_mag - rng.uniform(0.0, 1.4, n)
+    bp_rp = bp - rp
+    ref = float(np.median(bp_rp))
+    ZP_TRUE = 20.0
+    CT_TRUE = {0: -0.10, 1: 0.06, 2: 0.14}     # mag per mag BP-RP, per channel
+
+    img = np.full((H, W, 3), 12.0, dtype=np.float64)
+    for i in range(n):
+        for ci, cat_m in enumerate((rp[i], g_mag[i], bp[i])):
+            m_eff = cat_m - ZP_TRUE - CT_TRUE[ci] * (bp_rp[i] - ref)
+            flux = 10.0 ** (-0.4 * m_eff)
+            _add_gaussian(img[..., ci], xs[i], ys[i], flux)
+    img += rng.normal(0.0, 1.0, img.shape)
+    img = np.clip(img, 0.0, None)
+
+    ra, dec = wcs.all_pix2world(xs, ys, 0)
+    catalog = _FakeTable({
+        "source_id": np.arange(1, n + 1), "ra": ra, "dec": dec,
+        "phot_g_mean_mag": g_mag, "phot_bp_mean_mag": bp,
+        "phot_rp_mean_mag": rp,
+    })
+    out = str(tmp_path / "s.fits")
+
+    args_ct = _Args()
+    args_ct.photometry_color_terms = True
+    with patch("src.net_query.gaia_cone_search", return_value=catalog):
+        s_ct = run_photometry(img, hdr, args_ct, None, out)
+        s_plain = run_photometry(img, hdr, _Args(), None, out)
+
+    assert s_ct is not None and s_plain is not None
+    assert s_ct["color_terms_fitted"] and not s_plain["color_terms_fitted"]
+    for ch, ci in (("R", 0), ("G", 1), ("B", 2)):
+        assert s_ct["zeropoints"][ch]["ct"] == pytest.approx(CT_TRUE[ci], abs=0.02)
+        # colour term absorbed -> tighter zero-point residual
+        assert s_ct["zeropoints"][ch]["zp_err"] < s_plain["zeropoints"][ch]["zp_err"]
 
 
 def test_run_photometry_needs_wcs(synthetic_field):
