@@ -4,6 +4,27 @@ All notable user-facing changes to OriginStack are documented here. Format
 loosely follows [Keep a Changelog](https://keepachangelog.com/); versions
 match the `VERSION` file and `v*` git tags.
 
+## [Unreleased]
+
+### Added
+
+- **`--photometry`: absolute aperture photometry on the linear stack.**
+  Detects stars, cone-searches Gaia DR3 around the field (via the header
+  WCS — a Celestron Origin `info.json` session solve or `--plate-solve`),
+  cross-matches, and does per-channel circular-aperture photometry
+  (aperture + sigma-clipped sky annulus). Fits a robust per-channel
+  photometric zero point `m_cal = m_inst - k·X + ZP` against Gaia G/BP/RP
+  (RP→R, G→G, BP→B — a coarse OSC mapping, not a filter-matched
+  transform), with an airmass term `X` derived from the site GPS +
+  observation time in `info.json` when present (otherwise extinction is
+  folded into the zero point). Writes `<output>_photometry.csv` (per-star
+  RA/Dec, flux/mag/mag-err/SNR per channel, saturation flag) and
+  `MAGZP_R/G/B` + `MAGZPE_R/G/B` header keywords. `--photometry-extinction-k`
+  overrides the nominal per-band extinction coefficients (R=0.09, G=0.15,
+  B=0.23 mag/airmass). Needs a WCS; no per-sub light curves in this first
+  cut (the streaming stacker doesn't retain frames), and the Poisson error
+  term is only included when the header carries a real `GAIN`/`EGAIN`.
+
 ## [1.0.0] - 2026-08-21
 
 ### Changed

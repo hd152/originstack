@@ -1038,6 +1038,45 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         if args.verbose:
             print("\n  Plate solving skipped (use --plate-solve to enable)")
 
+    if getattr(args, 'photometry', False):
+        if _wcs_available:
+            safe_print("\n  Aperture photometry (Gaia DR3)...")
+            _phot_start = time.time()
+            try:
+                from src.photometry import run_photometry, format_photometry_summary
+                # hdu.data is still the linear pre-Phase-4 stack here (colour
+                # calibration below is the first step that would mutate it).
+                _lin = np.transpose(np.asarray(hdu.data, dtype=np.float64),
+                                    (1, 2, 0))
+                _phot = run_photometry(_lin, hdu.header, args,
+                                       getattr(args, '_session_info', None),
+                                       output_path)
+                if _phot is not None:
+                    for _ch in ('R', 'G', 'B'):
+                        _zp = _phot['zeropoints'].get(_ch)
+                        if _zp:
+                            hdu.header[f'MAGZP_{_ch}'] = (
+                                round(_zp['zp'], 4),
+                                f'{_ch} photometric zero point (mag)')
+                            hdu.header[f'MAGZPE_{_ch}'] = (
+                                round(_zp['zp_err'], 4),
+                                f'{_ch} zero-point uncertainty (mag)')
+                    hdu.header['PHOTNSTR'] = (_phot['n_matched'],
+                                              'Gaia stars used for photometry')
+                    if _phot['airmass'] is not None:
+                        hdu.header['PHOTAIRM'] = (_phot['airmass'],
+                                                  'Airmass at field centre')
+                    hdu.header['PHOTAPR'] = (_phot['aperture_px'],
+                                             'Photometry aperture radius (px)')
+                    hdu.writeto(output_path, overwrite=True)
+                    safe_print(format_photometry_summary(_phot))
+                    safe_print(f"  Photometry ({format_time(time.time() - _phot_start)})")
+            except Exception as e:
+                safe_print(f"  WARNING: photometry failed: {e}")
+        else:
+            safe_print("\n  Photometry: no WCS available (needs --plate-solve or a "
+                       "session solve) -- skipping")
+
     if getattr(args, 'color_calibrate', False) and _wcs_available:
         safe_print("\n  Applying photometric colour calibration...")
         cc_start = time.time()

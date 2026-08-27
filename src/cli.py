@@ -1517,6 +1517,21 @@ def build_parser() -> argparse.ArgumentParser:
                         'response curves, not a measured curve for your specific camera '
                         '+ filters -- more physically grounded than colorindex, not a '
                         'claim of matching a specific sensor\'s real QE curve.')
+    g_out.add_argument('--photometry', action='store_true',
+                   help='Aperture-photometer the linear stack against Gaia DR3 and '
+                        'write a calibrated stellar catalogue (<output>_photometry.csv) '
+                        'plus MAGZP_R/G/B zero-point header keywords. Needs a WCS '
+                        '(--plate-solve or a session info.json solve). Uses the site '
+                        'GPS + observation time from info.json for an airmass term; '
+                        'falls back to folding extinction into the zero point when '
+                        'those are absent. OSC channels are mapped coarsely to Gaia '
+                        'RP/G/BP -- absolute accuracy ~0.05 mag, differential better.')
+    g_out.add_argument('--photometry-extinction-k', type=float, default=None,
+                   metavar='MAG/AIRMASS',
+                   help='Override the per-band atmospheric extinction coefficient used '
+                        'by --photometry (applied to all of R/G/B). Default: nominal '
+                        'R=0.09 G=0.15 B=0.23. Only matters when an airmass could be '
+                        'derived.')
     g_out.add_argument('--fix-atmospheric-dispersion', action='store_true',
                        help='EXPERIMENTAL: shift R/B channels back toward the green '
                             'channel\'s position to correct chromatic atmospheric '
