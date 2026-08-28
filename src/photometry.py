@@ -55,11 +55,10 @@ _APB_SUBPIX = 4  # aperture-edge supersampling factor (native + numpy paths)
 _NOMINAL_K = {"R": 0.09, "G": 0.15, "B": 0.23}
 
 _CHANNELS = ("R", "G", "B")
-# Gaia band feeding each OSC channel's catalogue magnitude. Coarse by
-# construction -- Gaia G is a very broad white-ish band, BP/RP are half-band
-# blue/red -- but good enough to anchor a zero point to ~0.05 mag.
-_GAIA_BAND_FOR_CHANNEL = {"R": "phot_rp_mean_mag", "G": "phot_g_mean_mag",
-                          "B": "phot_bp_mean_mag"}
+# OSC channel <- Gaia band. Coarse by construction (Gaia G is a very broad
+# white-ish band, BP/RP are half-band blue/red) but good enough to anchor a
+# zero point to ~0.05 mag. Single source of truth for both photometry paths.
+_GAIA_BAND_FOR_CHANNEL = {"R": "rp", "G": "g", "B": "bp"}
 
 
 def _field_centre_and_radius(header, shape):
@@ -165,7 +164,9 @@ def _fit_zeropoint_colorterm(resid, color, ref_color, fit_ct=False,
     ``resid`` is per-star ``m_cat - m_inst + k*X``; ``color`` is the Gaia
     BP-RP colour. With ``fit_ct=False`` the colour term is forced to zero
     and this reduces to a sigma-clipped median (the default). Returns
-    ``(zp, zp_err, ct, n_used)`` or ``None``.
+    ``(zp, zp_err, ct, n_used, ct_fitted)`` or ``None`` -- ``ct_fitted`` is
+    False when ``fit_ct`` was asked for but too few stars survived clipping
+    to fit a slope (the result is then a plain median).
     """
     r = np.asarray(resid, dtype=np.float64)
     col = np.asarray(color, dtype=np.float64) - float(ref_color)
@@ -174,10 +175,11 @@ def _fit_zeropoint_colorterm(resid, color, ref_color, fit_ct=False,
     if r.size < 5:
         return None
     keep = np.ones(r.size, bool)
-    zp, ct = float(np.median(r)), 0.0
+    zp, ct, ct_fitted = float(np.median(r)), 0.0, False
     for _ in range(iters):
         rr, cc = r[keep], col[keep]
-        if fit_ct and rr.size >= 8:
+        ct_fitted = bool(fit_ct and rr.size >= 8)
+        if ct_fitted:
             A = np.column_stack([np.ones_like(cc), cc])
             coef, *_ = np.linalg.lstsq(A, rr, rcond=None)
             zp, ct = float(coef[0]), float(coef[1])
@@ -197,7 +199,7 @@ def _fit_zeropoint_colorterm(resid, color, ref_color, fit_ct=False,
     res_final = r[keep] - (zp + ct * col[keep])
     zp_err = (1.4826 * np.median(np.abs(res_final - np.median(res_final)))
               / math.sqrt(max(int(keep.sum()), 1)))
-    return zp, float(zp_err), ct, int(keep.sum())
+    return zp, float(zp_err), ct, int(keep.sum()), ct_fitted
 
 
 # ---------------------------------------------------------------------------
@@ -473,14 +475,20 @@ def _photometer_matched(gm, img_rgb, header, args, session_info):
                 break
         except (TypeError, ValueError):
             pass
-    if sat_level is None:
-        sat_level = 0.98 * float(np.nanmax(np.asarray(img_rgb)))
 
     color = gm.bp - gm.rp
-    cat_channel_mag = {"R": gm.rp, "G": gm.g, "B": gm.bp}
+    cat_channel_mag = {ch: getattr(gm, _GAIA_BAND_FOR_CHANNEL[ch]) for ch in _CHANNELS}
     n = len(gm.x)
     star_peak = row_nanmax(ap_peak, gm.det_peak)
-    saturated = star_peak >= sat_level
+    if sat_level is not None:
+        saturated = star_peak >= sat_level
+    else:
+        # No saturation level in the header: a mean-combined stack rarely
+        # has clipped cores, and 0.98*max would wrongly drop the brightest
+        # (best-SNR) calibrators. Only flag stars that actually reach the
+        # data ceiling; the zero-point fit's own sigma-clip handles the rest.
+        ceiling = float(np.nanmax(np.asarray(img_rgb)))
+        saturated = star_peak >= ceiling * (1.0 - 1e-6)
 
     m_inst = {c: np.full(n, np.nan) for c in _CHANNELS}
     magerr_flux = {c: np.full(n, np.nan) for c in _CHANNELS}
@@ -508,7 +516,8 @@ def _photometer_matched(gm, img_rgb, header, args, session_info):
     for ch in _CHANNELS:
         out = _fit_zeropoint_colorterm(resid[ch], color, ref_color, fit_ct=fit_ct)
         if out is not None:
-            fit[ch] = {"zp": out[0], "zp_err": out[1], "ct": out[2], "n": out[3]}
+            fit[ch] = {"zp": out[0], "zp_err": out[1], "ct": out[2],
+                       "n": out[3], "ct_fitted": out[4]}
     if not fit:
         return None
 
@@ -610,12 +619,14 @@ def run_photometry(linear_img: np.ndarray, header, args, session_info,
         "airmass": round(phot["airmass"], 3) if phot["airmass"] is not None else None,
         "extinction_k": {c: round(phot["k"][c], 3) for c in _CHANNELS},
         "plate_scale_arcsec": round(gm.plate_scale, 3),
-        "color_terms_fitted": phot["fit_ct"],
+        "color_terms_requested": phot["fit_ct"],
+        "color_terms_fitted": any(v["ct_fitted"] for v in phot["fit"].values()),
         "ref_color": round(phot["ref_color"], 4),
         "gain_e_per_adu": round(phot["gain"], 4) if phot["gain"] else None,
         "zeropoints": {c: {"zp": round(v["zp"], 4),
                            "zp_err": round(v["zp_err"], 4),
                            "ct": round(v["ct"], 4),
+                           "ct_fitted": bool(v["ct_fitted"]),
                            "n": v["n"]}
                       for c, v in phot["fit"].items()},
     }
@@ -635,14 +646,16 @@ def format_photometry_summary(summary: dict) -> str:
     if summary.get("gain_e_per_adu"):
         lines.append(f"    gain {summary['gain_e_per_adu']} e-/ADU -> Poisson "
                      "term included in per-star errors")
-    ct_on = summary.get("color_terms_fitted")
+    if summary.get("color_terms_requested") and not summary.get("color_terms_fitted"):
+        lines.append("    colour terms requested but too few stars to fit a "
+                     "slope -- fell back to a plain zero-point median")
     for ch in _CHANNELS:
         zp = summary["zeropoints"].get(ch)
         if not zp:
             continue
         msg = (f"    ZP_{ch} = {zp['zp']:+.4f} +/- {zp['zp_err']:.4f}  "
                f"(n={zp['n']})")
-        if ct_on:
+        if zp.get("ct_fitted"):
             msg += (f"   CT_{ch} = {zp['ct']:+.4f} /mag "
                     f"(ref BP-RP {summary['ref_color']})")
         lines.append(msg)

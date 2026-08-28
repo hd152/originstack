@@ -23,12 +23,14 @@ import csv
 import logging
 import math
 import os
+import warnings
 from typing import Optional
 
 import numpy as np
 
 from src.photometry import (aperture_photometry_batch, match_gaia_field,
-                            _airmass, _read_gain, _id_str, row_nanmax)
+                            _airmass, _read_gain, _id_str, row_nanmax,
+                            _GAIA_BAND_FOR_CHANNEL)
 
 _log = logging.getLogger("originstack")
 _CH = ("r", "g", "b")
@@ -146,7 +148,7 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
 
     n_frames = len(final)
     n_star = len(gm.x)
-    gaia_mag = {"r": gm.rp, "g": gm.g, "b": gm.bp}
+    gaia_mag = {c: getattr(gm, _GAIA_BAND_FOR_CHANNEL[c.upper()]) for c in _CH}
     gain = _read_gain(header, args)
 
     flux = np.full((n_frames, n_star, 3), np.nan)
@@ -155,6 +157,7 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
     mjd = np.full(n_frames, np.nan)
     airmass = np.full(n_frames, np.nan)
     fnames = []
+    obs_ceiling = 0.0     # max pixel value actually seen across the subs
 
     for j in range(n_frames):
         idx = final_indices[j]
@@ -165,6 +168,7 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
         aligned = apply_transform(frame, shift=shifts[j],
                                   transform=transforms[j], local_field=lf)
         sub = np.ascontiguousarray(aligned[top:bottom, left:right])
+        obs_ceiling = max(obs_ceiling, float(np.nanmax(sub)))
         f, _sky, sig, pk, area = aperture_photometry_batch(
             sub, gm.x, gm.y, float(gm.ap_radius), gm.r_in, gm.r_out)
         flux[j] = f
@@ -185,8 +189,20 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
                           np.nan)
         magerr = 1.0857 * ferr / np.where(flux > 0, flux, np.nan)
 
-    sat_level = 0.98 * float(np.nanmax(stacked_linear))
-    ever_sat = np.nansum(fpeak >= sat_level, axis=0) > 0
+    # Only a pixel at the actual observed ceiling counts as saturated -- a
+    # bright star's per-frame peak routinely exceeds a fraction of the
+    # (fainter) mean-stack max, so a stack-derived threshold would wrongly
+    # exclude the best comparison stars.
+    _hdr_sat = None
+    for _k in ("SATURATE", "DATAMAX"):
+        try:
+            if header.get(_k) is not None:
+                _hdr_sat = float(header[_k])
+                break
+        except (TypeError, ValueError):
+            pass
+    sat_level = _hdr_sat if _hdr_sat is not None else obs_ceiling * (1.0 - 1e-6)
+    ever_sat = np.any(fpeak >= sat_level, axis=0)
     finite_frac = np.mean(np.isfinite(m_inst[:, :, 1]), axis=0)
 
     # Ensemble comparison stars: well-detected, unsaturated, mid-brightness.
@@ -204,32 +220,40 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
                      "-- light curves will be noisy", int(ensemble.sum()))
 
     # Iterative ensemble differential zero point (per channel, per frame).
+    # A frame or star with no finite ensemble residual makes nanmedian/nanstd
+    # emit an "All-NaN slice" RuntimeWarning; the NaN it returns is handled
+    # downstream as a missing point, so silence just this block.
     zp = np.zeros((n_frames, 3))
-    for _ in range(4):
-        for c in range(3):
-            diff = gaia_mag[_CH[c]][None, :] - m_inst[:, :, c]
-            zp[:, c] = np.nanmedian(np.where(ensemble[None, :], diff, np.nan), axis=1)
-        m_corr = m_inst + zp[:, None, :]
-        rms_g = np.nanstd(m_corr[:, :, 1], axis=0)
-        if ensemble.sum() <= 3:
-            break
-        thr = np.nanmedian(rms_g[ensemble]) + 2.0 * 1.4826 * np.nanmedian(
-            np.abs(rms_g[ensemble] - np.nanmedian(rms_g[ensemble])))
-        new_ens = ensemble & (rms_g <= max(thr, 1e-6))
-        if new_ens.sum() < 3 or new_ens.sum() == ensemble.sum():
-            ensemble = new_ens if new_ens.sum() >= 3 else ensemble
-            break
-        ensemble = new_ens
+    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for _ in range(4):
+            for c in range(3):
+                diff = gaia_mag[_CH[c]][None, :] - m_inst[:, :, c]
+                zp[:, c] = np.nanmedian(
+                    np.where(ensemble[None, :], diff, np.nan), axis=1)
+            m_corr = m_inst + zp[:, None, :]
+            rms_g = np.nanstd(m_corr[:, :, 1], axis=0)
+            if ensemble.sum() <= 3:
+                break
+            thr = np.nanmedian(rms_g[ensemble]) + 2.0 * 1.4826 * np.nanmedian(
+                np.abs(rms_g[ensemble] - np.nanmedian(rms_g[ensemble])))
+            new_ens = ensemble & (rms_g <= max(thr, 1e-6))
+            if new_ens.sum() < 3 or new_ens.sum() == ensemble.sum():
+                ensemble = new_ens if new_ens.sum() >= 3 else ensemble
+                break
+            ensemble = new_ens
 
-    m_corr = m_inst + zp[:, None, :]
-    # per-frame zero-point scatter folds into every star's error
-    zp_err = np.zeros((n_frames, 3))
-    for c in range(3):
-        r = (gaia_mag[_CH[c]][None, :] - m_corr[:, :, c])
-        r = np.where(ensemble[None, :], r, np.nan)
-        n_ens = max(int(ensemble.sum()), 1)
-        zp_err[:, c] = 1.4826 * np.nanmedian(np.abs(r - np.nanmedian(r, axis=1,
-                                             keepdims=True)), axis=1) / math.sqrt(n_ens)
+        m_corr = m_inst + zp[:, None, :]
+        # per-frame zero-point scatter folds into every star's error
+        zp_err = np.zeros((n_frames, 3))
+        for c in range(3):
+            r = np.where(ensemble[None, :],
+                         gaia_mag[_CH[c]][None, :] - m_corr[:, :, c], np.nan)
+            n_ens = max(int(ensemble.sum()), 1)
+            zp_err[:, c] = 1.4826 * np.nanmedian(
+                np.abs(r - np.nanmedian(r, axis=1, keepdims=True)),
+                axis=1) / math.sqrt(n_ens)
+    zp_err = np.nan_to_num(zp_err, nan=0.0)
     tot_err = np.sqrt(magerr ** 2 + (zp_err[:, None, :]) ** 2)
 
     lc_path = os.path.splitext(output_path)[0] + "_lightcurves.csv"

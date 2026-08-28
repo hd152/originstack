@@ -447,6 +447,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _run_auto_advisor(final, args,
                                   prior_type=_r_type, prior_confidence=_r_conf)
 
+            if getattr(args, 'photometry_timeseries', False):
+                safe_print("\n  NOTE: --photometry-timeseries needs the registered "
+                           "frames in memory (Phase 1-3); it is skipped on a "
+                           "checkpoint-resume run. Re-run without resuming to get "
+                           "light curves.")
+
     if resume_phase < 3:
         # ======================================================================
         # PHASES 1-3: Normal path (requires memmap)
@@ -1082,7 +1088,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                             hdu.header[f'MAGZPE_{_ch}'] = (
                                 round(_zp['zp_err'], 4),
                                 f'{_ch} zero-point uncertainty (mag)')
-                            if _phot.get('color_terms_fitted'):
+                            if _zp.get('ct_fitted'):
                                 hdu.header[f'MAGCT_{_ch}'] = (
                                     round(_zp['ct'], 4),
                                     f'{_ch} colour term (mag per mag BP-RP)')

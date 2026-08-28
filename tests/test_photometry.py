@@ -19,7 +19,7 @@ import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from src.photometry import run_photometry
+from src.photometry import run_photometry, _fit_zeropoint_colorterm
 
 
 class _Args:
@@ -254,3 +254,63 @@ def test_extinction_term_applied_with_gps(synthetic_field):
     assert summary is not None
     assert summary["airmass"] is not None and summary["airmass"] >= 1.0
     assert summary["extinction_k"]["G"] == pytest.approx(0.15)
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: colour-term fit flag + saturation heuristic
+# ---------------------------------------------------------------------------
+
+def test_fit_zeropoint_colorterm_flags_when_slope_not_fitted():
+    rng = np.random.default_rng(5)
+    color = rng.uniform(0.4, 2.2, 12)
+    resid = 19.0 + 0.08 * (color - color.mean()) + rng.normal(0, 0.01, 12)
+
+    zp, zp_err, ct, n, fitted = _fit_zeropoint_colorterm(
+        resid, color, float(np.median(color)), fit_ct=True)
+    assert fitted is True
+    assert ct == pytest.approx(0.08, abs=0.03)
+
+    # Only 6 stars -> not enough to fit a slope; falls back to a median.
+    zp, zp_err, ct, n, fitted = _fit_zeropoint_colorterm(
+        resid[:6], color[:6], float(np.median(color[:6])), fit_ct=True)
+    assert fitted is False
+    assert ct == 0.0
+
+    # fit_ct=False is always a median, never "fitted".
+    _, _, ct, _, fitted = _fit_zeropoint_colorterm(
+        resid, color, float(np.median(color)), fit_ct=False)
+    assert fitted is False and ct == 0.0
+
+
+def test_bright_unsaturated_cluster_not_flagged(tmp_path):
+    """A tight cluster of bright (but non-clipping) stars must not be flagged
+    saturated when the header carries no SATURATE level."""
+    rng = np.random.default_rng(11)
+    H = W = 320
+    hdr = _make_wcs_header(H, W)
+    wcs = WCS(hdr)
+    n = 30
+    xs = rng.uniform(24, W - 24, n)
+    ys = rng.uniform(24, H - 24, n)
+    # 8 stars within ~0.15 mag of each other near the top, rest fainter.
+    g = np.concatenate([rng.uniform(10.40, 10.55, 8), rng.uniform(12.0, 13.5, n - 8)])
+    bp = g + 0.3
+    rp = g - 0.3
+    img = np.full((H, W, 3), 12.0)
+    for i in range(n):
+        for ci, m in enumerate((rp[i], g[i], bp[i])):
+            _add_gaussian(img[..., ci], xs[i], ys[i], 10.0 ** (-0.4 * (m - 20.0)))
+    img += rng.normal(0, 1, img.shape)
+    img = np.clip(img, 0, None)
+    ra, dec = wcs.all_pix2world(xs, ys, 0)
+    catalog = _FakeTable({"source_id": np.arange(n), "ra": ra, "dec": dec,
+                          "phot_g_mean_mag": g, "phot_bp_mean_mag": bp,
+                          "phot_rp_mean_mag": rp})
+    with patch("src.net_query.gaia_cone_search", return_value=catalog):
+        s = run_photometry(img, hdr, _Args(), None, str(tmp_path / "s.fits"))
+    assert s is not None
+    with open(s["csv_path"], newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    n_sat = sum(int(r["saturated"]) for r in rows)
+    # At most the single literal-max-pixel star; the bright cluster is fine.
+    assert n_sat <= 1
