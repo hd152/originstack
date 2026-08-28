@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import List, Optional
+from typing import Optional
 try:
     import psutil
     HAS_PSUTIL = True
@@ -212,3 +212,28 @@ def get_memory_usage_mb() -> float:
     if HAS_PSUTIL:
         return psutil.Process().memory_info().rss / 1024**2
     return 0.0
+
+
+def header_get_first(header, keys, cast=None, default=None):
+    """First present, non-None value among ``keys`` in a FITS-header-like
+    mapping (anything with ``.get``). With ``cast`` given, the value is run
+    through it and a failing cast is treated as absent. Returns ``default``
+    when nothing matches.
+
+    Folds the recurring "try each of these header spellings" pattern
+    (``DATE-OBS``/``DATE_OBS``/``DATEOBS``, ``EGAIN``/``GAIN``,
+    ``SATURATE``/``DATAMAX``, the ``CCD-TEMP`` family, ...).
+    """
+    if header is None or not hasattr(header, "get"):
+        return default
+    for key in keys:
+        val = header.get(key)
+        if val is None:
+            continue
+        if cast is None:
+            return val
+        try:
+            return cast(val)
+        except (TypeError, ValueError):
+            continue
+    return default

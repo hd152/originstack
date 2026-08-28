@@ -4,6 +4,71 @@ All notable user-facing changes to OriginStack are documented here. Format
 loosely follows [Keep a Changelog](https://keepachangelog.com/); versions
 match the `VERSION` file and `v*` git tags.
 
+## [Unreleased]
+
+### Added
+
+- **`--photometry`: absolute aperture photometry on the linear stack.**
+  Detects stars, cone-searches Gaia DR3 around the field (via the header
+  WCS — a Celestron Origin `info.json` session solve or `--plate-solve`),
+  cross-matches, and does per-channel **partial-pixel** circular-aperture
+  photometry (supersampled aperture edge + robust sky annulus). Fits a
+  robust per-channel photometric zero point
+  `m_cal = m_inst - k·X + ZP + CT·(BP-RP - ref)` against Gaia G/BP/RP
+  (RP→R, G→G, BP→B — a coarse OSC mapping, not a filter-matched
+  transform), with an airmass term `X` from the site GPS + observation
+  time in `info.json` when present (otherwise extinction folds into the
+  zero point). Writes `<output>_photometry.csv` (per-star RA/Dec,
+  flux/mag/mag-err/SNR per channel, saturation flag) and
+  `MAGZP_R/G/B` / `MAGZPE_R/G/B` / `MAGCT_R/G/B` / `PHOTGAIN` header
+  keywords. Flags: `--photometry-color-terms` (fit the per-channel colour
+  term instead of a plain median), `--photometry-extinction-k` (override
+  the nominal `k` = R 0.09 / G 0.15 / B 0.23 mag/airmass),
+  `--photometry-gain` (electrons/ADU for the Poisson error term).
+- **`--photometry-timeseries`: per-frame differential light curves.**
+  Runs a separate pass over the registered subs (right after Phase 3),
+  aperture-photometering a fixed Gaia star list on every frame and
+  ensemble-differential-calibrating a per-frame zero point (removes
+  transparency / airmass drift). Writes `<output>_lightcurves.csv` (one
+  row per frame × star — MJD, airmass, per-channel mag/mag-err) and
+  `<output>_lightcurve_stats.csv` (per star — mean, rms, MAD, reduced χ²
+  vs a constant, and a `variable` flag). `--photometry-target "RA,DEC"` or
+  `"px:X,Y"` marks and reports one star. Needs a session `info.json` WCS
+  (`--plate-solve` runs too late for per-frame work); differential only,
+  no absolute zero point.
+- **Photon-transfer gain / read-noise from raw calibration frames.** When
+  `--photometry`/`--photometry-timeseries` is set and no `--photometry-gain`
+  is given, a Janesick two-frame difference over ≥2 bias + ≥2 flat frames
+  estimates the sensor gain (e-/ADU) and read noise (e-), feeding a real
+  Poisson term into the per-star photometric errors.
+
+### Changed
+
+- **`--fix-atmospheric-dispersion` now auto-derives `--plate-scale` and
+  `--zenith-angle`** (from the header WCS, and from the `info.json` GPS +
+  observation time) when they are not given. `--parallactic-angle` stays
+  required — a wrong value shifts colour channels the wrong way and
+  mapping it onto the detector needs the image north angle.
+
+### Internal
+
+- **`astro_native` 0.18.0 → 0.19.0: `aperture_photometry_batch` kernel** —
+  partial-pixel aperture photometry for N centres at once, rayon-parallel
+  over stars. ~150× faster than the numpy mirror at time-series scale
+  (300 stars × 200 frames: ~23 s → ~0.2 s). Numpy fallback
+  (`_aperture_photometry_batch_numpy`) with a native parity test.
+- **Refactor: shared photometry primitives.** New `src/photometry_core.py`
+  (aperture-photometry kernel + dispatcher, WCS→pixel projection, field
+  centre/radius, small array helpers) and `src/observing_geometry.py`
+  (alt/az, airmass, zenith & parallactic angle from lat/long + RA/Dec +
+  UTC). `color_calibrate._aperture_flux` and
+  `photometric_calibration._aperture_photometry` are now thin wrappers
+  over the shared kernel (partial-pixel apertures, ~150× faster with the
+  native build) instead of three separate per-star Python loops.
+  `utils.header_get_first` folds the repeated "try each header spelling"
+  pattern (`DATE-OBS`/`DATE_OBS`/…, `EGAIN`/`GAIN`, `SATURATE`/`DATAMAX`,
+  the `CCD-TEMP` family).
+
 ## [1.0.0] - 2026-08-21
 
 ### Changed

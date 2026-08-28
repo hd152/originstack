@@ -1338,3 +1338,58 @@ def test_radial_renormalize_dispatch_matches_numpy_fallback():
     finally:
         _denoising_mod._HAS_NATIVE = had
     np.testing.assert_allclose(got, want, atol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# aperture_photometry_batch (src/photometry.py) -- new in astro_native 0.19
+# ---------------------------------------------------------------------------
+
+_HAS_APB = hasattr(native, "aperture_photometry_batch")
+
+
+@pytest.mark.skipif(not _HAS_APB, reason="astro_native lacks aperture_photometry_batch")
+@pytest.mark.parametrize("r_ap,r_in,r_out", [(5.0, 8.0, 13.0),
+                                             (6.3, 9.1, 15.7),
+                                             (3.0, 6.0, 9.0)])
+def test_aperture_photometry_batch_matches_numpy(r_ap, r_in, r_out):
+    from src.photometry_core import _aperture_photometry_batch_numpy
+    rng = np.random.default_rng(7)
+    H, W, C = 120, 140, 3
+    img = rng.normal(30.0, 2.0, (H, W, C)).astype(np.float32)
+    xs = rng.uniform(20, W - 20, 25)
+    ys = rng.uniform(20, H - 20, 25)
+    yy, xx = np.mgrid[0:H, 0:W]
+    for x, y in zip(xs, ys):
+        s = rng.uniform(1.5, 2.5)
+        for c in range(C):
+            img[..., c] += rng.uniform(200, 3000) * np.exp(
+                -(((xx - x) ** 2 + (yy - y) ** 2) / (2 * s ** 2)))
+    img = np.ascontiguousarray(img)
+
+    nat = native.aperture_photometry_batch(img, xs, ys, r_ap, r_in, r_out, 4)
+    ref = _aperture_photometry_batch_numpy(img, xs, ys, r_ap, r_in, r_out, 4)
+    for a, b in zip(nat, ref):
+        a = np.asarray(a, float)
+        b = np.asarray(b, float)
+        assert np.array_equal(np.isfinite(a), np.isfinite(b))
+        m = np.isfinite(a) & np.isfinite(b)
+        np.testing.assert_allclose(a[m], b[m], rtol=1e-5, atol=1e-3)
+
+
+@pytest.mark.skipif(not _HAS_APB, reason="astro_native lacks aperture_photometry_batch")
+def test_aperture_photometry_batch_edge_star_is_nan():
+    img = np.ones((40, 40, 3), np.float32)
+    xs = np.array([2.0, 20.0])   # first star's r_out disk spills off the frame
+    ys = np.array([20.0, 20.0])
+    flux, sky, sig, peak, area = native.aperture_photometry_batch(
+        img, xs, ys, 4.0, 6.0, 9.0, 4)
+    assert not np.any(np.isfinite(np.asarray(flux)[0]))
+    assert np.all(np.isfinite(np.asarray(flux)[1]))
+
+
+@pytest.mark.skipif(not _HAS_APB, reason="astro_native lacks aperture_photometry_batch")
+def test_aperture_photometry_batch_rejects_bad_radii():
+    img = np.ones((20, 20, 1), np.float32)
+    xs = np.array([10.0]); ys = np.array([10.0])
+    with pytest.raises(ValueError):
+        native.aperture_photometry_batch(img, xs, ys, 5.0, 4.0, 9.0, 4)

@@ -93,6 +93,17 @@ results["bilateral_filter"] = bench(
     "bilateral_filter (sigma_space=3)",
     lambda: nat.bilateral_filter(rgb_full, 50.0, 3.0, 9))
 
+# --- batch aperture photometry: time-series shape (300 stars, one frame) ---
+if hasattr(nat, "aperture_photometry_batch"):
+    apb_img = np.ascontiguousarray(
+        rng.uniform(20, 2000, (1500, 2000, 3)).astype(np.float32))
+    apb_xs = rng.uniform(30, 1970, 300)
+    apb_ys = rng.uniform(30, 1470, 300)
+    results["aperture_photometry_batch"] = bench(
+        "aperture_phot_batch (300 stars)",
+        lambda: nat.aperture_photometry_batch(
+            apb_img, apb_xs, apb_ys, 6.0, 9.0, 15.0, 4))
+
 out = sys.argv[1] if len(sys.argv) > 1 else "bench_results.json"
 with open(out, "w") as f:
     json.dump(results, f, indent=1)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import math
 import os
 import shutil
 import tempfile
@@ -13,7 +14,8 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.models import FrameInfo, ProcessingStats
-from src.utils import safe_print, print_phase, format_time, get_memory_usage_mb
+from src.utils import (safe_print, print_phase, format_time, get_memory_usage_mb,
+                       header_get_first)
 from src.io_fits import load_fits, load_frame, save_preview_rgb, populate_fits_header
 from src.debayer import debayer, autodetect_bayer_orientation
 from src.plate_solve import solve_plate
@@ -447,6 +449,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _run_auto_advisor(final, args,
                                   prior_type=_r_type, prior_confidence=_r_conf)
 
+            if getattr(args, 'photometry_timeseries', False):
+                safe_print("\n  NOTE: --photometry-timeseries needs the registered "
+                           "frames in memory (Phase 1-3); it is skipped on a "
+                           "checkpoint-resume run. Re-run without resuming to get "
+                           "light curves.")
+
     if resume_phase < 3:
         # ======================================================================
         # PHASES 1-3: Normal path (requires memmap)
@@ -798,6 +806,27 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _save_blink_frames(final, final_indices, mem_rgb, shifts, transforms,
                                    top, bottom, left, right, output_path)
 
+            # Per-frame differential light curves (needs the registered frames
+            # still in mem_rgb, so it runs here rather than in the post-output
+            # section; uses the session info.json WCS).
+            if getattr(args, 'photometry_timeseries', False):
+                safe_print("\n  Time-series photometry (per-frame light curves)...")
+                _ts_start = time.time()
+                try:
+                    from src.photometry_timeseries import (
+                        run_timeseries_photometry, format_timeseries_summary)
+                    _ts = run_timeseries_photometry(
+                        final, final_indices, mem_rgb, shifts, transforms,
+                        displacement_fields, (top, bottom, left, right),
+                        fits_stacked, getattr(args, '_session_info', None),
+                        args, output_path)
+                    if _ts is not None:
+                        safe_print(format_timeseries_summary(_ts))
+                        safe_print(f"  Time-series photometry "
+                                   f"({format_time(time.time() - _ts_start)})")
+                except Exception as e:
+                    safe_print(f"  WARNING: time-series photometry failed: {e}")
+
             # Comet stacking: second pass aligned on comet nucleus
             if getattr(args, 'comet_mode', False):
                 print_phase(3, "Comet Stacking (nucleus-aligned pass)")
@@ -982,10 +1011,39 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         _ps = getattr(args, 'plate_scale', None)
         _za = getattr(args, 'zenith_angle', None)
         _pa = getattr(args, 'parallactic_angle', None)
+        _si_disp = getattr(args, '_session_info', None)
+        # Auto-fill the two unambiguous parameters when not given: plate
+        # scale from the header WCS, zenith angle from the site GPS + time.
+        # Parallactic angle is left manual -- a wrong value shifts colour
+        # channels the wrong way, and mapping it onto the detector needs the
+        # image's north position angle, which isn't reliably known here.
+        if _ps is None:
+            from src.photometry_core import _field_centre_and_radius
+            _c = _field_centre_and_radius(hdu.header, stacked.shape)
+            if _c is not None:
+                _ps = _c[3]
+                safe_print(f"  [dispersion] plate scale {_ps:.3f} arcsec/px from the WCS")
+        if (_za is None and _si_disp is not None
+                and getattr(_si_disp, 'has_gps', False)
+                and getattr(_si_disp, 'has_wcs', False)):
+            from src.observing_geometry import zenith_angle_deg
+            _t = header_get_first(hdu.header, ('DATE-OBS', 'DATE_OBS', 'DATEOBS'),
+                                  cast=str) or _si_disp.date_time
+            if _t:
+                _za = zenith_angle_deg(
+                    math.degrees(_si_disp.ra_rad), math.degrees(_si_disp.dec_rad),
+                    _si_disp.latitude, _si_disp.longitude,
+                    _si_disp.altitude or 0.0, _t)
+                if _za is not None:
+                    safe_print(f"  [dispersion] zenith angle {_za:.1f} deg "
+                               "from site GPS + observation time")
         if _ps is None or _za is None or _pa is None:
-            safe_print("  WARNING: --fix-atmospheric-dispersion needs --plate-scale, "
-                      "--zenith-angle, and --parallactic-angle -- skipping "
-                      "(none are auto-derived; see --help)")
+            _missing = [nm for nm, v in (('--plate-scale', _ps),
+                                         ('--zenith-angle', _za),
+                                         ('--parallactic-angle', _pa)) if v is None]
+            safe_print("  WARNING: --fix-atmospheric-dispersion still missing "
+                       f"{', '.join(_missing)} -- skipping (parallactic angle is "
+                       "not auto-derived; see --help)")
         else:
             try:
                 from src.atmospheric_dispersion import correct_atmospheric_dispersion
@@ -1037,6 +1095,55 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         _wcs_available = False
         if args.verbose:
             print("\n  Plate solving skipped (use --plate-solve to enable)")
+
+    if getattr(args, 'photometry', False):
+        if _wcs_available:
+            safe_print("\n  Aperture photometry (Gaia DR3)...")
+            _phot_start = time.time()
+            try:
+                from src.photometry import run_photometry, format_photometry_summary
+                # hdu.data is still the linear pre-Phase-4 stack here (colour
+                # calibration below is the first step that would mutate it).
+                _lin = np.transpose(np.asarray(hdu.data, dtype=np.float64),
+                                    (1, 2, 0))
+                _phot = run_photometry(_lin, hdu.header, args,
+                                       getattr(args, '_session_info', None),
+                                       output_path)
+                if _phot is not None:
+                    for _ch in ('R', 'G', 'B'):
+                        _zp = _phot['zeropoints'].get(_ch)
+                        if _zp:
+                            hdu.header[f'MAGZP_{_ch}'] = (
+                                round(_zp['zp'], 4),
+                                f'{_ch} photometric zero point (mag)')
+                            hdu.header[f'MAGZPE_{_ch}'] = (
+                                round(_zp['zp_err'], 4),
+                                f'{_ch} zero-point uncertainty (mag)')
+                            if _zp.get('ct_fitted'):
+                                hdu.header[f'MAGCT_{_ch}'] = (
+                                    round(_zp['ct'], 4),
+                                    f'{_ch} colour term (mag per mag BP-RP)')
+                    if _phot.get('color_terms_fitted'):
+                        hdu.header['PHOTCREF'] = (_phot['ref_color'],
+                                                 'Colour-term reference Gaia BP-RP')
+                    hdu.header['PHOTNSTR'] = (_phot['n_matched'],
+                                              'Gaia stars used for photometry')
+                    if _phot['airmass'] is not None:
+                        hdu.header['PHOTAIRM'] = (_phot['airmass'],
+                                                  'Airmass at field centre')
+                    if _phot.get('gain_e_per_adu'):
+                        hdu.header['PHOTGAIN'] = (_phot['gain_e_per_adu'],
+                                                 'Gain used for Poisson errors (e-/ADU)')
+                    hdu.header['PHOTAPR'] = (_phot['aperture_px'],
+                                             'Photometry aperture radius (px)')
+                    hdu.writeto(output_path, overwrite=True)
+                    safe_print(format_photometry_summary(_phot))
+                    safe_print(f"  Photometry ({format_time(time.time() - _phot_start)})")
+            except Exception as e:
+                safe_print(f"  WARNING: photometry failed: {e}")
+        else:
+            safe_print("\n  Photometry: no WCS available (needs --plate-solve or a "
+                       "session solve) -- skipping")
 
     if getattr(args, 'color_calibrate', False) and _wcs_available:
         safe_print("\n  Applying photometric colour calibration...")

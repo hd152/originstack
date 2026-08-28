@@ -175,7 +175,7 @@ SUMMARY
 | `median` | Robust, no tuning required |
 | `mean` | Fastest, no rejection |
 
-Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-interpolated sub-pixel accumulation.
+Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-3 sub-pixel accumulation by default; `--drizzle-kernel {psf,magic}` swaps in a PSF-matched or ringing-free Magic-Kernel footprint, and `--super-res-iters N` adds iterative back-projection refinement.
 
 ### Quality Filtering
 - Per-frame metrics: brightness, contrast, star count, FWHM, SNR, composite score
@@ -202,7 +202,7 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 14. ❌ Perona-Malik anisotropic diffusion — `--denoiser aniso` (native/Rust accelerated)
 15. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
 16. ❌ Photometric colour calibration — `--photometric-calibration`
-17. ❌ Deconvolution — `--deconvolve rl|tv` (RL is GPU-accelerated with `--use-gpu`)
+17. ❌ Deconvolution — `--deconvolve rl|tv|rl-sv|sparse` (RL is GPU-accelerated with `--use-gpu`; `rl-sv` is spatially-variant, `sparse` is FISTA in this project's wavelet basis)
 18. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
 19. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
 20. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
@@ -228,6 +228,8 @@ Eight built-in target presets tune all parameters at once:
 ### Advanced Features
 - **Plate solving** via ASTAP or nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
 - **Photometric colour calibration** — gray-locus method (`--photometric-calibration`), or full field-star calibration via Gaia DR3 (`--color-calibrate`)
+- **Aperture photometry** (`--photometry`) — calibrates the stack against Gaia DR3: per-channel zero points (optional colour terms), airmass from the `info.json` GPS + time, a Poisson error term from raw bias/flat pairs, and a `<output>_photometry.csv` star catalogue with magnitudes + uncertainties
+- **Differential light curves** (`--photometry-timeseries`) — aperture-photometers a fixed Gaia star list on every registered sub and ensemble-calibrates, writing per-frame + per-star CSVs with a variability flag; `--photometry-target "RA,DEC"` reports one star
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
@@ -247,11 +249,11 @@ Eight built-in target presets tune all parameters at once:
 
 ## Installation
 
-Requires Python 3.9+.
+Requires Python 3.10+ (the optional native extension targets the CPython 3.10 ABI).
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/yourusername/originstack.git
+git clone https://github.com/hd152/originstack.git
 cd originstack
 
 # 2. Create a virtual environment (recommended)
@@ -656,6 +658,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Luma denoising (wavelet) | ✅ on | `--denoiser none` |
 | Chroma noise reduction | ✅ on | `--no-chroma-nr` |
 | Star reduction | ✅ on | `--no-star-reduce` |
+| Star removal (writes a `_starless.fits` sidecar; main output keeps stars) | ✅ on | `--no-remove-stars` |
 | Local contrast enhancement | ✅ on | `--no-local-contrast` |
 | Chromatic aberration correction | ✅ on | `--no-ca-correction` |
 | Cosmic ray rejection | auto | `--cosmic-ray-rejection` / `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |
@@ -719,21 +722,23 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 
 ### Native (Rust) acceleration
 
-[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 cosmic-ray/median hot paths, the Phase-2/3 warp + combine hot path, drizzle, DBE, and the MMT denoiser:
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~40 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, and the photometry aperture loop. A representative sample:
 
 | Kernel | Speedup vs numpy/scipy |
 |--------|------------------------|
 | `sigma_clip_combine` (default stack method) | ~37× |
-| `esd_combine` | ~24× |
-| `percentile_clip_combine` | ~13× |
-| `median_combine` | ~6× |
+| `esd_combine` / `percentile_clip_combine` / `median_combine` | ~24× / ~13× / ~6× |
 | Fused patch-weighted + sigma-clip combine | ~100× |
 | Per-frame Lanczos-3 warp (alignment + drizzle resample) | ~5× / ~26× |
+| Malvar debayer (default Phase-1 debayer) | ~2× |
 | L.A.Cosmic cosmic-ray rejection | ~2× under real parallel load |
 | Median filter (3×3 median network / larger windows) | ~13× / ~26× |
 | MMT denoise median cascade | ~10× |
 | DBE surface fit + patch sampler | ~2.4× / ~31× |
 | Anisotropic diffusion | ~37× |
+| Batch aperture photometry (`--photometry` / `--photometry-timeseries`) | ~150× |
+
+See CLAUDE.md's "Native (Rust) acceleration" section for the full kernel-by-kernel list.
 
 Build (needs a Rust toolchain + `pip install maturin`):
 

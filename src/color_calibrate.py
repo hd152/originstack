@@ -23,7 +23,7 @@ matched, a warning is printed and the image is returned unchanged.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -33,20 +33,13 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 try:
-    from astropy.wcs import WCS
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
+    from astropy.wcs import WCS  # noqa: F401  (kept for HAS_ASTROPY_WCS gate)
     HAS_ASTROPY_WCS = True
 except Exception:
     HAS_ASTROPY_WCS = False
 
-try:
-    from astropy.stats import sigma_clipped_stats
-    HAS_SIGMA_CLIP = True
-except Exception:
-    HAS_SIGMA_CLIP = False
-
 from src import net_query
+from src.photometry_core import _pixel_coords, aperture_photometry_batch
 
 
 # ---------------------------------------------------------------------------
@@ -129,74 +122,22 @@ def query_2mass_stars(header, max_stars: int = 500):
 # Aperture photometry
 # ---------------------------------------------------------------------------
 
-def _pixel_coords(table, header) -> Optional[np.ndarray]:
-    """Convert catalogue RA/Dec to image pixel coordinates.
-
-    Returns (N, 2) array of (x, y) pixel coordinates, or None.
-    """
-    if not HAS_ASTROPY_WCS:
-        return None
-    try:
-        wcs = WCS(header)
-        if "ra" in table.colnames:
-            ra  = np.array(table["ra"],  dtype=float)
-            dec = np.array(table["dec"], dtype=float)
-        else:
-            ra  = np.array(table["RAJ2000"], dtype=float)
-            dec = np.array(table["DEJ2000"], dtype=float)
-        coords = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-        x, y = wcs.all_world2pix(ra, dec, 0)
-        return np.column_stack([x, y])
-    except Exception:
-        return None
-
-
 def _aperture_flux(img: np.ndarray, px: np.ndarray, py: np.ndarray,
                    radius: int = 5, sky_annulus: int = 3) -> np.ndarray:
-    """Simple circular aperture photometry.
+    """Circular aperture photometry -> (N, 3) per-channel background-
+    subtracted flux (negatives clamped to 0; NaN for stars whose aperture
+    leaves the frame).
 
-    Returns (N, 3) array of per-star, per-channel background-subtracted flux.
-    Stars outside the image or with negative sky are excluded (set to NaN).
+    Thin wrapper over ``photometry_core.aperture_photometry_batch`` -- the
+    shared partial-pixel / robust-annulus kernel. Colour-cal only uses the
+    per-star flux ratios, so the small numeric shift from the previous
+    integer-mask + sigma-clipped-annulus implementation (sub-percent, and
+    the scales are clamped to [0.5, 2.0] anyway) is not material.
     """
-    H, W = img.shape[:2]
-    C = img.shape[2] if img.ndim == 3 else 1
-    fluxes = np.full((len(px), C), np.nan, dtype=np.float64)
-
-    r_in  = radius
-    r_out = radius + sky_annulus
-
-    yy, xx = np.mgrid[-r_out:r_out + 1, -r_out:r_out + 1]
-    ap_mask  = xx ** 2 + yy ** 2 <= r_in  ** 2
-    sky_mask = (xx ** 2 + yy ** 2 >  r_in  ** 2) & \
-               (xx ** 2 + yy ** 2 <= r_out ** 2)
-
-    for i, (cx, cy) in enumerate(zip(px, py)):
-        cx_int = int(round(cx))
-        cy_int = int(round(cy))
-        y0 = cy_int - r_out
-        y1 = cy_int + r_out + 1
-        x0 = cx_int - r_out
-        x1 = cx_int + r_out + 1
-        if y0 < 0 or x0 < 0 or y1 > H or x1 > W:
-            continue
-        patch = img[y0:y1, x0:x1]  # (2*r_out+1, 2*r_out+1, C)
-        if patch.shape[:2] != (2 * r_out + 1, 2 * r_out + 1):
-            continue
-        for c in range(C):
-            ch = patch[:, :, c] if img.ndim == 3 else patch
-            sky_vals = ch[sky_mask]
-            if HAS_SIGMA_CLIP and len(sky_vals) > 5:
-                try:
-                    _, sky_med, _ = sigma_clipped_stats(sky_vals, sigma=3.0)
-                    sky_med = float(sky_med)
-                except Exception:
-                    sky_med = float(np.median(sky_vals))
-            else:
-                sky_med = float(np.median(sky_vals))
-            flux = float(np.sum(ch[ap_mask])) - sky_med * int(ap_mask.sum())
-            fluxes[i, c] = max(flux, 0.0)
-
-    return fluxes
+    flux, *_ = aperture_photometry_batch(
+        img, np.asarray(px, dtype=float), np.asarray(py, dtype=float),
+        float(radius), float(radius), float(radius + sky_annulus))
+    return np.where(np.isfinite(flux), np.maximum(flux, 0.0), np.nan)
 
 
 # ---------------------------------------------------------------------------

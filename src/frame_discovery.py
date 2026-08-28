@@ -146,14 +146,10 @@ def _frame_exptime(f: FrameInfo) -> Optional[float]:
 
 def _frame_temp(f: FrameInfo) -> Optional[float]:
     """Extract CCD temperature (°C) from a frame's header."""
-    for key in ('CCDTEMP', 'CCD-TEMP', 'TEMPERAT', 'CCD_TEMP', 'SET-TEMP'):
-        val = f.header.get(key)
-        if val is not None:
-            try:
-                return float(val)
-            except (ValueError, TypeError):
-                pass
-    return None
+    from src.utils import header_get_first
+    return header_get_first(
+        f.header, ('CCDTEMP', 'CCD-TEMP', 'TEMPERAT', 'CCD_TEMP', 'SET-TEMP'),
+        cast=float)
 
 
 def select_matching_darks(lights: List[FrameInfo], darks: List[FrameInfo]) -> List[FrameInfo]:
