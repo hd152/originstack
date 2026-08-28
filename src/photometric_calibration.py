@@ -5,7 +5,8 @@ import logging
 from typing import Optional, Tuple
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
+
+from src.photometry_core import aperture_photometry_batch
 
 _log = logging.getLogger(__name__)
 
@@ -14,51 +15,21 @@ def _aperture_photometry(img: np.ndarray, star_positions,
                           aperture_r: int = 6,
                           sky_inner: int = 8,
                           sky_outer: int = 12) -> Optional[np.ndarray]:
-    """Simple circular aperture photometry for R, G, B channels.
+    """Circular aperture photometry for R, G, B channels via the shared
+    ``photometry_core.aperture_photometry_batch`` kernel (partial-pixel
+    aperture, median + MAD sky annulus).
 
-    For each star, integrates flux in a circle of radius ``aperture_r``
-    after subtracting the median annulus sky value.
-
-    Returns an (N, 3) array of flux measurements or None on failure.
+    Returns an ``(N, 3)`` array for the stars with a positive, finite flux
+    in every channel, or None.
     """
     if star_positions is None or len(star_positions) == 0:
         return None
-    H, W = img.shape[:2]
-    fluxes = []
-
-    for star in star_positions:
-        yc = int(round(float(star['ycentroid'])))
-        xc = int(round(float(star['xcentroid'])))
-        if (yc < sky_outer + 1 or yc >= H - sky_outer - 1 or
-                xc < sky_outer + 1 or xc >= W - sky_outer - 1):
-            continue
-
-        yy, xx = np.mgrid[yc - sky_outer:yc + sky_outer + 1,
-                           xc - sky_outer:xc + sky_outer + 1]
-        r2 = (yy - yc) ** 2 + (xx - xc) ** 2
-        ap_mask = r2 <= aperture_r ** 2
-        sky_mask = (r2 >= sky_inner ** 2) & (r2 <= sky_outer ** 2)
-
-        star_flux = []
-        skip = False
-        for c in range(3):
-            patch = img[yc - sky_outer:yc + sky_outer + 1,
-                        xc - sky_outer:xc + sky_outer + 1, c]
-            sky_pix = patch[sky_mask]
-            if sky_pix.size < 4:
-                skip = True
-                break
-            sky_bg = float(np.median(sky_pix))
-            ap_pix = patch[ap_mask] - sky_bg
-            flux = float(ap_pix.sum())
-            if flux <= 0:
-                skip = True
-                break
-            star_flux.append(flux)
-        if not skip and len(star_flux) == 3:
-            fluxes.append(star_flux)
-
-    return np.array(fluxes, dtype=np.float64) if fluxes else None
+    px = np.asarray(star_positions['xcentroid'], dtype=float)
+    py = np.asarray(star_positions['ycentroid'], dtype=float)
+    flux, *_ = aperture_photometry_batch(
+        img, px, py, float(aperture_r), float(sky_inner), float(sky_outer))
+    good = np.all(np.isfinite(flux) & (flux > 0.0), axis=1)
+    return flux[good].astype(np.float64) if np.any(good) else None
 
 
 def _gray_locus_calibration(fluxes: np.ndarray,

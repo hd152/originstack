@@ -22,6 +22,7 @@ from astropy.wcs import WCS
 
 from src.session_info import SessionInfo
 from src.photometry_timeseries import run_timeseries_photometry
+from tests._photometry_helpers import FakeTable as _FakeTable
 
 
 class _Args:
@@ -46,17 +47,6 @@ def _session_info(H, W, scale_arcsec=2.0):
     si.total_duration_ms = 40 * 60 * 1000.0
     return si
 
-
-class _FakeTable:
-    def __init__(self, cols):
-        self._c = {k: np.asarray(v) for k, v in cols.items()}
-        self.colnames = list(cols.keys())
-
-    def __getitem__(self, k):
-        return self._c[k]
-
-    def __len__(self):
-        return len(next(iter(self._c.values())))
 
 
 @pytest.fixture

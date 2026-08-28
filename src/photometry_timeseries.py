@@ -28,9 +28,10 @@ from typing import Optional
 
 import numpy as np
 
-from src.photometry import (aperture_photometry_batch, match_gaia_field,
-                            _airmass, _read_gain, _id_str, row_nanmax,
+from src.photometry_core import (aperture_photometry_batch, row_nanmax, _id_str)
+from src.photometry import (match_gaia_field, _airmass, _read_gain,
                             _GAIA_BAND_FOR_CHANNEL)
+from src.utils import header_get_first
 
 _log = logging.getLogger("originstack")
 _CH = ("r", "g", "b")
@@ -68,9 +69,9 @@ def _frame_time_iso(frame, session_info, j, n):
     """ISO UTC timestamp for sub *j*: the frame's own DATE-OBS if present,
     else interpolated from the session start + total duration."""
     hdr = getattr(frame, "header", {}) or {}
-    for key in ("DATE-OBS", "DATE_OBS", "DATEOBS"):
-        if hdr.get(key):
-            return str(hdr[key])
+    own = header_get_first(hdr, ("DATE-OBS", "DATE_OBS", "DATEOBS"), cast=str)
+    if own:
+        return own
     start = getattr(session_info, "date_time", None) if session_info else None
     dur_ms = getattr(session_info, "total_duration_ms", None) if session_info else None
     if start and dur_ms and n > 1:
@@ -193,14 +194,7 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
     # bright star's per-frame peak routinely exceeds a fraction of the
     # (fainter) mean-stack max, so a stack-derived threshold would wrongly
     # exclude the best comparison stars.
-    _hdr_sat = None
-    for _k in ("SATURATE", "DATAMAX"):
-        try:
-            if header.get(_k) is not None:
-                _hdr_sat = float(header[_k])
-                break
-        except (TypeError, ValueError):
-            pass
+    _hdr_sat = header_get_first(header, ("SATURATE", "DATAMAX"), cast=float)
     sat_level = _hdr_sat if _hdr_sat is not None else obs_ceiling * (1.0 - 1e-6)
     ever_sat = np.any(fpeak >= sat_level, axis=0)
     finite_frac = np.mean(np.isfinite(m_inst[:, :, 1]), axis=0)

@@ -42,6 +42,14 @@ match the `VERSION` file and `v*` git tags.
   estimates the sensor gain (e-/ADU) and read noise (e-), feeding a real
   Poisson term into the per-star photometric errors.
 
+### Changed
+
+- **`--fix-atmospheric-dispersion` now auto-derives `--plate-scale` and
+  `--zenith-angle`** (from the header WCS, and from the `info.json` GPS +
+  observation time) when they are not given. `--parallactic-angle` stays
+  required — a wrong value shifts colour channels the wrong way and
+  mapping it onto the detector needs the image north angle.
+
 ### Internal
 
 - **`astro_native` 0.18.0 → 0.19.0: `aperture_photometry_batch` kernel** —
@@ -49,6 +57,17 @@ match the `VERSION` file and `v*` git tags.
   over stars. ~150× faster than the numpy mirror at time-series scale
   (300 stars × 200 frames: ~23 s → ~0.2 s). Numpy fallback
   (`_aperture_photometry_batch_numpy`) with a native parity test.
+- **Refactor: shared photometry primitives.** New `src/photometry_core.py`
+  (aperture-photometry kernel + dispatcher, WCS→pixel projection, field
+  centre/radius, small array helpers) and `src/observing_geometry.py`
+  (alt/az, airmass, zenith & parallactic angle from lat/long + RA/Dec +
+  UTC). `color_calibrate._aperture_flux` and
+  `photometric_calibration._aperture_photometry` are now thin wrappers
+  over the shared kernel (partial-pixel apertures, ~150× faster with the
+  native build) instead of three separate per-star Python loops.
+  `utils.header_get_first` folds the repeated "try each header spelling"
+  pattern (`DATE-OBS`/`DATE_OBS`/…, `EGAIN`/`GAIN`, `SATURATE`/`DATAMAX`,
+  the `CCD-TEMP` family).
 
 ## [1.0.0] - 2026-08-21
 

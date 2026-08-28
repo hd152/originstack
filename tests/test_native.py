@@ -1352,7 +1352,7 @@ _HAS_APB = hasattr(native, "aperture_photometry_batch")
                                              (6.3, 9.1, 15.7),
                                              (3.0, 6.0, 9.0)])
 def test_aperture_photometry_batch_matches_numpy(r_ap, r_in, r_out):
-    from src.photometry import _aperture_photometry_batch_numpy
+    from src.photometry_core import _aperture_photometry_batch_numpy
     rng = np.random.default_rng(7)
     H, W, C = 120, 140, 3
     img = rng.normal(30.0, 2.0, (H, W, C)).astype(np.float32)

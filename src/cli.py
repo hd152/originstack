@@ -1592,17 +1592,20 @@ def build_parser() -> argparse.ArgumentParser:
                             'standard-atmosphere refractive-index formula) -- no established '
                             'software reference implementation exists for this, unlike this '
                             'pipeline\'s other corrections (real ADCs are physical prism '
-                            'hardware). Requires --plate-scale, --zenith-angle, and '
-                            '--parallactic-angle (all in the units noted below) -- none are '
-                            'auto-derived, since getting the geometry wrong shifts colour '
-                            'channels the WRONG way and actively worsens the image. Not '
-                            'wired into --auto. Most useful for low-altitude targets '
-                            '(zenith angle > ~40deg).')
+                            'hardware). --plate-scale and --zenith-angle are auto-derived '
+                            '(from the WCS, and from the info.json GPS + observation time) '
+                            'when not given; --parallactic-angle is still required -- a '
+                            'wrong value shifts colour channels the WRONG way, and mapping '
+                            'it onto the detector needs the image north angle, which is not '
+                            'reliably known here. Not wired into --auto. Most useful for '
+                            'low-altitude targets (zenith angle > ~40deg).')
     g_out.add_argument('--plate-scale', type=float, default=None, metavar='ARCSEC/PX',
-                       help='Image plate scale for --fix-atmospheric-dispersion.')
+                       help='Image plate scale for --fix-atmospheric-dispersion '
+                            '(auto-derived from the WCS when omitted).')
     g_out.add_argument('--zenith-angle', type=float, default=None, metavar='DEG',
                        help='Target zenith angle (90 - altitude) at capture time, for '
-                            '--fix-atmospheric-dispersion.')
+                            '--fix-atmospheric-dispersion (auto-derived from the info.json '
+                            'GPS + observation time when omitted).')
     g_out.add_argument('--parallactic-angle', type=float, default=None, metavar='DEG',
                        help='On-detector direction of "toward zenith" (0=up/+y, 90=right/+x), '
                             'for --fix-atmospheric-dispersion. Depends on site latitude, '

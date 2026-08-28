@@ -8,8 +8,8 @@ photometry catalogue:
      the image via the header WCS (session info.json solve from a Celestron
      Origin, or --plate-solve).
   3. Cross-match detected stars to Gaia by pixel position.
-  4. Circular-aperture photometry per channel (reuses color_calibrate's
-     `_aperture_flux`: aperture + sigma-clipped sky annulus).
+  4. Partial-pixel circular-aperture photometry per channel
+     (`photometry_core.aperture_photometry_batch`).
   5. Fit a per-channel photometric zero point
         m_cal = m_inst - k * X + ZP
      against the Gaia G/BP/RP magnitudes (RP->R, G->G, BP->B -- a coarse
@@ -40,14 +40,12 @@ from typing import Optional
 
 import numpy as np
 
-try:
-    import astro_native as _NATIVE
-except Exception:  # pragma: no cover - native module is optional
-    _NATIVE = None
+from src.photometry_core import (
+    _field_centre_and_radius, _id_str, _pixel_coords,
+    aperture_photometry_batch, row_nanmax)
+from src.utils import header_get_first
 
 _log = logging.getLogger("originstack")
-
-_APB_SUBPIX = 4  # aperture-edge supersampling factor (native + numpy paths)
 
 # Nominal broadband extinction coefficients (mag / airmass) for a typical
 # sea-level-ish site, used when the fit only has one airmass to work with
@@ -61,29 +59,6 @@ _CHANNELS = ("R", "G", "B")
 _GAIA_BAND_FOR_CHANNEL = {"R": "rp", "G": "g", "B": "bp"}
 
 
-def _field_centre_and_radius(header, shape):
-    """(ra_deg, dec_deg, search_radius_deg, plate_scale_arcsec) from the WCS."""
-    try:
-        from astropy.wcs import WCS
-        from astropy.wcs.utils import proj_plane_pixel_scales
-    except Exception:
-        return None
-    try:
-        w = WCS(header).celestial
-        if not w.has_celestial:
-            return None
-        H, W = shape[:2]
-        sky = w.pixel_to_world(W / 2.0, H / 2.0)
-        ra0 = float(sky.ra.deg)
-        dec0 = float(sky.dec.deg)
-        scales_deg = proj_plane_pixel_scales(w)  # deg/pixel, (x, y)
-        scale_arcsec = float(np.mean(scales_deg)) * 3600.0
-        half_diag_deg = 0.5 * math.hypot(W * scales_deg[0], H * scales_deg[1])
-        return ra0, dec0, half_diag_deg * 1.15, scale_arcsec
-    except Exception:
-        return None
-
-
 def _airmass(header, session_info, ra_deg, dec_deg, when=None):
     """Airmass at the field centre for a given observation time.
 
@@ -95,38 +70,17 @@ def _airmass(header, session_info, ra_deg, dec_deg, when=None):
     if session_info is None or not getattr(session_info, "has_gps", False):
         return None
     time_str = str(when) if when else None
-    if time_str is None and header is not None:
-        for key in ("DATE-OBS", "DATE_OBS", "DATEOBS"):
-            if header.get(key):
-                time_str = str(header[key])
-                break
+    if time_str is None:
+        time_str = header_get_first(header, ("DATE-OBS", "DATE_OBS", "DATEOBS"),
+                                    cast=str)
     if time_str is None:
         time_str = getattr(session_info, "date_time", None)
     if not time_str:
         return None
-    try:
-        from astropy.coordinates import AltAz, EarthLocation, SkyCoord
-        from astropy.time import Time
-        import astropy.units as u
-    except Exception:
-        return None
-    try:
-        loc = EarthLocation(lat=session_info.latitude * u.deg,
-                            lon=session_info.longitude * u.deg,
-                            height=(session_info.altitude or 0.0) * u.m)
-        t = Time(time_str)
-        altaz = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg).transform_to(
-            AltAz(obstime=t, location=loc))
-        alt_deg = float(altaz.alt.deg)
-        if alt_deg <= 3.0:
-            return None
-        # Kasten & Young (1989) -- stays finite and accurate toward the horizon.
-        z = 90.0 - alt_deg
-        X = 1.0 / (math.cos(math.radians(z))
-                   + 0.50572 * (96.07995 - z) ** (-1.6364))
-        return float(X) if np.isfinite(X) and X >= 1.0 else None
-    except Exception:
-        return None
+    from src.observing_geometry import airmass as _airmass_of
+    return _airmass_of(ra_deg, dec_deg, session_info.latitude,
+                       session_info.longitude, session_info.altitude or 0.0,
+                       time_str)
 
 
 def _match_catalog_to_detections(cat_xy, det_xy, radius_px):
@@ -201,99 +155,6 @@ def _fit_zeropoint_colorterm(resid, color, ref_color, fit_ct=False,
               / math.sqrt(max(int(keep.sum()), 1)))
     return zp, float(zp_err), ct, int(keep.sum()), ct_fitted
 
-
-# ---------------------------------------------------------------------------
-# Batch aperture photometry (native Rust kernel + numpy mirror)
-# ---------------------------------------------------------------------------
-
-def aperture_photometry_batch(img, xs, ys, r_ap, r_in, r_out,
-                              subpix: int = _APB_SUBPIX):
-    """Partial-pixel circular-aperture photometry for many centres at once.
-
-    Returns ``(flux, sky, sky_sigma, peak, area)`` -- ``flux``/``sky``/
-    ``sky_sigma``/``peak`` are ``(N, C)`` (background-subtracted flux,
-    robust sky median, ``1.4826*MAD`` sky sigma, and the raw max pixel
-    value inside the aperture per channel), ``area`` is ``(N,)`` (effective
-    aperture pixel area). A star whose full ``r_out`` disk is not inside
-    the frame gets an all-NaN row. Integer pixel coordinates are pixel
-    centres (matches ``star_detect`` / ``_aperture_flux``).
-
-    Dispatches to the native ``aperture_photometry_batch`` kernel when
-    built; ``_aperture_photometry_batch_numpy`` otherwise.
-    """
-    img_c = np.ascontiguousarray(img, dtype=np.float32)
-    xs_c = np.ascontiguousarray(xs, dtype=np.float64)
-    ys_c = np.ascontiguousarray(ys, dtype=np.float64)
-    if _NATIVE is not None and hasattr(_NATIVE, "aperture_photometry_batch"):
-        return _NATIVE.aperture_photometry_batch(
-            img_c, xs_c, ys_c, float(r_ap), float(r_in), float(r_out),
-            int(subpix))
-    return _aperture_photometry_batch_numpy(
-        img_c, xs_c, ys_c, float(r_ap), float(r_in), float(r_out), int(subpix))
-
-
-def _aperture_photometry_batch_numpy(img, xs, ys, r_ap, r_in, r_out,
-                                     subpix=_APB_SUBPIX):
-    """Numpy reference for :func:`aperture_photometry_batch` (parity-tested
-    against the native kernel in ``tests/test_native.py``)."""
-    a = np.asarray(img, dtype=np.float64)
-    H, W, C = a.shape
-    N = len(xs)
-    flux = np.full((N, C), np.nan)
-    sky = np.full((N, C), np.nan)
-    sig = np.full((N, C), np.nan)
-    peak = np.full((N, C), np.nan)
-    area = np.full(N, np.nan)
-
-    sub_off = (np.arange(subpix) + 0.5) / subpix - 0.5
-    oy, ox = np.meshgrid(sub_off, sub_off, indexing="ij")
-    half_diag = math.sqrt(0.5)
-    full_in = (r_ap - half_diag) ** 2 if r_ap > half_diag else -1.0
-    full_out = (r_ap + half_diag) ** 2
-    r_ap2, r_in2, r_out2 = r_ap ** 2, r_in ** 2, r_out ** 2
-
-    for i in range(N):
-        cx, cy = float(xs[i]), float(ys[i])
-        if (not np.isfinite(cx) or not np.isfinite(cy)
-                or cx - r_out < 0 or cx + r_out >= W - 1
-                or cy - r_out < 0 or cy + r_out >= H - 1):
-            continue
-        x0 = max(int(math.floor(cx - r_out)) - 1, 0)
-        y0 = max(int(math.floor(cy - r_out)) - 1, 0)
-        x1 = min(int(math.ceil(cx + r_out)) + 1, W - 1)
-        y1 = min(int(math.ceil(cy + r_out)) + 1, H - 1)
-        yy, xx = np.mgrid[y0:y1 + 1, x0:x1 + 1]
-        dy = yy - cy
-        dx = xx - cx
-        d2 = dx * dx + dy * dy
-
-        frac = np.zeros(d2.shape, dtype=np.float64)
-        if full_in > 0:
-            frac[d2 <= full_in] = 1.0
-        edge = (d2 > (full_in if full_in > 0 else -1.0)) & (d2 < full_out)
-        if np.any(edge):
-            de_y = dy[edge][:, None, None] + oy[None]
-            de_x = dx[edge][:, None, None] + ox[None]
-            frac[edge] = (de_x ** 2 + de_y ** 2 <= r_ap2).mean(axis=(1, 2))
-
-        patch = a[y0:y1 + 1, x0:x1 + 1, :]
-        ap_area = float(frac.sum())
-        area[i] = ap_area
-        ap_sum = (patch * frac[..., None]).sum(axis=(0, 1))
-        ap_mask = frac > 0.0
-        ann = (d2 > r_in2) & (d2 <= r_out2)
-        for c in range(C):
-            if np.any(ap_mask):
-                peak[i, c] = float(patch[ap_mask, c].max())
-            vals = patch[ann, c]
-            if vals.size < 4:
-                continue
-            med = float(np.median(vals))
-            mad = float(np.median(np.abs(vals - med)))
-            sky[i, c] = med
-            sig[i, c] = 1.4826 * mad
-            flux[i, c] = ap_sum[c] - med * ap_area
-    return flux, sky, sig, peak, area
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +233,6 @@ def match_gaia_field(img_rgb, header, *, max_rows: int = 1200,
                      "no" if catalog is None else len(catalog))
         return None
 
-    from src.color_calibrate import _pixel_coords
     cat_pix = _pixel_coords(catalog, header)
     if cat_pix is None:
         _log.warning("Photometry: could not project Gaia onto the image -- skipping")
@@ -445,14 +305,8 @@ def _read_gain(header, args=None):
                 return float(ptc)
         except (TypeError, ValueError):
             pass
-    for key in ("EGAIN", "GAIN"):
-        v = header.get(key) if hasattr(header, "get") else None
-        try:
-            if v is not None and float(v) > 0:
-                return float(v)
-        except (TypeError, ValueError):
-            pass
-    return None
+    hdr_gain = header_get_first(header, ("EGAIN", "GAIN"), cast=float)
+    return hdr_gain if (hdr_gain is not None and hdr_gain > 0) else None
 
 
 def _photometer_matched(gm, img_rgb, header, args, session_info):
@@ -467,14 +321,7 @@ def _photometer_matched(gm, img_rgb, header, args, session_info):
     flux, sky, sky_sig, ap_peak, area = aperture_photometry_batch(
         img_rgb, gm.x, gm.y, float(gm.ap_radius), gm.r_in, gm.r_out)
 
-    sat_level = None
-    for key in ("SATURATE", "DATAMAX"):
-        try:
-            if header.get(key) is not None:
-                sat_level = float(header[key])
-                break
-        except (TypeError, ValueError):
-            pass
+    sat_level = header_get_first(header, ("SATURATE", "DATAMAX"), cast=float)
 
     color = gm.bp - gm.rp
     cat_channel_mag = {ch: getattr(gm, _GAIA_BAND_FOR_CHANNEL[ch]) for ch in _CHANNELS}
@@ -554,25 +401,7 @@ def _photometer_matched(gm, img_rgb, header, args, session_info):
     return {
         "rows": rows, "fit": fit, "k": k, "X": X, "airmass": airmass,
         "ref_color": ref_color, "fit_ct": fit_ct, "gain": gain,
-        "m_inst": m_inst, "magerr_flux": magerr_flux, "snr": snr,
-        "flux": flux, "saturated": saturated,
     }
-
-
-def _id_str(v):
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return str(v)
-
-
-def row_nanmax(a, fallback):
-    """Per-row max ignoring NaN, without numpy's All-NaN-slice warning;
-    rows that are entirely NaN take the matching ``fallback`` value."""
-    a = np.asarray(a, dtype=np.float64)
-    all_nan = ~np.any(np.isfinite(a), axis=1)
-    out = np.where(np.isfinite(a), a, -np.inf).max(axis=1)
-    return np.where(all_nan, np.asarray(fallback, dtype=np.float64), out)
 
 
 _PHOT_FIELDNAMES = (["source_id", "x", "y", "ra_deg", "dec_deg",

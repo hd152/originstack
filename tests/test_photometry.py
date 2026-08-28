@@ -20,6 +20,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from src.photometry import run_photometry, _fit_zeropoint_colorterm
+from tests._photometry_helpers import make_wcs_header as _make_wcs_header, add_gaussian as _add_gaussian, FakeTable as _FakeTable
 
 
 class _Args:
@@ -27,54 +28,6 @@ class _Args:
     photometry_color_terms = False
     photometry_gain = None
     verbose = False
-
-
-def _make_wcs_header(H, W, scale_arcsec=2.0):
-    hdr = fits.Header()
-    hdr["NAXIS"] = 2
-    hdr["NAXIS1"] = W
-    hdr["NAXIS2"] = H
-    hdr["CTYPE1"] = "RA---TAN"
-    hdr["CTYPE2"] = "DEC--TAN"
-    hdr["CRPIX1"] = W / 2.0
-    hdr["CRPIX2"] = H / 2.0
-    hdr["CRVAL1"] = 180.0
-    hdr["CRVAL2"] = 0.0
-    s = scale_arcsec / 3600.0
-    hdr["CD1_1"] = -s
-    hdr["CD1_2"] = 0.0
-    hdr["CD2_1"] = 0.0
-    hdr["CD2_2"] = s
-    return hdr
-
-
-def _add_gaussian(plane, x, y, total_flux, sigma=1.6):
-    H, W = plane.shape
-    r = int(np.ceil(4 * sigma))
-    x0, x1 = max(0, int(x) - r), min(W, int(x) + r + 1)
-    y0, y1 = max(0, int(y) - r), min(H, int(y) + r + 1)
-    yy, xx = np.mgrid[y0:y1, x0:x1]
-    g = np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * sigma ** 2))
-    g *= total_flux / (2 * np.pi * sigma ** 2)
-    plane[y0:y1, x0:x1] += g
-
-
-class _FakeColumn(np.ndarray):
-    pass
-
-
-class _FakeTable:
-    """Minimal astropy-Table stand-in: table['col'] -> ndarray, len()."""
-
-    def __init__(self, cols):
-        self._cols = {k: np.asarray(v) for k, v in cols.items()}
-        self.colnames = list(cols.keys())
-
-    def __getitem__(self, key):
-        return self._cols[key]
-
-    def __len__(self):
-        return len(next(iter(self._cols.values())))
 
 
 @pytest.fixture

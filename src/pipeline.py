@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import math
 import os
 import shutil
 import tempfile
@@ -13,7 +14,8 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.models import FrameInfo, ProcessingStats
-from src.utils import safe_print, print_phase, format_time, get_memory_usage_mb
+from src.utils import (safe_print, print_phase, format_time, get_memory_usage_mb,
+                       header_get_first)
 from src.io_fits import load_fits, load_frame, save_preview_rgb, populate_fits_header
 from src.debayer import debayer, autodetect_bayer_orientation
 from src.plate_solve import solve_plate
@@ -1009,10 +1011,39 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         _ps = getattr(args, 'plate_scale', None)
         _za = getattr(args, 'zenith_angle', None)
         _pa = getattr(args, 'parallactic_angle', None)
+        _si_disp = getattr(args, '_session_info', None)
+        # Auto-fill the two unambiguous parameters when not given: plate
+        # scale from the header WCS, zenith angle from the site GPS + time.
+        # Parallactic angle is left manual -- a wrong value shifts colour
+        # channels the wrong way, and mapping it onto the detector needs the
+        # image's north position angle, which isn't reliably known here.
+        if _ps is None:
+            from src.photometry_core import _field_centre_and_radius
+            _c = _field_centre_and_radius(hdu.header, stacked.shape)
+            if _c is not None:
+                _ps = _c[3]
+                safe_print(f"  [dispersion] plate scale {_ps:.3f} arcsec/px from the WCS")
+        if (_za is None and _si_disp is not None
+                and getattr(_si_disp, 'has_gps', False)
+                and getattr(_si_disp, 'has_wcs', False)):
+            from src.observing_geometry import zenith_angle_deg
+            _t = header_get_first(hdu.header, ('DATE-OBS', 'DATE_OBS', 'DATEOBS'),
+                                  cast=str) or _si_disp.date_time
+            if _t:
+                _za = zenith_angle_deg(
+                    math.degrees(_si_disp.ra_rad), math.degrees(_si_disp.dec_rad),
+                    _si_disp.latitude, _si_disp.longitude,
+                    _si_disp.altitude or 0.0, _t)
+                if _za is not None:
+                    safe_print(f"  [dispersion] zenith angle {_za:.1f} deg "
+                               "from site GPS + observation time")
         if _ps is None or _za is None or _pa is None:
-            safe_print("  WARNING: --fix-atmospheric-dispersion needs --plate-scale, "
-                      "--zenith-angle, and --parallactic-angle -- skipping "
-                      "(none are auto-derived; see --help)")
+            _missing = [nm for nm, v in (('--plate-scale', _ps),
+                                         ('--zenith-angle', _za),
+                                         ('--parallactic-angle', _pa)) if v is None]
+            safe_print("  WARNING: --fix-atmospheric-dispersion still missing "
+                       f"{', '.join(_missing)} -- skipping (parallactic angle is "
+                       "not auto-derived; see --help)")
         else:
             try:
                 from src.atmospheric_dispersion import correct_atmospheric_dispersion
