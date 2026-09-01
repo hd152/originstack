@@ -8,7 +8,7 @@ import numpy as np
 
 from src.photometry_core import aperture_photometry_batch
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger("originstack")
 
 
 def _aperture_photometry(img: np.ndarray, star_positions,

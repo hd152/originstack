@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import FrameInfo, ProcessingStats
-from src.utils import safe_print, format_time
+from src.utils import format_time, safe_print
 
 try:
     from tqdm import tqdm
@@ -49,7 +49,7 @@ def _prefetch_files(lights: List[FrameInfo], pool: ThreadPoolExecutor) -> None:
     read latency overlaps with scoring instead of stalling it. SER virtual
     frames (``path::index``) share one real file -- dedupe so a folder of
     many sub-frames doesn't re-read the same video repeatedly."""
-    from src.io_ser import is_ser_virtual_path, _split_vpath
+    from src.io_ser import _split_vpath, is_ser_virtual_path
 
     seen = set()
     for f in lights:
@@ -67,8 +67,8 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
     session's masters, and the metrics degrade gracefully without calibration.
     """
     try:
+        from src.debayer import autodetect_bayer_orientation, debayer, green_equalize
         from src.io_fits import load_frame
-        from src.debayer import debayer, green_equalize, autodetect_bayer_orientation
         from src.quality import compute_quality_metrics
 
         data, hdr = load_frame(path)
@@ -110,7 +110,7 @@ def _walk_light_folders(root: str) -> List[Tuple[str, List[FrameInfo]]]:
 
 def run_quality_sweep(root: str, args) -> int:
     """Score every light under ``root`` and flag poor ones. Returns exit code."""
-    from src.frame_processor import quality_gate, _pin_worker_to_single_thread
+    from src.frame_processor import _pin_worker_to_single_thread, quality_gate
 
     apply_renames = bool(getattr(args, 'apply', False))
     root = os.path.abspath(root)
@@ -231,11 +231,11 @@ def run_quality_sweep(root: str, args) -> int:
                + (f", {n_renamed} renamed to *{REJECT_SUFFIX}" if apply_renames
                   else ""))
     if not apply_renames and n_flagged_total:
-        safe_print(f"Dry run — re-run with --apply to rename flagged files "
-                   f"(reversible with --sweep-undo)")
+        safe_print("Dry run — re-run with --apply to rename flagged files "
+                   "(reversible with --sweep-undo)")
     elif apply_renames and n_renamed:
-        safe_print(f"Renamed files are invisible to stacking; restore any time "
-                   f"with --sweep-undo")
+        safe_print("Renamed files are invisible to stacking; restore any time "
+                   "with --sweep-undo")
     safe_print("=" * 70)
     return 0
 

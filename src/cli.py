@@ -19,17 +19,17 @@ except Exception:
     def tqdm(iterable, **kwargs):
         return iterable
 
-from src.gpu_context import get_gpu, reset_gpu
-from src.models import Config, ProcessingStats
-from src.utils import safe_print, print_header, format_time, setup_logging
-from src.io_fits import make_master, save_preview_rgb
-from src.frame_discovery import (discover_frames, select_matching_darks, select_matching_flats,
-                                 group_lights_by_filter)
+from src.cleanup import deregister as _cleanup_deregister
+from src.cleanup import register as _cleanup_register
 from src.debayer import build_hot_pixel_map
-from src.registration import calculate_shift, apply_transform
-from src.pipeline import stack_target
+from src.frame_discovery import discover_frames, group_lights_by_filter, select_matching_darks, select_matching_flats
+from src.gpu_context import get_gpu, reset_gpu
 from src.health_check import run_health_check
-from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
+from src.io_fits import make_master, save_preview_rgb
+from src.models import Config, ProcessingStats
+from src.pipeline import stack_target
+from src.registration import apply_transform, calculate_shift
+from src.utils import format_time, print_header, safe_print, setup_logging
 
 
 def load_config_file(config_path: str, args: argparse.Namespace) -> list:
@@ -42,7 +42,7 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
             try:
                 import tomli as tomllib
             except ImportError:
-                safe_print(f"  WARNING: TOML support not available (pip install tomli)")
+                safe_print("  WARNING: TOML support not available (pip install tomli)")
                 return changes
 
         with open(config_path, 'rb') as f:
@@ -380,8 +380,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
                                   (_peek_temp(f) for f in frames['dark']) if t is not None))
             _use_dark_model = _n_distinct >= 3
         if _use_dark_model:
-            from src.dark_temp_model import (build_dark_temperature_model,
-                                              sample_dark_at_temperature, _frame_temp)
+            from src.dark_temp_model import _frame_temp, build_dark_temperature_model, sample_dark_at_temperature
             light_temps = [t for t in (_frame_temp(f) for f in lights) if t is not None]
             target_temp = sum(light_temps) / len(light_temps) if light_temps else None
             model = build_dark_temperature_model(frames['dark']) if target_temp is not None else None
@@ -546,7 +545,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         # Determine bayer pattern for this subfolder's lights
         lights_here = sub.get('light', [])
         if lights_here:
-            from src.session_info import load_session_info, _INFO_FILENAMES
+            from src.session_info import _INFO_FILENAMES, load_session_info
             si = load_session_info(d)
             session_bayer = si.bayer if si else None
             patterns = set()
@@ -561,15 +560,15 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
     all_patterns = set(p for ps in _session_bayers.values() for p in ps)
     if len(all_patterns) > 1:
         safe_print(
-            f"\n  ⚠ WARNING: Bayer pattern mismatch across sessions — "
-            f"frames will be debayered with their individual BAYERPAT header if present, "
-            f"but sessions without a BAYERPAT header will use the first session's pattern."
+            "\n  ⚠ WARNING: Bayer pattern mismatch across sessions — "
+            "frames will be debayered with their individual BAYERPAT header if present, "
+            "but sessions without a BAYERPAT header will use the first session's pattern."
         )
         for name, patterns in sorted(_session_bayers.items()):
             safe_print(f"    {name}: {', '.join(sorted(patterns))}")
         safe_print(
-            f"  ⚠ Mixing cameras with different Bayer patterns in a combined stack "
-            f"will produce incorrect colours in frames that lack a BAYERPAT header."
+            "  ⚠ Mixing cameras with different Bayer patterns in a combined stack "
+            "will produce incorrect colours in frames that lack a BAYERPAT header."
         )
 
     extra_cal = _load_calibration_dir(args)
@@ -587,7 +586,7 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
         raise SystemExit('No light frames found')
 
     if getattr(args, 'dry_run', False):
-        safe_print(f"\n  --- DRY RUN ---")
+        safe_print("\n  --- DRY RUN ---")
         safe_print(f"  Light frames: {n_lights} pooled from {n_sessions} sessions")
         safe_print(f"  Stack method: {args.stack_method}")
         return
@@ -653,7 +652,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     if any(os.listdir(directory)) and any(f.lower().endswith(('.fit', '.fits')) for f in os.listdir(directory)):
         # single folder
         targets = [(directory, output)]
-        safe_print(f"  Mode: Single folder")
+        safe_print("  Mode: Single folder")
     elif subdirs and _want_combine_sessions(args):
         # Combined-sessions mode: pool all lights from all subfolders into one stack
         safe_print(f"  Mode: Combined sessions ({len(subdirs)} subfolders -> single unified stack)")
@@ -873,7 +872,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 n_lights = len(frames['light'])
                 bytes_per_frame = h * w * 3 * 4  # float32 RGB
                 memmap_size_mb = (n_lights * bytes_per_frame * 2) / (1024**2)
-                safe_print(f"\n  --- DRY RUN ---")
+                safe_print("\n  --- DRY RUN ---")
                 safe_print(f"  Light frames: {n_lights} x {w}x{h}")
                 safe_print(f"  Estimated temp storage: {memmap_size_mb:.0f} MB")
                 safe_print(f"  Stack method: {args.stack_method}")
@@ -994,7 +993,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     if len(produced) > 1:
         safe_print(f"  Targets processed: {len(produced)}")
     safe_print(f"  Total time: {format_time(total_time)}")
-    safe_print(f"\n  ✓ All processing complete!")
+    safe_print("\n  ✓ All processing complete!")
     safe_print(f"{'=' * 70}\n")
 
 

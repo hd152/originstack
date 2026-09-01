@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.star_repair import repair_saturated_stars, _moffat, _fit_moffat_wing
+from src.star_repair import _fit_moffat_wing, _moffat, repair_saturated_stars
 
 
 def _moffat_star(H, W, cx, cy, amp, alpha, beta, bg=100.0):

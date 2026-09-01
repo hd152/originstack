@@ -21,6 +21,23 @@ pytest -q
 pytest tests/test_core.py::test_calculate_shift_recovery -v
 ```
 
+### Lint
+```bash
+pip install -r requirements-dev.txt          # ruff + test tooling
+python -m ruff check .                        # style: pyflakes/pycodestyle/imports/logging
+python -m ruff check --fix .                  # apply the safe autofixes
+python tools/lint_conventions.py              # project conventions (see below)
+python tools/lint_conventions.py --git origin/main   # + diff-scoped rules (print noise, Cargo bump)
+```
+Both are gated in CI (the `lint` job) and re-checked by `tests/test_lint_conventions.py`.
+Ruff config lives in [pyproject.toml](pyproject.toml) — kept deliberately narrow (high-signal
+rules only). The convention linter ([tools/lint_conventions.py](tools/lint_conventions.py))
+enforces repo rules ruff can't express: **OS001** `logging.getLogger` must pass `"originstack"`,
+not `__name__`/root; **OS002** module-level optional-dependency imports in `src/` must be
+`try/except`-guarded; **OS003** (warn) no bare `print()` in library code — use `safe_print`;
+**OS004** (warn) every native `#[pyfunction]` needs a test reference; **OS005** (warn, `--git`)
+bump `ext/astro_native/Cargo.toml` when the crate source changes.
+
 ### Run the stacker
 ```bash
 python originstack.py -d lights/ -o stacked.fits

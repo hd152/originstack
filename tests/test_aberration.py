@@ -6,7 +6,7 @@ import tempfile
 
 import numpy as np
 
-from src.aberration import analyze_field_aberration, _star_shape, _compass
+from src.aberration import _compass, _star_shape, analyze_field_aberration
 
 
 def _sources(xs, ys, flux=None):

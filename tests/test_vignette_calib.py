@@ -8,7 +8,7 @@ import os
 import numpy as np
 import pytest
 
-from src.vignette_calib import load_vignette_map, apply_vignette_correction
+from src.vignette_calib import apply_vignette_correction, load_vignette_map
 
 
 class TestApplyVignetteCorrection:
@@ -85,8 +85,10 @@ class TestBuildMastersVignetteWiring:
         assert masters['vignette'] is None
 
     def test_build_masters_loads_map_from_args(self, tmp_path):
-        from astropy.io import fits
         from types import SimpleNamespace
+
+        from astropy.io import fits
+
         from src.cli import _build_masters
         path = tmp_path / "vmap.fits"
         fits.PrimaryHDU(np.zeros((3, 8, 8), dtype=np.float32)).writeto(str(path))
@@ -97,6 +99,7 @@ class TestBuildMastersVignetteWiring:
 
     def test_build_masters_missing_map_path_stays_none(self, tmp_path):
         from types import SimpleNamespace
+
         from src.cli import _build_masters
         args = SimpleNamespace(vignette_map=str(tmp_path / "missing.fits"))
         masters = _build_masters({'light': [], 'dark': [], 'flat': [], 'bias': []}, args=args)

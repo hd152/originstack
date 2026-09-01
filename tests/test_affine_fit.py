@@ -12,7 +12,10 @@ import numpy as np
 import pytest
 
 from src.affine_fit import (
-    fit_rigid_ransac, _ransac_rigid_numpy, _umeyama_2d, RigidTransform,
+    RigidTransform,
+    _ransac_rigid_numpy,
+    _umeyama_2d,
+    fit_rigid_ransac,
 )
 
 
@@ -98,8 +101,8 @@ class TestRansacRigidNumpy:
         # this codebase's own code no longer needs skimage for this, test
         # order can leave the stub in place instead of the real module.
         try:
-            from skimage.transform import EuclideanTransform
             from skimage.measure import ransac as sk_ransac
+            from skimage.transform import EuclideanTransform
         except ImportError:
             pytest.skip("skimage.transform unavailable or stubbed by another "
                        "test module's sys.modules mocking in this run")

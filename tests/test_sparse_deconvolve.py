@@ -6,10 +6,10 @@ project's own wavelet basis instead.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import fftconvolve
 from scipy.ndimage import laplace
+from scipy.signal import fftconvolve
 
-from src.psf_deconvolution import sparse_wavelet_deconvolve, make_synthetic_psf
+from src.psf_deconvolution import make_synthetic_psf, sparse_wavelet_deconvolve
 
 
 def _make_star_field_rgb(shape=(128, 128), n_stars=15, sigma=2.0, amp=500.0, bg=100.0):

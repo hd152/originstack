@@ -16,8 +16,8 @@ import pytest
 
 from src.atmospheric_dispersion import (
     _refractive_index_air_minus_one,
-    differential_refraction_arcsec,
     correct_atmospheric_dispersion,
+    differential_refraction_arcsec,
 )
 
 

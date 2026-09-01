@@ -13,24 +13,29 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from src.models import FrameInfo, ProcessingStats
-from src.utils import (safe_print, print_phase, format_time, get_memory_usage_mb,
-                       header_get_first)
-from src.io_fits import load_fits, load_frame, save_preview_rgb, populate_fits_header
-from src.debayer import debayer, autodetect_bayer_orientation
-from src.plate_solve import solve_plate
+from src.checkpoint import (
+    can_resume,
+    cleanup_checkpoint,
+    load_field_list,
+    load_raw_stack,
+    load_transforms,
+    restore_frame_state,
+    save_checkpoint,
+    save_raw_stack,
+)
+from src.cleanup import deregister as _cleanup_deregister
+from src.cleanup import register as _cleanup_register
+from src.debayer import autodetect_bayer_orientation, debayer
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
+from src.io_fits import load_fits, load_frame, populate_fits_header, save_preview_rgb
+from src.models import FrameInfo, ProcessingStats
+from src.plate_solve import solve_plate
+from src.postprocess import postprocess_stack
 from src.registration import run_registration_phase, select_reference_frame
 from src.stacking import run_stacking_phase
-from src.postprocess import postprocess_stack
-from src.checkpoint import (save_checkpoint, save_raw_stack, load_raw_stack,
-                            can_resume, restore_frame_state, cleanup_checkpoint,
-                            load_transforms, load_field_list)
-from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
-
+from src.utils import format_time, get_memory_usage_mb, header_get_first, print_phase, safe_print
 
 try:
-    import psutil
     HAS_PSUTIL = True
 except Exception:
     HAS_PSUTIL = False
@@ -89,8 +94,9 @@ def _save_blink_frames(final: List[FrameInfo], final_indices: List[int],
                        top: int, bottom: int, left: int, right: int,
                        output_path: str) -> None:
     """Save aligned, cropped frames as a multi-extension FITS for blink comparison."""
-    from src.registration import apply_transform
     from astropy.io import fits as afits
+
+    from src.registration import apply_transform
 
     blink_path = os.path.splitext(output_path)[0] + '_blink.fits'
     try:
@@ -372,7 +378,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     args._session_info = _session_info
     args._session_bayer = _session_info.bayer if _session_info else None
     if _session_info:
-        _si_parts = [f"  Session info (info.json):"]
+        _si_parts = ["  Session info (info.json):"]
         if _session_info.object_name:
             _si_parts.append(f"object={_session_info.object_name!r}")
         if _session_info.bayer:
@@ -380,7 +386,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         if _session_info.has_wcs:
             _si_parts.append("WCS=yes")
         if _session_info.has_gps:
-            _si_parts.append(f"GPS=yes")
+            _si_parts.append("GPS=yes")
         safe_print("  ".join(_si_parts))
     else:
         safe_print(f"  Session info: no info.json found in {os.path.basename(_directory)!r}")
@@ -611,7 +617,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 # defect flag for _apply_quality_settings' defensive nudge.
                 _prior_type, _prior_conf = _inferred_type, _inferred_conf
                 if getattr(args, 'astrollm', False) and getattr(args, 'auto', False):
-                    from src.astrollm import sample_session_priors, map_astrollm_category
+                    from src.astrollm import map_astrollm_category, sample_session_priors
                     _astrollm_result = sample_session_priors(final, args)
                     if _astrollm_result:
                         args._astrollm_defect_flagged = _astrollm_result.get(
@@ -627,7 +633,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                   prior_confidence=_prior_conf)
 
             if not final:
-                print(f'\n  ERROR: No accepted frames after checkpoint restore!')
+                print('\n  ERROR: No accepted frames after checkpoint restore!')
                 mm_mgr.cleanup()
                 return None
 
@@ -721,7 +727,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if args.stack_method == 'auto':
                 if len(final) < 8:
                     args.stack_method = 'percentile'
-                    safe_print(f"    Auto-selected percentile clipping (<8 frames)")
+                    safe_print("    Auto-selected percentile clipping (<8 frames)")
                 else:
                     args.stack_method = 'sigma_clip'
                     safe_print(f"    Auto-selected sigma_clip ({len(final)} frames)")
@@ -752,9 +758,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
             if want_psf_kernel or want_ibp or want_matched_filter:
                 try:
+                    from src.models import Config as _Config
                     from src.psf_deconvolution import estimate_psf
                     from src.stacking import build_drizzle_psf_table
-                    from src.models import Config as _Config
                     star_positions = best.metrics.get('_star_sources') if best.metrics else None
                     psf_estimate, psf_fwhm = estimate_psf(ref_lum, star_positions)
                     if psf_estimate is not None:
@@ -778,8 +784,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     safe_print(f"  PSF estimation failed ({exc}) -- {_psf_fallback_suffix()}")
 
             if getattr(args, 'drizzle_kernel', 'lanczos3') == 'magic' and drizzle_scale_val > 1.0:
-                from src.stacking import build_magic_kernel_table
                 from src.models import Config as _Config
+                from src.stacking import build_magic_kernel_table
                 magic_table, magic_halo = build_magic_kernel_table(phases=_Config.DRIZZLE_PSF_PHASES)
                 psf_kernel_table = (magic_table, magic_halo, _Config.DRIZZLE_PSF_PHASES)
                 safe_print(f"  drizzle kernel: Magic Kernel (base, not Sharp), "
@@ -813,8 +819,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 safe_print("\n  Time-series photometry (per-frame light curves)...")
                 _ts_start = time.time()
                 try:
-                    from src.photometry_timeseries import (
-                        run_timeseries_photometry, format_timeseries_summary)
+                    from src.photometry_timeseries import format_timeseries_summary, run_timeseries_photometry
                     _ts = run_timeseries_photometry(
                         final, final_indices, mem_rgb, shifts, transforms,
                         displacement_fields, (top, bottom, left, right),
@@ -992,8 +997,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     if want_matched_filter and psf_estimate is not None:
         try:
-            from src.matched_filter import apply_matched_filter
             from src.background import _estimate_sky_sigma
+            from src.matched_filter import apply_matched_filter
             noise_sigma = _estimate_sky_sigma(stacked)
             mf_result = apply_matched_filter(stacked, psf_estimate, noise_sigma=noise_sigma)
             mf_path = os.path.splitext(output_path)[0] + '_matched_filter.fits'
@@ -1101,7 +1106,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             safe_print("\n  Aperture photometry (Gaia DR3)...")
             _phot_start = time.time()
             try:
-                from src.photometry import run_photometry, format_photometry_summary
+                from src.photometry import format_photometry_summary, run_photometry
                 # hdu.data is still the linear pre-Phase-4 stack here (colour
                 # calibration below is the first step that would mutate it).
                 _lin = np.transpose(np.asarray(hdu.data, dtype=np.float64),
@@ -1288,13 +1293,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         print(f"  Peak memory:      {stats.peak_memory_mb:.1f} MB")
 
     if stats.warnings:
-        safe_print(f"\n  Warnings:")
+        safe_print("\n  Warnings:")
         for w in stats.warnings[:5]:
             safe_print(f"    - {w}")
     if stats.errors:
         safe_print(f"\n  Errors: {len(stats.errors)}")
 
-    safe_print(f"\n  Stack complete!")
+    safe_print("\n  Stack complete!")
     if getattr(args, 'keep_checkpoint', False):
         safe_print("  Checkpoint preserved (--keep-checkpoint). Re-run with same "
                    "output path to test different post-processing settings.")

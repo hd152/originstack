@@ -8,8 +8,8 @@ import numpy as np
 
 from src.denoising import (
     _structure_tensor_coherence,
-    directional_wavelet_denoise,
     adaptive_wavelet_denoise,
+    directional_wavelet_denoise,
 )
 
 

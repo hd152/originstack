@@ -87,7 +87,7 @@ class GpuContext:
         if use_gpu and HAS_CUPY:
             _install_cuda_unraisablehook()
             try:
-                cp.cuda.Device(0).compute_capability
+                _ = cp.cuda.Device(0).compute_capability  # probe: raises if no usable device
                 self.xp = cp
                 import cupyx.scipy.ndimage as _cp_ndimage
                 self.xndimage = _cp_ndimage
@@ -179,7 +179,7 @@ class GpuContext:
             safe_print(f"  GPU: {self.device_name}")
             safe_print(f"  VRAM: {self.vram_free_mb:.0f}/{self.vram_total_mb:.0f} MB free")
         else:
-            safe_print(f"  Compute: CPU")
+            safe_print("  Compute: CPU")
 
 
 class _CudaStreamContext:

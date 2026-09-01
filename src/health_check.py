@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List
 
 import numpy as np
 
 from src.models import Config
-from src.utils import safe_print, print_header
+from src.utils import print_header, safe_print
 
 
 def run_health_check(frames: dict, masters: dict, directory: str) -> None:

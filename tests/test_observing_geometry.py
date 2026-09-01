@@ -5,10 +5,8 @@ import math
 
 import pytest
 
-from src.observing_geometry import (airmass, airmass_kasten_young, altaz,
-                                    parallactic_angle_deg, zenith_angle_deg)
+from src.observing_geometry import airmass, airmass_kasten_young, altaz, parallactic_angle_deg, zenith_angle_deg
 from src.utils import header_get_first
-
 
 # ---------------------------------------------------------------------------
 # airmass_kasten_young (pure function, no astropy)
@@ -39,9 +37,9 @@ _SITE = dict(lat_deg=40.0, lon_deg=-105.0, height_m=1600.0)
 
 def _transit_time(ra_deg):
     """A UTC time near which ``ra_deg`` transits at the test site."""
+    import astropy.units as u
     from astropy.coordinates import EarthLocation
     from astropy.time import Time
-    import astropy.units as u
     loc = EarthLocation(lat=_SITE["lat_deg"] * u.deg, lon=_SITE["lon_deg"] * u.deg)
     t = Time("2026-03-20T00:00:00")
     for _ in range(48):

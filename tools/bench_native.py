@@ -4,8 +4,8 @@ import json
 import sys
 import time
 
-import numpy as np
 import astro_native as nat
+import numpy as np
 
 rng = np.random.default_rng(7)
 
@@ -51,6 +51,7 @@ results["percentile"] = bench(
 d60 = make_stack(60, 384, 512)
 lut = np.full((61, 15), np.inf)
 from scipy import stats as st
+
 for ne in range(3, 61):
     for i in range(min(15, ne - 2)):
         ncur = ne - i

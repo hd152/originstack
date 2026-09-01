@@ -277,7 +277,7 @@ def can_resume(output_path: str, lights: List[FrameInfo]) -> Tuple[bool, int, Op
     current_paths = {f.path for f in lights}
 
     if saved_paths != current_paths:
-        safe_print(f"  Checkpoint found but frame set changed — starting fresh")
+        safe_print("  Checkpoint found but frame set changed — starting fresh")
         return False, 0, None
 
     phase = state.get('phase', 0)

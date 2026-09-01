@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from typing import Optional, Tuple
 
 import numpy as np
@@ -405,7 +404,7 @@ def _star_mask_for(rgb: np.ndarray, fwhm: float = 3.5) -> Optional[np.ndarray]:
     Uses the matched-filter detector (src/star_detect.py) when it finds
     sources, else a crude numpy local-maxima fallback."""
     try:
-        from src.quality import generate_star_mask, detect_stars_auto
+        from src.quality import detect_stars_auto, generate_star_mask
     except Exception:
         return None
     lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
@@ -622,4 +621,4 @@ def run_combine_cli(argv=None) -> None:
                                             rgb_stars=rgb_stars)
 
     _save_combined(combined, args.output, preview_stretch=args.stretch)
-    print(f"\n  Done!")
+    print("\n  Done!")

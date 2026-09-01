@@ -12,9 +12,9 @@ import numpy as np
 import scipy.fft as sfft
 from scipy import ndimage
 
-from src.gpu_context import GpuContext, get_gpu
+from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import safe_print, get_logger
+from src.utils import get_logger, safe_print
 
 try:
     from tqdm import tqdm
@@ -32,8 +32,8 @@ except Exception:
     _native = None
     HAS_NATIVE = False
 
+from src.affine_fit import fit_rigid_ransac
 from src.phase_correlate import phase_cross_correlation
-from src.affine_fit import fit_rigid_ransac, RigidTransform
 
 # Always available now (fit_rigid_ransac has no external dependency -- native
 # Rust kernel with an exact numpy fallback, see src/affine_fit.py). Kept as a
@@ -73,7 +73,7 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
 
     # Shift img points by initial estimate for better matching.
     # Initial shift is the amount needed to move 'img' to align with 'ref'.
-    # So img_points = ref_points + shift. To find correspondence, we map 
+    # So img_points = ref_points + shift. To find correspondence, we map
     # img_points back to ref space: img_points - shift.
     shift_vec = np.array([initial_shift[1], initial_shift[0]]) # [sx, sy]
     img_pts_shifted = img_pts - shift_vec
@@ -282,7 +282,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
             with open(f'_registration_debug/{frame_name}_stats.txt', 'w') as f:
                 f.write(f"Reference:\n  min={np.min(ref):.2f}, max={np.max(ref):.2f}, mean={np.mean(ref):.2f}, std={np.std(ref):.2f}\n")
                 f.write(f"Image:\n  min={np.min(img):.2f}, max={np.max(img):.2f}, mean={np.mean(img):.2f}, std={np.std(img):.2f}\n")
-        except Exception as e:
+        except Exception:
             pass
 
     # Step 1: Multi-scale pyramid registration (coarse-to-fine).
@@ -508,17 +508,17 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                     shift_x = float(cim[1] - cim2[1])
                     shift_mag = np.sqrt(shift_x**2 + shift_y**2)
 
-                    if shift_mag > 0.1 or n_ref > 50: 
+                    if shift_mag > 0.1 or n_ref > 50:
                         if verbose:
                             print(f"      [centroid fallback (p{percentile}): ({shift_x:.1f}, {shift_y:.1f})]")
                         return shift_y, shift_x
 
             debug_info.append(f"centroid(p{percentile}): n_ref={n_ref}, n_img={n_img}")
-        except Exception as e:
+        except Exception:
             pass
 
     if verbose and debug_info:
-        print(f"      [CRITICAL: no registration method succeeded] " + " | ".join(debug_info))
+        print("      [CRITICAL: no registration method succeeded] " + " | ".join(debug_info))
     return 0.0, 0.0
 
 
@@ -672,7 +672,7 @@ def calculate_shift_pyramid(ref: np.ndarray, img: np.ndarray,
 
         if lvl > 0:
             # Scale accumulated shift to next finer level (pixel units * 2)
-            # We multiply total here so that the accumulated shift from coarser levels 
+            # We multiply total here so that the accumulated shift from coarser levels
             # is properly scaled when used as a starting point for the finer level.
             total_sy *= 2.0
             total_sx *= 2.0
@@ -707,7 +707,7 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
             out_xy = (R @ corners_xy.T).T + t_xy  # forward map to output
             cols_out = out_xy[:, 0]  # x = col
             rows_out = out_xy[:, 1]  # y = row
-            
+
             top_vals.append(max(rows_out[0], rows_out[1]))
             bottom_vals.append(min(rows_out[2], rows_out[3]))
             left_vals.append(max(cols_out[0], cols_out[2]))
@@ -723,7 +723,7 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
     bottom = int(np.floor(min(bottom_vals))) - margin
     left = int(np.ceil(max(left_vals))) + margin
     right = int(np.floor(min(right_vals))) - margin
-    
+
     if top >= bottom or left >= right:
         return 0, H, 0, W
     return top, bottom, left, right
@@ -799,7 +799,7 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> D
         labels = {'dithered': 'Dithered (random offsets detected)',
                   'tracking_drift': 'Tracking drift (systematic trend)',
                   'aligned': 'Well-aligned (minimal offsets)'}
-        safe_print(f"\n  Dither analysis:")
+        safe_print("\n  Dither analysis:")
         safe_print(f"    Pattern: {labels.get(pattern, pattern)}")
         safe_print(f"    Mean offset: {mean_mag:.1f} px")
         safe_print(f"    Unique positions: {unique_positions}/{len(shifts)} frames")
@@ -1413,7 +1413,7 @@ def _print_registration_breakdown(timings: Dict[str, float]) -> None:
     if total <= 0:
         return
     from src.utils import format_time
-    safe_print(f"\n  Registration breakdown (wall-clock per sub-step):")
+    safe_print("\n  Registration breakdown (wall-clock per sub-step):")
     for key, label in _REG_STEP_LABELS.items():
         t = timings.get(key, 0.0)
         if t <= 0.01 and key not in ('ref_star_detect', 'shift_calculation'):
@@ -1470,7 +1470,7 @@ def run_registration_phase(
         if ref_stars is None:
             try:
                 # 3. Local-maxima fallback — pure scipy, always available
-                from scipy.ndimage import maximum_filter, gaussian_filter
+                from scipy.ndimage import gaussian_filter, maximum_filter
                 _redet_tried.append('local-maxima')
                 smoothed = gaussian_filter(ref_lum.astype(np.float64), sigma=2.0)
                 bg = float(np.median(smoothed))
@@ -1660,7 +1660,7 @@ def run_registration_phase(
                                             Config.GPU_VRAM_RESERVE_MB), len(final))
     else:
         n_workers = min(os.cpu_count() or 4, len(final))
-        
+
     from src.ui_events import get_ui_events as _get_wv
     _wv = _get_wv()
     _wv_done = 0
@@ -1695,7 +1695,7 @@ def run_registration_phase(
     shift_y = [s[0] for s in shifts]
     shift_mags = [np.sqrt(sx**2 + sy**2) for sx, sy in shifts]
     if not args.no_registration:
-        print(f"  Shift statistics:")
+        print("  Shift statistics:")
         print(f"    X: mean={np.mean(shift_x):+.1f}px, std={np.std(shift_x):.1f}px, "
               f"range=[{np.min(shift_x):+.1f}, {np.max(shift_x):+.1f}]")
         print(f"    Y: mean={np.mean(shift_y):+.1f}px, std={np.std(shift_y):.1f}px, "
@@ -1715,7 +1715,7 @@ def run_registration_phase(
             stats.add_warning(warning)
             safe_print(f'\n  ⚠ WARNING: {warning}')
         elif len(final) <= 3:
-            safe_print(f'\n  INFO: All frames registered with zero shift — well-aligned.')
+            safe_print('\n  INFO: All frames registered with zero shift — well-aligned.')
     elif zero_shifts > len(final) * 0.8 and len(final) > 2:
         warning = f'{zero_shifts}/{len(final)} frames have zero shift'
         stats.add_warning(warning)
@@ -1866,7 +1866,7 @@ def run_registration_phase(
             safe_print(f"  Patch quality maps computed "
                        f"({n_from_scores}/{len(final)} from Phase-1 scores).")
         else:
-            safe_print(f"  Patch quality maps computed.")
+            safe_print("  Patch quality maps computed.")
 
     _reg_timings['patch_quality_maps'] = time.time() - _t
     _print_registration_breakdown(_reg_timings)
@@ -1879,18 +1879,18 @@ def run_registration_phase(
         labels = {'dithered': 'Dithered (random offsets)',
                   'tracking_drift': 'Tracking drift (systematic trend)',
                   'aligned': 'Well-aligned (minimal offsets)'}
-        print(f"\n  Dither analysis:")
+        print("\n  Dither analysis:")
         print(f"    Pattern: {labels.get(dither_info['pattern'], dither_info['pattern'])}")
         print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
         print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
         if dither_info.get('direction_spread_deg', 0) > 0:
             print(f"    Direction spread: {dither_info['direction_spread_deg']:.1f} deg")
         if dither_info['is_dithered'] and args.stack_method == 'mean':
-            safe_print(f"    Warning: mean stacking does not reject cosmic rays; "
-                       f"consider --stack-method sigma_clip")
+            safe_print("    Warning: mean stacking does not reject cosmic rays; "
+                       "consider --stack-method sigma_clip")
         if dither_info['is_dithered'] and getattr(args, 'drizzle_scale', 1.0) <= 1.0:
-            safe_print(f"    Tip: dithered data detected — add --drizzle-scale 2.0 "
-                       f"to enable sub-pixel super-resolution stacking")
+            safe_print("    Tip: dithered data detected — add --drizzle-scale 2.0 "
+                       "to enable sub-pixel super-resolution stacking")
 
     return shifts, transforms, dither_info, final, final_indices
 
@@ -2281,7 +2281,7 @@ def run_comet_registration_phase(
             n_ok = sum(1 for p in eph_positions if p is not None)
             safe_print(f"  [Comet] Ephemeris: {n_ok}/{len(final)} positions retrieved")
 
-    print(f"  [Comet] Locating nucleus in reference frame...")
+    print("  [Comet] Locating nucleus in reference frame...")
     # Find the reference frame index in final
     try:
         ref_j = next(j for j, orig_idx in enumerate(final_indices) if orig_idx == best_idx)
@@ -2380,7 +2380,7 @@ def run_comet_registration_phase(
 
     # --- Optional affine correction around nucleus ---
     if use_affine:
-        safe_print(f"  [Comet] Computing affine (rotation+scale) corrections per frame...")
+        safe_print("  [Comet] Computing affine (rotation+scale) corrections per frame...")
         ref_stars = None
         try:
             from src.quality import detect_stars_auto

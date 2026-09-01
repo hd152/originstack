@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.channel_combine import (narrowband_combine, scnr_green,
-                                  fix_narrowband_stars)
+from src.channel_combine import fix_narrowband_stars, narrowband_combine, scnr_green
 
 
 def test_sho_palette_mapping():

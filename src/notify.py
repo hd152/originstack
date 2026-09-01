@@ -14,8 +14,8 @@ this is cosmetic and must never affect run state.
 """
 from __future__ import annotations
 
-import sys
 import ctypes
+import sys
 from ctypes import wintypes
 
 NIM_ADD = 0x00000000

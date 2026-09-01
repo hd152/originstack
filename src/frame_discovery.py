@@ -6,10 +6,10 @@ import os
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
-from src.models import FrameInfo
 from src.io_fits import _read_fits_header
+from src.models import FrameInfo
 from src.utils import safe_print
 
 
@@ -18,12 +18,12 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
     heuristics and headers. A .ser file is expanded into one virtual
     ``path::frame_index`` entry per frame it contains (see src/io_ser.py)."""
     try:
-        from src.io_raw import RAW_EXTENSIONS, read_raw_header, HAS_RAWPY
+        from src.io_raw import HAS_RAWPY, RAW_EXTENSIONS, read_raw_header
         _raw_exts: tuple = RAW_EXTENSIONS if HAS_RAWPY else ()
     except Exception:
         _raw_exts = ()
     try:
-        from src.io_tiff import TIFF_EXTENSIONS, read_tiff_header, HAS_TIFFFILE
+        from src.io_tiff import HAS_TIFFFILE, TIFF_EXTENSIONS, read_tiff_header
         _tiff_exts: tuple = TIFF_EXTENSIONS if HAS_TIFFFILE else ()
     except Exception:
         _tiff_exts = ()
@@ -33,7 +33,7 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
     except Exception:
         _xisf_exts = ()
     try:
-        from src.io_ser import is_ser_virtual_path, read_ser_frame_header, expand_ser_files
+        from src.io_ser import expand_ser_files, is_ser_virtual_path, read_ser_frame_header
         _ser_files = expand_ser_files(directory)
     except Exception:
         def is_ser_virtual_path(path: str) -> bool:  # type: ignore[misc]

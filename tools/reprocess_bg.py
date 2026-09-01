@@ -29,7 +29,7 @@ import numpy as np
 from astropy.io import fits
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from originstack import sky_floor_normalize, generate_star_mask, safe_print
+from originstack import generate_star_mask, safe_print, sky_floor_normalize
 
 try:
     from astropy.stats import sigma_clipped_stats

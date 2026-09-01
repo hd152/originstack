@@ -6,8 +6,8 @@ import unittest
 
 import numpy as np
 
-from src.ui_events import UIEvents
 from src.io_fits import preview_jpeg_bytes, render_preview_uint8
+from src.ui_events import UIEvents
 
 
 def _synth_rgb(H=128, W=160):
@@ -90,6 +90,7 @@ class TestRunState(unittest.TestCase):
 class TestPreviewBytes(unittest.TestCase):
     def test_jpeg_roundtrip(self):
         import io
+
         from PIL import Image
         data = preview_jpeg_bytes(_synth_rgb(), stretch='ghs')
         self.assertIsNotNone(data)
@@ -98,7 +99,10 @@ class TestPreviewBytes(unittest.TestCase):
 
     def test_render_matches_file_path(self):
         """render_preview_uint8 is the same array save_preview_rgb encodes."""
-        import io, os, tempfile
+        import io
+        import os
+        import tempfile
+
         from PIL import Image
         rgb = _synth_rgb()
         out = render_preview_uint8(rgb, stretch='ghs')

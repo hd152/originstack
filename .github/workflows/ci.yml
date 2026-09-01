@@ -6,6 +6,25 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install lint tools
+        run: pip install ruff==0.16.3
+
+      - name: Style lint (ruff)
+        run: ruff check --output-format=github .
+
+      - name: Project-convention lint
+        run: python tools/lint_conventions.py --github
+
   test:
     runs-on: ubuntu-latest
     strategy:

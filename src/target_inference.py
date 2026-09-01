@@ -23,7 +23,7 @@ import re
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger("originstack")
 
 # ---------------------------------------------------------------------------
 # Static catalogue

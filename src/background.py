@@ -1,9 +1,8 @@
 """Background extraction and sky normalization."""
 from __future__ import annotations
 
-import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Tuple, Any
+from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
@@ -39,7 +38,6 @@ except ImportError:
     # Fallback logging for standalone usage
     def safe_print(*args, **kwargs):
         print(*args, **kwargs)
-    safe_print = print
 
 try:
     from astropy.stats import sigma_clipped_stats
@@ -95,11 +93,11 @@ def _estimate_sky_sigma(img: np.ndarray) -> float:
     # Ensure float64 for calculations to maintain precision
     G = img[:, :, 1].astype(np.float64)
     img_max = float(img.max())
-    
+
     pos_g = G[G > 0]
     if pos_g.size < 100:
         return max(img_max * 1e-4, 1.0)
-    
+
     p80 = float(np.percentile(pos_g, 80))
     if p80 == 0: return max(img_max * 1e-5, 1.0)
 
@@ -110,7 +108,7 @@ def _estimate_sky_sigma(img: np.ndarray) -> float:
 
     msk_h = (lft > 0) & (rgt > 0) & (lft < p80) & (rgt < p80)
     msk_v = (tp  > 0) & (bot > 0) & (tp  < p80) & (bot  < p80)
-    
+
     # Concatenate diffs
     # Using np.concatenate on flattened arrays is efficient
     h_diffs = (rgt - lft)[msk_h]
@@ -235,7 +233,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 
     # --- Outlier Rejection & Interpolation ---
     nan_mask = np.isnan(bg_grid)
-    
+
     # Determine global statistics for outlier rejection
     if np.any(~nan_mask):
         finite_vals = bg_grid[~nan_mask].ravel()
@@ -262,14 +260,14 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
     if np.any(outlier_mask) and not np.all(outlier_mask):
         iy_good, ix_good = np.where(~outlier_mask)
         vals_good = bg_grid[iy_good, ix_good]
-        
+
         # Normalized coordinates for numerical stability
         y_good = (iy_good.astype(float) + 0.5) / ny
         x_good = (ix_good.astype(float) + 0.5) / nx
-        
+
         # Polynomial degree selection
         # Ensure enough points for degree 3 (10 params) or fallback to degree 2 (6 params)
-        min_samples_poly3 = 15 
+        min_samples_poly3 = 15
         min_samples_poly2 = 6
         is_poly3 = len(y_good) >= min_samples_poly3
 
@@ -288,7 +286,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
             iy_bad, ix_bad = np.where(outlier_mask)
             y_bad = (iy_bad.astype(float) + 0.5) / ny
             x_bad = (ix_bad.astype(float) + 0.5) / nx
-            
+
             if is_poly3:
                 bad_features = np.column_stack([
                     np.ones(len(y_bad)), y_bad, x_bad,
@@ -298,7 +296,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
                 bad_features = np.column_stack([
                     np.ones(len(y_bad)), y_bad, x_bad,
                     y_bad ** 2, y_bad * x_bad, x_bad ** 2])
-            
+
             bg_grid[outlier_mask] = bad_features.dot(coeffs)
         except Exception:
             bg_grid[outlier_mask] = grid_median
@@ -406,35 +404,35 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
 
         detect_thresh = sky_med + 5.0 * max(sky_std, 1.0)
         frac_bright = float(np.mean(lum_smooth > detect_thresh))
-        
+
         if peak_val > detect_thresh and frac_bright > 0.005:
             excl_radius = int(min(H, W) * 0.30)
             yy, xx = np.mgrid[:H, :W]
             remaining_lum = lum_smooth.copy()
             primary_peak = peak_val
             n_sources = 0
-            
+
             for _ in range(3):
                 py, px = np.unravel_index(int(np.argmax(remaining_lum)), (H, W))
                 pv = float(remaining_lum[py, px])
                 if pv <= detect_thresh:
                     break
-                
+
                 # Relative brightness check for secondary sources
                 if n_sources > 0:
                     primary_excess = primary_peak - sky_med
                     current_excess = pv - sky_med
                     if primary_excess > 0 and current_excess < 0.5 * primary_excess:
                         break
-                
+
                 dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
                 galaxy_mask = (dist < excl_radius).astype(np.float32)
                 np.clip(combined_mask + galaxy_mask, 0, 1, out=combined_mask)
-                
+
                 # Mask processed source
                 remaining_lum[dist < excl_radius] = float(np.min(remaining_lum))
                 n_sources += 1
-                
+
                 if verbose:
                     safe_print(f"    Galaxy mask #{n_sources}: centre=({px},{py}), "
                                f"radius={excl_radius}px")
@@ -445,7 +443,7 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
     # Process channels in parallel
     result = np.empty_like(rgb)
     channel_names = ['Red', 'Green', 'Blue']
-    
+
     def _process_channel(c):
         channel_data = rgb[:, :, c]
         bg = extract_background(channel_data, mesh_size=mesh_size,
@@ -533,7 +531,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         sky_std = float(np.std(border_pix))
         detect_thresh = sky_med + 5.0 * max(sky_std, 1.0)
         frac_bright = float(np.mean(lum_smooth > detect_thresh))
-        
+
         if frac_bright > 0.005:
             ny = max(1, H // mesh_size)
             nx = max(1, W // mesh_size)
@@ -644,7 +642,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
 
         grid_y = (np.arange(ny) + 0.5) * (H / ny)
         grid_x = (np.arange(nx) + 0.5) * (W / nx)
-        
+
         if ny >= 2 and nx >= 2:
             ext_grid = np.zeros((ny + 2, nx + 2), dtype=np.float64)
             ext_grid[1:-1, 1:-1] = bg_grid
@@ -666,7 +664,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             spline = RectBivariateSpline(ext_y, ext_x, ext_grid, kx=min(3, nx+1), ky=min(3, ny+1))
         else:
             spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=min(3, max(0,nx-1)), ky=min(3, max(0,ny-1)))
-            
+
         background = spline(np.arange(H), np.arange(W)).astype(np.float64)
         blur_sigma = (H/ny) * 0.5
         if blur_sigma > 0:
@@ -691,7 +689,7 @@ def sky_floor_normalize(rgb: np.ndarray, star_mask: Optional[np.ndarray] = None,
     H, W = rgb.shape[:2]
     if H == 0 or W == 0:
         return rgb.copy()
-        
+
     result = rgb.copy()
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
@@ -796,14 +794,14 @@ def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
 
     detect_thresh = sky_med + 5.0 * max(sky_std, 1.0)
     frac_bright = float(np.mean(lum_smooth > detect_thresh))
-    
+
     if frac_bright > 0.005:
         dil_radius = max(15, int(min(H, W) * 0.02))
         r = dil_radius
         y_idx, x_idx = np.ogrid[-r:r + 1, -r:r + 1]
         disk = (y_idx ** 2 + x_idx ** 2 <= r ** 2)
         structure = disk.astype(np.uint8) # Binary dilation expects struct array
-        
+
         remaining_lum = lum_smooth.copy()
         primary_peak = float(np.max(remaining_lum))
 
@@ -812,18 +810,18 @@ def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
             pv = float(remaining_lum[py, px])
             if pv <= detect_thresh:
                 break
-            
+
             if src_i > 0:
                 if (primary_peak - sky_med) > 0:
                     if (pv - sky_med) < 0.5 * (primary_peak - sky_med):
                         break
-                        
+
             src_thresh = sky_med + 0.5 * (detect_thresh - sky_med)
             src_binary = (lum_smooth > src_thresh).astype(np.uint8)
-            
+
             # Use binary_dilation on the binary mask
             dilated = binary_dilation(src_binary, structure=structure).astype(np.float32)
-            
+
             np.clip(emission + dilated, 0.0, 1.0, out=emission)
             # Blank out processed source
             remaining_lum[emission > 0.5] = float(np.min(remaining_lum))
@@ -914,14 +912,14 @@ def _sample_background_patches(
     for iy in range(ny):
         y0 = int(round(iy * cell_h))
         y1 = min(int(round((iy + 1) * cell_h)), H)
-        
+
         # Optimization: check center pixel of emission mask first if sparse
         # But for correctness, we iterate.
-        
+
         for ix in range(nx):
             x0 = int(round(ix * cell_w))
             x1 = min(int(round((ix + 1) * cell_w)), W)
-            
+
             # Slice once for both mask and data
             em_patch = emission_mask[y0:y1, x0:x1]
             if np.any(em_patch >= 0.5): # Fast check for any mask overlap
@@ -944,7 +942,7 @@ def _sample_background_patches(
             sig = 1.4826 * mad
             if sig > 1e-12:
                 px = px[np.abs(px - patch_med) <= 3.0 * sig]
-            
+
             med_val = float(np.median(px)) if px.size > 0 else patch_med
 
             coords_list.append(((y0 + (y1 - y0) * 0.5) / H,
@@ -1249,7 +1247,7 @@ def dynamic_background_extraction(
     H, W = rgb.shape[:2]
     if H == 0 or W == 0:
         return rgb.copy()
-        
+
     emission_mask, sky_med, sky_std, _dense_field = _dbe_prepare_emission_mask(
         rgb, star_mask, exclusion_mask, verbose, "DBE")
 

@@ -30,7 +30,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.debayer import debayer_malvar, debayer_menon2007, _HAS_NATIVE
+from src.debayer import _HAS_NATIVE, debayer_malvar, debayer_menon2007
 
 _OFFSETS = {  # pattern -> (r, g1, g2, b) offsets, matches src/debayer.py
     'RGGB': ((0, 0), (0, 1), (1, 0), (1, 1)),
@@ -113,7 +113,7 @@ def compare(name: str, rgb_truth: np.ndarray, margin: int = 12):
 
 
 if __name__ == '__main__':
-    print(f"Native kernels: {'yes' if _HAS_NATIVE else 'no (numpy fallback -- pip install maturin && '
-                                                          'maturin develop --release in ext/astro_native)'}\n")
+    _native_note = 'yes' if _HAS_NATIVE else 'no (numpy fallback -- pip install maturin && maturin develop --release in ext/astro_native)'
+    print(f"Native kernels: {_native_note}\n")
     compare("detail (fixed-frequency colour stripes)", detail_scene())
     compare("starfield (astro-realistic)", starfield_scene())

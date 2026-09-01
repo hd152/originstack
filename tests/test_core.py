@@ -1,16 +1,26 @@
 import os
 import tempfile
+
 import numpy as np
 from astropy.io import fits
 from scipy.signal import fftconvolve
 
-from originstack import (debayer_bilinear, calculate_shift, compute_quality_metrics,
-                         estimate_psf, make_synthetic_psf, richardson_lucy_deconvolve,
-                         drizzle_combine, _lanczos_resample_frame, Config,
-                         select_matching_darks, FrameInfo)
+from originstack import (
+    Config,
+    FrameInfo,
+    _lanczos_resample_frame,
+    calculate_shift,
+    compute_quality_metrics,
+    debayer_bilinear,
+    drizzle_combine,
+    estimate_psf,
+    make_synthetic_psf,
+    richardson_lucy_deconvolve,
+    select_matching_darks,
+)
 
 
-def make_star_image(shape=(64, 64), centers=[(32, 32)], amp=1000.0):
+def make_star_image(shape=(64, 64), centers=((32, 32),), amp=1000.0):
     im = np.zeros(shape, dtype=np.float32)
     for y, x in centers:
         yy, xx = np.indices(shape)

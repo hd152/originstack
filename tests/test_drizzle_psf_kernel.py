@@ -19,11 +19,11 @@ import numpy as np
 import pytest
 
 from src.stacking import (
+    _magic_kernel_1d,
+    _warp_affine_kernel_table_numpy,
     build_drizzle_psf_table,
     build_magic_kernel_table,
-    _magic_kernel_1d,
     warp_affine_psf,
-    _warp_affine_kernel_table_numpy,
 )
 
 native = pytest.importorskip("astro_native")

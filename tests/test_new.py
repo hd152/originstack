@@ -9,7 +9,6 @@ import numpy as np
 
 from src.models import FrameInfo
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -672,10 +671,10 @@ class TestProcessSingleFramePreload(unittest.TestCase):
         return img.clip(0)
 
     def test_preloaded_data_bypasses_disk(self):
-        """When preloaded_data is supplied, load_fits must NOT be called."""
+        """When preloaded_data is supplied, the disk loader must NOT be called."""
         from unittest.mock import patch
         raw = self._fake_raw()
-        with patch('src.frame_processor.load_fits', side_effect=AssertionError("load_fits called")):
+        with patch('src.frame_processor.load_frame', side_effect=AssertionError("load_frame called")):
             result = self.process(
                 path='nonexistent.fits',
                 header={},
@@ -915,6 +914,7 @@ class TestPreviewBlackSigmaDepthScaling(unittest.TestCase):
 
     def _run(self, n_frames, preset):
         import argparse
+
         from src.auto_settings import _apply_quality_settings
         args = argparse.Namespace(preview_black_sigma=preset,
                                   stack_method='sigma_clip',
@@ -953,8 +953,7 @@ class TestPatchScoresPhase1Split(unittest.TestCase):
     shifting and avoids that entirely."""
 
     def test_zero_shift_matches_legacy_exactly(self):
-        from src.registration import (compute_patch_quality_map,
-                                      compute_patch_scores, patch_scores_to_map)
+        from src.registration import compute_patch_quality_map, compute_patch_scores, patch_scores_to_map
         rng = np.random.default_rng(0)
         lum = rng.normal(1000, 50, (512, 768)).astype(np.float32)
         legacy = compute_patch_quality_map(lum)
@@ -963,9 +962,8 @@ class TestPatchScoresPhase1Split(unittest.TestCase):
 
     def test_shifted_grid_moves_weight(self):
         from scipy import ndimage
-        from src.registration import (compute_patch_scores,
-                                      patch_scores_to_map,
-                                      _patch_grid_geometry)
+
+        from src.registration import _patch_grid_geometry, compute_patch_scores, patch_scores_to_map
         rng = np.random.default_rng(1)
         H, W = 512, 768
         lum = rng.normal(1000, 5, (H, W)).astype(np.float32)
@@ -992,6 +990,7 @@ class TestSinglePrimaryLumaDenoiser(unittest.TestCase):
 
     def _run(self, **flags):
         import argparse
+
         from src.auto_settings import _apply_quality_settings
         defaults = dict(preview_black_sigma=0.0, stack_method='sigma_clip',
                         auto_denoise_strength=True, denoise=False,
@@ -1024,6 +1023,7 @@ class TestSinglePrimaryLumaDenoiser(unittest.TestCase):
 
     def test_low_snr_acdnr_not_added_when_mmt_active(self):
         import argparse
+
         from src.auto_settings import _apply_quality_settings
         args = argparse.Namespace(preview_black_sigma=0.0,
                                   stack_method='sigma_clip',

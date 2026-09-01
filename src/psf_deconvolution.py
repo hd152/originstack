@@ -9,6 +9,8 @@ from scipy import signal as _scipy_signal
 
 from src.models import Config
 
+_log = logging.getLogger("originstack")
+
 try:
     from scipy.optimize import curve_fit
     HAS_CURVE_FIT = True
@@ -27,7 +29,7 @@ def estimate_psf(img: np.ndarray, star_positions,
     are successfully fit.
     """
     if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
-        logging.warning("Too few stars for PSF estimation "
+        _log.warning("Too few stars for PSF estimation "
                         f"({0 if star_positions is None else len(star_positions)} < {Config.RL_PSF_MIN_STARS})")
         return None, 0.0
 
@@ -35,7 +37,7 @@ def estimate_psf(img: np.ndarray, star_positions,
         psf_size = Config.RL_PSF_SIZE
 
     if not HAS_CURVE_FIT:
-        logging.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
+        _log.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
         return None, 0.0
 
     if cutout_radius is None:
@@ -118,7 +120,7 @@ def estimate_psf(img: np.ndarray, star_positions,
     # Require minimum successful fits
     if model == 'moffat':
         if len(alphas) < Config.RL_PSF_MIN_STARS:
-            logging.warning(f"PSF estimation: only {len(alphas)} Moffat fits succeeded "
+            _log.warning(f"PSF estimation: only {len(alphas)} Moffat fits succeeded "
                             f"(need {Config.RL_PSF_MIN_STARS})")
             return None, 0.0
         med_alpha = float(np.median(alphas))
@@ -131,7 +133,7 @@ def estimate_psf(img: np.ndarray, star_positions,
         psf = (1.0 + r2 / (med_alpha ** 2)) ** (-med_beta)
     else:
         if len(sigmas) < Config.RL_PSF_MIN_STARS:
-            logging.warning(f"PSF estimation: only {len(sigmas)} Gaussian fits succeeded "
+            _log.warning(f"PSF estimation: only {len(sigmas)} Gaussian fits succeeded "
                             f"(need {Config.RL_PSF_MIN_STARS})")
             return None, 0.0
         med_sigma = float(np.median(sigmas))
@@ -142,7 +144,7 @@ def estimate_psf(img: np.ndarray, star_positions,
         psf = np.exp(-r2 / (2.0 * med_sigma ** 2))
 
     psf /= psf.sum()
-    logging.info(f"PSF estimated: model={model}, FWHM={fwhm:.2f}px, "
+    _log.info(f"PSF estimated: model={model}, FWHM={fwhm:.2f}px, "
                  f"from {len(alphas) if model == 'moffat' else len(sigmas)} stars")
     return psf.astype(np.float64), float(fwhm)
 
@@ -195,7 +197,7 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
         (psf_kernel, fwhm_pixels) — (None, 0.0) if estimation fails.
     """
     if star_positions is None or len(star_positions) < Config.RL_PSF_MIN_STARS:
-        logging.warning("Blind PSF: too few stars (%d)", 0 if star_positions is None else len(star_positions))
+        _log.warning("Blind PSF: too few stars (%d)", 0 if star_positions is None else len(star_positions))
         return None, 0.0
 
     if psf_size is None:
@@ -251,7 +253,7 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
         stacked_cutouts.append(psf_cutout)
 
     if len(stacked_cutouts) < Config.RL_PSF_MIN_STARS:
-        logging.warning("Blind PSF: only %d usable stars (need %d)",
+        _log.warning("Blind PSF: only %d usable stars (need %d)",
                         len(stacked_cutouts), Config.RL_PSF_MIN_STARS)
         return None, 0.0
 
@@ -311,7 +313,7 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
     above = int(np.sum(psf > half_max))
     fwhm = 2.0 * np.sqrt(above / np.pi) if above > 0 else float(psf_size // 4)
 
-    logging.info("Blind PSF: stacked %d stars, FWHM≈%.2f px", len(stacked_cutouts), fwhm)
+    _log.info("Blind PSF: stacked %d stars, FWHM≈%.2f px", len(stacked_cutouts), fwhm)
     return psf.astype(np.float64), fwhm
 
 
@@ -568,7 +570,7 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
         try:
             Y_deconv = _gpu.to_host(
                 _rl_deconvolve_xp(Y_pos, psf, iterations, _gpu.xp, _gpu.xsignal))
-            logging.info("Richardson-Lucy deconvolution ran on GPU")
+            _log.info("Richardson-Lucy deconvolution ran on GPU")
         except Exception as exc:
             if _gpu.is_oom(exc):
                 # Permanent fallback (matches debayer.py's GPU call sites),
@@ -577,7 +579,7 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
                 # this once per tile, so leaving the GPU "active" here would
                 # just repeat the same OOM on every remaining tile.
                 _gpu.disable()
-            logging.debug("GPU RL failed (%s); falling back to CPU", exc)
+            _log.debug("GPU RL failed (%s); falling back to CPU", exc)
             Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal)
     else:
         Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal)
@@ -654,7 +656,7 @@ def richardson_lucy_svpsf(img: np.ndarray, sources, iterations: int = 15,
     # Global PSF as the per-tile fallback; abort if even that fails.
     global_psf, _gf = estimate_psf(img, sources, model=model)
     if global_psf is None:
-        logging.info("SV-PSF: global PSF estimation failed — no deconvolution")
+        _log.info("SV-PSF: global PSF estimation failed — no deconvolution")
         return img
 
     from scipy import signal as _sig
@@ -709,7 +711,7 @@ def richardson_lucy_svpsf(img: np.ndarray, sources, iterations: int = 15,
     if star_mask is not None:
         Y_deconv = Y_deconv * (1.0 - star_mask) + Y * star_mask
     if verbose:
-        logging.info(f"SV-PSF: {n_local}/{n_tiles * n_tiles} tiles used a local PSF")
+        _log.info(f"SV-PSF: {n_local}/{n_tiles * n_tiles} tiles used a local PSF")
 
     R = Y_deconv + 1.40200 * Cr
     G = Y_deconv - 0.34414 * Cb - 0.71414 * Cr

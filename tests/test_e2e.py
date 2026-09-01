@@ -20,7 +20,6 @@ import unittest
 import numpy as np
 from astropy.io import fits
 
-
 # ---------------------------------------------------------------------------
 # Helpers shared by all end-to-end tests
 # ---------------------------------------------------------------------------
@@ -551,7 +550,7 @@ class TestE2ERegistration(unittest.TestCase):
             paths = _create_synthetic_dataset(tmpdir, shifts_yx=shifts_yx)
 
             # Run pipeline WITH registration
-            from src.io_fits import make_master, load_fits
+            from src.io_fits import load_fits, make_master
             from src.models import FrameInfo, ProcessingStats
             from src.pipeline import stack_target
 

@@ -3,35 +3,53 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
-import subprocess
-import tempfile
 import time
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 from scipy import ndimage
 
+from src.background import (
+    _border_pixels,
+    _dbe_prepare_emission_mask,
+    apply_background_extraction,
+    dynamic_background_extraction,
+    gaussian_filter_ds,
+    remove_sky_residual,
+    sky_floor_normalize,
+    wavelet_background_extraction,
+)
+from src.denoising import (
+    acdnr_denoise,
+    adaptive_wavelet_denoise,
+    anisotropic_diffusion,
+    bilateral_denoise,
+    bm3d_denoise,
+    directional_wavelet_denoise,
+    estimate_denoise_strength,
+    larson_sekanina,
+    mmt_denoise,
+    multiscale_local_contrast,
+    nlm_denoise,
+    radial_renormalize,
+    reduce_chroma_noise,
+    reduce_stars,
+    remove_star_halos,
+    scnr,
+    wavelet_denoise,
+)
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import safe_print, format_time
-from src.quality import generate_star_mask, detect_stars_auto
-from src.background import (apply_background_extraction, remove_sky_residual,
-                            gaussian_filter_ds,
-                            sky_floor_normalize, dynamic_background_extraction,
-                            wavelet_background_extraction,
-                            _border_pixels, _sigma_sky, _dbe_prepare_emission_mask)
-from src.denoising import (wavelet_denoise, adaptive_wavelet_denoise, nlm_denoise,
-                           bilateral_denoise, reduce_chroma_noise,
-                           estimate_denoise_strength, reduce_stars,
-                           multiscale_local_contrast, mmt_denoise, acdnr_denoise,
-                           bm3d_denoise, anisotropic_diffusion, scnr,
-                           remove_star_halos, radial_renormalize, larson_sekanina,
-                           directional_wavelet_denoise)
-from src.psf_deconvolution import (estimate_psf, make_synthetic_psf,
-                                    richardson_lucy_deconvolve,
-                                    estimate_psf_blind, tv_regularized_deconvolve,
-                                    sparse_wavelet_deconvolve)
 from src.photometric_calibration import photometric_color_calibrate
+from src.psf_deconvolution import (
+    estimate_psf,
+    estimate_psf_blind,
+    make_synthetic_psf,
+    richardson_lucy_deconvolve,
+    sparse_wavelet_deconvolve,
+    tv_regularized_deconvolve,
+)
+from src.quality import detect_stars_auto, generate_star_mask
+from src.utils import format_time, safe_print
 
 try:
     from astropy.stats import sigma_clipped_stats
@@ -549,7 +567,7 @@ def postprocess_stack(
         bm3d_stride = getattr(args, 'bm3d_stride', None)
         bm3d_sw = getattr(args, 'bm3d_search_window', 16)
         bm3d_gs = getattr(args, 'bm3d_group_size', 8)
-        sig_str = f"auto" if bm3d_sigma <= 0 else f"{bm3d_sigma:.1f}"
+        sig_str = "auto" if bm3d_sigma <= 0 else f"{bm3d_sigma:.1f}"
         print(f"\n  Applying BM3D denoising (sigma={sig_str}, stride={bm3d_stride or 'auto'})...")
         bm3d_start = time.time()
         stacked = bm3d_denoise(stacked, sigma_psd=bm3d_sigma,
@@ -600,7 +618,7 @@ def postprocess_stack(
     # 6.95. Photometric color calibration
     if getattr(args, 'photometric_calibration', False) and 'photo_cal' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_photo_cal')
-        print(f"\n  Applying photometric color calibration (gray-locus method)...")
+        print("\n  Applying photometric color calibration (gray-locus method)...")
         pc_start = time.time()
         stacked, _pc_scales = photometric_color_calibrate(
             stacked, _pp_sources, verbose=args.verbose)
@@ -609,7 +627,7 @@ def postprocess_stack(
                        f"(R×{_pc_scales[0]:.3f} G×{_pc_scales[1]:.3f} B×{_pc_scales[2]:.3f}, "
                        f"{format_time(time.time() - pc_start)})")
         else:
-            safe_print(f"  ⚠ Photometric calibration skipped (insufficient stars)")
+            safe_print("  ⚠ Photometric calibration skipped (insufficient stars)")
         stacked = _sanitize(stacked, "photometric calibration")
 
     # 7. Deconvolution (RL, blind PSF, or TV)
@@ -632,7 +650,7 @@ def postprocess_stack(
             psf_fwhm = float(rl_fwhm_override)
             safe_print(f"\n  Deconvolution: synthetic PSF FWHM={rl_fwhm_override:.2f}px...")
         elif use_blind_psf and _pp_sources is not None and len(_pp_sources) > 0:
-            safe_print(f"\n  Estimating PSF (blind star-stacking, no model fitting)...")
+            safe_print("\n  Estimating PSF (blind star-stacking, no model fitting)...")
             psf, psf_fwhm = estimate_psf_blind(stacked, _pp_sources)
             if psf is not None:
                 safe_print(f"    Blind PSF FWHM ≈ {psf_fwhm:.2f} px")
@@ -765,7 +783,7 @@ def postprocess_stack(
     if (getattr(args, 'comet_mode', False)
             and getattr(args, 'comet_radial_renorm', False)
             and 'comet_radial_renorm' not in skip_steps):
-        print(f"\n  Applying comet radial renormalization...")
+        print("\n  Applying comet radial renormalization...")
         _rr_start = time.time()
         try:
             from src.registration import find_comet_centroid

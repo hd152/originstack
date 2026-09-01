@@ -4,8 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.local_normalize import (local_normalize_stack, _coarse_background,
-                                 _upsample, _HAS_SCIPY)
+from src.local_normalize import _HAS_SCIPY, _coarse_background, _upsample, local_normalize_stack
 
 pytestmark = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
 

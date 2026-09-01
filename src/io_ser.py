@@ -45,7 +45,7 @@ import os
 import re
 import struct
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 

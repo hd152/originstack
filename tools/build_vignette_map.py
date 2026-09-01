@@ -34,10 +34,9 @@ from astropy.io import fits
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.background import _border_pixels, _build_emission_mask, _sigma_sky, extract_background, gaussian_filter_ds
+from src.debayer import debayer, green_equalize
 from src.io_fits import load_frame
-from src.debayer import green_equalize, debayer
-from src.background import (_build_emission_mask, gaussian_filter_ds,
-                            _border_pixels, _sigma_sky, extract_background)
 
 
 def block_downsample(img: np.ndarray, factor: int) -> np.ndarray:

@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from typing import Optional
+
 try:
     import psutil
     HAS_PSUTIL = True

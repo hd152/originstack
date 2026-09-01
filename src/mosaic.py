@@ -28,9 +28,8 @@ from typing import List, Tuple
 import numpy as np
 from astropy.io import fits
 
-from src.utils import safe_print
 from src.io_fits import save_preview_rgb
-
+from src.utils import safe_print
 
 # ---------------------------------------------------------------------------
 # Optional dependencies

@@ -7,9 +7,8 @@ import unittest
 import numpy as np
 from astropy.io import fits
 
-from src.quality_sweep import (run_quality_sweep, undo_quality_sweep,
-                               REJECT_SUFFIX, _walk_light_folders)
 from src.frame_discovery import discover_frames
+from src.quality_sweep import REJECT_SUFFIX, _walk_light_folders, run_quality_sweep, undo_quality_sweep
 
 
 def _write_light(path, good=True, seed=0, H=128, W=160):

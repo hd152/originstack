@@ -19,8 +19,8 @@ import numpy as np
 from src.color_calibrate import (
     _blackbody_spectrum,
     _default_channel_response,
-    synthetic_channel_flux,
     fit_channel_scales_spcc,
+    synthetic_channel_flux,
 )
 
 

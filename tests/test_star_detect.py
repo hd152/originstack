@@ -13,8 +13,10 @@ import numpy as np
 import pytest
 
 from src.star_detect import (
-    detect_stars_matched_filter, _detect_stars_matched_filter_numpy,
-    _bilinear_upsample, _SOURCES_DTYPE,
+    _SOURCES_DTYPE,
+    _bilinear_upsample,
+    _detect_stars_matched_filter_numpy,
+    detect_stars_matched_filter,
 )
 
 

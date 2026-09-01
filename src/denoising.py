@@ -1,16 +1,16 @@
 """Denoising and image processing: wavelet, bilateral, NLM, local normalize, arcsinh."""
 from __future__ import annotations
 
-import logging
 from typing import Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
 
-from src.models import Config
-from src.utils import safe_print, get_logger
-from src.background import _estimate_sky_sigma, gaussian_filter_ds
 from src import wavelet
+from src.background import _estimate_sky_sigma, gaussian_filter_ds
+from src.models import Config
+from src.utils import get_logger, safe_print
+
 _log = get_logger()
 
 # Optional native (Rust) kernels — graceful degradation to numpy if absent.
@@ -31,7 +31,7 @@ except Exception:
 try:
     from astropy.stats import sigma_clipped_stats
 except Exception:
-    
+
     sigma_clipped_stats = None
 
 
@@ -1749,7 +1749,8 @@ def larson_sekanina(img: np.ndarray, nucleus_y: float, nucleus_x: float,
         Float32 image of the same shape with jets enhanced.
     """
     try:
-        from scipy.ndimage import rotate as _rotate, shift as _shift
+        from scipy.ndimage import rotate as _rotate
+        from scipy.ndimage import shift as _shift
     except ImportError:
         safe_print("  WARNING: larson_sekanina requires scipy — skipping")
         return img.astype(np.float32)

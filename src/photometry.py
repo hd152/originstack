@@ -40,9 +40,7 @@ from typing import Optional
 
 import numpy as np
 
-from src.photometry_core import (
-    _field_centre_and_radius, _id_str, _pixel_coords,
-    aperture_photometry_batch, row_nanmax)
+from src.photometry_core import _field_centre_and_radius, _id_str, _pixel_coords, aperture_photometry_batch, row_nanmax
 from src.utils import header_get_first
 
 _log = logging.getLogger("originstack")

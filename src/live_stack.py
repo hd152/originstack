@@ -31,7 +31,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from src.utils import safe_print, format_time
+from src.utils import format_time, safe_print
 
 try:
     from scipy import ndimage as _ndi
@@ -82,7 +82,7 @@ class LiveStacker:
         """Process one light frame and fold it into the running stack.
         Returns True if the frame was accepted."""
         from src.frame_processor import _process_single_frame
-        from src.registration import calculate_shift, apply_transform
+        from src.registration import apply_transform, calculate_shift
 
         try:
             res = _process_single_frame(
@@ -276,8 +276,8 @@ def build_session_masters(args, directory: str) -> Tuple[Dict, Dict]:
     set ``args._session_bayer`` from the first light frame's header. Shared
     by ``--live`` and ``--stream`` so the two streaming modes can't silently
     drift on calibration setup. Returns ``(masters, frames)``."""
-    from src.frame_discovery import discover_frames
     from src.cli import _build_masters, _load_calibration_dir
+    from src.frame_discovery import discover_frames
     frames = discover_frames(directory)
     extra = _load_calibration_dir(args)
     for k in ('dark', 'flat', 'bias'):
@@ -295,8 +295,8 @@ def build_session_masters(args, directory: str) -> Tuple[Dict, Dict]:
         _sb = lights[0].header.get('BAYERPAT') or lights[0].header.get('COLORTYP')
         if _sb and getattr(args, 'bayer_autodetect', True):
             try:
-                from src.io_fits import load_frame
                 from src.debayer import autodetect_bayer_orientation
+                from src.io_fits import load_frame
                 _probe_data, _ = load_frame(lights[0].path)
                 if _probe_data is not None and _probe_data.ndim == 2:
                     _sb = autodetect_bayer_orientation(_probe_data, _sb)

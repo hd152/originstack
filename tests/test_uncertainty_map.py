@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.stacking import ivw_combine, _ivw_tile
+from src.stacking import _ivw_tile, ivw_combine
 
 
 class TestIvwTileReturnWsum:

@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger("originstack")
 
 _INFO_FILENAMES = ('info.json', 'session.json', 'capture.json')
 

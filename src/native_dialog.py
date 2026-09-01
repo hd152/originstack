@@ -11,8 +11,8 @@ Only meaningful on Windows; every function no-ops (returns False) elsewhere.
 """
 from __future__ import annotations
 
-import sys
 import ctypes
+import sys
 
 MB_OK = 0x00000000
 MB_YESNO = 0x00000004

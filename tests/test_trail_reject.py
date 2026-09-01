@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.trail_reject import detect_trail_mask, reject_trails, _bresenham_line
+from src.trail_reject import _bresenham_line, detect_trail_mask, reject_trails
 
 
 def _sky(H, W, level=100.0, noise=3.0, seed=0):

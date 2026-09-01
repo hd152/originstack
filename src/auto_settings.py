@@ -29,7 +29,7 @@ except Exception:
     HAS_BM3D_PKG = False
 
 if TYPE_CHECKING:
-    import argparse
+    pass
 
 # ---------------------------------------------------------------------------
 # Target type labels

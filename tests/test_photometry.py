@@ -15,12 +15,13 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from src.photometry import run_photometry, _fit_zeropoint_colorterm
-from tests._photometry_helpers import make_wcs_header as _make_wcs_header, add_gaussian as _add_gaussian, FakeTable as _FakeTable
+from src.photometry import _fit_zeropoint_colorterm, run_photometry
+from tests._photometry_helpers import FakeTable as _FakeTable
+from tests._photometry_helpers import add_gaussian as _add_gaussian
+from tests._photometry_helpers import make_wcs_header as _make_wcs_header
 
 
 class _Args:

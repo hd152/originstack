@@ -4,14 +4,13 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 
 from src.models import FrameInfo, ProcessingStats
-from src.utils import safe_print
 
 try:
     from PIL import Image
@@ -349,7 +348,6 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
     from datetime import datetime, timezone
 
     try:
-        import psutil
         HAS_PSUTIL = True
     except Exception:
         HAS_PSUTIL = False

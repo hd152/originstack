@@ -3,8 +3,7 @@
 import unittest
 
 from src.cli import parse_args
-from src.desktop_control import (get_form_schema, build_argv_from_form,
-                                 RunManager, get_run_manager)
+from src.desktop_control import RunManager, build_argv_from_form, get_form_schema, get_run_manager
 
 
 class TestFormSchema(unittest.TestCase):

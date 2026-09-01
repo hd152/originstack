@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pytest
 
-from src.live_stack import LiveStacker, _stack_snr, _HAS_SCIPY
+from src.live_stack import _HAS_SCIPY, LiveStacker, _stack_snr
 
 pytestmark = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
 

@@ -28,9 +28,8 @@ from typing import Optional
 
 import numpy as np
 
-from src.photometry_core import (aperture_photometry_batch, row_nanmax, _id_str)
-from src.photometry import (match_gaia_field, _airmass, _read_gain,
-                            _GAIA_BAND_FOR_CHANNEL)
+from src.photometry import _GAIA_BAND_FOR_CHANNEL, _airmass, _read_gain, match_gaia_field
+from src.photometry_core import _id_str, aperture_photometry_batch, row_nanmax
 from src.utils import header_get_first
 
 _log = logging.getLogger("originstack")
@@ -44,6 +43,7 @@ def _cropped_session_wcs_header(session_info, shape_hw, left, top):
         return None
     try:
         from astropy.io import fits
+
         from src.session_info import build_wcs_keywords
         kw = build_wcs_keywords(session_info)
         if not kw:

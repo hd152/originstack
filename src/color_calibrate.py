@@ -27,7 +27,6 @@ from typing import Tuple
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Optional imports
 # ---------------------------------------------------------------------------
@@ -40,7 +39,6 @@ except Exception:
 
 from src import net_query
 from src.photometry_core import _pixel_coords, aperture_photometry_batch
-
 
 # ---------------------------------------------------------------------------
 # Catalog query

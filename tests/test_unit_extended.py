@@ -9,7 +9,6 @@ import unittest
 import numpy as np
 from astropy.io import fits
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -161,7 +160,7 @@ class TestMakeMaster(unittest.TestCase):
         self.make_master = make_master
         self.FrameInfo = FrameInfo
 
-    def _write_frame(self, tmpdir: str, name: str, data: np.ndarray) -> 'FrameInfo':
+    def _write_frame(self, tmpdir: str, name: str, data: np.ndarray):
         path = os.path.join(tmpdir, name)
         _write_fits(path, data)
         return self.FrameInfo(path=path, type='dark', header={})

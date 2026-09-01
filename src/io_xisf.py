@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import struct
 import xml.etree.ElementTree as ET
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 

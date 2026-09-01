@@ -23,7 +23,6 @@ from astropy.io import fits
 from src import net_query
 from src.utils import safe_print
 
-
 # ---------------------------------------------------------------------------
 # ASTAP helpers
 # ---------------------------------------------------------------------------
@@ -333,7 +332,7 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
             # Clean up temporary file
             try:
                 os.unlink(tmp_path)
-            except:
+            except OSError:
                 pass
 
     except Exception as e:

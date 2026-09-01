@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import Config
-from src.utils import safe_print, get_logger
+from src.utils import get_logger, safe_print
 
 _log = get_logger()
 
@@ -68,7 +68,7 @@ def _register_stack(new_lum: np.ndarray, prev_lum: np.ndarray,
     translation-seeded star-match affine and translation-only fallbacks.
     Returns (transform, shift) — exactly one is non-None on success,
     both None on failure."""
-    from src.registration import calculate_shift, match_stars_affine, _blind_match_transform
+    from src.registration import _blind_match_transform, calculate_shift, match_stars_affine
 
     prev_stars = _detect_stars(prev_lum)
 

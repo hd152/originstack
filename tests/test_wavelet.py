@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.wavelet import wavedec2, waverec2, dwt_max_level, soft_threshold
+from src.wavelet import dwt_max_level, soft_threshold, wavedec2, waverec2
 
 
 class TestDwtMaxLevel:

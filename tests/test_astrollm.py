@@ -14,9 +14,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 import src.astrollm as astrollm_mod
-from src.astrollm import (run_astrollm_infer, score_lights_with_astrollm,
-                          score_master_with_astrollm, map_astrollm_category,
-                          sample_session_priors)
+from src.astrollm import (
+    map_astrollm_category,
+    run_astrollm_infer,
+    sample_session_priors,
+    score_lights_with_astrollm,
+    score_master_with_astrollm,
+)
 
 
 def _completed(returncode=0, stdout='', stderr=''):

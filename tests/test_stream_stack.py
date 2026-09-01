@@ -7,10 +7,15 @@ import sys
 import numpy as np
 import pytest
 
-from src.stream_stack import (
-    FrameRecord, survey, select_reference, fold, run_stream_stack, _HAS_SCIPY,
-)
 from src.pipeline import _MemmapManager
+from src.stream_stack import (
+    _HAS_SCIPY,
+    FrameRecord,
+    fold,
+    run_stream_stack,
+    select_reference,
+    survey,
+)
 
 pytestmark = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
 
@@ -49,7 +54,7 @@ def _stream_args(directory, output, **overrides):
     sys.argv = ['originstack.py', '-d', str(directory), '-o', str(output),
                 '--preset', 'quick', '--stream']
     try:
-        from src.cli import parse_args, apply_preset
+        from src.cli import apply_preset, parse_args
         args = parse_args()
     finally:
         sys.argv = old_argv
@@ -109,8 +114,8 @@ def test_survey_discards_full_res_data(tmp_path):
 
 def test_auto_advisor_noop_when_auto_not_set(tmp_path, monkeypatch):
     """--auto not passed: must not touch args at all (existing behavior)."""
-    from src.stream_stack import _run_auto_advisor_for_stream
     import src.auto_settings as auto_mod
+    from src.stream_stack import _run_auto_advisor_for_stream
 
     calls = []
     monkeypatch.setattr(auto_mod, 'apply_auto_settings',
@@ -131,8 +136,8 @@ def test_auto_advisor_applies_settings_when_auto_set(tmp_path, monkeypatch):
     frames' metrics, and its returned changes must land on args (proven via
     a stub that flips a real args attribute, avoiding a dependency on the
     real pixel-signal classifier's behavior on tiny synthetic data)."""
-    from src.stream_stack import _run_auto_advisor_for_stream
     import src.auto_settings as auto_mod
+    from src.stream_stack import _run_auto_advisor_for_stream
 
     def _stub(final, args, prior_type=None, prior_confidence=0.0):
         assert len(final) >= 1

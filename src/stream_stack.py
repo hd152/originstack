@@ -49,8 +49,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.utils import safe_print, format_time, get_memory_usage_mb
 from src.models import Config, FrameInfo, ProcessingStats
+from src.utils import format_time, get_memory_usage_mb, safe_print
 
 try:
     from tqdm import tqdm
@@ -221,7 +221,10 @@ def _register_frame_to_reference(ref_lum: np.ndarray, ref_stars, img_lum: np.nda
     the cascade actually produced the result (for -v per-frame logging).
     """
     from src.registration import (
-        match_stars_affine, _blind_match_transform, calculate_shift, HAS_SKIMAGE_TRANSFORM,
+        HAS_SKIMAGE_TRANSFORM,
+        _blind_match_transform,
+        calculate_shift,
+        match_stars_affine,
     )
 
     use_affine = (HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
@@ -280,7 +283,7 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
     Returns (linear_stack, frame_infos, shifts, total_exposure, n_rejected_pixels).
     """
     from src.frame_processor import _process_single_frame
-    from src.stacking import online_sigma_clip_seed_burnin, online_sigma_clip_fold_frame
+    from src.stacking import online_sigma_clip_fold_frame, online_sigma_clip_seed_burnin
 
     accepted = [r for r in records if r.accepted]
     if not accepted:
@@ -457,10 +460,11 @@ def run_stream_stack(args) -> int:
 
     args.stack_method = 'online_sigma_clip'
 
-    from src.postprocess import postprocess_stack
+    from astropy.io import fits
+
     from src.io_fits import populate_fits_header, save_preview_rgb
     from src.pipeline import _save_tiff
-    from astropy.io import fits
+    from src.postprocess import postprocess_stack
 
     fits_stacked = stacked.copy()
 

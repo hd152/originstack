@@ -10,8 +10,8 @@ from src.denoising import (
     _estimate_noise_level_function,
     _generalized_anscombe,
     _inverse_generalized_anscombe,
-    wavelet_denoise,
     adaptive_wavelet_denoise,
+    wavelet_denoise,
 )
 
 

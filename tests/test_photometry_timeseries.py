@@ -16,12 +16,11 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from src.session_info import SessionInfo
 from src.photometry_timeseries import run_timeseries_photometry
+from src.session_info import SessionInfo
 from tests._photometry_helpers import FakeTable as _FakeTable
 
 

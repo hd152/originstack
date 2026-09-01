@@ -27,14 +27,13 @@ never scales noise.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
 from src.utils import safe_print
 
 try:
-    from scipy.ndimage import zoom as _zoom, gaussian_filter as _gauss
+    from scipy.ndimage import gaussian_filter as _gauss
+    from scipy.ndimage import zoom as _zoom
     _HAS_SCIPY = True
 except Exception:  # pragma: no cover
     _zoom = _gauss = None

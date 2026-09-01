@@ -1,0 +1,45 @@
+[tool.ruff]
+# OriginStack style linter. Kept deliberately narrow: high-signal rules only,
+# so `ruff check` stays a real gate in CI rather than a wall of style noise.
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    "synthetic_data",
+    "sample",
+    "Benchmark",
+    "packaging/dist",
+    "ext/astro_native/target",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (undefined names, unused imports/vars, bad f-strings)
+    "W",    # pycodestyle warnings
+    "I",    # import sorting
+    "LOG",  # flake8-logging (pairs with the named-logger convention below)
+    "PLE",  # pylint errors (real bugs only)
+    "B006", # mutable argument default
+    "B018", # useless expression
+    "T100", # stray pdb.set_trace
+]
+ignore = [
+    "E501",  # line length: enforced softly via line-length, not as a hard error
+    "E741",  # ambiguous var names (l, I) — pervasive in the math code, low value
+    "E402",  # imports not at top: this codebase gates many imports behind try/except
+    "E701",  # multiple statements on one line (colon) — cosmetic
+    "E702",  # multiple statements on one line (semicolon) — cosmetic
+    "E731",  # lambda assignment — used deliberately for small local kernels
+    "F841",  # unused local: frequent in the numeric code as named intermediates;
+             # revisit once the worst offenders are cleaned up
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests lean on fixtures/imports that read as "unused" and on bare-ish asserts.
+"tests/*" = ["F401", "F811"]
+# Root shims re-export everything on purpose.
+"originstack.py" = ["F401", "F403", "F405"]
+"desktop_app.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]

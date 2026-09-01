@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import queue
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -12,20 +11,26 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.gpu_context import get_gpu
-from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import safe_print, print_quality_table, format_time
-from src.io_fits import load_fits, load_frame
+from src.debayer import (
+    apply_chromatic_aberration,
+    apply_hot_pixel_map_bayer,
+    autodetect_bayer_orientation,
+    correct_chromatic_aberration,
+    debayer,
+    green_equalize,
+    measure_chromatic_aberration,
+    remove_hot_pixels_bayer,
+    remove_hot_pixels_rgb_with_lum,
+    white_balance_grayworld,
+    white_balance_whitepatch,
+)
 from src.frame_discovery import is_nebula_filter
-from src.debayer import (debayer, green_equalize, remove_hot_pixels_bayer,
-                         apply_hot_pixel_map_bayer,
-                         remove_hot_pixels_rgb, remove_hot_pixels_rgb_with_lum,
-                         white_balance_grayworld, white_balance_whitepatch,
-                         correct_chromatic_aberration,
-                         measure_chromatic_aberration, apply_chromatic_aberration,
-                         autodetect_bayer_orientation)
-from src.quality import validate_image_data, compute_quality_metrics, estimate_bortle
+from src.gpu_context import get_gpu
+from src.io_fits import load_frame
+from src.models import Config, FrameInfo, ProcessingStats
+from src.quality import compute_quality_metrics, estimate_bortle, validate_image_data
 from src.stacking import lacosmic_reject
+from src.utils import format_time, print_quality_table, safe_print
 
 try:
     from tqdm import tqdm

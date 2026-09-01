@@ -7,8 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.exposure_fusion import fuse_exposures, _quality_weights, _laplacian_pyramid, \
-    _reconstruct_from_laplacian
+from src.exposure_fusion import _laplacian_pyramid, _quality_weights, _reconstruct_from_laplacian, fuse_exposures
 
 
 def _synthetic_pair(h=64, w=64):

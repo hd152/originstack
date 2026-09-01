@@ -43,10 +43,10 @@ TestEndToEnd              – full mini-pipeline smoke tests
 from __future__ import annotations
 
 import os
-import sys
-import types
 import pickle
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -172,7 +172,6 @@ finally:
     _devnull.close()
 
 import src.gpu_context as _gpu_mod
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers

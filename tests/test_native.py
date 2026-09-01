@@ -7,17 +7,17 @@ import numpy as np
 import pytest
 
 import originstack as astro
-import src.stacking as _stacking_mod
-import src.wavelet as _wavelet_mod
 import src.blind_match as _blind_match_mod
-import src.denoising as _denoising_mod
-import src.debayer as _debayer_mod
-import src.robust_pca as _robust_pca_mod
 import src.channel_combine as _channel_combine_mod
-import src.star_repair as _star_repair_mod
+import src.debayer as _debayer_mod
+import src.denoising as _denoising_mod
 import src.local_normalize as _local_normalize_mod
+import src.robust_pca as _robust_pca_mod
+import src.stacking as _stacking_mod
 import src.star_removal as _star_removal_mod
+import src.star_repair as _star_repair_mod
 import src.trail_reject as _trail_reject_mod
+import src.wavelet as _wavelet_mod
 
 native = pytest.importorskip("astro_native")
 

@@ -48,8 +48,9 @@ def _build_wcs(header) -> Optional[object]:
     if 'CTYPE1' not in header or 'CRVAL1' not in header:
         return None
     try:
-        from astropy.wcs import WCS
         import warnings
+
+        from astropy.wcs import WCS
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')  # FITSFixedWarning on minor header quirks
             wcs = WCS(header, naxis=2)
@@ -84,7 +85,7 @@ def query_annotation_objects(
     an exception) on any query failure -- annotation degrades to "nothing
     found" rather than aborting the whole run.
     """
-    from src.net_query import tap_query, _SIMBAD_TAP
+    from src.net_query import _SIMBAD_TAP, tap_query
 
     objects: List[Dict] = []
 

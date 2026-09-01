@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
 from src.models import Config
+
+_log = logging.getLogger("originstack")
 
 
 def estimate_bortle(background: float, exptime_s: float, gain: float = 100.0) -> Optional[int]:
@@ -56,7 +58,7 @@ def detect_stars_auto(lum: np.ndarray, noise: float,
         sources = detect_stars_matched_filter(lum.astype(np.float64))
         return sources if sources is not None and len(sources) > 0 else None
     except Exception as e:
-        logging.debug(f"matched-filter detection failed: {type(e).__name__}: {e}")
+        _log.debug(f"matched-filter detection failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -72,7 +74,7 @@ _SOURCES_DTYPE = np.dtype([
 # Module-level imports for scipy — avoids repeated sys.modules lookups and
 # attribute resolution on every call to compute_quality_metrics.
 try:
-    from scipy.ndimage import laplace, maximum_filter, gaussian_filter
+    from scipy.ndimage import gaussian_filter, laplace, maximum_filter
     _SCIPY_AVAILABLE = True
 except ImportError:
     laplace = maximum_filter = gaussian_filter = None

@@ -7,8 +7,7 @@ import unittest
 import numpy as np
 from astropy.io import fits
 
-from src.merge import (merge_previous_stacks, load_merge_stack,
-                       apply_merge_header)
+from src.merge import apply_merge_header, load_merge_stack, merge_previous_stacks
 
 
 def _star_field(shift=(0.0, 0.0), rot_deg=0.0, seed=0, H=256, W=320):

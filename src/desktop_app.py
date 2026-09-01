@@ -19,12 +19,11 @@ from __future__ import annotations
 import datetime
 import io
 import os
+import tkinter as tk
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-import tkinter as tk
 from tkinter import filedialog, scrolledtext, ttk
+from typing import Any, Dict, List, Optional
 
 
 def _log_dir() -> Path:
@@ -655,8 +654,8 @@ class App:
     POLL_MS = 150
 
     def __init__(self, root: tk.Tk) -> None:
-        from src.ui_events import get_ui_events
         from src.desktop_control import get_run_manager
+        from src.ui_events import get_ui_events
         self.root = root
         self.ui = get_ui_events()
         self.ui.attach()
@@ -1024,7 +1023,7 @@ def _run_headless(cli_argv: List[str]) -> int:
     ``multiprocessing.freeze_support()`` above still works -- the old
     dashboard's ``POST /api/start`` did this over HTTP; there's no server to
     do it through anymore, so this is a direct in-process replacement."""
-    from src.cli import parse_args, process_directory, apply_post_parse_setup
+    from src.cli import apply_post_parse_setup, parse_args, process_directory
     try:
         args = parse_args(cli_argv)
         apply_post_parse_setup(args)

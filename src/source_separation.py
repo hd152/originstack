@@ -128,6 +128,7 @@ def run_nmf_separation_report(img: np.ndarray, output_path: str,
     project's other opt-in diagnostic/utility outputs.
     """
     from astropy.io import fits
+
     from src.utils import safe_print
 
     try:

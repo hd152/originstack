@@ -18,9 +18,9 @@ def altaz(ra_deg: float, dec_deg: float, lat_deg: float, lon_deg: float,
     """(altitude_deg, azimuth_deg) of the target at ``when_iso`` (UTC ISO),
     or None."""
     try:
+        import astropy.units as u
         from astropy.coordinates import AltAz, EarthLocation, SkyCoord
         from astropy.time import Time
-        import astropy.units as u
     except Exception:
         return None
     try:
@@ -75,10 +75,10 @@ def parallactic_angle_deg(ra_deg: float, dec_deg: float, lat_deg: float,
     north position angle. None on failure.
     """
     try:
-        from astropy.coordinates import EarthLocation
-        from astropy.time import Time
         import astropy.units as u
         import numpy as np
+        from astropy.coordinates import EarthLocation
+        from astropy.time import Time
     except Exception:
         return None
     try:

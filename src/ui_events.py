@@ -19,7 +19,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 _MAX_LOG_LINES = 500
 _MAX_FRAME_ROWS = 60
@@ -320,6 +320,7 @@ class UIEvents:
             return None
         try:
             import numpy as np
+
             from src.io_fits import preview_jpeg_bytes
             f = np.asarray(src, dtype=np.float32)
             return preview_jpeg_bytes(

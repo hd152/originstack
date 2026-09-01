@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest import mock
 
-from src.native_dialog import show_error, ask_yes_no, IDYES
+from src.native_dialog import IDYES, ask_yes_no, show_error
 
 
 class TestShowError(unittest.TestCase):

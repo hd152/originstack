@@ -171,9 +171,10 @@ class RunManager:
     def _run(self, argv: List[str]) -> None:
         import os
         import tempfile
-        from src.cli import parse_args, process_directory, apply_post_parse_setup
-        from src.utils import get_logger, safe_print
+
+        from src.cli import apply_post_parse_setup, parse_args, process_directory
         from src.ui_events import get_ui_events
+        from src.utils import get_logger, safe_print
 
         wv = get_ui_events()
         status, error = 'ok', None

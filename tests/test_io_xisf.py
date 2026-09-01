@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from src.io_xisf import read_xisf, read_xisf_header, is_xisf_file
+from src.io_xisf import is_xisf_file, read_xisf, read_xisf_header
 from src.xisf_writer import write_xisf
 
 

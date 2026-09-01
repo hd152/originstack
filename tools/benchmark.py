@@ -1,5 +1,7 @@
 import time
+
 from src.pipeline import stack_target
+
 
 def benchmark_pipeline(frames, output_path, args):
     start_time = time.time()

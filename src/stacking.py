@@ -13,10 +13,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from scipy import ndimage
 
+from src.cleanup import deregister as _cleanup_deregister
+from src.cleanup import register as _cleanup_register
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import safe_print, get_logger, format_time
-from src.cleanup import register as _cleanup_register, deregister as _cleanup_deregister
+from src.utils import format_time, get_logger, safe_print
 
 try:
     from tqdm import tqdm
@@ -1634,7 +1635,7 @@ def ivw_combine(data: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray] =
                     data, noise32, sky32, gain if gain is not None else None, w32)
                 wsum_px = np.asarray(wsum).mean(axis=-1)  # one confidence map, not per-channel
                 sigma = (1.0 / np.sqrt(np.maximum(wsum_px, 1e-12))).astype(np.float32)
-                safe_print(f"    [rust] inverse-variance-weighted combine + uncertainty map")
+                safe_print("    [rust] inverse-variance-weighted combine + uncertainty map")
                 return np.asarray(result), sigma
             except Exception as exc:
                 _log.debug("native ivw_combine_with_sigma failed (%s); using numpy", exc)
