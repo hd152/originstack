@@ -15,13 +15,12 @@ commit      : abd1f5f67bdb3c51a54d6d1e28f2429df76d2d08
 vendored on : 2026-09-06
 vendored by : scripted minimal-set copy (ONNX inference path only)
 
-Included (everything infer_onnx.py imports transitively):
+Included (the upstream reference for src/astrollm_infer.py's numpy/scipy port):
   infer_onnx.py                 <- torch-free entry point (--model / --image / --json)
   data/imageops.py              <- percentile stretch + resize/center-crop + background correction (cv2+numpy)
   data/shape_features.py        <- comet shape-gate features for infer_onnx.py's category head (cv2+numpy)
-  data/__init__.py              <- empty; makes `data` importable with cwd=this dir
-  checkpoints/model.onnx        <- exported model (epoch 15, SSL-pretrained + fine-tuned; ~10 MB)
-  requirements.txt              <- upstream requirements-infer.txt (numpy, onnxruntime, opencv-python-headless)
+  checkpoints/model.onnx        <- exported model (epoch 15, SSL-pretrained + fine-tuned; ~10 MB;
+                                   byte-identical to src/data/astrollm.onnx)
 
 Model heads meaningful for this checkpoint (baked into the ONNX metadata's
 `tasks`): reject, quality, category, exposure, sky_brightness,

@@ -15,7 +15,6 @@ copied from, so a future re-sync can diff against it:
 | `data/imageops.py` | percentile stretch + resize/centre-crop + background correction |
 | `data/shape_features.py` | comet shape-gate features |
 | `checkpoints/model.onnx` | the exported model (byte-identical to `src/data/astrollm.onnx`) |
-| `requirements.txt` | upstream's slim inference deps (onnxruntime + opencv + numpy) |
 
 ## Re-syncing to a newer astrollm
 

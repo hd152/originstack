@@ -1466,17 +1466,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Thread-pool size for per-frame astrollm scoring calls (default: 2). '
                         'onnxruntime releases the GIL during the forward pass, so a thread '
                         'pool parallelises it without a ProcessPoolExecutor.')
-    # Back-compat: the pre-in-process flags. --astrollm-dir / --astrollm-checkpoint
-    # still resolve a model path; --astrollm-python / --astrollm-script are inert.
+    # Back-compat: pre-in-process path overrides. --astrollm-dir /
+    # --astrollm-checkpoint still resolve a model path. (--astrollm-python /
+    # --astrollm-script / --astrollm-timeout were removed -- inert since the
+    # scorer moved in-process.)
     g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'),
                    metavar='DIR', help=argparse.SUPPRESS)
     g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
-                   help=argparse.SUPPRESS)
-    g_astrollm.add_argument('--astrollm-python', default=None, metavar='PATH',
-                   help=argparse.SUPPRESS)
-    g_astrollm.add_argument('--astrollm-script', default=None, metavar='PATH',
-                   help=argparse.SUPPRESS)
-    g_astrollm.add_argument('--astrollm-timeout', type=float, default=60.0, metavar='SEC',
                    help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
@@ -1934,16 +1930,12 @@ def parse_args(argv=None):
 
         # Back-compat: --astrollm-model wins; otherwise honour the old
         # --astrollm-checkpoint, then derive from --astrollm-dir's layout.
-        # --astrollm-python / --astrollm-script are inert now (in-process).
         if not args.astrollm_model:
             if args.astrollm_checkpoint:
                 args.astrollm_model = args.astrollm_checkpoint
             elif args.astrollm_dir:
                 args.astrollm_model = os.path.join(
                     args.astrollm_dir, 'checkpoints', 'model.onnx')
-        if args.astrollm_python or args.astrollm_script:
-            safe_print("  NOTE: --astrollm-python / --astrollm-script are deprecated and "
-                       "ignored -- astrollm now runs in-process (see --astrollm-model)")
 
         if not onnxruntime_available():
             safe_print("  WARNING: --astrollm needs the 'onnxruntime' package "

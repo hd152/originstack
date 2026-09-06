@@ -476,14 +476,14 @@ class TestCliAstrollmResolution:
         assert args.astrollm is True
         assert args.astrollm_model == str(ck / 'model.onnx')
 
-    def test_deprecated_python_script_flags_warn_but_dont_break(self, tmp_path, monkeypatch, capsys):
+    def test_legacy_checkpoint_flag_still_resolves_a_model(self, tmp_path, monkeypatch):
         monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        m = tmp_path / 'old.onnx'
+        m.write_bytes(b'x')
         monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
-        monkeypatch.setattr(infer_mod, 'resolve_model_path', lambda p: p or 'bundled')
-        args = self._parse(tmp_path, '--astrollm-python', 'py.exe',
-                           '--astrollm-script', 'infer_onnx.py')
+        args = self._parse(tmp_path, '--astrollm-checkpoint', str(m))
         assert args.astrollm is True
-        assert 'deprecated' in capsys.readouterr().out
+        assert args.astrollm_model == str(m)
 
 
 if __name__ == '__main__':
