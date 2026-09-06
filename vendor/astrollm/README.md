@@ -16,6 +16,15 @@ copied from, so a future re-sync can diff against it:
 | `data/shape_features.py` | comet shape-gate features |
 | `checkpoints/model.onnx` | the exported model (byte-identical to `src/data/astrollm.onnx`) |
 
+## Current model (v4)
+
+`model_v4_nossl_best.pt` → ONNX, epoch 15, a **from-scratch** (no-SSL) 7-task
+run. The graph emits **8** outputs (`head_order` always builds `trailing` +
+`background_grid`) but ONNX metadata `tasks` lists **7** — `trailing` is
+untrained on this checkpoint. `src/astrollm_infer.py` gates every head on
+`tasks`, so `trailing` (noise) and `background_grid` (trained, but unused —
+OriginStack has DBE) are not surfaced. See `VENDORED_FROM.txt`.
+
 ## Re-syncing to a newer astrollm
 
 1. Copy the four source files above from the new upstream commit into this dir.

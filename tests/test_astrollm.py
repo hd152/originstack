@@ -152,6 +152,17 @@ class TestRealInference:
         assert r['category'] in ('galaxy', 'nebula', 'star_cluster', 'comet')
         assert 0.0 <= r['category_confidence'] <= 1.0
 
+    def test_untrained_and_unused_heads_not_surfaced(self):
+        """The bundled v4 graph emits 8 outputs incl. `trailing` (untrained,
+        excluded from `tasks`) and `background_grid` (trained but unused).
+        Neither may leak into the result -- every head is gated on `tasks`."""
+        r = infer_mod.score_rgb(self._synth_rgb())
+        assert r is not None
+        assert 'trailing' not in r['tasks']
+        for k in ('trailing_score', 'trailing_flag', 'background_grid',
+                  'background_extracted_to'):
+            assert k not in r, k
+
     def test_score_path_png_roundtrip(self, tmp_path):
         pytest.importorskip('PIL')
         from PIL import Image

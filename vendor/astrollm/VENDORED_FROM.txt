@@ -11,7 +11,7 @@ diff against upstream; see README.md for the re-sync steps.
 
 source repo : https://github.com/hd152/astrollm
 branch      : improve-training-and-tooling
-commit      : abd1f5f67bdb3c51a54d6d1e28f2429df76d2d08
+commit      : 528579c0bf4dead07936ad17e59204f698d29678
 vendored on : 2026-09-06
 vendored by : scripted minimal-set copy (ONNX inference path only)
 
@@ -19,17 +19,27 @@ Included (the upstream reference for src/astrollm_infer.py's numpy/scipy port):
   infer_onnx.py                 <- torch-free entry point (--model / --image / --json)
   data/imageops.py              <- percentile stretch + resize/center-crop + background correction (cv2+numpy)
   data/shape_features.py        <- comet shape-gate features for infer_onnx.py's category head (cv2+numpy)
-  checkpoints/model.onnx        <- exported model (epoch 15, SSL-pretrained + fine-tuned; ~10 MB;
-                                   byte-identical to src/data/astrollm.onnx)
+  checkpoints/model.onnx        <- exported model (~11 MB; byte-identical to src/data/astrollm.onnx)
 
-Model heads meaningful for this checkpoint (baked into the ONNX metadata's
-`tasks`): reject, quality, category, exposure, sky_brightness,
-stray_light_gradient. `category` is a 4-class head -- galaxy, nebula,
-star_cluster, comet (the earlier 7-bucket taxonomy with planet/star/other is
-gone). `exposure` is now a 7-class classifier (5/10/15/20/25/30/40 s) rather
-than the old `log_exposure` regression head. infer_onnx.py also carries
-dormant `trailing` / `background_grid` code paths from later upstream commits;
-this checkpoint's graph has neither head, so they never fire.
+Model: v4, from checkpoints/model_v4_nossl_best.pt -- a 7-task run trained
+FROM SCRATCH (no SSL pre-training), best-by-category checkpoint at epoch 15
+(category_acc_frames 0.872). Replaces the epoch-15 SSL-pretrained + fine-tuned
+v3b model. Matches/beats v3b on category, reject recall and quality; ~0.07
+lower on exposure accuracy (the one metric below v3b).
+
+Graph outputs / `tasks` mismatch -- IMPORTANT:
+  head_order (8 graph outputs): reject, quality, category, exposure,
+    sky_brightness, stray_light_gradient, trailing, background_grid
+  tasks (7, ONNX metadata):     reject, quality, category, exposure,
+    sky_brightness, stray_light_gradient, background_grid
+The architecture always builds all 8 heads, so the graph always emits 8
+outputs, but `trailing` is UNTRAINED on this checkpoint (random weights) and
+is correctly excluded from `tasks`. Consumers MUST gate every head on
+membership in `tasks`, never on output presence -- src/astrollm_infer.py
+does. `background_grid` IS trained (a spatial background-flatten map); the
+port ignores it since OriginStack runs its own DBE. `category` is 4-class
+(galaxy/nebula/star_cluster/comet); `exposure` is a 7-class classifier
+(5/10/15/20/25/30/40 s).
 
 NOT vendored: infer.py (torch), export_onnx.py (dev-only), pretrain_ssl.py,
 cull.py, models/, data/cache.py, data/dataset.py, data/light_stats.py,

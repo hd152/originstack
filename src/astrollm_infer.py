@@ -254,6 +254,14 @@ def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
             return None
         out = dict(zip(meta['head_order'], raw))
 
+        # Gate EVERY head on `tasks`, never on presence in `out`/head_order.
+        # The exported graph always builds all 8 heads (head_order lists them
+        # all), but a head the checkpoint never trained -- e.g. `trailing` on
+        # the v4 epoch-15 model -- is excluded from `tasks` and its output is
+        # random noise. `trailing` and `background_grid` are deliberately not
+        # surfaced below: OriginStack has no use for the spatial
+        # background-grid map (it runs its own DBE), and trailing is untrained
+        # on the current model. Wire either only when `'<head>' in tasks`.
         result: dict = {'checkpoint_epoch': meta['epoch'], 'tasks': tasks}
         if 'reject' in tasks:
             p = float(_sigmoid(float(out['reject'][0])))
