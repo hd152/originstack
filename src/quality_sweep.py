@@ -14,6 +14,7 @@ passed through ``quality_gate`` — the exact hard-reject / statistical-outlier
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -61,32 +62,70 @@ def _prefetch_files(lights: List[FrameInfo], pool: ThreadPoolExecutor) -> None:
 
 
 def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
-    """ProcessPool worker: load -> debayer -> luminance -> quality metrics.
+    """ProcessPool worker: load -> luminance proxy -> gate-only quality metrics.
 
     Uncalibrated on purpose — the sweep judges raw lights without needing the
     session's masters, and the metrics degrade gracefully without calibration.
+
+    A 2D (Bayer) frame is reduced to a half-resolution luminance proxy by
+    averaging each 2x2 mosaic cell instead of running a full Malvar debayer:
+    every 2x2 cell holds exactly one R, two G and one B sample for any RGGB-
+    family pattern, so the cell mean ~= 0.25R + 0.5G + 0.25B — close enough to
+    Rec.601 luma for a keep/reject gate, and it skips the single most
+    expensive step per frame. FWHM (measured on the half-res proxy) is scaled
+    back to full-resolution pixels before returning.
     """
     try:
-        from src.debayer import autodetect_bayer_orientation, debayer, green_equalize
         from src.io_fits import load_frame
         from src.quality import compute_quality_metrics
 
         data, hdr = load_frame(path)
         if data is None or data.size == 0:
             return path, None, 'empty data array'
-        if data.ndim == 2:
-            bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
-            bayer = autodetect_bayer_orientation(np.asarray(data), bayer)
-            data = green_equalize(np.asarray(data), pattern=bayer)
-            rgb = debayer(np.asarray(data), pattern=bayer, method='malvar')
+        arr = np.asarray(data, dtype=np.float32)
+        if arr.ndim == 2:
+            h, w = arr.shape[0] & ~1, arr.shape[1] & ~1
+            lum = 0.25 * (arr[0:h:2, 0:w:2] + arr[0:h:2, 1:w:2]
+                          + arr[1:h:2, 0:w:2] + arr[1:h:2, 1:w:2])
+            fwhm_scale = 2.0
         else:
-            rgb = data
-        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
-               + 0.114 * rgb[:, :, 2]).astype(np.float32)
-        metrics = compute_quality_metrics(lum, advanced_metrics=False)
+            lum = (0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1]
+                   + 0.114 * arr[:, :, 2]).astype(np.float32)
+            fwhm_scale = 1.0
+        metrics = compute_quality_metrics(lum, advanced_metrics=False, gate_only=True)
+        if fwhm_scale != 1.0 and metrics.get('fwhm'):
+            metrics['fwhm'] *= fwhm_scale
+        metrics.pop('_star_sources', None)  # not consumed by the sweep; keep IPC/cache small
         return path, metrics, None
     except Exception as exc:
         return path, None, f'{type(exc).__name__}: {exc}'
+
+
+# Bump when _score_one's metric logic changes so stale caches are ignored.
+_CACHE_VERSION = 2
+_CACHE_NAME = '.sweepcache.json'
+
+
+def _load_cache(root: str) -> dict:
+    """Return {abspath: {"mt": mtime_ns, "sz": size, "m": metrics}} or {}."""
+    try:
+        with open(os.path.join(root, _CACHE_NAME), encoding='utf-8') as fh:
+            blob = json.load(fh)
+        if blob.get('v') != _CACHE_VERSION:
+            return {}
+        return blob.get('frames', {})
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cache(root: str, frames: dict) -> None:
+    try:
+        tmp = os.path.join(root, _CACHE_NAME + '.tmp')
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump({'v': _CACHE_VERSION, 'frames': frames}, fh)
+        os.replace(tmp, os.path.join(root, _CACHE_NAME))
+    except OSError as exc:
+        safe_print(f"  (could not write {_CACHE_NAME}: {exc})")
 
 
 def _walk_light_folders(root: str) -> List[Tuple[str, List[FrameInfo]]]:
@@ -134,7 +173,28 @@ def run_quality_sweep(root: str, args) -> int:
     t0 = time.time()
     n_flagged_total = 0
     n_renamed = 0
+    n_cache_hits = 0
     csv_rows: List[str] = []
+
+    use_cache = not getattr(args, 'sweep_no_cache', False)
+    cache = _load_cache(root) if use_cache else {}
+    new_cache: dict = {}
+
+    def _cache_probe(fpath: str):
+        """Return (key, stat_tuple, cached_metrics|None) for a frame."""
+        from src.io_ser import is_ser_virtual_path
+        if not use_cache or is_ser_virtual_path(fpath):
+            return None, None, None
+        key = os.path.abspath(fpath)
+        try:
+            st = os.stat(fpath)
+        except OSError:
+            return key, None, None
+        sig = [st.st_mtime_ns, st.st_size]
+        hit = cache.get(key)
+        if hit and hit.get('sig') == sig:
+            return key, sig, hit.get('m')
+        return key, sig, None
 
     prefetch_workers = max(4, min(16, workers * 2))
     with ProcessPoolExecutor(max_workers=workers,
@@ -145,13 +205,27 @@ def run_quality_sweep(root: str, args) -> int:
 
         for idx, (dirpath, lights) in enumerate(folders):
             rel = os.path.relpath(dirpath, root)
-            futs = {pool.submit(_score_one, f.path): f for f in lights}
+
+            # Serve unchanged frames straight from the on-disk cache; only
+            # submit the rest to the worker pool.
+            futs = {}
+            sigs: Dict[str, list] = {}
+            for f in lights:
+                key, sig, cached = _cache_probe(f.path)
+                if key is not None:
+                    sigs[f.path] = [key, sig]
+                if cached is not None:
+                    f.metrics = dict(cached)
+                    new_cache[key] = {'sig': sig, 'm': cached}
+                    n_cache_hits += 1
+                else:
+                    futs[pool.submit(_score_one, f.path)] = f
             # Overlap the next folder's disk I/O with this folder's CPU-bound
             # scoring instead of waiting on it at the top of the next iteration.
             if idx + 1 < len(folders):
                 _prefetch_files(folders[idx + 1][1], prefetch_pool)
             n_err = 0
-            for fut in tqdm(as_completed(futs), total=len(lights),
+            for fut in tqdm(as_completed(futs), total=len(futs),
                             desc=f"  {rel}", unit="frame",
                             disable=getattr(args, 'verbose', False)):
                 path, metrics, err = fut.result()
@@ -164,6 +238,9 @@ def run_quality_sweep(root: str, args) -> int:
                     n_err += 1
                 else:
                     f.metrics = metrics
+                    ks = sigs.get(path)
+                    if ks and ks[1] is not None:
+                        new_cache[ks[0]] = {'sig': ks[1], 'm': metrics}
 
             # The pipeline's own gate: hard rejects + statistical outliers +
             # relative score threshold, folder-relative. The sweep runs the
@@ -216,6 +293,9 @@ def run_quality_sweep(root: str, args) -> int:
                         safe_print(f"    ERROR renaming "
                                    f"{os.path.basename(f.path)}: {exc}")
 
+    if use_cache:
+        _save_cache(root, new_cache)
+
     report_path = getattr(args, 'quality_report', None)
     if report_path:
         with open(report_path, 'w', encoding='utf-8') as fh:
@@ -226,7 +306,9 @@ def run_quality_sweep(root: str, args) -> int:
 
     safe_print("")
     safe_print("=" * 70)
-    safe_print(f"Swept {n_total} lights in {format_time(time.time() - t0)}: "
+    n_scored = n_total - n_cache_hits
+    safe_print(f"Swept {n_total} lights in {format_time(time.time() - t0)} "
+               f"({n_scored} scored, {n_cache_hits} from cache): "
                f"{n_flagged_total} flagged"
                + (f", {n_renamed} renamed to *{REJECT_SUFFIX}" if apply_renames
                   else ""))

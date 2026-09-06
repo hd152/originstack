@@ -685,8 +685,16 @@ def decompose_psf_zernike(img: np.ndarray, star_positions,
 
 
 def compute_quality_metrics(img: np.ndarray, quick: bool = False,
-                            advanced_metrics: bool = True) -> Dict:
+                            advanced_metrics: bool = True,
+                            gate_only: bool = False) -> Dict:
     """Comprehensive quality analysis with multiple metrics.
+
+    ``gate_only`` (used by the collection quality sweep) computes just the
+    fields ``quality_gate`` and the sweep CSV consume -- snr, star_count,
+    contrast, dynamic_range, fwhm, score -- and skips the Laplacian/Brenner
+    sharpness, multiscale-entropy, PSF-anisotropy and ellipticity work whose
+    results the sweep discards. All skipped keys are still present in the
+    returned dict, set to 0.0, so callers reading them don't KeyError.
 
     Performance improvements vs original:
     - img_s cast to float32 once upfront — all downstream operations share
@@ -790,7 +798,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
 
     # Laplacian sharpness — img_s is already float32, no cast needed.
     sharpness = 0.0
-    if laplace is not None:
+    if not gate_only and laplace is not None:
         try:
             sharpness = float(np.var(laplace(img_s)))
         except Exception:
@@ -798,14 +806,15 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
 
     # Brenner gradient sharpness — noise-robust complement to Laplacian.
     brenner = 0.0
-    try:
-        brenner = compute_brenner_sharpness(img_s)
-    except Exception:
-        brenner = 0.0
+    if not gate_only:
+        try:
+            brenner = compute_brenner_sharpness(img_s)
+        except Exception:
+            brenner = 0.0
 
     # Wavelet multi-scale entropy ratio — captures seeing quality independently of SNR.
     wavelet_entropy_ratio = 0.0
-    if not quick:
+    if not quick and not gate_only:
         try:
             wavelet_entropy_ratio = compute_multiscale_entropy(img_s)
         except Exception:
@@ -816,7 +825,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     psf_pa_scatter = 0.0
     psf_anisotropy_type = 'isotropic'
     ellipticity = 0.0
-    if not quick and sources_s is not None and len(sources_s) > 0:
+    if not quick and not gate_only and sources_s is not None and len(sources_s) > 0:
         try:
             psf_ellipticity, psf_pa_scatter, psf_anisotropy_type = measure_psf_anisotropy(sources_s)
         except Exception:

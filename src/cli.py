@@ -1041,6 +1041,10 @@ def build_parser() -> argparse.ArgumentParser:
     g_core.add_argument('--sweep-undo', action='store_true',
                    help='Recursively strip the .rejected suffix applied by '
                         '--quality-sweep --apply, restoring all flagged files')
+    g_core.add_argument('--sweep-no-cache', action='store_true',
+                   help='With --quality-sweep: ignore and do not write the '
+                        '.sweepcache.json score cache (by default unchanged '
+                        'frames are served from it, making re-sweeps fast)')
     g_core.add_argument('--live', action='store_true',
                    help='Real-time (live) stacking: watch the directory and fold each new '
                         'sub into a running stack as it lands, pushing the growing result '

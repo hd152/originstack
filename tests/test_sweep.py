@@ -34,7 +34,7 @@ def _write_light(path, good=True, seed=0, H=128, W=160):
 def _args(**kw):
     d = dict(apply=False, parallel=1, verbose=False, quality_report=None,
              quality_filter=True, quality_threshold=50.0,
-             max_ellipticity=0.5)
+             max_ellipticity=0.5, sweep_no_cache=False)
     d.update(kw)
     return argparse.Namespace(**d)
 
@@ -110,6 +110,63 @@ class TestQualitySweep(unittest.TestCase):
             self.assertEqual(lines[0], 'filename,snr,fwhm,star_count,'
                                        'quality_score,accepted,rejection_reason')
             self.assertEqual(len(lines), 1 + 10)  # 7 + 3 lights
+
+    def test_cache_written_and_reused(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+
+        import src.quality_sweep as qs
+
+        def _run(td):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = run_quality_sweep(td, _args())
+            self.assertEqual(rc, 0)
+            return buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as td:
+            _make_tree(td)
+            _run(td)
+            cpath = os.path.join(td, qs._CACHE_NAME)
+            self.assertTrue(os.path.exists(cpath))
+            blob = json.load(open(cpath, encoding='utf-8'))
+            self.assertEqual(blob['v'], qs._CACHE_VERSION)
+            self.assertEqual(len(blob['frames']), 10)  # 7 + 3 lights
+            for e in blob['frames'].values():
+                self.assertEqual(len(e['sig']), 2)
+                self.assertIn('score', e['m'])
+
+            # Re-run: nothing re-scored.
+            self.assertIn('0 scored, 10 from cache', _run(td))
+
+            # Touch one file -> only that frame is re-scored.
+            os.utime(os.path.join(td, 'M42', 'Light0000.fits'), None)
+            self.assertIn('1 scored, 9 from cache', _run(td))
+
+    def test_no_cache_flag(self):
+        import src.quality_sweep as qs
+        with tempfile.TemporaryDirectory() as td:
+            _make_tree(td)
+            run_quality_sweep(td, _args(sweep_no_cache=True))
+            self.assertFalse(os.path.exists(os.path.join(td, qs._CACHE_NAME)))
+
+    def test_gate_only_metrics_skip_discarded_fields(self):
+        from src.quality import compute_quality_metrics
+        rng = np.random.default_rng(0)
+        img = np.full((160, 200), 400.0, np.float32)
+        yy, xx = np.mgrid[0:160, 0:200]
+        for _ in range(20):
+            cy, cx = rng.uniform(15, 145), rng.uniform(15, 185)
+            img += rng.uniform(2000, 6000) * np.exp(
+                -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 1.8 ** 2))
+        img += rng.normal(0, 15, img.shape)
+        m = compute_quality_metrics(img, advanced_metrics=False, gate_only=True)
+        for k in ('snr', 'star_count', 'contrast', 'dynamic_range', 'score'):
+            self.assertGreater(m[k], 0, k)
+        for k in ('sharpness', 'brenner', 'wavelet_entropy_ratio',
+                  'ellipticity', 'psf_ellipticity'):
+            self.assertEqual(m[k], 0.0, k)
 
 
 if __name__ == '__main__':
