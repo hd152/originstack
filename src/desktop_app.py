@@ -519,6 +519,18 @@ class PreviewCanvas(ttk.Frame):
         self._img_a = Image.open(io.BytesIO(jpeg_bytes)).convert('RGB')
         self.redraw()
 
+    def clear(self) -> None:
+        """Drop the displayed image(s) -- called when a new run starts so the
+        viewer doesn't keep showing the previous run's stack."""
+        self._img_a = self._img_b = self._photo = None
+        self._nat_w = self._nat_h = 0
+        self.current_slug = self.compare_slug = ''
+        self.compare_on = False
+        self.scale = self.fit_scale = 1.0
+        self.tx = self.ty = 0.0
+        self.caption_var.set('Waiting for the first stack…')
+        self.redraw()
+
     # ── view transform ─────────────────────────────────────────────────
 
     def fit(self) -> None:
@@ -643,6 +655,14 @@ class FrameStrip(ttk.Frame):
         ttk.Label(self.inner, text=name[:14], style='Faint.TLabel',
                  font=('Consolas', 8)).grid(row=1, column=col)
 
+    def clear(self) -> None:
+        """Drop every thumbnail -- called when a new run starts."""
+        for child in self.inner.winfo_children():
+            child.destroy()
+        self._shown_ids.clear()
+        self._photos.clear()
+        self.canvas.configure(scrollregion=(0, 0, 0, 0))
+
 
 class App:
     """Wires the Setup form, RunManager, and progress/preview panels
@@ -663,6 +683,7 @@ class App:
         self._last_version = -1
         self._shown_log_lines = 0
         self._last_run_status = 'idle'
+        self._named_cache: List[Dict[str, Any]] = []
 
         root.title('OriginStack')
         root.geometry('1400x900')
@@ -915,6 +936,20 @@ class App:
             self._refresh_run_button()
             return
         self._last_version = snap['version']
+
+        # New run just started -- drop the previous run's preview image,
+        # milestone slots and thumbnail ring (UIEvents.run_started() already
+        # cleared its side; the widgets need clearing too).
+        if snap['run_status'] == 'running' and self._last_run_status != 'running':
+            self.preview.clear()
+            self.frame_strip.clear()
+            self.view_var.set('')
+            self.compare_var.set(False)
+            self.compare_combo_var.set('')
+            self.wipe_scale.pack_forget()
+            self._named_cache = []
+            self.view_combo['values'] = []
+            self.compare_combo['values'] = []
 
         # phases / progress
         phase = snap['phase']
