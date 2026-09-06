@@ -1,6 +1,13 @@
 astrollm ONNX-inference code + exported model, vendored for OriginStack's
---astrollm feature (see src/astrollm.py). torch-free: the exported model runs
-under onnxruntime, so this vendored copy needs neither torch nor astropy.
+--astrollm feature. torch-free: the exported model runs under onnxruntime, so
+this snapshot needs neither torch nor astropy.
+
+NOTE (2026-09-06): this directory is now a PROVENANCE SNAPSHOT ONLY, not on
+the runtime path. --astrollm runs in-process from src/astrollm_infer.py (a
+numpy/scipy port of infer_onnx.py + data/imageops.py + data/shape_features.py,
+no OpenCV) against src/data/astrollm.onnx (byte-identical to
+checkpoints/model.onnx here). These files are kept so a future re-sync can
+diff against upstream; see README.md for the re-sync steps.
 
 source repo : https://github.com/hd152/astrollm
 branch      : improve-training-and-tooling
@@ -30,6 +37,6 @@ cull.py, models/, data/cache.py, data/dataset.py, data/light_stats.py,
 data/manifest.py, train.py, data/*.jsonl, configs/, tests/, the .pt checkpoints.
 
 infer_onnx.py handles TIFF/PNG/JPG only -- it refuses FITS (no astropy debayer).
-OriginStack renders each raw light frame to a temp image itself before calling
-it: src/astrollm.py::_render_light_for_onnx (debayer + write TIFF/PNG). Re-sync
-by re-copying against a newer astrollm commit and updating the hash above.
+The in-process port (src/astrollm_infer.py::_load_image_any) debayers a raw
+.fits light itself and feeds the array straight to the model -- no temp file.
+Re-sync steps: see README.md.

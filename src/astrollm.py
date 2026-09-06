@@ -1,161 +1,56 @@
-"""astrollm integration: subprocess-based defect/quality/category scoring.
+"""astrollm integration: in-process defect/quality/category scoring.
 
-astrollm is a separately-trained model, still finishing its first real
-training run. This is advisory/logging only -- results are stored on
-FrameInfo.metrics['astrollm'] for visibility but never set f.accepted or
-touch f.metrics['score'], and no frame is auto-dropped. Subprocess call
-only, no network -- matches astrollm's local-only premise.
+astrollm is a separately-trained vision classifier. Its ONNX-inference code
+is ported into ``src/astrollm_infer.py`` (numpy/scipy, no OpenCV) and the
+exported model ships inside the package at ``src/data/astrollm.onnx`` -- no
+external folder, venv or subprocess. ``onnxruntime`` is an optional
+dependency; ``--astrollm`` self-disables with a warning when it or the model
+file is absent.
+
+Advisory/logging only -- results are stored on FrameInfo.metrics['astrollm']
+for visibility but never set f.accepted or touch f.metrics['score'], and no
+frame is auto-dropped. No network -- matches astrollm's local-only premise.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import subprocess
-import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 
+from src import astrollm_infer
 from src.models import Config, FrameInfo
 from src.utils import safe_print
 
 logger = logging.getLogger('originstack')
 
-_FITS_EXTS = ('.fits', '.fit', '.fts')
+
+def astrollm_ready(args) -> bool:
+    """True when in-process scoring can actually run: onnxruntime importable
+    and a model file (bundled or ``--astrollm-model`` override) on disk."""
+    if not astrollm_infer.onnxruntime_available():
+        return False
+    return astrollm_infer.resolve_model_path(
+        getattr(args, 'astrollm_model', None)) is not None
 
 
-def _render_light_for_onnx(src_path: str) -> Tuple[str, bool]:
-    """Debayer a raw light frame to a temp RGB image for ``infer_onnx.py``.
-
-    The vendored ONNX entry point (``vendor/astrollm/infer_onnx.py``) reads
-    TIFF/PNG/JPG only -- it dropped astropy, so it refuses FITS. OriginStack
-    renders each raw frame itself here: a small score drift vs astrollm's own
-    cv2 debayer, acceptable for an advisory-only signal.
-
-    Returns ``(path, is_temp)``. Non-FITS input (the already-rendered stacked
-    master) passes straight through. If rendering isn't possible -- unreadable
-    frame, or neither ``tifffile`` nor ``Pillow`` available -- the original
-    path is returned unchanged so ``infer_onnx.py`` rejects it and the frame
-    simply goes unscored, rather than raising into the pipeline.
+def run_astrollm_infer(image_path: str,
+                       model_path: Optional[str] = None) -> Optional[dict]:
+    """Score one image path (FITS light frame, or a rendered TIFF/PNG/JPG
+    master) with the in-process ONNX model. Returns the result dict, or None
+    (logging a warning) on any failure -- unreadable input, onnxruntime or
+    model absent, inference error. Callers must treat None as "no score
+    available", never as a rejection signal.
     """
-    if not src_path.lower().endswith(_FITS_EXTS):
-        return src_path, False
-    try:
-        from src.io_fits import load_frame
-        data, hdr = load_frame(src_path)
-        arr = np.asarray(data)
-        if arr.ndim == 2:
-            from src.debayer import debayer
-            pattern = str(hdr.get('BAYERPAT') or hdr.get('COLORTYP')
-                          or 'GBRG').strip().upper()
-            rgb = debayer(arr.astype(np.float32), pattern=pattern)
-        elif arr.ndim == 3:
-            rgb = arr.astype(np.float32)
-            if rgb.shape[0] in (1, 3) and rgb.shape[-1] not in (1, 3):
-                rgb = np.moveaxis(rgb, 0, -1)          # (C,H,W) -> (H,W,C)
-        else:
-            return src_path, False
-
-        lo, hi = float(np.nanmin(rgb)), float(np.nanmax(rgb))
-        if hi <= lo:
-            hi = lo + 1.0
-        # 16-bit range pack only -- let infer_onnx.py apply the per-channel
-        # percentile stretch it was trained on.
-        u16 = np.clip((rgb - lo) / (hi - lo) * 65535.0, 0, 65535).astype(np.uint16)
-
-        fd, out = tempfile.mkstemp(suffix='.tiff', prefix='astrollm_')
-        os.close(fd)
-        try:
-            import tifffile
-            tifffile.imwrite(out, u16)
-            return out, True
-        except Exception:
-            pass
-        try:
-            from PIL import Image
-            png = out[:-5] + '.png'
-            Image.fromarray((u16 >> 8).astype(np.uint8), 'RGB').save(png)
-            os.unlink(out)
-            return png, True
-        except Exception:
-            for p in (out, out[:-5] + '.png'):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-            logger.warning("astrollm: no tifffile/Pillow to render "
-                           f"{os.path.basename(src_path)} for ONNX inference")
-            return src_path, False
-    except Exception as e:
-        logger.warning(f"astrollm: could not render {os.path.basename(src_path)} "
-                       f"for ONNX inference: {e}")
-        return src_path, False
+    return astrollm_infer.score_path(image_path, model_path=model_path)
 
 
-def run_astrollm_infer(image_path: str, python_exe: str, script_path: str,
-                       checkpoint_path: str,
-                       timeout: float = Config.ASTROLLM_TIMEOUT_S) -> Optional[dict]:
-    """Run astrollm's ``infer_onnx.py`` on one image, return its parsed JSON.
-
-    A raw ``.fits`` frame is debayered to a temp image first (see
-    ``_render_light_for_onnx``) since the ONNX entry point takes TIFF/PNG/JPG
-    only. Returns None (logging a warning) on any failure -- bad exit code,
-    timeout, missing binary, unrenderable input, or unparseable stdout.
-    Callers must treat None as "no score available", never as a rejection.
-    """
-    render_path, is_temp = _render_light_for_onnx(image_path)
-    # infer_onnx.py is run with cwd=<its own dir> so its relative --model
-    # default / `from data.imageops import` resolve against the vendored
-    # copy; a relative image path would resolve there too, so make it
-    # absolute first.
-    cmd = [python_exe, script_path, '--model', checkpoint_path,
-           '--image', os.path.abspath(render_path), '--json']
-    try:
-        try:
-            proc = subprocess.run(cmd, cwd=os.path.dirname(script_path) or None,
-                                  capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            logger.warning(f"astrollm: timed out after {timeout:.0f}s on "
-                           f"{os.path.basename(image_path)}")
-            return None
-        except (FileNotFoundError, OSError) as e:
-            logger.warning(f"astrollm: could not launch subprocess for "
-                           f"{os.path.basename(image_path)}: {e}")
-            return None
-
-        if proc.returncode != 0:
-            logger.warning(f"astrollm: exit {proc.returncode} for "
-                           f"{os.path.basename(image_path)}: "
-                           f"{proc.stderr.strip()[-300:]}")
-            return None
-
-        lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
-        if not lines:
-            logger.warning(f"astrollm: empty stdout for {os.path.basename(image_path)}")
-            return None
-        try:
-            return json.loads(lines[-1])
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"astrollm: could not parse JSON output for "
-                           f"{os.path.basename(image_path)}: {e}")
-            return None
-    finally:
-        if is_temp:
-            try:
-                os.unlink(render_path)
-            except OSError:
-                pass
-
-
-def _astrollm_paths(args) -> Optional[tuple]:
-    python_exe = getattr(args, 'astrollm_python', None)
-    script_path = getattr(args, 'astrollm_script', None)
-    checkpoint_path = getattr(args, 'astrollm_checkpoint', None)
-    if not (python_exe and script_path and checkpoint_path):
+def _astrollm_model(args) -> Optional[str]:
+    if not astrollm_infer.onnxruntime_available():
         return None
-    return python_exe, script_path, checkpoint_path
+    return astrollm_infer.resolve_model_path(getattr(args, 'astrollm_model', None))
 
 
 def score_lights_with_astrollm(lights: List[FrameInfo], args) -> None:
@@ -167,19 +62,17 @@ def score_lights_with_astrollm(lights: List[FrameInfo], args) -> None:
     Config.ASTROLLM_OUTLIER_SIGMA below the session mean -- all log-only,
     matching astrollm's early/unvalidated integration status.
 
-    Gated on --astrollm-score-all, not just --astrollm: scoring every
-    accepted frame costs ~8s/frame (subprocess + model-load overhead, not
-    per-image compute) -- minutes on a large session. Checked here too,
-    not just at the call site, so calling this function directly is never
-    accidentally slow regardless of caller.
+    Gated on --astrollm-score-all, not just --astrollm: even in-process,
+    scoring every accepted frame (decode + debayer + stretch + resize +
+    forward pass) adds up on a large session. Checked here too, not just at
+    the call site, so calling this function directly is never accidentally
+    slow regardless of caller.
     """
     if not (getattr(args, 'astrollm', False) and getattr(args, 'astrollm_score_all', False)):
         return
-    paths = _astrollm_paths(args)
-    if paths is None:
+    model_path = _astrollm_model(args)
+    if model_path is None:
         return
-    python_exe, script_path, checkpoint_path = paths
-    timeout = float(getattr(args, 'astrollm_timeout', Config.ASTROLLM_TIMEOUT_S))
     workers = max(1, int(getattr(args, 'astrollm_workers', 2)))
 
     targets = [f for f in lights if f.accepted]
@@ -190,8 +83,7 @@ def score_lights_with_astrollm(lights: List[FrameInfo], args) -> None:
                f"({workers} worker(s))...")
 
     def _score(f: FrameInfo):
-        return f, run_astrollm_infer(f.path, python_exe, script_path,
-                                     checkpoint_path, timeout=timeout)
+        return f, run_astrollm_infer(f.path, model_path)
 
     results = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -272,13 +164,11 @@ def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
     defect flag (a defensive nudge toward --trail-reject + stronger chroma
     denoising in _apply_quality_settings, never a frame rejection).
 
-    Deliberately scores a SMALL SAMPLE, not the whole session: one
-    astrollm subprocess call still costs a few seconds, dominated by
-    interpreter + onnxruntime startup and the per-frame debayer render
-    rather than the ONNX inference itself -- scoring every accepted frame
-    (score_lights_with_astrollm's job, a
-    separate opt-in path) would add minutes to a session with 100+
-    frames, which defeats the point of a fast pre-stacking signal. Mirrors
+    Deliberately scores a SMALL SAMPLE, not the whole session: each frame
+    still costs a decode + debayer + stretch + resize + forward pass, so
+    scoring every accepted frame (score_lights_with_astrollm's job, a
+    separate opt-in path) would add up on a session with 100+ frames, which
+    defeats the point of a fast pre-stacking signal. Mirrors
     frame_processor.py's _measure_session_ca: a few frames spread through
     the session (early/middle/late) rather than just the first one, on
     the same "this is a fixed property of the session, not a per-frame
@@ -291,11 +181,9 @@ def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
     """
     if not getattr(args, 'astrollm', False):
         return None
-    paths = _astrollm_paths(args)
-    if paths is None:
+    model_path = _astrollm_model(args)
+    if model_path is None:
         return None
-    python_exe, script_path, checkpoint_path = paths
-    timeout = float(getattr(args, 'astrollm_timeout', Config.ASTROLLM_TIMEOUT_S))
 
     accepted = [f for f in lights if f.accepted]
     if not accepted:
@@ -304,8 +192,7 @@ def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
     idxs = sorted({n // 6, n // 2, (5 * n) // 6})
 
     def _one(i: int):
-        return run_astrollm_infer(accepted[i].path, python_exe, script_path,
-                                  checkpoint_path, timeout=timeout)
+        return run_astrollm_infer(accepted[i].path, model_path)
 
     results = []
     try:
@@ -352,8 +239,9 @@ def score_master_with_astrollm(master_image_path: str, args,
 
     Pass a rendered non-FITS image (the TIFF export when present, else the
     preview JPEG -- see src/pipeline.py's call site). A ``.fits`` path would
-    be run through ``_render_light_for_onnx``'s single-frame Bayer debayer,
-    wrong for an already-stacked (3, H, W) RGB master.
+    be run through the single-frame Bayer debayer in
+    ``astrollm_infer._load_image_any``, wrong for an already-stacked
+    (3, H, W) RGB master.
 
     Compares astrollm's predicted category against the pipeline's own
     metadata-based target inference and flags a mismatch as a possible
@@ -361,14 +249,11 @@ def score_master_with_astrollm(master_image_path: str, args,
     """
     if not getattr(args, 'astrollm', False):
         return
-    paths = _astrollm_paths(args)
-    if paths is None:
+    model_path = _astrollm_model(args)
+    if model_path is None:
         return
-    python_exe, script_path, checkpoint_path = paths
-    timeout = float(getattr(args, 'astrollm_timeout', Config.ASTROLLM_TIMEOUT_S))
 
-    result = run_astrollm_infer(master_image_path, python_exe, script_path,
-                                checkpoint_path, timeout=timeout)
+    result = run_astrollm_infer(master_image_path, model_path)
     if result is None:
         safe_print("  astrollm: master scoring failed (see warning above)")
         return

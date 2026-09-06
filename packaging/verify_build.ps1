@@ -11,8 +11,8 @@
 
     1. A normal launch: polls for a window with the right title to appear
        (proves every bundled import -- astropy/scipy/astro_native/rawpy/
-       tifffile/tkinter -- actually resolved at runtime and the app didn't
-       crash on startup), then reads the startup log
+       tifffile/onnxruntime/tkinter -- actually resolved at runtime and the
+       app didn't crash on startup), then reads the startup log
        (`desktop_app.py::_log_startup_status`) to confirm astro_native
        loaded rather than silently falling back to numpy -- shipping that
        fallback's perf profile by accident defeats the point of bundling
@@ -86,10 +86,16 @@ if (-not (Test-Path $synthDir)) {
 if (-not (Test-Path $synthDir)) { throw "synthetic_data was not created -- cannot run the Phase 1 check" }
 
 $outPath = "$env:TEMP\originstack_verify_out.fits"
+$headlessLog = "$env:TEMP\originstack_verify_stdout.txt"
+if (Test-Path $headlessLog) { Remove-Item $headlessLog -Force }
+# --astrollm exercises the bundled in-process scorer (onnxruntime +
+# src/data/astrollm.onnx). It self-disables with a warning if either is
+# missing from the frozen build -- asserted absent below.
 $headlessArgs = @('--verify-headless', '-d', (Resolve-Path $synthDir).Path, '-o', $outPath,
                   '--parallel', '4', '--debayer-method', 'malvar',
-                  '--white-balance', 'grayworld', '--stack-method', 'median')
-$headlessProc = Start-Process -FilePath $ExePath -ArgumentList $headlessArgs -PassThru
+                  '--white-balance', 'grayworld', '--stack-method', 'median', '--astrollm')
+$headlessProc = Start-Process -FilePath $ExePath -ArgumentList $headlessArgs -PassThru `
+                              -RedirectStandardOutput $headlessLog
 
 $maxWindows = 0  # --verify-headless opens no window of its own
 for ($i = 0; $i -lt 30; $i++) {
@@ -111,6 +117,16 @@ if (-not (Test-Path $outPath)) {
     throw "--verify-headless did not produce $outPath -- run failed (check console/log output above)"
 }
 Write-Host "Phase 1 multiprocessing check passed (no extra GUI windows)"
+
+# Bundled astrollm scorer: must not have self-disabled in the frozen build.
+if (Test-Path $headlessLog) {
+    $astroLog = Get-Content $headlessLog -Raw
+    if ($astroLog -match 'disabling astrollm scoring') {
+        throw "--astrollm self-disabled in the packaged build -- onnxruntime or " +
+              "src/data/astrollm.onnx missing from the bundle"
+    }
+    Write-Host "Bundled --astrollm scorer loaded (no self-disable warning)"
+}
 
 # ── 3. Graceful shutdown: confirm nothing is left running ─────────────────
 Get-Process -Name $exeName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue

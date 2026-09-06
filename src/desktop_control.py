@@ -40,6 +40,8 @@ _UNSUPPORTED_DESTS = {'live', 'stream', 'quality_sweep', 'sweep_undo'}
 def _field_for_action(action: argparse.Action) -> Optional[Dict[str, Any]]:
     if action.dest in ('help', argparse.SUPPRESS) or action.dest in _UNSUPPORTED_DESTS:
         return None
+    if action.help is argparse.SUPPRESS:  # hidden/deprecated flags stay out of the form
+        return None
     flag = next((s for s in action.option_strings if s.startswith('--')),
                 (action.option_strings or [None])[0])
     if flag is None:  # positional -- none exist in this parser today

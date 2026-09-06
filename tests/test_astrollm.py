@@ -1,19 +1,23 @@
-"""Tests for astrollm integration (src/astrollm.py): subprocess wiring,
-JSON parsing/error handling, and advisory-only session-relative flagging.
+"""Tests for the astrollm integration (src/astrollm.py + src/astrollm_infer.py):
+in-process ONNX inference wiring, numpy/scipy preprocessing, and the
+advisory-only session-relative flagging.
 
-astrollm is not installed in the test environment -- every test mocks
-subprocess.run (or run_astrollm_infer directly) so nothing here depends on a
-real checkpoint/venv.
+onnxruntime may or may not be installed in the test environment. Tests that
+need a real forward pass skip when it (or the bundled model) is absent;
+everything else mocks ``run_astrollm_infer`` / ``_astrollm_model`` so it
+never depends on a real model.
 """
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
+import pytest
+
 import src.astrollm as astrollm_mod
+import src.astrollm_infer as infer_mod
 from src.astrollm import (
     map_astrollm_category,
     run_astrollm_infer,
@@ -22,131 +26,203 @@ from src.astrollm import (
     score_master_with_astrollm,
 )
 
+_HAVE_ORT = infer_mod.onnxruntime_available()
+_HAVE_MODEL = infer_mod.resolve_model_path(None) is not None
+_real_infer = pytest.mark.skipif(
+    not (_HAVE_ORT and _HAVE_MODEL),
+    reason='onnxruntime or bundled model not available')
 
-def _completed(returncode=0, stdout='', stderr=''):
-    return subprocess.CompletedProcess(args=[], returncode=returncode,
-                                       stdout=stdout, stderr=stderr)
 
+# ---------------------------------------------------------------------------
+# astrollm_infer: preprocessing ports
+# ---------------------------------------------------------------------------
+
+class TestPreprocessing:
+
+    def test_stretch_to_uint8_per_channel_full_range(self):
+        img = np.zeros((20, 20, 3), np.float32)
+        img[..., 0] = np.linspace(100, 200, 20)[:, None]      # R: 100..200
+        img[..., 1] = np.linspace(0, 50, 20)[:, None]         # G: 0..50
+        img[..., 2] = 7.0                                     # B: flat
+        out = infer_mod._stretch_to_uint8(img)
+        assert out.dtype == np.uint8
+        # each non-flat channel is stretched to (near) the full 0..255 range
+        assert out[..., 0].min() < 5 and out[..., 0].max() > 250
+        assert out[..., 1].min() < 5 and out[..., 1].max() > 250
+        # flat channel: hi<=lo guard -> all zeros, no divide-by-zero
+        assert out[..., 2].max() == 0
+
+    def test_resize_center_crop_exact_square(self):
+        img = (np.random.default_rng(0).random((300, 500, 3)) * 255).astype(np.uint8)
+        for size in (64, 128, 256, 384):
+            out = infer_mod._resize_center_crop(img, size)
+            assert out.shape == (size, size, 3)
+            assert out.dtype == np.uint8
+
+    def test_resize_center_crop_upscale(self):
+        img = (np.random.default_rng(1).random((40, 60, 3)) * 255).astype(np.uint8)
+        out = infer_mod._resize_center_crop(img, 128)
+        assert out.shape == (128, 128, 3)
+
+    def test_blob_shape_features_centered_single_blob(self):
+        g = np.zeros((200, 200), np.uint8)
+        g[95:105, 95:105] = 255                    # one blob, dead centre
+        n, dist = infer_mod._blob_shape_features(g)
+        assert n == 1
+        assert dist < 0.05                          # ~centre
+
+    def test_blob_shape_features_offcentre_and_count(self):
+        g = np.zeros((200, 200), np.uint8)
+        g[5:15, 5:15] = 255                         # corner blob (largest)
+        for cx in range(20, 180, 15):              # a row of smaller blobs
+            g[100:104, cx:cx + 4] = 255
+        n, dist = infer_mod._blob_shape_features(g)
+        assert n >= 5
+        assert dist > 0.5                           # largest blob is a corner
+
+    def test_blob_shape_features_blank_returns_not_centered(self):
+        n, dist = infer_mod._blob_shape_features(np.zeros((50, 50), np.uint8))
+        assert n == 0 and dist == 1.0
+
+    def test_gate_comet_only_touches_comet_top(self):
+        cats = ['galaxy', 'nebula', 'star_cluster', 'comet']
+        probs = np.array([0.7, 0.1, 0.1, 0.1])     # top = galaxy
+        gray = np.zeros((100, 100), np.uint8)
+        assert infer_mod._gate_comet_prediction(probs, gray, cats) == 0
+
+    def test_gate_comet_demotes_when_shape_disagrees(self):
+        cats = ['galaxy', 'nebula', 'star_cluster', 'comet']
+        probs = np.array([0.05, 0.25, 0.1, 0.6])   # top = comet
+        gray = np.zeros((200, 200), np.uint8)
+        gray[5:15, 5:15] = 255                      # bright blob in a corner
+        picked = infer_mod._gate_comet_prediction(probs, gray, cats)
+        assert picked == 1                          # -> 2nd best (nebula)
+
+
+# ---------------------------------------------------------------------------
+# astrollm_infer: model resolution / availability gate
+# ---------------------------------------------------------------------------
+
+class TestModelResolution:
+
+    def test_bundled_model_path_is_under_src_data(self):
+        p = infer_mod.bundled_model_path()
+        assert p.replace('\\', '/').endswith('src/data/astrollm.onnx')
+
+    def test_resolve_prefers_explicit_when_it_exists(self, tmp_path):
+        m = tmp_path / 'custom.onnx'
+        m.write_bytes(b'not really onnx')
+        assert infer_mod.resolve_model_path(str(m)) == str(m)
+
+    def test_resolve_falls_back_to_bundled_for_bad_explicit(self):
+        got = infer_mod.resolve_model_path('/no/such/model.onnx')
+        assert got == (infer_mod.bundled_model_path() if _HAVE_MODEL else None)
+
+    def test_score_rgb_none_without_onnxruntime(self, monkeypatch):
+        monkeypatch.setattr(infer_mod, '_ort', None)
+        assert infer_mod.score_rgb(np.zeros((32, 32, 3), np.float32)) is None
+
+
+# ---------------------------------------------------------------------------
+# astrollm_infer: real forward pass (skips without onnxruntime)
+# ---------------------------------------------------------------------------
+
+@_real_infer
+class TestRealInference:
+
+    def _synth_rgb(self):
+        rng = np.random.default_rng(42)
+        h, w = 300, 400
+        yy, xx = np.mgrid[0:h, 0:w]
+        img = 40 + 0.03 * xx + rng.normal(0, 3, (h, w))
+        for _ in range(30):
+            cy, cx = rng.integers(30, h - 30), rng.integers(30, w - 30)
+            img += rng.uniform(60, 200) * np.exp(
+                -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * rng.uniform(1.5, 3) ** 2))
+        img = np.clip(img, 0, 255)
+        return np.stack([img, img * 0.9, img * 0.8], -1).astype(np.float32)
+
+    def test_score_rgb_returns_expected_keys(self):
+        r = infer_mod.score_rgb(self._synth_rgb())
+        assert r is not None
+        for k in ('checkpoint_epoch', 'tasks', 'defect_probability', 'is_defective',
+                  'quality_score', 'category', 'category_confidence', 'top_categories',
+                  'sky_brightness', 'stray_light_gradient', 'stray_light_flag'):
+            assert k in r, k
+        assert r['category'] in ('galaxy', 'nebula', 'star_cluster', 'comet')
+        assert 0.0 <= r['category_confidence'] <= 1.0
+
+    def test_score_path_png_roundtrip(self, tmp_path):
+        pytest.importorskip('PIL')
+        from PIL import Image
+        p = tmp_path / 'synth.png'
+        Image.fromarray(self._synth_rgb().astype(np.uint8), 'RGB').save(p)
+        r = infer_mod.score_path(str(p))
+        assert r is not None and r['image'] == str(p)
+        assert r['category'] in ('galaxy', 'nebula', 'star_cluster', 'comet')
+
+    def test_score_path_bayer_fits(self, tmp_path):
+        fits = pytest.importorskip('astropy.io.fits')
+        if not hasattr(fits.PrimaryHDU, 'writeto'):
+            pytest.skip('astropy.io.fits stubbed by another test module')
+        rng = np.random.default_rng(0)
+        mosaic = (rng.random((240, 320)) * 3000 + 200).astype(np.uint16)
+        hdu = fits.PrimaryHDU(data=mosaic)
+        hdu.header['BAYERPAT'] = 'RGGB'
+        src = str(tmp_path / 'Light0001.fits')
+        hdu.writeto(src, overwrite=True)
+        r = infer_mod.score_path(src)
+        assert r is not None and r['category'] in (
+            'galaxy', 'nebula', 'star_cluster', 'comet')
+
+    def test_session_cache_reuses_one_inferencesession(self):
+        infer_mod._SESSION_CACHE.clear()
+        mp = infer_mod.resolve_model_path(None)
+        infer_mod.score_rgb(self._synth_rgb())
+        infer_mod.score_rgb(self._synth_rgb())
+        assert list(infer_mod._SESSION_CACHE) == [mp]
+
+
+# ---------------------------------------------------------------------------
+# src/astrollm.py: run_astrollm_infer wrapper
+# ---------------------------------------------------------------------------
 
 class TestRunAstrollmInfer:
 
-    def test_valid_json_parsed(self):
-        payload = {'image': 'a.fits', 'is_defective': False, 'quality_score': 400.0,
-                  'category': 'galaxy', 'category_confidence': 0.8}
-        with mock.patch('subprocess.run', return_value=_completed(stdout=json.dumps(payload) + '\n')):
-            result = run_astrollm_infer('a.fits', 'py.exe', 'infer.py', 'model.pt')
-        assert result == payload
+    def test_delegates_to_score_path_with_model(self):
+        with mock.patch.object(astrollm_mod.astrollm_infer, 'score_path',
+                               return_value={'category': 'galaxy'}) as m:
+            out = run_astrollm_infer('master.tiff', 'model.onnx')
+        assert out == {'category': 'galaxy'}
+        m.assert_called_once_with('master.tiff', model_path='model.onnx')
 
-    def test_nonzero_exit_returns_none(self):
-        with mock.patch('subprocess.run', return_value=_completed(returncode=1, stderr='boom')):
-            result = run_astrollm_infer('a.fits', 'py.exe', 'infer.py', 'model.pt')
-        assert result is None
-
-    def test_timeout_returns_none(self):
-        with mock.patch('subprocess.run', side_effect=subprocess.TimeoutExpired(cmd=[], timeout=1)):
-            result = run_astrollm_infer('a.fits', 'py.exe', 'infer.py', 'model.pt')
-        assert result is None
-
-    def test_garbage_stdout_returns_none(self):
-        with mock.patch('subprocess.run', return_value=_completed(stdout='not json')):
-            result = run_astrollm_infer('a.fits', 'py.exe', 'infer.py', 'model.pt')
-        assert result is None
-
-    def test_missing_binary_returns_none(self):
-        with mock.patch('subprocess.run', side_effect=FileNotFoundError('no such file')):
-            result = run_astrollm_infer('a.fits', 'py.exe', 'infer.py', 'model.pt')
-        assert result is None
-
-    def test_takes_last_stdout_line(self):
-        payload = {'quality_score': 1.0}
-        stdout = 'some warning line\n' + json.dumps(payload) + '\n'
-        with mock.patch('subprocess.run', return_value=_completed(stdout=stdout)):
-            result = run_astrollm_infer('a.fits', 'py.exe', 'infer.py', 'model.pt')
-        assert result == payload
-
-    def test_passes_model_flag_not_checkpoint(self):
-        with mock.patch('subprocess.run',
-                        return_value=_completed(stdout='{"x": 1}')) as m:
-            run_astrollm_infer('master.tiff', 'py.exe', 'infer_onnx.py', 'model.onnx')
-        cmd = m.call_args[0][0]
-        assert '--model' in cmd and 'model.onnx' in cmd
-        assert '--checkpoint' not in cmd
-
-    def test_non_fits_passes_straight_through(self):
-        with mock.patch('subprocess.run',
-                        return_value=_completed(stdout='{"x": 1}')) as m:
-            run_astrollm_infer('master.tiff', 'py.exe', 'infer_onnx.py', 'model.onnx')
-        cmd = m.call_args[0][0]
-        assert cmd[cmd.index('--image') + 1].endswith('master.tiff')
+    def test_failure_returns_none(self):
+        with mock.patch.object(astrollm_mod.astrollm_infer, 'score_path',
+                               return_value=None):
+            assert run_astrollm_infer('x.fits') is None
 
 
-class TestRenderLightForONNX:
-
-    def _bayer_fits(self, path):
-        import numpy as np
-        import pytest
-        from astropy.io import fits
-        if not hasattr(fits.PrimaryHDU, 'writeto'):
-            pytest.skip('astropy.io.fits is stubbed by another test module in this run')
-        rng = np.random.default_rng(0)
-        img = (rng.random((96, 120)) * 4000 + 200).astype(np.uint16)
-        hdu = fits.PrimaryHDU(data=img)
-        hdu.header['BAYERPAT'] = 'RGGB'
-        hdu.writeto(path, overwrite=True)
-
-    def test_non_fits_is_passthrough(self):
-        from src.astrollm import _render_light_for_onnx
-        assert _render_light_for_onnx('x.tiff') == ('x.tiff', False)
-        assert _render_light_for_onnx('x.png') == ('x.png', False)
-
-    def test_unreadable_fits_falls_back_to_original(self):
-        from src.astrollm import _render_light_for_onnx
-        assert _render_light_for_onnx('does_not_exist.fits') == ('does_not_exist.fits', False)
-
-    def test_bayer_fits_renders_rgb_temp_image(self, tmp_path):
-        import os
-
-        from src.astrollm import _render_light_for_onnx
-        src = str(tmp_path / 'Light0001.fits')
-        self._bayer_fits(src)
-        out, is_temp = _render_light_for_onnx(src)
-        try:
-            assert is_temp and out != src and os.path.exists(out)
-            assert out.lower().endswith(('.tiff', '.png'))
-        finally:
-            if is_temp and os.path.exists(out):
-                os.unlink(out)
-
-    def test_run_infer_cleans_up_rendered_temp(self, tmp_path):
-        import os
-
-        from src import astrollm as A
-        src = str(tmp_path / 'Light0002.fits')
-        self._bayer_fits(src)
-        captured = {}
-
-        def _fake_run(cmd, **kw):
-            captured['img'] = cmd[cmd.index('--image') + 1]
-            return _completed(stdout='{"category": "galaxy"}')
-
-        with mock.patch('subprocess.run', side_effect=_fake_run):
-            r = A.run_astrollm_infer(src, 'py.exe', 'infer_onnx.py', 'model.onnx')
-        assert r == {'category': 'galaxy'}
-        # infer_onnx got a rendered temp, not the .fits, and it's gone now.
-        assert not captured['img'].lower().endswith('.fits')
-        assert not os.path.exists(captured['img'])
-
+# ---------------------------------------------------------------------------
+# src/astrollm.py: advisory scoring (mock run_astrollm_infer + _astrollm_model)
+# ---------------------------------------------------------------------------
 
 def _frame(path, accepted=True):
     return SimpleNamespace(path=path, accepted=accepted, metrics={'score': 50.0})
 
 
 def _args(**overrides):
-    base = dict(astrollm=True, astrollm_score_all=True, astrollm_python='py.exe',
-               astrollm_script='infer.py', astrollm_checkpoint='model.pt',
-               astrollm_workers=2, astrollm_timeout=60.0)
+    base = dict(astrollm=True, astrollm_score_all=True, astrollm_model=None,
+                astrollm_workers=2)
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+@pytest.fixture(autouse=True)
+def _model_resolves():
+    """Every advisory-path test assumes a usable model; the two 'missing
+    model' tests re-patch it to None inside their own ``with`` block."""
+    with mock.patch.object(astrollm_mod, '_astrollm_model', return_value='model.onnx'):
+        yield
 
 
 class TestScoreLightsWithAstrollm:
@@ -158,18 +234,15 @@ class TestScoreLightsWithAstrollm:
         m.assert_not_called()
         assert 'astrollm' not in lights[0].metrics
 
-    def test_missing_config_is_noop(self):
+    def test_missing_model_is_noop(self):
         lights = [_frame('a.fits')]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            score_lights_with_astrollm(lights, _args(astrollm_python=None))
+        with mock.patch.object(astrollm_mod, '_astrollm_model', return_value=None), \
+             mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
+            score_lights_with_astrollm(lights, _args())
         m.assert_not_called()
         assert 'astrollm' not in lights[0].metrics
 
     def test_astrollm_on_but_score_all_off_is_noop(self):
-        """--astrollm alone (without --astrollm-score-all) must not trigger
-        the slow every-frame scan -- that's the whole point of the split:
-        --astrollm's fast 3-frame sample (sample_session_priors) is a
-        separate code path this function has nothing to do with."""
         lights = [_frame('a.fits')]
         with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
             score_lights_with_astrollm(lights, _args(astrollm_score_all=False))
@@ -232,9 +305,7 @@ class TestScoreMasterWithAstrollm:
         with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=result):
             with caplog.at_level('WARNING', logger='originstack'):
                 score_master_with_astrollm('stack.fits', _args(), 'galaxy')
-        assert any('mismatch' in r.message or 'does not match' in r.message
-                  for r in caplog.records) or any(
-                  'does not match' in r.getMessage() for r in caplog.records)
+        assert any('does not match' in r.getMessage() for r in caplog.records)
 
     def test_category_match_does_not_warn(self, caplog):
         result = {'category': 'galaxy', 'category_confidence': 0.9,
@@ -245,15 +316,20 @@ class TestScoreMasterWithAstrollm:
         assert not any('does not match' in r.getMessage() for r in caplog.records)
 
     def test_coarse_category_vs_fine_inferred_type_does_not_warn(self, caplog):
-        """astrollm's 'nebula' bucket vs originstack's finer 'emission_nebula'
-        (or 'globular_cluster' vs its own 'star_cluster') is a correct call,
-        not a mismatch -- word-overlap matching must not flag it."""
         result = {'category': 'nebula', 'category_confidence': 0.95,
                  'sky_brightness': 40.0, 'stray_light_gradient': 20.0}
         with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=result):
             with caplog.at_level('WARNING', logger='originstack'):
                 score_master_with_astrollm('stack.tiff', _args(), 'emission_nebula')
         assert not any('does not match' in r.getMessage() for r in caplog.records)
+
+    def test_predicted_exposure_printed_when_present(self, capsys):
+        result = {'category': 'galaxy', 'category_confidence': 0.9,
+                 'sky_brightness': 40.0, 'stray_light_gradient': 5.0,
+                 'predicted_exposure_s': 30.0}
+        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=result):
+            score_master_with_astrollm('stack.tiff', _args(), 'galaxy')
+        assert 'predicted_exposure=30s' in capsys.readouterr().out
 
     def test_failed_score_logged_not_raised(self, capsys):
         with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=None):
@@ -270,7 +346,6 @@ class TestMapAstrollmCategory:
         assert map_astrollm_category('star_cluster') == 'globular_cluster'
 
     def test_ambiguous_nebula_returns_none(self):
-        # Could be emission/reflection/planetary -- no safe single mapping.
         assert map_astrollm_category('nebula') is None
 
     def test_unrelated_categories_return_none(self):
@@ -293,10 +368,11 @@ class TestSampleSessionPriors:
         assert result is None
         m.assert_not_called()
 
-    def test_missing_config_is_noop(self):
+    def test_missing_model_is_noop(self):
         lights = [_frame(f'{i}.fits') for i in range(10)]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            result = sample_session_priors(lights, _args(astrollm_checkpoint=None))
+        with mock.patch.object(astrollm_mod, '_astrollm_model', return_value=None), \
+             mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
+            result = sample_session_priors(lights, _args())
         assert result is None
         m.assert_not_called()
 
@@ -306,8 +382,6 @@ class TestSampleSessionPriors:
         assert result is None
 
     def test_samples_a_few_frames_not_all(self):
-        """The whole point is staying fast on a large session -- must not
-        call astrollm once per frame."""
         lights = [_frame(f'{i}.fits') for i in range(120)]
         payload = {'category': 'galaxy', 'category_confidence': 0.9,
                   'is_defective': False, 'stray_light_flag': False,
@@ -358,42 +432,58 @@ class TestSampleSessionPriors:
         assert result is None
 
 
-class TestVendoredAstrollmResolution:
-    """--astrollm auto-points at vendor/astrollm/ when it exists (approach A)."""
+# ---------------------------------------------------------------------------
+# src/cli.py: --astrollm resolution (bundled model, onnxruntime gate)
+# ---------------------------------------------------------------------------
 
-    def test_astrollm_dir_defaults_to_vendored_copy(self, tmp_path, monkeypatch):
-        import os
+class TestCliAstrollmResolution:
 
+    def _parse(self, tmp_path, *extra):
         from src import cli
+        return cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
+                               '--astrollm', *extra])
 
-        repo_root = os.path.dirname(os.path.dirname(cli.__file__))
-        vendored = os.path.join(repo_root, 'vendor', 'astrollm')
-        if not os.path.isdir(vendored):
-            import pytest
-            pytest.skip('vendor/astrollm/ not present')
-
+    @_real_infer
+    def test_astrollm_stays_enabled_with_bundled_model(self, tmp_path, monkeypatch):
         monkeypatch.delenv('ASTROLLM_DIR', raising=False)
-        args = cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
-                               '--astrollm'])
-        assert os.path.normpath(args.astrollm_dir) == os.path.normpath(vendored)
-        assert args.astrollm_script == os.path.join(vendored, 'infer_onnx.py')
-        assert args.astrollm_checkpoint == os.path.join(vendored, 'checkpoints', 'model.onnx')
-        # infer_onnx.py + model.onnx are actually vendored; only the venv python
-        # is absent in a fresh checkout, so scoring self-disables with a warning.
-        assert os.path.exists(args.astrollm_script)
-        assert os.path.exists(args.astrollm_checkpoint)
+        args = self._parse(tmp_path)
+        assert args.astrollm is True
+        assert args.astrollm_model is None  # bundled default, resolved at call time
 
-    def test_explicit_astrollm_dir_wins_over_vendored(self, tmp_path, monkeypatch):
-        import os
-
-        from src import cli
-
+    def test_disabled_without_onnxruntime(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv('ASTROLLM_DIR', raising=False)
-        custom = tmp_path / 'my_astrollm'
-        custom.mkdir()
-        args = cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
-                               '--astrollm', '--astrollm-dir', str(custom)])
-        assert os.path.normpath(args.astrollm_dir) == os.path.normpath(str(custom))
+        monkeypatch.setattr(infer_mod, '_ort', None)
+        args = self._parse(tmp_path)
+        assert args.astrollm is False
+        assert 'onnxruntime' in capsys.readouterr().out
+
+    def test_explicit_model_override_is_kept(self, tmp_path, monkeypatch):
+        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        m = tmp_path / 'v4.onnx'
+        m.write_bytes(b'x')
+        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        args = self._parse(tmp_path, '--astrollm-model', str(m))
+        assert args.astrollm is True
+        assert args.astrollm_model == str(m)
+
+    def test_legacy_dir_flag_still_resolves_a_model(self, tmp_path, monkeypatch):
+        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        ck = tmp_path / 'checkpoints'
+        ck.mkdir()
+        (ck / 'model.onnx').write_bytes(b'x')
+        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        args = self._parse(tmp_path, '--astrollm-dir', str(tmp_path))
+        assert args.astrollm is True
+        assert args.astrollm_model == str(ck / 'model.onnx')
+
+    def test_deprecated_python_script_flags_warn_but_dont_break(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        monkeypatch.setattr(infer_mod, 'resolve_model_path', lambda p: p or 'bundled')
+        args = self._parse(tmp_path, '--astrollm-python', 'py.exe',
+                           '--astrollm-script', 'infer_onnx.py')
+        assert args.astrollm is True
+        assert 'deprecated' in capsys.readouterr().out
 
 
 if __name__ == '__main__':

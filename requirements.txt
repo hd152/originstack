@@ -15,6 +15,11 @@ psutil>=5.9
 #   TIFF input support (16/32-bit linear TIFF lights, e.g. from N.I.N.A./SharpCap/PixInsight):
 #     tifffile>=2023.1   — read TIFF images; also used to write --export tiff output
 #
+#   astrollm advisory scoring (--astrollm): defect/quality/category CNN, run in-process
+#     onnxruntime>=1.17  — runs the bundled model (src/data/astrollm.onnx) via
+#                          src/astrollm_infer.py (numpy/scipy preprocessing, no OpenCV).
+#                          --astrollm self-disables with a warning when absent.
+#
 #   XISF input (PixInsight's native format) and SER (FireCapture/SharpCap planetary
 #   video) support need no extra packages — both are read with a built-in parser.
 #

@@ -1441,49 +1441,43 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
     g_astrollm.add_argument('--astrollm', action='store_true',
                    help='Score the final stacked master with astrollm (separately-trained '
-                        'defect/quality/category classifier), run as a per-image subprocess. '
-                        'When --auto is also active (the default -- pass --no-auto to '
-                        'disable), also samples 3 light frames spread through the session '
-                        '(fast, ~8s each): the sampled category feeds the same target-'
+                        'defect/quality/category classifier), run in-process via onnxruntime '
+                        'against the bundled model (src/data/astrollm.onnx -- no external '
+                        'folder or venv). When --auto is also active (the default -- pass '
+                        '--no-auto to disable), also samples 3 light frames spread through '
+                        'the session: the sampled category feeds the same target-'
                         'classification prior SIMBAD/header metadata uses, and a defect flag '
                         'nudges settings defensively (trail-reject, stronger chroma '
                         'denoising) -- never auto-rejects a frame, this model is still '
                         'finishing its first training run. Pair with --astrollm-score-all to '
-                        'also score every accepted frame (much slower -- minutes, not '
-                        'seconds, on a large session). Needs --astrollm-dir (or the '
-                        'individual --astrollm-python/-script/-checkpoint overrides).')
+                        'also score every accepted frame (slower on a large session). Needs '
+                        'the optional "onnxruntime" package (pip install onnxruntime); '
+                        'self-disables with a warning if it is absent.')
     g_astrollm.add_argument('--astrollm-score-all', action='store_true',
                    help='Also score every accepted light frame with astrollm (not just '
                         'the fast 3-frame sample --astrollm always does), logging advisory '
                         'per-frame defect/stray-light flags and below-average quality_score '
-                        'outliers. Meaningfully slower -- ~8s per frame, so minutes on a '
-                        'large session -- since each call is a separate subprocess with its '
-                        'own Python/torch startup cost, not just per-image compute. Requires '
-                        '--astrollm.')
-    g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'), metavar='DIR',
-                   help='astrollm repo root. Derives --astrollm-python '
-                        '(DIR\\.venv\\Scripts\\python.exe), --astrollm-script (DIR\\infer_onnx.py), '
-                        'and --astrollm-checkpoint (DIR\\checkpoints\\model.onnx) from astrollm\'s '
-                        'standard layout -- the three overrides below only need to be passed '
-                        'individually if your layout differs. Defaults to the ASTROLLM_DIR '
-                        'environment variable, else the vendored copy at vendor/astrollm/ '
-                        'if present.')
-    g_astrollm.add_argument('--astrollm-python', default=None, metavar='PATH',
-                   help='Path to the astrollm venv\'s python.exe (override; default: derived '
-                        'from --astrollm-dir)')
-    g_astrollm.add_argument('--astrollm-script', default=None, metavar='PATH',
-                   help='Path to astrollm\'s infer_onnx.py (override; default: derived from '
-                        '--astrollm-dir)')
-    g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
-                   help='Path to the exported astrollm ONNX model (override; default: '
-                        'DIR\\checkpoints\\model.onnx from --astrollm-dir). A relative path is '
-                        'resolved against --astrollm-script\'s directory')
+                        'outliers. Slower on a large session (a decode + debayer + stretch + '
+                        'resize + forward pass per frame). Requires --astrollm.')
+    g_astrollm.add_argument('--astrollm-model', default=None, metavar='PATH',
+                   help='Path to an exported astrollm ONNX model, overriding the bundled '
+                        'src/data/astrollm.onnx (e.g. to test a newer checkpoint).')
     g_astrollm.add_argument('--astrollm-workers', type=int, default=2, metavar='N',
                    help='Thread-pool size for per-frame astrollm scoring calls (default: 2). '
-                        'Subprocess-bound (model load + inference in a separate process), '
-                        'not CPU-bound, so a thread pool is used rather than ProcessPoolExecutor.')
+                        'onnxruntime releases the GIL during the forward pass, so a thread '
+                        'pool parallelises it without a ProcessPoolExecutor.')
+    # Back-compat: the pre-in-process flags. --astrollm-dir / --astrollm-checkpoint
+    # still resolve a model path; --astrollm-python / --astrollm-script are inert.
+    g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'),
+                   metavar='DIR', help=argparse.SUPPRESS)
+    g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
+                   help=argparse.SUPPRESS)
+    g_astrollm.add_argument('--astrollm-python', default=None, metavar='PATH',
+                   help=argparse.SUPPRESS)
+    g_astrollm.add_argument('--astrollm-script', default=None, metavar='PATH',
+                   help=argparse.SUPPRESS)
     g_astrollm.add_argument('--astrollm-timeout', type=float, default=60.0, metavar='SEC',
-                   help='Per-call subprocess timeout in seconds (default: 60)')
+                   help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
@@ -1936,40 +1930,29 @@ def parse_args(argv=None):
     args.export_masks = 'masks' in _dbg
 
     if args.astrollm:
-        # --astrollm-dir derives the three individual paths from astrollm's
-        # standard repo layout; an explicit --astrollm-python/-script/
-        # -checkpoint always wins over the derived value.
-        if not args.astrollm_dir:
-            _vendored = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'vendor', 'astrollm')
-            if os.path.isdir(_vendored):
-                args.astrollm_dir = _vendored
-        if args.astrollm_dir:
-            if not args.astrollm_python:
-                args.astrollm_python = os.path.join(args.astrollm_dir, '.venv', 'Scripts', 'python.exe')
-            if not args.astrollm_script:
-                args.astrollm_script = os.path.join(args.astrollm_dir, 'infer_onnx.py')
-            if not args.astrollm_checkpoint:
-                args.astrollm_checkpoint = os.path.join(args.astrollm_dir, 'checkpoints', 'model.onnx')
-        if args.astrollm_checkpoint and args.astrollm_script and not os.path.isabs(args.astrollm_checkpoint):
-            args.astrollm_checkpoint = os.path.join(
-                os.path.dirname(args.astrollm_script), args.astrollm_checkpoint)
-        missing = [name for name, val in (
-            ('--astrollm-python', args.astrollm_python),
-            ('--astrollm-script', args.astrollm_script),
-            ('--astrollm-checkpoint', args.astrollm_checkpoint),
-        ) if not val]
-        bad_paths = [name for name, val in (
-            ('--astrollm-python', args.astrollm_python),
-            ('--astrollm-script', args.astrollm_script),
-            ('--astrollm-checkpoint', args.astrollm_checkpoint),
-        ) if val and not os.path.exists(val)]
-        if missing:
-            safe_print(f"  WARNING: --astrollm requires {', '.join(missing)} -- disabling astrollm scoring")
+        from src.astrollm_infer import onnxruntime_available, resolve_model_path
+
+        # Back-compat: --astrollm-model wins; otherwise honour the old
+        # --astrollm-checkpoint, then derive from --astrollm-dir's layout.
+        # --astrollm-python / --astrollm-script are inert now (in-process).
+        if not args.astrollm_model:
+            if args.astrollm_checkpoint:
+                args.astrollm_model = args.astrollm_checkpoint
+            elif args.astrollm_dir:
+                args.astrollm_model = os.path.join(
+                    args.astrollm_dir, 'checkpoints', 'model.onnx')
+        if args.astrollm_python or args.astrollm_script:
+            safe_print("  NOTE: --astrollm-python / --astrollm-script are deprecated and "
+                       "ignored -- astrollm now runs in-process (see --astrollm-model)")
+
+        if not onnxruntime_available():
+            safe_print("  WARNING: --astrollm needs the 'onnxruntime' package "
+                       "(pip install onnxruntime) -- disabling astrollm scoring")
             args.astrollm = False
-        elif bad_paths:
-            safe_print(f"  WARNING: --astrollm path(s) not found: {', '.join(bad_paths)} -- disabling astrollm scoring")
+        elif resolve_model_path(args.astrollm_model) is None:
+            _m = args.astrollm_model or '(bundled src/data/astrollm.onnx)'
+            safe_print(f"  WARNING: --astrollm model not found: {_m} "
+                       f"-- disabling astrollm scoring")
             args.astrollm = False
 
     if getattr(args, 'astrollm_score_all', False) and not args.astrollm:

@@ -17,13 +17,17 @@ ROOT = Path(SPECPATH).parent  # packaging/ -> repo root
 # ships sibling DLLs (raw_r.dll, vcomp140.dll) next to its .pyd that
 # PyInstaller's binary walker may or may not follow depending on version.
 datas, binaries, hiddenimports = [], [], []
-for pkg in ('rawpy',):
+for pkg in ('rawpy', 'onnxruntime'):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
     hiddenimports += h
 
 datas += [(str(ROOT / 'VERSION'), '.')]
+
+# The bundled astrollm model (src/astrollm_infer.py loads it by path relative
+# to its own __file__, so PyInstaller's module graph never sees it). ~10 MB.
+datas += [(str(ROOT / 'src' / 'data' / 'astrollm.onnx'), 'src/data')]
 
 a = Analysis(
     [str(ROOT / 'desktop_app.py')],

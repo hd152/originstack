@@ -641,11 +641,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # once regardless of whether Phase 1 just ran or was restored
             # from a checkpoint -- lights[*].accepted is mutated in place by
             # restore_frame_state either way. Opt-in separately from plain
-            # --astrollm (--astrollm-score-all): scoring every accepted
-            # frame costs ~8s/frame (subprocess + model-load overhead, not
-            # per-image compute), minutes on a large session -- --astrollm
-            # alone only pays that cost 3x total, via sample_session_priors
-            # above.
+            # --astrollm (--astrollm-score-all): scoring every accepted frame
+            # is a decode + debayer + stretch + resize + forward pass each,
+            # which adds up on a large session -- --astrollm alone only pays
+            # that cost 3x total, via sample_session_priors above.
             if getattr(args, 'astrollm', False) and getattr(args, 'astrollm_score_all', False):
                 from src.astrollm import score_lights_with_astrollm
                 score_lights_with_astrollm(lights, args)
@@ -1193,12 +1192,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)))
 
     if getattr(args, 'astrollm', False):
-        # astrollm's FITS loader assumes a raw (undebayered) single-plane
+        # astrollm_infer's FITS path assumes a raw (undebayered) single-plane
         # Bayer light frame -- our output FITS is an already-debayered
-        # (3, H, W) RGB cube, which trips its cv2 debayer path. Score
-        # whichever already-rendered non-FITS image is available instead:
-        # the linear TIFF export when present (--export tiff), else the
-        # preview JPEG this call just wrote (always available, stretched).
+        # (3, H, W) RGB cube, which its single-frame debayer would mangle.
+        # Score whichever already-rendered non-FITS image is available
+        # instead: the linear TIFF export when present (--export tiff), else
+        # the preview JPEG this call just wrote (always available, stretched).
         from src.astrollm import score_master_with_astrollm
         _tiff_path = os.path.splitext(output_path)[0] + '.tiff'
         _master_image = _tiff_path if getattr(args, 'output_tiff', False) else preview_path
