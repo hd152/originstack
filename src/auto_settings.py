@@ -201,7 +201,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # better than a parametric Gaussian/Moffat for filamentary nebulae.
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
-        ('remove_stars',            True),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.75),
         # Toned down from (7.0, 0.18): a real Trifid Nebula render at the old
@@ -254,7 +253,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_tv',           False),
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
-        ('remove_stars',            True),
         # The galaxy's own broad, smooth halo tapers with no hard edge, so a
         # per-pixel significance mask can't reliably tell it apart from
         # residual gradient at the object's edge -- the smooth background fit
@@ -294,10 +292,9 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_iterations',   20),
         ('deconvolve_blind_psf',    True),
         ('deconvolve_tv',           False),
-        # Stars are the target — never soften them, and never produce a
-        # starless sidecar (it would erase the target itself).
+        # Stars are the target — never soften them. (Star removal is opt-in
+        # globally now via --remove-stars, so nothing to disable here.)
         ('star_reduce',             False),
-        ('remove_stars',            False),
         ('galaxy_mode',             False),
         ('local_contrast',          True),
         ('local_contrast_strength', 0.80),
@@ -325,7 +322,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # Reduce background stars so the compact nebula is not dominated by halos.
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
-        ('remove_stars',            True),
         ('galaxy_mode',             False),
         ('local_contrast',          True),
         ('local_contrast_strength', 0.80),
@@ -358,7 +354,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
-        ('remove_stars',            True),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.70),
         ('ghs_b',                   8.0),
@@ -384,7 +379,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'star_field': [
         # deconvolve is conditional — set in _apply_dynamic_settings
         ('star_reduce',             False),
-        ('remove_stars',            False),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
@@ -398,7 +392,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'wide_field': [
         ('deconvolve',              False),
         ('star_reduce',             False),
-        ('remove_stars',            False),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),

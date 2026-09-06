@@ -1622,7 +1622,7 @@ def build_parser() -> argparse.ArgumentParser:
                             'each with its own per-channel spectral signature and a '
                             'spatially-varying activation map), written as '
                             '<stem>_star_component.fits / <stem>_nebula_component.fits. '
-                            'An alternative to --no-remove-stars\'s inpainting for use cases '
+                            'An alternative to --remove-stars\'s inpainting for use cases '
                             'that want the star signal separated out, not discarded. '
                             'Non-convex optimisation with no convergence guarantee -- '
                             'inspect the output before trusting the split, especially if '
@@ -1703,14 +1703,17 @@ def build_parser() -> argparse.ArgumentParser:
                         'object (a brighter star, a vignetting corner, etc. -- confirmed on '
                         'a real dense-star-field target) -- open the stacked preview, read '
                         'off the galaxy\'s pixel position, and pin it directly.')
+    g_post.add_argument('--remove-stars', dest='remove_stars', action='store_true',
+                   help='Also write a starless sidecar (<output>_starless.fits). '
+                        'Off by default. Detected stars are inpainted with local '
+                        'background (normalised-convolution fill, per-star radius '
+                        'scaled to brightness); the main output is untouched. The '
+                        'sidecar is for downstream nebula/background work '
+                        '(aggressive stretch, external star recombination). '
+                        'Computed last, on the fully post-processed image. Not '
+                        'turned on by --auto.')
     g_post.add_argument('--no-remove-stars', dest='remove_stars', action='store_false',
-                   help='Disable star removal. By default, detected stars are '
-                        'inpainted with local background (normalised-convolution '
-                        'fill, per-star radius scaled to brightness) and saved as a '
-                        '<output>_starless.fits sidecar. The main output is '
-                        'untouched; the sidecar is for downstream nebula/background '
-                        'work (aggressive stretch, external star recombination). '
-                        'Computed last, on the fully post-processed image.')
+                   help=argparse.SUPPRESS)  # back-compat no-op (star removal is opt-in now)
 
     # Defaults for parameters that are tunable via config file but not exposed on the CLI.
     # Set these in a TOML config with --config to override them.
@@ -1850,7 +1853,7 @@ def build_parser() -> argparse.ArgumentParser:
         pre_gradient_removal=False,
         drizzle_pixfrac=1.0,
         halo_removal=False,
-        remove_stars=True,
+        remove_stars=False,   # opt-in: --remove-stars writes the starless sidecar
         galaxy_mode=False,
     )
     return p
