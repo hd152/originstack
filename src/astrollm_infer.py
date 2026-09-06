@@ -25,6 +25,7 @@ import threading
 from typing import Optional
 
 import numpy as np
+from scipy import ndimage
 
 logger = logging.getLogger('originstack')
 
@@ -119,17 +120,16 @@ def _resize_center_crop(img: np.ndarray, size: int) -> np.ndarray:
     it's only ever used session-relative (outlier detection across frames
     scored the same way), never as an absolute gate.
     """
-    from scipy.ndimage import gaussian_filter, zoom
-
     h, w = img.shape[:2]
     scale = size / min(h, w)
     f = img.astype(np.float32)
     if scale < 1.0:
         sigma = ((1.0 / scale) - 1.0) / 2.0
         if sigma > 0.01:
-            f = gaussian_filter(f, (sigma, sigma, 0) if f.ndim == 3 else (sigma, sigma))
+            f = ndimage.gaussian_filter(
+                f, (sigma, sigma, 0) if f.ndim == 3 else (sigma, sigma))
     factor = (scale, scale, 1) if f.ndim == 3 else (scale, scale)
-    z = zoom(f, factor, order=1, mode='reflect')
+    z = ndimage.zoom(f, factor, order=1, mode='reflect')
     zh, zw = z.shape[:2]
     top = max(0, (zh - size) // 2)
     left = max(0, (zw - size) // 2)
@@ -153,8 +153,6 @@ def _blob_shape_features(gray: np.ndarray, thresh_percentile: float = 99.0,
     component in a grayscale uint8 image. 8-connectivity. Matches upstream
     ``shape_features.blob_shape_features`` (which used
     ``cv2.connectedComponentsWithStats``)."""
-    from scipy import ndimage
-
     h, w = gray.shape
     thresh_val = max(float(np.percentile(gray, thresh_percentile)), 1.0)
     binary = gray > thresh_val
@@ -217,17 +215,8 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
-def _d4_views(arr: np.ndarray):
-    views = []
-    for flip in (False, True):
-        base = arr[:, :, :, ::-1] if flip else arr
-        views.extend(np.rot90(base, k, axes=(2, 3)) for k in range(4))
-    return [np.ascontiguousarray(v) for v in views]
-
-
 def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
-              size: int = 256, tta: bool = False,
-              shape_gate: bool = True) -> Optional[dict]:
+              size: int = 256, shape_gate: bool = True) -> Optional[dict]:
     """Score an ``(H, W, 3)`` RGB array (any range/dtype -- it's percentile-
     stretched here). Returns the same result dict the old
     ``infer_onnx.py --json`` produced, or ``None`` on any failure (logged).
@@ -248,19 +237,22 @@ def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
         arr = arr[:, :, :3]
 
         stretched = _stretch_to_uint8(arr)
-        feat_rgb = _resize_center_crop(stretched, _SHAPE_GATE_SIZE)
-        gray = (0.299 * feat_rgb[..., 0] + 0.587 * feat_rgb[..., 1]
-                + 0.114 * feat_rgb[..., 2]).astype(np.uint8)
         model_in = _resize_center_crop(stretched, size)
         x = (model_in.transpose(2, 0, 1).astype(np.float32) / 255.0)[np.newaxis]
 
         sess = _get_session(mp)
         meta = _meta(sess)
         tasks = meta['tasks'] or meta['head_order']
-        batches = _d4_views(x) if tta else [x]
-        raw = [sess.run(None, {'image': b}) for b in batches]
-        acc = [sum(rb[i] for rb in raw) / len(raw) for i in range(len(raw[0]))]
-        out = dict(zip(meta['head_order'], acc))
+        raw = sess.run(None, {'image': x})
+        # Upstream infer_onnx.py uses zip(..., strict=True) here: a model
+        # whose graph outputs don't line up with the head_order metadata is
+        # an export bug, not something to score around silently.
+        if len(raw) != len(meta['head_order']):
+            logger.warning(
+                f"astrollm: model has {len(raw)} outputs but head_order "
+                f"metadata lists {len(meta['head_order'])} -- refusing to guess")
+            return None
+        out = dict(zip(meta['head_order'], raw))
 
         result: dict = {'checkpoint_epoch': meta['epoch'], 'tasks': tasks}
         if 'reject' in tasks:
@@ -274,7 +266,15 @@ def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
             cats = meta['categories']
             order = np.argsort(probs)[::-1]
             top = int(order[0])
-            picked = _gate_comet_prediction(probs, gray, cats) if shape_gate else top
+            if shape_gate and 'comet' in cats and cats[top] == 'comet':
+                # Shape features are only consulted to (maybe) demote a
+                # comet top pick -- compute the 512px crop lazily here.
+                feat_rgb = _resize_center_crop(stretched, _SHAPE_GATE_SIZE)
+                gray = (0.299 * feat_rgb[..., 0] + 0.587 * feat_rgb[..., 1]
+                        + 0.114 * feat_rgb[..., 2]).astype(np.uint8)
+                picked = _gate_comet_prediction(probs, gray, cats)
+            else:
+                picked = top
             result['category'] = cats[picked]
             result['category_confidence'] = float(probs[picked])
             result['top_categories'] = [[cats[i], float(probs[i])] for i in order[:3]]
@@ -332,14 +332,13 @@ def _load_image_any(path: str) -> Optional[np.ndarray]:
 
 
 def score_path(path: str, *, model_path: Optional[str] = None,
-               size: int = 256, tta: bool = False,
-               shape_gate: bool = True) -> Optional[dict]:
+               size: int = 256, shape_gate: bool = True) -> Optional[dict]:
     """``score_rgb`` for a file path. Returns the result dict (with an
     ``image`` key added) or ``None`` on any failure."""
     rgb = _load_image_any(path)
     if rgb is None:
         return None
-    result = score_rgb(rgb, model_path=model_path, size=size, tta=tta,
+    result = score_rgb(rgb, model_path=model_path, size=size,
                        shape_gate=shape_gate)
     if result is not None:
         result['image'] = path

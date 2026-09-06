@@ -1466,14 +1466,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Thread-pool size for per-frame astrollm scoring calls (default: 2). '
                         'onnxruntime releases the GIL during the forward pass, so a thread '
                         'pool parallelises it without a ProcessPoolExecutor.')
-    # Back-compat: pre-in-process path overrides. --astrollm-dir /
-    # --astrollm-checkpoint still resolve a model path. (--astrollm-python /
-    # --astrollm-script / --astrollm-timeout were removed -- inert since the
-    # scorer moved in-process.)
+    # Back-compat, all hidden: --astrollm-dir / --astrollm-checkpoint still
+    # resolve a model path; --astrollm-timeout / -python / -script are inert
+    # no-ops kept so pre-in-process command lines don't hard-error.
     g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'),
                    metavar='DIR', help=argparse.SUPPRESS)
     g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
                    help=argparse.SUPPRESS)
+    g_astrollm.add_argument('--astrollm-timeout', type=float, default=None,
+                   metavar='SEC', help=argparse.SUPPRESS)
+    g_astrollm.add_argument('--astrollm-python', default=None, help=argparse.SUPPRESS)
+    g_astrollm.add_argument('--astrollm-script', default=None, help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
@@ -1941,10 +1944,16 @@ def parse_args(argv=None):
             safe_print("  WARNING: --astrollm needs the 'onnxruntime' package "
                        "(pip install onnxruntime) -- disabling astrollm scoring")
             args.astrollm = False
-        elif resolve_model_path(args.astrollm_model) is None:
-            _m = args.astrollm_model or '(bundled src/data/astrollm.onnx)'
-            safe_print(f"  WARNING: --astrollm model not found: {_m} "
+        elif args.astrollm_model and not os.path.isfile(args.astrollm_model):
+            # An explicit override that doesn't exist is a hard error -- never
+            # silently fall back to the bundled model (resolve_model_path
+            # would), the user asked for a specific file.
+            safe_print(f"  WARNING: --astrollm model not found: {args.astrollm_model} "
                        f"-- disabling astrollm scoring")
+            args.astrollm = False
+        elif resolve_model_path(args.astrollm_model) is None:
+            safe_print("  WARNING: --astrollm has no model (bundled "
+                       "src/data/astrollm.onnx missing) -- disabling astrollm scoring")
             args.astrollm = False
 
     if getattr(args, 'astrollm_score_all', False) and not args.astrollm:

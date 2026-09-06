@@ -175,12 +175,14 @@ class TestRealInference:
         assert r is not None and r['category'] in (
             'galaxy', 'nebula', 'star_cluster', 'comet')
 
-    def test_session_cache_reuses_one_inferencesession(self):
-        infer_mod._SESSION_CACHE.clear()
+    def test_session_cache_reuses_one_inferencesession(self, monkeypatch):
+        # Isolated cache dict so this can't race other tests under pytest -n.
+        fresh: dict = {}
+        monkeypatch.setattr(infer_mod, '_SESSION_CACHE', fresh)
         mp = infer_mod.resolve_model_path(None)
         infer_mod.score_rgb(self._synth_rgb())
         infer_mod.score_rgb(self._synth_rgb())
-        assert list(infer_mod._SESSION_CACHE) == [mp]
+        assert list(fresh) == [mp]
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +486,23 @@ class TestCliAstrollmResolution:
         args = self._parse(tmp_path, '--astrollm-checkpoint', str(m))
         assert args.astrollm is True
         assert args.astrollm_model == str(m)
+
+    def test_bad_explicit_model_disables_not_silent_bundled_fallback(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        bad = str(tmp_path / 'nope.onnx')
+        args = self._parse(tmp_path, '--astrollm-model', bad)
+        assert args.astrollm is False
+        assert bad in capsys.readouterr().out
+
+    def test_removed_flags_are_inert_not_errors(self, tmp_path, monkeypatch):
+        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        monkeypatch.setattr(infer_mod, 'resolve_model_path', lambda p: p or 'bundled')
+        # old command lines that still pass these must not hard-error
+        args = self._parse(tmp_path, '--astrollm-timeout', '120',
+                           '--astrollm-python', 'py.exe', '--astrollm-script', 's.py')
+        assert args.astrollm is True
 
 
 if __name__ == '__main__':
