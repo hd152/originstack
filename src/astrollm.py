@@ -12,8 +12,9 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -22,50 +23,130 @@ from src.utils import safe_print
 
 logger = logging.getLogger('originstack')
 
+_FITS_EXTS = ('.fits', '.fit', '.fts')
+
+
+def _render_light_for_onnx(src_path: str) -> Tuple[str, bool]:
+    """Debayer a raw light frame to a temp RGB image for ``infer_onnx.py``.
+
+    The vendored ONNX entry point (``vendor/astrollm/infer_onnx.py``) reads
+    TIFF/PNG/JPG only -- it dropped astropy, so it refuses FITS. OriginStack
+    renders each raw frame itself here: a small score drift vs astrollm's own
+    cv2 debayer, acceptable for an advisory-only signal.
+
+    Returns ``(path, is_temp)``. Non-FITS input (the already-rendered stacked
+    master) passes straight through. If rendering isn't possible -- unreadable
+    frame, or neither ``tifffile`` nor ``Pillow`` available -- the original
+    path is returned unchanged so ``infer_onnx.py`` rejects it and the frame
+    simply goes unscored, rather than raising into the pipeline.
+    """
+    if not src_path.lower().endswith(_FITS_EXTS):
+        return src_path, False
+    try:
+        from src.io_fits import load_frame
+        data, hdr = load_frame(src_path)
+        arr = np.asarray(data)
+        if arr.ndim == 2:
+            from src.debayer import debayer
+            pattern = str(hdr.get('BAYERPAT') or hdr.get('COLORTYP')
+                          or 'GBRG').strip().upper()
+            rgb = debayer(arr.astype(np.float32), pattern=pattern)
+        elif arr.ndim == 3:
+            rgb = arr.astype(np.float32)
+            if rgb.shape[0] in (1, 3) and rgb.shape[-1] not in (1, 3):
+                rgb = np.moveaxis(rgb, 0, -1)          # (C,H,W) -> (H,W,C)
+        else:
+            return src_path, False
+
+        lo, hi = float(np.nanmin(rgb)), float(np.nanmax(rgb))
+        if hi <= lo:
+            hi = lo + 1.0
+        # 16-bit range pack only -- let infer_onnx.py apply the per-channel
+        # percentile stretch it was trained on.
+        u16 = np.clip((rgb - lo) / (hi - lo) * 65535.0, 0, 65535).astype(np.uint16)
+
+        fd, out = tempfile.mkstemp(suffix='.tiff', prefix='astrollm_')
+        os.close(fd)
+        try:
+            import tifffile
+            tifffile.imwrite(out, u16)
+            return out, True
+        except Exception:
+            pass
+        try:
+            from PIL import Image
+            png = out[:-5] + '.png'
+            Image.fromarray((u16 >> 8).astype(np.uint8), 'RGB').save(png)
+            os.unlink(out)
+            return png, True
+        except Exception:
+            for p in (out, out[:-5] + '.png'):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            logger.warning("astrollm: no tifffile/Pillow to render "
+                           f"{os.path.basename(src_path)} for ONNX inference")
+            return src_path, False
+    except Exception as e:
+        logger.warning(f"astrollm: could not render {os.path.basename(src_path)} "
+                       f"for ONNX inference: {e}")
+        return src_path, False
+
 
 def run_astrollm_infer(image_path: str, python_exe: str, script_path: str,
                        checkpoint_path: str,
                        timeout: float = Config.ASTROLLM_TIMEOUT_S) -> Optional[dict]:
-    """Run astrollm's infer.py on one image and return its parsed JSON result.
+    """Run astrollm's ``infer_onnx.py`` on one image, return its parsed JSON.
 
-    Returns None (logging a warning) on any failure -- bad exit code,
-    timeout, missing binary, or unparseable stdout. Callers must treat None
-    as "no score available", never as a rejection signal.
+    A raw ``.fits`` frame is debayered to a temp image first (see
+    ``_render_light_for_onnx``) since the ONNX entry point takes TIFF/PNG/JPG
+    only. Returns None (logging a warning) on any failure -- bad exit code,
+    timeout, missing binary, unrenderable input, or unparseable stdout.
+    Callers must treat None as "no score available", never as a rejection.
     """
-    # infer.py is run with cwd=<its own dir> (so a relative --checkpoint
-    # resolves against the astrollm repo, matching the documented
-    # invocation) -- a relative image_path would resolve against that same
-    # cwd instead of the caller's, so make it absolute first.
-    cmd = [python_exe, script_path, '--checkpoint', checkpoint_path,
-           '--image', os.path.abspath(image_path), '--json']
+    render_path, is_temp = _render_light_for_onnx(image_path)
+    # infer_onnx.py is run with cwd=<its own dir> so its relative --model
+    # default / `from data.imageops import` resolve against the vendored
+    # copy; a relative image path would resolve there too, so make it
+    # absolute first.
+    cmd = [python_exe, script_path, '--model', checkpoint_path,
+           '--image', os.path.abspath(render_path), '--json']
     try:
-        proc = subprocess.run(cmd, cwd=os.path.dirname(script_path) or None,
-                              capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        logger.warning(f"astrollm: timed out after {timeout:.0f}s on "
-                       f"{os.path.basename(image_path)}")
-        return None
-    except (FileNotFoundError, OSError) as e:
-        logger.warning(f"astrollm: could not launch subprocess for "
-                       f"{os.path.basename(image_path)}: {e}")
-        return None
+        try:
+            proc = subprocess.run(cmd, cwd=os.path.dirname(script_path) or None,
+                                  capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"astrollm: timed out after {timeout:.0f}s on "
+                           f"{os.path.basename(image_path)}")
+            return None
+        except (FileNotFoundError, OSError) as e:
+            logger.warning(f"astrollm: could not launch subprocess for "
+                           f"{os.path.basename(image_path)}: {e}")
+            return None
 
-    if proc.returncode != 0:
-        logger.warning(f"astrollm: exit {proc.returncode} for "
-                       f"{os.path.basename(image_path)}: "
-                       f"{proc.stderr.strip()[-300:]}")
-        return None
+        if proc.returncode != 0:
+            logger.warning(f"astrollm: exit {proc.returncode} for "
+                           f"{os.path.basename(image_path)}: "
+                           f"{proc.stderr.strip()[-300:]}")
+            return None
 
-    lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
-    if not lines:
-        logger.warning(f"astrollm: empty stdout for {os.path.basename(image_path)}")
-        return None
-    try:
-        return json.loads(lines[-1])
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"astrollm: could not parse JSON output for "
-                       f"{os.path.basename(image_path)}: {e}")
-        return None
+        lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
+        if not lines:
+            logger.warning(f"astrollm: empty stdout for {os.path.basename(image_path)}")
+            return None
+        try:
+            return json.loads(lines[-1])
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"astrollm: could not parse JSON output for "
+                           f"{os.path.basename(image_path)}: {e}")
+            return None
+    finally:
+        if is_temp:
+            try:
+                os.unlink(render_path)
+            except OSError:
+                pass
 
 
 def _astrollm_paths(args) -> Optional[tuple]:
@@ -159,17 +240,17 @@ def score_lights_with_astrollm(lights: List[FrameInfo], args) -> None:
                            + (", ..." if len(below) > 5 else ""))
 
 
-# astrollm's category head is a coarse 7-bucket taxonomy (galaxy, nebula,
-# star_cluster, comet, planet, star, other) -- only two map unambiguously
-# onto one of the pipeline's own 7 target-type anchors (auto_settings.py's
-# _TYPE_ANCHORS). "nebula" alone can't distinguish emission/reflection/
-# planetary, and comet/planet/star/other aren't targets the target-type
-# blend-weight system covers at all (comet has its own separate
-# --comet-mode). A wrong guess here would misdirect --auto's whole preset
-# blend, so ambiguous categories intentionally get no mapping (no boost)
-# rather than a guessed one -- unlike score_master_with_astrollm's
-# mismatch warning above, which can afford to be fuzzy since a human reads
-# it.
+# astrollm's category head is a coarse 4-class taxonomy (galaxy, nebula,
+# star_cluster, comet) -- only two map unambiguously onto one of the
+# pipeline's own 7 target-type anchors (auto_settings.py's _TYPE_ANCHORS).
+# "nebula" alone can't distinguish emission/reflection/planetary, and comet
+# isn't a target the target-type blend-weight system covers at all (comet
+# has its own separate --comet-mode). A wrong guess here would misdirect
+# --auto's whole preset blend, so ambiguous categories intentionally get no
+# mapping (no boost) rather than a guessed one -- unlike
+# score_master_with_astrollm's mismatch warning above, which can afford to
+# be fuzzy since a human reads it. (Older checkpoints had a 7-bucket head
+# with planet/star/other; those keys are simply absent here, still None.)
 _CATEGORY_TO_TARGET_TYPE = {
     'galaxy': 'galaxy',
     'star_cluster': 'globular_cluster',
@@ -192,9 +273,10 @@ def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
     denoising in _apply_quality_settings, never a frame rejection).
 
     Deliberately scores a SMALL SAMPLE, not the whole session: one
-    astrollm subprocess call costs ~8s, dominated by Python/torch
-    startup and model load rather than the actual per-image inference --
-    scoring every accepted frame (score_lights_with_astrollm's job, a
+    astrollm subprocess call still costs a few seconds, dominated by
+    interpreter + onnxruntime startup and the per-frame debayer render
+    rather than the ONNX inference itself -- scoring every accepted frame
+    (score_lights_with_astrollm's job, a
     separate opt-in path) would add minutes to a session with 100+
     frames, which defeats the point of a fast pre-stacking signal. Mirrors
     frame_processor.py's _measure_session_ca: a few frames spread through
@@ -268,12 +350,10 @@ def score_master_with_astrollm(master_image_path: str, args,
                                inferred_type: Optional[str] = None) -> None:
     """Score the final stacked master with astrollm, advisory-only (log only).
 
-    ``master_image_path`` must NOT be the pipeline's own main output FITS:
-    astrollm's infer.py treats any ``.fits`` input as a raw undebayered
-    single-plane Bayer light frame and runs it through its own cv2 debayer,
-    which errors on our already-debayered (3, H, W) RGB cube. Callers must
-    pass a rendered non-FITS image instead -- the TIFF export when present,
-    else the preview JPEG (see src/pipeline.py's call site).
+    Pass a rendered non-FITS image (the TIFF export when present, else the
+    preview JPEG -- see src/pipeline.py's call site). A ``.fits`` path would
+    be run through ``_render_light_for_onnx``'s single-frame Bayer debayer,
+    wrong for an already-stacked (3, H, W) RGB master.
 
     Compares astrollm's predicted category against the pipeline's own
     metadata-based target inference and flags a mismatch as a possible
@@ -295,15 +375,18 @@ def score_master_with_astrollm(master_image_path: str, args,
 
     category = result.get('category')
     confidence = result.get('category_confidence', 0.0)
+    _exp = result.get('predicted_exposure_s')
+    _exp_str = f"  predicted_exposure={_exp:.0f}s" if _exp else ""
     safe_print(f"  astrollm (master): category={category} "
                f"conf={confidence:.0%}  "
                f"sky_brightness={result.get('sky_brightness', 0):.1f}  "
-               f"stray_light_gradient={result.get('stray_light_gradient', 0):.1f}")
+               f"stray_light_gradient={result.get('stray_light_gradient', 0):.1f}"
+               f"{_exp_str}")
 
     if inferred_type and category and inferred_type != 'unknown':
-        # astrollm's category head is a coarse 7-bucket taxonomy (galaxy,
-        # nebula, star_cluster, comet, planet, star, other) while
-        # inferred_type is fine-grained (emission_nebula, reflection_nebula,
+        # astrollm's category head is a coarse 4-class taxonomy (galaxy,
+        # nebula, star_cluster, comet) while inferred_type is fine-grained
+        # (emission_nebula, reflection_nebula,
         # planetary_nebula, globular_cluster, ...) -- an exact-string
         # compare would flag "nebula" vs "emission_nebula" as a mismatch
         # even though astrollm got it right. Match on shared word tokens

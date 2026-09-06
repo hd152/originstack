@@ -64,6 +64,78 @@ class TestRunAstrollmInfer:
             result = run_astrollm_infer('a.fits', 'py.exe', 'infer.py', 'model.pt')
         assert result == payload
 
+    def test_passes_model_flag_not_checkpoint(self):
+        with mock.patch('subprocess.run',
+                        return_value=_completed(stdout='{"x": 1}')) as m:
+            run_astrollm_infer('master.tiff', 'py.exe', 'infer_onnx.py', 'model.onnx')
+        cmd = m.call_args[0][0]
+        assert '--model' in cmd and 'model.onnx' in cmd
+        assert '--checkpoint' not in cmd
+
+    def test_non_fits_passes_straight_through(self):
+        with mock.patch('subprocess.run',
+                        return_value=_completed(stdout='{"x": 1}')) as m:
+            run_astrollm_infer('master.tiff', 'py.exe', 'infer_onnx.py', 'model.onnx')
+        cmd = m.call_args[0][0]
+        assert cmd[cmd.index('--image') + 1].endswith('master.tiff')
+
+
+class TestRenderLightForONNX:
+
+    def _bayer_fits(self, path):
+        import numpy as np
+        import pytest
+        from astropy.io import fits
+        if not hasattr(fits.PrimaryHDU, 'writeto'):
+            pytest.skip('astropy.io.fits is stubbed by another test module in this run')
+        rng = np.random.default_rng(0)
+        img = (rng.random((96, 120)) * 4000 + 200).astype(np.uint16)
+        hdu = fits.PrimaryHDU(data=img)
+        hdu.header['BAYERPAT'] = 'RGGB'
+        hdu.writeto(path, overwrite=True)
+
+    def test_non_fits_is_passthrough(self):
+        from src.astrollm import _render_light_for_onnx
+        assert _render_light_for_onnx('x.tiff') == ('x.tiff', False)
+        assert _render_light_for_onnx('x.png') == ('x.png', False)
+
+    def test_unreadable_fits_falls_back_to_original(self):
+        from src.astrollm import _render_light_for_onnx
+        assert _render_light_for_onnx('does_not_exist.fits') == ('does_not_exist.fits', False)
+
+    def test_bayer_fits_renders_rgb_temp_image(self, tmp_path):
+        import os
+
+        from src.astrollm import _render_light_for_onnx
+        src = str(tmp_path / 'Light0001.fits')
+        self._bayer_fits(src)
+        out, is_temp = _render_light_for_onnx(src)
+        try:
+            assert is_temp and out != src and os.path.exists(out)
+            assert out.lower().endswith(('.tiff', '.png'))
+        finally:
+            if is_temp and os.path.exists(out):
+                os.unlink(out)
+
+    def test_run_infer_cleans_up_rendered_temp(self, tmp_path):
+        import os
+
+        from src import astrollm as A
+        src = str(tmp_path / 'Light0002.fits')
+        self._bayer_fits(src)
+        captured = {}
+
+        def _fake_run(cmd, **kw):
+            captured['img'] = cmd[cmd.index('--image') + 1]
+            return _completed(stdout='{"category": "galaxy"}')
+
+        with mock.patch('subprocess.run', side_effect=_fake_run):
+            r = A.run_astrollm_infer(src, 'py.exe', 'infer_onnx.py', 'model.onnx')
+        assert r == {'category': 'galaxy'}
+        # infer_onnx got a rendered temp, not the .fits, and it's gone now.
+        assert not captured['img'].lower().endswith('.fits')
+        assert not os.path.exists(captured['img'])
+
 
 def _frame(path, accepted=True):
     return SimpleNamespace(path=path, accepted=accepted, metrics={'score': 50.0})
@@ -284,6 +356,44 @@ class TestSampleSessionPriors:
         with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=None):
             result = sample_session_priors(lights, _args())
         assert result is None
+
+
+class TestVendoredAstrollmResolution:
+    """--astrollm auto-points at vendor/astrollm/ when it exists (approach A)."""
+
+    def test_astrollm_dir_defaults_to_vendored_copy(self, tmp_path, monkeypatch):
+        import os
+
+        from src import cli
+
+        repo_root = os.path.dirname(os.path.dirname(cli.__file__))
+        vendored = os.path.join(repo_root, 'vendor', 'astrollm')
+        if not os.path.isdir(vendored):
+            import pytest
+            pytest.skip('vendor/astrollm/ not present')
+
+        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        args = cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
+                               '--astrollm'])
+        assert os.path.normpath(args.astrollm_dir) == os.path.normpath(vendored)
+        assert args.astrollm_script == os.path.join(vendored, 'infer_onnx.py')
+        assert args.astrollm_checkpoint == os.path.join(vendored, 'checkpoints', 'model.onnx')
+        # infer_onnx.py + model.onnx are actually vendored; only the venv python
+        # is absent in a fresh checkout, so scoring self-disables with a warning.
+        assert os.path.exists(args.astrollm_script)
+        assert os.path.exists(args.astrollm_checkpoint)
+
+    def test_explicit_astrollm_dir_wins_over_vendored(self, tmp_path, monkeypatch):
+        import os
+
+        from src import cli
+
+        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        custom = tmp_path / 'my_astrollm'
+        custom.mkdir()
+        args = cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
+                               '--astrollm', '--astrollm-dir', str(custom)])
+        assert os.path.normpath(args.astrollm_dir) == os.path.normpath(str(custom))
 
 
 if __name__ == '__main__':

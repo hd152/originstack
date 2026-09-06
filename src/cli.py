@@ -1458,20 +1458,21 @@ def build_parser() -> argparse.ArgumentParser:
                         '--astrollm.')
     g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'), metavar='DIR',
                    help='astrollm repo root. Derives --astrollm-python '
-                        '(DIR\\.venv\\Scripts\\python.exe), --astrollm-script (DIR\\infer.py), '
-                        'and --astrollm-checkpoint (DIR\\checkpoints\\model.pt) from astrollm\'s '
+                        '(DIR\\.venv\\Scripts\\python.exe), --astrollm-script (DIR\\infer_onnx.py), '
+                        'and --astrollm-checkpoint (DIR\\checkpoints\\model.onnx) from astrollm\'s '
                         'standard layout -- the three overrides below only need to be passed '
                         'individually if your layout differs. Defaults to the ASTROLLM_DIR '
-                        'environment variable if set.')
+                        'environment variable, else the vendored copy at vendor/astrollm/ '
+                        'if present.')
     g_astrollm.add_argument('--astrollm-python', default=None, metavar='PATH',
                    help='Path to the astrollm venv\'s python.exe (override; default: derived '
                         'from --astrollm-dir)')
     g_astrollm.add_argument('--astrollm-script', default=None, metavar='PATH',
-                   help='Path to astrollm\'s infer.py (override; default: derived from '
+                   help='Path to astrollm\'s infer_onnx.py (override; default: derived from '
                         '--astrollm-dir)')
     g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
-                   help='Path to the astrollm model checkpoint (override; default: '
-                        'DIR\\checkpoints\\model.pt from --astrollm-dir). A relative path is '
+                   help='Path to the exported astrollm ONNX model (override; default: '
+                        'DIR\\checkpoints\\model.onnx from --astrollm-dir). A relative path is '
                         'resolved against --astrollm-script\'s directory')
     g_astrollm.add_argument('--astrollm-workers', type=int, default=2, metavar='N',
                    help='Thread-pool size for per-frame astrollm scoring calls (default: 2). '
@@ -1934,13 +1935,19 @@ def parse_args(argv=None):
         # --astrollm-dir derives the three individual paths from astrollm's
         # standard repo layout; an explicit --astrollm-python/-script/
         # -checkpoint always wins over the derived value.
+        if not args.astrollm_dir:
+            _vendored = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'vendor', 'astrollm')
+            if os.path.isdir(_vendored):
+                args.astrollm_dir = _vendored
         if args.astrollm_dir:
             if not args.astrollm_python:
                 args.astrollm_python = os.path.join(args.astrollm_dir, '.venv', 'Scripts', 'python.exe')
             if not args.astrollm_script:
-                args.astrollm_script = os.path.join(args.astrollm_dir, 'infer.py')
+                args.astrollm_script = os.path.join(args.astrollm_dir, 'infer_onnx.py')
             if not args.astrollm_checkpoint:
-                args.astrollm_checkpoint = os.path.join(args.astrollm_dir, 'checkpoints', 'model.pt')
+                args.astrollm_checkpoint = os.path.join(args.astrollm_dir, 'checkpoints', 'model.onnx')
         if args.astrollm_checkpoint and args.astrollm_script and not os.path.isabs(args.astrollm_checkpoint):
             args.astrollm_checkpoint = os.path.join(
                 os.path.dirname(args.astrollm_script), args.astrollm_checkpoint)

@@ -1,0 +1,35 @@
+astrollm ONNX-inference code + exported model, vendored for OriginStack's
+--astrollm feature (see src/astrollm.py). torch-free: the exported model runs
+under onnxruntime, so this vendored copy needs neither torch nor astropy.
+
+source repo : https://github.com/hd152/astrollm
+branch      : improve-training-and-tooling
+commit      : abd1f5f67bdb3c51a54d6d1e28f2429df76d2d08
+vendored on : 2026-09-06
+vendored by : scripted minimal-set copy (ONNX inference path only)
+
+Included (everything infer_onnx.py imports transitively):
+  infer_onnx.py                 <- torch-free entry point (--model / --image / --json)
+  data/imageops.py              <- percentile stretch + resize/center-crop + background correction (cv2+numpy)
+  data/shape_features.py        <- comet shape-gate features for infer_onnx.py's category head (cv2+numpy)
+  data/__init__.py              <- empty; makes `data` importable with cwd=this dir
+  checkpoints/model.onnx        <- exported model (epoch 15, SSL-pretrained + fine-tuned; ~10 MB)
+  requirements.txt              <- upstream requirements-infer.txt (numpy, onnxruntime, opencv-python-headless)
+
+Model heads meaningful for this checkpoint (baked into the ONNX metadata's
+`tasks`): reject, quality, category, exposure, sky_brightness,
+stray_light_gradient. `category` is a 4-class head -- galaxy, nebula,
+star_cluster, comet (the earlier 7-bucket taxonomy with planet/star/other is
+gone). `exposure` is now a 7-class classifier (5/10/15/20/25/30/40 s) rather
+than the old `log_exposure` regression head. infer_onnx.py also carries
+dormant `trailing` / `background_grid` code paths from later upstream commits;
+this checkpoint's graph has neither head, so they never fire.
+
+NOT vendored: infer.py (torch), export_onnx.py (dev-only), pretrain_ssl.py,
+cull.py, models/, data/cache.py, data/dataset.py, data/light_stats.py,
+data/manifest.py, train.py, data/*.jsonl, configs/, tests/, the .pt checkpoints.
+
+infer_onnx.py handles TIFF/PNG/JPG only -- it refuses FITS (no astropy debayer).
+OriginStack renders each raw light frame to a temp image itself before calling
+it: src/astrollm.py::_render_light_for_onnx (debayer + write TIFF/PNG). Re-sync
+by re-copying against a newer astrollm commit and updating the hash above.

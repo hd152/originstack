@@ -1,0 +1,13 @@
+# Slim inference-only deps: run the exported ONNX model (infer_onnx.py) with
+# no torch and no astropy. ~80 MB installed vs ~1 GB for the full training
+# env. Use a separate venv:
+#   python -m venv .venv-infer
+#   .venv-infer\Scripts\pip install -r requirements-infer.txt
+#   .venv-infer\Scripts\python infer_onnx.py --model checkpoints\model.onnx --image master.tiff
+#
+# For training, or for FITS input, use requirements.txt instead.
+numpy
+onnxruntime
+# Same pin as requirements.txt - this machine's global env runs GraXpert on a
+# different opencv build; always install into a venv.
+opencv-python-headless==5.0.0.93
