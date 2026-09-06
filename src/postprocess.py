@@ -878,7 +878,7 @@ def postprocess_stack(
                 _rs_fwhm = float(np.median(
                     [f.metrics.get('fwhm', 4.0) for f in final
                      if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
-                print(f"\n  Removing stars (fwhm={_rs_fwhm:.1f}px)...")
+                safe_print(f"\n  Removing stars (fwhm={_rs_fwhm:.1f}px)...")
                 _rs_start = time.time()
                 from src.star_removal import remove_stars
                 starless, n_removed = remove_stars(stacked, _pp_sources, _rs_fwhm,
