@@ -278,6 +278,21 @@ class UIEvents:
             self._state['progress'] = {'label': '', 'done': 0, 'total': 0}
             self._state['run_status'] = 'running'
             self._state['run_error'] = None
+            # Drop every preview from the previous run: the single back-compat
+            # slot, the retained milestone slots (+ their f16 re-stretch
+            # sources), and the per-frame thumbnail ring. Version counters are
+            # bumped, not reset, so the GUI's poll loop sees the change and
+            # redraws an empty viewer instead of showing last run's images.
+            self._preview_bytes = None
+            self._preview_caption = ''
+            self._preview_version += 1
+            self._last_preview_time = 0.0
+            self._named.clear()
+            self._latest_slug = ''
+            self._named_version += 1
+            self._frame_thumbs.clear()
+            self._frame_thumb_seq = 0
+            self._frame_thumbs_version += 1
             self._bump()
 
     def run_finished(self, status: str, error: Optional[str] = None) -> None:

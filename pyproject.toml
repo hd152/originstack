@@ -9,6 +9,7 @@ extend-exclude = [
     "Benchmark",
     "packaging/dist",
     "ext/astro_native/target",
+    "vendor",
 ]
 
 [tool.ruff.lint]

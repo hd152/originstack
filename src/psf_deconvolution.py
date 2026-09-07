@@ -17,6 +17,83 @@ try:
 except Exception:
     HAS_CURVE_FIT = False
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE_PSF2D = (hasattr(_native, 'fit_psf_moffat2d_native')
+                         and hasattr(_native, 'fit_psf_gauss2d_native'))
+except Exception:  # pragma: no cover
+    _native = None
+    _HAS_NATIVE_PSF2D = False
+
+
+def _moffat_2d(coords, amplitude, x0, y0, alpha, beta, background):
+    y, x = coords
+    r2 = (x - x0) ** 2 + (y - y0) ** 2
+    return (amplitude * (1.0 + r2 / (alpha ** 2)) ** (-beta) + background).ravel()
+
+
+def _gaussian_2d(coords, amplitude, x0, y0, sigma, background):
+    y, x = coords
+    r2 = (x - x0) ** 2 + (y - y0) ** 2
+    return (amplitude * np.exp(-r2 / (2.0 * sigma ** 2)) + background).ravel()
+
+
+def _fit_star_2d_numpy(cutout: np.ndarray, model: str,
+                       peak: float, bg: float) -> Optional[tuple]:
+    """scipy.optimize.curve_fit fallback for a single star cutout -- see
+    ``_fit_star_2d``. Returns the full parameter tuple or None."""
+    if not HAS_CURVE_FIT:
+        return None
+    sz = cutout.shape[0]
+    yg, xg = np.mgrid[0:sz, 0:sz]
+    center = sz / 2.0
+    try:
+        if model == 'moffat':
+            popt, _ = curve_fit(
+                _moffat_2d, (yg, xg), cutout.ravel(),
+                p0=[peak - bg, center, center, 2.0, 3.0, bg],
+                bounds=([0, center - 3, center - 3, 0.5, 1.0, 0],
+                        [peak * 2, center + 3, center + 3, 20.0, 10.0, peak]),
+                maxfev=2000)
+        else:
+            popt, _ = curve_fit(
+                _gaussian_2d, (yg, xg), cutout.ravel(),
+                p0=[peak - bg, center, center, 2.0, bg],
+                bounds=([0, center - 3, center - 3, 0.3, 0],
+                        [peak * 2, center + 3, center + 3, 20.0, peak]),
+                maxfev=2000)
+        return tuple(float(v) for v in popt)
+    except (RuntimeError, ValueError):
+        return None
+
+
+def _fit_star_2d(cutout: np.ndarray, model: str,
+                 peak: float, bg: float) -> Optional[tuple]:
+    """Fit a 2D Moffat/Gaussian to one star cutout.
+
+    Native path (``fit_psf_moffat2d_native`` / ``fit_psf_gauss2d_native``):
+    scipy's bounded curve_fit re-evaluates the Python model on every one of
+    the cutout's ~900 pixels each trust-region iteration -- for up to
+    RL_PSF_MAX_STARS stars per PSF estimate that callback cost dominates, not
+    the fit arithmetic. The native kernels are a from-scratch bounded LM with
+    each model and its analytic Jacobian inlined (no callback), using the
+    same p0/bounds as ``_fit_star_2d_numpy``. Returns the parameter tuple
+    (moffat: amp,x0,y0,alpha,beta,bg; gauss: amp,x0,y0,sigma,bg) or None.
+    """
+    if _HAS_NATIVE_PSF2D:
+        z = np.ascontiguousarray(cutout.ravel(), dtype=np.float64)
+        sz = int(cutout.shape[0])
+        try:
+            fn = (_native.fit_psf_moffat2d_native if model == 'moffat'
+                  else _native.fit_psf_gauss2d_native)
+            res = fn(z, sz, float(peak), float(bg))
+        except ValueError:
+            res = None
+        if res is None or not all(np.isfinite(v) for v in res):
+            return None
+        return tuple(float(v) for v in res)
+    return _fit_star_2d_numpy(cutout, model, peak, bg)
+
 def estimate_psf(img: np.ndarray, star_positions,
                  cutout_radius: int = None, psf_size: int = None,
                  model: str = 'moffat') -> Tuple[Optional[np.ndarray], float]:
@@ -36,8 +113,9 @@ def estimate_psf(img: np.ndarray, star_positions,
     if psf_size is None:
         psf_size = Config.RL_PSF_SIZE
 
-    if not HAS_CURVE_FIT:
-        _log.warning("scipy.optimize.curve_fit unavailable; cannot estimate PSF")
+    if not HAS_CURVE_FIT and not _HAS_NATIVE_PSF2D:
+        _log.warning("neither scipy.optimize.curve_fit nor the native 2D PSF "
+                     "fitter is available; cannot estimate PSF")
         return None, 0.0
 
     if cutout_radius is None:
@@ -54,18 +132,6 @@ def estimate_psf(img: np.ndarray, star_positions,
         sorted_idx = np.argsort(star_positions['flux'])[::-1]
     except (KeyError, TypeError):
         sorted_idx = range(len(star_positions))
-
-    # 2D Moffat: I(x,y) = A * (1 + ((x-x0)^2 + (y-y0)^2) / alpha^2)^(-beta) + bg
-    def moffat_2d(coords, amplitude, x0, y0, alpha, beta, background):
-        y, x = coords
-        r2 = (x - x0) ** 2 + (y - y0) ** 2
-        return (amplitude * (1.0 + r2 / (alpha ** 2)) ** (-beta) + background).ravel()
-
-    # 2D Gaussian: used as fallback when model='gaussian'
-    def gaussian_2d(coords, amplitude, x0, y0, sigma, background):
-        y, x = coords
-        r2 = (x - x0) ** 2 + (y - y0) ** 2
-        return (amplitude * np.exp(-r2 / (2.0 * sigma ** 2)) + background).ravel()
 
     alphas = []
     betas = []
@@ -94,28 +160,14 @@ def estimate_psf(img: np.ndarray, star_positions,
             continue
         n_tried += 1
 
-        sz = cutout.shape[0]
-        yg, xg = np.mgrid[0:sz, 0:sz]
-        center = sz / 2.0
-
-        try:
-            if model == 'moffat':
-                p0 = [peak - bg, center, center, 2.0, 3.0, bg]
-                bounds = ([0, center - 3, center - 3, 0.5, 1.0, 0],
-                          [peak * 2, center + 3, center + 3, 20.0, 10.0, peak])
-                popt, _ = curve_fit(moffat_2d, (yg, xg), cutout.ravel(),
-                                    p0=p0, bounds=bounds, maxfev=2000)
-                alphas.append(popt[3])
-                betas.append(popt[4])
-            else:
-                p0 = [peak - bg, center, center, 2.0, bg]
-                bounds = ([0, center - 3, center - 3, 0.3, 0],
-                          [peak * 2, center + 3, center + 3, 20.0, peak])
-                popt, _ = curve_fit(gaussian_2d, (yg, xg), cutout.ravel(),
-                                    p0=p0, bounds=bounds, maxfev=2000)
-                sigmas.append(popt[3])
-        except (RuntimeError, ValueError):
+        popt = _fit_star_2d(cutout, model, peak, bg)
+        if popt is None:
             continue
+        if model == 'moffat':
+            alphas.append(popt[3])
+            betas.append(popt[4])
+        else:
+            sigmas.append(popt[3])
 
     # Require minimum successful fits
     if model == 'moffat':

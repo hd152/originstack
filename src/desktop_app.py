@@ -222,7 +222,28 @@ class ScrollableFrame(ttk.Frame):
 # the other ~110 flags are fine-tuning most runs never need.
 _COMMON_DESTS = ['directory', 'output', 'preset', 'auto', 'stack_method',
                  'denoiser', 'deconvolve', 'drizzle_scale', 'trail_reject',
-                 'use_gpu', 'parallel', 'astrollm']
+                 'use_gpu', 'parallel', 'originvision']
+
+# Human field labels. Anything not listed falls back to the dest name with
+# underscores spaced and the first letter capitalised ("stack_method" ->
+# "Stack method"). Only the cases where that reads badly are overridden.
+_FIELD_LABELS = {
+    'directory': 'Light frames',
+    'output': 'Output file',
+    'parallel': 'Workers',
+    'use_gpu': 'Use GPU',
+    'originvision': 'originvision scoring',
+    'trail_reject': 'Trail rejection',
+    'drizzle_scale': 'Drizzle scale',
+    'plate_solve': 'Plate solve',
+    'color_calibrate': 'Colour calibrate',
+    'remove_stars': 'Starless sidecar',
+}
+
+
+def _field_label(field: Dict[str, Any]) -> str:
+    dest = field['dest']
+    return _FIELD_LABELS.get(dest, dest.replace('_', ' ').capitalize())
 
 
 class SetupForm(ttk.Frame):
@@ -326,40 +347,46 @@ class SetupForm(ttk.Frame):
 
     def _build_field(self, parent, row: int, field: Dict[str, Any]) -> None:
         dest, kind = field['dest'], field['kind']
-        # bool_false fields (e.g. dest 'auto', flag '--no-auto') default
-        # checked=True -- the checkbox represents args.<dest> directly, so
-        # checked means "auto stays on" (the flag is *omitted*). Labeling it
-        # with the negating flag text would read backwards (a checked box
-        # next to "--no-auto" reads as "disable it"); show the dest name
-        # instead so checked-and-labeled-"Auto" means what it looks like.
-        label_text = dest.replace('_', ' ').capitalize() if kind == 'bool_false' else field['flag']
-        label = ttk.Label(parent, text=label_text)
+        # Human label from the dest, never the raw "--flag" (and never the
+        # *negating* flag for bool_false fields like dest 'auto' / flag
+        # '--no-auto', which would read backwards next to a checked box).
+        label = ttk.Label(parent, text=_field_label(field))
         label.grid(row=row, column=0, sticky='w', padx=(4, 8), pady=3)
-        if field.get('help'):
-            _Tooltip(label, field['help'])
+        # Tooltip keeps the CLI flag name discoverable now that the visible
+        # label no longer shows it.
+        _tip = field.get('help') or ''
+        _flag = field.get('flag')
+        if _flag:
+            _tip = f"{_flag}\n{_tip}".strip()
+        if _tip:
+            _Tooltip(label, _tip)
 
         rows_used = 1
         if kind in ('bool_true', 'bool_false'):
             var = tk.BooleanVar(value=bool(field['default']))
-            ttk.Checkbutton(parent, variable=var).grid(row=row, column=1, sticky='w')
+            ttk.Checkbutton(parent, variable=var).grid(row=row, column=1,
+                                                       sticky='w', pady=3)
         elif kind == 'select':
             var = tk.StringVar(value='' if field['default'] is None else str(field['default']))
             cb = ttk.Combobox(parent, textvariable=var, state='readonly',
                               values=[''] + [str(c) for c in (field['choices'] or [])],
-                              width=22)
-            cb.grid(row=row, column=1, sticky='w')
+                              width=14)
+            cb.grid(row=row, column=1, sticky='we', pady=3)
         else:
             default = field['default']
             text = ', '.join(default) if isinstance(default, list) else \
                    ('' if default is None else str(default))
             var = tk.StringVar(value=text)
-            entry = ttk.Entry(parent, textvariable=var, width=30)
-            entry.grid(row=row, column=1, sticky='we')
+            # Small char width -- the field grows to fill column 1 (weighted)
+            # when there's room, but this keeps the left pane able to shrink
+            # so the horizontal sash can hold an even split with the preview.
+            entry = ttk.Entry(parent, textvariable=var, width=12)
+            entry.grid(row=row, column=1, sticky='we', pady=3)
             widget_hint = field.get('widget')
             if widget_hint:
                 ttk.Button(parent, text='Browse…', width=9,
                           command=lambda d=dest, v=var, w=widget_hint:
-                              self._browse(d, v, w)).grid(row=row, column=2, padx=4)
+                              self._browse(d, v, w)).grid(row=row, column=2, padx=4, pady=3)
             if dest == 'directory':
                 var.trace_add('write', lambda *_: self._rescan_directory())
                 count_label = ttk.Label(parent, textvariable=self.dir_count_var,
@@ -519,6 +546,18 @@ class PreviewCanvas(ttk.Frame):
         self._img_a = Image.open(io.BytesIO(jpeg_bytes)).convert('RGB')
         self.redraw()
 
+    def clear(self) -> None:
+        """Drop the displayed image(s) -- called when a new run starts so the
+        viewer doesn't keep showing the previous run's stack."""
+        self._img_a = self._img_b = self._photo = None
+        self._nat_w = self._nat_h = 0
+        self.current_slug = self.compare_slug = ''
+        self.compare_on = False
+        self.scale = self.fit_scale = 1.0
+        self.tx = self.ty = 0.0
+        self.caption_var.set('Waiting for the first stack…')
+        self.redraw()
+
     # ── view transform ─────────────────────────────────────────────────
 
     def fit(self) -> None:
@@ -643,6 +682,14 @@ class FrameStrip(ttk.Frame):
         ttk.Label(self.inner, text=name[:14], style='Faint.TLabel',
                  font=('Consolas', 8)).grid(row=1, column=col)
 
+    def clear(self) -> None:
+        """Drop every thumbnail -- called when a new run starts."""
+        for child in self.inner.winfo_children():
+            child.destroy()
+        self._shown_ids.clear()
+        self._photos.clear()
+        self.canvas.configure(scrollregion=(0, 0, 0, 0))
+
 
 class App:
     """Wires the Setup form, RunManager, and progress/preview panels
@@ -663,6 +710,7 @@ class App:
         self._last_version = -1
         self._shown_log_lines = 0
         self._last_run_status = 'idle'
+        self._named_cache: List[Dict[str, Any]] = []
 
         root.title('OriginStack')
         root.geometry('1400x900')
@@ -689,11 +737,22 @@ class App:
 
         # ttk.PanedWindow only honors `weight` once the user drags the sash
         # by hand -- on first layout each pane gets its content's natural
-        # (requested) size instead, which left the Setup form's wide tabs
-        # swallowing nearly the whole window. Force an even split explicitly
-        # once real geometry is available.
-        root.update_idletasks()
-        paned.sashpos(0, root.winfo_width() // 2)
+        # (requested) size instead, which lets the Setup form's wide fields
+        # swallow most of the window and squeeze the preview. Pin the sash to
+        # an even split once the window has a real mapped width; doing it in
+        # __init__ (before the WM sizes the window) reads a stale width and
+        # the split never lands. Runs once.
+        self._split_pinned = False
+
+        def _pin_split(_evt=None):
+            if self._split_pinned:
+                return
+            w = paned.winfo_width()
+            if w > 1:
+                paned.sashpos(0, w // 2)
+                self._split_pinned = True
+        paned.bind('<Configure>', _pin_split, add='+')
+        root.after(80, _pin_split)
 
         root.protocol('WM_DELETE_WINDOW', self._on_closing)
         root.after(self.POLL_MS, self._poll)
@@ -727,7 +786,7 @@ class App:
         self.start_btn = ttk.Button(run_row, text='Start', style='Accent.TButton',
                                     command=self._on_start)
         self.start_btn.pack(side='left')
-        self.status_var = tk.StringVar(value='Idle.')
+        self.status_var = tk.StringVar(value='Idle')
         ttk.Label(run_row, textvariable=self.status_var, style='Dim.TLabel').pack(
             side='left', padx=10)
         self.open_folder_var = tk.BooleanVar(value=False)
@@ -752,24 +811,16 @@ class App:
         ttk.Label(phase_frame, textvariable=self.progress_var).grid(
             row=2, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
 
-        frames_frame = ttk.LabelFrame(parent, text='RECENT FRAMES')
-        frames_frame.pack(fill='x', pady=6)
-        cols = ('frame', 'score', 'snr', 'stars', 'fwhm')
-        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=6)
-        for c, w in zip(cols, (160, 60, 60, 50, 60)):
-            self.frames_tree.heading(c, text=c.capitalize())
-            self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
-        self.frames_tree.tag_configure('bad', foreground=_BAD)
-        self.frames_tree.pack(fill='x')
-
+        # RECENT FRAMES moved to the right column; the whole left column
+        # below the pipeline bar is the log now.
         log_frame = ttk.LabelFrame(parent, text='LOG')
         log_frame.pack(fill='both', expand=True, pady=6)
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=12, bg=_LOG_BG, fg=_LOG_FG, insertbackground=_LOG_FG,
+            log_frame, height=20, bg=_LOG_BG, fg=_LOG_FG, insertbackground=_LOG_FG,
             font=('Consolas', 9), state='disabled', wrap='word')
         self.log_text.pack(fill='both', expand=True)
 
-    # ── right column: preview, frame strip, stretch, summary ──────────
+    # ── right column: preview, frame strip, recent frames, summary ────
 
     def _build_right(self, parent: ttk.Frame) -> None:
         preview_frame = ttk.LabelFrame(parent, text='PREVIEW')
@@ -778,7 +829,8 @@ class App:
         vtools = ttk.Frame(preview_frame)
         vtools.pack(fill='x', pady=4)
         self.view_var = tk.StringVar()
-        self.view_combo = ttk.Combobox(vtools, textvariable=self.view_var, state='readonly', width=24)
+        self.view_combo = ttk.Combobox(vtools, textvariable=self.view_var,
+                                       state='readonly', width=20)
         self.view_combo.pack(side='left')
         self.view_combo.bind('<<ComboboxSelected>>', self._on_view_selected)
         self.compare_var = tk.BooleanVar(value=False)
@@ -786,8 +838,8 @@ class App:
                         command=self._on_compare_toggled).pack(side='left', padx=8)
         self.compare_combo_var = tk.StringVar()
         self.compare_combo = ttk.Combobox(vtools, textvariable=self.compare_combo_var,
-                                          state='readonly', width=24)
-        self.compare_combo.pack(side='left')
+                                          state='readonly', width=20)
+        self.compare_combo.pack(side='left', fill='x', expand=True)
         self.compare_combo.bind('<<ComboboxSelected>>', self._on_compare_selected)
 
         self.preview = PreviewCanvas(preview_frame)
@@ -804,23 +856,15 @@ class App:
         self.frame_strip = FrameStrip(strip_frame, on_click=self._on_thumb_click)
         self.frame_strip.pack(fill='x')
 
-        stretch_frame = ttk.LabelFrame(parent, text='STRETCH')
-        stretch_frame.pack(fill='x', pady=6)
-        self.stretch_vars = {
-            'black': tk.DoubleVar(value=0.0), 'b': tk.DoubleVar(value=8.0),
-            'sp': tk.DoubleVar(value=0.15), 'hp': tk.DoubleVar(value=0.95),
-        }
-        specs = [('black', 'Black σ', -1, 4), ('b', 'GHS b', 0, 20),
-                 ('sp', 'GHS sp', 0, 1), ('hp', 'GHS hp', 0, 1)]
-        for row, (key, label, lo, hi) in enumerate(specs):
-            ttk.Label(stretch_frame, text=label).grid(row=row, column=0, sticky='w', padx=4)
-            ttk.Scale(stretch_frame, from_=lo, to=hi, orient='horizontal',
-                     variable=self.stretch_vars[key]).grid(row=row, column=1, sticky='we', padx=4)
-            stretch_frame.grid_columnconfigure(1, weight=1)
-        btn_row = ttk.Frame(stretch_frame)
-        btn_row.grid(row=len(specs), column=0, columnspan=2, pady=6)
-        ttk.Button(btn_row, text='Apply to view', command=self._apply_stretch).pack(side='left')
-        ttk.Button(btn_row, text='Reset', command=self._reset_stretch).pack(side='left', padx=6)
+        frames_frame = ttk.LabelFrame(parent, text='RECENT FRAMES')
+        frames_frame.pack(fill='x', pady=6)
+        cols = ('frame', 'score', 'snr', 'stars', 'fwhm')
+        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=8)
+        for c, w in zip(cols, (170, 60, 60, 50, 60)):
+            self.frames_tree.heading(c, text=c.capitalize())
+            self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
+        self.frames_tree.tag_configure('bad', foreground=_BAD)
+        self.frames_tree.pack(fill='x')
 
         summary_frame = ttk.LabelFrame(parent, text='COMPLETE')
         summary_frame.pack(fill='x', pady=6)
@@ -880,23 +924,6 @@ class App:
         if data:
             self.preview.load_slot(data, f'frame-{fid}', f'Frame #{fid}')
 
-    def _apply_stretch(self) -> None:
-        slug = self.preview.current_slug
-        if not slug:
-            return
-        params = {k: v.get() for k, v in self.stretch_vars.items()}
-        params['stretch'] = 'ghs'
-        data = self.ui.restretch(slug, params)
-        if data:
-            self.preview.replace_pixels(data)
-
-    def _reset_stretch(self) -> None:
-        self.stretch_vars['black'].set(0.0)
-        self.stretch_vars['b'].set(8.0)
-        self.stretch_vars['sp'].set(0.15)
-        self.stretch_vars['hp'].set(0.95)
-        self._apply_stretch()
-
     @staticmethod
     def _slug_from_label(label: str) -> str:
         return label.rsplit(' [', 1)[-1].rstrip(']') if ' [' in label else label
@@ -915,6 +942,20 @@ class App:
             self._refresh_run_button()
             return
         self._last_version = snap['version']
+
+        # New run just started -- drop the previous run's preview image,
+        # milestone slots and thumbnail ring (UIEvents.run_started() already
+        # cleared its side; the widgets need clearing too).
+        if snap['run_status'] == 'running' and self._last_run_status != 'running':
+            self.preview.clear()
+            self.frame_strip.clear()
+            self.view_var.set('')
+            self.compare_var.set(False)
+            self.compare_combo_var.set('')
+            self.wipe_scale.pack_forget()
+            self._named_cache = []
+            self.view_combo['values'] = []
+            self.compare_combo['values'] = []
 
         # phases / progress
         phase = snap['phase']
@@ -1002,7 +1043,7 @@ class App:
             self.start_btn.state(['!disabled'])
             if snap is not None and snap['run_status'] in ('ok', 'error'):
                 done_ok = snap['run_status'] == 'ok'
-                self.status_var.set('Done.' if done_ok else f"Failed: {snap['run_error']}")
+                self.status_var.set('Done' if done_ok else f"Failed: {snap['run_error']}")
                 self.header_status_var.set('Complete' if done_ok else 'Failed')
                 # Edge-triggered (not every poll tick) so it only pops once
                 # per completed run, not repeatedly while the status holds.

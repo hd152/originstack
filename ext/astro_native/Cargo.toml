@@ -1,6 +1,6 @@
 [package]
 name = "astro_native"
-version = "0.19.0"
+version = "0.21.0"
 edition = "2021"
 description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
 
@@ -12,9 +12,16 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 numpy = "0.23"
 rayon = "1.10"
+# Pure-Rust ONNX inference for the bundled originvision model (no C++ ONNX
+# Runtime, no extra DLL to ship). See the originvision section in lib.rs.
+tract-onnx = "0.21"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "thin"
 codegen-units = 1
-panic = "abort"
+# NOT "abort": tract parses an external .onnx file (bundled, or a user
+# --originvision-model), and a malformed model must surface as a Python
+# exception via pyo3's panic guard, not SIGABRT the whole process. The
+# arithmetic kernels never panic; this only matters for the model loader.
+panic = "unwind"

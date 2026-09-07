@@ -1,0 +1,55 @@
+originvision ONNX-inference code + exported model, vendored for OriginStack's
+--originvision feature. torch-free: the exported model runs under onnxruntime, so
+this snapshot needs neither torch nor astropy.
+
+NOTE (2026-09-06): this directory is a PROVENANCE SNAPSHOT ONLY, not on the
+runtime path. --originvision inference is now the native
+astro_native.originvision_score kernel (ext/astro_native/src/lib.rs, mod
+originvision): preprocessing + ONNX forward pass via the pure-Rust `tract`
+runtime, no Python ONNX dependency. src/originvision_infer.py keeps a
+numpy/scipy + Python-onnxruntime port of infer_onnx.py + data/imageops.py +
+data/shape_features.py as a fallback for a source checkout without
+astro_native built. Both run against src/data/originvision.onnx
+(byte-identical to checkpoints/model.onnx here). These files are kept so a
+future re-sync can diff against upstream; see README.md.
+
+source repo : https://github.com/hd152/originvision
+branch      : improve-training-and-tooling
+commit      : 528579c0bf4dead07936ad17e59204f698d29678
+vendored on : 2026-09-06
+vendored by : scripted minimal-set copy (ONNX inference path only)
+
+Included (the upstream reference for src/originvision_infer.py's numpy/scipy port):
+  infer_onnx.py                 <- torch-free entry point (--model / --image / --json)
+  data/imageops.py              <- percentile stretch + resize/center-crop + background correction (cv2+numpy)
+  data/shape_features.py        <- comet shape-gate features for infer_onnx.py's category head (cv2+numpy)
+  checkpoints/model.onnx        <- exported model (~11 MB; byte-identical to src/data/originvision.onnx)
+
+Model: v4, from checkpoints/model_v4_nossl_best.pt -- a 7-task run trained
+FROM SCRATCH (no SSL pre-training), best-by-category checkpoint at epoch 15
+(category_acc_frames 0.872). Replaces the epoch-15 SSL-pretrained + fine-tuned
+v3b model. Matches/beats v3b on category, reject recall and quality; ~0.07
+lower on exposure accuracy (the one metric below v3b).
+
+Graph outputs / `tasks` mismatch -- IMPORTANT:
+  head_order (8 graph outputs): reject, quality, category, exposure,
+    sky_brightness, stray_light_gradient, trailing, background_grid
+  tasks (7, ONNX metadata):     reject, quality, category, exposure,
+    sky_brightness, stray_light_gradient, background_grid
+The architecture always builds all 8 heads, so the graph always emits 8
+outputs, but `trailing` is UNTRAINED on this checkpoint (random weights) and
+is correctly excluded from `tasks`. Consumers MUST gate every head on
+membership in `tasks`, never on output presence -- src/originvision_infer.py
+does. `background_grid` IS trained (a spatial background-flatten map); the
+port ignores it since OriginStack runs its own DBE. `category` is 4-class
+(galaxy/nebula/star_cluster/comet); `exposure` is a 7-class classifier
+(5/10/15/20/25/30/40 s).
+
+NOT vendored: infer.py (torch), export_onnx.py (dev-only), pretrain_ssl.py,
+cull.py, models/, data/cache.py, data/dataset.py, data/light_stats.py,
+data/manifest.py, train.py, data/*.jsonl, configs/, tests/, the .pt checkpoints.
+
+infer_onnx.py handles TIFF/PNG/JPG only -- it refuses FITS (no astropy debayer).
+The in-process port (src/originvision_infer.py::_load_image_any) debayers a raw
+.fits light itself and feeds the array straight to the model -- no temp file.
+Re-sync steps: see README.md.

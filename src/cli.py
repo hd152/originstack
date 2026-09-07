@@ -1008,7 +1008,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_comet = p.add_argument_group('Comet mode')
     g_adv = p.add_argument_group('Advanced (most are managed automatically by --auto)')
     g_debug = p.add_argument_group('Diagnostics & debugging')
-    g_astrollm = p.add_argument_group('astrollm scoring (advisory)')
+    g_originvision = p.add_argument_group('originvision scoring (advisory)')
     g_core.add_argument('-d', '--directory', required=True)
     g_core.add_argument('-o', '--output', default=None,
                    help='Output FITS path (default: <directory>_stacked.fits)')
@@ -1041,6 +1041,10 @@ def build_parser() -> argparse.ArgumentParser:
     g_core.add_argument('--sweep-undo', action='store_true',
                    help='Recursively strip the .rejected suffix applied by '
                         '--quality-sweep --apply, restoring all flagged files')
+    g_core.add_argument('--sweep-no-cache', action='store_true',
+                   help='With --quality-sweep: ignore and do not write the '
+                        '.sweepcache.json score cache (by default unchanged '
+                        'frames are served from it, making re-sweeps fast)')
     g_core.add_argument('--live', action='store_true',
                    help='Real-time (live) stacking: watch the directory and fold each new '
                         'sub into a running stack as it lands, pushing the growing result '
@@ -1435,50 +1439,45 @@ def build_parser() -> argparse.ArgumentParser:
                         'accepted, rejection_reason)')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
-    g_astrollm.add_argument('--astrollm', action='store_true',
-                   help='Score the final stacked master with astrollm (separately-trained '
-                        'defect/quality/category classifier), run as a per-image subprocess. '
-                        'When --auto is also active (the default -- pass --no-auto to '
-                        'disable), also samples 3 light frames spread through the session '
-                        '(fast, ~8s each): the sampled category feeds the same target-'
-                        'classification prior SIMBAD/header metadata uses, and a defect flag '
-                        'nudges settings defensively (trail-reject, stronger chroma '
-                        'denoising) -- never auto-rejects a frame, this model is still '
-                        'finishing its first training run. Pair with --astrollm-score-all to '
-                        'also score every accepted frame (much slower -- minutes, not '
-                        'seconds, on a large session). Needs --astrollm-dir (or the '
-                        'individual --astrollm-python/-script/-checkpoint overrides).')
-    g_astrollm.add_argument('--astrollm-score-all', action='store_true',
-                   help='Also score every accepted light frame with astrollm (not just '
-                        'the fast 3-frame sample --astrollm always does), logging advisory '
+    g_originvision.add_argument('--originvision', action='store_true',
+                   help='Score the final stacked master with originvision (separately-trained '
+                        'defect/quality/category classifier), run in-process against the '
+                        'bundled model (src/data/originvision.onnx -- no external folder or '
+                        'venv). Inference is the native astro_native kernel (pure-Rust tract, '
+                        'nothing extra to install); a source checkout without astro_native '
+                        'falls back to a Python onnxruntime path. When --auto is also active '
+                        '(the default -- pass --no-auto to disable), also samples 3 light '
+                        'frames spread through the session: the sampled category feeds the '
+                        'same target-classification prior SIMBAD/header metadata uses, and a '
+                        'defect flag nudges settings defensively (trail-reject, stronger '
+                        'chroma denoising) -- never auto-rejects a frame, this model is still '
+                        'finishing its first training run. Pair with --originvision-score-all '
+                        'to also score every accepted frame (slower on a large session). '
+                        'Self-disables with a warning when no backend is available.')
+    g_originvision.add_argument('--originvision-score-all', action='store_true',
+                   help='Also score every accepted light frame with originvision (not just '
+                        'the fast 3-frame sample --originvision always does), logging advisory '
                         'per-frame defect/stray-light flags and below-average quality_score '
-                        'outliers. Meaningfully slower -- ~8s per frame, so minutes on a '
-                        'large session -- since each call is a separate subprocess with its '
-                        'own Python/torch startup cost, not just per-image compute. Requires '
-                        '--astrollm.')
-    g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'), metavar='DIR',
-                   help='astrollm repo root. Derives --astrollm-python '
-                        '(DIR\\.venv\\Scripts\\python.exe), --astrollm-script (DIR\\infer.py), '
-                        'and --astrollm-checkpoint (DIR\\checkpoints\\model.pt) from astrollm\'s '
-                        'standard layout -- the three overrides below only need to be passed '
-                        'individually if your layout differs. Defaults to the ASTROLLM_DIR '
-                        'environment variable if set.')
-    g_astrollm.add_argument('--astrollm-python', default=None, metavar='PATH',
-                   help='Path to the astrollm venv\'s python.exe (override; default: derived '
-                        'from --astrollm-dir)')
-    g_astrollm.add_argument('--astrollm-script', default=None, metavar='PATH',
-                   help='Path to astrollm\'s infer.py (override; default: derived from '
-                        '--astrollm-dir)')
-    g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
-                   help='Path to the astrollm model checkpoint (override; default: '
-                        'DIR\\checkpoints\\model.pt from --astrollm-dir). A relative path is '
-                        'resolved against --astrollm-script\'s directory')
-    g_astrollm.add_argument('--astrollm-workers', type=int, default=2, metavar='N',
-                   help='Thread-pool size for per-frame astrollm scoring calls (default: 2). '
-                        'Subprocess-bound (model load + inference in a separate process), '
-                        'not CPU-bound, so a thread pool is used rather than ProcessPoolExecutor.')
-    g_astrollm.add_argument('--astrollm-timeout', type=float, default=60.0, metavar='SEC',
-                   help='Per-call subprocess timeout in seconds (default: 60)')
+                        'outliers. Slower on a large session (a decode + debayer + stretch + '
+                        'resize + forward pass per frame). Requires --originvision.')
+    g_originvision.add_argument('--originvision-model', default=None, metavar='PATH',
+                   help='Path to an exported originvision ONNX model, overriding the bundled '
+                        'src/data/originvision.onnx (e.g. to test a newer checkpoint).')
+    g_originvision.add_argument('--originvision-workers', type=int, default=2, metavar='N',
+                   help='Thread-pool size for per-frame originvision scoring calls (default: 2). '
+                        'onnxruntime releases the GIL during the forward pass, so a thread '
+                        'pool parallelises it without a ProcessPoolExecutor.')
+    # Back-compat, all hidden: --originvision-dir / --originvision-checkpoint still
+    # resolve a model path; --originvision-timeout / -python / -script are inert
+    # no-ops kept so pre-in-process command lines don't hard-error.
+    g_originvision.add_argument('--originvision-dir', default=os.environ.get('ORIGINVISION_DIR'),
+                   metavar='DIR', help=argparse.SUPPRESS)
+    g_originvision.add_argument('--originvision-checkpoint', default=None, metavar='PATH',
+                   help=argparse.SUPPRESS)
+    g_originvision.add_argument('--originvision-timeout', type=float, default=None,
+                   metavar='SEC', help=argparse.SUPPRESS)
+    g_originvision.add_argument('--originvision-python', default=None, help=argparse.SUPPRESS)
+    g_originvision.add_argument('--originvision-script', default=None, help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
@@ -1624,7 +1623,7 @@ def build_parser() -> argparse.ArgumentParser:
                             'each with its own per-channel spectral signature and a '
                             'spatially-varying activation map), written as '
                             '<stem>_star_component.fits / <stem>_nebula_component.fits. '
-                            'An alternative to --no-remove-stars\'s inpainting for use cases '
+                            'An alternative to --remove-stars\'s inpainting for use cases '
                             'that want the star signal separated out, not discarded. '
                             'Non-convex optimisation with no convergence guarantee -- '
                             'inspect the output before trusting the split, especially if '
@@ -1705,14 +1704,17 @@ def build_parser() -> argparse.ArgumentParser:
                         'object (a brighter star, a vignetting corner, etc. -- confirmed on '
                         'a real dense-star-field target) -- open the stacked preview, read '
                         'off the galaxy\'s pixel position, and pin it directly.')
+    g_post.add_argument('--remove-stars', dest='remove_stars', action='store_true',
+                   help='Also write a starless sidecar (<output>_starless.fits). '
+                        'Off by default. Detected stars are inpainted with local '
+                        'background (normalised-convolution fill, per-star radius '
+                        'scaled to brightness); the main output is untouched. The '
+                        'sidecar is for downstream nebula/background work '
+                        '(aggressive stretch, external star recombination). '
+                        'Computed last, on the fully post-processed image. Not '
+                        'turned on by --auto.')
     g_post.add_argument('--no-remove-stars', dest='remove_stars', action='store_false',
-                   help='Disable star removal. By default, detected stars are '
-                        'inpainted with local background (normalised-convolution '
-                        'fill, per-star radius scaled to brightness) and saved as a '
-                        '<output>_starless.fits sidecar. The main output is '
-                        'untouched; the sidecar is for downstream nebula/background '
-                        'work (aggressive stretch, external star recombination). '
-                        'Computed last, on the fully post-processed image.')
+                   help=argparse.SUPPRESS)  # back-compat no-op (star removal is opt-in now)
 
     # Defaults for parameters that are tunable via config file but not exposed on the CLI.
     # Set these in a TOML config with --config to override them.
@@ -1852,7 +1854,7 @@ def build_parser() -> argparse.ArgumentParser:
         pre_gradient_removal=False,
         drizzle_pixfrac=1.0,
         halo_removal=False,
-        remove_stars=True,
+        remove_stars=False,   # opt-in: --remove-stars writes the starless sidecar
         galaxy_mode=False,
     )
     return p
@@ -1930,44 +1932,44 @@ def parse_args(argv=None):
     args.keep_intermediates = 'intermediates' in _dbg
     args.export_masks = 'masks' in _dbg
 
-    if args.astrollm:
-        # --astrollm-dir derives the three individual paths from astrollm's
-        # standard repo layout; an explicit --astrollm-python/-script/
-        # -checkpoint always wins over the derived value.
-        if args.astrollm_dir:
-            if not args.astrollm_python:
-                args.astrollm_python = os.path.join(args.astrollm_dir, '.venv', 'Scripts', 'python.exe')
-            if not args.astrollm_script:
-                args.astrollm_script = os.path.join(args.astrollm_dir, 'infer.py')
-            if not args.astrollm_checkpoint:
-                args.astrollm_checkpoint = os.path.join(args.astrollm_dir, 'checkpoints', 'model.pt')
-        if args.astrollm_checkpoint and args.astrollm_script and not os.path.isabs(args.astrollm_checkpoint):
-            args.astrollm_checkpoint = os.path.join(
-                os.path.dirname(args.astrollm_script), args.astrollm_checkpoint)
-        missing = [name for name, val in (
-            ('--astrollm-python', args.astrollm_python),
-            ('--astrollm-script', args.astrollm_script),
-            ('--astrollm-checkpoint', args.astrollm_checkpoint),
-        ) if not val]
-        bad_paths = [name for name, val in (
-            ('--astrollm-python', args.astrollm_python),
-            ('--astrollm-script', args.astrollm_script),
-            ('--astrollm-checkpoint', args.astrollm_checkpoint),
-        ) if val and not os.path.exists(val)]
-        if missing:
-            safe_print(f"  WARNING: --astrollm requires {', '.join(missing)} -- disabling astrollm scoring")
-            args.astrollm = False
-        elif bad_paths:
-            safe_print(f"  WARNING: --astrollm path(s) not found: {', '.join(bad_paths)} -- disabling astrollm scoring")
-            args.astrollm = False
+    if args.originvision:
+        from src.originvision_infer import backend_name, onnxruntime_available, resolve_model_path
 
-    if getattr(args, 'astrollm_score_all', False) and not args.astrollm:
-        # Covers both "never passed --astrollm" and "--astrollm got disabled
+        # Back-compat: --originvision-model wins; otherwise honour the old
+        # --originvision-checkpoint, then derive from --originvision-dir's layout.
+        if not args.originvision_model:
+            if args.originvision_checkpoint:
+                args.originvision_model = args.originvision_checkpoint
+            elif args.originvision_dir:
+                args.originvision_model = os.path.join(
+                    args.originvision_dir, 'checkpoints', 'model.onnx')
+
+        if not onnxruntime_available():
+            safe_print("  WARNING: --originvision has no inference backend "
+                       "(build ext/astro_native, or pip install onnxruntime) "
+                       "-- disabling originvision scoring")
+            args.originvision = False
+        elif args.originvision_model and not os.path.isfile(args.originvision_model):
+            # An explicit override that doesn't exist is a hard error -- never
+            # silently fall back to the bundled model (resolve_model_path
+            # would), the user asked for a specific file.
+            safe_print(f"  WARNING: --originvision model not found: {args.originvision_model} "
+                       f"-- disabling originvision scoring")
+            args.originvision = False
+        elif resolve_model_path(args.originvision_model) is None:
+            safe_print("  WARNING: --originvision has no model (bundled "
+                       "src/data/originvision.onnx missing) -- disabling originvision scoring")
+            args.originvision = False
+        else:
+            safe_print(f"  originvision: {backend_name()} backend")
+
+    if getattr(args, 'originvision_score_all', False) and not args.originvision:
+        # Covers both "never passed --originvision" and "--originvision got disabled
         # just above for missing/bad paths" -- either way score_all's own
-        # gate (astrollm AND astrollm_score_all, checked in src/astrollm.py
+        # gate (originvision AND originvision_score_all, checked in src/originvision.py
         # too) makes it a silent no-op otherwise, which is easy to mistake
         # for "ran but found nothing" rather than "didn't run at all".
-        safe_print("  WARNING: --astrollm-score-all has no effect without --astrollm")
+        safe_print("  WARNING: --originvision-score-all has no effect without --originvision")
 
     return args
 

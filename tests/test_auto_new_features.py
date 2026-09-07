@@ -84,14 +84,28 @@ class TestGalaxySkipsSkyResidual:
     """remove_sky_residual's own extended-source detection is cruder than
     --galaxy-mode's fitted exclusion ellipse (a stricter threshold, a fixed
     circle instead of a shape-tracking ellipse) -- even with the ellipse now
-    also threaded through to it, real (patchy/irregular) galaxy structure
-    extending past it still gets partially eaten across the step's 3 passes.
-    Confirmed on real data that skipping the step entirely measurably
-    improves output quality for a galaxy target, so the auto-advisor adds
-    it to skip_step whenever the blend weight is dominated by galaxy."""
+    also threaded through to it, real (patchy/irregular) galaxy structure or
+    a frame-filling emission/reflection nebula still gets partially eaten
+    across the step's 3 passes. Confirmed on real data for a galaxy and on a
+    real Lagoon Nebula session, so the auto-advisor adds it to skip_step
+    whenever the galaxy + emission + reflection blend weight dominates."""
 
     def test_galaxy_anchor_adds_sky_residual_to_skip_step(self):
         sig = dict(a._TYPE_ANCHORS['galaxy'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=None)
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['sky_residual']
+
+    def test_emission_nebula_anchor_adds_sky_residual_to_skip_step(self):
+        sig = dict(a._TYPE_ANCHORS['emission_nebula'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=None)
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['sky_residual']
+
+    def test_reflection_nebula_anchor_adds_sky_residual_to_skip_step(self):
+        sig = dict(a._TYPE_ANCHORS['reflection_nebula'])
         weights = a._blend_weights(sig)
         args = _args(skip_step=None)
         a._apply_dynamic_settings(sig, weights, args)
@@ -312,41 +326,41 @@ def _quality_sig(**overrides):
     return base
 
 
-class TestAstrollmDefectNudge:
-    """--astrollm's fast session-sample defect flag (src/astrollm.py::
-    sample_session_priors, via args._astrollm_defect_flagged) nudges
+class TestOriginvisionDefectNudge:
+    """--originvision's fast session-sample defect flag (src/originvision.py::
+    sample_session_priors, via args._originvision_defect_flagged) nudges
     settings defensively -- trail_reject on, chroma denoising strengthened
     -- never a frame rejection."""
 
     def test_defect_flagged_enables_trail_reject(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.trail_reject is True
 
     def test_defect_flagged_strengthens_chroma_boost(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.denoise_chroma_boost >= 3.0
 
     def test_no_defect_flag_leaves_settings_untouched(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=False)
+                     _originvision_defect_flagged=False)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.trail_reject is False
         assert args.denoise_chroma_boost == 2.0
 
     def test_explicit_trail_reject_wins(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True,
+                     _originvision_defect_flagged=True,
                      _explicit_cli_dests={'trail_reject'})
         a._apply_quality_settings(_quality_sig(), args)
         assert args.trail_reject is False  # not overwritten
 
     def test_explicit_chroma_boost_wins(self):
         args = _args(trail_reject=False, denoise_chroma_boost=1.5,
-                     _astrollm_defect_flagged=True,
+                     _originvision_defect_flagged=True,
                      _explicit_cli_dests={'denoise_chroma_boost'})
         a._apply_quality_settings(_quality_sig(), args)
         assert args.denoise_chroma_boost == 1.5  # not overwritten
@@ -356,13 +370,13 @@ class TestAstrollmDefectNudge:
         rejects/down-weights a frame -- that's a bigger behavioral bet
         than this early/unvalidated model earns."""
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         assert not hasattr(args, 'accepted')
         a._apply_quality_settings(_quality_sig(), args)
         assert not hasattr(args, 'accepted')
 
     def test_already_strong_chroma_boost_not_lowered(self):
         args = _args(trail_reject=True, denoise_chroma_boost=4.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.denoise_chroma_boost == 4.0

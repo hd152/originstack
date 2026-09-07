@@ -234,7 +234,7 @@ Eight built-in target presets tune all parameters at once:
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges
-- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`) with phase progress, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, live re-stretch, before/after wipe compare) while stacking — see [Desktop App](#desktop-app) below
+- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`) with phase progress, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, before/after wipe compare) while stacking — see [Desktop App](#desktop-app) below
 - **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
@@ -242,7 +242,7 @@ Eight built-in target presets tune all parameters at once:
 - **Galaxy/extended-source exclusion masking** (`--galaxy-mode`, `--galaxy-center X,Y`) — protects a galaxy's broad halo from background extraction, so it isn't fit and subtracted as gradient; auto-enabled for galaxy targets by `--auto`
 - **Robust-PCA master calibration** (`--master-method robust_pca`, `--flat-from-lights`) — separates true shared calibration pattern from session-specific outliers (dust motes, transient hot pixels) instead of a per-pixel median
 - **Real-time and streaming stacking** — `--live` folds new subs into a running stack as they land; `--stream` two-pass streams an already-complete large directory at O(1) full-resolution memory
-- **astrollm classification** (`--astrollm`) — optional external image classifier that samples a few frames to feed target-type detection and flag defective frames defensively; `--astrollm-score-all` scores every frame (slower, opt-in)
+- **originvision classification** (`--originvision`) — a bundled defect/quality/category CNN that samples a few frames to feed target-type detection and flag defective frames defensively. Runs fully in-process (native Rust `tract` inference, or a Python `onnxruntime` fallback in a source checkout) — nothing external to install. `--originvision-score-all` scores every frame (slower, opt-in)
 - **Object annotation** (`--annotate`) — labels bright stars and named deep-sky objects on a copy of the preview, using a WCS solution
 
 ---
@@ -279,11 +279,13 @@ cd ext/astro_native && maturin develop --release   # into a venv
 
 | Package | Feature |
 |---------|---------|
+| `psutil` | Memory-adaptive worker/memmap sizing (guarded with a fixed fallback everywhere) |
 | `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
 | `tifffile` | TIFF input and `--export tiff` output |
+| `onnxruntime` | `--originvision` inference fallback (only for a source checkout without `astro_native` built) |
 | `reproject` | Mosaic stitching |
-| `astro_native` (Rust) | 31 native kernels: stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted), Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, 2D wavelet transform, blind (unknown-rotation) star-pattern match, BM3D block-matching fallback, hot-pixel fix/replace |
+| `astro_native` (Rust) | ~44 native kernels: stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted), Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, 2D wavelet transform, blind star-pattern match, BM3D block-matching fallback, hot-pixel fix/replace, 1D + 2D Moffat/Gaussian PSF fits, and the full `--originvision` inference path (pure-Rust `tract` ONNX) |
 
 `opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/Menon2007 debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`, also native; NLM denoising, Richardson-Lucy's CPU fallback, and satellite-trail detection are native/numpy now; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — no dependency for any of them.
 
@@ -335,10 +337,9 @@ python desktop_app.py
 
 On Windows, the packaged build (`OriginStack.exe`, see [Packaging](packaging/README.md)) needs no Python install at all — just double-click it.
 
-The window has three panels:
-- **Setup** — every CLI flag as a form, grouped into tabs (Core, Frames & calibration, Registration & stacking, Post-processing, …), auto-generated from the same argument parser the CLI uses, so it never drifts out of sync. Directory/output/config fields get a native folder/file picker; hover any field for its full description.
-- **Pipeline / Log / Recent frames** — live phase progress, the same log output you'd see on the command line, and a running table of per-frame quality (score, SNR, star count, FWHM) as Phase 1 scores each light.
-- **Preview** — the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result), and use the **Stretch** sliders to re-render the current view from its retained linear source without touching the saved output file. A thumbnail strip below shows per-frame previews published during Phase 1.
+The window has two columns:
+- **Left — Setup + Log** — every CLI flag as a form (grouped, auto-generated from the same argument parser the CLI uses, so it never drifts out of sync; directory/output fields get a native picker, hover any field for its full description), then the pipeline phase bar, then the live log — the same output you'd see on the command line.
+- **Right — Preview + frames** — the stacked result, updated live at each milestone: scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a per-frame thumbnail strip and a running table of per-frame quality (score, SNR, star count, FWHM) as Phase 1 scores each light.
 
 Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
 
@@ -658,7 +659,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Luma denoising (wavelet) | ✅ on | `--denoiser none` |
 | Chroma noise reduction | ✅ on | `--no-chroma-nr` |
 | Star reduction | ✅ on | `--no-star-reduce` |
-| Star removal (writes a `_starless.fits` sidecar; main output keeps stars) | ✅ on | `--no-remove-stars` |
+| Star removal (writes a `_starless.fits` sidecar; main output keeps stars) | ❌ off | `--remove-stars` |
 | Local contrast enhancement | ✅ on | `--no-local-contrast` |
 | Chromatic aberration correction | ✅ on | `--no-ca-correction` |
 | Cosmic ray rejection | auto | `--cosmic-ray-rejection` / `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |
@@ -722,7 +723,7 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 
 ### Native (Rust) acceleration
 
-[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~40 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, and the photometry aperture loop. A representative sample:
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~44 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and the full `--originvision` inference path (preprocessing + ONNX forward pass via the pure-Rust `tract` runtime — no Python ONNX dependency). A representative sample:
 
 | Kernel | Speedup vs numpy/scipy |
 |--------|------------------------|

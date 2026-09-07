@@ -201,7 +201,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # better than a parametric Gaussian/Moffat for filamentary nebulae.
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
-        ('remove_stars',            True),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.75),
         # Toned down from (7.0, 0.18): a real Trifid Nebula render at the old
@@ -254,7 +253,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_tv',           False),
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
-        ('remove_stars',            True),
         # The galaxy's own broad, smooth halo tapers with no hard edge, so a
         # per-pixel significance mask can't reliably tell it apart from
         # residual gradient at the object's edge -- the smooth background fit
@@ -294,10 +292,9 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_iterations',   20),
         ('deconvolve_blind_psf',    True),
         ('deconvolve_tv',           False),
-        # Stars are the target — never soften them, and never produce a
-        # starless sidecar (it would erase the target itself).
+        # Stars are the target — never soften them. (Star removal is opt-in
+        # globally now via --remove-stars, so nothing to disable here.)
         ('star_reduce',             False),
-        ('remove_stars',            False),
         ('galaxy_mode',             False),
         ('local_contrast',          True),
         ('local_contrast_strength', 0.80),
@@ -325,7 +322,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # Reduce background stars so the compact nebula is not dominated by halos.
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
-        ('remove_stars',            True),
         ('galaxy_mode',             False),
         ('local_contrast',          True),
         ('local_contrast_strength', 0.80),
@@ -358,7 +354,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_iterations',   15),
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
-        ('remove_stars',            True),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.70),
         ('ghs_b',                   8.0),
@@ -384,7 +379,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'star_field': [
         # deconvolve is conditional — set in _apply_dynamic_settings
         ('star_reduce',             False),
-        ('remove_stars',            False),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.5),
         ('ghs_b',                   6.0),
@@ -398,7 +392,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'wide_field': [
         ('deconvolve',              False),
         ('star_reduce',             False),
-        ('remove_stars',            False),
         ('galaxy_mode',             False),
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),
@@ -571,28 +564,33 @@ def _apply_dynamic_settings(
         _set('deconvolve', True)
         _set('deconvolve_iterations', 10)
 
-    # Galaxy targets skip the sky-residual correction passes entirely
-    # (--skip-step sky_residual): unlike DBE (which honors --galaxy-mode's
-    # fitted exclusion ellipse), remove_sky_residual's own extended-source
-    # detection is a much stricter, cruder fallback -- even with the ellipse
-    # now also threaded through to it, real (patchy, irregular) galaxy arms
-    # extending past a symmetric ellipse fit, or spanning a mesh cell only
-    # partially, still get partially fit away as "background" across 3
-    # residual passes. Confirmed on real data: skipping the step entirely
-    # measurably improves output quality for a galaxy -- DBE's own single
-    # protected pass already does the main background-flattening job for
-    # this target type, so the extra passes are net-negative here even
-    # though they help other targets. `skip_step` is a plain list (not
-    # blendable/settable via _set() above), and explicit-dest opt-out is
-    # honored manually since a straight append can't reuse _set()'s
-    # overwrite-if-different equality check.
+    # Extended-source targets skip the sky-residual correction passes
+    # entirely (--skip-step sky_residual): unlike DBE (which honors
+    # --galaxy-mode's fitted exclusion ellipse), remove_sky_residual's own
+    # extended-source detection is a much stricter, cruder fallback -- even
+    # with the ellipse now also threaded through to it, real (patchy,
+    # irregular) galaxy arms extending past a symmetric ellipse fit, or a
+    # frame-filling emission/reflection nebula with no hard edge, still get
+    # partially fit away as "background" across 3 residual passes. Confirmed
+    # on real data for a galaxy (skipping measurably improves output) and on
+    # a real Lagoon Nebula session (the residual passes removed over half
+    # the nebulosity). DBE's own single protected pass already does the main
+    # background-flattening job for these types. The galaxy/emission/
+    # reflection blend weights are only high when the object actually fills
+    # the frame -- a small nebula on empty sky keeps the step. `skip_step`
+    # is a plain list (not blendable/settable via _set() above), and
+    # explicit-dest opt-out is honored manually since a straight append
+    # can't reuse _set()'s overwrite-if-different equality check.
     current_skip = list(getattr(args, 'skip_step', None) or [])
-    if (weights.get('galaxy', 0.0) > 0.3
+    _extended_w = (weights.get('galaxy', 0.0)
+                   + weights.get('emission_nebula', 0.0)
+                   + weights.get('reflection_nebula', 0.0))
+    if (_extended_w > 0.3
             and 'skip_step' not in _explicit
             and 'sky_residual' not in current_skip):
         current_skip.append('sky_residual')
         setattr(args, 'skip_step', current_skip)
-        changes.append("skip_step  += 'sky_residual' (galaxy target)")
+        changes.append("skip_step  += 'sky_residual' (extended-source target)")
 
     return changes
 
@@ -848,16 +846,16 @@ def _apply_quality_settings(
             and getattr(args, 'color_calibrate_method', 'colorindex') == 'colorindex'):
         _set('color_calibrate_method', 'spcc')
 
-    # 19. astrollm defect signal (--astrollm, fast session-sample only --
-    #     see src/astrollm.py::sample_session_priors, not the full-session
+    # 19. originvision defect signal (--originvision, fast session-sample only --
+    #     see src/originvision.py::sample_session_priors, not the full-session
     #     per-frame scoring) nudges settings defensively rather than
     #     rejecting anything outright: enable trail-reject (satellite/
     #     aircraft trail inpainting) and strengthen chroma denoising, since
     #     a defect/stray-light flag most often means exactly what those two
-    #     settings address. astrollm is still an early/unvalidated model
-    #     (see src/astrollm.py's module docstring) -- auto-dropping frames
+    #     settings address. originvision is still an early/unvalidated model
+    #     (see src/originvision.py's module docstring) -- auto-dropping frames
     #     on its say-so would be a much bigger bet than a soft nudge.
-    if getattr(args, '_astrollm_defect_flagged', False):
+    if getattr(args, '_originvision_defect_flagged', False):
         if not getattr(args, 'trail_reject', False):
             _set('trail_reject', True)
         _chroma_boost = float(getattr(args, 'denoise_chroma_boost', 2.0) or 2.0)

@@ -5031,6 +5031,254 @@ fn fit_moffat_native(
 }
 
 // ---------------------------------------------------------------------------
+// 2D PSF star fit (src/psf_deconvolution.py's `estimate_psf` per-star curve_fit)
+// ---------------------------------------------------------------------------
+//
+// estimate_psf fits a 2D Moffat (default) or Gaussian to each of up to
+// RL_PSF_MAX_STARS bright, unsaturated star cutouts (~31x31 px) via
+// scipy.optimize.curve_fit -- whose bounded solver evaluates the Python model
+// (plus numerical differencing) on ~961 points every trust-region iteration.
+// Same pattern and fix as fit_moffat_native above, one dimension up: a
+// from-scratch bounded Levenberg-Marquardt with each model and its analytic
+// Jacobian inlined, box constraints enforced by clamping the step. Not a port
+// of curve_fit's TRF path -- parity is judged by both recovering the same
+// synthetic ground-truth params within tolerance (tests/test_native.py).
+
+/// Gaussian elimination with partial pivoting for a small dense NxN system.
+/// `None` on a (near-)singular matrix.
+fn solve_lin<const N: usize>(mut a: [[f64; N]; N], mut b: [f64; N]) -> Option<[f64; N]> {
+    for col in 0..N {
+        let mut piv = col;
+        let mut best = a[col][col].abs();
+        for row in (col + 1)..N {
+            let m = a[row][col].abs();
+            if m > best {
+                best = m;
+                piv = row;
+            }
+        }
+        if best < 1e-18 {
+            return None;
+        }
+        a.swap(col, piv);
+        b.swap(col, piv);
+        let d = a[col][col];
+        for row in (col + 1)..N {
+            let f = a[row][col] / d;
+            if f != 0.0 {
+                for k in col..N {
+                    a[row][k] -= f * a[col][k];
+                }
+                b[row] -= f * b[col];
+            }
+        }
+    }
+    let mut x = [0.0f64; N];
+    for i in (0..N).rev() {
+        let mut s = b[i];
+        for k in (i + 1)..N {
+            s -= a[i][k] * x[k];
+        }
+        x[i] = s / a[i][i];
+    }
+    Some(x)
+}
+
+/// Bounded LM shared by the two 2D-PSF models. `resid_jac(p, i)` returns
+/// `(model(p, i) - z[i], d model / d p)` for sample `i`. Same outer-loop /
+/// lambda schedule as `fit_moffat_lm`.
+fn psf_lm<const N: usize, F>(
+    n: usize,
+    lower: [f64; N],
+    upper: [f64; N],
+    p0: [f64; N],
+    resid_jac: F,
+) -> Option<[f64; N]>
+where
+    F: Fn(&[f64; N], usize) -> (f64, [f64; N]),
+{
+    let mut p = p0;
+    for k in 0..N {
+        p[k] = p[k].clamp(lower[k], upper[k]);
+    }
+    let cost = |p: &[f64; N]| -> f64 {
+        let mut s = 0.0;
+        for i in 0..n {
+            let (r, _) = resid_jac(p, i);
+            s += r * r;
+        }
+        s
+    };
+    let mut lambda = 1e-3f64;
+    let mut c = cost(&p);
+    for _outer in 0..100 {
+        let mut jtj = [[0.0f64; N]; N];
+        let mut jtr = [0.0f64; N];
+        for i in 0..n {
+            let (r, j) = resid_jac(&p, i);
+            for a in 0..N {
+                jtr[a] += j[a] * r;
+                for b in 0..N {
+                    jtj[a][b] += j[a] * j[b];
+                }
+            }
+        }
+        let mut improved = false;
+        for _try in 0..8 {
+            let mut aug = jtj;
+            for d in 0..N {
+                aug[d][d] += lambda * jtj[d][d].max(1e-12);
+            }
+            let mut neg = [0.0f64; N];
+            for d in 0..N {
+                neg[d] = -jtr[d];
+            }
+            let delta = match solve_lin(aug, neg) {
+                Some(d) => d,
+                None => {
+                    lambda *= 10.0;
+                    continue;
+                }
+            };
+            let mut cand = p;
+            for k in 0..N {
+                cand[k] = (p[k] + delta[k]).clamp(lower[k], upper[k]);
+            }
+            let cand_cost = cost(&cand);
+            if cand_cost < c {
+                p = cand;
+                c = cand_cost;
+                lambda = (lambda * 0.3).max(1e-12);
+                improved = true;
+                break;
+            } else {
+                lambda *= 10.0;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    if p.iter().all(|x| x.is_finite()) {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// 2D Moffat `A*(1 + ((x-x0)^2+(y-y0)^2)/alpha^2)^-beta + bg`,
+/// params `[amp, x0, y0, alpha, beta, bg]`; returns (value, partials).
+#[inline]
+fn moffat2d_eval(x: f64, y: f64, p: &[f64; 6]) -> (f64, [f64; 6]) {
+    let (amp, x0, y0, alpha, beta, bg) = (p[0], p[1], p[2], p[3], p[4], p[5]);
+    let dx = x - x0;
+    let dy = y - y0;
+    let r2 = dx * dx + dy * dy;
+    let a2 = alpha * alpha;
+    let base = 1.0 + r2 / a2;
+    let pw = base.powf(-beta);
+    let sig = amp * pw;
+    let g = sig * beta / base;
+    (
+        sig + bg,
+        [
+            pw,                             // d/d amp
+            2.0 * dx / a2 * g,              // d/d x0
+            2.0 * dy / a2 * g,              // d/d y0
+            2.0 * r2 / (a2 * alpha) * g,    // d/d alpha  (= 2 r2 / alpha^3 * g)
+            -sig * base.ln(),               // d/d beta
+            1.0,                            // d/d bg
+        ],
+    )
+}
+
+/// 2D Gaussian `A*exp(-((x-x0)^2+(y-y0)^2)/(2 sigma^2)) + bg`,
+/// params `[amp, x0, y0, sigma, bg]`; returns (value, partials).
+#[inline]
+fn gauss2d_eval(x: f64, y: f64, p: &[f64; 5]) -> (f64, [f64; 5]) {
+    let (amp, x0, y0, sigma, bg) = (p[0], p[1], p[2], p[3], p[4]);
+    let dx = x - x0;
+    let dy = y - y0;
+    let r2 = dx * dx + dy * dy;
+    let s2 = sigma * sigma;
+    let e = (-r2 / (2.0 * s2)).exp();
+    let sig = amp * e;
+    (
+        sig + bg,
+        [
+            e,                        // d/d amp
+            sig * dx / s2,            // d/d x0
+            sig * dy / s2,            // d/d y0
+            sig * r2 / (s2 * sigma),  // d/d sigma  (= r2 / sigma^3 * sig)
+            1.0,                      // d/d bg
+        ],
+    )
+}
+
+/// Fit a 2D Moffat to a row-major `sz*sz` star cutout. `peak`/`bg` seed the
+/// same p0/bounds `estimate_psf` builds for curve_fit. Returns
+/// `(amp, x0, y0, alpha, beta, bg)` or `None`.
+#[pyfunction]
+fn fit_psf_moffat2d_native(
+    z: PyReadonlyArray1<f64>,
+    sz: usize,
+    peak: f64,
+    bg: f64,
+) -> PyResult<Option<(f64, f64, f64, f64, f64, f64)>> {
+    let z = z.as_slice()?;
+    if sz < 3 || z.len() != sz * sz {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "z length must equal sz*sz with sz >= 3",
+        ));
+    }
+    if !(peak > bg) || !peak.is_finite() || !bg.is_finite() {
+        return Ok(None);
+    }
+    let center = sz as f64 / 2.0;
+    let lower = [0.0, center - 3.0, center - 3.0, 0.5, 1.0, 0.0];
+    let upper = [peak * 2.0, center + 3.0, center + 3.0, 20.0, 10.0, peak];
+    let p0 = [peak - bg, center, center, 2.0, 3.0, bg];
+    let res = psf_lm::<6, _>(z.len(), lower, upper, p0, |p, i| {
+        let x = (i % sz) as f64;
+        let y = (i / sz) as f64;
+        let (val, j) = moffat2d_eval(x, y, p);
+        (val - z[i], j)
+    });
+    Ok(res.map(|p| (p[0], p[1], p[2], p[3], p[4], p[5])))
+}
+
+/// Fit a 2D Gaussian to a row-major `sz*sz` star cutout.
+/// Returns `(amp, x0, y0, sigma, bg)` or `None`.
+#[pyfunction]
+fn fit_psf_gauss2d_native(
+    z: PyReadonlyArray1<f64>,
+    sz: usize,
+    peak: f64,
+    bg: f64,
+) -> PyResult<Option<(f64, f64, f64, f64, f64)>> {
+    let z = z.as_slice()?;
+    if sz < 3 || z.len() != sz * sz {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "z length must equal sz*sz with sz >= 3",
+        ));
+    }
+    if !(peak > bg) || !peak.is_finite() || !bg.is_finite() {
+        return Ok(None);
+    }
+    let center = sz as f64 / 2.0;
+    let lower = [0.0, center - 3.0, center - 3.0, 0.3, 0.0];
+    let upper = [peak * 2.0, center + 3.0, center + 3.0, 20.0, peak];
+    let p0 = [peak - bg, center, center, 2.0, bg];
+    let res = psf_lm::<5, _>(z.len(), lower, upper, p0, |p, i| {
+        let x = (i % sz) as f64;
+        let y = (i / sz) as f64;
+        let (val, j) = gauss2d_eval(x, y, p);
+        (val - z[i], j)
+    });
+    Ok(res.map(|p| (p[0], p[1], p[2], p[3], p[4])))
+}
+
+// ---------------------------------------------------------------------------
 // Background mesh median grid (src/background.py's `_process_channel`)
 // ---------------------------------------------------------------------------
 //
@@ -5521,8 +5769,507 @@ fn aperture_photometry_batch<'py>(
     ))
 }
 
+// ===========================================================================
+// originvision in-process inference (src/originvision_infer.py's score_rgb)
+// ===========================================================================
+//
+// Runs the bundled originvision ONNX model end-to-end in Rust via `tract`
+// (pure Rust -- no C++ ONNX Runtime, no extra DLL to ship). Replaces the
+// numpy/scipy preprocessing + Python `onnxruntime` InferenceSession that
+// src/originvision_infer.py::score_rgb used to do. FITS/TIFF/PNG loading +
+// debayering stays in Python (astropy / the pipeline's loaders); this takes
+// an already-decoded (H, W, 3) f32 RGB array and returns the same result
+// dict `score_rgb` did.
+//
+// Preprocessing mirrors src/originvision_infer.py:
+//   per-channel [0.5, 99.5] percentile stretch -> u8
+//   -> gaussian pre-blur (downscale only) + bilinear resize shorter side to
+//      `size`, centre-crop to size x size, /255, NCHW
+// Every result head is gated on the ONNX metadata `tasks` list, never on
+// output presence (the v4 graph builds an untrained `trailing` head).
+mod originvision {
+    use pyo3::prelude::*;
+    use pyo3::types::PyDict;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tract_onnx::prelude::*;
+
+    type Runnable = TypedRunnableModel<TypedModel>;
+
+    pub struct Session {
+        model: Runnable,
+        head_order: Vec<String>,
+        tasks: Vec<String>,
+        categories: Vec<String>,
+        exposures: Vec<f64>,
+        quality_scale: f64,
+        stray_light_threshold: f64,
+        epoch: Option<i64>,
+    }
+
+    fn cache() -> &'static Mutex<HashMap<String, Arc<Session>>> {
+        static C: OnceLock<Mutex<HashMap<String, Arc<Session>>>> = OnceLock::new();
+        C.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn split_csv(m: &HashMap<String, String>, k: &str) -> Vec<String> {
+        m.get(k)
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn load(path: &str, size: usize) -> TractResult<Session> {
+        let proto = tract_onnx::onnx().proto_model_for_path(path)?;
+        let mut meta: HashMap<String, String> = HashMap::new();
+        for p in &proto.metadata_props {
+            meta.insert(p.key.clone(), p.value.clone());
+        }
+        let head_order = split_csv(&meta, "head_order");
+        let tasks = {
+            let t = split_csv(&meta, "tasks");
+            if t.is_empty() {
+                head_order.clone()
+            } else {
+                t
+            }
+        };
+        let categories = split_csv(&meta, "categories");
+        let exposures = split_csv(&meta, "exposures")
+            .iter()
+            .filter_map(|x| x.parse::<f64>().ok())
+            .collect();
+        let quality_scale = meta
+            .get("quality_scale")
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(400.0);
+        let stray_light_threshold = meta
+            .get("stray_light_threshold")
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(27.0);
+        let epoch = meta.get("epoch").and_then(|s| s.trim().parse::<i64>().ok());
+
+        let model = tract_onnx::onnx()
+            .model_for_proto_model(&proto)?
+            .with_input_fact(0, f32::fact([1, 3, size, size]).into())?
+            .into_optimized()?
+            .into_runnable()?;
+
+        Ok(Session {
+            model,
+            head_order,
+            tasks,
+            categories,
+            exposures,
+            quality_scale,
+            stray_light_threshold,
+            epoch,
+        })
+    }
+
+    fn get_session(path: &str, size: usize) -> TractResult<Arc<Session>> {
+        {
+            let c = cache().lock().unwrap();
+            if let Some(s) = c.get(path) {
+                return Ok(Arc::clone(s));
+            }
+        }
+        let s = Arc::new(load(path, size)?);
+        cache().lock().unwrap().insert(path.to_string(), Arc::clone(&s));
+        Ok(s)
+    }
+
+    // ---- preprocessing (mirror src/originvision_infer.py) -----------------
+
+    /// numpy-style linear-interpolated percentile of a pre-sorted slice.
+    fn pctl(sorted: &[f32], p: f64) -> f64 {
+        let n = sorted.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let rank = p / 100.0 * (n as f64 - 1.0);
+        let lo = rank.floor() as usize;
+        let hi = rank.ceil() as usize;
+        let frac = rank - lo as f64;
+        sorted[lo] as f64 * (1.0 - frac) + sorted[hi] as f64 * frac
+    }
+
+    /// Per-channel [0.5, 99.5] percentile clip + linear stretch to u8.
+    /// Byte-for-byte `imageops.stretch_to_uint8` (`(clip01 * 255).astype(u8)`
+    /// truncates toward zero).
+    fn stretch_u8(rgb: &[f32], n: usize) -> Vec<u8> {
+        let mut out = vec![0u8; n * 3];
+        let mut ch = vec![0f32; n];
+        for c in 0..3 {
+            for i in 0..n {
+                ch[i] = rgb[i * 3 + c];
+            }
+            let mut s = ch.clone();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let lo = pctl(&s, 0.5);
+            let mut hi = pctl(&s, 99.5);
+            if hi <= lo {
+                hi = lo + 1.0;
+            }
+            let scale = 255.0 / (hi - lo);
+            for i in 0..n {
+                let v = ((ch[i] as f64 - lo) * scale).clamp(0.0, 255.0);
+                out[i * 3 + c] = v as u8;
+            }
+        }
+        out
+    }
+
+    /// Separable Gaussian blur over an (h, w, 3) u8 image -> f32, reflect
+    /// boundary, `truncate=4.0` radius (matches scipy.ndimage.gaussian_filter).
+    fn gaussian_blur(img: &[u8], h: usize, w: usize, sigma: f64) -> Vec<f32> {
+        let radius = (4.0 * sigma + 0.5) as isize;
+        let mut kernel = vec![0f64; (2 * radius + 1) as usize];
+        let mut ksum = 0.0;
+        for (idx, kv) in kernel.iter_mut().enumerate() {
+            let x = idx as isize - radius;
+            *kv = (-(x * x) as f64 / (2.0 * sigma * sigma)).exp();
+            ksum += *kv;
+        }
+        for kv in kernel.iter_mut() {
+            *kv /= ksum;
+        }
+        let refl = |i: isize, len: isize| -> usize {
+            // scipy 'reflect' (a b c | c b a), non-edge-duplicating is 'mirror';
+            // gaussian_filter's default is 'reflect' == edge-duplicating.
+            let mut i = i;
+            let n2 = 2 * len;
+            i = ((i % n2) + n2) % n2;
+            if i >= len {
+                i = n2 - 1 - i;
+            }
+            i as usize
+        };
+        let mut tmp = vec![0f32; h * w * 3];
+        // horizontal
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let mut acc = 0.0f64;
+                    for (idx, kv) in kernel.iter().enumerate() {
+                        let xx = refl(x as isize + idx as isize - radius, w as isize);
+                        acc += *kv * img[(y * w + xx) * 3 + c] as f64;
+                    }
+                    tmp[(y * w + x) * 3 + c] = acc as f32;
+                }
+            }
+        }
+        // vertical
+        let mut out = vec![0f32; h * w * 3];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let mut acc = 0.0f64;
+                    for (idx, kv) in kernel.iter().enumerate() {
+                        let yy = refl(y as isize + idx as isize - radius, h as isize);
+                        acc += *kv * tmp[(yy * w + x) * 3 + c] as f64;
+                    }
+                    out[(y * w + x) * 3 + c] = acc as f32;
+                }
+            }
+        }
+        out
+    }
+
+    /// Resize shorter side to `size`, centre-crop to size x size. Downscale
+    /// gets a Gaussian pre-blur (sigma = ((1/scale)-1)/2), then bilinear
+    /// resample (input coord = output coord / scale, reflect edges) -- the
+    /// numpy/scipy `_resize_center_crop` this ports uses `zoom(order=1)` with
+    /// the same pre-blur; a small pixel drift vs that is expected and covered
+    /// by the parity test's tolerance.
+    fn resize_center_crop(stretched: &[u8], h: usize, w: usize, size: usize) -> Vec<u8> {
+        let scale = size as f64 / h.min(w) as f64;
+        let f: Vec<f32> = if scale < 1.0 {
+            let sigma = (1.0 / scale - 1.0) / 2.0;
+            if sigma > 0.01 {
+                gaussian_blur(stretched, h, w, sigma)
+            } else {
+                stretched.iter().map(|&v| v as f32).collect()
+            }
+        } else {
+            stretched.iter().map(|&v| v as f32).collect()
+        };
+        let nh = (h as f64 * scale).round().max(1.0) as usize;
+        let nw = (w as f64 * scale).round().max(1.0) as usize;
+        let clampi = |v: isize, n: usize| -> usize {
+            if v < 0 {
+                0
+            } else if v as usize >= n {
+                n - 1
+            } else {
+                v as usize
+            }
+        };
+        let mut res = vec![0f32; nh * nw * 3];
+        for oy in 0..nh {
+            let iy = oy as f64 / scale;
+            let y0 = iy.floor();
+            let fy = iy - y0;
+            let y0i = clampi(y0 as isize, h);
+            let y1i = clampi(y0 as isize + 1, h);
+            for ox in 0..nw {
+                let ix = ox as f64 / scale;
+                let x0 = ix.floor();
+                let fx = ix - x0;
+                let x0i = clampi(x0 as isize, w);
+                let x1i = clampi(x0 as isize + 1, w);
+                for c in 0..3 {
+                    let v00 = f[(y0i * w + x0i) * 3 + c] as f64;
+                    let v01 = f[(y0i * w + x1i) * 3 + c] as f64;
+                    let v10 = f[(y1i * w + x0i) * 3 + c] as f64;
+                    let v11 = f[(y1i * w + x1i) * 3 + c] as f64;
+                    let top = v00 * (1.0 - fx) + v01 * fx;
+                    let bot = v10 * (1.0 - fx) + v11 * fx;
+                    res[(oy * nw + ox) * 3 + c] = (top * (1.0 - fy) + bot * fy) as f32;
+                }
+            }
+        }
+        let top = if nh > size { (nh - size) / 2 } else { 0 };
+        let left = if nw > size { (nw - size) / 2 } else { 0 };
+        let mut out = vec![0u8; size * size * 3];
+        for oy in 0..size {
+            let sy = (top + oy).min(nh - 1);
+            for ox in 0..size {
+                let sx = (left + ox).min(nw - 1);
+                for c in 0..3 {
+                    out[(oy * size + ox) * 3 + c] =
+                        res[(sy * nw + sx) * 3 + c].clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    fn softmax(x: &[f32]) -> Vec<f64> {
+        let m = x.iter().cloned().fold(f32::MIN, f32::max) as f64;
+        let e: Vec<f64> = x.iter().map(|&v| (v as f64 - m).exp()).collect();
+        let s: f64 = e.iter().sum();
+        e.iter().map(|v| v / s).collect()
+    }
+
+    fn sigmoid(x: f64) -> f64 {
+        1.0 / (1.0 + (-x).exp())
+    }
+
+    // ---- comet shape gate (numpy port of data/shape_features.py) ----------
+
+    /// `(n_components, center_dist_norm)` for the largest bright 8-connected
+    /// component of a grayscale u8 image thresholded at its 99th percentile.
+    fn blob_shape_features(gray: &[u8], h: usize, w: usize) -> (usize, f64) {
+        let mut s: Vec<f32> = gray.iter().map(|&v| v as f32).collect();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let thresh = pctl(&s, 99.0).max(1.0);
+        let bin: Vec<bool> = gray.iter().map(|&v| v as f64 > thresh).collect();
+        let mut label = vec![0usize; h * w];
+        let mut next = 0usize;
+        let mut areas: Vec<usize> = vec![0];
+        let mut sum_y: Vec<f64> = vec![0.0];
+        let mut sum_x: Vec<f64> = vec![0.0];
+        let mut stack: Vec<usize> = Vec::new();
+        for start in 0..(h * w) {
+            if !bin[start] || label[start] != 0 {
+                continue;
+            }
+            next += 1;
+            areas.push(0);
+            sum_y.push(0.0);
+            sum_x.push(0.0);
+            stack.push(start);
+            label[start] = next;
+            while let Some(p) = stack.pop() {
+                let py = p / w;
+                let px = p % w;
+                areas[next] += 1;
+                sum_y[next] += py as f64;
+                sum_x[next] += px as f64;
+                for dy in -1isize..=1 {
+                    for dx in -1isize..=1 {
+                        if dy == 0 && dx == 0 {
+                            continue;
+                        }
+                        let ny = py as isize + dy;
+                        let nx = px as isize + dx;
+                        if ny < 0 || nx < 0 || ny >= h as isize || nx >= w as isize {
+                            continue;
+                        }
+                        let q = ny as usize * w + nx as usize;
+                        if bin[q] && label[q] == 0 {
+                            label[q] = next;
+                            stack.push(q);
+                        }
+                    }
+                }
+            }
+        }
+        let keep: Vec<usize> = (1..=next).filter(|&i| areas[i] >= 5).collect();
+        if keep.is_empty() {
+            return (0, 1.0);
+        }
+        let largest = *keep.iter().max_by_key(|&&i| areas[i]).unwrap();
+        let cy = sum_y[largest] / areas[largest] as f64;
+        let cx = sum_x[largest] / areas[largest] as f64;
+        let dist = ((cx - w as f64 / 2.0).powi(2) + (cy - h as f64 / 2.0).powi(2)).sqrt();
+        let norm = dist / (0.5 * ((w * w + h * h) as f64).sqrt());
+        (keep.len(), norm)
+    }
+
+    // ---- public entry ----------------------------------------------------
+
+    const SHAPE_GATE_SIZE: usize = 512;
+    const COMET_GATE_CENTER_DIST: f64 = 0.20;
+    const COMET_GATE_N_COMPONENTS: usize = 80;
+
+    #[pyfunction]
+    #[pyo3(signature = (rgb, model_path, size=256, shape_gate=true))]
+    pub fn originvision_score(
+        py: Python<'_>,
+        rgb: numpy::PyReadonlyArray3<f32>,
+        model_path: &str,
+        size: usize,
+        shape_gate: bool,
+    ) -> PyResult<Option<PyObject>> {
+        let a = rgb.as_array();
+        let sh = a.shape();
+        if sh.len() != 3 || sh[2] < 3 {
+            return Ok(None);
+        }
+        let (h, w) = (sh[0], sh[1]);
+        let n = h * w;
+        let mut flat = vec![0f32; n * 3];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    flat[(y * w + x) * 3 + c] = a[[y, x, c]];
+                }
+            }
+        }
+
+        let run = || -> TractResult<Option<PyObject>> {
+            let sess = get_session(model_path, size)?;
+            let stretched = stretch_u8(&flat, n);
+            let model_in = resize_center_crop(&stretched, h, w, size);
+
+            // NCHW, /255
+            let mut nchw = vec![0f32; 3 * size * size];
+            for yx in 0..(size * size) {
+                for c in 0..3 {
+                    nchw[c * size * size + yx] = model_in[yx * 3 + c] as f32 / 255.0;
+                }
+            }
+            let input =
+                tract_ndarray::Array4::from_shape_vec((1, 3, size, size), nchw)?.into_tensor();
+            let outputs = sess.model.run(tvec!(input.into()))?;
+
+            let mut out: HashMap<&str, Vec<f32>> = HashMap::new();
+            for (name, t) in sess.head_order.iter().zip(outputs.iter()) {
+                out.insert(name.as_str(), t.to_array_view::<f32>()?.iter().cloned().collect());
+            }
+            let has = |k: &str| sess.tasks.iter().any(|t| t == k);
+            let g = |k: &str| out.get(k);
+
+            let d = PyDict::new(py);
+            d.set_item("checkpoint_epoch", sess.epoch)?;
+            d.set_item("tasks", sess.tasks.clone())?;
+
+            if has("reject") {
+                if let Some(v) = g("reject") {
+                    let p = sigmoid(v[0] as f64);
+                    d.set_item("defect_probability", p)?;
+                    d.set_item("is_defective", p > 0.5)?;
+                }
+            }
+            if has("quality") {
+                if let Some(v) = g("quality") {
+                    d.set_item("quality_score", v[0] as f64 * sess.quality_scale)?;
+                }
+            }
+            if has("category") {
+                if let Some(v) = g("category") {
+                    let probs = softmax(v);
+                    let cats = &sess.categories;
+                    let mut order: Vec<usize> = (0..probs.len()).collect();
+                    order.sort_by(|&i, &j| probs[j].partial_cmp(&probs[i]).unwrap());
+                    let top = order[0];
+                    let picked = if shape_gate
+                        && cats.get(top).map(|c| c == "comet").unwrap_or(false)
+                    {
+                        let feat = resize_center_crop(&stretched, h, w, SHAPE_GATE_SIZE);
+                        let gray: Vec<u8> = (0..SHAPE_GATE_SIZE * SHAPE_GATE_SIZE)
+                            .map(|i| {
+                                (0.299 * feat[i * 3] as f64
+                                    + 0.587 * feat[i * 3 + 1] as f64
+                                    + 0.114 * feat[i * 3 + 2] as f64) as u8
+                            })
+                            .collect();
+                        let (ncomp, cdist) =
+                            blob_shape_features(&gray, SHAPE_GATE_SIZE, SHAPE_GATE_SIZE);
+                        if cdist > COMET_GATE_CENTER_DIST || ncomp > COMET_GATE_N_COMPONENTS {
+                            order[1]
+                        } else {
+                            top
+                        }
+                    } else {
+                        top
+                    };
+                    d.set_item("category", cats.get(picked).cloned().unwrap_or_default())?;
+                    d.set_item("category_confidence", probs[picked])?;
+                    let tops: Vec<(String, f64)> = order
+                        .iter()
+                        .take(3)
+                        .map(|&i| (cats.get(i).cloned().unwrap_or_default(), probs[i]))
+                        .collect();
+                    d.set_item("top_categories", tops)?;
+                    d.set_item("category_shape_gated", picked != top)?;
+                }
+            }
+            if has("exposure") {
+                if let Some(v) = g("exposure") {
+                    let probs = softmax(v);
+                    let i = (0..probs.len())
+                        .max_by(|&x, &y| probs[x].partial_cmp(&probs[y]).unwrap())
+                        .unwrap_or(0);
+                    if let Some(e) = sess.exposures.get(i) {
+                        d.set_item("predicted_exposure_s", *e)?;
+                    }
+                    d.set_item("exposure_confidence", probs[i])?;
+                }
+            }
+            if has("sky_brightness") {
+                if let Some(v) = g("sky_brightness") {
+                    d.set_item("sky_brightness", v[0] as f64 * 255.0)?;
+                }
+            }
+            if has("stray_light_gradient") {
+                if let Some(v) = g("stray_light_gradient") {
+                    let val = v[0] as f64 * 255.0;
+                    d.set_item("stray_light_gradient", val)?;
+                    d.set_item("stray_light_flag", val > sess.stray_light_threshold)?;
+                }
+            }
+            Ok(Some(d.into()))
+        };
+
+        match run() {
+            Ok(r) => Ok(r),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "originvision native inference failed: {e}"
+            ))),
+        }
+    }
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(originvision::originvision_score, m)?)?;
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_seed_burnin, m)?)?;
@@ -5558,6 +6305,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(small_times_wide, m)?)?;
     m.add_function(wrap_pyfunction!(continuum_scale_moments, m)?)?;
     m.add_function(wrap_pyfunction!(fit_moffat_native, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_psf_moffat2d_native, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_psf_gauss2d_native, m)?)?;
     m.add_function(wrap_pyfunction!(mesh_median_grid, m)?)?;
     m.add_function(wrap_pyfunction!(local_normalize_grid, m)?)?;
     m.add_function(wrap_pyfunction!(stamp_star_disks, m)?)?;

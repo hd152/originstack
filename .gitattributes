@@ -1,0 +1,10 @@
+# Model checkpoints: binary, never diffed or EOL-normalised.
+*.pt binary
+*.pth binary
+vendor/originvision/checkpoints/** binary
+*.onnx binary
+
+# Vendored third-party source: keep LF so the tree stays byte-identical to
+# upstream (re-synced by copying, not editing -- see vendor/*/VENDORED_FROM.txt).
+vendor/** text eol=lf
+vendor/originvision/checkpoints/** binary

@@ -25,6 +25,12 @@ for pkg in ('rawpy',):
 
 datas += [(str(ROOT / 'VERSION'), '.')]
 
+# The bundled originvision model. astro_native.originvision_score (pure-Rust
+# tract) loads it by path; src/originvision_infer.py resolves that path
+# relative to its own __file__, so PyInstaller's module graph never sees the
+# file. ~11 MB. No onnxruntime in the bundle -- inference is fully native.
+datas += [(str(ROOT / 'src' / 'data' / 'originvision.onnx'), 'src/data')]
+
 a = Analysis(
     [str(ROOT / 'desktop_app.py')],
     pathex=[str(ROOT)],

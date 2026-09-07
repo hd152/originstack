@@ -64,6 +64,30 @@ class TestRunState(unittest.TestCase):
         self.assertEqual(self.ui._state['progress'], {'label': '', 'done': 0, 'total': 0})
         self.assertGreater(self.ui._version, before_version)
 
+    def test_run_started_clears_previews_and_thumbnails(self):
+        self.ui.preview(_synth_rgb(), "Final", slot='final', min_interval=0.0)
+        self.ui.frame_preview("light_001.fits", _synth_rgb())
+        self.assertIsNotNone(self.ui._preview_bytes)
+        self.assertTrue(self.ui._named)
+        self.assertTrue(self.ui._frame_thumbs)
+        pv, nv, fv = (self.ui._preview_version, self.ui._named_version,
+                      self.ui._frame_thumbs_version)
+
+        self.ui.run_started()
+
+        self.assertIsNone(self.ui._preview_bytes)
+        self.assertEqual(self.ui._preview_caption, '')
+        self.assertEqual(len(self.ui._named), 0)
+        self.assertEqual(self.ui._latest_slug, '')
+        self.assertEqual(len(self.ui._frame_thumbs), 0)
+        # versions bumped, not reset, so the GUI poll loop redraws empty
+        self.assertGreater(self.ui._preview_version, pv)
+        self.assertGreater(self.ui._named_version, nv)
+        self.assertGreater(self.ui._frame_thumbs_version, fv)
+        snap = self.ui.snapshot()
+        self.assertEqual(snap['named'], [])
+        self.assertEqual(snap['frames_img'], [])
+
     def test_run_finished_ok(self):
         self.ui.run_started()
         self.ui.run_finished('ok')

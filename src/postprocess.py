@@ -870,26 +870,30 @@ def postprocess_stack(
     # post-processed image, so it reflects the actual final look. Saved as a
     # sidecar rather than replacing the main output: this pipeline's
     # deliverable keeps stars, the starless image is for downstream
-    # nebula/background work.
+    # nebula/background work. Wrapped so a failure here (inpaint blow-up,
+    # sidecar write error) can never cost the caller the main stack.
     if getattr(args, 'remove_stars', False) and 'remove_stars' not in skip_steps:
-        if _pp_sources is not None and len(_pp_sources) > 0:
-            _rs_fwhm = float(np.median(
-                [f.metrics.get('fwhm', 4.0) for f in final
-                 if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
-            print(f"\n  Removing stars (fwhm={_rs_fwhm:.1f}px)...")
-            _rs_start = time.time()
-            from src.star_removal import remove_stars
-            starless, n_removed = remove_stars(stacked, _pp_sources, _rs_fwhm,
-                                               verbose=args.verbose)
-            if n_removed > 0:
-                _output_path_rs = getattr(args, 'output', None)
-                if _output_path_rs:
-                    _save_sidecar_fits(starless, _output_path_rs, '_starless')
-                safe_print(f"  ✓ Star removal ({format_time(time.time() - _rs_start)})")
+        try:
+            if _pp_sources is not None and len(_pp_sources) > 0:
+                _rs_fwhm = float(np.median(
+                    [f.metrics.get('fwhm', 4.0) for f in final
+                     if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
+                safe_print(f"\n  Removing stars (fwhm={_rs_fwhm:.1f}px)...")
+                _rs_start = time.time()
+                from src.star_removal import remove_stars
+                starless, n_removed = remove_stars(stacked, _pp_sources, _rs_fwhm,
+                                                   verbose=args.verbose)
+                if n_removed > 0:
+                    _output_path_rs = getattr(args, 'output', None)
+                    if _output_path_rs:
+                        _save_sidecar_fits(starless, _output_path_rs, '_starless')
+                    safe_print(f"  ✓ Star removal ({format_time(time.time() - _rs_start)})")
+                else:
+                    safe_print("  ⚠ Star removal: no stars removed (mask empty or tripped safety cap)")
             else:
-                safe_print("  ⚠ Star removal: no stars removed (mask empty or tripped safety cap)")
-        else:
-            safe_print("\n  No star detections for star removal — skipping")
+                safe_print("\n  No star detections for star removal — skipping")
+        except Exception as _rs_exc:
+            safe_print(f"  ⚠ Star removal failed ({_rs_exc}) — main output unaffected")
 
     stacked = _sanitize(stacked, "final post-processing")
     return stacked
