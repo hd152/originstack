@@ -43,7 +43,7 @@ python originstack.py --sweep-undo -d collection/                # restore every
 ```
 
 ### Optional native (Rust) acceleration
-30+ hot-path kernels run in Rust when the `astro_native` module is built
+40+ hot-path kernels run in Rust when the `astro_native` module is built
 (stacking combines ~4–100×, Lanczos warp for alignment and drizzle ~5–26×,
 L.A.Cosmic, median filters, the MMT median cascade ~10×, DBE sampling+fit,
 anisotropic diffusion ~37×); otherwise a numpy fallback is used. Build once:
@@ -130,7 +130,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Luma denoising (curvelet-inspired wavelet) | ✅ | `--denoiser none` |
 | Chroma noise reduction | ✅ | `--no-chroma-nr` |
 | Star reduction | ✅ | `--no-star-reduce` |
-| Star removal (`<output>_starless.fits` sidecar) | ✅ | `--no-remove-stars` |
+| Star removal (`<output>_starless.fits` sidecar) | ❌ | `--remove-stars` |
 | Local contrast enhancement | ✅ | `--no-local-contrast` |
 | CA correction | ✅ | `--no-ca-correction` |
 | Cosmic ray rejection | auto | `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |
@@ -147,7 +147,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Elastic (non-rigid) local registration | ❌ | `--elastic-registration` |
 | Plate solving | ❌ | `--plate-solve` |
 | Galaxy exclusion masking | auto for galaxy targets | `--galaxy-mode` / `--galaxy-center X,Y` |
-| originvision-assisted classification | ❌ | `--originvision` (needs `--originvision-dir`) |
+| originvision-assisted classification | ❌ | `--originvision` (bundled model, native inference) |
 
 ---
 

@@ -44,7 +44,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/aberration.py` | 313 | Field aberration/tilt inspector (`--aberration-report`) — see feature 37 |
 | `src/dither_report.py` | 112 | Dither-coverage uniformity diagnostic (`--dither-report`) — see feature 38 |
 | `src/star_repair.py` | 163 | Saturated star core repair (`--repair-stars`) — see feature 39 |
-| `src/star_removal.py` | 128 | Star removal, on by default (`--no-remove-stars`) — see feature 40 |
+| `src/star_removal.py` | 128 | Star removal, opt-in (`--remove-stars`) — see feature 40 |
 | `src/trail_reject.py` | 243 | Satellite/aircraft trail rejection (`--trail-reject`) — see feature 41 |
 | `src/local_normalize.py` | 118 | Per-frame Local Normalization (`--local-normalize`), pre-combine — see feature 42 |
 | `src/live_stack.py` | 339 | Real-time stacking (`--live`) — see feature 44 |
@@ -66,7 +66,8 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/color_calibrate.py` | 572 | Photometric colour calibration using plate-solved star colours (`--color-calibrate`, `--color-calibrate-method {colorindex,spcc}`) |
 | `src/photometric_calibration.py` | 181 | Gray-locus photometric colour calibration (`--photometric-calibration`) |
 | `src/annotation.py` | 224 | Object annotation (`--annotate`) — see feature 20 |
-| `src/originvision.py` | 319 | originvision integration (`--originvision` / `--originvision-score-all`) — see feature 46 |
+| `src/originvision.py` | ~290 | originvision integration (`--originvision` / `--originvision-score-all`) — see feature 46 |
+| `src/originvision_infer.py` | ~370 | originvision inference dispatcher: native `astro_native.originvision_score` (Rust/tract), else a numpy/scipy + Python-`onnxruntime` fallback; model resolution, FITS/TIFF/PNG loading |
 | `src/mosaic.py` | 320 | WCS-based mosaic stitching (`--mosaic`) |
 | `src/checkpoint.py` | 327 | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
 | `src/merge.py` | 279 | Incremental stacking — register + weighted-merge previous linear stacks (`--merge`) |
@@ -77,7 +78,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/cli.py` | 1911 | `process_directory`, `parse_args`, `main` |
 | `originstack.py` | 179 | Backward-compatibility re-export shim |
 | `desktop_app.py` (root) | 24 | Thin root shim — `from src.desktop_app import main` |
-| `ext/astro_native/` (Rust) | 4915 | Optional PyO3/maturin crate (30+ kernels): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind (unknown-rotation) star-pattern match, 2D wavelet transform, BM3D block-matching fallback, hot-pixel fix/replace, robust-PCA Gram-matrix SVD kernels, continuum-subtraction moments (numpy fallback when absent) |
+| `ext/astro_native/` (Rust) | ~6300 | Optional PyO3/maturin crate (~44 kernels, numpy fallback when absent): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind star-pattern match, 2D wavelet transform, BM3D block-matching fallback, hot-pixel fix/replace, robust-PCA Gram-matrix SVD, continuum-subtraction moments, 1D + 2D Moffat/Gaussian PSF fits, and the full **originvision inference path** (preprocessing + ONNX forward pass via pure-Rust `tract` — see feature 46) |
 
 **Total: ~30,000 lines** (Python, `src/` alone; excludes the Rust crate). Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
@@ -410,6 +411,7 @@ real use.
 
 - Recursively walks the tree under `-d`, scores every light frame (uncalibrated debayered luminance through `compute_quality_metrics`), and applies the pipeline's own `quality_gate` per folder — hard rejects, statistical outliers, and the folder-relative score threshold (`--quality-threshold`)
 - Dry-run report by default; `--apply` renames flagged files to `*.fits.rejected` (invisible to frame discovery, which matches only `.fit`/`.fits`); `--sweep-undo` restores them
+- Per-frame scores are cached to a versioned `.sweepcache.json` at the sweep root, keyed by file mtime+size, so re-sweeps of a mostly-unchanged collection only re-score new/changed frames. `--sweep-no-cache` ignores and does not write it
 - `--quality-report PATH` writes the per-frame CSV; darks/flats/bias and pipeline outputs are excluded by the standard classifier
 
 ### 27. Hierarchical Processing
@@ -516,11 +518,11 @@ See feature 13 (Denoising) for details — Noise2Self-style parameter selection 
 - Per-channel Moffat wing fit refills clipped (saturated) star cores
 - Runs before star reduction/removal in the post-processing chain
 
-### 40. Star Removal (on by default; `--no-remove-stars` to disable)
+### 40. Star Removal (opt-in; `--remove-stars`)
 
-- Inpaints each detected star with local background (normalised-convolution fill), on by default
-- Runs last, on the fully post-processed image; writes a `<output>_starless.fits` sidecar — the main output keeps stars
-- `--auto` turns it off for star-dominant target types (`globular_cluster`, `star_field`, `wide_field`) where the stars are the target
+- Off by default. `--remove-stars` inpaints each detected star with local background (normalised-convolution fill) and writes a `<output>_starless.fits` sidecar — the main output keeps stars
+- Runs last, on the fully post-processed image
+- Not enabled by `--auto`. `--no-remove-stars` is kept as a hidden no-op so pre-existing command lines don't error
 
 ### 41. Satellite/Aircraft Trail Rejection (`--trail-reject`)
 
@@ -553,9 +555,10 @@ See feature 11 (Stacking Methods) for details — additive per-frame background 
 
 ### 46. originvision Integration (`--originvision`, `--originvision-score-all`)
 
-- Optional integration with originvision, a separately-trained image classifier (external repo, invoked as a per-image subprocess — no network call)
-- `--originvision` (needs `--originvision-dir`, or the individual `--originvision-python`/`-script`/`-checkpoint`/`-timeout`/`-workers` overrides): when `--auto` is also active (the default), samples 3 light frames spread through the session (fast, ~8s each). The sampled category feeds the same target-classification prior SIMBAD/header metadata uses; a defect flag nudges settings defensively (enables `--trail-reject`, boosts chroma denoising strength). Never auto-rejects a frame — advisory only, this model is still finishing its first training run
-- `--originvision-score-all`: also scores every accepted light frame with originvision (much slower — minutes, not seconds, on a large session). Has no effect without `--originvision` also set (warns at startup if passed alone)
+- originvision is a separately-trained defect/quality/category vision classifier. Inference runs **fully in-process, no network**: the native `astro_native.originvision_score` kernel (pure-Rust `tract` ONNX runtime) is the primary path and the only one in the packaged app; a source checkout without `ext/astro_native/` built falls back to a Python `onnxruntime` path (`src/originvision_infer.py`). The exported model ships inside the package at `src/data/originvision.onnx` — nothing external to install or point at
+- `--originvision`: with `--auto` active (the default), samples 3 light frames spread through the session. The sampled category feeds the same target-classification prior SIMBAD/header metadata uses; a defect flag nudges settings defensively (enables `--trail-reject`, boosts chroma denoising strength). Never auto-rejects a frame — advisory only. Self-disables with a warning when no inference backend or the model file is available
+- `--originvision-model PATH` overrides the bundled model (e.g. to test a newer checkpoint). `--originvision-dir` / `--originvision-checkpoint` are kept as hidden back-compat path overrides; `--originvision-python` / `-script` / `-timeout` were removed with the old subprocess
+- `--originvision-score-all`: also scores every accepted light frame (slower on a large session). Has no effect without `--originvision` also set (warns at startup if passed alone)
 - Scores are stored in `FrameInfo.metrics['originvision']` and logged, but never set `accepted` or feed `metrics['score']`
 
 ---
@@ -642,7 +645,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--galaxy-mask-radius PX` | auto | Override the fitted exclusion ellipse's semi-major axis |
 | `--no-chroma-nr` | — | Disable chroma noise reduction |
 | `--no-star-reduce` | — | Disable star halo softening |
-| `--no-remove-stars` | on by default | Disable star removal / `<output>_starless.fits` sidecar (feature 40) |
+| `--remove-stars` | off | Star removal / write a `<output>_starless.fits` sidecar (feature 40) |
 | `--no-local-contrast` | — | Disable multiscale local contrast |
 | `--scnr` | off | Subtractive green-cast removal |
 | `--photometric-calibration` | off | Gray-locus colour calibration |
@@ -669,10 +672,10 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 ### originvision (feature 46)
 
-`--originvision` (needs `--originvision-dir` or the individual overrides) plus:
-`--originvision-score-all`, `--originvision-dir`, `--originvision-python`,
-`--originvision-script`, `--originvision-checkpoint`, `--originvision-timeout`,
-`--originvision-workers`. See `--help` for details.
+`--originvision` (self-contained — bundled model, native inference) plus
+`--originvision-score-all` and `--originvision-model PATH` (override the
+bundled model). `--originvision-dir` / `--originvision-checkpoint` /
+`--originvision-workers` are hidden back-compat flags. See `--help`.
 
 ### Multi-session, merge & checkpoint
 
@@ -744,7 +747,7 @@ python originstack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 python originstack.py -d lights/ -o m51.fits --auto --galaxy-mode --galaxy-center 1420,930 -v
 
 # originvision-assisted classification (fast, 3-frame sample) plus a full-session scan
-python originstack.py -d lights/ -o stacked.fits --auto --originvision --originvision-dir C:/source/originvision --originvision-score-all -v
+python originstack.py -d lights/ -o stacked.fits --auto --originvision --originvision-score-all -v
 ```
 
 ---
@@ -760,17 +763,18 @@ python originstack.py -d lights/ -o stacked.fits --auto --originvision --originv
 | `scipy >= 1.7` | Shifting, interpolation, Gaussian filters |
 | `tqdm >= 4.65` | Progress bars (falls back to plain iterator) |
 | `Pillow >= 9.0` | Preview JPEG generation |
-| `psutil >= 5.9` | Memory usage reporting |
 
 ### Optional (install separately)
 
 | Package | Feature Unlocked |
 |---------|-----------------|
+| `psutil >= 5.9` | Memory-adaptive worker/memmap sizing (every use is `try/except`-guarded with a fixed fallback; `src/utils.py` `HAS_PSUTIL`) |
+| `onnxruntime >= 1.17` | `--originvision` inference **fallback** for a source checkout without `astro_native` built (the packaged app uses the native Rust `tract` kernel) |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see `requirements-gpu.txt`) |
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
 | `tifffile` | TIFF input and 32-bit TIFF output (`--export tiff`) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…); RAW files are silently excluded from discovery when absent |
-| `astro_native` (Rust) | 30+ native kernels; numpy fallback when absent (see below) |
+| `astro_native` (Rust) | ~44 native kernels + the full `--originvision` inference path; numpy fallback when absent (see below) |
 
 `opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/Menon2007 debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration is `src/blind_match.py`, also native; NLM denoising and Richardson-Lucy's CPU fallback are native/numpy now; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — none of them need an external dependency.
 
