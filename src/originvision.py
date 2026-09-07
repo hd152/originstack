@@ -28,8 +28,9 @@ logger = logging.getLogger('originstack')
 
 
 def originvision_ready(args) -> bool:
-    """True when in-process scoring can actually run: onnxruntime importable
-    and a model file (bundled or ``--originvision-model`` override) on disk."""
+    """True when in-process scoring can actually run: an inference backend
+    (the native astro_native kernel, or onnxruntime) plus a model file
+    (bundled or ``--originvision-model`` override) on disk."""
     if not originvision_infer.onnxruntime_available():
         return False
     return originvision_infer.resolve_model_path(

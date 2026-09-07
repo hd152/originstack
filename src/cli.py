@@ -1441,18 +1441,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
     g_originvision.add_argument('--originvision', action='store_true',
                    help='Score the final stacked master with originvision (separately-trained '
-                        'defect/quality/category classifier), run in-process via onnxruntime '
-                        'against the bundled model (src/data/originvision.onnx -- no external '
-                        'folder or venv). When --auto is also active (the default -- pass '
-                        '--no-auto to disable), also samples 3 light frames spread through '
-                        'the session: the sampled category feeds the same target-'
-                        'classification prior SIMBAD/header metadata uses, and a defect flag '
-                        'nudges settings defensively (trail-reject, stronger chroma '
-                        'denoising) -- never auto-rejects a frame, this model is still '
-                        'finishing its first training run. Pair with --originvision-score-all to '
-                        'also score every accepted frame (slower on a large session). Needs '
-                        'the optional "onnxruntime" package (pip install onnxruntime); '
-                        'self-disables with a warning if it is absent.')
+                        'defect/quality/category classifier), run in-process against the '
+                        'bundled model (src/data/originvision.onnx -- no external folder or '
+                        'venv). Inference is the native astro_native kernel (pure-Rust tract, '
+                        'nothing extra to install); a source checkout without astro_native '
+                        'falls back to a Python onnxruntime path. When --auto is also active '
+                        '(the default -- pass --no-auto to disable), also samples 3 light '
+                        'frames spread through the session: the sampled category feeds the '
+                        'same target-classification prior SIMBAD/header metadata uses, and a '
+                        'defect flag nudges settings defensively (trail-reject, stronger '
+                        'chroma denoising) -- never auto-rejects a frame, this model is still '
+                        'finishing its first training run. Pair with --originvision-score-all '
+                        'to also score every accepted frame (slower on a large session). '
+                        'Self-disables with a warning when no backend is available.')
     g_originvision.add_argument('--originvision-score-all', action='store_true',
                    help='Also score every accepted light frame with originvision (not just '
                         'the fast 3-frame sample --originvision always does), logging advisory '
@@ -1932,7 +1933,7 @@ def parse_args(argv=None):
     args.export_masks = 'masks' in _dbg
 
     if args.originvision:
-        from src.originvision_infer import onnxruntime_available, resolve_model_path
+        from src.originvision_infer import backend_name, onnxruntime_available, resolve_model_path
 
         # Back-compat: --originvision-model wins; otherwise honour the old
         # --originvision-checkpoint, then derive from --originvision-dir's layout.
@@ -1944,8 +1945,9 @@ def parse_args(argv=None):
                     args.originvision_dir, 'checkpoints', 'model.onnx')
 
         if not onnxruntime_available():
-            safe_print("  WARNING: --originvision needs the 'onnxruntime' package "
-                       "(pip install onnxruntime) -- disabling originvision scoring")
+            safe_print("  WARNING: --originvision has no inference backend "
+                       "(build ext/astro_native, or pip install onnxruntime) "
+                       "-- disabling originvision scoring")
             args.originvision = False
         elif args.originvision_model and not os.path.isfile(args.originvision_model):
             # An explicit override that doesn't exist is a hard error -- never
@@ -1958,6 +1960,8 @@ def parse_args(argv=None):
             safe_print("  WARNING: --originvision has no model (bundled "
                        "src/data/originvision.onnx missing) -- disabling originvision scoring")
             args.originvision = False
+        else:
+            safe_print(f"  originvision: {backend_name()} backend")
 
     if getattr(args, 'originvision_score_all', False) and not args.originvision:
         # Covers both "never passed --originvision" and "--originvision got disabled

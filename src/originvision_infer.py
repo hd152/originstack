@@ -1,13 +1,19 @@
-"""In-process originvision ONNX inference -- the wired-in replacement for the
+"""In-process originvision inference -- the wired-in replacement for the
 old ``vendor/originvision/infer_onnx.py`` subprocess.
 
-This is a numpy/scipy port of that entry point plus the two ``data/``
-helpers it imported (``imageops.py``, ``shape_features.py``); it drops the
-OpenCV dependency (this codebase has none) and runs the exported model
-directly through ``onnxruntime`` in the calling process. ``onnxruntime`` is
-an *optional* dependency, guarded here the same way ``rawpy``/``cupy`` are
-elsewhere -- ``--originvision`` self-disables with a warning when it or the
-bundled model file is absent.
+Two backends, picked automatically:
+
+* **native** -- ``astro_native.originvision_score`` runs the whole path
+  (preprocessing + the ONNX forward pass via the pure-Rust ``tract``
+  runtime) with no Python-level ONNX dependency. This is the primary path
+  and the only one in the packaged app.
+* **onnxruntime fallback** -- a numpy/scipy port of the upstream
+  ``infer_onnx.py`` + ``data/imageops.py`` + ``data/shape_features.py``
+  (no OpenCV) driving a Python ``onnxruntime`` ``InferenceSession``. Used
+  only in a source checkout where ``astro_native`` isn't built.
+
+``--originvision`` self-disables with a warning when neither backend nor the
+bundled model file is available.
 
 The bundled model lives at ``src/data/originvision.onnx`` (see
 ``vendor/originvision/VENDORED_FROM.txt`` for provenance / re-sync). An explicit
@@ -29,7 +35,14 @@ from scipy import ndimage
 
 logger = logging.getLogger('originstack')
 
-try:  # optional dependency -- guarded (lint OS002)
+try:  # native (Rust/tract) inference -- the primary backend when astro_native is built
+    import astro_native as _native
+    _HAS_NATIVE_OV = hasattr(_native, 'originvision_score')
+except Exception:  # pragma: no cover
+    _native = None
+    _HAS_NATIVE_OV = False
+
+try:  # onnxruntime -- fallback path for a source checkout without astro_native
     import onnxruntime as _ort
 except Exception:  # pragma: no cover - onnxruntime absent
     _ort = None
@@ -54,7 +67,14 @@ _SESSION_LOCK = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def onnxruntime_available() -> bool:
-    return _ort is not None
+    """True when a scoring backend exists -- the native tract kernel
+    (``astro_native.originvision_score``) or the ``onnxruntime`` fallback.
+    Name kept for its call sites; it gates whether ``--originvision`` runs."""
+    return _HAS_NATIVE_OV or _ort is not None
+
+
+def backend_name() -> str:
+    return 'native' if _HAS_NATIVE_OV else ('onnxruntime' if _ort is not None else 'none')
 
 
 def bundled_model_path() -> str:
@@ -215,27 +235,47 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+def _prep_rgb(rgb: np.ndarray) -> Optional[np.ndarray]:
+    """Coerce any of (H,W), (H,W,3+), (1|3,H,W) into a contiguous (H,W,3)
+    float32 array, or None if it can't be interpreted as an image."""
+    arr = np.asarray(rgb)
+    if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[-1] not in (1, 3):
+        arr = np.moveaxis(arr, 0, -1)             # (C,H,W) -> (H,W,C)
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return None
+    return np.ascontiguousarray(arr[:, :, :3], dtype=np.float32)
+
+
 def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
               size: int = 256, shape_gate: bool = True) -> Optional[dict]:
     """Score an ``(H, W, 3)`` RGB array (any range/dtype -- it's percentile-
-    stretched here). Returns the same result dict the old
-    ``infer_onnx.py --json`` produced, or ``None`` on any failure (logged).
+    stretched here). Returns the result dict, or ``None`` on any failure
+    (logged). Uses the native tract kernel when ``astro_native`` is built,
+    otherwise the ``onnxruntime`` fallback.
     """
-    if _ort is None:
-        return None
     mp = resolve_model_path(model_path)
     if mp is None:
         return None
-    try:
-        arr = np.asarray(rgb)
-        if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[-1] not in (1, 3):
-            arr = np.moveaxis(arr, 0, -1)          # (C,H,W) -> (H,W,C)
-        if arr.ndim == 2:
-            arr = np.stack([arr] * 3, axis=-1)
-        if arr.ndim != 3 or arr.shape[2] < 3:
-            return None
-        arr = arr[:, :, :3]
+    arr = _prep_rgb(rgb)
+    if arr is None:
+        return None
 
+    if _HAS_NATIVE_OV:
+        try:
+            return _native.originvision_score(arr, mp, size, shape_gate)
+        except ValueError:
+            return None
+        except Exception as exc:            # RuntimeError from a bad model, etc.
+            logger.warning(f"originvision: native inference failed ({exc}); "
+                           f"{'falling back to onnxruntime' if _ort is not None else 'no fallback'}")
+            if _ort is None:
+                return None
+
+    if _ort is None:
+        return None
+    try:
         stretched = _stretch_to_uint8(arr)
         model_in = _resize_center_crop(stretched, size)
         x = (model_in.transpose(2, 0, 1).astype(np.float32) / 255.0)[np.newaxis]

@@ -19,10 +19,12 @@ Pillow>=9.0
 #   TIFF input support (16/32-bit linear TIFF lights, e.g. from N.I.N.A./SharpCap/PixInsight):
 #     tifffile>=2023.1   — read TIFF images; also used to write --export tiff output
 #
-#   originvision advisory scoring (--originvision): defect/quality/category CNN, run in-process
-#     onnxruntime>=1.17  — runs the bundled model (src/data/originvision.onnx) via
-#                          src/originvision_infer.py (numpy/scipy preprocessing, no OpenCV).
-#                          --originvision self-disables with a warning when absent.
+#   originvision advisory scoring (--originvision): defect/quality/category CNN, in-process.
+#     The native astro_native kernel (pure-Rust tract, built from ext/astro_native/)
+#     runs the whole path -- no Python ONNX dependency, and this is the only backend
+#     in the packaged app. For a source checkout without astro_native built:
+#       onnxruntime>=1.17  — fallback path via src/originvision_infer.py's numpy/scipy
+#                            port. --originvision self-disables when neither is available.
 #
 #   XISF input (PixInsight's native format) and SER (FireCapture/SharpCap planetary
 #   video) support need no extra packages — both are read with a built-in parser.

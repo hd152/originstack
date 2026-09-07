@@ -1240,6 +1240,68 @@ def test_fit_psf_2d_native_none_on_flat_cutout():
 
 
 # ---------------------------------------------------------------------------
+# originvision_score (src/originvision_infer.py's score_rgb, --originvision)
+# ---------------------------------------------------------------------------
+
+import src.originvision_infer as _ov_mod  # noqa: E402
+
+_ov_model = _ov_mod.resolve_model_path(None)
+_have_ov = hasattr(native, 'originvision_score') and _ov_model is not None
+
+
+def _synth_star_frame(seed=7):
+    rng = np.random.default_rng(seed)
+    h, w = 260, 340
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = 42.0 + 0.02 * xx + rng.normal(0, 3, (h, w))
+    for _ in range(28):
+        cy, cx = rng.integers(30, h - 30), rng.integers(30, w - 30)
+        img += rng.uniform(60, 200) * np.exp(
+            -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * rng.uniform(1.5, 3) ** 2))
+    return np.ascontiguousarray(
+        np.stack([img, img * 0.92, img * 0.85], -1), dtype=np.float32)
+
+
+@pytest.mark.skipif(not _have_ov, reason='native originvision_score / bundled model absent')
+def test_originvision_score_native_shape_and_keys():
+    rgb = _synth_star_frame()
+    r = native.originvision_score(rgb, _ov_model, 256, True)
+    assert isinstance(r, dict)
+    assert 'trailing' not in r['tasks']            # v4: untrained head excluded
+    for k in ('checkpoint_epoch', 'tasks', 'defect_probability', 'is_defective',
+              'quality_score', 'category', 'category_confidence', 'top_categories',
+              'sky_brightness', 'stray_light_gradient', 'stray_light_flag'):
+        assert k in r, k
+    assert r['category'] in ('galaxy', 'nebula', 'star_cluster', 'comet')
+    assert 0.0 <= r['category_confidence'] <= 1.0
+    for bad in ('trailing_score', 'trailing_flag', 'background_grid'):
+        assert bad not in r
+
+
+@pytest.mark.skipif(not _have_ov, reason='native originvision_score / bundled model absent')
+def test_originvision_score_native_bad_input_returns_none():
+    assert native.originvision_score(
+        np.zeros((8, 8, 2), np.float32), _ov_model, 256, True) is None
+
+
+@pytest.mark.skipif(
+    not (_have_ov and _ov_mod._ort is not None),
+    reason='need native + onnxruntime for the cross-backend parity check')
+def test_originvision_score_native_matches_onnxruntime():
+    import unittest.mock as _m
+    rgb = _synth_star_frame(11)
+    nat = _ov_mod.score_rgb(rgb)
+    with _m.patch.object(_ov_mod, '_HAS_NATIVE_OV', False):
+        ort = _ov_mod.score_rgb(rgb)
+    assert nat is not None and ort is not None
+    assert nat['category'] == ort['category']
+    assert nat['is_defective'] == ort['is_defective']
+    assert nat['stray_light_flag'] == ort['stray_light_flag']
+    for k in ('sky_brightness', 'stray_light_gradient', 'defect_probability'):
+        assert abs(nat[k] - ort[k]) < max(1.0, abs(ort[k]) * 0.05), (k, nat[k], ort[k])
+
+
+# ---------------------------------------------------------------------------
 # mesh_median_grid (src/background.py's `_process_channel`)
 # ---------------------------------------------------------------------------
 

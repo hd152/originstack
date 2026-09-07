@@ -2,12 +2,16 @@ originvision ONNX-inference code + exported model, vendored for OriginStack's
 --originvision feature. torch-free: the exported model runs under onnxruntime, so
 this snapshot needs neither torch nor astropy.
 
-NOTE (2026-09-06): this directory is now a PROVENANCE SNAPSHOT ONLY, not on
-the runtime path. --originvision runs in-process from src/originvision_infer.py (a
-numpy/scipy port of infer_onnx.py + data/imageops.py + data/shape_features.py,
-no OpenCV) against src/data/originvision.onnx (byte-identical to
-checkpoints/model.onnx here). These files are kept so a future re-sync can
-diff against upstream; see README.md for the re-sync steps.
+NOTE (2026-09-06): this directory is a PROVENANCE SNAPSHOT ONLY, not on the
+runtime path. --originvision inference is now the native
+astro_native.originvision_score kernel (ext/astro_native/src/lib.rs, mod
+originvision): preprocessing + ONNX forward pass via the pure-Rust `tract`
+runtime, no Python ONNX dependency. src/originvision_infer.py keeps a
+numpy/scipy + Python-onnxruntime port of infer_onnx.py + data/imageops.py +
+data/shape_features.py as a fallback for a source checkout without
+astro_native built. Both run against src/data/originvision.onnx
+(byte-identical to checkpoints/model.onnx here). These files are kept so a
+future re-sync can diff against upstream; see README.md.
 
 source repo : https://github.com/hd152/originvision
 branch      : improve-training-and-tooling

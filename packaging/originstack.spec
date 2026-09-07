@@ -17,7 +17,7 @@ ROOT = Path(SPECPATH).parent  # packaging/ -> repo root
 # ships sibling DLLs (raw_r.dll, vcomp140.dll) next to its .pyd that
 # PyInstaller's binary walker may or may not follow depending on version.
 datas, binaries, hiddenimports = [], [], []
-for pkg in ('rawpy', 'onnxruntime'):
+for pkg in ('rawpy',):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -25,8 +25,10 @@ for pkg in ('rawpy', 'onnxruntime'):
 
 datas += [(str(ROOT / 'VERSION'), '.')]
 
-# The bundled originvision model (src/originvision_infer.py loads it by path relative
-# to its own __file__, so PyInstaller's module graph never sees it). ~10 MB.
+# The bundled originvision model. astro_native.originvision_score (pure-Rust
+# tract) loads it by path; src/originvision_infer.py resolves that path
+# relative to its own __file__, so PyInstaller's module graph never sees the
+# file. ~11 MB. No onnxruntime in the bundle -- inference is fully native.
 datas += [(str(ROOT / 'src' / 'data' / 'originvision.onnx'), 'src/data')]
 
 a = Analysis(

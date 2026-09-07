@@ -47,12 +47,12 @@ $py = "$venvPath\Scripts\python.exe"
 #    documents but doesn't install (psutil/rawpy/tifffile are commented-out
 #    "optional" there -- the packaged exe bundles all three for a real
 #    astrophotography workflow: psutil for memory-adaptive worker sizing,
-#    rawpy/tifffile for input formats). onnxruntime powers the bundled
-#    --originvision scorer (src/originvision_infer.py + src/data/originvision.onnx);
-#    without it --originvision self-disables. The desktop app's own UI (tkinter)
-#    is stdlib -- nothing extra to install for it.
+#    rawpy/tifffile for input formats). --originvision scoring is now the
+#    native astro_native.originvision_score kernel (pure-Rust tract, built
+#    below) -- no onnxruntime in the packaged app. The desktop app's own UI
+#    (tkinter) is stdlib -- nothing extra to install for it.
 & $py -m pip install -r "$Root\requirements.txt"
-& $py -m pip install "psutil>=5.9" "rawpy>=0.19" "tifffile>=2023.1" "onnxruntime>=1.17" `
+& $py -m pip install "psutil>=5.9" "rawpy>=0.19" "tifffile>=2023.1" `
                       "pyinstaller>=6.0" "pyinstaller-hooks-contrib" "maturin>=1.7,<2.0"
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 

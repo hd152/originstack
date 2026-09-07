@@ -26,11 +26,16 @@ from src.originvision import (
     score_master_with_originvision,
 )
 
-_HAVE_ORT = infer_mod.onnxruntime_available()
+_HAVE_ORT = infer_mod._ort is not None
+_HAVE_NATIVE = infer_mod._HAS_NATIVE_OV
+_HAVE_BACKEND = infer_mod.onnxruntime_available()   # native OR onnxruntime
 _HAVE_MODEL = infer_mod.resolve_model_path(None) is not None
 _real_infer = pytest.mark.skipif(
-    not (_HAVE_ORT and _HAVE_MODEL),
-    reason='onnxruntime or bundled model not available')
+    not (_HAVE_BACKEND and _HAVE_MODEL),
+    reason='no originvision backend (native/onnxruntime) or bundled model')
+_need_both = pytest.mark.skipif(
+    not (_HAVE_ORT and _HAVE_NATIVE and _HAVE_MODEL),
+    reason='need native AND onnxruntime for a cross-backend parity check')
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +123,9 @@ class TestModelResolution:
         got = infer_mod.resolve_model_path('/no/such/model.onnx')
         assert got == (infer_mod.bundled_model_path() if _HAVE_MODEL else None)
 
-    def test_score_rgb_none_without_onnxruntime(self, monkeypatch):
+    def test_score_rgb_none_without_any_backend(self, monkeypatch):
         monkeypatch.setattr(infer_mod, '_ort', None)
+        monkeypatch.setattr(infer_mod, '_HAS_NATIVE_OV', False)
         assert infer_mod.score_rgb(np.zeros((32, 32, 3), np.float32)) is None
 
 
@@ -186,14 +192,38 @@ class TestRealInference:
         assert r is not None and r['category'] in (
             'galaxy', 'nebula', 'star_cluster', 'comet')
 
-    def test_session_cache_reuses_one_inferencesession(self, monkeypatch):
-        # Isolated cache dict so this can't race other tests under pytest -n.
+    @pytest.mark.skipif(not _HAVE_ORT, reason='onnxruntime fallback path only')
+    def test_onnxruntime_fallback_session_cache(self, monkeypatch):
+        # The native backend caches its session in Rust; this exercises the
+        # onnxruntime fallback's _SESSION_CACHE. Isolated dict so it can't
+        # race other tests under pytest -n.
+        monkeypatch.setattr(infer_mod, '_HAS_NATIVE_OV', False)
         fresh: dict = {}
         monkeypatch.setattr(infer_mod, '_SESSION_CACHE', fresh)
         mp = infer_mod.resolve_model_path(None)
         infer_mod.score_rgb(self._synth_rgb())
         infer_mod.score_rgb(self._synth_rgb())
         assert list(fresh) == [mp]
+
+    @_need_both
+    def test_native_matches_onnxruntime(self):
+        """Native tract path vs the onnxruntime fallback on the same frame:
+        identical category / flags, scalars within tolerance (preprocessing
+        differs slightly -- Rust bilinear vs scipy zoom)."""
+        rgb = self._synth_rgb()
+        native = infer_mod.score_rgb(rgb)
+        # force the fallback
+        import unittest.mock as _m
+        with _m.patch.object(infer_mod, '_HAS_NATIVE_OV', False):
+            ort = infer_mod.score_rgb(rgb)
+        assert native is not None and ort is not None
+        assert native['category'] == ort['category']
+        assert native['is_defective'] == ort['is_defective']
+        assert native['stray_light_flag'] == ort['stray_light_flag']
+        assert native.get('predicted_exposure_s') == ort.get('predicted_exposure_s')
+        for k in ('sky_brightness', 'stray_light_gradient', 'defect_probability'):
+            assert abs(native[k] - ort[k]) < max(1.0, abs(ort[k]) * 0.05), (k, native[k], ort[k])
+        assert abs(native['category_confidence'] - ort['category_confidence']) < 0.03
 
 
 # ---------------------------------------------------------------------------
@@ -463,12 +493,12 @@ class TestCliOriginvisionResolution:
         assert args.originvision is True
         assert args.originvision_model is None  # bundled default, resolved at call time
 
-    def test_disabled_without_onnxruntime(self, tmp_path, monkeypatch, capsys):
+    def test_disabled_without_any_backend(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
-        monkeypatch.setattr(infer_mod, '_ort', None)
+        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: False)
         args = self._parse(tmp_path)
         assert args.originvision is False
-        assert 'onnxruntime' in capsys.readouterr().out
+        assert 'no inference backend' in capsys.readouterr().out
 
     def test_explicit_model_override_is_kept(self, tmp_path, monkeypatch):
         monkeypatch.delenv('ORIGINVISION_DIR', raising=False)

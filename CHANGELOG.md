@@ -88,6 +88,13 @@ match the `VERSION` file and `v*` git tags.
   session size. Full per-frame scoring is still available, opt-in, via the
   new `--originvision-score-all` flag. `--originvision-score-all` alone (without
   `--originvision`) is a no-op and now warns at startup.
+- **`--originvision` inference is now a native `astro_native` kernel** (the
+  originvision model project, formerly "astrollm"). `astro_native.originvision_score`
+  runs the whole path — preprocessing plus the ONNX forward pass, via the
+  pure-Rust `tract` runtime — so a source checkout with `ext/astro_native/`
+  built, and the packaged app, need **no Python ONNX dependency** at all.
+  `onnxruntime` stays only as a fallback for a source checkout without the
+  crate built. The bundled model (`src/data/originvision.onnx`) is unchanged.
 
 ### Internal
 

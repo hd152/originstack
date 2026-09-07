@@ -11,7 +11,7 @@
 
     1. A normal launch: polls for a window with the right title to appear
        (proves every bundled import -- astropy/scipy/astro_native/rawpy/
-       tifffile/onnxruntime/tkinter -- actually resolved at runtime and the
+       tifffile/tkinter -- actually resolved at runtime and the
        app didn't crash on startup), then reads the startup log
        (`desktop_app.py::_log_startup_status`) to confirm astro_native
        loaded rather than silently falling back to numpy -- shipping that
@@ -88,8 +88,8 @@ if (-not (Test-Path $synthDir)) { throw "synthetic_data was not created -- canno
 $outPath = "$env:TEMP\originstack_verify_out.fits"
 $headlessLog = "$env:TEMP\originstack_verify_stdout.txt"
 if (Test-Path $headlessLog) { Remove-Item $headlessLog -Force }
-# --originvision exercises the bundled in-process scorer (onnxruntime +
-# src/data/originvision.onnx). It self-disables with a warning if either is
+# --originvision exercises the bundled native scorer (astro_native.originvision_score
+# + src/data/originvision.onnx). It self-disables with a warning if either is
 # missing from the frozen build -- asserted absent below.
 $headlessArgs = @('--verify-headless', '-d', (Resolve-Path $synthDir).Path, '-o', $outPath,
                   '--parallel', '4', '--debayer-method', 'malvar',
@@ -122,8 +122,8 @@ Write-Host "Phase 1 multiprocessing check passed (no extra GUI windows)"
 if (Test-Path $headlessLog) {
     $astroLog = Get-Content $headlessLog -Raw
     if ($astroLog -match 'disabling originvision scoring') {
-        throw "--originvision self-disabled in the packaged build -- onnxruntime or " +
-              "src/data/originvision.onnx missing from the bundle"
+        throw "--originvision self-disabled in the packaged build -- the native " +
+              "astro_native.originvision_score kernel or src/data/originvision.onnx is missing"
     }
     Write-Host "Bundled --originvision scorer loaded (no self-disable warning)"
 }
