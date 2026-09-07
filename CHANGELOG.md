@@ -44,6 +44,14 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **`--auto` now skips the sky-residual correction passes for emission and
+  reflection nebulae too, not just galaxies.** `remove_sky_residual`'s
+  mesh background fit reads a frame-filling nebula as elevated background
+  and subtracts through it (confirmed on a real Lagoon Nebula session —
+  the passes removed over half the nebulosity). DBE's own protected pass
+  already does the main background-flattening job for these targets. Small
+  nebulae on empty sky (low emission/reflection blend weight) keep the
+  step. Override either way with an explicit `--skip-step`.
 - **`--fix-atmospheric-dispersion` now auto-derives `--plate-scale` and
   `--zenith-angle`** (from the header WCS, and from the `info.json` GPS +
   observation time) when they are not given. `--parallactic-angle` stays

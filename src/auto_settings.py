@@ -564,28 +564,33 @@ def _apply_dynamic_settings(
         _set('deconvolve', True)
         _set('deconvolve_iterations', 10)
 
-    # Galaxy targets skip the sky-residual correction passes entirely
-    # (--skip-step sky_residual): unlike DBE (which honors --galaxy-mode's
-    # fitted exclusion ellipse), remove_sky_residual's own extended-source
-    # detection is a much stricter, cruder fallback -- even with the ellipse
-    # now also threaded through to it, real (patchy, irregular) galaxy arms
-    # extending past a symmetric ellipse fit, or spanning a mesh cell only
-    # partially, still get partially fit away as "background" across 3
-    # residual passes. Confirmed on real data: skipping the step entirely
-    # measurably improves output quality for a galaxy -- DBE's own single
-    # protected pass already does the main background-flattening job for
-    # this target type, so the extra passes are net-negative here even
-    # though they help other targets. `skip_step` is a plain list (not
-    # blendable/settable via _set() above), and explicit-dest opt-out is
-    # honored manually since a straight append can't reuse _set()'s
-    # overwrite-if-different equality check.
+    # Extended-source targets skip the sky-residual correction passes
+    # entirely (--skip-step sky_residual): unlike DBE (which honors
+    # --galaxy-mode's fitted exclusion ellipse), remove_sky_residual's own
+    # extended-source detection is a much stricter, cruder fallback -- even
+    # with the ellipse now also threaded through to it, real (patchy,
+    # irregular) galaxy arms extending past a symmetric ellipse fit, or a
+    # frame-filling emission/reflection nebula with no hard edge, still get
+    # partially fit away as "background" across 3 residual passes. Confirmed
+    # on real data for a galaxy (skipping measurably improves output) and on
+    # a real Lagoon Nebula session (the residual passes removed over half
+    # the nebulosity). DBE's own single protected pass already does the main
+    # background-flattening job for these types. The galaxy/emission/
+    # reflection blend weights are only high when the object actually fills
+    # the frame -- a small nebula on empty sky keeps the step. `skip_step`
+    # is a plain list (not blendable/settable via _set() above), and
+    # explicit-dest opt-out is honored manually since a straight append
+    # can't reuse _set()'s overwrite-if-different equality check.
     current_skip = list(getattr(args, 'skip_step', None) or [])
-    if (weights.get('galaxy', 0.0) > 0.3
+    _extended_w = (weights.get('galaxy', 0.0)
+                   + weights.get('emission_nebula', 0.0)
+                   + weights.get('reflection_nebula', 0.0))
+    if (_extended_w > 0.3
             and 'skip_step' not in _explicit
             and 'sky_residual' not in current_skip):
         current_skip.append('sky_residual')
         setattr(args, 'skip_step', current_skip)
-        changes.append("skip_step  += 'sky_residual' (galaxy target)")
+        changes.append("skip_step  += 'sky_residual' (extended-source target)")
 
     return changes
 

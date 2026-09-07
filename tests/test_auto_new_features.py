@@ -84,14 +84,28 @@ class TestGalaxySkipsSkyResidual:
     """remove_sky_residual's own extended-source detection is cruder than
     --galaxy-mode's fitted exclusion ellipse (a stricter threshold, a fixed
     circle instead of a shape-tracking ellipse) -- even with the ellipse now
-    also threaded through to it, real (patchy/irregular) galaxy structure
-    extending past it still gets partially eaten across the step's 3 passes.
-    Confirmed on real data that skipping the step entirely measurably
-    improves output quality for a galaxy target, so the auto-advisor adds
-    it to skip_step whenever the blend weight is dominated by galaxy."""
+    also threaded through to it, real (patchy/irregular) galaxy structure or
+    a frame-filling emission/reflection nebula still gets partially eaten
+    across the step's 3 passes. Confirmed on real data for a galaxy and on a
+    real Lagoon Nebula session, so the auto-advisor adds it to skip_step
+    whenever the galaxy + emission + reflection blend weight dominates."""
 
     def test_galaxy_anchor_adds_sky_residual_to_skip_step(self):
         sig = dict(a._TYPE_ANCHORS['galaxy'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=None)
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['sky_residual']
+
+    def test_emission_nebula_anchor_adds_sky_residual_to_skip_step(self):
+        sig = dict(a._TYPE_ANCHORS['emission_nebula'])
+        weights = a._blend_weights(sig)
+        args = _args(skip_step=None)
+        a._apply_dynamic_settings(sig, weights, args)
+        assert args.skip_step == ['sky_residual']
+
+    def test_reflection_nebula_anchor_adds_sky_residual_to_skip_step(self):
+        sig = dict(a._TYPE_ANCHORS['reflection_nebula'])
         weights = a._blend_weights(sig)
         args = _args(skip_step=None)
         a._apply_dynamic_settings(sig, weights, args)
