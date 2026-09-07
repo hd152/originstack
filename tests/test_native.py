@@ -1155,6 +1155,91 @@ def test_fit_moffat_native_none_on_nonpositive_peak():
 
 
 # ---------------------------------------------------------------------------
+# fit_psf_moffat2d_native / fit_psf_gauss2d_native (src/psf_deconvolution.py)
+# ---------------------------------------------------------------------------
+
+import src.psf_deconvolution as _psf_mod  # noqa: E402
+
+
+def _synthetic_star_cutout(rng, sz=31, model='moffat', amp=900.0, bg=45.0,
+                           alpha=3.2, beta=2.7, sigma=2.4, noise=2.5):
+    yy, xx = np.mgrid[0:sz, 0:sz].astype(np.float64)
+    x0, y0 = sz / 2.0 + rng.uniform(-1.0, 1.0), sz / 2.0 + rng.uniform(-1.0, 1.0)
+    r2 = (xx - x0) ** 2 + (yy - y0) ** 2
+    if model == 'moffat':
+        z = amp * (1.0 + r2 / alpha ** 2) ** (-beta) + bg
+        truth = (amp, x0, y0, alpha, beta, bg)
+    else:
+        z = amp * np.exp(-r2 / (2.0 * sigma ** 2)) + bg
+        truth = (amp, x0, y0, sigma, bg)
+    z = z + rng.normal(0.0, noise, z.shape)
+    return np.ascontiguousarray(z.ravel(), dtype=np.float64), truth
+
+
+@pytest.mark.parametrize("alpha,beta", [(2.6, 2.2), (3.4, 3.0), (5.0, 4.5)])
+def test_fit_psf_moffat2d_native_recovers_synthetic(alpha, beta):
+    rng = np.random.default_rng(hash((alpha, beta)) & 0xFFFF)
+    z, (amp, x0, y0, a_t, b_t, bg) = _synthetic_star_cutout(
+        rng, model='moffat', alpha=alpha, beta=beta)
+    sz = int(round(z.size ** 0.5))
+    pk, b25 = float(z.max()), float(np.percentile(z, 25))
+    got = native.fit_psf_moffat2d_native(z, sz, pk, b25)
+    want = _psf_mod._fit_star_2d_numpy(z.reshape(sz, sz), 'moffat', pk, b25)
+    assert got is not None and want is not None
+    # near the true shape params, and near curve_fit's own fit
+    assert abs(got[3] - a_t) / a_t < 0.25
+    assert abs(got[4] - b_t) / b_t < 0.30
+    assert abs(got[3] - want[3]) / want[3] < 0.20
+    assert abs(got[4] - want[4]) / want[4] < 0.25
+
+
+@pytest.mark.parametrize("sigma", [1.8, 2.5, 3.6])
+def test_fit_psf_gauss2d_native_recovers_synthetic(sigma):
+    rng = np.random.default_rng(int(sigma * 1000))
+    z, (amp, x0, y0, s_t, bg) = _synthetic_star_cutout(
+        rng, model='gaussian', sigma=sigma)
+    sz = int(round(z.size ** 0.5))
+    pk, b25 = float(z.max()), float(np.percentile(z, 25))
+    got = native.fit_psf_gauss2d_native(z, sz, pk, b25)
+    want = _psf_mod._fit_star_2d_numpy(z.reshape(sz, sz), 'gaussian', pk, b25)
+    assert got is not None and want is not None
+    assert abs(got[3] - s_t) / s_t < 0.20
+    assert abs(got[3] - want[3]) / want[3] < 0.15
+
+
+def test_fit_psf_2d_native_dispatch_matches_numpy():
+    rng = np.random.default_rng(11)
+    z, _ = _synthetic_star_cutout(rng, model='moffat')
+    sz = int(round(z.size ** 0.5))
+    cut = z.reshape(sz, sz)
+    pk, b25 = float(z.max()), float(np.percentile(z, 25))
+    had = _psf_mod._HAS_NATIVE_PSF2D
+    try:
+        _psf_mod._HAS_NATIVE_PSF2D = True
+        got = _psf_mod._fit_star_2d(cut, 'moffat', pk, b25)
+        _psf_mod._HAS_NATIVE_PSF2D = False
+        want = _psf_mod._fit_star_2d(cut, 'moffat', pk, b25)
+    finally:
+        _psf_mod._HAS_NATIVE_PSF2D = had
+    assert got is not None and want is not None
+    assert abs(got[3] - want[3]) / want[3] < 0.20
+
+
+def test_fit_psf_2d_native_bad_size_raises():
+    rng = np.random.default_rng(12)
+    z, _ = _synthetic_star_cutout(rng)
+    with pytest.raises(ValueError):
+        native.fit_psf_moffat2d_native(z, 30, float(z.max()), 0.0)  # 30*30 != z.size
+
+
+def test_fit_psf_2d_native_none_on_flat_cutout():
+    z = np.full(31 * 31, 50.0, dtype=np.float64)
+    # peak == bg -> no signal, kernel returns None (not a fit failure)
+    assert native.fit_psf_moffat2d_native(z, 31, 50.0, 50.0) is None
+    assert native.fit_psf_gauss2d_native(z, 31, 50.0, 50.0) is None
+
+
+# ---------------------------------------------------------------------------
 # mesh_median_grid (src/background.py's `_process_channel`)
 # ---------------------------------------------------------------------------
 
