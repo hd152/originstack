@@ -147,7 +147,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Elastic (non-rigid) local registration | ❌ | `--elastic-registration` |
 | Plate solving | ❌ | `--plate-solve` |
 | Galaxy exclusion masking | auto for galaxy targets | `--galaxy-mode` / `--galaxy-center X,Y` |
-| astrollm-assisted classification | ❌ | `--astrollm` (needs `--astrollm-dir`) |
+| originvision-assisted classification | ❌ | `--originvision` (needs `--originvision-dir`) |
 
 ---
 

@@ -1,10 +1,10 @@
-"""Tests for the astrollm integration (src/astrollm.py + src/astrollm_infer.py):
+"""Tests for the originvision integration (src/originvision.py + src/originvision_infer.py):
 in-process ONNX inference wiring, numpy/scipy preprocessing, and the
 advisory-only session-relative flagging.
 
 onnxruntime may or may not be installed in the test environment. Tests that
 need a real forward pass skip when it (or the bundled model) is absent;
-everything else mocks ``run_astrollm_infer`` / ``_astrollm_model`` so it
+everything else mocks ``run_originvision_infer`` / ``_originvision_model`` so it
 never depends on a real model.
 """
 from __future__ import annotations
@@ -16,14 +16,14 @@ from unittest import mock
 import numpy as np
 import pytest
 
-import src.astrollm as astrollm_mod
-import src.astrollm_infer as infer_mod
-from src.astrollm import (
-    map_astrollm_category,
-    run_astrollm_infer,
+import src.originvision as originvision_mod
+import src.originvision_infer as infer_mod
+from src.originvision import (
+    map_originvision_category,
+    run_originvision_infer,
     sample_session_priors,
-    score_lights_with_astrollm,
-    score_master_with_astrollm,
+    score_lights_with_originvision,
+    score_master_with_originvision,
 )
 
 _HAVE_ORT = infer_mod.onnxruntime_available()
@@ -34,7 +34,7 @@ _real_infer = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# astrollm_infer: preprocessing ports
+# originvision_infer: preprocessing ports
 # ---------------------------------------------------------------------------
 
 class TestPreprocessing:
@@ -100,14 +100,14 @@ class TestPreprocessing:
 
 
 # ---------------------------------------------------------------------------
-# astrollm_infer: model resolution / availability gate
+# originvision_infer: model resolution / availability gate
 # ---------------------------------------------------------------------------
 
 class TestModelResolution:
 
     def test_bundled_model_path_is_under_src_data(self):
         p = infer_mod.bundled_model_path()
-        assert p.replace('\\', '/').endswith('src/data/astrollm.onnx')
+        assert p.replace('\\', '/').endswith('src/data/originvision.onnx')
 
     def test_resolve_prefers_explicit_when_it_exists(self, tmp_path):
         m = tmp_path / 'custom.onnx'
@@ -124,7 +124,7 @@ class TestModelResolution:
 
 
 # ---------------------------------------------------------------------------
-# astrollm_infer: real forward pass (skips without onnxruntime)
+# originvision_infer: real forward pass (skips without onnxruntime)
 # ---------------------------------------------------------------------------
 
 @_real_infer
@@ -197,26 +197,26 @@ class TestRealInference:
 
 
 # ---------------------------------------------------------------------------
-# src/astrollm.py: run_astrollm_infer wrapper
+# src/originvision.py: run_originvision_infer wrapper
 # ---------------------------------------------------------------------------
 
-class TestRunAstrollmInfer:
+class TestRunOriginvisionInfer:
 
     def test_delegates_to_score_path_with_model(self):
-        with mock.patch.object(astrollm_mod.astrollm_infer, 'score_path',
+        with mock.patch.object(originvision_mod.originvision_infer, 'score_path',
                                return_value={'category': 'galaxy'}) as m:
-            out = run_astrollm_infer('master.tiff', 'model.onnx')
+            out = run_originvision_infer('master.tiff', 'model.onnx')
         assert out == {'category': 'galaxy'}
         m.assert_called_once_with('master.tiff', model_path='model.onnx')
 
     def test_failure_returns_none(self):
-        with mock.patch.object(astrollm_mod.astrollm_infer, 'score_path',
+        with mock.patch.object(originvision_mod.originvision_infer, 'score_path',
                                return_value=None):
-            assert run_astrollm_infer('x.fits') is None
+            assert run_originvision_infer('x.fits') is None
 
 
 # ---------------------------------------------------------------------------
-# src/astrollm.py: advisory scoring (mock run_astrollm_infer + _astrollm_model)
+# src/originvision.py: advisory scoring (mock run_originvision_infer + _originvision_model)
 # ---------------------------------------------------------------------------
 
 def _frame(path, accepted=True):
@@ -224,8 +224,8 @@ def _frame(path, accepted=True):
 
 
 def _args(**overrides):
-    base = dict(astrollm=True, astrollm_score_all=True, astrollm_model=None,
-                astrollm_workers=2)
+    base = dict(originvision=True, originvision_score_all=True, originvision_model=None,
+                originvision_workers=2)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -234,33 +234,33 @@ def _args(**overrides):
 def _model_resolves():
     """Every advisory-path test assumes a usable model; the two 'missing
     model' tests re-patch it to None inside their own ``with`` block."""
-    with mock.patch.object(astrollm_mod, '_astrollm_model', return_value='model.onnx'):
+    with mock.patch.object(originvision_mod, '_originvision_model', return_value='model.onnx'):
         yield
 
 
-class TestScoreLightsWithAstrollm:
+class TestScoreLightsWithOriginvision:
 
     def test_disabled_is_noop(self):
         lights = [_frame('a.fits')]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            score_lights_with_astrollm(lights, _args(astrollm=False))
+        with mock.patch.object(originvision_mod, 'run_originvision_infer') as m:
+            score_lights_with_originvision(lights, _args(originvision=False))
         m.assert_not_called()
-        assert 'astrollm' not in lights[0].metrics
+        assert 'originvision' not in lights[0].metrics
 
     def test_missing_model_is_noop(self):
         lights = [_frame('a.fits')]
-        with mock.patch.object(astrollm_mod, '_astrollm_model', return_value=None), \
-             mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            score_lights_with_astrollm(lights, _args())
+        with mock.patch.object(originvision_mod, '_originvision_model', return_value=None), \
+             mock.patch.object(originvision_mod, 'run_originvision_infer') as m:
+            score_lights_with_originvision(lights, _args())
         m.assert_not_called()
-        assert 'astrollm' not in lights[0].metrics
+        assert 'originvision' not in lights[0].metrics
 
-    def test_astrollm_on_but_score_all_off_is_noop(self):
+    def test_originvision_on_but_score_all_off_is_noop(self):
         lights = [_frame('a.fits')]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            score_lights_with_astrollm(lights, _args(astrollm_score_all=False))
+        with mock.patch.object(originvision_mod, 'run_originvision_infer') as m:
+            score_lights_with_originvision(lights, _args(originvision_score_all=False))
         m.assert_not_called()
-        assert 'astrollm' not in lights[0].metrics
+        assert 'originvision' not in lights[0].metrics
 
     def test_stores_result_without_touching_accepted_or_score(self):
         lights = [_frame('a.fits'), _frame('b.fits')]
@@ -268,11 +268,11 @@ class TestScoreLightsWithAstrollm:
             'a.fits': {'quality_score': 400.0, 'is_defective': False, 'stray_light_flag': False},
             'b.fits': {'quality_score': 410.0, 'is_defective': True, 'stray_light_flag': False},
         }
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer',
+        with mock.patch.object(originvision_mod, 'run_originvision_infer',
                                side_effect=lambda path, *a, **k: results[path]):
-            score_lights_with_astrollm(lights, _args())
+            score_lights_with_originvision(lights, _args())
         for f in lights:
-            assert f.metrics['astrollm'] == results[f.path]
+            assert f.metrics['originvision'] == results[f.path]
             assert f.accepted is True
             assert f.metrics['score'] == 50.0
 
@@ -280,10 +280,10 @@ class TestScoreLightsWithAstrollm:
         lights = [_frame('a.fits'), _frame('b.fits')]
         def _side_effect(path, *a, **k):
             return None if path == 'a.fits' else {'quality_score': 100.0}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', side_effect=_side_effect):
-            score_lights_with_astrollm(lights, _args())
-        assert lights[0].metrics['astrollm'] is None
-        assert lights[1].metrics['astrollm'] == {'quality_score': 100.0}
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', side_effect=_side_effect):
+            score_lights_with_originvision(lights, _args())
+        assert lights[0].metrics['originvision'] is None
+        assert lights[1].metrics['originvision'] == {'quality_score': 100.0}
 
     def test_below_session_average_frame_flagged_in_output(self, capsys):
         lights = [_frame(f'good{i}.fits') for i in range(9)]
@@ -292,99 +292,99 @@ class TestScoreLightsWithAstrollm:
             if path == 'bad.fits':
                 return {'quality_score': 1.0}
             return {'quality_score': 500.0}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', side_effect=_side_effect):
-            score_lights_with_astrollm(lights, _args())
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', side_effect=_side_effect):
+            score_lights_with_originvision(lights, _args())
         out = capsys.readouterr().out
         assert 'below-session-average' in out
         assert 'bad.fits' in out
 
     def test_rejected_frames_skipped(self):
         lights = [_frame('a.fits', accepted=False)]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            score_lights_with_astrollm(lights, _args())
+        with mock.patch.object(originvision_mod, 'run_originvision_infer') as m:
+            score_lights_with_originvision(lights, _args())
         m.assert_not_called()
 
 
-class TestScoreMasterWithAstrollm:
+class TestScoreMasterWithOriginvision:
 
     def test_disabled_is_noop(self):
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            score_master_with_astrollm('stack.fits', _args(astrollm=False), 'galaxy')
+        with mock.patch.object(originvision_mod, 'run_originvision_infer') as m:
+            score_master_with_originvision('stack.fits', _args(originvision=False), 'galaxy')
         m.assert_not_called()
 
     def test_category_mismatch_warns(self, caplog):
         result = {'category': 'nebula', 'category_confidence': 0.7,
                  'sky_brightness': 80.0, 'stray_light_gradient': 5.0}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=result):
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=result):
             with caplog.at_level('WARNING', logger='originstack'):
-                score_master_with_astrollm('stack.fits', _args(), 'galaxy')
+                score_master_with_originvision('stack.fits', _args(), 'galaxy')
         assert any('does not match' in r.getMessage() for r in caplog.records)
 
     def test_category_match_does_not_warn(self, caplog):
         result = {'category': 'galaxy', 'category_confidence': 0.9,
                  'sky_brightness': 80.0, 'stray_light_gradient': 5.0}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=result):
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=result):
             with caplog.at_level('WARNING', logger='originstack'):
-                score_master_with_astrollm('stack.fits', _args(), 'galaxy')
+                score_master_with_originvision('stack.fits', _args(), 'galaxy')
         assert not any('does not match' in r.getMessage() for r in caplog.records)
 
     def test_coarse_category_vs_fine_inferred_type_does_not_warn(self, caplog):
         result = {'category': 'nebula', 'category_confidence': 0.95,
                  'sky_brightness': 40.0, 'stray_light_gradient': 20.0}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=result):
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=result):
             with caplog.at_level('WARNING', logger='originstack'):
-                score_master_with_astrollm('stack.tiff', _args(), 'emission_nebula')
+                score_master_with_originvision('stack.tiff', _args(), 'emission_nebula')
         assert not any('does not match' in r.getMessage() for r in caplog.records)
 
     def test_predicted_exposure_printed_when_present(self, capsys):
         result = {'category': 'galaxy', 'category_confidence': 0.9,
                  'sky_brightness': 40.0, 'stray_light_gradient': 5.0,
                  'predicted_exposure_s': 30.0}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=result):
-            score_master_with_astrollm('stack.tiff', _args(), 'galaxy')
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=result):
+            score_master_with_originvision('stack.tiff', _args(), 'galaxy')
         assert 'predicted_exposure=30s' in capsys.readouterr().out
 
     def test_failed_score_logged_not_raised(self, capsys):
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=None):
-            score_master_with_astrollm('stack.fits', _args(), 'galaxy')
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=None):
+            score_master_with_originvision('stack.fits', _args(), 'galaxy')
         assert 'failed' in capsys.readouterr().out
 
 
-class TestMapAstrollmCategory:
+class TestMapOriginvisionCategory:
 
     def test_galaxy_maps_unambiguously(self):
-        assert map_astrollm_category('galaxy') == 'galaxy'
+        assert map_originvision_category('galaxy') == 'galaxy'
 
     def test_star_cluster_maps_to_globular_cluster(self):
-        assert map_astrollm_category('star_cluster') == 'globular_cluster'
+        assert map_originvision_category('star_cluster') == 'globular_cluster'
 
     def test_ambiguous_nebula_returns_none(self):
-        assert map_astrollm_category('nebula') is None
+        assert map_originvision_category('nebula') is None
 
     def test_unrelated_categories_return_none(self):
         for c in ('comet', 'planet', 'star', 'other'):
-            assert map_astrollm_category(c) is None
+            assert map_originvision_category(c) is None
 
     def test_none_input_returns_none(self):
-        assert map_astrollm_category(None) is None
+        assert map_originvision_category(None) is None
 
     def test_case_insensitive(self):
-        assert map_astrollm_category('GALAXY') == 'galaxy'
+        assert map_originvision_category('GALAXY') == 'galaxy'
 
 
 class TestSampleSessionPriors:
 
     def test_disabled_is_noop(self):
         lights = [_frame(f'{i}.fits') for i in range(10)]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
-            result = sample_session_priors(lights, _args(astrollm=False))
+        with mock.patch.object(originvision_mod, 'run_originvision_infer') as m:
+            result = sample_session_priors(lights, _args(originvision=False))
         assert result is None
         m.assert_not_called()
 
     def test_missing_model_is_noop(self):
         lights = [_frame(f'{i}.fits') for i in range(10)]
-        with mock.patch.object(astrollm_mod, '_astrollm_model', return_value=None), \
-             mock.patch.object(astrollm_mod, 'run_astrollm_infer') as m:
+        with mock.patch.object(originvision_mod, '_originvision_model', return_value=None), \
+             mock.patch.object(originvision_mod, 'run_originvision_infer') as m:
             result = sample_session_priors(lights, _args())
         assert result is None
         m.assert_not_called()
@@ -399,7 +399,7 @@ class TestSampleSessionPriors:
         payload = {'category': 'galaxy', 'category_confidence': 0.9,
                   'is_defective': False, 'stray_light_flag': False,
                   'defect_probability': 0.1}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=payload) as m:
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=payload) as m:
             result = sample_session_priors(lights, _args())
         assert result is not None
         assert m.call_count <= 3
@@ -411,7 +411,7 @@ class TestSampleSessionPriors:
             {'category': 'galaxy', 'category_confidence': 0.8, 'defect_probability': 0.0},
             {'category': 'nebula', 'category_confidence': 0.99, 'defect_probability': 0.0},
         ]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', side_effect=payloads):
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', side_effect=payloads):
             result = sample_session_priors(lights, _args())
         assert result['category'] == 'galaxy'
 
@@ -425,7 +425,7 @@ class TestSampleSessionPriors:
             {'category': 'galaxy', 'category_confidence': 0.9, 'is_defective': False,
              'defect_probability': 0.1},
         ]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', side_effect=payloads):
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', side_effect=payloads):
             result = sample_session_priors(lights, _args())
         assert result['defect_flagged'] is True
 
@@ -434,86 +434,86 @@ class TestSampleSessionPriors:
         payload = {'category': 'galaxy', 'category_confidence': 0.9,
                   'is_defective': False, 'stray_light_flag': False,
                   'defect_probability': 0.05}
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=payload):
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=payload):
             result = sample_session_priors(lights, _args())
         assert result['defect_flagged'] is False
 
     def test_all_samples_failing_returns_none(self):
         lights = [_frame(f'{i}.fits') for i in range(12)]
-        with mock.patch.object(astrollm_mod, 'run_astrollm_infer', return_value=None):
+        with mock.patch.object(originvision_mod, 'run_originvision_infer', return_value=None):
             result = sample_session_priors(lights, _args())
         assert result is None
 
 
 # ---------------------------------------------------------------------------
-# src/cli.py: --astrollm resolution (bundled model, onnxruntime gate)
+# src/cli.py: --originvision resolution (bundled model, onnxruntime gate)
 # ---------------------------------------------------------------------------
 
-class TestCliAstrollmResolution:
+class TestCliOriginvisionResolution:
 
     def _parse(self, tmp_path, *extra):
         from src import cli
         return cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
-                               '--astrollm', *extra])
+                               '--originvision', *extra])
 
     @_real_infer
-    def test_astrollm_stays_enabled_with_bundled_model(self, tmp_path, monkeypatch):
-        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+    def test_originvision_stays_enabled_with_bundled_model(self, tmp_path, monkeypatch):
+        monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         args = self._parse(tmp_path)
-        assert args.astrollm is True
-        assert args.astrollm_model is None  # bundled default, resolved at call time
+        assert args.originvision is True
+        assert args.originvision_model is None  # bundled default, resolved at call time
 
     def test_disabled_without_onnxruntime(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         monkeypatch.setattr(infer_mod, '_ort', None)
         args = self._parse(tmp_path)
-        assert args.astrollm is False
+        assert args.originvision is False
         assert 'onnxruntime' in capsys.readouterr().out
 
     def test_explicit_model_override_is_kept(self, tmp_path, monkeypatch):
-        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         m = tmp_path / 'v4.onnx'
         m.write_bytes(b'x')
         monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
-        args = self._parse(tmp_path, '--astrollm-model', str(m))
-        assert args.astrollm is True
-        assert args.astrollm_model == str(m)
+        args = self._parse(tmp_path, '--originvision-model', str(m))
+        assert args.originvision is True
+        assert args.originvision_model == str(m)
 
     def test_legacy_dir_flag_still_resolves_a_model(self, tmp_path, monkeypatch):
-        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         ck = tmp_path / 'checkpoints'
         ck.mkdir()
         (ck / 'model.onnx').write_bytes(b'x')
         monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
-        args = self._parse(tmp_path, '--astrollm-dir', str(tmp_path))
-        assert args.astrollm is True
-        assert args.astrollm_model == str(ck / 'model.onnx')
+        args = self._parse(tmp_path, '--originvision-dir', str(tmp_path))
+        assert args.originvision is True
+        assert args.originvision_model == str(ck / 'model.onnx')
 
     def test_legacy_checkpoint_flag_still_resolves_a_model(self, tmp_path, monkeypatch):
-        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         m = tmp_path / 'old.onnx'
         m.write_bytes(b'x')
         monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
-        args = self._parse(tmp_path, '--astrollm-checkpoint', str(m))
-        assert args.astrollm is True
-        assert args.astrollm_model == str(m)
+        args = self._parse(tmp_path, '--originvision-checkpoint', str(m))
+        assert args.originvision is True
+        assert args.originvision_model == str(m)
 
     def test_bad_explicit_model_disables_not_silent_bundled_fallback(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
         bad = str(tmp_path / 'nope.onnx')
-        args = self._parse(tmp_path, '--astrollm-model', bad)
-        assert args.astrollm is False
+        args = self._parse(tmp_path, '--originvision-model', bad)
+        assert args.originvision is False
         assert bad in capsys.readouterr().out
 
     def test_removed_flags_are_inert_not_errors(self, tmp_path, monkeypatch):
-        monkeypatch.delenv('ASTROLLM_DIR', raising=False)
+        monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
         monkeypatch.setattr(infer_mod, 'resolve_model_path', lambda p: p or 'bundled')
         # old command lines that still pass these must not hard-error
-        args = self._parse(tmp_path, '--astrollm-timeout', '120',
-                           '--astrollm-python', 'py.exe', '--astrollm-script', 's.py')
-        assert args.astrollm is True
+        args = self._parse(tmp_path, '--originvision-timeout', '120',
+                           '--originvision-python', 'py.exe', '--originvision-script', 's.py')
+        assert args.originvision is True
 
 
 if __name__ == '__main__':

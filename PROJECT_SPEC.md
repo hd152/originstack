@@ -66,7 +66,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/color_calibrate.py` | 572 | Photometric colour calibration using plate-solved star colours (`--color-calibrate`, `--color-calibrate-method {colorindex,spcc}`) |
 | `src/photometric_calibration.py` | 181 | Gray-locus photometric colour calibration (`--photometric-calibration`) |
 | `src/annotation.py` | 224 | Object annotation (`--annotate`) — see feature 20 |
-| `src/astrollm.py` | 319 | astrollm integration (`--astrollm` / `--astrollm-score-all`) — see feature 46 |
+| `src/originvision.py` | 319 | originvision integration (`--originvision` / `--originvision-score-all`) — see feature 46 |
 | `src/mosaic.py` | 320 | WCS-based mosaic stitching (`--mosaic`) |
 | `src/checkpoint.py` | 327 | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
 | `src/merge.py` | 279 | Incremental stacking — register + weighted-merge previous linear stacks (`--merge`) |
@@ -525,7 +525,7 @@ See feature 13 (Denoising) for details — Noise2Self-style parameter selection 
 ### 41. Satellite/Aircraft Trail Rejection (`--trail-reject`)
 
 - Per-frame Hough line detection + local-background inpaint, applied in Phase 1 before stacking
-- Off by default; `--auto` can enable it defensively (e.g. when astrollm flags a defective frame — see feature 46)
+- Off by default; `--auto` can enable it defensively (e.g. when originvision flags a defective frame — see feature 46)
 
 ### 42. Per-Frame Local Normalization (`--local-normalize`)
 
@@ -551,12 +551,12 @@ See feature 11 (Stacking Methods) for details — additive per-frame background 
 - Offered alongside, not replacing, star removal (feature 40) — separates signal into components rather than discarding a masked region, suiting a downstream continuum-subtraction-style use better
 - Non-convex, no global-optimum guarantee; writes `<stem>_star_component.fits`/`_nebula_component.fits`
 
-### 46. astrollm Integration (`--astrollm`, `--astrollm-score-all`)
+### 46. originvision Integration (`--originvision`, `--originvision-score-all`)
 
-- Optional integration with astrollm, a separately-trained image classifier (external repo, invoked as a per-image subprocess — no network call)
-- `--astrollm` (needs `--astrollm-dir`, or the individual `--astrollm-python`/`-script`/`-checkpoint`/`-timeout`/`-workers` overrides): when `--auto` is also active (the default), samples 3 light frames spread through the session (fast, ~8s each). The sampled category feeds the same target-classification prior SIMBAD/header metadata uses; a defect flag nudges settings defensively (enables `--trail-reject`, boosts chroma denoising strength). Never auto-rejects a frame — advisory only, this model is still finishing its first training run
-- `--astrollm-score-all`: also scores every accepted light frame with astrollm (much slower — minutes, not seconds, on a large session). Has no effect without `--astrollm` also set (warns at startup if passed alone)
-- Scores are stored in `FrameInfo.metrics['astrollm']` and logged, but never set `accepted` or feed `metrics['score']`
+- Optional integration with originvision, a separately-trained image classifier (external repo, invoked as a per-image subprocess — no network call)
+- `--originvision` (needs `--originvision-dir`, or the individual `--originvision-python`/`-script`/`-checkpoint`/`-timeout`/`-workers` overrides): when `--auto` is also active (the default), samples 3 light frames spread through the session (fast, ~8s each). The sampled category feeds the same target-classification prior SIMBAD/header metadata uses; a defect flag nudges settings defensively (enables `--trail-reject`, boosts chroma denoising strength). Never auto-rejects a frame — advisory only, this model is still finishing its first training run
+- `--originvision-score-all`: also scores every accepted light frame with originvision (much slower — minutes, not seconds, on a large session). Has no effect without `--originvision` also set (warns at startup if passed alone)
+- Scores are stored in `FrameInfo.metrics['originvision']` and logged, but never set `accepted` or feed `metrics['score']`
 
 ---
 
@@ -667,12 +667,12 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--aberration-report` | off | Field aberration/tilt diagnostic PNG (feature 37) |
 | `--dither-report` | off | Dither-coverage uniformity diagnostic PNG (feature 38) |
 
-### astrollm (feature 46)
+### originvision (feature 46)
 
-`--astrollm` (needs `--astrollm-dir` or the individual overrides) plus:
-`--astrollm-score-all`, `--astrollm-dir`, `--astrollm-python`,
-`--astrollm-script`, `--astrollm-checkpoint`, `--astrollm-timeout`,
-`--astrollm-workers`. See `--help` for details.
+`--originvision` (needs `--originvision-dir` or the individual overrides) plus:
+`--originvision-score-all`, `--originvision-dir`, `--originvision-python`,
+`--originvision-script`, `--originvision-checkpoint`, `--originvision-timeout`,
+`--originvision-workers`. See `--help` for details.
 
 ### Multi-session, merge & checkpoint
 
@@ -743,8 +743,8 @@ python originstack.py -d lights/ -o stacked.fits   --no-star-reduce --no-local-c
 # Galaxy target with a manual exclusion-mask center (bypasses auto-detection)
 python originstack.py -d lights/ -o m51.fits --auto --galaxy-mode --galaxy-center 1420,930 -v
 
-# astrollm-assisted classification (fast, 3-frame sample) plus a full-session scan
-python originstack.py -d lights/ -o stacked.fits --auto --astrollm --astrollm-dir C:/source/astrollm --astrollm-score-all -v
+# originvision-assisted classification (fast, 3-frame sample) plus a full-session scan
+python originstack.py -d lights/ -o stacked.fits --auto --originvision --originvision-dir C:/source/originvision --originvision-score-all -v
 ```
 
 ---

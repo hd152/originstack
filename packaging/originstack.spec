@@ -25,9 +25,9 @@ for pkg in ('rawpy', 'onnxruntime'):
 
 datas += [(str(ROOT / 'VERSION'), '.')]
 
-# The bundled astrollm model (src/astrollm_infer.py loads it by path relative
+# The bundled originvision model (src/originvision_infer.py loads it by path relative
 # to its own __file__, so PyInstaller's module graph never sees it). ~10 MB.
-datas += [(str(ROOT / 'src' / 'data' / 'astrollm.onnx'), 'src/data')]
+datas += [(str(ROOT / 'src' / 'data' / 'originvision.onnx'), 'src/data')]
 
 a = Analysis(
     [str(ROOT / 'desktop_app.py')],

@@ -222,7 +222,7 @@ class ScrollableFrame(ttk.Frame):
 # the other ~110 flags are fine-tuning most runs never need.
 _COMMON_DESTS = ['directory', 'output', 'preset', 'auto', 'stack_method',
                  'denoiser', 'deconvolve', 'drizzle_scale', 'trail_reject',
-                 'use_gpu', 'parallel', 'astrollm']
+                 'use_gpu', 'parallel', 'originvision']
 
 # Human field labels. Anything not listed falls back to the dest name with
 # underscores spaced and the first letter capitalised ("stack_method" ->
@@ -232,7 +232,7 @@ _FIELD_LABELS = {
     'output': 'Output file',
     'parallel': 'Workers',
     'use_gpu': 'Use GPU',
-    'astrollm': 'astrollm scoring',
+    'originvision': 'originvision scoring',
     'trail_reject': 'Trail rejection',
     'drizzle_scale': 'Drizzle scale',
     'plate_solve': 'Plate solve',

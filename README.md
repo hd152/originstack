@@ -242,7 +242,7 @@ Eight built-in target presets tune all parameters at once:
 - **Galaxy/extended-source exclusion masking** (`--galaxy-mode`, `--galaxy-center X,Y`) — protects a galaxy's broad halo from background extraction, so it isn't fit and subtracted as gradient; auto-enabled for galaxy targets by `--auto`
 - **Robust-PCA master calibration** (`--master-method robust_pca`, `--flat-from-lights`) — separates true shared calibration pattern from session-specific outliers (dust motes, transient hot pixels) instead of a per-pixel median
 - **Real-time and streaming stacking** — `--live` folds new subs into a running stack as they land; `--stream` two-pass streams an already-complete large directory at O(1) full-resolution memory
-- **astrollm classification** (`--astrollm`) — optional external image classifier that samples a few frames to feed target-type detection and flag defective frames defensively; `--astrollm-score-all` scores every frame (slower, opt-in)
+- **originvision classification** (`--originvision`) — optional external image classifier that samples a few frames to feed target-type detection and flag defective frames defensively; `--originvision-score-all` scores every frame (slower, opt-in)
 - **Object annotation** (`--annotate`) — labels bright stars and named deep-sky objects on a copy of the preview, using a WCS solution
 
 ---

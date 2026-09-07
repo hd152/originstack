@@ -1,25 +1,25 @@
-astrollm ONNX-inference code + exported model, vendored for OriginStack's
---astrollm feature. torch-free: the exported model runs under onnxruntime, so
+originvision ONNX-inference code + exported model, vendored for OriginStack's
+--originvision feature. torch-free: the exported model runs under onnxruntime, so
 this snapshot needs neither torch nor astropy.
 
 NOTE (2026-09-06): this directory is now a PROVENANCE SNAPSHOT ONLY, not on
-the runtime path. --astrollm runs in-process from src/astrollm_infer.py (a
+the runtime path. --originvision runs in-process from src/originvision_infer.py (a
 numpy/scipy port of infer_onnx.py + data/imageops.py + data/shape_features.py,
-no OpenCV) against src/data/astrollm.onnx (byte-identical to
+no OpenCV) against src/data/originvision.onnx (byte-identical to
 checkpoints/model.onnx here). These files are kept so a future re-sync can
 diff against upstream; see README.md for the re-sync steps.
 
-source repo : https://github.com/hd152/astrollm
+source repo : https://github.com/hd152/originvision
 branch      : improve-training-and-tooling
 commit      : 528579c0bf4dead07936ad17e59204f698d29678
 vendored on : 2026-09-06
 vendored by : scripted minimal-set copy (ONNX inference path only)
 
-Included (the upstream reference for src/astrollm_infer.py's numpy/scipy port):
+Included (the upstream reference for src/originvision_infer.py's numpy/scipy port):
   infer_onnx.py                 <- torch-free entry point (--model / --image / --json)
   data/imageops.py              <- percentile stretch + resize/center-crop + background correction (cv2+numpy)
   data/shape_features.py        <- comet shape-gate features for infer_onnx.py's category head (cv2+numpy)
-  checkpoints/model.onnx        <- exported model (~11 MB; byte-identical to src/data/astrollm.onnx)
+  checkpoints/model.onnx        <- exported model (~11 MB; byte-identical to src/data/originvision.onnx)
 
 Model: v4, from checkpoints/model_v4_nossl_best.pt -- a 7-task run trained
 FROM SCRATCH (no SSL pre-training), best-by-category checkpoint at epoch 15
@@ -35,7 +35,7 @@ Graph outputs / `tasks` mismatch -- IMPORTANT:
 The architecture always builds all 8 heads, so the graph always emits 8
 outputs, but `trailing` is UNTRAINED on this checkpoint (random weights) and
 is correctly excluded from `tasks`. Consumers MUST gate every head on
-membership in `tasks`, never on output presence -- src/astrollm_infer.py
+membership in `tasks`, never on output presence -- src/originvision_infer.py
 does. `background_grid` IS trained (a spatial background-flatten map); the
 port ignores it since OriginStack runs its own DBE. `category` is 4-class
 (galaxy/nebula/star_cluster/comet); `exposure` is a 7-class classifier
@@ -46,6 +46,6 @@ cull.py, models/, data/cache.py, data/dataset.py, data/light_stats.py,
 data/manifest.py, train.py, data/*.jsonl, configs/, tests/, the .pt checkpoints.
 
 infer_onnx.py handles TIFF/PNG/JPG only -- it refuses FITS (no astropy debayer).
-The in-process port (src/astrollm_infer.py::_load_image_any) debayers a raw
+The in-process port (src/originvision_infer.py::_load_image_any) debayers a raw
 .fits light itself and feeds the array straight to the model -- no temp file.
 Re-sync steps: see README.md.

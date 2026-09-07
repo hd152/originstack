@@ -88,12 +88,12 @@ if (-not (Test-Path $synthDir)) { throw "synthetic_data was not created -- canno
 $outPath = "$env:TEMP\originstack_verify_out.fits"
 $headlessLog = "$env:TEMP\originstack_verify_stdout.txt"
 if (Test-Path $headlessLog) { Remove-Item $headlessLog -Force }
-# --astrollm exercises the bundled in-process scorer (onnxruntime +
-# src/data/astrollm.onnx). It self-disables with a warning if either is
+# --originvision exercises the bundled in-process scorer (onnxruntime +
+# src/data/originvision.onnx). It self-disables with a warning if either is
 # missing from the frozen build -- asserted absent below.
 $headlessArgs = @('--verify-headless', '-d', (Resolve-Path $synthDir).Path, '-o', $outPath,
                   '--parallel', '4', '--debayer-method', 'malvar',
-                  '--white-balance', 'grayworld', '--stack-method', 'median', '--astrollm')
+                  '--white-balance', 'grayworld', '--stack-method', 'median', '--originvision')
 $headlessProc = Start-Process -FilePath $ExePath -ArgumentList $headlessArgs -PassThru `
                               -RedirectStandardOutput $headlessLog
 
@@ -118,14 +118,14 @@ if (-not (Test-Path $outPath)) {
 }
 Write-Host "Phase 1 multiprocessing check passed (no extra GUI windows)"
 
-# Bundled astrollm scorer: must not have self-disabled in the frozen build.
+# Bundled originvision scorer: must not have self-disabled in the frozen build.
 if (Test-Path $headlessLog) {
     $astroLog = Get-Content $headlessLog -Raw
-    if ($astroLog -match 'disabling astrollm scoring') {
-        throw "--astrollm self-disabled in the packaged build -- onnxruntime or " +
-              "src/data/astrollm.onnx missing from the bundle"
+    if ($astroLog -match 'disabling originvision scoring') {
+        throw "--originvision self-disabled in the packaged build -- onnxruntime or " +
+              "src/data/originvision.onnx missing from the bundle"
     }
-    Write-Host "Bundled --astrollm scorer loaded (no self-disable warning)"
+    Write-Host "Bundled --originvision scorer loaded (no self-disable warning)"
 }
 
 # ── 3. Graceful shutdown: confirm nothing is left running ─────────────────

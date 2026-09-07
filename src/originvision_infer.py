@@ -1,19 +1,19 @@
-"""In-process astrollm ONNX inference -- the wired-in replacement for the
-old ``vendor/astrollm/infer_onnx.py`` subprocess.
+"""In-process originvision ONNX inference -- the wired-in replacement for the
+old ``vendor/originvision/infer_onnx.py`` subprocess.
 
 This is a numpy/scipy port of that entry point plus the two ``data/``
 helpers it imported (``imageops.py``, ``shape_features.py``); it drops the
 OpenCV dependency (this codebase has none) and runs the exported model
 directly through ``onnxruntime`` in the calling process. ``onnxruntime`` is
 an *optional* dependency, guarded here the same way ``rawpy``/``cupy`` are
-elsewhere -- ``--astrollm`` self-disables with a warning when it or the
+elsewhere -- ``--originvision`` self-disables with a warning when it or the
 bundled model file is absent.
 
-The bundled model lives at ``src/data/astrollm.onnx`` (see
-``vendor/astrollm/VENDORED_FROM.txt`` for provenance / re-sync). An explicit
-model path (``--astrollm-model`` / ``--astrollm-dir``) still overrides it.
+The bundled model lives at ``src/data/originvision.onnx`` (see
+``vendor/originvision/VENDORED_FROM.txt`` for provenance / re-sync). An explicit
+model path (``--originvision-model`` / ``--originvision-dir``) still overrides it.
 
-Advisory only -- see ``src/astrollm.py`` for how the result dict is used
+Advisory only -- see ``src/originvision.py`` for how the result dict is used
 (never sets ``FrameInfo.accepted`` or ``metrics['score']``).
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ _FITS_EXTS = ('.fits', '.fit', '.fts')
 # size -- keep that.
 _SHAPE_GATE_SIZE = 512
 
-# grid-searched on astrollm's val set -- see upstream data/shape_features.py
+# grid-searched on originvision's val set -- see upstream data/shape_features.py
 _COMET_GATE_CENTER_DIST = 0.20
 _COMET_GATE_N_COMPONENTS = 80
 
@@ -58,8 +58,8 @@ def onnxruntime_available() -> bool:
 
 
 def bundled_model_path() -> str:
-    """Path to the model shipped inside the package (``src/data/astrollm.onnx``)."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'astrollm.onnx')
+    """Path to the model shipped inside the package (``src/data/originvision.onnx``)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'originvision.onnx')
 
 
 def resolve_model_path(explicit: Optional[str] = None) -> Optional[str]:
@@ -249,7 +249,7 @@ def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
         # an export bug, not something to score around silently.
         if len(raw) != len(meta['head_order']):
             logger.warning(
-                f"astrollm: model has {len(raw)} outputs but head_order "
+                f"originvision: model has {len(raw)} outputs but head_order "
                 f"metadata lists {len(meta['head_order'])} -- refusing to guess")
             return None
         out = dict(zip(meta['head_order'], raw))
@@ -301,7 +301,7 @@ def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
             result['stray_light_flag'] = g > meta['stray_light_threshold']
         return result
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning(f"astrollm: in-process inference failed: {exc}")
+        logger.warning(f"originvision: in-process inference failed: {exc}")
         return None
 
 
@@ -335,7 +335,7 @@ def _load_image_any(path: str) -> Optional[np.ndarray]:
         from PIL import Image
         return np.asarray(Image.open(path).convert('RGB')).astype(np.float32)
     except Exception as exc:
-        logger.warning(f"astrollm: could not read {os.path.basename(path)}: {exc}")
+        logger.warning(f"originvision: could not read {os.path.basename(path)}: {exc}")
         return None
 
 

@@ -48,8 +48,8 @@ $py = "$venvPath\Scripts\python.exe"
 #    "optional" there -- the packaged exe bundles all three for a real
 #    astrophotography workflow: psutil for memory-adaptive worker sizing,
 #    rawpy/tifffile for input formats). onnxruntime powers the bundled
-#    --astrollm scorer (src/astrollm_infer.py + src/data/astrollm.onnx);
-#    without it --astrollm self-disables. The desktop app's own UI (tkinter)
+#    --originvision scorer (src/originvision_infer.py + src/data/originvision.onnx);
+#    without it --originvision self-disables. The desktop app's own UI (tkinter)
 #    is stdlib -- nothing extra to install for it.
 & $py -m pip install -r "$Root\requirements.txt"
 & $py -m pip install "psutil>=5.9" "rawpy>=0.19" "tifffile>=2023.1" "onnxruntime>=1.17" `

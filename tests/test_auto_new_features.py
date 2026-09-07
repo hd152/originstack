@@ -312,41 +312,41 @@ def _quality_sig(**overrides):
     return base
 
 
-class TestAstrollmDefectNudge:
-    """--astrollm's fast session-sample defect flag (src/astrollm.py::
-    sample_session_priors, via args._astrollm_defect_flagged) nudges
+class TestOriginvisionDefectNudge:
+    """--originvision's fast session-sample defect flag (src/originvision.py::
+    sample_session_priors, via args._originvision_defect_flagged) nudges
     settings defensively -- trail_reject on, chroma denoising strengthened
     -- never a frame rejection."""
 
     def test_defect_flagged_enables_trail_reject(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.trail_reject is True
 
     def test_defect_flagged_strengthens_chroma_boost(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.denoise_chroma_boost >= 3.0
 
     def test_no_defect_flag_leaves_settings_untouched(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=False)
+                     _originvision_defect_flagged=False)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.trail_reject is False
         assert args.denoise_chroma_boost == 2.0
 
     def test_explicit_trail_reject_wins(self):
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True,
+                     _originvision_defect_flagged=True,
                      _explicit_cli_dests={'trail_reject'})
         a._apply_quality_settings(_quality_sig(), args)
         assert args.trail_reject is False  # not overwritten
 
     def test_explicit_chroma_boost_wins(self):
         args = _args(trail_reject=False, denoise_chroma_boost=1.5,
-                     _astrollm_defect_flagged=True,
+                     _originvision_defect_flagged=True,
                      _explicit_cli_dests={'denoise_chroma_boost'})
         a._apply_quality_settings(_quality_sig(), args)
         assert args.denoise_chroma_boost == 1.5  # not overwritten
@@ -356,13 +356,13 @@ class TestAstrollmDefectNudge:
         rejects/down-weights a frame -- that's a bigger behavioral bet
         than this early/unvalidated model earns."""
         args = _args(trail_reject=False, denoise_chroma_boost=2.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         assert not hasattr(args, 'accepted')
         a._apply_quality_settings(_quality_sig(), args)
         assert not hasattr(args, 'accepted')
 
     def test_already_strong_chroma_boost_not_lowered(self):
         args = _args(trail_reject=True, denoise_chroma_boost=4.0,
-                     _astrollm_defect_flagged=True)
+                     _originvision_defect_flagged=True)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.denoise_chroma_boost == 4.0

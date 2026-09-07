@@ -1008,7 +1008,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_comet = p.add_argument_group('Comet mode')
     g_adv = p.add_argument_group('Advanced (most are managed automatically by --auto)')
     g_debug = p.add_argument_group('Diagnostics & debugging')
-    g_astrollm = p.add_argument_group('astrollm scoring (advisory)')
+    g_originvision = p.add_argument_group('originvision scoring (advisory)')
     g_core.add_argument('-d', '--directory', required=True)
     g_core.add_argument('-o', '--output', default=None,
                    help='Output FITS path (default: <directory>_stacked.fits)')
@@ -1439,44 +1439,44 @@ def build_parser() -> argparse.ArgumentParser:
                         'accepted, rejection_reason)')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
-    g_astrollm.add_argument('--astrollm', action='store_true',
-                   help='Score the final stacked master with astrollm (separately-trained '
+    g_originvision.add_argument('--originvision', action='store_true',
+                   help='Score the final stacked master with originvision (separately-trained '
                         'defect/quality/category classifier), run in-process via onnxruntime '
-                        'against the bundled model (src/data/astrollm.onnx -- no external '
+                        'against the bundled model (src/data/originvision.onnx -- no external '
                         'folder or venv). When --auto is also active (the default -- pass '
                         '--no-auto to disable), also samples 3 light frames spread through '
                         'the session: the sampled category feeds the same target-'
                         'classification prior SIMBAD/header metadata uses, and a defect flag '
                         'nudges settings defensively (trail-reject, stronger chroma '
                         'denoising) -- never auto-rejects a frame, this model is still '
-                        'finishing its first training run. Pair with --astrollm-score-all to '
+                        'finishing its first training run. Pair with --originvision-score-all to '
                         'also score every accepted frame (slower on a large session). Needs '
                         'the optional "onnxruntime" package (pip install onnxruntime); '
                         'self-disables with a warning if it is absent.')
-    g_astrollm.add_argument('--astrollm-score-all', action='store_true',
-                   help='Also score every accepted light frame with astrollm (not just '
-                        'the fast 3-frame sample --astrollm always does), logging advisory '
+    g_originvision.add_argument('--originvision-score-all', action='store_true',
+                   help='Also score every accepted light frame with originvision (not just '
+                        'the fast 3-frame sample --originvision always does), logging advisory '
                         'per-frame defect/stray-light flags and below-average quality_score '
                         'outliers. Slower on a large session (a decode + debayer + stretch + '
-                        'resize + forward pass per frame). Requires --astrollm.')
-    g_astrollm.add_argument('--astrollm-model', default=None, metavar='PATH',
-                   help='Path to an exported astrollm ONNX model, overriding the bundled '
-                        'src/data/astrollm.onnx (e.g. to test a newer checkpoint).')
-    g_astrollm.add_argument('--astrollm-workers', type=int, default=2, metavar='N',
-                   help='Thread-pool size for per-frame astrollm scoring calls (default: 2). '
+                        'resize + forward pass per frame). Requires --originvision.')
+    g_originvision.add_argument('--originvision-model', default=None, metavar='PATH',
+                   help='Path to an exported originvision ONNX model, overriding the bundled '
+                        'src/data/originvision.onnx (e.g. to test a newer checkpoint).')
+    g_originvision.add_argument('--originvision-workers', type=int, default=2, metavar='N',
+                   help='Thread-pool size for per-frame originvision scoring calls (default: 2). '
                         'onnxruntime releases the GIL during the forward pass, so a thread '
                         'pool parallelises it without a ProcessPoolExecutor.')
-    # Back-compat, all hidden: --astrollm-dir / --astrollm-checkpoint still
-    # resolve a model path; --astrollm-timeout / -python / -script are inert
+    # Back-compat, all hidden: --originvision-dir / --originvision-checkpoint still
+    # resolve a model path; --originvision-timeout / -python / -script are inert
     # no-ops kept so pre-in-process command lines don't hard-error.
-    g_astrollm.add_argument('--astrollm-dir', default=os.environ.get('ASTROLLM_DIR'),
+    g_originvision.add_argument('--originvision-dir', default=os.environ.get('ORIGINVISION_DIR'),
                    metavar='DIR', help=argparse.SUPPRESS)
-    g_astrollm.add_argument('--astrollm-checkpoint', default=None, metavar='PATH',
+    g_originvision.add_argument('--originvision-checkpoint', default=None, metavar='PATH',
                    help=argparse.SUPPRESS)
-    g_astrollm.add_argument('--astrollm-timeout', type=float, default=None,
+    g_originvision.add_argument('--originvision-timeout', type=float, default=None,
                    metavar='SEC', help=argparse.SUPPRESS)
-    g_astrollm.add_argument('--astrollm-python', default=None, help=argparse.SUPPRESS)
-    g_astrollm.add_argument('--astrollm-script', default=None, help=argparse.SUPPRESS)
+    g_originvision.add_argument('--originvision-python', default=None, help=argparse.SUPPRESS)
+    g_originvision.add_argument('--originvision-script', default=None, help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
@@ -1931,41 +1931,41 @@ def parse_args(argv=None):
     args.keep_intermediates = 'intermediates' in _dbg
     args.export_masks = 'masks' in _dbg
 
-    if args.astrollm:
-        from src.astrollm_infer import onnxruntime_available, resolve_model_path
+    if args.originvision:
+        from src.originvision_infer import onnxruntime_available, resolve_model_path
 
-        # Back-compat: --astrollm-model wins; otherwise honour the old
-        # --astrollm-checkpoint, then derive from --astrollm-dir's layout.
-        if not args.astrollm_model:
-            if args.astrollm_checkpoint:
-                args.astrollm_model = args.astrollm_checkpoint
-            elif args.astrollm_dir:
-                args.astrollm_model = os.path.join(
-                    args.astrollm_dir, 'checkpoints', 'model.onnx')
+        # Back-compat: --originvision-model wins; otherwise honour the old
+        # --originvision-checkpoint, then derive from --originvision-dir's layout.
+        if not args.originvision_model:
+            if args.originvision_checkpoint:
+                args.originvision_model = args.originvision_checkpoint
+            elif args.originvision_dir:
+                args.originvision_model = os.path.join(
+                    args.originvision_dir, 'checkpoints', 'model.onnx')
 
         if not onnxruntime_available():
-            safe_print("  WARNING: --astrollm needs the 'onnxruntime' package "
-                       "(pip install onnxruntime) -- disabling astrollm scoring")
-            args.astrollm = False
-        elif args.astrollm_model and not os.path.isfile(args.astrollm_model):
+            safe_print("  WARNING: --originvision needs the 'onnxruntime' package "
+                       "(pip install onnxruntime) -- disabling originvision scoring")
+            args.originvision = False
+        elif args.originvision_model and not os.path.isfile(args.originvision_model):
             # An explicit override that doesn't exist is a hard error -- never
             # silently fall back to the bundled model (resolve_model_path
             # would), the user asked for a specific file.
-            safe_print(f"  WARNING: --astrollm model not found: {args.astrollm_model} "
-                       f"-- disabling astrollm scoring")
-            args.astrollm = False
-        elif resolve_model_path(args.astrollm_model) is None:
-            safe_print("  WARNING: --astrollm has no model (bundled "
-                       "src/data/astrollm.onnx missing) -- disabling astrollm scoring")
-            args.astrollm = False
+            safe_print(f"  WARNING: --originvision model not found: {args.originvision_model} "
+                       f"-- disabling originvision scoring")
+            args.originvision = False
+        elif resolve_model_path(args.originvision_model) is None:
+            safe_print("  WARNING: --originvision has no model (bundled "
+                       "src/data/originvision.onnx missing) -- disabling originvision scoring")
+            args.originvision = False
 
-    if getattr(args, 'astrollm_score_all', False) and not args.astrollm:
-        # Covers both "never passed --astrollm" and "--astrollm got disabled
+    if getattr(args, 'originvision_score_all', False) and not args.originvision:
+        # Covers both "never passed --originvision" and "--originvision got disabled
         # just above for missing/bad paths" -- either way score_all's own
-        # gate (astrollm AND astrollm_score_all, checked in src/astrollm.py
+        # gate (originvision AND originvision_score_all, checked in src/originvision.py
         # too) makes it a silent no-op otherwise, which is easy to mistake
         # for "ran but found nothing" rather than "didn't run at all".
-        safe_print("  WARNING: --astrollm-score-all has no effect without --astrollm")
+        safe_print("  WARNING: --originvision-score-all has no effect without --originvision")
 
     return args
 
