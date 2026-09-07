@@ -811,24 +811,16 @@ class App:
         ttk.Label(phase_frame, textvariable=self.progress_var).grid(
             row=2, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
 
-        frames_frame = ttk.LabelFrame(parent, text='RECENT FRAMES')
-        frames_frame.pack(fill='x', pady=6)
-        cols = ('frame', 'score', 'snr', 'stars', 'fwhm')
-        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=6)
-        for c, w in zip(cols, (160, 60, 60, 50, 60)):
-            self.frames_tree.heading(c, text=c.capitalize())
-            self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
-        self.frames_tree.tag_configure('bad', foreground=_BAD)
-        self.frames_tree.pack(fill='x')
-
+        # RECENT FRAMES moved to the right column; the whole left column
+        # below the pipeline bar is the log now.
         log_frame = ttk.LabelFrame(parent, text='LOG')
         log_frame.pack(fill='both', expand=True, pady=6)
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=12, bg=_LOG_BG, fg=_LOG_FG, insertbackground=_LOG_FG,
+            log_frame, height=20, bg=_LOG_BG, fg=_LOG_FG, insertbackground=_LOG_FG,
             font=('Consolas', 9), state='disabled', wrap='word')
         self.log_text.pack(fill='both', expand=True)
 
-    # ── right column: preview, frame strip, stretch, summary ──────────
+    # ── right column: preview, frame strip, recent frames, summary ────
 
     def _build_right(self, parent: ttk.Frame) -> None:
         preview_frame = ttk.LabelFrame(parent, text='PREVIEW')
@@ -864,23 +856,15 @@ class App:
         self.frame_strip = FrameStrip(strip_frame, on_click=self._on_thumb_click)
         self.frame_strip.pack(fill='x')
 
-        stretch_frame = ttk.LabelFrame(parent, text='STRETCH')
-        stretch_frame.pack(fill='x', pady=6)
-        self.stretch_vars = {
-            'black': tk.DoubleVar(value=0.0), 'b': tk.DoubleVar(value=8.0),
-            'sp': tk.DoubleVar(value=0.15), 'hp': tk.DoubleVar(value=0.95),
-        }
-        specs = [('black', 'Black σ', -1, 4), ('b', 'GHS b', 0, 20),
-                 ('sp', 'GHS sp', 0, 1), ('hp', 'GHS hp', 0, 1)]
-        for row, (key, label, lo, hi) in enumerate(specs):
-            ttk.Label(stretch_frame, text=label).grid(row=row, column=0, sticky='w', padx=4)
-            ttk.Scale(stretch_frame, from_=lo, to=hi, orient='horizontal',
-                     variable=self.stretch_vars[key]).grid(row=row, column=1, sticky='we', padx=4)
-            stretch_frame.grid_columnconfigure(1, weight=1)
-        btn_row = ttk.Frame(stretch_frame)
-        btn_row.grid(row=len(specs), column=0, columnspan=2, pady=6)
-        ttk.Button(btn_row, text='Apply to view', command=self._apply_stretch).pack(side='left')
-        ttk.Button(btn_row, text='Reset', command=self._reset_stretch).pack(side='left', padx=6)
+        frames_frame = ttk.LabelFrame(parent, text='RECENT FRAMES')
+        frames_frame.pack(fill='x', pady=6)
+        cols = ('frame', 'score', 'snr', 'stars', 'fwhm')
+        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=8)
+        for c, w in zip(cols, (170, 60, 60, 50, 60)):
+            self.frames_tree.heading(c, text=c.capitalize())
+            self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
+        self.frames_tree.tag_configure('bad', foreground=_BAD)
+        self.frames_tree.pack(fill='x')
 
         summary_frame = ttk.LabelFrame(parent, text='COMPLETE')
         summary_frame.pack(fill='x', pady=6)
@@ -939,23 +923,6 @@ class App:
         data = self.ui.frame_jpeg(fid)
         if data:
             self.preview.load_slot(data, f'frame-{fid}', f'Frame #{fid}')
-
-    def _apply_stretch(self) -> None:
-        slug = self.preview.current_slug
-        if not slug:
-            return
-        params = {k: v.get() for k, v in self.stretch_vars.items()}
-        params['stretch'] = 'ghs'
-        data = self.ui.restretch(slug, params)
-        if data:
-            self.preview.replace_pixels(data)
-
-    def _reset_stretch(self) -> None:
-        self.stretch_vars['black'].set(0.0)
-        self.stretch_vars['b'].set(8.0)
-        self.stretch_vars['sp'].set(0.15)
-        self.stretch_vars['hp'].set(0.95)
-        self._apply_stretch()
 
     @staticmethod
     def _slug_from_label(label: str) -> str:
