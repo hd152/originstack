@@ -6,8 +6,40 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-07
+
+### Breaking
+
+- **`--astrollm*` → `--originvision*`.** The upstream model project renamed
+  itself (`astrollm` → `originvision`), and OriginStack follows: every
+  `--astrollm`, `--astrollm-score-all`, `--astrollm-model` etc. is now
+  `--originvision*`, the `ASTROLLM_DIR` env var is `ORIGINVISION_DIR`, and
+  `FrameInfo.metrics['astrollm']` is `['originvision']`. **No aliases** —
+  a command line still passing `--astrollm` will error. `--astrollm-python`
+  / `--astrollm-script` / `--astrollm-timeout` were already inert after the
+  scorer moved in-process and are removed entirely.
+- **Star removal is opt-in.** The `<output>_starless.fits` sidecar
+  surprised users who never asked for it. It is **off by default** now;
+  `--remove-stars` enables it. `--no-remove-stars` is kept as a hidden
+  no-op so existing command lines don't error. `--auto` no longer turns it
+  on for any target type. The main output (with stars) is unaffected
+  either way.
+
 ### Added
 
+- **`--originvision` inference runs fully in-process in Rust.** The new
+  `astro_native.originvision_score` kernel does the whole path —
+  preprocessing (percentile stretch, resize/centre-crop, comet shape-gate)
+  plus the ONNX forward pass, via the pure-Rust `tract` runtime — with **no
+  Python ONNX dependency and no extra DLL**. A source checkout without
+  `ext/astro_native/` built falls back to a Python `onnxruntime` path;
+  `onnxruntime` is no longer bundled in the packaged app. The exported
+  model ships inside the package at `src/data/originvision.onnx`.
+- **`--originvision-model PATH`** overrides the bundled model (e.g. to test
+  a newer checkpoint). The bundled model is now "v4" — a from-scratch,
+  no-SSL 7-task run (best-by-category checkpoint, epoch 15). vs the
+  previous model it matches or beats on category, reject-recall and
+  quality; it is ~0.07 lower on exposure-class accuracy.
 - **`--photometry`: absolute aperture photometry on the linear stack.**
   Detects stars, cone-searches Gaia DR3 around the field (via the header
   WCS — a Celestron Origin `info.json` session solve or `--plate-solve`),
@@ -41,6 +73,10 @@ match the `VERSION` file and `v*` git tags.
   is given, a Janesick two-frame difference over ≥2 bias + ≥2 flat frames
   estimates the sensor gain (e-/ADU) and read noise (e-), feeding a real
   Poisson term into the per-star photometric errors.
+- **Quality-sweep score cache.** `--quality-sweep` writes a versioned
+  `.sweepcache.json` at the sweep root, keyed by each frame's mtime+size,
+  so re-sweeps of a mostly-unchanged collection only re-score new or
+  changed frames. `--sweep-no-cache` ignores and does not write it.
 
 ### Changed
 
@@ -57,25 +93,42 @@ match the `VERSION` file and `v*` git tags.
   observation time) when they are not given. `--parallactic-angle` stays
   required — a wrong value shifts colour channels the wrong way and
   mapping it onto the detector needs the image north angle.
+- **Desktop app layout.** The GHS-slider **STRETCH** panel is removed
+  (`ui_events.restretch` / the preview's `replace_pixels` stay as
+  API). RECENT FRAMES moves next to the preview on the right, so the whole
+  left column below the pipeline bar is the log. Form field labels are now
+  human ("Light frames", "Stack method", …) instead of the raw `--flag`
+  text, with the flag name in the hover tooltip. Previews and the
+  thumbnail ring clear at the start of each new run.
+- **`psutil` is an optional dependency now, not a core one.** Every use is
+  already `try/except`-guarded with a fixed fallback; installing it lets
+  the pipeline size workers and memmaps to real free RAM.
 
 ### Internal
 
-- **`astro_native` 0.18.0 → 0.19.0: `aperture_photometry_batch` kernel** —
-  partial-pixel aperture photometry for N centres at once, rayon-parallel
-  over stars. ~150× faster than the numpy mirror at time-series scale
-  (300 stars × 200 frames: ~23 s → ~0.2 s). Numpy fallback
-  (`_aperture_photometry_batch_numpy`) with a native parity test.
+- **`astro_native` 0.18.0 → 0.21.0.** New kernels: `originvision_score`
+  (full `--originvision` inference via `tract`), `fit_psf_moffat2d_native`
+  / `fit_psf_gauss2d_native` (2D star-profile PSF fits — removes scipy
+  `curve_fit`'s per-iteration Python callback, ~4× on a 30-star PSF
+  estimate), `aperture_photometry_batch` (partial-pixel aperture
+  photometry for N centres at once, ~150× at time-series scale). Release
+  profile `panic = "abort"` → `"unwind"` so a malformed
+  `--originvision-model` raises a Python exception instead of aborting the
+  process; `lto` `true` → `"thin"` (tract's ~120-crate dep tree made fat
+  LTO builds punishing).
+- **`vendor/astrollm/` → `vendor/originvision/`** — an upstream provenance
+  snapshot only, not on the runtime path.
 - **Refactor: shared photometry primitives.** New `src/photometry_core.py`
   (aperture-photometry kernel + dispatcher, WCS→pixel projection, field
-  centre/radius, small array helpers) and `src/observing_geometry.py`
-  (alt/az, airmass, zenith & parallactic angle from lat/long + RA/Dec +
-  UTC). `color_calibrate._aperture_flux` and
-  `photometric_calibration._aperture_photometry` are now thin wrappers
-  over the shared kernel (partial-pixel apertures, ~150× faster with the
-  native build) instead of three separate per-star Python loops.
-  `utils.header_get_first` folds the repeated "try each header spelling"
-  pattern (`DATE-OBS`/`DATE_OBS`/…, `EGAIN`/`GAIN`, `SATURATE`/`DATAMAX`,
-  the `CCD-TEMP` family).
+  centre/radius) and `src/observing_geometry.py` (alt/az, airmass, zenith
+  & parallactic angle from lat/long + RA/Dec + UTC). `color_calibrate` and
+  `photometric_calibration`'s per-star aperture loops are now thin
+  wrappers over the shared native kernel.
+- **`postprocess_stack` hardening.** A failure in the star-removal /
+  starless-sidecar block can no longer abort the output stage and leave an
+  orphan `_starless.fits` with no main output — it is now a warning.
+- **Dependency trim.** `onnxruntime` is no longer installed by
+  `build_windows.ps1` or collected into the packaged app.
 
 ## [1.0.0] - 2026-08-21
 
@@ -96,13 +149,6 @@ match the `VERSION` file and `v*` git tags.
   session size. Full per-frame scoring is still available, opt-in, via the
   new `--originvision-score-all` flag. `--originvision-score-all` alone (without
   `--originvision`) is a no-op and now warns at startup.
-- **`--originvision` inference is now a native `astro_native` kernel** (the
-  originvision model project, formerly "astrollm"). `astro_native.originvision_score`
-  runs the whole path — preprocessing plus the ONNX forward pass, via the
-  pure-Rust `tract` runtime — so a source checkout with `ext/astro_native/`
-  built, and the packaged app, need **no Python ONNX dependency** at all.
-  `onnxruntime` stays only as a fallback for a source checkout without the
-  crate built. The bundled model (`src/data/originvision.onnx`) is unchanged.
 
 ### Internal
 
@@ -139,3 +185,4 @@ match the `VERSION` file and `v*` git tags.
 Versions prior to 1.0.0 (`v0.1.0` – `v0.9.0`) predate this changelog; see
 the [GitHub Releases](https://github.com/hd152/originstack/releases) page
 and `git log` for that history.
+
