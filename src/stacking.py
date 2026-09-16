@@ -156,8 +156,10 @@ def _cap_tile_workers(n_workers: int, N: int, tile_size: int, C: int) -> int:
         import psutil
         avail = psutil.virtual_memory().available
         safe = max(1, int(avail * 0.5 / max(per_worker_bytes, 1)))
-    except ImportError:
-        # Without psutil: conservatively allow 1 GB budget for tile workers
+    except Exception:
+        # psutil absent, or present but its call failed (e.g. a sandboxed
+        # CI runner with a broken/partial psutil) -- conservatively allow a
+        # 1 GB budget for tile workers either way.
         safe = max(1, (1024 * 1024 * 1024) // max(per_worker_bytes, 1))
     return min(n_workers, safe)
 
@@ -199,7 +201,10 @@ def _adaptive_tile_size(N: int, C: int) -> int:
         max_t = int(max_t_sq ** 0.5)
         # Round down to nearest multiple of 16, min 16, cap at default
         return max(16, (min(default, max_t) // 16) * 16)
-    except ImportError:
+    except Exception:
+        # psutil absent, or present but its call failed (e.g. a sandboxed
+        # CI runner with a broken/partial psutil) -- fall back to the
+        # unscaled default tile size either way.
         return default
 
 
@@ -1850,7 +1855,10 @@ def patch_weighted_mean_combine(
         import psutil
         avail_mb = psutil.virtual_memory().available / 1e6
         n_workers = min(n_workers, max(1, int(avail_mb * 0.5 / per_worker_mb)))
-    except ImportError:
+    except Exception:
+        # psutil absent, or present but its call failed (e.g. a sandboxed
+        # CI runner with a broken/partial psutil) -- assume a 512 MB budget
+        # either way.
         n_workers = min(n_workers, max(1, int(512 / per_worker_mb)))
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
