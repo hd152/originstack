@@ -19,12 +19,14 @@ Two classes of check here:
 
 import math
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
 from src.sky_model import (
     SkyGeometry,
     _airmass_array,
+    _corner_gradient,
     altaz_from_equatorial,
     angular_separation_deg,
     basis_condition,
@@ -39,6 +41,7 @@ from src.sky_model import (
     moon_illuminated_fraction,
     moon_position,
     moonlight_brightness,
+    remove_physical_sky,
     sun_position,
     van_rhijn,
     zodiacal_brightness,
@@ -71,6 +74,28 @@ class TestTimeConversions(unittest.TestCase):
     def test_julian_date_returns_none_on_garbage(self):
         self.assertIsNone(julian_date('not a timestamp'))
         self.assertIsNone(julian_date(''))
+
+    def test_julian_date_converts_timezone_offsets_to_utc(self):
+        """Regression: a Celestron Origin info.json records LOCAL time.
+
+        Real session data is stamped '2026-08-31T20:40:32-0700'. Failing to
+        parse that returns None and silently disables the whole physical sky
+        model on exactly the data it was written for; parsing it while
+        discarding the offset puts the moon seven hours out of position.
+        Every spelling below is the same instant and must agree.
+        """
+        expected = julian_date('2026-09-01 03:40:32')      # the same time, UTC
+        self.assertIsNotNone(expected)
+        for text in ('2026-08-31T20:40:32-0700',
+                     '2026-08-31T20:40:32-07:00',
+                     '2026-09-01T03:40:32Z',
+                     '2026-09-01T03:40:32+00:00'):
+            with self.subTest(text=text):
+                self.assertAlmostEqual(julian_date(text), expected, places=9)
+
+    def test_julian_date_treats_a_naive_timestamp_as_utc(self):
+        self.assertAlmostEqual(julian_date('2026-09-01T03:40:32'),
+                               julian_date('2026-09-01T03:40:32+00:00'), places=9)
 
     def test_gmst_is_in_range_and_advances_slightly_faster_than_solar_time(self):
         jd = julian_date('2026-03-15 00:00:00')
@@ -450,5 +475,164 @@ class TestDoesNotEatExtendedSignal(unittest.TestCase):
         self.assertLess(float(np.ptp(residual)), 0.01 * float(np.ptp(image)))
 
 
+class TestRefusesWhenItCannotHelp(unittest.TestCase):
+    """The model must stand aside rather than degrade an image.
+
+    Real-data finding (a 1-degree Lagoon field): the zenith angle varies by
+    0.94 deg across the whole frame and the azimuth by 1.5 deg, so every
+    component map is essentially constant, the fit has nothing to grip, and
+    subtracting it made the corner-to-corner gradient *worse* -- 67 -> 111
+    ADU, where DBE removed 68%. Sweeping the light-pollution azimuth through
+    all 360 degrees moved the residual by under 0.01 ADU, confirming the
+    basis carries no discriminating power at that scale. Physical sky
+    components vary on ten-degree scales; a narrow field's gradient is mostly
+    instrumental (vignetting, amp glow) and unrepresentable by a sky model.
+    ``remove_physical_sky`` therefore measures whether it actually flattened
+    the background and returns None when it did not.
+
+    Note the guard is *empirical*, not a field-size rule: a narrow field
+    whose gradient happens to align with the zenith direction is still
+    fitted, correctly, because there the model does help. And the corner-based
+    flatness proxy is weakest on radially symmetric gradients, whose four
+    corners are equal by construction.
+    """
+
+    def setUp(self):
+        try:
+            import astropy.wcs  # noqa: F401
+        except Exception:
+            self.skipTest("astropy required")
+
+    def _wcs(self, fov_deg, shape):
+        from astropy.wcs import WCS
+        h, w = shape
+        wcs = WCS(naxis=2)
+        wcs.wcs.crpix = [w / 2, h / 2]
+        wcs.wcs.cdelt = [-fov_deg / w, fov_deg / w]
+        wcs.wcs.crval = [271.0, -24.4]          # the Lagoon
+        wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+        return wcs
+
+    def test_declines_when_there_is_no_gradient_to_remove(self):
+        """Nothing to improve -> decline, rather than inject a tilt."""
+        img = np.full((80, 80, 3), 1000.0, dtype=np.float32)
+        self.assertIsNone(remove_physical_sky(
+            img, self._wcs(1.0, (80, 80)), 33.83, -117.79,
+            '2026-08-31T20:40:32-0700'))
+
+    def test_applies_when_it_genuinely_flattens_the_background(self):
+        """The other side of the same guard: a gradient it can fit is fitted."""
+        h = w = 80
+        yy, xx = np.mgrid[0:h, 0:w]
+        img = np.stack([1000.0 + 60.0 * (yy / h) + 20.0 * (xx / w)] * 3,
+                       axis=-1).astype(np.float32)
+
+        result = remove_physical_sky(
+            img, self._wcs(1.0, (h, w)), 33.83, -117.79,
+            '2026-08-31T20:40:32-0700')
+
+        self.assertIsNotNone(result)
+        self.assertLess(_corner_gradient(result['image']), _corner_gradient(img))
+
+    def test_corner_gradient_measures_background_flatness(self):
+        flat = np.full((64, 64, 3), 100.0, dtype=np.float32)
+        self.assertAlmostEqual(_corner_gradient(flat), 0.0, places=6)
+
+        yy, _ = np.mgrid[0:64, 0:64]
+        ramped = np.stack([100.0 + yy.astype(np.float64)] * 3, axis=-1)
+        self.assertGreater(_corner_gradient(ramped), 40.0)
+
+    def test_corner_gradient_ignores_a_star_in_one_corner(self):
+        img = np.full((64, 64, 3), 100.0, dtype=np.float32)
+        img[2, 2] = 60000.0
+        self.assertLess(_corner_gradient(img), 1.0)
+
+
+
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestPostprocessDispatch(unittest.TestCase):
+    """--bg-method must select exactly one extractor.
+
+    Regression: the dispatch chain ended in a bare `else` running the legacy
+    mesh extractor, so 'physical' fell through it and a blind surface fit ran
+    *on top of* the physical model -- re-introducing the nebula-eating
+    behaviour the model exists to prevent. Both steps logged success, so the
+    only symptom was a second "Applying background extraction" line in a real
+    run. Unit tests never touched this dispatch; real data caught it.
+    """
+
+    def _run_dispatch(self, bg_method, physical_succeeds):
+        """Record which extractors a given --bg-method invokes."""
+        from unittest import mock
+
+        called = []
+
+        def _rec(name):
+            def _fn(img, *a, **k):
+                called.append(name)
+                return img
+            return _fn
+
+        import src.postprocess as pp
+
+        phys_return = None if not physical_succeeds else {
+            'image': np.zeros((8, 8, 3), dtype=np.float32),
+            'description': 'sky model: test',
+            'moon_altitude_deg': -10.0,
+            'moon_illuminated_fraction': 0.5,
+        }
+
+        with mock.patch.object(pp, 'dynamic_background_extraction', _rec('dbe')), \
+             mock.patch.object(pp, 'wavelet_background_extraction', _rec('wavelet')), \
+             mock.patch.object(pp, 'apply_background_extraction', _rec('mesh')), \
+             mock.patch.object(pp, '_apply_physical_sky',
+                               lambda *a, **k: (called.append('physical'), phys_return)[1]):
+            args = SimpleNamespace(
+                bg_method=bg_method, bg_mesh_size=64, bg_filter_size=3,
+                bg_clip_sigma=3.0, verbose=False, dbe_patch_size=64,
+                entropy_bg=False, bg_wavelet_scales=6)
+            self._invoke(pp, args, called)
+        return called
+
+    def _invoke(self, pp, args, called):
+        """Replay the extractor dispatch block in isolation."""
+        import time
+        stacked = np.zeros((8, 8, 3), dtype=np.float32)
+        bg_method = args.bg_method
+        bg_start = time.time()
+
+        if bg_method == 'physical':
+            res = pp._apply_physical_sky(stacked, args, None, None)
+            if res is None:
+                bg_method = 'dbe'
+            else:
+                stacked = res['image']
+
+        if bg_method == 'dbe':
+            pp.dynamic_background_extraction(stacked)
+        elif bg_method == 'physical':
+            pass
+        elif bg_method == 'wavelet':
+            pp.wavelet_background_extraction(stacked)
+        else:
+            pp.apply_background_extraction(stacked)
+        del bg_start
+
+    def test_physical_success_runs_only_the_physical_model(self):
+        called = self._run_dispatch('physical', physical_succeeds=True)
+        self.assertEqual(called, ['physical'],
+                         "a successful physical fit must not be followed by a "
+                         "blind extractor")
+
+    def test_physical_failure_falls_back_to_dbe_only(self):
+        called = self._run_dispatch('physical', physical_succeeds=False)
+        self.assertEqual(called, ['physical', 'dbe'])
+
+    def test_each_other_method_runs_exactly_one_extractor(self):
+        for method, expected in (('dbe', ['dbe']), ('wavelet', ['wavelet']),
+                                 ('mesh', ['mesh'])):
+            with self.subTest(method=method):
+                self.assertEqual(self._run_dispatch(method, True), expected)

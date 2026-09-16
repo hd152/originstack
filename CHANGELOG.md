@@ -30,30 +30,44 @@ match the `VERSION` file and `v*` git tags.
   residual proportional to the local image gradient — largest at bright
   stars. Without that term every bright star in the frame reports as a
   high-significance transient.
-- **`--bg-method physical`: a sky background model from first principles.**
-  Every other background extractor here — mesh, DBE, wavelet — fits a
-  free-form surface and calls whatever it fits "the background", which is why
-  none of them can tell a light-pollution gradient from a frame-filling
-  nebula (this removed over half the nebulosity from a real Lagoon session,
-  and the existing mitigation is a heuristic that skips the sky-residual
-  passes for extended targets — treating the symptom). This models the sky as
-  a sum of components whose *spatial shapes are fixed by geometry* —
-  scattered moonlight (Krisciunas & Schaefer 1991), van Rhijn airglow,
-  zodiacal light, and ground-source skyglow — leaving only one **non-negative**
-  amplitude per component free. A nebula is not in that span and the model has
-  nowhere to put one: measured at **98% of a synthetic frame-filling nebula
-  preserved**, against a blind polynomial surface on the same scene that eats
-  most of it, while a pure gradient is still removed to 0.00% residual.
-  Non-negativity is load-bearing, not cosmetic — across a real field the
-  component maps are nearly collinear, and an *unbounded* fit synthesises a
-  bump from large cancelling coefficients (measured at −25% preservation,
-  i.e. worse than doing nothing).
-  Ephemerides are computed in closed form rather than via astropy, whose
-  `AltAz` path needs the IERS tables the packaged app deliberately excludes;
-  validated against astropy at **0.009° for the sun and 0.05° for the moon**.
-  Needs a session `info.json` with a WCS, GPS and timestamp (it runs before
-  `--plate-solve`); falls back to DBE with a message otherwise.
-  `--light-pollution-azimuth` points the skyglow term at the local town.
+- **`--bg-method physical`: an experimental sky background model from first
+  principles.** Models the sky as a sum of components whose *spatial shapes
+  are fixed by geometry* — scattered moonlight (Krisciunas & Schaefer 1991),
+  van Rhijn airglow, zodiacal light, ground-source skyglow — leaving one
+  **non-negative** amplitude per component free, so unlike a free-form
+  surface it has nowhere to put a nebula. `--light-pollution-azimuth` aims
+  the skyglow term. Ephemerides are closed-form rather than astropy, whose
+  `AltAz` path needs the IERS tables the packaged app excludes; validated
+  against astropy at **0.009° for the sun and 0.05° for the moon**.
+
+  **Read this before using it.** On a real 1° deep-sky field the model does
+  not work, and it now detects that and declines. Measured on a real Lagoon
+  session: the zenith angle varies by only 0.94° across the whole frame and
+  the azimuth by 1.5°, so every component map is essentially flat, the fit
+  has nothing to grip, and subtracting it made the corner-to-corner gradient
+  **worse** (67 → 111 ADU) where DBE removed 68% of it. Sweeping
+  `--light-pollution-azimuth` through all 360° moved the residual by under
+  0.01 ADU. This is structural, not a tuning problem: physical sky components
+  vary on ten-degree scales, so a narrow field's gradient is dominated by
+  *instrumental* effects — vignetting, amp glow, filter gradients — that a
+  model of the sky cannot represent by construction. `remove_physical_sky`
+  therefore measures whether it actually flattened the background and falls
+  back to DBE when it did not. Expect it to earn its place only on wide
+  fields; on typical deep-sky framing it will stand aside.
+
+  Two earlier claims are corrected by that testing. **DBE does not eat
+  nebulosity** — it retained 99.5% of the Lagoon's signal; the session that
+  motivated this work was damaged by the `sky_residual` *residual passes*, a
+  different step, which `--auto` already skips for extended targets. And the
+  "98% of a synthetic nebula preserved vs a blind surface that eats it" result
+  holds only for a synthetic gradient *built from the model's own basis*; it
+  does not generalise to real data.
+- **Non-negativity is load-bearing.** Across a real field the component maps
+  are nearly collinear, so an *unbounded* fit synthesises a bump from large
+  cancelling coefficients and inverts a nebula (measured at −25% preservation,
+  worse than doing nothing). Constraining every coefficient to ≥ 0 removes
+  that freedom: a non-negative sum of monotonic ramps stays monotonic and
+  cannot have an interior maximum.
 - **Honest attribution.** The fitted coefficients would let the model report
   what a gradient was *made of*, but over a typical field the component maps
   differ by a few percent and the split between them is not identifiable

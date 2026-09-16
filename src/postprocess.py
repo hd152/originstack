@@ -112,24 +112,26 @@ def _save_sidecar_fits(img: np.ndarray, output_path: str, suffix: str) -> None:
 
 
 def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
-    """Fit and subtract the physical sky model, or None if inputs are missing.
+    """Fit and subtract the physical sky model.
 
-    Needs three things a blind extractor doesn't: a WCS (to know where each
-    pixel points), an observation time, and site coordinates. Any of them
-    absent means the geometry can't be built, and the caller falls back to
-    DBE -- the same graceful-degradation contract as every other optional
-    input in this pipeline.
+    Returns ``(result, reason)``: ``result`` is the ``remove_physical_sky``
+    dict, or None with ``reason`` explaining which of the two very different
+    failure modes occurred. Distinguishing them matters -- "your session has
+    no GPS" and "this model cannot help at this field size" call for opposite
+    responses from the user, and reporting the first when the second happened
+    (as an earlier version did on a session that had full GPS and a solve)
+    sends people looking for missing metadata that is already present.
     """
     from src.sky_model import remove_physical_sky
 
     session = getattr(args, '_session_info', None)
     if session is None or not getattr(session, 'has_gps', False):
-        return None
+        return None, 'no site coordinates in the session info.json'
     # Background extraction runs before --plate-solve, so the only WCS
     # available here is the session's own (a Celestron Origin info.json
     # solve). That is the same constraint --photometry-timeseries lives with.
     if not getattr(session, 'has_wcs', False):
-        return None
+        return None, 'no session WCS (background extraction runs before --plate-solve)'
 
     try:
         from astropy.wcs import WCS
@@ -137,14 +139,14 @@ def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
         from src.session_info import build_wcs_keywords
         wcs = WCS(build_wcs_keywords(session))
         if not wcs.has_celestial:
-            return None
+            return None, 'session WCS has no celestial axes'
     except Exception:
-        return None
+        return None, 'session WCS could not be built'
 
     lat, lon = session.latitude, session.longitude
     when = getattr(session, 'date_time', None)
     if lat is None or lon is None or not when:
-        return None
+        return None, 'session info.json lacks GPS or a timestamp'
 
     # Stars and any extended-source exclusion region are kept out of the fit:
     # the model describes sky, and the upward-only clipping inside
@@ -157,13 +159,21 @@ def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
         mask = excl if mask is None else (mask | excl)
 
     try:
-        return remove_physical_sky(stacked, wcs, float(lat), float(lon), str(when),
-                                   mask=mask,
-                                   lp_source_az_deg=float(
-                                       getattr(args, 'light_pollution_azimuth', 0.0) or 0.0))
+        result = remove_physical_sky(
+            stacked, wcs, float(lat), float(lon), str(when), mask=mask,
+            lp_source_az_deg=float(
+                getattr(args, 'light_pollution_azimuth', 0.0) or 0.0))
     except Exception as exc:
-        safe_print(f"  WARNING: physical sky model failed: {exc}")
-        return None
+        return None, f'the fit raised: {exc}'
+
+    if result is None:
+        # Geometry was fine; the model simply had no purchase on this field.
+        # See remove_physical_sky -- physical components vary on ten-degree
+        # scales, so a narrow field's gradient is mostly instrumental.
+        return None, ('it did not flatten the background at this field size '
+                      '(physical sky components are nearly constant across a '
+                      'field this small; the gradient is likely instrumental)')
+    return result, ''
 
 
 def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
@@ -362,10 +372,11 @@ def postprocess_stack(
         if bg_method == 'physical':
             print("\n  Applying physical sky model (moon + airglow + zodiacal + "
                   "light pollution)...")
-            _phys = _apply_physical_sky(stacked, args, pp_star_mask, _bg_excl_mask)
+            _phys, _phys_reason = _apply_physical_sky(
+                stacked, args, pp_star_mask, _bg_excl_mask)
             if _phys is None:
-                safe_print("  Physical sky model unavailable (needs a WCS, an "
-                           "observation time and site coordinates) -- falling back to DBE")
+                safe_print(f"  Physical sky model not used: {_phys_reason}")
+                safe_print("    Falling back to Dynamic Background Extraction")
                 bg_method = 'dbe'
             else:
                 stacked = _phys['image']
@@ -386,6 +397,13 @@ def postprocess_stack(
                 use_entropy_weights=_entropy_bg,
                 exclusion_mask=_bg_excl_mask)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
+        elif bg_method == 'physical':
+            # Already done above. This branch exists so the final `else`
+            # (legacy mesh) cannot catch 'physical' and run a blind surface
+            # fit on top of the model -- which would re-introduce exactly the
+            # nebula-eating behaviour the physical model exists to avoid, and
+            # silently, since both steps report success.
+            pass
         elif bg_method == 'wavelet':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
             wavelet_scales = getattr(args, 'bg_wavelet_scales', 6)
