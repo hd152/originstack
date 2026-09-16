@@ -380,3 +380,92 @@ class TestOriginvisionDefectNudge:
                      _originvision_defect_flagged=True)
         a._apply_quality_settings(_quality_sig(), args)
         assert args.denoise_chroma_boost == 4.0
+
+
+class TestFreeDiagnostics:
+    """--auto is on by default, so anything switched on here runs for
+    everyone. The bar is 'free and harmless', not merely 'useful'."""
+
+    def test_ivw_enables_the_uncertainty_map(self):
+        args = _args(stack_method='ivw', uncertainty_map=False)
+        changes = a._apply_free_diagnostics(args)
+        assert args.uncertainty_map is True
+        assert any('uncertainty_map' in c for c in changes)
+
+    def test_other_combines_are_left_alone(self):
+        # Only ivw has an exact analytic per-pixel variance; elsewhere the
+        # map would be meaningless, not merely cheap.
+        for method in ('sigma_clip', 'median', 'percentile', 'auto'):
+            args = _args(stack_method=method, uncertainty_map=False)
+            a._apply_free_diagnostics(args)
+            assert args.uncertainty_map is False, method
+
+    def test_an_explicit_user_choice_wins(self):
+        args = _args(stack_method='ivw', uncertainty_map=False,
+                     _explicit_cli_dests={'uncertainty_map'})
+        changes = a._apply_free_diagnostics(args)
+        assert args.uncertainty_map is False
+        assert changes == []
+
+    def test_already_on_reports_no_change(self):
+        args = _args(stack_method='ivw', uncertainty_map=True)
+        assert a._apply_free_diagnostics(args) == []
+
+
+class TestOptionalFeatureSuggestions:
+    """Advice only -- these cost runtime or extra outputs, so nothing here
+    may actually mutate args."""
+
+    def _session(self, gps=True, wcs=True):
+        return SimpleNamespace(has_gps=gps, has_wcs=wcs)
+
+    def test_extended_target_with_a_session_solve_suggests_the_physical_sky_model(self):
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
+        out = a.suggest_optional_features(
+            args, {'emission_nebula': 0.8}, session_info=self._session())
+        assert any('--bg-method physical' in s for s in out)
+        assert args.bg_method == 'dbe', "suggestions must not mutate args"
+
+    def test_not_suggested_without_gps_or_a_session_wcs(self):
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
+        for session in (self._session(gps=False), self._session(wcs=False), None):
+            out = a.suggest_optional_features(
+                args, {'emission_nebula': 0.8}, session_info=session)
+            assert not any('physical' in s for s in out)
+
+    def test_not_suggested_for_a_compact_target(self):
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
+        out = a.suggest_optional_features(
+            args, {'star_cluster': 0.9}, session_info=self._session())
+        assert not any('physical' in s for s in out)
+
+    def test_not_suggested_when_the_user_chose_bg_method(self):
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False,
+                     _explicit_cli_dests={'bg_method'})
+        out = a.suggest_optional_features(
+            args, {'emission_nebula': 0.8}, session_info=self._session())
+        assert not any('physical' in s for s in out)
+
+    def test_merge_suggests_transient_detection_against_that_epoch(self):
+        args = _args(bg_method='dbe', merge=['prev.fits'],
+                     transient_detect=None, uncertainty_map=False)
+        out = a.suggest_optional_features(args, {}, session_info=None)
+        assert any('--transient-detect prev.fits' in s for s in out)
+
+    def test_no_transient_suggestion_when_already_requested(self):
+        args = _args(bg_method='dbe', merge=['prev.fits'],
+                     transient_detect='prev.fits', uncertainty_map=False)
+        out = a.suggest_optional_features(args, {}, session_info=None)
+        assert not any('--transient-detect' in s for s in out)
+
+    def test_uncertainty_map_suggests_propagation_and_names_the_cost(self):
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=True,
+                     uncertainty_propagate=False)
+        out = a.suggest_optional_features(args, {}, session_info=None)
+        propagate = [s for s in out if '--uncertainty-propagate' in s]
+        assert propagate
+        assert 'Phase 4' in propagate[0], "the runtime cost must be stated"
+
+    def test_returns_nothing_for_a_plain_run(self):
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
+        assert a.suggest_optional_features(args, {}, session_info=None) == []

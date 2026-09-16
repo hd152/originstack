@@ -208,6 +208,20 @@ def _run_auto_advisor(final: List[FrameInfo], args,
     else:
         safe_print("  Current settings already optimal — no changes applied.")
 
+    # Advice, not action: these cost real runtime or extra outputs, and --auto
+    # is on by default, so the user opts in rather than discovering them.
+    try:
+        from src.auto_settings import suggest_optional_features
+        _suggestions = suggest_optional_features(
+            args, weights, session_info=getattr(args, '_session_info', None))
+        if _suggestions:
+            safe_print("  Suggested for this target (not enabled):")
+            for s in _suggestions:
+                safe_print(f"    - {s}")
+    except Exception as _exc:
+        import logging
+        logging.getLogger("originstack").debug("auto suggestions failed (%s)", _exc)
+
 
 def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
     """Save (H, W, 3) float32 image as TIFF alongside the FITS output.

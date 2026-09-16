@@ -937,5 +937,80 @@ def apply_auto_settings(
     changes: List[str] = []
     changes.extend(_apply_dynamic_settings(sig, weights, args))
     changes.extend(_apply_quality_settings(sig, args, target_type=target_type, weights=weights))
+    changes.extend(_apply_free_diagnostics(args))
 
     return target_type, label, sig, changes, weights
+
+
+def _apply_free_diagnostics(args) -> List[str]:
+    """Turn on diagnostics that cost effectively nothing.
+
+    ``--auto`` is on by default, so anything switched on here runs for every
+    user on every run. The bar is therefore "free and harmless", not merely
+    "useful" -- features with real runtime cost stay opt-in and are only
+    *suggested* (see ``suggest_optional_features``).
+
+    ``--uncertainty-map`` qualifies: with ``--stack-method ivw`` the native
+    combine kernel already computes the per-pixel summed inverse-variance
+    weight it needs, so emitting the map is a write, not a computation. It
+    is meaningless for every other combine (only ivw has an exact analytic
+    per-pixel variance), so this does nothing elsewhere.
+    """
+    changes: List[str] = []
+    _explicit = getattr(args, '_explicit_cli_dests', set())
+
+    if (getattr(args, 'stack_method', None) == 'ivw'
+            and 'uncertainty_map' not in _explicit
+            and not getattr(args, 'uncertainty_map', False)):
+        args.uncertainty_map = True
+        changes.append("uncertainty_map  False -> True (free with --stack-method ivw)")
+
+    return changes
+
+
+def suggest_optional_features(args, weights: Optional[Dict[str, float]] = None,
+                              session_info=None) -> List[str]:
+    """Opt-in features this run looks like it would benefit from.
+
+    Advice only -- nothing here is switched on. These all carry a real cost
+    (extra runtime, extra output files) or need input the pipeline cannot
+    invent, so the user decides. Returned as ready-to-paste flag text.
+    """
+    suggestions: List[str] = []
+    weights = weights or {}
+    _explicit = getattr(args, '_explicit_cli_dests', set())
+
+    # The physical sky model needs a session solve + GPS + timestamp, so only
+    # suggest it when those are actually present -- otherwise it would fall
+    # back to DBE and the advice would be noise.
+    extended = (weights.get('galaxy', 0.0)
+                + weights.get('emission_nebula', 0.0)
+                + weights.get('reflection_nebula', 0.0))
+    has_geometry = bool(session_info is not None
+                        and getattr(session_info, 'has_gps', False)
+                        and getattr(session_info, 'has_wcs', False))
+    if (extended > 0.3 and has_geometry
+            and getattr(args, 'bg_method', 'dbe') != 'physical'
+            and 'bg_method' not in _explicit):
+        suggestions.append(
+            "--bg-method physical   (extended target with a session solve + GPS: "
+            "fits a geometry-constrained sky model that cannot absorb nebulosity, "
+            "instead of skipping the sky-residual passes to avoid that)")
+
+    # --merge already supplies a prior epoch of this exact field, which is
+    # precisely what difference imaging needs.
+    merge_refs = getattr(args, 'merge', None)
+    if merge_refs and not getattr(args, 'transient_detect', None):
+        first = merge_refs[0] if isinstance(merge_refs, (list, tuple)) else merge_refs
+        suggestions.append(
+            f"--transient-detect {first}   (--merge already provides an earlier epoch "
+            "of this field: compare them to find novae, outbursts and asteroids)")
+
+    if (getattr(args, 'uncertainty_map', False)
+            and not getattr(args, 'uncertainty_propagate', False)):
+        suggestions.append(
+            "--uncertainty-propagate   (carry the error bars through post-processing "
+            "for a real per-pixel confidence map; costs one extra Phase 4 pass per "
+            "realization, default 8)")
+
+    return suggestions
