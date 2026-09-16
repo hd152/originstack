@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-15
+
 ### Changed
 
 - **`--originvision` comet class is suppressed, not shape-gated.** The
