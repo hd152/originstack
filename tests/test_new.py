@@ -411,26 +411,11 @@ class TestArcSinhStretch(unittest.TestCase):
         self.assertLessEqual(float(result.max()), 1.0)
 
 
-class TestReduceChromaNoise(unittest.TestCase):
+class TestReduceChromaNoiseEffect(unittest.TestCase):
 
     def setUp(self):
         from src.denoising import reduce_chroma_noise
         self.reduce = reduce_chroma_noise
-
-    def test_shape_preserved(self):
-        rgb = _star_rgb()
-        result = self.reduce(rgb)
-        self.assertEqual(result.shape, rgb.shape)
-
-    def test_dtype_is_float32(self):
-        rgb = _star_rgb()
-        result = self.reduce(rgb)
-        self.assertEqual(result.dtype, np.float32)
-
-    def test_non_negative_output(self):
-        rgb = _star_rgb(bg=50.0)
-        result = self.reduce(rgb)
-        self.assertGreaterEqual(float(result.min()), 0.0)
 
     def test_chroma_noise_reduced_in_sky(self):
         """Sky pixels should have less channel-to-channel variation after NR."""

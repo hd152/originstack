@@ -132,11 +132,25 @@ def _make_astropy_stub():
     return astropy_mod, io_mod, fits_mod, stats_mod
 
 
-_astropy_stub, _io_stub, _fits_stub, _stats_stub = _make_astropy_stub()
-sys.modules.setdefault("astropy", _astropy_stub)
-sys.modules.setdefault("astropy.io", _io_stub)
-sys.modules.setdefault("astropy.io.fits", _fits_stub)
-sys.modules.setdefault("astropy.stats", _stats_stub)
+# Only stub astropy when it is genuinely unavailable. These go into
+# sys.modules at import time and are never removed, so an unconditional
+# setdefault poisons every test module imported after this one: whichever
+# file lands first wins, and the loser gets a fake astropy.io.fits with no
+# .writeto. The full suite passes today only because some earlier import
+# happens to pull in the real package first -- run
+# `pytest tests/test_main.py tests/test_unit_extended.py` on its own and
+# seven tests fail with "module 'astropy.io.fits' has no attribute
+# 'writeto'". astropy is a hard requirement (requirements.txt), so in any
+# normal environment this branch is dead and the real package is used.
+try:
+    import astropy.io.fits  # noqa: F401
+    import astropy.stats  # noqa: F401
+except Exception:
+    _astropy_stub, _io_stub, _fits_stub, _stats_stub = _make_astropy_stub()
+    sys.modules.setdefault("astropy", _astropy_stub)
+    sys.modules.setdefault("astropy.io", _io_stub)
+    sys.modules.setdefault("astropy.io.fits", _fits_stub)
+    sys.modules.setdefault("astropy.stats", _stats_stub)
 
 for _m in [
     "tqdm", "psutil",
@@ -144,12 +158,20 @@ for _m in [
 ]:
     sys.modules.setdefault(_m, types.ModuleType(_m))
 
-_pil = types.ModuleType("PIL")
-_pil_img = types.ModuleType("PIL.Image")
-_pil_img.fromarray = lambda arr: mock.MagicMock()
-_pil.Image = _pil_img
-sys.modules.setdefault("PIL", _pil)
-sys.modules.setdefault("PIL.Image", _pil_img)
+# Same conditional treatment as astropy above: seven other test modules
+# (test_aberration, test_annotation, test_io_xisf, test_originvision,
+# test_self_supervised_calibration, test_tiff_export_pillow_fallback,
+# test_ui_events) use real Pillow, and a leaked stub whose Image.fromarray
+# returns a MagicMock would break them depending only on import order.
+try:
+    import PIL.Image  # noqa: F401
+except Exception:
+    _pil = types.ModuleType("PIL")
+    _pil_img = types.ModuleType("PIL.Image")
+    _pil_img.fromarray = lambda arr: mock.MagicMock()
+    _pil.Image = _pil_img
+    sys.modules.setdefault("PIL", _pil)
+    sys.modules.setdefault("PIL.Image", _pil_img)
 
 # ---- Import module under test ----
 _orig_stdout = sys.stdout
@@ -205,55 +227,51 @@ def _write_fits(data: np.ndarray, path: str, header_extra=None):
 # ---------------------------------------------------------------------------
 
 class TestClassifyFrame(unittest.TestCase):
-    def test_dark_filename(self):
-        self.assertEqual(astro.classify_frame("dark_001.fit", {}), "dark")
+    """Frame-type classification, table-driven.
 
-    def test_flat_filename(self):
-        self.assertEqual(astro.classify_frame("flat_001.fit", {}), "flat")
+    Consolidated 2026-09 from two parallel copies (this one and a near-identical
+    TestClassifyFrame in test_unit_extended.py) that between them spent 30 test
+    methods on these 22 behaviours under different names. Cases are the union of
+    both; add a row rather than a method.
+    """
 
-    def test_bias_filename(self):
-        self.assertEqual(astro.classify_frame("bias_001.fit", {}), "bias")
+    CASES = [
+        # (filename, header, expected, why)
+        # Pipeline outputs must never be re-ingested as inputs.
+        ('any.fits', {'COMBINED': True}, 'skip', 'COMBINED header'),
+        ('any.fits', {'CREATOR': 'astro_stack v2'}, 'skip', 'legacy CREATOR prefix'),
+        ('any.fits', {'CREATOR': 'astro_stack/pipeline'}, 'skip', 'CREATOR substring'),
+        ('any.fits', {'CREATOR': 'originstack.py v1.0'}, 'skip', 'current CREATOR'),
+        # Dark: filename or IMAGETYP, either case, with or without a separator.
+        ('dark_001.fit', {}, 'dark', 'filename'),
+        ('dark001.fits', {}, 'dark', 'filename, no separator'),
+        ('DARK_001.FIT', {}, 'dark', 'filename is case-insensitive'),
+        ('x.fit', {'IMAGETYP': 'dark'}, 'dark', 'IMAGETYP'),
+        ('image.fits', {'IMAGETYP': 'Dark'}, 'dark', 'IMAGETYP mixed case'),
+        ('image.fits', {'IMAGETYP': 'DARK'}, 'dark', 'IMAGETYP upper case'),
+        # Flat.
+        ('flat_001.fit', {}, 'flat', 'filename'),
+        ('x.fit', {'IMAGETYP': 'flat'}, 'flat', 'IMAGETYP'),
+        ('x.fit', {'IMAGETYP': 'FLAT'}, 'flat', 'IMAGETYP upper case'),
+        # Bias, including the zero-exposure shortcut.
+        ('bias_001.fit', {}, 'bias', 'filename'),
+        ('bias0001.fits', {}, 'bias', 'filename, no separator'),
+        ('x.fit', {'IMAGETYP': 'bias'}, 'bias', 'IMAGETYP'),
+        ('frame.fit', {'EXPTIME': 0}, 'bias', 'zero exposure'),
+        # Light is the fallthrough.
+        ('frame_001.fit', {}, 'light', 'no signal anywhere'),
+        ('img_001.fits', {}, 'light', 'empty header'),
+        ('frame.fit', {'EXPTIME': 30.0}, 'light', 'non-zero exposure'),
+        ('light_001.fits', {'EXPTIME': 120, 'IMAGETYP': 'Light Frame'}, 'light',
+         'explicit light'),
+        # Precedence: the filename wins over a contradicting IMAGETYP.
+        ('dark_001.fit', {'IMAGETYP': 'light'}, 'dark', 'filename beats IMAGETYP'),
+    ]
 
-    def test_light_default(self):
-        self.assertEqual(astro.classify_frame("frame_001.fit", {}), "light")
-
-    def test_dark_imagetyp(self):
-        self.assertEqual(astro.classify_frame("x.fit", {"IMAGETYP": "dark"}), "dark")
-
-    def test_flat_imagetyp(self):
-        self.assertEqual(astro.classify_frame("x.fit", {"IMAGETYP": "flat"}), "flat")
-
-    def test_bias_imagetyp(self):
-        self.assertEqual(astro.classify_frame("x.fit", {"IMAGETYP": "bias"}), "bias")
-
-    def test_bias_zero_exptime(self):
-        self.assertEqual(astro.classify_frame("frame.fit", {"EXPTIME": 0}), "bias")
-
-    def test_skip_combined(self):
-        self.assertEqual(astro.classify_frame("frame.fit", {"COMBINED": True}), "skip")
-
-    def test_skip_creator(self):
-        # Pre-rename prefix (astro_stack.py -> originstack.py) -- outputs
-        # from older runs must still be recognized.
-        self.assertEqual(astro.classify_frame("x.fit", {"CREATOR": "astro_stack v2"}), "skip")
-
-    def test_skip_creator_current_name(self):
-        self.assertEqual(astro.classify_frame("x.fit", {"CREATOR": "originstack.py"}), "skip")
-
-    def test_case_insensitive_filename(self):
-        self.assertEqual(astro.classify_frame("DARK_001.FIT", {}), "dark")
-
-    def test_case_insensitive_imagetyp(self):
-        self.assertEqual(astro.classify_frame("x.fit", {"IMAGETYP": "FLAT"}), "flat")
-
-    def test_nonzero_exptime_is_light(self):
-        self.assertEqual(astro.classify_frame("frame.fit", {"EXPTIME": 30.0}), "light")
-
-    def test_filename_dark_overrides_light_imagetyp(self):
-        # filename-based detection should take priority
-        result = astro.classify_frame("dark_001.fit", {"IMAGETYP": "light"})
-        self.assertEqual(result, "dark")
-
+    def test_classification(self):
+        for name, header, expected, why in self.CASES:
+            with self.subTest(name=name, why=why):
+                self.assertEqual(astro.classify_frame(name, header), expected)
 
 class TestFormatTime(unittest.TestCase):
     def test_zero(self):

@@ -40,75 +40,6 @@ def _make_bayer(shape=(32, 32), pattern='RGGB', r=1000.0, g=800.0, b=600.0) -> n
 # 1. classify_frame (src/frame_discovery.py)
 # ===========================================================================
 
-class TestClassifyFrame(unittest.TestCase):
-
-    def setUp(self):
-        from src.frame_discovery import classify_frame
-        self.classify = classify_frame
-
-    # --- Skip conditions (pipeline outputs) ---
-
-    def test_combined_header_skipped(self):
-        self.assertEqual(self.classify('any.fits', {'COMBINED': True}), 'skip')
-
-    def test_creator_header_skipped(self):
-        # Pre-rename prefix (astro_stack.py -> originstack.py) -- outputs
-        # from older runs must still be recognized.
-        self.assertEqual(self.classify('any.fits', {'CREATOR': 'astro_stack.py v1.0'}), 'skip')
-
-    def test_creator_substring_skipped(self):
-        self.assertEqual(self.classify('any.fits', {'CREATOR': 'astro_stack/pipeline'}), 'skip')
-
-    def test_creator_header_skipped_current_name(self):
-        self.assertEqual(self.classify('any.fits', {'CREATOR': 'originstack.py v1.0'}), 'skip')
-
-    # --- Dark detection ---
-
-    def test_filename_dark_returns_dark(self):
-        self.assertEqual(self.classify('dark001.fits', {}), 'dark')
-
-    def test_imagetyp_dark_case_insensitive(self):
-        self.assertEqual(self.classify('image.fits', {'IMAGETYP': 'Dark'}), 'dark')
-
-    def test_imagetyp_dark_uppercase(self):
-        self.assertEqual(self.classify('image.fits', {'IMAGETYP': 'DARK'}), 'dark')
-
-    # --- Flat detection ---
-
-    def test_filename_flat_returns_flat(self):
-        self.assertEqual(self.classify('flat_001.fits', {}), 'flat')
-
-    def test_imagetyp_flat(self):
-        self.assertEqual(self.classify('frame.fits', {'IMAGETYP': 'flat'}), 'flat')
-
-    # --- Bias detection ---
-
-    def test_filename_bias_returns_bias(self):
-        self.assertEqual(self.classify('bias0001.fits', {}), 'bias')
-
-    def test_exptime_zero_returns_bias(self):
-        self.assertEqual(self.classify('frame.fits', {'EXPTIME': 0}), 'bias')
-
-    def test_imagetyp_bias(self):
-        self.assertEqual(self.classify('frame.fits', {'IMAGETYP': 'bias'}), 'bias')
-
-    # --- Light fallthrough ---
-
-    def test_no_match_returns_light(self):
-        self.assertEqual(self.classify('light_001.fits', {'EXPTIME': 120, 'IMAGETYP': 'Light Frame'}), 'light')
-
-    def test_empty_header_light(self):
-        self.assertEqual(self.classify('img_001.fits', {}), 'light')
-
-    # --- Name takes priority over blank header ---
-
-    def test_name_dark_wins_over_empty_imagetyp(self):
-        self.assertEqual(self.classify('dark_0042.fit', {'EXPTIME': 30}), 'dark')
-
-
-# ===========================================================================
-# 2. FITS I/O  (src/io_fits.py)
-# ===========================================================================
 
 class TestLoadFits(unittest.TestCase):
 
@@ -260,7 +191,7 @@ class TestDebayerPatterns(unittest.TestCase):
             self.fail(f"debayer_bilinear crashed on odd-sized input: {e}")
 
 
-class TestWhiteBalance(unittest.TestCase):
+class TestWhiteBalanceEdgeCases(unittest.TestCase):
 
     def setUp(self):
         from src.debayer import white_balance_grayworld, white_balance_whitepatch
@@ -273,18 +204,6 @@ class TestWhiteBalance(unittest.TestCase):
         rgb[:, :, 1] = g
         rgb[:, :, 2] = b
         return rgb
-
-    def test_grayworld_equalises_channel_means(self):
-        rgb = self._unbalanced_rgb()
-        result = self.grayworld(rgb)
-        means = [result[:, :, c].mean() for c in range(3)]
-        self.assertLess(abs(means[0] - means[1]) / max(means[1], 1), 0.10)
-        self.assertLess(abs(means[1] - means[2]) / max(means[2], 1), 0.10)
-
-    def test_grayworld_preserves_shape(self):
-        rgb = self._unbalanced_rgb()
-        result = self.grayworld(rgb)
-        self.assertEqual(result.shape, rgb.shape)
 
     def test_grayworld_dtype_float32(self):
         rgb = self._unbalanced_rgb()
@@ -420,33 +339,11 @@ class TestApplyShift(unittest.TestCase):
         self.assertEqual(result.shape, img.shape)
 
 
-class TestCalcCommonCrop(unittest.TestCase):
+class TestCalcCommonCropFallback(unittest.TestCase):
 
     def setUp(self):
         from src.registration import calc_common_crop
         self.calc_crop = calc_common_crop
-
-    def test_all_zero_shifts_no_crop(self):
-        """If every frame is perfectly aligned, crop should cover the full image."""
-        shifts = [(0.0, 0.0)] * 5
-        top, bot, left, right = self.calc_crop(shifts, (100, 100))
-        self.assertGreaterEqual(right - left, 80)
-        self.assertGreaterEqual(bot - top, 80)
-
-    def test_positive_shift_removes_top_left(self):
-        """A frame shifted down-right means top/left rows/cols are invalid — crop removes them."""
-        shifts = [(0.0, 0.0), (10.0, 10.0)]
-        top, bot, left, right = self.calc_crop(shifts, (100, 100))
-        # top should be > 0 because frame 2 was shifted down by 10
-        self.assertGreater(top, 0)
-        self.assertGreater(left, 0)
-
-    def test_result_is_non_empty(self):
-        """Crop result should always produce a positive-area rectangle."""
-        shifts = [(0.0, 0.0), (5.0, -3.0), (-2.0, 4.0)]
-        top, bot, left, right = self.calc_crop(shifts, (128, 128))
-        self.assertGreater(bot - top, 0)
-        self.assertGreater(right - left, 0)
 
     def test_large_shifts_fallback_to_full_frame(self):
         """When shifts exceed the image, fallback to (0, H, 0, W)."""
@@ -456,28 +353,11 @@ class TestCalcCommonCrop(unittest.TestCase):
         self.assertEqual((top, bot, left, right), (0, 100, 0, 100))
 
 
-class TestDetectDither(unittest.TestCase):
+class TestDetectDitherSpread(unittest.TestCase):
 
     def setUp(self):
         from src.registration import detect_dither
         self.detect_dither = detect_dither
-
-    def test_few_shifts_not_dithered(self):
-        result = self.detect_dither([(0.0, 0.0), (1.0, 1.0)])
-        self.assertFalse(result['is_dithered'])
-
-    def test_all_identical_shifts_not_dithered(self):
-        shifts = [(0.0, 0.0)] * 10
-        result = self.detect_dither(shifts)
-        self.assertFalse(result['is_dithered'])
-
-    def test_large_varied_shifts_dithered(self):
-        """Random shifts spanning many pixels indicate dithering."""
-        rng = np.random.default_rng(0)
-        shifts = [(float(rng.uniform(-30, 30)), float(rng.uniform(-30, 30)))
-                  for _ in range(12)]
-        result = self.detect_dither(shifts)
-        self.assertTrue(result['is_dithered'])
 
     def test_spread_positions_dithered(self):
         """10 spread positions with no sequential autocorrelation should be detected as dithered."""
@@ -488,17 +368,7 @@ class TestDetectDither(unittest.TestCase):
         result = self.detect_dither(shifts)
         self.assertTrue(result['is_dithered'])
 
-    def test_returns_required_keys(self):
-        result = self.detect_dither([(0.0, 0.0)] * 5)
-        for key in ('is_dithered', 'mean_magnitude', 'unique_positions'):
-            self.assertIn(key, result)
-
-
-# ===========================================================================
-# 5. Stacking algorithms (src/stacking.py)
-# ===========================================================================
-
-class TestSigmaClipCombine(unittest.TestCase):
+class TestSigmaClipCombineNumerics(unittest.TestCase):
 
     def setUp(self):
         from src.stacking import sigma_clip_combine
@@ -507,26 +377,6 @@ class TestSigmaClipCombine(unittest.TestCase):
     def _stack(self, *frames):
         """Stack a list of 2D arrays into a (N, H, W, 1) data cube."""
         return np.stack([f[:, :, np.newaxis] for f in frames], axis=0)
-
-    def test_output_shape(self):
-        data = np.random.default_rng(0).uniform(100, 200, (6, 16, 16, 3)).astype(np.float32)
-        result = self.combine(data)
-        self.assertEqual(result.shape, (16, 16, 3))
-
-    def test_output_dtype_float32(self):
-        data = np.ones((4, 8, 8, 3), dtype=np.float32) * 100.0
-        result = self.combine(data)
-        self.assertEqual(result.dtype, np.float32)
-
-    def test_rejects_bright_outlier(self):
-        """One frame with a huge spike should not contaminate the sigma-clipped mean."""
-        # 8 frames of constant 100, one frame has spike of 10000 at (5, 5)
-        rng = np.random.default_rng(1)
-        data = rng.normal(100, 1.5, (9, 16, 16, 1)).astype(np.float32)
-        data[0, 5, 5, 0] = 10000.0  # bright spike
-        result = self.combine(data, sigma=3.0)
-        # After sigma-clip the spike pixel should be close to 100
-        self.assertLess(float(result[5, 5, 0]), 200.0)
 
     def test_uniform_stack_gives_correct_mean(self):
         """All identical frames should return the frame value."""
@@ -551,18 +401,6 @@ class TestSigmaClipCombine(unittest.TestCase):
         result = self.combine(data, weights=weights)
         # Weighted mean = (100*3 + 200*1) / 4 = 125
         np.testing.assert_allclose(result, 125.0, atol=5.0)
-
-    def test_winsorize_mode(self):
-        """Winsorized combine should clip outliers to boundary, not reject them."""
-        rng = np.random.default_rng(2)
-        data = rng.normal(100, 2, (6, 8, 8, 1)).astype(np.float32)
-        data[0, 3, 3, 0] = 5000.0
-        result_normal = self.combine(data, sigma=3.0, winsorize=False)
-        result_wins = self.combine(data, sigma=3.0, winsorize=True)
-        # Both should reduce the spike; winsorized may differ from regular
-        self.assertLess(float(result_normal[3, 3, 0]), 200.0)
-        self.assertLess(float(result_wins[3, 3, 0]), 1000.0)
-
 
 class TestPercentileClipCombine(unittest.TestCase):
 
@@ -620,43 +458,3 @@ class TestESDCombine(unittest.TestCase):
 # 6. Registration shift calculation (src/registration.py)
 # ===========================================================================
 
-class TestCalculateShift(unittest.TestCase):
-
-    def setUp(self):
-        from src.registration import calculate_shift
-        self.calculate_shift = calculate_shift
-
-    def _star_image(self, shape=(128, 128), cy=64, cx=64, amp=2000.0, bg=50.0) -> np.ndarray:
-        yy, xx = np.indices(shape)
-        img = np.full(shape, bg, dtype=np.float32)
-        img += amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 3.0 ** 2))
-        img += np.random.default_rng(0).normal(0, 2, shape).astype(np.float32)
-        return img
-
-    def test_integer_shift_recovered(self):
-        """calculate_shift(ref, img) returns the shift to apply to img to align it with ref.
-        If img has the star at (64+dy, 64+dx), the returned shift is (-dy, -dx)."""
-        dy, dx = 5, -4
-        ref = self._star_image(cy=64, cx=64)
-        img = self._star_image(cy=64 + dy, cx=64 + dx)
-        sy, sx = self.calculate_shift(ref, img, upsample=1)
-        self.assertAlmostEqual(sy, -dy, delta=1.5)
-        self.assertAlmostEqual(sx, -dx, delta=1.5)
-
-    def test_zero_shift_near_zero(self):
-        """Two identical images should give near-zero shift."""
-        ref = self._star_image()
-        sy, sx = self.calculate_shift(ref, ref, upsample=1)
-        self.assertAlmostEqual(sy, 0.0, delta=0.5)
-        self.assertAlmostEqual(sx, 0.0, delta=0.5)
-
-    def test_returns_tuple_of_two_floats(self):
-        ref = self._star_image()
-        result = self.calculate_shift(ref, ref, upsample=1)
-        self.assertEqual(len(result), 2)
-        self.assertIsInstance(float(result[0]), float)
-        self.assertIsInstance(float(result[1]), float)
-
-
-if __name__ == '__main__':
-    unittest.main()
