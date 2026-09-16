@@ -1358,7 +1358,8 @@ def build_parser() -> argparse.ArgumentParser:
     g_post.add_argument('--no-background-extraction', dest='background_extraction',
                    action='store_false',
                    help='Disable background extraction')
-    g_post.add_argument('--bg-method', choices=['mesh', 'dbe', 'wavelet'], default='dbe',
+    g_post.add_argument('--bg-method', choices=['mesh', 'dbe', 'wavelet', 'physical'],
+                   default='dbe',
                    help='Background extraction method (default: dbe). '
                         'mesh: legacy polynomial grid (fastest). '
                         'dbe: Dynamic Background Extraction, robust local regression '
@@ -1366,7 +1367,22 @@ def build_parser() -> argparse.ArgumentParser:
                         'wavelet: starlet (a-trous) low-pass fit on the same sky-patch '
                         'samples as dbe -- a hard pixel-scale cutoff instead of a blur '
                         'radius, better at leaving faint extended nebulosity alone while '
-                        'still flattening the sky (see --bg-wavelet-scales).')
+                        'still flattening the sky (see --bg-wavelet-scales). '
+                        'physical: fit a first-principles sky model (moonlight via '
+                        'Krisciunas-Schaefer, van Rhijn airglow, zodiacal light, '
+                        'ground-source skyglow) whose spatial shapes are fixed by '
+                        'geometry, leaving only one non-negative amplitude per component '
+                        'free. Unlike the three surface fitters above it has nowhere to '
+                        'put a nebula, so it cannot subtract one -- the failure that '
+                        'removed half the nebulosity from a real Lagoon session. Needs a '
+                        'session info.json with a WCS, GPS and timestamp (it runs before '
+                        '--plate-solve); falls back to dbe with a message otherwise.')
+    g_post.add_argument('--light-pollution-azimuth', type=float, default=0.0,
+                   metavar='DEG',
+                   help='physical bg-method only: compass azimuth (degrees east of north) '
+                        'of the dominant ground light source, e.g. the town you are '
+                        'shooting away from. Shapes the skyglow term\'s azimuthal '
+                        'asymmetry (default: 0 = north).')
     g_post.add_argument('--bg-wavelet-scales', type=int, default=6, metavar='N',
                    help='wavelet bg-method only: starlet scale count -- background is '
                         'the coarsest approximation after N dyadic scales, i.e. structure '

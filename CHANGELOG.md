@@ -8,6 +8,36 @@ match the `VERSION` file and `v*` git tags.
 
 ### Added
 
+- **`--bg-method physical`: a sky background model from first principles.**
+  Every other background extractor here — mesh, DBE, wavelet — fits a
+  free-form surface and calls whatever it fits "the background", which is why
+  none of them can tell a light-pollution gradient from a frame-filling
+  nebula (this removed over half the nebulosity from a real Lagoon session,
+  and the existing mitigation is a heuristic that skips the sky-residual
+  passes for extended targets — treating the symptom). This models the sky as
+  a sum of components whose *spatial shapes are fixed by geometry* —
+  scattered moonlight (Krisciunas & Schaefer 1991), van Rhijn airglow,
+  zodiacal light, and ground-source skyglow — leaving only one **non-negative**
+  amplitude per component free. A nebula is not in that span and the model has
+  nowhere to put one: measured at **98% of a synthetic frame-filling nebula
+  preserved**, against a blind polynomial surface on the same scene that eats
+  most of it, while a pure gradient is still removed to 0.00% residual.
+  Non-negativity is load-bearing, not cosmetic — across a real field the
+  component maps are nearly collinear, and an *unbounded* fit synthesises a
+  bump from large cancelling coefficients (measured at −25% preservation,
+  i.e. worse than doing nothing).
+  Ephemerides are computed in closed form rather than via astropy, whose
+  `AltAz` path needs the IERS tables the packaged app deliberately excludes;
+  validated against astropy at **0.009° for the sun and 0.05° for the moon**.
+  Needs a session `info.json` with a WCS, GPS and timestamp (it runs before
+  `--plate-solve`); falls back to DBE with a message otherwise.
+  `--light-pollution-azimuth` points the skyglow term at the local town.
+- **Honest attribution.** The fitted coefficients would let the model report
+  what a gradient was *made of*, but over a typical field the component maps
+  differ by a few percent and the split between them is not identifiable
+  (design-matrix condition number ~1e5–1e7) even though the removal is valid.
+  Rather than print a confident-looking breakdown that means nothing, it says
+  so and reports the condition number.
 - **`--uncertainty-propagate`: error bars that survive post-processing.**
   Phase 3 already computes an exact per-pixel standard error for the linear
   stack (`--uncertainty-map`, the Gauss-Markov estimator's own

@@ -111,6 +111,61 @@ def _save_sidecar_fits(img: np.ndarray, output_path: str, suffix: str) -> None:
     safe_print(f"  Saved: {os.path.basename(path)}")
 
 
+def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
+    """Fit and subtract the physical sky model, or None if inputs are missing.
+
+    Needs three things a blind extractor doesn't: a WCS (to know where each
+    pixel points), an observation time, and site coordinates. Any of them
+    absent means the geometry can't be built, and the caller falls back to
+    DBE -- the same graceful-degradation contract as every other optional
+    input in this pipeline.
+    """
+    from src.sky_model import remove_physical_sky
+
+    session = getattr(args, '_session_info', None)
+    if session is None or not getattr(session, 'has_gps', False):
+        return None
+    # Background extraction runs before --plate-solve, so the only WCS
+    # available here is the session's own (a Celestron Origin info.json
+    # solve). That is the same constraint --photometry-timeseries lives with.
+    if not getattr(session, 'has_wcs', False):
+        return None
+
+    try:
+        from astropy.wcs import WCS
+
+        from src.session_info import build_wcs_keywords
+        wcs = WCS(build_wcs_keywords(session))
+        if not wcs.has_celestial:
+            return None
+    except Exception:
+        return None
+
+    lat, lon = session.latitude, session.longitude
+    when = getattr(session, 'date_time', None)
+    if lat is None or lon is None or not when:
+        return None
+
+    # Stars and any extended-source exclusion region are kept out of the fit:
+    # the model describes sky, and the upward-only clipping inside
+    # fit_sky_model is a second line of defence, not the first.
+    mask = None
+    if star_mask is not None:
+        mask = np.asarray(star_mask) > 0
+    if exclusion_mask is not None:
+        excl = np.asarray(exclusion_mask) > 0
+        mask = excl if mask is None else (mask | excl)
+
+    try:
+        return remove_physical_sky(stacked, wcs, float(lat), float(lon), str(when),
+                                   mask=mask,
+                                   lp_source_az_deg=float(
+                                       getattr(args, 'light_pollution_azimuth', 0.0) or 0.0))
+    except Exception as exc:
+        safe_print(f"  WARNING: physical sky model failed: {exc}")
+        return None
+
+
 def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
     """Replace NaN/Inf with zero and clip negatives."""
     if not np.isfinite(img).all():
@@ -303,6 +358,22 @@ def postprocess_stack(
             _bg_excl_mask = np.clip(_coma_excl_mask + _galaxy_excl_mask, 0.0, 1.0).astype(np.float32)
         else:
             _bg_excl_mask = _coma_excl_mask if _coma_excl_mask is not None else _galaxy_excl_mask
+
+        if bg_method == 'physical':
+            print("\n  Applying physical sky model (moon + airglow + zodiacal + "
+                  "light pollution)...")
+            _phys = _apply_physical_sky(stacked, args, pp_star_mask, _bg_excl_mask)
+            if _phys is None:
+                safe_print("  Physical sky model unavailable (needs a WCS, an "
+                           "observation time and site coordinates) -- falling back to DBE")
+                bg_method = 'dbe'
+            else:
+                stacked = _phys['image']
+                safe_print(f"    {_phys['description']}")
+                if _phys['moon_altitude_deg'] > 0:
+                    safe_print(f"    moon: {_phys['moon_altitude_deg']:.0f} deg altitude, "
+                               f"{100.0 * _phys['moon_illuminated_fraction']:.0f}% illuminated")
+                safe_print(f"  ✓ Physical sky model ({format_time(time.time() - bg_start)})")
 
         if bg_method == 'dbe':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
