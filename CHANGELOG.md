@@ -6,6 +6,35 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **`--uncertainty-propagate`: error bars that survive post-processing.**
+  Phase 3 already computes an exact per-pixel standard error for the linear
+  stack (`--uncertainty-map`, the Gauss-Markov estimator's own
+  `1/sqrt(sum 1/var)`), and Phase 4 then discarded it — every background
+  extraction, denoise and deconvolution reshapes the noise field, so that map
+  no longer describes the image you actually look at. This carries it through
+  by pushing `K` noise realizations (`--uncertainty-realizations`, default 8)
+  through the **unmodified** post-processing chain and measuring the per-pixel
+  spread. Monte Carlo rather than analytic propagation deliberately: nine of
+  the Phase 4 steps are nonlinear denoisers and four are iterative
+  deconvolvers, several spatially adaptive, so no closed-form Jacobian exists
+  for most of the chain — and this stays correct automatically when a new
+  denoiser is added. Writes `<output>_sigma_final.fits` (propagated standard
+  error) and `<output>_snr.fits` (per-pixel signal-to-noise above sky), and
+  logs what fraction of the frame clears 3σ and 5σ.
+- **Clamped-pixel detection.** Pixels the chain pins to a constant (the sky
+  pedestal lift and the non-negativity clips both do this) come back with
+  exactly zero propagated sigma. Those are reported as *undefined* confidence
+  (`NaN`), not near-infinite confidence, and the clamped fraction is logged
+  separately — a large one means the chain is flattening the image rather
+  than measuring it.
+- **`--error-aware-stretch SIGMA`.** Sets the preview JPEG black point at the
+  SIGMA-confidence contour, so anything the propagated error bars cannot
+  separate from sky clips to black instead of being lifted into apparent
+  structure — the classic over-stretch failure where amplified correlated
+  noise reads as nebulosity. Requires `--uncertainty-propagate`.
+
 ## [2.0.1] - 2026-09-15
 
 ### Changed

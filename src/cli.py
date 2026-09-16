@@ -1255,6 +1255,28 @@ def build_parser() -> argparse.ArgumentParser:
                         'analysis. One confidence map (channel weights averaged), not '
                         'per-channel. No effect with other stack methods (only ivw computes '
                         'an exact analytic per-pixel variance).')
+    g_stack.add_argument('--uncertainty-propagate', action='store_true',
+                   help='Carry the Phase 3 uncertainty map through the Phase 4 '
+                        'post-processing chain and write the result to '
+                        '<output>_sigma_final.fits, plus a confidence (signal-to-noise) '
+                        'map to <output>_snr.fits. Works by pushing '
+                        '--uncertainty-realizations noise realizations through the real '
+                        'post-processing chain and measuring the per-pixel spread -- exact '
+                        'for the nonlinear denoise/deconvolve steps that have no analytic '
+                        'variance propagation, at the cost of that many extra Phase 4 '
+                        'passes. Best paired with --stack-method ivw (a real analytic '
+                        'per-pixel input sigma); with any other combine the input sigma '
+                        'falls back to a spatially flat sky-noise estimate and the log says so.')
+    g_stack.add_argument('--uncertainty-realizations', type=int, default=8, metavar='K',
+                   help='Noise realizations for --uncertainty-propagate (default: 8). '
+                        'Relative error on the propagated sigma is roughly 1/sqrt(2K) '
+                        '(~25%% at 8, ~18%% at 16). Runtime is K extra post-processing passes.')
+    g_stack.add_argument('--error-aware-stretch', type=float, default=None, metavar='SIGMA',
+                   help='Set the preview JPEG black point at the SIGMA-confidence contour '
+                        'from --uncertainty-propagate, so anything the propagated error bars '
+                        'cannot separate from sky is clipped to black instead of being '
+                        'stretched into apparent structure. Typical: 3. Requires '
+                        '--uncertainty-propagate.')
     g_stack.add_argument('--rejection-sigma', type=float, default=3.0,
                    help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
     g_stack.add_argument('--rejection-iters', type=int, default=3,

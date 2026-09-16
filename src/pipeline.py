@@ -943,9 +943,48 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     else:
         args._diagnostic_dir = None
 
+    # --uncertainty-propagate re-runs Phase 4 on noise realizations of this
+    # exact array, so keep the linear pre-post-processing stack (Phase 4
+    # mutates its input in place in several steps).
+    _unc_input = stacked.copy() if getattr(args, 'uncertainty_propagate', False) else None
+
     stacked = postprocess_stack(stacked, args, final, stats)
 
     stats.post_processing_time = time.time() - phase_start
+
+    _snr_map = None
+    if _unc_input is not None:
+        from src.uncertainty import (
+            confidence_map,
+            flat_sigma_from_image,
+            propagate_uncertainty,
+            save_uncertainty_outputs,
+            summarize_confidence,
+        )
+        _k = int(getattr(args, 'uncertainty_realizations', 8))
+        safe_print(f"\n  Propagating uncertainty through post-processing ({_k} realizations)...")
+        _unc_start = time.time()
+        try:
+            _sigma_in = _sigma_out.get('sigma')
+            if _sigma_in is None:
+                _flat = flat_sigma_from_image(_unc_input)
+                safe_print(f"    No analytic input sigma (needs --stack-method ivw "
+                           f"--uncertainty-map); using a flat sky-noise estimate "
+                           f"({_flat:.4g} ADU) -- no per-pixel shot-noise structure")
+                _sigma_in = np.full(_unc_input.shape[:2], _flat, dtype=np.float32)
+            _sigma_post, _ = propagate_uncertainty(
+                _unc_input, _sigma_in, args, final, stats,
+                postprocess_fn=postprocess_stack,
+                n_realizations=_k,
+                seed=int(getattr(args, 'seed', 0) or 0),
+                verbose=bool(getattr(args, 'verbose', False)))
+            _snr_map = confidence_map(stacked, _sigma_post)
+            save_uncertainty_outputs(output_path, _sigma_post, _snr_map)
+            safe_print(f"  {summarize_confidence(_snr_map)}")
+            safe_print(f"  Uncertainty propagation: {time.time() - _unc_start:.1f}s")
+        except Exception as e:
+            safe_print(f"  WARNING: uncertainty propagation failed: {e}")
+            _snr_map = None
 
     # HDR multi-exposure blend (applied to post-processed stack)
     if getattr(args, 'hdr_combine', None):
@@ -1185,7 +1224,27 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     stretch_method = getattr(args, 'stretch', 'linear')
-    save_preview_rgb(stacked, preview_path, stretch=stretch_method,
+    _preview_src = stacked
+    _eas = getattr(args, 'error_aware_stretch', None)
+    if _eas is not None:
+        if _snr_map is None:
+            safe_print("  WARNING: --error-aware-stretch needs --uncertainty-propagate "
+                       "(no confidence map available); using the normal black point")
+        else:
+            from src.uncertainty import error_aware_black_point
+            _floor = error_aware_black_point(_snr_map, stacked, n_sigma=float(_eas))
+            if _floor is None:
+                safe_print(f"  WARNING: no pixel reaches {float(_eas):g}-sigma confidence; "
+                           f"using the normal black point")
+            else:
+                # Floor sub-threshold pixels at the contour value so the stretch's
+                # own black point lands there: everything the error bars can't
+                # separate from sky renders black instead of being lifted into
+                # apparent structure.
+                _preview_src = np.maximum(stacked, _floor)
+                safe_print(f"  Error-aware stretch: black point at the {float(_eas):g}-sigma "
+                           f"contour ({_floor:.4g} ADU)")
+    save_preview_rgb(_preview_src, preview_path, stretch=stretch_method,
                      ghs_b=float(getattr(args, 'ghs_b', 8.0)),
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
