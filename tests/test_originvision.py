@@ -28,7 +28,7 @@ from src.originvision import (
 
 _HAVE_ORT = infer_mod._ort is not None
 _HAVE_NATIVE = infer_mod._HAS_NATIVE_OV
-_HAVE_BACKEND = infer_mod.onnxruntime_available()   # native OR onnxruntime
+_HAVE_BACKEND = infer_mod.scoring_backend_available()   # native OR onnxruntime
 _HAVE_MODEL = infer_mod.resolve_model_path(None) is not None
 _real_infer = pytest.mark.skipif(
     not (_HAVE_BACKEND and _HAVE_MODEL),
@@ -69,39 +69,52 @@ class TestPreprocessing:
         out = infer_mod._resize_center_crop(img, 128)
         assert out.shape == (128, 128, 3)
 
-    def test_blob_shape_features_centered_single_blob(self):
-        g = np.zeros((200, 200), np.uint8)
-        g[95:105, 95:105] = 255                    # one blob, dead centre
-        n, dist = infer_mod._blob_shape_features(g)
-        assert n == 1
-        assert dist < 0.05                          # ~centre
 
-    def test_blob_shape_features_offcentre_and_count(self):
-        g = np.zeros((200, 200), np.uint8)
-        g[5:15, 5:15] = 255                         # corner blob (largest)
-        for cx in range(20, 180, 15):              # a row of smaller blobs
-            g[100:104, cx:cx + 4] = 255
-        n, dist = infer_mod._blob_shape_features(g)
-        assert n >= 5
-        assert dist > 0.5                           # largest blob is a corner
+class _FakeCatSession:
+    """Minimal onnxruntime-style session with only a `category` head, so the
+    comet-suppression branch in `score_rgb` can be exercised without a real
+    model or onnxruntime installed."""
 
-    def test_blob_shape_features_blank_returns_not_centered(self):
-        n, dist = infer_mod._blob_shape_features(np.zeros((50, 50), np.uint8))
-        assert n == 0 and dist == 1.0
+    def __init__(self, logits):
+        self._logits = np.asarray(logits, np.float32)
 
-    def test_gate_comet_only_touches_comet_top(self):
-        cats = ['galaxy', 'nebula', 'star_cluster', 'comet']
-        probs = np.array([0.7, 0.1, 0.1, 0.1])     # top = galaxy
-        gray = np.zeros((100, 100), np.uint8)
-        assert infer_mod._gate_comet_prediction(probs, gray, cats) == 0
+    def get_modelmeta(self):
+        cats = 'galaxy,nebula,star_cluster,comet'
 
-    def test_gate_comet_demotes_when_shape_disagrees(self):
-        cats = ['galaxy', 'nebula', 'star_cluster', 'comet']
-        probs = np.array([0.05, 0.25, 0.1, 0.6])   # top = comet
-        gray = np.zeros((200, 200), np.uint8)
-        gray[5:15, 5:15] = 255                      # bright blob in a corner
-        picked = infer_mod._gate_comet_prediction(probs, gray, cats)
-        assert picked == 1                          # -> 2nd best (nebula)
+        class _M:
+            custom_metadata_map = {'tasks': 'category', 'head_order': 'category',
+                                   'categories': cats}
+        return _M()
+
+    def run(self, _outs, _feed):
+        return [self._logits[np.newaxis]]
+
+
+class TestCometSuppression:
+    """`comet` is a distrusted class: a top `comet` pick is demoted to the
+    runner-up (native kernel and onnxruntime fallback alike)."""
+
+    def _score(self, monkeypatch, logits, *, shape_gate=True):
+        monkeypatch.setattr(infer_mod, '_HAS_NATIVE_OV', False)
+        monkeypatch.setattr(infer_mod, '_ort', object())          # bypass the None guard
+        monkeypatch.setattr(infer_mod, '_get_session',
+                            lambda mp: _FakeCatSession(logits))
+        return infer_mod.score_rgb(np.zeros((32, 32, 3), np.float32),
+                                   shape_gate=shape_gate)
+
+    def test_comet_top_is_demoted_to_runner_up(self, monkeypatch):
+        r = self._score(monkeypatch, [0.1, 2.0, 0.1, 5.0])   # argmax = comet, 2nd = nebula
+        assert r['category'] == 'nebula'
+        assert r['category_shape_gated'] is True
+
+    def test_non_comet_top_is_untouched(self, monkeypatch):
+        r = self._score(monkeypatch, [5.0, 2.0, 0.1, 0.1])   # argmax = galaxy
+        assert r['category'] == 'galaxy'
+        assert r['category_shape_gated'] is False
+
+    def test_shape_gate_false_keeps_comet(self, monkeypatch):
+        r = self._score(monkeypatch, [0.1, 2.0, 0.1, 5.0], shape_gate=False)
+        assert r['category'] == 'comet'
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +508,7 @@ class TestCliOriginvisionResolution:
 
     def test_disabled_without_any_backend(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
-        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: False)
+        monkeypatch.setattr(infer_mod, 'scoring_backend_available', lambda: False)
         args = self._parse(tmp_path)
         assert args.originvision is False
         assert 'no inference backend' in capsys.readouterr().out
@@ -504,7 +517,7 @@ class TestCliOriginvisionResolution:
         monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         m = tmp_path / 'v4.onnx'
         m.write_bytes(b'x')
-        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        monkeypatch.setattr(infer_mod, 'scoring_backend_available', lambda: True)
         args = self._parse(tmp_path, '--originvision-model', str(m))
         assert args.originvision is True
         assert args.originvision_model == str(m)
@@ -514,7 +527,7 @@ class TestCliOriginvisionResolution:
         ck = tmp_path / 'checkpoints'
         ck.mkdir()
         (ck / 'model.onnx').write_bytes(b'x')
-        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        monkeypatch.setattr(infer_mod, 'scoring_backend_available', lambda: True)
         args = self._parse(tmp_path, '--originvision-dir', str(tmp_path))
         assert args.originvision is True
         assert args.originvision_model == str(ck / 'model.onnx')
@@ -523,27 +536,28 @@ class TestCliOriginvisionResolution:
         monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
         m = tmp_path / 'old.onnx'
         m.write_bytes(b'x')
-        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        monkeypatch.setattr(infer_mod, 'scoring_backend_available', lambda: True)
         args = self._parse(tmp_path, '--originvision-checkpoint', str(m))
         assert args.originvision is True
         assert args.originvision_model == str(m)
 
     def test_bad_explicit_model_disables_not_silent_bundled_fallback(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
-        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
+        monkeypatch.setattr(infer_mod, 'scoring_backend_available', lambda: True)
         bad = str(tmp_path / 'nope.onnx')
         args = self._parse(tmp_path, '--originvision-model', bad)
         assert args.originvision is False
         assert bad in capsys.readouterr().out
 
-    def test_removed_flags_are_inert_not_errors(self, tmp_path, monkeypatch):
+    def test_dropped_subprocess_flags_now_rejected(self, tmp_path, monkeypatch):
+        # --originvision-timeout / -python / -script were inert no-ops for the
+        # removed subprocess scorer; they are gone now (not silently swallowed).
         monkeypatch.delenv('ORIGINVISION_DIR', raising=False)
-        monkeypatch.setattr(infer_mod, 'onnxruntime_available', lambda: True)
-        monkeypatch.setattr(infer_mod, 'resolve_model_path', lambda p: p or 'bundled')
-        # old command lines that still pass these must not hard-error
-        args = self._parse(tmp_path, '--originvision-timeout', '120',
-                           '--originvision-python', 'py.exe', '--originvision-script', 's.py')
-        assert args.originvision is True
+        for flag, val in (('--originvision-timeout', '120'),
+                          ('--originvision-python', 'py.exe'),
+                          ('--originvision-script', 's.py')):
+            with pytest.raises(SystemExit):
+                self._parse(tmp_path, flag, val)
 
 
 if __name__ == '__main__':

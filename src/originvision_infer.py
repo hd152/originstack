@@ -8,9 +8,10 @@ Two backends, picked automatically:
   runtime) with no Python-level ONNX dependency. This is the primary path
   and the only one in the packaged app.
 * **onnxruntime fallback** -- a numpy/scipy port of the upstream
-  ``infer_onnx.py`` + ``data/imageops.py`` + ``data/shape_features.py``
-  (no OpenCV) driving a Python ``onnxruntime`` ``InferenceSession``. Used
-  only in a source checkout where ``astro_native`` isn't built.
+  ``infer_onnx.py`` + ``data/imageops.py`` (no OpenCV) driving a Python
+  ``onnxruntime`` ``InferenceSession``. Used only in a source checkout where
+  ``astro_native`` isn't built. Kept converged with the native kernel:
+  same preprocessing, same head gating, same `comet`-demotion.
 
 ``--originvision`` self-disables with a warning when neither backend nor the
 bundled model file is available.
@@ -49,15 +50,6 @@ except Exception:  # pragma: no cover - onnxruntime absent
 
 _FITS_EXTS = ('.fits', '.fit', '.fts')
 
-# the comet shape-gate's thresholds were tuned on features computed at 512px
-# (upstream data/shape_features.py), independent of the model's own input
-# size -- keep that.
-_SHAPE_GATE_SIZE = 512
-
-# grid-searched on originvision's val set -- see upstream data/shape_features.py
-_COMET_GATE_CENTER_DIST = 0.20
-_COMET_GATE_N_COMPONENTS = 80
-
 _SESSION_CACHE: dict = {}
 _SESSION_LOCK = threading.Lock()
 
@@ -66,10 +58,10 @@ _SESSION_LOCK = threading.Lock()
 # availability / model resolution
 # ---------------------------------------------------------------------------
 
-def onnxruntime_available() -> bool:
+def scoring_backend_available() -> bool:
     """True when a scoring backend exists -- the native tract kernel
     (``astro_native.originvision_score``) or the ``onnxruntime`` fallback.
-    Name kept for its call sites; it gates whether ``--originvision`` runs."""
+    Gates whether ``--originvision`` runs."""
     return _HAS_NATIVE_OV or _ort is not None
 
 
@@ -161,49 +153,6 @@ def _resize_center_crop(img: np.ndarray, size: int) -> np.ndarray:
             pad.append((0, 0))
         out = np.pad(out, pad, mode='edge')[:size, :size]
     return np.clip(out, 0, 255).astype(np.uint8)
-
-
-# ---------------------------------------------------------------------------
-# comet shape gate (numpy/scipy port of upstream data/shape_features.py)
-# ---------------------------------------------------------------------------
-
-def _blob_shape_features(gray: np.ndarray, thresh_percentile: float = 99.0,
-                         min_area: int = 5):
-    """``(n_components, center_dist_norm)`` for the largest bright connected
-    component in a grayscale uint8 image. 8-connectivity. Matches upstream
-    ``shape_features.blob_shape_features`` (which used
-    ``cv2.connectedComponentsWithStats``)."""
-    h, w = gray.shape
-    thresh_val = max(float(np.percentile(gray, thresh_percentile)), 1.0)
-    binary = gray > thresh_val
-    labels, n_labels = ndimage.label(binary, structure=np.ones((3, 3), dtype=int))
-    if n_labels == 0:
-        return 0, 1.0
-    areas = np.bincount(labels.ravel())[1:]  # drop background label 0
-    keep = np.nonzero(areas >= min_area)[0]
-    if keep.size == 0:
-        return 0, 1.0
-    largest = int(keep[np.argmax(areas[keep])]) + 1
-    cy, cx = ndimage.center_of_mass(binary, labels, largest)
-    center_dist = ((cx - w / 2) ** 2 + (cy - h / 2) ** 2) ** 0.5
-    center_dist_norm = center_dist / (0.5 * (w ** 2 + h ** 2) ** 0.5)
-    return int(keep.size), float(center_dist_norm)
-
-
-def _gate_comet_prediction(probs: np.ndarray, gray: np.ndarray,
-                           categories) -> int:
-    """Raw argmax, unless it's ``comet`` and the shape features disagree, in
-    which case fall back to the 2nd-best class. Only ever makes the comet
-    head more conservative."""
-    order = np.argsort(probs)[::-1]
-    top = int(order[0])
-    if 'comet' not in categories or categories[top] != 'comet':
-        return top
-    n_components, center_dist_norm = _blob_shape_features(gray)
-    if (center_dist_norm > _COMET_GATE_CENTER_DIST
-            or n_components > _COMET_GATE_N_COMPONENTS):
-        return int(order[1])
-    return top
 
 
 # ---------------------------------------------------------------------------
@@ -314,13 +263,12 @@ def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
             cats = meta['categories']
             order = np.argsort(probs)[::-1]
             top = int(order[0])
-            if shape_gate and 'comet' in cats and cats[top] == 'comet':
-                # Shape features are only consulted to (maybe) demote a
-                # comet top pick -- compute the 512px crop lazily here.
-                feat_rgb = _resize_center_crop(stretched, _SHAPE_GATE_SIZE)
-                gray = (0.299 * feat_rgb[..., 0] + 0.587 * feat_rgb[..., 1]
-                        + 0.114 * feat_rgb[..., 2]).astype(np.uint8)
-                picked = _gate_comet_prediction(probs, gray, cats)
+            # `comet` is suppressed: the current checkpoint's comet class isn't
+            # trusted, so a top `comet` pick is demoted to the runner-up.
+            # (`shape_gate=False` disables the suppression.) Mirrors the native
+            # kernel's `compute`.
+            if shape_gate and len(order) > 1 and cats[top] == 'comet':
+                picked = int(order[1])
             else:
                 picked = top
             result['category'] = cats[picked]

@@ -5872,30 +5872,48 @@ mod originvision {
     }
 
     fn get_session(path: &str, size: usize) -> TractResult<Arc<Session>> {
+        // Key on (path, size): the input size is baked into the compiled graph
+        // by `load`'s `with_input_fact` + `into_optimized`, so a second call at
+        // a different size for the same path must not reuse the old graph.
+        let key = format!("{path}\u{0}{size}");
         {
             let c = cache().lock().unwrap();
-            if let Some(s) = c.get(path) {
+            if let Some(s) = c.get(&key) {
                 return Ok(Arc::clone(s));
             }
         }
         let s = Arc::new(load(path, size)?);
-        cache().lock().unwrap().insert(path.to_string(), Arc::clone(&s));
+        cache().lock().unwrap().insert(key, Arc::clone(&s));
         Ok(s)
     }
 
     // ---- preprocessing (mirror src/originvision_infer.py) -----------------
 
-    /// numpy-style linear-interpolated percentile of a pre-sorted slice.
-    fn pctl(sorted: &[f32], p: f64) -> f64 {
-        let n = sorted.len();
+    /// numpy-style linear-interpolated percentile at fractional rank
+    /// `p/100*(n-1)` via quickselect -- O(n), no full sort (this file's
+    /// kernel-internals convention: `select_nth_unstable` over `sort`).
+    /// Reorders `v` in place.
+    fn pctl_select(v: &mut [f32], p: f64) -> f64 {
+        let n = v.len();
         if n == 0 {
             return 0.0;
         }
+        if n == 1 {
+            return v[0] as f64;
+        }
         let rank = p / 100.0 * (n as f64 - 1.0);
         let lo = rank.floor() as usize;
-        let hi = rank.ceil() as usize;
         let frac = rank - lo as f64;
-        sorted[lo] as f64 * (1.0 - frac) + sorted[hi] as f64 * frac
+        let (_, kth, right) = v.select_nth_unstable_by(lo, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let vlo = *kth as f64;
+        if frac <= 0.0 || right.is_empty() {
+            return vlo;
+        }
+        // element at sorted index lo+1 == min of the right partition
+        let vhi = right.iter().cloned().fold(f32::INFINITY, f32::min) as f64;
+        vlo * (1.0 - frac) + vhi * frac
     }
 
     /// Per-channel [0.5, 99.5] percentile clip + linear stretch to u8.
@@ -5904,14 +5922,15 @@ mod originvision {
     fn stretch_u8(rgb: &[f32], n: usize) -> Vec<u8> {
         let mut out = vec![0u8; n * 3];
         let mut ch = vec![0f32; n];
+        let mut scratch = vec![0f32; n];
         for c in 0..3 {
             for i in 0..n {
                 ch[i] = rgb[i * 3 + c];
             }
-            let mut s = ch.clone();
-            s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let lo = pctl(&s, 0.5);
-            let mut hi = pctl(&s, 99.5);
+            scratch.copy_from_slice(&ch);
+            let lo = pctl_select(&mut scratch, 0.5);
+            scratch.copy_from_slice(&ch);
+            let mut hi = pctl_select(&mut scratch, 99.5);
             if hi <= lo {
                 hi = lo + 1.0;
             }
@@ -6060,73 +6079,159 @@ mod originvision {
         1.0 / (1.0 + (-x).exp())
     }
 
-    // ---- comet shape gate (numpy port of data/shape_features.py) ----------
-
-    /// `(n_components, center_dist_norm)` for the largest bright 8-connected
-    /// component of a grayscale u8 image thresholded at its 99th percentile.
-    fn blob_shape_features(gray: &[u8], h: usize, w: usize) -> (usize, f64) {
-        let mut s: Vec<f32> = gray.iter().map(|&v| v as f32).collect();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let thresh = pctl(&s, 99.0).max(1.0);
-        let bin: Vec<bool> = gray.iter().map(|&v| v as f64 > thresh).collect();
-        let mut label = vec![0usize; h * w];
-        let mut next = 0usize;
-        let mut areas: Vec<usize> = vec![0];
-        let mut sum_y: Vec<f64> = vec![0.0];
-        let mut sum_x: Vec<f64> = vec![0.0];
-        let mut stack: Vec<usize> = Vec::new();
-        for start in 0..(h * w) {
-            if !bin[start] || label[start] != 0 {
-                continue;
-            }
-            next += 1;
-            areas.push(0);
-            sum_y.push(0.0);
-            sum_x.push(0.0);
-            stack.push(start);
-            label[start] = next;
-            while let Some(p) = stack.pop() {
-                let py = p / w;
-                let px = p % w;
-                areas[next] += 1;
-                sum_y[next] += py as f64;
-                sum_x[next] += px as f64;
-                for dy in -1isize..=1 {
-                    for dx in -1isize..=1 {
-                        if dy == 0 && dx == 0 {
-                            continue;
-                        }
-                        let ny = py as isize + dy;
-                        let nx = px as isize + dx;
-                        if ny < 0 || nx < 0 || ny >= h as isize || nx >= w as isize {
-                            continue;
-                        }
-                        let q = ny as usize * w + nx as usize;
-                        if bin[q] && label[q] == 0 {
-                            label[q] = next;
-                            stack.push(q);
-                        }
-                    }
-                }
-            }
-        }
-        let keep: Vec<usize> = (1..=next).filter(|&i| areas[i] >= 5).collect();
-        if keep.is_empty() {
-            return (0, 1.0);
-        }
-        let largest = *keep.iter().max_by_key(|&&i| areas[i]).unwrap();
-        let cy = sum_y[largest] / areas[largest] as f64;
-        let cx = sum_x[largest] / areas[largest] as f64;
-        let dist = ((cx - w as f64 / 2.0).powi(2) + (cy - h as f64 / 2.0).powi(2)).sqrt();
-        let norm = dist / (0.5 * ((w * w + h * h) as f64).sqrt());
-        (keep.len(), norm)
-    }
-
     // ---- public entry ----------------------------------------------------
 
-    const SHAPE_GATE_SIZE: usize = 512;
-    const COMET_GATE_CENTER_DIST: f64 = 0.20;
-    const COMET_GATE_N_COMPONENTS: usize = 80;
+    #[derive(Default)]
+    struct CategoryOut {
+        category: String,
+        confidence: f64,
+        top: Vec<(String, f64)>,
+        shape_gated: bool,
+    }
+
+    /// Everything the forward pass produces, as plain Rust -- built off the
+    /// GIL, then marshalled into a `PyDict` by the caller.
+    #[derive(Default)]
+    struct ScoreData {
+        epoch: Option<i64>,
+        tasks: Vec<String>,
+        defect: Option<(f64, bool)>,
+        quality_score: Option<f64>,
+        category: Option<CategoryOut>,
+        exposure: Option<(Option<f64>, f64)>,
+        sky_brightness: Option<f64>,
+        stray_light: Option<(f64, bool)>,
+    }
+
+    /// Pure compute: preprocess + tract forward pass + head decode. No
+    /// `Python` token -- runs inside `py.allow_threads`. Errors are strings
+    /// (surfaced as `PyRuntimeError` by the caller).
+    fn compute(
+        flat: &[f32],
+        h: usize,
+        w: usize,
+        model_path: &str,
+        size: usize,
+        shape_gate: bool,
+    ) -> Result<ScoreData, String> {
+        let n = h * w;
+        let sess = get_session(model_path, size).map_err(|e| e.to_string())?;
+        let stretched = stretch_u8(flat, n);
+        let model_in = resize_center_crop(&stretched, h, w, size);
+
+        // NCHW, /255
+        let mut nchw = vec![0f32; 3 * size * size];
+        for yx in 0..(size * size) {
+            for c in 0..3 {
+                nchw[c * size * size + yx] = model_in[yx * 3 + c] as f32 / 255.0;
+            }
+        }
+        let input = tract_ndarray::Array4::from_shape_vec((1, 3, size, size), nchw)
+            .map_err(|e| e.to_string())?
+            .into_tensor();
+        let outputs = sess
+            .model
+            .run(tvec!(input.into()))
+            .map_err(|e| e.to_string())?;
+
+        // A model whose graph outputs don't line up with its head_order
+        // metadata is an export bug -- refuse to guess (mirrors the
+        // onnxruntime fallback's `zip(strict=True)` intent).
+        if sess.head_order.is_empty() || outputs.len() != sess.head_order.len() {
+            return Err(format!(
+                "model has {} graph outputs but head_order metadata lists {} -- refusing to guess",
+                outputs.len(),
+                sess.head_order.len()
+            ));
+        }
+
+        let mut out: HashMap<&str, Vec<f32>> = HashMap::new();
+        for (name, t) in sess.head_order.iter().zip(outputs.iter()) {
+            let v = t
+                .to_array_view::<f32>()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .cloned()
+                .collect();
+            out.insert(name.as_str(), v);
+        }
+        let has = |k: &str| sess.tasks.iter().any(|t| t == k);
+        let g = |k: &str| out.get(k);
+
+        let mut sd = ScoreData {
+            epoch: sess.epoch,
+            tasks: sess.tasks.clone(),
+            ..Default::default()
+        };
+
+        if has("reject") {
+            if let Some(v) = g("reject") {
+                let p = sigmoid(v[0] as f64);
+                sd.defect = Some((p, p > 0.5));
+            }
+        }
+        if has("quality") {
+            if let Some(v) = g("quality") {
+                sd.quality_score = Some(v[0] as f64 * sess.quality_scale);
+            }
+        }
+        if has("category") {
+            if let Some(v) = g("category") {
+                let probs = softmax(v);
+                let cats = &sess.categories;
+                let mut order: Vec<usize> = (0..probs.len()).collect();
+                order.sort_by(|&i, &j| {
+                    probs[j].partial_cmp(&probs[i]).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let top = order[0];
+                // `comet` is suppressed: the current checkpoint's comet class
+                // isn't trusted, so a top `comet` pick is demoted to the
+                // runner-up rather than run through a hand-tuned shape gate.
+                // (`shape_gate=false` disables the suppression.)
+                let picked = if shape_gate
+                    && order.len() > 1
+                    && cats.get(top).map(|c| c == "comet").unwrap_or(false)
+                {
+                    order[1]
+                } else {
+                    top
+                };
+                sd.category = Some(CategoryOut {
+                    category: cats.get(picked).cloned().unwrap_or_default(),
+                    confidence: probs[picked],
+                    top: order
+                        .iter()
+                        .take(3)
+                        .map(|&i| (cats.get(i).cloned().unwrap_or_default(), probs[i]))
+                        .collect(),
+                    shape_gated: picked != top,
+                });
+            }
+        }
+        if has("exposure") {
+            if let Some(v) = g("exposure") {
+                let probs = softmax(v);
+                let i = (0..probs.len())
+                    .max_by(|&x, &y| {
+                        probs[x].partial_cmp(&probs[y]).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(0);
+                sd.exposure = Some((sess.exposures.get(i).copied(), probs[i]));
+            }
+        }
+        if has("sky_brightness") {
+            if let Some(v) = g("sky_brightness") {
+                sd.sky_brightness = Some(v[0] as f64 * 255.0);
+            }
+        }
+        if has("stray_light_gradient") {
+            if let Some(v) = g("stray_light_gradient") {
+                let val = v[0] as f64 * 255.0;
+                sd.stray_light = Some((val, val > sess.stray_light_threshold));
+            }
+        }
+        Ok(sd)
+    }
 
     #[pyfunction]
     #[pyo3(signature = (rgb, model_path, size=256, shape_gate=true))]
@@ -6139,7 +6244,7 @@ mod originvision {
     ) -> PyResult<Option<PyObject>> {
         let a = rgb.as_array();
         let sh = a.shape();
-        if sh.len() != 3 || sh[2] < 3 {
+        if sh.len() != 3 || sh[2] < 3 || sh[0] == 0 || sh[1] == 0 {
             return Ok(None);
         }
         let (h, w) = (sh[0], sh[1]);
@@ -6153,117 +6258,61 @@ mod originvision {
             }
         }
 
-        let run = || -> TractResult<Option<PyObject>> {
-            let sess = get_session(model_path, size)?;
-            let stretched = stretch_u8(&flat, n);
-            let model_in = resize_center_crop(&stretched, h, w, size);
+        // Heavy work off the GIL, panic-guarded: `tract` parses an external
+        // .onnx file and a malformed one can panic inside the parser -- that
+        // unwinds to a `pyo3_runtime.PanicException` (a `BaseException`,
+        // uncatchable by callers' `except Exception`), so convert it to a
+        // plain `RuntimeError` here.
+        let outcome = py.allow_threads(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compute(&flat, h, w, model_path, size, shape_gate)
+            }))
+        });
 
-            // NCHW, /255
-            let mut nchw = vec![0f32; 3 * size * size];
-            for yx in 0..(size * size) {
-                for c in 0..3 {
-                    nchw[c * size * size + yx] = model_in[yx * 3 + c] as f32 / 255.0;
-                }
+        let sd = match outcome {
+            Ok(Ok(sd)) => sd,
+            Ok(Err(msg)) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "originvision native inference failed: {msg}"
+                )))
             }
-            let input =
-                tract_ndarray::Array4::from_shape_vec((1, 3, size, size), nchw)?.into_tensor();
-            let outputs = sess.model.run(tvec!(input.into()))?;
-
-            let mut out: HashMap<&str, Vec<f32>> = HashMap::new();
-            for (name, t) in sess.head_order.iter().zip(outputs.iter()) {
-                out.insert(name.as_str(), t.to_array_view::<f32>()?.iter().cloned().collect());
+            Err(_) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "originvision native inference panicked (malformed model?)".to_string(),
+                ))
             }
-            let has = |k: &str| sess.tasks.iter().any(|t| t == k);
-            let g = |k: &str| out.get(k);
-
-            let d = PyDict::new(py);
-            d.set_item("checkpoint_epoch", sess.epoch)?;
-            d.set_item("tasks", sess.tasks.clone())?;
-
-            if has("reject") {
-                if let Some(v) = g("reject") {
-                    let p = sigmoid(v[0] as f64);
-                    d.set_item("defect_probability", p)?;
-                    d.set_item("is_defective", p > 0.5)?;
-                }
-            }
-            if has("quality") {
-                if let Some(v) = g("quality") {
-                    d.set_item("quality_score", v[0] as f64 * sess.quality_scale)?;
-                }
-            }
-            if has("category") {
-                if let Some(v) = g("category") {
-                    let probs = softmax(v);
-                    let cats = &sess.categories;
-                    let mut order: Vec<usize> = (0..probs.len()).collect();
-                    order.sort_by(|&i, &j| probs[j].partial_cmp(&probs[i]).unwrap());
-                    let top = order[0];
-                    let picked = if shape_gate
-                        && cats.get(top).map(|c| c == "comet").unwrap_or(false)
-                    {
-                        let feat = resize_center_crop(&stretched, h, w, SHAPE_GATE_SIZE);
-                        let gray: Vec<u8> = (0..SHAPE_GATE_SIZE * SHAPE_GATE_SIZE)
-                            .map(|i| {
-                                (0.299 * feat[i * 3] as f64
-                                    + 0.587 * feat[i * 3 + 1] as f64
-                                    + 0.114 * feat[i * 3 + 2] as f64) as u8
-                            })
-                            .collect();
-                        let (ncomp, cdist) =
-                            blob_shape_features(&gray, SHAPE_GATE_SIZE, SHAPE_GATE_SIZE);
-                        if cdist > COMET_GATE_CENTER_DIST || ncomp > COMET_GATE_N_COMPONENTS {
-                            order[1]
-                        } else {
-                            top
-                        }
-                    } else {
-                        top
-                    };
-                    d.set_item("category", cats.get(picked).cloned().unwrap_or_default())?;
-                    d.set_item("category_confidence", probs[picked])?;
-                    let tops: Vec<(String, f64)> = order
-                        .iter()
-                        .take(3)
-                        .map(|&i| (cats.get(i).cloned().unwrap_or_default(), probs[i]))
-                        .collect();
-                    d.set_item("top_categories", tops)?;
-                    d.set_item("category_shape_gated", picked != top)?;
-                }
-            }
-            if has("exposure") {
-                if let Some(v) = g("exposure") {
-                    let probs = softmax(v);
-                    let i = (0..probs.len())
-                        .max_by(|&x, &y| probs[x].partial_cmp(&probs[y]).unwrap())
-                        .unwrap_or(0);
-                    if let Some(e) = sess.exposures.get(i) {
-                        d.set_item("predicted_exposure_s", *e)?;
-                    }
-                    d.set_item("exposure_confidence", probs[i])?;
-                }
-            }
-            if has("sky_brightness") {
-                if let Some(v) = g("sky_brightness") {
-                    d.set_item("sky_brightness", v[0] as f64 * 255.0)?;
-                }
-            }
-            if has("stray_light_gradient") {
-                if let Some(v) = g("stray_light_gradient") {
-                    let val = v[0] as f64 * 255.0;
-                    d.set_item("stray_light_gradient", val)?;
-                    d.set_item("stray_light_flag", val > sess.stray_light_threshold)?;
-                }
-            }
-            Ok(Some(d.into()))
         };
 
-        match run() {
-            Ok(r) => Ok(r),
-            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "originvision native inference failed: {e}"
-            ))),
+        let d = PyDict::new(py);
+        d.set_item("checkpoint_epoch", sd.epoch)?;
+        d.set_item("tasks", sd.tasks.clone())?;
+        if let Some((p, is_def)) = sd.defect {
+            d.set_item("defect_probability", p)?;
+            d.set_item("is_defective", is_def)?;
         }
+        if let Some(q) = sd.quality_score {
+            d.set_item("quality_score", q)?;
+        }
+        if let Some(c) = sd.category {
+            d.set_item("category", c.category)?;
+            d.set_item("category_confidence", c.confidence)?;
+            d.set_item("top_categories", c.top)?;
+            d.set_item("category_shape_gated", c.shape_gated)?;
+        }
+        if let Some((exp_s, conf)) = sd.exposure {
+            if let Some(e) = exp_s {
+                d.set_item("predicted_exposure_s", e)?;
+            }
+            d.set_item("exposure_confidence", conf)?;
+        }
+        if let Some(s) = sd.sky_brightness {
+            d.set_item("sky_brightness", s)?;
+        }
+        if let Some((val, flag)) = sd.stray_light {
+            d.set_item("stray_light_gradient", val)?;
+            d.set_item("stray_light_flag", flag)?;
+        }
+        Ok(Some(d.into()))
     }
 }
 

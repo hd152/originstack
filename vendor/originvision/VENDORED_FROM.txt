@@ -8,10 +8,9 @@ astro_native.originvision_score kernel (ext/astro_native/src/lib.rs, mod
 originvision): preprocessing + ONNX forward pass via the pure-Rust `tract`
 runtime, no Python ONNX dependency. src/originvision_infer.py keeps a
 numpy/scipy + Python-onnxruntime port of infer_onnx.py + data/imageops.py +
-data/shape_features.py as a fallback for a source checkout without
-astro_native built. Both run against src/data/originvision.onnx
-(byte-identical to checkpoints/model.onnx here). These files are kept so a
-future re-sync can diff against upstream; see README.md.
+data/imageops.py as a fallback for a source checkout without astro_native
+built. Both run against src/data/originvision.onnx. These reference files are
+kept so a future re-sync can diff against upstream; see README.md.
 
 source repo : https://github.com/hd152/originvision
 branch      : improve-training-and-tooling
@@ -22,8 +21,13 @@ vendored by : scripted minimal-set copy (ONNX inference path only)
 Included (the upstream reference for src/originvision_infer.py's numpy/scipy port):
   infer_onnx.py                 <- torch-free entry point (--model / --image / --json)
   data/imageops.py              <- percentile stretch + resize/center-crop + background correction (cv2+numpy)
-  data/shape_features.py        <- comet shape-gate features for infer_onnx.py's category head (cv2+numpy)
-  checkpoints/model.onnx        <- exported model (~11 MB; byte-identical to src/data/originvision.onnx)
+  data/shape_features.py        <- upstream comet shape-gate features; NO LONGER PORTED
+                                   (OriginStack demotes a top `comet` pick to the runner-up
+                                   instead of running a shape gate). Kept for provenance only.
+
+NOT included: the exported model. It lives only at src/data/originvision.onnx
+(~11 MB) -- it is not duplicated in this dir. A re-sync writes the new export
+straight there.
 
 Model: v4, from checkpoints/model_v4_nossl_best.pt -- a 7-task run trained
 FROM SCRATCH (no SSL pre-training), best-by-category checkpoint at epoch 15

@@ -6,6 +6,45 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--originvision` comet class is suppressed, not shape-gated.** The
+  hand-tuned 8-connected-component blob shape gate (two val-set-tuned
+  constants, maintained in both Rust and numpy) is gone; a top `comet`
+  prediction is now simply demoted to the runner-up class, since the
+  current checkpoint's comet head isn't trusted. `category_shape_gated`
+  stays in the result dict (now meaning "comet was demoted").
+- **`--originvision-timeout` / `--originvision-python` / `--originvision-script`
+  removed.** They were inert no-ops left from the old subprocess scorer and
+  guarded a flag spelling that only ever shipped in-process; passing them
+  now errors instead of being silently ignored. `--originvision-model`,
+  `--originvision-dir`, `--originvision-checkpoint` are unchanged.
+- **`quality.compute_quality_metrics`** takes one `level={'full','quick','gate'}`
+  argument instead of the `quick` / `gate_only` bool pair.
+
+### Fixed
+
+- **`--originvision` native inference releases the GIL** (`py.allow_threads`)
+  around preprocessing + the `tract` forward pass, so `--originvision-workers`
+  / `--originvision-score-all` actually parallelise on the native backend.
+- **A malformed `--originvision-model` can no longer abort a run.** A panic
+  inside `tract`'s parser is caught in the kernel and re-raised as a normal
+  `RuntimeError` (previously a `pyo3_runtime.PanicException`, a
+  `BaseException` that slipped past the advisory-path error handling), and a
+  zero-dimension input array is rejected cleanly.
+- **`--originvision` native and onnxruntime backends now agree** on a model
+  whose graph-output count doesn't match its `head_order` metadata — both
+  reject it (the native path previously truncated silently).
+- **Collection quality sweep (`--quality-sweep`)** drops `quality_gate`'s
+  absolute `hard_limit` stage for OSC frames scored via the half-resolution
+  Bayer proxy (2×2 averaging shifts SNR/contrast/dynamic-range off the
+  cutoff scale); the folder-relative stages still run, and unreadable frames
+  are flagged directly.
+- The native `astro_native` crate now commits its `Cargo.lock`, and CI's new
+  `native` job builds the crate so the native-kernel parity suites
+  (`tests/test_native.py`, native-vs-onnxruntime originvision parity) run on
+  every push instead of only on a developer machine.
+
 ## [2.0.0] - 2026-09-07
 
 ### Breaking

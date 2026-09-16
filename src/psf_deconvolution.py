@@ -87,7 +87,10 @@ def _fit_star_2d(cutout: np.ndarray, model: str,
             fn = (_native.fit_psf_moffat2d_native if model == 'moffat'
                   else _native.fit_psf_gauss2d_native)
             res = fn(z, sz, float(peak), float(bg))
-        except ValueError:
+        except Exception:
+            # ValueError on bad size; the crate is panic=unwind, so a kernel
+            # failure surfaces as RuntimeError -- either way, degrade to the
+            # numpy path's "return None", never abort --deconvolve.
             res = None
         if res is None or not all(np.isfinite(v) for v in res):
             return None

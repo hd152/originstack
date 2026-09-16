@@ -433,7 +433,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     timings['validate'], _t = time.perf_counter() - _t, time.perf_counter()
 
     metrics = {} if skip_quality else compute_quality_metrics(
-        lum, quick=quick_quality, advanced_metrics=advanced_metrics)
+        lum, level='quick' if quick_quality else 'full',
+        advanced_metrics=advanced_metrics)
     if metrics:
         try:
             _exptime = float(header.get('EXPTIME', 0) or 0)

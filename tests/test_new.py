@@ -612,8 +612,8 @@ class TestComputeQualityMetricsAdvanced(unittest.TestCase):
             self.assertLess(m_small['fwhm'], m_large['fwhm'])
 
     def test_quick_mode_skips_star_detection(self):
-        """quick=True must still return all required keys, with star_count=0."""
-        m = self.cqm(self._star_lum(), quick=True)
+        """level='quick' must still return all required keys, with star_count=0."""
+        m = self.cqm(self._star_lum(), level='quick')
         for k in ('brightness', 'score', 'snr', 'background', 'noise'):
             self.assertIn(k, m)
         self.assertEqual(m['star_count'], 0)

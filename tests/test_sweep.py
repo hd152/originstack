@@ -161,7 +161,7 @@ class TestQualitySweep(unittest.TestCase):
             img += rng.uniform(2000, 6000) * np.exp(
                 -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 1.8 ** 2))
         img += rng.normal(0, 15, img.shape)
-        m = compute_quality_metrics(img, advanced_metrics=False, gate_only=True)
+        m = compute_quality_metrics(img, level='gate', advanced_metrics=False)
         for k in ('snr', 'star_count', 'contrast', 'dynamic_range', 'score'):
             self.assertGreater(m[k], 0, k)
         for k in ('sharpness', 'brenner', 'wavelet_entropy_ratio',

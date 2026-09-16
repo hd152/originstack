@@ -25,6 +25,48 @@ jobs:
       - name: Project-convention lint
         run: python tools/lint_conventions.py --github
 
+  # Builds the Rust crate and runs the kernel-parity suites against it. The
+  # `test` job above deliberately runs without astro_native (numpy-fallback
+  # coverage); this job is where `tests/test_native.py` and the native-vs-
+  # onnxruntime originvision parity checks actually execute -- otherwise the
+  # "native matches the numpy/onnxruntime reference" claim never runs in CI.
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/astro_native
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-native-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-native-
+
+      - name: Install deps + build astro_native
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest maturin onnxruntime
+          cd ext/astro_native
+          maturin build --release
+          pip install --force-reinstall --no-deps target/wheels/astro_native-*.whl
+
+      - name: Native kernel + originvision parity tests
+        run: pytest -q tests/test_native.py tests/test_originvision.py
+
   test:
     runs-on: ubuntu-latest
     strategy:

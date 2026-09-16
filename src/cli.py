@@ -1465,19 +1465,16 @@ def build_parser() -> argparse.ArgumentParser:
                         'src/data/originvision.onnx (e.g. to test a newer checkpoint).')
     g_originvision.add_argument('--originvision-workers', type=int, default=2, metavar='N',
                    help='Thread-pool size for per-frame originvision scoring calls (default: 2). '
-                        'onnxruntime releases the GIL during the forward pass, so a thread '
-                        'pool parallelises it without a ProcessPoolExecutor.')
-    # Back-compat, all hidden: --originvision-dir / --originvision-checkpoint still
-    # resolve a model path; --originvision-timeout / -python / -script are inert
-    # no-ops kept so pre-in-process command lines don't hard-error.
+                        'Both backends release the GIL during the forward pass (the native '
+                        'tract kernel via py.allow_threads), so a thread pool parallelises it '
+                        'without a ProcessPoolExecutor.')
+    # Back-compat, hidden: --originvision-dir / --originvision-checkpoint still
+    # resolve a model path for command lines written against the pre-in-process
+    # layout.
     g_originvision.add_argument('--originvision-dir', default=os.environ.get('ORIGINVISION_DIR'),
                    metavar='DIR', help=argparse.SUPPRESS)
     g_originvision.add_argument('--originvision-checkpoint', default=None, metavar='PATH',
                    help=argparse.SUPPRESS)
-    g_originvision.add_argument('--originvision-timeout', type=float, default=None,
-                   metavar='SEC', help=argparse.SUPPRESS)
-    g_originvision.add_argument('--originvision-python', default=None, help=argparse.SUPPRESS)
-    g_originvision.add_argument('--originvision-script', default=None, help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
                    help='Plate solver backend: astap (fast, local) or '
                         'astrometry (nova.astrometry.net, requires API key). '
@@ -1933,7 +1930,7 @@ def parse_args(argv=None):
     args.export_masks = 'masks' in _dbg
 
     if args.originvision:
-        from src.originvision_infer import backend_name, onnxruntime_available, resolve_model_path
+        from src.originvision_infer import backend_name, resolve_model_path, scoring_backend_available
 
         # Back-compat: --originvision-model wins; otherwise honour the old
         # --originvision-checkpoint, then derive from --originvision-dir's layout.
@@ -1944,7 +1941,7 @@ def parse_args(argv=None):
                 args.originvision_model = os.path.join(
                     args.originvision_dir, 'checkpoints', 'model.onnx')
 
-        if not onnxruntime_available():
+        if not scoring_backend_available():
             safe_print("  WARNING: --originvision has no inference backend "
                        "(build ext/astro_native, or pip install onnxruntime) "
                        "-- disabling originvision scoring")

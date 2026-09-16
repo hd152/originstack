@@ -73,7 +73,10 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
     family pattern, so the cell mean ~= 0.25R + 0.5G + 0.25B — close enough to
     Rec.601 luma for a keep/reject gate, and it skips the single most
     expensive step per frame. FWHM (measured on the half-res proxy) is scaled
-    back to full-resolution pixels before returning.
+    back to full-resolution pixels before returning. Metrics from this proxy
+    carry ``_proxy_scored=True`` so the caller can drop ``quality_gate``'s
+    absolute ``hard_limit`` stage (SNR/contrast/dynamic-range cutoffs shift
+    under 2x2 averaging) and keep only the folder-relative stages.
     """
     try:
         from src.io_fits import load_frame
@@ -92,9 +95,11 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
             lum = (0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1]
                    + 0.114 * arr[:, :, 2]).astype(np.float32)
             fwhm_scale = 1.0
-        metrics = compute_quality_metrics(lum, advanced_metrics=False, gate_only=True)
-        if fwhm_scale != 1.0 and metrics.get('fwhm'):
-            metrics['fwhm'] *= fwhm_scale
+        metrics = compute_quality_metrics(lum, level='gate', advanced_metrics=False)
+        if fwhm_scale != 1.0:
+            metrics['_proxy_scored'] = True   # half-res Bayer proxy -> skip absolute gate
+            if metrics.get('fwhm'):
+                metrics['fwhm'] *= fwhm_scale
         metrics.pop('_star_sources', None)  # not consumed by the sweep; keep IPC/cache small
         return path, metrics, None
     except Exception as exc:
@@ -102,7 +107,7 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
 
 
 # Bump when _score_one's metric logic changes so stale caches are ignored.
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 _CACHE_NAME = '.sweepcache.json'
 
 
@@ -231,10 +236,12 @@ def run_quality_sweep(root: str, args) -> int:
                 path, metrics, err = fut.result()
                 f = futs[fut]
                 if err:
-                    # Unreadable counts as a hard failure worth flagging.
+                    # Unreadable counts as a hard failure worth flagging --
+                    # mark it directly, not via a gate stage that may be off.
                     f.metrics = {'score': 0.0, 'star_count': 0, 'snr': 0.0,
                                  'contrast': 0.0, 'dynamic_range': 0.0,
                                  '_sweep_error': err}
+                    f.accepted = False
                     n_err += 1
                 else:
                     f.metrics = metrics
@@ -248,9 +255,21 @@ def run_quality_sweep(root: str, args) -> int:
             # pipeline's default 2.5) since it's an advisory pass reviewed by
             # a human before --apply renames anything, not a silent stacking
             # decision — worth catching more marginal frames.
-            rejected_reasons: Dict[str, str] = {}
+            rejected_reasons: Dict[str, str] = {
+                f.path: f"unreadable: {f.metrics['_sweep_error']}"
+                for f in lights if f.metrics and f.metrics.get('_sweep_error')}
             stats = ProcessingStats()
-            quality_gate(lights, args, rejected_reasons, stats, outlier_sigma=2.0)
+            # Half-res Bayer proxy metrics don't sit on the same scale as
+            # quality_gate's absolute hard_limit cutoffs (2x2 averaging lifts
+            # SNR, smears contrast/dynamic-range/star peaks), so drop that
+            # stage when any frame was proxy-scored and keep the two
+            # folder-relative stages, which still catch a genuinely bad frame.
+            proxy = any(f.metrics.get('_proxy_scored')
+                        for f in lights if f.metrics)
+            gate_stages = (('statistical', 'percentile') if proxy
+                           else ('hard_limit', 'statistical', 'percentile'))
+            quality_gate(lights, args, rejected_reasons, stats,
+                         outlier_sigma=2.0, stages=gate_stages)
 
             flagged = [f for f in lights if not f.accepted]
             n_flagged_total += len(flagged)

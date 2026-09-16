@@ -27,16 +27,6 @@ from src.utils import safe_print
 logger = logging.getLogger('originstack')
 
 
-def originvision_ready(args) -> bool:
-    """True when in-process scoring can actually run: an inference backend
-    (the native astro_native kernel, or onnxruntime) plus a model file
-    (bundled or ``--originvision-model`` override) on disk."""
-    if not originvision_infer.onnxruntime_available():
-        return False
-    return originvision_infer.resolve_model_path(
-        getattr(args, 'originvision_model', None)) is not None
-
-
 def run_originvision_infer(image_path: str,
                        model_path: Optional[str] = None) -> Optional[dict]:
     """Score one image path (FITS light frame, or a rendered TIFF/PNG/JPG
@@ -49,7 +39,7 @@ def run_originvision_infer(image_path: str,
 
 
 def _originvision_model(args) -> Optional[str]:
-    if not originvision_infer.onnxruntime_available():
+    if not originvision_infer.scoring_backend_available():
         return None
     return originvision_infer.resolve_model_path(getattr(args, 'originvision_model', None))
 
@@ -141,7 +131,7 @@ def score_lights_with_originvision(lights: List[FrameInfo], args) -> None:
 # has its own separate --comet-mode). A wrong guess here would misdirect
 # --auto's whole preset blend, so ambiguous categories intentionally get no
 # mapping (no boost) rather than a guessed one -- unlike
-# score_master_with_originvision's mismatch warning above, which can afford to
+# score_master_with_originvision's mismatch warning below, which can afford to
 # be fuzzy since a human reads it. (Older checkpoints had a 7-bucket head
 # with planet/star/other; those keys are simply absent here, still None.)
 _CATEGORY_TO_TARGET_TYPE = {

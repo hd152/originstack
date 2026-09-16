@@ -684,17 +684,28 @@ def decompose_psf_zernike(img: np.ndarray, star_positions,
     }
 
 
-def compute_quality_metrics(img: np.ndarray, quick: bool = False,
-                            advanced_metrics: bool = True,
-                            gate_only: bool = False) -> Dict:
+def compute_quality_metrics(img: np.ndarray, level: str = 'full',
+                            advanced_metrics: bool = True) -> Dict:
     """Comprehensive quality analysis with multiple metrics.
 
-    ``gate_only`` (used by the collection quality sweep) computes just the
-    fields ``quality_gate`` and the sweep CSV consume -- snr, star_count,
-    contrast, dynamic_range, fwhm, score -- and skips the Laplacian/Brenner
-    sharpness, multiscale-entropy, PSF-anisotropy and ellipticity work whose
-    results the sweep discards. All skipped keys are still present in the
-    returned dict, set to 0.0, so callers reading them don't KeyError.
+    ``level`` picks how much work to do -- one axis, three named points, no
+    illegal combinations (replaces the old ``quick`` / ``gate_only`` bool
+    pair):
+
+    * ``'full'``   -- everything (default).
+    * ``'quick'``  -- SNR-only score for the initial quality gate; no star
+      detection, no sharpness/entropy/PSF work.
+    * ``'gate'``   -- what ``quality_gate`` and the collection quality sweep
+      consume (snr, star_count, contrast, dynamic_range, fwhm, score) but not
+      the Laplacian/Brenner sharpness, multiscale-entropy, PSF-anisotropy or
+      ellipticity work the sweep discards.
+
+    ``advanced_metrics`` is orthogonal: the Strehl proxy, atmospheric
+    dispersion and Zernike decomposition (all expensive per-star cutout work)
+    run only when it is True *and* ``level != 'quick'``.
+
+    All skipped keys are still present in the returned dict, set to 0.0, so
+    callers reading them don't KeyError.
 
     Performance improvements vs original:
     - img_s cast to float32 once upfront — all downstream operations share
@@ -707,6 +718,9 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     - Return dict values explicitly cast to float to avoid returning numpy
       scalars, which can cause downstream serialisation surprises.
     """
+    if level not in ('full', 'quick', 'gate'):
+        raise ValueError(f"level must be 'full', 'quick' or 'gate', got {level!r}")
+
     _min_dim = min(img.shape)
     _ds = 4 if _min_dim >= 2048 else (2 if _min_dim >= 1024 else 1)
     # Cast to float32 once — shared by stats, percentile, and laplace below.
@@ -739,7 +753,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     sources_s = None
     fwhm = 0.0
 
-    if not quick:
+    if level != 'quick':
         # matched-filter (the only detector) -- see detect_stars_auto's
         # docstring for why this must be the single dispatch point rather
         # than each call site picking its own backend.
@@ -784,7 +798,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     # only run when the caller opts in via advanced_metrics.
     strehl = 0.0
     dispersion_px = 0.0
-    if advanced_metrics and not quick and star_count > 0 and sources_s is not None:
+    if advanced_metrics and level != 'quick' and star_count > 0 and sources_s is not None:
         fwhm_detect = fwhm / _star_ds if _star_ds > 1 else fwhm  # downsampled-space FWHM
         try:
             strehl = estimate_strehl_ratio(img_s_stars, sources_s, fwhm=fwhm_detect)
@@ -798,7 +812,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
 
     # Laplacian sharpness — img_s is already float32, no cast needed.
     sharpness = 0.0
-    if not gate_only and laplace is not None:
+    if level != 'gate' and laplace is not None:
         try:
             sharpness = float(np.var(laplace(img_s)))
         except Exception:
@@ -806,7 +820,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
 
     # Brenner gradient sharpness — noise-robust complement to Laplacian.
     brenner = 0.0
-    if not gate_only:
+    if level != 'gate':
         try:
             brenner = compute_brenner_sharpness(img_s)
         except Exception:
@@ -814,7 +828,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
 
     # Wavelet multi-scale entropy ratio — captures seeing quality independently of SNR.
     wavelet_entropy_ratio = 0.0
-    if not quick and not gate_only:
+    if level == 'full':
         try:
             wavelet_entropy_ratio = compute_multiscale_entropy(img_s)
         except Exception:
@@ -825,7 +839,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     psf_pa_scatter = 0.0
     psf_anisotropy_type = 'isotropic'
     ellipticity = 0.0
-    if not quick and not gate_only and sources_s is not None and len(sources_s) > 0:
+    if level == 'full' and sources_s is not None and len(sources_s) > 0:
         try:
             psf_ellipticity, psf_pa_scatter, psf_anisotropy_type = measure_psf_anisotropy(sources_s)
         except Exception:
@@ -845,7 +859,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
 
     # Zernike PSF decomposition — optical aberration fingerprint.
     zernike_result: Dict = {}
-    if advanced_metrics and not quick and star_count > 0 and sources_s is not None:
+    if advanced_metrics and level != 'quick' and star_count > 0 and sources_s is not None:
         try:
             zernike_result = decompose_psf_zernike(img_s_stars, sources_s)
         except Exception:
@@ -854,7 +868,7 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
     # Composite quality score (0–100 range).
     # Normalisation targets realistic single-frame values:
     #   SNR ~2 = good sky-limited frame; FWHM ~4px = good seeing (gentle penalty above that).
-    if quick:
+    if level == 'quick':
         # SNR-only score for the initial quality gate (no star detection overhead)
         score = min(max(snr / 2.0, 0.01), 1.0) * 100.0
     else:
