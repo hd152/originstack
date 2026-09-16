@@ -1005,6 +1005,16 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     hdu = fits.PrimaryHDU()
     data_out = np.transpose(fits_stacked, (2, 0, 1)).astype(np.float32)
     hdu.data = data_out
+    # Difference imaging runs on the LINEAR stack, not the post-processed one.
+    # Phase 4 applies nonlinear stretches, denoising and local contrast, all of
+    # which break photometric linearity and make a flux comparison between two
+    # epochs meaningless -- and the reference a user supplies is a previous
+    # run's output FITS, which is this same linear product. Comparing the
+    # post-processed array against a linear reference mismatches the
+    # photometric scale by a fraction of a percent, which on a bright star is
+    # several sigma, and reports a "transient" at every star in the field.
+    _transient_src = (fits_stacked.copy()
+                      if getattr(args, 'transient_detect', None) else None)
     del fits_stacked
 
     populate_fits_header(
@@ -1032,6 +1042,28 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if getattr(args, 'nmf_separate', False):
         from src.source_separation import run_nmf_separation_report
         run_nmf_separation_report(stacked, output_path)
+
+    if getattr(args, 'transient_detect', None):
+        from src.difference_imaging import run_transient_detection
+        safe_print("\n  Difference imaging against "
+                   f"{os.path.basename(args.transient_detect)}...")
+        _td_start = time.time()
+        try:
+            _wcs_for_transients = None
+            try:
+                from astropy.wcs import WCS
+                _w = WCS(hdu.header)
+                _wcs_for_transients = _w if _w.has_celestial else None
+            except Exception:
+                _wcs_for_transients = None
+            run_transient_detection(
+                _transient_src, args.transient_detect, output_path, args=args,
+                threshold=float(getattr(args, 'transient_threshold', 5.0)),
+                wcs=_wcs_for_transients)
+            safe_print(f"  Difference imaging: {time.time() - _td_start:.1f}s")
+        except Exception as e:
+            # Diagnostic add-on: a failure here must never cost the stack.
+            safe_print(f"  WARNING: difference imaging failed: {e}")
 
     if want_matched_filter and psf_estimate is not None:
         try:

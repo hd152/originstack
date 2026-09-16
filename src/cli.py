@@ -1377,6 +1377,25 @@ def build_parser() -> argparse.ArgumentParser:
                         'removed half the nebulosity from a real Lagoon session. Needs a '
                         'session info.json with a WCS, GPS and timestamp (it runs before '
                         '--plate-solve); falls back to dbe with a message otherwise.')
+    g_post.add_argument('--transient-detect', metavar='REF.fits', default=None,
+                   help='Compare this stack against an earlier epoch of the same field '
+                        'and report what changed -- novae, dwarf-nova outbursts, '
+                        'supernovae, asteroids crossing the field, variable stars. Uses '
+                        'ZOGY proper image subtraction (Zackay, Ofek & Gal-Yam 2016), '
+                        'which cross-convolves each epoch with the other\'s PSF so '
+                        'stellar residuals cancel even when the two nights had different '
+                        'seeing -- a plain subtraction leaves a bright dipole at every '
+                        'star and buries any real transient. The reference is registered '
+                        'onto this stack with the same blind rotation-agnostic star match '
+                        '--merge uses. Writes <output>_difference.fits, '
+                        '<output>_scorr.fits (significance in sigma) and '
+                        '<output>_transients.csv. Diagnostic only -- never alters the '
+                        'stack.')
+    g_post.add_argument('--transient-threshold', type=float, default=5.0, metavar='SIGMA',
+                   help='Detection threshold for --transient-detect, in sigma of the '
+                        'corrected score image (default: 5.0). The score is calibrated '
+                        '(source + astrometric noise are propagated), so this is a real '
+                        'significance, not an arbitrary cut.')
     g_post.add_argument('--light-pollution-azimuth', type=float, default=0.0,
                    metavar='DEG',
                    help='physical bg-method only: compass azimuth (degrees east of north) '

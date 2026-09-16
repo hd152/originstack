@@ -8,6 +8,28 @@ match the `VERSION` file and `v*` git tags.
 
 ### Added
 
+- **`--transient-detect REF.fits`: find what changed between two epochs.**
+  Stacking software answers "what does my target look like?"; this answers
+  "did anything *appear*?" — novae, dwarf-nova outbursts, supernovae,
+  asteroids crossing the field, variable stars. Uses ZOGY proper image
+  subtraction (Zackay, Ofek & Gal-Yam 2016), which cross-convolves each epoch
+  with the *other's* PSF so stellar residuals cancel even when the two nights
+  had different seeing. A plain `new - ref` leaves a bright dipole at every
+  star, scaling with stellar brightness — the artefacts land exactly where
+  the interesting objects are. The reference is registered with the same
+  blind, rotation-agnostic star match `--merge` uses. Writes
+  `<output>_difference.fits`, `<output>_scorr.fits` (significance in sigma)
+  and `<output>_transients.csv`, with sky coordinates when a WCS is present.
+  `--transient-threshold` sets the cut (default 5σ); the score is properly
+  calibrated, so that is a real significance rather than an arbitrary number.
+  Diagnostic only — it never alters the stack, and a failure can't cost you
+  the output.
+- **Astrometric noise is propagated, not ignored.** `S_corr` includes source
+  (Poisson) *and* astrometric noise. The latter is what makes this usable on
+  real data: registration is never perfect, and a sub-pixel slip leaves a
+  residual proportional to the local image gradient — largest at bright
+  stars. Without that term every bright star in the frame reports as a
+  high-significance transient.
 - **`--bg-method physical`: a sky background model from first principles.**
   Every other background extractor here — mesh, DBE, wavelet — fits a
   free-form surface and calls whatever it fits "the background", which is why

@@ -1,0 +1,320 @@
+"""Proper image subtraction (ZOGY) and transient detection.
+
+The scenes here are synthetic but not toy: a star field with a *different PSF
+per epoch*, which is the situation that makes naive subtraction useless and is
+the entire reason ZOGY exists. Two properties are asserted against ground
+truth rather than against a golden array:
+
+1. Stellar residuals cancel even when the seeing differs, and measurably
+   better than a plain ``new - ref`` on the same scene.
+2. An injected transient is recovered at the right position, and a pair with
+   nothing new in it produces no detections.
+"""
+
+import math
+import unittest
+
+import numpy as np
+
+from src.difference_imaging import (
+    Transient,
+    _prepare_psf,
+    _to_luminance,
+    detect_transients,
+    estimate_background_sigma,
+    estimate_flux_ratio,
+    write_transient_catalog,
+    zogy,
+)
+
+
+def _gaussian_psf(size: int, fwhm: float) -> np.ndarray:
+    """Normalised Gaussian kernel, odd-sized and centred."""
+    if size % 2 == 0:
+        size += 1
+    sigma = fwhm / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+    c = size // 2
+    yy, xx = np.mgrid[0:size, 0:size]
+    g = np.exp(-(((yy - c) ** 2 + (xx - c) ** 2) / (2.0 * sigma ** 2)))
+    return g / g.sum()
+
+
+def _render_field(shape, stars, fwhm, sky=100.0, noise=1.0, seed=0):
+    """Star field convolved to a given seeing, with Poisson-ish noise."""
+    from scipy.signal import fftconvolve
+
+    h, w = shape
+    img = np.zeros((h, w), dtype=np.float64)
+    for y, x, flux in stars:
+        iy, ix = int(round(y)), int(round(x))
+        if 0 <= iy < h and 0 <= ix < w:
+            img[iy, ix] += flux
+
+    img = fftconvolve(img, _gaussian_psf(21, fwhm), mode='same')
+    rng = np.random.default_rng(seed)
+    return img + sky + rng.normal(0.0, noise, (h, w))
+
+
+_STARS = [(20.0, 25.0, 4000.0), (60.0, 70.0, 9000.0), (40.0, 55.0, 2500.0),
+          (75.0, 20.0, 6000.0), (30.0, 80.0, 3200.0), (85.0, 60.0, 5000.0),
+          (15.0, 50.0, 2800.0), (55.0, 15.0, 7000.0)]
+_SHAPE = (100, 100)
+
+
+class TestHelpers(unittest.TestCase):
+    def test_luminance_uses_rec601_weights(self):
+        img = np.zeros((2, 2, 3), dtype=np.float32)
+        img[..., 1] = 100.0
+        self.assertAlmostEqual(float(_to_luminance(img)[0, 0]), 58.7, places=4)
+
+    def test_luminance_passes_through_a_2d_image(self):
+        img = np.arange(9, dtype=np.float32).reshape(3, 3)
+        np.testing.assert_allclose(_to_luminance(img), img)
+
+    def test_prepare_psf_normalises_and_centres_at_the_origin(self):
+        psf = _gaussian_psf(9, 3.0) * 7.0        # deliberately not unit sum
+        prepared = _prepare_psf(psf, (64, 64))
+
+        self.assertEqual(prepared.shape, (64, 64))
+        self.assertAlmostEqual(float(prepared.sum()), 1.0, places=9)
+        # The peak must land on index [0, 0]: the FFT's origin. Getting this
+        # wrong shifts every output by half the frame.
+        self.assertEqual(np.unravel_index(int(np.argmax(prepared)), prepared.shape),
+                         (0, 0))
+
+    def test_prepare_psf_rejects_a_degenerate_or_oversized_kernel(self):
+        with self.assertRaises(ValueError):
+            _prepare_psf(np.zeros((5, 5)), (32, 32))
+        with self.assertRaises(ValueError):
+            _prepare_psf(_gaussian_psf(65, 3.0), (32, 32))
+
+    def test_background_sigma_recovers_injected_noise(self):
+        rng = np.random.default_rng(3)
+        img = 500.0 + rng.normal(0.0, 7.0, (128, 128))
+        self.assertAlmostEqual(estimate_background_sigma(img), 7.0, delta=1.0)
+
+    def test_background_sigma_ignores_bright_stars(self):
+        rng = np.random.default_rng(4)
+        img = 500.0 + rng.normal(0.0, 5.0, (128, 128))
+        img[::16, ::16] = 50000.0               # a grid of bright stars
+        self.assertAlmostEqual(estimate_background_sigma(img), 5.0, delta=1.0)
+
+    def test_flux_ratio_recovers_a_known_scaling(self):
+        ref = _render_field(_SHAPE, _STARS, fwhm=3.0, seed=1)
+        new = ref * 1.7
+        self.assertAlmostEqual(estimate_flux_ratio(new, ref), 1.7, delta=0.1)
+
+    def test_flux_ratio_is_unity_for_identical_images(self):
+        ref = _render_field(_SHAPE, _STARS, fwhm=3.0, seed=2)
+        self.assertAlmostEqual(estimate_flux_ratio(ref, ref), 1.0, delta=0.05)
+
+
+class TestZogySubtraction(unittest.TestCase):
+    """The core claim: stellar residuals cancel across differing seeing."""
+
+    def setUp(self):
+        self.psf_ref = _gaussian_psf(21, 3.0)
+        self.psf_new = _gaussian_psf(21, 4.5)      # noticeably worse seeing
+        self.ref = _render_field(_SHAPE, _STARS, fwhm=3.0, sky=0.0, noise=1.0, seed=10)
+        self.new = _render_field(_SHAPE, _STARS, fwhm=4.5, sky=0.0, noise=1.0, seed=11)
+
+    def _star_region_peak(self, img):
+        """Largest absolute residual within a few px of any input star."""
+        worst = 0.0
+        for y, x, _ in _STARS:
+            iy, ix = int(y), int(x)
+            patch = img[max(0, iy - 4):iy + 5, max(0, ix - 4):ix + 5]
+            worst = max(worst, float(np.abs(patch).max()))
+        return worst
+
+    def test_beats_naive_subtraction_at_star_positions(self):
+        """The money test. Naive subtraction dipoles; ZOGY does not."""
+        result = zogy(self.new, self.ref, self.psf_new, self.psf_ref)
+
+        naive = self.new - self.ref
+        naive_resid = self._star_region_peak(naive) / estimate_background_sigma(naive)
+        zogy_resid = self._star_region_peak(result.difference) / \
+            estimate_background_sigma(result.difference)
+
+        self.assertLess(zogy_resid, naive_resid,
+                        "ZOGY should leave smaller stellar residuals than a "
+                        "plain subtraction when the PSFs differ")
+        # Naive subtraction of a 1.5x seeing change leaves enormous dipoles;
+        # this guards the test scene itself from becoming trivially easy.
+        self.assertGreater(naive_resid, 20.0,
+                           "test scene is not exercising a real PSF mismatch")
+
+    def test_identical_epochs_produce_no_detections(self):
+        img = _render_field(_SHAPE, _STARS, fwhm=3.0, sky=0.0, noise=1.0, seed=12)
+        psf = _gaussian_psf(21, 3.0)
+
+        result = zogy(img, img, psf, psf, astrometric_sigma=(0.3, 0.3))
+
+        self.assertEqual(detect_transients(result.score_corr, threshold=5.0), [])
+
+    def test_outputs_have_the_input_shape_and_are_finite(self):
+        result = zogy(self.new, self.ref, self.psf_new, self.psf_ref)
+        for name, arr in (('difference', result.difference),
+                          ('score', result.score),
+                          ('score_corr', result.score_corr)):
+            self.assertEqual(arr.shape, _SHAPE, name)
+            self.assertTrue(np.isfinite(arr).all(), f"{name} has non-finite pixels")
+        self.assertGreater(result.flux_difference, 0.0)
+
+    def test_accepts_rgb_input_by_reducing_to_luminance(self):
+        rgb_new = np.stack([self.new] * 3, axis=-1)
+        rgb_ref = np.stack([self.ref] * 3, axis=-1)
+        result = zogy(rgb_new, rgb_ref, self.psf_new, self.psf_ref)
+        self.assertEqual(result.difference.shape, _SHAPE)
+
+    def test_mismatched_shapes_raise(self):
+        with self.assertRaises(ValueError):
+            zogy(self.new, self.ref[:-1], self.psf_new, self.psf_ref)
+
+
+class TestTransientRecovery(unittest.TestCase):
+    def test_injected_new_source_is_found_at_the_right_place(self):
+        psf_ref = _gaussian_psf(21, 3.0)
+        psf_new = _gaussian_psf(21, 3.4)
+        ref = _render_field(_SHAPE, _STARS, fwhm=3.0, sky=0.0, noise=1.0, seed=20)
+
+        ty, tx = 48.0, 33.0
+        new = _render_field(_SHAPE, _STARS + [(ty, tx, 3000.0)],
+                            fwhm=3.4, sky=0.0, noise=1.0, seed=21)
+
+        result = zogy(new, ref, psf_new, psf_ref, astrometric_sigma=(0.3, 0.3))
+        found = detect_transients(result.score_corr, threshold=5.0)
+
+        self.assertTrue(found, "injected transient was not detected")
+        best = max(found, key=lambda t: t.significance)
+        self.assertLess(math.hypot(best.y - ty, best.x - tx), 3.0,
+                        f"detected at ({best.y}, {best.x}), injected at ({ty}, {tx})")
+        self.assertEqual(best.kind, 'brightening')
+
+    def test_a_source_that_disappears_is_reported_as_fading(self):
+        psf = _gaussian_psf(21, 3.0)
+        ty, tx = 44.0, 66.0
+        ref = _render_field(_SHAPE, _STARS + [(ty, tx, 3000.0)],
+                            fwhm=3.0, sky=0.0, noise=1.0, seed=30)
+        new = _render_field(_SHAPE, _STARS, fwhm=3.0, sky=0.0, noise=1.0, seed=31)
+
+        result = zogy(new, ref, psf, psf, astrometric_sigma=(0.3, 0.3))
+        found = detect_transients(result.score_corr, threshold=5.0)
+
+        self.assertTrue(found)
+        best = max(found, key=lambda t: t.significance)
+        self.assertEqual(best.kind, 'fading')
+        self.assertLess(math.hypot(best.y - ty, best.x - tx), 3.0)
+
+    def test_astrometric_term_suppresses_misregistration_false_positives(self):
+        """Without it, a sub-pixel shift lights up every bright star."""
+        from scipy.ndimage import shift as ndshift
+
+        psf = _gaussian_psf(21, 3.0)
+        ref = _render_field(_SHAPE, _STARS, fwhm=3.0, sky=0.0, noise=1.0, seed=40)
+        new = ndshift(ref, (0.4, 0.25), order=3, mode='nearest')
+
+        without = zogy(new, ref, psf, psf, astrometric_sigma=(0.0, 0.0))
+        with_ast = zogy(new, ref, psf, psf, astrometric_sigma=(0.4, 0.4))
+
+        n_without = len(detect_transients(without.score_corr, threshold=5.0))
+        n_with = len(detect_transients(with_ast.score_corr, threshold=5.0))
+
+        self.assertGreater(n_without, 0,
+                           "test scene should produce misregistration artefacts")
+        self.assertLess(n_with, n_without,
+                        "astrometric noise term should suppress shift artefacts")
+
+
+class TestDetectTransients(unittest.TestCase):
+    def test_threshold_is_respected_and_peaks_are_ranked(self):
+        s = np.zeros((50, 50), dtype=np.float32)
+        s[10, 10] = 9.0
+        s[30, 30] = 6.0
+        s[40, 40] = 3.0                      # below threshold
+
+        found = detect_transients(s, threshold=5.0)
+
+        self.assertEqual(len(found), 2)
+        self.assertAlmostEqual(found[0].significance, 9.0, places=4)
+        self.assertAlmostEqual(found[1].significance, 6.0, places=4)
+
+    def test_negative_peaks_are_reported_as_fading(self):
+        s = np.zeros((20, 20), dtype=np.float32)
+        s[5, 5] = -8.0
+        found = detect_transients(s, threshold=5.0)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].kind, 'fading')
+        self.assertAlmostEqual(found[0].significance, 8.0, places=4)
+
+    def test_exclusion_radius_prevents_duplicate_peaks(self):
+        s = np.zeros((40, 40), dtype=np.float32)
+        s[20, 20] = 10.0
+        s[20, 21] = 9.5                      # same source, adjacent pixel
+        found = detect_transients(s, threshold=5.0, min_separation=5)
+        self.assertEqual(len(found), 1)
+
+    def test_non_finite_pixels_are_ignored(self):
+        s = np.zeros((20, 20), dtype=np.float32)
+        s[3, 3] = np.nan
+        s[9, 9] = np.inf
+        s[5, 5] = 7.0
+        found = detect_transients(s, threshold=5.0)
+        self.assertEqual(len(found), 1)
+        self.assertEqual((found[0].y, found[0].x), (5.0, 5.0))
+
+    def test_respects_the_candidate_cap(self):
+        rng = np.random.default_rng(5)
+        s = rng.uniform(20.0, 30.0, (60, 60)).astype(np.float32)
+        found = detect_transients(s, threshold=5.0, min_separation=1,
+                                  max_candidates=7)
+        self.assertEqual(len(found), 7)
+
+
+class TestCatalogOutput(unittest.TestCase):
+    def test_csv_has_a_header_and_one_row_per_detection(self):
+        import csv
+        import tempfile
+
+        transients = [Transient(y=10.0, x=20.0, significance=7.5, kind='brightening'),
+                      Transient(y=30.0, x=40.0, significance=5.5, kind='fading')]
+        with tempfile.TemporaryDirectory() as d:
+            path = f"{d}/cat.csv"
+            write_transient_catalog(path, transients)
+            with open(path, newline='', encoding='utf-8') as fh:
+                rows = list(csv.reader(fh))
+
+        self.assertEqual(rows[0], ['x', 'y', 'significance_sigma', 'kind'])
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[1][3], 'brightening')
+        self.assertEqual(rows[2][3], 'fading')
+
+    def test_wcs_adds_sky_coordinates(self):
+        import csv
+        import tempfile
+        try:
+            from astropy.wcs import WCS
+        except Exception:
+            self.skipTest("astropy required")
+
+        wcs = WCS(naxis=2)
+        wcs.wcs.crpix = [50, 50]
+        wcs.wcs.cdelt = [-0.001, 0.001]
+        wcs.wcs.crval = [120.0, 30.0]
+        wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+
+        with tempfile.TemporaryDirectory() as d:
+            path = f"{d}/cat.csv"
+            write_transient_catalog(
+                path, [Transient(y=50.0, x=50.0, significance=8.0, kind='brightening')],
+                wcs=wcs)
+            with open(path, newline='', encoding='utf-8') as fh:
+                rows = list(csv.reader(fh))
+
+        self.assertIn('ra_deg', rows[0])
+        self.assertAlmostEqual(float(rows[1][4]), 120.0, delta=0.3)
+        self.assertAlmostEqual(float(rows[1][5]), 30.0, delta=0.3)
+
+
+if __name__ == '__main__':
+    unittest.main()
