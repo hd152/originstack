@@ -404,12 +404,16 @@ def postprocess_stack(
     if getattr(args, 'denoise', False) and 'wavelet' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_wavelet_denoise')
         chroma_boost = getattr(args, 'denoise_chroma_boost', 2.0)
+        denoise_gain = getattr(args, 'denoise_gain', None)
+        denoise_read_noise = getattr(args, 'denoise_read_noise', Config.DEFAULT_READ_NOISE_E)
         dn_start = time.time()
         if getattr(args, 'denoise_adaptive', False):
             print(f"\n  Applying adaptive wavelet denoising "
-                  f"(BayesShrink, chroma_factor={chroma_boost:.1f})...")
+                  f"(BayesShrink, chroma_factor={chroma_boost:.1f}"
+                  f"{f', VST gain={denoise_gain:.2f}e-/ADU' if denoise_gain else ''})...")
             stacked = adaptive_wavelet_denoise(stacked, chroma_factor=chroma_boost,
-                                               star_mask=pp_star_mask)
+                                               star_mask=pp_star_mask,
+                                               gain=denoise_gain, read_noise=denoise_read_noise)
         else:
             strength = getattr(args, 'denoise_strength', 3.0)
             if getattr(args, 'auto_denoise_strength', True):
@@ -420,9 +424,11 @@ def postprocess_stack(
                 fwhm_note = f', FWHM={fwhm_mean:.1f}px' if fwhm_mean > 0 else ''
                 safe_print(f"\n  Auto-denoise strength: {strength:.2f} (from stacked SNR{fwhm_note})")
             print(f"\n  Applying wavelet denoising "
-                  f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f})...")
+                  f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f}"
+                  f"{f', VST gain={denoise_gain:.2f}e-/ADU' if denoise_gain else ''})...")
             stacked = wavelet_denoise(stacked, threshold_factor=strength,
-                                      chroma_factor=chroma_boost, star_mask=pp_star_mask)
+                                      chroma_factor=chroma_boost, star_mask=pp_star_mask,
+                                      gain=denoise_gain, read_noise=denoise_read_noise)
         safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
         stacked = _sanitize(stacked, "wavelet denoising")
 

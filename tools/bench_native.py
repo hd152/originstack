@@ -78,6 +78,17 @@ results["warp_shift"] = bench(
 results["warp_affine"] = bench(
     "warp (rotation)", lambda: nat.warp_affine_lanczos3(img, R, [3.2, -1.7], 2048, 3056, 0.0))
 
+# --- PSF-kernel drizzle warp: same frame, 9x9-tap non-separable table ---
+_halo, _phases = 4, 16
+_taps = 2 * _halo + 1
+_psf_table = rng.uniform(0.0, 1.0, (_phases, _phases, _taps, _taps)).astype(np.float64)
+_psf_table /= _psf_table.sum(axis=(2, 3), keepdims=True)
+_psf_table = np.ascontiguousarray(_psf_table.ravel())
+results["warp_psf_kernel"] = bench(
+    "warp (psf-kernel table)",
+    lambda: nat.warp_affine_kernel_table(img, I, [2.4, -1.7], 2048, 3056,
+                                         _psf_table, _halo, _phases, 0.0))
+
 # --- anisotropic diffusion ---
 small = np.ascontiguousarray(np.clip(rng.normal(300, 40, (1024, 1528, 3)), 0, None).astype(np.float32))
 results["aniso"] = bench(

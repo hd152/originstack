@@ -324,10 +324,33 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     if cal_needed:
         safe_print("\nCreating master calibration frames...")
 
+    # master_method defaults to 'median' and is opt-in only for 'robust_pca' at
+    # real scale -- benchmarked robust_pca_decompose directly (2000x3000x3, 20
+    # frames): 2910s (~48.5 min) pre-optimization, 1264s (~21 min) after
+    # src/robust_pca.py's Gram-matrix-trick SVD (native gram_matrix_wide/
+    # small_times_wide kernels, ~9x over a direct SVD call on this shape,
+    # ~2.3x end-to-end -- the non-SVD per-iteration ops don't benefit and now
+    # dominate more of the budget). Still too slow to silently default for a
+    # real-sized calibration library. Below ROBUST_PCA_AUTO_MAX_FRAMES,
+    # though, cost scales down enough (~5min at N=10) to be a reasonable
+    # --auto default -- gated per calibration type (bias/dark/flat counts
+    # often differ) below, not globally, so one small type doesn't drag a
+    # large one into robust_pca too.
+    master_method = getattr(args, 'master_method', 'median') or 'median'
+    _auto_master = (getattr(args, 'auto', False)
+                    and master_method == 'median'
+                    and 'master_method' not in getattr(args, '_explicit_cli_dests', set()))
+
+    def _method_for(n_frames: int) -> str:
+        if (_auto_master and Config.ROBUST_PCA_MIN_FRAMES <= n_frames
+                <= Config.ROBUST_PCA_AUTO_MAX_FRAMES):
+            return 'robust_pca'
+        return master_method
+
     masters: dict = {}
 
     if frames.get('bias'):
-        masters['bias'] = make_master(frames['bias'], method='median')
+        masters['bias'] = make_master(frames['bias'], method=_method_for(len(frames['bias'])))
         if masters['bias'] is not None:
             safe_print(f"  ✓ Master bias:  {len(frames['bias'])} frames -> "
                        f"{masters['bias'].shape[0]}×{masters['bias'].shape[1]}")
@@ -336,7 +359,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
 
     if frames.get('dark'):
         frames['dark'] = select_matching_darks(lights, frames['dark'])
-        masters['dark'] = make_master(frames['dark'], method='median')
+        masters['dark'] = make_master(frames['dark'], method=_method_for(len(frames['dark'])))
         if masters['dark'] is not None:
             safe_print(f"  ✓ Master dark:  {len(frames['dark'])} frames -> "
                        f"{masters['dark'].shape[0]}×{masters['dark'].shape[1]}")
@@ -345,7 +368,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
 
     if frames.get('flat'):
         frames['flat'] = select_matching_flats(lights, frames['flat'])
-        masters['flat'] = make_master(frames['flat'], method='median')
+        masters['flat'] = make_master(frames['flat'], method=_method_for(len(frames['flat'])))
         if masters['flat'] is not None:
             safe_print(f"  ✓ Master flat:  {len(frames['flat'])} frames -> "
                        f"{masters['flat'].shape[0]}×{masters['flat'].shape[1]}")
@@ -946,6 +969,15 @@ def build_parser() -> argparse.ArgumentParser:
                         'directory via --config diagnostic_dir), '
                         'intermediates (keep aligned per-frame FITS), '
                         'masks (save the star mask FITS).')
+    g_post.add_argument('--denoise-gain', type=float, default=None, metavar='E/ADU',
+                   help='Detector gain (electrons/ADU) for wavelet denoising. When set, '
+                        'each YCbCr plane is variance-stabilized (generalized Anscombe '
+                        'transform) before BayesShrink thresholding and inverse-transformed '
+                        'after -- correct for real Poisson(shot)+Gaussian(read) sensor '
+                        'noise, vs the pure-Gaussian single-sigma model wavelet denoising '
+                        'otherwise assumes. Off by default (byte-identical to the pre-VST '
+                        'behaviour). Read noise via --config denoise_read_noise (default '
+                        '%.1fe-).' % Config.DEFAULT_READ_NOISE_E)
     g_post.add_argument('--skip-step', action='append', default=[], metavar='STEP',
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
@@ -955,6 +987,15 @@ def build_parser() -> argparse.ArgumentParser:
     g_stack.add_argument('--no-registration', action='store_true')
     g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
+    g_stack.add_argument('--max-rotation-deg', type=float, default=Config.AFFINE_MAX_ROTATION_DEG,
+                   metavar='DEG',
+                   help='Reject an affine fit rotating more than this many degrees '
+                        '(default: %.0f) -- a bad RANSAC star match can converge on a '
+                        'wildly wrong but internally-consistent transform; falls back to '
+                        'translation-only registration instead. Raise for alt-az mounts '
+                        '(large field rotation over a session is real, not a bad match); '
+                        'lower for equatorial mounts where any real rotation this large '
+                        'means something actually went wrong.' % Config.AFFINE_MAX_ROTATION_DEG)
     g_stack.add_argument('--no-reg-residual-reject', dest='reg_residual_reject',
                    action='store_false', default=True,
                    help='Disable dropping frames whose post-registration star-position '
@@ -968,9 +1009,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_stack.add_argument('--no-reg-residual-check', action='store_true',
                    help='Skip the post-registration residual check entirely (no '
                         'diagnostic, no rejection) -- faster but no safety net')
-    g_stack.add_argument('--elastic-registration', action='store_true',
-                   help='Fit a smooth per-frame local (non-rigid) displacement field '
-                        'from matched-star residuals after global affine registration, '
+    g_stack.add_argument('--no-elastic-registration', dest='elastic_registration', action='store_false',
+                   help='Disable fitting a smooth per-frame local (non-rigid) displacement '
+                        'field from matched-star residuals after global affine registration, '
                         'correcting spatially-varying distortion (differential '
                         'atmospheric refraction, field rotation across the frame, tube '
                         'flexure) that a single affine transform per frame cannot fix. '
@@ -981,6 +1022,42 @@ def build_parser() -> argparse.ArgumentParser:
                         'fitted displacement to %.1fpx. Off by default -- opt-in, '
                         'higher-risk correction.' % (Config.LOCAL_WARP_MIN_STARS,
                                                       Config.LOCAL_WARP_MAX_DISPLACEMENT_PX))
+    g_stack.add_argument('--elastic-registration-method', choices=['star', 'flow'],
+                   default='star',
+                   help='--elastic-registration field-fitting method (default: star). '
+                        'star: fit from sparse matched-star correspondences (DBE-style '
+                        'local regression) -- poorly constrained in star-sparse regions. '
+                        'flow: dense pyramidal Lucas-Kanade optical flow between each '
+                        'frame\'s own (globally pre-warped) luminance and the reference -- '
+                        'uses the whole image, no star correspondences needed, but slower '
+                        'and unvalidated against real data (like --elastic-registration '
+                        'itself).')
+    g_stack.add_argument('--gaia-distortion-correction', action='store_true',
+                   help='Fit a session-wide optical distortion field (coma, field '
+                        'curvature) from Gaia DR3 reference-star positions vs. the '
+                        'reference frame\'s detected centroids, and apply it to every '
+                        'frame. Different from --elastic-registration: that corrects '
+                        'per-frame relative drift; this corrects the telescope\'s own '
+                        'absolute distortion (same for every frame), anchored to real sky '
+                        'positions instead of internal self-consistency -- the two stack '
+                        '(both can be on at once). Needs a WCS already present in the '
+                        'reference frame\'s header (a capture-software plate-solve, e.g. '
+                        'N.I.N.A./SGP/TheSkyX/MaxIm, or a --merge\'d prior session\'s '
+                        'solve) -- this does NOT trigger a new plate-solve itself (that '
+                        'only happens late, on the final stack); skipped with a message '
+                        'if no WCS is present. Unvalidated against real data this session '
+                        '(synthetic-only), like --elastic-registration.')
+    g_frames.add_argument('--master-method', choices=['median', 'mean', 'robust_pca'],
+                   default='median',
+                   help='Master bias/dark/flat combine method (default: median). '
+                        'robust_pca: Principal Component Pursuit low-rank + sparse '
+                        'decomposition -- separates the true shared pattern (flat-field '
+                        'vignetting, fixed dark current) from sparse outliers (dust motes '
+                        'that shifted between sessions, transient hot pixels) more '
+                        'explicitly than median\'s per-pixel order statistic. Needs >= %d '
+                        'frames per calibration type (falls back to median otherwise); '
+                        'loads the full stack into memory and is slower than median/mean.'
+                        % Config.ROBUST_PCA_MIN_FRAMES)
     g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
@@ -993,7 +1070,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_stack.add_argument('--stack-method',
                    choices=['mean', 'median', 'sigma_clip', 'winsorized',
                             'percentile', 'esd', 'trimmed_mean', 'linear_fit',
-                            'ivw', 'auto'],
+                            'ivw', 'wavelet', 'auto'],
                    default='auto',
                    help='Stacking/rejection method. '
                         'sigma_clip: MAD-based iterative rejection (default for dithered data). '
@@ -1010,6 +1087,13 @@ def build_parser() -> argparse.ArgumentParser:
                         'measured Phase 1 background sigma; no rejection, pair with '
                         '--cosmic-ray-rejection/--trail-reject (tune gain via --config '
                         'ivw_gain for an added per-pixel shot-noise term). '
+                        'wavelet: decompose every frame and sigma-clip-combine each wavelet '
+                        'subband across frames (reuses --rejection-sigma/-iters/-estimator), '
+                        'then reconstruct -- preserves faint fine-scale structure a pixel-domain '
+                        'outlier test can shave off, at the cost of N wavelet transforms per '
+                        'channel (slower than the pixel-domain methods). Not compatible with '
+                        '--drizzle-scale > 1 (v1 limitation); tune depth via --config '
+                        'wavelet_combine_levels (default 4). '
                         'auto: choose based on frame count (<8->percentile, else sigma_clip). '
                         'mean/median: no rejection.')
     g_stack.add_argument('--rejection-sigma', type=float, default=3.0,
@@ -1038,6 +1122,40 @@ def build_parser() -> argparse.ArgumentParser:
                         'heuristic misfires on a legitimately imbalanced sensor/target.')
     g_stack.add_argument('--drizzle-scale', type=float, default=1.0,
                    help='Drizzle scale factor (e.g. 2.0 for 2x super-resolution, 1.0 = disabled)')
+    g_stack.add_argument('--super-res-iters', type=int, default=0, metavar='N',
+                   help='Iterative back-projection (IBP, Irani & Peleg 1991) super-resolution '
+                        'refinement passes after drizzle (default: 0 = off; only meaningful '
+                        'with --drizzle-scale > 1). Each iteration forward-simulates what '
+                        'every original frame should look like given the current estimate '
+                        '(inverse-warp + PSF blur), compares to what was actually observed, '
+                        'and back-projects the residual correction. Genuine resolution gain '
+                        'beyond drizzle\'s one-shot linear resample -- but like any inverse-'
+                        'problem iteration, more isn\'t always better: it converges then '
+                        'starts amplifying noise past a scene-dependent point (measured on '
+                        'synthetic data: RMSE bottoms out around 5 iterations, then rises '
+                        'again by ~10). 5 is a reasonable starting point; watch the output '
+                        'rather than maximising N. '
+                        'Needs a PSF estimate (same estimator as --drizzle-kernel psf/'
+                        '--deconvolve rl) -- skipped with a warning if that fails. Not yet '
+                        'compatible with --elastic-registration (tune step size via --config '
+                        'ibp_relax, default %.1f).' % Config.IBP_RELAX)
+    g_stack.add_argument('--drizzle-kernel', choices=['lanczos3', 'psf'], default='lanczos3',
+                   help='Drizzle resample kernel (default: lanczos3; only matters when '
+                        '--drizzle-scale > 1). psf: build the resample kernel from the '
+                        'session\'s own estimated PSF (Moffat fit to reference-frame stars, '
+                        'same estimator as --deconvolve rl) via a windowed Wiener inverse '
+                        'filter -- mild built-in sharpening during resample (tune '
+                        'aggressiveness via --config drizzle_psf_wiener_k, default %.3f; '
+                        'lower = sharper but more prone to ringing/noise gain). NOT simply '
+                        'the raw PSF shape as the kernel -- that measurably broadens stars '
+                        '(convolving an already-blurred profile with itself again), which '
+                        'was verified and corrected during development. Cropped to a small '
+                        '%dx%d tap radius (a resample kernel, not a full deconvolution pass '
+                        '-- pair with --deconvolve for a bigger correction). Falls back to '
+                        'lanczos3 if PSF estimation fails (too few reference stars) or with '
+                        '--elastic-registration (the elastic warp path doesn\'t use this '
+                        'kernel).' % (Config.DRIZZLE_PSF_WIENER_K, Config.DRIZZLE_PSF_KERNEL_SIZE,
+                                      Config.DRIZZLE_PSF_KERNEL_SIZE))
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
     g_out.add_argument('--plate-solve', action='store_true',
@@ -1082,10 +1200,10 @@ def build_parser() -> argparse.ArgumentParser:
                         '(default: 0.0). Higher (e.g. 2.0) clips background noise '
                         'to black for a small target on empty sky; negative keeps '
                         'faint frame-filling nebulosity visible. Set per target by --auto.')
-    g_post.add_argument('--repair-stars', action='store_true',
-                   help='Rebuild saturated (flat-top) star cores from their unsaturated '
-                        'wings via a per-channel Moffat fit — restores a natural peak and '
-                        'star colour instead of a clipped white disk.')
+    g_post.add_argument('--no-repair-stars', dest='repair_stars', action='store_false',
+                   help='Disable rebuilding saturated (flat-top) star cores from their '
+                        'unsaturated wings via a per-channel Moffat fit — restores a natural '
+                        'peak and star colour instead of a clipped white disk. On by default.')
     g_post.add_argument('--no-star-reduce', dest='star_reduce', action='store_false',
                    help='Disable star reduction')
     g_post.add_argument('--no-local-contrast', dest='local_contrast', action='store_false',
@@ -1105,17 +1223,31 @@ def build_parser() -> argparse.ArgumentParser:
                         '--drizzle-scale > 1.')
     g_frames.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
-    g_frames.add_argument('--trail-reject', action='store_true',
-                   help='Detect and erase satellite/aircraft trails per frame before '
+    g_frames.add_argument('--no-trail-reject', dest='trail_reject', action='store_false',
+                   help='Disable satellite/aircraft trail detection+erase per frame before '
                         'stacking (Hough line detection + local-background inpaint). '
                         'Robust even at low frame counts where sigma-clip cannot reject '
-                        'a trail seen in only one or two subs.')
-    g_stack.add_argument('--local-normalize', action='store_true',
-                   help='Additively match every frame background to the per-frame median '
-                        'before the rejection combine (removes per-frame gradients from '
-                        'moonlight / light-pollution drift / thin cloud, and sharpens '
-                        'sigma-clip). Applies to rejection stack methods (not plain mean '
-                        'or drizzle).')
+                        'a trail seen in only one or two subs. On by default.')
+    g_stack.add_argument('--no-local-normalize', dest='local_normalize', action='store_false',
+                   help='Disable additive background matching of every frame to the '
+                        'per-frame median before the rejection combine (removes per-frame '
+                        'gradients from moonlight / light-pollution drift / thin cloud, and '
+                        'sharpens sigma-clip). Applies to rejection stack methods (not plain '
+                        'mean or drizzle). On by default.')
+    g_stack.add_argument('--bm4d-prefilter', action='store_true',
+                   help='Cross-frame BM4D-style collaborative-filter denoising on the '
+                        'aligned stack, before the rejection combine. Different from '
+                        '--denoiser bm3d (post-combine, spatial self-similarity search '
+                        'within the single final image): this exploits exact cross-frame '
+                        'correspondence already established by alignment -- no motion '
+                        'search needed, the block at (x,y) in every frame already IS the '
+                        'matching block. Complements rather than replaces post-combine '
+                        'BM3D. Real cost: one 3-D DCT collaborative filter per block '
+                        'position, linear in frame count -- can be slow on large images '
+                        'with many frames (same order as --denoiser bm3d\'s own runtime '
+                        'note). Not compatible with --drizzle-scale > 1 (needs the batch '
+                        'aligned-stack array the drizzle resample path doesn\'t build). '
+                        'Unvalidated against real data this session (synthetic-only).')
     g_frames.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
                    help='Disable per-frame cosmic ray rejection (L.A.Cosmic)')
@@ -1254,6 +1386,10 @@ def build_parser() -> argparse.ArgumentParser:
         star_reduce=True,
         local_contrast=True,
         ca_correction=True,
+        trail_reject=True,
+        local_normalize=True,
+        repair_stars=True,
+        elastic_registration=True,
         cosmic_ray_rejection=None,  # tri-state: None = auto (see pipeline.py)
         # Denoiser tuning
         denoise_chroma_boost=2.0,
@@ -1308,6 +1444,10 @@ def build_parser() -> argparse.ArgumentParser:
         linear_fit_sigma_high=2.0,
         linear_fit_iters=5,
         ivw_gain=None,  # electrons/ADU; None = per-frame-constant noise weight (no shot-noise term)
+        denoise_read_noise=Config.DEFAULT_READ_NOISE_E,  # electrons; used only with --denoise-gain
+        drizzle_psf_wiener_k=Config.DRIZZLE_PSF_WIENER_K,  # used only with --drizzle-kernel psf
+        wavelet_combine_levels=4,  # used only with --stack-method wavelet
+        ibp_relax=Config.IBP_RELAX,  # used only with --super-res-iters
         # Quality
         # (advanced_metrics has no CLI flag -- set via --config only)
         # Per-feature tuning

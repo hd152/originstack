@@ -31,7 +31,13 @@ class Config:
     STAR_MASK_MAX_STARS = 500  # Max stars for mask generation
     AFFINE_MAX_STARS = 80  # Max stars for affine matching
     AFFINE_MATCH_RADIUS = 10.0  # Max pixel distance for star matching
-    AFFINE_MAX_ROTATION_DEG = 20.0  # Reject an affine fit rotating more than this (bad RANSAC match)
+    AFFINE_MAX_ROTATION_DEG = 5.0   # Reject an affine fit rotating more than this (bad RANSAC match).
+                                     # Tightened from 20 -- gates per-frame-pair rotation (vs reference),
+                                     # not cumulative session rotation; on equatorial/GEM mounts real
+                                     # rotation is ~0 so a tight gate catches bad RANSAC matches faster.
+                                     # Alt-az users without a derotator may need to raise this via
+                                     # --max-rotation-deg if legitimate frames start falling back to
+                                     # translation-only.
     MAX_REALISTIC_SHIFT_FRAC = 0.3  # Reject a shift/affine translation exceeding this fraction of frame W/H (bad match, not real drift)
     GPU_PHASE1_WORKER_MB = 450.0   # VRAM per thread: raw+cal+green_eq+debayer+hotpix+wb peak
     GPU_FFT_WORKER_MB = 800.0      # VRAM per thread for padded complex128 FFT
@@ -112,6 +118,72 @@ class Config:
     # Comet tracking / nucleus detection
     COMET_DOG_SIGMA_SMALL = 2.0     # DoG small sigma (suppresses point sources)
     COMET_DOG_SIGMA_LARGE = 10.0    # DoG large sigma (enhances diffuse coma core)
+
+    # Robust-PCA (Principal Component Pursuit) master calibration frames
+    ROBUST_PCA_MIN_FRAMES = 5       # Below this, the low-rank/sparse split is
+                                     # underdetermined -- make_master falls back to median
+    ROBUST_PCA_AUTO_MAX_FRAMES = 10 # --auto only auto-upgrades median->robust_pca for a
+                                     # calibration type at or below this frame count.
+                                     # Cost scales O(N^2 x pixels); measured 1264s/~21min
+                                     # at N=20 -- too slow for a silent --auto default at
+                                     # that scale (see _build_masters's comment). At
+                                     # N<=10 that scales to ~(10/20)^2 * 1264s ~= 316s
+                                     # (~5.3min), judged tolerable for --auto; still
+                                     # opt-in via --master-method robust_pca above this
+    ROBUST_PCA_MAX_ITERS = 50       # IALM iterations (each is one economy SVD of an
+                                     # (N, H*W*C) matrix, via src.robust_pca's
+                                     # Gram-matrix-trick + native gram_matrix_wide/
+                                     # small_times_wide kernels -- ~9x over a direct
+                                     # np.linalg.svd call on a realistic problem shape
+                                     # (N=20, P=18M), ~2.3x end-to-end after the
+                                     # non-SVD per-iteration ops that don't benefit;
+                                     # measured 1264s/~21min full run, down from
+                                     # 2910s/~48.5min pre-optimization. Bounded, not
+                                     # adaptive-early-exit beyond the tolerance below)
+    ROBUST_PCA_TOL = 1e-7           # Relative Frobenius-norm residual convergence tolerance
+
+    # Generalized Anscombe variance-stabilizing transform (VST) for wavelet denoising
+    DEFAULT_READ_NOISE_E = 5.0      # Fallback read noise (electrons) when --denoise-gain is
+                                     # set without an explicit --denoise-read-noise override
+
+    # PSF-kernel drizzle resampling
+    DRIZZLE_PSF_KERNEL_SIZE = 9     # Tap radius for the drizzle resample kernel when
+                                     # --drizzle-kernel psf is set -- deliberately much
+                                     # smaller than RL_PSF_SIZE (31): this is a per-pixel
+                                     # resample tap count, not a deconvolution kernel
+    DRIZZLE_PSF_PHASES = 16         # Subpixel phase quantization per axis for the
+                                     # precomputed tap-weight table
+
+    # Iterative back-projection (IBP, Irani & Peleg 1991) super-resolution refinement
+    IBP_RELAX = 0.15                # Step-size / damping factor on the per-iteration
+                                     # back-projected update. Swept on synthetic
+                                     # known-ground-truth super-res data (see
+                                     # tests/test_ibp_super_res.py): 0.5 (the original
+                                     # guess) reliably makes RMSE *worse*, not better --
+                                     # the direction of the update is correct (verified:
+                                     # RMSE drops monotonically with relax at a single
+                                     # iteration) but 0.5 overshoots. 0.15 consistently
+                                     # improved RMSE across 5 synthetic seeds; combined
+                                     # with ~5 iterations (RMSE bottoms out there, then
+                                     # rises again -- classic IBP noise amplification).
+    DRIZZLE_PSF_WIENER_K = 0.02     # Wiener regularization constant for the PSF inverse
+                                     # filter the tap table is built from (see
+                                     # build_drizzle_psf_table). Using the raw PSF shape
+                                     # as the resample kernel measurably BROADENS stars
+                                     # (convolving a sigma~2px star with a sigma~2px
+                                     # kernel gives sigma*sqrt(2) -- verified empirically,
+                                     # not just theory). This value was swept on a
+                                     # synthetic Gaussian-PSF star: ~0.03 is close to
+                                     # neutral (no broadening), ~0.01 gives ~9% FWHM
+                                     # sharpening; noise response stays well-behaved
+                                     # (suppressed, not amplified) across that whole
+                                     # range, so 0.02 is a conservative middle default,
+                                     # not a hard optimum
+
+    # astrollm (external defect/quality/category classifier, --astrollm)
+    ASTROLLM_TIMEOUT_S = 60.0       # Per-frame subprocess timeout for infer.py
+    ASTROLLM_OUTLIER_SIGMA = 2.0    # Session-relative quality_score flag threshold
+                                     # (advisory logging only -- see src/astrollm.py)
 
 
 @dataclass

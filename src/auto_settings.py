@@ -573,8 +573,14 @@ def _apply_dynamic_settings(
 def _apply_quality_settings(
     sig: dict, args, target_type: str = 'unknown',
     weights: Optional[Dict[str, float]] = None,
+    final: Optional[list] = None,
 ) -> List[str]:
-    """Apply frame-count, SNR, FWHM, Strehl, and dispersion adjustments."""
+    """Apply frame-count, SNR, FWHM, Strehl, and dispersion adjustments.
+
+    ``final``: accepted frames (only needed for the EGAIN header lookup,
+    rule 17 below) -- optional so existing callers/tests that don't need it
+    don't have to change.
+    """
     changes: List[str] = []
     _explicit = getattr(args, '_explicit_cli_dests', set())
 
@@ -601,8 +607,20 @@ def _apply_quality_settings(
     med_ellip   = sig.get('median_ellipticity', 0.0)
 
     # 1. Frame-count-based stacking method (only when still at default 'auto')
+    _drizzle_scale = float(getattr(args, 'drizzle_scale', 1.0) or 1.0)
+    _fine_structure_weight = sum((weights or {}).get(t, 0.0)
+                                 for t in ('emission_nebula', 'reflection_nebula', 'galaxy'))
     if getattr(args, 'stack_method', 'auto') == 'auto':
-        if n < 8:
+        if _drizzle_scale <= 1.0 and 8 <= n <= 40 and _fine_structure_weight > 0.5:
+            # Wavelet-domain combine (src/stacking.py::wavelet_combine) preserves
+            # faint fine-scale structure a pixel-domain outlier test can shave off
+            # at an aggressive threshold -- worth its N-wavelet-transforms cost at
+            # this frame-count band for targets where that structure matters.
+            # Below 8 frames too few for the benefit to show; above 40 the
+            # transform cost dominates; doesn't support drizzle yet (v1
+            # limitation, see wavelet_combine's docstring).
+            _set('stack_method', 'wavelet')
+        elif n < 8:
             _set('stack_method', 'percentile')
         elif n < 15:
             # Trimmed mean: simple, robust alternative to ESD for moderate N.
@@ -768,6 +786,104 @@ def _apply_quality_settings(
         if getattr(args, 'denoise_acdnr', False):
             _set('denoise_acdnr', False)
 
+    # 15. Elastic (non-rigid) registration, star-correspondence method only.
+    #     Corrects spatially-varying distortion (differential atmospheric
+    #     refraction, field rotation) a single global affine per frame can't
+    #     fix -- reuses DBE's well-tested local-regression fitter. Gated on
+    #     enough frames/stars for the fit to be reliable: n>=20 matches the
+    #     existing consensus_ref threshold above; star_count>=30 is well
+    #     above Config.LOCAL_WARP_MIN_STARS as a safety margin so most
+    #     individual frames still clear the per-frame floor after dithering.
+    #     The dense-flow method stays opt-in-only -- only synthetic-tuned
+    #     this session, unlike the star method's DBE-regression reuse.
+    if (n >= 20 and sig['star_count'] >= 30
+            and not getattr(args, 'elastic_registration', False)):
+        _set('elastic_registration', True)
+        _set('elastic_registration_method', 'star')
+
+    # 16. PSF-matched drizzle kernel + IBP super-resolution refinement -- only
+    #     when the user already explicitly asked for --drizzle-scale > 1
+    #     (auto never turns drizzle itself on: that's an output-resolution/
+    #     file-size choice, not a target-classification one) and elastic
+    #     registration isn't active (mutually exclusive per
+    #     run_stacking_phase's own guard -- checking here avoids the
+    #     wasted PSF-estimation attempt and its skip warning). Defaults
+    #     (wiener_k=0.02, relax=0.15/5 iters) were empirically validated on
+    #     synthetic ground-truth data this session, not hand-picked.
+    if _drizzle_scale > 1.0 and not getattr(args, 'elastic_registration', False):
+        if getattr(args, 'drizzle_kernel', 'lanczos3') == 'lanczos3':
+            _set('drizzle_kernel', 'psf')
+        if not getattr(args, 'super_res_iters', 0):
+            _set('super_res_iters', 5)
+
+    # 17. VST wavelet denoise gain, EGAIN header case only. The GAIN header
+    #     field this codebase already reads elsewhere (frame_discovery.py,
+    #     io_fits.py) is a camera *setting* (ISO-like dial value, camera-
+    #     specific), not electrons/ADU -- using it here would silently feed
+    #     the generalized-Anscombe transform a physically wrong constant.
+    #     Some capture tools (SharpCap, N.I.N.A.) write a literal EGAIN key
+    #     in true e-/ADU units; only auto-enable when that specific key is
+    #     present and in a physically sane range. No-op (today's behaviour)
+    #     otherwise -- deliberately not derived from GAIN.
+    if final and not getattr(args, 'denoise_gain', None):
+        try:
+            _egain_raw = final[0].header.get('EGAIN') if final[0].header else None
+            if _egain_raw is not None:
+                _egain = float(_egain_raw)
+                if 0.05 <= _egain <= 20.0:
+                    _set('denoise_gain', _egain)
+        except (TypeError, ValueError):
+            pass
+
+    # 18. Gaia DR3 astrometric distortion correction. Reuses the exact same
+    #     trusted DBE-regression fitter as rule 15's elastic-registration
+    #     'star' method (fit_displacement_field), so the same reasoning for
+    #     auto-enabling that applies here. Unconditional (no frame-count
+    #     gate needed): fit_gaia_distortion_field self-gates and fails soft
+    #     -- a no-op whenever the reference frame's header has no WCS, which
+    #     is the common case unless the capture software plate-solves. The
+    #     real side effect isn't compute cost, it's that this now makes a
+    #     live Gaia TAP network query by default on any session that DOES
+    #     have a WCS -- accepted deliberately, not an oversight.
+    if not getattr(args, 'gaia_distortion_correction', False):
+        _set('gaia_distortion_correction', True)
+
+    # 19. Bortle-scale-aware background/gradient aggressiveness.
+    #     estimate_bortle (src/quality.py) is computed per-frame in Phase 1
+    #     (frame_processor.py) but until now was only ever read for the
+    #     end-of-run summary print (pipeline.py) -- never actually drove a
+    #     processing decision. Heavier sky glow (Bortle 7-9) means stronger,
+    #     more spatially-complex gradients than simple vignetting: force
+    #     pre-gradient removal on, and tighten the DBE patch grid / background
+    #     sample rejection sigma -- as a ceiling (min() against whatever the
+    #     target-type blend above already picked), not an override, so this
+    #     only ever makes background extraction *more* careful, never
+    #     fights the target-type-driven value with a looser one.
+    #     local_normalize (additive per-frame background match) is also
+    #     bortle-gated here, not just a ceiling like the others: it was
+    #     previously 100% manual opt-in, never touched by --auto at all.
+    #     Real match for heavy light pollution specifically (not target
+    #     type) -- cycling streetlights / municipal LED changes mid-session
+    #     drift the background frame-to-frame in exactly the way it
+    #     corrects, a problem that doesn't show up the same way at dark
+    #     sites. --trail-reject was considered too (satellite/plane trails)
+    #     and deliberately left alone: driven by orbital object density and
+    #     flight paths, not sky brightness -- bortle isn't the right trigger
+    #     for it.
+    if final:
+        bortle_vals = [f.metrics.get('bortle_estimate') for f in final
+                       if f.metrics and f.metrics.get('bortle_estimate') is not None]
+        if bortle_vals:
+            bortle = float(np.median(bortle_vals))
+            if bortle >= 7:
+                _set('pre_gradient_removal', True)
+                _set('dbe_patch_size', min(getattr(args, 'dbe_patch_size', 64), 48))
+                _set('bg_clip_sigma', min(getattr(args, 'bg_clip_sigma', 3.0), 2.5))
+                if not getattr(args, 'local_normalize', False):
+                    _set('local_normalize', True)
+            if bortle >= 8:
+                _set('dbe_patch_size', min(getattr(args, 'dbe_patch_size', 64), 32))
+
     return changes
 
 
@@ -842,6 +958,7 @@ def apply_auto_settings(
 
     changes: List[str] = []
     changes.extend(_apply_dynamic_settings(sig, weights, args))
-    changes.extend(_apply_quality_settings(sig, args, target_type=target_type, weights=weights))
+    changes.extend(_apply_quality_settings(sig, args, target_type=target_type, weights=weights,
+                                           final=final))
 
     return target_type, label, sig, changes, weights

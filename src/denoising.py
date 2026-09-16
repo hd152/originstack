@@ -79,6 +79,43 @@ def estimate_denoise_strength(stacked: np.ndarray, fwhm_mean: float = 0.0) -> fl
     return float(np.clip(strength, 1.0, 5.5))
 
 
+def generalized_anscombe_forward(y: np.ndarray, gain: float, read_noise: float = 0.0) -> np.ndarray:
+    """Generalized Anscombe variance-stabilizing transform (GAT).
+
+    Maps a Poisson(shot noise, scaled by ``gain`` e-/ADU) + Gaussian(``read_noise``
+    electrons) observation ``y`` (in ADU) to a domain where the noise variance is
+    approximately uniform (~1) regardless of signal level -- the assumption
+    BayesShrink's single global sigma estimate actually needs.
+
+    ``u = gain*y`` converts ADU to electron units, where ``u`` is distributed
+    as ``Poisson(gain*x) + N(0, read_noise^2)`` (electron-domain read noise
+    adds directly once ADU noise is scaled by gain) -- the classic unit-gain
+    generalized-Anscombe scenario (Starck, Murtagh & Bijaoui 1995 / Makitalo &
+    Foi 2011):
+
+        z = 2 * sqrt(gain*y + 3/8 + read_noise^2)
+    """
+    u = gain * y
+    return 2.0 * np.sqrt(np.maximum(u + 0.375 + read_noise ** 2, 0.0))
+
+
+def generalized_anscombe_inverse(z: np.ndarray, gain: float, read_noise: float = 0.0) -> np.ndarray:
+    """Closed-form asymptotically-unbiased inverse of the generalized Anscombe
+    transform (Makitalo & Foi 2011). The naive algebraic inverse of the
+    forward sqrt is biased at low signal levels (denoising/thresholding
+    happens on ``z`` in between, so the inverse doesn't just undo the
+    forward's algebra) -- this polynomial-in-1/z correction removes that
+    bias. The same correction coefficients (1/8, sqrt(3/2)/4, ...) apply
+    whether or not ``read_noise`` is zero, since it was folded into the
+    forward sqrt's offset by construction; only the final ``- read_noise^2``
+    subtraction (undoing that offset) depends on it.
+    """
+    z = np.maximum(z, 1e-6)
+    exact_unbiased = ((z / 2.0) ** 2 - 0.125 + 0.25 * np.sqrt(1.5) / z
+                      - (11.0 / 8.0) / z ** 2 + 1.25 * np.sqrt(1.5) / z ** 3)
+    return (exact_unbiased - read_noise ** 2) / gain
+
+
 def _bayesshrink_threshold(coeffs: np.ndarray, sigma_noise: float) -> float:
     """BayesShrink adaptive threshold for one wavelet subband.
 
@@ -101,7 +138,9 @@ def _bayesshrink_threshold(coeffs: np.ndarray, sigma_noise: float) -> float:
 
 def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
                               chroma_factor: float = 2.0,
-                              star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                              star_mask: Optional[np.ndarray] = None,
+                              gain: Optional[float] = None,
+                              read_noise: float = 0.0) -> np.ndarray:
     """Adaptive multi-scale wavelet denoising using BayesShrink thresholds.
 
     Unlike ``wavelet_denoise`` which applies a single global
@@ -122,6 +161,19 @@ def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
                        colour speckle at the cost of slight chroma blurring.
         star_mask: Optional float mask (0–1, 1 = star core).  Star pixels are
                    blended back from the original to avoid core softening.
+        gain: Optional detector gain (electrons/ADU). When given, each YCbCr
+              plane is variance-stabilized (generalized Anscombe transform)
+              before decomposition and inverse-transformed after
+              reconstruction, so BayesShrink's single-sigma-per-plane
+              assumption holds for genuinely Poisson-Gaussian sensor noise
+              instead of the pure-Gaussian noise this function otherwise
+              assumes. ``None`` (default) skips the transform entirely --
+              byte-identical to the pre-VST behaviour. Applied per YCbCr
+              plane (an approximation: true per-channel photon noise lives
+              in R/G/B, not the YCbCr-mixed planes) at the same fidelity
+              level as this function's existing per-plane Gaussian model.
+        read_noise: Detector read noise in electrons, used only when ``gain``
+                    is set.
 
     Returns:
         Denoised float32 image (H, W, 3).
@@ -135,12 +187,14 @@ def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
     Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
 
     def _adaptive_denoise_plane(plane: np.ndarray, chroma_mult: float) -> np.ndarray:
-        max_level = wavelet.dwt_max_level(min(plane.shape))
+        work = generalized_anscombe_forward(plane, gain, read_noise) if gain else plane
+
+        max_level = wavelet.dwt_max_level(min(work.shape))
         use_levels = min(levels, max_level)
         if use_levels < 1:
             return plane
 
-        coeffs = wavelet.wavedec2(plane, use_levels)
+        coeffs = wavelet.wavedec2(work, use_levels)
 
         # Global noise estimate from finest-level HH subband (standard MAD estimator)
         sigma_noise = np.median(np.abs(coeffs[-1][-1])) / 0.6745
@@ -154,7 +208,10 @@ def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
                 new_detail.append(wavelet.soft_threshold(d, threshold))
             new_coeffs.append(tuple(new_detail))
 
-        return wavelet.waverec2(new_coeffs)[:h, :w]
+        denoised = wavelet.waverec2(new_coeffs)[:h, :w]
+        if gain:
+            denoised = generalized_anscombe_inverse(denoised, gain, read_noise)
+        return denoised
 
     Y_d  = _adaptive_denoise_plane(Y,  1.0)
     Cb_d = _adaptive_denoise_plane(Cb, chroma_factor)
@@ -175,7 +232,9 @@ def adaptive_wavelet_denoise(img: np.ndarray, levels: int = 4,
 
 def wavelet_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 3.0,
                     chroma_factor: float = 2.0,
-                    star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+                    star_mask: Optional[np.ndarray] = None,
+                    gain: Optional[float] = None,
+                    read_noise: float = 0.0) -> np.ndarray:
     """Multi-scale wavelet denoising with luma/chroma split and star protection.
 
     Operates in YCbCr colour space so that chroma channels (Cb, Cr) can receive
@@ -186,6 +245,10 @@ def wavelet_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 
     If star_mask is provided (float [0,1], 1=star core), the denoised result is
     blended back with the original at star positions so that star cores are not
     softened and their colours are preserved.
+
+    ``gain``/``read_noise``: see ``adaptive_wavelet_denoise`` -- same optional
+    generalized-Anscombe variance stabilization, ``gain=None`` (default) is
+    byte-identical to the pre-VST behaviour.
     """
     h, w = img.shape[0], img.shape[1]
     src = img.astype(np.float64)
@@ -196,11 +259,13 @@ def wavelet_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 
     Cr =  0.50000 * src[:, :, 0] - 0.41869 * src[:, :, 1] - 0.08131 * src[:, :, 2]
 
     def _denoise_plane(plane, factor):
-        max_level = wavelet.dwt_max_level(min(plane.shape))
+        work = generalized_anscombe_forward(plane, gain, read_noise) if gain else plane
+
+        max_level = wavelet.dwt_max_level(min(work.shape))
         use_levels = min(levels, max_level)
         if use_levels < 1:
             return plane
-        coeffs = wavelet.wavedec2(plane, use_levels)
+        coeffs = wavelet.wavedec2(work, use_levels)
         detail_hh = coeffs[-1][-1]
         sigma_noise = np.median(np.abs(detail_hh)) / 0.6745
         threshold = factor * sigma_noise
@@ -209,7 +274,10 @@ def wavelet_denoise(img: np.ndarray, levels: int = 4, threshold_factor: float = 
             new_coeffs.append(tuple(
                 wavelet.soft_threshold(d, threshold) for d in detail_level
             ))
-        return wavelet.waverec2(new_coeffs)[:h, :w]
+        denoised = wavelet.waverec2(new_coeffs)[:h, :w]
+        if gain:
+            denoised = generalized_anscombe_inverse(denoised, gain, read_noise)
+        return denoised
 
     chroma_thresh = threshold_factor * chroma_factor
     Y_d  = _denoise_plane(Y,  threshold_factor)

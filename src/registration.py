@@ -1395,6 +1395,146 @@ def sample_displacement_field(field: np.ndarray, H: int, W: int,
     return dy, dx
 
 
+def fit_displacement_field_flow(ref_lum: np.ndarray, frame_lum_warped: np.ndarray,
+                                H: int, W: int, levels: int = 4,
+                                inner_iters: int = 2, damping: float = 0.5) -> Optional[np.ndarray]:
+    """Fit a smooth (Gc, Gc, 2) local displacement field via dense pyramidal
+    Lucas-Kanade optical flow, as an alternative to ``fit_displacement_field``'s
+    sparse matched-star fit -- better constrained in star-sparse regions of
+    the frame since it uses the full luminance image instead of a handful of
+    star correspondences.
+
+    ``frame_lum_warped`` must already be resampled into the same
+    reference-aligned coordinate space as ``ref_lum`` (i.e. the caller has
+    already applied the frame's global affine/translation transform via
+    ``apply_transform`` with no ``local_field``) -- this function only
+    recovers the *residual* local distortion left after that global
+    registration, matching ``fit_displacement_field``'s contract exactly.
+
+    Solves for D(o) such that ``frame_lum_warped(o - D(o)) ~= ref_lum(o)``
+    (backward-warp optical flow), which is precisely the displacement
+    convention ``apply_transform``'s ``local_field`` composition already
+    expects (see its docstring): ``src(o) = R @ (o - t - D(o))``.
+
+    Returns ``None`` if the reference frame has too little gradient energy
+    for a reliable flow estimate (near-featureless frame) -- caller should
+    fall back to the frame's unmodified affine/translation warp, same as
+    ``fit_displacement_field``'s below-star-floor case.
+    """
+    ref = ref_lum.astype(np.float64)
+    mov = frame_lum_warped.astype(np.float64)
+
+    # Gaussian pyramid: smooth + downsample by 2 each level, coarsest first.
+    def _build_pyramid(img: np.ndarray) -> list:
+        pyr = [img]
+        cur = img
+        for _ in range(levels - 1):
+            if min(cur.shape) < 16:
+                break
+            smoothed = ndimage.gaussian_filter(cur, sigma=1.0)
+            cur = smoothed[::2, ::2]
+            pyr.append(cur)
+        return pyr[::-1]  # coarsest first
+
+    ref_pyr = _build_pyramid(ref)
+    mov_pyr = _build_pyramid(mov)
+    n_levels = len(ref_pyr)
+
+    # Gradient-energy sanity check on the coarsest level (cheap, catches a
+    # flat/near-featureless frame before wasting the full pyramid refinement).
+    coarse_grad_energy = float(np.mean(ndimage.sobel(ref_pyr[0]) ** 2))
+    if coarse_grad_energy < 1e-9:
+        return None
+
+    window = 15  # LK structure-tensor window (px, at each pyramid level's own resolution)
+    eps = 1e-6
+
+    disp = np.zeros_like(ref_pyr[0])  # dy at current (coarsest) level
+    dispx = np.zeros_like(ref_pyr[0])  # dx at current (coarsest) level
+
+    for lvl in range(n_levels):
+        I1 = ref_pyr[lvl]
+        I2 = mov_pyr[lvl]
+        h_l, w_l = I1.shape
+
+        if lvl > 0:
+            # Upsample the previous (coarser) level's field, scaling
+            # magnitude x2 since pixel units double at each finer level.
+            zoom_y = h_l / disp.shape[0]
+            zoom_x = w_l / disp.shape[1]
+            disp = ndimage.zoom(disp, (zoom_y, zoom_x), order=1) * 2.0
+            dispx = ndimage.zoom(dispx, (zoom_y, zoom_x), order=1) * 2.0
+            # zoom can be off by a pixel from rounding -- crop/pad to exact shape.
+            disp = disp[:h_l, :w_l]
+            dispx = dispx[:h_l, :w_l]
+            if disp.shape != (h_l, w_l):
+                pad_y, pad_x = h_l - disp.shape[0], w_l - disp.shape[1]
+                disp = np.pad(disp, ((0, max(pad_y, 0)), (0, max(pad_x, 0))), mode='edge')
+                dispx = np.pad(dispx, ((0, max(pad_y, 0)), (0, max(pad_x, 0))), mode='edge')
+
+        oy, ox = np.mgrid[0:h_l, 0:w_l].astype(np.float64)
+        for _ in range(inner_iters):
+            src_y = oy - disp
+            src_x = ox - dispx
+            I2_warped = ndimage.map_coordinates(I2, [src_y, src_x], order=1,
+                                                mode='constant', cval=np.nan)
+            valid = np.isfinite(I2_warped)
+            I2_warped = np.nan_to_num(I2_warped, nan=0.0)
+
+            error = (I1 - I2_warped) * valid
+            Ix = ndimage.sobel(I2_warped, axis=1) / 8.0
+            Iy = ndimage.sobel(I2_warped, axis=0) / 8.0
+            Ix *= valid
+            Iy *= valid
+
+            Ixx = ndimage.uniform_filter(Ix * Ix, size=window)
+            Iyy = ndimage.uniform_filter(Iy * Iy, size=window)
+            Ixy = ndimage.uniform_filter(Ix * Iy, size=window)
+            Ixt = ndimage.uniform_filter(Ix * error, size=window)
+            Iyt = ndimage.uniform_filter(Iy * error, size=window)
+
+            det = Ixx * Iyy - Ixy * Ixy
+            det_safe = np.where(np.abs(det) < eps, eps, det)
+            # Newton step solves [Ix,Iy]*delta = -(I2_warped - I1) = error,
+            # i.e. the raw normal-equations solution is the *negative* of
+            # this system (error, not -error, was accumulated into
+            # Ixt/Iyt) -- negate here rather than flip error's sign above,
+            # so `error`'s own sign stays intuitive (I1 - I2_warped).
+            inc_x = -(Iyy * Ixt - Ixy * Iyt) / det_safe
+            inc_y = -(Ixx * Iyt - Ixy * Ixt) / det_safe
+            # Guard against divergence in low-texture/singular regions. The
+            # forward-additive (not inverse-compositional) formulation here
+            # re-evaluates I2's gradient at the current warp estimate every
+            # iteration, which overshoots/oscillates at full Newton step size
+            # (measured empirically on a synthetic sinusoidal field) --
+            # damping < 1 trades iteration count for stability.
+            inc_x = np.clip(inc_x, -4.0, 4.0) * damping
+            inc_y = np.clip(inc_y, -4.0, 4.0) * damping
+
+            dispx += inc_x
+            disp += inc_y
+
+    # Downsample the full-res field to the coarse (Gc, Gc, 2) grid contract
+    # fit_displacement_field already produces, so sample_displacement_field
+    # and the fused-warp consumer need no changes.
+    Gc = Config.LOCAL_WARP_GRID_SIZE
+    field_y = ndimage.zoom(disp, (Gc / disp.shape[0], Gc / disp.shape[1]), order=1)
+    field_x = ndimage.zoom(dispx, (Gc / dispx.shape[0], Gc / dispx.shape[1]), order=1)
+    field_y = field_y[:Gc, :Gc]
+    field_x = field_x[:Gc, :Gc]
+    if field_y.shape != (Gc, Gc):
+        field_y = ndimage.zoom(field_y, (Gc / field_y.shape[0], Gc / field_y.shape[1]), order=1)
+        field_x = ndimage.zoom(field_x, (Gc / field_x.shape[0], Gc / field_x.shape[1]), order=1)
+
+    field = np.stack([field_y, field_x], axis=-1).astype(np.float32)
+
+    mag = np.hypot(field[..., 0], field[..., 1])
+    clamp = Config.LOCAL_WARP_MAX_DISPLACEMENT_PX
+    scale = np.minimum(1.0, clamp / np.maximum(mag, 1e-9))
+    field *= scale[..., None]
+    return field
+
+
 _REG_STEP_LABELS = {
     'ref_star_detect': 'Reference star (re-)detection',
     'shift_calculation': 'Shift calculation (phase-corr/RANSAC, all frames)',
@@ -1635,7 +1775,8 @@ def run_registration_phase(
                         affine_tf.params[1, 0], affine_tf.params[0, 0])))
                     if (abs(tf_tx) > Config.MAX_REALISTIC_SHIFT_FRAC * W
                             or abs(tf_ty) > Config.MAX_REALISTIC_SHIFT_FRAC * H
-                            or tf_rot_deg > Config.AFFINE_MAX_ROTATION_DEG):
+                            or tf_rot_deg > getattr(args, 'max_rotation_deg',
+                                                    Config.AFFINE_MAX_ROTATION_DEG)):
                         safe_print(
                             f'Unrealistic affine fit shift=({tf_tx:.1f},{tf_ty:.1f})px '
                             f'rotation={tf_rot_deg:.1f}deg for {f.path}, '
@@ -1727,12 +1868,16 @@ def run_registration_phase(
     # forcing it to run (full coverage, not the sampled subset) even if the
     # RMS-reject gate itself was disabled via --no-reg-residual-check.
     elastic_on = getattr(args, 'elastic_registration', False) and not args.no_registration
+    # The dense-flow field fit (below) doesn't need the star-correspondence
+    # residual-check pass at all -- only 'star' method does.
+    elastic_needs_correspondences = (
+        elastic_on and getattr(args, 'elastic_registration_method', 'star') == 'star')
     correspondences: Optional[List[Optional[Tuple[np.ndarray, np.ndarray]]]] = None
-    if ((not getattr(args, 'no_reg_residual_check', False) or elastic_on)
+    if ((not getattr(args, 'no_reg_residual_check', False) or elastic_needs_correspondences)
             and ref_stars is not None
             and len(ref_stars) >= 5
             and not args.no_registration):
-        if elastic_on and getattr(args, 'no_reg_residual_check', False):
+        if elastic_needs_correspondences and getattr(args, 'no_reg_residual_check', False):
             safe_print("  --elastic-registration needs the residual-check star match "
                        "pass; running it despite --no-reg-residual-check "
                        "(RMS-reject gate stays disabled)")
@@ -1762,8 +1907,8 @@ def run_registration_phase(
             mem_lum, final_indices, best_idx,
             max_residual_px=max_residual_px,
             cached_lums=cached_lums,
-            return_correspondences=elastic_on,
-            force_full_check=elastic_on,
+            return_correspondences=elastic_needs_correspondences,
+            force_full_check=elastic_needs_correspondences,
         )
         n_res_failed = sum(1 for p in res_passed if not p)
         for j, (f, passed, rms) in enumerate(zip(final, res_passed, residuals)):
@@ -1786,11 +1931,41 @@ def run_registration_phase(
 
     _reg_timings['residual_check'], _t = time.time() - _t, time.time()
 
-    # Elastic (non-rigid) local displacement fields, fit from the matched-star
-    # residuals collected above. Frames with too few matched stars fall back
-    # to unmodified affine-only warping (None field).
+    # Elastic (non-rigid) local displacement fields. 'star' (default) fits
+    # from the matched-star residuals collected above; 'flow' fits a dense
+    # pyramidal-LK field directly from each frame's own (globally-warped)
+    # luminance against ref_lum -- no star correspondences needed, better
+    # constrained in star-sparse regions. Frames the chosen method can't fit
+    # (too few matched stars / too little gradient energy) fall back to
+    # unmodified affine-only warping (None field).
+    elastic_method = getattr(args, 'elastic_registration_method', 'star')
     displacement_fields: Optional[List[Optional[np.ndarray]]] = None
-    if elastic_on and correspondences is not None:
+
+    # Gaia distortion correction: session-wide (not per-frame) absolute
+    # optical distortion, fit once from the reference frame's own detected
+    # stars vs. Gaia DR3 predicted positions -- independent of
+    # --elastic-registration (that corrects a different thing: per-frame
+    # relative drift). See src/gaia_distortion.py's module docstring.
+    gaia_field = None
+    if getattr(args, 'gaia_distortion_correction', False) and not args.no_registration:
+        from src.gaia_distortion import fit_gaia_distortion_field
+        gaia_field = fit_gaia_distortion_field(best.header, ref_stars, H, W)
+
+    if elastic_on and elastic_method == 'flow':
+        safe_print(f"  Fitting local displacement fields (dense flow, {len(final)} frames)...")
+        displacement_fields = []
+        n_fit = 0
+        for j in range(len(final)):
+            frame_lum_raw = np.asarray(mem_lum[final_indices[j]])
+            frame_lum_warped = apply_transform(frame_lum_raw, shift=shifts[j],
+                                               transform=transforms[j])
+            field = fit_displacement_field_flow(ref_lum, frame_lum_warped, H, W)
+            displacement_fields.append(field)
+            if field is not None:
+                n_fit += 1
+        safe_print(f"  Local displacement fields: {n_fit}/{len(final)} frames "
+                   f"(others fall back to affine-only: insufficient gradient energy)")
+    elif elastic_on and correspondences is not None:
         safe_print(f"  Fitting local displacement fields ({len(final)} frames)...")
         displacement_fields = []
         n_fit = 0
@@ -1806,6 +1981,22 @@ def run_registration_phase(
                 n_fit += 1
         safe_print(f"  Local displacement fields: {n_fit}/{len(final)} frames "
                    f"(others fall back to affine-only: too few matched stars)")
+
+    if gaia_field is not None:
+        if displacement_fields is None:
+            # No elastic correction active -- gaia field alone, identical
+            # for every frame (it corrects the shared optical geometry, not
+            # anything frame-specific).
+            displacement_fields = [gaia_field] * len(final)
+        else:
+            # Both express a (dy,dx) correction in the same reference-pixel
+            # grid convention (apply_transform's local_field) -- elastic
+            # corrects per-frame relative drift, gaia corrects the shared
+            # absolute distortion, so summing applies both.
+            displacement_fields = [
+                (f + gaia_field) if f is not None else gaia_field
+                for f in displacement_fields
+            ]
 
     _reg_timings['displacement_fields'], _t = time.time() - _t, time.time()
 

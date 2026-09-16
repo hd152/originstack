@@ -34,6 +34,55 @@ def estimate_bortle(background: float, exptime_s: float, gain: float = 100.0) ->
     return min(bortle, 9)
 
 
+def estimate_background_gradient(img_s: np.ndarray, noise: float, mesh: int = 8) -> float:
+    """Cheap per-frame background gradient magnitude (noise-normalised,
+    dimensionless), from a coarse low-order plane fit to a mesh grid of
+    robust per-cell background levels.
+
+    A quality-gate signal for catching a frame with an anomalous gradient
+    relative to the rest of the session -- a cloud reflecting light-pollution
+    glow, a light cycling on mid-session -- not a background-removal step
+    itself (see src/background.py's DBE for that, which this deliberately
+    doesn't reuse: DBE's patch-rejection-cascade fit is tuned for
+    post-combine final-image quality, too slow to run on every Phase-1
+    frame). Per-cell level uses the 25th percentile (robust against stars
+    and real nebulosity within a cell, unlike a mean/median which either
+    includes them or needs a slower rejection pass).
+    """
+    H, W = img_s.shape[:2]
+    if H < mesh * 4 or W < mesh * 4:
+        return 0.0
+    ys = np.linspace(0, H, mesh + 1).astype(int)
+    xs = np.linspace(0, W, mesh + 1).astype(int)
+    grid = np.full((mesh, mesh), np.nan)
+    cy = np.zeros((mesh, mesh))
+    cx = np.zeros((mesh, mesh))
+    for i in range(mesh):
+        for j in range(mesh):
+            cell = img_s[ys[i]:ys[i + 1], xs[j]:xs[j + 1]]
+            if cell.size == 0:
+                continue
+            grid[i, j] = np.percentile(cell, 25)
+            cy[i, j] = (ys[i] + ys[i + 1]) / 2.0
+            cx[i, j] = (xs[j] + xs[j + 1]) / 2.0
+
+    valid = np.isfinite(grid)
+    if int(valid.sum()) < 4:
+        return 0.0
+    A = np.column_stack([np.ones(int(valid.sum())), cy[valid], cx[valid]])
+    b = grid[valid]
+    try:
+        coeffs, *_ = np.linalg.lstsq(A, b, rcond=None)
+    except Exception:
+        return 0.0
+    grad_y, grad_x = coeffs[1], coeffs[2]
+    grad_per_px = float(np.hypot(grad_y, grad_x))
+    # Normalise by noise so the metric is comparable across frames/sessions
+    # with different sky brightness/exposure -- a raw ADU/px gradient means
+    # different things at different noise floors.
+    return grad_per_px / max(noise, 1e-6)
+
+
 def detect_stars_auto(lum: np.ndarray, noise: float,
                       background: Optional[float] = None) -> Optional[np.ndarray]:
     """Unified star-detection dispatcher: every call site across
@@ -868,6 +917,8 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         sources_s['xcentroid'] = sources_s['xcentroid'] * _star_ds
         sources_s['ycentroid'] = sources_s['ycentroid'] * _star_ds
 
+    gradient_magnitude = estimate_background_gradient(img_s, noise)
+
     return {
         'brightness': brightness,
         'mean': mean,
@@ -899,5 +950,6 @@ def compute_quality_metrics(img: np.ndarray, quick: bool = False,
         'zernike_astig': float(zernike_result.get('zernike_astig', 0.0)),
         'zernike_coma': float(zernike_result.get('zernike_coma', 0.0)),
         'zernike_spherical': float(zernike_result.get('zernike_spherical', 0.0)),
+        'gradient_magnitude': gradient_magnitude,
         '_star_sources': sources_s,
     }

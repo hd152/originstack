@@ -242,7 +242,8 @@ def _register_frame_to_reference(ref_lum: np.ndarray, ref_stars, img_lum: np.nda
             tf_rot_deg = abs(np.degrees(np.arctan2(
                 affine_tf.params[1, 0], affine_tf.params[0, 0])))
             if not (abs(tf_tx) > 0.1 * W or abs(tf_ty) > 0.1 * H
-                    or tf_rot_deg > Config.AFFINE_MAX_ROTATION_DEG):
+                    or tf_rot_deg > getattr(args, 'max_rotation_deg',
+                                            Config.AFFINE_MAX_ROTATION_DEG)):
                 return tf_ty, tf_tx, affine_tf, method
             # Unrealistic affine fit -- fall through to translation-only.
 

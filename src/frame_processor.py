@@ -1399,6 +1399,10 @@ def quality_gate(
         snrs      = np.array([f.metrics['snr']         for f in accepted])
         star_cnts = np.array([f.metrics['star_count']  for f in accepted])
         contrasts = np.array([f.metrics['contrast']    for f in accepted])
+        # 0.0 fallback for checkpoints/callers predating this metric --
+        # missing values collapse to "identical to everyone" (see
+        # _is_inlier_high's s<1e-6 branch), not spuriously flagged.
+        gradients = np.array([f.metrics.get('gradient_magnitude', 0.0) for f in accepted])
 
         def _is_inlier(values, threshold=outlier_sigma):
             if len(values) < 3:
@@ -1411,10 +1415,25 @@ def quality_gate(
                 return np.ones(len(values), dtype=bool)
             return np.abs((values - m) / s) < threshold
 
+        def _is_inlier_high(values, threshold=outlier_sigma):
+            """One-sided variant: only an ABOVE-average value is suspicious
+            (a cloud reflecting light-pollution glow, a light cycling on --
+            a frame with a *weaker* gradient than the session isn't a
+            problem, so unlike SNR/star-count/contrast this shouldn't
+            penalise deviation in the other direction)."""
+            if len(values) < 3:
+                return np.ones(len(values), dtype=bool)
+            m, s = np.mean(values), np.std(values)
+            if s < 1e-6:
+                return np.ones(len(values), dtype=bool)
+            return (values - m) / s < threshold
+
         snr_ok   = _is_inlier(snrs)
         star_ok  = _is_inlier(star_cnts)
         cont_ok  = _is_inlier(contrasts)
-        n_outlier = (~snr_ok).astype(int) + (~star_ok).astype(int) + (~cont_ok).astype(int)
+        grad_ok  = _is_inlier_high(gradients)
+        n_outlier = ((~snr_ok).astype(int) + (~star_ok).astype(int)
+                    + (~cont_ok).astype(int) + (~grad_ok).astype(int))
         for i, f in enumerate(accepted):
             if n_outlier[i] >= 2:
                 parts = []
@@ -1424,6 +1443,8 @@ def quality_gate(
                     parts.append(f"stars={f.metrics['star_count']}")
                 if not cont_ok[i]:
                     parts.append(f"contrast={f.metrics['contrast']:.1f}")
+                if not grad_ok[i]:
+                    parts.append(f"gradient={f.metrics.get('gradient_magnitude', 0.0):.1f}")
                 rejected_reasons[f.path] = "statistical outlier: " + ", ".join(parts)
                 f.accepted = False
             else:
