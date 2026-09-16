@@ -21,6 +21,11 @@ match the `VERSION` file and `v*` git tags.
   `--originvision-dir`, `--originvision-checkpoint` are unchanged.
 - **`quality.compute_quality_metrics`** takes one `level={'full','quick','gate'}`
   argument instead of the `quick` / `gate_only` bool pair.
+- **Smaller Windows bundle.** The PyInstaller spec now excludes two payloads
+  nothing in the app reaches: `PIL.AvifImagePlugin` (the AVIF codec, ~7.5 MB
+  `_avif.pyd` + libavif — previews are JPEG/PNG only) and `scipy.io`
+  (MATLAB/WAV/NetCDF readers, ~2 MB). ~10 MB off the onedir, ~4 MiB off the
+  distributed zip.
 
 ### Fixed
 

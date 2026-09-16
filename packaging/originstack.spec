@@ -52,12 +52,45 @@ a = Analysis(
     # tkinter is the desktop app's UI toolkit as of 2026-08 (replaced a
     # pywebview-wrapped local HTTP dashboard) -- no longer excluded. Only
     # its own test suite is dead weight.
-    excludes=['cupy', 'tkinter.test', 'matplotlib.tests'],
+    #
+    # scipy.io: MATLAB/WAV/NetCDF/Harwell-Boeing readers. No scipy.io import
+    #   anywhere in src/. Safe to drop: scipy core / scipy.optimize /
+    #   scipy.interpolate never pull scipy.io -- only an explicit
+    #   `import scipy.io` reaches it.
+    #
+    # NOT excludable: scipy.optimize._highspy (the HiGHS LP solver, ~6.9MB).
+    #   src/ never calls scipy.optimize.linprog, but scipy/optimize/__init__
+    #   imports _linprog_highs -> _highspy *eagerly at module load*, and
+    #   scipy.interpolate (used by src/background.py) drags in scipy.optimize.
+    #   Excluding it => ModuleNotFoundError on startup. Verified by
+    #   packaging/verify_build.ps1 (2026-09).
+    # PIL.AvifImagePlugin: the AVIF codec plugin (~7.5MB _avif.pyd + libavif).
+    #   OriginStack's Pillow use is JPEG/PNG preview read/write + ImageDraw/
+    #   ImageFont/ImageTk compositing only (grepped) -- no AVIF/HEIF.
+    # Both are re-checked by packaging/verify_build.ps1 (a real packaged-exe
+    # run) -- if excluding one breaks a lazy import path, that is where it
+    # surfaces, not in pytest (dev venv, separate site-packages).
+    excludes=['cupy', 'tkinter.test', 'matplotlib.tests',
+              'scipy.io', 'PIL.AvifImagePlugin'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
+
+# Belt-and-braces for the PIL.AvifImagePlugin exclude above:
+# pyinstaller-hooks-contrib's PIL hook can force-collect the plugin's
+# compiled sibling (_avif.*.pyd) + bundled libavif DLLs even when the
+# Python module is in `excludes`, because they were gathered as data/binary
+# entries, not followed as imports. Drop those payload files by path so the
+# exclude actually reclaims the disk (~7.5MB). Tokens are matched against
+# the *destination* path, lowercased, forward-slashed.
+_DROP_TOKENS = ('avif',)
+def _keep(dest):
+    d = dest.replace('\\', '/').lower()
+    return not any(tok in d for tok in _DROP_TOKENS)
+a.binaries = [b for b in a.binaries if _keep(b[0])]
+a.datas = [d for d in a.datas if _keep(d[0])]
 
 # astropy_iers_data (Earth-rotation/leap-second tables, ~8.5MB): nothing in
 # src/ touches astropy.time.Time/EarthLocation/AltAz or any other frame that
