@@ -490,11 +490,15 @@ class TestRefusesWhenItCannotHelp(unittest.TestCase):
     ``remove_physical_sky`` therefore measures whether it actually flattened
     the background and returns None when it did not.
 
-    Note the guard is *empirical*, not a field-size rule: a narrow field
-    whose gradient happens to align with the zenith direction is still
-    fitted, correctly, because there the model does help. And the corner-based
-    flatness proxy is weakest on radially symmetric gradients, whose four
-    corners are equal by construction.
+    There are now two gates in front of it. A *field-size* gate declines
+    anything under 5 degrees outright -- the measured point where the basis
+    condition number drops below 1e3 and the components become separable at
+    all -- and this *empirical* one catches the rest by checking the fit
+    actually flattened the background. The tests here exercise the empirical
+    one, so they use fields wide enough to clear the size gate first.
+
+    The corner-based flatness proxy is weakest on radially symmetric
+    gradients, whose four corners are equal by construction.
     """
 
     def setUp(self):
@@ -517,7 +521,7 @@ class TestRefusesWhenItCannotHelp(unittest.TestCase):
         """Nothing to improve -> decline, rather than inject a tilt."""
         img = np.full((80, 80, 3), 1000.0, dtype=np.float32)
         self.assertIsNone(remove_physical_sky(
-            img, self._wcs(1.0, (80, 80)), 33.83, -117.79,
+            img, self._wcs(8.0, (80, 80)), 33.83, -117.79,
             '2026-08-31T20:40:32-0700'))
 
     def test_applies_when_it_genuinely_flattens_the_background(self):
@@ -528,7 +532,7 @@ class TestRefusesWhenItCannotHelp(unittest.TestCase):
                        axis=-1).astype(np.float32)
 
         result = remove_physical_sky(
-            img, self._wcs(1.0, (h, w)), 33.83, -117.79,
+            img, self._wcs(8.0, (h, w)), 33.83, -117.79,
             '2026-08-31T20:40:32-0700')
 
         self.assertIsNotNone(result)

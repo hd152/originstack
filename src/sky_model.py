@@ -62,7 +62,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -503,13 +503,57 @@ def _bilinear_upsample(values: np.ndarray, ys: np.ndarray, xs: np.ndarray,
             + ty * ((1 - tx) * v10 + tx * v11))
 
 
+def amp_glow_basis(shape: Tuple[int, int],
+                   decay_frac: float = 0.28) -> Tuple[List[np.ndarray], List[str]]:
+    """Per-corner exponential glow, in **sensor** coordinates.
+
+    Amp glow is electroluminescence from readout electronics at the edge of
+    the sensor: brightest in one corner, falling off exponentially, and fixed
+    to the detector rather than the sky. One term per corner lets the
+    non-negative fit pick whichever corner (or pair) the camera actually
+    glows from, without being told.
+
+    Note what is deliberately **absent** here: a vignetting term. Vignetting
+    is radially symmetric about the optical axis, and observers centre their
+    targets, so a free centred radial term is nebula-shaped -- it would
+    reopen exactly the failure this module exists to prevent, and
+    ``_corner_gradient`` cannot catch it because a radial pattern leaves all
+    four corners equal by construction. It is also largely redundant:
+    ``frame_processor`` already divides by the master flat when one exists,
+    which is what a flat is for. Measuring residual vignetting honestly needs
+    the same star compared at different sensor positions across a dithered
+    session -- see ``fit_sky_model_multi`` -- not a shape fitted to one
+    stacked background. Corner terms carry none of that risk: they peak at an
+    edge, so they cannot absorb a centred object.
+    """
+    h, w = int(shape[0]), int(shape[1])
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    ny, nx = yy / max(h - 1, 1), xx / max(w - 1, 1)
+    scale = max(float(decay_frac), 1e-3)
+
+    terms, names = [], []
+    for cy, cx, label in ((0.0, 0.0, 'tl'), (0.0, 1.0, 'tr'),
+                          (1.0, 0.0, 'bl'), (1.0, 1.0, 'br')):
+        dist = np.hypot(ny - cy, nx - cx)
+        terms.append(np.exp(-dist / scale))
+        names.append(f'amp_glow_{label}')
+    return terms, names
+
+
 def build_basis(geom: SkyGeometry,
-                lp_source_az_deg: float = 0.0) -> Tuple[np.ndarray, List[str]]:
+                lp_source_az_deg: float = 0.0,
+                instrumental: bool = False) -> Tuple[np.ndarray, List[str]]:
     """Stack the physical component maps into a design matrix.
 
     Returns ``(basis, names)`` where ``basis`` is ``(n_terms, H, W)``. Each
     term is normalised to unit mean so the fitted coefficients are directly
     comparable as "how much of the gradient is this component".
+
+    ``instrumental`` adds detector-fixed terms (see ``amp_glow_basis``). They
+    are off by default because they are only separable from the sky terms
+    when the sky geometry actually moves between exposures -- on a single
+    stacked frame both are just smooth surfaces and adding more of them only
+    makes an already ill-conditioned fit worse.
     """
     terms, names = [], []
 
@@ -531,6 +575,11 @@ def build_basis(geom: SkyGeometry,
     terms.append(light_pollution_brightness(geom.azimuth, geom.zenith_angle,
                                             lp_source_az_deg))
     names.append('light_pollution')
+
+    if instrumental:
+        inst_terms, inst_names = amp_glow_basis(geom.zenith_angle.shape)
+        terms.extend(inst_terms)
+        names.extend(inst_names)
 
     basis = np.stack([_unit_mean(t) for t in terms], axis=0)
     return basis, names
@@ -616,6 +665,35 @@ _ATTRIBUTION_MAX_COND = 1.0e3
 # extractor is standing by and is the right tool whenever this one isn't.
 _MIN_GRADIENT_IMPROVEMENT = 0.95
 
+# Field of view (degrees, longest axis) below which the sky components carry
+# too little structure to be worth fitting. From a measured condition-number
+# sweep -- see the gate in remove_physical_sky. This is roughly 300 mm on
+# APS-C; shorter lenses qualify, telescopes generally do not.
+_MIN_FIELD_OF_VIEW_DEG = 5.0
+
+
+def _field_of_view_deg(wcs, shape: Tuple[int, int]) -> Optional[float]:
+    """Angular size of the longest image axis, or None if the WCS won't say.
+
+    Always goes through ``proj_plane_pixel_scales`` rather than reading
+    ``wcs.wcs.cdelt``. A real session WCS -- a Celestron Origin solve, for
+    one -- carries its scale in a **CD matrix** and leaves ``cdelt`` at
+    ``[1, 1]``, so reading cdelt directly returns the image size in *pixels*
+    dressed up as degrees: 2958 "degrees" for a 2958-pixel-wide frame, which
+    sails past any sanity threshold instead of tripping it. A fallback
+    guarded on "cdelt looks unset" never fires either, because 1.0 is
+    perfectly finite and positive.
+    """
+    try:
+        from astropy.wcs.utils import proj_plane_pixel_scales
+        scales = np.abs(np.asarray(proj_plane_pixel_scales(wcs), dtype=np.float64))
+        if scales.size < 2 or not np.all(np.isfinite(scales)) or not np.all(scales > 0):
+            return None
+        h, w = int(shape[0]), int(shape[1])
+        return float(max(h * scales[1], w * scales[0]))
+    except Exception:
+        return None
+
 
 def _corner_gradient(image: np.ndarray) -> float:
     """Corner-to-corner spread of the background, a scalar flatness measure.
@@ -639,6 +717,93 @@ def basis_condition(basis: np.ndarray) -> float:
         return float(np.linalg.cond(flat))
     except Exception:                                     # pragma: no cover
         return float('inf')
+
+
+def fit_sky_model_multi(channels: Sequence[np.ndarray],
+                        geometries: Sequence['SkyGeometry'],
+                        masks: Optional[Sequence[Optional[np.ndarray]]] = None,
+                        lp_source_az_deg: float = 0.0,
+                        n_iter: int = 3, clip_sigma: float = 2.5):
+    """Joint fit across several exposures, separating sky from detector.
+
+    This is what makes the decomposition identifiable. On a single frame the
+    sky components are nearly collinear (condition ~1e5 at a 1-degree field),
+    so the split between them is meaningless -- and a detector-fixed term is
+    indistinguishable from a sky one, because both are just smooth surfaces.
+
+    Across a session they separate, because they move differently:
+
+      * **Sky** terms are fixed to the *sky*. As the target tracks, its
+        zenith angle, azimuth and moon separation all change, so each sky
+        component's map is different in every exposure.
+      * **Detector** terms are fixed to the *sensor*. Amp glow sits in the
+        same corner in every exposure regardless of where the telescope
+        points.
+
+    So the solve shares one amplitude per component across all frames, while
+    letting each frame contribute its own geometry. A component that changes
+    with the sky and one that does not can then be told apart, which no
+    amount of cleverness on a single stacked frame can do.
+
+    Args:
+        channels: One 2-D luminance plane per exposure. All the same shape.
+        geometries: The matching ``SkyGeometry`` per exposure, each built
+            from that exposure's own timestamp.
+        masks: Optional per-exposure boolean masks of pixels to exclude
+            (stars, the target itself).
+
+    Returns:
+        ``(coefficients, names, models)`` -- one shared coefficient vector,
+        the term names, and the per-exposure model images it implies.
+    """
+    if len(channels) != len(geometries):
+        raise ValueError("need one geometry per channel")
+    if len(channels) < 2:
+        raise ValueError("multi-frame separation needs at least two exposures")
+
+    bases, names = [], None
+    for geom in geometries:
+        basis, this_names = build_basis(geom, lp_source_az_deg, instrumental=True)
+        if names is None:
+            names = this_names
+        elif this_names != names:
+            # A moonlight term appears only while the moon is above the
+            # horizon, so a session spanning moonrise would otherwise stack
+            # design matrices with different columns.
+            raise ValueError("frames disagree on which components are present; "
+                             "split the session at moonrise/moonset")
+        bases.append(basis)
+
+    n_terms = bases[0].shape[0]
+    rows, targets = [], []
+    for i, (basis, channel) in enumerate(zip(bases, channels)):
+        flat = basis.reshape(n_terms, -1).T
+        data = np.asarray(channel, dtype=np.float64).ravel()
+        good = np.isfinite(data)
+        if masks is not None and masks[i] is not None:
+            good &= ~np.asarray(masks[i], dtype=bool).ravel()
+        rows.append(flat[good])
+        targets.append(data[good])
+
+    design = np.concatenate(rows, axis=0)
+    target = np.concatenate(targets, axis=0)
+    if design.shape[0] < n_terms * 4:
+        raise ValueError("not enough unmasked background pixels to fit the sky model")
+
+    keep = np.ones(design.shape[0], dtype=bool)
+    coeffs = np.zeros(n_terms, dtype=np.float64)
+    for _ in range(max(1, n_iter)):
+        coeffs = _nnls(design[keep], target[keep])
+        residual = target - design @ coeffs
+        scale = float(np.std(residual[keep]))
+        if not np.isfinite(scale) or scale <= 0:
+            break
+        keep &= residual < clip_sigma * scale      # upward-only, as single-frame
+        if keep.sum() < n_terms * 4:
+            break
+
+    models = [np.tensordot(coeffs, b, axes=(0, 0)) for b in bases]
+    return coeffs, names, models
 
 
 def describe_fit(coeffs: np.ndarray, names: List[str],
@@ -697,6 +862,26 @@ def remove_physical_sky(image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
     """
     geom = build_geometry(wcs, image.shape[:2], lat_deg, lon_deg, when_iso)
     if geom is None:
+        return None
+
+    # Field-size gate. Measured sweep of the design-matrix condition number
+    # against field of view (moon down, so sky terms only):
+    #
+    #     0.5 deg -> 5.1e5    2 deg -> 3.2e4    10 deg -> 4.2e2
+    #     1.0 deg -> 1.3e5    5 deg -> 9.5e2    40 deg -> 6.3e1
+    #
+    # The components only become separable around 5 degrees, and below that
+    # they carry too little structure to fit a real gradient at all. A close
+    # bright moon does not rescue it: with a full moon 52 deg up and 5 deg
+    # from the target, the moonlight term still varies by only 5% across a
+    # 1-degree frame (condition 9.2e5). So this is a property of the field,
+    # not of the night, and it is worth failing fast rather than fitting
+    # noise and then discovering it via the improvement check below.
+    fov = _field_of_view_deg(wcs, image.shape[:2])
+    if fov is not None and fov < _MIN_FIELD_OF_VIEW_DEG:
+        _log.debug("physical sky model: %.2f deg field is below the %.1f deg "
+                   "where sky components become separable; falling back",
+                   fov, _MIN_FIELD_OF_VIEW_DEG)
         return None
 
     basis, names = build_basis(geom, lp_source_az_deg)
