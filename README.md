@@ -1,4 +1,9 @@
-# OriginStack
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <img src="assets/logo.png" alt="OriginStack" width="460">
+  </picture>
+</p>
 
 **Streaming FITS stacker for astrophotography — runs on ordinary hardware, scales to any frame count.**
 
