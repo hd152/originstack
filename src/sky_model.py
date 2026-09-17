@@ -542,7 +542,8 @@ def amp_glow_basis(shape: Tuple[int, int],
 
 def build_basis(geom: SkyGeometry,
                 lp_source_az_deg: float = 0.0,
-                instrumental: bool = False) -> Tuple[np.ndarray, List[str]]:
+                instrumental: bool = False,
+                always_moonlight: bool = False) -> Tuple[np.ndarray, List[str]]:
     """Stack the physical component maps into a design matrix.
 
     Returns ``(basis, names)`` where ``basis`` is ``(n_terms, H, W)``. Each
@@ -565,7 +566,14 @@ def build_basis(geom: SkyGeometry,
 
     moon = moonlight_brightness(geom.moon_sep, geom.moon_alt,
                                 geom.zenith_angle, geom.phase_angle)
-    if np.ptp(moon) > 0:
+    if np.ptp(moon) > 0 or always_moonlight:
+        # A single frame drops the term entirely when the moon is down, since
+        # an all-zero column is dead weight in the fit. A *session* cannot:
+        # a real Lagoon run spans moonrise (-4.8 deg to +6.2 deg over 56
+        # minutes), so the term is absent early and present late, and a joint
+        # fit needs the same columns in every frame. Keeping a zero column is
+        # the honest representation -- there genuinely was no moonlight then
+        # -- and NNLS handles it without complaint.
         terms.append(moon)
         names.append('moonlight')
 
@@ -763,15 +771,12 @@ def fit_sky_model_multi(channels: Sequence[np.ndarray],
 
     bases, names = [], None
     for geom in geometries:
-        basis, this_names = build_basis(geom, lp_source_az_deg, instrumental=True)
+        basis, this_names = build_basis(geom, lp_source_az_deg,
+                                        instrumental=True, always_moonlight=True)
         if names is None:
             names = this_names
         elif this_names != names:
-            # A moonlight term appears only while the moon is above the
-            # horizon, so a session spanning moonrise would otherwise stack
-            # design matrices with different columns.
-            raise ValueError("frames disagree on which components are present; "
-                             "split the session at moonrise/moonset")
+            raise ValueError("frames disagree on which components are present")
         bases.append(basis)
 
     n_terms = bases[0].shape[0]
