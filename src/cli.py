@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import time
+from typing import List, Optional
 
 import numpy as np
 from astropy.io import fits
@@ -612,19 +613,122 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
     safe_print(f"\n  Total elapsed: {format_time(time.time() - overall_start)}")
 
 
-def _want_combine_sessions(args: argparse.Namespace) -> bool:
-    """Multiple subfolders default to pooling into one unified stack --
-    a multi-night/multi-filter session directory is the far more common
-    case than wanting independent per-subfolder stacks stitched together
-    afterward. --mosaic needs per-subfolder targets to reproject and stitch,
-    so it always wins; otherwise an explicit --combine-sessions or
-    --hierarchical wins; absent either, the new default is combine."""
+# Field rotation above this much between sessions makes pooling their frames
+# into one stack expensive. The common crop keeps only what every frame
+# covers, so a rotation of `r` degrees costs roughly radians(r) *
+# half-diagonal pixels off each edge -- about 94 px at 3 degrees on a typical
+# sensor, and it grows linearly. Below this, pooling is simpler and gives the
+# rejection statistics one deep stack provides; above it, stacking each
+# session separately and merging with rotation awareness keeps far more field.
+_ROTATION_SPLIT_THRESHOLD_DEG = 3.0
+
+
+def _predict_rotation_spread(subdirs: List[str]) -> Optional[float]:
+    """Field rotation spanned by a set of sessions, in degrees, or None.
+
+    Reads only metadata -- each session's info.json for the target and site,
+    and the first/last light header for the times -- so this costs nothing
+    and can run before any stacking decision is made.
+
+    On an alt-az mount the field rotates as the target tracks, by the change
+    in parallactic angle. Pooling frames from sessions at different hour
+    angles therefore throws away the corners: measured at 26.8 degrees across
+    five real Lagoon sessions, about 860 px of corner displacement and 42% of
+    the frame. Returns None when the metadata needed isn't there, which is
+    the caller's cue to keep the previous behaviour rather than guess.
+    """
+    import math as _math
+
+    from src.frame_discovery import discover_frames
+    from src.observing_geometry import parallactic_angle_deg
+    from src.session_info import load_session_info
+
+    angles: List[float] = []
+    per_session: List[float] = []
+    for d in subdirs:
+        si = load_session_info(d)
+        if si is None or not si.has_wcs or not si.has_gps:
+            return None
+        # Use the pipeline's own classifier, not a glob: a session directory
+        # holds bias/dark/flat beside the lights, and a flat carries
+        # DATE-OBS = '0-00-00T00:00:00', which would poison the time span.
+        try:
+            found = discover_frames(d)
+            lights = sorted(f.path for f in found.get('light', []))
+        except Exception:
+            return None
+        if not lights:
+            return None
+        try:
+            from astropy.io import fits as _fits
+            h0 = _fits.getheader(lights[0])
+            h1 = _fits.getheader(lights[-1])
+        except Exception:
+            return None
+        ra, dec = _math.degrees(si.ra_rad), _math.degrees(si.dec_rad)
+        offset = str(h0.get('TIMEZONE', '') or '').strip()
+        session_angles: List[float] = []
+        for hdr in (h0, h1):
+            when = hdr.get('DATE-OBS')
+            if not when:
+                return None
+            pa = parallactic_angle_deg(ra, dec, si.latitude, si.longitude,
+                                       str(when) + offset)
+            if pa is None:
+                return None
+            session_angles.append(pa)
+        angles.extend(session_angles)
+        per_session.append(max(session_angles) - min(session_angles))
+
+    if not angles:
+        return None
+    total = max(angles) - min(angles)
+    return max(0.0, total - max(per_session))
+
+
+def _want_combine_sessions(args: argparse.Namespace,
+                           subdirs: Optional[List[str]] = None) -> bool:
+    """Pool every subfolder's lights into one stack, or stack them separately?
+
+    Explicit flags always win: --mosaic needs per-subfolder panels, and
+    --combine-sessions / --hierarchical mean what they say.
+
+    Absent those, the choice is made from the data rather than from a guess
+    about what users usually want. Pooling used to be the unconditional
+    default on the reasoning that a multi-night directory is the common case
+    -- but that is exactly the case where pooling is most expensive. On an
+    alt-az mount the field rotates as the target tracks, so sessions at
+    different hour angles are rotated relative to each other, and one common
+    crop across all of them throws away the corners. Measured across five
+    real Lagoon sessions: 26.8 degrees of rotation, 42% of the frame lost.
+    Stacking each session separately and merging with rotation-aware
+    registration keeps that area.
+
+    So: predict the rotation from metadata alone (free), and split when it
+    is large enough to matter. When the metadata is missing the previous
+    behaviour stands -- an unreadable session should not silently change how
+    the stack is built.
+    """
     if getattr(args, 'mosaic', False):
         return False
     explicit = getattr(args, '_explicit_cli_dests', set())
     if 'combine_sessions' in explicit:
         return bool(args.combine_sessions)
-    return not getattr(args, 'hierarchical', False)
+    if getattr(args, 'hierarchical', False):
+        return False
+
+    if subdirs and len(subdirs) > 1:
+        spread = _predict_rotation_spread(subdirs)
+        if spread is not None and spread > _ROTATION_SPLIT_THRESHOLD_DEG:
+            safe_print(f"  Sessions differ by {spread:.1f} deg of field rotation "
+                       f"beyond what any one session spans "
+                       f"(> {_ROTATION_SPLIT_THRESHOLD_DEG:g} deg): stacking each "
+                       f"separately and merging, to avoid cropping the corners")
+            return False
+        if spread is not None:
+            safe_print(f"  Sessions differ by only {spread:.1f} deg of field "
+                       f"rotation: pooling into one stack")
+    return True
 
 
 def process_directory(directory: str, output: str, args: argparse.Namespace):
@@ -652,7 +756,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         # single folder
         targets = [(directory, output)]
         safe_print("  Mode: Single folder")
-    elif subdirs and _want_combine_sessions(args):
+    elif subdirs and _want_combine_sessions(args, subdirs):
         # Combined-sessions mode: pool all lights from all subfolders into one stack
         safe_print(f"  Mode: Combined sessions ({len(subdirs)} subfolders -> single unified stack)")
         _run_combined_sessions(subdirs, output, args)
