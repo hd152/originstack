@@ -9,8 +9,33 @@ so callers can fall back cleanly.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from typing import Optional, Tuple
+
+
+def _as_utc_iso(when_iso: str) -> Optional[str]:
+    """Normalise a timestamp to a UTC string astropy's Time will accept.
+
+    ``astropy.time.Time`` rejects an ISO string carrying a numeric UTC offset
+    (``2026-08-31T20:40:35-0700``), which is exactly the format a Celestron
+    Origin ``info.json`` and its FITS headers use. Every function in this
+    module then returned None on that data, silently dropping the airmass
+    extinction term from --photometry and the auto-derived zenith angle from
+    --fix-atmospheric-dispersion. Because they all fail soft by design,
+    nothing errored -- the pipeline just quietly did less on the one camera
+    this project was written for.
+    """
+    if not when_iso:
+        return None
+    text = str(when_iso).strip()
+    try:
+        dt = _dt.datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        return text        # let astropy try it unchanged
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    return dt.isoformat()
 
 
 def altaz(ra_deg: float, dec_deg: float, lat_deg: float, lon_deg: float,
@@ -26,7 +51,10 @@ def altaz(ra_deg: float, dec_deg: float, lat_deg: float, lon_deg: float,
     try:
         loc = EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg,
                             height=(height_m or 0.0) * u.m)
-        frame = AltAz(obstime=Time(str(when_iso)), location=loc)
+        when = _as_utc_iso(when_iso)
+        if when is None:
+            return None
+        frame = AltAz(obstime=Time(when), location=loc)
         aa = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg).transform_to(frame)
         return float(aa.alt.deg), float(aa.az.deg)
     except Exception:
@@ -83,7 +111,10 @@ def parallactic_angle_deg(ra_deg: float, dec_deg: float, lat_deg: float,
         return None
     try:
         loc = EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg)
-        lst = Time(str(when_iso), location=loc).sidereal_time("apparent").deg
+        when = _as_utc_iso(when_iso)
+        if when is None:
+            return None
+        lst = Time(when, location=loc).sidereal_time("apparent").deg
         ha = math.radians((lst - ra_deg + 180.0) % 360.0 - 180.0)  # [-pi, pi]
         dec = math.radians(dec_deg)
         phi = math.radians(lat_deg)

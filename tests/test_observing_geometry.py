@@ -95,3 +95,67 @@ def test_header_get_first_default_and_none_header():
     assert header_get_first({}, ("X",), default=7) == 7
     assert header_get_first(None, ("X",)) is None
     assert header_get_first({"X": None}, ("X",), default="d") == "d"
+
+
+# ---------------------------------------------------------------------------
+# UTC-offset timestamps (Celestron Origin)
+# ---------------------------------------------------------------------------
+
+_ORIGIN_LOCAL = "2026-08-31T20:40:35-0700"      # as an Origin header writes it
+_SAME_UTC = "2026-09-01T03:40:35"               # the identical instant
+_TZ_SITE = (33.83, -117.79)
+_TZ_TARGET = (271.0, -24.36)                        # the Lagoon
+
+
+def test_offset_timestamps_agree_with_their_utc_equivalent():
+    """Regression: every function here returned None on real Origin data.
+
+    ``astropy.time.Time`` rejects an ISO string with a numeric UTC offset,
+    which is exactly the format a Celestron Origin writes to DATE-OBS and
+    info.json. Because this module fails soft by design, nothing errored --
+    it silently dropped the airmass extinction term from --photometry (a real
+    photometric error, absorbed into the zero point) and the auto-derived
+    zenith angle for --fix-atmospheric-dispersion, on the one camera this
+    project was written for.
+    """
+    local = altaz(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL)
+    utc = altaz(*_TZ_TARGET, *_TZ_SITE, 0.0, _SAME_UTC)
+
+    assert local is not None, "an Origin timestamp must not return None"
+    assert utc is not None
+    assert local[0] == pytest.approx(utc[0], abs=1e-9)
+    assert local[1] == pytest.approx(utc[1], abs=1e-9)
+
+
+@pytest.mark.parametrize("spelling", [
+    "2026-09-01T03:40:35",          # naive, already UTC
+    "2026-09-01T03:40:35Z",
+    "2026-09-01T03:40:35+00:00",
+    "2026-08-31T20:40:35-0700",     # Origin: offset without a colon
+    "2026-08-31T20:40:35-07:00",    # offset with a colon
+])
+def test_every_spelling_of_one_instant_gives_the_same_geometry(spelling):
+    reference = airmass(*_TZ_TARGET, *_TZ_SITE, 0.0, _SAME_UTC)
+    assert reference is not None
+    assert airmass(*_TZ_TARGET, *_TZ_SITE, 0.0, spelling) == pytest.approx(reference, rel=1e-9)
+
+
+def test_offset_is_converted_not_discarded():
+    """Stripping '-0700' instead of converting it is seven hours of error."""
+    honoured = altaz(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL)
+    stripped = altaz(*_TZ_TARGET, *_TZ_SITE, 0.0, "2026-08-31T20:40:35")
+
+    assert honoured is not None and stripped is not None
+    # Seven hours of Earth rotation is ~105 degrees of hour angle; the two
+    # readings must not be mistaken for each other.
+    assert abs(honoured[0] - stripped[0]) > 5.0
+
+
+def test_parallactic_angle_accepts_an_offset_timestamp():
+    assert parallactic_angle_deg(*_TZ_TARGET, *_TZ_SITE, _ORIGIN_LOCAL) == pytest.approx(
+        parallactic_angle_deg(*_TZ_TARGET, *_TZ_SITE, _SAME_UTC), abs=1e-9)
+
+
+def test_zenith_angle_accepts_an_offset_timestamp():
+    assert zenith_angle_deg(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL) == pytest.approx(
+        zenith_angle_deg(*_TZ_TARGET, *_TZ_SITE, 0.0, _SAME_UTC), abs=1e-9)
