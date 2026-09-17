@@ -28,7 +28,6 @@ from src.health_check import run_health_check
 from src.io_fits import make_master, save_preview_rgb
 from src.models import Config, ProcessingStats
 from src.pipeline import stack_target
-from src.registration import apply_transform, calculate_shift
 from src.utils import format_time, print_header, safe_print, setup_logging
 
 
@@ -915,66 +914,62 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 safe_print("  Falling back to translation-based combine...")
 
         if not mosaic_done:
-            # --- Translation-based combine (default / fallback) ---
-            def _fits_shape(p):
-                with fits.open(p, memmap=True) as hd:
-                    return hd[0].data.shape
-            shapes = [_fits_shape(p) for p in produced]
-            # shapes are (3,H,W)
-            mins = np.min([[s[1], s[2]] for s in shapes], axis=0)
-            Hm, Wm = int(mins[0]), int(mins[1])
-            safe_print(f"  Cropping all stacks to minimum dimensions: {Hm}×{Wm}")
+            # --- Rotation-aware combine, via the same path --merge uses ---
+            #
+            # This used to register the per-subfolder stacks with
+            # calculate_shift, which returns a pure (dy, dx) translation and
+            # cannot represent rotation at all. On an alt-az mount the field
+            # rotates while it tracks, so separate sessions differ by an
+            # arbitrary angle -- measured at 26.8 degrees across five real
+            # Lagoon sessions, about 860 px of corner displacement. Correcting
+            # that with a shift leaves stars smeared toward the corners, which
+            # is worse than not combining at all.
+            #
+            # merge_previous_stacks does the right thing: blind
+            # rotation-agnostic star-pattern matching (src/blind_match.py),
+            # then a per-pixel NFRAMES-weighted mean inside each warped
+            # footprint, so a deep session is not diluted by a shallow one.
+            from src.merge import load_merge_stack, merge_previous_stacks
 
-            stacks = []
-            for p in tqdm(produced, desc="  Loading", unit="target", disable=args.verbose):
-                with fits.open(p, memmap=True) as hd:
-                    d = np.transpose(hd[0].data, (1, 2, 0)).astype(np.float32)
-                    stacks.append(d[:Hm, :Wm, :])
+            # Reference grid = the deepest stack: most signal for the star
+            # match, and the least resampling of the data that matters most.
+            depths = []
+            for path in produced:
+                try:
+                    _, meta = load_merge_stack(path)
+                    depths.append(int(meta.get('nframes') or 0))
+                except Exception:
+                    depths.append(0)
+            ref_idx = int(np.argmax(depths)) if any(depths) else 0
+            ref_path = produced[ref_idx]
+            others = [p for i, p in enumerate(produced) if i != ref_idx]
 
-            # Register each stack against the first (reference) stack
-            safe_print(f"  Registering {len(stacks) - 1} stack(s) against reference...")
-            ref_lum = np.mean(stacks[0], axis=2)
-            shifts = [(0.0, 0.0)]
-            for i in range(1, len(stacks)):
-                lum = np.mean(stacks[i], axis=2)
-                sy, sx = calculate_shift(ref_lum, lum, verbose=getattr(args, 'verbose', False))
-                shifts.append((sy, sx))
-                safe_print(f"    Stack {i + 1}/{len(stacks)}: shift=({sx:.2f}, {sy:.2f}) px")
+            safe_print(f"  Reference grid: {os.path.basename(ref_path)} "
+                       f"({depths[ref_idx]} frames)")
+            try:
+                ref_stack, ref_meta = load_merge_stack(ref_path)
+                combined, merge_info = merge_previous_stacks(
+                    ref_stack, int(ref_meta.get('nframes') or 1), others,
+                    verbose=getattr(args, 'verbose', False))
+            except Exception as exc:
+                safe_print(f"  ERROR: rotation-aware combine failed: {exc}")
+                safe_print("  The per-target stacks are kept; combine them with "
+                           "--merge manually.")
+                raise
 
-            # Apply shifts (zero-pad edges)
-            aligned = []
-            for stack, (sy, sx) in zip(stacks, shifts):
-                if sy == 0.0 and sx == 0.0:
-                    aligned.append(stack)
-                else:
-                    aligned.append(apply_transform(stack, shift=(sy, sx)))
-
-            # Crop to the valid (non-padded) overlap region across all aligned stacks
-            all_dy = [s[0] for s in shifts]
-            all_dx = [s[1] for s in shifts]
-            y0 = int(np.ceil(max(0.0, max(all_dy))))
-            y1 = int(np.floor(Hm + min(0.0, min(all_dy))))
-            x0 = int(np.ceil(max(0.0, max(all_dx))))
-            x1 = int(np.floor(Wm + min(0.0, min(all_dx))))
-
-            if y0 >= y1 or x0 >= x1:
-                safe_print("  Warning: shifts exceed image overlap — combining without registration")
-                y0, y1, x0, x1 = 0, Hm, 0, Wm
-
-            Hf, Wf = y1 - y0, x1 - x0
-            safe_print(f"  Valid overlap after registration: {Hf}×{Wf}")
-
-            acc = np.zeros((Hf, Wf, 3), dtype=np.float64)
-            for img in aligned:
-                acc += img[y0:y1, x0:x1, :]
-            combined = (acc / len(aligned)).astype(np.float32)
-
+            Hf, Wf = combined.shape[:2]
             out_hdu = fits.PrimaryHDU()
             out_hdu.data = np.transpose(combined, (2, 0, 1))
             out_hdu.header['NTARGETS'] = len(produced)
+            try:
+                from src.merge import apply_merge_header
+                apply_merge_header(out_hdu.header, merge_info)
+            except Exception:
+                pass
             out_hdu.writeto(output, overwrite=True)
             preview_path = os.path.splitext(output)[0] + '.jpg'
-            save_preview_rgb(combined, preview_path, stretch=getattr(args, 'stretch', 'linear'))
+            save_preview_rgb(combined, preview_path,
+                             stretch=getattr(args, 'stretch', 'linear'))
 
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
