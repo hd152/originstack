@@ -787,9 +787,27 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             args.plate_solve = True
 
     # Process each target
+    #
+    # --auto mutates args in place, and every target shares this one object,
+    # so without a reset each target inherits the previous one's tuning. Most
+    # settings self-correct because the advisor recomputes them per target,
+    # but accumulating ones do not: skip_step is *appended* to and guarded by
+    # "not already present", so a nebula session that adds 'sky_residual'
+    # silently makes a globular-cluster session in the same directory skip
+    # its sky-residual correction too. Snapshot the user's baseline and
+    # restore it before each target so every session is advised on its own
+    # merits. Mutable containers are copied, not aliased, or restoring would
+    # hand back the same list the previous target appended to.
+    import copy as _copy
+    _baseline = {k: (_copy.copy(v) if isinstance(v, (list, dict, set)) else v)
+                 for k, v in vars(args).items()}
+
     produced = []
     for target_idx, (d, outp) in enumerate(targets, 1):
         if len(targets) > 1:
+            for _k, _v in _baseline.items():
+                setattr(args, _k, _copy.copy(_v)
+                        if isinstance(_v, (list, dict, set)) else _v)
             safe_print(f'\n{"=" * 70}')
             safe_print(f'TARGET {target_idx}/{len(targets)}: {os.path.basename(d)}')
             safe_print(f'{"=" * 70}')
