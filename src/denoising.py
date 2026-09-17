@@ -1020,6 +1020,14 @@ def generalized_hyperbolic_stretch(
     return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
+# Percentile at which the local-contrast detail source is clipped, so a bright
+# star's flux cannot smear outward through the blur and carve a dark ring in
+# the nebulosity around it. Chosen by measurement on a real stack: p99 cuts the
+# ring from -6.1% to -0.5% while keeping ~81% of the contrast gain; p97/p95
+# remove the ring entirely but progressively undo the enhancement itself.
+_DETAIL_CLIP_PERCENTILE = 99.0
+
+
 def multiscale_local_contrast(
         img: np.ndarray,
         strength: float = 0.7,
@@ -1076,13 +1084,36 @@ def multiscale_local_contrast(
     if star_mask is not None:
         mask *= (1.0 - star_mask.astype(np.float64))
 
+    # Detail is measured against a PEAK-CLIPPED luminance ————————————————————
+    # Otherwise a bright star's flux leaks into its own background estimate:
+    # blurring at these scales smears the core outward, so in the annulus just
+    # beyond the protected core `blurred` far exceeds `lum`, `detail` goes
+    # strongly negative, and the enhancement *subtracts* real nebulosity --
+    # a black collar around every bright star, starting exactly where core
+    # protection stops.
+    #
+    # Measured on a real Lagoon stack at the strength --auto selects for an
+    # emission nebula (0.749): the background around bright stars darkened by
+    # 6.1% on average and 14.2% at worst. Clipping the detail source at the
+    # 99th percentile caps how much stellar flux can smear outward and brings
+    # that to 0.5% / 1.8%, while retaining ~81% of the contrast gain away from
+    # stars. Clipping harder (p97, p95) removes the ring completely but walks
+    # the enhancement back toward doing nothing at all.
+    #
+    # Note this deliberately does NOT key off `star_mask`: that mask is a
+    # narrow fwhm-3 core covering ~0.4% of pixels, far smaller than the wings
+    # that actually pollute a sigma-12 blur. An earlier attempt to fix this by
+    # infilling masked pixels measured beautifully on a synthetic scene with a
+    # hard disk mask and changed real output by 0.01%.
+    detail_src = np.minimum(lum, float(np.percentile(lum, _DETAIL_CLIP_PERCENTILE)))
+
     # Multiscale detail injection ——————————————————————————————————————————
     enhanced_lum = lum.copy()
     for sigma, w in zip(scales, scale_weights):
         if w <= 0 or strength <= 0:
             continue
-        blurred = ndimage.gaussian_filter(lum, sigma=float(sigma))
-        detail = lum - blurred          # high-frequency detail at this scale
+        blurred = ndimage.gaussian_filter(detail_src, sigma=float(sigma))
+        detail = detail_src - blurred   # high-frequency detail at this scale
         enhanced_lum += strength * w * detail * mask
 
     # Reconstruct RGB by the luminance ratio (hue/saturation preserved)
