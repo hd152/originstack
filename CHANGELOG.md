@@ -101,6 +101,49 @@ match the `VERSION` file and `v*` git tags.
   structure — the classic over-stretch failure where amplified correlated
   noise reads as nebulosity. Requires `--uncertainty-propagate`.
 
+### Changed
+
+- **Multi-night directories are no longer pooled into one stack by default.**
+  Pooling every subfolder's lights was unconditional, on the reasoning that a
+  multi-night session directory is the common case. It is — and that is
+  exactly the case where pooling costs the most. On an alt-az mount the field
+  rotates as the target tracks, so sessions at different hour angles are
+  rotated relative to each other, and the common crop keeps only what *every*
+  frame covers. Measured across five real Lagoon sessions: 26.8° of rotation,
+  42% of the frame discarded. OriginStack now predicts that rotation from
+  metadata alone (each session's `info.json` plus the first and last light
+  header — free, and decided before any stacking starts) and stacks the
+  sessions separately when it exceeds 3°, merging them with rotation
+  awareness afterwards. The prediction reports *avoidable* rotation — the
+  total spread minus the most any single session covers — because a session
+  merely 15 minutes long already sweeps ~3.6° and would otherwise be advised
+  to split away from itself. Explicit `--combine-sessions`, `--hierarchical`
+  and `--mosaic` still win, and unreadable metadata keeps the old pooling
+  behaviour rather than guessing.
+- **Per-subfolder stacks are combined with rotation-aware registration.** The
+  hierarchical combine registered each stack against the first with a pure
+  (dy, dx) translation, which cannot represent rotation at all — so on the
+  same alt-az data above it left stars smeared toward the corners, silently,
+  since the shift search returns a plausible-looking number either way. It
+  now routes through the same blind, rotation-agnostic star match `--merge`
+  uses, weighting each session by its own `NFRAMES` so a deep session is not
+  diluted by a shallow one, and taking the deepest stack as the reference
+  grid rather than whichever subfolder sorted first. A failure now stops with
+  the per-target stacks kept on disk and a pointer at `--merge`, instead of
+  falling back to producing the smeared composite this replaces.
+
+### Fixed
+
+- **`--auto` no longer carries one target's tuning into the next.** In a
+  multi-target run every target shared one settings object. Most settings
+  were unaffected, because the advisor recomputes each one per target — but
+  `--skip-step` is *appended* to, guarded by "not already present", so once a
+  nebula target added `sky_residual` every later target saw it there and left
+  it alone. A globular cluster stacked from the same directory silently
+  skipped its sky-residual correction because a different object wanted that,
+  with no log line to say so. Each target is now advised from the settings
+  you actually passed.
+
 ## [2.0.1] - 2026-09-15
 
 ### Changed
