@@ -34,8 +34,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/blind_match.py` | 230 | `match_rigid_unknown_rotation` — blind (unknown-rotation) star match, used by `--merge` |
 | `src/psf_deconvolution.py` | 719 | PSF estimation (Moffat/Gaussian), Richardson-Lucy (global + spatially-variant), TV, `sparse_wavelet_deconvolve` |
 | `src/background.py` | 1506 | DBE (robust local regression, Rust-accelerated), mesh/wavelet sky extraction, residual removal, exclusion-mask support (`--galaxy-mode`) |
-| `src/denoising.py` | 1789 | Wavelet (BayesShrink), MMT, ACDNR, bilateral, NLM, aniso, curvelet-inspired directional wavelet, `--variance-stabilize`, star reduction, local contrast |
-| `src/self_supervised_calibration.py` | 103 | Noise2Self-style denoiser parameter calibration (`--denoise-strength-calibrate`) — see feature 36 |
+| `src/denoising.py` | 1789 | Curvelet-inspired directional wavelet (BayesShrink), ACDNR, bilateral, aniso, `--variance-stabilize`, star reduction, local contrast |
 | `src/wavelet.py` | 258 | `wavedec2`/`waverec2` — native 2D wavelet transform (bior1.3 + db4) |
 | `src/registration.py` | 2421 | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase`, `fit_displacement_field` (`--elastic-registration`) |
 | `src/stacking.py` | 2607 | Sigma-clip, percentile, ESD, linear-fit, IVW, wavelet-subband, drizzle (Lanczos-3/PSF-matched/Magic Kernel), IBP super-res, `run_stacking_phase` |
@@ -278,22 +277,22 @@ The post-registration residual check verifies alignment on the riskiest ~20% of 
 ### 13. Denoising
 
 The primary luma denoiser is selected with a single flag —
-`--denoiser {auto,wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,curvelet,none}`
+`--denoiser {auto,curvelet,wavelet,acdnr,bilateral,aniso,none}`
 (default `auto`, which resolves to `curvelet` unless a preset/`--auto`
 selects otherwise) — and the auto-advisor enforces **one primary**
-(precedence BM3D > MMT > wavelet > ACDNR): layering several full-frame
+(curvelet wavelet primary, ACDNR only as the fallback sky smoother): layering several full-frame
 smoothers compounds smoothing without adding selectivity. Chroma noise
 reduction is separate and always available. Per-denoiser tuning lives in
-the config-file tier (see `--config`).
+the config-file tier (see `--config`). NLM, BM3D and MMT were removed after
+`tools/bench_denoise_quality.py` showed NLM halving star peaks, MMT erasing
+~93% of fine structure at its default, and BM3D being slow and
+licence-encumbered.
 
 | Denoiser | Notes | Config keys |
 |----------|-------|-------------|
-| `curvelet` (`auto` default) | Adaptive BayesShrink DWT (like `wavelet`) but the per-subband threshold is locally reduced wherever a structure-tensor coherence map detects elongated structure (filaments, galaxy arms), protecting it more than an isotropic threshold would. Curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet transform | `directional_protect_strength` (default 0.6; 0 = identical to `wavelet`) |
-| `wavelet` | Plain adaptive BayesShrink per subband, luma/chroma split, star-protected, strength auto-tuned from SNR | `denoise_strength`, `denoise_adaptive`, `auto_denoise_strength`, `denoise_chroma_boost` |
-| `mmt` | Multiscale Median Transform — robust to Poisson+read noise, best edge preservation (Rust-accelerated median cascade, ~10x) | `denoise_mmt_levels`, `denoise_mmt_strength` |
-| `bm3d` | Collaborative filtering, near-optimal, slower (auto-enabled by the advisor when SNR/frame count justify it) | `bm3d_sigma`, `bm3d_stride`, `bm3d_search_window`, `bm3d_group_size` |
+| `curvelet` (`auto` default) | Adaptive BayesShrink DWT with the per-subband threshold is locally reduced wherever a structure-tensor coherence map detects elongated structure (filaments, galaxy arms), protecting it more than an isotropic threshold would. Curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet transform | `directional_protect_strength` (default 0.6; 0 = identical to `--denoiser wavelet`) |
+| `wavelet` | Same denoiser as `curvelet` with the structure protection turned off (plain adaptive BayesShrink per subband, luma/chroma split, star-protected) | `denoise_chroma_boost` |
 | `acdnr` | Contrast-gated sky smoothing — flat sky smoothed, structure preserved | `denoise_acdnr_sigma`, `denoise_acdnr_k` |
-| `nlm` | Non-local means (native/numpy fast NL-means, box-filter accelerated) | `denoise_nlm_strength`, `denoise_nlm_blend` |
 | `bilateral` | Edge-preserving bilateral filter, joint colour-space weighting (Rust-accelerated) | `denoise_bilateral_sigma_color`, `denoise_bilateral_sigma_space` |
 | `aniso` | Perona-Malik anisotropic diffusion (Rust-accelerated, ~37x) | `aniso_iterations`, `aniso_kappa`, `aniso_gamma`, `aniso_option` |
 | `none` | Disable luma denoising | — |
@@ -304,21 +303,11 @@ coarse pass for medium-scale colour blotches (`chroma_nr_large_sigma`, auto-set
 for galaxy targets).
 
 **Variance stabilisation** (`--variance-stabilize`): applies a generalized
-Anscombe transform to the luma plane before wavelet thresholding (both
-`wavelet` and `curvelet`), inverting it after — makes BayesShrink's single
+Anscombe transform to the luma plane before wavelet thresholding (`curvelet`/`wavelet`), inverting it after — makes BayesShrink's single
 per-subband noise estimate valid across the whole brightness range instead
 of just near sky level, since shot noise on bright pixels is Poisson, not
 Gaussian. Gain/read-noise are self-estimated from the image's own local
 mean-variance relationship.
-
-**Self-supervised strength calibration** (`--denoise-strength-calibrate`,
-`--denoiser wavelet` only): a Noise2Self-style calibrator masks a small
-random pixel subset (replaced with a 4-neighbour average), denoises, scores
-the prediction at the masked positions against their true values, sweeps
-`--denoise-strength` and picks the minimum — an alternative to the default
-SNR-heuristic that needs no ground truth. Verified to select near the true
-MSE-minimising parameter on synthetic ground truth before being trusted for
-real use.
 
 ### 14. PSF Deconvolution (`--deconvolve {off,rl,rl-sv,tv,sparse}`)
 
@@ -498,9 +487,9 @@ Extends the FITS-only loader to camera RAW, TIFF, XISF, and SER — all dispatch
 - `--flat-from-lights`: reuses the same decomposition on a capped sample of *light* frames when no dedicated flats exist — the low-rank component approximates vignetting/dust, stars and nebula structure fall into the sparse component since dithering shifts them frame-to-frame while vignetting stays sensor-locked. Approximate; opt-in
 - Solver internals are Rust-accelerated (Gram-matrix thin-SVD trick, ~9x over direct `np.linalg.svd` at realistic shapes)
 
-### 36. Self-Supervised Denoiser Parameter Calibration (`--denoise-strength-calibrate`)
+### 36. (removed)
 
-See feature 13 (Denoising) for details — Noise2Self-style parameter selection for `--denoiser wavelet`, no ground truth needed.
+The Noise2Self-style `--denoise-strength-calibrate` was removed with the plain non-adaptive wavelet path it calibrated.
 
 ### 37. Field Aberration / Tilt Report (`--aberration-report`)
 
@@ -631,9 +620,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--denoiser NAME` | auto (curvelet) | Primary luma denoiser: wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, curvelet, none |
-| `--denoise-strength N` | 3.0 | Luma denoise threshold factor |
-| `--denoise-strength-calibrate` | off | Self-supervised strength selection, `--denoiser wavelet` only (feature 36) |
+| `--denoiser NAME` | auto (curvelet) | Primary luma denoiser: curvelet, wavelet, acdnr, bilateral, aniso, none |
 | `--variance-stabilize` | off | Generalized Anscombe transform before wavelet/curvelet thresholding |
 | `--deconvolve {off,rl,rl-sv,tv,sparse}` | off | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet (FISTA) deconvolution |
 | `--repair-stars` | off | Saturated star core repair via Moffat wing fit (feature 39) |
@@ -703,7 +690,7 @@ bundled model). `--originvision-dir` / `--originvision-checkpoint` /
 | `--export-frames-dir PATH` | Stretched JPEG per accepted frame |
 | `--log-level` / `--log-file` | Logging control |
 
-Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky_floor`, `wavelet`, `sky_residual`, `sky_pedestal`, `nlm`, `bilateral`, `mmt`, `acdnr`, `bm3d`, `aniso`, `scnr`, `photo_cal`, `deconvolve`, `star_reduce`, `local_contrast`, `sky_neutralize`, `star_remove`
+Valid step names for `--skip-step`: `hot_pixel`, `background`, `chroma_nr`, `sky_floor`, `wavelet`, `sky_residual`, `sky_pedestal`, `bilateral`, `acdnr`, `curvelet`, `aniso`, `scnr`, `photo_cal`, `deconvolve`, `star_reduce`, `local_contrast`, `sky_neutralize`, `star_remove`
 
 ---
 
@@ -726,7 +713,7 @@ python originstack.py -d tonight/ -o m51_v2.fits --auto --merge m51_v1.fits
 python originstack.py -d lights/ -o galaxy.fits --preset galaxy --deconvolve rl -v
 
 # Explicit denoiser choice
-python originstack.py -d lights/ -o out.fits --auto --denoiser mmt -v
+python originstack.py -d lights/ -o out.fits --auto --denoiser aniso -v
 
 # Super-resolution drizzle
 python originstack.py -d lights/ -o drizzled.fits --drizzle-scale 2.0 -v

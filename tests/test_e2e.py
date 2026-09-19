@@ -75,13 +75,13 @@ def _make_minimal_args(**overrides) -> argparse.Namespace:
         bg_filter_size=3,
         bg_clip_sigma=3.0,
         denoise=False,
-        denoise_strength=1.0,
-        denoise_adaptive=True,
-        denoise_nlm=False,
-        denoise_nlm_blend=0.5,
+
+
+
+
         denoise_bilateral=False,
         denoise_bilateral_sigma_space=3.0,
-        denoise_mmt=False,
+
         denoise_acdnr=False,
         deconvolve=False,
         star_reduce=False,

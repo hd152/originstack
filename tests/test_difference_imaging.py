@@ -220,10 +220,15 @@ class TestTransientRecovery(unittest.TestCase):
         n_without = len(detect_transients(without.score_corr, threshold=5.0))
         n_with = len(detect_transients(with_ast.score_corr, threshold=5.0))
 
-        self.assertGreater(n_without, 0,
-                           "test scene should produce misregistration artefacts")
-        self.assertLess(n_with, n_without,
-                        "astrometric noise term should suppress shift artefacts")
+        # Measured on this scene: every one of the 8 stars lights up (16
+        # detections, both lobes of each dipole) without the term, and none
+        # with it. Assert the property, not merely a direction -- "fewer" would
+        # still pass at 15 of 16, i.e. with the false positives essentially
+        # intact.
+        self.assertGreaterEqual(n_without, len(_STARS),
+                                "scene should light up every star without the term")
+        self.assertEqual(n_with, 0,
+                         "astrometric term should remove all shift artefacts")
 
 
 class TestDetectTransients(unittest.TestCase):
@@ -318,3 +323,298 @@ class TestCatalogOutput(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _rgb(lum):
+    """Replicate a luminance plane to the pipeline's (H, W, 3) layout."""
+    return np.repeat(np.asarray(lum, dtype=np.float32)[:, :, None], 3, axis=2)
+
+
+def _write_reference(path, lum, rawstack=True):
+    """Write a reference the way the pipeline does: (3, H, W), RAWSTACK set."""
+    from astropy.io import fits
+    hdu = fits.PrimaryHDU(data=np.transpose(_rgb(lum), (2, 0, 1)))
+    if rawstack:
+        hdu.header['RAWSTACK'] = True
+    hdu.writeto(path, overwrite=True)
+
+
+def _wide_field(n_stars=40, seed=7, shape=(220, 240)):
+    """A star field with enough well-separated stars to register and fit a PSF."""
+    rng = np.random.default_rng(seed)
+    h, w = shape
+    stars = []
+    while len(stars) < n_stars:
+        y, x = rng.uniform(25, h - 25), rng.uniform(25, w - 25)
+        if all(math.hypot(y - sy, x - sx) > 20 for sy, sx, _ in stars):
+            stars.append((y, x, float(rng.uniform(3000, 12000))))
+    return stars
+
+
+class TestRunTransientDetection(unittest.TestCase):
+    """The ``--transient-detect`` entry point, end to end.
+
+    ``zogy`` and ``detect_transients`` were covered; the orchestration around
+    them was not, and that is where the failures documented in the code itself
+    live: the sky-pedestal mismatch, the (C, H, W) axis order, the reference
+    header, and the footprint of a rotated reference.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ref_path = f"{self.tmp.name}/ref.fits"
+        self.out_path = f"{self.tmp.name}/new.fits"
+        self.stars = _wide_field()
+
+    def _epochs(self, transient=None, ref_pedestal=0.0, ref_fwhm=3.4, new_fwhm=2.8):
+        ref = _render_field((220, 240), self.stars, fwhm=ref_fwhm,
+                            sky=ref_pedestal, noise=1.0, seed=50)
+        new_stars = self.stars + ([transient] if transient else [])
+        new = _render_field((220, 240), new_stars, fwhm=new_fwhm,
+                            sky=0.0, noise=1.0, seed=51)
+        return new, ref
+
+    def _run(self, new, ref, **kw):
+        from src.difference_imaging import run_transient_detection
+        _write_reference(self.ref_path, ref, rawstack=kw.pop('rawstack', True))
+        return run_transient_detection(_rgb(new), self.ref_path, self.out_path, **kw)
+
+    def test_finds_an_injected_transient_across_a_seeing_change(self):
+        ty, tx = 110.0, 120.0
+        new, ref = self._epochs(transient=(ty, tx, 14000.0))
+
+        summary = self._run(new, ref)
+
+        self.assertIsNotNone(summary, "a well-formed pair must produce a result")
+        best = max(summary['transients'], key=lambda t: t.significance)
+        self.assertEqual(best.kind, 'brightening')
+        self.assertLess(math.hypot(best.y - ty, best.x - tx), 3.0)
+
+    def test_a_pair_with_nothing_new_reports_nothing(self):
+        new, ref = self._epochs()
+        summary = self._run(new, ref)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary['transients'], [],
+                         "identical fields must not produce candidates")
+
+    def test_a_sky_pedestal_difference_does_not_flood_the_catalogue(self):
+        """Regression: the in-memory stack has had its pedestal removed, while
+        a reference read from disk still carries one -- medians of 0.7 against
+        952 were observed for the same field. Without per-epoch background
+        subtraction every pixel reads as 'fading'."""
+        new, ref = self._epochs(ref_pedestal=950.0)
+        summary = self._run(new, ref)
+        self.assertIsNotNone(summary)
+        self.assertLess(len(summary['transients']), 5)
+
+    def test_reference_stored_channels_first_is_read_in_the_right_order(self):
+        """A wrong-axis read yields garbage rather than an exception; the
+        planted transient surviving at the right pixel proves the order."""
+        ty, tx = 60.0, 180.0
+        new, ref = self._epochs(transient=(ty, tx, 14000.0))
+        summary = self._run(new, ref)
+        self.assertIsNotNone(summary)
+        best = max(summary['transients'], key=lambda t: t.significance)
+        self.assertLess(math.hypot(best.y - ty, best.x - tx), 3.0)
+
+    def test_a_non_linear_reference_is_refused(self):
+        """A post-processed reference mismatches the flux scale, and every star
+        would report as a transient. --merge refuses the same file."""
+        import os
+        new, ref = self._epochs()
+        summary = self._run(new, ref, rawstack=False)
+        self.assertIsNone(summary)
+        self.assertFalse(os.path.exists(self.out_path.replace('.fits', '_transients.csv')),
+                         "a refused reference must not leave a catalogue behind")
+
+    def test_a_missing_reference_returns_none(self):
+        from src.difference_imaging import run_transient_detection
+        new, _ = self._epochs()
+        self.assertIsNone(run_transient_detection(
+            _rgb(new), f"{self.tmp.name}/nope.fits", self.out_path))
+
+    def test_mismatched_frame_sizes_return_none(self):
+        new, ref = self._epochs()
+        self.assertIsNone(self._run(new[:200, :200], ref))
+
+    def test_the_registration_sigma_is_measured_and_floored_not_hardcoded(self):
+        """The old code returned a literal 0.3 and reported it as a measured
+        residual. The summary must carry the value actually used, and it must
+        never fall below the documented floor."""
+        from src.difference_imaging import _ASTROMETRIC_SIGMA_FLOOR_PX
+        new, ref = self._epochs()
+        summary = self._run(new, ref)
+        self.assertIsNotNone(summary)
+        self.assertGreaterEqual(summary['astrometric_sigma_px'],
+                                _ASTROMETRIC_SIGMA_FLOOR_PX)
+        measured = summary['registration_residual_px']
+        self.assertTrue(measured is None or measured >= 0.0)
+
+    def test_stars_in_the_uncovered_wedges_of_a_rotated_reference_are_not_transients(self):
+        """A cross-night pair differs by field rotation on an alt-az mount, so
+        the warped reference has empty corners. A star in `new` there has
+        nothing to subtract against and used to come out as a confident
+        'brightening'. Measured on this scene: 6 false candidates (exactly the
+        six planted corner/edge stars) without the footprint mask, 0 with it.
+
+        The stars are placed deliberately: a first version of this test used a
+        field with a 25 px margin, put none of its 60 stars in a wedge, and so
+        passed with the mask disabled.
+        """
+        from scipy.ndimage import rotate
+
+        corner = [(12.0, 12.0, 9000.0), (14.0, 226.0, 9000.0),
+                  (206.0, 14.0, 9000.0), (208.0, 228.0, 9000.0),
+                  (110.0, 8.0, 9000.0), (112.0, 232.0, 9000.0)]
+        stars = _wide_field(n_stars=40, seed=3)
+        new = _render_field((220, 240), stars + corner, fwhm=3.0,
+                            sky=0.0, noise=1.0, seed=51)
+        # The reference has the same stars *except* the corner ones (they are
+        # outside its coverage once rotated), rotated by 9 degrees.
+        ref = rotate(_render_field((220, 240), stars, fwhm=3.0, sky=0.0,
+                                   noise=1.0, seed=50),
+                     9.0, reshape=False, order=1, mode='constant', cval=0.0)
+
+        summary = self._run(new, ref)
+
+        self.assertIsNotNone(summary, "a 9 degree rotation must still register")
+        self.assertLess(summary['covered_fraction'], 0.95,
+                        "the rotated reference leaves empty wedges")
+        self.assertGreater(summary['covered_fraction'], 0.5)
+        self.assertEqual(
+            [t for t in summary['transients'] if t.kind == 'brightening'], [],
+            "stars where the reference has no coverage are not transients")
+
+    def test_a_fully_covered_pair_reports_full_coverage(self):
+        new, ref = self._epochs()
+        summary = self._run(new, ref)
+        self.assertIsNotNone(summary)
+        self.assertGreater(summary['covered_fraction'], 0.99)
+
+    def test_outputs_are_written_next_to_the_output_path(self):
+        import os
+        new, ref = self._epochs(transient=(110.0, 120.0, 14000.0))
+        summary = self._run(new, ref)
+        self.assertIsNotNone(summary)
+        stem = self.out_path[:-len('.fits')]
+        for suffix in ('_difference.fits', '_scorr.fits', '_transients.csv'):
+            with self.subTest(suffix=suffix):
+                self.assertTrue(os.path.exists(stem + suffix))
+
+
+class TestErodeFootprint(unittest.TestCase):
+    """``_erode`` shrinks the covered region away from *uncovered* pixels only.
+
+    Tested directly because it cannot be reached through a fully covered pair:
+    that short-circuits before erosion runs, so an end-to-end test of the
+    frame-edge behaviour passes whatever the border setting is (a mutation
+    that flipped it survived the first version of this suite).
+    """
+
+    def test_the_frame_edge_is_not_treated_as_uncovered(self):
+        from src.difference_imaging import _erode
+        mask = np.ones((40, 40), dtype=bool)
+        mask[:5, :5] = False                      # an empty wedge in one corner
+
+        out = _erode(mask, 3)
+
+        # Edges far from the wedge keep their coverage. With the scipy default
+        # (border_value=0) these all erode away, discarding a PSF-width strip
+        # off every side of the frame.
+        self.assertTrue(out[20, 39], "right edge should survive")
+        self.assertTrue(out[39, 20], "bottom edge should survive")
+        self.assertTrue(out[39, 39], "far corner should survive")
+
+    def test_pixels_near_an_uncovered_region_are_eroded(self):
+        from src.difference_imaging import _erode
+        mask = np.ones((40, 40), dtype=bool)
+        mask[:5, :5] = False
+
+        out = _erode(mask, 3)
+
+        self.assertFalse(out[2, 6], "within the margin of the wedge")
+        self.assertFalse(out[6, 2])
+        self.assertTrue(out[20, 20], "well clear of the wedge")
+
+    def test_a_fully_covered_mask_is_returned_unchanged(self):
+        from src.difference_imaging import _erode
+        mask = np.ones((10, 10), dtype=bool)
+        self.assertTrue(_erode(mask, 4).all())
+
+
+class TestCatalogSkyCoordinates(unittest.TestCase):
+    """The catalogue's RA/Dec column is what makes a candidate checkable."""
+
+    def _wcs(self, naxis):
+        from astropy.wcs import WCS
+        w = WCS(naxis=naxis)
+        w.wcs.ctype = ['RA---TAN', 'DEC--TAN', 'LINEAR'][:naxis]
+        w.wcs.crval = [270.9, -24.4, 0.0][:naxis]
+        w.wcs.crpix = [50.0, 50.0, 1.0][:naxis]
+        w.wcs.cdelt = [-0.0005, 0.0005, 1.0][:naxis]
+        return w
+
+    def _write(self, wcs):
+        import csv
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = f"{d}/t.csv"
+            write_transient_catalog(path, [Transient(50.0, 50.0, 9.0, 'brightening')],
+                                    wcs=wcs)
+            with open(path, newline='') as fh:
+                return list(csv.DictReader(fh))
+
+    def test_a_celestial_wcs_fills_ra_and_dec(self):
+        row = self._write(self._wcs(2))[0]
+        self.assertAlmostEqual(float(row['ra_deg']), 270.9, delta=0.01)
+        self.assertAlmostEqual(float(row['dec_deg']), -24.4, delta=0.01)
+
+    def test_a_three_axis_wcs_is_the_failure_the_pipeline_must_avoid(self):
+        """Documents why pipeline.py builds WCS(header, naxis=2): a 3-axis WCS
+        (what a bare WCS(hdu.header) yields for the (3, H, W) cube) still
+        reports has_celestial, but cannot convert 2D pixel coordinates."""
+        wcs3 = self._wcs(3)
+        self.assertTrue(wcs3.has_celestial)
+        row = self._write(wcs3)[0]
+        self.assertEqual(row['ra_deg'], '')
+
+    def test_a_failed_conversion_is_announced_not_silent(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self._write(self._wcs(3))
+        self.assertIn('no sky coordinates', buf.getvalue())
+
+
+class TestDetectTransientsBehaviour(unittest.TestCase):
+    def test_a_non_positive_threshold_is_rejected(self):
+        """Zero admits every pixel: max_candidates of pure noise as detections."""
+        with self.assertRaises(ValueError):
+            detect_transients(np.zeros((10, 10), dtype=np.float32), threshold=0.0)
+
+    def test_matches_the_reference_greedy_algorithm_on_ties_and_nans(self):
+        """The one-pass rewrite must give the same detections, in the same
+        order, as the per-candidate argmax loop it replaced -- including when
+        many pixels tie and some are NaN."""
+        rng = np.random.default_rng(1)
+        for trial in range(40):
+            base = rng.normal(0, 2.5, (60, 70))
+            s = np.round(base) if trial % 2 else base
+            s[rng.random(s.shape) < 0.02] = np.nan
+            sep, cap = int(rng.integers(1, 8)), int(rng.choice([5, 50, 500]))
+
+            work = np.where(np.isfinite(s), np.abs(s), 0.0)
+            expected = []
+            while len(expected) < cap:
+                idx = int(np.argmax(work))
+                if float(work.flat[idx]) < 4.0:
+                    break
+                y, x = np.unravel_index(idx, work.shape)
+                expected.append((float(y), float(x)))
+                work[max(0, y - sep):y + sep + 1, max(0, x - sep):x + sep + 1] = 0.0
+
+            got = [(t.y, t.x) for t in detect_transients(s, 4.0, sep, cap)]
+            self.assertEqual(got, expected, f"trial {trial}")

@@ -45,7 +45,7 @@ python originstack.py --sweep-undo -d collection/                # restore every
 ### Optional native (Rust) acceleration
 40+ hot-path kernels run in Rust when the `astro_native` module is built
 (stacking combines ~4–100×, Lanczos warp for alignment and drizzle ~5–26×,
-L.A.Cosmic, median filters, the MMT median cascade ~10×, DBE sampling+fit,
+L.A.Cosmic, median filters, DBE sampling+fit,
 anisotropic diffusion ~37×); otherwise a numpy fallback is used. Build once:
 
 ```bash
@@ -139,7 +139,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 
 | Feature | Off by default | Enable |
 |---------|:---:|---------|
-| Alternative primary denoiser | ❌ | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso}` (default `auto` = curvelet) |
+| Alternative primary denoiser | ❌ | `--denoiser {wavelet,acdnr,bilateral,aniso}` (default `auto` = curvelet) |
 | Deconvolution | ❌ | `--deconvolve {rl,rl-sv,tv,sparse}` (RL on GPU with `--use-gpu`) |
 | Coarse chroma-NR (colour blotches) | auto | config key `chroma_nr_large_sigma` |
 | Preview black point (sky-σ) | auto | `--preview-black-sigma 3` |
@@ -157,7 +157,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 --preset quick        # Fastest: mean stack, minimal post-processing
 --preset quality      # Best output: sigma_clip, all denoisers, deconvolution
 --preset galaxy       # GHS stretch, star reduction, bilateral
---preset nebula       # GHS stretch, MMT + ACDNR
+--preset nebula       # GHS stretch, curvelet + ACDNR
 --preset narrowband   # Tuned for Ha/OIII/SII data
 --preset starfield    # No star reduction, minimal processing
 --preset planetary    # No background, with deconvolution

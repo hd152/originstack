@@ -372,6 +372,16 @@ class TestDoesNotEatExtendedSignal(unittest.TestCase):
     geometry. A nebula is not in that span, so the fit cannot absorb one --
     unlike a free-form surface, which is exactly what removed half the
     nebulosity from a real Lagoon session.
+
+    **Scope.** These call ``fit_sky_model`` directly on a 1.5 degree fixture --
+    the realistic telescope-field regime where the components are nearly
+    collinear, which is what makes non-negativity load-bearing. Production
+    would not reach this fit at that size: ``remove_physical_sky`` declines
+    anything under ``_MIN_FIELD_OF_VIEW_DEG`` before fitting. So this
+    characterises the fitter's safety in the hardest regime (and guards the
+    wide-field path against the same failure), not a path a user can hit at
+    this field size; the gate itself is covered in
+    ``test_sky_model_field_gate.py``.
     """
 
     def _scene(self, h=96, w=96):
@@ -553,10 +563,6 @@ class TestRefusesWhenItCannotHelp(unittest.TestCase):
 
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestPostprocessDispatch(unittest.TestCase):
     """--bg-method must select exactly one extractor.
 
@@ -568,8 +574,28 @@ class TestPostprocessDispatch(unittest.TestCase):
     run. Unit tests never touched this dispatch; real data caught it.
     """
 
+    # Every skip_step name postprocess_stack honours except 'background' --
+    # so the real function runs, but only the block under test does any work.
+    _SKIP_ALL_BUT_BACKGROUND = [
+        'hot_pixel', 'repair_stars', 'chroma_nr', 'sky_floor', 'wavelet',
+        'sky_residual', 'sky_pedestal', 'nlm', 'bilateral', 'mmt', 'acdnr',
+        'bm3d', 'curvelet', 'aniso', 'scnr', 'photo_cal', 'deconvolve',
+        'star_reduce', 'local_contrast', 'comet_radial_renorm',
+        'comet_larson_sekanina', 'sky_neutralize', 'remove_stars',
+    ]
+
     def _run_dispatch(self, bg_method, physical_succeeds):
-        """Record which extractors a given --bg-method invokes."""
+        """Record which extractors a given --bg-method invokes.
+
+        This drives the REAL ``postprocess_stack``. An earlier version of this
+        test replayed a hand-copied replica of the dispatch block, which meant
+        the regression it guards could be reintroduced in postprocess.py with
+        every test still green -- and the replica had in fact already drifted
+        out of sync with production (it modelled ``_apply_physical_sky`` as
+        returning a bare dict after production had changed it to return a
+        ``(result, reason)`` tuple), so feeding the real dispatch the replica's
+        mock raised ValueError. Mock the extractors, not the caller.
+        """
         from unittest import mock
 
         called = []
@@ -588,42 +614,37 @@ class TestPostprocessDispatch(unittest.TestCase):
             'moon_altitude_deg': -10.0,
             'moon_illuminated_fraction': 0.5,
         }
+        reason = 'could not help at this field size' if not physical_succeeds else ''
+
+        def _phys(*a, **k):
+            called.append('physical')
+            return phys_return, reason
+
+        args = SimpleNamespace(
+            bg_method=bg_method, bg_mesh_size=64, bg_filter_size=3,
+            bg_clip_sigma=3.0, verbose=False, dbe_patch_size=64,
+            entropy_bg=False, bg_wavelet_scales=6,
+            background_extraction=True,
+            skip_step=list(self._SKIP_ALL_BUT_BACKGROUND),
+            # everything else postprocess_stack reaches for before/after the
+            # background block, all switched off
+            comet_mode=False, galaxy_mode=False, keep_intermediates=False,
+            export_masks=False, halo_removal=False, repair_stars=False,
+            denoise=False, denoise_bilateral=False,
+            denoise_acdnr=False,
+            denoise_curvelet=False, denoise_aniso=False, scnr=False,
+            photometric_calibration=False, deconvolve=False,
+            star_reduce=False, local_contrast=False, remove_stars=False,
+            chroma_nr=False, output=None, _diagnostic_dir=None,
+        )
+        stacked = np.zeros((8, 8, 3), dtype=np.float32)
 
         with mock.patch.object(pp, 'dynamic_background_extraction', _rec('dbe')), \
              mock.patch.object(pp, 'wavelet_background_extraction', _rec('wavelet')), \
              mock.patch.object(pp, 'apply_background_extraction', _rec('mesh')), \
-             mock.patch.object(pp, '_apply_physical_sky',
-                               lambda *a, **k: (called.append('physical'), phys_return)[1]):
-            args = SimpleNamespace(
-                bg_method=bg_method, bg_mesh_size=64, bg_filter_size=3,
-                bg_clip_sigma=3.0, verbose=False, dbe_patch_size=64,
-                entropy_bg=False, bg_wavelet_scales=6)
-            self._invoke(pp, args, called)
+             mock.patch.object(pp, '_apply_physical_sky', _phys):
+            pp.postprocess_stack(stacked, args, [], SimpleNamespace())
         return called
-
-    def _invoke(self, pp, args, called):
-        """Replay the extractor dispatch block in isolation."""
-        import time
-        stacked = np.zeros((8, 8, 3), dtype=np.float32)
-        bg_method = args.bg_method
-        bg_start = time.time()
-
-        if bg_method == 'physical':
-            res = pp._apply_physical_sky(stacked, args, None, None)
-            if res is None:
-                bg_method = 'dbe'
-            else:
-                stacked = res['image']
-
-        if bg_method == 'dbe':
-            pp.dynamic_background_extraction(stacked)
-        elif bg_method == 'physical':
-            pass
-        elif bg_method == 'wavelet':
-            pp.wavelet_background_extraction(stacked)
-        else:
-            pp.apply_background_extraction(stacked)
-        del bg_start
 
     def test_physical_success_runs_only_the_physical_model(self):
         called = self._run_dispatch('physical', physical_succeeds=True)
@@ -640,3 +661,99 @@ class TestPostprocessDispatch(unittest.TestCase):
                                  ('mesh', ['mesh'])):
             with self.subTest(method=method):
                 self.assertEqual(self._run_dispatch(method, True), expected)
+
+
+class TestApplyPhysicalSkyReasons(unittest.TestCase):
+    """Why the model declined, as reported to the user.
+
+    "Your session has no GPS" and "this model cannot help at this field size"
+    call for opposite responses, and reporting the first when the second
+    happened (an earlier version did, on a session that had full GPS and a
+    solve) sends people hunting for metadata that is already present. This
+    was documented as load-bearing and had no test.
+    """
+
+    @staticmethod
+    def _session(fov_deg=10.0, **over):
+        from src.session_info import SessionInfo
+        base = dict(ra_rad=math.radians(271.0), dec_rad=math.radians(-24.4),
+                    fov_x_rad=math.radians(fov_deg), fov_y_rad=math.radians(fov_deg * 2 / 3),
+                    image_width=60, image_height=40, orientation_rad=0.0,
+                    latitude=33.83, longitude=-117.79,
+                    date_time='2026-08-31T20:40:32-0700')
+        base.update(over)
+        return SessionInfo(**base)
+
+    @staticmethod
+    def _run(session, image=None):
+        import src.postprocess as pp
+        img = np.ones((40, 60, 3), dtype=np.float32) * 1000 if image is None else image
+        args = SimpleNamespace(_session_info=session, light_pollution_azimuth=0.0)
+        return pp._apply_physical_sky(img, args, None, None)
+
+    def test_no_session_at_all(self):
+        result, reason = self._run(None)
+        self.assertIsNone(result)
+        self.assertIn('no site coordinates', reason)
+
+    def test_no_gps(self):
+        result, reason = self._run(self._session(latitude=None, longitude=None))
+        self.assertIsNone(result)
+        self.assertIn('no site coordinates', reason)
+
+    def test_no_wcs(self):
+        result, reason = self._run(self._session(fov_x_rad=None))
+        self.assertIsNone(result)
+        self.assertIn('no session WCS', reason)
+
+    def test_no_timestamp(self):
+        result, reason = self._run(self._session(date_time=None))
+        self.assertIsNone(result)
+        self.assertIn('timestamp', reason)
+
+    def test_a_narrow_field_blames_the_field_not_the_metadata(self):
+        """The regression itself: full GPS + solve, ~1 degree field."""
+        result, reason = self._run(self._session(fov_deg=1.2))
+        self.assertIsNone(result)
+        self.assertIn('deg field is below', reason)
+        for wrong in ('no site coordinates', 'no session WCS', 'timestamp'):
+            self.assertNotIn(wrong, reason,
+                             "must not send the user hunting for metadata they have")
+
+    def test_a_failed_fit_says_so(self):
+        from unittest import mock
+
+        import src.sky_model as sm
+        with mock.patch.object(sm, '_nnls', side_effect=RuntimeError("did not converge")):
+            result, reason = self._run(self._session(fov_deg=10.0))
+        self.assertIsNone(result)
+        self.assertIn('fit failed', reason)
+        self.assertNotIn('field', reason.split('fit failed')[0])
+
+    def test_success_passes_through_with_an_empty_reason(self):
+        from unittest import mock
+
+        import src.sky_model as sm
+        fake = {'image': np.zeros((40, 60, 3), dtype=np.float32), 'description': 'x',
+                'moon_altitude_deg': -5.0, 'moon_illuminated_fraction': 0.1}
+        with mock.patch.object(sm, 'remove_physical_sky_with_reason',
+                               return_value=(fake, '')):
+            result, reason = self._run(self._session(fov_deg=30.0))
+        self.assertIs(result, fake)
+        self.assertEqual(reason, '')
+
+    def test_the_models_own_reason_is_reported_verbatim(self):
+        """The model knows why it declined; a fixed sentence in the caller used
+        to stand in for four different causes."""
+        from unittest import mock
+
+        import src.sky_model as sm
+        with mock.patch.object(sm, 'remove_physical_sky_with_reason',
+                               return_value=(None, 'some specific cause')):
+            result, reason = self._run(self._session(fov_deg=30.0))
+        self.assertIsNone(result)
+        self.assertEqual(reason, 'some specific cause')
+
+
+if __name__ == '__main__':
+    unittest.main()

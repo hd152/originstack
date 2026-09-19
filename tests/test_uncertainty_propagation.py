@@ -14,6 +14,7 @@ import unittest
 import numpy as np
 
 from src.uncertainty import (
+    _QUIET_OFF,
     _quiet_args,
     confidence_map,
     error_aware_black_point,
@@ -23,8 +24,7 @@ from src.uncertainty import (
 
 
 def _args(**kw):
-    ns = argparse.Namespace(remove_stars=True, nmf_separate=True,
-                            photometric_calibration=True, verbose=True)
+    ns = argparse.Namespace(**{name: True for name in _QUIET_OFF})
     for k, v in kw.items():
         setattr(ns, k, v)
     return ns
@@ -35,12 +35,30 @@ class TestQuietArgs(unittest.TestCase):
         original = _args()
         quiet = _quiet_args(original)
 
-        for name in ('remove_stars', 'nmf_separate', 'photometric_calibration', 'verbose'):
+        for name in _QUIET_OFF:
             self.assertFalse(getattr(quiet, name), f"{name} should be off in realizations")
             self.assertTrue(getattr(original, name), f"{name} must survive on the original")
 
         self.assertIsNone(quiet._diagnostic_dir)
-        self.assertTrue(quiet._uncertainty_realization)
+
+    def test_every_phase4_file_writing_flag_is_quieted(self):
+        """The list is hand-maintained, so pin what it must contain.
+
+        Each of these makes postprocess_stack write a sidecar. Left enabled,
+        it is rewritten once per realization under a swallowed stdout, and the
+        file left on disk is the last *noise realization* rather than the real
+        image -- silently, since the "Saved:" line goes into the buffer too.
+        """
+        for name in ('remove_stars', 'nmf_separate', 'aberration_report',
+                     'diagnostic', 'export_masks', 'keep_intermediates',
+                     'comet_radial_renorm', 'comet_larson_sekanina'):
+            self.assertIn(name, _QUIET_OFF,
+                          f"{name} writes a sidecar and must not run K times")
+
+    def test_network_steps_are_quieted(self):
+        # Gaia/VizieR queries (K of them) -- they don't shape the noise field.
+        self.assertIn('photometric_calibration', _QUIET_OFF)
+        self.assertIn('annotate', _QUIET_OFF)
 
     def test_tolerates_args_missing_the_optional_flags(self):
         # Namespaces built by tests/older configs may not carry every flag.
@@ -60,7 +78,7 @@ class TestPropagateUncertainty(unittest.TestCase):
         sigma_in = 4.0
         sigma_map = np.full((self.h, self.w), sigma_in, dtype=np.float32)
 
-        sigma_post, mean_post = propagate_uncertainty(
+        sigma_post, mean_post, _ = propagate_uncertainty(
             self.stacked, sigma_map, self.args, [], None,
             postprocess_fn=lambda img, a, f, s: img,
             n_realizations=64, seed=1)
@@ -74,7 +92,7 @@ class TestPropagateUncertainty(unittest.TestCase):
         sigma_map = np.full((self.h, self.w), 4.0, dtype=np.float32)
         gain = 3.0
 
-        sigma_post, _ = propagate_uncertainty(
+        sigma_post, _, _ = propagate_uncertainty(
             self.stacked, sigma_map, self.args, [], None,
             postprocess_fn=lambda img, a, f, s: img * gain,
             n_realizations=64, seed=2)
@@ -89,7 +107,7 @@ class TestPropagateUncertainty(unittest.TestCase):
             from scipy.ndimage import uniform_filter
             return uniform_filter(img, size=(3, 3, 1), mode='reflect')
 
-        sigma_post, _ = propagate_uncertainty(
+        sigma_post, _, _ = propagate_uncertainty(
             self.stacked, sigma_map, self.args, [], None,
             postprocess_fn=box_blur, n_realizations=64, seed=3)
 
@@ -103,7 +121,7 @@ class TestPropagateUncertainty(unittest.TestCase):
         sigma_map[:, :self.w // 2] = 2.0
         sigma_map[:, self.w // 2:] = 8.0
 
-        sigma_post, _ = propagate_uncertainty(
+        sigma_post, _, _ = propagate_uncertainty(
             self.stacked, sigma_map, self.args, [], None,
             postprocess_fn=lambda img, a, f, s: img,
             n_realizations=64, seed=4)
@@ -115,14 +133,14 @@ class TestPropagateUncertainty(unittest.TestCase):
         sigma_map = np.full((self.h, self.w), 3.0, dtype=np.float32)
         kw = dict(postprocess_fn=lambda img, a, f, s: img, n_realizations=8, seed=7)
 
-        a, _ = propagate_uncertainty(self.stacked, sigma_map, self.args, [], None, **kw)
-        b, _ = propagate_uncertainty(self.stacked, sigma_map, self.args, [], None, **kw)
+        a, _, _ = propagate_uncertainty(self.stacked, sigma_map, self.args, [], None, **kw)
+        b, _, _ = propagate_uncertainty(self.stacked, sigma_map, self.args, [], None, **kw)
 
         np.testing.assert_array_equal(a, b)
 
     def test_accepts_a_per_channel_input_sigma(self):
         sigma_map = np.full((self.h, self.w, self.c), 5.0, dtype=np.float32)
-        sigma_post, _ = propagate_uncertainty(
+        sigma_post, _, _ = propagate_uncertainty(
             self.stacked, sigma_map, self.args, [], None,
             postprocess_fn=lambda img, a, f, s: img, n_realizations=32, seed=5)
         self.assertAlmostEqual(float(sigma_post.mean()), 5.0, delta=0.5)
@@ -137,7 +155,7 @@ class TestPropagateUncertainty(unittest.TestCase):
                 raise RuntimeError("simulated post-processing failure")
             return img
 
-        sigma_post, _ = propagate_uncertainty(
+        sigma_post, _, _ = propagate_uncertainty(
             self.stacked, sigma_map, self.args, [], None,
             postprocess_fn=flaky, n_realizations=32, seed=6)
 
@@ -161,6 +179,114 @@ class TestPropagateUncertainty(unittest.TestCase):
             propagate_uncertainty(self.stacked, sigma_map, self.args, [], None,
                                   postprocess_fn=lambda img, a, f, s: img[:-2, :-2],
                                   n_realizations=4, seed=9)
+
+
+class TestNoiseAdaptiveChainBias(unittest.TestCase):
+    """The case the three analytic chains above structurally cannot catch.
+
+    Identity, a pure scale and a box blur are all *linear*, so the fact that a
+    realization carries sqrt(2)x the real noise (``stacked`` already holds
+    ~sigma of its own, and propagation adds another sigma on top) cancels
+    exactly and the estimator looks exact. Most of this project's Phase 4 is
+    not linear in that sense: BayesShrink reads its threshold off each
+    subband's measured noise, DBE and the sky-floor passes measure sky sigma,
+    ``estimate_denoise_strength`` keys off SNR. Handed an inflated
+    realization, each denoises *harder* than it did on the real image, and the
+    spread that comes back understates the truth.
+
+    These tests pin the bias against this project's *real* wavelet denoiser,
+    not a toy, because the size of the effect is easy to get wrong from first
+    principles -- see ``test_bias_against_the_real_wavelet_denoiser``.
+    """
+
+    def setUp(self):
+        self.h, self.w, self.c = 24, 24, 3
+        self.stacked_clean = np.full((self.h, self.w, self.c), 100.0, dtype=np.float32)
+        self.sigma_in = 4.0
+        self.args = _args()
+
+    @staticmethod
+    def _structured_field(h, w, c):
+        """Sky gradient + gaussian blobs -- content a denoiser reacts to.
+
+        A flat field is the wrong fixture here: at a 3-sigma threshold almost
+        every pixel clips to the median, both spreads collapse toward zero,
+        and the test passes while measuring nothing.
+        """
+        yy, xx = np.mgrid[0:h, 0:w]
+        img = (100.0 + 0.05 * xx + 0.03 * yy).astype(np.float32)
+        for cy, cx, amp, sd in [(8, 8, 60, 3), (16, 18, 35, 4)]:
+            img = img + amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sd * sd))
+        return np.repeat(img[:, :, None], c, axis=2).astype(np.float32)
+
+    def test_bias_against_the_real_wavelet_denoiser(self):
+        """Propagated vs true output sigma for an actually-adaptive chain.
+
+        Ground truth is the spread of the chain's output at the *real*
+        operating point -- independent noisy copies of the clean image, each
+        carrying exactly sigma -- against propagation's realizations, which
+        sit on top of an already-noisy stack and so carry sqrt(2)*sigma.
+
+        The measured ratio when this was written was 0.93-1.03 across sigma in
+        {1, 4, 12} and threshold_factor in {2, 3, 5}. The assertion is
+        deliberately loose around that: the point is to catch a *mechanism*
+        change (a denoiser whose adaptive response is strong enough to bias
+        the estimate seriously), not to pin one machine's arithmetic.
+        """
+        from src.denoising import directional_wavelet_denoise
+
+        h = w = 48
+        clean = self._structured_field(h, w, self.c)
+        rng = np.random.default_rng(11)
+
+        def chain(img, a=None, f=None, s=None):
+            return directional_wavelet_denoise(np.asarray(img, dtype=np.float32),
+                                               levels=3)
+
+        stacked = clean + rng.standard_normal(clean.shape).astype(np.float32) * self.sigma_in
+        sigma_map = np.full((h, w), self.sigma_in, dtype=np.float32)
+
+        propagated, _, adaptivity = propagate_uncertainty(
+            stacked, sigma_map, self.args, [], None,
+            postprocess_fn=chain, n_realizations=24, seed=12,
+            probe_realizations=0)
+
+        truth = float(np.stack([
+            chain(clean + rng.standard_normal(clean.shape).astype(np.float32) * self.sigma_in)
+            for _ in range(24)]).std(axis=0).mean())
+
+        ratio = float(propagated.mean()) / truth
+        self.assertGreater(ratio, 0.80,
+                           f"propagated sigma understates by more than the measured "
+                           f"few percent (ratio {ratio:.3f}); an adaptive step's "
+                           f"response has changed and the module docstring's "
+                           f"accuracy claim needs re-measuring")
+        self.assertLess(ratio, 1.20,
+                        f"propagated sigma now OVER-states (ratio {ratio:.3f}); "
+                        f"the documented bias direction has flipped")
+
+    def test_adaptivity_probe_reports_two_for_a_scale_invariant_chain(self):
+        """A linear chain must NOT be flagged -- otherwise the warning is noise."""
+        sigma_map = np.full((self.h, self.w), self.sigma_in, dtype=np.float32)
+
+        _, _, adaptivity = propagate_uncertainty(
+            self.stacked_clean, sigma_map, self.args, [], None,
+            postprocess_fn=lambda img, a, f, s: img * 3.0,
+            n_realizations=32, seed=13, probe_realizations=16)
+
+        self.assertIsNotNone(adaptivity)
+        self.assertAlmostEqual(adaptivity, 2.0, delta=0.25)
+        # ... and therefore sits above the threshold pipeline.py warns at, so
+        # a linear chain never produces the "adapts strongly" note.
+        self.assertGreater(adaptivity, 1.5)
+
+    def test_probe_can_be_disabled(self):
+        sigma_map = np.full((self.h, self.w), self.sigma_in, dtype=np.float32)
+        _, _, adaptivity = propagate_uncertainty(
+            self.stacked_clean, sigma_map, self.args, [], None,
+            postprocess_fn=lambda img, a, f, s: img,
+            n_realizations=4, seed=14, probe_realizations=0)
+        self.assertIsNone(adaptivity)
 
 
 class TestConfidenceMap(unittest.TestCase):
@@ -255,3 +381,50 @@ class TestErrorAwareBlackPoint(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestFlagValidation(unittest.TestCase):
+    """Arguments whose bad values used to be accepted and acted on silently."""
+
+    def _parse(self, *extra):
+        from src.cli import build_parser
+        return build_parser().parse_args(['-d', 'somewhere', *extra])
+
+    def _rejects(self, *extra):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self._parse(*extra)
+
+    def test_defaults_are_unchanged(self):
+        args = self._parse()
+        self.assertEqual(args.uncertainty_realizations, 8)
+        self.assertEqual(args.transient_threshold, 5.0)
+
+    def test_a_valid_realization_count_is_accepted(self):
+        self.assertEqual(self._parse('--uncertainty-realizations', '16').uncertainty_realizations, 16)
+
+    def test_fewer_than_two_realizations_is_rejected(self):
+        """propagate_uncertainty used to clamp these to 2 without saying so, so
+        `--uncertainty-realizations 0` quietly ran two passes."""
+        for bad in ('0', '1', '-4', 'many', '2.5'):
+            with self.subTest(value=bad):
+                self._rejects('--uncertainty-realizations', bad)
+
+    def test_a_positive_threshold_is_accepted(self):
+        self.assertEqual(self._parse('--transient-threshold', '3.5').transient_threshold, 3.5)
+
+    def test_a_non_positive_threshold_is_rejected(self):
+        """Zero admits every pixel and reports the 500 noisiest as detections."""
+        for bad in ('0', '0.0', '-2', 'nan', 'high'):
+            with self.subTest(value=bad):
+                self._rejects('--transient-threshold', bad)
+
+    def test_the_help_text_states_the_measured_caveat_and_the_memory_cost(self):
+        from src.cli import build_parser
+        text = ' '.join(next(a for a in build_parser()._actions
+                            if '--uncertainty-propagate' in a.option_strings).help.split())
+        self.assertNotIn('exact for the nonlinear', text,
+                         "the 'exact' claim was corrected -- see uncertainty.py")
+        self.assertIn('biased', text)
+        self.assertIn('GB', text)

@@ -102,6 +102,30 @@ def _register_stack(new_lum: np.ndarray, prev_lum: np.ndarray,
     return None, None
 
 
+def _meta_from_header(path: str, hdr) -> Dict[str, Any]:
+    return {
+        'path': path,
+        'nframes': int(hdr.get('NFRAMES', 0) or 0),
+        'intgtime': float(hdr.get('INTGTIME', 0.0) or 0.0),
+        'totexp': float(hdr.get('TOTEXP', 0.0) or 0.0),
+        'datefrst': hdr.get('DATEFRST'),
+        'datelast': hdr.get('DATELAST'),
+    }
+
+
+def read_merge_meta(path: str) -> Dict[str, Any]:
+    """The same metadata ``load_merge_stack`` returns, read from the header only.
+
+    For callers that need a stack's depth or dates to *choose* one -- picking
+    the reference grid of a hierarchical combine, say -- and would otherwise
+    pull in and float32-copy the whole image (~144 MB at 6 MP, per stack) to
+    read one integer. Deliberately does not check ``RAWSTACK``: that is
+    ``load_merge_stack``'s job, and it runs on whichever stack is chosen.
+    """
+    from astropy.io import fits as _fits
+    return _meta_from_header(path, _fits.getheader(path))
+
+
 def load_merge_stack(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Load and validate one ``--merge`` input. Returns (HWC float32, meta)."""
     from astropy.io import fits as _fits
@@ -119,15 +143,7 @@ def load_merge_stack(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
     if data.ndim != 3 or data.shape[2] != 3:
         raise ValueError(f"{os.path.basename(path)}: expected an RGB stack, "
                          f"got shape {data.shape}")
-    meta = {
-        'path': path,
-        'nframes': int(hdr.get('NFRAMES', 0) or 0),
-        'intgtime': float(hdr.get('INTGTIME', 0.0) or 0.0),
-        'totexp': float(hdr.get('TOTEXP', 0.0) or 0.0),
-        'datefrst': hdr.get('DATEFRST'),
-        'datelast': hdr.get('DATELAST'),
-    }
-    return np.ascontiguousarray(data, dtype=np.float32), meta
+    return np.ascontiguousarray(data, dtype=np.float32), _meta_from_header(path, hdr)
 
 
 def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
@@ -259,6 +275,34 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     return merged, info
 
 
+def seed_reference_header(header, meta: Dict[str, Any]) -> None:
+    """Start a fresh output header from the reference stack's own aggregates.
+
+    ``apply_merge_header`` is written for ``--merge``, where the output header
+    already holds *this* session's totals and only the previous stacks are
+    added on top -- so it guards every aggregate with "already present". A
+    hierarchical combine builds its header from scratch, where nothing is
+    present, so every guard skipped: the combined output lost its integration
+    time and dates, and -- never having been marked ``RAWSTACK`` -- could not be
+    fed back into ``--merge`` or ``--transient-detect``. Both were silent.
+
+    Seeds the reference's own totals (``merge_info`` covers only the *other*
+    stacks) and marks the result a linear stack, which it is: a weighted mean
+    of linear stacks, before any Phase 4 step.
+    """
+    header['RAWSTACK'] = (True, 'Linear pre-post-processing stack')
+    if meta.get('intgtime', 0.0) > 0:
+        header['INTGTIME'] = (meta['intgtime'],
+                              'Total integration time (s)')
+        header['INTGMIN'] = (meta['intgtime'] / 60.0, 'Total integration time (minutes)')
+    if meta.get('totexp', 0.0) > 0:
+        header['TOTEXP'] = (meta['totexp'], 'Total exposure time (s)')
+    if meta.get('datefrst'):
+        header['DATEFRST'] = str(meta['datefrst'])
+    if meta.get('datelast'):
+        header['DATELAST'] = str(meta['datelast'])
+
+
 def apply_merge_header(header, info: Dict[str, Any]) -> None:
     """Override the session header aggregates with merged totals."""
     header['NFRAMES'] = (info['total_frames'], 'Number of stacked frames (all merged sessions)')
@@ -267,12 +311,12 @@ def apply_merge_header(header, info: Dict[str, Any]) -> None:
         header[f'MRGSRC{i + 1}'] = (src[:68], 'Merged source stack')
     if info['total_intgtime'] > 0 and 'INTGTIME' in header:
         total = float(header['INTGTIME']) + info['total_intgtime']
-        header['INTGTIME'] = (total, 'Total integration time across all frames (seconds)')
+        header['INTGTIME'] = (total, 'Total integration time (s)')
         if 'INTGMIN' in header:
             header['INTGMIN'] = (total / 60.0, 'Total integration time (minutes)')
     if info['total_totexp'] > 0 and 'TOTEXP' in header:
         header['TOTEXP'] = (float(header['TOTEXP']) + info['total_totexp'],
-                            'Total integrated exposure time in seconds')
+                            'Total exposure time (s)')
     if info['datefrst'] and 'DATEFRST' in header:
         header['DATEFRST'] = min(str(header['DATEFRST']), info['datefrst'])
     if info['datelast'] and 'DATELAST' in header:

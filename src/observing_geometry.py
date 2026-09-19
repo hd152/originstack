@@ -9,9 +9,10 @@ so callers can fall back cleanly.
 """
 from __future__ import annotations
 
-import datetime as _dt
 import math
 from typing import Optional, Tuple
+
+from src.utils import parse_timestamp
 
 
 def _as_utc_iso(when_iso: str) -> Optional[str]:
@@ -28,26 +29,50 @@ def _as_utc_iso(when_iso: str) -> Optional[str]:
     """
     if not when_iso:
         return None
-    text = str(when_iso).strip()
-    try:
-        dt = _dt.datetime.fromisoformat(text.replace('Z', '+00:00'))
-    except ValueError:
-        return text        # let astropy try it unchanged
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    dt = parse_timestamp(when_iso)
+    if dt is None:
+        return str(when_iso).strip()   # let astropy try it unchanged
     return dt.isoformat()
+
+
+def _altaz_closed_form(ra_deg: float, dec_deg: float, lat_deg: float,
+                       lon_deg: float,
+                       when_iso: str) -> Optional[Tuple[float, float]]:
+    """(alt, az) with no astropy and no IERS tables -- see ``altaz``."""
+    try:
+        from src.sky_model import altaz_from_equatorial, gmst_deg, julian_date
+    except Exception:  # pragma: no cover - sky_model is not optional
+        return None
+    jd = julian_date(when_iso)
+    if jd is None:
+        return None
+    lst = (gmst_deg(jd) + float(lon_deg)) % 360.0
+    alt, az = altaz_from_equatorial(ra_deg, dec_deg, lat_deg, lst)
+    return float(alt), float(az)
 
 
 def altaz(ra_deg: float, dec_deg: float, lat_deg: float, lon_deg: float,
           height_m: float, when_iso: str) -> Optional[Tuple[float, float]]:
     """(altitude_deg, azimuth_deg) of the target at ``when_iso`` (UTC ISO),
-    or None."""
+    or None.
+
+    astropy is tried first (it carries the target from J2000 to the equinox of
+    date properly), but a closed-form fallback runs when astropy is absent or
+    its IERS tables are -- which is the case inside the packaged app, where
+    ``packaging/originstack.spec`` strips ``astropy_iers_data``. Without the
+    fallback every caller here returned None in the frozen build: --photometry
+    silently dropped its airmass extinction term and
+    --fix-atmospheric-dispersion silently lost its auto-derived zenith angle.
+    The fallback works in mean equinox of date against J2000 input, so it
+    carries the ~0.35 deg precession offset documented in ``sky_model`` --
+    irrelevant to airmass, which varies on degree scales.
+    """
     try:
         import astropy.units as u
         from astropy.coordinates import AltAz, EarthLocation, SkyCoord
         from astropy.time import Time
     except Exception:
-        return None
+        return _altaz_closed_form(ra_deg, dec_deg, lat_deg, lon_deg, when_iso)
     try:
         loc = EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg,
                             height=(height_m or 0.0) * u.m)
@@ -58,7 +83,7 @@ def altaz(ra_deg: float, dec_deg: float, lat_deg: float, lon_deg: float,
         aa = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg).transform_to(frame)
         return float(aa.alt.deg), float(aa.az.deg)
     except Exception:
-        return None
+        return _altaz_closed_form(ra_deg, dec_deg, lat_deg, lon_deg, when_iso)
 
 
 def airmass_kasten_young(alt_deg: float) -> Optional[float]:
@@ -101,25 +126,34 @@ def parallactic_angle_deg(ra_deg: float, dec_deg: float, lat_deg: float,
     circle through the target. NOTE: this is *not* yet the on-detector
     "toward zenith" direction; the caller must still add the image's
     north position angle. None on failure.
+
+    Local sidereal time comes from ``sky_model.gmst_deg`` (closed form), not
+    ``astropy.time.Time.sidereal_time``. That is deliberate and load-bearing:
+    apparent sidereal time needs UT1-UTC from the IERS earth-orientation
+    tables, which ``packaging/originstack.spec`` strips from the frozen build
+    -- so the astropy path raised FileNotFoundError inside the packaged app,
+    was swallowed by the ``except`` below, and returned None. Since
+    ``cli._predict_rotation_spread`` calls this on the *default* path, the exe
+    and a source checkout silently produced different stacks from the same
+    directory. The closed form has no such dependency.
+
+    Mean rather than apparent sidereal time costs at most the equation of the
+    equinoxes (~18 arcsec), far below anything either caller resolves.
     """
     try:
-        import astropy.units as u
-        import numpy as np
-        from astropy.coordinates import EarthLocation
-        from astropy.time import Time
-    except Exception:
+        from src.sky_model import gmst_deg, julian_date
+    except Exception:  # pragma: no cover - sky_model is not optional
         return None
     try:
-        loc = EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg)
-        when = _as_utc_iso(when_iso)
-        if when is None:
+        jd = julian_date(when_iso)
+        if jd is None:
             return None
-        lst = Time(when, location=loc).sidereal_time("apparent").deg
+        lst = (gmst_deg(jd) + float(lon_deg)) % 360.0
         ha = math.radians((lst - ra_deg + 180.0) % 360.0 - 180.0)  # [-pi, pi]
         dec = math.radians(dec_deg)
         phi = math.radians(lat_deg)
         q = math.atan2(math.sin(ha),
                        math.tan(phi) * math.cos(dec) - math.sin(dec) * math.cos(ha))
-        return float(np.degrees(q))
+        return float(math.degrees(q))
     except Exception:
         return None

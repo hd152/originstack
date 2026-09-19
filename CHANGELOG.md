@@ -6,6 +6,40 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Removed
+
+- **Denoisers that did not earn their place.** A ground-truth benchmark
+  (`tools/bench_denoise_quality.py`: synthetic nebula/galaxy/star-field
+  scenes with a known clean image, noise correlated like real stacks) found:
+  - **NLM** cut star peaks to 50% of their true brightness and gave ~11x the
+    input error inside star cores, at 17 s/MP. Removed.
+  - **MMT** erased ~93% of fine structure at its default strength (a median
+    cascade deletes thin filaments by construction) and had been the
+    `--auto` primary for galaxy, globular-cluster and planetary-nebula
+    targets. Removed; those targets now use the curvelet wavelet.
+  - **BM3D** was the best quality but slow (14 s/MP) and needs a
+    non-commercial-licensed package; its pure-scipy fallback was measurably
+    worse than the package. Removed with its Rust DCT/block-matching kernels
+    (`astro_native` 0.23.0) and the `bm3d` entry in `THIRD_PARTY_NOTICES.md`.
+  - **Plain (non-adaptive) wavelet** and `adaptive_wavelet_denoise` are
+    merged into the curvelet denoiser, which is numerically identical to
+    plain BayesShrink at `directional_protect_strength=0`.
+    `--denoiser wavelet` still works and now means exactly that.
+    `--denoise-strength`, `--denoise-strength-calibrate` and the Noise2Self
+    calibration module (`self_supervised_calibration.py`) only served the
+    removed non-adaptive path and are gone too.
+  `--denoiser nlm|mmt|bm3d` are now rejected. Presets and config files that
+  named them fall back to the curvelet default (unknown config keys are
+  ignored).
+
+### Fixed
+
+- **`--variance-stabilize` (and `--auto`'s rule enabling it) had no effect on
+  the default denoiser.** It was only wired into the wavelet paths;
+  `--denoiser curvelet`, the default, silently ignored it. It is now applied
+  by the curvelet denoiser, so `--auto` runs on curvelet targets now really
+  use it (benchmark: faint-region error 0.87 → 0.85 at unchanged detail retention).
+
 ### Added
 
 - **`--transient-detect REF.fits`: find what changed between two epochs.**
@@ -23,7 +57,17 @@ match the `VERSION` file and `v*` git tags.
   `--transient-threshold` sets the cut (default 5σ); the score is properly
   calibrated, so that is a real significance rather than an arbitrary number.
   Diagnostic only — it never alters the stack, and a failure can't cost you
-  the output.
+  the output. The reference must be a **linear** stack (the main output FITS,
+  `RAWSTACK=True`), exactly as for `--merge`: a post-processed one mismatches
+  the flux scale and every star in the field would report as a transient, so
+  it is refused with a message rather than compared. Where the warped
+  reference has no coverage (a cross-night pair on an alt-az mount differs by
+  field rotation, leaving empty corners) results are masked out and the log
+  says what fraction of the frame the comparison covers — without that, stars
+  in those corners came out as confident "brightenings" (6 false candidates
+  on a synthetic 9° rotation, 0 with the mask). The registration residual fed
+  to the astrometric term is now *measured* from the matched stars, with 0.3 px
+  as a floor; it used to be a hard-coded 0.3 reported as a measurement.
 - **Astrometric noise is propagated, not ignored.** `S_corr` includes source
   (Poisson) *and* astrometric noise. The latter is what makes this usable on
   real data: registration is never perfect, and a sub-pixel slip leaves a
@@ -53,7 +97,15 @@ match the `VERSION` file and `v*` git tags.
   model of the sky cannot represent by construction. `remove_physical_sky`
   therefore measures whether it actually flattened the background and falls
   back to DBE when it did not. Expect it to earn its place only on wide
-  fields; on typical deep-sky framing it will stand aside.
+  fields; on typical deep-sky framing it will stand aside. The field-size
+  gate runs *before* any geometry is built, so a telescope field is declined
+  in effectively no time (it used to cost ~1 s and ~580 MB first), and the
+  reason reported is the real one — too narrow a field, a failed fit, or a fit
+  that did not help — rather than one sentence for all of them. Azimuth and
+  helio-ecliptic longitude are interpolated on the circle, so a field
+  straddling due north no longer gets a bogus 360° ramp; and a failed
+  non-negative fit declines to DBE instead of silently substituting the
+  unbounded fit described below as harmful.
 
   Two earlier claims are corrected by that testing. **DBE does not eat
   nebulosity** — it retained 99.5% of the Lagoon's signal; the session that
@@ -88,7 +140,16 @@ match the `VERSION` file and `v*` git tags.
   for most of the chain — and this stays correct automatically when a new
   denoiser is added. Writes `<output>_sigma_final.fits` (propagated standard
   error) and `<output>_snr.fits` (per-pixel signal-to-noise above sky), and
-  logs what fraction of the frame clears 3σ and 5σ.
+  logs what fraction of the frame clears 3σ and 5σ. **Accuracy:** each
+  realization carries √2× the real noise (the stack already holds ~σ; the
+  realization adds another σ), so steps that estimate their parameters from
+  the data denoise it slightly harder than the real image and the spread comes
+  back a little low. Measured against this project's own `wavelet_denoise`
+  across σ ∈ {1, 4, 12} and thresholds ∈ {2, 3, 5}: 0.93–1.03× the true
+  output noise — a few percent, well inside the ~25% Monte Carlo error at the
+  default K. A probe at half amplitude reports how noise-scale-dependent the
+  chain actually was, and the log warns if it is strongly so. Holds a copy of
+  the linear stack plus two float64 accumulators (~1.1 GB at 24 MP).
 - **Clamped-pixel detection.** Pixels the chain pins to a constant (the sky
   pedestal lift and the non-negativity clips both do this) come back with
   exactly zero propagated sigma. Those are reported as *undefined* confidence
@@ -100,6 +161,22 @@ match the `VERSION` file and `v*` git tags.
   separate from sky clips to black instead of being lifted into apparent
   structure — the classic over-stretch failure where amplified correlated
   noise reads as nebulosity. Requires `--uncertainty-propagate`.
+- **`--auto` suggests optional features instead of silently skipping them.**
+  After classifying a target it prints a "Suggested for this target (not
+  enabled)" block for features that carry a real cost or need input it cannot
+  invent: `--bg-method physical` (only for extended targets with a session
+  solve + GPS **and** a field of at least 5°, since below that it declines),
+  `--transient-detect` when `--merge` already supplies an earlier epoch, and
+  `--uncertainty-propagate` when an uncertainty map exists. It only acts on
+  things that are cheap and harmless: `--stack-method ivw` now also writes
+  `<output>_sigma.fits` (cheap, not free — the sigma kernel measured ~0.135 s
+  against 0.049 s for the plain combine — and it does add a file to the output
+  directory, which the log line says).
+- **A project icon and logo**, generated from code by `tools/make_icon.py`
+  rather than committed as opaque binaries. `packaging/icon.ico` now carries
+  six sizes (it lacked 64 and 128, which Windows uses for Alt-Tab), and the
+  packaged app now bundles it so the *window* icon shows, not just the
+  taskbar/Explorer one.
 
 ### Changed
 
@@ -118,8 +195,13 @@ match the `VERSION` file and `v*` git tags.
   total spread minus the most any single session covers — because a session
   merely 15 minutes long already sweeps ~3.6° and would otherwise be advised
   to split away from itself. Explicit `--combine-sessions`, `--hierarchical`
-  and `--mosaic` still win, and unreadable metadata keeps the old pooling
-  behaviour rather than guessing.
+  and `--mosaic` still win — including when they come from a saved `--config`
+  file, which the first version silently overrode — and unreadable metadata
+  keeps the old pooling behaviour rather than guessing, now *saying so*
+  instead of pooling without a word. The prediction no longer depends on
+  astropy's IERS tables (see Fixed), so a source checkout and the packaged
+  app choose the same way. The `--combine-sessions` / `--hierarchical` help
+  text, which the GUI shows, describes this instead of "the default".
 - **Per-subfolder stacks are combined with rotation-aware registration.** The
   hierarchical combine registered each stack against the first with a pure
   (dy, dx) translation, which cannot represent rotation at all — so on the
@@ -130,7 +212,22 @@ match the `VERSION` file and `v*` git tags.
   diluted by a shallow one, and taking the deepest stack as the reference
   grid rather than whichever subfolder sorted first. A failure now stops with
   the per-target stacks kept on disk and a pointer at `--merge`, instead of
-  falling back to producing the smeared composite this replaces.
+  falling back to producing the smeared composite this replaces. The combined
+  output now carries the *reference* stack's own integration time and dates
+  plus `RAWSTACK=True`, so it can be fed into `--merge` or `--transient-detect`
+  — previously it lost every aggregate and was not marked linear, silently.
+  Choosing the reference grid reads header metadata rather than loading every
+  stack's pixels to read one integer.
+- **`--uncertainty-realizations` and `--transient-threshold` reject nonsense.**
+  Fewer than 2 realizations has no spread to measure (it used to be clamped to
+  2 without a word), and a threshold of 0 or below admits every pixel and
+  reports the 500 noisiest as detections.
+- **ZOGY is ~3.4× faster on the Origin's frame size.** The 1096-px axis is
+  8 × 137, which drops pocketfft onto its slow Bluestein path; frames are now
+  padded to an FFT-friendly size (which also moves the FFT's circular
+  wraparound out into cropped padding) and intermediates are released as soon
+  as they are consumed. `S_corr` is unchanged to 2e-5σ in the interior, and
+  detection is a single pass rather than one full-frame scan per candidate.
 
 ### Fixed
 
@@ -142,7 +239,48 @@ match the `VERSION` file and `v*` git tags.
   it alone. A globular cluster stacked from the same directory silently
   skipped its sky-residual correction because a different object wanted that,
   with no log line to say so. Each target is now advised from the settings
-  you actually passed.
+  you actually passed. The reset also removes attributes a target *created*
+  (a measured photon-transfer gain, an originvision defect flag) — the same
+  leak one layer further out, which would have handed a calibration-less
+  target the previous target's gain.
+- **The packaged app and a source checkout no longer stack the same directory
+  differently.** `packaging/originstack.spec` strips astropy's IERS tables, but
+  the new rotation prediction called `Time.sidereal_time("apparent")`, which
+  needs them. In the exe it raised `FileNotFoundError`, a fail-soft `except`
+  turned that into `None`, and the exe silently always pooled while a checkout
+  split. Sidereal time is now closed-form (agrees with astropy to 0.0024°
+  against a 3° threshold), and `altaz` falls back to it when astropy or its
+  tables are missing — which is also why `--photometry`'s airmass term and
+  `--fix-atmospheric-dispersion`'s zenith angle silently vanished in the exe.
+  astropy is also told never to reach for the network mid-run.
+- **`observing_geometry` handles Celestron Origin timestamps.** `astropy`'s
+  `Time` rejects `2026-08-31T20:40:35-0700`, which is exactly what an Origin
+  writes to `DATE-OBS` and `info.json`, so airmass, zenith angle and
+  parallactic angle all returned `None`. `--photometry` silently lost its
+  airmass extinction term (absorbed into the zero point — a real photometric
+  error, not a missing nicety), so zero points may shift once it is applied.
+  Offsets are converted to UTC, not stripped: discarding `-0700` is seven hours
+  of Earth rotation.
+- **Local contrast no longer carves a dark collar around bright stars.**
+  Blurring at the enhancement scales smears a star's core outward, so just
+  beyond the protected core the blurred luminance far exceeds the original and
+  the enhancement subtracted real nebulosity: 6.1% mean darkening in an
+  r = 8–22 px annulus on a real stack (14.2% worst). The detail source is now
+  clipped at the 99th percentile — 0.5% / 1.8% — keeping ~81% of the contrast
+  gain away from stars. **This changes every default output** (local contrast
+  is on by default), so a re-stack will differ visibly around bright stars
+  from an earlier one.
+- **`--uncertainty-propagate` no longer overwrites real sidecars with noise.**
+  The quieted realizations left `--aberration-report`, `--export-masks`,
+  `--keep-intermediates` and the comet sidecars enabled, so each was rewritten
+  once per realization under a swallowed stdout and the file left on disk was
+  the *last noise realization*. `--denoise-strength-calibrate` is also now off
+  during realizations (it was K × 9 extra full-image denoises).
+- **`--transient-detect` catalogues get RA/Dec.** A bare `WCS(header)` on the
+  `(3, H, W)` cube is 3-axis, still passes `has_celestial`, then fails on 2-D
+  pixels — blanking every row of the one column that makes a candidate
+  checkable against MPC/TNS/VSX. It is built with `naxis=2`, and a failed
+  conversion is now announced instead of swallowed.
 
 ## [2.0.1] - 2026-09-15
 

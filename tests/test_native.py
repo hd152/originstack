@@ -294,39 +294,6 @@ def test_match_rigid_unknown_rotation_matches_numpy_end_to_end(theta, tx, ty, se
     np.testing.assert_allclose(got.params, ref.params, atol=1e-6)
 
 
-def test_dct2_ortho_matches_scipy():
-    scipy_fft = pytest.importorskip("scipy.fft")
-    rng = np.random.default_rng(5)
-    x = rng.uniform(0, 1000, (8, 8))
-    ref = scipy_fft.dctn(x, axes=(0, 1), norm='ortho')
-    got = native.dct2_ortho_native(np.ascontiguousarray(x, dtype=np.float64))
-    np.testing.assert_allclose(got, ref, atol=1e-9)
-
-    ref_i = scipy_fft.idctn(ref, axes=(0, 1), norm='ortho')
-    got_i = native.idct2_ortho_native(np.ascontiguousarray(ref, dtype=np.float64))
-    np.testing.assert_allclose(got_i, ref_i, atol=1e-9)
-    np.testing.assert_allclose(got_i, x, atol=1e-9)  # roundtrip recovers input exactly
-
-
-def test_bm3d_denoise_native_matches_numpy():
-    scipy_fft = pytest.importorskip("scipy.fft")
-    rng = np.random.default_rng(11)
-    h, w = 40, 40
-    clean = 500.0 + 200.0 * np.sin(np.mgrid[0:h, 0:w][0] / 5.0)
-    y = clean + rng.normal(0, 15.0, (h, w))
-    sigma_psd = 15.0
-    bs, stride, sw, group_size = 8, 4, 16, 8
-
-    ref = _denoising_mod._bm3d_step12_numpy(
-        y, bs, stride, sw, group_size, sigma_psd, scipy_fft.dctn, scipy_fft.idctn)
-    got = native.bm3d_denoise_native(
-        np.ascontiguousarray(y, dtype=np.float64), bs, stride, sw, group_size, sigma_psd)
-
-    np.testing.assert_allclose(got, ref, atol=1e-6)
-    # Sanity: denoising actually reduces noise vs the raw noisy input.
-    assert np.abs(got - clean).mean() < np.abs(y - clean).mean()
-
-
 def _numpy_sigma_clipped_median(*a, **kw):
     """Force the pure-numpy iterative sigma-clip path."""
     had = _debayer_mod._HAS_NATIVE

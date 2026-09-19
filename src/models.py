@@ -57,10 +57,6 @@ class Config:
                                   # (swept 1.0-2.0 on real data: 1.0-1.25 matches the old RBF's
                                   # large-scale flatness; larger trades flatness for smoothness)
 
-    # BM3D denoising
-    BM3D_SIGMA_PSD = 0.0            # 0 = auto-estimate from sky noise
-    BM3D_SEARCH_WINDOW = 16
-
     # Blind PSF estimation
     BLIND_PSF_ITERATIONS = 8        # RL iterations for PSF update
 

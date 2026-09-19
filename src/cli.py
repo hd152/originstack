@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import logging
+import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -11,14 +15,6 @@ from typing import List, Optional
 import numpy as np
 from astropy.io import fits
 from scipy import ndimage
-
-try:
-    from tqdm import tqdm
-    HAS_TQDM = True
-except Exception:
-    HAS_TQDM = False
-    def tqdm(iterable, **kwargs):
-        return iterable
 
 from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
@@ -29,7 +25,9 @@ from src.health_check import run_health_check
 from src.io_fits import make_master, save_preview_rgb
 from src.models import Config, ProcessingStats
 from src.pipeline import stack_target
-from src.utils import format_time, print_header, safe_print, setup_logging
+from src.utils import disable_astropy_network, format_time, print_header, safe_print, setup_logging
+
+_log = logging.getLogger("originstack")
 
 
 def load_config_file(config_path: str, args: argparse.Namespace) -> list:
@@ -58,12 +56,9 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
                 'estimator': 'rejection_estimator',
             },
             'denoise': {
-                'wavelet': 'denoise',
-                'strength': 'denoise_strength',
-                'adaptive': 'denoise_adaptive',
-                'nlm': 'denoise_nlm',
+                'wavelet': 'denoise_curvelet',
+                'curvelet': 'denoise_curvelet',
                 'bilateral': 'denoise_bilateral',
-                'mmt': 'denoise_mmt',
                 'acdnr': 'denoise_acdnr',
             },
             'stretch': {
@@ -117,12 +112,8 @@ def apply_preset(args: argparse.Namespace) -> list:
     presets = {
         'quick': {
             'stack_method': 'mean',
-            'denoise': True,
-            'denoise_adaptive': False,
-            'denoise_strength': 2.0,
-            'denoise_nlm': False,
+            'denoise_curvelet': True,
             'denoise_bilateral': False,
-            'denoise_mmt': False,
             'denoise_acdnr': False,
             'deconvolve': False,
             'background_extraction': True,
@@ -136,9 +127,7 @@ def apply_preset(args: argparse.Namespace) -> list:
             'stack_method': 'sigma_clip',
             'rejection_sigma': 2.5,
             'rejection_iters': 5,
-            'denoise': True,
-            'denoise_adaptive': True,
-            'denoise_mmt': True,
+            'denoise_curvelet': True,
             'denoise_acdnr': True,
             'deconvolve': True,
             'background_extraction': True,
@@ -152,10 +141,7 @@ def apply_preset(args: argparse.Namespace) -> list:
         'narrowband': {
             'stack_method': 'sigma_clip',
             'rejection_sigma': 2.0,
-            'denoise': True,
-            'denoise_adaptive': True,
-            'denoise_mmt': True,
-            'denoise_mmt_strength': 2.0,
+            'denoise_curvelet': True,
             'denoise_acdnr': True,
             'denoise_acdnr_k': 2.0,
             'deconvolve': False,
@@ -172,8 +158,7 @@ def apply_preset(args: argparse.Namespace) -> list:
         },
         'galaxy': {
             'stack_method': 'sigma_clip',
-            'denoise': True,
-            'denoise_adaptive': True,
+            'denoise_curvelet': True,
             'denoise_bilateral': True,
             'deconvolve': True,
             'background_extraction': True,
@@ -190,8 +175,7 @@ def apply_preset(args: argparse.Namespace) -> list:
         },
         'starfield': {
             'stack_method': 'sigma_clip',
-            'denoise': True,
-            'denoise_adaptive': True,
+            'denoise_curvelet': True,
             'deconvolve': False,
             'background_extraction': True,
             'bg_method': 'dbe',
@@ -205,9 +189,7 @@ def apply_preset(args: argparse.Namespace) -> list:
         'nebula': {
             'stack_method': 'sigma_clip',
             'rejection_sigma': 2.5,
-            'denoise': True,
-            'denoise_adaptive': True,
-            'denoise_mmt': True,
+            'denoise_curvelet': True,
             'denoise_acdnr': True,
             'deconvolve': False,
             'background_extraction': True,
@@ -222,8 +204,7 @@ def apply_preset(args: argparse.Namespace) -> list:
         },
         'planetary': {
             'stack_method': 'mean',
-            'denoise': True,
-            'denoise_adaptive': True,
+            'denoise_curvelet': True,
             'deconvolve': True,
             'background_extraction': False,
             'star_reduce': False,
@@ -236,8 +217,7 @@ def apply_preset(args: argparse.Namespace) -> list:
         },
         'lunar': {
             'stack_method': 'mean',
-            'denoise': True,
-            'denoise_adaptive': True,
+            'denoise_curvelet': True,
             'background_extraction': False,
             'star_reduce': False,
             'local_contrast': True,
@@ -623,59 +603,71 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
 _ROTATION_SPLIT_THRESHOLD_DEG = 3.0
 
 
+# A FITS TIMEZONE value this code can append to DATE-OBS: '-0700', '+05:30'.
+# Anything else ('PDT', 'US/Pacific', '-07:00 (PDT)') would produce an
+# unparseable timestamp and silently disable the rotation prediction.
+_TZ_OFFSET_RE = re.compile(r'[+-]\d{2}:?\d{2}')
+
+
 def _predict_rotation_spread(subdirs: List[str]) -> Optional[float]:
     """Field rotation spanned by a set of sessions, in degrees, or None.
 
-    Reads only metadata -- each session's info.json for the target and site,
-    and the first/last light header for the times -- so this costs nothing
-    and can run before any stacking decision is made.
+    Reads metadata only -- each session's info.json for the target and site,
+    and the first/last light header for the times -- so it can run before any
+    stacking decision is made. Not free, though: ``discover_frames`` opens
+    and classifies every header in each subfolder. The light headers it
+    returns are reused below rather than re-opened.
 
     On an alt-az mount the field rotates as the target tracks, by the change
     in parallactic angle. Pooling frames from sessions at different hour
     angles therefore throws away the corners: measured at 26.8 degrees across
     five real Lagoon sessions, about 860 px of corner displacement and 42% of
     the frame. Returns None when the metadata needed isn't there, which is
-    the caller's cue to keep the previous behaviour rather than guess.
+    the caller's cue to keep the previous behaviour rather than guess; the
+    specific reason goes to the debug log, and the caller says that the
+    prediction could not be made.
     """
-    import math as _math
-
-    from src.frame_discovery import discover_frames
     from src.observing_geometry import parallactic_angle_deg
     from src.session_info import load_session_info
+
+    def _give_up(d, why):
+        _log.debug("rotation prediction unavailable for %s: %s", d, why)
+        return None
 
     angles: List[float] = []
     per_session: List[float] = []
     for d in subdirs:
         si = load_session_info(d)
         if si is None or not si.has_wcs or not si.has_gps:
-            return None
+            return _give_up(d, "no info.json with both a WCS solve and GPS")
         # Use the pipeline's own classifier, not a glob: a session directory
         # holds bias/dark/flat beside the lights, and a flat carries
         # DATE-OBS = '0-00-00T00:00:00', which would poison the time span.
         try:
             found = discover_frames(d)
-            lights = sorted(f.path for f in found.get('light', []))
-        except Exception:
-            return None
+        except Exception as exc:
+            return _give_up(d, f"frame discovery failed ({exc})")
+        lights = sorted(found.get('light', []), key=lambda f: f.path)
         if not lights:
-            return None
-        try:
-            from astropy.io import fits as _fits
-            h0 = _fits.getheader(lights[0])
-            h1 = _fits.getheader(lights[-1])
-        except Exception:
-            return None
-        ra, dec = _math.degrees(si.ra_rad), _math.degrees(si.dec_rad)
+            return _give_up(d, "no light frames")
+        # discover_frames already read these headers (sidecar JSON merged in,
+        # and for RAW/TIFF/XISF too, which fits.getheader could not open).
+        h0, h1 = lights[0].header or {}, lights[-1].header or {}
+
         offset = str(h0.get('TIMEZONE', '') or '').strip()
+        if offset and not _TZ_OFFSET_RE.fullmatch(offset):
+            return _give_up(d, f"TIMEZONE {offset!r} is not a +/-HHMM offset")
+
+        ra, dec = math.degrees(si.ra_rad), math.degrees(si.dec_rad)
         session_angles: List[float] = []
         for hdr in (h0, h1):
             when = hdr.get('DATE-OBS')
             if not when:
-                return None
+                return _give_up(d, "a light frame has no DATE-OBS")
             pa = parallactic_angle_deg(ra, dec, si.latitude, si.longitude,
                                        str(when) + offset)
             if pa is None:
-                return None
+                return _give_up(d, f"could not evaluate DATE-OBS {when!r}{offset}")
             session_angles.append(pa)
         angles.extend(session_angles)
         per_session.append(max(session_angles) - min(session_angles))
@@ -711,24 +703,83 @@ def _want_combine_sessions(args: argparse.Namespace,
     """
     if getattr(args, 'mosaic', False):
         return False
-    explicit = getattr(args, '_explicit_cli_dests', set())
-    if 'combine_sessions' in explicit:
-        return bool(args.combine_sessions)
+    # Read the value, not just membership in _explicit_cli_dests. That set is
+    # built from argv alone, so a --config file saying combine_sessions = true
+    # was silently overridden by the heuristic below on replay. Both flags are
+    # store_true with a False default and nothing else in src/ writes them, so
+    # True can only mean the user asked -- on the command line or in a saved
+    # config. (A saved config also records the *default* False; treating that
+    # as a choice would pin every replayed run to split, so only True counts.)
+    if getattr(args, 'combine_sessions', False):
+        return True
     if getattr(args, 'hierarchical', False):
         return False
 
     if subdirs and len(subdirs) > 1:
         spread = _predict_rotation_spread(subdirs)
-        if spread is not None and spread > _ROTATION_SPLIT_THRESHOLD_DEG:
+        if spread is None:
+            # Without this line a session missing its info.json GPS/WCS gets
+            # the old pooled behaviour with no sign the rotation check ran --
+            # indistinguishable from the check being broken.
+            safe_print("  Could not predict field rotation from session metadata "
+                       "(needs info.json GPS + WCS and light DATE-OBS): pooling "
+                       "into one stack. Pass --hierarchical to stack each "
+                       "session separately.")
+        elif spread > _ROTATION_SPLIT_THRESHOLD_DEG:
             safe_print(f"  Sessions differ by {spread:.1f} deg of field rotation "
                        f"beyond what any one session spans "
                        f"(> {_ROTATION_SPLIT_THRESHOLD_DEG:g} deg): stacking each "
                        f"separately and merging, to avoid cropping the corners")
             return False
-        if spread is not None:
+        else:
             safe_print(f"  Sessions differ by only {spread:.1f} deg of field "
                        f"rotation: pooling into one stack")
     return True
+
+
+def _copy_arg_value(value):
+    """Copy a mutable container; pass anything else through.
+
+    The single home for the copy rule both halves of the per-target reset
+    depend on. Aliasing instead of copying fails silently in two different
+    ways, one per half: alias on snapshot and the first target's appends
+    pollute the baseline itself, so every later restore replays the leak;
+    alias on restore and each target appends to the one list the baseline
+    holds.
+    """
+    return copy.copy(value) if isinstance(value, (list, dict, set)) else value
+
+
+def _snapshot_args(args: argparse.Namespace) -> dict:
+    """Capture the user's baseline settings before any target runs.
+
+    Every target in a multi-target run shares one ``args``, and --auto mutates
+    it in place. Settings the advisor *recomputes* per target self-correct;
+    *accumulating* ones do not. ``skip_step`` is appended to under a "not
+    already present" guard, so a nebula session that adds 'sky_residual'
+    silently made a globular-cluster session in the same directory skip its
+    sky-residual correction too -- and the target that would have logged the
+    append never ran it, so nothing said so.
+    """
+    return {k: _copy_arg_value(v) for k, v in vars(args).items()}
+
+
+def _restore_args(args: argparse.Namespace, baseline: dict) -> None:
+    """Put ``args`` back to ``baseline`` before the next target.
+
+    Deleting attributes the previous target *created* matters as much as
+    restoring the ones it changed. Several are set conditionally and read
+    later, so a stale one leaks exactly like the skip_step bug above, one
+    layer further out: ``_ptc_gain_e_per_adu`` (set only when that target had
+    bias + flat pairs) would hand a calibration-less target the previous
+    target's measured gain for --photometry's Poisson term, and
+    ``_originvision_defect_flagged`` would nudge a clean session into
+    --trail-reject because a previous one was trailed.
+    """
+    for key in set(vars(args)) - set(baseline):
+        delattr(args, key)
+    for key, value in baseline.items():
+        setattr(args, key, _copy_arg_value(value))
 
 
 def process_directory(directory: str, output: str, args: argparse.Namespace):
@@ -786,28 +837,16 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             safe_print("  NOTE: --mosaic implies --plate-solve — enabling automatically")
             args.plate_solve = True
 
-    # Process each target
-    #
-    # --auto mutates args in place, and every target shares this one object,
-    # so without a reset each target inherits the previous one's tuning. Most
-    # settings self-correct because the advisor recomputes them per target,
-    # but accumulating ones do not: skip_step is *appended* to and guarded by
-    # "not already present", so a nebula session that adds 'sky_residual'
-    # silently makes a globular-cluster session in the same directory skip
-    # its sky-residual correction too. Snapshot the user's baseline and
-    # restore it before each target so every session is advised on its own
-    # merits. Mutable containers are copied, not aliased, or restoring would
-    # hand back the same list the previous target appended to.
-    import copy as _copy
-    _baseline = {k: (_copy.copy(v) if isinstance(v, (list, dict, set)) else v)
-                 for k, v in vars(args).items()}
+    # Process each target. Every target shares this one `args`, and --auto
+    # mutates it in place -- see _snapshot_args for why that needs a reset.
+    _baseline = _snapshot_args(args) if len(targets) > 1 else None
 
     produced = []
     for target_idx, (d, outp) in enumerate(targets, 1):
+        if _baseline is not None:
+            _restore_args(args, _baseline)
+
         if len(targets) > 1:
-            for _k, _v in _baseline.items():
-                setattr(args, _k, _copy.copy(_v)
-                        if isinstance(_v, (list, dict, set)) else _v)
             safe_print(f'\n{"=" * 70}')
             safe_print(f'TARGET {target_idx}/{len(targets)}: {os.path.basename(d)}')
             safe_print(f'{"=" * 70}')
@@ -998,10 +1037,9 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 safe_print(f"  Estimated temp storage: {memmap_size_mb:.0f} MB")
                 safe_print(f"  Stack method: {args.stack_method}")
                 safe_print(f"  Background extraction: {'DBE' if getattr(args, 'dbe', True) else 'mesh'}")
-                safe_print(f"  Denoising: wavelet={getattr(args, 'denoise', False)}, "
-                           f"NLM={getattr(args, 'denoise_nlm', False)}, "
+                safe_print(f"  Denoising: curvelet={getattr(args, 'denoise_curvelet', False)}, "
                            f"bilateral={getattr(args, 'denoise_bilateral', False)}, "
-                           f"MMT={getattr(args, 'denoise_mmt', False)}, "
+                           f"aniso={getattr(args, 'denoise_aniso', False)}, "
                            f"ACDNR={getattr(args, 'denoise_acdnr', False)}")
                 safe_print(f"  Deconvolution: {getattr(args, 'deconvolve', False)}")
                 safe_print(f"  Star reduction: {getattr(args, 'star_reduce', False)}")
@@ -1051,15 +1089,22 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             # rotation-agnostic star-pattern matching (src/blind_match.py),
             # then a per-pixel NFRAMES-weighted mean inside each warped
             # footprint, so a deep session is not diluted by a shallow one.
-            from src.merge import load_merge_stack, merge_previous_stacks
+            from src.merge import (
+                apply_merge_header,
+                load_merge_stack,
+                merge_previous_stacks,
+                read_merge_meta,
+                seed_reference_header,
+            )
 
             # Reference grid = the deepest stack: most signal for the star
             # match, and the least resampling of the data that matters most.
             depths = []
             for path in produced:
                 try:
-                    _, meta = load_merge_stack(path)
-                    depths.append(int(meta.get('nframes') or 0))
+                    # Header only: this used to load and float32-copy every
+                    # stack's pixels just to read NFRAMES.
+                    depths.append(int(read_merge_meta(path).get('nframes') or 0))
                 except Exception:
                     depths.append(0)
             ref_idx = int(np.argmax(depths)) if any(depths) else 0
@@ -1084,10 +1129,14 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             out_hdu.data = np.transpose(combined, (2, 0, 1))
             out_hdu.header['NTARGETS'] = len(produced)
             try:
-                from src.merge import apply_merge_header
+                seed_reference_header(out_hdu.header, ref_meta)
                 apply_merge_header(out_hdu.header, merge_info)
-            except Exception:
-                pass
+            except Exception as exc:
+                # The pixels are already merged and correct, so do not fail the
+                # run over metadata -- but do say so. Silently dropping these
+                # left a combined stack that looked fine and could not chain.
+                safe_print(f"  WARNING: could not record merge totals in the header "
+                           f"({exc}); the combined stack will not chain into --merge")
             out_hdu.writeto(output, overwrite=True)
             preview_path = os.path.splitext(output)[0] + '.jpg'
             save_preview_rgb(combined, preview_path,
@@ -1112,6 +1161,38 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     safe_print(f"  Total time: {format_time(total_time)}")
     safe_print("\n  ✓ All processing complete!")
     safe_print(f"{'=' * 70}\n")
+
+
+def _positive_float(text: str) -> float:
+    """argparse type: a strictly positive float.
+
+    A detection threshold of 0 (or negative) admits every pixel, and the run
+    reports its 500 noisiest as detections.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not value > 0.0:
+        raise argparse.ArgumentTypeError(f"must be greater than 0, got {value:g}")
+    return value
+
+
+def _realization_count(text: str) -> int:
+    """argparse type: at least 2 noise realizations.
+
+    One realization has no spread to measure. ``propagate_uncertainty`` used to
+    clamp anything lower to 2 without saying so, so ``--uncertainty-realizations
+    0`` quietly ran two passes.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer") from None
+    if value < 2:
+        raise argparse.ArgumentTypeError(
+            f"need at least 2 realizations to measure a spread, got {value}")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1207,32 +1288,30 @@ def build_parser() -> argparse.ArgumentParser:
                         'narrowband: tuned for Ha/OIII/SII data. '
                         'galaxy: galaxy imaging (GHS stretch, star reduction, bilateral denoise). '
                         'starfield: star fields (no star reduction, minimal processing). '
-                        'nebula: emission/reflection nebula (GHS stretch, MMT+ACDNR denoise). '
+                        'nebula: emission/reflection nebula (GHS stretch, curvelet+ACDNR denoise). '
                         'planetary: planetary targets (no background extraction, deconvolution). '
                         'lunar: lunar surface (linear stretch, no star reduction).')
     g_core.add_argument('--dry-run', action='store_true',
                    help='Discover and classify frames, show calibration info, print effective '
                         'parameters, and estimate resource usage — without processing anything')
     g_post.add_argument('--denoiser',
-                   choices=['auto', 'wavelet', 'mmt', 'bm3d', 'acdnr', 'nlm',
-                            'bilateral', 'aniso', 'curvelet', 'none'],
+                   choices=['auto', 'curvelet', 'wavelet', 'acdnr', 'bilateral', 'aniso',
+                            'none'],
                    default='auto',
                    help='Primary luma denoiser (default: auto — curvelet unless a '
                         'preset/--auto selects otherwise). '
-                        'wavelet: adaptive BayesShrink DWT. '
-                        'mmt: Multiscale Median Transform, robust to Poisson+read noise. '
-                        'bm3d: collaborative filtering, near-optimal but slower. '
-                        'acdnr: contrast-gated sky smoothing. '
-                        'nlm / bilateral / aniso: alternative edge-preserving filters. '
-                        'curvelet: adaptive BayesShrink DWT (like wavelet) but with the '
-                        'per-subband threshold locally reduced wherever a structure-tensor '
-                        'coherence map detects elongated structure (filaments, galaxy arms) '
-                        '-- curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet '
+                        'curvelet: adaptive BayesShrink DWT with the per-subband threshold '
+                        'locally reduced wherever a structure-tensor coherence map detects '
+                        'elongated structure (filaments, galaxy arms) -- '
+                        'curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet '
                         'transform (tune via --config directional_protect_strength, default '
-                        '0.6; 0=identical to wavelet). '
+                        '0.6). '
+                        'wavelet: the same denoiser with that protection turned off '
+                        '(--config directional_protect_strength is ignored). '
+                        'acdnr: contrast-gated sky smoothing. '
+                        'bilateral / aniso: edge-preserving filters. '
                         'none: disable luma denoising. Chroma noise reduction is '
-                        'separate (--no-chroma-nr). Strength via --denoise-strength; '
-                        'fine tuning via --config.')
+                        'separate (--no-chroma-nr). Fine tuning via --config.')
     g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse'],
                    default='off', dest='deconvolve_mode',
                    help='Deconvolution: off (default), rl (Richardson-Lucy), '
@@ -1257,7 +1336,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_post.add_argument('--skip-step', action='append', default=[], metavar='STEP',
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
-                        'wavelet, sky_residual, sky_pedestal, nlm, bilateral, mmt, '
+                        'sky_residual, sky_pedestal, bilateral, '
                         'acdnr, curvelet, deconvolve, star_reduce, local_contrast, '
                         'sky_neutralize, remove_stars')
     g_stack.add_argument('--no-registration', action='store_true')
@@ -1378,13 +1457,19 @@ def build_parser() -> argparse.ArgumentParser:
                         '<output>_sigma_final.fits, plus a confidence (signal-to-noise) '
                         'map to <output>_snr.fits. Works by pushing '
                         '--uncertainty-realizations noise realizations through the real '
-                        'post-processing chain and measuring the per-pixel spread -- exact '
-                        'for the nonlinear denoise/deconvolve steps that have no analytic '
+                        'post-processing chain and measuring the per-pixel spread, which '
+                        'handles the nonlinear denoise/deconvolve steps that have no analytic '
                         'variance propagation, at the cost of that many extra Phase 4 '
-                        'passes. Best paired with --stack-method ivw (a real analytic '
+                        'passes. Steps that estimate their parameters from the data '
+                        '(BayesShrink, sky sigma) see slightly more noise in each '
+                        'realization than in the real image, so the result is biased a few '
+                        'percent low for this pipeline\'s own denoisers; the log warns if '
+                        'the chain adapts strongly enough for that to matter. Memory: holds '
+                        'a copy of the linear stack plus two float64 accumulators (~1.1 GB '
+                        'at 24 MP). Best paired with --stack-method ivw (a real analytic '
                         'per-pixel input sigma); with any other combine the input sigma '
                         'falls back to a spatially flat sky-noise estimate and the log says so.')
-    g_stack.add_argument('--uncertainty-realizations', type=int, default=8, metavar='K',
+    g_stack.add_argument('--uncertainty-realizations', type=_realization_count, default=8, metavar='K',
                    help='Noise realizations for --uncertainty-propagate (default: 8). '
                         'Relative error on the propagated sigma is roughly 1/sqrt(2K) '
                         '(~25%% at 8, ~18%% at 16). Runtime is K extra post-processing passes.')
@@ -1513,7 +1598,7 @@ def build_parser() -> argparse.ArgumentParser:
                         '<output>_scorr.fits (significance in sigma) and '
                         '<output>_transients.csv. Diagnostic only -- never alters the '
                         'stack.')
-    g_post.add_argument('--transient-threshold', type=float, default=5.0, metavar='SIGMA',
+    g_post.add_argument('--transient-threshold', type=_positive_float, default=5.0, metavar='SIGMA',
                    help='Detection threshold for --transient-detect, in sigma of the '
                         'corrected score image (default: 5.0). The score is calibrated '
                         '(source + astrometric noise are propagated), so this is a real '
@@ -1531,22 +1616,9 @@ def build_parser() -> argparse.ArgumentParser:
                         'removed, anything larger is left alone (default: 6). Lower = '
                         'more aggressive/smaller-scale gradient removal, risks eating '
                         'broad nebulosity; higher = leaves more large-scale gradient in.')
-    g_post.add_argument('--denoise-strength', type=float, default=3.0,
-                   help='Wavelet luma denoise threshold factor (default: 3.0)')
-    g_post.add_argument('--denoise-strength-calibrate', action='store_true',
-                   help='Calibrate --denoise-strength via a Noise2Self-style self-'
-                        'supervised sweep on the stack itself instead of the default '
-                        'SNR-based heuristic: masks a small random pixel subset, denoises '
-                        'the rest, scores each candidate strength by how well it predicts '
-                        'the masked pixels\' true values, picks the minimum -- no SNR '
-                        'estimate needed, no ground truth needed. Only affects '
-                        '--denoiser wavelet (the plain, non-adaptive path); no effect on '
-                        'the default adaptive BayesShrink denoiser, which has no single '
-                        'strength parameter to calibrate.')
     g_post.add_argument('--variance-stabilize', action='store_true',
                    help='Apply a generalized Anscombe transform to the luma plane before '
-                        'wavelet denoising (both --denoiser wavelet and the adaptive '
-                        'BayesShrink default), inverting it after. Shot noise on bright '
+                        'wavelet denoising (--denoiser curvelet/wavelet), inverting it after. Shot noise on bright '
                         'pixels is Poisson, not Gaussian; BayesShrink\'s single per-subband '
                         'threshold (from the finest detail subband\'s MAD) implicitly '
                         'assumes uniform Gaussian noise, which the transform makes closer '
@@ -1821,16 +1893,19 @@ def build_parser() -> argparse.ArgumentParser:
     g_sessions.add_argument('--no-resume', action='store_true',
                    help='Ignore any existing checkpoint and start from scratch.')
     g_sessions.add_argument('--combine-sessions', action='store_true',
-                   help='Pool all light frames from every subfolder into a single unified '
-                        'stack instead of stacking each subfolder separately. This is now '
-                        'the default whenever subfolders are found (unless --mosaic or '
-                        '--hierarchical) -- this flag only matters to force it back on '
-                        'after an explicit --hierarchical.')
+                   help='Always pool all light frames from every subfolder into a single '
+                        'unified stack. Without this flag (or --hierarchical) the choice is '
+                        'made from the data: sessions are pooled unless their field rotation '
+                        'differs by more than 3 deg -- predicted from each info.json and the '
+                        'light-frame times -- in which case each is stacked separately and '
+                        'merged, since pooling rotated sessions crops away the corners. '
+                        'Overrides --hierarchical.')
     g_sessions.add_argument('--hierarchical', action='store_true',
-                   help='Opt back into the pre-default behavior: stack each subfolder '
-                        'separately, then combine the per-subfolder stacks by registration '
-                        '(or --mosaic, if given). Has no effect unless the input directory '
-                        'contains subfolders.')
+                   help='Always stack each subfolder separately, then combine the '
+                        'per-subfolder stacks with rotation-aware registration (or '
+                        '--mosaic, if given). Without this flag (or --combine-sessions) the '
+                        'choice is made from the predicted field rotation between sessions. '
+                        'Has no effect unless the input directory contains subfolders.')
     g_sessions.add_argument('--mosaic', action='store_true',
                    help='Stitch per-subfolder stacks into a mosaic via WCS reprojection. '
                         'Requires: pip install reproject and a working plate solver. '
@@ -1899,20 +1974,14 @@ def build_parser() -> argparse.ArgumentParser:
         background_extraction=True,
         # Primary luma denoiser when --denoiser is left at 'auto' and no
         # preset/--auto overrides it: directional (curvelet-inspired)
-        # adaptive wavelet, not plain adaptive_wavelet_denoise. At
-        # protect_strength=0.6 it's a strict superset of plain wavelet's
-        # protection -- isotropic/noise-only regions get the same BayesShrink
-        # threshold either way, coherent/elongated structure (galaxy arms,
-        # nebula filaments) gets a reduced one. Plain wavelet erasing real
-        # galaxy detail (dust lanes, spiral structure -- low-contrast,
-        # sitting close to the noise floor) on a run with no --auto/preset
-        # was reported and reproduced; curvelet is the existing, purpose-built
-        # fix, just not previously the default. `--denoiser wavelet` still
-        # gives the plain (unprotected) behavior explicitly if ever wanted.
-        denoise=False,
+        # adaptive wavelet. At protect_strength=0.6 it's a strict superset
+        # of plain BayesShrink's protection -- isotropic/noise-only regions
+        # get the same threshold either way, coherent/elongated structure
+        # (galaxy arms, nebula filaments) gets a reduced one. Plain
+        # BayesShrink erasing real galaxy detail (dust lanes, spiral
+        # structure) on a run with no --auto/preset was reported and
+        # reproduced. `--denoiser wavelet` gives protection-off explicitly.
         denoise_curvelet=True,
-        auto_denoise_strength=True,
-        denoise_adaptive=True,
         chroma_nr=True,
         star_reduce=True,
         local_contrast=True,
@@ -1923,18 +1992,10 @@ def build_parser() -> argparse.ArgumentParser:
         chroma_nr_sigma=2.0,
         chroma_nr_large_sigma=0.0,
         chroma_nr_large_strength=0.7,
-        denoise_nlm_strength=1.0,
-        denoise_nlm_blend=0.5,
         denoise_bilateral_sigma_color=None,
         denoise_bilateral_sigma_space=3.0,
-        denoise_mmt_levels=4,
-        denoise_mmt_strength=3.0,
         denoise_acdnr_sigma=1.5,
         denoise_acdnr_k=3.0,
-        bm3d_sigma=0.0,
-        bm3d_stride=None,
-        bm3d_search_window=16,
-        bm3d_group_size=8,
         aniso_iterations=20,
         aniso_kappa=30.0,
         aniso_gamma=0.1,
@@ -2000,11 +2061,8 @@ def build_parser() -> argparse.ArgumentParser:
         weight_noise=False,
         # Consolidated under --denoiser / --deconvolve / --export / --debug;
         # individually overridable via --config.
-        denoise_nlm=False,
         denoise_bilateral=False,
-        denoise_mmt=False,
         denoise_acdnr=False,
-        denoise_bm3d=False,
         denoise_aniso=False,
         deconvolve=False,
         deconvolve_tv=False,
@@ -2066,14 +2124,13 @@ def parse_args(argv=None):
     # attributes, so everything downstream is unchanged). ──
     if args.denoiser != 'auto':
         d = args.denoiser
-        args.denoise = (d == 'wavelet')
-        args.denoise_mmt = (d == 'mmt')
-        args.denoise_bm3d = (d == 'bm3d')
+        args.denoise_curvelet = d in ('curvelet', 'wavelet')
+        if d == 'wavelet':
+            # Same denoiser, structure protection off (plain BayesShrink).
+            args.directional_protect_strength = 0.0
         args.denoise_acdnr = (d == 'acdnr')
-        args.denoise_nlm = (d == 'nlm')
         args.denoise_bilateral = (d == 'bilateral')
         args.denoise_aniso = (d == 'aniso')
-        args.denoise_curvelet = (d == 'curvelet')
     args.deconvolve = args.deconvolve_mode in ('rl', 'tv', 'rl-sv', 'sparse')
     args.deconvolve_tv = (args.deconvolve_mode == 'tv')
     args.deconvolve_svpsf = (args.deconvolve_mode == 'rl-sv')
@@ -2086,8 +2143,9 @@ def parse_args(argv=None):
     # --denoiser / --deconvolve wins over preset & auto just like a direct flag.
     if 'denoiser' in _explicit_dests:
         _explicit_dests.update({
-            'denoise', 'denoise_mmt', 'denoise_bm3d', 'denoise_acdnr',
-            'denoise_nlm', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet'})
+            'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet'})
+        if args.denoiser == 'wavelet':
+            _explicit_dests.add('directional_protect_strength')
     if 'deconvolve_mode' in _explicit_dests:
         _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse'})
 
@@ -2192,6 +2250,7 @@ def main():
         run_combine_cli(sys.argv[2:])
         return
 
+    disable_astropy_network()
     args = parse_args()
 
     # Collection maintenance modes: no output path, no stacking.

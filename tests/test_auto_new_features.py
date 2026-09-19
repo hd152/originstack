@@ -7,6 +7,7 @@ drizzle_kernel=magic, hdr_blend_mode=fusion, color_calibrate_method=spcc
 from __future__ import annotations
 
 import argparse
+import math
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -21,9 +22,9 @@ from src.models import Config
 def _args(**overrides):
     base = dict(
         _explicit_cli_dests=set(), stack_method='auto', deconvolve=True,
-        auto_denoise_strength=True, debayer_method='malvar',
-        denoise_mmt=False, denoise_acdnr=False, denoise=False,
-        denoise_curvelet=False, denoise_bm3d=False, deconvolve_tv=False,
+        debayer_method='malvar',
+        denoise_acdnr=False,
+        denoise_curvelet=False, deconvolve_tv=False,
         patch_registration=False, consensus_ref=False, preview_black_sigma=0.0,
         variance_stabilize=False, drizzle_scale=1.0, drizzle_kernel='lanczos3',
         hdr_combine=None, hdr_blend_mode='threshold',
@@ -35,32 +36,24 @@ def _args(**overrides):
 
 class TestCurveletForFilamentTargets:
 
-    def test_emission_nebula_anchor_prefers_curvelet_over_mmt(self):
+    def test_emission_nebula_anchor_prefers_curvelet(self):
         sig = dict(a._TYPE_ANCHORS['emission_nebula'])
         weights = a._blend_weights(sig)
         args = _args()
         a._apply_dynamic_settings(sig, weights, args)
         assert args.denoise_curvelet is True
-        assert args.denoise_mmt is False
 
-    def test_reflection_nebula_anchor_prefers_curvelet_over_mmt(self):
+    def test_reflection_nebula_anchor_prefers_curvelet(self):
         sig = dict(a._TYPE_ANCHORS['reflection_nebula'])
         weights = a._blend_weights(sig)
         args = _args()
         a._apply_dynamic_settings(sig, weights, args)
         assert args.denoise_curvelet is True
-        assert args.denoise_mmt is False
 
-    def test_galaxy_anchor_still_prefers_mmt(self):
-        # Galaxy wasn't switched -- only emission/reflection nebula were.
-        # _apply_dynamic_settings alone can leave denoise_curvelet True too
-        # (a tiny nonzero blend weight on emission/reflection nebula is
-        # enough, since only those two presets define that attr at all --
-        # same pre-existing behavior denoise_mmt itself would have if it
-        # weren't also galaxy's own dominant preset). apply_auto_settings's
-        # real pipeline always runs _apply_quality_settings' rule 14 right
-        # after, which is what actually resolves the conflict -- so exercise
-        # both, matching production usage, rather than half the pipeline.
+    def test_galaxy_anchor_prefers_curvelet_over_acdnr(self):
+        # _apply_dynamic_settings only sets the blended per-preset flags;
+        # apply_auto_settings' rule 14 then resolves curvelet vs ACDNR --
+        # exercise both, matching production usage.
         sig = dict(a._TYPE_ANCHORS['galaxy'])
         weights = a._blend_weights(sig)
         args = _args()
@@ -69,8 +62,8 @@ class TestCurveletForFilamentTargets:
                    'star_count': 20, 'strehl': 0, 'dispersion': 0,
                    'median_ellipticity': 0}
         a._apply_quality_settings(full_sig, args, weights=weights)
-        assert args.denoise_mmt is True
-        assert args.denoise_curvelet is False
+        assert args.denoise_curvelet is True
+        assert args.denoise_acdnr is False
 
     def test_explicit_denoise_curvelet_flag_wins(self):
         sig = dict(a._TYPE_ANCHORS['galaxy'])
@@ -150,13 +143,6 @@ class TestGalaxySkipsSkyResidual:
 
 class TestVarianceStabilizeRule:
 
-    def test_enabled_when_wavelet_primary(self):
-        args = _args(denoise=True)
-        a._apply_quality_settings({'n_frames': 10, 'snr': 10, 'fwhm': 2.0,
-                                   'star_count': 20, 'strehl': 0, 'dispersion': 0,
-                                   'median_ellipticity': 0}, args)
-        assert args.variance_stabilize is True
-
     def test_enabled_when_curvelet_primary(self):
         args = _args(denoise_curvelet=True)
         a._apply_quality_settings({'n_frames': 10, 'snr': 10, 'fwhm': 2.0,
@@ -164,15 +150,15 @@ class TestVarianceStabilizeRule:
                                    'median_ellipticity': 0}, args)
         assert args.variance_stabilize is True
 
-    def test_not_forced_when_neither_active(self):
-        args = _args(denoise=False, denoise_curvelet=False, denoise_mmt=True)
+    def test_not_forced_when_curvelet_inactive(self):
+        args = _args(denoise_curvelet=False, denoise_acdnr=True)
         a._apply_quality_settings({'n_frames': 10, 'snr': 10, 'fwhm': 2.0,
                                    'star_count': 20, 'strehl': 0, 'dispersion': 0,
                                    'median_ellipticity': 0}, args)
         assert args.variance_stabilize is False
 
     def test_explicit_false_respected(self):
-        args = _args(denoise=True, variance_stabilize=False,
+        args = _args(denoise_curvelet=True, variance_stabilize=False,
                      _explicit_cli_dests={'variance_stabilize'})
         a._apply_quality_settings({'n_frames': 10, 'snr': 10, 'fwhm': 2.0,
                                    'star_count': 20, 'strehl': 0, 'dispersion': 0,
@@ -416,8 +402,11 @@ class TestOptionalFeatureSuggestions:
     """Advice only -- these cost runtime or extra outputs, so nothing here
     may actually mutate args."""
 
-    def _session(self, gps=True, wcs=True):
-        return SimpleNamespace(has_gps=gps, has_wcs=wcs)
+    def _session(self, gps=True, wcs=True, fov_deg=10.0):
+        """A session solve. Defaults to a wide field: the physical sky model
+        declines anything under ~5 degrees, so suggesting it needs one."""
+        rad = None if fov_deg is None else math.radians(fov_deg)
+        return SimpleNamespace(has_gps=gps, has_wcs=wcs, fov_x_rad=rad, fov_y_rad=rad)
 
     def test_extended_target_with_a_session_solve_suggests_the_physical_sky_model(self):
         args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
@@ -432,6 +421,35 @@ class TestOptionalFeatureSuggestions:
             out = a.suggest_optional_features(
                 args, {'emission_nebula': 0.8}, session_info=session)
             assert not any('physical' in s for s in out)
+
+    def test_not_suggested_on_a_telescope_sized_field(self):
+        """The regression: an extended target with full GPS + solve is exactly
+        what gets imaged through a telescope, at ~1 degree -- where the model
+        is measured to fail and declines. Suggesting it there sent users to try
+        a flag that falls straight back to DBE."""
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
+        out = a.suggest_optional_features(
+            args, {'emission_nebula': 0.8}, session_info=self._session(fov_deg=1.2))
+        assert not any('physical' in s for s in out)
+
+    def test_the_field_size_cutoff_matches_the_models_own_gate(self):
+        """One threshold, not two that can drift apart."""
+        from src.sky_model import _MIN_FIELD_OF_VIEW_DEG as gate
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
+        just_under = a.suggest_optional_features(
+            args, {'emission_nebula': 0.8},
+            session_info=self._session(fov_deg=gate - 0.5))
+        at_gate = a.suggest_optional_features(
+            args, {'emission_nebula': 0.8},
+            session_info=self._session(fov_deg=gate + 0.01))
+        assert not any('physical' in s for s in just_under)
+        assert any('physical' in s for s in at_gate)
+
+    def test_an_unreadable_field_size_is_not_suggested(self):
+        args = _args(bg_method='dbe', merge=None, uncertainty_map=False)
+        out = a.suggest_optional_features(
+            args, {'emission_nebula': 0.8}, session_info=self._session(fov_deg=None))
+        assert not any('physical' in s for s in out)
 
     def test_not_suggested_for_a_compact_target(self):
         args = _args(bg_method='dbe', merge=None, uncertainty_map=False)

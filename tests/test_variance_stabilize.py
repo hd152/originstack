@@ -1,6 +1,6 @@
 """Tests for the generalized Anscombe transform variance-stabilization
-pre/post step (--variance-stabilize), used by wavelet_denoise and
-adaptive_wavelet_denoise's luma plane before BayesShrink thresholding.
+pre/post step (--variance-stabilize), used by
+directional_wavelet_denoise's luma plane before BayesShrink thresholding.
 """
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ from src.denoising import (
     _estimate_noise_level_function,
     _generalized_anscombe,
     _inverse_generalized_anscombe,
-    adaptive_wavelet_denoise,
-    wavelet_denoise,
+    directional_wavelet_denoise,
 )
 
 
@@ -86,22 +85,16 @@ class TestWaveletDenoiseVarianceStabilize:
         img = np.stack([base] * 3, axis=-1) + rng.normal(0, 8.0, (h, w, 3))
         return np.clip(img, 0, None).astype(np.float32)
 
-    def test_wavelet_denoise_runs_with_stabilize(self):
-        img = self._synthetic_image()
-        out = wavelet_denoise(img, variance_stabilize=True)
-        assert out.shape == img.shape
-        assert np.all(np.isfinite(out))
-
-    def test_adaptive_wavelet_denoise_runs_with_stabilize(self):
+    def test_directional_wavelet_denoise_runs_with_stabilize(self):
         img = self._synthetic_image(seed=1)
-        out = adaptive_wavelet_denoise(img, variance_stabilize=True)
+        out = directional_wavelet_denoise(img, variance_stabilize=True)
         assert out.shape == img.shape
         assert np.all(np.isfinite(out))
 
     def test_stabilize_reduces_noise_comparably_to_default(self):
         img = self._synthetic_image(seed=2)
-        out_default = adaptive_wavelet_denoise(img, variance_stabilize=False)
-        out_stab = adaptive_wavelet_denoise(img, variance_stabilize=True)
+        out_default = directional_wavelet_denoise(img, variance_stabilize=False)
+        out_stab = directional_wavelet_denoise(img, variance_stabilize=True)
         # Both should meaningfully reduce noise vs. the raw image in a flat
         # background corner (away from the synthetic "star").
         raw_std = float(np.std(img[:10, :10, 0]))

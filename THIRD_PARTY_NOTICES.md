@@ -31,7 +31,6 @@ without it (see `CLAUDE.md`'s "Optional dependencies" section).
 | [onnxruntime](https://onnxruntime.ai/) | `--originvision` inference **fallback** for a source checkout without `astro_native` built (the packaged app uses the native Rust `tract` kernel instead — see the Rust section) | MIT |
 | [CuPy](https://cupy.dev/) | GPU acceleration (`--use-gpu`) | MIT |
 | [Cython](https://cython.org/) | Build dependency for some CuPy wheels (`requirements-gpu.txt`) | Apache-2.0 |
-| **[bm3d](https://webpages.tuni.fi/foi/GCF-BM3D/)** | `--denoiser bm3d` collaborative-filter denoising | **Free for non-commercial use only** (Tampere University) — this is *not* a permissive open-source license like the others on this page. It is optional and not installed by default; if you enable `--denoiser bm3d` in a commercial context, you are responsible for obtaining your own license from the rights holder. Every other denoiser in this pipeline (wavelet, MMT, ACDNR, NLM, bilateral, aniso) has no such restriction. |
 
 ## Rust — native extension build dependencies
 

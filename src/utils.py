@@ -215,6 +215,64 @@ def get_memory_usage_mb() -> float:
     return 0.0
 
 
+def disable_astropy_network() -> None:
+    """Stop astropy silently reaching for the network mid-run.
+
+    astropy refreshes its IERS earth-orientation table over HTTP when the
+    bundled one looks stale. That turns an offline or firewalled machine into
+    a multi-second socket timeout per mirror, inside functions that then fail
+    soft and report nothing -- and it fires during a stack, not at startup.
+    This project's ephemeris math is closed-form precisely to avoid depending
+    on those tables (see ``sky_model``), so there is nothing to refresh.
+
+    No-op when astropy is absent.
+    """
+    try:
+        from astropy.utils import iers
+        iers.conf.auto_download = False
+    except Exception:
+        pass
+
+
+def parse_timestamp(when: str):
+    """Parse an ISO-8601-ish timestamp to a naive UTC ``datetime``, or None.
+
+    **Offsets are converted, never stripped.** A Celestron Origin
+    ``info.json`` and its FITS headers stamp local time with a numeric offset
+    (``2026-08-31T20:40:32-0700``). Failing to parse that at all silently
+    disables every feature keyed on observation time; merely discarding the
+    ``-0700`` puts the timestamp seven hours out, which moves the moon most of
+    the way across the sky. A naive timestamp is assumed to already be UTC.
+
+    Serves both ``sky_model.julian_date`` and ``observing_geometry``, which
+    each carried their own copy of this normalisation.
+    """
+    import datetime as _dt
+
+    if not when:
+        return None
+    text = str(when).strip()
+
+    dt = None
+    # fromisoformat covers 'Z', '+HH:MM' and (3.11+) '+HHMM' in one shot.
+    try:
+        dt = _dt.datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        naive = text.replace('Z', '').replace('T', ' ')
+        for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S',
+                    '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                dt = _dt.datetime.strptime(naive, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def header_get_first(header, keys, cast=None, default=None):
     """First present, non-None value among ``keys`` in a FITS-header-like
     mapping (anything with ``.get``). With ``cast`` given, the value is run

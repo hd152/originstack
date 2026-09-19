@@ -12,10 +12,13 @@ The mode is now predicted from metadata alone, which is free and happens
 before any stacking. These tests cover the decision, not the stacking.
 """
 
+import io
 import json
 import os
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
+from unittest import mock
 
 import numpy as np
 
@@ -30,7 +33,7 @@ except Exception:
 
 def _write_session(root, name, times, ra_deg=271.0, dec_deg=-24.36,
                    lat=33.83, lon=-117.79, with_gps=True, with_wcs=True,
-                   include_flat=False):
+                   include_flat=False, tz='-0700'):
     """A minimal session directory: info.json plus dated light frames."""
     d = os.path.join(root, name)
     os.makedirs(d, exist_ok=True)
@@ -55,7 +58,7 @@ def _write_session(root, name, times, ra_deg=271.0, dec_deg=-24.36,
     for i, t in enumerate(times):
         hdu = fits.PrimaryHDU(data=np.ones((8, 8), dtype=np.float32))
         hdu.header['DATE-OBS'] = t
-        hdu.header['TIMEZONE'] = '-0700'
+        hdu.header['TIMEZONE'] = tz
         hdu.header['EXPTIME'] = 30.0
         hdu.writeto(os.path.join(d, f'Light{i:04d}.fits'), overwrite=True)
 
@@ -133,6 +136,47 @@ class TestPredictRotationSpread(unittest.TestCase):
         os.makedirs(d, exist_ok=True)
         self.assertIsNone(_predict_rotation_spread([d]))
 
+    def test_works_without_astropys_iers_tables(self):
+        """Regression: the packaged exe strips astropy_iers_data, so
+        Time.sidereal_time("apparent") raised FileNotFoundError('finals2000A.all')
+        there -- swallowed by a fail-soft except, so the prediction returned
+        None and the exe silently always pooled while a source checkout
+        split. Same directory, two different stacks. Sidereal time is now
+        closed-form, so a broken astropy must not matter."""
+        a = _write_session(self.root, 'a',
+                           ['2026-08-31T20:40:35', '2026-08-31T21:10:35'])
+        b = _write_session(self.root, 'b',
+                           ['2026-08-31T23:40:35', '2026-09-01T00:10:35'])
+        expected = _predict_rotation_spread([a, b])
+        self.assertIsNotNone(expected)
+
+        from astropy.time import Time
+        with mock.patch.object(Time, 'sidereal_time',
+                               side_effect=FileNotFoundError('finals2000A.all')):
+            frozen = _predict_rotation_spread([a, b])
+
+        self.assertIsNotNone(frozen, "must not depend on the IERS tables")
+        self.assertAlmostEqual(frozen, expected, places=6)
+
+    def test_a_timezone_that_is_not_an_offset_is_declined_not_misparsed(self):
+        """'PDT' appended to DATE-OBS is unparseable; the prediction used to
+        vanish silently. Now it is declined, and the reason is logged."""
+        d = _write_session(self.root, 'badtz',
+                           ['2026-08-31T20:40:35', '2026-08-31T20:50:35'], tz='PDT')
+        with self.assertLogs('originstack', level='DEBUG') as logs:
+            self.assertIsNone(_predict_rotation_spread([d]))
+        self.assertTrue(any('TIMEZONE' in m for m in logs.output))
+
+    def test_a_colon_separated_offset_is_accepted(self):
+        d = _write_session(self.root, 'colon',
+                           ['2026-08-31T20:40:35', '2026-08-31T20:50:35'], tz='-07:00')
+        self.assertIsNotNone(_predict_rotation_spread([d]))
+
+    def test_a_missing_timezone_is_read_as_utc(self):
+        d = _write_session(self.root, 'notz',
+                           ['2026-08-31T20:40:35', '2026-08-31T20:50:35'], tz='')
+        self.assertIsNotNone(_predict_rotation_spread([d]))
+
 
 @unittest.skipUnless(HAS_ASTROPY, "astropy required")
 class TestModeSelection(unittest.TestCase):
@@ -183,6 +227,38 @@ class TestModeSelection(unittest.TestCase):
 
     def test_a_single_subfolder_is_pooled(self):
         self.assertTrue(_want_combine_sessions(_args(), self.far[:1]))
+
+    def test_a_saved_config_that_asks_for_pooling_is_honoured(self):
+        """Regression: a --config file recording combine_sessions = true was
+        silently overridden by the rotation heuristic on replay, because the
+        explicit-flag check only consulted _explicit_cli_dests, which is built
+        from argv alone. The value is what matters, wherever it came from."""
+        args = _args(combine_sessions=True)          # no _explicit_cli_dests entry
+        self.assertTrue(_want_combine_sessions(args, self.far))
+
+    def test_the_default_false_does_not_pin_a_replayed_run_to_splitting(self):
+        """A saved config also records the *default* False. Only True is a
+        choice; False must still leave the decision to the data."""
+        self.assertTrue(_want_combine_sessions(_args(combine_sessions=False), self.close))
+        self.assertFalse(_want_combine_sessions(_args(combine_sessions=False), self.far))
+
+    def test_a_failed_prediction_says_so(self):
+        """Pooling on unreadable metadata is right, but doing it silently is
+        indistinguishable from the rotation check being broken."""
+        bare = os.path.join(self.root, 'bare')
+        os.makedirs(bare, exist_ok=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertTrue(_want_combine_sessions(_args(), [bare, bare]))
+        self.assertIn('Could not predict field rotation', buf.getvalue())
+        self.assertIn('--hierarchical', buf.getvalue(),
+                      "the message should say how to override it")
+
+    def test_a_successful_prediction_states_the_measured_spread(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _want_combine_sessions(_args(), self.far)
+        self.assertIn('deg of field rotation', buf.getvalue())
 
 
 if __name__ == '__main__':

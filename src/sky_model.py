@@ -59,12 +59,14 @@ References:
 
 from __future__ import annotations
 
-import datetime as _dt
 import logging
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+from src.utils import parse_timestamp
 
 _log = logging.getLogger("originstack")
 
@@ -88,28 +90,9 @@ def julian_date(when: str) -> Optional[float]:
     hours out, which moves the moon most of the way across the sky. Offsets
     are converted to UTC; a naive timestamp is assumed to already be UTC.
     """
-    if not when:
-        return None
-    text = str(when).strip()
-
-    dt = None
-    # fromisoformat covers 'Z', '+HH:MM' and (3.11+) '+HHMM' in one shot.
-    try:
-        dt = _dt.datetime.fromisoformat(text.replace('Z', '+00:00'))
-    except ValueError:
-        naive = text.replace('Z', '').replace('T', ' ')
-        for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S',
-                    '%Y-%m-%d %H:%M', '%Y-%m-%d'):
-            try:
-                dt = _dt.datetime.strptime(naive, fmt)
-                break
-            except ValueError:
-                continue
+    dt = parse_timestamp(when)
     if dt is None:
         return None
-
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
 
     y, m = dt.year, dt.month
     if m <= 2:
@@ -306,9 +289,14 @@ def moon_phase_angle_deg(jd: float) -> float:
     return float(180.0 - float(elong))
 
 
+def _illuminated_fraction(phase_angle_deg: float) -> float:
+    """Illuminated fraction of the lunar disc for a given phase angle."""
+    return float((1.0 + math.cos(phase_angle_deg * _DEG)) / 2.0)
+
+
 def moon_illuminated_fraction(jd: float) -> float:
     """Fraction of the lunar disc illuminated, 0 (new) to 1 (full)."""
-    return float((1.0 + math.cos(moon_phase_angle_deg(jd) * _DEG)) / 2.0)
+    return _illuminated_fraction(moon_phase_angle_deg(jd))
 
 
 # ---------------------------------------------------------------------------
@@ -415,19 +403,21 @@ def light_pollution_brightness(az_deg, zenith_angle_deg_arr,
 # Basis construction and fitting
 # ---------------------------------------------------------------------------
 
+@dataclass
 class SkyGeometry:
-    """Per-pixel observing geometry for one frame."""
+    """Per-pixel observing geometry for one frame.
 
-    def __init__(self, zenith_angle, azimuth, moon_sep, moon_alt,
-                 helio_lon, ecl_lat, jd, phase_angle):
-        self.zenith_angle = zenith_angle
-        self.azimuth = azimuth
-        self.moon_sep = moon_sep
-        self.moon_alt = moon_alt
-        self.helio_lon = helio_lon
-        self.ecl_lat = ecl_lat
-        self.jd = jd
-        self.phase_angle = phase_angle
+    The array fields are ``(H, W)`` in degrees; ``moon_alt`` and
+    ``phase_angle`` are scalars for the frame.
+    """
+    zenith_angle: np.ndarray
+    azimuth: np.ndarray
+    moon_sep: np.ndarray
+    moon_alt: float
+    helio_lon: np.ndarray
+    ecl_lat: np.ndarray
+    jd: float
+    phase_angle: float
 
 
 def build_geometry(wcs, shape: Tuple[int, int], lat_deg: float, lon_deg: float,
@@ -478,9 +468,24 @@ def build_geometry(wcs, shape: Tuple[int, int], lat_deg: float, lon_deg: float,
     def _up(arr):
         return _bilinear_upsample(arr, ys, xs, h, w)
 
+    def _up_angle(deg):
+        """Upsample a quantity that lives on a circle (``% 360``).
+
+        Interpolating the raw values across the 360 -> 0 seam ramps the long
+        way round: a coarse row of ``359.5, 0.2`` becomes ``359.5, 263.7,
+        167.9, 72.1, 0.2`` -- up to half the frame off by ~180 deg, which then
+        feeds ``cos(az - source_az)`` in the light-pollution term. It is
+        reachable on exactly the fields the size gate admits: a field pointed
+        near due north straddles az = 0 by construction, and one near the
+        anti-solar point straddles helio_lon = 0. Interpolate the unit vector
+        instead and recombine.
+        """
+        rad = np.asarray(deg, dtype=np.float64) * _DEG
+        return np.degrees(np.arctan2(_up(np.sin(rad)), _up(np.cos(rad)))) % 360.0
+
     return SkyGeometry(
-        zenith_angle=_up(zenith), azimuth=_up(az), moon_sep=_up(moon_sep),
-        moon_alt=float(moon_alt[0]), helio_lon=_up(helio_lon),
+        zenith_angle=_up(zenith), azimuth=_up_angle(az), moon_sep=_up(moon_sep),
+        moon_alt=float(moon_alt[0]), helio_lon=_up_angle(helio_lon),
         ecl_lat=_up(ecl_lat), jd=jd, phase_angle=moon_phase_angle_deg(jd))
 
 
@@ -503,58 +508,13 @@ def _bilinear_upsample(values: np.ndarray, ys: np.ndarray, xs: np.ndarray,
             + ty * ((1 - tx) * v10 + tx * v11))
 
 
-def amp_glow_basis(shape: Tuple[int, int],
-                   decay_frac: float = 0.28) -> Tuple[List[np.ndarray], List[str]]:
-    """Per-corner exponential glow, in **sensor** coordinates.
-
-    Amp glow is electroluminescence from readout electronics at the edge of
-    the sensor: brightest in one corner, falling off exponentially, and fixed
-    to the detector rather than the sky. One term per corner lets the
-    non-negative fit pick whichever corner (or pair) the camera actually
-    glows from, without being told.
-
-    Note what is deliberately **absent** here: a vignetting term. Vignetting
-    is radially symmetric about the optical axis, and observers centre their
-    targets, so a free centred radial term is nebula-shaped -- it would
-    reopen exactly the failure this module exists to prevent, and
-    ``_corner_gradient`` cannot catch it because a radial pattern leaves all
-    four corners equal by construction. It is also largely redundant:
-    ``frame_processor`` already divides by the master flat when one exists,
-    which is what a flat is for. Measuring residual vignetting honestly needs
-    the same star compared at different sensor positions across a dithered
-    session -- see ``fit_sky_model_multi`` -- not a shape fitted to one
-    stacked background. Corner terms carry none of that risk: they peak at an
-    edge, so they cannot absorb a centred object.
-    """
-    h, w = int(shape[0]), int(shape[1])
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
-    ny, nx = yy / max(h - 1, 1), xx / max(w - 1, 1)
-    scale = max(float(decay_frac), 1e-3)
-
-    terms, names = [], []
-    for cy, cx, label in ((0.0, 0.0, 'tl'), (0.0, 1.0, 'tr'),
-                          (1.0, 0.0, 'bl'), (1.0, 1.0, 'br')):
-        dist = np.hypot(ny - cy, nx - cx)
-        terms.append(np.exp(-dist / scale))
-        names.append(f'amp_glow_{label}')
-    return terms, names
-
-
 def build_basis(geom: SkyGeometry,
-                lp_source_az_deg: float = 0.0,
-                instrumental: bool = False,
-                always_moonlight: bool = False) -> Tuple[np.ndarray, List[str]]:
+                lp_source_az_deg: float = 0.0) -> Tuple[np.ndarray, List[str]]:
     """Stack the physical component maps into a design matrix.
 
     Returns ``(basis, names)`` where ``basis`` is ``(n_terms, H, W)``. Each
     term is normalised to unit mean so the fitted coefficients are directly
     comparable as "how much of the gradient is this component".
-
-    ``instrumental`` adds detector-fixed terms (see ``amp_glow_basis``). They
-    are off by default because they are only separable from the sky terms
-    when the sky geometry actually moves between exposures -- on a single
-    stacked frame both are just smooth surfaces and adding more of them only
-    makes an already ill-conditioned fit worse.
     """
     terms, names = [], []
 
@@ -566,14 +526,9 @@ def build_basis(geom: SkyGeometry,
 
     moon = moonlight_brightness(geom.moon_sep, geom.moon_alt,
                                 geom.zenith_angle, geom.phase_angle)
-    if np.ptp(moon) > 0 or always_moonlight:
-        # A single frame drops the term entirely when the moon is down, since
-        # an all-zero column is dead weight in the fit. A *session* cannot:
-        # a real Lagoon run spans moonrise (-4.8 deg to +6.2 deg over 56
-        # minutes), so the term is absent early and present late, and a joint
-        # fit needs the same columns in every frame. Keeping a zero column is
-        # the honest representation -- there genuinely was no moonlight then
-        # -- and NNLS handles it without complaint.
+    if np.ptp(moon) > 0:
+        # Dropped entirely when the moon is down: an all-zero column is dead
+        # weight in the fit.
         terms.append(moon)
         names.append('moonlight')
 
@@ -583,11 +538,6 @@ def build_basis(geom: SkyGeometry,
     terms.append(light_pollution_brightness(geom.azimuth, geom.zenith_angle,
                                             lp_source_az_deg))
     names.append('light_pollution')
-
-    if instrumental:
-        inst_terms, inst_names = amp_glow_basis(geom.zenith_angle.shape)
-        terms.extend(inst_terms)
-        names.extend(inst_names)
 
     basis = np.stack([_unit_mean(t) for t in terms], axis=0)
     return basis, names
@@ -599,9 +549,31 @@ def _unit_mean(arr: np.ndarray) -> np.ndarray:
     return arr / mean if abs(mean) > 1e-12 else arr
 
 
+# The fit has only ~6 free parameters, so a few hundred thousand samples pin
+# them down completely; the remaining pixels of a full-resolution frame add
+# noise averaging the fit does not need, at a cost that was measured at 3 s per
+# channel (9 NNLS solves per image) plus a ~288 MB fancy-indexed copy of the
+# design matrix per solve. Measured on a synthetic gradient: fitting on a
+# 1-in-8 sample was 65x faster and the dominant coefficient agreed to 0.25%.
+_FIT_MAX_SAMPLES = 100_000
+
+
+def _fit_stride(shape: Tuple[int, int], max_samples: int = _FIT_MAX_SAMPLES) -> int:
+    """Pixel stride that brings an ``(h, w)`` frame down to ~``max_samples``.
+
+    1 (no decimation) for anything already small enough, so tests and small
+    frames behave exactly as before.
+    """
+    npix = int(shape[0]) * int(shape[1])
+    if max_samples <= 0 or npix <= max_samples:
+        return 1
+    return max(1, int(math.ceil(math.sqrt(npix / float(max_samples)))))
+
+
 def fit_sky_model(channel: np.ndarray, basis: np.ndarray,
                   mask: Optional[np.ndarray] = None,
-                  n_iter: int = 3, clip_sigma: float = 2.5
+                  n_iter: int = 3, clip_sigma: float = 2.5,
+                  max_samples: int = _FIT_MAX_SAMPLES
                   ) -> Tuple[np.ndarray, np.ndarray]:
     """Robust least-squares fit of ``channel`` to the physical basis.
 
@@ -623,14 +595,24 @@ def fit_sky_model(channel: np.ndarray, basis: np.ndarray,
     so only the high tail is rejected. Symmetric clipping would drag the
     fitted background up into the signal and subtract real flux.
 
+    The coefficients are fit on a strided sample of at most ``max_samples``
+    pixels (see ``_FIT_MAX_SAMPLES``); the returned model is full-resolution.
+
     Returns ``(coefficients, model_image)``.
     """
-    flat_basis = basis.reshape(basis.shape[0], -1).T      # (npix, nterms)
-    flat_data = np.asarray(channel, dtype=np.float64).ravel()
+    channel = np.asarray(channel)
+    stride = _fit_stride(channel.shape, max_samples)
+    sub = (slice(None), slice(None, None, stride), slice(None, None, stride))
+    fit_basis = basis[sub]                                # (nterms, h', w')
+    fit_data = channel[::stride, ::stride]
+    fit_mask = None if mask is None else np.asarray(mask, dtype=bool)[::stride, ::stride]
+
+    flat_basis = fit_basis.reshape(fit_basis.shape[0], -1).T   # (npix', nterms)
+    flat_data = np.asarray(fit_data, dtype=np.float64).ravel()
 
     good = np.isfinite(flat_data)
-    if mask is not None:
-        good &= ~np.asarray(mask, dtype=bool).ravel()
+    if fit_mask is not None:
+        good &= ~fit_mask.ravel()
     if good.sum() < flat_basis.shape[1] * 4:
         raise ValueError("not enough unmasked background pixels to fit the sky model")
 
@@ -645,20 +627,33 @@ def fit_sky_model(channel: np.ndarray, basis: np.ndarray,
         if good.sum() < flat_basis.shape[1] * 4:
             break
 
-    model = (flat_basis @ coeffs).reshape(channel.shape)
+    # The model is evaluated at full resolution from the full basis: the fit
+    # only ever needs the coefficients, but the subtraction needs every pixel.
+    model = np.tensordot(coeffs, basis, axes=(0, 0))
     return coeffs, model
 
 
 def _nnls(design: np.ndarray, data: np.ndarray) -> np.ndarray:
-    """Non-negative least squares, with a plain-lstsq clamp as a fallback."""
-    try:
-        from scipy.optimize import nnls
-        coeffs, _ = nnls(design, data)
-        return np.asarray(coeffs, dtype=np.float64)
-    except Exception as exc:                              # pragma: no cover
-        _log.debug("nnls unavailable (%s); clamping an unbounded fit", exc)
-        coeffs, *_ = np.linalg.lstsq(design, data, rcond=None)
-        return np.maximum(np.asarray(coeffs, dtype=np.float64), 0.0)
+    """Non-negative least squares.
+
+    Deliberately has **no fallback**. This used to catch every exception --
+    including scipy's own ``RuntimeError`` on failing to converge, not just a
+    missing scipy -- and quietly substitute a clamped unbounded ``lstsq``. But
+    the non-negativity constraint is the entire reason this model cannot eat a
+    nebula: across a real field the component maps are nearly collinear
+    (condition ~1e5), and an unbounded fit builds an interior maximum out of
+    large cancelling coefficients, measured at -25% signal preservation.
+    Clamping *after* the fact does not restore the constraint. The one
+    situation that triggered the substitution was therefore exactly the one
+    where the answer could not be trusted, and it was logged at debug level
+    only. A failure now propagates, and ``remove_physical_sky`` turns it into
+    "decline and let DBE run", which is what every other way of not helping
+    already does. scipy is a hard dependency of this project, so a missing
+    import is not a case worth degrading through either.
+    """
+    from scipy.optimize import nnls
+    coeffs, _ = nnls(design, data)
+    return np.asarray(coeffs, dtype=np.float64)
 
 
 # Above this condition number the component maps are too nearly parallel for
@@ -718,97 +713,20 @@ def _corner_gradient(image: np.ndarray) -> float:
     return max(corners) - min(corners)
 
 
-def basis_condition(basis: np.ndarray) -> float:
-    """Condition number of the design matrix, for attribution gating."""
-    flat = basis.reshape(basis.shape[0], -1).T
+def basis_condition(basis: np.ndarray, max_samples: int = _FIT_MAX_SAMPLES) -> float:
+    """Condition number of the design matrix, for attribution gating.
+
+    Computed on the same strided sample the fit uses. An SVD of the full
+    ``(H*W, n_terms)`` matrix costs a fancy-indexed copy and a couple of
+    seconds at 6 MP to produce a number that is only ever compared to
+    ``_ATTRIBUTION_MAX_COND``, and the maps are smooth, so a sample gives it.
+    """
+    stride = _fit_stride(basis.shape[1:], max_samples)
+    flat = basis[:, ::stride, ::stride].reshape(basis.shape[0], -1).T
     try:
         return float(np.linalg.cond(flat))
     except Exception:                                     # pragma: no cover
         return float('inf')
-
-
-def fit_sky_model_multi(channels: Sequence[np.ndarray],
-                        geometries: Sequence['SkyGeometry'],
-                        masks: Optional[Sequence[Optional[np.ndarray]]] = None,
-                        lp_source_az_deg: float = 0.0,
-                        n_iter: int = 3, clip_sigma: float = 2.5):
-    """Joint fit across several exposures, separating sky from detector.
-
-    This is what makes the decomposition identifiable. On a single frame the
-    sky components are nearly collinear (condition ~1e5 at a 1-degree field),
-    so the split between them is meaningless -- and a detector-fixed term is
-    indistinguishable from a sky one, because both are just smooth surfaces.
-
-    Across a session they separate, because they move differently:
-
-      * **Sky** terms are fixed to the *sky*. As the target tracks, its
-        zenith angle, azimuth and moon separation all change, so each sky
-        component's map is different in every exposure.
-      * **Detector** terms are fixed to the *sensor*. Amp glow sits in the
-        same corner in every exposure regardless of where the telescope
-        points.
-
-    So the solve shares one amplitude per component across all frames, while
-    letting each frame contribute its own geometry. A component that changes
-    with the sky and one that does not can then be told apart, which no
-    amount of cleverness on a single stacked frame can do.
-
-    Args:
-        channels: One 2-D luminance plane per exposure. All the same shape.
-        geometries: The matching ``SkyGeometry`` per exposure, each built
-            from that exposure's own timestamp.
-        masks: Optional per-exposure boolean masks of pixels to exclude
-            (stars, the target itself).
-
-    Returns:
-        ``(coefficients, names, models)`` -- one shared coefficient vector,
-        the term names, and the per-exposure model images it implies.
-    """
-    if len(channels) != len(geometries):
-        raise ValueError("need one geometry per channel")
-    if len(channels) < 2:
-        raise ValueError("multi-frame separation needs at least two exposures")
-
-    bases, names = [], None
-    for geom in geometries:
-        basis, this_names = build_basis(geom, lp_source_az_deg,
-                                        instrumental=True, always_moonlight=True)
-        if names is None:
-            names = this_names
-        elif this_names != names:
-            raise ValueError("frames disagree on which components are present")
-        bases.append(basis)
-
-    n_terms = bases[0].shape[0]
-    rows, targets = [], []
-    for i, (basis, channel) in enumerate(zip(bases, channels)):
-        flat = basis.reshape(n_terms, -1).T
-        data = np.asarray(channel, dtype=np.float64).ravel()
-        good = np.isfinite(data)
-        if masks is not None and masks[i] is not None:
-            good &= ~np.asarray(masks[i], dtype=bool).ravel()
-        rows.append(flat[good])
-        targets.append(data[good])
-
-    design = np.concatenate(rows, axis=0)
-    target = np.concatenate(targets, axis=0)
-    if design.shape[0] < n_terms * 4:
-        raise ValueError("not enough unmasked background pixels to fit the sky model")
-
-    keep = np.ones(design.shape[0], dtype=bool)
-    coeffs = np.zeros(n_terms, dtype=np.float64)
-    for _ in range(max(1, n_iter)):
-        coeffs = _nnls(design[keep], target[keep])
-        residual = target - design @ coeffs
-        scale = float(np.std(residual[keep]))
-        if not np.isfinite(scale) or scale <= 0:
-            break
-        keep &= residual < clip_sigma * scale      # upward-only, as single-frame
-        if keep.sum() < n_terms * 4:
-            break
-
-    models = [np.tensordot(coeffs, b, axes=(0, 0)) for b in bases]
-    return coeffs, names, models
 
 
 def describe_fit(coeffs: np.ndarray, names: List[str],
@@ -842,9 +760,29 @@ def remove_physical_sky(image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
                         when_iso: str, mask: Optional[np.ndarray] = None,
                         lp_source_az_deg: float = 0.0
                         ) -> Optional[Dict]:
+    """Fit and subtract the physical sky model; ``None`` when it declines.
+
+    A thin wrapper over ``remove_physical_sky_with_reason``, which says *why*.
+    Kept for callers that only need the result.
+    """
+    return remove_physical_sky_with_reason(
+        image, wcs, lat_deg, lon_deg, when_iso, mask, lp_source_az_deg)[0]
+
+
+def remove_physical_sky_with_reason(
+        image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
+        when_iso: str, mask: Optional[np.ndarray] = None,
+        lp_source_az_deg: float = 0.0) -> Tuple[Optional[Dict], str]:
     """Fit and subtract the physical sky model, per channel.
 
-    Returns ``None`` (rather than raising) when the geometry can't be built
+    Returns ``(result, reason)``. ``reason`` is empty on success and otherwise
+    says which of several very different things happened -- this can decline
+    because the geometry could not be built, because the field is too narrow
+    for the components to separate, because the fit failed, or because the fit
+    ran and did not help. The caller reports it to the user, and a single
+    catch-all sentence for all four sent people looking for the wrong fix.
+
+    Returns ``None`` for the result (rather than raising) when the geometry can't be built
     (no WCS, no timestamp, no site coordinates) **or when the fitted model
     does not actually flatten the background**, so callers fall back to a
     blind extractor exactly as they do for every other optional input.
@@ -865,10 +803,6 @@ def remove_physical_sky(image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
     construction. The model earns its place on wide fields; on narrow ones it
     must stand aside for an extractor that can fit what is actually there.
     """
-    geom = build_geometry(wcs, image.shape[:2], lat_deg, lon_deg, when_iso)
-    if geom is None:
-        return None
-
     # Field-size gate. Measured sweep of the design-matrix condition number
     # against field of view (moon down, so sky terms only):
     #
@@ -882,22 +816,45 @@ def remove_physical_sky(image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
     # 1-degree frame (condition 9.2e5). So this is a property of the field,
     # not of the night, and it is worth failing fast rather than fitting
     # noise and then discovering it via the improvement check below.
+    #
+    # It runs BEFORE build_geometry, not after: the gate is pure WCS metadata,
+    # and geometry built for a field that is then declined costs ~1 s and
+    # ~580 MB at 6 MP. A telescope field is essentially always declined, so
+    # the common case was paying for a result it always threw away.
     fov = _field_of_view_deg(wcs, image.shape[:2])
     if fov is not None and fov < _MIN_FIELD_OF_VIEW_DEG:
         _log.debug("physical sky model: %.2f deg field is below the %.1f deg "
                    "where sky components become separable; falling back",
                    fov, _MIN_FIELD_OF_VIEW_DEG)
-        return None
+        return None, (f"the {fov:.2f} deg field is below the "
+                      f"{_MIN_FIELD_OF_VIEW_DEG:g} deg where the sky components become "
+                      "separable; at this size the gradient is mostly instrumental "
+                      "(vignetting, amp glow), which a model of the sky cannot represent")
+
+    geom = build_geometry(wcs, image.shape[:2], lat_deg, lon_deg, when_iso)
+    if geom is None:
+        return None, ("the observing geometry could not be built "
+                      "(unparseable timestamp, or the WCS would not project)")
 
     basis, names = build_basis(geom, lp_source_az_deg)
 
     out = np.array(image, dtype=np.float32, copy=True)
-    models, all_coeffs = [], []
+    all_coeffs = []
 
     n_ch = image.shape[2] if image.ndim == 3 else 1
     for c in range(n_ch):
         channel = image[:, :, c] if image.ndim == 3 else image
-        coeffs, model = fit_sky_model(channel, basis, mask)
+        try:
+            coeffs, model = fit_sky_model(channel, basis, mask)
+        except Exception as exc:
+            # Includes an NNLS convergence failure, which is *not* recoverable
+            # by substituting an unconstrained fit (see _nnls). Declining lets
+            # DBE run, exactly as for every other way of being unable to help --
+            # but at warning level, since unlike a narrow field this was not
+            # expected and the user should be able to see it.
+            _log.warning("physical sky model: fit failed on channel %d (%s); "
+                         "falling back to a blind extractor", c, exc)
+            return None, f"the non-negative fit failed on channel {c}: {exc}"
         # Preserve the channel's own sky level: subtract only the *varying*
         # part, so this stays a gradient remover and does not also silently
         # re-zero the pedestal that later Phase 4 steps expect to be there.
@@ -906,7 +863,6 @@ def remove_physical_sky(image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
             out[:, :, c] = channel - varying
         else:
             out = channel - varying
-        models.append(model)
         all_coeffs.append(coeffs)
 
     # Verify the model actually helped before handing it back.
@@ -916,18 +872,20 @@ def remove_physical_sky(image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
         _log.debug("physical sky model: corner gradient %.3f -> %.3f, not an "
                    "improvement; falling back to a blind extractor",
                    before, after)
-        return None
+        return None, (f"the fitted model did not flatten the background "
+                      f"(corner-to-corner spread {before:.3g} -> {after:.3g}); "
+                      "the gradient is likely instrumental rather than sky")
 
     mean_coeffs = np.mean(np.stack(all_coeffs, axis=0), axis=0)
     condition = basis_condition(basis)
-    return {
+    result = {
         'image': out,
-        'model': np.stack(models, axis=-1) if image.ndim == 3 else models[0],
         'coefficients': mean_coeffs,
         'names': names,
         'condition': condition,
         'description': describe_fit(mean_coeffs, names, condition),
         'moon_altitude_deg': geom.moon_alt,
         'moon_phase_angle_deg': geom.phase_angle,
-        'moon_illuminated_fraction': float((1.0 + math.cos(geom.phase_angle * _DEG)) / 2.0),
+        'moon_illuminated_fraction': _illuminated_fraction(geom.phase_angle),
     }
+    return result, ''

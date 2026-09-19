@@ -31,6 +31,12 @@ datas += [(str(ROOT / 'VERSION'), '.')]
 # file. ~11 MB. No onnxruntime in the bundle -- inference is fully native.
 datas += [(str(ROOT / 'src' / 'data' / 'originvision.onnx'), 'src/data')]
 
+# The window icon. The EXE resource below sets the taskbar/Explorer icon, but
+# desktop_app.py also calls root.iconbitmap() with a path relative to its own
+# __file__ -- which resolved to nothing in the bundle, so the window itself
+# silently kept tkinter's default feather.
+datas += [(str(ROOT / 'packaging' / 'icon.ico'), 'packaging')]
+
 a = Analysis(
     [str(ROOT / 'desktop_app.py')],
     pathex=[str(ROOT)],
@@ -92,16 +98,28 @@ def _keep(dest):
 a.binaries = [b for b in a.binaries if _keep(b[0])]
 a.datas = [d for d in a.datas if _keep(d[0])]
 
-# astropy_iers_data (Earth-rotation/leap-second tables, ~8.5MB): nothing in
-# src/ touches astropy.time.Time/EarthLocation/AltAz or any other frame that
-# needs Earth-orientation parameters -- confirmed by grepping every astropy
-# import in src/ (only astropy.io.fits, astropy.stats, astropy.wcs.WCS,
-# astropy.coordinates.SkyCoord(frame='icrs'), astropy.units, astropy.table --
-# none of which are IERS-dependent) and empirically, by running the exact
-# WCS.wcs_pix2world + SkyCoord ICRS separation calls annotation.py/
-# color_calibrate.py make with warnings promoted to errors and network
-# access disabled: zero IERS access. pyinstaller-hooks-contrib's astropy
-# hook bundles it unconditionally just because `astropy` is imported at all.
+# astropy_iers_data (Earth-rotation/leap-second tables, ~8.5MB).
+#
+# CORRECTED: the original claim here -- "nothing in src/ touches
+# astropy.time.Time/EarthLocation/AltAz" -- was already false when written.
+# observing_geometry.py and photometry_timeseries.py both use Time and
+# EarthLocation. Dropping the tables therefore made those calls raise
+# FileNotFoundError('finals2000A.all') inside the frozen app, where their
+# fail-soft `except Exception: return None` swallowed it: --photometry lost
+# its airmass extinction term and --fix-atmospheric-dispersion lost its
+# auto-derived zenith angle, silently and only in the packaged build. Once
+# cli._predict_rotation_spread started calling parallactic_angle_deg on the
+# DEFAULT path, the exe and a source checkout began producing different
+# stacks from the same directory.
+#
+# The exclusion is kept, and is now safe, because observing_geometry no
+# longer needs the tables: parallactic_angle_deg computes sidereal time in
+# closed form via sky_model.gmst_deg, and altaz falls back to
+# sky_model.altaz_from_equatorial when astropy or its tables are missing.
+# If anything in src/ ever needs *apparent* sidereal time, UT1-UTC or
+# sub-arcsecond frame conversion, delete this line rather than re-deriving
+# the claim -- and do not trust a grep alone, since every caller here fails
+# soft and will hide the breakage.
 a.datas = [d for d in a.datas if 'astropy_iers_data' not in d[0]]
 
 # TRIED TWICE AND REVERTED: numpy.libs/ and scipy.libs/ both contain a

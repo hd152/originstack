@@ -21,22 +21,16 @@ from src.background import (
 )
 from src.denoising import (
     acdnr_denoise,
-    adaptive_wavelet_denoise,
     anisotropic_diffusion,
     bilateral_denoise,
-    bm3d_denoise,
     directional_wavelet_denoise,
-    estimate_denoise_strength,
     larson_sekanina,
-    mmt_denoise,
     multiscale_local_contrast,
-    nlm_denoise,
     radial_renormalize,
     reduce_chroma_noise,
     reduce_stars,
     remove_star_halos,
     scnr,
-    wavelet_denoise,
 )
 from src.models import Config, FrameInfo, ProcessingStats
 from src.photometric_calibration import photometric_color_calibrate
@@ -122,7 +116,7 @@ def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
     (as an earlier version did on a session that had full GPS and a solve)
     sends people looking for missing metadata that is already present.
     """
-    from src.sky_model import remove_physical_sky
+    from src.sky_model import remove_physical_sky_with_reason
 
     session = getattr(args, '_session_info', None)
     if session is None or not getattr(session, 'has_gps', False):
@@ -159,21 +153,18 @@ def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
         mask = excl if mask is None else (mask | excl)
 
     try:
-        result = remove_physical_sky(
+        result, reason = remove_physical_sky_with_reason(
             stacked, wcs, float(lat), float(lon), str(when), mask=mask,
             lp_source_az_deg=float(
                 getattr(args, 'light_pollution_azimuth', 0.0) or 0.0))
     except Exception as exc:
         return None, f'the fit raised: {exc}'
 
-    if result is None:
-        # Geometry was fine; the model simply had no purchase on this field.
-        # See remove_physical_sky -- physical components vary on ten-degree
-        # scales, so a narrow field's gradient is mostly instrumental.
-        return None, ('it did not flatten the background at this field size '
-                      '(physical sky components are nearly constant across a '
-                      'field this small; the gradient is likely instrumental)')
-    return result, ''
+    # The model reports its own reason for declining. A single fixed sentence
+    # here used to stand in for four different causes -- bad geometry, a field
+    # too narrow, a failed fit, a fit that did not help -- and only one of them
+    # is "at this field size".
+    return (result, '') if result is not None else (None, reason)
 
 
 def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
@@ -369,9 +360,21 @@ def postprocess_stack(
         else:
             _bg_excl_mask = _coma_excl_mask if _coma_excl_mask is not None else _galaxy_excl_mask
 
+        # Background extraction runs exactly once. The physical model is tried
+        # first when asked for, and either succeeds (nothing else may run -- a
+        # blind surface fit on top of it would re-introduce the nebula-eating
+        # behaviour the model exists to avoid, silently, since both steps
+        # report success) or falls back to DBE with a reason.
+        #
+        # `_bg_done` rather than letting 'physical' flow into the chain below:
+        # that structure needed an `elif bg_method == 'physical': pass` branch
+        # to stop the final `else` catching it, i.e. it created the hazard and
+        # then documented it. A guard cannot be fallen through by accident.
+        _bg_done = False
+
         if bg_method == 'physical':
-            print("\n  Applying physical sky model (moon + airglow + zodiacal + "
-                  "light pollution)...")
+            safe_print("\n  Applying physical sky model (moon + airglow + zodiacal + "
+                       "light pollution)...")
             _phys, _phys_reason = _apply_physical_sky(
                 stacked, args, pp_star_mask, _bg_excl_mask)
             if _phys is None:
@@ -385,11 +388,14 @@ def postprocess_stack(
                     safe_print(f"    moon: {_phys['moon_altitude_deg']:.0f} deg altitude, "
                                f"{100.0 * _phys['moon_illuminated_fraction']:.0f}% illuminated")
                 safe_print(f"  ✓ Physical sky model ({format_time(time.time() - bg_start)})")
+                _bg_done = True
 
-        if bg_method == 'dbe':
+        if _bg_done:
+            pass
+        elif bg_method == 'dbe':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
-            print(f"\n  Applying Dynamic Background Extraction "
-                  f"(patch={dbe_patch}px, robust local regression, sigma={args.bg_clip_sigma})...")
+            safe_print(f"\n  Applying Dynamic Background Extraction "
+                       f"(patch={dbe_patch}px, robust local regression, sigma={args.bg_clip_sigma})...")
             _entropy_bg = getattr(args, 'entropy_bg', False)
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
@@ -397,13 +403,6 @@ def postprocess_stack(
                 use_entropy_weights=_entropy_bg,
                 exclusion_mask=_bg_excl_mask)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
-        elif bg_method == 'physical':
-            # Already done above. This branch exists so the final `else`
-            # (legacy mesh) cannot catch 'physical' and run a blind surface
-            # fit on top of the model -- which would re-introduce exactly the
-            # nebula-eating behaviour the physical model exists to avoid, and
-            # silently, since both steps report success.
-            pass
         elif bg_method == 'wavelet':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
             wavelet_scales = getattr(args, 'bg_wavelet_scales', 6)
@@ -517,50 +516,6 @@ def postprocess_stack(
         except Exception:
             pass
 
-    # 4. Wavelet denoising
-    if getattr(args, 'denoise', False) and 'wavelet' not in skip_steps:
-        _diag_save(stacked, _diag_dir, _diag_counter, 'before_wavelet_denoise')
-        chroma_boost = getattr(args, 'denoise_chroma_boost', 2.0)
-        dn_start = time.time()
-        if getattr(args, 'denoise_adaptive', False):
-            print(f"\n  Applying adaptive wavelet denoising "
-                  f"(BayesShrink, chroma_factor={chroma_boost:.1f})...")
-            stacked = adaptive_wavelet_denoise(
-                stacked, chroma_factor=chroma_boost, star_mask=pp_star_mask,
-                variance_stabilize=getattr(args, 'variance_stabilize', False))
-        else:
-            strength = None
-            if getattr(args, 'denoise_strength_calibrate', False):
-                from src.self_supervised_calibration import calibrate_wavelet_strength
-                try:
-                    strength, _losses = calibrate_wavelet_strength(stacked)
-                    safe_print(f"\n  Self-supervised denoise strength: {strength:.2f} "
-                              f"(Noise2Self-style calibration on the stack itself, "
-                              f"no SNR estimate needed)")
-                except Exception as exc:
-                    safe_print(f"  WARNING: self-supervised calibration failed ({exc}) -- "
-                              f"falling back to SNR-based auto-tuning")
-                    strength = None
-            else:
-                strength = None
-            if strength is None:
-                strength = getattr(args, 'denoise_strength', 3.0)
-                if getattr(args, 'auto_denoise_strength', True):
-                    fwhm_vals = [f.metrics.get('fwhm', 0.0) for f in final
-                                 if f.metrics and f.metrics.get('fwhm', 0.0) > 0]
-                    fwhm_mean = float(np.mean(fwhm_vals)) if fwhm_vals else 0.0
-                    strength = estimate_denoise_strength(stacked, fwhm_mean=fwhm_mean)
-                    fwhm_note = f', FWHM={fwhm_mean:.1f}px' if fwhm_mean > 0 else ''
-                    safe_print(f"\n  Auto-denoise strength: {strength:.2f} (from stacked SNR{fwhm_note})")
-            print(f"\n  Applying wavelet denoising "
-                  f"(luma={strength:.1f}, chroma={strength * chroma_boost:.1f})...")
-            stacked = wavelet_denoise(
-                stacked, threshold_factor=strength, chroma_factor=chroma_boost,
-                star_mask=pp_star_mask,
-                variance_stabilize=getattr(args, 'variance_stabilize', False))
-        safe_print(f"  ✓ Wavelet denoise ({format_time(time.time() - dn_start)})")
-        stacked = _sanitize(stacked, "wavelet denoising")
-
     # 4.5. Sky residual correction (always after background extraction)
     if args.background_extraction and 'sky_residual' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_sky_residual')
@@ -598,17 +553,6 @@ def postprocess_stack(
             safe_print(f"  ✓ Sky pedestal: +{pedestal:.2f} "
                        f"(sky sigma={_ped_sigma:.2f})")
 
-    # 5. NLM denoising
-    if getattr(args, 'denoise_nlm', False) and 'nlm' not in skip_steps:
-        _diag_save(stacked, _diag_dir, _diag_counter, 'before_nlm_denoise')
-        nlm_h = getattr(args, 'denoise_nlm_strength', 1.0)
-        nlm_blend = getattr(args, 'denoise_nlm_blend', 0.5)
-        print(f"\n  Applying NLM denoising (h={nlm_h:.1f}, blend={nlm_blend:.2f})...")
-        nlm_start = time.time()
-        stacked = nlm_denoise(stacked, h=nlm_h, blend=nlm_blend)
-        safe_print(f"  ✓ NLM denoise ({format_time(time.time() - nlm_start)})")
-        stacked = _sanitize(stacked, "NLM denoising")
-
     # 6. Bilateral denoising
     if getattr(args, 'denoise_bilateral', False) and 'bilateral' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_bilateral_denoise')
@@ -623,19 +567,6 @@ def postprocess_stack(
         safe_print(f"  ✓ Bilateral denoise ({format_time(time.time() - bil_start)})")
         stacked = _sanitize(stacked, "bilateral denoising")
 
-    # 6.5. MMT denoising
-    if getattr(args, 'denoise_mmt', False) and 'mmt' not in skip_steps:
-        _diag_save(stacked, _diag_dir, _diag_counter, 'before_mmt_denoise')
-        mmt_levels = getattr(args, 'denoise_mmt_levels', 4)
-        mmt_strength = getattr(args, 'denoise_mmt_strength', 3.0)
-        mmt_chroma = getattr(args, 'denoise_chroma_boost', 2.0)
-        print(f"\n  Applying MMT denoising "
-              f"(levels={mmt_levels}, strength={mmt_strength:.1f}, chroma={mmt_chroma:.1f})...")
-        mmt_start = time.time()
-        stacked = mmt_denoise(stacked, levels=mmt_levels, threshold_factor=mmt_strength,
-                              chroma_factor=mmt_chroma, star_mask=pp_star_mask)
-        safe_print(f"  ✓ MMT denoise ({format_time(time.time() - mmt_start)})")
-
     # 6.6. ACDNR denoising
     if getattr(args, 'denoise_acdnr', False) and 'acdnr' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_acdnr_denoise')
@@ -649,22 +580,6 @@ def postprocess_stack(
                                 chroma_factor=acdnr_chroma, star_mask=pp_star_mask)
         safe_print(f"  ✓ ACDNR denoise ({format_time(time.time() - acdnr_start)})")
 
-    # 6.7. BM3D denoising
-    if getattr(args, 'denoise_bm3d', False) and 'bm3d' not in skip_steps:
-        _diag_save(stacked, _diag_dir, _diag_counter, 'before_bm3d_denoise')
-        bm3d_sigma = getattr(args, 'bm3d_sigma', 0.0)
-        bm3d_stride = getattr(args, 'bm3d_stride', None)
-        bm3d_sw = getattr(args, 'bm3d_search_window', 16)
-        bm3d_gs = getattr(args, 'bm3d_group_size', 8)
-        sig_str = "auto" if bm3d_sigma <= 0 else f"{bm3d_sigma:.1f}"
-        print(f"\n  Applying BM3D denoising (sigma={sig_str}, stride={bm3d_stride or 'auto'})...")
-        bm3d_start = time.time()
-        stacked = bm3d_denoise(stacked, sigma_psd=bm3d_sigma,
-                               stride=bm3d_stride, search_window=bm3d_sw,
-                               group_size=bm3d_gs, star_mask=pp_star_mask)
-        safe_print(f"  ✓ BM3D denoise ({format_time(time.time() - bm3d_start)})")
-        stacked = _sanitize(stacked, "BM3D denoising")
-
     # 6.7b. Directional (curvelet/shearlet-inspired) adaptive wavelet denoising
     if getattr(args, 'denoise_curvelet', False) and 'curvelet' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_curvelet_denoise')
@@ -675,7 +590,8 @@ def postprocess_stack(
         curv_start = time.time()
         stacked = directional_wavelet_denoise(
             stacked, chroma_factor=curv_chroma, star_mask=pp_star_mask,
-            protect_strength=curv_protect)
+            protect_strength=curv_protect,
+            variance_stabilize=getattr(args, 'variance_stabilize', False))
         safe_print(f"  ✓ Directional wavelet denoise ({format_time(time.time() - curv_start)})")
 
     # 6.8. Anisotropic diffusion (Perona-Malik)

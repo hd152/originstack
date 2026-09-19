@@ -540,10 +540,8 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
     header['AFFINE'] = (not getattr(args, 'no_affine', False), 'Affine registration enabled')
 
     # Post-processing flags (reflect what was done to the saved data, not just config)
-    denoise_applied = post_processed and getattr(args, 'denoise', False)
+    denoise_applied = post_processed and getattr(args, 'denoise_curvelet', False)
     header['DENOISE'] = (denoise_applied, 'Wavelet denoising applied to FITS data')
-    if denoise_applied:
-        header['DNSTRNG'] = (getattr(args, 'denoise_strength', 3.0), 'Denoise threshold factor')
     header['STRETCH'] = (getattr(args, 'stretch', 'linear'), 'Preview stretch method (JPG only)')
     header['DEBAYER'] = (args.debayer_method, 'Debayering method used')
 

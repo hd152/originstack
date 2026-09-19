@@ -25,9 +25,9 @@ from src import auto_settings as a
 def _args(**overrides):
     base = dict(
         _explicit_cli_dests=set(), stack_method='auto', deconvolve=True,
-        auto_denoise_strength=True, debayer_method='malvar',
-        denoise_mmt=False, denoise_acdnr=False, denoise=False,
-        denoise_bm3d=False, deconvolve_tv=False, patch_registration=False,
+        debayer_method='malvar',
+        denoise_acdnr=False,
+        deconvolve_tv=False, patch_registration=False,
         consensus_ref=False, preview_black_sigma=0.0,
     )
     base.update(overrides)

@@ -8,7 +8,6 @@ import numpy as np
 
 from src.denoising import (
     _structure_tensor_coherence,
-    adaptive_wavelet_denoise,
     directional_wavelet_denoise,
 )
 
@@ -62,16 +61,16 @@ class TestDirectionalWaveletDenoise:
         assert out.dtype == np.float32
         assert np.all(np.isfinite(out))
 
-    def test_protect_strength_zero_matches_plain_bayesshrink(self):
+    def test_protect_strength_changes_output(self):
         img, _ = self._filament_image(seed=1)
-        out_directional = directional_wavelet_denoise(img, protect_strength=0.0)
-        out_plain = adaptive_wavelet_denoise(img)
-        np.testing.assert_allclose(out_directional, out_plain, atol=1e-4)
+        out_off = directional_wavelet_denoise(img, protect_strength=0.0)
+        out_on = directional_wavelet_denoise(img, protect_strength=0.8)
+        assert not np.allclose(out_off, out_on, atol=1e-4)
 
     def test_preserves_filament_better_than_plain_bayesshrink(self):
         img, filament = self._filament_image(seed=2, noise_sigma=20.0)
         out_directional = directional_wavelet_denoise(img, protect_strength=0.8)
-        out_plain = adaptive_wavelet_denoise(img)
+        out_plain = directional_wavelet_denoise(img, protect_strength=0.0)
 
         # Measure signal retained along the filament's ridge line (diagonal)
         # relative to the true filament profile -- protecting coherent

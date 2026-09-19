@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import logging
 import math
 import os
 import shutil
@@ -34,6 +35,8 @@ from src.postprocess import postprocess_stack
 from src.registration import run_registration_phase, select_reference_frame
 from src.stacking import run_stacking_phase
 from src.utils import format_time, get_memory_usage_mb, header_get_first, print_phase, safe_print
+
+_log = logging.getLogger("originstack")
 
 try:
     HAS_PSUTIL = True
@@ -219,8 +222,7 @@ def _run_auto_advisor(final: List[FrameInfo], args,
             for s in _suggestions:
                 safe_print(f"    - {s}")
     except Exception as _exc:
-        import logging
-        logging.getLogger("originstack").debug("auto suggestions failed (%s)", _exc)
+        _log.debug("auto suggestions failed (%s)", _exc)
 
 
 def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
@@ -986,7 +988,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                            f"--uncertainty-map); using a flat sky-noise estimate "
                            f"({_flat:.4g} ADU) -- no per-pixel shot-noise structure")
                 _sigma_in = np.full(_unc_input.shape[:2], _flat, dtype=np.float32)
-            _sigma_post, _ = propagate_uncertainty(
+            _sigma_post, _, _adaptivity = propagate_uncertainty(
                 _unc_input, _sigma_in, args, final, stats,
                 postprocess_fn=postprocess_stack,
                 n_realizations=_k,
@@ -995,6 +997,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             _snr_map = confidence_map(stacked, _sigma_post)
             save_uncertainty_outputs(output_path, _sigma_post, _snr_map)
             safe_print(f"  {summarize_confidence(_snr_map)}")
+            # Realizations carry sqrt(2)x the real noise, so Phase 4 steps that
+            # estimate their parameters from the data denoise them slightly
+            # harder than they denoised the real image. Measured at only a few
+            # percent for this pipeline's own denoisers (see uncertainty.py),
+            # so this warns only when the chain behaves far more adaptively
+            # than those -- i.e. when the measured caveat no longer applies.
+            if _adaptivity is not None and _adaptivity < 1.5:
+                safe_print(
+                    f"    NOTE: spread scaled {_adaptivity:.2f}x rather than 2.00x "
+                    f"when handed 2x the noise -- this chain adapts strongly to its "
+                    f"input noise level, so read these error bars as a lower bound")
             safe_print(f"  Uncertainty propagation: {time.time() - _unc_start:.1f}s")
         except Exception as e:
             safe_print(f"  WARNING: uncertainty propagation failed: {e}")
@@ -1066,12 +1079,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             _wcs_for_transients = None
             try:
                 from astropy.wcs import WCS
-                _w = WCS(hdu.header)
+
+                # naxis=2 is load-bearing. hdu.data is the (3, H, W) RGB cube
+                # here, so a bare WCS(hdu.header) is 3-axis: has_celestial is
+                # still True and passes the guard, but all_pix2world then
+                # wants three coordinates, raises, and every row of the
+                # transient catalogue got a blank RA/Dec -- the one column
+                # that makes a candidate checkable against MPC/TNS/VSX.
+                # annotation.py reads this same header shape the same way.
+                _w = WCS(hdu.header, naxis=2)
                 _wcs_for_transients = _w if _w.has_celestial else None
-            except Exception:
+            except Exception as _we:
+                _log.debug("transient catalogue: no usable WCS (%s)", _we)
                 _wcs_for_transients = None
             run_transient_detection(
-                _transient_src, args.transient_detect, output_path, args=args,
+                _transient_src, args.transient_detect, output_path,
                 threshold=float(getattr(args, 'transient_threshold', 5.0)),
                 wcs=_wcs_for_transients)
             safe_print(f"  Difference imaging: {time.time() - _td_start:.1f}s")

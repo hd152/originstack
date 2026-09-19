@@ -57,6 +57,7 @@ import os
 from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy import fft as sp_fft
 
 from src.utils import safe_print
 
@@ -68,7 +69,6 @@ class ZogyResult(NamedTuple):
     difference: np.ndarray       # D -- the optimal difference image
     score: np.ndarray            # S -- match-filtered difference
     score_corr: np.ndarray       # S_corr -- S in units of its own sigma
-    psf_difference: np.ndarray   # P_D -- the PSF of D
     flux_difference: float       # F_D -- the flux zero point of D
 
 
@@ -228,74 +228,90 @@ def zogy(new: np.ndarray, ref: np.ndarray,
     if n_img.shape != r_img.shape:
         raise ValueError(f"image shapes differ: {n_img.shape} vs {r_img.shape}")
 
-    shape = n_img.shape
+    h, w = n_img.shape
+    # Noise is measured on the real pixels, before any padding is added.
     sn = float(sigma_new) if sigma_new is not None else estimate_background_sigma(n_img)
     sr = float(sigma_ref) if sigma_ref is not None else estimate_background_sigma(r_img)
     fn, fr = float(flux_new), float(flux_ref)
 
-    pn = _prepare_psf(psf_new, shape)
-    pr = _prepare_psf(psf_ref, shape)
+    # Pad to an FFT-friendly size. The Celestron Origin's own 1096-px axis is
+    # 8 x 137, and a large prime factor drops pocketfft onto its slow Bluestein
+    # path: measured 2.1x faster padded to 1100, and this function runs ~17
+    # full-frame transforms. It also moves the circular wraparound every FFT
+    # convolution carries out into padding that is cropped away. Zeros are
+    # the right fill because both epochs arrive background-subtracted, so zero
+    # *is* sky.
+    fh, fw = sp_fft.next_fast_len(h, real=True), sp_fft.next_fast_len(w, real=True)
+    shape = (fh, fw)
+    n_pad = np.zeros(shape, dtype=np.float64)
+    r_pad = np.zeros(shape, dtype=np.float64)
+    n_pad[:h, :w] = n_img
+    r_pad[:h, :w] = r_img
 
-    n_hat = np.fft.fft2(n_img)
-    r_hat = np.fft.fft2(r_img)
-    pn_hat = np.fft.fft2(pn)
-    pr_hat = np.fft.fft2(pr)
+    pn_hat = sp_fft.fft2(_prepare_psf(psf_new, shape))
+    pr_hat = sp_fft.fft2(_prepare_psf(psf_ref, shape))
+    n_hat = sp_fft.fft2(n_pad)
+    r_hat = sp_fft.fft2(r_pad)
+    del n_pad, r_pad
 
     # Zackay+ eq. 13 denominator. The floor keeps the division finite where
     # both PSFs have a zero (they are band-limited, so this does happen).
-    denom = (sn ** 2 * fr ** 2 * np.abs(pr_hat) ** 2
-             + sr ** 2 * fn ** 2 * np.abs(pn_hat) ** 2)
-    denom = np.maximum(denom, 1e-30)
+    abs_pn2 = np.abs(pn_hat) ** 2
+    abs_pr2 = np.abs(pr_hat) ** 2
+    denom = np.maximum(sn ** 2 * fr ** 2 * abs_pr2 + sr ** 2 * fn ** 2 * abs_pn2, 1e-30)
     sqrt_denom = np.sqrt(denom)
 
     d_hat = (fr * n_hat * pr_hat - fn * r_hat * pn_hat) / sqrt_denom
-    difference = np.real(np.fft.ifft2(d_hat))
+    difference = np.real(sp_fft.ifft2(d_hat))[:h, :w]
 
-    # Flux zero point and PSF of D (eq. 15, 14).
+    # Flux zero point and PSF of D (eq. 15, 14). Only P_D's transform is
+    # needed -- it builds the score below -- so it is never inverted.
     f_d = fn * fr / math.sqrt(sn ** 2 * fr ** 2 + sr ** 2 * fn ** 2)
     pd_hat = fr * fn * pr_hat * pn_hat / (f_d * sqrt_denom)
-    psf_difference = np.real(np.fft.ifft2(pd_hat))
+    del sqrt_denom
 
     # Score image (eq. 16): D match-filtered with its own PSF.
-    s_hat = f_d * d_hat * np.conj(pd_hat)
-    score = np.real(np.fft.ifft2(s_hat))
+    score = np.real(sp_fft.ifft2(f_d * d_hat * np.conj(pd_hat)))[:h, :w]
+    del d_hat, pd_hat
 
     # --- Noise terms for S_corr (eq. 26-30) ---
     # Matched-filter kernels for each input image.
-    kn_hat = fr * fn ** 2 * np.conj(pn_hat) * np.abs(pr_hat) ** 2 / denom
-    kr_hat = fn * fr ** 2 * np.conj(pr_hat) * np.abs(pn_hat) ** 2 / denom
-    kn = np.real(np.fft.ifft2(kn_hat))
-    kr = np.real(np.fft.ifft2(kr_hat))
+    kn_hat = fr * fn ** 2 * np.conj(pn_hat) * abs_pr2 / denom
+    kr_hat = fn * fr ** 2 * np.conj(pr_hat) * abs_pn2 / denom
+    del abs_pn2, abs_pr2, denom, pn_hat, pr_hat
 
-    if var_new is None:
-        var_new = np.maximum(n_img, 0.0) + sn ** 2
-    if var_ref is None:
-        var_ref = np.maximum(r_img, 0.0) + sr ** 2
-    var_new = np.asarray(var_new, dtype=np.float64)
-    var_ref = np.asarray(var_ref, dtype=np.float64)
+    # Variance maps live on the padded grid too. The padding is sky, so it
+    # carries sky variance -- not zero, which would understate the noise the
+    # kernels smear in from the edges.
+    def _padded_var(var, img, sky_sigma):
+        out = np.full(shape, sky_sigma ** 2, dtype=np.float64)
+        out[:h, :w] = (np.maximum(img, 0.0) + sky_sigma ** 2 if var is None
+                       else np.asarray(var, dtype=np.float64))
+        return out
 
     # Source noise: each variance map convolved with the squared kernel.
-    v_sn = np.real(np.fft.ifft2(np.fft.fft2(var_new) * np.fft.fft2(kn ** 2)))
-    v_sr = np.real(np.fft.ifft2(np.fft.fft2(var_ref) * np.fft.fft2(kr ** 2)))
+    kn_sq_hat = sp_fft.fft2(np.real(sp_fft.ifft2(kn_hat)) ** 2)
+    v_total = np.real(sp_fft.ifft2(sp_fft.fft2(_padded_var(var_new, n_img, sn)) * kn_sq_hat))
+    del kn_sq_hat
+    kr_sq_hat = sp_fft.fft2(np.real(sp_fft.ifft2(kr_hat)) ** 2)
+    v_total += np.real(sp_fft.ifft2(sp_fft.fft2(_padded_var(var_ref, r_img, sr)) * kr_sq_hat))
+    del kr_sq_hat
 
     # Astrometric noise: a registration slip shows up scaled by the local
     # gradient, which is exactly why bright stars dominate the false positives.
     sig_y, sig_x = float(astrometric_sigma[0]), float(astrometric_sigma[1])
-    v_ast = np.zeros(shape, dtype=np.float64)
     if sig_y > 0 or sig_x > 0:
-        s_n = np.real(np.fft.ifft2(n_hat * kn_hat))
-        s_r = np.real(np.fft.ifft2(r_hat * kr_hat))
-        for comp in (s_n, s_r):
-            gy, gx = np.gradient(comp)
-            v_ast += (sig_y * gy) ** 2 + (sig_x * gx) ** 2
+        for img_hat, k_hat in ((n_hat, kn_hat), (r_hat, kr_hat)):
+            gy, gx = np.gradient(np.real(sp_fft.ifft2(img_hat * k_hat)))
+            v_total += (sig_y * gy) ** 2 + (sig_x * gx) ** 2
+    del n_hat, r_hat, kn_hat, kr_hat
 
-    variance = np.maximum(v_sn + v_sr + v_ast, 1e-30)
+    variance = np.maximum(v_total[:h, :w], 1e-30)
     score_corr = score / np.sqrt(variance)
 
     return ZogyResult(difference=difference.astype(np.float32),
                       score=score.astype(np.float32),
                       score_corr=score_corr.astype(np.float32),
-                      psf_difference=psf_difference.astype(np.float32),
                       flux_difference=float(f_d))
 
 
@@ -311,23 +327,39 @@ def detect_transients(score_corr: np.ndarray, threshold: float = 5.0,
     nature, and anything dense enough to need deblending is almost certainly a
     subtraction artefact.
     """
+    if not threshold > 0:
+        # A threshold at or below zero admits every pixel, and the result is
+        # max_candidates of pure noise presented as detections.
+        raise ValueError(f"threshold must be positive, got {threshold}")
+
     arr = np.asarray(score_corr, dtype=np.float64)
     work = np.where(np.isfinite(arr), np.abs(arr), 0.0)
-    found: List[Transient] = []
+    height, width = work.shape
 
-    while len(found) < max_candidates:
-        idx = int(np.argmax(work))
-        peak = float(work.flat[idx])
-        if peak < threshold:
-            break
-        y, x = np.unravel_index(idx, work.shape)
+    # Collect every pixel over threshold once, brightest first, then walk that
+    # short list. The previous form re-ran argmax over the *whole* frame per
+    # candidate -- up to max_candidates full-frame scans, costliest precisely
+    # on a failed subtraction, which is when it hits the cap. A stable sort
+    # breaks ties toward the lowest flat index, as argmax did, so the
+    # detections and their order are unchanged.
+    cand = np.flatnonzero(work >= threshold)
+    order = cand[np.argsort(-work.ravel()[cand], kind='stable')]
+
+    suppressed = np.zeros(work.shape, dtype=bool)
+    found: List[Transient] = []
+    for idx in order:
+        y, x = divmod(int(idx), width)
+        if suppressed[y, x]:
+            continue
         signed = float(arr[y, x])
         found.append(Transient(y=float(y), x=float(x),
                                significance=abs(signed),
                                kind='brightening' if signed > 0 else 'fading'))
-        y0, y1 = max(0, y - min_separation), min(work.shape[0], y + min_separation + 1)
-        x0, x1 = max(0, x - min_separation), min(work.shape[1], x + min_separation + 1)
-        work[y0:y1, x0:x1] = 0.0
+        if len(found) >= max_candidates:
+            break
+        y0, y1 = max(0, y - min_separation), min(height, y + min_separation + 1)
+        x0, x1 = max(0, x - min_separation), min(width, x + min_separation + 1)
+        suppressed[y0:y1, x0:x1] = True
 
     return found
 
@@ -338,6 +370,8 @@ def write_transient_catalog(path: str, transients: Sequence[Transient],
     import csv
 
     has_wcs = wcs is not None
+    n_failed = 0
+    first_error = None
     with open(path, 'w', newline='', encoding='utf-8') as fh:
         writer = csv.writer(fh)
         header = ['x', 'y', 'significance_sigma', 'kind']
@@ -351,21 +385,41 @@ def write_transient_catalog(path: str, transients: Sequence[Transient],
                 try:
                     ra, dec = wcs.all_pix2world(t.x, t.y, 0)
                     row += [f"{float(ra):.6f}", f"{float(dec):.6f}"]
-                except Exception:
+                except Exception as exc:
                     row += ['', '']
+                    n_failed += 1
+                    first_error = first_error or exc
             writer.writerow(row)
+
+    # A blank RA/Dec column is easy to miss and makes every candidate
+    # uncheckable, so say so -- once, not once per row. This is how a 3-axis
+    # WCS built from the (C, H, W) cube blanked the whole catalogue silently.
+    if n_failed:
+        safe_print(f"    WARNING: no sky coordinates for {n_failed} of "
+                   f"{len(transients)} candidate(s): {first_error}")
+
+
+# Registration is rarely better than this across epochs. The measured
+# residual is used when it is larger; this is the floor, never the value.
+# Understating it re-creates the bright-star false positives ZOGY's
+# astrometric noise term exists to suppress.
+_ASTROMETRIC_SIGMA_FLOOR_PX = 0.3
+
+# Stars the residual measurement pairs up must lie this close after the
+# transform -- the blind matcher's own inlier tolerance.
+_RESIDUAL_MATCH_TOL_PX = 3.0
 
 
 def run_transient_detection(stacked: np.ndarray, reference_path: str,
-                            output_path: str, args=None,
-                            threshold: float = 5.0,
+                            output_path: str, threshold: float = 5.0,
                             wcs=None) -> Optional[dict]:
     """Orchestrate a two-epoch comparison: align, subtract, detect, report.
 
     Returns a summary dict, or None when the comparison could not be set up
-    (missing reference, too few stars to estimate a PSF, no overlap). Never
-    raises into the caller -- this is a diagnostic add-on, not part of
-    producing the stack.
+    (missing or non-linear reference, too few stars to estimate a PSF, no
+    overlap). Setup failures are reported and return None; an I/O failure
+    writing the outputs (disk full, read-only directory) *does* raise, so the
+    caller must still guard this -- ``pipeline.py`` does.
     """
     from src.io_fits import load_fits
 
@@ -374,9 +428,22 @@ def run_transient_detection(stacked: np.ndarray, reference_path: str,
         return None
 
     try:
-        ref, _ref_header = load_fits(reference_path)
+        ref, ref_header = load_fits(reference_path)
     except Exception as exc:
         safe_print(f"  WARNING: could not read transient reference: {exc}")
+        return None
+
+    # The comparison is only meaningful between two LINEAR stacks. Phase 4's
+    # stretches, denoisers and local contrast break photometric linearity, so
+    # a post-processed reference mismatches the flux scale by a fraction of a
+    # percent -- several sigma on a bright star -- and every star in the field
+    # reports as a confident transient. --merge refuses the same file for the
+    # same reason.
+    if not bool((ref_header or {}).get('RAWSTACK', False)):
+        safe_print(f"  WARNING: {os.path.basename(reference_path)} is not a linear "
+                   f"(pre-post-processing) stack: header RAWSTACK is missing or "
+                   f"False. Pass the main output FITS of a previous run, not the "
+                   f"_processed one -- skipping difference imaging.")
         return None
 
     # The pipeline writes RGB planes as (C, H, W); load_fits hands them back
@@ -402,33 +469,50 @@ def run_transient_detection(stacked: np.ndarray, reference_path: str,
     new_lum = new_lum - float(np.median(new_lum))
     ref_lum = ref_lum - float(np.median(ref_lum))
 
-    aligned, shift_rms = _align_reference(new_lum, ref_lum)
-    if aligned is None:
+    alignment = _align_reference(new_lum, ref_lum)
+    if alignment is None:
         safe_print("  WARNING: could not register the reference epoch onto this stack")
         return None
-    ref_lum = aligned
+    ref_lum, footprint, residual_px, new_stars = alignment
 
-    psf_new, psf_ref = _estimate_epoch_psfs(new_lum, ref_lum)
+    psf_new, psf_ref = _estimate_epoch_psfs(new_lum, ref_lum, new_stars=new_stars)
     if psf_new is None or psf_ref is None:
         safe_print("  WARNING: too few stars to estimate a PSF for one of the epochs")
         return None
 
-    # Registration is never exact; feeding the measured residual in is what
-    # keeps bright stars from dominating the detections.
-    astro_sigma = (shift_rms, shift_rms)
+    # The measured residual is 2D; ZOGY wants it per axis. The floor applies
+    # when the measurement comes back smaller -- or could not be made.
+    measured_axis = residual_px / math.sqrt(2.0) if residual_px is not None else None
+    astro_sigma_px = max(measured_axis or 0.0, _ASTROMETRIC_SIGMA_FLOOR_PX)
     flux_ratio = estimate_flux_ratio(new_lum, ref_lum)
 
     result = zogy(new_lum, ref_lum, psf_new, psf_ref,
                   flux_new=flux_ratio, flux_ref=1.0,
-                  astrometric_sigma=astro_sigma)
+                  astrometric_sigma=(astro_sigma_px, astro_sigma_px))
 
-    transients = detect_transients(result.score_corr, threshold=threshold)
+    # Outside the warped reference's footprint there IS no reference: apply
+    # the transform to a cross-night pair with any field rotation and the
+    # corners fill with zeros. Every star in `new` there has nothing to
+    # subtract against, so each one came out as a high-significance
+    # 'brightening' -- and the astrometric term cannot help, since it models a
+    # small slip, not a missing image. Phase 3 crops to the common region for
+    # this reason; here the uncovered area, eroded by the PSF's reach (a star
+    # just inside the edge is still half-cut), is masked out of the results.
+    margin = max(max(np.shape(psf_new)), max(np.shape(psf_ref))) // 2 + 2
+    valid = _erode(footprint > 0.99, margin)
+    score_corr = np.where(valid, result.score_corr, np.nan).astype(np.float32)
+    difference = np.where(valid, result.difference, np.nan).astype(np.float32)
+    covered = float(valid.mean())
+
+    transients = detect_transients(score_corr, threshold=threshold)
 
     stem = os.path.splitext(output_path)[0]
-    _write_fits_plane(stem + '_difference.fits', result.difference,
-                      'ZOGY optimal difference image (D)')
-    _write_fits_plane(stem + '_scorr.fits', result.score_corr,
-                      'ZOGY corrected score image (S_corr), units of sigma')
+    _write_fits_plane(stem + '_difference.fits', difference,
+                      'ZOGY optimal difference image (D); NaN outside the '
+                      'reference footprint')
+    _write_fits_plane(stem + '_scorr.fits', score_corr,
+                      'ZOGY corrected score image (S_corr), units of sigma; '
+                      'NaN outside the reference footprint')
     catalog = stem + '_transients.csv'
     write_transient_catalog(catalog, transients, wcs=wcs)
 
@@ -436,27 +520,62 @@ def run_transient_detection(stacked: np.ndarray, reference_path: str,
     safe_print(f"  Difference imaging: {len(transients)} candidate(s) above "
                f"{threshold:g} sigma ({n_bright} brightening, "
                f"{len(transients) - n_bright} fading)")
-    safe_print(f"    registration residual {shift_rms:.2f} px, "
-               f"flux ratio {flux_ratio:.3f}")
+    if measured_axis is None:
+        reg = (f"registration residual not measurable -- assumed "
+               f"{astro_sigma_px:.2f} px/axis")
+    elif measured_axis < _ASTROMETRIC_SIGMA_FLOOR_PX:
+        reg = (f"registration residual {measured_axis:.2f} px/axis measured, "
+               f"{astro_sigma_px:.2f} px floor applied")
+    else:
+        reg = f"registration residual {measured_axis:.2f} px/axis measured"
+    safe_print(f"    {reg}, flux ratio {flux_ratio:.3f}, "
+               f"{100.0 * covered:.0f}% of frame covered by the reference")
     safe_print(f"    {os.path.basename(catalog)}")
 
     return {
         'transients': transients,
         'flux_ratio': flux_ratio,
-        'registration_rms_px': shift_rms,
+        'registration_residual_px': measured_axis,
+        'astrometric_sigma_px': astro_sigma_px,
+        'covered_fraction': covered,
         'catalog': catalog,
     }
 
 
-def _align_reference(new_lum: np.ndarray,
-                     ref_lum: np.ndarray) -> Tuple[Optional[np.ndarray], float]:
+def _erode(mask: np.ndarray, margin: int) -> np.ndarray:
+    """Shrink a boolean mask by ``margin`` pixels away from its uncovered parts.
+
+    ``border_value=1`` is deliberate: the frame's own outer edge is not
+    uncovered sky. Treating it as such (the scipy default) erodes a PSF-width
+    strip off all four sides -- measured 66% "covered" for a frame that was
+    93% covered -- and would silently discard a genuine transient near the
+    edge. Only the boundary against the warped reference's empty wedges
+    should cost margin.
+    """
+    if margin <= 0 or mask.all() or not mask.any():
+        return mask
+    from scipy.ndimage import binary_erosion
+    return binary_erosion(mask, iterations=int(margin), border_value=1)
+
+
+def _align_reference(new_lum: np.ndarray, ref_lum: np.ndarray):
     """Register the reference epoch onto the new one.
 
     Cross-night pairs differ by arbitrary field rotation on an alt-az mount,
     so this goes through the same blind star-pattern matcher ``--merge`` uses
-    rather than assuming a pure translation. Returns the warped reference and
-    an estimate of the residual registration error in pixels, which feeds
-    ZOGY's astrometric noise term.
+    rather than assuming a pure translation.
+
+    Returns ``(warped_ref, footprint, residual_px, new_stars)`` or None:
+
+    - ``footprint`` is the warped reference's coverage in [0, 1] -- the same
+      transform applied to an all-ones image. Outside it the reference is
+      fill, not data.
+    - ``residual_px`` is the RMS 2D distance between matched star pairs after
+      the transform: a real measurement of how well the epochs line up, which
+      feeds ZOGY's astrometric noise term. None when too few pairs match to
+      measure it.
+    - ``new_stars`` is returned so the PSF estimate can reuse it rather than
+      detect the same stars on the same unchanged array a second time.
     """
     from src.registration import apply_transform
     from src.star_detect import detect_stars_matched_filter
@@ -466,10 +585,10 @@ def _align_reference(new_lum: np.ndarray,
         ref_stars = detect_stars_matched_filter(ref_lum.astype(np.float32))
     except Exception as exc:
         _log.debug("transient alignment: star detection failed (%s)", exc)
-        return None, 0.0
+        return None
 
     if new_stars is None or ref_stars is None or len(new_stars) < 5 or len(ref_stars) < 5:
-        return None, 0.0
+        return None
 
     try:
         from src.blind_match import match_rigid_unknown_rotation
@@ -479,29 +598,63 @@ def _align_reference(new_lum: np.ndarray,
         transform = None
 
     if transform is None:
-        return None, 0.0
+        return None
 
     try:
         warped = apply_transform(ref_lum.astype(np.float32), transform=transform)
+        footprint = apply_transform(np.ones_like(ref_lum, dtype=np.float32),
+                                    transform=transform)
     except Exception as exc:
         _log.debug("transient alignment: warp failed (%s)", exc)
-        return None, 0.0
+        return None
 
-    # A conservative floor: sub-pixel registration is rarely better than this
-    # across epochs, and understating it re-creates the bright-star false
-    # positives the astrometric term exists to suppress.
-    return np.asarray(warped, dtype=np.float64), 0.3
+    residual = _match_residual_px(ref_stars, new_stars, transform)
+    return (np.asarray(warped, dtype=np.float64), np.asarray(footprint),
+            residual, new_stars)
 
 
-def _estimate_epoch_psfs(new_lum: np.ndarray, ref_lum: np.ndarray):
-    """Empirical PSF for each epoch from its own stars."""
+def _match_residual_px(src_stars, dst_stars, transform) -> Optional[float]:
+    """RMS distance between matched star pairs after ``transform``, in px.
+
+    Maps each source star through the transform, pairs it with its nearest
+    destination star, and keeps pairs within the matcher's own inlier
+    tolerance. Uses the matcher's own src->dst convention.
+    """
+    try:
+        from scipy.spatial import cKDTree
+
+        def _xy(stars):
+            return np.column_stack([np.asarray(stars['xcentroid'], dtype=np.float64),
+                                    np.asarray(stars['ycentroid'], dtype=np.float64)])
+
+        src, dst = _xy(src_stars), _xy(dst_stars)
+        R = transform.params[:2, :2]
+        t = transform.params[:2, 2]
+        dists, _ = cKDTree(dst).query(src @ R.T + t, k=1)
+        good = dists[np.isfinite(dists) & (dists < _RESIDUAL_MATCH_TOL_PX)]
+        if good.size < 5:
+            return None
+        return float(np.sqrt(np.mean(good ** 2)))
+    except Exception as exc:
+        _log.debug("transient alignment: residual measurement failed (%s)", exc)
+        return None
+
+
+def _estimate_epoch_psfs(new_lum: np.ndarray, ref_lum: np.ndarray, new_stars=None):
+    """Empirical PSF for each epoch from its own stars.
+
+    ``new_stars`` may be passed in from alignment: ``new_lum`` is unchanged
+    in between, so detecting again is pure repetition. The reference has been
+    warped since, so its stars are always re-detected.
+    """
     from src.psf_deconvolution import estimate_psf
     from src.star_detect import detect_stars_matched_filter
 
     psfs = []
-    for img in (new_lum, ref_lum):
+    for img, stars in ((new_lum, new_stars), (ref_lum, None)):
         try:
-            stars = detect_stars_matched_filter(img.astype(np.float32))
+            if stars is None:
+                stars = detect_stars_matched_filter(img.astype(np.float32))
             psf, _ = estimate_psf(img.astype(np.float32), stars)
         except Exception as exc:
             _log.debug("transient PSF estimation failed (%s)", exc)

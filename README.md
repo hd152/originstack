@@ -196,32 +196,32 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 3. ✅ Background extraction (DBE via Gaussian-weighted local-linear regression with Tukey-biweight IRLS, bounded by construction; or legacy mesh/wavelet)
 4. ✅ Chroma noise reduction (fine pass; optional coarse pass for medium-scale colour blotches, auto-set for galaxy targets)
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
-6. ✅ Wavelet denoising — BayesShrink adaptive, auto-tuned from SNR (curvelet-inspired directional variant by default; plain `--denoiser wavelet` is opt-in)
-7. ✅ Sky residual correction (second pass after denoising)
-8. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
-9. ❌ Non-local means denoising — `--denoiser nlm`
-10. ❌ Bilateral filter — `--denoiser bilateral`
-11. ❌ Multiscale Median Transform (MMT) — `--denoiser mmt` (native/Rust accelerated)
-12. ❌ ACDNR adaptive contrast denoising — `--denoiser acdnr`
-13. ❌ BM3D collaborative filter — `--denoiser bm3d`
-14. ❌ Perona-Malik anisotropic diffusion — `--denoiser aniso` (native/Rust accelerated)
-15. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
-16. ❌ Photometric colour calibration — `--photometric-calibration`
-17. ❌ Deconvolution — `--deconvolve rl|tv|rl-sv|sparse` (RL is GPU-accelerated with `--use-gpu`; `rl-sv` is spatially-variant, `sparse` is FISTA in this project's wavelet basis)
-18. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
-19. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
-20. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
+6. ✅ Sky residual correction (second pass after background extraction)
+7. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
+8. ✅ Wavelet denoising — curvelet-inspired directional BayesShrink (`--denoiser wavelet` turns the structure protection off)
+9. ❌ Bilateral filter — `--denoiser bilateral`
+10. ❌ ACDNR adaptive contrast denoising — `--denoiser acdnr`
+11. ❌ Perona-Malik anisotropic diffusion — `--denoiser aniso` (native/Rust accelerated)
+12. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
+13. ❌ Photometric colour calibration — `--photometric-calibration`
+14. ❌ Deconvolution — `--deconvolve rl|tv|rl-sv|sparse` (RL is GPU-accelerated with `--use-gpu`; `rl-sv` is spatially-variant, `sparse` is FISTA in this project's wavelet basis)
+15. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
+16. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
+17. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
 
-> The auto-advisor enforces a **single primary luma denoiser** (precedence
-> BM3D > MMT > wavelet > ACDNR) — layering several full-frame smoothers erodes
-> faint structure without adding selectivity. Pick explicitly with `--denoiser`.
+> The auto-advisor enforces a **single primary luma denoiser** (the curvelet
+> wavelet, with ACDNR only as the fallback sky smoother) — layering several
+> full-frame smoothers erodes faint structure without adding selectivity. Pick
+> explicitly with `--denoiser`. NLM, BM3D and MMT were removed after a
+> ground-truth benchmark (`tools/bench_denoise_quality.py`): NLM damaged star
+> cores, MMT erased fine structure, BM3D was slow and licence-encumbered.
 
 ### Presets
 Eight built-in target presets tune all parameters at once:
 
 ```bash
 --preset galaxy       # GHS stretch, star reduction, bilateral filter
---preset nebula       # GHS stretch, MMT + ACDNR denoising
+--preset nebula       # GHS stretch, curvelet + ACDNR denoising
 --preset narrowband   # Tuned for Ha/OIII/SII narrow-band data
 --preset starfield    # No star reduction, minimal processing
 --preset planetary    # No background extraction, deconvolution enabled
@@ -671,7 +671,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Quality filtering | ✅ on | `--no-quality-filter` |
 | Affine registration | ✅ on | `--no-affine` |
 | Elastic local registration | ⬜ off | `--elastic-registration` |
-| Primary denoiser choice | auto (curvelet) | `--denoiser {wavelet,mmt,bm3d,acdnr,nlm,bilateral,aniso,curvelet,none}` |
+| Primary denoiser choice | auto (curvelet) | `--denoiser {curvelet,wavelet,acdnr,bilateral,aniso,none}` |
 | Deconvolution | ❌ off | `--deconvolve {rl,rl-sv,tv,sparse}` |
 
 ---
@@ -695,7 +695,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
 | `--elastic-registration` | Local (non-rigid) displacement correction on top of the global affine (off by default) |
-| `--denoiser NAME` | Primary luma denoiser (auto — curvelet unless overridden —, wavelet, mmt, bm3d, acdnr, nlm, bilateral, aniso, curvelet, none) |
+| `--denoiser NAME` | Primary luma denoiser (auto — curvelet unless overridden —, curvelet, wavelet, acdnr, bilateral, aniso, none) |
 | `--deconvolve {off,rl,rl-sv,tv,sparse}` | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet deconvolution |
 | `--plate-solve` | Plate solve via astrometry.net (requires API key) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |
@@ -739,7 +739,6 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 | Malvar debayer (default Phase-1 debayer) | ~2× |
 | L.A.Cosmic cosmic-ray rejection | ~2× under real parallel load |
 | Median filter (3×3 median network / larger windows) | ~13× / ~26× |
-| MMT denoise median cascade | ~10× |
 | DBE surface fit + patch sampler | ~2.4× / ~31× |
 | Anisotropic diffusion | ~37× |
 | Batch aperture photometry (`--photometry` / `--photometry-timeseries`) | ~150× |
@@ -778,7 +777,7 @@ originstack.py                  ← thin backward-compatibility entry point
     ├── debayer.py              ← Bayer demosaicing, hot pixels, white balance
     ├── quality.py              ← star detection, FWHM, quality metrics
     ├── background.py           ← DBE, mesh sky extraction, floor normalisation
-    ├── denoising.py            ← wavelet, NLM, bilateral, MMT, ACDNR, stretch
+    ├── denoising.py            ← curvelet wavelet, bilateral, ACDNR, aniso, stretch
     ├── psf_deconvolution.py    ← PSF estimation, Richardson-Lucy
     ├── io_fits.py              ← FITS load/save, master frame creation
     ├── frame_discovery.py      ← automatic frame classification
@@ -871,6 +870,5 @@ python originstack.py -d lights/ -o stacked.fits --use-gpu
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party dependency licenses (including one
-non-permissive optional dependency, `bm3d`) are listed in
+MIT — see [LICENSE](LICENSE). Third-party dependency licenses are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

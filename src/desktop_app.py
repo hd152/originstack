@@ -271,7 +271,7 @@ class SetupForm(ttk.Frame):
         # denoiser family, at raw argparse defaults on every GUI-launched
         # run regardless of target type. Confirmed as the actual cause of a
         # reported "galaxy detail lost to denoising" bug: the auto-advisor's
-        # galaxy-specific MMT/ACDNR choice never got a chance to apply.
+        # galaxy-specific denoiser choice never got a chance to apply.
         self._initial: Dict[str, Any] = {}
         self.dir_count_var = tk.StringVar(value='')
         all_fields = {f['dest']: f for fields in self.schema.values() for f in fields}

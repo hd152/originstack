@@ -7,7 +7,13 @@ import unittest
 import numpy as np
 from astropy.io import fits
 
-from src.merge import apply_merge_header, load_merge_stack, merge_previous_stacks
+from src.merge import (
+    apply_merge_header,
+    load_merge_stack,
+    merge_previous_stacks,
+    read_merge_meta,
+    seed_reference_header,
+)
 
 
 def _star_field(shift=(0.0, 0.0), rot_deg=0.0, seed=0, H=256, W=320):
@@ -132,6 +138,92 @@ class TestApplyMergeHeader(unittest.TestCase):
         self.assertAlmostEqual(hdr['TOTEXP'], 2680.0)
         self.assertEqual(hdr['DATEFRST'], '2026-06-20T20:00:00')
         self.assertEqual(hdr['DATELAST'], '2026-07-01T22:20:00')
+
+
+class TestReadMergeMeta(unittest.TestCase):
+    def test_matches_load_merge_stack_without_touching_pixels(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 'lin.fits')
+            _write_stack(p, _star_field(), nframes=42, intgtime=420.0)
+            _, full = load_merge_stack(p)
+            self.assertEqual(read_merge_meta(p), full)
+
+    def test_does_not_validate_rawstack(self):
+        """Choosing a reference by depth must not fail on a stack that
+        load_merge_stack would refuse -- that check runs on the chosen one."""
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 'proc.fits')
+            _write_stack(p, _star_field(), nframes=10, rawstack=False)
+            self.assertEqual(read_merge_meta(p)['nframes'], 10)
+
+
+class TestHierarchicalHeaderChains(unittest.TestCase):
+    """A hierarchical combine builds its header from scratch.
+
+    ``apply_merge_header`` was written for ``--merge``, where the header already
+    holds this session's totals and it only adds previous stacks -- so it guards
+    every aggregate with "already present". On a fresh header every guard
+    skipped, silently: the combined output lost its integration time and dates,
+    and, never marked RAWSTACK, could not be fed back into ``--merge`` or
+    ``--transient-detect``.
+    """
+
+    REF = {'nframes': 100, 'intgtime': 1000.0, 'totexp': 1000.0,
+           'datefrst': '2026-06-01T21:00:00', 'datelast': '2026-06-01T23:00:00'}
+    INFO = {'n_sources': 1, 'sources': ['other.fits'], 'total_frames': 160,
+            'total_intgtime': 600.0, 'total_totexp': 600.0,
+            'datefrst': '2026-05-20T20:00:00', 'datelast': '2026-05-20T21:00:00'}
+
+    def _combined_header(self):
+        hdr = fits.Header()
+        seed_reference_header(hdr, self.REF)
+        apply_merge_header(hdr, self.INFO)
+        return hdr
+
+    def test_totals_include_the_reference_and_the_others(self):
+        hdr = self._combined_header()
+        self.assertEqual(hdr['NFRAMES'], 160)
+        self.assertAlmostEqual(hdr['INTGTIME'], 1600.0)
+        self.assertAlmostEqual(hdr['INTGMIN'], 1600.0 / 60.0)
+        self.assertAlmostEqual(hdr['TOTEXP'], 1600.0)
+
+    def test_dates_span_every_stack(self):
+        hdr = self._combined_header()
+        self.assertEqual(hdr['DATEFRST'], '2026-05-20T20:00:00')
+        self.assertEqual(hdr['DATELAST'], '2026-06-01T23:00:00')
+
+    def test_the_result_is_marked_a_linear_stack(self):
+        self.assertTrue(self._combined_header()['RAWSTACK'])
+
+    def test_without_seeding_the_aggregates_are_silently_lost(self):
+        """The bug, reproduced: apply_merge_header alone on a fresh header."""
+        hdr = fits.Header()
+        apply_merge_header(hdr, self.INFO)
+        self.assertNotIn('INTGTIME', hdr)
+        self.assertNotIn('RAWSTACK', hdr)
+
+    def test_the_combined_output_can_be_merged_again(self):
+        """The property that matters: write it, and load_merge_stack accepts it
+        with the right totals."""
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 'combined.fits')
+            hdu = fits.PrimaryHDU(data=np.transpose(_star_field(), (2, 0, 1)))
+            seed_reference_header(hdu.header, self.REF)
+            apply_merge_header(hdu.header, self.INFO)
+            hdu.writeto(p)
+
+            _, meta = load_merge_stack(p)          # raises without RAWSTACK
+
+            self.assertEqual(meta['nframes'], 160)
+            self.assertAlmostEqual(meta['intgtime'], 1600.0)
+
+    def test_a_reference_with_no_totals_leaves_them_absent_not_zero(self):
+        hdr = fits.Header()
+        seed_reference_header(hdr, {'nframes': 0, 'intgtime': 0.0, 'totexp': 0.0,
+                                    'datefrst': None, 'datelast': None})
+        self.assertNotIn('INTGTIME', hdr)
+        self.assertNotIn('DATEFRST', hdr)
+        self.assertTrue(hdr['RAWSTACK'])
 
 
 if __name__ == '__main__':

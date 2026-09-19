@@ -16,17 +16,14 @@ apply_auto_settings(final, args) -> (target_type, label, signals, changes, weigh
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from src.models import Config
+from src.sky_model import _MIN_FIELD_OF_VIEW_DEG
 from src.utils import safe_print
-
-try:
-    from src.denoising import HAS_BM3D_PKG
-except Exception:
-    HAS_BM3D_PKG = False
 
 if TYPE_CHECKING:
     pass
@@ -222,15 +219,12 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # residual green cast that survives flat-field correction.
         ('scnr',                    True),
         ('photometric_calibration', True),
-        # Denoising: directional (curvelet-inspired) wavelet denoising
-        # instead of MMT as primary -- its structure-tensor coherence map
-        # is a more targeted mechanism for exactly what this target has a
-        # lot of (elongated Ha filaments) than MMT's general median
-        # cascade. ACDNR for residual sky noise, then a gentle Perona-Malik
+        # Denoising: directional (curvelet-inspired) wavelet denoising as
+        # primary -- its structure-tensor coherence map is a targeted
+        # mechanism for exactly what this target has a lot of (elongated
+        # Ha filaments). ACDNR for residual sky noise, then a gentle Perona-Malik
         # pass with option=2 (soft roll-off) to further protect filament
         # edges.
-        ('denoise',                 False),
-        ('denoise_mmt',             False),
         ('denoise_curvelet',        True),
         ('denoise_acdnr',           True),
         ('denoise_aniso',           True),
@@ -277,11 +271,9 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('entropy_bg',              True),
         ('scnr',                    True),
         ('photometric_calibration', True),
-        # Denoising: MMT handles non-Gaussian noise near the bright core;
-        # ACDNR cleans sky between arms; BM3D added conditionally when
-        # SNR and frame count are sufficient (see _apply_quality_settings).
-        ('denoise',                 False),
-        ('denoise_mmt',             True),
+        # Denoising: curvelet-style wavelet as primary; ACDNR cleans sky
+        # between arms.
+        ('denoise_curvelet',             True),
         ('denoise_acdnr',           True),
     ],
     'globular_cluster': [
@@ -307,8 +299,7 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('entropy_bg',              True),
         ('scnr',                    True),
         ('photometric_calibration', True),
-        ('denoise',                 False),
-        ('denoise_mmt',             True),
+        ('denoise_curvelet',             True),
         ('denoise_acdnr',           True),
     ],
     'planetary_nebula': [
@@ -337,8 +328,7 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('entropy_bg',              True),
         ('scnr',                    True),
         ('photometric_calibration', True),
-        ('denoise',                 False),
-        ('denoise_mmt',             True),
+        ('denoise_curvelet',             True),
         ('denoise_acdnr',           True),
         ('denoise_aniso',           True),
         ('aniso_option',            2),
@@ -368,8 +358,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # reflection nebulae is elongated/filamentary too and responds
         # well to both the coherence-protected thresholding and the PDE
         # edge preservation.
-        ('denoise',                 False),
-        ('denoise_mmt',             False),
         ('denoise_curvelet',        True),
         ('denoise_acdnr',           True),
         ('denoise_aniso',           True),
@@ -648,16 +636,6 @@ def _apply_quality_settings(
     if n >= 20 and not getattr(args, 'consensus_ref', False):
         _set('consensus_ref', True)
 
-    # 2. SNR-based denoising (only when auto-tuning is explicitly disabled)
-    if not getattr(args, 'auto_denoise_strength', True):
-        if snr > 0:
-            if snr < 5:
-                _set('denoise_strength', 4.5)
-            elif snr < 10:
-                _set('denoise_strength', 3.5)
-            elif snr > 20:
-                _set('denoise_strength', 2.0)
-
     # Ellipticity warning: poor tracking produces elongated stars
     if fwhm > 4.0 and med_ellip > 0.3:
         safe_print(f"  NOTE: median star ellipticity={med_ellip:.3f} > 0.3 with FWHM={fwhm:.1f}px "
@@ -671,43 +649,12 @@ def _apply_quality_settings(
         if new_iters != current_iters:
             _set('deconvolve_iterations', new_iters)
 
-    # 5. MMT strength scaled to SNR
-    if getattr(args, 'denoise_mmt', False) and snr > 0:
-        if snr < 5:
-            _set('denoise_mmt_strength', 4.0)
-        elif snr < 10:
-            _set('denoise_mmt_strength', 3.5)
-        elif snr > 20:
-            _set('denoise_mmt_strength', 2.0)
-
     # 6. Baseline ACDNR for unknown/noisy targets with no other luma denoiser
     #    (rule 14 enforces a single primary; don't add one just to remove it).
     if (snr < 5 and snr > 0
             and not getattr(args, 'denoise_acdnr', False)
-            and not getattr(args, 'denoise_mmt', False)
-            and not getattr(args, 'denoise', False)
-            and not getattr(args, 'denoise_bm3d', False)):
+            and not getattr(args, 'denoise_curvelet', False)):
         _set('denoise_acdnr', True)
-
-    # 7. BM3D: enable when the bm3d package is installed and the stack has enough
-    #    SNR for block-matching to outperform median-based methods.  Thresholds are
-    #    lower when the package is available (hardware-accelerated C backend) vs
-    #    absent (pure-scipy DCT fallback which is ~5-10x slower and less effective).
-    #    BM3D-suitable-ness is now a weighted sum over these 4 types instead of
-    #    exact bucket membership -- a session that's mostly (but not entirely)
-    #    one of these types can still qualify.
-    _bm3d_targets = ('galaxy', 'globular_cluster', 'emission_nebula', 'reflection_nebula')
-    _bm3d_snr_min = 8 if HAS_BM3D_PKG else 12
-    _bm3d_n_min   = 12 if HAS_BM3D_PKG else 20
-    _w = weights or {}
-    _bm3d_weight = sum(_w.get(t, 0.0) for t in _bm3d_targets)
-    if (_bm3d_weight > 0.5
-            and snr >= _bm3d_snr_min
-            and n >= _bm3d_n_min
-            and not getattr(args, 'denoise_bm3d', False)):
-        _set('denoise_bm3d', True)
-        if _w.get('globular_cluster', 0.0) > 0.5 or snr > 20:
-            _set('bm3d_stride', 4)
 
     # 8. TV deconvolution iteration count scaled to stack SNR.
     #    Low SNR: fewer iterations to avoid converging toward noise.
@@ -776,44 +723,27 @@ def _apply_quality_settings(
 
     # 14. Single primary luma denoiser. Target presets and the SNR rules
     #     above can each enable a denoiser; layering several full-frame
-    #     smoothers (wavelet + MMT + curvelet + ACDNR + BM3D) compounds
-    #     smoothing — each pass erodes the faint structure the previous one
-    #     preserved — without adding selectivity, and pays for every pass.
-    #     Precedence: BM3D (enabled only when its SNR/frame-count
-    #     conditions hold) > MMT (robust to the non-Gaussian residual noise
-    #     of stacked OSC data) > curvelet (directional/coherence-adaptive
-    #     wavelet -- ranked below MMT since MMT's median cascade is the
-    #     more battle-tested default when both would otherwise apply) >
-    #     wavelet > ACDNR (fallback sky smoother). Chroma-only cleanup
-    #     (chroma_nr, SCNR) is orthogonal and unaffected; explicit extras
-    #     like --denoise-aniso/-nlm/-bilateral are user intent and also
-    #     left alone.
-    if getattr(args, 'denoise_bm3d', False):
-        for attr in ('denoise_mmt', 'denoise_curvelet', 'denoise', 'denoise_acdnr'):
-            if getattr(args, attr, False):
-                _set(attr, False)
-    elif getattr(args, 'denoise_mmt', False):
-        for attr in ('denoise_curvelet', 'denoise', 'denoise_acdnr'):
-            if getattr(args, attr, False):
-                _set(attr, False)
-    elif getattr(args, 'denoise_curvelet', False):
-        for attr in ('denoise', 'denoise_acdnr'):
-            if getattr(args, attr, False):
-                _set(attr, False)
-    elif getattr(args, 'denoise', False):
+    #     smoothers compounds smoothing -- each pass erodes the faint
+    #     structure the previous one preserved -- without adding
+    #     selectivity, and pays for every pass. The curvelet-style wavelet
+    #     is the primary; ACDNR is only the fallback sky smoother when it is
+    #     off. Chroma-only cleanup (chroma_nr, SCNR) is orthogonal and
+    #     unaffected; explicit extras like --denoiser aniso/bilateral are
+    #     user intent and also left alone.
+    if getattr(args, 'denoise_curvelet', False):
         if getattr(args, 'denoise_acdnr', False):
             _set('denoise_acdnr', False)
 
     # 15. Variance-stabilize the luma plane (generalized Anscombe transform)
-    #     ahead of whichever wavelet-family denoiser ended up primary --
-    #     wavelet and curvelet both threshold via a single per-subband
+    #     ahead of the curvelet-style wavelet denoiser --
+    #     it thresholds via a single per-subband
     #     noise estimate that's only strictly valid under uniform Gaussian
     #     noise; the transform makes that assumption closer to true
     #     everywhere in the frame, not just near the sky background level.
     #     A closer match to the true noise model, not a target-type
-    #     tradeoff, so applied whenever one of those two denoisers is
+    #     tradeoff, so applied whenever that denoiser is
     #     active rather than blended per preset.
-    if getattr(args, 'denoise', False) or getattr(args, 'denoise_curvelet', False):
+    if getattr(args, 'denoise_curvelet', False):
         if not getattr(args, 'variance_stabilize', False):
             _set('variance_stabilize', True)
 
@@ -950,11 +880,14 @@ def _apply_free_diagnostics(args) -> List[str]:
     "useful" -- features with real runtime cost stay opt-in and are only
     *suggested* (see ``suggest_optional_features``).
 
-    ``--uncertainty-map`` qualifies: with ``--stack-method ivw`` the native
-    combine kernel already computes the per-pixel summed inverse-variance
-    weight it needs, so emitting the map is a write, not a computation. It
-    is meaningless for every other combine (only ivw has an exact analytic
-    per-pixel variance), so this does nothing elsewhere.
+    ``--uncertainty-map`` qualifies, with two honest caveats. It is cheap, not
+    free: the sigma-emitting native kernel measured ~0.135 s against 0.049 s
+    for the plain combine at N=20, 1200x1600x3 (it is a sibling kernel that
+    also accumulates the per-pixel weight sum) -- small in absolute terms, and
+    only on ``--stack-method ivw``. And it is not silent: it writes a new
+    ``<output>_sigma.fits`` into the user's output directory, which the change
+    line below says. It is meaningless for every other combine (only ivw has
+    an exact analytic per-pixel variance), so this does nothing elsewhere.
     """
     changes: List[str] = []
     _explicit = getattr(args, '_explicit_cli_dests', set())
@@ -963,9 +896,20 @@ def _apply_free_diagnostics(args) -> List[str]:
             and 'uncertainty_map' not in _explicit
             and not getattr(args, 'uncertainty_map', False)):
         args.uncertainty_map = True
-        changes.append("uncertainty_map  False -> True (free with --stack-method ivw)")
+        changes.append("uncertainty_map  False -> True (cheap with --stack-method ivw; writes <output>_sigma.fits)")
 
     return changes
+
+
+def _session_fov_deg(session_info) -> Optional[float]:
+    """Longest field-of-view axis, in degrees, from a session's own solve."""
+    try:
+        axes = [float(v) for v in (getattr(session_info, 'fov_x_rad', None),
+                                   getattr(session_info, 'fov_y_rad', None))
+                if v is not None]
+        return math.degrees(max(axes)) if axes else None
+    except (TypeError, ValueError):
+        return None
 
 
 def suggest_optional_features(args, weights: Optional[Dict[str, float]] = None,
@@ -980,22 +924,28 @@ def suggest_optional_features(args, weights: Optional[Dict[str, float]] = None,
     weights = weights or {}
     _explicit = getattr(args, '_explicit_cli_dests', set())
 
-    # The physical sky model needs a session solve + GPS + timestamp, so only
-    # suggest it when those are actually present -- otherwise it would fall
-    # back to DBE and the advice would be noise.
+    # The physical sky model needs a session solve + GPS + timestamp, AND a
+    # wide enough field. Below _MIN_FIELD_OF_VIEW_DEG it declines outright
+    # (the components are too collinear to separate), so suggesting it on a
+    # typical ~1 degree telescope field -- exactly where it is most likely to
+    # be suggested, since that is where extended targets get imaged -- would
+    # send the user to try a flag that falls straight back to DBE.
     extended = (weights.get('galaxy', 0.0)
                 + weights.get('emission_nebula', 0.0)
                 + weights.get('reflection_nebula', 0.0))
     has_geometry = bool(session_info is not None
                         and getattr(session_info, 'has_gps', False)
                         and getattr(session_info, 'has_wcs', False))
+    fov = _session_fov_deg(session_info) if has_geometry else None
     if (extended > 0.3 and has_geometry
+            and fov is not None and fov >= _MIN_FIELD_OF_VIEW_DEG
             and getattr(args, 'bg_method', 'dbe') != 'physical'
             and 'bg_method' not in _explicit):
         suggestions.append(
-            "--bg-method physical   (extended target with a session solve + GPS: "
-            "fits a geometry-constrained sky model that cannot absorb nebulosity, "
-            "instead of skipping the sky-residual passes to avoid that)")
+            f"--bg-method physical   (extended target, {fov:.0f} deg field, with a "
+            "session solve + GPS: fits a geometry-constrained sky model that cannot "
+            "absorb nebulosity, instead of skipping the sky-residual passes to "
+            "avoid that)")
 
     # --merge already supplies a prior epoch of this exact field, which is
     # precisely what difference imaging needs.

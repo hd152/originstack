@@ -159,3 +159,127 @@ def test_parallactic_angle_accepts_an_offset_timestamp():
 def test_zenith_angle_accepts_an_offset_timestamp():
     assert zenith_angle_deg(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL) == pytest.approx(
         zenith_angle_deg(*_TZ_TARGET, *_TZ_SITE, 0.0, _SAME_UTC), abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# No dependency on astropy's IERS tables
+# ---------------------------------------------------------------------------
+#
+# packaging/originstack.spec strips astropy_iers_data from the frozen app. Any
+# call that needs UT1-UTC then raises FileNotFoundError('finals2000A.all'),
+# which every function here swallows (fail-soft by design) and turns into None.
+# --photometry's airmass term, --fix-atmospheric-dispersion's zenith angle and
+# the default-path rotation prediction all silently vanished in the exe while
+# working in a source checkout.
+
+def _astropy_reference_lst_parallactic(ra, dec, lat, lon, when_iso):
+    """Parallactic angle from astropy's *apparent* sidereal time -- the ground
+    truth the closed form is compared against. Skips when astropy cannot
+    evaluate that date offline (which is itself the failure being tested for)."""
+    pytest.importorskip("astropy")
+    import astropy.units as u
+    from astropy.coordinates import EarthLocation
+    from astropy.time import Time
+    from astropy.utils.iers import conf
+
+    from src.observing_geometry import _as_utc_iso
+    try:
+        with conf.set_temp("auto_max_age", None), conf.set_temp("auto_download", False):
+            loc = EarthLocation(lat=lat * u.deg, lon=lon * u.deg)
+            lst = Time(_as_utc_iso(when_iso), location=loc).sidereal_time("apparent").deg
+    except Exception as exc:                                  # pragma: no cover
+        pytest.skip(f"astropy cannot evaluate this date offline: {exc}")
+    ha = math.radians((lst - ra + 180.0) % 360.0 - 180.0)
+    d, phi = math.radians(dec), math.radians(lat)
+    return math.degrees(math.atan2(math.sin(ha),
+                                   math.tan(phi) * math.cos(d) - math.sin(d) * math.cos(ha)))
+
+
+@pytest.mark.parametrize("when,ra,dec", [
+    ("2026-08-31T20:40:32-0700", 270.9, -24.4),
+    ("2026-03-01T02:00:00", 83.8, -5.4),
+    ("2026-12-15T23:10:00+0000", 10.7, 41.3),
+    ("2026-06-02T05:31:00-0700", 202.5, 47.2),
+])
+def test_closed_form_parallactic_angle_matches_astropy(when, ra, dec):
+    """Mean vs apparent sidereal time differs by the equation of the equinoxes
+    (~18 arcsec); measured worst case over these was 0.0024 deg. The consumers
+    resolve degrees (the rotation split threshold is 3), so 0.01 is generous."""
+    lat, lon = 37.77, -122.42
+    closed = parallactic_angle_deg(ra, dec, lat, lon, when)
+    truth = _astropy_reference_lst_parallactic(ra, dec, lat, lon, when)
+    assert closed is not None
+    assert abs((closed - truth + 180.0) % 360.0 - 180.0) < 0.01
+
+
+def test_parallactic_angle_does_not_call_astropys_sidereal_time(monkeypatch):
+    pytest.importorskip("astropy")
+    from astropy.time import Time
+
+    def boom(*a, **k):
+        raise FileNotFoundError("finals2000A.all")
+
+    monkeypatch.setattr(Time, "sidereal_time", boom)
+    assert parallactic_angle_deg(270.9, -24.4, 33.83, -117.79, _ORIGIN_LOCAL) is not None
+
+
+def test_altaz_falls_back_to_closed_form_when_astropy_is_missing(monkeypatch):
+    """Without the fallback this returned None in the frozen build."""
+    pytest.importorskip("astropy")
+    import sys
+
+    with_astropy = altaz(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL)
+    assert with_astropy is not None
+
+    monkeypatch.setitem(sys.modules, "astropy.coordinates", None)   # import raises
+    fallback = altaz(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL)
+
+    assert fallback is not None, "must not return None just because astropy is absent"
+    # Mean-equinox-of-date against J2000 input carries the documented ~0.35 deg
+    # precession offset; irrelevant to airmass, so allow a degree.
+    assert fallback[0] == pytest.approx(with_astropy[0], abs=1.0)
+    assert fallback[1] == pytest.approx(with_astropy[1], abs=1.0)
+
+
+def test_altaz_falls_back_when_the_astropy_transform_itself_fails(monkeypatch):
+    """The IERS failure does not surface as an ImportError: astropy imports
+    fine and then raises inside the transform."""
+    pytest.importorskip("astropy")
+    from astropy.coordinates import SkyCoord
+
+    def boom(*a, **k):
+        raise FileNotFoundError("finals2000A.all")
+
+    monkeypatch.setattr(SkyCoord, "transform_to", boom)
+    assert altaz(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL) is not None
+    assert airmass(*_TZ_TARGET, *_TZ_SITE, 0.0, _ORIGIN_LOCAL) is not None
+
+
+def test_garbage_time_still_returns_none_from_the_fallback(monkeypatch):
+    pytest.importorskip("astropy")
+    import sys
+
+    monkeypatch.setitem(sys.modules, "astropy.coordinates", None)
+    assert altaz(180.0, 0.0, when_iso="not-a-time", **_SITE) is None
+
+
+# ---------------------------------------------------------------------------
+# parse_timestamp (shared by observing_geometry and sky_model)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "2026-09-01T03:40:35", "2026-09-01T03:40:35Z", "2026-09-01T03:40:35+00:00",
+    "2026-08-31T20:40:35-0700", "2026-08-31T20:40:35-07:00",
+    "2026-09-01 03:40:35",
+])
+def test_parse_timestamp_normalises_every_spelling_to_naive_utc(text):
+    from src.utils import parse_timestamp
+    dt = parse_timestamp(text)
+    assert dt is not None and dt.tzinfo is None
+    assert (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second) == (2026, 9, 1, 3, 40, 35)
+
+
+@pytest.mark.parametrize("bad", ["", None, "not a timestamp", "0-00-00T00:00:00"])
+def test_parse_timestamp_returns_none_for_garbage(bad):
+    from src.utils import parse_timestamp
+    assert parse_timestamp(bad) is None

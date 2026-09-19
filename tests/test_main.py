@@ -152,11 +152,18 @@ except Exception:
     sys.modules.setdefault("astropy.io.fits", _fits_stub)
     sys.modules.setdefault("astropy.stats", _stats_stub)
 
-for _m in [
-    "tqdm", "psutil",
-    "cupy",
-]:
-    sys.modules.setdefault(_m, types.ModuleType(_m))
+# Same conditional treatment for the remaining optional packages. An
+# unconditional setdefault here shadowed a genuinely installed psutil and tqdm
+# with empty modules for the whole session (verified: `psutil` had no
+# `virtual_memory`, `tqdm` no `tqdm`), so every memory-adaptive path ran its
+# degraded fallback whichever test file happened to import first.
+# tqdm and psutil are declared dependencies, so this branch is dead in a
+# normal environment; cupy is genuinely optional and usually absent.
+for _m in ["tqdm", "psutil", "cupy"]:
+    try:
+        __import__(_m)
+    except Exception:
+        sys.modules.setdefault(_m, types.ModuleType(_m))
 
 # Same conditional treatment as astropy above: seven other test modules
 # (test_aberration, test_annotation, test_io_xisf, test_originvision,

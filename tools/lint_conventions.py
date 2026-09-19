@@ -42,7 +42,7 @@ SRC = ROOT / "src"
 # are intentionally excluded.
 OPTIONAL_PACKAGES = {
     "rawpy", "tifffile", "cupy", "cupyx", "astro_native", "tqdm",
-    "PIL", "psutil", "bm3d", "colour_demosaicing", "cv2", "matplotlib",
+    "PIL", "psutil", "colour_demosaicing", "cv2", "matplotlib",
 }
 
 # src/ modules where bare print() is legitimate (they define/own the console path).

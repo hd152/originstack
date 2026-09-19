@@ -44,22 +44,11 @@ Pillow>=9.0
 #       port of skimage's probabilistic_hough_line, which is itself
 #       non-deterministic run-to-run; validated to find the same synthetic
 #       trails, and the Bresenham line draw is bit-exact vs skimage.draw.line)
-#     - NLM denoising (src/denoising.py _nlm_denoise_numpy -- a faithful
-#       reimplementation of the published fast-NLM algorithm skimage's own
-#       docstring cites (Darbon 2008), not a bit-exact port: skimage ships
-#       fast_mode NLM as a compiled Cython kernel with no .pyx source in the
-#       installed wheel. Validated for equivalent denoising behaviour against
-#       real skimage -- 0.998 correlation, near-identical background noise
-#       reduction on a synthetic test image, see tests/test_nlm_denoise.py)
 #     - compute_multiscale_entropy's db4 wavelet decomposition (src/wavelet.py,
 #       extended from the bior1.3-only version to also carry db4's filter
 #       bank; forward-only, bit-exact vs pywt.wavedec2, see tests/test_wavelet.py)
 #     - Wavelet denoising (--denoise, bior1.3) was already native/numpy
 #       (src/wavelet.py)
-#
-#   Denoising:
-#     bm3d               — fast BM3D collaborative-filter (--denoise-bm3d); replaces
-#                          the built-in pure-scipy DCT fallback (~5-10× faster)
 #
 #   opencv-python is NOT used anywhere in this codebase. Bilateral filter and Malvar
 #   debayer are native Rust kernels (numpy fallback if astro_native isn't built); VNG
