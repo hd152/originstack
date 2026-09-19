@@ -500,7 +500,11 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
             out_chroma = out_chroma * (1.0 - blend_large) + coarse * blend_large
         result[:, :, c] = lum + out_chroma
 
-    return np.clip(result, 0, None).astype(np.float32)
+    # No non-negativity clip: this runs right after background extraction, which
+    # centres the sky on zero, and the sky pedestal that keeps noise above zero is
+    # applied later. Clipping here half-wave-rectifies the sky noise (50% exact
+    # zeros + positive spikes) -- the stretch then renders the spikes as white dots.
+    return result.astype(np.float32)
 
 
 def generalized_hyperbolic_stretch(

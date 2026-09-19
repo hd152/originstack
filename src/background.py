@@ -747,6 +747,33 @@ def sky_floor_normalize(rgb: np.ndarray, star_mask: Optional[np.ndarray] = None,
     return result
 
 
+def _flatten_edge_glow(lum_smooth: np.ndarray, sky_med: float, sky_std: float) -> np.ndarray:
+    """Return ``lum_smooth`` with edge-anchored glow components set to ``sky_med``.
+
+    A component of the above-sky region (light pollution, a lamp, moonlight
+    brightening toward a corner) whose smoothed peak lies within the frame's
+    border band is a gradient cut off by the sensor edge, not a compact
+    object. Only components larger than 2% of the frame are flattened, so a
+    star or small object that happens to sit near the edge is left alone.
+    """
+    H, W = lum_smooth.shape
+    border = max(4, int(min(H, W) * 0.05))
+    labeled, n = ndimage.label(lum_smooth > sky_med + 1.0 * max(sky_std, 1.0))
+    if n == 0:
+        return lum_smooth
+    min_area = 0.02 * H * W
+    out = lum_smooth
+    areas = np.bincount(labeled.ravel(), minlength=n + 1)
+    for i in np.nonzero(areas[1:] > min_area)[0] + 1:
+        comp = labeled == i
+        py, px = np.unravel_index(int(np.argmax(np.where(comp, lum_smooth, -np.inf))), (H, W))
+        if py < border or py >= H - border or px < border or px >= W - border:
+            if out is lum_smooth:
+                out = lum_smooth.copy()
+            out[comp] = sky_med
+    return out
+
+
 def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
                                exclusion_mask: Optional[np.ndarray],
                                verbose: bool, label: str) -> Tuple[np.ndarray, float, float, bool]:
@@ -759,6 +786,12 @@ def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
     lum_smooth = gaussian_filter_ds(lum, sigma=smooth_sigma)
     sky_med, sky_std = _sigma_sky(_border_pixels(lum_smooth))
 
+    if exclusion_mask is not None:
+        # A caller-supplied exclusion (galaxy/comet mode) already protects the
+        # target explicitly, so a gradient anchored on the frame edge is not
+        # the target -- let DBE model it as background instead of preserving
+        # it as "emission".
+        lum_smooth = _flatten_edge_glow(lum_smooth, sky_med, sky_std)
     emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
     if exclusion_mask is not None:
         try:

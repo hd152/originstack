@@ -30,6 +30,7 @@ class Config:
     ARCSINH_STRETCH_FACTOR = 5.0  # Default arcsinh stretch factor
     STAR_MASK_MAX_STARS = 500  # Max stars for mask generation
     AFFINE_MAX_STARS = 80  # Max stars for affine matching
+    REG_MIN_STARS = 12  # Registration catalog thinner than this is re-detected at lower thresholds (noisy/hazy subs)
     AFFINE_MATCH_RADIUS = 10.0  # Max pixel distance for star matching
     AFFINE_MAX_ROTATION_DEG = 20.0  # Reject an affine fit rotating more than this (bad RANSAC match)
     MAX_REALISTIC_SHIFT_FRAC = 0.3  # Reject a shift/affine translation exceeding this fraction of frame W/H (bad match, not real drift)

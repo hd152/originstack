@@ -98,6 +98,47 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     return None
 
 
+def registration_stars(lum: np.ndarray, noise: float,
+                       existing: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+    """Star catalog for registration, with a lower-threshold rescue for thin ones.
+
+    The default detector's confirmation threshold is tuned for clean subs; on a
+    noisy or hazy session it returns a handful of stars (2-6 measured on a real
+    Whirlpool session), below the 3 that ``match_stars_affine`` needs. Affine
+    matching then silently declines for every frame and registration falls back
+    to translation-only -- which cannot represent field rotation, so stars arc
+    around the field centre in the stack and the residual check (needs >= 5
+    reference stars) never runs. When the catalog is thinner than
+    ``Config.REG_MIN_STARS``, re-detect on a 2x2-binned luminance (SNR x2 per
+    star) at progressively lower confirmation thresholds and keep the larger
+    catalog. Coordinates are returned in ``lum``'s own pixel grid.
+    """
+    from src.quality import detect_stars_auto
+    from src.star_detect import detect_stars_matched_filter
+
+    cat = existing if existing is not None else detect_stars_auto(lum, noise)
+    n_have = 0 if cat is None else len(cat)
+    if n_have >= Config.REG_MIN_STARS or min(lum.shape) < 64:
+        return cat
+    h, w = (lum.shape[0] // 2) * 2, (lum.shape[1] // 2) * 2
+    binned = lum[:h, :w].astype(np.float64).reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3))
+    for k in (12.0, 8.0, 6.0):
+        try:
+            found = detect_stars_matched_filter(binned, fwhm=3.0, k_confirm=k)
+        except Exception as e:
+            _log.debug("registration star rescue failed: %s", e)
+            return cat
+        if len(found) >= Config.REG_MIN_STARS:
+            break
+    if len(found) <= n_have:
+        return cat
+    found = found[np.argsort(-found['flux'])][:Config.AFFINE_MAX_STARS]
+    # Binned pixel i covers full-res pixels 2i and 2i+1: centre at 2i + 0.5.
+    found['xcentroid'] = found['xcentroid'] * 2.0 + 0.5
+    found['ycentroid'] = found['ycentroid'] * 2.0 + 0.5
+    return found
+
+
 def _blind_match_transform(ref_stars: Optional[Any], img_stars: Optional[Any]) -> Optional[Any]:
     """Find a rigid (rotation+translation) transform between two star
     catalogs with no assumption about the rotation angle -- see
@@ -1017,7 +1058,6 @@ def _match_frame_stars(
     Returns (ref_xy_matched, frame_xy_matched) — both (N, 2) arrays of matched
     star pairs in (x, y) order — or None if fewer than 3 stars matched.
     """
-    from src.quality import detect_stars_auto
 
     aligned_lum = ndimage.shift(
         lum, shift=shift, order=1, mode='constant', cval=0.0
@@ -1027,7 +1067,7 @@ def _match_frame_stars(
         offset=-(transform.params[:2, :2] @ np.array([shift[0], shift[1]])),
         order=1, mode='constant', cval=0.0
     )
-    frame_stars = detect_stars_auto(aligned_lum, noise_val)
+    frame_stars = registration_stars(aligned_lum, noise_val)
     if frame_stars is None or len(frame_stars) < 3:
         return None
     frame_xy = np.array(
@@ -1447,6 +1487,16 @@ def run_registration_phase(
     ref_stars = best.metrics.get('_star_sources')
     if ref_stars is not None and len(ref_stars) == 0:
         ref_stars = None  # treat empty array same as absent
+    if not getattr(args, 'no_affine', False) and (
+            ref_stars is None or len(ref_stars) < Config.REG_MIN_STARS):
+        _n_before = 0 if ref_stars is None else len(ref_stars)
+        _rescued = registration_stars(
+            ref_lum, float(best.metrics.get('noise', 1.0)) if best.metrics else 1.0, ref_stars)
+        if _rescued is not None and len(_rescued) > _n_before:
+            safe_print(f"  Thin reference star catalog ({_n_before}); re-detected "
+                       f"{len(_rescued)} stars at a lower threshold for registration")
+            ref_stars = _rescued
+            best.metrics['_star_sources'] = ref_stars
 
     # If star sources are missing (lost from checkpoint JSON serialisation, or
     # detection unavailable in Phase 1), attempt re-detection now using the
@@ -1542,7 +1592,9 @@ def run_registration_phase(
                 # correctly-warped frame and compares them against the old
                 # reference's star positions -- adding the old-vs-new reference
                 # offset as a constant spurious residual on every single frame.
-                new_ref_stars = best.metrics.get('_star_sources')
+                new_ref_stars = registration_stars(
+                    ref_lum, float(best.metrics.get('noise', 1.0)),
+                    best.metrics.get('_star_sources'))
                 if new_ref_stars is not None and len(new_ref_stars) > 0:
                     ref_stars = new_ref_stars
                 safe_print(f"  Consensus reference: {os.path.basename(best.path)} "
@@ -1602,7 +1654,8 @@ def run_registration_phase(
             _masked_corr = getattr(args, 'masked_correlation', False)
             use_affine = HAS_SKIMAGE_TRANSFORM and not getattr(args, 'no_affine', False)
             if use_affine:
-                img_stars = f.metrics.get('_star_sources')
+                img_stars = registration_stars(
+                    lum, float(f.metrics.get('noise', 1.0)), f.metrics.get('_star_sources'))
                 # Cheap catalog-only paths first: nearest-neighbor star
                 # matching seeded with the pyramid shift already computed
                 # during reference selection (seed_shifts[j] -- effectively
@@ -2064,9 +2117,23 @@ def find_extended_source_ellipse(
     weights = np.clip(lum_smooth - sky_med, 0.0, None)
     centroids = ndimage.center_of_mass(weights, labeled, index=range(1, n + 1))
     sizes = ndimage.sum(binary, labeled, index=range(1, n + 1))
+    # A glow (light pollution, a nearby lamp, moonlight) that brightens toward
+    # a corner can have its intensity-weighted centroid well inside the frame
+    # while its smoothed *peak* sits on the sensor edge -- the signature of a
+    # gradient cut off by the frame, not an object. Seen on a real alt-az
+    # session: a 590k-px blob anchored at (0,0) with centroid (379,312) beat
+    # the actual galaxy (5k px), so the exclusion ellipse protected the glow
+    # from background extraction and it survived into the output. Reject a
+    # blob whose peak lies in the border band.
+    def _peaks_at_edge(label_idx: int) -> bool:
+        m = labeled == label_idx + 1
+        py, px = np.unravel_index(int(np.argmax(np.where(m, lum_smooth, -np.inf))), lum_smooth.shape)
+        return bool(py < border or py >= H - border or px < border or px >= W - border)
+
     candidates = [i for i, (center_y, center_x) in enumerate(centroids)
                  if edge_margin_y < center_y < H - edge_margin_y
-                 and edge_margin_x < center_x < W - edge_margin_x]
+                 and edge_margin_x < center_x < W - edge_margin_x
+                 and not _peaks_at_edge(i)]
     if not candidates:
         return None
     peak_label = max(candidates, key=lambda i: sizes[i]) + 1

@@ -370,6 +370,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     # Check for a checkpoint from a previous interrupted run
     resume_phase = 0
+    # Bound here, not only inside Phase 3: a >=phase-3 checkpoint resume skips that
+    # block, and the matched-filter step after Phase 4 reads both.
+    want_matched_filter = getattr(args, 'matched_filter', False)
+    psf_estimate = None
     ckpt_state: Optional[Dict] = None
     _sigma_out: dict = {}  # populated by run_stacking_phase when --uncertainty-map
     # applies; defined unconditionally since Phase 3 (where it's normally set)
