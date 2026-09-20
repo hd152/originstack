@@ -5926,6 +5926,244 @@ mod originvision {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CFA drizzle: splat one frame's measured Bayer samples (src/cfa_drizzle.py)
+// ---------------------------------------------------------------------------
+//
+// One call folds a whole calibrated frame into the running drizzle
+// accumulators. Every sensor pixel measured exactly one colour (its Bayer
+// parity picks the channel via `chan_table[(y&1)*2 + (x&1)]`); its sample is
+// (1) mapped onto the output grid through the frame's affine, (2) tested
+// against the reference stack, and (3) deposited as a square drop of half-side
+// `h` by exact area overlap into `num` (weighted value), `den` (weight) and
+// `cov` (unweighted coverage), each (out_h, out_w, 3) f64.
+//
+// The numpy path (`_frame_splat_numpy`) walks the same three steps with
+// per-channel bincounts -- ~6 full-size bincount passes per neighbour tap per
+// channel, which is what made a 148-frame run take 407 s. Here the work is one
+// pass over the samples, parallelised over bands of OUTPUT rows: every thread
+// owns its rows exclusively (a drop that straddles a band edge is deposited
+// by each band only into its own rows), so there are no atomics and no
+// per-thread accumulator copies (three full-size f64 planes per thread would
+// be gigabytes at sensor size).
+
+#[inline]
+fn bilinear_at(img: &[f32], oh: usize, ow: usize, c: usize, y: f64, x: f64) -> f64 {
+    let yc = y.max(0.0).min(oh as f64 - 1.0);
+    let xc = x.max(0.0).min(ow as f64 - 1.0);
+    let y0 = (yc.floor() as usize).min(oh - 2);
+    let x0 = (xc.floor() as usize).min(ow - 2);
+    let fy = yc - y0 as f64;
+    let fx = xc - x0 as f64;
+    let at = |yy: usize, xx: usize| img[(yy * ow + xx) * 3 + c] as f64;
+    (1.0 - fy) * ((1.0 - fx) * at(y0, x0) + fx * at(y0, x0 + 1))
+        + fy * ((1.0 - fx) * at(y0 + 1, x0) + fx * at(y0 + 1, x0 + 1))
+}
+
+/// Returns (samples_considered, samples_rejected) for this frame.
+#[pyfunction]
+#[pyo3(signature = (rgb, reference, chan_table, minv, off, h, sig, sky, reject_sigma, signal_tol, num, den, cov))]
+#[allow(clippy::too_many_arguments)]
+fn cfa_drizzle_frame<'py>(
+    py: Python<'py>,
+    rgb: PyReadonlyArray3<'py, f32>,
+    reference: PyReadonlyArray3<'py, f32>,
+    chan_table: PyReadonlyArray1<'py, u8>,
+    minv: PyReadonlyArray1<'py, f64>,
+    off: PyReadonlyArray1<'py, f64>,
+    h: f64,
+    sig: PyReadonlyArray1<'py, f64>,
+    sky: PyReadonlyArray1<'py, f64>,
+    reject_sigma: f64,
+    signal_tol: f64,
+    mut num: PyReadwriteArray3<'py, f64>,
+    mut den: PyReadwriteArray3<'py, f64>,
+    mut cov: PyReadwriteArray3<'py, f64>,
+) -> PyResult<(u64, u64)> {
+    let rs = rgb.as_array().shape().to_vec();
+    let os = reference.as_array().shape().to_vec();
+    if rs[2] != 3 || os[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("rgb and reference must have 3 channels"));
+    }
+    let (sh, sw) = (rs[0], rs[1]);
+    let (oh, ow) = (os[0], os[1]);
+    if oh < 2 || ow < 2 || num.as_array().shape() != [oh, ow, 3]
+        || den.as_array().shape() != [oh, ow, 3] || cov.as_array().shape() != [oh, ow, 3]
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "accumulators must be (out_h, out_w, 3) matching reference",
+        ));
+    }
+    let rgb_s = rgb.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("rgb must be C-contiguous")
+    })?;
+    let ref_s = reference.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("reference must be C-contiguous")
+    })?;
+    let ct = chan_table.as_slice()?;
+    let mv = minv.as_slice()?;
+    let of = off.as_slice()?;
+    let sg = sig.as_slice()?;
+    let sk = sky.as_slice()?;
+    if ct.len() != 4 || mv.len() != 4 || of.len() != 2 || sg.len() != 3 || sk.len() != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("bad parameter vector length"));
+    }
+    let num_s = num.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("num must be C-contiguous")
+    })?;
+    let den_s = den.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("den must be C-contiguous")
+    })?;
+    let cov_s = cov.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("cov must be C-contiguous")
+    })?;
+
+    let (m00, m01, m10, m11) = (mv[0], mv[1], mv[2], mv[3]);
+    let (off0, off1) = (of[0], of[1]);
+    // Forward affine input->output is o = Minv (i - off); its inverse
+    // i = M o + off maps an output band back to the input rows that can land in it.
+    let det = m00 * m11 - m01 * m10;
+    if det.abs() < 1e-12 {
+        return Err(pyo3::exceptions::PyValueError::new_err("singular affine"));
+    }
+    let (i00, i01) = (m11 / det, -m01 / det);
+
+    let k = (2.0 * h).floor() as i64 + 2;
+    let norm = 1.0 / (4.0 * h * h);
+    let valid_ch: [bool; 3] = [
+        sg[0].is_finite() && sg[0] > 0.0,
+        sg[1].is_finite() && sg[1] > 0.0,
+        sg[2].is_finite() && sg[2] > 0.0,
+    ];
+    let fw: [f64; 3] = [
+        if valid_ch[0] { 1.0 / (sg[0] * sg[0]) } else { 0.0 },
+        if valid_ch[1] { 1.0 / (sg[1] * sg[1]) } else { 0.0 },
+        if valid_ch[2] { 1.0 / (sg[2] * sg[2]) } else { 0.0 },
+    ];
+
+    const BAND: usize = 16;
+    let row_len = ow * 3;
+    let considered = std::sync::atomic::AtomicU64::new(0);
+    let rejected = std::sync::atomic::AtomicU64::new(0);
+
+    py.allow_threads(|| {
+        num_s
+            .par_chunks_mut(BAND * row_len)
+            .zip(den_s.par_chunks_mut(BAND * row_len))
+            .zip(cov_s.par_chunks_mut(BAND * row_len))
+            .enumerate()
+            .for_each(|(band, ((nb, db), cb))| {
+                let r0 = band * BAND;
+                let r1 = (r0 + nb.len() / row_len).min(oh);
+                // Output rows this band may receive (a drop reaches h beyond its centre).
+                let lo_o = r0 as f64 - h - 0.5;
+                let hi_o = r1 as f64 + h - 0.5;
+
+                // Bounding input rows: map the band's 4 corners back to the sensor.
+                let mut imin = f64::INFINITY;
+                let mut imax = f64::NEG_INFINITY;
+                for &oy in &[lo_o, hi_o] {
+                    for &ox in &[-h - 0.5, ow as f64 + h - 0.5] {
+                        let iy = i00 * oy + i01 * ox + off0;
+                        if iy < imin { imin = iy; }
+                        if iy > imax { imax = iy; }
+                    }
+                }
+                let y_start = (imin.floor() as i64 - 1).max(0) as usize;
+                let y_end = ((imax.ceil() as i64 + 2).max(0) as usize).min(sh);
+
+                let mut n_cons = 0u64;
+                let mut n_rej = 0u64;
+                for iy in y_start..y_end {
+                    let dy = iy as f64 - off0;
+                    // oy(ix) = m00*dy + m01*(ix - off1): solve for the ix span that
+                    // lands inside [lo_o, hi_o]; that keeps this pass O(samples in band).
+                    let base = m00 * dy;
+                    let (x_lo, x_hi) = if m01.abs() < 1e-12 {
+                        if base >= lo_o && base <= hi_o { (0usize, sw) } else { continue; }
+                    } else {
+                        let a = (lo_o - base) / m01 + off1;
+                        let b = (hi_o - base) / m01 + off1;
+                        let (u, v) = if a < b { (a, b) } else { (b, a) };
+                        (
+                            (u.floor() as i64 - 1).max(0) as usize,
+                            ((v.ceil() as i64 + 2).max(0) as usize).min(sw),
+                        )
+                    };
+                    for ix in x_lo..x_hi {
+                        let dx = ix as f64 - off1;
+                        let oy = m00 * dy + m01 * dx;
+                        let ox = m10 * dy + m11 * dx;
+                        // same admission test as the numpy path
+                        if !(oy > -h - 0.5 && oy < oh as f64 + h - 0.5
+                            && ox > -h - 0.5 && ox < ow as f64 + h - 0.5)
+                        {
+                            continue;
+                        }
+                        // band ownership: skip drops that cannot touch our rows
+                        if oy + h <= r0 as f64 - 0.5 || oy - h >= r1 as f64 - 0.5 {
+                            continue;
+                        }
+                        let c = ct[(iy & 1) * 2 + (ix & 1)] as usize;
+                        if c > 2 {
+                            continue;
+                        }
+                        let v = rgb_s[(iy * sw + ix) * 3 + c] as f64;
+                        let r_at = bilinear_at(ref_s, oh, ow, c, oy, ox);
+                        let resid = v - r_at;
+                        // Count each sample once: only the band that owns its centre row.
+                        let owner = {
+                            let cy = oy.round().max(0.0).min(oh as f64 - 1.0) as usize;
+                            cy >= r0 && cy < r1
+                        };
+                        if !valid_ch[c] {
+                            continue;
+                        }
+                        let s = sg[c];
+                        let sig_sig = (r_at - sk[c]).max(0.0) * signal_tol;
+                        let tol = reject_sigma * (s * s + sig_sig * sig_sig).sqrt();
+                        let keep = resid.abs() <= tol;
+                        if owner {
+                            n_cons += 1;
+                            if !keep { n_rej += 1; }
+                        }
+                        if !keep {
+                            continue;
+                        }
+                        let y0 = (oy - h + 0.5).floor() as i64;
+                        let x0 = (ox - h + 0.5).floor() as i64;
+                        for a in 0..k {
+                            let qy = y0 + a;
+                            if qy < r0 as i64 || qy >= r1 as i64 { continue; }
+                            let qyf = qy as f64;
+                            let ovy = (oy + h).min(qyf + 0.5) - (oy - h).max(qyf - 0.5);
+                            if ovy <= 0.0 { continue; }
+                            for b in 0..k {
+                                let qx = x0 + b;
+                                if qx < 0 || qx >= ow as i64 { continue; }
+                                let qxf = qx as f64;
+                                let ovx = (ox + h).min(qxf + 0.5) - (ox - h).max(qxf - 0.5);
+                                if ovx <= 0.0 { continue; }
+                                let wgt = ovy * ovx * norm;
+                                let idx = ((qy as usize - r0) * ow + qx as usize) * 3 + c;
+                                nb[idx] += wgt * v * fw[c];
+                                db[idx] += wgt * fw[c];
+                                cb[idx] += wgt;
+                            }
+                        }
+                    }
+                }
+                considered.fetch_add(n_cons, std::sync::atomic::Ordering::Relaxed);
+                rejected.fetch_add(n_rej, std::sync::atomic::Ordering::Relaxed);
+            });
+    });
+
+    Ok((
+        considered.load(std::sync::atomic::Ordering::Relaxed),
+        rejected.load(std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(originvision::originvision_score, m)?)?;
@@ -5969,6 +6207,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bresenham_line_native, m)?)?;
     m.add_function(wrap_pyfunction!(radial_bin_median, m)?)?;
     m.add_function(wrap_pyfunction!(aperture_photometry_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(cfa_drizzle_frame, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

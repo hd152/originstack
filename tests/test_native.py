@@ -1507,3 +1507,74 @@ def test_aperture_photometry_batch_rejects_bad_radii():
     xs = np.array([10.0]); ys = np.array([10.0])
     with pytest.raises(ValueError):
         native.aperture_photometry_batch(img, xs, ys, 5.0, 4.0, 9.0, 4)
+
+
+# ---------------------------------------------------------------------------
+# cfa_drizzle_frame (src/cfa_drizzle.py, --cfa-drizzle)
+# ---------------------------------------------------------------------------
+
+_HAS_CFA = hasattr(native, "cfa_drizzle_frame")
+
+
+def _cfa_inputs(n=12, H=96, seed=11):
+    from tests.test_cfa_drizzle import _sim
+    truth, mem, shifts = _sim(n, seed=seed, H=H)
+    ref = truth.astype(np.float32) + np.random.default_rng(0).normal(
+        0, 5, truth.shape).astype(np.float32)
+    return mem, shifts, ref
+
+
+@pytest.mark.skipif(not _HAS_CFA, reason="astro_native lacks cfa_drizzle_frame")
+@pytest.mark.parametrize("pixfrac,scale", [(1.0, 1.0), (0.6, 1.0), (0.8, 2.0)])
+def test_cfa_drizzle_frame_matches_numpy_translation(pixfrac, scale):
+    from src.cfa_drizzle import cfa_drizzle_combine
+    mem, shifts, ref = _cfa_inputs()
+    ref = ref if scale == 1.0 else np.kron(ref, np.ones((2, 2, 1), np.float32))
+    n = len(shifts)
+    kw = dict(pattern='RGGB', top=0, left=0, scale=scale, pixfrac=pixfrac)
+    a, sa = cfa_drizzle_combine(mem, list(range(n)), shifts, [None] * n, ref,
+                                use_native=False, **kw)
+    b, sb = cfa_drizzle_combine(mem, list(range(n)), shifts, [None] * n, ref,
+                                use_native=True, **kw)
+    np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-3)
+    assert sa['samples'] == sb['samples']
+    assert sa['rejected_frac'] == pytest.approx(sb['rejected_frac'], abs=1e-9)
+    assert sb['native'] and not sa['native']
+
+
+@pytest.mark.skipif(not _HAS_CFA, reason="astro_native lacks cfa_drizzle_frame")
+@pytest.mark.parametrize("deg", [0.0, 4.5, -9.0, 30.0])
+def test_cfa_drizzle_frame_matches_numpy_under_rotation(deg):
+    """Rotation is what makes the row-band ownership logic non-trivial: a band's
+    input rows slant across the sensor, and a drop straddling a band edge must
+    still be deposited exactly once per row."""
+    from src.affine_fit import RigidTransform
+    from src.cfa_drizzle import cfa_drizzle_combine
+    mem, _, ref = _cfa_inputs(n=8, H=160)
+    n = len(mem)
+    rng = np.random.default_rng(3)
+    tfs = [RigidTransform.from_rotation_translation(
+        np.deg2rad(deg + rng.normal(0, 0.3)), (float(rng.normal(0, 3)), float(rng.normal(0, 3))))
+        for _ in range(n)]
+    ref = np.pad(ref, ((0, 64), (0, 0), (0, 0)), mode='edge')[:160]
+    kw = dict(pattern='RGGB', top=4, left=4, scale=1.0, pixfrac=0.8)
+    a, sa = cfa_drizzle_combine(mem, list(range(n)), [None] * n, tfs, ref,
+                                use_native=False, **kw)
+    b, sb = cfa_drizzle_combine(mem, list(range(n)), [None] * n, tfs, ref,
+                                use_native=True, **kw)
+    np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-3)
+    assert sa['samples'] == sb['samples']
+
+
+@pytest.mark.skipif(not _HAS_CFA, reason="astro_native lacks cfa_drizzle_frame")
+def test_cfa_drizzle_frame_rejects_bad_shapes():
+    z3 = lambda h, w: np.zeros((h, w, 3))
+    rgb = np.zeros((8, 8, 3), np.float32)
+    ref = np.zeros((6, 6, 3), np.float32)
+    args = (np.array([0, 1, 1, 2], np.uint8), np.array([1., 0., 0., 1.]),
+            np.array([0., 0.]), 0.5, np.ones(3), np.zeros(3), 4.0, 0.15)
+    with pytest.raises(ValueError):   # accumulators not matching the reference
+        native.cfa_drizzle_frame(rgb, ref, *args, z3(5, 6), z3(6, 6), z3(6, 6))
+    with pytest.raises(ValueError):   # singular affine
+        native.cfa_drizzle_frame(rgb, ref, args[0], np.zeros(4), *args[2:],
+                                 z3(6, 6), z3(6, 6), z3(6, 6))

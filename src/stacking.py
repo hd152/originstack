@@ -2518,6 +2518,14 @@ def run_stacking_phase(
                     total_weight += w
             stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
 
+    # --cfa-drizzle: recombine the measured Bayer samples onto the stack's grid
+    # (see src/cfa_drizzle.py); the stack built above is its rejection
+    # reference and the fallback where the mosaic lattice is still too sparse.
+    if getattr(args, 'cfa_drizzle', False):
+        from src.cfa_drizzle import apply_cfa_drizzle
+        stacked = apply_cfa_drizzle(stacked, mem_rgb, final_indices, shifts, transforms,
+                                    top, left, args, displacement_fields)
+
     # Save a pre-post-processing copy for FITS output (preserves high sky SNR)
     fits_stacked = stacked.copy()
     try:
