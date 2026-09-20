@@ -992,9 +992,19 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     # --uncertainty-propagate re-runs Phase 4 on noise realizations of this
     # exact array, so keep the linear pre-post-processing stack (Phase 4
     # mutates its input in place in several steps).
-    _unc_input = stacked.copy() if getattr(args, 'uncertainty_propagate', False) else None
+    # Hierarchical multi-session runs combine the per-session linear stacks and run
+    # Phase 4 once on the combined image (cli._postprocess_combined), so a stack that
+    # is only an input to that combine skips it: the combine reads the linear FITS,
+    # nothing Phase 4 does here can reach the result, and it is the slowest phase.
+    _defer_phase4 = bool(getattr(args, '_defer_phase4', False))
+    _unc_input = (stacked.copy() if getattr(args, 'uncertainty_propagate', False)
+                  and not _defer_phase4 else None)
 
-    stacked = postprocess_stack(stacked, args, final, stats)
+    if _defer_phase4:
+        safe_print("\n  Phase 4 deferred: this session's stack is combined with the others "
+                   "first, then post-processed once")
+    else:
+        stacked = postprocess_stack(stacked, args, final, stats)
 
     stats.post_processing_time = time.time() - phase_start
 
@@ -1389,7 +1399,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         from src.ui_events import get_ui_events
         _wv = get_ui_events()
         if _wv.active:
-            _wv.preview(stacked, 'Final (post-processed)', args=args,
+            _wv.preview(stacked,
+                        'Session stack (linear)' if _defer_phase4 else 'Final (post-processed)',
+                        args=args,
                         slot='final', min_interval=0.0)
             _fw = [f.metrics.get('fwhm', 0) for f in final
                    if f.metrics and f.metrics.get('fwhm', 0) > 0]

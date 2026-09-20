@@ -48,6 +48,7 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **Multi-session (hierarchical) runs post-process once.** Each session's stack used to go through the whole of Phase 4 and then the combined stack went through it again, although the combine only reads the linear per-session FITS. Sessions that will be combined now skip Phase 4 (and their throwaway preview stays linear); it runs once on the combined stack. Single sessions, filter-split groups and the combined stack are unchanged.
 - **Faster Phase 1, identical output** (`astro_native` 0.27.0). Calibration (bias, scaled dark, flat, finite
   check, clip) and both hot-pixel passes (Bayer mosaic and RGB) each run as one native call instead of
   ~6-20 full-frame numpy passes: per 2048x3056 frame calibrate 40 -> 9 ms, Bayer hot-pixel fix 715 -> 29 ms,

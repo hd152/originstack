@@ -294,10 +294,9 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
 def _postprocess_combined(combined, eff_args, output_path):
     """Run Phase 4 on a hierarchically combined linear stack.
 
-    The per-target stacks each went through post-processing, but the combined
-    output was only a linear stack with a linear preview: the deliverable of a
-    multi-session run never got background extraction, denoising or a stretch
-    tuned to it. ``--merge`` runs Phase 4 once on the merged result; this does
+    The per-session stacks skip Phase 4 (``args._defer_phase4``): the combine reads
+    their linear FITS, so this is the one place the chain runs -- on the deepest
+    image, once. ``--merge`` does the same on its merged result; this does
     the same for the hierarchical path, with the settings the reference
     target's own run ended up with (including --auto's choices). The frame
     list is empty, so measured-FWHM lookups fall back to their defaults.
@@ -307,6 +306,7 @@ def _postprocess_combined(combined, eff_args, output_path):
     from src.postprocess import postprocess_stack
     eff = argparse.Namespace(**vars(eff_args))
     eff.output = output_path
+    eff._defer_phase4 = False
     eff._diagnostic_dir = None
     print_header("PHASE 4: POST-PROCESSING THE COMBINED STACK", "-")
     return postprocess_stack(combined.copy(), eff, [], ProcessingStats())
@@ -857,6 +857,9 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     overall_start = time.time()
     subdirs = [os.path.join(directory, d) for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
     targets = []
+    # Several sessions stacked separately then combined: Phase 4 belongs on the
+    # combined stack, not on each input to it (see stack_target).
+    defer_phase4 = False
 
     safe_print("\nDiscovering frames...")
     if any(os.listdir(directory)) and any(f.lower().endswith(('.fit', '.fits')) for f in os.listdir(directory)):
@@ -878,6 +881,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             tmp_stacks.append(outp)
             _cleanup_register(outp)
         safe_print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
+        defer_phase4 = len(targets) > 1
         # final combined output will be combined from tmp_stacks
     else:
         safe_print('  ERROR: No FITS files found')
@@ -1113,7 +1117,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             safe_print(f"\n  ⚠ WARNING: {warning}")
 
         args._input_directory = d  # per-target input dir for session info and target inference
-        res = stack_target([f for t in frames.values() for f in t], outp, args, masters, stats)
+        args._defer_phase4 = defer_phase4
+        try:
+            res = stack_target([f for t in frames.values() for f in t], outp, args, masters, stats)
+        finally:
+            args._defer_phase4 = False   # before the snapshot below: it is not part of the target's settings
         if res:
             produced.append(res)
             save_effective_config(args, outp)
