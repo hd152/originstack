@@ -312,6 +312,17 @@ def _postprocess_combined(combined, eff_args, output_path):
     return postprocess_stack(combined.copy(), eff, [], ProcessingStats())
 
 
+def _unit_interval(text: str) -> float:
+    """argparse type: a float in [0, 1]."""
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number")
+    if not 0.0 <= v <= 1.0:
+        raise argparse.ArgumentTypeError(f"{v:g} is outside 0-1")
+    return v
+
+
 def _load_calibration_dir(args: argparse.Namespace) -> dict:
     """Discover calibration frames from --cal-dir.
 
@@ -1376,23 +1387,29 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Discover and classify frames, show calibration info, print effective '
                         'parameters, and estimate resource usage — without processing anything')
     g_post.add_argument('--denoiser',
-                   choices=['auto', 'curvelet', 'wavelet', 'acdnr', 'bilateral', 'aniso',
+                   choices=['auto', 'wavelet', 'curvelet', 'acdnr', 'bilateral', 'aniso',
                             'none'],
                    default='auto',
-                   help='Primary luma denoiser (default: auto — curvelet unless a '
+                   help='Primary luma denoiser (default: auto — wavelet unless a '
                         'preset/--auto selects otherwise). '
-                        'curvelet: adaptive BayesShrink DWT with the per-subband threshold '
+                        'wavelet: adaptive BayesShrink DWT whose per-subband threshold is '
                         'locally reduced wherever a structure-tensor coherence map detects '
                         'elongated structure (filaments, galaxy arms) -- '
                         'curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet '
-                        'transform (tune via --config directional_protect_strength, default '
-                        '0.6). '
-                        'wavelet: the same denoiser with that protection turned off '
-                        '(--config directional_protect_strength is ignored). '
+                        'transform. How much that protection reduces the threshold is '
+                        '--wavelet-protect (0 = plain BayesShrink). '
+                        'curvelet: an alias for wavelet, kept for old command lines. '
                         'acdnr: contrast-gated sky smoothing. '
                         'bilateral / aniso: edge-preserving filters. '
                         'none: disable luma denoising. Chroma noise reduction is '
                         'separate (--no-chroma-nr). Fine tuning via --config.')
+    g_post.add_argument('--wavelet-protect', dest='directional_protect_strength',
+                   type=_unit_interval, metavar='0-1',
+                   help='Structure protection for the wavelet denoiser: how strongly the '
+                        'threshold is lowered where elongated structure (filaments, galaxy '
+                        'arms) is detected. 0 = plain BayesShrink with no protection; '
+                        'default 0.6 (or the --auto preset\'s value). Only applies with '
+                        '--denoiser wavelet/curvelet.')
     g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse'],
                    default='off', dest='deconvolve_mode',
                    help='Deconvolution: off (default), rl (Richardson-Lucy), '
@@ -1418,7 +1435,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
                         'sky_residual, sky_pedestal, bilateral, '
-                        'acdnr, curvelet, deconvolve, star_reduce, local_contrast, '
+                        'acdnr, wavelet (alias: curvelet), deconvolve, star_reduce, local_contrast, '
                         'sky_neutralize, edge_bands, remove_stars, starless_process')
     g_stack.add_argument('--cfa-drizzle', dest='cfa_drizzle', action='store_true',
                    help='Bayer-aware drizzle: after stacking, recombine each frame\'s '
@@ -2236,10 +2253,12 @@ def parse_args(argv=None):
     # attributes, so everything downstream is unchanged). ──
     if args.denoiser != 'auto':
         d = args.denoiser
+        # 'curvelet' is an alias for 'wavelet'. (Before the two were merged,
+        # 'wavelet' meant the same function with protection forced to 0; that is
+        # now spelled --denoiser wavelet --wavelet-protect 0.)
         args.denoise_curvelet = d in ('curvelet', 'wavelet')
-        if d == 'wavelet':
-            # Same denoiser, structure protection off (plain BayesShrink).
-            args.directional_protect_strength = 0.0
+        if d == 'curvelet':
+            args.denoiser = 'wavelet'
         args.denoise_acdnr = (d == 'acdnr')
         args.denoise_bilateral = (d == 'bilateral')
         args.denoise_aniso = (d == 'aniso')
@@ -2256,8 +2275,6 @@ def parse_args(argv=None):
     if 'denoiser' in _explicit_dests:
         _explicit_dests.update({
             'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet'})
-        if args.denoiser == 'wavelet':
-            _explicit_dests.add('directional_protect_strength')
     if 'deconvolve_mode' in _explicit_dests:
         _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse'})
 

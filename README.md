@@ -198,7 +198,7 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 5. ✅ Sky floor normalisation (per-channel pedestal removal)
 6. ✅ Sky residual correction (second pass after background extraction)
 7. ✅ Sky pedestal — lift the background off zero before the non-negativity clips (prevents black-hole clipping)
-8. ✅ Wavelet denoising — curvelet-inspired directional BayesShrink (`--denoiser wavelet` turns the structure protection off)
+8. ✅ Wavelet denoising — curvelet-inspired directional BayesShrink (`--denoiser wavelet`; `--wavelet-protect 0` turns the structure protection off; `--denoiser curvelet` is an alias)
 9. ❌ Bilateral filter — `--denoiser bilateral`
 10. ❌ ACDNR adaptive contrast denoising — `--denoiser acdnr`
 11. ❌ Perona-Malik anisotropic diffusion — `--denoiser aniso` (native/Rust accelerated)

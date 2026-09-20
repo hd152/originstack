@@ -628,7 +628,8 @@ def postprocess_stack(
         safe_print(f"  ✓ ACDNR denoise ({format_time(time.time() - acdnr_start)})")
 
     # 6.7b. Directional (curvelet/shearlet-inspired) adaptive wavelet denoising
-    if getattr(args, 'denoise_curvelet', False) and 'curvelet' not in skip_steps:
+    if (getattr(args, 'denoise_curvelet', False)
+            and not ({'wavelet', 'curvelet'} & skip_steps)):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_curvelet_denoise')
         curv_chroma = getattr(args, 'denoise_chroma_boost', 2.0)
         curv_protect = getattr(args, 'directional_protect_strength', 0.6)
