@@ -5,10 +5,23 @@ A previous run's main output FITS is the linear, pre-post-processing stack
 ``--merge PREV.fits [...]`` registers each such stack onto the current
 session's pixel grid (star-match affine with a translation fallback — nights
 on an alt-az mount differ by arbitrary field rotation) and combines them as a
-per-pixel weighted mean, weight = that stack's frame count inside its warped
-footprint and 0 outside, so zero-filled borders never dilute the result:
+per-pixel weighted mean, weight = that stack's inverse noise variance inside
+its warped footprint and 0 outside, so zero-filled borders never dilute the
+result:
 
     merged(x) = sum_i w_i(x) * S_i(x) / sum_i w_i(x)
+
+Sessions are rarely comparable in raw ADU: a 25 s ISO 500 stack sits at a
+different flux scale than a 10 s ISO 200 one, and averaging them as-is mixes
+two brightness scales (real Fireworks Galaxy data, five sessions). Each
+previous stack is therefore first mapped onto the current stack's flux scale
+(``_match_flux_scale``: a robust per-channel gain + sky offset fit on the
+smoothed, above-noise pixels both stacks share), and the weights are
+1/sigma^2 of the *scaled* stack's measured pixel noise (``_pixel_noise``) --
+the Gauss-Markov optimum -- not its frame count, which is only a proxy when
+every session has the same per-frame exposure and noise. If any stack's noise
+cannot be measured the whole merge falls back to frame-count weights (gains
+are still applied).
 
 There is no cross-session outlier rejection — each session already rejected
 outliers internally when it was stacked (the same tradeoff hierarchical mode
@@ -146,6 +159,90 @@ def load_merge_stack(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
     return np.ascontiguousarray(data, dtype=np.float32), _meta_from_header(path, hdr)
 
 
+_SCALE_SMOOTH_SIGMA = 4.0     # px; equalises seeing/PSF differences between sessions
+_SCALE_MIN_SNR = 8.0          # smoothed-pixel S/N (in both stacks) to enter the fit
+_SCALE_MIN_PIXELS = 500
+_SCALE_SNAP = 0.015           # gains within 1 +/- this are treated as exactly 1
+_SCALE_BOUNDS = (0.2, 5.0)
+_FOOTPRINT_TRIM_PX = 3        # px trimmed off each warped footprint edge
+_NOISE_LAG = 4                # px; differencing at a lag clears resampling correlation
+
+
+def _pixel_noise(ch: np.ndarray, valid: np.ndarray) -> float:
+    """Robust per-pixel noise sigma of one channel inside ``valid``.
+
+    MAD of differences between pixels ``_NOISE_LAG`` apart, / sqrt(2): stars
+    and nebulosity are a small tail the MAD ignores, and the lag keeps the
+    estimate from being fooled by the short-range correlation debayering and
+    resampling leave in a stack (it still sees the variance those steps really
+    removed, which is what the weights should reflect). NaN if there are too
+    few valid pairs.
+    """
+    L = _NOISE_LAG
+    pair = valid[:, L:] & valid[:, :-L]
+    if int(pair.sum()) < 1000:
+        return float('nan')
+    d = (ch[:, L:].astype(np.float64) - ch[:, :-L])[pair]
+    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+
+
+def _match_flux_scale(ref: np.ndarray, img: np.ndarray, valid: np.ndarray
+                      ) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Per-channel (gain, offset) mapping ``img`` onto ``ref``'s flux scale.
+
+    ``ref ~= offset + gain * img``. Both are Gaussian-smoothed first so a
+    seeing difference between sessions does not read as a flux difference,
+    each is reduced to its own sky (median over ``valid``), and the gain is a
+    Tukey-IRLS regression through the origin on pixels bright in *both*
+    (smoothed S/N >= ``_SCALE_MIN_SNR``). Unmeasurable channels (too few
+    shared bright pixels, or a gain outside ``_SCALE_BOUNDS``) get gain 1 and
+    offset 0; a gain within ``_SCALE_SNAP`` of 1 snaps to 1 so a same-settings
+    merge is not perturbed by estimator noise. Returns (gain[3], offset[3],
+    pixels used in the worst-measured channel).
+    """
+    from scipy.ndimage import gaussian_filter
+    gains = np.ones(3)
+    offsets = np.zeros(3)
+    n_min = None
+    for c in range(3):
+        sr = gaussian_filter(ref[:, :, c].astype(np.float32), _SCALE_SMOOTH_SIGMA)
+        si = gaussian_filter(img[:, :, c].astype(np.float32), _SCALE_SMOOTH_SIGMA)
+        vr, vi = sr[valid].astype(np.float64), si[valid].astype(np.float64)
+        if vr.size < _SCALE_MIN_PIXELS:
+            n_min = 0
+            continue
+        mr, mi = float(np.median(vr)), float(np.median(vi))
+        sd_r = 1.4826 * float(np.median(np.abs(vr - mr)))
+        sd_i = 1.4826 * float(np.median(np.abs(vi - mi)))
+        x = vi - mi
+        y = vr - mr
+        sel = (x > _SCALE_MIN_SNR * sd_i) & (y > _SCALE_MIN_SNR * sd_r)
+        n = int(sel.sum())
+        n_min = n if n_min is None else min(n_min, n)
+        if n < _SCALE_MIN_PIXELS:
+            continue
+        x, y = x[sel], y[sel]
+        if n > 200_000:
+            k = np.random.default_rng(0).choice(n, 200_000, replace=False)
+            x, y = x[k], y[k]
+        g = float(np.sum(x * y) / np.sum(x * x))
+        for _ in range(8):
+            r = y - g * x
+            scale = 1.4826 * float(np.median(np.abs(r))) + 1e-12
+            u = r / (4.685 * scale)
+            w = np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+            if w.sum() <= 0:
+                break
+            g = float(np.sum(w * x * y) / np.sum(w * x * x))
+        if not np.isfinite(g) or not (_SCALE_BOUNDS[0] <= g <= _SCALE_BOUNDS[1]):
+            continue
+        if abs(g - 1.0) < _SCALE_SNAP:
+            g = 1.0
+        gains[c] = g
+        offsets[c] = mr - g * mi
+    return gains, offsets, int(n_min or 0)
+
+
 def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                           merge_paths: List[str],
                           verbose: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -160,6 +257,14 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     H, W = stacked.shape[:2]
     new_w = float(max(new_frame_count, 1))
 
+    # Two accumulators run side by side: inverse-variance weights (preferred)
+    # and frame-count weights (fallback when any stack's noise is unmeasurable).
+    new_sigma = np.array([_pixel_noise(stacked[:, :, c], np.ones((H, W), dtype=bool))
+                          for c in range(3)])
+    noise_ok = bool(np.all(np.isfinite(new_sigma)) and np.all(new_sigma > 0))
+    w_new = 1.0 / new_sigma ** 2 if noise_ok else np.ones(3)
+    acc_n = stacked.astype(np.float64) * w_new
+    wsum_n = np.broadcast_to(w_new, (H, W, 3)).astype(np.float64).copy()
     acc = stacked.astype(np.float64) * new_w
     wsum = np.full((H, W), new_w, dtype=np.float64)
 
@@ -219,6 +324,15 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
             aligned = apply_transform(prev, shift=shift, transform=tf)
             footprint = apply_transform(embed_mask, shift=shift, transform=tf)
         valid = footprint > 0.5
+        # Trim the footprint's rim. A warped stack's outermost pixels are a
+        # blend of image and the zero fill outside it (and Lanczos rings against
+        # that edge), so they sit off the true sky level; averaged in, they drew
+        # a thin bright/dark outline around every merged session's footprint
+        # (visible as tilted rectangles across a real five-session combine).
+        from scipy import ndimage as _ndi
+        if _FOOTPRINT_TRIM_PX > 0:   # scipy: iterations<1 erodes until nothing is left
+            valid = _ndi.binary_erosion(valid, iterations=_FOOTPRINT_TRIM_PX,
+                                        border_value=1)
 
         overlap = float(np.mean(valid))
         if overlap < Config.MERGE_MIN_OVERLAP:
@@ -246,9 +360,27 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                     f"(< {Config.MERGE_MIN_CORRELATION}) — wrong target or "
                     f"failed registration; refusing to merge")
 
+        gains, offsets, n_fit = _match_flux_scale(stacked, aligned, valid)
+        scaled = aligned.astype(np.float64) * gains + offsets
+        if np.any(gains != 1.0):
+            safe_print(f"    flux scale vs current stack: R x{gains[0]:.3f}  "
+                       f"G x{gains[1]:.3f}  B x{gains[2]:.3f} ({n_fit} px in fit)")
+
         w_map = np.where(valid, w_prev, 0.0)
-        acc += aligned.astype(np.float64) * w_map[:, :, np.newaxis]
+        acc += scaled * w_map[:, :, np.newaxis]
         wsum += w_map
+
+        if noise_ok:
+            prev_sigma = np.array([_pixel_noise(aligned[:, :, c], valid)
+                                   for c in range(3)]) * gains
+            if np.all(np.isfinite(prev_sigma)) and np.all(prev_sigma > 0):
+                w_c = 1.0 / prev_sigma ** 2
+                acc_n += scaled * np.where(valid[:, :, np.newaxis], w_c, 0.0)
+                wsum_n += np.where(valid[:, :, np.newaxis], w_c, 0.0)
+                info.setdefault('weights', []).append(
+                    (os.path.basename(path), float(np.mean(w_c / w_new))))
+            else:
+                noise_ok = False
 
         if tf is not None:
             t_xy = tf.params[:2, 2]
@@ -271,7 +403,13 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
             if v:
                 info[key] = pick(info[key], str(v)) if info[key] else str(v)
 
-    merged = (acc / np.maximum(wsum[:, :, np.newaxis], 1e-12)).astype(np.float32)
+    if noise_ok:
+        merged = (acc_n / np.maximum(wsum_n, 1e-30)).astype(np.float32)
+        info['weighting'] = 'inverse-variance'
+    else:
+        merged = (acc / np.maximum(wsum[:, :, np.newaxis], 1e-12)).astype(np.float32)
+        info['weighting'] = 'frame-count'
+    safe_print(f"  Merge weighting: {info['weighting']}")
     return merged, info
 
 

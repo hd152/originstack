@@ -16,7 +16,7 @@ from src.merge import (
 )
 
 
-def _star_field(shift=(0.0, 0.0), rot_deg=0.0, seed=0, H=256, W=320):
+def _star_field(shift=(0.0, 0.0), rot_deg=0.0, seed=0, H=256, W=320, noise=5.0):
     """Synthetic RGB star field; optionally shifted/rotated (same sky)."""
     rng = np.random.default_rng(seed)
     star_rng = np.random.default_rng(99)  # same stars every call
@@ -31,7 +31,7 @@ def _star_field(shift=(0.0, 0.0), rot_deg=0.0, seed=0, H=256, W=320):
         sy, sx = star_rng.uniform(20, H - 20), star_rng.uniform(20, W - 20)
         amp = star_rng.uniform(2000, 9000)
         img += amp * np.exp(-((ry - sy) ** 2 + (rx - sx) ** 2) / (2 * 1.8 ** 2))
-    img = img + rng.normal(0, 5, (H, W))
+    img = img + rng.normal(0, noise, (H, W))
     return np.stack([img, img, img], axis=2).astype(np.float32)
 
 
@@ -70,8 +70,10 @@ class TestMergePreviousStacks(unittest.TestCase):
     def test_weighted_mean_identity_alignment(self):
         """Same sky, zero offset: merged = (w1*a + w2*b) / (w1+w2)."""
         with tempfile.TemporaryDirectory() as td:
-            a = _star_field(seed=1)
-            b = _star_field(seed=2)
+            # Stack noise falls as 1/sqrt(N), as it does for real stacks, so
+            # the inverse-variance weights come out at the frame-count ratio.
+            a = _star_field(seed=1, noise=5.0 * np.sqrt(3.0))
+            b = _star_field(seed=2, noise=5.0)
             p = os.path.join(td, 'prev.fits')
             _write_stack(p, b, nframes=30)
             merged, info = merge_previous_stacks(a, 10, [p])
@@ -81,7 +83,7 @@ class TestMergePreviousStacks(unittest.TestCase):
             m = 8
             diff = np.abs(merged[m:-m, m:-m].astype(np.float64)
                           - expected[m:-m, m:-m])
-            self.assertLess(float(diff.max()), 2.0)
+            self.assertLess(float(diff.max()), 3.0)
             self.assertEqual(info['total_frames'], 40)
 
     def test_rotated_shifted_stack_aligns(self):
@@ -101,6 +103,57 @@ class TestMergePreviousStacks(unittest.TestCase):
             c_merged = np.corrcoef(lum(new), lum(merged))[0, 1]
             self.assertGreater(c_merged, 0.98)
             self.assertGreater(c_merged, c_prev + 0.05)
+
+    def test_previous_stack_is_mapped_onto_the_current_flux_scale(self):
+        """A stack captured at another exposure/gain must not be averaged in
+        raw ADU: 2.5x the signal plus a different sky pedestal lands back on
+        the current stack's scale."""
+        with tempfile.TemporaryDirectory() as td:
+            new = _star_field(seed=1, noise=5.0)
+            base = _star_field(seed=2, noise=0.0)
+            prev = (base - 1000.0) * 2.5 + 400.0
+            prev = prev + np.random.default_rng(7).normal(0, 12.5, prev.shape[:2])[:, :, None]
+            p = os.path.join(td, 'prev.fits')
+            _write_stack(p, prev.astype(np.float32), nframes=30)
+            merged, info = merge_previous_stacks(new, 30, [p])
+            m = 8
+            a = merged[m:-m, m:-m, 1].astype(np.float64).ravel()
+            b = new[m:-m, m:-m, 1].astype(np.float64).ravel()
+            slope = np.polyfit(b, a, 1)[0]
+            self.assertAlmostEqual(slope, 1.0, delta=0.03)
+            self.assertAlmostEqual(float(np.median(a)), float(np.median(b)), delta=3.0)
+            self.assertEqual(info['weighting'], 'inverse-variance')
+
+    def test_same_settings_stack_is_not_rescaled(self):
+        with tempfile.TemporaryDirectory() as td:
+            new = _star_field(seed=1)
+            p = os.path.join(td, 'prev.fits')
+            _write_stack(p, _star_field(seed=2), nframes=10)
+            from src.merge import _match_flux_scale
+            gains, offsets, _ = _match_flux_scale(
+                new, _star_field(seed=2), np.ones(new.shape[:2], dtype=bool))
+            np.testing.assert_array_equal(gains, np.ones(3))
+            np.testing.assert_allclose(offsets, 0.0, atol=1.0)
+
+    def test_weights_follow_measured_noise_not_frame_count(self):
+        """Equal frame counts but 3x the noise in one stack: the merge must
+        beat a plain mean and approach the inverse-variance optimum."""
+        with tempfile.TemporaryDirectory() as td:
+            truth = _star_field(seed=1, noise=0.0)
+            good = _star_field(seed=1, noise=5.0) - truth
+            noisy = _star_field(seed=1, noise=15.0) - truth
+            rng = np.random.default_rng(3)
+            good = rng.normal(0, 5.0, truth.shape[:2])[:, :, None] + truth
+            noisy = rng.normal(0, 15.0, truth.shape[:2])[:, :, None] + truth
+            p = os.path.join(td, 'prev.fits')
+            _write_stack(p, noisy.astype(np.float32), nframes=10)
+            merged, _ = merge_previous_stacks(good.astype(np.float32), 10, [p])
+            m = 8
+            err = (merged - truth)[m:-m, m:-m, 1].std()
+            plain = np.sqrt(5.0 ** 2 + 15.0 ** 2) / 2.0      # 7.9
+            optimum = 1.0 / np.sqrt(1 / 25.0 + 1 / 225.0)    # 4.74
+            self.assertLess(err, plain - 1.5)
+            self.assertLess(err, optimum + 0.8)
 
     def test_low_overlap_rejected(self):
         with tempfile.TemporaryDirectory() as td:
@@ -228,3 +281,30 @@ class TestHierarchicalHeaderChains(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestFootprintRimIsTrimmed(unittest.TestCase):
+
+    def _merge_with_bright_rim(self, trim):
+        import src.merge as m
+        old = m._FOOTPRINT_TRIM_PX
+        m._FOOTPRINT_TRIM_PX = trim
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                new = _star_field(seed=3, noise=1.0)
+                base = _star_field(shift=(-6.0, 0.0), seed=4, noise=1.0)   # sits 6 px lower
+                prev = base.copy()
+                prev[:2, :, :] += 500.0            # the rim of the previous stack
+                p = os.path.join(td, 'prev.fits')
+                _write_stack(p, prev, nframes=10)
+                merged, _ = m.merge_previous_stacks(new, 10, [p])
+            return merged
+        finally:
+            m._FOOTPRINT_TRIM_PX = old
+
+    def test_bright_rim_of_a_warped_stack_does_not_leak(self):
+        # rim lands on rows ~6-7 of the new grid; sky there is ~1000
+        leak_off = float(np.median(self._merge_with_bright_rim(0)[6:8, 40:280, 1])) - 1000.0
+        leak_on = float(np.median(self._merge_with_bright_rim(3)[6:8, 40:280, 1])) - 1000.0
+        self.assertGreater(leak_off, 100.0)      # the artifact is real without the trim
+        self.assertLess(abs(leak_on), 10.0)      # and gone with it
