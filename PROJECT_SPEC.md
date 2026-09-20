@@ -73,11 +73,19 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/quality_sweep.py` | 270 | Collection quality sweep — recursive scoring + reversible flagging (`--quality-sweep`) |
 | `src/xisf_writer.py` | 107 | XISF 1.0 format writer (`--export xisf`) |
 | `src/cleanup.py` | 47 | Global temp-file registry — auto-remove all registered paths on exit or interrupt |
+| `src/banding.py` | ~190 | Row/column banding removal (`--banding-removal`) — per Bayer plane, neighbour-difference noise, local highlight cut, sort-based median + Savitzky-Golay trend, significance-gated |
+| `src/transparency.py` | ~180 | Per-frame transparency from a fixed star ensemble (`--transparency-min`); `to_aligned_yx` (the inverse of `apply_transform`'s convention, tested against it) |
+| `src/distortion.py` | ~260 | Session-wide radial distortion model (`--distortion-model`): fit, significance test on held-out frames, analytic per-frame displacement fields |
+| `src/session_report.py` | ~400 | Session diagnostics PNG/CSV (`--session-report`), drift/rotation/periodic-tracking/focus analysis; PIL-only plotting |
+| `src/noise_validation.py` | ~150 | Odd/even half-stack noise map + consistency map (`--noise-validate`) |
+| `src/moving_objects.py` | ~330 | Moving-object detection, velocity-space linking, tracked stacking (`--moving-objects`) |
+| `src/lightcurve_analysis.py` | ~260 | Lomb-Scargle period + BLS/trapezoid transit analysis of light curves (`--lightcurve-analysis`); uses astropy.timeseries |
+| `src/cfa_drizzle.py` | ~300 | Bayer-aware drizzle (`--cfa-drizzle`), native `cfa_drizzle_frame` kernel + numpy mirror |
 | `src/pipeline.py` | 1197 | Four-phase orchestrator, `stack_target` |
 | `src/cli.py` | 1911 | `process_directory`, `parse_args`, `main` |
 | `originstack.py` | 179 | Backward-compatibility re-export shim |
 | `desktop_app.py` (root) | 24 | Thin root shim — `from src.desktop_app import main` |
-| `ext/astro_native/` (Rust) | ~6300 | Optional PyO3/maturin crate (~44 kernels, numpy fallback when absent): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind star-pattern match, 2D wavelet transform, BM3D block-matching fallback, hot-pixel fix/replace, robust-PCA Gram-matrix SVD, continuum-subtraction moments, 1D + 2D Moffat/Gaussian PSF fits, and the full **originvision inference path** (preprocessing + ONNX forward pass via pure-Rust `tract` — see feature 46) |
+| `ext/astro_native/` (Rust) | ~6300 | Optional PyO3/maturin crate v0.25 (~44 kernels, numpy fallback when absent): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind star-pattern match, 2D wavelet transform, hot-pixel fix/replace, CFA-drizzle splat, fused white balance, robust-PCA Gram-matrix SVD, continuum-subtraction moments, 1D + 2D Moffat/Gaussian PSF fits, and the full **originvision inference path** (preprocessing + ONNX forward pass via pure-Rust `tract` — see feature 46) |
 
 **Total: ~30,000 lines** (Python, `src/` alone; excludes the Rust crate). Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
@@ -228,6 +236,10 @@ The post-registration residual check verifies alignment on the riskiest ~20% of 
 - Shifts > 10% of image dimension are rejected as unrealistic (translation fallback path)
 - The affine fit is independently sanity-checked (shift > 10% of frame size, or rotation > `Config.AFFINE_MAX_ROTATION_DEG` = 5deg) before being accepted; a bad RANSAC star match can converge on a wildly wrong but internally-consistent transform, so this can't be caught by the translation-only guard. Falls back to translation-only registration on failure.
 - Post-registration residual check re-detects stars in each aligned frame and measures RMS centroid error (sampled ~20% + riskiest-by-shift frames, escalating to all frames if any sample fails). Frames exceeding `Config.REG_RESIDUAL_MAX_PX` (1.5px) are dropped from the stack by default -- `--no-reg-residual-reject` to keep them (still annotated via `reg_residual_px` in metrics); `--no-reg-residual-check` skips the check entirely.
+- **Shift-outlier rescue**: the pyramid shift is translation-only, so on an alt-az mount field rotation makes it return garbage for a rotated frame (a real session: 34 of 148 frames flagged at ~2300 px when the true offsets were a few hundred). Flagged frames are registered by the blind rigid star match (`src/blind_match.py`) with the same sanity limits as the affine path; only if that fails do they get the old zero/coarse-shift handling.
+- **The residual gate cannot reject a whole session** (`_relative_residual_gate`): when it fails > 50% of >= 10 frames while the session's median residual is within `REG_RESIDUAL_MAX_PX_CAP`, frames are judged against the session's own median + 4 robust sigma (capped).
+- **Transparency** (`src/transparency.py`): after registration each frame's stars are mapped into the reference, mutually matched, and the median flux ratio of unsaturated matches (session median = 1.0) is stored as `metrics['transparency']`; `--transparency-min` drops frames below it.
+- **`--distortion-model`** (`src/distortion.py`; real Origin data: a1 = +0.0007, not significant, not applied): fits `u = c + (p-c)(1 + a1 r^2 + a2 r^4)` from every frame's matches by minimising the residual of per-frame rigid fits in undistorted space, applied through per-frame displacement fields in the same resample pass elastic registration uses (built analytically -- `fit_displacement_field` smooths and shrank a smooth field to ~70% of its amplitude). Applied only when it reduces the residual on held-out frames by >= 10% and >= 0.1 px; skipped with `--elastic-registration`.
 - Optional elastic (non-rigid) local correction extends this further — see feature 32 below.
 - Dither pattern detection → auto-selects sigma-clip stacking method
 
@@ -277,10 +289,10 @@ The post-registration residual check verifies alignment on the riskiest ~20% of 
 ### 13. Denoising
 
 The primary luma denoiser is selected with a single flag —
-`--denoiser {auto,curvelet,wavelet,acdnr,bilateral,aniso,none}`
-(default `auto`, which resolves to `curvelet` unless a preset/`--auto`
+`--denoiser {auto,wavelet,curvelet,acdnr,bilateral,aniso,none}`
+(default `auto`, which resolves to `wavelet` unless a preset/`--auto`
 selects otherwise) — and the auto-advisor enforces **one primary**
-(curvelet wavelet primary, ACDNR only as the fallback sky smoother): layering several full-frame
+(wavelet primary, ACDNR only as the fallback sky smoother): layering several full-frame
 smoothers compounds smoothing without adding selectivity. Chroma noise
 reduction is separate and always available. Per-denoiser tuning lives in
 the config-file tier (see `--config`). NLM, BM3D and MMT were removed after
@@ -290,8 +302,7 @@ licence-encumbered.
 
 | Denoiser | Notes | Config keys |
 |----------|-------|-------------|
-| `curvelet` (`auto` default) | Adaptive BayesShrink DWT with the per-subband threshold is locally reduced wherever a structure-tensor coherence map detects elongated structure (filaments, galaxy arms), protecting it more than an isotropic threshold would. Curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet transform | `directional_protect_strength` (default 0.6; 0 = identical to `--denoiser wavelet`) |
-| `wavelet` | Same denoiser as `curvelet` with the structure protection turned off (plain adaptive BayesShrink per subband, luma/chroma split, star-protected) | `denoise_chroma_boost` |
+| `wavelet` (`auto` default; `curvelet` is an alias) | Adaptive BayesShrink DWT with the per-subband threshold locally reduced wherever a structure-tensor coherence map detects elongated structure (filaments, galaxy arms), protecting it more than an isotropic threshold would. Curvelet/shearlet-*inspired*, not an actual ridgelet/shearlet transform. Protection strength is `--wavelet-protect 0-1` (default 0.6; 0 = plain adaptive BayesShrink per subband, luma/chroma split, star-protected). Before the merge `--denoiser wavelet` meant protection forced to 0 | `--wavelet-protect` / `directional_protect_strength`, `denoise_chroma_boost` |
 | `acdnr` | Contrast-gated sky smoothing — flat sky smoothed, structure preserved | `denoise_acdnr_sigma`, `denoise_acdnr_k` |
 | `bilateral` | Edge-preserving bilateral filter, joint colour-space weighting (Rust-accelerated) | `denoise_bilateral_sigma_color`, `denoise_bilateral_sigma_space` |
 | `aniso` | Perona-Malik anisotropic diffusion (Rust-accelerated, ~37x) | `aniso_iterations`, `aniso_kappa`, `aniso_gamma`, `aniso_option` |
@@ -382,7 +393,7 @@ mean-variance relationship.
 ### 24. Incremental Stacking (`--merge`)
 
 - The main output FITS is the **linear pre-post-processing stack** (`RAWSTACK=True`) carrying `NFRAMES`/`INTGTIME`/`TOTEXP` headers
-- `--merge PREV.fits [...]` processes only the new session through Phases 1-3, registers each previous stack onto the new grid (blind rigid star-pattern match first, `src/blind_match.py` — nights differ by arbitrary field rotation on alt-az mounts, and this makes no assumption about the angle — translation-seeded star-catalog RANSAC and translation-only fallbacks), and combines as a per-pixel `NFRAMES`-weighted mean inside each warped footprint
+- `--merge PREV.fits [...]` processes only the new session through Phases 1-3, registers each previous stack onto the new grid (blind rigid star-pattern match first, `src/blind_match.py` — nights differ by arbitrary field rotation on alt-az mounts, and this makes no assumption about the angle — translation-seeded star-catalog RANSAC and translation-only fallbacks), maps each onto the current stack's flux scale (robust per-channel gain + sky offset), and combines as a per-pixel **inverse-noise-variance** weighted mean inside each warped footprint (frame count is only a proxy when sessions share exposure/ISO; 3 px of each footprint's rim is trimmed)
 - Phase 4 runs once on the merged result; header aggregates are summed, so the output chains into future merges
 - Guards: hard error on registration failure, <25% footprint overlap, or <0.15 aligned-luminance correlation (wrong-target protection); refuses non-linear inputs and `--drizzle-scale > 1`
 - No cross-session outlier rejection (each session already rejected internally)
@@ -407,7 +418,7 @@ mean-variance relationship.
 
 - **Auto-detected**: FITS in the root directory → single-folder mode; subdirectories with FITS → hierarchical mode
 - Each subfolder processed independently with its own calibration frames
-- Final combination: registered and mean-combined with crop to common valid dimensions
+- Final combination: the same rotation-agnostic, flux-matched, noise-weighted merge as `--merge`; the reference grid is the stack with the most integration time; **Phase 4 then runs on the combined stack** with the reference target's own effective settings (the FITS stays a linear `RAWSTACK`)
 - `--debug intermediates`: saves per-subfolder stacks
 - `--combine-sessions`: pools all lights from all subfolders into one unified stack
 
@@ -550,6 +561,37 @@ See feature 11 (Stacking Methods) for details — additive per-frame background 
 - `--originvision-score-all`: also scores every accepted light frame (slower on a large session). Has no effect without `--originvision` also set (warns at startup if passed alone)
 - Scores are stored in `FrameInfo.metrics['originvision']` and logged, but never set `accepted` or feed `metrics['score']`
 
+### 47. Banding Removal (`--banding-removal`)
+
+- Per-row and per-column offsets are measured on each calibrated frame **before debayering**, per Bayer colour plane against that plane's own trend; the two planes sharing a sensor row/column are averaged and the same correction is applied to both
+- The estimate is the median of pixels below a *local* highlight cut (box-filtered level + 3 sigma of the neighbour-difference noise), minus a Savitzky-Golay trend (a windowed median biased the ends of a sloped series by ~3 sigma); offsets are gated by their own standard error (none below 1.5 SE, full above 3.5), so a clean frame is left essentially alone
+- Noise comes from neighbour differences, not the plane MAD (vignetting inflated the MAD 786 vs 455 ADU on a real frame, which made the significance test too generous)
+- Real Origin frames carry ~12 ADU of genuine per-frame row banding (~3% of pixel noise): negligible after stacking, so this is for sensors where it matters. Costs ~0.65 s per full frame per worker
+
+### 48. Frame Transparency (`--transparency-min`)
+
+- Median flux ratio of a fixed, unsaturated star ensemble against the reference, normalised to the session median. Real session: min 0.86, p10 0.91, max 1.23 over 148 frames (~41 stars each). Thin cloud dims stars without changing FWHM or SNR much, so the quality gate can pass it
+
+### 49. Session Report (`--session-report`)
+
+- `<output>_session.png` (nine panels) and `.csv`; the summary reports drift rate and direction, tracking scatter, a Lomb-Scargle-detected periodic tracking error (FAP < 1%), field-rotation rate (unwrapped) and total, FWHM trend and its correlation with sensor temperature, transparency range. Drift/dy/dx are the frame **centre's** displacement (a transform's raw translation is the corner's and sweeps an arc under field rotation)
+
+### 50. Noise Validation (`--noise-validate`)
+
+- `var(A-B) = sigma1^2 (1/nA + 1/nB)` for the odd/even half-means gives the full stack's measured per-pixel noise (per channel, locally) with no sensor model and no whiteness assumption; the halves' local correlation is a confidence map for faint structure. Compared with per-frame noise / sqrt(N) it reports how far resampling has correlated the pixels. Real session: R 43.2 / G 36.5 / B 36.9 ADU, 61% of the frame repeatable
+
+### 51. Moving Objects (`--moving-objects`, `--moving-objects-stack`)
+
+- Residual of each aligned frame against the (rejection) stack, matched-filter smoothed, stars masked by brightness-scaled radii, candidates linked by voting in velocity space (a cell collecting detections from many *different frames*); tracks refit by least squares. A source moving < ~2 FWHM over the session is not distinguishable from a residual and is not reported; trails are `--trail-reject`'s business. Real session: 1497 candidates, 0 tracks
+
+### 52. Light-Curve Analysis (`--lightcurve-analysis`)
+
+- On `--photometry-timeseries` output: Lomb-Scargle (astropy) up to half the baseline with a false-alarm probability; box-least-squares to place a dip, then a trapezoid least-squares fit with errors from the Jacobian and a BIC comparison against a flat curve
+
+### 53. Bayer-Aware Drizzle (`--cfa-drizzle`)
+
+- See `src/cfa_drizzle.py`. Real-data verdict (148 frames, FWHM 4.9 px): luma noise -13%, colour noise +110%, sharpness -5% -- a trade for undersampled data, not a general upgrade. Native kernel `cfa_drizzle_frame`: 407 s -> 26 s
+
 ---
 
 ## Complete CLI Reference
@@ -615,12 +657,23 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--no-reg-residual-reject` | — | Keep frames failing the post-registration residual check (dropped by default) |
 | `--no-reg-residual-check` | — | Skip the post-registration residual check entirely |
 | `--elastic-registration` | off | Fit + apply a per-frame local (non-rigid) displacement field on top of the global affine |
+| `--distortion-model` | off | Session-wide radial distortion, applied per frame (skipped with `--elastic-registration`) |
+| `--transparency-min N` | 0 | Drop frames whose relative transparency is below N (0 = measure and report only) |
+| `--banding-removal` | off | Row/column banding removal per calibrated Bayer frame (`banding_amount`, `banding_sigma` via `--config`) |
+| `--cfa-drizzle` | off | Recombine measured Bayer samples (uses `--drizzle-scale` / `--drizzle-pixfrac`; needs `--debayer-method malvar`) |
+| `--noise-validate` | off | Odd/even half-stacks: `<output>_noise.fits`, `<output>_consistency.fits` |
+| `--moving-objects` / `--moving-objects-stack` | off | Asteroid-like mover search -> `<output>_moving_objects.csv` (+ `_moving_N.fits`) |
 
 ### Post-processing (Phase 4)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--denoiser NAME` | auto (curvelet) | Primary luma denoiser: curvelet, wavelet, acdnr, bilateral, aniso, none |
+| `--denoiser NAME` | auto (wavelet) | Primary luma denoiser: wavelet (alias curvelet), acdnr, bilateral, aniso, none |
+| `--wavelet-protect 0-1` | 0.6 | Structure protection of the wavelet denoiser (0 = plain BayesShrink) |
+| `--starless-process` | off | Run the denoisers, local contrast and deconvolution on a starless copy; add the stars back |
+| `--layered-stretch` | off | Preview black/white points from a starless copy (needs `--stretch ghs`) |
+| `--session-report` | off | Write `<output>_session.png` / `.csv` |
+| `--lightcurve-analysis` | off | Period + transit analysis of `--photometry-timeseries` output |
 | `--variance-stabilize` | off | Generalized Anscombe transform before wavelet/curvelet thresholding |
 | `--deconvolve {off,rl,rl-sv,tv,sparse}` | off | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet (FISTA) deconvolution |
 | `--repair-stars` | off | Saturated star core repair via Moffat wing fit (feature 39) |

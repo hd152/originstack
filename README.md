@@ -167,6 +167,10 @@ SUMMARY
 - Crops to the valid common region across all frames (no black borders)
 - Sampled post-registration residual verification, escalating to all frames on failure; frames whose measured alignment error still exceeds threshold are dropped by default (`--no-reg-residual-reject` to keep them)
 - The affine fit itself is sanity-checked (shift/rotation bounds) before use, falling back to translation-only registration on a bad RANSAC match instead of applying it uncorrected
+- **Frames a rotating field breaks are rescued, not dropped**: on an alt-az mount the pyramid shift (translation only) returns garbage for a rotated frame; flagged frames are now registered by a blind rigid star match (a real session had 34 of 148 frames stacked at the wrong position before this)
+- **The residual gate cannot reject a whole session**: if the absolute threshold would fail most frames, frames are judged against the session's own residual spread instead
+- **Per-frame transparency** — the median flux of a fixed star ensemble relative to the session median, measured after registration; `--transparency-min 0.8` drops frames thinned by cloud/haze that the FWHM/SNR gates miss
+- **Session-wide distortion model** (`--distortion-model`, off by default) — one radial distortion (two coefficients) fitted from every frame's star matches and applied as per-frame corrections in the same single resample pass; only applied if it clearly helps on frames the fit did not see
 - **Elastic (non-rigid) local registration** (`--elastic-registration`, off by default) — fits a smooth per-frame local displacement field from matched-star residuals, correcting spatially-varying distortion (differential atmospheric refraction, field rotation, tube flexure) a single global affine can't. Composed into the same single resample pass as the affine warp (no extra blur pass), and works under `--drizzle-scale` too
 
 ### Stacking Methods (7)
@@ -207,7 +211,9 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 14. ❌ Deconvolution — `--deconvolve rl|tv|rl-sv|sparse` (RL is GPU-accelerated with `--use-gpu`; `rl-sv` is spatially-variant, `sparse` is FISTA in this project's wavelet basis)
 15. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
 16. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
-17. ✅ Final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
+17. ✅ Edge-band correction (`--skip-step edge_bands`) — removes the sky excess that rises toward the frame edges, then the final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
+
+Opt-in variants of the chain: `--starless-process` runs the denoisers and local contrast (and deconvolution, if enabled) on a starless copy and adds the stars back untouched; `--layered-stretch` takes the preview's black/white points from a starless copy so a faint galaxy or nebula owns the tonal range instead of being squeezed under the stars' white point.
 
 > The auto-advisor enforces a **single primary luma denoiser** (the curvelet
 > wavelet, with ACDNR only as the fallback sky smoother) — layering several
@@ -235,10 +241,17 @@ Eight built-in target presets tune all parameters at once:
 - **Photometric colour calibration** — gray-locus method (`--photometric-calibration`), or full field-star calibration via Gaia DR3 (`--color-calibrate`)
 - **Aperture photometry** (`--photometry`) — calibrates the stack against Gaia DR3: per-channel zero points (optional colour terms), airmass from the `info.json` GPS + time, a Poisson error term from raw bias/flat pairs, and a `<output>_photometry.csv` star catalogue with magnitudes + uncertainties
 - **Differential light curves** (`--photometry-timeseries`) — aperture-photometers a fixed Gaia star list on every registered sub and ensemble-calibrates, writing per-frame + per-star CSVs with a variability flag; `--photometry-target "RA,DEC"` reports one star
+- **Banding removal** (`--banding-removal`) — per-row/column offsets removed from each calibrated Bayer frame before debayering, per colour plane, only where significant; a clean frame is left essentially untouched
+- **Session diagnostics report** (`--session-report`) — `<output>_session.png` + `.csv`: FWHM, transparency, SNR, background, drift, field rotation, ellipticity, residual and temperature against time, with the drift rate, any periodic tracking error, the rotation rate and any focus-vs-temperature drift printed
+- **Noise validation** (`--noise-validate`) — stacks the odd and even frames separately; their difference is an empirical noise map (`<output>_noise.fits`) and their local correlation shows which structure is repeatable (`<output>_consistency.fits`)
+- **Moving objects** (`--moving-objects`, `--moving-objects-stack`) — links per-frame residuals into asteroid-like tracks by voting in velocity space; optionally stacks a window along each track so a mover too faint for any one frame comes up out of the noise
+- **Light-curve analysis** (`--lightcurve-analysis`, with `--photometry-timeseries`) — Lomb-Scargle period search with a false-alarm probability and a box-least-squares + trapezoid transit fit with errors and a BIC test
+- **Bayer-aware drizzle** (`--cfa-drizzle`, opt-in) — recombines each frame's *measured* colour samples instead of debayer-interpolated ones (native kernel, 15.7× the numpy path). On well-sampled data it trades 13% lower luma noise for 2× colour noise and no sharpness gain, so it is meant for undersampled data
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
-- **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges
+- **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges. Stacks from different exposure/ISO are mapped onto one flux scale first and weighted by measured noise, not frame count
+- **Multi-session (hierarchical) runs post-process the combined stack** — the combined output goes through Phase 4 with the reference session's settings, and the reference grid is the session with the most integration time
 - **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`) with phase progress, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, before/after wipe compare) while stacking — see [Desktop App](#desktop-app) below
 - **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
@@ -473,6 +486,25 @@ python originstack.py -d lights/ -o stacked.fits \
   -v
 ```
 
+### Session diagnostics and the optional analyses
+
+```bash
+# How did the night go? Drift, rotation, focus trend, transparency
+python originstack.py -d lights/ -o stacked.fits --session-report
+
+# Drop frames thinned by cloud (relative flux < 0.8), remove sensor banding
+python originstack.py -d lights/ -o stacked.fits --transparency-min 0.8 --banding-removal
+
+# Look for asteroids and stack along the first tracks
+python originstack.py -d lights/ -o stacked.fits --moving-objects-stack
+
+# Measured noise + which structure is repeatable, session-wide distortion fit
+python originstack.py -d lights/ -o stacked.fits --noise-validate --distortion-model
+
+# Period/transit search on the light curves (needs a session WCS)
+python originstack.py -d lights/ -o stacked.fits --photometry-timeseries --lightcurve-analysis
+```
+
 ### Debug registration problems
 
 ```bash
@@ -695,7 +727,18 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
 | `--elastic-registration` | Local (non-rigid) displacement correction on top of the global affine (off by default) |
-| `--denoiser NAME` | Primary luma denoiser (auto — curvelet unless overridden —, curvelet, wavelet, acdnr, bilateral, aniso, none) |
+| `--distortion-model` | One radial distortion for the whole session, applied per frame (off by default; skipped with `--elastic-registration`) |
+| `--transparency-min 0-1` | Drop frames whose relative transparency is below this (0 = report only) |
+| `--banding-removal` | Remove row/column banding from each calibrated frame (off by default) |
+| `--cfa-drizzle` | Bayer-aware drizzle of the measured samples (opt-in; for undersampled data) |
+| `--noise-validate` | Odd/even half-stacks: measured noise map + repeatable-structure map |
+| `--moving-objects[-stack]` | Find asteroid-like movers; optionally stack along each track |
+| `--session-report` | Write `<output>_session.png` / `.csv` diagnostics |
+| `--lightcurve-analysis` | Period + transit analysis of `--photometry-timeseries` light curves |
+| `--denoiser NAME` | Primary luma denoiser (auto — wavelet unless overridden —, wavelet, acdnr, bilateral, aniso, none; `curvelet` is an alias for `wavelet`) |
+| `--wavelet-protect 0-1` | Structure protection for the wavelet denoiser (default 0.6; 0 = plain BayesShrink) |
+| `--starless-process` | Denoise / local-contrast / deconvolve a starless copy, add the stars back untouched |
+| `--layered-stretch` | Preview stretch points taken from a starless copy (preview JPEG only) |
 | `--deconvolve {off,rl,rl-sv,tv,sparse}` | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet deconvolution |
 | `--plate-solve` | Plate solve via astrometry.net (requires API key) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |
@@ -728,7 +771,7 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 
 ### Native (Rust) acceleration
 
-[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~44 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and the full `--originvision` inference path (preprocessing + ONNX forward pass via the pure-Rust `tract` runtime — no Python ONNX dependency). A representative sample:
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~42 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and the full `--originvision` inference path (preprocessing + ONNX forward pass via the pure-Rust `tract` runtime — no Python ONNX dependency). A representative sample:
 
 | Kernel | Speedup vs numpy/scipy |
 |--------|------------------------|
@@ -742,6 +785,9 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 | DBE surface fit + patch sampler | ~2.4× / ~31× |
 | Anisotropic diffusion | ~37× |
 | Batch aperture photometry (`--photometry` / `--photometry-timeseries`) | ~150× |
+| CFA drizzle frame splat (`--cfa-drizzle`) | ~15.7× (407 s → 26 s, 148 frames) |
+| White balance (default Phase 1 step, bit-identical to numpy) | ~6.9× single-thread |
+| Lanczos-3 warp of a rotated frame (alignment, drizzle; bit-identical to the previous kernel) | ~3.5× (2187 → 625 ms/frame) |
 
 See CLAUDE.md's "Native (Rust) acceleration" section for the full kernel-by-kernel list.
 

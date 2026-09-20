@@ -1928,6 +1928,34 @@ def run_registration_phase(
             if correspondences is not None:
                 correspondences = [c for c, k in zip(correspondences, keep_mask) if k]
 
+    # Per-frame transparency from a fixed star ensemble (see src/transparency.py).
+    # Always measured (cheap; feeds --session-report); frames are only dropped when
+    # --transparency-min is set.
+    if ref_stars is not None and not args.no_registration and len(final) >= 3:
+        try:
+            from src.transparency import measure_transparency, transparency_keep_mask
+            _ts = measure_transparency(final, shifts, transforms, ref_stars, ref_frame=best)
+            if _ts['measured'] >= max(3, len(final) // 2):
+                safe_print(f"  Transparency (relative flux of a fixed star ensemble, "
+                           f"session median = 1.00): min {_ts['min']:.2f}  p10 {_ts['p10']:.2f}  "
+                           f"max {_ts['max']:.2f}  ({_ts['measured']}/{_ts['frames']} frames, "
+                           f"~{_ts['median_matches']} stars each)")
+                _thr = float(getattr(args, 'transparency_min', 0.0) or 0.0)
+                _keep = transparency_keep_mask(_ts['values'], _thr)
+                if not all(_keep):
+                    safe_print(f"  Transparency gate (--transparency-min {_thr:g}): "
+                               f"removing {sum(1 for k in _keep if not k)} frame(s)")
+                    final = [f for f, k in zip(final, _keep) if k]
+                    final_indices = [i for i, k in zip(final_indices, _keep) if k]
+                    shifts = [x for x, k in zip(shifts, _keep) if k]
+                    transforms = [x for x, k in zip(transforms, _keep) if k]
+                    if correspondences is not None:
+                        correspondences = [c for c, k in zip(correspondences, _keep) if k]
+            else:
+                safe_print("  Transparency: too few frames with a usable star catalogue -- skipped")
+        except Exception as _tex:
+            _log.debug("transparency measurement failed: %s", _tex)
+
     _reg_timings['residual_check'], _t = time.time() - _t, time.time()
 
     # Elastic (non-rigid) local displacement fields, fit from the matched-star
@@ -1950,6 +1978,37 @@ def run_registration_phase(
                 n_fit += 1
         safe_print(f"  Local displacement fields: {n_fit}/{len(final)} frames "
                    f"(others fall back to affine-only: too few matched stars)")
+
+    # --distortion-model: one radial distortion for the whole session, applied as
+    # per-frame displacement fields through the same path elastic registration uses.
+    if getattr(args, 'distortion_model', False) and not args.no_registration:
+        if elastic_on:
+            safe_print("  --distortion-model skipped: --elastic-registration already fits "
+                       "a displacement field per frame")
+        elif ref_stars is None:
+            safe_print("  --distortion-model skipped: no reference star catalogue")
+        else:
+            try:
+                from src.distortion import (
+                    build_displacement_fields,
+                    collect_pairs,
+                    fit_radial_distortion,
+                    format_summary,
+                    is_significant,
+                )
+                _pairs = collect_pairs(final, shifts, transforms, ref_stars)
+                _dfit = fit_radial_distortion(_pairs, (H, W))
+                if _dfit is None:
+                    safe_print("  Distortion model: too few frames with enough matched "
+                               "stars -- skipped")
+                else:
+                    _dok = is_significant(_dfit)
+                    safe_print(format_summary(_dfit, _dok))
+                    if _dok:
+                        displacement_fields = build_displacement_fields(
+                            _dfit, shifts, transforms, (H, W))
+            except Exception as _dex:
+                safe_print(f"  WARNING: distortion model failed ({_dex}); registration unchanged")
 
     _reg_timings['displacement_fields'], _t = time.time() - _t, time.time()
 

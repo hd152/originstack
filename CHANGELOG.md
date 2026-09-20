@@ -23,8 +23,9 @@ match the `VERSION` file and `v*` git tags.
     (`astro_native` 0.23.0) and the `bm3d` entry in `THIRD_PARTY_NOTICES.md`.
   - **Plain (non-adaptive) wavelet** and `adaptive_wavelet_denoise` are
     merged into the curvelet denoiser, which is numerically identical to
-    plain BayesShrink at `directional_protect_strength=0`.
-    `--denoiser wavelet` still works and now means exactly that.
+    plain BayesShrink at `directional_protect_strength=0`. (See *Changed*
+    below: `--denoiser wavelet` is now the one canonical name and
+    protection is `--wavelet-protect`.)
     `--denoise-strength`, `--denoise-strength-calibrate` and the Noise2Self
     calibration module (`self_supervised_calibration.py`) only served the
     removed non-adaptive path and are gone too.
@@ -32,7 +33,80 @@ match the `VERSION` file and `v*` git tags.
   named them fall back to the curvelet default (unknown config keys are
   ignored).
 
+### Changed
+
+- **`--denoiser wavelet` and `curvelet` are one denoiser.** They already ran
+  the same function; `wavelet` just forced structure protection to 0. `wavelet`
+  is now the canonical name (`curvelet` stays as an alias), and protection is its
+  own option, `--wavelet-protect 0-1` (default 0.6; 0 = plain BayesShrink).
+  **Behaviour change:** an old command line using `--denoiser wavelet` now gets
+  0.6 protection; `--denoiser wavelet --wavelet-protect 0` is the old behaviour.
+  `--skip-step` accepts `wavelet` or `curvelet`.
+- **`--merge` and hierarchical combines weight by measured noise, and match flux
+  scale first.** Stacks from different exposure/ISO were averaged in raw ADU and
+  weighted by frame count. Each previous stack is now mapped onto the current
+  stack's flux scale (robust per-channel gain and sky offset) and weighted by
+  inverse noise variance; 3 px of each warped footprint's rim is trimmed so it
+  no longer draws an outline. On five real Fireworks Galaxy sessions (10 s ISO 200,
+  25 s ISO 500, 30 s ISO 200) the fitted scales matched what exposure and ISO
+  predict, and pixel noise fell 37% (38.0 to 24.1) with 376 frames.
+- **Hierarchical (multi-session) runs post-process the combined stack.** It used
+  to be only a linear stack with a linear preview. It now goes through Phase 4
+  with the reference target's own effective settings, and the reference grid is
+  the stack with the most integration time (was: most frames).
+- **The galaxy preset's preview black point is 1.0, not 3.0.** At 3.0 (2.6 after
+  the depth rule) a low-surface-brightness disk rendered black and only the core
+  survived, though the linear data held the whole galaxy.
+- **DBE re-admits gradient patches.** The sampler rejected any patch brighter
+  than a luminance-based `sky + 2 sigma`, so in the strongest channel most patches
+  (R: 165 accepted vs ~715 for G/B) and all the edge ones were dropped; the edge
+  glow survived DBE (R +114 ADU) while G/B were removed completely. A polynomial
+  fitted to the accepted patches now re-admits candidates it explains, growing
+  outward. Every edge is within +-3 ADU afterwards and the galaxy disk is
+  unchanged or slightly brighter over sky. This, not a narrow strip, was the
+  coloured band along the bottom of the preview.
+
+- **Faster default path, identical output** (`astro_native` 0.25.0). Two kernels that run on every
+  stack got faster without changing a single output value: **white balance** is now one
+  native pass instead of ~8 numpy temporaries (543 to 78 ms per frame single-thread), and the
+  **Lanczos-3 warp** used for alignment and drizzle computes its tap weights with three trig
+  calls per axis instead of twelve and reads each RGB tap row once (2187 to 625 ms for a rotated
+  frame). Both are bit-identical to what they replace, checked on a real frame. Alignment,
+  the largest single block of a real run, was compute-bound in that warp, not disk-bound as first
+  suspected.
+
 ### Fixed
+
+- **Gray-world white balance is more accurate.** Channel means were accumulated in float32 over
+  ~6M pixels, which drifted up to ~1.5% on a real frame's red channel and skewed the gains; they
+  are now accumulated in float64 (native and numpy paths identical). Colour balance shifts very
+  slightly.
+- **Frames a rotating field breaks are registered, not stacked at the wrong
+  position.** The pyramid shift is translation-only, so on an alt-az mount it
+  returns garbage for a rotated frame: 34 of 148 frames (40 of 117 in another
+  session) were flagged as outliers and stacked at zero or a coarse shift. They are
+  now registered by the blind rigid star match. Real session: pixel noise 39.7 to
+  38.0, star sharpness +17%.
+- **The registration residual gate could reject a whole session.** A saved config
+  that enabled `pre_gradient_removal` raised the measured SNR from 1.7 to 5.0,
+  which shrank the adaptive threshold to its 1.5 px floor against a true median
+  residual of 1.83 px: 144 of 145 frames were rejected and one frame was stacked,
+  with only a log line. When the absolute gate would fail most of a session, frames
+  are now judged against the session's own median + 4 robust sigma (still capped).
+- **Saved configs could not be loaded on Windows.** `save_effective_config` wrote
+  `log_file = "C:\Users\..."` unescaped, which TOML rejects ("Invalid hex
+  value"); the run then fell back to defaults with only a warning. Strings are
+  now escaped and round-trip through `tomllib`. Note that a saved config also
+  bakes in `--auto`'s derived choices (`pre_gradient_removal`, `galaxy_mode`, ...)
+  as if set by hand, which changes Phase 1 metrics: it is not equivalent to
+  re-running with `--auto`.
+- **Fireworks Galaxy (NGC 6946) was not recognised**, so `--auto` never skipped
+  `sky_residual` and the galaxy was fit away as background. Added, and any unknown
+  target name containing "galaxy" now infers the galaxy type.
+- `remove_stars`' FWHM fallback returned NaN when no frame had a measured FWHM
+  (`np.median([]) or 4.0` never used its default).
+- `tools/lint_conventions.py --git` crashed on Windows decoding git output as
+  cp1252; it now decodes UTF-8.
 
 - **`--variance-stabilize` (and `--auto`'s rule enabling it) had no effect on
   the default denoiser.** It was only wired into the wavelet paths;
@@ -42,6 +116,54 @@ match the `VERSION` file and `v*` git tags.
 
 ### Added
 
+- **`--banding-removal`: row/column banding removal per calibrated Bayer frame.**
+  Per colour plane against its own trend, highlight-protected against the *local*
+  level, significance-gated so a clean frame is left essentially untouched. Noise
+  is measured from neighbour differences (vignetting inflates a plane MAD: 786 vs a
+  true 455 ADU on a real frame). Real Origin frames carry ~12 ADU of genuine
+  per-frame row banding, about 3% of pixel noise -- negligible after stacking.
+- **Per-frame transparency and `--transparency-min`.** The median flux of a fixed
+  star ensemble against the reference, normalised to the session median, measured
+  after registration (real session: 0.86 to 1.23). Thin cloud dims stars without
+  changing FWHM or SNR much, so the quality gate can pass it.
+- **`--session-report`**: `<output>_session.png` and `.csv` plotting FWHM,
+  transparency, SNR, background, drift, field rotation, ellipticity, residual and
+  temperature against time, with drift rate, periodic tracking error, rotation rate
+  and focus-vs-temperature drift reported. Drift is referenced to the frame
+  *centre*: a transform's raw translation is the displacement of the (0, 0) corner,
+  which under 0.5 deg/min of field rotation swept an arc that read as 23 px/min of
+  "drift" on the first real run. Frames the residual check skipped (it samples
+  ~20% of a large session) plot as gaps, not as a residual of zero.
+- **`--distortion-model`**: one radial distortion for the whole session, fitted
+  from every frame's star matches and applied as per-frame displacement fields in
+  the same resample pass elastic registration uses. Applied only when it reduces
+  the residual on held-out frames. On the Fireworks session it found a1 = +0.0007
+  (no measurable distortion in the Origin's optics) and correctly declined to apply
+  anything.
+- **`--noise-validate`**: odd/even half-stacks give the full stack's measured
+  noise map (`<output>_noise.fits`) and a local-correlation map of which structure
+  is repeatable (`<output>_consistency.fits`). Real session: stack noise R 43.2 /
+  G 36.5 / B 36.9 ADU, 1.16x what per-frame noise / sqrt(N) predicts, with 61% of
+  the frame showing repeatable structure.
+- **`--moving-objects` / `--moving-objects-stack`**: asteroid-like movers found by
+  linking per-frame residuals in velocity space, with an optional stack along each
+  track. Real session: 1497 candidate detections, 0 linked tracks -- no false tracks
+  from the clutter.
+- **`--lightcurve-analysis`**: Lomb-Scargle period search (with FAP) and a
+  box-least-squares + trapezoid transit fit on `--photometry-timeseries` output.
+- **`--cfa-drizzle`** and the native `cfa_drizzle_frame` kernel (`astro_native`
+  0.24.0): recombine each frame's measured Bayer samples. 407 s to 26 s on 148
+  frames. On a well-sampled real stack (FWHM 4.9 px) it does not help: luma noise
+  -13% but colour noise 2x and no sharpness gain, so it stays opt-in for
+  undersampled data.
+- **`--starless-process`** (denoisers, local contrast and deconvolution on a
+  starless layer, stars added back) and **`--layered-stretch`** (preview black and
+  white points from a starless copy). Measured on a real stack: the starless
+  denoise gained ~7% lower noise; deconvolving the starless layer did *not* help at
+  this SNR (RL fragmented the disk, sparse rang); the layered stretch reveals the
+  full galaxy disk that the plain stretch leaves near-black.
+- **Edge-band correction** (`--skip-step edge_bands`) before the final sky
+  flattening, as a backstop for sky excess that rises toward the frame edges.
 - **`--transient-detect REF.fits`: find what changed between two epochs.**
   Stacking software answers "what does my target look like?"; this answers
   "did anything *appear*?" — novae, dwarf-nova outbursts, supernovae,

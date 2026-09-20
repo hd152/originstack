@@ -127,7 +127,7 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Feature | On by default | Disable |
 |---------|:---:|---------|
 | Background extraction (DBE) | ✅ | `--no-background-extraction` |
-| Luma denoising (curvelet-inspired wavelet) | ✅ | `--denoiser none` |
+| Luma denoising (wavelet, curvelet-inspired) | ✅ | `--denoiser none` |
 | Chroma noise reduction | ✅ | `--no-chroma-nr` |
 | Star reduction | ✅ | `--no-star-reduce` |
 | Star removal (`<output>_starless.fits` sidecar) | ❌ | `--remove-stars` |
@@ -139,12 +139,22 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 
 | Feature | Off by default | Enable |
 |---------|:---:|---------|
-| Alternative primary denoiser | ❌ | `--denoiser {wavelet,acdnr,bilateral,aniso}` (default `auto` = curvelet) |
+| Alternative primary denoiser | ❌ | `--denoiser {acdnr,bilateral,aniso}` (default `auto` = wavelet; `--wavelet-protect 0-1` tunes it, `curvelet` is an alias) |
 | Deconvolution | ❌ | `--deconvolve {rl,rl-sv,tv,sparse}` (RL on GPU with `--use-gpu`) |
 | Coarse chroma-NR (colour blotches) | auto | config key `chroma_nr_large_sigma` |
 | Preview black point (sky-σ) | auto | `--preview-black-sigma 3` |
 | Drizzle super-resolution | ❌ | `--drizzle-scale 2.0` |
 | Elastic (non-rigid) local registration | ❌ | `--elastic-registration` |
+| Session-wide radial distortion model | ❌ | `--distortion-model` |
+| Frame transparency gate (cloud/haze) | ❌ (measured always) | `--transparency-min 0.8` |
+| Row/column banding removal | ❌ | `--banding-removal` |
+| Session diagnostics plots + CSV | ❌ | `--session-report` |
+| Noise validation (odd/even halves) | ❌ | `--noise-validate` |
+| Moving-object (asteroid) search | ❌ | `--moving-objects` / `--moving-objects-stack` |
+| Light-curve period/transit analysis | ❌ | `--photometry-timeseries --lightcurve-analysis` |
+| Bayer-aware drizzle (undersampled data) | ❌ | `--cfa-drizzle` |
+| Denoise/contrast a starless layer | ❌ | `--starless-process` |
+| Layered preview stretch | ❌ | `--layered-stretch` |
 | Plate solving | ❌ | `--plate-solve` |
 | Galaxy exclusion masking | auto for galaxy targets | `--galaxy-mode` / `--galaxy-center X,Y` |
 | originvision-assisted classification | ❌ | `--originvision` (bundled model, native inference) |

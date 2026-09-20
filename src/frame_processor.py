@@ -139,7 +139,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           session_bayer: Optional[str] = None,
                           pre_gradient_removal: bool = False,
                           ca_shifts: Optional[dict] = None,
-                          trail_reject: bool = False) -> Dict[str, Any]:
+                          trail_reject: bool = False,
+                          banding: Optional[tuple] = None) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -288,6 +289,20 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     except Exception as e:
         return {'error': f'calibration error: {e}'}
     timings['calibrate'], _t = time.perf_counter() - _t, time.perf_counter()
+
+    # Row/column banding removal (--banding-removal): on the calibrated mosaic,
+    # per colour plane, before debayering spreads a row offset across rows.
+    if banding is not None:
+        try:
+            from src.banding import remove_banding_bayer, remove_banding_rgb
+            if hasattr(data, 'get'):
+                data = data.get()
+            _amt, _sig = banding
+            data = (remove_banding_bayer(data, _amt, _sig) if data.ndim == 2
+                    else remove_banding_rgb(data, _amt, _sig))
+        except Exception:
+            pass
+    timings['banding'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Debayer
     try:
@@ -462,6 +477,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 # Module-level state for parallel workers (must be module-level for pickling)
 _worker_masters: Dict[str, Any] = {}
 _worker_trail_reject: bool = False  # per-session trail-rejection flag for pool workers
+_worker_banding: Optional[tuple] = None  # (amount, sigma) for pool workers, or None
 _warned_dark_scales: set = set()  # dedup dark-scale mismatch warnings across frames
 _warned_nebula_wb_skip: set = set()  # dedup nebula-filter white-balance-skip notice
 
@@ -610,7 +626,17 @@ def _pin_worker_to_single_thread() -> None:
     os.environ['RAYON_NUM_THREADS'] = str(_RAYON_WORKER_CAP)
 
 
-def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False) -> None:
+def _banding_cfg(args) -> Optional[tuple]:
+    """(amount, sigma) when --banding-removal is on, else None. Carried to pool
+    workers through the initializer (like trail_reject), not the task tuple."""
+    if not getattr(args, 'banding_removal', False):
+        return None
+    return (float(getattr(args, 'banding_amount', 1.0)),
+            float(getattr(args, 'banding_sigma', 3.0)))
+
+
+def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
+                     banding: Optional[tuple] = None) -> None:
     """Initializer for pool workers — attach to shared-memory calibration arrays.
 
     *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
@@ -619,8 +645,9 @@ def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False) ->
     not be threaded through the per-frame task tuple.
     """
     _pin_worker_to_single_thread()
-    global _worker_masters, _worker_trail_reject
+    global _worker_masters, _worker_trail_reject, _worker_banding
     _worker_trail_reject = bool(trail_reject)
+    _worker_banding = banding
     _worker_masters = {}
     for name, (shm_name, dtype_str, shape) in shm_specs.items():
         shm = SharedMemory(name=shm_name, create=False)
@@ -728,7 +755,8 @@ def _parallel_frame_worker(
                                    session_bayer=session_bayer,
                                    pre_gradient_removal=pre_gradient_removal,
                                    ca_shifts=ca_shifts,
-                                   trail_reject=_worker_trail_reject)
+                                   trail_reject=_worker_trail_reject,
+                                   banding=_worker_banding)
     if result.get('error'):
         return (frame_idx, None, result['error'], None)
 
@@ -852,7 +880,7 @@ def execute_frame_processing(
         try:
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_init_worker_shm,
-                                     initargs=(shm_specs, _tr)) as pool:
+                                     initargs=(shm_specs, _tr, _banding_cfg(args))) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 _wv = _get_ui_events()
                 _wv_done = 0
@@ -961,7 +989,8 @@ def execute_frame_processing(
                     pre_gradient_removal=_pgr,
                     skip_quality=_use_qpool,  # GPU workers skip quality
                     ca_shifts=_ca_shifts,
-                    trail_reject=getattr(args, 'trail_reject', False))
+                    trail_reject=getattr(args, 'trail_reject', False),
+                    banding=_banding_cfg(args))
             if result.get('error'):
                 return i, None, result['error'], None, None
             mem_rgb[i] = result['rgb']
@@ -1072,7 +1101,8 @@ def execute_frame_processing(
                 session_bayer=_sb,
                 pre_gradient_removal=_pgr,
                 ca_shifts=_ca_shifts,
-                trail_reject=getattr(args, 'trail_reject', False))
+                trail_reject=getattr(args, 'trail_reject', False),
+                    banding=_banding_cfg(args))
             _wv = _get_ui_events()
             _wv.progress('Processing frames', i + 1, n)
             if result.get('error'):
@@ -1108,13 +1138,14 @@ def execute_frame_processing(
     _print_step_breakdown(_step_totals, _step_frames, _worker_count_used)
 
 
-_STEP_ORDER = ('load', 'calibrate', 'debayer', 'hotpix', 'vignette', 'white_balance',
+_STEP_ORDER = ('load', 'calibrate', 'banding', 'debayer', 'hotpix', 'vignette', 'white_balance',
               'ca_correction', 'cosmic_ray_rejection', 'lum_recompute',
               'pre_gradient_removal', 'validate', 'quality',
               'patch_scores', 'memmap_write', 'final_flush')
 _STEP_LABELS = {
     'load': 'Load (disk read)',
     'calibrate': 'Calibrate (bias/dark/flat)',
+    'banding': 'Banding removal (--banding-removal)',
     'debayer': 'Debayer',
     'hotpix': 'Hot-pixel removal',
     'vignette': 'Vignette map (--vignette-map)',
@@ -1253,7 +1284,7 @@ def reload_accepted_frames(
         try:
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_init_worker_shm,
-                                     initargs=(shm_specs, _tr)) as pool:
+                                     initargs=(shm_specs, _tr, _banding_cfg(args))) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",
@@ -1316,7 +1347,8 @@ def reload_accepted_frames(
                     pre_gradient_removal=_pgr,
                     preloaded_data=preloaded,
                     ca_shifts=_ca_shifts,
-                    trail_reject=_tr)
+                    trail_reject=_tr,
+                    banding=_banding_cfg(args))
             if result.get('error'):
                 return j, orig_idx, None, None, result['error']
             return j, orig_idx, result['rgb'], result['lum'], None

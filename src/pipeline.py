@@ -848,8 +848,34 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                         safe_print(format_timeseries_summary(_ts))
                         safe_print(f"  Time-series photometry "
                                    f"({format_time(time.time() - _ts_start)})")
+                        if getattr(args, 'lightcurve_analysis', False):
+                            from src.lightcurve_analysis import analyze_lightcurves, format_analysis_summary
+                            _base = os.path.splitext(output_path)[0]
+                            _la = analyze_lightcurves(
+                                _base + '_lightcurves.csv', _base + '_lightcurve_stats.csv',
+                                _base + '_lightcurve_analysis.csv')
+                            if _la is not None:
+                                safe_print(format_analysis_summary(_la))
+                            else:
+                                safe_print("  Light-curve analysis: no light curve had enough "
+                                           "points")
                 except Exception as e:
                     safe_print(f"  WARNING: time-series photometry failed: {e}")
+
+            # Session diagnostics: drift, rotation, focus trend, transparency.
+            if getattr(args, 'session_report', False):
+                try:
+                    from src.session_report import write_session_report
+                    _sr = write_session_report(final, shifts, transforms, output_path,
+                                               n_rejected=stats.rejected_frames,
+                                               shape_hw=(H, W))
+                    if _sr is not None:
+                        safe_print("\n  Session report:")
+                        for _ln in _sr['lines']:
+                            safe_print(f"    {_ln}")
+                        safe_print(f"    -> {os.path.basename(_sr['png'] or _sr['csv'] or '')}")
+                except Exception as e:
+                    safe_print(f"  WARNING: session report failed: {e}")
 
             # Comet stacking: second pass aligned on comet nucleus
             if getattr(args, 'comet_mode', False):

@@ -2280,6 +2280,62 @@ def run_stacking_phase(
         else:
             stacked = median_combine(mem_aligned, verbose=args.verbose)
 
+        # --noise-validate: odd/even half-stacks while the aligned frames are
+        # still on disk (see src/noise_validation.py).
+        if getattr(args, 'noise_validate', False) and n_final >= 6:
+            try:
+                from astropy.io import fits as _nfits
+
+                from src.noise_validation import format_summary, validate_noise
+                _fn = [float(f.metrics.get('noise', 0) or 0) for f in final if f.metrics]
+                _fn = [x for x in _fn if x > 0]
+                _nv = validate_noise(mem_aligned,
+                                     frame_noise=float(np.median(_fn)) if _fn else None)
+                safe_print(format_summary(_nv))
+                _nbase = getattr(args, 'output', None)
+                if _nbase:
+                    _nbase = os.path.splitext(_nbase)[0]
+                    _h = _nfits.Header()
+                    _h['COMMENT'] = 'per-pixel noise sigma of the full stack from odd/even halves'
+                    _nfits.PrimaryHDU(np.transpose(_nv['sigma'], (2, 0, 1)), _h).writeto(
+                        _nbase + '_noise.fits', overwrite=True)
+                    _h2 = _nfits.Header()
+                    _h2['COMMENT'] = 'local correlation between odd/even half-stacks (0-1)'
+                    _nfits.PrimaryHDU(_nv['consistency'], _h2).writeto(
+                        _nbase + '_consistency.fits', overwrite=True)
+                    safe_print(f"    -> {os.path.basename(_nbase)}_noise.fits, "
+                               f"{os.path.basename(_nbase)}_consistency.fits")
+                if sigma_out is not None:
+                    sigma_out['noise_validation'] = {
+                        k: _nv[k] for k in ('median_sigma', 'n') if k in _nv}
+            except Exception as _nve:
+                safe_print(f"  WARNING: noise validation failed: {_nve}")
+
+        # --moving-objects: link per-frame residuals into tracks while the aligned
+        # frames are still on disk (see src/moving_objects.py).
+        if (getattr(args, 'moving_objects', False)
+                or getattr(args, 'moving_objects_stack', False)) and n_final >= 8:
+            try:
+                from src import moving_objects as _mo
+                _t_mo = time.time()
+                _times = _mo.frame_times_min(final)
+                _fw = [float(f.metrics.get('fwhm', 0) or 0) for f in final if f.metrics]
+                _fw = [x for x in _fw if x > 0]
+                _res = _mo.find_moving_objects(
+                    mem_aligned, _times, stacked,
+                    fwhm=float(np.median(_fw)) if _fw else 4.0,
+                    threshold=float(getattr(args, 'moving_objects_threshold', 5.0)))
+                safe_print(_mo.format_summary(_res))
+                _mbase = _mo.output_base(getattr(args, 'output', None))
+                if _mbase and _res['tracks']:
+                    for _p in _mo.write_outputs(
+                            _res, mem_aligned, _times, _mbase,
+                            stack_tracks=bool(getattr(args, 'moving_objects_stack', False))):
+                        safe_print(f"    -> {os.path.basename(_p)}")
+                safe_print(f"  Moving-object search ({time.time() - _t_mo:.1f}s)")
+            except Exception as _moe:
+                safe_print(f"  WARNING: moving-object search failed: {_moe}")
+
         del mem_aligned
         try:
             os.remove(mm_aligned_path)

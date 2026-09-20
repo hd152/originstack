@@ -1451,6 +1451,64 @@ def build_parser() -> argparse.ArgumentParser:
                         '~2.5 px), not a general quality upgrade. Uses --drizzle-scale and '
                         '--drizzle-pixfrac. Not supported with --elastic-registration. '
                         'Off by default.')
+    g_stack.add_argument('--banding-removal', dest='banding_removal', action='store_true',
+                   help='Remove per-row / per-column offsets (CMOS banding) from each '
+                        'calibrated frame before debayering: measured per Bayer colour '
+                        'plane against its own trend, highlight-protected, and only where '
+                        'the offset exceeds its own standard error, so a clean frame is '
+                        'left untouched. Tune via --config banding_amount (0-1, default '
+                        '1.0) and banding_sigma (highlight cut, default 3.0). Off by '
+                        'default.')
+    g_stack.add_argument('--transparency-min', dest='transparency_min', type=_unit_interval,
+                   metavar='0-1',
+                   help='Drop frames whose transparency -- the median flux of a fixed '
+                        'star ensemble relative to the session median (1.0 = typical) -- '
+                        'falls below this. Catches thin cloud and haze that dim the stars '
+                        'without changing FWHM or SNR much. 0 (default) only reports it; '
+                        '0.8 is a sensible starting point.')
+    g_post.add_argument('--lightcurve-analysis', dest='lightcurve_analysis',
+                   action='store_true',
+                   help='After --photometry-timeseries, search the target and the most '
+                        'variable stars for periods (Lomb-Scargle, with a false-alarm '
+                        'probability) and dips (box-least-squares search + a trapezoid '
+                        'transit fit with errors and a BIC test); writes '
+                        '<output>_lightcurve_analysis.csv. Needs --photometry-timeseries.')
+    g_post.add_argument('--session-report', dest='session_report', action='store_true',
+                   help='Write <output>_session.png (FWHM, transparency, SNR, background, '
+                        'drift, field rotation, ellipticity, residual and temperature '
+                        'against time) and <output>_session.csv, and print the drift rate, '
+                        'any periodic tracking error, the field-rotation rate and any '
+                        'FWHM-vs-temperature focus drift.')
+    g_stack.add_argument('--noise-validate', dest='noise_validate', action='store_true',
+                   help='Stack the odd and even frames separately and use their difference '
+                        'as an empirical noise measurement: writes <output>_noise.fits (the '
+                        'full stack\'s per-pixel noise sigma, per channel) and '
+                        '<output>_consistency.fits (local correlation between the halves: '
+                        'where structure is repeatable vs noise), and prints the measured '
+                        'noise against per-frame noise / sqrt(N). Needs a non-drizzle '
+                        'stack method with an aligned-frame array.')
+    g_stack.add_argument('--moving-objects', dest='moving_objects', action='store_true',
+                   help='Search the aligned frames for asteroids and other slow movers: '
+                        'per-frame residuals against the stack are linked into straight '
+                        'tracks by voting in velocity space (a mover must appear in >= '
+                        '25%% of frames and move more than ~2 FWHM over the session). '
+                        'Writes <output>_moving_objects.csv. Needs a non-drizzle stack '
+                        'method with an aligned-frame array.')
+    g_stack.add_argument('--moving-objects-stack', dest='moving_objects_stack',
+                   action='store_true',
+                   help='Implies --moving-objects; also writes <output>_moving_N.fits, a '
+                        'median stack of a small window following each of the first '
+                        'three tracks, so a mover too faint for any one frame comes up '
+                        'out of the noise.')
+    g_stack.add_argument('--distortion-model', dest='distortion_model', action='store_true',
+                   help='Fit one radial optical distortion for the whole session (two '
+                        'coefficients, from every frame\'s star matches) and apply it as a '
+                        'per-frame correction in the single resample pass. Reduces the '
+                        'registration residual a rigid fit leaves on rotated/shifted frames '
+                        'and gives every frame the same correction, even those with few '
+                        'stars. Only applied when it clearly helps on frames the fit did '
+                        'not see. Alternative to --elastic-registration (which is skipped '
+                        'if both are set).')
     g_stack.add_argument('--no-registration', action='store_true')
     g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
@@ -2218,6 +2276,14 @@ def build_parser() -> argparse.ArgumentParser:
         starless_process=False,
         layered_stretch=False,
         cfa_drizzle=False,
+        transparency_min=0.0,
+        lightcurve_analysis=False,
+        session_report=False,
+        noise_validate=False,
+        moving_objects_threshold=5.0,
+        distortion_model=False,
+        banding_amount=1.0,
+        banding_sigma=3.0,
         galaxy_mode=False,
     )
     return p
