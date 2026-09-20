@@ -1578,3 +1578,176 @@ def test_cfa_drizzle_frame_rejects_bad_shapes():
     with pytest.raises(ValueError):   # singular affine
         native.cfa_drizzle_frame(rgb, ref, args[0], np.zeros(4), *args[2:],
                                  z3(6, 6), z3(6, 6), z3(6, 6))
+
+
+# ---------------------------------------------------------------------------
+# white_balance_apply (src/debayer.py white_balance_grayworld / _whitepatch)
+# ---------------------------------------------------------------------------
+
+_HAS_WB = hasattr(native, "white_balance_apply")
+
+
+def _wb_frame(seed=0, h=64, w=90, saturate=True):
+    rng = np.random.default_rng(seed)
+    img = rng.uniform(100, 30000, (h, w, 3)).astype(np.float32)
+    if saturate:                      # clipped star cores: equal channels at the ceiling
+        for cy, cx in ((10, 12), (40, 60), (20, 75)):
+            img[cy - 1:cy + 2, cx - 1:cx + 2, :] = 60000.0
+        img[30, 30] = [55000.0, 59000.0, 57000.0]      # near-clipped, unequal (below the cores)
+    return img
+
+
+def _wb_both(fn, img):
+    import src.debayer as deb
+    saved = deb._HAS_NATIVE
+    try:
+        deb._HAS_NATIVE = False
+        ref = fn(img.copy())
+        deb._HAS_NATIVE = True
+        new = fn(img.copy())
+    finally:
+        deb._HAS_NATIVE = saved
+    return ref, new
+
+
+@pytest.mark.skipif(not _HAS_WB, reason="astro_native lacks white_balance_apply")
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_white_balance_grayworld_is_bit_identical(seed):
+    import src.debayer as deb
+    ref, new = _wb_both(deb.white_balance_grayworld, _wb_frame(seed))
+    assert ref.dtype == new.dtype == np.float32
+    np.testing.assert_array_equal(ref, new)
+
+
+@pytest.mark.skipif(not _HAS_WB, reason="astro_native lacks white_balance_apply")
+def test_white_balance_whitepatch_is_bit_identical():
+    import src.debayer as deb
+    ref, new = _wb_both(deb.white_balance_whitepatch, _wb_frame(3))
+    np.testing.assert_array_equal(ref, new)
+
+
+@pytest.mark.skipif(not _HAS_WB, reason="astro_native lacks white_balance_apply")
+def test_white_balance_clipped_cores_are_neutralised_and_output_is_non_negative():
+    import src.debayer as deb
+    img = _wb_frame(4)
+    _, new = _wb_both(deb.white_balance_grayworld, img)
+    core = new[9:12, 11:14, :]                       # equal channels at the ceiling stay equal
+    assert np.allclose(core[..., 0], core[..., 1]) and np.allclose(core[..., 1], core[..., 2])
+    assert float(new.min()) >= 0.0
+
+
+@pytest.mark.skipif(not _HAS_WB, reason="astro_native lacks white_balance_apply")
+def test_white_balance_nan_propagates_like_numpy():
+    import src.debayer as deb
+    img = _wb_frame(5)
+    img[7, 7, 1] = np.nan
+    with np.errstate(all='ignore'):
+        ref, new = _wb_both(deb.white_balance_grayworld, img)
+    np.testing.assert_array_equal(np.isnan(ref), np.isnan(new))
+
+
+@pytest.mark.skipif(not _HAS_WB, reason="astro_native lacks white_balance_apply")
+def test_white_balance_direct_kernel_rejects_bad_input_and_falls_back_on_float64_gains():
+    img = _wb_frame(6)
+    with pytest.raises(ValueError):
+        native.white_balance_apply(np.zeros((4, 4, 4), np.float32), np.ones(3, np.float32), False)
+    with pytest.raises(ValueError):
+        native.white_balance_apply(img, np.ones(2, np.float32), False)
+    import src.debayer as deb
+    assert deb._white_balance_native(np, img, np.ones(3, np.float64), False) is None     # dtype guard
+    assert deb._white_balance_native(np, img[:, :, :2], np.ones(3, np.float32), False) is None
+    out = deb._white_balance_native(np, np.asfortranarray(img), np.ones(3, np.float32), False)
+    assert out is not None and out.shape == img.shape                                   # non-contiguous ok
+
+
+@pytest.mark.skipif(not hasattr(native, "white_balance_grayworld"),
+                    reason="astro_native lacks white_balance_grayworld")
+def test_white_balance_grayworld_kernel_matches_float64_mean_path():
+    """The gains come from float64-accumulated channel means (a float32 running
+    sum drifts ~1.5% on real frames); the kernel must match the numpy path that
+    does the same, and the means must be the accurate ones."""
+    rng = np.random.default_rng(9)
+    img = rng.uniform(0, 60000, (300, 420, 3)).astype(np.float32)
+    ours = native.white_balance_grayworld(img)
+    import src.debayer as deb
+    saved = deb._HAS_NATIVE
+    try:
+        deb._HAS_NATIVE = False
+        ref = deb.white_balance_grayworld(img.copy())
+    finally:
+        deb._HAS_NATIVE = saved
+    np.testing.assert_array_equal(ours, ref)
+    # gray-world result must have (nearly) equal channel means -- the float32
+    # accumulation it replaced could leave them further apart (highlight blending moves them slightly either way)
+    m = ours.astype(np.float64).mean(axis=(0, 1))
+    assert (m.max() - m.min()) / m.mean() < 2e-3
+    with pytest.raises(ValueError):
+        native.white_balance_grayworld(np.zeros((4, 4, 4), np.float32))
+
+
+def _lanczos3_direct(x):
+    """Direct Lanczos-3 windowed sinc, float64 -- the definition the kernel's
+    angle-addition shortcut must agree with."""
+    x = np.asarray(x, dtype=np.float64)
+    out = np.zeros_like(x)
+    inside = np.abs(x) < 3.0
+    nz = inside & (x != 0.0)
+    px = np.pi * x[nz]
+    out[nz] = 3.0 * np.sin(px) * np.sin(px / 3.0) / (px * px)
+    out[inside & (x == 0.0)] = 1.0
+    return out
+
+
+def _warp_reference(img, R, off, out_h, out_w):
+    """Independent numpy Lanczos-3 affine warp (interior pixels only are defined)."""
+    oy, ox = np.mgrid[0:out_h, 0:out_w].astype(np.float64)
+    iy = R[0, 0] * oy + R[0, 1] * ox + off[0]
+    ix = R[1, 0] * oy + R[1, 1] * ox + off[1]
+    fy, fx = np.floor(iy), np.floor(ix)
+    ry, rx = iy - fy, ix - fx
+    taps = np.arange(-2, 4)
+    wy = np.stack([_lanczos3_direct(t - ry) for t in taps], axis=-1)
+    wx = np.stack([_lanczos3_direct(t - rx) for t in taps], axis=-1)
+    wy /= wy.sum(axis=-1, keepdims=True)
+    wx /= wx.sum(axis=-1, keepdims=True)
+    h, w = img.shape[:2]
+    inside = (fy - 2 >= 0) & (fy + 3 < h) & (fx - 2 >= 0) & (fx + 3 < w)
+    out = np.zeros((out_h, out_w, img.shape[2]))
+    yy, xx = np.nonzero(inside)
+    for c in range(img.shape[2]):
+        acc = np.zeros(len(yy))
+        for a, ty in enumerate(taps):
+            row = np.zeros(len(yy))
+            for b, tx in enumerate(taps):
+                row += wx[yy, xx, b] * img[(fy[yy, xx] + ty).astype(int), (fx[yy, xx] + tx).astype(int), c]
+            acc += wy[yy, xx, a] * row
+        out[yy, xx, c] = acc
+    return out, inside
+
+
+@pytest.mark.parametrize("deg", [0.0, 3.0, 17.0, -41.0, 90.0])
+def test_warp_matches_an_independent_direct_lanczos_reference(deg):
+    rng = np.random.default_rng(int(abs(deg)) + 1)
+    img = rng.uniform(0, 30000, (90, 110, 3)).astype(np.float32)
+    th = np.deg2rad(deg)
+    R = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    off = np.array([7.31, -4.77]) + (np.eye(2) - R) @ np.array([45.0, 55.0])
+    got = native.warp_affine_lanczos3(img, R.ravel().tolist(), off.tolist(), 90, 110, 0.0)
+    ref, inside = _warp_reference(img, R, off, 90, 110)
+    assert inside.sum() > 2000
+    np.testing.assert_allclose(np.asarray(got)[inside], ref[inside], rtol=2e-6, atol=2e-2)
+
+
+def test_warp_rgb_fast_path_equals_the_single_channel_path():
+    """The 3-channel interior fast path re-orders the loads, not the arithmetic:
+    each channel must equal what the generic (c != 3) loop produces for it alone."""
+    rng = np.random.default_rng(5)
+    img = rng.uniform(0, 30000, (80, 100, 3)).astype(np.float32)
+    th = np.deg2rad(6.0)
+    R = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    off = [3.4, -2.2]
+    full = np.asarray(native.warp_affine_lanczos3(img, R.ravel().tolist(), off, 80, 100, 0.0))
+    for ch in range(3):
+        one = np.asarray(native.warp_affine_lanczos3(
+            np.ascontiguousarray(img[:, :, ch:ch + 1]), R.ravel().tolist(), off, 80, 100, 0.0))
+        np.testing.assert_array_equal(full[:, :, ch], one[:, :, 0])

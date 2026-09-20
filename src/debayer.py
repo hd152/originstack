@@ -532,12 +532,43 @@ def _desaturate_near_clipped_highlights(xp, img: np.ndarray, scaled: np.ndarray)
     return scaled * (1 - sat_frac) + neutral * sat_frac
 
 
+def _white_balance_native(xp, img, factors, divide: bool):
+    """Native fused gain + highlight-neutralise, or None to use the array path.
+
+    Bit-identical to ``_desaturate_near_clipped_highlights`` on the numpy path
+    (same f32 operations in the same order, no fused multiply-add; the gains are
+    still computed by the caller so numpy's reduction order is kept). Only for
+    host numpy float32 arrays with float32 gains: anything else (cupy, or gains
+    that numpy promoted to float64, whose result dtype the array path would then
+    also carry) keeps the original code."""
+    if not (xp is np and _HAS_NATIVE and hasattr(_native, 'white_balance_apply')):
+        return None
+    f = np.asarray(factors)
+    if img.ndim != 3 or img.shape[2] != 3 or img.dtype != np.float32 or f.dtype != np.float32:
+        return None
+    try:
+        return _native.white_balance_apply(np.ascontiguousarray(img), np.ascontiguousarray(f), bool(divide))
+    except Exception:
+        return None
+
+
 def white_balance_grayworld(rgb: np.ndarray) -> np.ndarray:
     gpu = get_gpu()
     xp = gpu.xp
     img = xp.asarray(rgb, dtype=xp.float32)
-    mean = img.mean(axis=(0, 1))
+    if (xp is np and _HAS_NATIVE and hasattr(_native, 'white_balance_grayworld')
+            and img.ndim == 3 and img.shape[2] == 3):
+        # whole path native, incl. the float64-accumulated channel means
+        try:
+            return _native.white_balance_grayworld(np.ascontiguousarray(img))
+        except Exception:
+            pass
+    # float64 accumulation: a float32 running sum over ~6M pixels drifts ~1.5% on real frames
+    mean = img.mean(axis=(0, 1), dtype=xp.float64).astype(xp.float32)
     scale = mean.mean() / (mean + 1e-12)
+    fast = _white_balance_native(xp, img, scale, divide=False)
+    if fast is not None:
+        return fast
     out = _desaturate_near_clipped_highlights(xp, img, img * scale)
     return xp.clip(out, 0, None)
 
@@ -557,6 +588,9 @@ def white_balance_whitepatch(rgb: np.ndarray, pct: Optional[float] = None) -> np
     bad     = (scales >= img_max * 0.999) | (scales < 1e-12)
     scales  = xp.where(bad, means + 1e-12, scales)
     scales  = scales / (scales.mean() + 1e-12)
+    fast = _white_balance_native(xp, img, scales, divide=True)
+    if fast is not None:
+        return fast
     out = _desaturate_near_clipped_highlights(xp, img, img / scales[None, None, :])
     return xp.clip(out, 0, None)
 

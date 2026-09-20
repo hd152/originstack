@@ -1808,27 +1808,60 @@ fn blind_match_hypotheses<'py>(
     Ok((r_arr.into_pyarray(py), t_arr.into_pyarray(py), best_inliers))
 }
 
-/// Lanczos-a windowed-sinc kernel weight for offset `x` (a = support radius).
-#[inline]
-fn lanczos_w(x: f64, a: f64) -> f64 {
-    if x == 0.0 {
-        1.0
-    } else if x.abs() >= a {
-        0.0
-    } else {
-        let px = std::f64::consts::PI * x;
-        (a * px.sin() * (px / a).sin()) / (px * px)
-    }
-}
-
 /// Compute the 6 normalised Lanczos-3 tap weights for fractional offset `r`
 /// (taps at floor-2 .. floor+3). Same arithmetic as the original inline loop.
 #[inline]
 fn lanczos6_weights(r: f64, out: &mut [f64; 6]) {
+    // The taps sit at x_t = k_t - r for k_t = -2..=3, spaced exactly 1 apart, so
+    // every sine the windowed-sinc needs follows from three evaluations by angle
+    // addition instead of two sin() per tap (12 per call, two calls per output
+    // pixel on a rotated warp -- ~24 trig calls a pixel, which was the whole cost:
+    // 1.74 s for a 2048x3056x3 frame on one thread):
+    //   sin(pi x_t)   = sin(pi k - pi r) = -(-1)^k sin(pi r)
+    //   sin(pi x_t/3) = sin(pi k/3) cos(pi r/3) - cos(pi k/3) sin(pi r/3)
+    // and lanczos3(x) = 3 sin(pi x) sin(pi x/3) / (pi x)^2 for 0 < |x| < 3 (1 at 0,
+    // 0 beyond). That is the direct formula the old per-tap loop evaluated; the two
+    // agree to ~1e-15 (verified against the previous kernel on a real rotated frame).
+    if r == 0.0 {
+        // x_2 == 0 -> weight 1 exactly; every other tap is an integer offset
+        *out = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        return;
+    }
+    const SIN_K3: [f64; 6] = [
+        -0.866_025_403_784_438_6, // sin(-2pi/3)
+        -0.866_025_403_784_438_6, // sin(-pi/3)
+        0.0,                      // sin(0)
+        0.866_025_403_784_438_6,  // sin(pi/3)
+        0.866_025_403_784_438_6,  // sin(2pi/3)
+        0.0,                      // sin(pi)
+    ];
+    const COS_K3: [f64; 6] = [
+        -0.5, // cos(-2pi/3)
+        0.5,  // cos(-pi/3)
+        1.0,  // cos(0)
+        0.5,  // cos(pi/3)
+        -0.5, // cos(2pi/3)
+        -1.0, // cos(pi)
+    ];
+    let pi = std::f64::consts::PI;
+    let s_r = (pi * r).sin();
+    let (s3, c3) = (pi * r / 3.0).sin_cos();
     let mut s = 0.0;
-    for (t, o) in out.iter_mut().enumerate() {
-        *o = lanczos_w((t as f64 - 2.0) - r, 3.0);
-        s += *o;
+    for t in 0..6 {
+        let k = t as f64 - 2.0;
+        let x = k - r;
+        // (-1)^k for k = -2..=3
+        let sign = if t % 2 == 0 { 1.0 } else { -1.0 };
+        let sin_px = -sign * s_r;
+        let sin_px3 = SIN_K3[t] * c3 - COS_K3[t] * s3;
+        let w = if x.abs() >= 3.0 {
+            0.0
+        } else {
+            let px = pi * x;
+            (3.0 * sin_px * sin_px3) / (px * px)
+        };
+        out[t] = w;
+        s += w;
     }
     if s != 0.0 {
         for v in out.iter_mut() {
@@ -1917,17 +1950,45 @@ fn warp_affine_lanczos3<'py>(
                             // sum to 1, zero taps contribute exactly 0.0.
                             let by = base_y as usize;
                             let bx = base_x as usize;
-                            for ch in 0..c {
-                                let mut acc = 0.0f64;
+                            if c == 3 {
+                                // RGB (the pipeline's case): read each tap row's 18
+                                // contiguous floats once and accumulate all three
+                                // channels together, instead of three passes with
+                                // stride-3 loads. Per channel the summation order is
+                                // unchanged (taps in x, then rows in y), so the result
+                                // is bit-identical to the generic loop below.
+                                let (mut a0, mut a1, mut a2) = (0.0f64, 0.0f64, 0.0f64);
                                 for ty in 0..6 {
-                                    let base = (by + ty) * row_stride + bx * c + ch;
-                                    let mut ra = 0.0f64;
+                                    let base = (by + ty) * row_stride + bx * 3;
+                                    let seg = &img[base..base + 18];
+                                    let (mut r0, mut r1, mut r2) = (0.0f64, 0.0f64, 0.0f64);
                                     for tx in 0..6 {
-                                        ra += wxv[tx] * img[base + tx * c] as f64;
+                                        let wxt = wxv[tx];
+                                        r0 += wxt * seg[tx * 3] as f64;
+                                        r1 += wxt * seg[tx * 3 + 1] as f64;
+                                        r2 += wxt * seg[tx * 3 + 2] as f64;
                                     }
-                                    acc += wyv[ty] * ra;
+                                    let wyt = wyv[ty];
+                                    a0 += wyt * r0;
+                                    a1 += wyt * r1;
+                                    a2 += wyt * r2;
                                 }
-                                out_row[ox * c + ch] = acc as f32;
+                                out_row[ox * 3] = a0 as f32;
+                                out_row[ox * 3 + 1] = a1 as f32;
+                                out_row[ox * 3 + 2] = a2 as f32;
+                            } else {
+                                for ch in 0..c {
+                                    let mut acc = 0.0f64;
+                                    for ty in 0..6 {
+                                        let base = (by + ty) * row_stride + bx * c + ch;
+                                        let mut ra = 0.0f64;
+                                        for tx in 0..6 {
+                                            ra += wxv[tx] * img[base + tx * c] as f64;
+                                        }
+                                        acc += wyv[ty] * ra;
+                                    }
+                                    out_row[ox * c + ch] = acc as f32;
+                                }
                             }
                         } else {
                             for ch in 0..c {
@@ -6164,6 +6225,168 @@ fn cfa_drizzle_frame<'py>(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// White balance: per-channel gain + near-clipped-highlight neutralisation
+// (src/debayer.py `_desaturate_near_clipped_highlights`)
+// ---------------------------------------------------------------------------
+//
+// The numpy path is: scaled = img * gain (or img / gain for white-patch);
+// pixel_peak = img.max(-1); ceiling = img.max(); sat = clip((pixel_peak /
+// (ceiling + 1e-12) - 0.8) / 0.2, 0, 1); out = scaled * (1 - sat) +
+// pixel_peak * sat; clip(out, 0). Written as array expressions that is ~8 full-size
+// temporaries and as many passes over 75 MB (538 ms per 2048x3056 frame on one
+// thread, against ~35 ms for the arithmetic itself -- and under 16 workers the
+// passes fight for memory bandwidth, so it was 1.5 s/frame in a real run).
+//
+// Here: one parallel max pass for the ceiling, one parallel pass that does
+// everything per pixel. The arithmetic is the same f32 operations in the same
+// order with no fused multiply-add (Rust does not contract a*b+c on its own), so
+// the result is bit-identical to the numpy path -- the ceiling is an exact max, and
+// the per-channel gains stay computed in numpy so its reduction order is kept.
+
+/// Shared body: gain (multiply, or divide for white-patch) + highlight
+/// neutralisation over a contiguous (h, w, 3) f32 buffer.
+fn white_balance_body(
+    py: Python<'_>,
+    flat: &[f32],
+    h: usize,
+    w: usize,
+    f: [f32; 3],
+    divide: bool,
+) -> Vec<f32> {
+    let (f0, f1, f2) = (f[0], f[1], f[2]);
+    let mut out = vec![0f32; h * w * 3];
+    py.allow_threads(|| {
+        // exact max (order-independent), NaN propagating like numpy's max
+        let ceiling: f32 = flat
+            .par_chunks(w * 3)
+            .map(|row| {
+                let mut m = f32::NEG_INFINITY;
+                for &v in row {
+                    if v.is_nan() {
+                        return f32::NAN;
+                    }
+                    if v > m {
+                        m = v;
+                    }
+                }
+                m
+            })
+            .reduce(
+                || f32::NEG_INFINITY,
+                |a, b| {
+                    if a.is_nan() || b.is_nan() {
+                        f32::NAN
+                    } else if a > b {
+                        a
+                    } else {
+                        b
+                    }
+                },
+            );
+        let denom = ceiling + 1e-12f32;
+        out.par_chunks_mut(w * 3)
+            .zip(flat.par_chunks(w * 3))
+            .for_each(|(orow, irow)| {
+                for x in 0..w {
+                    let r = irow[x * 3];
+                    let g = irow[x * 3 + 1];
+                    let b = irow[x * 3 + 2];
+                    // numpy max(axis=-1) propagates NaN
+                    let peak = if r.is_nan() || g.is_nan() || b.is_nan() {
+                        f32::NAN
+                    } else {
+                        let mut p = r;
+                        if g > p { p = g; }
+                        if b > p { p = b; }
+                        p
+                    };
+                    let t = (peak / denom - 0.8f32) / 0.2f32;
+                    let sat = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t };
+                    let one_minus = 1.0f32 - sat;
+                    let (s0, s1, s2) = if divide {
+                        (r / f0, g / f1, b / f2)
+                    } else {
+                        (r * f0, g * f1, b * f2)
+                    };
+                    let o0 = s0 * one_minus + peak * sat;
+                    let o1 = s1 * one_minus + peak * sat;
+                    let o2 = s2 * one_minus + peak * sat;
+                    orow[x * 3] = if o0 < 0.0 { 0.0 } else { o0 };
+                    orow[x * 3 + 1] = if o1 < 0.0 { 0.0 } else { o1 };
+                    orow[x * 3 + 2] = if o2 < 0.0 { 0.0 } else { o2 };
+                }
+            });
+    });
+    out
+}
+
+/// White balance with caller-supplied per-channel factors (white-patch).
+#[pyfunction]
+fn white_balance_apply<'py>(
+    py: Python<'py>,
+    img: PyReadonlyArray3<'py, f32>,
+    factors: PyReadonlyArray1<'py, f32>,
+    divide: bool,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let shape = img.as_array().shape().to_vec();
+    if shape[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
+    }
+    let f = factors.as_slice()?;
+    if f.len() != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("factors must have 3 entries"));
+    }
+    let flat = img.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("img must be C-contiguous")
+    })?;
+    let out = white_balance_body(py, flat, shape[0], shape[1], [f[0], f[1], f[2]], divide);
+    let arr3 = numpy::ndarray::Array3::from_shape_vec((shape[0], shape[1], 3), out)
+        .expect("shape mismatch building white_balance_apply output");
+    Ok(arr3.into_pyarray(py))
+}
+
+/// Gray-world white balance: the gains come from the per-channel means.
+///
+/// The means are accumulated in float64 (sequential, row-major) and rounded to
+/// float32, matching ``img.mean(axis=(0, 1), dtype=float64).astype(float32)``.
+/// A float32 running sum over millions of pixels drifts by up to ~1.5% on real
+/// frames, which skewed the gray-world gains. The gain
+/// ``mean.mean() / (mean + 1e-12)`` then follows in float32 as numpy computes it.
+#[pyfunction]
+fn white_balance_grayworld<'py>(
+    py: Python<'py>,
+    img: PyReadonlyArray3<'py, f32>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let shape = img.as_array().shape().to_vec();
+    if shape[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
+    }
+    let flat = img.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("img must be C-contiguous")
+    })?;
+    let (h, w) = (shape[0], shape[1]);
+    let mut acc = [0f64; 3];
+    for px in flat.chunks_exact(3) {
+        acc[0] += px[0] as f64;
+        acc[1] += px[1] as f64;
+        acc[2] += px[2] as f64;
+    }
+    let n = (h * w) as f64;
+    let mean = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
+    // numpy: mean.mean() on a 3-element float32 array is (m0 + m1) + m2, then / 3
+    let mm = ((mean[0] + mean[1]) + mean[2]) / 3.0f32;
+    let scale = [
+        mm / (mean[0] + 1e-12f32),
+        mm / (mean[1] + 1e-12f32),
+        mm / (mean[2] + 1e-12f32),
+    ];
+    let out = white_balance_body(py, flat, h, w, scale, false);
+    let arr3 = numpy::ndarray::Array3::from_shape_vec((h, w, 3), out)
+        .expect("shape mismatch building white_balance_grayworld output");
+    Ok(arr3.into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(originvision::originvision_score, m)?)?;
@@ -6208,6 +6431,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(radial_bin_median, m)?)?;
     m.add_function(wrap_pyfunction!(aperture_photometry_batch, m)?)?;
     m.add_function(wrap_pyfunction!(cfa_drizzle_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(white_balance_apply, m)?)?;
+    m.add_function(wrap_pyfunction!(white_balance_grayworld, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
