@@ -1316,11 +1316,20 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _preview_src = np.maximum(stacked, _floor)
                 safe_print(f"  Error-aware stretch: black point at the {float(_eas):g}-sigma "
                            f"contour ({_floor:.4g} ADU)")
+    _preview_starless = None
+    if getattr(args, 'layered_stretch', False) and stretch_method == 'ghs':
+        from src.star_removal import starless_from_image
+        _preview_starless = starless_from_image(_preview_src)
+        if _preview_starless is None:
+            safe_print("  Layered stretch: no usable star detections -- using the single stretch")
+        else:
+            safe_print("  Preview: layered stretch (starless layer + stars)")
     save_preview_rgb(_preview_src, preview_path, stretch=stretch_method,
                      ghs_b=float(getattr(args, 'ghs_b', 8.0)),
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)))
+                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
+                     starless=_preview_starless)
 
     if getattr(args, 'originvision', False):
         # originvision_infer's FITS path assumes a raw (undebayered) single-plane

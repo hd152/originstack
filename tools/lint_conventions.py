@@ -189,8 +189,11 @@ def check_native_parity(out):
 
 
 def _git(args: list[str]):
+    # Explicit utf-8: git emits UTF-8 regardless of the console codepage, and
+    # the locale default (cp1252 on Windows) crashed on any non-ASCII diff.
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
-                          text=True, check=True).stdout
+                          text=True, encoding="utf-8", errors="replace",
+                          check=True).stdout
 
 
 def check_cargo_version_bump(base, out):

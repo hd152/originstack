@@ -15,6 +15,7 @@ from src.background import (
     apply_background_extraction,
     dynamic_background_extraction,
     gaussian_filter_ds,
+    remove_edge_bands,
     remove_sky_residual,
     sky_floor_normalize,
     wavelet_background_extraction,
@@ -165,6 +166,40 @@ def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
     # too narrow, a failed fit, a fit that did not help -- and only one of them
     # is "at this field size".
     return (result, '') if result is not None else (None, reason)
+
+
+def _median_fwhm(final, default: float = 4.0) -> float:
+    """Median measured FWHM (px) over ``final``, or ``default`` when no frame
+    has one. ``float(np.median([]) or default)`` never used its default:
+    np.median of an empty list is NaN, and NaN is truthy."""
+    vals = [f.metrics.get('fwhm', 0) for f in (final or [])
+            if getattr(f, 'metrics', None) and f.metrics.get('fwhm', 0) > 0]
+    return float(np.median(vals)) if vals else float(default)
+
+
+def _split_starless(stacked: np.ndarray, sources, final, args):
+    """Split ``stacked`` into (starless, stars) with ``starless + stars == stacked``.
+
+    Returns (None, None) when the split is off, unavailable, or unsafe (no
+    detections, mask tripped star_removal's area cap), in which case callers
+    process the whole image exactly as before. Because the layers sum back to
+    the input exactly, a step run only on ``starless`` can never lose star
+    flux; anything the inpaint wrongly took (a galaxy's bright core mistaken
+    for a star) simply rides along untouched in ``stars``.
+    """
+    if (not getattr(args, 'starless_process', False)
+            or 'starless_process' in set(getattr(args, 'skip_step', []) or [])
+            or sources is None or len(sources) == 0):
+        return None, None
+    try:
+        from src.star_removal import remove_stars
+        starless, n = remove_stars(stacked, sources, _median_fwhm(final))
+        if n <= 0:
+            return None, None
+        return starless, stacked - starless
+    except Exception as exc:
+        safe_print(f"  ⚠ Starless split failed ({exc}) — processing with stars in place")
+        return None, None
 
 
 def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
@@ -553,6 +588,18 @@ def postprocess_stack(
             safe_print(f"  ✓ Sky pedestal: +{pedestal:.2f} "
                        f"(sky sigma={_ped_sigma:.2f})")
 
+    # Denoisers below see only the starless layer when --starless-process is on:
+    # with no stars in it they need no star mask (nothing to protect, no halo
+    # to leak into a background estimate), and the stars layer is added back
+    # untouched after the last denoiser.
+    _dn_starless, _dn_stars = _split_starless(stacked, _pp_sources, final, args)
+    if _dn_starless is not None:
+        safe_print("\n  Starless processing: denoising the starless layer only")
+        stacked = _dn_starless
+        _dn_mask = None
+    else:
+        _dn_mask = pp_star_mask
+
     # 6. Bilateral denoising
     if getattr(args, 'denoise_bilateral', False) and 'bilateral' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_bilateral_denoise')
@@ -577,7 +624,7 @@ def postprocess_stack(
               f"(sigma={acdnr_sigma:.1f}, k={acdnr_k:.1f}, chroma={acdnr_chroma:.1f})...")
         acdnr_start = time.time()
         stacked = acdnr_denoise(stacked, smoothing_sigma=acdnr_sigma, contrast_k=acdnr_k,
-                                chroma_factor=acdnr_chroma, star_mask=pp_star_mask)
+                                chroma_factor=acdnr_chroma, star_mask=_dn_mask)
         safe_print(f"  ✓ ACDNR denoise ({format_time(time.time() - acdnr_start)})")
 
     # 6.7b. Directional (curvelet/shearlet-inspired) adaptive wavelet denoising
@@ -589,7 +636,7 @@ def postprocess_stack(
               f"(protect_strength={curv_protect:.2f}, chroma={curv_chroma:.1f})...")
         curv_start = time.time()
         stacked = directional_wavelet_denoise(
-            stacked, chroma_factor=curv_chroma, star_mask=pp_star_mask,
+            stacked, chroma_factor=curv_chroma, star_mask=_dn_mask,
             protect_strength=curv_protect,
             variance_stabilize=getattr(args, 'variance_stabilize', False))
         safe_print(f"  ✓ Directional wavelet denoise ({format_time(time.time() - curv_start)})")
@@ -606,9 +653,13 @@ def postprocess_stack(
         aniso_start = time.time()
         stacked = anisotropic_diffusion(stacked, iterations=aniso_iters,
                                         kappa=aniso_kappa, gamma=aniso_gamma,
-                                        option=aniso_opt, star_mask=pp_star_mask)
+                                        option=aniso_opt, star_mask=_dn_mask)
         safe_print(f"  ✓ Anisotropic diffusion ({format_time(time.time() - aniso_start)})")
         stacked = _sanitize(stacked, "anisotropic diffusion")
+
+    if _dn_stars is not None:
+        stacked = _sanitize(stacked + _dn_stars, "starless recombine (denoise)")
+        _dn_stars = None
 
     # 6.9. SCNR (Subtractive Chromatic Noise Reduction)
     if getattr(args, 'scnr', False) and 'scnr' not in skip_steps:
@@ -726,6 +777,24 @@ def postprocess_stack(
             else:
                 deconv_mask = pp_star_mask
 
+            # --starless-process: deconvolve only the starless layer. The
+            # protection mask above exists because RL rings a dark moat around
+            # every star, and it dilates ~5x FWHM around each one -- on a
+            # galaxy in a rich star field that covers much of the galaxy, so
+            # exactly the structure deconvolution is for goes unsharpened. With
+            # the stars taken out there is nothing to ring, so no mask is
+            # needed and the whole layer is sharpened. (The spatially-variant
+            # path needs star positions in the image, so it keeps the old way.)
+            _dc_stars = None
+            if (getattr(args, 'starless_process', False)
+                    and not getattr(args, 'deconvolve_svpsf', False)):
+                _dc_starless, _dc_stars = _split_starless(stacked, _pp_sources, final, args)
+                if _dc_starless is not None:
+                    safe_print("  Starless processing: deconvolving the starless layer "
+                               "(no star-ringing mask needed)")
+                    stacked = _dc_starless
+                    deconv_mask = None
+
             deconv_start = time.time()
             if getattr(args, 'deconvolve_svpsf', False) and _pp_sources is not None:
                 from src.psf_deconvolution import richardson_lucy_svpsf
@@ -760,6 +829,8 @@ def postprocess_stack(
                                                       star_mask=deconv_mask)
                 safe_print(f"  ✓ Richardson-Lucy deconvolution "
                            f"({format_time(time.time() - deconv_start)})")
+            if _dc_stars is not None:
+                stacked = stacked + _dc_stars
             stacked = _sanitize(stacked, "deconvolution")
 
     # 8. Star reduction
@@ -780,8 +851,17 @@ def postprocess_stack(
         print(f"\n  Applying multiscale local contrast enhancement "
               f"(strength={lc_strength:.2f}, scales=2/12/40 px)...")
         lc_start = time.time()
-        stacked = multiscale_local_contrast(stacked, strength=lc_strength,
-                                            star_mask=pp_star_mask)
+        _lc_starless, _lc_stars = _split_starless(stacked, _pp_sources, final, args)
+        if _lc_starless is not None:
+            # No stars in the layer: no core protection needed and no stellar
+            # flux to clip out of the detail source, so the collar guard is off.
+            stacked = multiscale_local_contrast(_lc_starless, strength=lc_strength,
+                                                star_mask=None,
+                                                detail_clip_percentile=None)
+            stacked = stacked + _lc_stars
+        else:
+            stacked = multiscale_local_contrast(stacked, strength=lc_strength,
+                                                star_mask=pp_star_mask)
         safe_print(f"  ✓ Local contrast enhancement ({format_time(time.time() - lc_start)})")
 
     # 11. Comet: radial renormalization (reveals jets by flattening coma gradient)
@@ -851,6 +931,9 @@ def postprocess_stack(
         _skym, _, _, _ = _dbe_prepare_emission_mask(
             stacked, pp_star_mask, _bg_excl_mask, False, "Sky neutralize")
         _skym = 1.0 - _skym
+        if 'edge_bands' not in skip_steps:
+            # Localised edge strips are far narrower than the smoothing below.
+            stacked = remove_edge_bands(stacked, _skym, verbose=args.verbose)
         _sig_sn = max(64.0, float(min(stacked.shape[:2])) / 8.0)
         _den = gaussian_filter_ds(_skym, sigma=_sig_sn)
         _gm = []
@@ -880,9 +963,7 @@ def postprocess_stack(
     if getattr(args, 'remove_stars', False) and 'remove_stars' not in skip_steps:
         try:
             if _pp_sources is not None and len(_pp_sources) > 0:
-                _rs_fwhm = float(np.median(
-                    [f.metrics.get('fwhm', 4.0) for f in final
-                     if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
+                _rs_fwhm = _median_fwhm(final)
                 safe_print(f"\n  Removing stars (fwhm={_rs_fwhm:.1f}px)...")
                 _rs_start = time.time()
                 from src.star_removal import remove_stars

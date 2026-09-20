@@ -146,3 +146,29 @@ def remove_stars(rgb: np.ndarray, sources, fwhm: float,
         safe_print(f"    Star removal: masked {n_stars} star(s), "
                    f"{int(mask.sum())} px inpainted (max disk radius {max_r:.1f}px)")
     return out, n_stars
+
+
+def starless_from_image(rgb: np.ndarray, fwhm: float = 4.0) -> Optional[np.ndarray]:
+    """Starless copy of ``rgb``, detecting the stars itself.
+
+    For callers that only have the finished image (the layered preview stretch)
+    rather than the post-processing chain's own detections. Returns None when
+    there is nothing to remove or removal is unsafe (no detections, mask over
+    the safety cap), so callers fall back to the ordinary single-layer path.
+    """
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        return None
+    try:
+        from src.quality import detect_stars_auto
+        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
+               + 0.114 * rgb[:, :, 2]).astype(np.float32)
+        med = float(np.median(lum))
+        sd = 1.4826 * float(np.median(np.abs(lum - med)))
+        sources = detect_stars_auto(lum, max(sd, 1e-3), background=med)
+        if sources is None or len(sources) == 0:
+            return None
+        out, n = remove_stars(rgb, sources, fwhm)
+        return out if n > 0 else None
+    except Exception:
+        return None
+

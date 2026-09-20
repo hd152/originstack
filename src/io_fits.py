@@ -257,6 +257,48 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
     return out
 
 
+def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
+                                 ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                                 ghs_hp: float = 0.95, black_sigma: float = 0.0
+                                 ) -> np.ndarray:
+    """GHS preview whose black and white points come from the starless layer.
+
+    One stretch has to pick a single white point, and on a starry frame the
+    top of the histogram is stars (see the 99.5 percentile note in
+    ``render_preview_uint8``), so faint extended structure -- what the stretch
+    is for -- is squeezed into a sliver of the range. Here the points are read
+    off the *starless* image, so a faint galaxy disk or nebula owns the range;
+    the full image (stars included) is then stretched with those points and
+    GHS's highlight protection keeps the star cores from clipping harder than
+    they otherwise would.
+
+    An earlier version stretched the starless layer and the stars layer
+    separately and screen-blended them. That fails exactly where it matters: a
+    bright star over the galaxy is inpainted from its surroundings, the fill
+    sits below the true galaxy light there, and the stars layer carries the
+    difference through a *different* curve -- a dark disc at every such star,
+    measured on a real Fireworks Galaxy stack. Stretching the one full image
+    avoids ever recombining two curves.
+    """
+    from src.denoising import generalized_hyperbolic_stretch
+    lum_s = (0.299 * starless[:, :, 0] + 0.587 * starless[:, :, 1]
+             + 0.114 * starless[:, :, 2])
+    med, sigma = _sky_stats(lum_s)
+    black = med + black_sigma * sigma
+    # 99.9, not the 99.5 the plain stretch uses: with the stars gone the top of
+    # the histogram is the galaxy's own bright body, and 99.5 lands inside the
+    # disk (measured on a real stack: white 338 vs 679 at 99.9 vs 1177 for the
+    # full image) -- the core blows out and the noise floor is stretched to
+    # grain. 99.9 keeps the arms and outer disk visible without either.
+    white = float(np.percentile(lum_s, 99.9))
+    out = np.zeros(rgb.shape, dtype=np.float32)
+    for c in range(3):
+        out[:, :, c] = generalized_hyperbolic_stretch(
+            rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+            black_point=black, white_point=white)
+    return np.clip(out * 255, 0, 255).astype(np.uint8)
+
+
 def _preview_pil_image(out: np.ndarray, max_dim: int):
     """uint8 HWC -> size-capped PIL image (shared by file and bytes paths)."""
     h, w = out.shape[:2]
@@ -275,12 +317,20 @@ def _preview_pil_image(out: np.ndarray, max_dim: int):
 
 def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_b: float = 8.0, ghs_sp: float = 0.15,
-                     ghs_hp: float = 0.95, black_sigma: float = 0.0) -> None:
+                     ghs_hp: float = 0.95, black_sigma: float = 0.0,
+                     starless: Optional[np.ndarray] = None) -> None:
+    """Write the preview JPEG. ``starless`` (same shape as ``rgb``), with
+    ``stretch='ghs'``, switches to the layered stretch -- see
+    ``render_preview_layered_uint8``."""
     from src.models import Config
     if Image is None:
         return
-    out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                               ghs_hp=ghs_hp, black_sigma=black_sigma)
+    if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
+        out = render_preview_layered_uint8(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                           ghs_hp=ghs_hp, black_sigma=black_sigma)
+    else:
+        out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                   ghs_hp=ghs_hp, black_sigma=black_sigma)
     if out is None:
         return
     img = _preview_pil_image(out, Config.PREVIEW_MAX_DIMENSION)

@@ -601,7 +601,9 @@ def multiscale_local_contrast(
         strength: float = 0.7,
         scales: Tuple[int, ...] = (2, 12, 40),
         scale_weights: Tuple[float, ...] = (0.3, 0.6, 0.1),
-        star_mask: Optional[np.ndarray] = None) -> np.ndarray:
+        star_mask: Optional[np.ndarray] = None,
+        detail_clip_percentile: Optional[float] = _DETAIL_CLIP_PERCENTILE
+        ) -> np.ndarray:
     """Multiscale local contrast enhancement (MLCE) for galaxy structure.
 
     Applies luminance-domain unsharp masking simultaneously at fine, medium,
@@ -626,6 +628,11 @@ def multiscale_local_contrast(
                        Default gives primary weight to the medium-scale layer.
         star_mask:     Float mask (1 = star core).  Star pixels receive no
                        contrast enhancement — their halos must not grow.
+
+        detail_clip_percentile: Percentile at which the detail source is
+                       clipped (the bright-star collar guard, see below).
+                       ``None`` disables it -- correct for an image that has
+                       no stars in it (the ``--starless-process`` layer).
 
     Returns:
         Enhanced float32 image (H, W, 3), non-negative.
@@ -673,7 +680,8 @@ def multiscale_local_contrast(
     # that actually pollute a sigma-12 blur. An earlier attempt to fix this by
     # infilling masked pixels measured beautifully on a synthetic scene with a
     # hard disk mask and changed real output by 0.01%.
-    detail_src = np.minimum(lum, float(np.percentile(lum, _DETAIL_CLIP_PERCENTILE)))
+    detail_src = lum if detail_clip_percentile is None else np.minimum(
+        lum, float(np.percentile(lum, detail_clip_percentile)))
 
     # Multiscale detail injection ——————————————————————————————————————————
     enhanced_lum = lum.copy()

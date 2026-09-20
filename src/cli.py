@@ -238,6 +238,30 @@ def apply_preset(args: argparse.Namespace) -> list:
 
 
 
+def _toml_str(value: str) -> str:
+    """A TOML basic string. Backslashes and quotes must be escaped: a Windows
+    log path written raw makes the file unparseable ("Invalid hex value" at
+    the backslash-U of C:/Users), and the saved config then silently failed to
+    load -- the run fell back to defaults with only a warning."""
+    out = []
+    for ch in value:
+        if ch == '\\':
+            out.append('\\\\')
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ord(ch) < 0x20 or ord(ch) == 0x7f:
+            out.append('\\u%04x' % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + ''.join(out) + '"'
+
+
 def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
     """Save the effective parameter set as a TOML file next to the output."""
     config_path = os.path.splitext(output_path)[0] + '_config.toml'
@@ -256,15 +280,36 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
         elif isinstance(value, (int, float)):
             lines.append(f'{key} = {value}\n')
         elif isinstance(value, str):
-            lines.append(f'{key} = "{value}"\n')
+            lines.append(f'{key} = {_toml_str(value)}\n')
         elif value is None:
             continue
 
     try:
-        with open(config_path, 'w') as f:
+        with open(config_path, 'w', encoding='utf-8') as f:
             f.writelines(lines)
     except Exception as e:
         safe_print(f"  WARNING: Could not save config file ({e})")
+
+
+def _postprocess_combined(combined, eff_args, output_path):
+    """Run Phase 4 on a hierarchically combined linear stack.
+
+    The per-target stacks each went through post-processing, but the combined
+    output was only a linear stack with a linear preview: the deliverable of a
+    multi-session run never got background extraction, denoising or a stretch
+    tuned to it. ``--merge`` runs Phase 4 once on the merged result; this does
+    the same for the hierarchical path, with the settings the reference
+    target's own run ended up with (including --auto's choices). The frame
+    list is empty, so measured-FWHM lookups fall back to their defaults.
+    Returns the post-processed image, or None if it failed (the linear stack
+    on disk is unaffected either way).
+    """
+    from src.postprocess import postprocess_stack
+    eff = argparse.Namespace(**vars(eff_args))
+    eff.output = output_path
+    eff._diagnostic_dir = None
+    print_header("PHASE 4: POST-PROCESSING THE COMBINED STACK", "-")
+    return postprocess_stack(combined.copy(), eff, [], ProcessingStats())
 
 
 def _load_calibration_dir(args: argparse.Namespace) -> dict:
@@ -842,6 +887,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     _baseline = _snapshot_args(args) if len(targets) > 1 else None
 
     produced = []
+    _effective_args: dict = {}   # produced stack path -> the args it was made with
     for target_idx, (d, outp) in enumerate(targets, 1):
         if _baseline is not None:
             _restore_args(args, _baseline)
@@ -1060,6 +1106,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         if res:
             produced.append(res)
             save_effective_config(args, outp)
+            # Kept for the hierarchical combine: --auto's per-target settings live
+            # only on this shared args object and are reset before the next
+            # target, so the combined stack's Phase 4 would otherwise have none.
+            _effective_args[res] = argparse.Namespace(**_snapshot_args(args))
     # If hierarchical combine
     if len(produced) > 1:
         print_header("HIERARCHICAL COMBINING", "=")
@@ -1099,20 +1149,28 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
 
             # Reference grid = the deepest stack: most signal for the star
             # match, and the least resampling of the data that matters most.
-            depths = []
+            # "Deepest" is integration time when every stack records it, not
+            # frame count: sessions of 10 s and 30 s subs make 100 frames worth
+            # very different amounts of light.
+            frames_n, seconds = [], []
             for path in produced:
                 try:
                     # Header only: this used to load and float32-copy every
                     # stack's pixels just to read NFRAMES.
-                    depths.append(int(read_merge_meta(path).get('nframes') or 0))
+                    meta = read_merge_meta(path)
+                    frames_n.append(int(meta.get('nframes') or 0))
+                    seconds.append(float(meta.get('intgtime') or 0.0))
                 except Exception:
-                    depths.append(0)
+                    frames_n.append(0)
+                    seconds.append(0.0)
+            use_seconds = all(t > 0 for t in seconds)
+            depths = seconds if use_seconds else frames_n
             ref_idx = int(np.argmax(depths)) if any(depths) else 0
             ref_path = produced[ref_idx]
             others = [p for i, p in enumerate(produced) if i != ref_idx]
 
             safe_print(f"  Reference grid: {os.path.basename(ref_path)} "
-                       f"({depths[ref_idx]} frames)")
+                       f"({frames_n[ref_idx]} frames, {seconds[ref_idx]:.0f} s)")
             try:
                 ref_stack, ref_meta = load_merge_stack(ref_path)
                 combined, merge_info = merge_previous_stacks(
@@ -1139,8 +1197,31 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                            f"({exc}); the combined stack will not chain into --merge")
             out_hdu.writeto(output, overwrite=True)
             preview_path = os.path.splitext(output)[0] + '.jpg'
-            save_preview_rgb(combined, preview_path,
-                             stretch=getattr(args, 'stretch', 'linear'))
+            _eff = _effective_args.get(ref_path)
+            _processed = None
+            if _eff is not None:
+                try:
+                    _processed = _postprocess_combined(combined, _eff, output)
+                except Exception as exc:
+                    safe_print(f"  WARNING: post-processing the combined stack failed "
+                               f"({exc}); the linear combined stack is saved and its "
+                               f"preview is unprocessed")
+            if _processed is not None:
+                _pa = _eff
+                _pstretch = getattr(_pa, 'stretch', 'linear')
+                _pstarless = None
+                if getattr(_pa, 'layered_stretch', False) and _pstretch == 'ghs':
+                    from src.star_removal import starless_from_image
+                    _pstarless = starless_from_image(_processed)
+                save_preview_rgb(_processed, preview_path, stretch=_pstretch,
+                                 ghs_b=float(getattr(_pa, 'ghs_b', 8.0)),
+                                 ghs_sp=float(getattr(_pa, 'ghs_sp', 0.15)),
+                                 ghs_hp=float(getattr(_pa, 'ghs_hp', 0.95)),
+                                 black_sigma=float(getattr(_pa, 'preview_black_sigma', 0.0)),
+                                 starless=_pstarless)
+            else:
+                save_preview_rgb(combined, preview_path,
+                                 stretch=getattr(args, 'stretch', 'linear'))
 
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
@@ -1338,7 +1419,21 @@ def build_parser() -> argparse.ArgumentParser:
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
                         'sky_residual, sky_pedestal, bilateral, '
                         'acdnr, curvelet, deconvolve, star_reduce, local_contrast, '
-                        'sky_neutralize, remove_stars')
+                        'sky_neutralize, edge_bands, remove_stars, starless_process')
+    g_stack.add_argument('--cfa-drizzle', dest='cfa_drizzle', action='store_true',
+                   help='Bayer-aware drizzle: after stacking, recombine each frame\'s '
+                        'MEASURED colour samples (never the interpolated ones) onto the '
+                        'output grid, so R/B/G are not built from debayer guesses. Needs '
+                        'OSC data, --debayer-method malvar and a dithered/rotating '
+                        'session (more frames = better; the field rotation of an alt-az '
+                        'mount is the dither). Sharper stars and less colour error, but '
+                        'higher per-pixel noise than a normal stack (no interpolation '
+                        'smoothing). MEASURED on a real, well-sampled stack (FWHM 4.9 px, 148 '
+                        'frames): luma noise -13% but chroma noise 2.1x, no sharpness '
+                        'gain (26 s with the native kernel) -- so it is for undersampled data (FWHM under '
+                        '~2.5 px), not a general quality upgrade. Uses --drizzle-scale and '
+                        '--drizzle-pixfrac. Not supported with --elastic-registration. '
+                        'Off by default.')
     g_stack.add_argument('--no-registration', action='store_true')
     g_stack.add_argument('--no-affine', action='store_true',
                    help='Disable affine (rotation+translation) registration; use translation-only')
@@ -1964,6 +2059,20 @@ def build_parser() -> argparse.ArgumentParser:
                         '(aggressive stretch, external star recombination). '
                         'Computed last, on the fully post-processed image. Not '
                         'turned on by --auto.')
+    g_post.add_argument('--starless-process', dest='starless_process', action='store_true',
+                   help='Run the denoisers and local contrast on a starless copy '
+                        'of the image, then add the stars back untouched. With no '
+                        'stars in the layer there is nothing to protect (no star '
+                        'mask, no halo leaking into background estimates, no '
+                        'collar around bright stars), so faint galaxy/nebula '
+                        'structure gets cleaner treatment. The layers sum back to '
+                        'the input exactly, so no star flux is lost. Off by default.')
+    g_post.add_argument('--layered-stretch', dest='layered_stretch', action='store_true',
+                   help='Preview JPEG: take the stretch black/white points from a '
+                        'starless copy of the image, so faint galaxy/nebula structure '
+                        'owns the tonal range instead of being squeezed under the '
+                        'stars\' white point. Only affects the preview JPEG, not the '
+                        'FITS/TIFF. Needs --stretch ghs. Off by default.')
     g_post.add_argument('--no-remove-stars', dest='remove_stars', action='store_false',
                    help=argparse.SUPPRESS)  # back-compat no-op (star removal is opt-in now)
 
@@ -2089,6 +2198,9 @@ def build_parser() -> argparse.ArgumentParser:
         drizzle_pixfrac=1.0,
         halo_removal=False,
         remove_stars=False,   # opt-in: --remove-stars writes the starless sidecar
+        starless_process=False,
+        layered_stretch=False,
+        cfa_drizzle=False,
         galaxy_mode=False,
     )
     return p
