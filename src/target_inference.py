@@ -192,6 +192,7 @@ _CATALOGUE: Dict[str, Tuple[str, str]] = {
     'NGC5194': ('Whirlpool Galaxy',          _G),
     'NGC5236': ('Southern Pinwheel Galaxy',  _G),
     'NGC5907': ('Splinter Galaxy',           _G),
+    'NGC6946': ('Fireworks Galaxy',          _G),
     'NGC6188': ('NGC 6188',                  _EN),
     'NGC6231': ('NGC 6231',                  _SF),
     'NGC6334': ("Cat's Paw Nebula",          _EN),
@@ -284,6 +285,7 @@ _COMMON_NAMES: Dict[str, Tuple[Optional[str], str]] = {
     'leo triplet':             ('M65',     _G),
     'virgo a':                 ('M87',     _G),
     'splinter galaxy':         ('NGC5907', _G),
+    'fireworks galaxy':        ('NGC6946', _G),
     "croc's eye galaxy":       ('M94',     _G),
 
     # Globular clusters
@@ -483,6 +485,18 @@ def _lookup_by_name(name: str) -> Optional[Tuple[str, str, float]]:
     return None
 
 
+def _keyword_type(name: str) -> str:
+    """Last-resort type guess from a name absent from every table.
+
+    Only the unambiguous word "galaxy" counts: a nickname like "Fireworks
+    Galaxy" names a galaxy whether or not the catalogue knows it, and the
+    galaxy-protecting defaults (skipping sky_residual) hinge on that type.
+    "Nebula" is deliberately not guessed -- emission/reflection/planetary
+    settings differ too much.
+    """
+    return _G if re.search(r'\bgalax(y|ies)\b', name, re.IGNORECASE) else 'unknown'
+
+
 def _lookup_text(text: str) -> Optional[Tuple[str, str, float]]:
     """Search text for catalogue IDs or common names.
 
@@ -606,9 +620,9 @@ def infer_target_from_metadata(
                 candidates.append((simbad_result[0], simbad_result[1], 1.0, 'session'))
             else:
                 # Raw name, type unknown — still high confidence in the name itself
-                candidates.append((session_name, 'unknown', 0.80, 'session'))
+                candidates.append((session_name, _keyword_type(session_name), 0.80, 'session'))
         else:
-            candidates.append((session_name, 'unknown', 0.80, 'session'))
+            candidates.append((session_name, _keyword_type(session_name), 0.80, 'session'))
 
     # ---- Source 1: FITS OBJECT header ----
     header_name = _object_from_headers(frames)
@@ -623,7 +637,7 @@ def infer_target_from_metadata(
                                     simbad_result[2], 'simbad'))
             else:
                 # Keep the raw header name at low confidence; type unknown
-                candidates.append((header_name, 'unknown', 0.40, 'header'))
+                candidates.append((header_name, _keyword_type(header_name), 0.40, 'header'))
 
     # ---- Source 2: Folder name ----
     folder_label = _folder_to_label(directory)

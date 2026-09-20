@@ -257,10 +257,15 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.85),
         ('ghs_b',                   10.0),
         ('ghs_sp',                  0.12),
-        # Galaxy is a small target on empty sky — clip the sky noise tail to
-        # black (median + 3*sigma) so the vast empty background renders clean,
-        # not grainy, under stretch. Faint arms/companion sit well above this.
-        ('preview_black_sigma',     3.0),
+        # Keep the black point low. It used to be 3.0 (clip to median + 3*sigma)
+        # on the reasoning that faint arms sit well above that -- they do not:
+        # on a real Fireworks Galaxy stack (NGC 6946, low surface brightness)
+        # the linear output held the outer disk and arms intact, and the
+        # preview at ~2.6 sigma (3.0 blended down by the depth rule) rendered
+        # them black, leaving only the core. Rendering the same pixels at 1.0
+        # brought them back. Shallow-stack splotching is handled separately by
+        # the depth cap in _apply_quality_settings.
+        ('preview_black_sigma',     1.0),
         # Smooth medium-scale colour blotches in the empty sky around the small
         # galaxy (object-masked, so galaxy/star colour is preserved).
         ('chroma_nr_large_sigma',   50.0),
