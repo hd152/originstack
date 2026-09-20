@@ -1751,3 +1751,420 @@ def test_warp_rgb_fast_path_equals_the_single_channel_path():
         one = np.asarray(native.warp_affine_lanczos3(
             np.ascontiguousarray(img[:, :, ch:ch + 1]), R.ravel().tolist(), off, 80, 100, 0.0))
         np.testing.assert_array_equal(full[:, :, ch], one[:, :, 0])
+
+
+# ---------------------------------------------------------------------------
+# Fused drizzle accumulate / area-overlap splat
+# ---------------------------------------------------------------------------
+_HAS_DRIZ = hasattr(native, "drizzle_accumulate_lanczos3") and hasattr(native, "drizzle_splat_frame")
+
+
+def _driz_matrix(deg, scale):
+    th = np.deg2rad(deg)
+    c, s = np.cos(th) / scale, np.sin(th) / scale
+    return [c, -s, s, c]
+
+
+def _old_accumulate(acc, img, M, off, w, pixfrac, wmap, out_h, out_w):
+    """The pre-fusion Python path, verbatim: warp -> (tent weight) -> *= w -> add."""
+    res = native.warp_affine_lanczos3(img, M, off, out_h, out_w, 0.0)
+    if pixfrac < 1.0 - 1e-9:
+        gy, gx = np.meshgrid(np.arange(out_h, dtype=np.float64),
+                             np.arange(out_w, dtype=np.float64), indexing='ij')
+        raw_y = M[0] * gy + M[1] * gx + off[0]
+        raw_x = M[2] * gy + M[3] * gx + off[1]
+        half = max(pixfrac / 2.0, 1e-6)
+        w_y = np.maximum(0.0, 1.0 - np.abs(raw_y - np.round(raw_y)) / half)
+        w_x = np.maximum(0.0, 1.0 - np.abs(raw_x - np.round(raw_x)) / half)
+        pfw = (w_y * w_x * w)[:, :, np.newaxis]
+        res = res.astype(np.float64, copy=False) * pfw
+        np.add(acc, res, out=acc)
+        np.add(wmap, pfw, out=wmap)
+    else:
+        res *= w
+        np.add(acc, res, out=acc)
+
+
+@pytest.mark.skipif(not _HAS_DRIZ, reason="astro_native lacks the drizzle kernels")
+@pytest.mark.parametrize("deg", [0.0, 7.5, -23.0])
+@pytest.mark.parametrize("pixfrac", [1.0, 0.6])
+def test_drizzle_accumulate_is_bit_identical_to_warp_weight_add(deg, pixfrac):
+    rng = np.random.default_rng(3)
+    img = rng.uniform(0, 5e4, (70, 90, 3)).astype(np.float32)
+    out_h, out_w = 120, 160
+    M = _driz_matrix(deg, 2.0)
+    acc_old = np.zeros((out_h, out_w, 3))
+    acc_new = np.zeros((out_h, out_w, 3))
+    wm_old = np.zeros((out_h, out_w, 1))
+    wm_new = np.zeros((out_h, out_w, 1))
+    for j, w in enumerate([0.9, 1.7, 0.35]):          # several frames, different weights/offsets
+        off = [3.3 + j * 0.37, 5.1 - j * 0.21]
+        _old_accumulate(acc_old, img, M, off, w, pixfrac, wm_old, out_h, out_w)
+        native.drizzle_accumulate_lanczos3(acc_new, img, M, off, w, pixfrac,
+                                           wm_new if pixfrac < 1.0 else None)
+    np.testing.assert_array_equal(acc_old, acc_new)
+    if pixfrac < 1.0:
+        np.testing.assert_array_equal(wm_old, wm_new)
+
+
+@pytest.mark.skipif(not _HAS_DRIZ, reason="astro_native lacks the drizzle kernels")
+def test_drizzle_kernels_reject_bad_input():
+    img = np.zeros((20, 20, 3), np.float32)
+    acc = np.zeros((30, 30, 3))
+    with pytest.raises(ValueError):                    # pixfrac < 1 needs a weight map
+        native.drizzle_accumulate_lanczos3(acc, img, [0.5, 0, 0, 0.5], [0, 0], 1.0, 0.5, None)
+    with pytest.raises(ValueError):
+        native.drizzle_accumulate_lanczos3(np.zeros((30, 30, 2)), img, [0.5, 0, 0, 0.5], [0, 0], 1.0, 1.0)
+    with pytest.raises(ValueError):
+        native.drizzle_splat_frame(img, [2, 0, 0, 2], [0, 0], 0.0, 1.0, acc, np.zeros((30, 30, 1)))
+    with pytest.raises(ValueError):                    # singular affine
+        native.drizzle_splat_frame(img, [1, 1, 1, 1], [0, 0], 1.0, 1.0, acc, np.zeros((30, 30, 1)))
+
+
+def _splat_reference(img, fwd, off, h, w, oh, ow):
+    """Direct per-pixel area-overlap deposit, one input pixel at a time."""
+    num = np.zeros((oh, ow, 3))
+    den = np.zeros((oh, ow))
+    norm = 1.0 / (4.0 * h * h)
+    for iy in range(img.shape[0]):
+        for ix in range(img.shape[1]):
+            dy, dx = iy - off[0], ix - off[1]
+            oy = fwd[0] * dy + fwd[1] * dx
+            ox = fwd[2] * dy + fwd[3] * dx
+            for qy in range(oh):
+                ovy = min(oy + h, qy + 0.5) - max(oy - h, qy - 0.5)
+                if ovy <= 0:
+                    continue
+                for qx in range(ow):
+                    ovx = min(ox + h, qx + 0.5) - max(ox - h, qx - 0.5)
+                    if ovx <= 0:
+                        continue
+                    g = ovy * ovx * norm * w
+                    num[qy, qx] += g * img[iy, ix].astype(np.float64)
+                    den[qy, qx] += g
+    return num, den
+
+
+@pytest.mark.skipif(not _HAS_DRIZ, reason="astro_native lacks the drizzle kernels")
+@pytest.mark.parametrize("deg", [0.0, 12.0])
+def test_drizzle_splat_matches_direct_area_overlap(deg):
+    rng = np.random.default_rng(5)
+    img = rng.uniform(0, 1000, (14, 18, 3)).astype(np.float32)
+    scale = 2.0
+    M = np.array(_driz_matrix(deg, scale)).reshape(2, 2)
+    off = np.array([1.7, -0.9])
+    fwd = np.linalg.inv(M)
+    oh, ow = 30, 38
+    h = 0.7 * scale / 2.0
+    ref_num, ref_den = _splat_reference(img, fwd.ravel(), off, h, 1.3, oh, ow)
+    num = np.zeros((oh, ow, 3))
+    den = np.zeros((oh, ow, 1))
+    native.drizzle_splat_frame(img, fwd.ravel().tolist(), off.tolist(), h, 1.3, num, den)
+    np.testing.assert_allclose(num, ref_num, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(den[:, :, 0], ref_den, rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.skipif(not _HAS_DRIZ, reason="astro_native lacks the drizzle kernels")
+def test_drizzle_splat_conserves_flux_and_flat_field():
+    """A flat image stays flat where covered, and total weight = frame weight x
+    input pixels (each drop's overlap weights sum to 1 when fully inside)."""
+    img = np.full((40, 50, 3), 321.0, np.float32)
+    scale = 2.0
+    M = np.array(_driz_matrix(9.0, scale)).reshape(2, 2)
+    off = -M @ np.array([60.0, 60.0])      # input origin lands at output (60, 60): fully inside
+    num = np.zeros((260, 260, 3))
+    den = np.zeros((260, 260, 1))
+    native.drizzle_splat_frame(img, np.linalg.inv(M).ravel().tolist(), off.tolist(), 0.9, 2.0, num, den)
+    covered = den[:, :, 0] > 1e-9
+    assert covered.sum() > 3000
+    np.testing.assert_allclose((num / np.where(den > 0, den, 1))[covered], 321.0, rtol=1e-9)
+    assert abs(den.sum() - 2.0 * 40 * 50) < 1e-6 * 2.0 * 40 * 50   # fully inside the output
+
+
+# ---------------------------------------------------------------------------
+# Fused Phase-1 kernels: calibration and hot-pixel removal
+# ---------------------------------------------------------------------------
+
+_HAS_FUSED = all(hasattr(native, n) for n in ("calibrate_frame_inplace", "hot_pixel_bayer", "hot_pixel_rgb"))
+
+
+class _NoKernel:
+    """The debayer module's native handle with named kernels removed, so a call
+    lands on the path that was in production before the kernel existed."""
+
+    def __init__(self, real, *hidden):
+        self._real, self._hidden = real, hidden
+
+    def __getattr__(self, name):
+        if name in self._hidden:
+            raise AttributeError(name)
+        return getattr(self._real, name)
+
+
+def _without(monkeypatch, *names):
+    monkeypatch.setattr(_debayer_mod, "_native", _NoKernel(_debayer_mod._native, *names))
+
+
+def _mosaic(h=96, w=130, seed=3):
+    rng = np.random.default_rng(seed)
+    raw = (rng.normal(1000, 40, (h, w)) + rng.poisson(5, (h, w))).astype(np.float32)
+    hot = rng.random((h, w)) < 6e-3
+    raw[hot] += rng.uniform(500, 5000, int(hot.sum())).astype(np.float32)
+    return raw, hot, rng
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+@pytest.mark.parametrize("use", [("b",), ("d",), ("f",), ("b", "d"), ("b", "f"), ("d", "f"), ("b", "d", "f")])
+def test_calibrate_frame_bit_identical_to_numpy(use, monkeypatch):
+    raw, _hot, rng = _mosaic()
+    m = {
+        "b": rng.normal(100, 3, raw.shape).astype(np.float32),
+        "d": rng.normal(150, 5, raw.shape).astype(np.float32),
+        "f": np.clip(rng.normal(1, 0.1, raw.shape), 0.4, 2.5).astype(np.float32),
+    }
+    args = (m.get("b") if "b" in use else None, m.get("d") if "d" in use else None, 1.37,
+            m.get("f") if "f" in use else None)
+    fast, ok_f = _debayer_mod.calibrate_frame(raw.copy(), *args)
+    monkeypatch.setattr(_debayer_mod, "_HAS_NATIVE", False)
+    ref, ok_r = _debayer_mod.calibrate_frame(raw.copy(), *args)
+    assert ok_f and ok_r
+    np.testing.assert_array_equal(fast, ref)
+    assert fast.min() >= 0.0
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+def test_calibrate_frame_reports_non_finite(monkeypatch):
+    raw, _hot, rng = _mosaic()
+    flat = np.ones(raw.shape, np.float32)
+    flat[3, 3] = 0.0                      # divide by zero -> inf
+    _, ok = _debayer_mod.calibrate_frame(raw.copy(), None, None, 1.0, flat)
+    assert ok is False
+    monkeypatch.setattr(_debayer_mod, "_HAS_NATIVE", False)
+    _, ok = _debayer_mod.calibrate_frame(raw.copy(), None, None, 1.0, flat)
+    assert ok is False
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+def test_calibrate_frame_leaves_non_float32_masters_to_numpy():
+    raw, _hot, rng = _mosaic()
+    dark = rng.normal(150, 5, raw.shape)               # float64: the fused kernel must not run
+    out, ok = _debayer_mod.calibrate_frame(raw.copy(), None, dark, 1.0, None)
+    ref = np.clip(raw - dark.astype(np.float32) * 1.0, 0, None)
+    assert ok
+    np.testing.assert_allclose(out, ref, atol=1e-3)
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+@pytest.mark.parametrize("shape", [(96, 130), (7, 9), (3, 5), (64, 66)])
+def test_hot_pixel_bayer_statistical_bit_identical(shape, monkeypatch):
+    raw, _hot, _ = _mosaic(*shape)
+    fast = _debayer_mod._fix_hot_bayer(raw.copy())
+    monkeypatch.setattr(_debayer_mod, "_HAS_NATIVE", False)
+    ref = _debayer_mod._fix_hot_bayer(raw.copy())
+    np.testing.assert_array_equal(fast, ref)
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+def test_hot_pixel_bayer_actually_repairs_hot_pixels():
+    raw, hot, _ = _mosaic()
+    out = _debayer_mod._fix_hot_bayer(raw.copy())
+    assert (out != raw).sum() > 0.5 * hot.sum()
+    assert out.max() < raw.max()
+    assert np.all(out <= raw)                           # only ever replaces upward outliers
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+def test_hot_pixel_bayer_map_bit_identical(monkeypatch):
+    raw, hot, _ = _mosaic()
+    fast = _debayer_mod._fix_hot_bayer(raw.copy(), threshold=None, hot_map=hot)
+    monkeypatch.setattr(_debayer_mod, "_HAS_NATIVE", False)
+    ref = _debayer_mod._fix_hot_bayer(raw.copy(), threshold=None, hot_map=hot)
+    np.testing.assert_array_equal(fast, ref)
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+def test_hot_pixel_bayer_rejects_map_and_threshold_together():
+    raw, hot, _ = _mosaic()
+    with pytest.raises(ValueError):
+        native.hot_pixel_bayer(raw, hot.astype(np.uint8), 5.0)
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+def test_hot_pixel_rgb_bit_identical_to_previous_native_path(monkeypatch):
+    """Against the box-mean kernel path that shipped before (a sequential f64 sum);
+    the pure-numpy fallback's scipy uniform_filter differs from it by an ulp."""
+    rng = np.random.default_rng(5)
+    rgb = rng.normal(500, 30, (90, 120, 3)).astype(np.float32)
+    rgb[rng.random((90, 120)) < 8e-3] += 800
+    fast, lum_f = _debayer_mod._fix_hot_rgb(rgb.copy())
+    _without(monkeypatch, "hot_pixel_rgb")
+    ref, lum_r = _debayer_mod._fix_hot_rgb(rgb.copy())
+    assert (fast != rgb).any()
+    np.testing.assert_array_equal(fast, ref)
+    np.testing.assert_array_equal(lum_f, lum_r)
+
+
+@pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
+def test_hot_pixel_rgb_nothing_flagged_and_degenerate():
+    rng = np.random.default_rng(6)
+    clean = rng.normal(500, 30, (60, 80, 3)).astype(np.float32)
+    fixed, lum = native.hot_pixel_rgb(clean, 1e6)       # nothing can exceed this
+    assert fixed is None
+    np.testing.assert_array_equal(
+        lum, (np.float32(0.299) * clean[:, :, 0] + np.float32(0.587) * clean[:, :, 1]
+              + np.float32(0.114) * clean[:, :, 2]))
+    assert native.hot_pixel_rgb(np.full((30, 30, 3), 100.0, np.float32), 12.0) is None
+    # ...and the wrapper still handles the degenerate MAD via numpy's np.std fallback
+    out, _ = _debayer_mod._fix_hot_rgb(np.full((30, 30, 3), 100.0, np.float32))
+    np.testing.assert_array_equal(out, np.full((30, 30, 3), 100.0, np.float32))
+
+
+@pytest.mark.skipif(not hasattr(native, "pre_gradient_apply"), reason="astro_native lacks pre_gradient_apply")
+def test_pre_gradient_removal_bit_identical_to_numpy(monkeypatch):
+    import src.frame_processor as fp
+    rng = np.random.default_rng(8)
+    h, w = 140, 190
+    yy, xx = np.mgrid[0:h, 0:w]
+    base = (300 + 0.4 * yy + 0.2 * xx + 0.001 * yy * xx).astype(np.float32)
+    rgb = np.ascontiguousarray(
+        np.stack([base, base * 1.1, base * 0.9], 2) + rng.normal(0, 20, (h, w, 3)).astype(np.float32))
+    a, b = rgb.copy(), rgb.copy()
+    lum_n = fp._pre_gradient_removal(a, None)
+    monkeypatch.setattr(_debayer_mod, "_HAS_NATIVE", False)
+    lum_p = fp._pre_gradient_removal(b, None)
+    np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(lum_n, lum_p)
+    assert a.min() >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Debayer-adjacent kernels (crate 0.28): medians, G1/G2 + Bayer-grid equalisation,
+# in-place hot-pixel / white balance, luminance
+# ---------------------------------------------------------------------------
+
+_HAS_DEBAYER_K = all(hasattr(native, n) for n in (
+    "strided_sigma_clipped_median", "green_equalize_inplace", "bayer_grid_equalize_inplace",
+    "hot_pixel_rgb_inplace", "luminance_native", "white_balance_grayworld_inplace",
+    "white_balance_apply_inplace"))
+_need_debayer_k = pytest.mark.skipif(not _HAS_DEBAYER_K, reason="astro_native lacks the debayer-adjacent kernels")
+
+
+def _sky_plane(h=180, w=240, seed=11):
+    rng = np.random.default_rng(seed)
+    a = rng.normal(500, 25, (h, w)).astype(np.float32)
+    hot = rng.random((h, w)) < 0.01                                    # stars: a heavy upper tail
+    a[hot] += rng.uniform(200, 4000, int(hot.sum())).astype(np.float32)
+    return a
+
+
+@_need_debayer_k
+@pytest.mark.parametrize("sl", [(slice(None), slice(None)), (slice(0, None, 2), slice(1, None, 2)),
+                                (slice(1, None, 2), slice(0, None, 2))])
+def test_strided_sigma_clipped_median_matches_numpy_reference(sl):
+    a = _sky_plane()
+    view = a[sl]
+    got = native.strided_sigma_clipped_median(view, 3.0, 3)
+    # the pure numpy algorithm, spelled out
+    x = view.ravel()
+    for _ in range(3):
+        med = float(np.median(x)); std = float(np.std(x))
+        if std < 1e-12:
+            break
+        x = x[np.abs(x - med) < 3.0 * std]
+    expect = float(np.median(x))
+    assert got == pytest.approx(expect, rel=1e-6)          # numpy's f32 std/sum differ from the f64 kernel's
+    # and the older 1-D kernel (now on the same core) agrees exactly
+    assert got == native.sigma_clipped_median_native(np.ascontiguousarray(view.ravel()), 3.0, 3)
+
+
+@_need_debayer_k
+@pytest.mark.parametrize("pattern", ["RGGB", "BGGR", "GRBG", "GBRG"])
+@pytest.mark.parametrize("imbalance", [1.0, 1.05, 1.5])
+def test_green_equalize_inplace_bit_identical(pattern, imbalance, monkeypatch):
+    rng = np.random.default_rng(4)
+    raw = rng.normal(800, 30, (96, 130)).astype(np.float32)
+    (_, _), (g1r, g1c), (g2r, g2c), (_, _) = _debayer_mod._PATTERN_OFFSETS[pattern]
+    raw[g2r::2, g2c::2] *= np.float32(imbalance)
+    fast = _debayer_mod.green_equalize(raw.copy(), pattern=pattern)
+    _without(monkeypatch, "strided_sigma_clipped_median", "green_equalize_inplace")
+    ref = _debayer_mod.green_equalize(raw.copy(), pattern=pattern)     # previous path: f64 medians, numpy scaling
+    np.testing.assert_array_equal(fast, ref)
+
+
+@_need_debayer_k
+def test_green_equalize_inplace_flag_edits_caller_array_only_when_asked():
+    rng = np.random.default_rng(5)
+    raw = rng.normal(800, 30, (64, 64)).astype(np.float32)
+    raw[1::2, 0::2] *= np.float32(1.1)
+    keep = raw.copy()
+    out = _debayer_mod.green_equalize(raw, pattern="RGGB")            # default: a copy
+    np.testing.assert_array_equal(raw, keep)
+    assert out is not raw
+    out2 = _debayer_mod.green_equalize(raw, pattern="RGGB", inplace=True)
+    assert out2 is raw and not np.array_equal(raw, keep)
+
+
+@_need_debayer_k
+@pytest.mark.parametrize("offset", [0.0, 0.5, 3.0, 400.0])
+def test_bayer_grid_equalize_bit_identical(offset, monkeypatch):
+    rng = np.random.default_rng(6)
+    rgb = rng.normal(300, 20, (90, 120, 3)).astype(np.float32)
+    rgb[0::2, 1::2, 1] += np.float32(offset)                         # a per-position green bias
+    fast = _debayer_mod._equalize_bayer_grid(rgb.copy())
+    _without(monkeypatch, "strided_sigma_clipped_median", "bayer_grid_equalize_inplace")
+    ref = _debayer_mod._equalize_bayer_grid(rgb.copy())                # previous path
+    np.testing.assert_array_equal(fast, ref)                          # 400 is past the 100 ADU guard: unchanged
+    assert (offset == 400.0) == np.array_equal(fast, rgb)
+
+
+@_need_debayer_k
+def test_debayer_malvar_full_path_bit_identical(monkeypatch):
+    rng = np.random.default_rng(7)
+    raw = rng.normal(700, 30, (100, 140)).astype(np.float32)
+    raw[1::2, 0::2] *= np.float32(1.04)
+    fast = _debayer_mod.debayer(_debayer_mod.green_equalize(raw.copy(), "RGGB"), "RGGB", "malvar")
+    _without(monkeypatch, "strided_sigma_clipped_median", "green_equalize_inplace",
+             "bayer_grid_equalize_inplace")
+    ref = _debayer_mod.debayer(_debayer_mod.green_equalize(raw.copy(), "RGGB"), "RGGB", "malvar")
+    np.testing.assert_array_equal(fast, ref)
+
+
+@_need_debayer_k
+def test_hot_pixel_rgb_inplace_matches_copying_kernel():
+    rng = np.random.default_rng(9)
+    rgb = rng.normal(500, 30, (90, 120, 3)).astype(np.float32)
+    rgb[rng.random((90, 120)) < 8e-3] += 800
+    ref_fixed, ref_lum = native.hot_pixel_rgb(rgb, 12.0)
+    work = rgb.copy()
+    lum = native.hot_pixel_rgb_inplace(work, 12.0)
+    np.testing.assert_array_equal(work, ref_fixed)
+    np.testing.assert_array_equal(lum, ref_lum)
+    clean = rng.normal(500, 30, (60, 80, 3)).astype(np.float32)
+    keep = clean.copy()
+    assert native.hot_pixel_rgb_inplace(clean, 1e6) is not None
+    np.testing.assert_array_equal(clean, keep)                        # nothing flagged: untouched
+    flat = np.full((30, 30, 3), 100.0, np.float32)
+    assert native.hot_pixel_rgb_inplace(flat, 12.0) is None
+
+
+@_need_debayer_k
+def test_white_balance_grayworld_inplace_bit_identical():
+    rng = np.random.default_rng(10)
+    img = np.abs(rng.normal(400, 60, (80, 110, 3))).astype(np.float32) * np.array([1.0, 0.6, 0.8], np.float32)
+    img[5, 5] = 9000.0                                                # a near-clipped star
+    ref = native.white_balance_grayworld(img)
+    work = img.copy()
+    assert _debayer_mod.white_balance_grayworld(work, inplace=True) is work
+    np.testing.assert_array_equal(work, ref)
+    f = np.array([1.3, 1.0, 0.7], np.float32)
+    work2 = img.copy()
+    native.white_balance_apply_inplace(work2, f, True)
+    np.testing.assert_array_equal(work2, native.white_balance_apply(img, f, True))
+
+
+@_need_debayer_k
+def test_luminance_native_bit_identical():
+    rng = np.random.default_rng(12)
+    rgb = rng.normal(500, 90, (70, 90, 3)).astype(np.float32)
+    np.testing.assert_array_equal(
+        _debayer_mod.luminance(rgb), 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])

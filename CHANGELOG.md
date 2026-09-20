@@ -6,6 +6,19 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **`-o` accepts a folder.** Give an existing folder, a path ending in a separator, or a name with no
+  extension and the FITS (and its matching JPG) are named `<session>_stacked` inside it, creating the
+  folder if needed and adding `_2`, `_3`... rather than overwriting an existing pair. Also applies to the
+  desktop app's output field.
+- **`--drizzle-method splat`**: the original area-overlap drizzle. Every input pixel is a square drop of
+  side `--drizzle-pixfrac` x scale, deposited into the output by exact overlap. About 6x faster than the
+  default resample path (22x with a small pixfrac), no Lanczos ringing, but softer -- on a synthetic
+  dithered scene its error against truth was 40-44 against 35 for resample, so it is opt-in, and best with
+  many dithered frames and a pixfrac below 1. Ignored (with a message) for `--drizzle-kernel psf/magic`
+  and `--elastic-registration`.
+
 ### Removed
 
 - **Denoisers that did not earn their place.** A ground-truth benchmark
@@ -34,6 +47,18 @@ match the `VERSION` file and `v*` git tags.
   ignored).
 
 ### Changed
+
+- **Faster Phase 1, identical output** (`astro_native` 0.27.0). Calibration (bias, scaled dark, flat, finite
+  check, clip) and both hot-pixel passes (Bayer mosaic and RGB) each run as one native call instead of
+  ~6-20 full-frame numpy passes: per 2048x3056 frame calibrate 40 -> 9 ms, Bayer hot-pixel fix 715 -> 29 ms,
+  hot-pixel map replacement 666 -> 12 ms, RGB hot-pixel fix 1174 -> 52 ms (single thread). These were about a
+  third of Phase 1's worker time under 16 workers, where memory bandwidth is the limit. Bit-identical results.
+  Per-frame pre-gradient removal (on in saved `--auto` configs) is fused too: 349 -> 8 ms per frame.
+- **Faster debayer stage** (`astro_native` 0.28.0). The sigma-clipped medians, G1/G2 equalisation and Bayer-grid equalisation no longer copy strided views or the 75 MB RGB frame, and hot-pixel removal, gray-world white balance and the luminance recompute work in place / in one pass. Real session (148 frames, 16 workers), ms per frame: debayer 2207 -> 1002, hot-pixel removal 489 -> 310, white balance 255 -> 187, luminance 259 -> 68. Same output as before.
+- **Faster drizzle, identical output** (`astro_native` 0.26.0). The default resample path now warps,
+  weights and accumulates each frame in one native pass instead of building a temporary image and adding
+  it under a lock: 385 to 269 ms per 2x frame, and 1193 to 305 ms with `--drizzle-pixfrac < 1` (which
+  built seven full-size temporaries per frame). Bit-identical to the previous result.
 
 - **`--denoiser wavelet` and `curvelet` are one denoiser.** They already ran
   the same function; `wavelet` just forced structure protection to 0. `wavelet`

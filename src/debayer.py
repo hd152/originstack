@@ -105,6 +105,13 @@ def autodetect_bayer_orientation(raw, pattern: str, imbalance_threshold: float =
 
 
 def _sigma_clipped_median(arr, sigma: float = 3.0, iters: int = 3, xp=np) -> float:
+    if (xp is np and _HAS_NATIVE and hasattr(_native, 'strided_sigma_clipped_median')
+            and isinstance(arr, np.ndarray) and arr.ndim == 2 and arr.dtype == np.float32):
+        # gathers the (strided) view itself: no ravel()/ascontiguousarray copy in numpy
+        try:
+            return float(_native.strided_sigma_clipped_median(arr, float(sigma), int(iters)))
+        except Exception:
+            pass
     if xp is np and _HAS_NATIVE and hasattr(_native, 'sigma_clipped_median_native'):
         try:
             flat = np.ascontiguousarray(arr.ravel(), dtype=np.float32)
@@ -123,7 +130,7 @@ def _sigma_clipped_median(arr, sigma: float = 3.0, iters: int = 3, xp=np) -> flo
     return float(xp.median(x)) if len(x) > 0 else float(xp.median(arr))
 
 
-def green_equalize(raw, pattern: str = 'RGGB'):
+def green_equalize(raw, pattern: str = 'RGGB', inplace: bool = False):
     """Scale the G2 sub-channel to match G1's sigma-clipped median.
 
     CMOS sensors have two physically distinct green sub-pixels (G1, G2) per
@@ -134,11 +141,26 @@ def green_equalize(raw, pattern: str = 'RGGB'):
 
     The correction is capped at ±20 % to guard against bad frames where one
     sub-channel is near zero (saturated sky, very low counts, etc.).
-    Accepts both numpy and CuPy arrays; output matches the input type.
+    Accepts both numpy and CuPy arrays; output matches the input type. With
+    ``inplace=True`` a writable C-contiguous float32 numpy mosaic is corrected
+    where it lies (no 25 MB copy) -- only for a caller that owns it.
     """
     offsets = _PATTERN_OFFSETS.get(pattern.upper())
     if offsets is None:
         return raw
+    if (_HAS_NATIVE and hasattr(_native, 'green_equalize_inplace') and isinstance(raw, np.ndarray)
+            and raw.ndim == 2):
+        try:
+            (_, _), (g1_r, g1_c), (g2_r, g2_c), (_, _) = offsets
+            work = raw
+            if not (inplace and raw.dtype == np.float32 and raw.flags['C_CONTIGUOUS']
+                    and raw.flags['WRITEABLE']):
+                work = np.array(raw, dtype=np.float32, order='C', copy=True)
+            # medians of both green planes gathered natively, G2 scaled in place
+            _native.green_equalize_inplace(work, g1_r, g1_c, g2_r, g2_c)
+            return work
+        except Exception:
+            pass
     try:
         import cupy as _cp
         xp = _cp.get_array_module(raw)
@@ -168,7 +190,7 @@ def green_equalize(raw, pattern: str = 'RGGB'):
     return raw_f
 
 
-def _equalize_bayer_grid(rgb: np.ndarray) -> np.ndarray:
+def _equalize_bayer_grid(rgb: np.ndarray, inplace: bool = False) -> np.ndarray:
     """Remove 2×2 position-dependent green bias introduced by edge-aware CFA interpolation.
 
     Malvar debayering produces systematically different green values at
@@ -180,7 +202,18 @@ def _equalize_bayer_grid(rgb: np.ndarray) -> np.ndarray:
     four Bayer-position sub-channels, then subtracts the deviation from the
     per-image mean.  Guards skip corrections outside the plausible 0.01–100 ADU
     range to avoid modifying high-SNR targets or corrupted frames.
+
+    ``inplace=True`` edits a writable C-contiguous float32 array where it lies (the
+    native path then touches the green plane once and copies nothing).
     """
+    if (_HAS_NATIVE and hasattr(_native, 'bayer_grid_equalize_inplace') and isinstance(rgb, np.ndarray)
+            and rgb.dtype == np.float32 and rgb.ndim == 3 and rgb.shape[2] == 3
+            and rgb.flags['C_CONTIGUOUS'] and rgb.flags['WRITEABLE']):
+        try:
+            work = rgb if inplace else rgb.copy()
+            return work if _native.bayer_grid_equalize_inplace(work) or inplace else rgb
+        except Exception:
+            pass
     G = rgb[:, :, 1]
     ee = _sigma_clipped_median(G[::2,  ::2])   # R positions (even row, even col)
     eo = _sigma_clipped_median(G[::2,  1::2])  # G1 positions (even row, odd col)
@@ -335,8 +368,8 @@ def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
         except Exception:
             out = None
         if out is not None:
-            return _equalize_bayer_grid(out)
-    return _equalize_bayer_grid(_debayer_malvar_numpy(raw, pattern))
+            return _equalize_bayer_grid(out, inplace=True)   # `out` is ours: no copy
+    return _equalize_bayer_grid(_debayer_malvar_numpy(raw, pattern), inplace=True)
 
 
 # Menon (2007) DDFAPD 5x5 gradient-diffusion kernel: weights how far the
@@ -552,9 +585,19 @@ def _white_balance_native(xp, img, factors, divide: bool):
         return None
 
 
-def white_balance_grayworld(rgb: np.ndarray) -> np.ndarray:
+def white_balance_grayworld(rgb: np.ndarray, inplace: bool = False) -> np.ndarray:
+    """Gray-world white balance. ``inplace=True`` rewrites a writable C-contiguous float32
+    numpy image where it lies and returns it (native path; otherwise as usual)."""
     gpu = get_gpu()
     xp = gpu.xp
+    if (inplace and xp is np and _HAS_NATIVE and hasattr(_native, 'white_balance_grayworld_inplace')
+            and isinstance(rgb, np.ndarray) and rgb.dtype == np.float32 and rgb.ndim == 3
+            and rgb.shape[2] == 3 and rgb.flags['C_CONTIGUOUS'] and rgb.flags['WRITEABLE']):
+        try:
+            _native.white_balance_grayworld_inplace(rgb)
+            return rgb
+        except Exception:
+            pass
     img = xp.asarray(rgb, dtype=xp.float32)
     if (xp is np and _HAS_NATIVE and hasattr(_native, 'white_balance_grayworld')
             and img.ndim == 3 and img.shape[2] == 3):
@@ -658,13 +701,28 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     """
     if data.ndim != 2:
         return data
-    result = data.astype(np.float32, copy=True)
 
     has_map = hot_map is not None and hot_map.shape == data.shape and np.any(hot_map)
     do_stat = threshold is not None
     if do_stat and threshold is _DETECT:
         threshold = Config.HOT_PIXEL_BAYER_THRESHOLD
 
+    # Native: one call, no per-sub-plane temporaries; bit-identical (same f32 ops in
+    # the same order). Map and statistics are never asked for together by the
+    # pipeline, and the numpy path shares one median between them, so that
+    # combination stays on numpy.
+    if (_HAS_NATIVE and hasattr(_native, 'hot_pixel_bayer') and isinstance(data, np.ndarray)
+            and (has_map or do_stat) and not (has_map and do_stat)):
+        try:
+            src = np.ascontiguousarray(data, dtype=np.float32)
+            if has_map:
+                return _native.hot_pixel_bayer(
+                    src, np.ascontiguousarray(hot_map, dtype=np.uint8), None)
+            return _native.hot_pixel_bayer(src, None, float(threshold))
+        except Exception:
+            pass
+
+    result = data.astype(np.float32, copy=True)
     if not has_map and not do_stat:
         return result
 
@@ -711,13 +769,34 @@ def _median_filter3(arr, xp, _nd):
     return _nd.median_filter(arr, size=3)
 
 
-def _fix_hot_rgb_impl(rgb, threshold, xp, _nd):
+def _fix_hot_rgb_impl(rgb, threshold, xp, _nd, inplace=False):
     """Pure implementation of RGB hot-pixel correction; works with numpy or CuPy.
 
     Detection uses a single luma median filter (1 pass instead of 3).
     Replacement uses uniform_filter (box mean) which is ~5x faster than
     median on GPU and gives equivalent quality for isolated hot pixels.
     """
+    if (xp is np and _HAS_NATIVE and hasattr(_native, 'hot_pixel_rgb')
+            and isinstance(rgb, np.ndarray) and rgb.dtype == np.float32
+            and rgb.ndim == 3 and rgb.shape[2] == 3 and threshold is not None):
+        # Fused luma + 3x3 median + MAD + sparse replacement, bit-identical to the
+        # numpy steps below; None means a degenerate MAD (numpy falls back to np.std).
+        try:
+            if (inplace and hasattr(_native, 'hot_pixel_rgb_inplace')
+                    and rgb.flags['C_CONTIGUOUS'] and rgb.flags['WRITEABLE']):
+                # only the flagged pixels are written: no output array, no copy
+                lum_ip = _native.hot_pixel_rgb_inplace(rgb, float(threshold))
+                if lum_ip is not None:
+                    return rgb, lum_ip
+                fused = None
+            else:
+                fused = _native.hot_pixel_rgb(np.ascontiguousarray(rgb), float(threshold))
+        except Exception:
+            fused = None
+        if fused is not None:
+            fixed, lum_out = fused
+            return (rgb if fixed is None else fixed), lum_out
+
     lum     = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
     med_lum = _median_filter3(lum, xp, _nd)
     diff    = lum - med_lum
@@ -747,7 +826,7 @@ def _fix_hot_rgb_impl(rgb, threshold, xp, _nd):
     return result, lum_fixed
 
 
-def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT):
+def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT, inplace: bool = False):
     """Detect hot pixels on luminance, fix all 3 channels.
 
     Computes per-channel medians once (3 passes), reconstructs median
@@ -767,7 +846,7 @@ def _fix_hot_rgb(rgb: np.ndarray, threshold: Optional[float] = _DETECT):
                 gpu.disable()
             else:
                 raise
-    return _fix_hot_rgb_impl(np.asarray(rgb), threshold, np, ndimage)
+    return _fix_hot_rgb_impl(np.asarray(rgb), threshold, np, ndimage, inplace=inplace)
 
 
 def _fix_hot_mono_impl(img, threshold, xp, _nd):
@@ -814,6 +893,67 @@ def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.n
 remove_hot_pixels = _fix_hot_mono
 remove_hot_pixels_bayer = lambda data, threshold=_DETECT: fix_hot_pixels(data, mode='bayer', threshold=threshold)
 apply_hot_pixel_map_bayer = lambda data, hot_map: fix_hot_pixels(data, mode='bayer', hot_map=hot_map, threshold=None)
+
+
+def luminance(rgb):
+    """0.299 R + 0.587 G + 0.114 B in float32 -- one native pass for a host float32
+    image (bit-identical to the numpy expression, which builds three temporaries)."""
+    if (_HAS_NATIVE and hasattr(_native, 'luminance_native') and isinstance(rgb, np.ndarray)
+            and rgb.dtype == np.float32 and rgb.ndim == 3 and rgb.shape[2] == 3
+            and rgb.flags['C_CONTIGUOUS']):
+        try:
+            return _native.luminance_native(rgb)
+        except Exception:
+            pass
+    return 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+
+def calibrate_frame(data, bias, dark, dark_scale, flat_norm):
+    """Bias / scaled-dark / flat calibration of one light frame, clipped at zero.
+
+    ``bias``, ``dark`` and ``flat_norm`` are same-shape masters or None. Returns
+    ``(calibrated, finite)``; ``finite`` is False when the result held a non-finite
+    value (the caller reports that as an error, as before). ``data`` is updated in
+    place when it is already a writable float32 array, exactly as the numpy steps
+    always did.
+
+    Native (float32 masters): one parallel pass, same per-element operations in the
+    same order as the numpy sequence, so bit-identical -- it replaces ~6 full-frame
+    passes and two temporaries (``dark * scale``, the clip's copy).
+    """
+    masters = [m for m in (bias, dark, flat_norm) if m is not None]
+    if (_HAS_NATIVE and hasattr(_native, 'calibrate_frame_inplace') and masters
+            and isinstance(data, np.ndarray)
+            and all(isinstance(m, np.ndarray) and m.dtype == np.float32
+                    and m.flags['C_CONTIGUOUS'] for m in masters)):
+        try:
+            work = data
+            if work.dtype != np.float32 or not work.flags['C_CONTIGUOUS'] or not work.flags['WRITEABLE']:
+                work = np.array(data, dtype=np.float32, order='C', copy=True)
+            finite = _native.calibrate_frame_inplace(
+                work.reshape(-1),
+                None if bias is None else bias.reshape(-1),
+                None if dark is None else dark.reshape(-1),
+                float(dark_scale),
+                None if flat_norm is None else flat_norm.reshape(-1))
+            return work, bool(finite)
+        except Exception:
+            pass
+
+    if bias is not None:
+        data = data.astype(np.float32, copy=False)
+        data -= bias
+    if dark is not None:
+        data = data.astype(np.float32, copy=False)
+        np.subtract(data, dark * dark_scale, out=data)
+        if bias is not None:
+            data += bias * dark_scale
+    if flat_norm is not None:
+        data = data.astype(np.float32, copy=False)
+        data /= flat_norm
+    if not np.isfinite(data).all():
+        return data, False
+    return np.clip(data, 0, None), True
 
 
 def _block_avg_2x(a: np.ndarray) -> np.ndarray:
@@ -952,12 +1092,14 @@ def remove_hot_pixels_rgb(rgb: np.ndarray, threshold: Optional[float] = None) ->
     return rgb_fixed
 
 
-def remove_hot_pixels_rgb_with_lum(rgb: np.ndarray, threshold: Optional[float] = None):
+def remove_hot_pixels_rgb_with_lum(rgb: np.ndarray, threshold: Optional[float] = None,
+                                   inplace: bool = False):
     """Like remove_hot_pixels_rgb but also returns the luminance as (rgb_fixed, lum).
 
     Use this in performance-critical paths to avoid recomputing luminance after
-    hot pixel removal.
+    hot pixel removal. ``inplace=True`` lets the native path write the (few) repaired
+    pixels into ``rgb`` itself instead of returning a copy -- for a caller that owns it.
     """
     if threshold is None:
         threshold = Config.HOT_PIXEL_THRESHOLD
-    return _fix_hot_rgb(rgb, threshold=threshold)
+    return _fix_hot_rgb(rgb, threshold=threshold, inplace=inplace)

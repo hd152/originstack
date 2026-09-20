@@ -1564,48 +1564,10 @@ fn median_f64_scratch(v: &mut [f64]) -> f64 {
     }
 }
 
-#[inline]
-fn std_pop_f64(v: &[f64]) -> f64 {
-    let n = v.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    let m: f64 = v.iter().sum::<f64>() / n as f64;
-    (v.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / n as f64).sqrt()
-}
-
 #[pyfunction]
 fn sigma_clipped_median_native(data: PyReadonlyArray1<'_, f32>, sigma: f64, iters: usize) -> f64 {
-    let orig: Vec<f64> = data.as_array().iter().map(|&v| v as f64).collect();
-    let mut x = orig.clone();
-    // Reused across iterations instead of `x.clone()`-ing fresh every time:
-    // median_f64_scratch's quickselect is destructive, so it still needs its
-    // own copy of `x` each iteration, but reusing one buffer (clear + refill)
-    // avoids a malloc/free round-trip per iteration on top of the copy that's
-    // unavoidable either way -- `x` itself must stay unpartitioned for the
-    // std-dev and sigma-clip retain() below.
-    let mut scratch: Vec<f64> = Vec::with_capacity(x.len());
-
-    for _ in 0..iters {
-        if x.is_empty() {
-            break;
-        }
-        scratch.clear();
-        scratch.extend_from_slice(&x);
-        let med = median_f64_scratch(&mut scratch);
-        let std = std_pop_f64(&x);
-        if std < 1e-12 {
-            break;
-        }
-        let thresh = sigma * std;
-        x.retain(|&v| (v - med).abs() < thresh);
-    }
-
-    if !x.is_empty() {
-        median_f64_scratch(&mut x)
-    } else {
-        median_f64_scratch(&mut orig.clone())
-    }
+    let v: Vec<f32> = data.as_array().iter().copied().collect();
+    sigma_clipped_median_f32(&v, sigma, iters)
 }
 
 // ---------------------------------------------------------------------------
@@ -1870,61 +1832,32 @@ fn lanczos6_weights(r: f64, out: &mut [f64; 6]) {
     }
 }
 
-/// Affine warp with Lanczos-3 resampling, matching scipy's
-/// `affine_transform` sampling convention: `out[oy,ox] = in[M @ (oy,ox) + off]`,
-/// out-of-bounds -> `cval`. `mat` is row-major 2x2 `[[m00,m01],[m10,m11]]`
-/// mapping (row,col); `off` is `[off_row, off_col]`. All channels in one pass,
-/// parallel across output rows.
-#[pyfunction]
-#[pyo3(signature = (data, mat, off, out_h, out_w, cval=0.0))]
-fn warp_affine_lanczos3<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray3<'py, f32>,
+/// One output row of the contiguous-input Lanczos-3 warp (the body of
+/// `warp_affine_lanczos3`'s fast path, shared with `drizzle_accumulate_lanczos3`
+/// so the two are the same arithmetic by construction).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn lanczos3_row_flat(
+    img: &[f32],
+    h: usize,
+    w: usize,
+    c: usize,
+    oy: usize,
+    out_row: &mut [f32],
     mat: [f64; 4],
     off: [f64; 2],
-    out_h: usize,
-    out_w: usize,
+    tab: &Option<(Vec<[f64; 6]>, Vec<isize>)>,
     cval: f32,
-) -> PyResult<Bound<'py, PyArray3<f32>>> {
-    let arr = data.as_array();
-    let s = arr.shape();
-    let (h, w, c) = (s[0], s[1], s[2]);
+) {
     let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
     let (o0, o1) = (off[0], off[1]);
-    // Diagonal matrix (pure translation or axis-aligned scaling, e.g. the
-    // drizzle output grid): iy depends only on oy and ix only on ox, so the
-    // Lanczos weights are separable — one wx table per image, one wy per row.
-    // This covers the common cases (rotation off) and removes ALL sin() calls
-    // plus the weight normalisation from the per-pixel loop.
-    let is_sep = m01 == 0.0 && m10 == 0.0;
-    let flat: Option<&[f32]> = arr.as_slice();
-
-    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if is_sep && flat.is_some() {
-        let mut wxs = vec![[0f64; 6]; out_w];
-        let mut bxs = vec![0isize; out_w];
-        for ox in 0..out_w {
-            let ix = m11 * ox as f64 + o1;
-            let fx = ix.floor();
-            lanczos6_weights(ix - fx, &mut wxs[ox]);
-            bxs[ox] = fx as isize - 2;
-        }
-        Some((wxs, bxs))
-    } else {
-        None
-    };
-
-    let mut out = vec![0f32; out_h * out_w * c];
-    py.allow_threads(|| {
-        out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy, out_row)| {
-            let mut wy = [0f64; 6];
-            let mut wx = [0f64; 6];
-            match (flat, &col_tab) {
-                // ---- fast path: contiguous input ----
-                (Some(img), tab) => {
+    let out_w = out_row.len() / c;
+    let mut wy = [0f64; 6];
+    let mut wx = [0f64; 6];
                     let row_stride = w * c;
                     for ox in 0..out_w {
                         let (wyv, wxv, base_y, base_x): (&[f64; 6], &[f64; 6], isize, isize) =
-                            if let Some((wxs, bxs)) = tab {
+                            if let Some((wxs, bxs)) = tab.as_ref() {
                                 if ox == 0 {
                                     let iy = m00 * oy as f64 + o0;
                                     let fy = iy.floor();
@@ -2016,6 +1949,60 @@ fn warp_affine_lanczos3<'py>(
                             }
                         }
                     }
+}
+
+/// Affine warp with Lanczos-3 resampling, matching scipy's
+/// `affine_transform` sampling convention: `out[oy,ox] = in[M @ (oy,ox) + off]`,
+/// out-of-bounds -> `cval`. `mat` is row-major 2x2 `[[m00,m01],[m10,m11]]`
+/// mapping (row,col); `off` is `[off_row, off_col]`. All channels in one pass,
+/// parallel across output rows.
+#[pyfunction]
+#[pyo3(signature = (data, mat, off, out_h, out_w, cval=0.0))]
+fn warp_affine_lanczos3<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    mat: [f64; 4],
+    off: [f64; 2],
+    out_h: usize,
+    out_w: usize,
+    cval: f32,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
+    let (o0, o1) = (off[0], off[1]);
+    // Diagonal matrix (pure translation or axis-aligned scaling, e.g. the
+    // drizzle output grid): iy depends only on oy and ix only on ox, so the
+    // Lanczos weights are separable — one wx table per image, one wy per row.
+    // This covers the common cases (rotation off) and removes ALL sin() calls
+    // plus the weight normalisation from the per-pixel loop.
+    let is_sep = m01 == 0.0 && m10 == 0.0;
+    let flat: Option<&[f32]> = arr.as_slice();
+
+    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if is_sep && flat.is_some() {
+        let mut wxs = vec![[0f64; 6]; out_w];
+        let mut bxs = vec![0isize; out_w];
+        for ox in 0..out_w {
+            let ix = m11 * ox as f64 + o1;
+            let fx = ix.floor();
+            lanczos6_weights(ix - fx, &mut wxs[ox]);
+            bxs[ox] = fx as isize - 2;
+        }
+        Some((wxs, bxs))
+    } else {
+        None
+    };
+
+    let mut out = vec![0f32; out_h * out_w * c];
+    py.allow_threads(|| {
+        out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy, out_row)| {
+            let mut wy = [0f64; 6];
+            let mut wx = [0f64; 6];
+            match (flat, &col_tab) {
+                // ---- fast path: contiguous input ----
+                (Some(img), tab) => {
+                    lanczos3_row_flat(img, h, w, c, oy, out_row, [m00, m01, m10, m11], [o0, o1], tab, cval);
                 }
                 // ---- non-contiguous fallback: original indexed loop ----
                 (None, _) => {
@@ -6226,6 +6213,889 @@ fn cfa_drizzle_frame<'py>(
 }
 
 // ---------------------------------------------------------------------------
+// Drizzle: fused warp + weight + accumulate (src/stacking.py run_stacking_phase)
+// ---------------------------------------------------------------------------
+//
+// The Python drizzle loop warped each frame into a fresh (out_h, out_w, 3) f32
+// array, multiplied it by the frame weight, and added it into a shared f64
+// accumulator under a lock -- three full-size passes and a serialisation point
+// per frame (the add alone was ~150 ms of a ~435 ms rotated frame at 2x scale,
+// one thread at a time). This kernel does the same arithmetic per output row and
+// adds straight into the accumulator: rows are the parallel unit, so each thread
+// owns its accumulator rows and no lock or temporary array exists.
+//
+// Bit-identical to the old path: the row is produced by `lanczos3_row_flat` (the
+// very code `warp_affine_lanczos3` runs), then `v * (w as f32)` in f32 (numpy
+// in-place `resampled *= w`), then `acc += f64(v)`. With `pixfrac < 1` the tent
+// weight numpy built from seven full-size f64 temporaries is computed per pixel
+// with the same float64 operations in the same order, and `wmap += pfw`.
+#[pyfunction]
+#[pyo3(signature = (acc, data, mat, off, weight, pixfrac, wmap=None))]
+#[allow(clippy::too_many_arguments)]
+fn drizzle_accumulate_lanczos3<'py>(
+    py: Python<'py>,
+    mut acc: PyReadwriteArray3<'py, f64>,
+    data: PyReadonlyArray3<'py, f32>,
+    mat: [f64; 4],
+    off: [f64; 2],
+    weight: f64,
+    pixfrac: f64,
+    wmap: Option<PyReadwriteArray3<'py, f64>>,
+) -> PyResult<()> {
+    let s = data.as_array().shape().to_vec();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let acs = acc.as_array().shape().to_vec();
+    if c != 3 || acs.len() != 3 || acs[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("data and acc must have 3 channels"));
+    }
+    let (out_h, out_w) = (acs[0], acs[1]);
+    let img = data.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("data must be C-contiguous")
+    })?;
+    let acc_s = acc.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("acc must be C-contiguous")
+    })?;
+    let use_pf = pixfrac < 1.0 - 1e-9;
+    let mut wmap = wmap;
+    let wm_s: Option<&mut [f64]> = match wmap.as_mut() {
+        Some(m) => {
+            if m.as_array().shape() != [out_h, out_w, 1] {
+                return Err(pyo3::exceptions::PyValueError::new_err("wmap must be (out_h, out_w, 1)"));
+            }
+            Some(m.as_slice_mut().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("wmap must be C-contiguous")
+            })?)
+        }
+        None => None,
+    };
+    if use_pf && wm_s.is_none() {
+        return Err(pyo3::exceptions::PyValueError::new_err("pixfrac < 1 needs a wmap"));
+    }
+    let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
+    let (o0, o1) = (off[0], off[1]);
+    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if m01 == 0.0 && m10 == 0.0 {
+        let mut wxs = vec![[0f64; 6]; out_w];
+        let mut bxs = vec![0isize; out_w];
+        for ox in 0..out_w {
+            let ix = m11 * ox as f64 + o1;
+            let fx = ix.floor();
+            lanczos6_weights(ix - fx, &mut wxs[ox]);
+            bxs[ox] = fx as isize - 2;
+        }
+        Some((wxs, bxs))
+    } else {
+        None
+    };
+    let wf32 = weight as f32;
+    let half_drop = (pixfrac / 2.0).max(1e-6);
+
+    py.allow_threads(|| {
+        let row = |oy: usize, arow: &mut [f64], mrow: Option<&mut [f64]>, buf: &mut Vec<f32>| {
+            buf.resize(out_w * 3, 0.0);
+            lanczos3_row_flat(img, h, w, 3, oy, buf, [m00, m01, m10, m11], [o0, o1], &col_tab, 0.0);
+            if use_pf {
+                let mrow = mrow.unwrap();
+                for ox in 0..out_w {
+                    let raw_y = m00 * oy as f64 + m01 * ox as f64 + o0;
+                    let raw_x = m10 * oy as f64 + m11 * ox as f64 + o1;
+                    let fy = (raw_y - raw_y.round_ties_even()).abs();
+                    let fx = (raw_x - raw_x.round_ties_even()).abs();
+                    let wy_ = (1.0 - fy / half_drop).max(0.0);
+                    let wx_ = (1.0 - fx / half_drop).max(0.0);
+                    let pfw = wy_ * wx_ * weight;
+                    for ch in 0..3 {
+                        arow[ox * 3 + ch] += buf[ox * 3 + ch] as f64 * pfw;
+                    }
+                    mrow[ox] += pfw;
+                }
+            } else {
+                for i in 0..out_w * 3 {
+                    arow[i] += (buf[i] * wf32) as f64;
+                }
+            }
+        };
+        match wm_s {
+            Some(wm) if use_pf => {
+                acc_s
+                    .par_chunks_mut(out_w * 3)
+                    .zip(wm.par_chunks_mut(out_w))
+                    .enumerate()
+                    .for_each_init(Vec::new, |buf, (oy, (arow, mrow))| {
+                        row(oy, arow, Some(mrow), buf)
+                    });
+            }
+            _ => {
+                acc_s
+                    .par_chunks_mut(out_w * 3)
+                    .enumerate()
+                    .for_each_init(Vec::new, |buf, (oy, arow)| row(oy, arow, None, buf));
+            }
+        }
+    });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Drizzle by area-overlap splatting (--drizzle-method splat)
+// ---------------------------------------------------------------------------
+//
+// The resampling path evaluates a 6x6-tap Lanczos gather at every OUTPUT pixel
+// (4x as many as input pixels at 2x scale) and does not implement drizzle's
+// pixfrac at all (it is a weight applied afterwards). This is the algorithm
+// itself: every input pixel is a square drop of side `pixfrac * scale` output
+// pixels (half-side `h`), mapped through the frame's affine and deposited by
+// exact area overlap into `num` (weight * value, per channel) and `den`
+// (weight). Work is one pass over the INPUT (~16x fewer multiply-adds than the
+// gather) and parallel over bands of output rows so every thread owns its rows.
+// Same drop geometry and band scheme as `cfa_drizzle_frame`; all three channels
+// share one drop (a debayered frame carries a value in each).
+#[pyfunction]
+#[pyo3(signature = (rgb, fwd, off, h, weight, num, den))]
+#[allow(clippy::too_many_arguments)]
+fn drizzle_splat_frame<'py>(
+    py: Python<'py>,
+    rgb: PyReadonlyArray3<'py, f32>,
+    fwd: [f64; 4],
+    off: [f64; 2],
+    h: f64,
+    weight: f64,
+    mut num: PyReadwriteArray3<'py, f64>,
+    mut den: PyReadwriteArray3<'py, f64>,
+) -> PyResult<()> {
+    let rs = rgb.as_array().shape().to_vec();
+    let ns = num.as_array().shape().to_vec();
+    if rs[2] != 3 || ns[2] != 3 || den.as_array().shape() != [ns[0], ns[1], 1] {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "rgb/num must have 3 channels and den must be (out_h, out_w, 1)",
+        ));
+    }
+    if !(h > 0.0) {
+        return Err(pyo3::exceptions::PyValueError::new_err("h must be > 0"));
+    }
+    let (sh, sw) = (rs[0], rs[1]);
+    let (oh, ow) = (ns[0], ns[1]);
+    let rgb_s = rgb.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("rgb must be C-contiguous")
+    })?;
+    let num_s = num.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("num must be C-contiguous")
+    })?;
+    let den_s = den.as_slice_mut().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("den must be C-contiguous")
+    })?;
+    let (m00, m01, m10, m11) = (fwd[0], fwd[1], fwd[2], fwd[3]);
+    let (off0, off1) = (off[0], off[1]);
+    let det = m00 * m11 - m01 * m10;
+    if det.abs() < 1e-12 {
+        return Err(pyo3::exceptions::PyValueError::new_err("singular affine"));
+    }
+    let (i00, i01) = (m11 / det, -m01 / det);
+    let k = (2.0 * h).floor() as i64 + 2;
+    let norm = 1.0 / (4.0 * h * h);
+
+    const BAND: usize = 16;
+    py.allow_threads(|| {
+        num_s
+            .par_chunks_mut(BAND * ow * 3)
+            .zip(den_s.par_chunks_mut(BAND * ow))
+            .enumerate()
+            .for_each(|(band, (nb, db))| {
+                let r0 = band * BAND;
+                let r1 = (r0 + db.len() / ow).min(oh);
+                let lo_o = r0 as f64 - h - 0.5;
+                let hi_o = r1 as f64 + h - 0.5;
+                let mut imin = f64::INFINITY;
+                let mut imax = f64::NEG_INFINITY;
+                for &oy in &[lo_o, hi_o] {
+                    for &ox in &[-h - 0.5, ow as f64 + h - 0.5] {
+                        let iy = i00 * oy + i01 * ox + off0;
+                        if iy < imin { imin = iy; }
+                        if iy > imax { imax = iy; }
+                    }
+                }
+                let y_start = (imin.floor() as i64 - 1).max(0) as usize;
+                let y_end = ((imax.ceil() as i64 + 2).max(0) as usize).min(sh);
+                for iy in y_start..y_end {
+                    let dy = iy as f64 - off0;
+                    let base = m00 * dy;
+                    let (x_lo, x_hi) = if m01.abs() < 1e-12 {
+                        if base >= lo_o && base <= hi_o { (0usize, sw) } else { continue; }
+                    } else {
+                        let a = (lo_o - base) / m01 + off1;
+                        let b = (hi_o - base) / m01 + off1;
+                        let (u, v) = if a < b { (a, b) } else { (b, a) };
+                        (
+                            (u.floor() as i64 - 1).max(0) as usize,
+                            ((v.ceil() as i64 + 2).max(0) as usize).min(sw),
+                        )
+                    };
+                    for ix in x_lo..x_hi {
+                        let dx = ix as f64 - off1;
+                        let oy = m00 * dy + m01 * dx;
+                        let ox = m10 * dy + m11 * dx;
+                        if !(oy > -h - 0.5 && oy < oh as f64 + h - 0.5
+                            && ox > -h - 0.5 && ox < ow as f64 + h - 0.5)
+                        {
+                            continue;
+                        }
+                        if oy + h <= r0 as f64 - 0.5 || oy - h >= r1 as f64 - 0.5 {
+                            continue;
+                        }
+                        let px = &rgb_s[(iy * sw + ix) * 3..(iy * sw + ix) * 3 + 3];
+                        if !(px[0].is_finite() && px[1].is_finite() && px[2].is_finite()) {
+                            continue;
+                        }
+                        let (v0, v1, v2) = (px[0] as f64, px[1] as f64, px[2] as f64);
+                        let y0 = (oy - h + 0.5).floor() as i64;
+                        let x0 = (ox - h + 0.5).floor() as i64;
+                        for a in 0..k {
+                            let qy = y0 + a;
+                            if qy < r0 as i64 || qy >= r1 as i64 { continue; }
+                            let qyf = qy as f64;
+                            let ovy = (oy + h).min(qyf + 0.5) - (oy - h).max(qyf - 0.5);
+                            if ovy <= 0.0 { continue; }
+                            for b in 0..k {
+                                let qx = x0 + b;
+                                if qx < 0 || qx >= ow as i64 { continue; }
+                                let qxf = qx as f64;
+                                let ovx = (ox + h).min(qxf + 0.5) - (ox - h).max(qxf - 0.5);
+                                if ovx <= 0.0 { continue; }
+                                let wgt = ovy * ovx * norm * weight;
+                                let cell = (qy as usize - r0) * ow + qx as usize;
+                                nb[cell * 3] += wgt * v0;
+                                nb[cell * 3 + 1] += wgt * v1;
+                                nb[cell * 3 + 2] += wgt * v2;
+                                db[cell] += wgt;
+                            }
+                        }
+                    }
+                }
+            });
+    });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fused Phase-1 kernels: calibration and hot-pixel removal
+// ---------------------------------------------------------------------------
+//
+// The numpy reference makes ~6 full-frame passes (and two temporaries) for
+// calibration and ~20 for hot-pixel detection, all of it memory-bandwidth
+// bound under 16 workers. These kernels do the same arithmetic in the same
+// order per element, so the result is bit-identical (no FMA in Rust unless
+// asked for), in one or two passes.
+
+/// Calibrate one frame in place: `x -= bias; x -= dark*s; x += bias*s;
+/// x /= flat; clip at 0`, all f32, one pass. Arguments are flat 1-D views (the
+/// caller reshapes) so the same kernel serves mosaics and RGB frames. Returns
+/// false when any value is non-finite after the flat division (the numpy path
+/// reports that as a calibration error).
+fn opt_master<'a, 'py>(
+    a: &'a Option<PyReadonlyArray1<'py, f32>>,
+    n: usize,
+) -> PyResult<Option<&'a [f32]>> {
+    match a {
+        None => Ok(None),
+        Some(v) => {
+            let s = v.as_slice().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("master must be contiguous")
+            })?;
+            if s.len() != n {
+                return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+            }
+            Ok(Some(s))
+        }
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, bias, dark, dark_scale, flat_norm))]
+fn calibrate_frame_inplace<'py>(
+    py: Python<'py>,
+    mut data: numpy::PyReadwriteArray1<'py, f32>,
+    bias: Option<PyReadonlyArray1<'py, f32>>,
+    dark: Option<PyReadonlyArray1<'py, f32>>,
+    dark_scale: f64,
+    flat_norm: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<bool> {
+    let d = data
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("data must be contiguous"))?;
+    let n = d.len();
+    let b = opt_master(&bias, n)?;
+    let dk = opt_master(&dark, n)?;
+    let fl = opt_master(&flat_norm, n)?;
+    // numpy: `dark_arr * dark_scale` with a Python float scalar is an f32
+    // multiply (NEP 50 weak scalar), so the scale is rounded to f32 first.
+    let s = dark_scale as f32;
+    const CH: usize = 1 << 16;
+
+    let ok = py.allow_threads(|| {
+        d.par_chunks_mut(CH)
+            .enumerate()
+            .map(|(ci, chunk)| {
+                let base = ci * CH;
+                let mut ok = true;
+                for (k, v) in chunk.iter_mut().enumerate() {
+                    let i = base + k;
+                    let mut x = *v;
+                    if let Some(b) = b {
+                        x -= b[i];
+                    }
+                    if let Some(dk) = dk {
+                        x -= dk[i] * s;
+                        if let Some(b) = b {
+                            x += b[i] * s;
+                        }
+                    }
+                    if let Some(fl) = fl {
+                        x /= fl[i];
+                    }
+                    if !x.is_finite() {
+                        ok = false;
+                    }
+                    *v = if x < 0.0 { 0.0 } else { x };
+                }
+                ok
+            })
+            .reduce(|| true, |a, b| a && b)
+    });
+    Ok(ok)
+}
+
+/// 3x3 median at plane position (i, j) of the (py, px) Bayer sub-plane of a
+/// row-major `w`-wide mosaic, reflect boundary on the sub-plane (scipy
+/// `mode='reflect'`), exactly what `median_filter(sub, size=3)` returns there.
+#[inline]
+fn bayer_plane_median3(data: &[f32], w: usize, hh: usize, ww: usize, py: usize, px: usize,
+                       i: usize, j: usize) -> f32 {
+    let mut win = [0f32; 9];
+    let mut k = 0;
+    for di in -1isize..=1 {
+        let ii = reflect_idx(i as isize + di, hh);
+        for dj in -1isize..=1 {
+            let jj = reflect_idx(j as isize + dj, ww);
+            win[k] = data[(2 * ii + py) * w + 2 * jj + px];
+            k += 1;
+        }
+    }
+    median9(&mut win)
+}
+
+/// Bayer-aware hot-pixel fix on a 2-D mosaic, returning a new array.
+///
+/// `hot_map` (optional, u8): those pixels are replaced by their sub-plane 3x3
+/// median -- computed only at the flagged pixels, not over the frame.
+/// `threshold` (optional): statistical detection per 2x2 sub-plane -- a pixel
+/// whose excess over the plane's 3x3 median exceeds `threshold` times
+/// 1.4826 x the plane's median absolute deviation is replaced by that median.
+/// Give one or the other, not both (the numpy path shares one median between
+/// the two; the pipeline never asks for both at once). All arithmetic is f32
+/// in numpy's order, so the result is bit-identical to `_fix_hot_bayer`.
+#[pyfunction]
+#[pyo3(signature = (data, hot_map=None, threshold=None))]
+fn hot_pixel_bayer<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f32>,
+    hot_map: Option<PyReadonlyArray2<'py, u8>>,
+    threshold: Option<f32>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    if hot_map.is_some() && threshold.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "give either hot_map or threshold",
+        ));
+    }
+    let arr = data.as_array();
+    let (h, w) = (arr.shape()[0], arr.shape()[1]);
+    let d: &[f32] = arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("data must be contiguous"))?;
+    let map_view = hot_map.as_ref().map(|m| m.as_array());
+    let map: Option<&[u8]> = match &map_view {
+        Some(v) => Some(v.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("hot_map must be contiguous")
+        })?),
+        None => None,
+    };
+    if let Some(m) = map {
+        if m.len() != h * w {
+            return Err(pyo3::exceptions::PyValueError::new_err("hot_map shape mismatch"));
+        }
+    }
+
+    let out = py.allow_threads(|| {
+        let mut out = d.to_vec();
+        if let Some(m) = map {
+            out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                let py_ = y & 1;
+                let i = y >> 1;
+                let hh = (h - py_ + 1) / 2;
+                for x in 0..w {
+                    if m[y * w + x] == 0 {
+                        continue;
+                    }
+                    let px = x & 1;
+                    let ww = (w - px + 1) / 2;
+                    row[x] = bayer_plane_median3(d, w, hh, ww, py_, px, i, x >> 1);
+                }
+            });
+        } else if let Some(thr) = threshold {
+            let sigma_k = 1.4826f64 as f32;
+            let planes: Vec<Vec<f32>> = (0..4usize)
+                .into_par_iter()
+                .map(|q| {
+                    let (py_, px) = (q >> 1, q & 1);
+                    let hh = (h.saturating_sub(py_) + 1) / 2;
+                    let ww = (w.saturating_sub(px) + 1) / 2;
+                    let mut p = vec![0f32; hh * ww];
+                    for i in 0..hh {
+                        let src = (2 * i + py_) * w + px;
+                        for j in 0..ww {
+                            p[i * ww + j] = d[src + 2 * j];
+                        }
+                    }
+                    if p.is_empty() {
+                        return p;
+                    }
+                    let med = median_filter_2d_f32(&p, hh, ww, 3);
+                    let mut ad: Vec<f32> =
+                        p.iter().zip(&med).map(|(a, m)| (a - m).abs()).collect();
+                    // numpy: a NaN anywhere makes the median NaN, so no pixel passes.
+                    if ad.iter().any(|v| v.is_nan()) {
+                        return p;
+                    }
+                    let mad = median_inplace(&mut ad);
+                    let sigma = mad * sigma_k;
+                    if sigma < 1e-6 {
+                        return p;
+                    }
+                    let cut = thr * sigma;
+                    for (v, m) in p.iter_mut().zip(&med) {
+                        if *v - *m > cut {
+                            *v = *m;
+                        }
+                    }
+                    p
+                })
+                .collect();
+            let wws = [(w + 1) / 2, w / 2];
+            out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                let py_ = y & 1;
+                let i = y >> 1;
+                for x in 0..w {
+                    let px = x & 1;
+                    row[x] = planes[py_ * 2 + px][i * wws[px] + (x >> 1)];
+                }
+            });
+        }
+        out
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+/// Everything `hot_pixel_rgb` decides, before any pixel is written: the luminance,
+/// and (when something exceeded the cut) each flagged pixel's index and its
+/// replacement. f32 arithmetic in numpy's order, box mean in f64.
+enum HotRgb {
+    /// MAD-based sigma < 1e-6: numpy falls back to `np.std`, which the caller runs.
+    Degenerate,
+    /// Nothing flagged (or a NaN made the MAD NaN, so nothing passes): the input is the answer.
+    Clean(Vec<f32>),
+    /// Luminance of the *input*, plus (pixel index, replacement rgb).
+    Hot(Vec<f32>, Vec<(usize, [f32; 3])>),
+}
+
+fn hot_rgb_core(f: &[f32], h: usize, w: usize, threshold: f64) -> HotRgb {
+    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
+    let mut lum = vec![0f32; h * w];
+    lum.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let b = (y * w + x) * 3;
+            row[x] = kr * f[b] + kg * f[b + 1] + kb * f[b + 2];
+        }
+    });
+    let med = median_filter_2d_f32(&lum, h, w, 3);
+    let mut ad: Vec<f32> = lum.par_iter().zip(med.par_iter()).map(|(a, m)| (a - m).abs()).collect();
+    if ad.par_iter().any(|v| v.is_nan()) {
+        return HotRgb::Clean(lum);
+    }
+    let mad = median_inplace(&mut ad);
+    drop(ad);
+    let sigma = mad as f64 * 1.4826;
+    if sigma < 1e-6 {
+        return HotRgb::Degenerate;
+    }
+    let cut = (threshold * sigma) as f32;
+    let hot: Vec<usize> = (0..h * w)
+        .into_par_iter()
+        .filter(|&i| lum[i] - med[i] > cut)
+        .collect();
+    if hot.is_empty() {
+        return HotRgb::Clean(lum);
+    }
+    let repl: Vec<(usize, [f32; 3])> = hot
+        .par_iter()
+        .map(|&i| {
+            let (y, x) = (i / w, i % w);
+            let mut v = [0f32; 3];
+            for ch in 0..3usize {
+                let mut acc = 0.0f64;
+                for dy in -1isize..=1 {
+                    let yy = wavelet_symmetric_idx(y as isize + dy, h);
+                    for dx in -1isize..=1 {
+                        let xx = wavelet_symmetric_idx(x as isize + dx, w);
+                        acc += f[(yy * w + xx) * 3 + ch] as f64;
+                    }
+                }
+                v[ch] = (acc / 9.0) as f32;
+            }
+            (i, v)
+        })
+        .collect();
+    HotRgb::Hot(lum, repl)
+}
+
+/// Write the replacements into `buf` and the luminance of each replaced pixel into `lum`.
+fn hot_rgb_apply(buf: &mut [f32], lum: &mut [f32], repl: &[(usize, [f32; 3])]) {
+    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
+    for &(i, v) in repl {
+        buf[i * 3] = v[0];
+        buf[i * 3 + 1] = v[1];
+        buf[i * 3 + 2] = v[2];
+        lum[i] = kr * v[0] + kg * v[1] + kb * v[2];
+    }
+}
+
+fn hot_rgb_check(rgb: &numpy::ndarray::ArrayView3<'_, f32>) -> PyResult<(usize, usize)> {
+    let s = rgb.shape();
+    if s[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("expected 3 channels"));
+    }
+    Ok((s[0], s[1]))
+}
+
+/// RGB hot-pixel removal on luminance, fused: luma, its 3x3 median, the MAD
+/// threshold and the sparse 3x3 box-mean replacement (all three channels of a
+/// flagged pixel), returning a new array.
+///
+/// Returns None when the MAD-based sigma is degenerate (< 1e-6: the numpy path
+/// then falls back to `np.std`, which the caller runs). Otherwise
+/// `(fixed_or_None, lum)`: `fixed` is None when nothing was flagged (the input
+/// is already the answer), `lum` is the luminance of the returned image.
+/// Bit-identical to `_fix_hot_rgb_impl`.
+#[pyfunction]
+fn hot_pixel_rgb<'py>(
+    py: Python<'py>,
+    rgb: PyReadonlyArray3<'py, f32>,
+    threshold: f64,
+) -> PyResult<Option<(Option<Bound<'py, PyArray3<f32>>>, Bound<'py, PyArray2<f32>>)>> {
+    let arr = rgb.as_array();
+    let (h, w) = hot_rgb_check(&arr)?;
+    let f: &[f32] = arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
+    let res = py.allow_threads(|| match hot_rgb_core(f, h, w, threshold) {
+        HotRgb::Degenerate => None,
+        HotRgb::Clean(lum) => Some((None, lum)),
+        HotRgb::Hot(mut lum, repl) => {
+            let mut out = f.to_vec();
+            hot_rgb_apply(&mut out, &mut lum, &repl);
+            Some((Some(out), lum))
+        }
+    });
+    Ok(res.map(|(out, lum)| {
+        (
+            out.map(|o| numpy::ndarray::Array3::from_shape_vec((h, w, 3), o).unwrap().into_pyarray(py)),
+            numpy::ndarray::Array2::from_shape_vec((h, w), lum).unwrap().into_pyarray(py),
+        )
+    }))
+}
+
+/// `hot_pixel_rgb` that writes the replacements into `rgb` itself: only the few
+/// flagged pixels are touched, so no 75 MB output array is allocated and copied.
+/// Returns the luminance of the resulting image, or None for a degenerate MAD
+/// (nothing is modified then).
+#[pyfunction]
+fn hot_pixel_rgb_inplace<'py>(
+    py: Python<'py>,
+    mut rgb: numpy::PyReadwriteArray3<'py, f32>,
+    threshold: f64,
+) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+    let (h, w) = hot_rgb_check(&rgb.as_array())?;
+    let f = rgb
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
+    let lum = py.allow_threads(|| match hot_rgb_core(&*f, h, w, threshold) {
+        HotRgb::Degenerate => None,
+        HotRgb::Clean(lum) => Some(lum),
+        HotRgb::Hot(mut lum, repl) => {
+            hot_rgb_apply(f, &mut lum, &repl);
+            Some(lum)
+        }
+    });
+    Ok(lum.map(|l| numpy::ndarray::Array2::from_shape_vec((h, w), l).unwrap().into_pyarray(py)))
+}
+
+/// Luminance `0.299 r + 0.587 g + 0.114 b`, f32 in numpy's operation order
+/// (the weak Python scalars round to f32 first), one parallel pass instead of
+/// three temporaries.
+#[pyfunction]
+fn luminance_native<'py>(
+    py: Python<'py>,
+    rgb: PyReadonlyArray3<'py, f32>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let arr = rgb.as_array();
+    let (h, w) = hot_rgb_check(&arr)?;
+    let f: &[f32] = arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
+    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
+    let mut lum = vec![0f32; h * w];
+    py.allow_threads(|| {
+        lum.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            let src = &f[y * w * 3..(y + 1) * w * 3];
+            for x in 0..w {
+                row[x] = kr * src[x * 3] + kg * src[x * 3 + 1] + kb * src[x * 3 + 2];
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), lum).unwrap().into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
+// Debayer-adjacent kernels: sigma-clipped medians without numpy's strided copies,
+// green G1/G2 equalisation, the Bayer-position grid equalisation
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn median_f32_as_f64(v: &mut [f32]) -> f64 {
+    let n = v.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mid = n / 2;
+    let (_, &mut m, _) =
+        v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if n % 2 == 1 {
+        m as f64
+    } else {
+        let mut lo = f32::NEG_INFINITY;
+        for &x in v[..mid].iter() {
+            if x > lo {
+                lo = x;
+            }
+        }
+        0.5 * (lo as f64 + m as f64)
+    }
+}
+
+/// Iterative sigma-clipped median on f32 storage. Identical result to the f64
+/// version (`sigma_clipped_median_native`): f32 -> f64 is exact, the order
+/// statistics are the same values, and every sum/compare is still done in f64;
+/// only the buffers are half the size, which is what matters under memory contention.
+/// (A two-pass radix-histogram selection was tried in place of the quickselect: exact
+/// too, but no faster -- ~6 ms per iteration either way, of which the two sequential
+/// f64 sums are a good part and cannot be reordered without changing the bits.)
+fn sigma_clipped_median_f32(orig: &[f32], sigma: f64, iters: usize) -> f64 {
+    let mut x: Vec<f32> = orig.to_vec();
+    let mut scratch: Vec<f32> = Vec::with_capacity(x.len());
+    for _ in 0..iters {
+        if x.is_empty() {
+            break;
+        }
+        scratch.clear();
+        scratch.extend_from_slice(&x);
+        let med = median_f32_as_f64(&mut scratch);
+        let n = x.len() as f64;
+        let m: f64 = x.iter().map(|&v| v as f64).sum::<f64>() / n;
+        let std = (x.iter().map(|&v| { let d = v as f64 - m; d * d }).sum::<f64>() / n).sqrt();
+        if std < 1e-12 {
+            break;
+        }
+        let thresh = sigma * std;
+        x.retain(|&v| (v as f64 - med).abs() < thresh);
+    }
+    if !x.is_empty() {
+        median_f32_as_f64(&mut x)
+    } else {
+        let mut o = orig.to_vec();
+        median_f32_as_f64(&mut o)
+    }
+}
+
+/// Gather the (py, px) 2x2 sub-plane of channel `ch` from an interleaved
+/// `chans`-channel image, row-major (the order numpy's `ravel` of the strided view has).
+fn gather_plane(src: &[f32], w: usize, h: usize, chans: usize, ch: usize, py: usize, px: usize) -> Vec<f32> {
+    let hh = (h.saturating_sub(py) + 1) / 2;
+    let ww = (w.saturating_sub(px) + 1) / 2;
+    let mut p = vec![0f32; hh * ww];
+    if ww == 0 {
+        return p;
+    }
+    p.par_chunks_mut(ww).enumerate().for_each(|(i, row)| {
+        let base = (2 * i + py) * w + px;
+        for j in 0..ww {
+            row[j] = src[(base + 2 * j) * chans + ch];
+        }
+    });
+    p
+}
+
+/// `_sigma_clipped_median` of any (possibly strided) 2-D float32 view, without
+/// numpy's copy of the view.
+#[pyfunction]
+#[pyo3(signature = (data, sigma=3.0, iters=3))]
+fn strided_sigma_clipped_median<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f32>,
+    sigma: f64,
+    iters: usize,
+) -> f64 {
+    let v: Vec<f32> = data.as_array().iter().copied().collect();
+    py.allow_threads(|| sigma_clipped_median_f32(&v, sigma, iters))
+}
+
+/// `green_equalize` on a float32 mosaic in place: scale the G2 sub-plane so its
+/// sigma-clipped median matches G1's, when the two are within 20% of each other.
+/// Returns whether a correction was applied.
+#[pyfunction]
+fn green_equalize_inplace<'py>(
+    py: Python<'py>,
+    mut raw: numpy::PyReadwriteArray2<'py, f32>,
+    g1_r: usize,
+    g1_c: usize,
+    g2_r: usize,
+    g2_c: usize,
+) -> PyResult<bool> {
+    let (h, w) = (raw.as_array().shape()[0], raw.as_array().shape()[1]);
+    let d = raw
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("raw must be contiguous"))?;
+    Ok(py.allow_threads(|| {
+        let (m1, m2) = {
+            let dd: &[f32] = &*d;
+            let (a, b) = rayon::join(
+                || sigma_clipped_median_f32(&gather_plane(dd, w, h, 1, 0, g1_r, g1_c), 3.0, 3),
+                || sigma_clipped_median_f32(&gather_plane(dd, w, h, 1, 0, g2_r, g2_c), 3.0, 3),
+            );
+            (a, b)
+        };
+        if m2 > 1e-6 && (m1 / m2 - 1.0).abs() < 0.2 {
+            let s = (m1 / m2) as f32;
+            d.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                if y % 2 == g2_r % 2 {
+                    let mut x = g2_c;
+                    while x < w {
+                        row[x] *= s;
+                        x += 2;
+                    }
+                }
+            });
+            true
+        } else {
+            false
+        }
+    }))
+}
+
+/// `_equalize_bayer_grid` on an interleaved float32 RGB image in place: subtract
+/// each of the four Bayer-position green medians' deviation from their mean (floor
+/// at 0), when that spread is within 0.01..100 ADU. Returns whether it applied.
+#[pyfunction]
+fn bayer_grid_equalize_inplace<'py>(
+    py: Python<'py>,
+    mut rgb: numpy::PyReadwriteArray3<'py, f32>,
+) -> PyResult<bool> {
+    let s = rgb.as_array().shape().to_vec();
+    let (h, w) = (s[0], s[1]);
+    if s[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("expected 3 channels"));
+    }
+    let f = rgb
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
+    Ok(py.allow_threads(|| {
+        let med: Vec<f64> = (0..4usize)
+            .into_par_iter()
+            .map(|q| {
+                let p = gather_plane(&*f, w, h, 3, 1, q >> 1, q & 1);
+                sigma_clipped_median_f32(&p, 3.0, 3)
+            })
+            .collect();
+        let overall = (med[0] + med[1] + med[2] + med[3]) / 4.0;
+        let spread = (med[0] - overall)
+            .abs()
+            .max((med[1] - overall).abs())
+            .max((med[2] - overall).abs())
+            .max((med[3] - overall).abs());
+        if spread < 0.01 || spread > 100.0 {
+            return false;
+        }
+        let off: Vec<f32> = med.iter().map(|m| (m - overall) as f32).collect();
+        f.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+            let py_ = y & 1;
+            for x in 0..w {
+                let v = row[x * 3 + 1] - off[py_ * 2 + (x & 1)];
+                row[x * 3 + 1] = if v < 0.0 { 0.0 } else { v };
+            }
+        });
+        true
+    }))
+}
+
+/// Per-frame quadratic background removal (`pre_gradient_removal`), fused. Evaluates
+/// the fitted surface `c0 + c1 r + c2 c + c3 r^2 + c4 r c + c5 c^2` (r, c = row and
+/// column over the frame size) in f64 in numpy's operation order, rounds it to f32,
+/// subtracts it from every channel in place with a floor at zero, and returns the
+/// new luminance -- one pass instead of two full-size f64 meshgrids, ~8 f64
+/// temporaries and three luma builds. Bit-identical to the numpy sequence.
+#[pyfunction]
+fn pre_gradient_apply<'py>(
+    py: Python<'py>,
+    mut rgb: numpy::PyReadwriteArray3<'py, f32>,
+    coeffs: Vec<f64>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    if coeffs.len() != 6 {
+        return Err(pyo3::exceptions::PyValueError::new_err("expected 6 coefficients"));
+    }
+    let s = rgb.as_array().shape().to_vec();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    if c != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("expected 3 channels"));
+    }
+    let f = rgb
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
+    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
+    let (c0, c1, c2, c3, c4, c5) = (coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5]);
+    let cols: Vec<f64> = (0..w).map(|x| x as f64 / w as f64).collect();
+    let c2cf: Vec<f64> = cols.iter().map(|&cf| c2 * cf).collect();
+    let c5cf2: Vec<f64> = cols.iter().map(|&cf| (c5 * cf) * cf).collect();
+
+    let mut lum = vec![0f32; h * w];
+    py.allow_threads(|| {
+        f.par_chunks_mut(w * 3).zip(lum.par_chunks_mut(w)).enumerate().for_each(|(y, (row, lrow))| {
+            let rf = y as f64 / h as f64;
+            let t1 = c0 + c1 * rf;
+            let t3 = (c3 * rf) * rf;
+            let c4rf = c4 * rf;
+            for x in 0..w {
+                let bg = ((((t1 + c2cf[x]) + t3) + c4rf * cols[x]) + c5cf2[x]) as f32;
+                let b = x * 3;
+                for k in 0..3 {
+                    let v = row[b + k] - bg;
+                    row[b + k] = if v < 0.0 { 0.0 } else { v };
+                }
+                lrow[x] = kr * row[b] + kg * row[b + 1] + kb * row[b + 2];
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), lum).unwrap().into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
 // White balance: per-channel gain + near-clipped-highlight neutralisation
 // (src/debayer.py `_desaturate_near_clipped_highlights`)
 // ---------------------------------------------------------------------------
@@ -6387,6 +7257,126 @@ fn white_balance_grayworld<'py>(
     Ok(arr3.into_pyarray(py))
 }
 
+/// In-place twin of `white_balance_body`: same per-pixel f32 operations in the same
+/// order, but each output pixel overwrites its input pixel, so no 75 MB output
+/// array is allocated, first-touched and written.
+fn white_balance_body_inplace(py: Python<'_>, flat: &mut [f32], w: usize, f: [f32; 3], divide: bool) {
+    let (f0, f1, f2) = (f[0], f[1], f[2]);
+    py.allow_threads(|| {
+        let ceiling: f32 = flat
+            .par_chunks(w * 3)
+            .map(|row| {
+                let mut m = f32::NEG_INFINITY;
+                for &v in row {
+                    if v.is_nan() {
+                        return f32::NAN;
+                    }
+                    if v > m {
+                        m = v;
+                    }
+                }
+                m
+            })
+            .reduce(
+                || f32::NEG_INFINITY,
+                |a, b| {
+                    if a.is_nan() || b.is_nan() {
+                        f32::NAN
+                    } else if a > b {
+                        a
+                    } else {
+                        b
+                    }
+                },
+            );
+        let denom = ceiling + 1e-12f32;
+        flat.par_chunks_mut(w * 3).for_each(|row| {
+            for x in 0..w {
+                let r = row[x * 3];
+                let g = row[x * 3 + 1];
+                let b = row[x * 3 + 2];
+                let peak = if r.is_nan() || g.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else {
+                    let mut p = r;
+                    if g > p { p = g; }
+                    if b > p { p = b; }
+                    p
+                };
+                let t = (peak / denom - 0.8f32) / 0.2f32;
+                let sat = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t };
+                let one_minus = 1.0f32 - sat;
+                let (s0, s1, s2) = if divide {
+                    (r / f0, g / f1, b / f2)
+                } else {
+                    (r * f0, g * f1, b * f2)
+                };
+                let o0 = s0 * one_minus + peak * sat;
+                let o1 = s1 * one_minus + peak * sat;
+                let o2 = s2 * one_minus + peak * sat;
+                row[x * 3] = if o0 < 0.0 { 0.0 } else { o0 };
+                row[x * 3 + 1] = if o1 < 0.0 { 0.0 } else { o1 };
+                row[x * 3 + 2] = if o2 < 0.0 { 0.0 } else { o2 };
+            }
+        });
+    });
+}
+
+/// `white_balance_apply` writing into `img` itself.
+#[pyfunction]
+fn white_balance_apply_inplace<'py>(
+    py: Python<'py>,
+    mut img: numpy::PyReadwriteArray3<'py, f32>,
+    factors: PyReadonlyArray1<'py, f32>,
+    divide: bool,
+) -> PyResult<()> {
+    let shape = img.as_array().shape().to_vec();
+    if shape[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
+    }
+    let f = factors.as_slice()?;
+    if f.len() != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("factors must have 3 entries"));
+    }
+    let flat = img
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
+    white_balance_body_inplace(py, flat, shape[1], [f[0], f[1], f[2]], divide);
+    Ok(())
+}
+
+/// `white_balance_grayworld` writing into `img` itself (same float64-accumulated means).
+#[pyfunction]
+fn white_balance_grayworld_inplace<'py>(
+    py: Python<'py>,
+    mut img: numpy::PyReadwriteArray3<'py, f32>,
+) -> PyResult<()> {
+    let shape = img.as_array().shape().to_vec();
+    if shape[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
+    }
+    let flat = img
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
+    let (h, w) = (shape[0], shape[1]);
+    let mut acc = [0f64; 3];
+    for px in flat.chunks_exact(3) {
+        acc[0] += px[0] as f64;
+        acc[1] += px[1] as f64;
+        acc[2] += px[2] as f64;
+    }
+    let n = (h * w) as f64;
+    let mean = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
+    let mm = ((mean[0] + mean[1]) + mean[2]) / 3.0f32;
+    let scale = [
+        mm / (mean[0] + 1e-12f32),
+        mm / (mean[1] + 1e-12f32),
+        mm / (mean[2] + 1e-12f32),
+    ];
+    white_balance_body_inplace(py, flat, w, scale, false);
+    Ok(())
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(originvision::originvision_score, m)?)?;
@@ -6431,6 +7421,19 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(radial_bin_median, m)?)?;
     m.add_function(wrap_pyfunction!(aperture_photometry_batch, m)?)?;
     m.add_function(wrap_pyfunction!(cfa_drizzle_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(drizzle_accumulate_lanczos3, m)?)?;
+    m.add_function(wrap_pyfunction!(drizzle_splat_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_frame_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(hot_pixel_bayer, m)?)?;
+    m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
+    m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
+    m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(luminance_native, m)?)?;
+    m.add_function(wrap_pyfunction!(strided_sigma_clipped_median, m)?)?;
+    m.add_function(wrap_pyfunction!(green_equalize_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(bayer_grid_equalize_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(white_balance_apply_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(white_balance_grayworld_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_apply, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

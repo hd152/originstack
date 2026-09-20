@@ -1301,7 +1301,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_originvision = p.add_argument_group('originvision scoring (advisory)')
     g_core.add_argument('-d', '--directory', required=True)
     g_core.add_argument('-o', '--output', default=None,
-                   help='Output FITS path (default: <directory>_stacked.fits)')
+                   help='Output FITS path, or a folder (then <session>_stacked.fits and its .jpg '
+                        'are generated inside it, never overwriting an existing pair). '
+                        'Default: <directory>_stacked.fits')
     g_core.add_argument('--cal-dir', default=None, metavar='PATH',
                    help='Directory containing calibration frames (darks, flats, bias). '
                         'Frames are classified automatically and the best-matching subset '
@@ -2093,6 +2095,17 @@ def build_parser() -> argparse.ArgumentParser:
                         'No external dependencies required.')
 
     # New feature flags (improvements 1-9)
+    g_stack.add_argument('--drizzle-method', choices=['resample', 'splat'], default='resample',
+                   help='How drizzle builds the output (default: resample; only matters '
+                        'when --drizzle-scale > 1). resample: each output pixel is a '
+                        'Lanczos-3 gather from the input, weighted afterwards by '
+                        '--drizzle-pixfrac. splat: the original drizzle algorithm -- every '
+                        'input pixel is a square drop of side pixfrac*scale output pixels '
+                        'deposited by exact area overlap. About 3x faster, no Lanczos '
+                        'ringing, slightly softer; with pixfrac 1.0 pixels a frame never '
+                        'covers are left empty, so use it with several dithered frames. '
+                        'Uses the Lanczos-3 kernel only: skipped (with a message) for '
+                        '--drizzle-kernel psf/magic and --elastic-registration.')
     g_stack.add_argument('--drizzle-pixfrac', type=float, default=1.0, metavar='P',
                    help='Drizzle pixel fraction (tent-kernel weight; < 1.0 = sharper '
                         'at cost of noise; default: 1.0).')
@@ -2403,6 +2416,29 @@ def parse_args(argv=None):
     return args
 
 
+def _output_is_folder(output: str) -> bool:
+    """True when ``-o`` names a folder rather than a file: an existing
+    directory, a path ending in a separator, or one with no file extension."""
+    if os.path.isdir(output) or output.endswith(('/', '\\')):
+        return True
+    return not os.path.splitext(output)[1]
+
+
+def _name_output_in_folder(folder: str, directory: str) -> str:
+    """Generate ``<session>_stacked.fits`` inside ``folder`` (created if missing).
+    An existing file is never overwritten: ``_2``, ``_3``... is appended until the
+    FITS and its JPG preview are both free."""
+    os.makedirs(folder, exist_ok=True)
+    base = os.path.basename(os.path.abspath(directory)) or 'stack'
+    n = 1
+    while True:
+        stem = f"{base}_stacked" + ('' if n == 1 else f"_{n}")
+        fits_path = os.path.join(folder, stem + '.fits')
+        if not (os.path.exists(fits_path) or os.path.exists(os.path.join(folder, stem + '.jpg'))):
+            return fits_path
+        n += 1
+
+
 def apply_post_parse_setup(args: argparse.Namespace) -> None:
     """Everything ``main()`` does between ``parse_args()`` and calling
     ``process_directory()``: default the output path, load ``--config``,
@@ -2414,10 +2450,15 @@ def apply_post_parse_setup(args: argparse.Namespace) -> None:
     function specifically so the two callers can't drift apart the way they
     already had (the desktop app was silently missing the "no output path
     specified" notice before this was extracted)."""
-    if not args.health_check and not getattr(args, 'dry_run', False) and not args.output:
-        dir_name = os.path.basename(os.path.abspath(args.directory))
-        args.output = f"{dir_name}_stacked.fits"
-        safe_print(f"  No output path specified — writing to {args.output}")
+    if not args.health_check and not getattr(args, 'dry_run', False):
+        if not args.output:
+            dir_name = os.path.basename(os.path.abspath(args.directory))
+            args.output = f"{dir_name}_stacked.fits"
+            safe_print(f"  No output path specified — writing to {args.output}")
+        elif _output_is_folder(args.output):
+            named = _name_output_in_folder(args.output, args.directory)
+            safe_print(f"  Output folder given — writing to {named} (and a matching .jpg)")
+            args.output = named
     # Load config file (before preset, so preset can override config)
     if getattr(args, 'config', None):
         config_changes = load_config_file(args.config, args)

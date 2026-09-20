@@ -85,7 +85,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/cli.py` | 1911 | `process_directory`, `parse_args`, `main` |
 | `originstack.py` | 179 | Backward-compatibility re-export shim |
 | `desktop_app.py` (root) | 24 | Thin root shim — `from src.desktop_app import main` |
-| `ext/astro_native/` (Rust) | ~6300 | Optional PyO3/maturin crate v0.25 (~44 kernels, numpy fallback when absent): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind star-pattern match, 2D wavelet transform, hot-pixel fix/replace, CFA-drizzle splat, fused white balance, robust-PCA Gram-matrix SVD, continuum-subtraction moments, 1D + 2D Moffat/Gaussian PSF fits, and the full **originvision inference path** (preprocessing + ONNX forward pass via pure-Rust `tract` — see feature 46) |
+| `ext/astro_native/` (Rust) | ~6300 | Optional PyO3/maturin crate v0.28 (~56 kernels, numpy fallback when absent): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind star-pattern match, 2D wavelet transform, hot-pixel fix/replace, CFA-drizzle splat, fused white balance, robust-PCA Gram-matrix SVD, continuum-subtraction moments, 1D + 2D Moffat/Gaussian PSF fits, and the full **originvision inference path** (preprocessing + ONNX forward pass via pure-Rust `tract` — see feature 46) |
 
 **Total: ~30,000 lines** (Python, `src/` alone; excludes the Rust crate). Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
@@ -266,6 +266,7 @@ The post-registration residual check verifies alignment on the riskiest ~20% of 
 | `wavelet` | Wavelet-subband stacking — combines each subband separately before reconstructing | Structure-preserving combine |
 
 **Drizzle super-resolution** (`--drizzle-scale 2.0`):
+- `--drizzle-method {resample,splat}` (default `resample`): `splat` is area-overlap drizzle (input pixels as square drops of side `pixfrac*scale`, native kernel, ~6x faster than the Lanczos gather, softer, no ringing; falls back to resample for psf/magic kernels or `--elastic-registration`). The resample path itself accumulates through a fused native kernel (bit-identical to the old warp+weight+add, 1.4x; 3.9x with pixfrac < 1)
 - `--drizzle-kernel {lanczos3,psf,magic}` (default `lanczos3`): Lanczos-3 sub-pixel accumulation (native Rust warp, ~26x vs the scipy path; all channels in one pass); `psf` resamples with the session's own estimated PSF as a Wiener-regularized matched filter (mild built-in sharpening, tune via `--config drizzle_psf_wiener_k`, falls back to lanczos3 if PSF estimation fails); `magic` uses Costella's base Magic Kernel (quadratic B-spline, provably non-negative/ringing-free but softer than Lanczos-3)
 - Requires dithered frames to produce true resolution gain
 - `--drizzle-pixfrac` controls the tent-kernel pixel fraction (< 1.0 = sharper, noisier)
@@ -651,6 +652,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--drizzle-scale N` | 1.0 | Super-resolution scale (2.0 = 2x; needs dithered frames) |
 | `--drizzle-pixfrac N` | 1.0 | Drizzle tent-kernel pixel fraction |
 | `--drizzle-kernel {lanczos3,psf,magic}` | lanczos3 | Drizzle resample kernel (feature 11) |
+| `--drizzle-method {resample,splat}` | resample | Drizzle build: Lanczos gather vs area-overlap drops |
 | `--super-res-iters N` | 0 | Iterative Back-Projection super-res refinement passes after drizzle (feature 11) |
 | `--no-registration` | — | Disable alignment (pre-aligned frames) |
 | `--no-affine` | — | Translation-only registration |

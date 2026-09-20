@@ -601,7 +601,7 @@ class TestE2ERegistration(unittest.TestCase):
 class TestE2EDrizzlePixfrac(unittest.TestCase):
     """drizzle_pixfrac must actually shrink each frame's footprint, not be a no-op."""
 
-    def _run_drizzle(self, tmpdir: str, paths: dict, pixfrac: float) -> np.ndarray:
+    def _run_drizzle(self, tmpdir: str, paths: dict, pixfrac: float, **overrides) -> np.ndarray:
         from src.io_fits import make_master
         from src.models import FrameInfo, ProcessingStats
         from src.pipeline import stack_target
@@ -629,9 +629,9 @@ class TestE2EDrizzlePixfrac(unittest.TestCase):
             'bias': None,
             'dark_exptime': 120.0,
         }
-        output_path = os.path.join(tmpdir, f'stacked_pf{pixfrac}.fits')
+        output_path = os.path.join(tmpdir, f'stacked_pf{pixfrac}_{len(os.listdir(tmpdir))}.fits')
         args = _make_minimal_args(drizzle_scale=2.0, drizzle_pixfrac=pixfrac,
-                                  stack_method='mean')
+                                  stack_method='mean', **overrides)
         stack_target(light_frames, output_path, args, masters, ProcessingStats())
         if not os.path.exists(output_path):
             self.skipTest("Output file not produced")
@@ -662,6 +662,53 @@ class TestE2EDrizzlePixfrac(unittest.TestCase):
             self.assertGreater(holes_shrunk, holes_full,
                                f"Small pixfrac ({holes_shrunk:.3f} zero-frac) should leave "
                                f"more holes than pixfrac=1 ({holes_full:.3f} zero-frac)")
+
+
+class TestE2EDrizzleFusedAndSplat(TestE2EDrizzlePixfrac):
+    """The fused native accumulate must reproduce the warp-then-add path bit
+    for bit, and --drizzle-method splat must produce a comparable image."""
+
+    def _run_unfused(self, tmpdir, paths, pixfrac):
+        import src.stacking as st
+        saved = st._native
+
+        class _NoFused:
+            def __getattr__(self, name):
+                if name in ('drizzle_accumulate_lanczos3', 'drizzle_splat_frame'):
+                    raise AttributeError(name)
+                return getattr(saved, name)
+
+        st._native = _NoFused()
+        try:
+            return self._run_drizzle(tmpdir, paths, pixfrac)
+        finally:
+            st._native = saved
+
+    def test_fused_matches_unfused_bit_for_bit(self):
+        import src.stacking as st
+        if not (st.HAS_NATIVE and hasattr(st._native, 'drizzle_accumulate_lanczos3')):
+            self.skipTest("native drizzle kernels not built")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            paths = _create_synthetic_dataset(tmpdir, n_lights=4)
+            for pf in (1.0, 0.6):
+                np.testing.assert_array_equal(self._run_unfused(tmpdir, paths, pf),
+                                              self._run_drizzle(tmpdir, paths, pf))
+
+    def test_splat_is_comparable_to_resample(self):
+        import src.stacking as st
+        if not (st.HAS_NATIVE and hasattr(st._native, 'drizzle_splat_frame')):
+            self.skipTest("native drizzle kernels not built")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            paths = _create_synthetic_dataset(tmpdir, n_lights=6)
+            base = self._run_drizzle(tmpdir, paths, 1.0)
+            splat = self._run_drizzle(tmpdir, paths, 1.0, drizzle_method='splat')
+            self.assertEqual(base.shape, splat.shape)
+            self.assertTrue(np.isfinite(splat).all())
+            covered = (splat.sum(axis=2) > 0) & (base.sum(axis=2) > 0)
+            self.assertGreater(covered.mean(), 0.9)
+            # same overall brightness (a drop conserves flux), within 3%
+            ratio = float(splat[covered].mean() / base[covered].mean())
+            self.assertAlmostEqual(ratio, 1.0, delta=0.03)
 
 
 class TestE2EElasticRegistration(unittest.TestCase):

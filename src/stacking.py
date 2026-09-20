@@ -2366,7 +2366,18 @@ def run_stacking_phase(
             gpu = get_gpu()
 
             use_elastic = displacement_fields is not None
-            if use_pixfrac or use_elastic:
+            # Native fused paths (src: drizzle_accumulate_lanczos3 / drizzle_splat_frame):
+            # warp + weight + accumulate in one pass, no per-frame temporaries, no lock.
+            _native_ok = (HAS_NATIVE and C == 3 and not use_elastic
+                          and psf_kernel_table is None)
+            want_splat = getattr(args, 'drizzle_method', 'resample') == 'splat'
+            if want_splat and not (_native_ok and hasattr(_native, 'drizzle_splat_frame')):
+                safe_print("  --drizzle-method splat needs the native kernel, the Lanczos-3 kernel and no "
+                           "--elastic-registration -- using resample")
+                want_splat = False
+            use_fused = (_native_ok and not want_splat
+                         and hasattr(_native, 'drizzle_accumulate_lanczos3'))
+            if (use_pixfrac or use_elastic) and not want_splat and not use_fused:
                 # Tent-kernel footprint shrink (classic drizzle pixfrac): each
                 # input pixel's contribution falls off toward the edge of its
                 # shrunken footprint instead of covering the whole output cell
@@ -2377,7 +2388,7 @@ def run_stacking_phase(
                 _grid_oy, _grid_ox = np.meshgrid(
                     np.arange(out_h, dtype=np.float64),
                     np.arange(out_w, dtype=np.float64), indexing='ij')
-                if use_pixfrac:
+                if use_pixfrac and not use_fused:
                     weight_map = np.zeros((out_h, out_w, 1), dtype=np.float64)
             spline_order = 5
             inv_scale = 1.0 / drizzle_scale
@@ -2513,14 +2524,65 @@ def run_stacking_phase(
             except Exception:
                 pass
 
-            with ThreadPoolExecutor(max_workers=n_drizzle) as executor:
-                futures = {executor.submit(_drizzle_one, j): j for j in range(n_final)}
-                for future in tqdm(as_completed(futures), total=n_final,
-                                   desc="  Drizzling", unit="frame",
-                                   disable=not args.verbose):
-                    future.result()
+            def _load_frame(j):
+                return np.ascontiguousarray(mem_rgb[final_indices[j]], dtype=np.float32)
 
-            if use_pixfrac:
+            def _run_native_frames(consume):
+                # The kernels parallelise inside a frame, so frames go one at a time;
+                # only the next frame's load overlaps with the current one's compute.
+                with ThreadPoolExecutor(max_workers=2) as loader:
+                    pending = loader.submit(_load_frame, 0)
+                    for j in tqdm(range(n_final), desc="  Drizzling", unit="frame",
+                                  disable=not args.verbose):
+                        rgb_j = pending.result()
+                        if j + 1 < n_final:
+                            pending = loader.submit(_load_frame, j + 1)
+                        M, off = _drizzle_matrix(transforms[j], shifts[j], top, left, inv_scale)
+                        consume(j, rgb_j, M, off)
+
+            if want_splat:
+                # Original drizzle: input pixels are square drops of side pixfrac*scale.
+                num = np.zeros((out_h, out_w, C), dtype=np.float64)
+                den = np.zeros((out_h, out_w, 1), dtype=np.float64)
+                half_side = max(pixfrac, 1e-3) * drizzle_scale / 2.0
+                safe_print(f"    [rust] area-overlap drizzle (drop side "
+                           f"{2 * half_side:.2f} output px)")
+
+                def _splat(j, rgb_j, M, off):
+                    fwd = np.linalg.inv(M)
+                    _native.drizzle_splat_frame(
+                        rgb_j, [float(fwd[0, 0]), float(fwd[0, 1]), float(fwd[1, 0]), float(fwd[1, 1])],
+                        [float(off[0]), float(off[1])], float(half_side), float(weights[j]), num, den)
+
+                _run_native_frames(_splat)
+                # Output pixels no frame's drops reached are holes: left at zero.
+                stacked = np.where(den > 0.0, num / np.where(den > 0.0, den, 1.0), 0.0).astype(np.float32)
+                del num, den
+            elif use_fused:
+                if use_pixfrac:
+                    weight_map = np.zeros((out_h, out_w, 1), dtype=np.float64)
+
+                def _fused(j, rgb_j, M, off):
+                    _native.drizzle_accumulate_lanczos3(
+                        acc, rgb_j, [float(M[0, 0]), float(M[0, 1]), float(M[1, 0]), float(M[1, 1])],
+                        [float(off[0]), float(off[1])], float(weights[j]), pixfrac,
+                        weight_map if use_pixfrac else None)
+                    if not use_pixfrac:
+                        total_weight_ref[0] += float(weights[j])
+
+                print("    [rust] fused warp+accumulate")
+                _run_native_frames(_fused)
+            else:
+                with ThreadPoolExecutor(max_workers=n_drizzle) as executor:
+                    futures = {executor.submit(_drizzle_one, j): j for j in range(n_final)}
+                    for future in tqdm(as_completed(futures), total=n_final,
+                                       desc="  Drizzling", unit="frame",
+                                       disable=not args.verbose):
+                        future.result()
+
+            if want_splat:
+                pass
+            elif use_pixfrac:
                 # Pixels no dithered frame's shrunken footprint ever landed on
                 # (holes) are left at zero rather than divided by an empty sum.
                 safe_weight = np.where(weight_map <= 0.0, 1.0, weight_map)

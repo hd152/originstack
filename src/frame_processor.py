@@ -15,9 +15,11 @@ from src.debayer import (
     apply_chromatic_aberration,
     apply_hot_pixel_map_bayer,
     autodetect_bayer_orientation,
+    calibrate_frame,
     correct_chromatic_aberration,
     debayer,
     green_equalize,
+    luminance,
     measure_chromatic_aberration,
     remove_hot_pixels_bayer,
     remove_hot_pixels_rgb_with_lum,
@@ -73,6 +75,50 @@ def _get_frame_rotation(hdr: dict) -> Optional[float]:
             except (TypeError, ValueError):
                 pass
     return None
+
+
+def _pre_gradient_removal(rgb: np.ndarray, lum: np.ndarray) -> np.ndarray:
+    """Fit a degree-2 surface to the luminance (sampled every 32 px), subtract it from
+    every channel in place (floored at 0) and return the new luminance.
+
+    Native path: only the sample points' luminance is built for the fit, and the
+    surface evaluation, subtraction and luminance are one parallel pass --
+    bit-identical to the numpy sequence below (2.7 s/frame under 16 workers, a third
+    of Phase 1 when the option is on).
+    """
+    import src.debayer as _dbm
+    H_pg, W_pg = rgb.shape[:2]
+    step = 32
+    ys = np.arange(step // 2, H_pg, step)
+    xs = np.arange(step // 2, W_pg, step)
+    Ys, Xs = np.meshgrid(ys, xs, indexing='ij')
+    Yn = Ys.ravel() / H_pg
+    Xn = Xs.ravel() / W_pg
+    A = np.column_stack([np.ones(len(Yn)), Yn, Xn, Yn * Yn, Yn * Xn, Xn * Xn])
+
+    native = (_dbm._HAS_NATIVE and hasattr(_dbm._native, 'pre_gradient_apply')
+              and isinstance(rgb, np.ndarray) and rgb.dtype == np.float32
+              and rgb.ndim == 3 and rgb.shape[2] == 3
+              and rgb.flags['C_CONTIGUOUS'] and rgb.flags['WRITEABLE'])
+    if native:
+        vals = (0.299 * rgb[Ys, Xs, 0] + 0.587 * rgb[Ys, Xs, 1] + 0.114 * rgb[Ys, Xs, 2])
+    else:
+        lum_pg = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        vals = lum_pg[Ys, Xs]
+    b_vec = vals.ravel().astype(np.float64)
+    coeffs, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+    if native:
+        return _dbm._native.pre_gradient_apply(rgb, [float(c) for c in coeffs])
+
+    rows_n = np.arange(H_pg, dtype=np.float64) / H_pg
+    cols_n = np.arange(W_pg, dtype=np.float64) / W_pg
+    Rf, Cf = np.meshgrid(rows_n, cols_n, indexing='ij')
+    bg_model = (coeffs[0] + coeffs[1] * Rf + coeffs[2] * Cf
+                + coeffs[3] * Rf * Rf + coeffs[4] * Rf * Cf
+                + coeffs[5] * Cf * Cf).astype(np.float32)
+    for c in range(rgb.shape[2]):
+        rgb[:, :, c] = np.clip(rgb[:, :, c] - bg_model, 0.0, None)
+    return luminance(rgb)
 
 
 def _build_flat_norm(
@@ -236,12 +282,12 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             bias_arr = masters.get('bias')
             if bias_arr is not None and bias_arr.shape != data.shape:
                 bias_arr = None
-            if bias_arr is not None:
-                data = data.astype(np.float32, copy=False)
-                data -= bias_arr
 
             dark_arr = masters.get('dark')
-            if dark_arr is not None and dark_arr.shape == data.shape:
+            if dark_arr is not None and dark_arr.shape != data.shape:
+                dark_arr = None
+            dark_scale = 1.0
+            if dark_arr is not None:
                 dark_exptime = masters.get('dark_exptime') or None
                 light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
                 if dark_exptime and light_exptime and dark_exptime > 0:
@@ -255,12 +301,6 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                                        f"-- ensure dark exposure matches lights for best results")
                 else:
                     dark_scale = 1.0
-                # Subtract scaled dark in-place: data -= (dark - bias) * scale
-                # = data -= dark*scale, then += bias*scale (avoiding a full dark_current copy)
-                data = data.astype(np.float32, copy=False)
-                np.subtract(data, dark_arr * dark_scale, out=data)
-                if bias_arr is not None:
-                    data += bias_arr * dark_scale
 
             flat_norm = masters.get('_flat_norm')  # pre-computed by caller when possible
             if flat_norm is None:
@@ -273,13 +313,14 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                             safe_print(f"  WARNING: flat field has {zero_frac * 100:.1f}% near-zero "
                                        f"pixels -- possible sensor defects or bad flat")
                         flat_norm = np.clip(flat_arr / med, 0.4, 2.5)
-            if flat_norm is not None and flat_norm.shape == data.shape:
-                data = data.astype(np.float32, copy=False)
-                data /= flat_norm
+            if flat_norm is not None and flat_norm.shape != data.shape:
+                flat_norm = None
 
-            if not np.isfinite(data).all():
+            # Bias, scaled dark, flat, non-finite check and the clip at zero, in one
+            # pass when native (src/debayer.py::calibrate_frame).
+            data, _finite = calibrate_frame(data, bias_arr, dark_arr, dark_scale, flat_norm)
+            if not _finite:
                 return {'error': 'calibration produced non-finite values'}
-            data = np.clip(data, 0, None)
             if data.ndim == 2 and masters.get('hot_pixel_map') is not None:
                 hot_map = masters['hot_pixel_map']
                 if hot_map.shape == data.shape:
@@ -315,13 +356,17 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             else:
                 bayer = hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB'))
                 bayer = autodetect_bayer_orientation(data, bayer)
-            data = green_equalize(data, pattern=bayer)
+            # `data` is this frame's own calibrated mosaic, consumed by the debayer just
+            # below: correct it where it lies instead of copying 25 MB
+            data = green_equalize(data, pattern=bayer, inplace=True)
             # Malvar/VNG run on native/numpy, not cupy — transfer D→H if data is on GPU
             if debayer_method != 'bilinear' and hasattr(data, 'get'):
                 data = data.get()
             rgb = debayer(data, pattern=bayer, method=debayer_method)
+            _rgb_owned = True      # fresh from the debayer: safe to edit in place
         else:
             rgb = data
+            _rgb_owned = False     # the loaded array itself
     except Exception as e:
         return {'error': f'debayering error: {e}'}
     timings['debayer'], _t = time.perf_counter() - _t, time.perf_counter()
@@ -330,7 +375,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     try:
         if rgb.ndim != 3 or rgb.shape[2] < 1:
             return {'error': f'Invalid RGB shape: {rgb.shape}'}
-        rgb, lum = remove_hot_pixels_rgb_with_lum(rgb)
+        rgb, lum = remove_hot_pixels_rgb_with_lum(rgb, inplace=_rgb_owned)
     except Exception as e:
         return {'error': f'hot pixel removal error: {e}'}
     timings['hotpix'], _t = time.perf_counter() - _t, time.perf_counter()
@@ -363,7 +408,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                 safe_print(f"  ℹ Nebula filter detected ({hdr.get('FILTER')}) -- "
                            f"skipping {white_balance} white balance")
         elif white_balance == 'grayworld':
-            rgb = white_balance_grayworld(rgb)
+            rgb = white_balance_grayworld(rgb, inplace=_rgb_owned)
         elif white_balance == 'whitepatch':
             rgb = white_balance_whitepatch(rgb)
     except Exception as e:
@@ -407,7 +452,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # Recompute lum only when white balance or post-processing changed the image.
     try:
         if white_balance != 'none' or ca_correction or cosmic_ray_rejection:
-            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+            lum = luminance(rgb)
         else:
             lum = np.asarray(lum)  # ensure host numpy array
     except Exception as e:
@@ -417,27 +462,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # Per-frame polynomial gradient removal (degree-2 background subtraction)
     if pre_gradient_removal:
         try:
-            lum_pg = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-            H_pg, W_pg = lum_pg.shape
-            step = 32
-            ys = np.arange(step // 2, H_pg, step)
-            xs = np.arange(step // 2, W_pg, step)
-            Ys, Xs = np.meshgrid(ys, xs, indexing='ij')
-            vals = lum_pg[Ys, Xs]
-            Yn = Ys.ravel() / H_pg
-            Xn = Xs.ravel() / W_pg
-            A = np.column_stack([np.ones(len(Yn)), Yn, Xn, Yn * Yn, Yn * Xn, Xn * Xn])
-            b_vec = vals.ravel().astype(np.float64)
-            coeffs, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
-            rows_n = np.arange(H_pg, dtype=np.float64) / H_pg
-            cols_n = np.arange(W_pg, dtype=np.float64) / W_pg
-            Rf, Cf = np.meshgrid(rows_n, cols_n, indexing='ij')
-            bg_model = (coeffs[0] + coeffs[1] * Rf + coeffs[2] * Cf
-                        + coeffs[3] * Rf * Rf + coeffs[4] * Rf * Cf
-                        + coeffs[5] * Cf * Cf).astype(np.float32)
-            for c in range(rgb.shape[2]):
-                rgb[:, :, c] = np.clip(rgb[:, :, c] - bg_model, 0.0, None)
-            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+            lum = _pre_gradient_removal(rgb, lum)
         except Exception:
             pass
     timings['pre_gradient_removal'], _t = time.perf_counter() - _t, time.perf_counter()

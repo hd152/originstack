@@ -184,7 +184,7 @@ SUMMARY
 | `median` | Robust, no tuning required |
 | `mean` | Fastest, no rejection |
 
-Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-3 sub-pixel accumulation by default; `--drizzle-kernel {psf,magic}` swaps in a PSF-matched or ringing-free Magic-Kernel footprint, and `--super-res-iters N` adds iterative back-projection refinement.
+Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-3 sub-pixel accumulation by default; `--drizzle-kernel {psf,magic}` swaps in a PSF-matched or ringing-free Magic-Kernel footprint, and `--super-res-iters N` adds iterative back-projection refinement. `--drizzle-method splat` uses true area-overlap drops instead of a Lanczos gather (~6x faster, softer, no ringing); the default resample path now accumulates in one native pass (1.4x, 3.9x with `--drizzle-pixfrac < 1`, same output).
 
 ### Quality Filtering
 - Per-frame metrics: brightness, contrast, star count, FWHM, SNR, composite score
