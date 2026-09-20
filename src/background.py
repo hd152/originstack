@@ -994,6 +994,85 @@ def _sample_background_patches(
                                    use_entropy_weights)
 
 
+def _poly_design(coords: np.ndarray, deg: int) -> np.ndarray:
+    y = coords[:, 0] - 0.5
+    x = coords[:, 1] - 0.5
+    cols = [np.ones_like(y), y, x, y * y, x * y, x * x]
+    if deg >= 3:
+        cols += [y ** 3, y * y * x, y * x * x, x ** 3]
+    return np.stack(cols, axis=1)
+
+
+def _admit_gradient_patches(channel: np.ndarray, emission_mask: np.ndarray,
+                            patch_size: int, masked_frac_thresh: float,
+                            sky_std: float, coords: np.ndarray,
+                            values: np.ndarray, use_entropy_weights: bool,
+                            max_iter: int = 8, tol_sigma: float = 1.0
+                            ) -> Tuple[np.ndarray, np.ndarray]:
+    """Re-admit background patches rejected only for being brighter than the
+    *global* sky level, when a smooth model explains them.
+
+    ``_sample_background_patches`` drops any patch whose median exceeds
+    ``sky_ref + 2*sky_std``. Across a real stack the sky brightens toward the
+    frame edges (R +68 to +111 ADU, G/B about half that, measured), so in the
+    strongest channel exactly the edge patches were rejected and the surface
+    fit had to extrapolate over them: DBE removed the G and B glow completely
+    and left the R glow untouched (+114 on the left edge). A gradient is smooth;
+    an object is not. So: fit a low-order polynomial to the patches accepted
+    so far, admit candidates that sit within ``tol_sigma * sky_std`` of it,
+    refit, and repeat -- the model grows outward one patch row at a time,
+    following a smooth gradient but stopping at anything that rises off it
+    faster than the polynomial can follow. Candidates come from the same
+    sampler with the brightness cut disabled, so the emission mask and the
+    variance/entropy filters still apply to them. Returns (coords, values).
+    """
+    if len(values) < 12:
+        return coords, values
+    hi = float(np.max(channel)) + 10.0 * max(sky_std, 1.0)
+    all_c, all_v = _sample_background_patches(
+        channel, emission_mask, patch_size, masked_frac_thresh,
+        sky_ref=hi, sky_std=sky_std, use_entropy_weights=use_entropy_weights)
+    if len(all_v) == 0:
+        return coords, values
+
+    def key(c):
+        return (np.round(c[:, 0] * 1e6).astype(np.int64) * 4_000_000
+                + np.round(c[:, 1] * 1e6).astype(np.int64))
+
+    have = set(key(coords).tolist())
+    cand_idx = np.array([i for i, k in enumerate(key(all_c).tolist()) if k not in have],
+                        dtype=np.int64)
+    if cand_idx.size == 0:
+        return coords, values
+    cand_c, cand_v = all_c[cand_idx], all_v[cand_idx]
+
+    tol = tol_sigma * max(float(sky_std), 1.0)
+    cur_c, cur_v = np.asarray(coords, float), np.asarray(values, float)
+    remaining = np.ones(len(cand_v), dtype=bool)
+    for _ in range(max_iter):
+        deg = 3 if len(cur_v) >= 40 else 2
+        A = _poly_design(cur_c, deg)
+        keep = np.ones(len(cur_v), dtype=bool)
+        coef = None
+        for _clip in range(3):
+            if keep.sum() < A.shape[1] + 2:
+                break
+            coef, *_ = np.linalg.lstsq(A[keep], cur_v[keep], rcond=None)
+            r = cur_v - A @ coef
+            s = 1.4826 * float(np.median(np.abs(r[keep] - np.median(r[keep]))))
+            keep = np.abs(r) <= 3.0 * max(s, 1e-6)
+        if coef is None:
+            break
+        pred = _poly_design(cand_c, deg) @ coef
+        add = remaining & (cand_v - pred <= tol)
+        if not add.any():
+            break
+        cur_c = np.vstack([cur_c, cand_c[add]])
+        cur_v = np.concatenate([cur_v, cand_v[add]])
+        remaining &= ~add
+    return cur_c, cur_v
+
+
 def _filter_sampled_patches(channel: np.ndarray, emission_mask: np.ndarray,
                             patch_size: int,
                             coords: np.ndarray, values: np.ndarray,
@@ -1297,9 +1376,14 @@ def dynamic_background_extraction(
             sky_ref=sky_med, sky_std=sky_std,
             use_entropy_weights=use_entropy_weights)
 
+        n0 = len(coords)
+        coords, values = _admit_gradient_patches(
+            channel, emission_mask, patch_size, masked_frac_thresh, sky_std,
+            coords, values, use_entropy_weights)
         n = len(coords)
         if verbose:
-            safe_print(f"    DBE {channel_names[c]}: {n} background patches accepted")
+            extra = f" (+{n - n0} admitted along the gradient)" if n > n0 else ""
+            safe_print(f"    DBE {channel_names[c]}: {n} background patches accepted{extra}")
 
         if n < Config.DBE_MIN_SAMPLES:
             if verbose:
@@ -1553,3 +1637,89 @@ def wavelet_background_extraction(
             result[:, :, c] = ch_result
 
     return result
+
+
+def remove_edge_bands(img: np.ndarray, sky_mask: np.ndarray,
+                      band_frac: float = 0.20, min_band: int = 24,
+                      max_band: int = 400, min_snr: float = 3.0,
+                      verbose: bool = False) -> np.ndarray:
+    """Subtract localised offsets along the frame edges from the sky.
+
+    A stack can carry a strip a few tens of rows deep along one edge whose sky
+    sits a few ADU off the interior (measured on a real 148-frame stack: the
+    bottom ~45 rows were R +13 / G -5 against the middle, three-tenths of a
+    sky sigma). Background extraction smooths at half a patch and the final
+    flatten at ~1/8 of the frame, both far coarser than the strip, so it
+    survived to the preview, where a black point near +1 sigma turned it into a
+    visible coloured band.
+
+    Per edge and channel: the median sky level at each depth (sky pixels only,
+    from ``sky_mask`` with 1 = sky) is compared with the level just inside the
+    band, smoothed along depth, and subtracted only where it is significant
+    (``min_snr`` times its standard error) and tapered to zero at the band's
+    inner boundary so no step is introduced there. Because the reference is
+    the adjacent interior, a smooth gradient across the whole frame produces
+    almost no offset inside the band and is left to the steps built for it.
+    """
+    out = img.astype(np.float32, copy=True)
+    H, W = out.shape[:2]
+    m = sky_mask > 0.5
+    for edge in ('top', 'bottom', 'left', 'right'):
+        vertical = edge in ('top', 'bottom')
+        depth_len = H if vertical else W
+        band = int(np.clip(round(band_frac * depth_len), min_band, max_band))
+        if 3 * band > depth_len:
+            continue
+        for c in range(3):
+            ch = out[:, :, c]
+            # depth 0 is the edge; work in a view where axis 0 is depth
+            if edge == 'top':
+                v, vm = ch[:3 * band], m[:3 * band]
+            elif edge == 'bottom':
+                v, vm = ch[::-1][:3 * band], m[::-1][:3 * band]
+            elif edge == 'left':
+                v, vm = ch[:, :3 * band].T, m[:, :3 * band].T
+            else:
+                v, vm = ch[:, ::-1][:, :3 * band].T, m[:, ::-1][:, :3 * band].T
+            n_ok = vm.sum(axis=1)
+            prof = np.full(v.shape[0], np.nan)
+            ok_rows = n_ok >= max(30, 0.3 * v.shape[1])
+            for d in np.nonzero(ok_rows)[0]:
+                prof[d] = np.median(v[d][vm[d]])
+            interior = prof[band:2 * band]
+            if np.isfinite(interior).sum() < band // 2 or np.isfinite(prof[:band]).sum() < band // 2:
+                continue
+            ref = float(np.nanmedian(interior))
+            # per-pixel sigma from the interior rows' own scatter
+            samp = v[band:2 * band][vm[band:2 * band]]
+            sigma = 1.4826 * float(np.median(np.abs(samp - np.median(samp)))) if samp.size else 0.0
+            if sigma <= 0:
+                continue
+            delta = prof[:band] - ref
+            idx = np.arange(band)
+            good = np.isfinite(delta)
+            delta = np.interp(idx, idx[good], delta[good])
+            delta = ndimage.gaussian_filter1d(delta, sigma=max(2.0, band / 10.0), mode='nearest')
+            se = 1.2533 * sigma / np.sqrt(np.maximum(n_ok[:band], 1))
+            se = np.interp(idx, idx, se)
+            sig_mask = np.abs(delta) > min_snr * se
+            if not sig_mask.any():
+                continue
+            corr = np.where(sig_mask, delta, 0.0)
+            # taper to 0 over the outer 30% of the band's depth: no step at its inner edge
+            t0 = int(0.7 * band)
+            taper = np.ones(band)
+            taper[t0:] = 0.5 * (1.0 + np.cos(np.pi * (idx[t0:] - t0) / max(band - t0, 1)))
+            corr = corr * taper
+            if verbose:
+                safe_print(f"    Edge band ({edge}, ch{c}): max offset "
+                           f"{float(np.abs(corr).max()):+.1f} ADU over {band}px")
+            if edge == 'top':
+                ch[:band] -= corr[:, None].astype(np.float32)
+            elif edge == 'bottom':
+                ch[::-1][:band] -= corr[:, None].astype(np.float32)
+            elif edge == 'left':
+                ch[:, :band] -= corr[None, :].astype(np.float32)
+            else:
+                ch[:, ::-1][:, :band] -= corr[None, :].astype(np.float32)
+    return out
