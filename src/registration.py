@@ -1461,6 +1461,33 @@ def _print_registration_breakdown(timings: Dict[str, float]) -> None:
         safe_print(f"    {label:<50} {format_time(t):>8}  ({t / total * 100:4.1f}%)")
 
 
+def _relative_residual_gate(residuals, max_residual_px: float, n_failed: int):
+    """(threshold_px, median_px) when the absolute residual gate is not
+    discriminating for this session, else None.
+
+    "Not discriminating" = it fails more than half of >= 10 frames while the
+    session's *median* residual is itself within ``REG_RESIDUAL_MAX_PX_CAP``:
+    every frame carrying the same modest residual means the threshold is
+    mis-set, not that every frame is bad. The replacement is the session's own
+    median + 4 robust sigma, never above the cap and never below the absolute
+    gate. A session whose median exceeds the cap really is misregistered and
+    gets None (keeps the strict result).
+    """
+    n = len(residuals)
+    if n < 10 or n_failed <= 0.5 * n:
+        return None
+    fin = np.array([r for r in residuals if np.isfinite(r)], dtype=np.float64)
+    if fin.size < n // 2:
+        return None
+    med = float(np.median(fin))
+    mad = 1.4826 * float(np.median(np.abs(fin - med)))
+    thr = min(Config.REG_RESIDUAL_MAX_PX_CAP,
+              max(max_residual_px, med + 4.0 * max(mad, 0.1 * med, 0.05)))
+    if med > Config.REG_RESIDUAL_MAX_PX_CAP or thr <= max_residual_px:
+        return None
+    return thr, med
+
+
 def run_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -1638,8 +1665,48 @@ def run_registration_phase(
 
     gpu = get_gpu()
 
+    _rescued: List[int] = []
+
+    def _rescue_outlier(j, f, orig_idx):
+        """Register a shift-outlier frame from its stars instead of giving up.
+
+        The pyramid shift is translation-only, so on an alt-az mount the
+        field rotation between the reference and a later frame makes it
+        return garbage (a real Fireworks Galaxy session: rotation grew
+        0.075 deg/frame, 34 of ~160 frames flagged at ~2300-2600 px while the
+        true offsets were a few hundred px). Those frames then went into the
+        stack at the wrong position. A blind rigid star-pattern match makes no
+        assumption about rotation or offset and registered every one of them.
+        Returns (shift, transform) when the fit passes the same sanity limits
+        as the normal affine path, else None.
+        """
+        if not HAS_SKIMAGE_TRANSFORM or getattr(args, 'no_affine', False):
+            return None
+        try:
+            lum = (cached_lums[orig_idx] if cached_lums[orig_idx] is not None
+                   else np.array(mem_lum[orig_idx]))
+            img_stars = registration_stars(
+                lum, float(f.metrics.get('noise', 1.0)), f.metrics.get('_star_sources'))
+            tf = _blind_match_transform(ref_stars, img_stars)
+            if tf is None:
+                return None
+            tx, ty = tf.params[0, 2], tf.params[1, 2]
+            rot = abs(np.degrees(np.arctan2(tf.params[1, 0], tf.params[0, 0])))
+            if (abs(tx) > Config.MAX_REALISTIC_SHIFT_FRAC * W
+                    or abs(ty) > Config.MAX_REALISTIC_SHIFT_FRAC * H
+                    or rot > Config.AFFINE_MAX_ROTATION_DEG):
+                return None
+            return (ty, tx), tf
+        except Exception as exc:
+            _log.debug("Outlier rescue failed for %s: %s", f.path, exc)
+            return None
+
     def _register_one(j, f, orig_idx):
         if outlier_mask[j]:
+            rescued = _rescue_outlier(j, f, orig_idx)
+            if rescued is not None:
+                _rescued.append(j)
+                return j, rescued[0], rescued[1]
             osy, osx = shifts[j] or (0.0, 0.0)
             if abs(osx) > Config.MAX_REALISTIC_SHIFT_FRAC * W or abs(osy) > Config.MAX_REALISTIC_SHIFT_FRAC * H:
                 safe_print(f'Unrealistic pyramid shift {osx},{osy} for {f.path}, ignoring')
@@ -1741,6 +1808,9 @@ def run_registration_phase(
                     safe_print(f'    {os.path.basename(f.path)}: shift=({sx:+.1f}, {sy:+.1f}) px, '
                                f'magnitude={np.sqrt(sy**2 + sx**2):.2f} px')
 
+    if _rescued:
+        safe_print(f"  Rescued {len(_rescued)} shift-outlier frame(s) by blind star "
+                   f"matching (field rotation the pyramid shift cannot represent)")
     _reg_timings['shift_calculation'], _t = time.time() - _t, time.time()
 
     # Shift statistics
@@ -1819,6 +1889,27 @@ def run_registration_phase(
             force_full_check=elastic_on,
         )
         n_res_failed = sum(1 for p in res_passed if not p)
+        # A threshold that rejects most of a session is not finding bad frames,
+        # it is mis-set for this session: every frame carrying the same modest
+        # residual (field distortion + a rotating field fit with a rigid
+        # transform) is the signature. That happened on a real 145-frame run
+        # whose saved config switched on pre_gradient_removal, which raised the
+        # measured SNR from 1.7 to 5.0, which shrank the adaptive threshold to
+        # its 1.5 px floor: 144 of 145 frames were rejected and a single frame
+        # was stacked, with only a log line to say so. Judge such a session
+        # against its own residual distribution instead (median + 4 robust
+        # sigma), still capped -- a session whose *median* residual is beyond
+        # the cap really is misregistered and keeps the strict result.
+        _rel = _relative_residual_gate(residuals, max_residual_px, n_res_failed)
+        if _rel is not None:
+            _thr, _med = _rel
+            res_passed = [bool(np.isfinite(r) and r <= _thr) for r in residuals]
+            n_res_failed = sum(1 for p in res_passed if not p)
+            safe_print(
+                f"  Residual check: the {max_residual_px:.1f}px gate would fail most of "
+                f"this session (median residual {_med:.2f}px), so it is not "
+                f"discriminating; judging against the session's own spread: "
+                f"threshold {_thr:.2f}px -> {len(final) - n_res_failed}/{len(final)} pass")
         for j, (f, passed, rms) in enumerate(zip(final, res_passed, residuals)):
             if f.metrics is not None:
                 f.metrics['reg_residual_px'] = round(rms, 3)
