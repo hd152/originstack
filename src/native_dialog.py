@@ -7,7 +7,7 @@ user32.dll's MessageBoxW is already on every Windows install and does the
 same job in one call -- same "small ctypes wrapper over dependency weight"
 choice src/notify.py already made for OS notifications.
 
-Only meaningful on Windows; every function no-ops (returns False) elsewhere.
+On Windows these are native MessageBox calls. Elsewhere they use tkinter's own message boxes (the desktop app already has Tk loaded there), and only fall back to a no-op if Tk cannot show one.
 """
 from __future__ import annotations
 
@@ -22,10 +22,23 @@ MB_TOPMOST = 0x00040000
 IDYES = 6
 
 
+def _tk_box(kind: str, title: str, message: str):
+    """tkinter message box for non-Windows platforms. Returns the answer (True/False for
+    'yesno'), True for 'error', or None when Tk could not show it (no display, no Tk)."""
+    try:
+        from tkinter import messagebox
+        if kind == "yesno":
+            return messagebox.askyesno(title, message)
+        messagebox.showerror(title, message)
+        return True
+    except Exception:
+        return None
+
+
 def show_error(title: str, message: str) -> bool:
     """Blocking native error dialog. Returns True if it was shown."""
     if sys.platform != "win32":
-        return False
+        return _tk_box("error", title, message) is not None
     try:
         ctypes.windll.user32.MessageBoxW(
             None, message, title, MB_OK | MB_ICONERROR | MB_TOPMOST)
@@ -39,7 +52,8 @@ def ask_yes_no(title: str, message: str, default: bool = True) -> bool:
     *default* if the dialog itself could not be shown (never trap the user
     behind a broken confirmation)."""
     if sys.platform != "win32":
-        return default
+        answer = _tk_box("yesno", title, message)
+        return default if answer is None else bool(answer)
     try:
         result = ctypes.windll.user32.MessageBoxW(
             None, message, title, MB_YESNO | MB_ICONQUESTION | MB_TOPMOST)

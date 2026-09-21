@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import io
 import os
+import sys
 import tkinter as tk
 import traceback
 from pathlib import Path
@@ -27,7 +28,15 @@ from typing import Any, Dict, List, Optional
 
 
 def _log_dir() -> Path:
-    return Path(os.environ.get('LOCALAPPDATA', '.')) / 'OriginStack' / 'logs'
+    r"""Per-user log folder: %LOCALAPPDATA%\OriginStack\logs on Windows, ~/Library/Logs
+    on macOS, $XDG_STATE_HOME (default ~/.local/state) elsewhere -- never the current
+    directory, which for a packaged app is wherever the launcher happened to start it."""
+    if sys.platform == 'win32':
+        return Path(os.environ.get('LOCALAPPDATA', '.')) / 'OriginStack' / 'logs'
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Logs' / 'OriginStack'
+    state = os.environ.get('XDG_STATE_HOME') or str(Path.home() / '.local' / 'state')
+    return Path(state) / 'OriginStack' / 'logs'
 
 
 def _log_startup_status() -> None:
@@ -84,9 +93,12 @@ _LOG_FG = '#ffb454'      # amber phosphor -- the log pane's signature color
 _LOG_BG = _WELL
 _SUCCESS = '#5cd98f'
 _BAD = '#ff4757'
-_FONT = ('Segoe UI', 9)
-_FONT_BOLD = ('Segoe UI', 9, 'bold')
-_FONT_MONO = ('Consolas', 9)
+# Segoe UI / Consolas ship with Windows; DejaVu is on essentially every Linux desktop.
+_SANS = 'Segoe UI' if sys.platform == 'win32' else 'DejaVu Sans'
+_MONO = 'Consolas' if sys.platform == 'win32' else 'DejaVu Sans Mono'
+_FONT = (_SANS, 9)
+_FONT_BOLD = (_SANS, 9, 'bold')
+_FONT_MONO = (_MONO, 9)
 
 
 def _apply_theme(root: tk.Tk) -> ttk.Style:
@@ -107,9 +119,9 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
     style.configure('Dim.TLabel', background=_BG, foreground=_TEXT_DIM)
     style.configure('Faint.TLabel', background=_BG, foreground=_TEXT_FAINT)
     style.configure('Header.TLabel', background=_BG, foreground=_TEXT,
-                    font=('Segoe UI', 14, 'bold'))
+                    font=(_SANS, 14, 'bold'))
     style.configure('Accent.TLabel', background=_BG, foreground=_ACCENT,
-                    font=('Segoe UI', 14, 'bold'))
+                    font=(_SANS, 14, 'bold'))
 
     # Content area matches the window background (_BG), not a separate
     # panel color -- ttk widgets don't composite against a parent's
@@ -121,7 +133,7 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
     style.configure('TLabelframe', background=_BG, bordercolor=_LINE,
                     relief='solid', borderwidth=1)
     style.configure('TLabelframe.Label', background=_BG,
-                    foreground=_TEXT_DIM, font=('Segoe UI', 9, 'bold'))
+                    foreground=_TEXT_DIM, font=(_SANS, 9, 'bold'))
 
     style.configure('TButton', background=_PANEL, foreground=_TEXT,
                     bordercolor=_LINE, focuscolor=_ACCENT2, padding=(10, 5))
@@ -171,7 +183,7 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
     style.configure('Treeview', background=_WELL, fieldbackground=_WELL,
                     foreground=_TEXT, bordercolor=_LINE, rowheight=22)
     style.configure('Treeview.Heading', background=_PANEL, foreground=_TEXT_FAINT,
-                    font=('Segoe UI', 8, 'bold'), relief='flat')
+                    font=(_SANS, 8, 'bold'), relief='flat')
     style.map('Treeview.Heading', background=[('active', _PANEL)])
     style.map('Treeview', background=[('selected', _LINE)],
              foreground=[('selected', _TEXT)])
@@ -670,7 +682,7 @@ class PreviewCanvas(ttk.Frame):
         cw, ch = max(c.winfo_width(), 1), max(c.winfo_height(), 1)
         if self._img_a is None:
             c.create_text(cw / 2, ch / 2, text='◆ ORIGINSTACK\nWaiting for the first stack preview…',
-                          fill=_TEXT_FAINT, justify='center', font=('Segoe UI', 11))
+                          fill=_TEXT_FAINT, justify='center', font=(_SANS, 11))
             self.zoom_var.set('—')
             return
         disp_w = max(1, int(self._nat_w * self.scale))
@@ -726,7 +738,7 @@ class FrameStrip(ttk.Frame):
                         command=lambda f=fid: self.on_click(f))
         btn.grid(row=0, column=col, padx=3)
         ttk.Label(self.inner, text=name[:14], style='Faint.TLabel',
-                 font=('Consolas', 8)).grid(row=1, column=col)
+                 font=(_MONO, 8)).grid(row=1, column=col)
 
     def clear(self) -> None:
         """Drop every thumbnail -- called when a new run starts."""
@@ -761,10 +773,17 @@ class App:
         root.title('OriginStack')
         root.geometry('1400x900')
         root.minsize(900, 600)
-        icon = Path(__file__).resolve().parent.parent / 'packaging' / 'icon.ico'
-        if icon.exists():
+        root_dir = Path(__file__).resolve().parent.parent
+        icon = root_dir / 'packaging' / 'icon.ico'
+        if sys.platform == 'win32' and icon.exists():
             try:
                 root.iconbitmap(str(icon))
+            except tk.TclError:
+                pass
+        elif (root_dir / 'assets' / 'icon.png').exists():     # Linux/macOS: .ico is not understood
+            try:
+                self._icon_img = tk.PhotoImage(file=str(root_dir / 'assets' / 'icon.png'))
+                root.iconphoto(True, self._icon_img)
             except tk.TclError:
                 pass
 
@@ -811,9 +830,9 @@ class App:
         inner = tk.Frame(header, background=_PANEL)
         inner.pack(fill='both', expand=True, padx=16)
         tk.Label(inner, text='◆', background=_PANEL, foreground=_ACCENT,
-                font=('Segoe UI', 13)).pack(side='left', pady=8)
+                font=(_SANS, 13)).pack(side='left', pady=8)
         tk.Label(inner, text='ORIGINSTACK', background=_PANEL, foreground=_TEXT,
-                font=('Segoe UI', 12, 'bold')).pack(side='left', padx=(8, 0), pady=8)
+                font=(_SANS, 12, 'bold')).pack(side='left', padx=(8, 0), pady=8)
         tk.Label(inner, text=f'v{read_version()}', background=_PANEL, foreground=_TEXT_FAINT,
                 font=_FONT_MONO).pack(side='left', padx=(10, 0), pady=8)
         self.header_status_var = tk.StringVar(value='Idle')
@@ -863,7 +882,7 @@ class App:
         log_frame.pack(fill='both', expand=True, pady=6)
         self.log_text = scrolledtext.ScrolledText(
             log_frame, height=20, bg=_LOG_BG, fg=_LOG_FG, insertbackground=_LOG_FG,
-            font=('Consolas', 9), state='disabled', wrap='word')
+            font=(_MONO, 9), state='disabled', wrap='word')
         self.log_text.pack(fill='both', expand=True)
 
     # ── right column: preview, frame strip, recent frames, summary ────

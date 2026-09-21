@@ -36,6 +36,8 @@ datas += [(str(ROOT / 'src' / 'data' / 'originvision.onnx'), 'src/data')]
 # __file__ -- which resolved to nothing in the bundle, so the window itself
 # silently kept tkinter's default feather.
 datas += [(str(ROOT / 'packaging' / 'icon.ico'), 'packaging')]
+# Linux/macOS window icon: desktop_app.py sets it from assets/icon.png (.ico is Windows-only).
+datas += [(str(ROOT / 'assets' / 'icon.png'), 'assets')]
 
 a = Analysis(
     [str(ROOT / 'desktop_app.py')],

@@ -1,18 +1,25 @@
 """Tests for src/native_dialog.py -- the ctypes MessageBoxW wrapper that
-replaced tkinter in desktop_app.py (saves ~7-8MB of bundled Tcl/Tk runtime
-in the packaged build)."""
+replaced tkinter in desktop_app.py on Windows (saves ~7-8MB of bundled Tcl/Tk runtime
+in the packaged build). Off Windows it uses tkinter's own boxes; those tests replace
+``_tk_box`` so a real dialog can never open during the suite."""
 from __future__ import annotations
 
 import sys
 import unittest
 from unittest import mock
 
+import src.native_dialog as nd
 from src.native_dialog import IDYES, ask_yes_no, show_error
 
 
 class TestShowError(unittest.TestCase):
-    def test_noop_on_non_windows(self):
-        with mock.patch.object(sys, 'platform', 'linux'):
+    def test_non_windows_uses_the_tk_box(self):
+        with mock.patch.object(sys, 'platform', 'linux'),              mock.patch.object(nd, '_tk_box', return_value=True) as box:
+            self.assertTrue(show_error("title", "message"))
+        box.assert_called_once_with("error", "title", "message")
+
+    def test_non_windows_without_a_display_reports_not_shown(self):
+        with mock.patch.object(sys, 'platform', 'linux'),              mock.patch.object(nd, '_tk_box', return_value=None):
             self.assertFalse(show_error("title", "message"))
 
     def test_calls_message_box_and_returns_true(self):
@@ -38,8 +45,15 @@ class TestShowError(unittest.TestCase):
 
 
 class TestAskYesNo(unittest.TestCase):
-    def test_returns_default_on_non_windows(self):
+    def test_non_windows_returns_the_users_answer(self):
         with mock.patch.object(sys, 'platform', 'linux'):
+            with mock.patch.object(nd, '_tk_box', return_value=False):
+                self.assertFalse(ask_yes_no("t", "m", default=True))
+            with mock.patch.object(nd, '_tk_box', return_value=True):
+                self.assertTrue(ask_yes_no("t", "m", default=False))
+
+    def test_non_windows_falls_back_to_default_without_a_display(self):
+        with mock.patch.object(sys, 'platform', 'linux'),              mock.patch.object(nd, '_tk_box', return_value=None):
             self.assertTrue(ask_yes_no("t", "m", default=True))
             self.assertFalse(ask_yes_no("t", "m", default=False))
 
