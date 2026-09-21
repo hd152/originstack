@@ -361,7 +361,7 @@ python desktop_app.py
 On Windows, the packaged build needs no Python install at all: download `OriginStack-<version>-setup.exe` from the [latest release](https://github.com/hd152/originstack/releases/latest) and run it (per-user install, Start Menu entry, uninstaller). Prefer the zip? **Extract all of it** first and run `OriginStack.exe` from the extracted folder — running the exe from inside the zip preview fails with "Failed to load Python DLL". See [Packaging](packaging/README.md).
 
 The window has two columns:
-- **Left — Setup + Log** — every CLI flag as a form (grouped, auto-generated from the same argument parser the CLI uses, so it never drifts out of sync; directory/output fields get a native picker, hover any field for its full description), then the pipeline phase bar, then the live log — the same output you'd see on the command line.
+- **Left — Setup + Log** — the CLI flags as a form (grouped, auto-generated from the same argument parser the CLI uses, so it never drifts out of sync; directory/output fields get a native picker, hover any field for its full description). Diagnostics, fine-tuning and experimental options stay hidden until you tick **Show expert options**. Below the form come the pipeline phase bar and the live log — the same output you'd see on the command line.
 - **Right — Preview + frames** — the stacked result, updated live at each milestone: scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a per-frame thumbnail strip and a running table of per-frame quality (score, SNR, star count, FWHM) as Phase 1 scores each light.
 
 Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
@@ -796,7 +796,32 @@ Notes on reading these numbers:
 - Phase 4 on a 2× drizzle output (a 3780×5952 image) still takes roughly 10 minutes and dominates a drizzle run; it was not sped up.
 - Registration timing varies from run to run (31 s and 40 s on identical code), so treat it as unchanged.
 - The final stacks are not bit-for-bit reproducible between two runs of the same code (registration is not deterministic), so speed comparisons were made on timings, with each optimisation separately checked against the code it replaced.
+- Two later changes are not in the table above: debayer's G1/G2 gain and 2×2 green offsets are now measured once per session instead of on every frame (`--no-session-cfa-eq` restores the per-frame path), taking Debayer from ~1.26 s to ~0.45 s per frame under 16 workers; and the temporary frame memmaps are no longer flushed to disk just before being deleted. Together they cut a 158-frame run from 135 s to 126 s with a bit-identical stack.
 - Memory stays bounded by the streaming architecture — frames are loaded one at a time and freed after accumulation (about one or two frames resident, plus the aligned-stack memmap on disk), so 500+ frame sessions run in the same working set.
+
+### Compared with Siril and DeepSkyStacker
+
+Same lights, same bias/dark/flat, one machine (Windows 11, 8-core / 16-thread CPU), each tool at default-style settings. Two Celestron Origin sessions: Omega Nebula (114 × 30 s) and Sunflower Galaxy (158 × 20 s). Reproduce on your own data with [`tools/bench_vs_siril.py`](tools/bench_vs_siril.py).
+
+**Time.** OriginStack's end-to-end figure includes its whole post-processing chain (background extraction, denoising, stretch); Siril's script stops at a linear stack. The like-for-like column leaves OriginStack's post-processing out.
+
+| Session | OriginStack, stack only | OriginStack, end to end | Siril 1.4, stack only | DeepSkyStacker 6.2 |
+|---------|------------------------|-------------------------|-----------------------|--------------------|
+| Omega, 114 frames | ~60 s | ~113 s | 53–66 s | 14 min 8 s |
+| Sunflower, 158 frames | ~78 s | ~126 s | ~69 s | not run |
+
+Siril's time varied by about 10 s between runs of the same script; OriginStack's repeated to within a second. OriginStack is ahead of Siril on registration and on warp + combine (it keeps frames in memory; Siril writes every intermediate frame to disk) and behind it on load + calibrate + debayer, where OriginStack also scores every frame's quality. Overall the two are roughly level on a linear stack, and Siril is faster if you want nothing but that. DeepSkyStacker was run with its defaults (plain average, no rejection); its time is mostly frame-by-frame registration.
+
+**Sharpness and noise**, measured on the linear stacks with one star detector on all of them:
+
+| Session | FWHM: OriginStack | FWHM: Siril | FWHM: DeepSkyStacker |
+|---------|-------------------|-------------|----------------------|
+| Omega | **7.14 px** | 8.81 px | 8.59 px |
+| Sunflower | **5.47 px** | 5.81 px | not run |
+
+OriginStack's stars are tighter on both sessions, by a large margin on Omega and a small one on Sunflower. Per-pixel noise is higher in OriginStack's stack at its native resolution (Lanczos-3 resampling keeps detail *and* noise; a smoother resampler suppresses both). Compared at equal sharpness the noise is equal or lower: after blurring OriginStack's Omega stack until its stars are still slightly tighter than Siril's, its noise is 0.86 / 0.93 / 1.04 of Siril's (R / G / B); on Sunflower it is 1.03 / 0.91 / 1.05. Read that as "no worse", not "cleaner".
+
+Things these numbers do not show: two sessions from one camera are a small sample; the FWHM estimate is coarse in a sparse star field; Siril and DeepSkyStacker have many settings that were left alone (a tuned DeepSkyStacker, with rejection and hot-pixel removal, would look better than the run above); and DeepSkyStacker's default stack of the Omega session showed horizontal streaks from unrejected hot pixels and included a few frames it had misregistered. Neither Siril nor OriginStack showed either problem.
 
 ### Native (Rust) acceleration
 
