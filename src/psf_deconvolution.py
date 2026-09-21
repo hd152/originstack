@@ -47,21 +47,23 @@ def _fit_star_2d_numpy(cutout: np.ndarray, model: str,
     sz = cutout.shape[0]
     yg, xg = np.mgrid[0:sz, 0:sz]
     center = sz / 2.0
+    # p0 is clipped into the bounds: on a background-subtracted image the measured sky
+    # `bg` is slightly negative, which is outside the [0, peak] bound and made curve_fit
+    # refuse every star ("Initial guess is outside of provided bounds") -- the native
+    # kernel clamps its start the same way, so only the numpy path had this failure.
     try:
         if model == 'moffat':
-            popt, _ = curve_fit(
-                _moffat_2d, (yg, xg), cutout.ravel(),
-                p0=[peak - bg, center, center, 2.0, 3.0, bg],
-                bounds=([0, center - 3, center - 3, 0.5, 1.0, 0],
-                        [peak * 2, center + 3, center + 3, 20.0, 10.0, peak]),
-                maxfev=2000)
+            lo = [0, center - 3, center - 3, 0.5, 1.0, 0]
+            hi = [peak * 2, center + 3, center + 3, 20.0, 10.0, peak]
+            p0 = np.clip([peak - bg, center, center, 2.0, 3.0, bg], lo, hi)
+            popt, _ = curve_fit(_moffat_2d, (yg, xg), cutout.ravel(),
+                                p0=p0, bounds=(lo, hi), maxfev=2000)
         else:
-            popt, _ = curve_fit(
-                _gaussian_2d, (yg, xg), cutout.ravel(),
-                p0=[peak - bg, center, center, 2.0, bg],
-                bounds=([0, center - 3, center - 3, 0.3, 0],
-                        [peak * 2, center + 3, center + 3, 20.0, peak]),
-                maxfev=2000)
+            lo = [0, center - 3, center - 3, 0.3, 0]
+            hi = [peak * 2, center + 3, center + 3, 20.0, peak]
+            p0 = np.clip([peak - bg, center, center, 2.0, bg], lo, hi)
+            popt, _ = curve_fit(_gaussian_2d, (yg, xg), cutout.ravel(),
+                                p0=p0, bounds=(lo, hi), maxfev=2000)
         return tuple(float(v) for v in popt)
     except (RuntimeError, ValueError):
         return None

@@ -608,9 +608,43 @@ def _align_reference(new_lum: np.ndarray, ref_lum: np.ndarray):
         _log.debug("transient alignment: warp failed (%s)", exc)
         return None
 
+    footprint = _footprint_with_pixel_tolerance(np.asarray(footprint))
     residual = _match_residual_px(ref_stars, new_stars, transform)
-    return (np.asarray(warped, dtype=np.float64), np.asarray(footprint),
+    return (np.asarray(warped, dtype=np.float64), footprint,
             residual, new_stars)
+
+
+def _footprint_with_pixel_tolerance(footprint: np.ndarray) -> np.ndarray:
+    """A footprint whose only uncovered pixels are a 1 px rim on the frame's border
+    is a fully covered one.
+
+    A pixel is covered when its source position lies within half a pixel of the
+    reference's edge, but a spline warp only fills positions strictly inside the
+    frame. A sub-pixel shift therefore left the first row/column at zero, two
+    *identical* epochs reported a 1 px uncovered rim, and the erosion in ``_erode``
+    widened it into a 17% loss of coverage (numpy fallback only: the native Lanczos
+    warp of a pure translation is exact). Anything that reaches further in than
+    that -- a rotation's wedges -- is left exactly as warped.
+    """
+    if footprint.ndim != 2 or min(footprint.shape) <= 4:
+        return footprint
+    if bool((footprint[1:-1, 1:-1] > 0.99).all()):
+        return np.ones_like(footprint)
+    from src import registration
+    if not registration.HAS_NATIVE:
+        # The native Lanczos warp of anything but a pure translation loses its 3-tap
+        # support within 3 px of the reference's edge, so its footprint has a ~3 px rim
+        # there (and `_erode` then masks the PSF reach beyond it); the scipy spline warp is
+        # exact right up to the edge. Zero the same rim so both backends drop the same
+        # untrustworthy strip -- without it, a star 8 px from the edge of a rotated
+        # reference was reported as a transient by the numpy path only.
+        rim = footprint.copy()
+        rim[:3, :] = 0
+        rim[-3:, :] = 0
+        rim[:, :3] = 0
+        rim[:, -3:] = 0
+        return rim
+    return footprint
 
 
 def _match_residual_px(src_stars, dst_stars, transform) -> Optional[float]:
