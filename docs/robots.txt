@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://hd152.github.io/originstack/sitemap.xml

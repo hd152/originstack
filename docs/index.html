@@ -3,12 +3,44 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OriginStack</title>
-<meta name="description" content="A free stacker and processor for astrophotography frames from a Celestron Origin or any colour camera. Runs on your own computer.">
-<meta property="og:title" content="OriginStack">
-<meta property="og:description" content="114 frames of 30 seconds, one image. A free astrophotography stacker for the Celestron Origin and other colour cameras.">
-<meta property="og:image" content="https://hd152.github.io/originstack/img/omega-stack.jpg">
+<title>OriginStack: free Celestron Origin astrophotography stacker</title>
+<meta name="description" content="Free, open-source astrophotography stacker for the Celestron Origin and other colour cameras. Calibrates, stacks and processes FITS, RAW and TIFF frames.">
+<meta name="keywords" content="astrophotography, image stacking, deep sky stacking, Celestron Origin, Origin smart telescope, FITS stacker, astrophotography software, calibration frames, bias dark flat, sigma clipping, drizzle, plate solving, DeepSkyStacker alternative, Siril alternative, free, open source, Windows">
+<meta name="author" content="Hans Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://hd152.github.io/originstack/">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://hd152.github.io/originstack/">
+<meta property="og:title" content="OriginStack: free Celestron Origin astrophotography stacker">
+<meta property="og:description" content="114 frames of 30 seconds, one image. Free, open-source stacking and processing for the Celestron Origin and other colour cameras.">
+<meta property="og:image" content="https://hd152.github.io/originstack/img/omega-stack.jpg">
+<meta property="og:image:alt" content="The Omega Nebula stacked from 114 frames of 30 seconds with OriginStack">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="OriginStack: free Celestron Origin astrophotography stacker">
+<meta name="twitter:description" content="114 frames of 30 seconds, one image. Free, open-source stacking and processing for astrophotography.">
+<meta name="twitter:image" content="https://hd152.github.io/originstack/img/omega-stack.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "OriginStack",
+  "url": "https://hd152.github.io/originstack/",
+  "description": "Free, open-source image stacking and processing software for astrophotography. Calibrates, aligns, stacks and processes frames from a Celestron Origin or any one-shot-colour camera.",
+  "applicationCategory": "MultimediaApplication",
+  "applicationSubCategory": "Astrophotography image stacking",
+  "operatingSystem": "Windows 10, Windows 11, Linux, macOS",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "downloadUrl": "https://github.com/hd152/originstack/releases/latest",
+  "codeRepository": "https://github.com/hd152/originstack",
+  "image": "https://hd152.github.io/originstack/img/omega-stack.jpg",
+  "author": { "@type": "Person", "name": "Hans Davenport" },
+  "keywords": "astrophotography, image stacking, Celestron Origin, FITS, calibration, drizzle, plate solving"
+}
+</script>
 <link rel="icon" href="img/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -189,7 +221,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 30px; justify-content: 
     </div>
 
     <h1>114 frames, 30 seconds each, one image.</h1>
-    <p class="lede">OriginStack stacks and processes astrophotography frames from a Celestron Origin or any colour camera. It runs on your own computer, needs no account, and only goes online for optional steps such as plate solving.</p>
+    <p class="lede">OriginStack stacks and processes astrophotography frames from a Celestron Origin or any colour camera. It runs on your own computer, needs no account, and only goes online to look up a target name it does not recognise or for optional steps such as plate solving.</p>
 
     <div class="actions">
       <a class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Download for Windows</a>
@@ -343,6 +375,10 @@ cd originstack
 pip install -r requirements.txt
 python desktop_app.py</pre>
         <p>The command line does the same job: <code>python originstack.py -d lights/ -o stacked.fits</code>. An optional Rust extension speeds up the heavy steps and falls back to plain NumPy without it.</p>
+      </div>
+      <div>
+        <h3>What else it does</h3>
+        <p>Calibration with bias, dark and flat frames, hot-pixel and satellite-trail removal, sigma-clipping and other outlier-rejecting stacking methods, optional drizzle, background and gradient removal, noise reduction and deconvolution, plate solving, colour calibration, photometry and a comet mode. If you are looking for a free alternative to DeepSkyStacker or Siril for Celestron Origin and other one-shot-colour astrophotography data, this is built for that.</p>
       </div>
       <div>
         <h3>What it reads</h3>
