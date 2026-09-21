@@ -6,6 +6,30 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-21
+
+### Changed
+
+- **Debayer is ~2.8x faster; a 158-frame run goes from 135 s to 126 s.** The G1/G2 gain and the four 2x2 green
+  offsets that the per-frame equalisation re-measured on every frame (six sigma-clipped medians over ~100 MB of
+  strided reads, memory-bandwidth bound) are now measured once per session from eight frames spread through it and
+  applied to every frame. Debayer drops from ~1.26 s to ~0.45 s per frame under 16 workers. The stack differs from
+  the per-frame path by ~0.1 ADU against 95-164 ADU of noise; FWHM and noise are identical. Falls back to the
+  per-frame path for short sessions (< 12 lights), GPU, non-Malvar debayer, or when the sampled frames disagree.
+  `--no-session-cfa-eq` restores the old behaviour.
+- **Temporary frame memmaps are no longer flushed to disk** just before being deleted (12+ GB of pointless serial
+  writes on a 158-frame session). The final stack is bit-identical; checked on Windows and on Linux (WSL2).
+- **Desktop app: expert options are hidden by default.** Diagnostics, fine-tuning and experimental options appear
+  only after ticking "Show expert options". The CLI is unchanged.
+- **README:** a "Compared with Siril and DeepSkyStacker" section with timings, star sharpness and matched-sharpness
+  noise from two Origin sessions, including what the numbers do not show.
+
+### Added
+
+- **`tools/bench_vs_siril.py`** reproduces the Siril comparison on any folder of Bayer FITS lights.
+- **Optional code signing in the release workflow** (SignPath Foundation): signs the exe and installer when the
+  `SIGNPATH_ORGANIZATION_ID` variable is set; releases stay unsigned until then. See `packaging/README.md`.
+
 ## [2.1.1] - 2026-09-20
 
 ### Added
