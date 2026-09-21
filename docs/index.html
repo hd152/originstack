@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OriginStack</title>
+<meta name="description" content="A free stacker and processor for astrophotography frames from a Celestron Origin or any colour camera. Runs on your own computer.">
+<meta property="og:title" content="OriginStack">
+<meta property="og:description" content="114 frames of 30 seconds, one image. A free astrophotography stacker for the Celestron Origin and other colour cameras.">
+<meta property="og:image" content="https://hd152.github.io/originstack/img/omega-stack.jpg">
+<meta property="og:type" content="website">
+<link rel="icon" href="img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --night: #0b1220;
+  --night-2: #16223a;
+  --plate: #ecf0f3;
+  --plate-2: #dfe5ea;
+  --ink: #14213a;
+  --slate: #56667c;
+  --ha: #b3312a;
+  --ha-dark: #93261f;
+  --oiii: #1d7f86;
+  --line: rgba(20, 33, 58, .16);
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --text: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --gutter: clamp(20px, 5vw, 72px);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0;
+  background: var(--plate);
+  color: var(--ink);
+  font-family: var(--text);
+  font-size: 1.125rem;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+img { max-width: 100%; display: block; }
+a { color: var(--ha-dark); text-underline-offset: .18em; }
+a:hover { color: var(--ha); }
+:focus-visible { outline: 3px solid var(--oiii); outline-offset: 3px; }
+h1, h2, h3 { font-family: var(--display); font-weight: 700; line-height: 1.08; margin: 0; letter-spacing: -.015em; }
+p { margin: 0 0 1em; }
+.wrap { padding-inline: var(--gutter); max-width: 1320px; margin-inline: auto; }
+.measure { max-width: 64ch; }
+
+/* ---------- hero: the dark room ---------- */
+.hero { background: var(--night); color: #e8edf5; padding-bottom: clamp(36px, 6vw, 80px); }
+.hero a { color: #e8edf5; }
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-block: 22px; }
+.bar img { height: 52px; width: auto; }
+.bar nav { display: flex; gap: clamp(16px, 3vw, 34px); font-family: var(--display); font-size: 1rem; font-weight: 500; }
+.bar nav a { text-decoration: none; opacity: .82; }
+.bar nav a:hover { opacity: 1; text-decoration: underline; }
+.hero h1 {
+  font-size: clamp(2.5rem, 6.4vw, 5.6rem);
+  font-variation-settings: "wdth" 88;
+  max-width: 20ch;
+  text-wrap: balance;
+  margin-top: clamp(20px, 4vw, 52px);
+}
+.hero .lede { font-size: clamp(1.1rem, 1.6vw, 1.32rem); max-width: 56ch; color: #bfcadb; margin: 22px 0 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 30px; align-items: center; }
+.btn {
+  display: inline-block; font-family: var(--display); font-weight: 600; font-size: 1.05rem;
+  padding: 14px 24px; border-radius: 4px; text-decoration: none; border: 2px solid transparent;
+}
+.btn.primary { background: var(--ha); color: #fff; }
+.btn.primary:hover { background: var(--ha-dark); color: #fff; }
+.btn.quiet { border-color: rgba(232, 237, 245, .5); color: #e8edf5; }
+.btn.quiet:hover { border-color: #e8edf5; background: rgba(232, 237, 245, .08); }
+.fine { font-size: .98rem; color: #9fb0c6; margin: 14px 0 0; max-width: 62ch; }
+
+/* before / after wipe */
+.wipe {
+  --p: 50%;
+  position: relative; margin-top: clamp(30px, 5vw, 60px);
+  aspect-ratio: 2925 / 2016; overflow: hidden; background: #000; touch-action: pan-y;
+  outline: 1px solid rgba(232, 237, 245, .16);
+}
+.wipe img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.wipe .before { clip-path: inset(0 calc(100% - var(--p)) 0 0); }
+.wipe .line { position: absolute; top: 0; bottom: 0; left: var(--p); width: 2px; margin-left: -1px; background: #fff; pointer-events: none; }
+.wipe .grip {
+  position: absolute; top: 50%; left: var(--p); width: 46px; height: 46px; margin: -23px 0 0 -23px;
+  border-radius: 50%; background: #fff; color: var(--night); pointer-events: none;
+  display: grid; place-items: center; font-family: var(--display); font-weight: 700; font-size: 1.05rem; letter-spacing: -.1em;
+}
+.wipe .cap {
+  position: absolute; bottom: 14px; padding: 6px 12px; background: rgba(11, 18, 32, .78);
+  color: #fff; font-family: var(--display); font-size: .95rem; font-weight: 500; pointer-events: none;
+}
+.wipe .cap.l { left: 14px; }
+.wipe .cap.r { right: 14px; }
+.wipe input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
+.wipe:focus-within { outline: 3px solid var(--oiii); outline-offset: 3px; }
+@media (max-width: 600px) {
+  .bar nav { display: none; }
+  .wipe .cap { font-size: .8rem; padding: 4px 9px; }
+  .wipe .cap.l { bottom: 46px; }
+}
+
+/* ---------- sections on the desk ---------- */
+section { padding-block: clamp(56px, 9vw, 120px); }
+section + section { border-top: 1px solid var(--line); }
+h2 { font-size: clamp(1.9rem, 4vw, 3.1rem); font-variation-settings: "wdth" 92; max-width: 22ch; }
+.intro { margin-top: 18px; color: var(--slate); }
+.intro strong { color: var(--ink); font-weight: 600; }
+
+/* where the time goes */
+.run { display: flex; height: 64px; margin: 42px 0 20px; border: 1px solid var(--line); }
+.run span { display: block; height: 100%; }
+.legend { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px 28px; font-family: var(--display); font-size: 1rem; }
+.legend li { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: baseline; }
+.legend i { width: 14px; height: 14px; display: block; transform: translateY(2px); }
+.legend b { font-variant-numeric: tabular-nums; font-weight: 600; }
+.phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 30px 44px; margin-top: 56px; }
+.phases h3 { font-size: 1.3rem; margin-bottom: 8px; }
+.phases p { color: #33435c; margin: 0; }
+.phases > div { border-left: 3px solid var(--ink); padding-left: 18px; }
+
+/* app screenshots */
+.shots { display: grid; gap: clamp(22px, 3vw, 40px); margin-top: 44px; grid-template-columns: repeat(12, 1fr); }
+.shot { margin: 0; }
+.shot img { width: 100%; height: auto; border: 1px solid var(--line); background: var(--night-2); }
+.shot figcaption { margin-top: 12px; font-size: 1rem; color: #33435c; max-width: 60ch; }
+.shot.big { grid-column: span 12; }
+.shot.s7 { grid-column: span 7; }
+.shot.s5 { grid-column: span 5; }
+@media (max-width: 800px) { .shot.s7, .shot.s5 { grid-column: span 12; } }
+
+/* comparison */
+.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: clamp(28px, 6vw, 90px); margin-top: 40px; align-items: start; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+.chart h3 { font-size: 1.15rem; margin: 26px 0 10px; }
+.chart h3:first-child { margin-top: 0; }
+.chart h3.sub { font-size: 1rem; font-weight: 600; margin: 18px 0 6px; color: var(--slate); }
+.row { display: grid; grid-template-columns: 8.6rem 1fr; gap: 12px; align-items: center; margin: 6px 0; font-family: var(--display); font-size: 1rem; }
+.track { display: flex; align-items: center; gap: 10px; }
+.track i { display: block; height: 22px; background: var(--slate); }
+.track i.us { background: var(--ha); }
+.track b { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.chart small { display: block; margin-top: 14px; color: var(--slate); font-size: .95rem; }
+table { border-collapse: collapse; width: 100%; font-family: var(--display); font-size: 1rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 11px 12px 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; }
+td.n, th.n { text-align: right; padding-right: 0; padding-left: 12px; white-space: nowrap; }
+caption { text-align: left; font-family: var(--text); color: var(--slate); font-size: .98rem; padding-bottom: 10px; }
+.caveat { margin-top: 34px; padding-left: 18px; border-left: 3px solid var(--ha); color: #33435c; }
+
+/* gallery */
+.gallery { display: grid; gap: clamp(14px, 2vw, 26px); margin-top: 44px; grid-template-columns: 1.55fr 1fr; align-items: start; }
+.gallery figure { margin: 0; }
+.gallery .stack { display: grid; gap: clamp(14px, 2vw, 26px); }
+.gallery img { width: 100%; height: auto; }
+.gallery figcaption { margin-top: 9px; font-size: 1rem; color: #33435c; }
+@media (max-width: 800px) { .gallery { grid-template-columns: 1fr; } }
+
+/* get it */
+.get { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px 56px; margin-top: 40px; }
+.get h3 { font-size: 1.35rem; margin-bottom: 8px; }
+.get p { color: #33435c; }
+pre { margin: 0 0 1em; padding: 14px 16px; background: var(--night); color: #dbe5f3; overflow-x: auto; font: .92rem/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.plain { color: var(--slate); margin-top: 44px; }
+
+footer { background: var(--night); color: #9fb0c6; padding-block: 40px; font-size: 1rem; }
+footer a { color: #dbe5f3; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 30px; justify-content: space-between; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="bar">
+      <img src="img/logo-dark.png" alt="OriginStack" width="920" height="256">
+      <nav aria-label="Sections">
+        <a href="#time">Speed</a>
+        <a href="#app">The app</a>
+        <a href="#compare">Compared</a>
+        <a href="#get">Install</a>
+      </nav>
+    </div>
+
+    <h1>114 frames, 30 seconds each, one image.</h1>
+    <p class="lede">OriginStack stacks and processes astrophotography frames from a Celestron Origin or any colour camera. It runs on your own computer, needs no account, and only goes online for optional steps such as plate solving.</p>
+
+    <div class="actions">
+      <a class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Download for Windows</a>
+      <a class="btn quiet" href="https://github.com/hd152/originstack">View the source on GitHub</a>
+    </div>
+    <p class="fine">Windows 10 or 11, 64-bit, free and MIT licensed. The installer is not code-signed yet, so SmartScreen may warn you: choose More info, then Run anyway.</p>
+
+    <div class="wipe" id="wipe" role="group" aria-label="Comparison of one frame and the finished stack">
+      <img class="after" src="img/omega-stack.jpg" width="1600" height="1103" alt="The Omega Nebula after stacking 114 frames and processing: bright red gas with dark lanes against a dense star field.">
+      <img class="before" src="img/omega-one-frame.jpg" width="1600" height="1103" alt="One 30-second frame of the same field, stretched to be visible: grainy, with the nebula faint against a noisy purple sky.">
+      <span class="line"></span>
+      <span class="grip" aria-hidden="true">&lt;&gt;</span>
+      <span class="cap l">One 30-second frame, stretched</span>
+      <span class="cap r">114 frames, stacked and processed</span>
+      <input type="range" min="0" max="100" value="50" aria-label="Drag to compare one frame with the finished stack">
+    </div>
+  </div>
+</header>
+
+<main>
+<section id="time">
+  <div class="wrap">
+    <h2>A night of frames in under two minutes</h2>
+    <p class="intro measure">The Omega Nebula, 114 frames, on an 8-core desktop: <strong>113 seconds</strong> from the raw files to a finished image. The red block is the part that makes the picture look good; the rest is getting 114 frames to line up.</p>
+
+    <div class="run" role="img" aria-label="Bar showing 113 seconds split into loading and scoring 24.8, registration 8.2, aligning and stacking 20.0, finishing 51.3 and disk and setup 8.8 seconds">
+      <span style="width:21.9%; background:#1d7f86"></span>
+      <span style="width:7.2%; background:#4fa3a8"></span>
+      <span style="width:17.7%; background:#8cc5c8"></span>
+      <span style="width:45.4%; background:#b3312a"></span>
+      <span style="width:7.8%; background:#b9c3cf"></span>
+    </div>
+    <ul class="legend">
+      <li><i style="background:#1d7f86"></i>Load, calibrate, score<b>24.8 s</b></li>
+      <li><i style="background:#4fa3a8"></i>Register<b>8.2 s</b></li>
+      <li><i style="background:#8cc5c8"></i>Align and stack<b>20.0 s</b></li>
+      <li><i style="background:#b3312a"></i>Finish the image<b>51.3 s</b></li>
+      <li><i style="background:#b9c3cf"></i>Disk and setup<b>8.8 s</b></li>
+    </ul>
+
+    <div class="phases">
+      <div>
+        <h3>Load, calibrate, score</h3>
+        <p>Each frame is corrected with your bias, dark and flat, turned from the sensor's colour mosaic into an image, and scored for sharpness and noise. Frames that are clearly bad are dropped.</p>
+      </div>
+      <div>
+        <h3>Register</h3>
+        <p>Frames are lined up to a fraction of a pixel, including the slow rotation of the field that an alt-az mount like the Origin produces.</p>
+      </div>
+      <div>
+        <h3>Align and stack</h3>
+        <p>The aligned frames are combined with outlier rejection, so satellite trails, hot pixels and cosmic rays drop out instead of averaging in.</p>
+      </div>
+      <div>
+        <h3>Finish the image</h3>
+        <p>Background gradients, colour and noise are handled, then the result is stretched to be viewed. The FITS file it saves stays linear, ready for any further work.</p>
+      </div>
+    </div>
+    <p class="plain measure">Frames are processed one at a time, so 500 frames need about the same memory as 50. Temporary files take roughly 100 MB of disk per frame while the run is going.</p>
+  </div>
+</section>
+
+<section id="app">
+  <div class="wrap">
+    <h2>Watch it work, or skip the settings</h2>
+    <p class="intro measure">Point the app at a folder of frames and press Run. Every option is one form, and the defaults choose settings for your target. These are real screens from stacking the Omega frames above.</p>
+
+    <div class="shots">
+      <figure class="shot big">
+        <img src="img/app-running.png" width="1600" height="1040" loading="lazy" alt="The OriginStack window during a run: settings on the left, three of four pipeline phases marked done, the log below, and on the right a preview of the linear stack of the Omega Nebula with a strip of frame thumbnails and a table of per-frame scores.">
+        <figcaption>Part-way through the Omega run. Phases 1 to 3 are done, the linear stack is already in the preview, and the finishing pass is starting.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <img src="img/app-scoring.png" width="1600" height="1040" loading="lazy" alt="The OriginStack window early in a run, with a folder chosen, its frame counts listed under it, the log, and a table of frame scores filling in.">
+        <figcaption>Early on, while frames are scored. Pick a folder and the app counts your lights, darks, flats and bias frames straight away. Each frame's score, signal-to-noise, star count and sharpness land in the table as it finishes.</figcaption>
+      </figure>
+      <figure class="shot s5">
+        <img src="img/app-done.png" width="800" height="968" loading="lazy" alt="The preview and frame panels after the run finished, showing the final image of the Omega Nebula.">
+        <figcaption>When it finishes you can zoom and pan the result, or wipe between the linear stack and the finished image.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <img src="img/app-expert.png" width="800" height="456" loading="lazy" alt="The Additional options panel with Expert options ticked, listing registration and stacking controls such as banding removal and distortion model.">
+        <figcaption>Around a hundred more options sit under Additional options. The rarer ones stay hidden until you tick Expert options.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <h2>How it compares with Siril and DeepSkyStacker</h2>
+    <p class="intro measure">Same frames, same bias, dark and flat, one machine, each tool on its default-style settings. Two Celestron Origin sessions: the Omega Nebula (114 × 30 s) and the Sunflower Galaxy (158 × 20 s).</p>
+
+    <div class="split">
+      <div class="chart">
+        <h3>Star sharpness (smaller is sharper)</h3>
+        <h3 class="sub">Omega</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:71.4%"></i><b>7.14 px</b></div></div>
+        <div class="row"><span>DeepSkyStacker</span><div class="track"><i style="width:85.9%"></i><b>8.59 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:88.1%"></i><b>8.81 px</b></div></div>
+        <h3 class="sub">Sunflower</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.7%"></i><b>5.47 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:58.1%"></i><b>5.81 px</b></div></div>
+        <small>Star width (FWHM) measured with one detector on all the linear stacks.</small>
+      </div>
+
+      <table>
+        <caption>Time to a stacked image</caption>
+        <thead><tr><th></th><th class="n">Omega</th><th class="n">Sunflower</th></tr></thead>
+        <tbody>
+          <tr><th>OriginStack, stack only</th><td class="n">about 60 s</td><td class="n">about 78 s</td></tr>
+          <tr><th>OriginStack, finished image</th><td class="n">about 113 s</td><td class="n">about 126 s</td></tr>
+          <tr><th>Siril, stack only</th><td class="n">53 to 66 s</td><td class="n">about 69 s</td></tr>
+          <tr><th>DeepSkyStacker</th><td class="n">14 min 8 s</td><td class="n">not run</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="caveat measure">Siril is as fast as OriginStack for a plain linear stack and faster on the Sunflower session; if you want nothing but that, use it. OriginStack's stars are tighter on both sessions, and at the same sharpness its noise is equal or lower. DeepSkyStacker ran at its defaults, and its result showed hot-pixel streaks and a few misregistered frames, so a tuned run would look better. Two sessions from one camera are a small sample. Full method and caveats are in the <a href="https://github.com/hd152/originstack#compared-with-siril-and-deepskystacker">README</a>, and <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats the Siril comparison on your own frames.</p>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>Made with it</h2>
+    <p class="intro measure">All from raw Celestron Origin frames, stacked and processed by OriginStack.</p>
+    <div class="gallery">
+      <figure><img src="img/whirlz1.jpg" width="1200" height="803" loading="lazy" alt="The Whirlpool Galaxy, a face-on spiral with a smaller companion galaxy."><figcaption>Whirlpool Galaxy (M51)</figcaption></figure>
+      <div class="stack">
+        <figure><img src="img/orion1.jpg" width="1200" height="811" loading="lazy" alt="The Orion Nebula with its bright central cloud and surrounding gas."><figcaption>Orion Nebula (M42), seven sessions combined</figcaption></figure>
+        <figure><img src="img/sgr1.jpg" width="1200" height="729" loading="lazy" alt="A dense field of stars in Sagittarius with dark dust lanes."><figcaption>Sagittarius Star Cloud (M24), 138 × 10 s</figcaption></figure>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <h2>Install it</h2>
+    <div class="get">
+      <div>
+        <h3>Windows installer</h3>
+        <p>Download the setup file from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a> and run it. It installs for your user only, adds a Start Menu entry and an uninstaller, and needs no Python.</p>
+        <p>Prefer the zip? Use Extract All first, then run OriginStack.exe from the extracted folder. Running it from inside the zip fails.</p>
+      </div>
+      <div>
+        <h3>From source</h3>
+        <p>On Windows, Linux (tested) or macOS (not tested):</p>
+<pre>git clone https://github.com/hd152/originstack
+cd originstack
+pip install -r requirements.txt
+python desktop_app.py</pre>
+        <p>The command line does the same job: <code>python originstack.py -d lights/ -o stacked.fits</code>. An optional Rust extension speeds up the heavy steps and falls back to plain NumPy without it.</p>
+      </div>
+      <div>
+        <h3>What it reads</h3>
+        <p>Celestron Origin FITS, and colour-camera frames as FITS, camera RAW (Canon, Nikon, Sony and others, needs rawpy), TIFF and XISF. SER video is supported for planetary work. Mix formats freely in one folder.</p>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the MIT licence.</span>
+    <span><a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a></span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  // Wipe: the range input drives one CSS variable. On load the divider sweeps in once.
+  var wipe = document.getElementById('wipe'), range = wipe.querySelector('input');
+  function set(v) { wipe.style.setProperty('--p', v + '%'); }
+  range.addEventListener('input', function () { set(range.value); });
+  var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    var from = 96, to = 50, t0 = null, dur = 1500, moved = false;
+    range.addEventListener('pointerdown', function () { moved = true; }, { once: true });
+    set(from);
+    requestAnimationFrame(function step(t) {
+      if (moved) return;
+      if (t0 === null) t0 = t;
+      var k = Math.min((t - t0) / dur, 1), e = 1 - Math.pow(1 - k, 3);
+      set(from + (to - from) * e); range.value = from + (to - from) * e;
+      if (k < 1) requestAnimationFrame(step);
+    });
+  }
+
+  // Point the download button at the newest installer; the static link still works without this.
+  try {
+    fetch('https://api.github.com/repos/hd152/originstack/releases/latest')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (!rel) return;
+        var a = document.getElementById('download');
+        var setup = (rel.assets || []).filter(function (x) { return /-setup\.exe$/.test(x.name); })[0];
+        if (setup) a.href = setup.browser_download_url;
+        a.textContent = 'Download OriginStack ' + String(rel.tag_name).replace(/^v/, '') + ' for Windows';
+      }).catch(function () {});
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>
