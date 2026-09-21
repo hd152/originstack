@@ -219,6 +219,14 @@
         <p>Prefer the zip? Use Extract All first, then run OriginStack.exe from the extracted folder. Running it from inside the zip fails.</p>
       </div>
       <div>
+        <h3>Linux bundle</h3>
+        <p>Download <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a>, extract it and run the installer. It installs for your user only, adds an application-menu entry, and needs no Python or root.</p>
+<pre>tar xzf OriginStack-*-linux-x64.tar.gz
+cd OriginStack-*-linux-x64
+./install.sh</pre>
+        <p>It needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later) and has had less real-world use than the Windows build. Run <code>./install.sh --uninstall</code> to remove it.</p>
+      </div>
+      <div>
         <h3>From source</h3>
         <p>On Windows, Linux (tested) or macOS (not tested):</p>
 <pre>git clone https://github.com/hd152/originstack

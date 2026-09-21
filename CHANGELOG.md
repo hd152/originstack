@@ -6,6 +6,17 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **Softening and noise gap investigated; README corrected.** The 2.2.2 note that OriginStack's stack is wider than its own
+  single frames (so registration is to blame) was a measurement artifact: Siril's stack measures the same 13% wider than
+  its own registered frames, because Gaussian fits to single low-signal frames are biased narrow by noise. Ruled out as
+  causes of the extra width (Omega only) and the noise gap: registration accuracy (~0.1 px translation, 0.003 degrees of
+  rotation, scale 4e-5 between frames), the warp kernel (Lanczos-3 against cubic spline: identical to two decimals),
+  rejection method and strength, patch and inverse-variance weighting, local normalisation, and debayer method. Found:
+  a single frame after calibration and debayering is ~9-10% noisier than Siril's in green and blue and ~11% quieter in
+  red (Malvar-He-Cutler against RCD). The rest of the stack-level gap is still unexplained.
+
 ## [2.2.2] - 2026-09-21
 
 ### Added
@@ -24,8 +35,9 @@ match the `VERSION` file and `v*` git tags.
   Siril's, from comparing each stack's FWHM over its *own* detected star list; which stars were picked moved the number
   by more than the claimed difference. Measured on the same stars in both stacks, each on its own pixel grid
   (`tools/common_star_fwhm.py`, tested on synthetic fields of known width), OriginStack's stars are 13% wider on Omega and
-  about equal on Sunflower and Sculptor. A single OriginStack frame after calibration and debayering is slightly sharper
-  than Siril's; the *stack* is 6-13% wider than its own single frames, so registration is where it is lost. Three
+  about equal on Sunflower and Sculptor. (An earlier version of this note said the stack was wider than its own single
+  frames, so registration was to blame; that was a measurement artifact, withdrawn under Unreleased below. Registration checks out:
+  ~0.1 px translation and 0.003 degrees of rotation error between frames.) Three
   sessions (Omega 114, Sunflower 158, Sculptor 532 frames) now also report memory and disk: OriginStack's peak memory is
   flat at ~17 GB from 114 to 532 frames while Siril's grows from 6.6 to 11.2 GB, Siril is as fast on Omega and 1.2-1.8x
   faster on the larger sessions, and OriginStack's stack is 1.0-1.6x noisier per pixel. README and website say so.
