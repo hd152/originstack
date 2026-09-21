@@ -68,7 +68,32 @@ def _ssl_context() -> ssl.SSLContext:
 # Low-level HTTP
 # ---------------------------------------------------------------------------
 
+class OfflineError(RuntimeError):
+    """Network use was attempted while ``--offline`` is on."""
+
+
+_OFFLINE = False
+
+
+def set_offline(flag: bool) -> None:
+    """Switch every request in this module off (``--offline``). All HTTP in the
+    project goes through the three ``_http_*`` helpers below, so guarding those
+    covers SIMBAD, Gaia, VizieR, astrometry.net and Horizons alike."""
+    global _OFFLINE
+    _OFFLINE = bool(flag)
+
+
+def is_offline() -> bool:
+    return _OFFLINE
+
+
+def _require_online(url: str) -> None:
+    if _OFFLINE:
+        raise OfflineError(f"network disabled by --offline (would have contacted {url.split('/')[2]})")
+
+
 def _http_get(url: str, timeout: float = _DEFAULT_TIMEOUT) -> bytes:
+    _require_online(url)
     # Every caller in this module passes a hardcoded https:// constant (or
     # one with only a server-assigned numeric id interpolated into the
     # path, e.g. a job id this module itself received from the service's
@@ -82,6 +107,7 @@ def _http_get(url: str, timeout: float = _DEFAULT_TIMEOUT) -> bytes:
 
 def _http_post_form(url: str, fields: Dict[str, str],
                     timeout: float = _DEFAULT_TIMEOUT) -> bytes:
+    _require_online(url)
     body = urllib.parse.urlencode(fields).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:  # nosec B310
@@ -91,6 +117,7 @@ def _http_post_form(url: str, fields: Dict[str, str],
 def _http_post_multipart(url: str, fields: Dict[str, str], file_field: str,
                          file_name: str, file_bytes: bytes,
                          timeout: float = _DEFAULT_TIMEOUT) -> bytes:
+    _require_online(url)
     boundary = uuid.uuid4().hex
     parts = []
     for name, value in fields.items():

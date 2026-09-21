@@ -942,6 +942,21 @@ See [QUICK_REFERENCE.md](QUICK_REFERENCE.md) for guidance on interpreting shift 
 
 ---
 
+## Network use and `--offline`
+
+OriginStack works entirely on your machine. It goes online in these cases only, and never uploads your frames except to astrometry.net when you ask for plate solving:
+
+| What | When | What is sent |
+|------|------|--------------|
+| SIMBAD lookup of the target | On a normal run, when the object name (from the session file, the FITS `OBJECT` header, or the folder name) is not in the built-in table | The name string only |
+| astrometry.net | `--plate-solve` | The image, to solve its position (needs your API key) |
+| Gaia / VizieR / SIMBAD catalogues | `--photometry`, `--photometry-timeseries`, `--annotate`, catalogue colour calibration | Sky coordinates of the field |
+| JPL Horizons | Comet ephemerides | The comet designation and time |
+
+Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no network requests at all: the target lookup is skipped, and the features in the table that need the network are turned off with a note in the log. Everything else, including the default colour calibration, is computed locally. This is enforced where the requests are made rather than caller by caller, and a test counts real connection attempts.
+
+---
+
 ## Plate Solving
 
 Requires a free API key from [nova.astrometry.net](https://nova.astrometry.net/api_help) — no extra package (direct HTTP via `src/net_query.py`).

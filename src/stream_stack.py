@@ -182,7 +182,7 @@ def _run_auto_advisor_for_stream(records: List[FrameRecord], args, directory: st
 
     session_info = getattr(args, '_session_info', None)
     name, target_type, confidence, source = infer_target_from_metadata(
-        directory, final, use_simbad=True,
+        directory, final, use_simbad=not getattr(args, 'offline', False),
         session_name=session_info.object_name if session_info else None)
     if name and target_type and target_type != 'unknown':
         safe_print(f"\n  Target: {name} [{target_type.replace('_', ' ').title()}]  "

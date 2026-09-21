@@ -610,7 +610,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     infer_target_from_metadata(
                         _directory,
                         final,
-                        use_simbad=True,
+                        use_simbad=not getattr(args, 'offline', False),
                         session_name=_si.object_name if _si else None,
                     )
                 args._inferred_target     = _inferred_name

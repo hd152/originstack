@@ -838,7 +838,28 @@ def _restore_args(args: argparse.Namespace, baseline: dict) -> None:
         setattr(args, key, _copy_arg_value(value))
 
 
+_ONLINE_FEATURES = ('plate_solve', 'annotate', 'photometry', 'photometry_timeseries', 'color_calibrate')
+
+
+def apply_network_policy(args: argparse.Namespace, announce: bool = False) -> bool:
+    """Install ``--offline`` for this run (``net_query`` is a process-wide switch, so
+    it is set on every run, including back to False for the next one in the same
+    process, e.g. the desktop app) and turn off the features that need the network.
+    Returns whether the run is offline."""
+    from src import net_query
+    offline = bool(getattr(args, 'offline', False))
+    net_query.set_offline(offline)
+    if offline and announce:
+        dropped = [f for f in _ONLINE_FEATURES if getattr(args, f, False)]
+        for f in dropped:
+            setattr(args, f, False)
+        safe_print("  Offline mode: no network requests will be made"
+                   + (f" (skipping --{', --'.join(d.replace('_', '-') for d in dropped)})" if dropped else ""))
+    return offline
+
+
 def process_directory(directory: str, output: str, args: argparse.Namespace):
+    apply_network_policy(args, announce=True)
     # Print banner
     print_header("Astrophotography FITS Stacker", "=")
     safe_print(f"Input:  {directory}")
@@ -1456,7 +1477,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'mount is the dither). Sharper stars and less colour error, but '
                         'higher per-pixel noise than a normal stack (no interpolation '
                         'smoothing). MEASURED on a real, well-sampled stack (FWHM 4.9 px, 148 '
-                        'frames): luma noise -13% but chroma noise 2.1x, no sharpness '
+                        'frames): luma noise -13%% but chroma noise 2.1x, no sharpness '
                         'gain (26 s with the native kernel) -- so it is for undersampled data (FWHM under '
                         '~2.5 px), not a general quality upgrade. Uses --drizzle-scale and '
                         '--drizzle-pixfrac. Not supported with --elastic-registration. '
@@ -2097,6 +2118,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Stitch per-subfolder stacks into a mosaic via WCS reprojection. '
                         'Requires: pip install reproject and a working plate solver. '
                         'Automatically enables --plate-solve.')
+    g_core.add_argument('--offline', action='store_true',
+                   help='Make no network requests at all. By default a run may look up a target '
+                        'name it does not recognise on SIMBAD (only the name is sent), and '
+                        'plate solving, catalogue colour calibration, photometry, annotation and '
+                        'comet ephemerides go online when you enable them. With --offline none '
+                        'of those run.')
     g_core.add_argument('--no-auto', dest='auto', action='store_false', default=True,
                    help='Disable the auto advisor: classify the target after Phase 1 and '
                         'apply optimised settings automatically (on by default, no API key '
@@ -2503,6 +2530,7 @@ def main():
 
     disable_astropy_network()
     args = parse_args()
+    apply_network_policy(args)
 
     # Collection maintenance modes: no output path, no stacking.
     if getattr(args, 'sweep_undo', False):
