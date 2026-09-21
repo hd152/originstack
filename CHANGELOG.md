@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-09-21
+
 ### Added
 
 - **Advanced features page** on the website (`docs/advanced.html`): what each advanced feature does and its flag, real
