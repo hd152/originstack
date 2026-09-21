@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import threading
 import time
@@ -16,6 +17,8 @@ from src.debayer import (
     apply_hot_pixel_map_bayer,
     autodetect_bayer_orientation,
     calibrate_frame,
+    cfa_frame_stats,
+    combine_cfa_stats,
     correct_chromatic_aberration,
     debayer,
     green_equalize,
@@ -23,6 +26,7 @@ from src.debayer import (
     measure_chromatic_aberration,
     remove_hot_pixels_bayer,
     remove_hot_pixels_rgb_with_lum,
+    set_session_cfa,
     white_balance_grayworld,
     white_balance_whitepatch,
 )
@@ -186,7 +190,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           pre_gradient_removal: bool = False,
                           ca_shifts: Optional[dict] = None,
                           trail_reject: bool = False,
-                          banding: Optional[tuple] = None) -> Dict[str, Any]:
+                          banding: Optional[tuple] = None,
+                          cfa_probe: bool = False) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -344,6 +349,15 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         except Exception:
             pass
     timings['banding'], _t = time.perf_counter() - _t, time.perf_counter()
+
+    # Session CFA probe (`_measure_session_cfa`): report what the per-frame
+    # equalisation would measure on this calibrated mosaic, and stop.
+    if cfa_probe:
+        if data.ndim != 2 or hasattr(data, 'get'):
+            return {'error': None, 'cfa_stats': None}
+        _pb = session_bayer or autodetect_bayer_orientation(
+            data, hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB')))
+        return {'error': None, 'cfa_stats': cfa_frame_stats(data, _pb), 'cfa_pattern': _pb}
 
     # Debayer
     try:
@@ -661,7 +675,8 @@ def _banding_cfg(args) -> Optional[tuple]:
 
 
 def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
-                     banding: Optional[tuple] = None) -> None:
+                     banding: Optional[tuple] = None,
+                     session_cfa: Optional[dict] = None) -> None:
     """Initializer for pool workers — attach to shared-memory calibration arrays.
 
     *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
@@ -673,6 +688,7 @@ def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
     global _worker_masters, _worker_trail_reject, _worker_banding
     _worker_trail_reject = bool(trail_reject)
     _worker_banding = banding
+    set_session_cfa(session_cfa)
     _worker_masters = {}
     for name, (shm_name, dtype_str, shape) in shm_specs.items():
         shm = SharedMemory(name=shm_name, create=False)
@@ -760,6 +776,84 @@ def _measure_session_ca(frames: List[FrameInfo], args) -> Optional[dict]:
     return out
 
 
+def _measure_session_cfa(frames: List[FrameInfo], masters: Dict[str, Any],
+                         args) -> Optional[dict]:
+    """Session-constant G1/G2 gain and 2x2 green offsets (see debayer.py's
+    "Session-constant CFA equalisation"), or None to keep the per-frame path.
+
+    A few frames spread through the session go through the real calibration
+    (masters, dark scaling, flat, hot pixels) and report what the per-frame
+    equalisation would have measured; `combine_cfa_stats` takes the median and
+    refuses a session whose samples disagree. Malvar CPU path only, and not for
+    short sessions where the probe would not pay back.
+    """
+    if (not getattr(args, 'session_cfa_eq', True)
+            or len(frames) < Config.SESSION_CFA_MIN_FRAMES
+            or getattr(args, 'debayer_method', 'malvar') != 'malvar'
+            or get_gpu().active):
+        return None
+    n = len(frames)
+    k = min(Config.SESSION_CFA_PROBE_FRAMES, n)
+    idxs = sorted({int((j + 0.5) * n / k) for j in range(k)})
+    _sb = getattr(args, '_session_bayer', None)
+
+    def _one(i: int):
+        return _process_single_frame(frames[i].path, {}, masters, args.debayer_method,
+                                     args.white_balance, session_bayer=_sb, cfa_probe=True)
+
+    samples, patterns = [], set()
+    try:
+        with ThreadPoolExecutor(max_workers=min(4, len(idxs))) as ex:
+            for fut in [ex.submit(_one, i) for i in idxs]:
+                try:
+                    res = fut.result()
+                except Exception:
+                    continue
+                if res.get('error') or res.get('cfa_stats') is None:
+                    continue
+                samples.append(res['cfa_stats'])
+                patterns.add(res.get('cfa_pattern'))
+    except Exception:
+        return None
+    if len(patterns) != 1:      # nothing measured, or frames disagree about the pattern
+        return None
+    return combine_cfa_stats(samples, patterns.pop())
+
+
+def _fmt_cfa(cfg: dict) -> str:
+    return (f"G2 gain {cfg['gain']:.5f}, 2x2 green offsets "
+            + ", ".join(f"{x:+.2f}" for x in cfg['grid']) + " ADU"
+            + ("" if cfg['apply_grid'] else " (negligible: not applied)"))
+
+
+def _with_session_cfa(fn):
+    """The session CFA values live in a debayer.py global the pool initialiser and
+    the sequential/thread paths both read; clear it when the phase ends so a later
+    target, or a caller debayering a single frame, never inherits this session's."""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        finally:
+            set_session_cfa(None)
+    return wrapper
+
+
+def _prepare_session_cfa(frames: List[FrameInfo], masters: Dict[str, Any], args) -> Optional[dict]:
+    """Measure (or reuse) the session CFA values, install them for this process
+    and remember them on ``args`` so the reload pass applies the same ones."""
+    if hasattr(args, '_session_cfa'):
+        cfg = args._session_cfa
+    else:
+        cfg = _measure_session_cfa(frames, masters, args)
+        args._session_cfa = cfg
+        if cfg is not None:
+            safe_print(f"  CFA equalisation: session-constant from {cfg['n']} frames "
+                       f"({_fmt_cfa(cfg)}) -- replaces per-frame medians")
+    set_session_cfa(cfg)
+    return cfg
+
+
 def _fmt_ca(s: Optional[Tuple[float, float]]) -> str:
     return f"({s[1]:+.2f}, {s[0]:+.2f})px" if s is not None else "none"
 
@@ -804,6 +898,7 @@ def _parallel_frame_worker(
     return (frame_idx, metrics_clean, None, timings)
 
 
+@_with_session_cfa
 def execute_frame_processing(
     lights: List[FrameInfo],
     masters: Dict[str, Optional[np.ndarray]],
@@ -846,6 +941,9 @@ def execute_frame_processing(
 
     # Pre-compute flat_norm once (with rotation correction) so workers don't redo it.
     _build_flat_norm(masters, lights)
+    if hasattr(args, '_session_cfa'):
+        del args._session_cfa           # a new Phase 1 measures its own session
+    _session_cfa = _prepare_session_cfa(lights, masters, args)
 
     if use_process_pool:
         # Auto: use all cores (RAM cap below governs the real limit). The old
@@ -905,7 +1003,8 @@ def execute_frame_processing(
         try:
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_init_worker_shm,
-                                     initargs=(shm_specs, _tr, _banding_cfg(args))) as pool:
+                                     initargs=(shm_specs, _tr, _banding_cfg(args),
+                                               _session_cfa)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 _wv = _get_ui_events()
                 _wv_done = 0
@@ -1221,6 +1320,7 @@ def _print_step_breakdown(step_totals: Dict[str, float], n_frames: int,
                    f"({t / total * 100:4.1f}%)  [{t / n_frames * 1000:5.1f} ms/frame]")
 
 
+@_with_session_cfa
 def reload_accepted_frames(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -1245,6 +1345,7 @@ def reload_accepted_frames(
     gpu = get_gpu()
 
     _build_flat_norm(masters, final)
+    _session_cfa = _prepare_session_cfa(final, masters, args)
 
     _ca  = getattr(args, 'ca_correction', False)
     _cr  = getattr(args, 'cosmic_ray_rejection', False)
@@ -1309,7 +1410,8 @@ def reload_accepted_frames(
         try:
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_init_worker_shm,
-                                     initargs=(shm_specs, _tr, _banding_cfg(args))) as pool:
+                                     initargs=(shm_specs, _tr, _banding_cfg(args),
+                                               _session_cfa)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",

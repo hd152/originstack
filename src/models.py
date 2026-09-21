@@ -11,7 +11,9 @@ class Config:
     HOT_PIXEL_THRESHOLD = 12.0
     HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
     CA_MIN_SHIFT_PX = 0.25           # Session CA below this: skip the correction warp entirely
-    MERGE_MIN_OVERLAP = 0.25         # --merge: min warped-footprint overlap before refusing
+    SESSION_CFA_MIN_FRAMES = 12      # Fewer lights than this: per-frame CFA equalisation, not one session estimate
+    SESSION_CFA_PROBE_FRAMES = 8     # Frames spread through the session that the estimate is taken from
+    MERGE_MIN_OVERLAP = 0.25        # --merge: min warped-footprint overlap before refusing
     MERGE_MIN_CORRELATION = 0.15     # --merge: min aligned-vs-new luminance correlation
     WHITE_PATCH_PERCENTILE = 99.5
     CROP_MARGIN = 2

@@ -148,6 +148,18 @@ def green_equalize(raw, pattern: str = 'RGGB', inplace: bool = False):
     offsets = _PATTERN_OFFSETS.get(pattern.upper())
     if offsets is None:
         return raw
+    cfg = _session_cfa
+    if (cfg is not None and cfg['pattern'] == pattern.upper()
+            and isinstance(raw, np.ndarray) and raw.ndim == 2):
+        # session-constant gain (see `combine_cfa_stats`): no per-frame medians
+        work = raw
+        if not (inplace and raw.dtype == np.float32 and raw.flags['C_CONTIGUOUS']
+                and raw.flags['WRITEABLE']):
+            work = np.array(raw, dtype=np.float32, order='C', copy=True)
+        (_, _), (_, _), (g2_r, g2_c), (_, _) = offsets
+        if abs(cfg['gain'] - 1.0) < 0.2:
+            work[g2_r::2, g2_c::2] *= np.float32(cfg['gain'])
+        return work
     if (_HAS_NATIVE and hasattr(_native, 'green_equalize_inplace') and isinstance(raw, np.ndarray)
             and raw.ndim == 2):
         try:
@@ -357,19 +369,104 @@ def _debayer_malvar_numpy(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     return np.stack([R, G, B], axis=-1).astype(np.float32)
 
 
+def _malvar_raw(raw: np.ndarray, pattern: str) -> np.ndarray:
+    """Malvar demosaic with no grid equalisation (native, numpy fallback)."""
+    if _HAS_NATIVE and hasattr(_native, 'debayer_malvar'):
+        try:
+            return _native.debayer_malvar(np.ascontiguousarray(raw, dtype=np.float32),
+                                          pattern.upper())
+        except Exception:
+            pass
+    return _debayer_malvar_numpy(raw, pattern)
+
+
 def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     """Malvar-He-Cutler demosaicing (native Rust kernel with a numpy
     fallback -- see ``_debayer_malvar_numpy`` for the algorithm/validation
     notes). No longer depends on cv2."""
-    if _HAS_NATIVE and hasattr(_native, 'debayer_malvar'):
-        raw_np = np.ascontiguousarray(raw, dtype=np.float32)
-        try:
-            out = _native.debayer_malvar(raw_np, pattern.upper())
-        except Exception:
-            out = None
-        if out is not None:
-            return _equalize_bayer_grid(out, inplace=True)   # `out` is ours: no copy
-    return _equalize_bayer_grid(_debayer_malvar_numpy(raw, pattern), inplace=True)
+    out = _malvar_raw(raw, pattern)      # `out` is ours: equalise it where it lies
+    cfg = _session_cfa
+    if cfg is not None and cfg['pattern'] == pattern.upper():
+        _apply_fixed_grid(out, cfg)
+        return out
+    return _equalize_bayer_grid(out, inplace=True)
+
+
+# ── Session-constant CFA equalisation ────────────────────────────────────────
+# green_equalize (G1/G2 gain) and _equalize_bayer_grid (2x2 green offsets) each
+# re-measure sigma-clipped medians on every frame -- six medians over ~100 MB of
+# strided reads, ~70% of the Debayer step (and memory-bandwidth bound, so it does
+# not scale across workers). Both quantities are properties of the sensor and the
+# Malvar kernel, not of any one frame, and each per-frame estimate is itself noisy
+# (~2 ADU against offsets of ~2-3 ADU), so `measure_session_cfa` estimates them
+# once from a few frames and every frame applies the session values. Opt-in per
+# session: `set_session_cfa(None)` (the default) keeps the per-frame path.
+_session_cfa: Optional[dict] = None
+_GRID_PARITY = ((0, 0), (0, 1), (1, 0), (1, 1))
+
+
+def set_session_cfa(cfg: Optional[dict]) -> None:
+    global _session_cfa
+    _session_cfa = cfg
+
+
+def get_session_cfa() -> Optional[dict]:
+    return _session_cfa
+
+
+def cfa_frame_stats(mosaic: np.ndarray, pattern: str) -> Optional[dict]:
+    """What the per-frame path would have measured on this calibrated mosaic:
+    the G1/G2 gain ``green_equalize`` applies, then the four 2x2 green
+    deviations ``_equalize_bayer_grid`` removes from the Malvar output. None when
+    the frame fails the same guards (G2 near zero, gain outside +-20%)."""
+    offsets = _PATTERN_OFFSETS.get(pattern.upper())
+    if offsets is None or getattr(mosaic, 'ndim', 0) != 2:
+        return None
+    (_, _), (g1_r, g1_c), (g2_r, g2_c), (_, _) = offsets
+    work = np.array(mosaic, dtype=np.float32, order='C', copy=True)
+    g1 = _sigma_clipped_median(work[g1_r::2, g1_c::2])
+    g2 = _sigma_clipped_median(work[g2_r::2, g2_c::2])
+    if g2 <= 1e-6 or abs(g1 / g2 - 1.0) >= 0.2:
+        return None
+    work[g2_r::2, g2_c::2] *= np.float32(g1 / g2)
+    green = _malvar_raw(work, pattern)[:, :, 1]
+    q = np.array([_sigma_clipped_median(np.ascontiguousarray(green[a::2, b::2]))
+                  for a, b in _GRID_PARITY])
+    return {'gain': float(g1 / g2), 'grid': (q - q.mean()).tolist()}
+
+
+def combine_cfa_stats(samples, pattern: str, min_samples: int = 5,
+                      max_grid_std: float = 3.0, max_gain_std: float = 0.01) -> Optional[dict]:
+    """Session values from per-frame ``cfa_frame_stats``: the median of each. None
+    (per-frame fallback) with too few valid samples or when they disagree by more
+    than a sensor property should -- a session whose offsets wander is not one a
+    single value describes."""
+    good = [s for s in samples if s]
+    if len(good) < min_samples:
+        return None
+    gains = np.array([s['gain'] for s in good])
+    grid = np.array([s['grid'] for s in good])
+    if gains.std() > max_gain_std or grid.std(axis=0).max() > max_grid_std:
+        return None
+    med = np.median(grid, axis=0)
+    med -= med.mean()
+    spread = float(np.abs(med).max())
+    return {'pattern': pattern.upper(), 'gain': float(np.median(gains)),
+            'grid': tuple(float(x) for x in med),
+            # the per-frame path's own guard: outside 0.01-100 ADU it leaves the frame alone
+            'apply_grid': 0.01 <= spread <= 100.0, 'n': len(good)}
+
+
+def _apply_fixed_grid(rgb: np.ndarray, cfg: dict) -> None:
+    """Subtract the session's 2x2 green offsets in place (clipped at zero, as the
+    per-frame path does)."""
+    if not cfg['apply_grid']:
+        return
+    green = rgb[:, :, 1]
+    for (a, b), off in zip(_GRID_PARITY, cfg['grid']):
+        v = green[a::2, b::2]
+        v -= np.float32(off)
+        np.maximum(v, 0, out=v)
 
 
 # Menon (2007) DDFAPD 5x5 gradient-diffusion kernel: weights how far the

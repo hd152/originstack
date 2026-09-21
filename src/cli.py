@@ -1582,6 +1582,13 @@ def build_parser() -> argparse.ArgumentParser:
                         'not a substitute for real flats when they exist. Needs >= %d '
                         'light frames; ignored when dedicated flat frames were discovered.'
                         % Config.ROBUST_PCA_MIN_FRAMES)
+    g_frames.add_argument('--no-session-cfa-eq', action='store_false', dest='session_cfa_eq',
+                   default=True,
+                   help='Re-measure the G1/G2 gain and 2x2 green offsets on every frame '
+                        '(6 sigma-clipped medians each) instead of measuring them once per '
+                        'session (>= %d light frames, Malvar debayer). The per-session values '
+                        'are a property of the sensor and are less noisy than a per-frame '
+                        'estimate; Debayer runs ~2.4x faster.' % Config.SESSION_CFA_MIN_FRAMES)
     g_frames.add_argument('--no-quality-filter', action='store_false', dest='quality_filter',
                    default=True,
                    help='Disable automatic rejection of the lowest-quality frames')
