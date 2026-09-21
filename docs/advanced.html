@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OriginStack advanced features: rotation, drizzle, photometry, diagnostics</title>
+<meta name="description" content="What OriginStack does beyond basic stacking: field-rotation handling, multi-night merging, drizzle, lucky-imaging weights, photometry, transient detection, session diagnostics, and an honest list of what did not work.">
+<meta name="keywords" content="astrophotography stacking features, field rotation alt-az, merge stacks, drizzle, sigma clipping, linear fit clipping, photometry, light curves, difference imaging, transient detection, uncertainty map, Celestron Origin">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://hd152.github.io/originstack/advanced.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://hd152.github.io/originstack/advanced.html">
+<meta property="og:title" content="OriginStack advanced features">
+<meta property="og:description" content="Field rotation, multi-night merging, drizzle, photometry, transient detection and session diagnostics, plus an honest list of what did not work.">
+<meta property="og:image" content="https://hd152.github.io/originstack/img/omega-stack.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="./#compare">Compared</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>What it does beyond a plain stack</h1>
+    <p class="lede">The basics are covered on the <a href="./">home page</a>. This page is for the rest: what each advanced feature does, the flag that turns it on, and, where we measured it, how well it works. Some of it did not work, and that is listed too.</p>
+    <p class="toc">
+      <a href="#rotation">Field rotation and nights</a>
+      <a href="#stacking">Stacking</a>
+      <a href="#quality">Frame quality</a>
+      <a href="#calibration">Calibration</a>
+      <a href="#diagnostics">Diagnostics</a>
+      <a href="#science">Measurement</a>
+      <a href="#finish">Finishing</a>
+      <a href="#workflow">Workflows</a>
+      <a href="#nope">What did not work</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="rotation">
+  <div class="wrap">
+    <h2>Field rotation and multiple nights</h2>
+    <p class="intro measure">On an alt-az mount such as the Origin, the sky rotates in the frame as the target tracks across it. Two things follow: single nights need rotation-aware alignment, and combining nights is harder than adding numbers.</p>
+    <dl class="feat">
+      <div><dt>Rotation-proof registration<code>on by default</code></dt>
+        <dd><p>Frames are aligned by matching star patterns with a rotation-and-scale fit, not by shifting them. A frame whose simple shift comes out as nonsense because of rotation is rescued with a blind star-pattern match instead of being stacked in the wrong place.</p>
+        <p class="fact">On a real Fireworks Galaxy session, 34 of 148 frames were flagged this way; another session flagged 40 of 117. They used to be stacked at a coarse or zero shift.</p></dd></div>
+      <div><dt>Merge nights into one stack<code>--merge PREV.fits</code></dt>
+        <dd><p>Processes only tonight's frames, then registers each earlier stack onto the new grid with no assumption about the rotation angle, matches its brightness scale, and combines with inverse-noise weights inside each footprint. The result stays linear, so it can be merged again next time.</p></dd></div>
+      <div><dt>Sessions stacked together or apart<code>folder of sessions</code></dt>
+        <dd><p>Pooling every night into one stack keeps only the area every frame covers, and rotation shrinks that area. OriginStack reads each session's metadata first, works out the rotation that pooling would lose, and stacks the sessions separately when it is more than 3 degrees. They are then registered onto the deepest one and finished once.</p>
+        <p class="fact">Pooling five Lagoon Nebula sessions would have spanned 26.8 degrees of rotation and cost 42% of the frame.</p></dd></div>
+      <div><dt>Mosaics<code>--mosaic</code></dt>
+        <dd><p>Stacks each subfolder as a panel and joins the panels.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="stacking">
+  <div class="wrap">
+    <h2>Stacking</h2>
+    <dl class="feat">
+      <div><dt>Nine ways to combine<code>--stack-method</code></dt>
+        <dd><p>Mean, median, sigma-clip, winsorized, percentile, ESD, linear-fit clipping, inverse-variance weighted, and a wavelet-domain combine. The default, <code>auto</code>, picks one for you. Rejection uses a robust spread estimate (MAD) by default.</p>
+        <p class="fact">Linear-fit clipping is modelled on PixInsight's method; it copes better with non-Gaussian tails than a plain sigma clip.</p></dd></div>
+      <div><dt>Optimal weighting and an error map<code>--stack-method ivw</code> <code>--uncertainty-map</code></dt>
+        <dd><p>Weights each frame by the inverse of its own measured noise variance, the best linear combination for that noise model. With the error map on, it also writes the standard error of every pixel as a second FITS file.</p></dd></div>
+      <div><dt>Drizzle<code>--drizzle-scale 2</code> <code>--drizzle-method splat</code></dt>
+        <dd><p>Combines dithered frames onto a finer grid. The default resamples with a Lanczos-3, PSF-matched or Magic Kernel filter. The splat method is the original area-overlap drizzle: about six times faster, no ringing, and softer.</p>
+        <p class="fact">On a synthetic dithered scene, splat's error against the truth was 40 to 44 against 35 for resample. That is why it is opt-in.</p></dd></div>
+      <div><dt>Super-resolution refinement<code>--super-res-iters</code></dt>
+        <dd><p>Iterative back-projection after drizzle: it simulates each frame from the current estimate, compares it with what was recorded, and feeds the difference back.</p></dd></div>
+      <div><dt>Lucky-imaging weights<code>patch-weighted combine</code></dt>
+        <dd><p>Frames are scored region by region, so a frame that is sharp in one corner and soft in another counts for more where it is sharp.</p></dd></div>
+      <div><dt>Real-time and low-memory stacking<code>--live</code> <code>--stream</code></dt>
+        <dd><p><code>--live</code> watches your capture folder and folds each new frame into a running stack, showing the growing image and its signal-to-noise. <code>--stream</code> stacks a finished folder in two passes with memory that does not grow with frame count. It leaves out a few extras, such as drizzle and merging.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="quality">
+  <div class="wrap">
+    <h2>Frame quality</h2>
+    <dl class="feat">
+      <div><dt>Scoring and rejection<code>--quality-threshold</code></dt>
+        <dd><p>Every frame is scored for signal-to-noise, star count, FWHM and sharpness. Hard limits and outlier tests drop the clearly bad ones, and the lowest-scoring fraction is dropped by percentile. Scores also drive the weights in the combine.</p></dd></div>
+      <div><dt>Transparency gating<code>--transparency-min</code></dt>
+        <dd><p>Measures each frame's relative brightness from a fixed set of stars, so frames dimmed by thin cloud can be dropped.</p>
+        <p class="fact">One real session ran from 0.86 to 1.23 against its median.</p></dd></div>
+      <div><dt>Satellite and aircraft trails<code>--trail-reject</code></dt>
+        <dd><p>Finds line segments in each frame and fills them from the surrounding background before stacking.</p></dd></div>
+      <div><dt>Cosmic rays and hot pixels<code>on by default</code></dt>
+        <dd><p>Hot pixels are handled per frame. With 20 or more frames and a rejecting combine, cosmic rays are removed per pixel by the combine itself, so the slower per-frame detector is skipped.</p></dd></div>
+      <div><dt>Row and column banding<code>--banding-removal</code></dt>
+        <dd><p>Removes faint horizontal or vertical stripes per colour plane after calibration, gated so it does nothing when the pattern is not significant.</p>
+        <p class="fact">Real Origin frames carry about 12 ADU of row banding, roughly 3% of the pixel noise.</p></dd></div>
+      <div><dt>Clean out a whole collection<code>--quality-sweep</code></dt>
+        <dd><p>Scores every light in a folder tree and renames the poor ones to <code>.fits.rejected</code>, which stacking then ignores. A dry run reports first, and <code>--sweep-undo</code> restores every file.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="calibration">
+  <div class="wrap">
+    <h2>Calibration</h2>
+    <dl class="feat">
+      <div><dt>Master frames that separate pattern from dust<code>--master-method robust_pca</code></dt>
+        <dd><p>Splits a stack of flats, darks or bias frames into the pattern they all share and the parts that moved between them, such as dust motes that shifted between sessions. It is slower than a median and needs enough frames, so it is opt-in, though the auto advisor upgrades to it when the frame count suits.</p></dd></div>
+      <div><dt>Flats from your lights<code>--flat-from-lights</code></dt>
+        <dd><p>When you have no flats, approximates one from a sample of light frames using the same decomposition, since dithering moves stars but not vignetting. Approximate, and opt-in.</p></dd></div>
+      <div><dt>Darks matched by temperature<code>--dark-temp-model</code></dt>
+        <dd><p>Fits dark current against sensor temperature across a whole dark library and evaluates it at each light's temperature, so a small library can cover a wide range.</p></dd></div>
+      <div><dt>Gain and read noise from your own frames<code>automatic with photometry</code></dt>
+        <dd><p>Estimates the camera gain and read noise from a pair of bias frames and a pair of flats, for the noise terms in photometry.</p></dd></div>
+      <div><dt>Session-constant colour-grid equalisation<code>on by default</code></dt>
+        <dd><p>The tiny gain difference between a sensor's two green pixels and a faint 2-by-2 pattern left by demosaicing are properties of the sensor, so they are measured once from eight frames instead of on every frame. Debayering became about 2.8 times faster with the stack unchanged to 0.1 ADU. <code>--no-session-cfa-eq</code> restores the per-frame path.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="diagnostics">
+  <div class="wrap">
+    <h2>Diagnostics that tell you why</h2>
+    <p class="intro measure">These do not change the image. They explain it: how the mount behaved, where the optics are soft, whether your dithering was even, and how much of the noise you see is real.</p>
+    <dl class="feat">
+      <div><dt>Session report<code>--session-report</code></dt>
+        <dd><p>A nine-panel picture and a CSV of the night: drift rate and direction, field rotation rate, periodic tracking error, FWHM trend over time and against temperature, transparency, and background.</p></dd></div>
+      <div><dt>Field aberration map<code>--aberration-report</code></dt>
+        <dd><p>Measures star width and elongation across the field and diagnoses tilt and curvature.</p></dd></div>
+      <div><dt>Dither coverage<code>--dither-report</code></dt>
+        <dd><p>Shows whether your sub-pixel dither positions cover the pixel evenly, which is what limits drizzle quality and which nothing else measures.</p></dd></div>
+      <div><dt>Noise you can check<code>--noise-validate</code></dt>
+        <dd><p>Stacks the odd and even frames separately and compares them. The difference gives the true noise in the stack, and the agreement map shows which structure is repeatable and which is noise.</p>
+        <p class="fact">On a real session about 61% of the frame was repeatable, and the measured noise was 1.16 times the per-frame estimate divided by the square root of the frame count.</p></dd></div>
+      <div><dt>Error bars on the finished image<code>--uncertainty-propagate</code></dt>
+        <dd><p>The stack's error map describes the linear stack, but the finishing steps reshape the noise. This carries the uncertainty through them by drawing noise realisations and running each through the real processing chain, then reporting per-pixel confidence. <code>--error-aware-stretch</code> uses it to keep sub-threshold noise out of the stretch.</p></dd></div>
+      <div><dt>Optics distortion fit<code>--distortion-model</code></dt>
+        <dd><p>Fits a radial distortion to the whole session and applies it only if it beats the noise. On the Origin's optics it found nothing significant (see below).</p></dd></div>
+      <div><dt>Health check<code>--health-check</code></dt>
+        <dd><p>Reports on a session's frames and calibration without stacking.</p></dd></div>
+    </dl>
+
+    <div class="figs">
+      <figure class="wide"><img src="img/report-session.png" width="1800" height="1390" loading="lazy" alt="OriginStack's session report: nine small plots of FWHM, transparency, signal-to-noise, sky background, registration shift, field rotation, PSF ellipticity, registration residual and sensor temperature over a 60-minute session, with a text summary underneath."><figcaption>The session report for the Omega Nebula run. It reads the night back to you: a steady 0.37 degrees per hour of field rotation, an 8-minute periodic tracking error with about 12 pixels of amplitude, a sky background that rose late in the hour, and transparency that stayed between 0.88 and 1.24 of its median.</figcaption></figure>
+      <figure><img src="img/report-aberration.png" width="900" height="660" loading="lazy" alt="A five-by-five grid of star-shape ellipses across the field, red on the left where stars are wide and green on the right where they are narrow."><figcaption>The aberration map for the same run. Stars are about 5.5 pixels wide on the left of the field and 4.4 on the right, and the report calls it a tilt to the east: a real property of the optics, found without touching the telescope.</figcaption></figure>
+      <figure><img src="img/report-dither.png" width="768" height="768" loading="lazy" alt="A 16-by-16 grid of coloured cells, mostly dark blue with scattered lighter cells, showing how often each sub-pixel dither position was used."><figcaption>Dither coverage for the same frames: each cell is one sub-pixel position and lighter means more frames landed there. The run warned that coverage was uneven, which is the point of the map. Drizzle quality is limited by exactly this.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="science">
+  <div class="wrap">
+    <h2>Measurement, not just pictures</h2>
+    <dl class="feat">
+      <div><dt>Absolute photometry<code>--photometry</code></dt>
+        <dd><p>Finds the stars, matches them to Gaia, measures each with a partial-pixel aperture and a robust sky annulus, and fits a per-channel zero point with extinction from your site and time. It writes a catalogue CSV and zero points into the FITS header.</p>
+        <p class="fact">Accuracy is about 0.05 magnitudes: the colour-camera channels are mapped coarsely onto Gaia's bands.</p></dd></div>
+      <div><dt>Light curves<code>--photometry-timeseries</code></dt>
+        <dd><p>Measures a fixed list of stars on every frame and calibrates each frame against an ensemble of steady comparison stars, so clouds and airmass cancel. Marks candidate variables and reports your target's scatter.</p></dd></div>
+      <div><dt>Periods and transits<code>--lightcurve-analysis</code></dt>
+        <dd><p>Runs a Lomb-Scargle period search and a box-least-squares search on those light curves, then fits a trapezoid transit and tests it against a flat line.</p></dd></div>
+      <div><dt>Did anything change?<code>--transient-detect REF.fits</code></dt>
+        <dd><p>Compares tonight with an earlier stack using proper image subtraction (ZOGY), which cancels the star residuals a plain subtraction leaves even when the seeing differs. Reports the significance of each candidate in real sigma, and masks the corners that field rotation left uncovered.</p></dd></div>
+      <div><dt>Asteroids and other movers<code>--moving-objects</code></dt>
+        <dd><p>Links faint detections across different frames into tracks and stacks along them. On a real session with no mover, 1,497 candidate detections produced no false tracks.</p></dd></div>
+      <div><dt>Plate solving, colour calibration, annotation<code>--plate-solve</code> <code>--color-calibrate</code> <code>--annotate</code></dt>
+        <dd><p>Solves the field on astrometry.net, calibrates colour against star spectra, and labels named objects and bright stars on a copy of the preview. These go online when you enable them; <code>--offline</code> turns them off.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="finish">
+  <div class="wrap">
+    <h2>Finishing the image</h2>
+    <dl class="feat">
+      <div><dt>Background and gradients<code>on by default</code></dt>
+        <dd><p>Dynamic background extraction fits a smooth surface to sky samples with a robust local regression, admits patches that follow a gradient, and flattens glow that is cut off by the frame edge. In a galaxy or comet mode it protects the object.</p></dd></div>
+      <div><dt>Noise reduction<code>--denoiser wavelet</code></dt>
+        <dd><p>A wavelet denoiser that protects elongated structure such as filaments and spiral arms, with an optional variance-stabilising transform. Chosen after benchmarking the alternatives on ground-truth scenes.</p></dd></div>
+      <div><dt>Deconvolution<code>--deconvolve rl|rl-sv|tv|sparse</code></dt>
+        <dd><p>Richardson-Lucy (global or varying across the field), total variation, and a sparse wavelet method. The point-spread function is estimated from your own stars, and stars are protected from ringing.</p></dd></div>
+      <div><dt>Starless processing<code>--remove-stars</code> <code>--starless-process</code></dt>
+        <dd><p>Removes stars by inpainting, saves a starless copy, and can run the denoising on the starless layer alone with the stars added back exactly.</p></dd></div>
+      <div><dt>Stretch<code>--stretch ghs</code> <code>--layered-stretch</code></dt>
+        <dd><p>Generalised hyperbolic stretch, with the black and white points taken from the starless image so bright stars do not set them.</p></dd></div>
+      <div><dt>Colour combinations<code>combine</code> <code>--scnr</code> <code>combine --continuum</code></dt>
+        <dd><p>LRGB and narrowband palettes (SHO, HOO), green-noise removal, magenta-star repair, and continuum subtraction with the subtraction scale fitted automatically.</p></dd></div>
+      <div><dt>Exposure fusion<code>--hdr-combine SHORT.fits</code> <code>--hdr-blend-mode fusion</code></dt>
+        <dd><p>Blends a short and a long exposure through a multi-resolution pyramid so there is no visible seam at the transition.</p></dd></div>
+      <div><dt>Star repair and separation<code>--repair-stars</code> <code>--nmf-separate</code></dt>
+        <dd><p>Refills clipped star cores from a fitted profile, or splits an image into star and nebula components with non-negative matrix factorisation.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="workflow">
+  <div class="wrap">
+    <h2>Workflows and plumbing</h2>
+    <dl class="feat">
+      <div><dt>Target-aware defaults<code>on by default</code> <code>--no-auto</code> <code>--preset</code></dt>
+        <dd><p>Classifies your target from the session file, FITS header and folder name, then blends settings smoothly across eight target presets, so something between an emission and a reflection nebula gets a mix instead of a hard jump. Anything you set yourself is left alone.</p></dd></div>
+      <div><dt>Resume and reproduce<code>--config</code> <code>checkpoints</code></dt>
+        <dd><p>A run saves a checkpoint after Phase 1, and every run can write its effective settings to a config file to reapply later.</p></dd></div>
+      <div><dt>Fast where it counts<code>astro_native</code></dt>
+        <dd><p>Fifty-seven multi-threaded Rust kernels cover the hot loops, each with a NumPy fallback and a parity test against it. The build reports which is active at startup.</p></dd></div>
+      <div><dt>Runs offline<code>--offline</code></dt>
+        <dd><p>Makes no network request at all. Without it, a run may look up a target name it does not recognise on SIMBAD; only the name is sent.</p></dd></div>
+      <div><dt>Every input, one folder<code>FITS RAW TIFF XISF SER</code></dt>
+        <dd><p>Camera RAW, TIFF, XISF and SER planetary video load through one path and can be mixed in a folder.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="nope">
+  <div class="wrap">
+    <h2>What we tried that did not work</h2>
+    <p class="intro measure">Most software lists what it can do. These were built, measured on real data, and found wanting. They are kept, off by default or self-disabling, so you can see why.</p>
+    <div class="nope">
+      <div><h3>A physics-based sky background model</h3>
+        <p>It fits airglow, moonlight, zodiacal light and light pollution by geometry. On a typical one-degree field those components are almost flat, so the fit has nothing to grip, and it made the corner-to-corner gradient worse (67 to 111 ADU) where the default removed 68%. It now measures its own result and declines when it does not help.</p></div>
+      <div><h3>Bayer-aware drizzle</h3>
+        <p>A simulation promised sharper stars. On a real well-sampled stack it cut luma noise by 13% but more than doubled the colour noise and gave no sharpness gain. It stays opt-in, for undersampled data only.</p></div>
+      <div><h3>Three denoisers</h3>
+        <p>Non-local means halved star peak brightness, block-matching (BM3D) was slow and licence-encumbered, and a multiscale-median method erased about 93% of fine structure. They were removed after a ground-truth benchmark.</p></div>
+      <div><h3>A distortion correction for the Origin</h3>
+        <p>The fit found a coefficient of +0.0007, not significant, so nothing is applied. The optics are effectively distortion-free; the machinery is tested on synthetic data.</p></div>
+      <div><h3>Deconvolving the starless layer at low signal</h3>
+        <p>On a stack of very noisy frames, the plain image beat both the starless Richardson-Lucy and the sparse method, which rang badly. It is implemented and correct, and not recommended below high signal-to-noise.</p></div>
+      <div><h3>Faster medians by sampling</h3>
+        <p>A strided or random subsample of the debayering statistics gave errors as large as the correction itself, because the data has structure with a four-pixel period and the per-frame noise is around 1,100 ADU. The fix was to measure once per session instead.</p></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the MIT licence.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a></span>
+  </div>
+</footer>
+</body>
+</html>
