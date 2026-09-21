@@ -15,10 +15,15 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 
 | Galaxy | Emission Nebula |
 |:---:|:---:|
-| ![Whirlpool Galaxy (M51)](sample/whirlz1.jpg) | ![Flaming Star Nebula (IC 405)](sample/flamingstar1.jpg) |
-| *Whirlpool Galaxy (M51)* | *Flaming Star Nebula (IC 405)* |
+| ![Whirlpool Galaxy (M51)](sample/whirlz1.jpg) | ![Omega Nebula (M17)](sample/omega1.jpg) |
+| *Whirlpool Galaxy (M51)* | *Omega Nebula (M17), 114 x 30 s* |
 
-Both stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames (`--preset galaxy` and `--preset nebula` respectively — see [Usage Examples](#usage-examples)).
+| Emission / Reflection Nebula | Star Cloud |
+|:---:|:---:|
+| ![Orion Nebula (M42)](sample/orion1.jpg) | ![Sagittarius Star Cloud (M24)](sample/sgr1.jpg) |
+| *Orion Nebula (M42), seven sessions combined* | *Sagittarius Star Cloud (M24), 138 x 10 s* |
+
+All stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames (`--preset galaxy` for the Whirlpool, `--preset nebula` for the two nebulae, `--preset starfield` for the star cloud -- see [Usage Examples](#usage-examples)). The Orion Nebula is a hierarchical multi-session combine: each night is stacked separately, registered onto the deepest one, merged, and post-processed once.
 
 ---
 
