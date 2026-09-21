@@ -61,14 +61,9 @@ Not bundled:
 
 ## Known limitations
 
-- **Unsigned exe.** No code-signing certificate is used for this build, so
-  Windows SmartScreen and some antivirus engines will flag it on first run.
-  There's no code fix for this without a paid cert; the available mitigation
-  is submitting the built `OriginStack.exe` to Microsoft's file-submission
-  portal (https://www.microsoft.com/en-us/wdsi/filesubmission) after each
-  release, which reduces false-positive flagging over time.
+- **Unsigned until SignPath is set up.** Without the SignPath variables below, releases are unsigned and
+  Windows SmartScreen and some antivirus engines flag them on first run. See "Code signing".
 - **Windows only.** No macOS/Linux packaging in this pass.
-- **The installer is unsigned too**, so SmartScreen treats `OriginStack-<version>-setup.exe` like the exe.
 - **Run it extracted or installed, never from inside the zip.** Double-clicking `OriginStack.exe` in
   Explorer's zip view extracts only the exe (into a `...zip.aca` temp folder), not its `_internal\`
   folder, and fails with "Failed to load Python DLL". Use the installer, or **Extract All** first.
@@ -82,6 +77,24 @@ prompt (the wizard's usual "for all users" choice is offered), adds a Start Menu
 desktop shortcut) and an uninstaller. The release workflow builds it after the PyInstaller step, installs
 it silently on the runner, runs `verify_build.ps1` against the *installed* exe, and only then attaches it
 to the release next to the zip.
+
+## Code signing (SignPath Foundation)
+
+`release.yml` signs `OriginStack.exe` (then re-zips) and the installer through
+[SignPath](https://signpath.org/) -- free for open-source projects. Signing is **skipped** unless the repo
+variable `SIGNPATH_ORGANIZATION_ID` is set, so releases keep working before approval.
+
+One-time setup (maintainer):
+1. Apply at https://signpath.org/apply (public repo, OSI licence, a code-signing policy page linked from
+   the README are required).
+2. In SignPath create project `originstack` with signing policy `release-signing`, and two artifact
+   configurations, both for a GitHub-uploaded zip: `exe` (`<pe-file path="OriginStack.exe">` sign) and
+   `installer` (`<pe-file path="OriginStack-*-setup.exe">` sign). Trust the GitHub.com connector and
+   restrict the policy to release tags.
+3. In GitHub: repo variable `SIGNPATH_ORGANIZATION_ID`, repo secret `SIGNPATH_API_TOKEN`.
+
+Only the top-level exe and installer are signed; the bundled `.pyd`/`.dll` files stay unsigned. The
+workflow fails the release if a signed file's Authenticode status is not `Valid`.
 
 ## Release automation
 

@@ -40,11 +40,83 @@ jobs:
         shell: pwsh
         run: .\packaging\verify_build.ps1
 
+      # Code signing via SignPath Foundation (free for open source). Optional:
+      # runs only once the repo variable SIGNPATH_ORGANIZATION_ID and the secret
+      # SIGNPATH_API_TOKEN exist, so releases keep working unsigned until the
+      # SignPath application is approved. See packaging/README.md ("Code signing").
+      - name: Upload exe for signing
+        id: upload-exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-exe
+          path: packaging/dist/OriginStack/OriginStack.exe
+
+      - name: Sign exe (SignPath)
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: originstack
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: exe
+          github-artifact-id: ${{ steps.upload-exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exe
+
+      # Swap the signed exe into the onedir and rebuild the zip, so the zip and
+      # the installer both ship the signed binary.
+      - name: Install signed exe and re-zip
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem signed-exe -Recurse -Filter OriginStack.exe | Select-Object -First 1
+          if (-not $signed) { throw "signed OriginStack.exe not found in signed-exe/" }
+          $sig = Get-AuthenticodeSignature $signed.FullName
+          if ($sig.Status -ne 'Valid') { throw "signed exe has status $($sig.Status)" }
+          Copy-Item $signed.FullName packaging\dist\OriginStack\OriginStack.exe -Force
+          $zip = Get-ChildItem "packaging\dist\OriginStack-*-windows-x64.zip" | Select-Object -First 1
+          Remove-Item $zip.FullName -Force
+          Compress-Archive -Path "packaging\dist\OriginStack\*" -DestinationPath $zip.FullName
+          .\packaging\verify_build.ps1
+
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
           .\packaging\build_installer.ps1
+
+      - name: Upload installer for signing
+        id: upload-setup
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-setup
+          path: packaging/dist/OriginStack-*-setup.exe
+
+      - name: Sign installer (SignPath)
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: originstack
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.upload-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+
+      - name: Install signed installer
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem signed-setup -Recurse -Filter *-setup.exe | Select-Object -First 1
+          if (-not $signed) { throw "signed installer not found in signed-setup/" }
+          $sig = Get-AuthenticodeSignature $signed.FullName
+          if ($sig.Status -ne 'Valid') { throw "signed installer has status $($sig.Status)" }
+          Copy-Item $signed.FullName "packaging\dist\$($signed.Name)" -Force
 
       - name: Verify the installer installs a working app
         shell: pwsh
