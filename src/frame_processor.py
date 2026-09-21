@@ -1051,12 +1051,12 @@ def execute_frame_processing(
                 except Exception:
                     pass
 
-        # Flush memmaps once after all workers complete — per-frame flushing
-        # inside workers causes excessive concurrent full-file I/O.
-        _t_flush = time.perf_counter()
-        mem_rgb.flush()
-        mem_lum.flush()
-        _step_totals['final_flush'] = time.perf_counter() - _t_flush
+        # No flush here. The workers wrote through their own mappings of these temp
+        # files; views of one file are coherent across processes without msync, and
+        # the files are deleted when the run ends (a checkpoint restore rebuilds the
+        # frames from the raw files, never from these), so flushing only forced ~12 GB
+        # of writes onto the critical path (8.8 s on a 158-frame session).
+        _step_totals['final_flush'] = 0.0
 
     elif n >= 2:
         gpu = get_gpu()

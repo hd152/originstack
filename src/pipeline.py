@@ -64,11 +64,9 @@ class _MemmapManager:
         # Explicitly close the underlying mmap handles.  On Windows,
         # os.remove() on an open memory-mapped file raises PermissionError,
         # so we must release the OS file lock before attempting deletion.
+        # No flush: every file here is a temp file removed just below, so msync would
+        # only write pages nobody reads (12+ GB serial I/O on a 158-frame session).
         for mm in self._memmaps:
-            try:
-                mm.flush()
-            except Exception:
-                pass
             try:
                 if hasattr(mm, '_mmap') and mm._mmap is not None:
                     mm._mmap.close()
