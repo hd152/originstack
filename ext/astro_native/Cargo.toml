@@ -1,6 +1,6 @@
 [package]
 name = "astro_native"
-version = "0.29.0"
+version = "0.30.0"
 edition = "2021"
 description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
 
@@ -25,3 +25,6 @@ codegen-units = 1
 # exception via pyo3's panic guard, not SIGABRT the whole process. The
 # arithmetic kernels never panic; this only matters for the model loader.
 panic = "unwind"
+# Debug symbols add nothing at run time (panics are converted to Python exceptions, not
+# backtraced); dropping them shrinks the wheel and the packaged exe.
+strip = true

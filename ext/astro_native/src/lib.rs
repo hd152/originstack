@@ -2564,6 +2564,42 @@ fn sort2_idx(p: &mut [f32; 9], i: usize, j: usize) {
     p[j] = a.max(b);
 }
 
+/// Interior of one output row of the 3x3 median: `row_out[1..w-1]` from the three input rows
+/// starting at `r0`, `r1`, `r2`. The compare-exchange network is branchless min/max, so the
+/// compiler vectorises it across `x` -- 4 lanes on baseline x86-64 (SSE2), 8 with AVX2.
+#[inline(always)]
+fn median3_interior_body(data: &[f32], r0: usize, r1: usize, r2: usize, w: usize, row_out: &mut [f32]) {
+    for x in 1..w - 1 {
+        let mut p = [
+            data[r0 + x - 1], data[r0 + x], data[r0 + x + 1],
+            data[r1 + x - 1], data[r1 + x], data[r1 + x + 1],
+            data[r2 + x - 1], data[r2 + x], data[r2 + x + 1],
+        ];
+        row_out[x] = median9(&mut p);
+    }
+}
+
+/// The same body compiled with AVX2 enabled. `#[target_feature]` applies to this function and to
+/// everything inlined into it, so the shared body above is vectorised 8 wide here. Only ever
+/// called after a run-time `is_x86_feature_detected!("avx2")`. Min/max are exact, so the result
+/// is identical to the baseline build's.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn median3_interior_avx2(data: &[f32], r0: usize, r1: usize, r2: usize, w: usize, row_out: &mut [f32]) {
+    median3_interior_body(data, r0, r1, r2, w, row_out)
+}
+
+fn median3_interior(r0: usize, r1: usize, r2: usize, w: usize, data: &[f32], row_out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU reports AVX2.
+            unsafe { return median3_interior_avx2(data, r0, r1, r2, w, row_out) }
+        }
+    }
+    median3_interior_body(data, r0, r1, r2, w, row_out)
+}
+
 /// Windowed median filter (odd `size`, reflect boundary), row-parallel.
 /// The window is tiny (9 or 25 elements for size 3/5) so a per-pixel gather
 /// beats scipy's generic rank-filter machinery. Interior pixels (no boundary
@@ -2628,17 +2664,7 @@ fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize) -> Vec<f3
             return;
         }
         if size == 3 {
-            let r0 = (y - 1) * w;
-            let r1 = y * w;
-            let r2 = (y + 1) * w;
-            for x in 1..w - 1 {
-                let mut p = [
-                    data[r0 + x - 1], data[r0 + x], data[r0 + x + 1],
-                    data[r1 + x - 1], data[r1 + x], data[r1 + x + 1],
-                    data[r2 + x - 1], data[r2 + x], data[r2 + x + 1],
-                ];
-                row_out[x] = median9(&mut p);
-            }
+            median3_interior((y - 1) * w, y * w, (y + 1) * w, w, data, row_out);
         } else {
             // size == 5: contiguous 5x5 gather + O(n) quickselect.
             // (f32::total_cmp was tried here and measured slightly slower
