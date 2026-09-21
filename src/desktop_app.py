@@ -331,7 +331,7 @@ class SetupForm(ttk.Frame):
         self._nav = nav
 
         self.expert_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(nav, text='Show expert options', variable=self.expert_var,
+        ttk.Checkbutton(nav, text='Expert options', variable=self.expert_var,
                         command=self._refresh_expert).pack(side='bottom', anchor='w',
                                                            padx=8, pady=8)
 
