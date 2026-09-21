@@ -36,7 +36,7 @@ from src.io_fits import load_frame
 from src.models import Config, FrameInfo, ProcessingStats
 from src.quality import compute_quality_metrics, estimate_bortle, validate_image_data
 from src.stacking import lacosmic_reject
-from src.utils import format_time, print_quality_table, safe_print
+from src.utils import format_time, mp_context, print_quality_table, safe_print
 
 try:
     from tqdm import tqdm
@@ -1001,7 +1001,7 @@ def execute_frame_processing(
                  for i in range(n)]
 
         try:
-            with ProcessPoolExecutor(max_workers=workers,
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
                                                _session_cfa)) as pool:
@@ -1408,7 +1408,7 @@ def reload_accepted_frames(
         _orig_to_j = {orig: j for j, orig in enumerate(final_indices)}
 
         try:
-            with ProcessPoolExecutor(max_workers=workers,
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
                                                _session_cfa)) as pool:

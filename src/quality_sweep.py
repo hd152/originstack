@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import FrameInfo, ProcessingStats
-from src.utils import format_time, safe_print
+from src.utils import format_time, mp_context, safe_print
 
 try:
     from tqdm import tqdm
@@ -202,7 +202,7 @@ def run_quality_sweep(root: str, args) -> int:
         return key, sig, None
 
     prefetch_workers = max(4, min(16, workers * 2))
-    with ProcessPoolExecutor(max_workers=workers,
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                              initializer=_pin_worker_to_single_thread) as pool, \
          ThreadPoolExecutor(max_workers=prefetch_workers) as prefetch_pool:
         if folders:

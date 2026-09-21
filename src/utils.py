@@ -296,3 +296,16 @@ def header_get_first(header, keys, cast=None, default=None):
         except (TypeError, ValueError):
             continue
     return default
+
+
+def mp_context():
+    """The multiprocessing context every process pool here must use: ``spawn``.
+
+    Linux's default start method (``fork`` before Python 3.14) copies the parent after
+    it has already started native threads -- the Rust kernels' rayon pool, OpenBLAS --
+    into children that inherit that pool's state but none of its threads, so the first
+    parallel call in a worker waits forever (seen: a packaged Linux build hung in Phase 1
+    with four idle workers). Windows only ever had ``spawn``; using it everywhere makes the
+    platforms behave alike, at the cost of each worker importing the stack once."""
+    import multiprocessing
+    return multiprocessing.get_context("spawn")
