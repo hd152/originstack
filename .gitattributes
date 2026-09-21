@@ -9,3 +9,7 @@ vendor/** text eol=lf
 
 # Lockfile: committed, keep LF so it doesn't churn between platforms.
 ext/astro_native/Cargo.lock text eol=lf
+
+# Shell scripts must keep LF or the shebang line breaks on Linux.
+*.sh text eol=lf
+packaging/linux/** text eol=lf

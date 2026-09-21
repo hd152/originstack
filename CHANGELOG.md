@@ -6,6 +6,25 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Linux build.** `packaging/build_linux.sh` produces `OriginStack-<version>-linux-x64.tar.gz` (+ `.sha256`): the desktop
+  app as a PyInstaller bundle with `install.sh` (per-user install into `~/.local/share`, an application-menu entry, and
+  `--uninstall`). `packaging/verify_build.sh` runs it under a display and checks that it starts, that the native Rust
+  kernels loaded rather than the numpy fallback, and that a real multi-worker stack completes. The release workflow builds
+  it on `ubuntu-22.04` (glibc 2.35) and attaches it to the release; it can also be run by hand from the Actions tab.
+
+### Fixed
+
+- **Linux: Phase 1 hung forever with the native extension built.** Process pools used the platform default start method,
+  which is `fork` on Linux before Python 3.14. The workers were copied after the Rust kernels' thread pool had started, so
+  each inherited that pool's state without its threads and waited forever on its first parallel call (a packaged build sat
+  for two hours with four idle workers). Every pool now uses `spawn`, as Windows always did (`src.utils.mp_context`), with a
+  test that fails if a pool is added without it.
+- **Desktop app off Windows:** logs went to the current directory; they now go to `$XDG_STATE_HOME/OriginStack/logs`
+  (`~/Library/Logs` on macOS). Error and confirm-on-close dialogs did nothing on Linux; they now use Tk's message boxes. The
+  window icon and fonts are set per platform.
+
 ## [2.2.1] - 2026-09-21
 
 ### Added

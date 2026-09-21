@@ -68,6 +68,26 @@ Not bundled:
   Explorer's zip view extracts only the exe (into a `...zip.aca` temp folder), not its `_internal\`
   folder, and fails with "Failed to load Python DLL". Use the installer, or **Extract All** first.
 
+## Linux
+
+`packaging/build_linux.sh` builds the same PyInstaller bundle on Linux and packs it as
+`OriginStack-<VERSION>-linux-x64.tar.gz` (+ `.sha256`) containing the bundle, `install.sh` (per-user install
+into `~/.local/share`, a menu entry, `--uninstall`) and a short README. `packaging/verify_build.sh` is the
+counterpart of `verify_build.ps1`: it launches the bundle under a display (or `xvfb-run`), requires the startup
+log to say the native kernels loaded, then runs `--verify-headless` with four workers on synthetic data.
+
+Needs a Python **with tkinter** (`apt install python3-tk`, or a distribution of Python that bundles Tk), a Rust
+toolchain, and `libtk8.6`/`libtcl8.6` present at build time so PyInstaller can collect them. The bundle needs a glibc at
+least as new as the build machine's, so the release workflow builds on `ubuntu-22.04` (glibc 2.35) rather than
+the newest image. To try it without a release, run the "Release" workflow by hand from the Actions tab: the Linux
+job runs and keeps the tarball as a workflow artifact.
+
+Local test from Windows: WSL2 works (WSLg provides the display). `sudo` is not needed if you install a Python with
+Tk via `uv python install 3.12` and Rust via `rustup`; a Python whose Tcl/Tk lives outside the default library path (uv's) also
+needs `LD_LIBRARY_PATH` pointing at its `lib/` while building, or the bundle misses `libtcl9tk9.0.so`.
+`verify_build.sh` exists because both of the problems found this way -- that missing library and a Phase 1 deadlock
+from `fork` -- only showed up by running the built bundle.
+
 ## Installer
 
 `packaging\build_installer.ps1` wraps `dist\OriginStack\` in a normal `OriginStack-<VERSION>-setup.exe`

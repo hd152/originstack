@@ -1,11 +1,15 @@
-name: Release (Windows desktop app build)
+name: Release (desktop app builds)
 
 on:
   push:
     tags: ['v*']
+  # Manual run: builds and verifies the Linux bundle and keeps it as a workflow artifact
+  # (nothing is attached to a release). Lets the Linux job be tested without tagging.
+  workflow_dispatch:
 
 jobs:
   build-windows:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     permissions:
       contents: write
@@ -140,3 +144,61 @@ jobs:
           $zip = Get-ChildItem "packaging\dist\OriginStack-*-windows-x64.zip" | Select-Object -First 1
           $setup = Get-ChildItem "packaging\dist\OriginStack-*-setup.exe" | Select-Object -First 1
           gh release upload "${{ github.ref_name }}" $zip.FullName $setup.FullName --clobber
+
+  # Linux bundle: built on the oldest runner still offered so the result runs on any glibc at
+  # least as new (Ubuntu 22.04 / Debian 12 / Fedora 36 and later). The Windows job above signs;
+  # this one does not (Linux has no equivalent of Authenticode).
+  build-linux:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/astro_native
+
+      - name: System packages (Tk runtime for the bundle, virtual display for the check)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libtk8.6 libtcl8.6 xvfb
+          python -c "import tkinter; print('tkinter', tkinter.TkVersion)"
+
+      - name: Verify VERSION matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(tr -d '[:space:]' < VERSION)"
+          [ "$tag" = "$ver" ] || { echo "Tag v$tag does not match VERSION file ($ver)"; exit 1; }
+
+      - name: Build
+        run: ./packaging/build_linux.sh
+
+      - name: Verify the bundle runs
+        run: ./packaging/verify_build.sh
+
+      - name: Keep the bundle as a workflow artifact (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: OriginStack-linux-x64
+          path: |
+            packaging/dist/OriginStack-*-linux-x64.tar.gz
+            packaging/dist/OriginStack-*-linux-x64.tar.gz.sha256
+
+      - name: Attach tarball and checksum to existing GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}"             packaging/dist/OriginStack-*-linux-x64.tar.gz             packaging/dist/OriginStack-*-linux-x64.tar.gz.sha256 --clobber
