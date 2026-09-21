@@ -2,7 +2,7 @@
 
 Stacks one folder of lights (plus any bias/dark/flat files in it) with OriginStack and
 with Siril's command-line build, then reports per-stage wall time, star sharpness
-(FWHM, measured with one detector on both stacks) and noise at matched resolution.
+(FWHM, fitted on the same stars in both stacks) and noise.
 
     python tools/bench_vs_siril.py "D:/astro/Omega/session1" --workdir bench_out
     python tools/bench_vs_siril.py lights/ --siril "C:/Program Files/Siril/bin/siril-cli.exe"
@@ -18,8 +18,12 @@ How the numbers are made comparable (and where they are not):
     OriginStack's total *and* its total without Phase 4, which is the like-for-like figure.
   * Noise is a lag-4 pixel-difference MAD on the linear stacks after registering
     OriginStack's onto Siril's grid and matching the flux scale per channel. It depends on
-    resolution (a blurrier stack is smoother per pixel), so it is also given after blurring
-    OriginStack's stack to a sharpness no better than Siril's.
+    resolution (a blurrier stack is smoother per pixel), so read it together with the star
+    widths; the blurred rows are for reference only.
+  * Star width is fitted on ONE shared set of stars, at the same positions in both stacks and
+    on each stack's own pixel grid (see common_star_fwhm.py). Comparing each stack's FWHM over
+    its own detected star list is not valid: which stars get picked changes the number by more
+    than the differences being claimed (an earlier version of this tool did exactly that).
 """
 from __future__ import annotations
 
@@ -37,6 +41,7 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 SIRIL_CANDIDATES = (
     r"C:\Program Files\Siril\bin\siril-cli.exe",
@@ -237,13 +242,20 @@ def main():
     for name, r in (("OriginStack", os_res), ("Siril", si_res)):
         print(f"{name:<12} peak memory {r['peak_private_mb'] / 1024:6.1f} GB   peak disk {r['peak_disk_gb']:6.1f} GB   "
               f"frames stacked {r['frames_stacked']} of {len(lights)}")
-    print("\n=== Stack quality (same detector on both linear stacks) ===")
-    print(f"FWHM  OriginStack {os_fwhm:.2f} px   Siril {si_fwhm:.2f} px      stars {os_stars} / {si_stars}")
+    from common_star_fwhm import common_star_fwhm
+    shared = common_star_fwhm(os_cube, si_cube)
+    print("\n=== Star width on the same stars in both linear stacks (smaller is sharper) ===")
+    if shared:
+        print(f"OriginStack {shared['a']:.2f} px (IQR {shared['a_iqr'][0]:.2f}-{shared['a_iqr'][1]:.2f})   "
+              f"Siril {shared['b']:.2f} px (IQR {shared['b_iqr'][0]:.2f}-{shared['b_iqr'][1]:.2f})   "
+              f"median per-star ratio {shared['ratio_a_over_b']:.3f}   n={shared['n']}")
+    else:
+        print("too few matched, unsaturated, isolated stars to compare")
+    print(f"(stars detected: OriginStack {os_stars}, Siril {si_stars}; not comparable as a sharpness figure)")
     if rows:
-        print("\nOriginStack noise / Siril noise (R, G, B) after blurring OriginStack's stack:")
+        print("\nOriginStack noise / Siril noise (R, G, B); rows after 0 blur OriginStack's stack, for reference only:")
         for sigma, (fw, r) in rows.items():
             print(f"  blur sigma {sigma:<4} FWHM {fw:5.2f}   {r[0]:.2f} {r[1]:.2f} {r[2]:.2f}")
-        print("  Compare at the row whose FWHM is closest to Siril's without being sharper.")
     with open(os.path.join(args.workdir, "results.json"), "w") as fh:
         json.dump({"lights": len(lights), "originstack": {"wall": os_wall, "phases": os_phases, "fwhm": os_fwhm,
                                                           "stars": os_stars, **os_res},

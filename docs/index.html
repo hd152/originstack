@@ -45,166 +45,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..600&display=swap" rel="stylesheet">
-<style>
-:root {
-  --night: #0b1220;
-  --night-2: #16223a;
-  --plate: #ecf0f3;
-  --plate-2: #dfe5ea;
-  --ink: #14213a;
-  --slate: #56667c;
-  --ha: #b3312a;
-  --ha-dark: #93261f;
-  --oiii: #1d7f86;
-  --line: rgba(20, 33, 58, .16);
-  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
-  --text: "Source Serif 4", Georgia, "Times New Roman", serif;
-  --gutter: clamp(20px, 5vw, 72px);
-}
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
-body {
-  margin: 0;
-  background: var(--plate);
-  color: var(--ink);
-  font-family: var(--text);
-  font-size: 1.125rem;
-  line-height: 1.62;
-  -webkit-font-smoothing: antialiased;
-}
-img { max-width: 100%; display: block; }
-a { color: var(--ha-dark); text-underline-offset: .18em; }
-a:hover { color: var(--ha); }
-:focus-visible { outline: 3px solid var(--oiii); outline-offset: 3px; }
-h1, h2, h3 { font-family: var(--display); font-weight: 700; line-height: 1.08; margin: 0; letter-spacing: -.015em; }
-p { margin: 0 0 1em; }
-.wrap { padding-inline: var(--gutter); max-width: 1320px; margin-inline: auto; }
-.measure { max-width: 64ch; }
-
-/* ---------- hero: the dark room ---------- */
-.hero { background: var(--night); color: #e8edf5; padding-bottom: clamp(36px, 6vw, 80px); }
-.hero a { color: #e8edf5; }
-.bar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-block: 22px; }
-.bar img { height: 52px; width: auto; }
-.bar nav { display: flex; gap: clamp(16px, 3vw, 34px); font-family: var(--display); font-size: 1rem; font-weight: 500; }
-.bar nav a { text-decoration: none; opacity: .82; }
-.bar nav a:hover { opacity: 1; text-decoration: underline; }
-.hero h1 {
-  font-size: clamp(2.5rem, 6.4vw, 5.6rem);
-  font-variation-settings: "wdth" 88;
-  max-width: 20ch;
-  text-wrap: balance;
-  margin-top: clamp(20px, 4vw, 52px);
-}
-.hero .lede { font-size: clamp(1.1rem, 1.6vw, 1.32rem); max-width: 56ch; color: #bfcadb; margin: 22px 0 0; }
-.actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 30px; align-items: center; }
-.btn {
-  display: inline-block; font-family: var(--display); font-weight: 600; font-size: 1.05rem;
-  padding: 14px 24px; border-radius: 4px; text-decoration: none; border: 2px solid transparent;
-}
-.btn.primary { background: var(--ha); color: #fff; }
-.btn.primary:hover { background: var(--ha-dark); color: #fff; }
-.btn.quiet { border-color: rgba(232, 237, 245, .5); color: #e8edf5; }
-.btn.quiet:hover { border-color: #e8edf5; background: rgba(232, 237, 245, .08); }
-.fine { font-size: .98rem; color: #9fb0c6; margin: 14px 0 0; max-width: 62ch; }
-
-/* before / after wipe */
-.wipe {
-  --p: 50%;
-  position: relative; margin-top: clamp(30px, 5vw, 60px);
-  aspect-ratio: 2925 / 2016; overflow: hidden; background: #000; touch-action: pan-y;
-  outline: 1px solid rgba(232, 237, 245, .16);
-}
-.wipe img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.wipe .before { clip-path: inset(0 calc(100% - var(--p)) 0 0); }
-.wipe .line { position: absolute; top: 0; bottom: 0; left: var(--p); width: 2px; margin-left: -1px; background: #fff; pointer-events: none; }
-.wipe .grip {
-  position: absolute; top: 50%; left: var(--p); width: 46px; height: 46px; margin: -23px 0 0 -23px;
-  border-radius: 50%; background: #fff; color: var(--night); pointer-events: none;
-  display: grid; place-items: center; font-family: var(--display); font-weight: 700; font-size: 1.05rem; letter-spacing: -.1em;
-}
-.wipe .cap {
-  position: absolute; bottom: 14px; padding: 6px 12px; background: rgba(11, 18, 32, .78);
-  color: #fff; font-family: var(--display); font-size: .95rem; font-weight: 500; pointer-events: none;
-}
-.wipe .cap.l { left: 14px; }
-.wipe .cap.r { right: 14px; }
-.wipe input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
-.wipe:focus-within { outline: 3px solid var(--oiii); outline-offset: 3px; }
-@media (max-width: 600px) {
-  .bar nav { display: none; }
-  .wipe .cap { font-size: .8rem; padding: 4px 9px; }
-  .wipe .cap.l { bottom: 46px; }
-}
-
-/* ---------- sections on the desk ---------- */
-section { padding-block: clamp(56px, 9vw, 120px); }
-section + section { border-top: 1px solid var(--line); }
-h2 { font-size: clamp(1.9rem, 4vw, 3.1rem); font-variation-settings: "wdth" 92; max-width: 22ch; }
-.intro { margin-top: 18px; color: var(--slate); }
-.intro strong { color: var(--ink); font-weight: 600; }
-
-/* where the time goes */
-.run { display: flex; height: 64px; margin: 42px 0 20px; border: 1px solid var(--line); }
-.run span { display: block; height: 100%; }
-.legend { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px 28px; font-family: var(--display); font-size: 1rem; }
-.legend li { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: baseline; }
-.legend i { width: 14px; height: 14px; display: block; transform: translateY(2px); }
-.legend b { font-variant-numeric: tabular-nums; font-weight: 600; }
-.phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 30px 44px; margin-top: 56px; }
-.phases h3 { font-size: 1.3rem; margin-bottom: 8px; }
-.phases p { color: #33435c; margin: 0; }
-.phases > div { border-left: 3px solid var(--ink); padding-left: 18px; }
-
-/* app screenshots */
-.shots { display: grid; gap: clamp(22px, 3vw, 40px); margin-top: 44px; grid-template-columns: repeat(12, 1fr); }
-.shot { margin: 0; }
-.shot img { width: 100%; height: auto; border: 1px solid var(--line); background: var(--night-2); }
-.shot figcaption { margin-top: 12px; font-size: 1rem; color: #33435c; max-width: 60ch; }
-.shot.big { grid-column: span 12; }
-.shot.s7 { grid-column: span 7; }
-.shot.s5 { grid-column: span 5; }
-@media (max-width: 800px) { .shot.s7, .shot.s5 { grid-column: span 12; } }
-
-/* comparison */
-.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: clamp(28px, 6vw, 90px); margin-top: 40px; align-items: start; }
-@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
-.chart h3 { font-size: 1.15rem; margin: 26px 0 10px; }
-.chart h3:first-child { margin-top: 0; }
-.chart h3.sub { font-size: 1rem; font-weight: 600; margin: 18px 0 6px; color: var(--slate); }
-.row { display: grid; grid-template-columns: 8.6rem 1fr; gap: 12px; align-items: center; margin: 6px 0; font-family: var(--display); font-size: 1rem; }
-.track { display: flex; align-items: center; gap: 10px; }
-.track i { display: block; height: 22px; background: var(--slate); }
-.track i.us { background: var(--ha); }
-.track b { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
-.chart small { display: block; margin-top: 14px; color: var(--slate); font-size: .95rem; }
-table { border-collapse: collapse; width: 100%; font-family: var(--display); font-size: 1rem; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: 11px 12px 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-weight: 600; }
-td.n, th.n { text-align: right; padding-right: 0; padding-left: 12px; white-space: nowrap; }
-caption { text-align: left; font-family: var(--text); color: var(--slate); font-size: .98rem; padding-bottom: 10px; }
-.caveat { margin-top: 34px; padding-left: 18px; border-left: 3px solid var(--ha); color: #33435c; }
-
-/* gallery */
-.gallery { display: grid; gap: clamp(14px, 2vw, 26px); margin-top: 44px; grid-template-columns: 1.55fr 1fr; align-items: start; }
-.gallery figure { margin: 0; }
-.gallery .stack { display: grid; gap: clamp(14px, 2vw, 26px); }
-.gallery img { width: 100%; height: auto; }
-.gallery figcaption { margin-top: 9px; font-size: 1rem; color: #33435c; }
-@media (max-width: 800px) { .gallery { grid-template-columns: 1fr; } }
-
-/* get it */
-.get { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px 56px; margin-top: 40px; }
-.get h3 { font-size: 1.35rem; margin-bottom: 8px; }
-.get p { color: #33435c; }
-pre { margin: 0 0 1em; padding: 14px 16px; background: var(--night); color: #dbe5f3; overflow-x: auto; font: .92rem/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace; }
-.plain { color: var(--slate); margin-top: 44px; }
-
-footer { background: var(--night); color: #9fb0c6; padding-block: 40px; font-size: 1rem; }
-footer a { color: #dbe5f3; }
-footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 30px; justify-content: space-between; }
-</style>
+<link rel="stylesheet" href="site.css">
 </head>
 <body>
 
@@ -216,6 +57,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 30px; justify-content: 
         <a href="#time">Speed</a>
         <a href="#app">The app</a>
         <a href="#compare">Compared</a>
+        <a href="advanced.html">Advanced</a>
         <a href="#get">Install</a>
       </nav>
     </div>
@@ -313,34 +155,43 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 30px; justify-content: 
 <section id="compare">
   <div class="wrap">
     <h2>How it compares with Siril and DeepSkyStacker</h2>
-    <p class="intro measure">Same frames, same bias, dark and flat, one machine, each tool on its default-style settings. Two Celestron Origin sessions: the Omega Nebula (114 × 30 s) and the Sunflower Galaxy (158 × 20 s).</p>
+    <p class="intro measure">Same frames, same bias, dark and flat, one machine, each tool on default-style settings. Three Celestron Origin sessions: the Omega Nebula (114 × 30 s), the Sunflower Galaxy (158 × 20 s) and the Sculptor Galaxy (532 × 10 s).</p>
+
+    <table class="wide">
+      <caption>OriginStack first, Siril second. Stack only means without OriginStack's finishing steps, which Siril does not have.</caption>
+      <thead><tr><th>Session</th><th class="n">Stack only</th><th class="n">OriginStack, finished image</th><th class="n">Peak memory</th><th class="n">Star width</th></tr></thead>
+      <tbody>
+        <tr><th>Omega, 114 frames</th><td class="n">61 s / 61 s</td><td class="n">116 s</td><td class="n">17.1 / 6.6 GB</td><td class="n">5.12 / 4.56 px</td></tr>
+        <tr><th>Sunflower, 158 frames</th><td class="n">83 s / 69 s</td><td class="n">134 s</td><td class="n">16.8 / 7.9 GB</td><td class="n">3.75 / 3.60 px</td></tr>
+        <tr><th>Sculptor, 532 frames</th><td class="n">259 s / 147 s</td><td class="n">273 s</td><td class="n">16.8 / 11.2 GB</td><td class="n">3.05 / 2.97 px</td></tr>
+      </tbody>
+    </table>
 
     <div class="split">
       <div class="chart">
-        <h3>Star sharpness (smaller is sharper)</h3>
+        <h3>Star width on the same stars (smaller is sharper)</h3>
         <h3 class="sub">Omega</h3>
-        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:71.4%"></i><b>7.14 px</b></div></div>
-        <div class="row"><span>DeepSkyStacker</span><div class="track"><i style="width:85.9%"></i><b>8.59 px</b></div></div>
-        <div class="row"><span>Siril</span><div class="track"><i style="width:88.1%"></i><b>8.81 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:70.2%"></i><b>4.56 px</b></div></div>
+        <div class="row"><span>DeepSkyStacker</span><div class="track"><i style="width:74.3%"></i><b>4.83 px</b></div></div>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:78.8%"></i><b>5.12 px</b></div></div>
         <h3 class="sub">Sunflower</h3>
-        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.7%"></i><b>5.47 px</b></div></div>
-        <div class="row"><span>Siril</span><div class="track"><i style="width:58.1%"></i><b>5.81 px</b></div></div>
-        <small>Star width (FWHM) measured with one detector on all the linear stacks.</small>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:55.4%"></i><b>3.60 px</b></div></div>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:57.7%"></i><b>3.75 px</b></div></div>
+        <h3 class="sub">Sculptor</h3>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:45.7%"></i><b>2.97 px</b></div></div>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:46.9%"></i><b>3.05 px</b></div></div>
+        <small>A Gaussian fit to each of up to 400 bright, unsaturated, isolated stars, at the same positions in both stacks, each on its own pixel grid.</small>
       </div>
 
-      <table>
-        <caption>Time to a stacked image</caption>
-        <thead><tr><th></th><th class="n">Omega</th><th class="n">Sunflower</th></tr></thead>
-        <tbody>
-          <tr><th>OriginStack, stack only</th><td class="n">about 60 s</td><td class="n">about 78 s</td></tr>
-          <tr><th>OriginStack, finished image</th><td class="n">about 113 s</td><td class="n">about 126 s</td></tr>
-          <tr><th>Siril, stack only</th><td class="n">53 to 66 s</td><td class="n">about 69 s</td></tr>
-          <tr><th>DeepSkyStacker</th><td class="n">14 min 8 s</td><td class="n">not run</td></tr>
-        </tbody>
-      </table>
+      <div class="verdict">
+        <h3>What the numbers say</h3>
+        <p><strong>On a plain linear stack, Siril is as good or better in these tests.</strong> It is as fast on Omega and faster on the two larger sessions, its stars are equally sharp or a little sharper, it uses less memory, and its stack is less noisy: OriginStack's per-pixel noise is 1.0 to 1.3 times Siril's on Omega, 1.2 to 1.3 times on Sunflower and 1.2 to 1.6 times on Sculptor.</p>
+        <p><strong>OriginStack's memory does not grow with the session.</strong> It stayed at 16.8 to 17.1 GB from 114 to 532 frames, set by the number of workers (<code>-j</code> lowers it), while Siril's grew from 6.6 to 11.2 GB. Peak temporary disk was about the same for both, at 18 to 61 GB.</p>
+        <p><strong>DeepSkyStacker</strong> took 14 min 8 s on Omega, produced stars a little softer than Siril's, and at its default settings left hot-pixel streaks and a few misregistered frames.</p>
+      </div>
     </div>
 
-    <p class="caveat measure">Siril is as fast as OriginStack for a plain linear stack and faster on the Sunflower session; if you want nothing but that, use it. OriginStack's stars are tighter on both sessions, and at the same sharpness its noise is equal or lower. DeepSkyStacker ran at its defaults, and its result showed hot-pixel streaks and a few misregistered frames, so a tuned run would look better. Two sessions from one camera are a small sample. Full method and caveats are in the <a href="https://github.com/hd152/originstack#compared-with-siril-and-deepskystacker">README</a>, and <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats the Siril comparison on your own frames.</p>
+    <p class="caveat measure">If a linear stack is all you want, Siril is a fine choice. OriginStack's case is what comes after the stack: it finishes the image in the same run with no setup, explains the night with <a href="advanced.html#diagnostics">diagnostics</a>, runs <a href="advanced.html#workflow">fully offline</a> if you ask, and does the <a href="advanced.html">rest</a> the other tools leave to you. It is not yet faster or cleaner than Siril at stacking, and we would rather say so. Three sessions from one camera are a small sample, and both tools were left at default-style settings. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats all of this on your own frames.</p>
   </div>
 </section>
 
@@ -393,7 +244,7 @@ python desktop_app.py</pre>
 <footer>
   <div class="wrap">
     <span>OriginStack is free software under the MIT licence.</span>
-    <span><a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a></span>
+    <span><a href="advanced.html">Advanced features</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a></span>
   </div>
 </footer>
 

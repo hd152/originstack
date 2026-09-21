@@ -8,11 +8,26 @@ match the `VERSION` file and `v*` git tags.
 
 ### Added
 
+- **Advanced features page** on the website (`docs/advanced.html`): what each advanced feature does and its flag, real
+  session-report, aberration and dither figures from the Omega run, and an honest list of what was tried and did not work.
 - **Linux build.** `packaging/build_linux.sh` produces `OriginStack-<version>-linux-x64.tar.gz` (+ `.sha256`): the desktop
   app as a PyInstaller bundle with `install.sh` (per-user install into `~/.local/share`, an application-menu entry, and
   `--uninstall`). `packaging/verify_build.sh` runs it under a display and checks that it starts, that the native Rust
   kernels loaded rather than the numpy fallback, and that a real multi-worker stack completes. The release workflow builds
   it on `ubuntu-22.04` (glibc 2.35) and attaches it to the release; it can also be run by hand from the Actions tab.
+
+### Changed
+
+- **The Siril comparison was wrong about sharpness, and is corrected.** It reported OriginStack's stars as tighter than
+  Siril's, from comparing each stack's FWHM over its *own* detected star list; which stars were picked moved the number
+  by more than the claimed difference. Measured on the same stars in both stacks, each on its own pixel grid
+  (`tools/common_star_fwhm.py`, tested on synthetic fields of known width), OriginStack's stars are 13% wider on Omega and
+  about equal on Sunflower and Sculptor. A single OriginStack frame after calibration and debayering is slightly sharper
+  than Siril's; the *stack* is 6-13% wider than its own single frames, so registration is where it is lost. Three
+  sessions (Omega 114, Sunflower 158, Sculptor 532 frames) now also report memory and disk: OriginStack's peak memory is
+  flat at ~17 GB from 114 to 532 frames while Siril's grows from 6.6 to 11.2 GB, Siril is as fast on Omega and 1.2-1.8x
+  faster on the larger sessions, and OriginStack's stack is 1.0-1.6x noisier per pixel. README and website say so.
+  `tools/bench_vs_siril.py` measures memory and disk and uses the shared-star metric.
 
 ### Fixed
 
