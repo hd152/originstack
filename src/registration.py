@@ -156,7 +156,46 @@ def _blind_match_transform(ref_stars: Optional[Any], img_stars: Optional[Any]) -
 
 def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
                     transform: Optional[Any] = None,
-                    local_field: Optional[np.ndarray] = None) -> np.ndarray:
+                    local_field: Optional[np.ndarray] = None,
+                    crop: Optional[Tuple[int, int, int, int]] = None) -> np.ndarray:
+    """``_apply_transform_impl``'s warp, optionally of only a window of the output.
+
+    ``crop=(top, bottom, left, right)`` returns ``warp(img)[top:bottom, left:right]``. The
+    native Lanczos path computes just that window (bit-identical to slicing the full warp:
+    same arithmetic per pixel, see ``warp_affine_lanczos3``'s ``origin``); everything else
+    warps the full frame and slices. Phase 3 discards everything outside the common crop, so
+    warping it was pure waste -- 41% of the pixels on a session with a 1415x2598 crop of
+    2048x3056.
+    """
+    if crop is None:
+        return _apply_transform_impl(img, shift, transform, local_field)
+    top, bottom, left, right = (int(v) for v in crop)
+    native_ok = (local_field is None and HAS_NATIVE and not get_gpu().active
+                 and isinstance(img, np.ndarray) and img.dtype == np.float32
+                 and img.flags['C_CONTIGUOUS'] and img.ndim == 3
+                 and hasattr(_native, 'warp_affine_lanczos3')
+                 and 0 <= top < bottom <= img.shape[0] and 0 <= left < right <= img.shape[1])
+    if native_ok:
+        try:
+            if transform is not None:
+                R = transform.params[:2, :2]
+                t_xy = transform.params[:2, 2]
+                mat = R
+                off = -R @ np.array([t_xy[1], t_xy[0]])
+            else:
+                mat = np.eye(2)
+                off = np.array([-shift[0], -shift[1]], dtype=np.float64)
+            return _native.warp_affine_lanczos3(
+                img, mat.astype(np.float64).ravel().tolist(),
+                off.astype(np.float64).tolist(), bottom - top, right - left, 0.0, (top, left))
+        except Exception as exc:
+            _log.debug("native windowed warp failed (%s); warping the full frame", exc)
+    return _apply_transform_impl(img, shift, transform, local_field)[top:bottom, left:right]
+
+
+def _apply_transform_impl(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
+                          transform: Optional[Any] = None,
+                          local_field: Optional[np.ndarray] = None) -> np.ndarray:
     """Apply translation or affine transform to a multi-channel image.
 
     Uses cubic spline interpolation (order=3) for subpixel accuracy.

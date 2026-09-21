@@ -2168,3 +2168,89 @@ def test_luminance_native_bit_identical():
     rgb = rng.normal(500, 90, (70, 90, 3)).astype(np.float32)
     np.testing.assert_array_equal(
         _debayer_mod.luminance(rgb), 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+
+
+# ---------------------------------------------------------------------------
+# Windowed Lanczos-3 warp (crate 0.29): warping only the crop == cropping the warp
+# ---------------------------------------------------------------------------
+
+_HAS_ORIGIN = hasattr(native, "warp_affine_lanczos3") and "origin" in (
+    getattr(native.warp_affine_lanczos3, "__text_signature__", "") or "")
+
+
+@pytest.mark.skipif(not _HAS_ORIGIN, reason="astro_native warp lacks the window origin")
+@pytest.mark.parametrize("mat_off", [
+    ([0.9877, -0.1564, 0.1564, 0.9877], [13.7, -6.3]),     # 9 deg rotation
+    ([1.0, 0.0, 0.0, 1.0], [3.37, -2.21]),                 # translation (separable table path)
+    ([0.5, 0.0, 0.0, 0.5], [1.3, 0.7]),                    # scaling (separable, drizzle-like)
+    ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0]),                    # identity
+])
+@pytest.mark.parametrize("window", [(0, 0, 60, 70), (17, 23, 50, 61), (40, 30, 40, 80)])
+def test_windowed_warp_equals_cropped_full_warp(mat_off, window):
+    mat, off = mat_off
+    rng = np.random.default_rng(21)
+    img = rng.normal(500, 60, (100, 110, 3)).astype(np.float32)
+    top, left, hh, ww = window
+    full = native.warp_affine_lanczos3(img, mat, off, 100, 110, 0.0)
+    part = native.warp_affine_lanczos3(img, mat, off, hh, ww, 0.0, (top, left))
+    np.testing.assert_array_equal(part, full[top:top + hh, left:left + ww])
+
+
+@pytest.mark.skipif(not _HAS_ORIGIN, reason="astro_native warp lacks the window origin")
+@pytest.mark.parametrize("use_transform", [True, False])
+def test_apply_transform_crop_matches_slicing_the_full_warp(use_transform):
+    import math
+
+    from src.registration import apply_transform
+    rng = np.random.default_rng(22)
+    img = rng.normal(500, 60, (100, 110, 3)).astype(np.float32)
+    kw = {}
+    if use_transform:
+        th = math.radians(6.0)
+        params = np.array([[math.cos(th), -math.sin(th), 4.5],
+                           [math.sin(th), math.cos(th), -3.25],
+                           [0.0, 0.0, 1.0]])
+        kw["transform"] = type("T", (), {"params": params})()
+    else:
+        kw["shift"] = (2.6, -1.4)
+    full = apply_transform(img, **kw)
+    crop = (12, 88, 9, 97)
+    np.testing.assert_array_equal(apply_transform(img, crop=crop, **kw),
+                                  full[crop[0]:crop[1], crop[2]:crop[3]])
+    # a non-native request (a local displacement field) still honours the crop
+    field = np.zeros((4, 4, 2), np.float64)
+    a = apply_transform(img, local_field=field, crop=crop, **kw)
+    assert a.shape == (76, 88, 3)
+
+
+@pytest.mark.skipif(not _HAS_ORIGIN, reason="astro_native warp lacks the window origin")
+def test_rotated_warp_weight_table_matches_closed_form():
+    """The rotated warp takes its Lanczos weights from an interpolated table; against the closed
+    form (ORIGINSTACK_LANCZOS_EXACT=1, read once per process, hence the subprocess) nearly every
+    float32 output is identical and the rest differ by about an ulp."""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    code = (
+        "import sys, math, numpy as np, astro_native as n\n"
+        "rng = np.random.default_rng(3)\n"
+        "yy, xx = np.mgrid[0:300, 0:340]\n"
+        "img = (500 + 300*np.sin(xx/17.0)*np.cos(yy/23.0) + rng.normal(0, 30, (300, 340))).astype(np.float32)\n"
+        "img = np.stack([img, img*0.9, img*1.1], 2).astype(np.float32)\n"
+        "img[rng.random((300, 340)) < 1e-3] += 5000\n"
+        "th = math.radians(7.0)\n"
+        "M = [math.cos(th), -math.sin(th), math.sin(th), math.cos(th)]\n"
+        "np.save(sys.argv[1], n.warp_affine_lanczos3(img, M, [10.3, -4.1], 300, 340))\n")
+    with tempfile.TemporaryDirectory() as d:
+        outs = {}
+        for tag, exact in (("table", "0"), ("exact", "1")):
+            path = os.path.join(d, tag + ".npy")
+            env = dict(os.environ, ORIGINSTACK_LANCZOS_EXACT=exact)
+            subprocess.run([sys.executable, "-c", code, path], check=True, env=env)
+            outs[tag] = np.load(path)
+    a, b = outs["exact"].astype(np.float64), outs["table"].astype(np.float64)
+    assert np.isfinite(b).all()
+    assert (a == b).mean() > 0.99
+    ulp = np.spacing(np.abs(outs["exact"]).astype(np.float32)).astype(np.float64)
+    assert (np.abs(a - b) <= 4 * ulp + 1e-3).all()

@@ -2106,9 +2106,9 @@ def run_stacking_phase(
                 lf = (displacement_fields[j]
                       if displacement_fields is not None and j < len(displacement_fields)
                       else None)
-                aligned = apply_transform(rgb, shift=shifts[j], transform=transforms[j],
-                                         local_field=lf)
-                mem_aligned[j] = aligned[top:bottom, left:right, :]
+                # only the crop is warped (the rest is discarded)
+                mem_aligned[j] = apply_transform(rgb, shift=shifts[j], transform=transforms[j],
+                                                 local_field=lf, crop=(top, bottom, left, right))
 
         n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                            Config.GPU_VRAM_RESERVE_MB), n_final)
@@ -2621,7 +2621,7 @@ def run_stacking_phase(
                           if displacement_fields is not None and j < len(displacement_fields)
                           else None)
                     return j, apply_transform(rgb, shift=shifts[j], transform=transforms[j],
-                                             local_field=lf)[top:bottom, left:right, :]
+                                             local_field=lf, crop=(top, bottom, left, right))
 
             n_workers = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                                   Config.GPU_VRAM_RESERVE_MB), n_final)
