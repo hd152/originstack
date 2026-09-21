@@ -6,6 +6,29 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-09-21
+
+### Added
+
+- **`--offline`: no network requests at all.** A normal run may look up a target name on SIMBAD when the built-in table
+  does not know it -- the session name, the FITS `OBJECT` header, and the name derived from the folder -- and the optional
+  features (plate solving, annotation, photometry, catalogue colour calibration, comet ephemerides) go online when enabled.
+  `--offline` (also a checkbox in the desktop app's Core options) switches all of it off, with a note in the log for any
+  enabled feature it skips. The guard sits in the low-level HTTP helpers, so every service is covered, and a test counts
+  real connection attempts. The README has a new "Network use" table.
+- **Project website** at https://hd152.github.io/originstack/ (GitHub Pages, from `docs/`).
+
+### Fixed
+
+- **`originstack.py --help` crashed** with `ValueError: unsupported format character` since 2026-09-19: the
+  `--cfa-drizzle` help text contained a bare `%`. Escaped, and a test now formats every help string.
+- **Desktop app:** the "Show expert options" checkbox was clipped in its sidebar; it now reads "Expert options".
+
+### Changed
+
+- **Release workflow:** each SignPath signing step waits up to 2 hours for the manual approval the Foundation requires
+  (the default was 10 minutes). Signing stays off until the project is approved.
+
 ## [2.2.0] - 2026-09-21
 
 ### Changed
