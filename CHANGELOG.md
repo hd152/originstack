@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-20
+
 ### Added
 
 - **`-o` accepts a folder.** Give an existing folder, a path ending in a separator, or a name with no
