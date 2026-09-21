@@ -67,20 +67,53 @@ def split_inputs(folder):
     return lights, cal
 
 
+def run_sampled(cmd, disk_path, **kw):
+    """Run *cmd* and sample, every 0.25 s, the private memory of the whole process tree
+    (workers included) and how far free space on *disk_path*'s drive has fallen. Private
+    bytes, not RSS: memory-mapped temp files and shared pages would otherwise be counted once
+    per process. Returns (returncode, stdout, seconds, peak_private_mb, peak_disk_gb)."""
+    import threading
+
+    import psutil
+
+    base_free = shutil.disk_usage(disk_path).free
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            errors="replace", **kw)
+    chunks = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()), daemon=True)
+    reader.start()
+    root = psutil.Process(proc.pid)
+    peak_mem = peak_disk = 0
+    t0 = time.time()
+    while proc.poll() is None:
+        total = 0
+        for p in [root] + root.children(recursive=True):
+            try:
+                mi = p.memory_info()
+                total += getattr(mi, "private", mi.rss)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        peak_mem = max(peak_mem, total)
+        peak_disk = max(peak_disk, base_free - shutil.disk_usage(disk_path).free)
+        time.sleep(0.25)
+    reader.join(timeout=10)
+    return proc.returncode, "".join(chunks), time.time() - t0, peak_mem / 2**20, peak_disk / 2**30
+
+
 def run_originstack(folder, workdir):
     out = os.path.join(workdir, "originstack.fits")
-    t0 = time.time()
-    proc = subprocess.run([sys.executable, os.path.join(ROOT, "originstack.py"), "-d", folder, "-o", out],
-                          capture_output=True, text=True, errors="replace")
-    wall = time.time() - t0
-    if proc.returncode != 0 or not os.path.exists(out):
-        sys.exit("OriginStack failed:\n" + proc.stdout[-2000:] + proc.stderr[-2000:])
+    rc, text, wall, mem, disk = run_sampled(
+        [sys.executable, os.path.join(ROOT, "originstack.py"), "-d", folder, "-o", out], workdir)
+    if rc != 0 or not os.path.exists(out):
+        sys.exit("OriginStack failed:\n" + text[-3000:])
     phases = {}
     for name in ("Quality+Load", "Registration", "Stacking", "Post-process", "Other (I/O)"):
-        m = re.search(re.escape(name) + r":\s+(?:(\d+)m )?([\d.]+)s", proc.stdout)
+        m = re.search(re.escape(name) + r":\s+(?:(\d+)m )?([\d.]+)s", text)
         if m:
             phases[name] = int(m.group(1) or 0) * 60 + float(m.group(2))
-    return out, wall, phases
+    m = re.search(r"Frames stacked:\s+(\d+)", text)
+    return out, wall, phases, {"peak_private_mb": mem, "peak_disk_gb": disk,
+                               "frames_stacked": int(m.group(1)) if m else None}
 
 
 def run_siril(siril, lights, cal, workdir):
@@ -102,21 +135,21 @@ def run_siril(siril, lights, cal, workdir):
         "stack r_pp_light rej 3 3 -norm=addscale -output_norm -rgb_equal -out=../siril_stack", "close", ""])
     with open(os.path.join(root, "run.ssf"), "w") as fh:
         fh.write(script)
-    t0 = time.time()
-    proc = subprocess.run([siril, "-d", root, "-s", "run.ssf"], capture_output=True, text=True, errors="replace")
-    wall = time.time() - t0
+    rc, text, wall, mem, disk = run_sampled([siril, "-d", root, "-s", "run.ssf"], root)
     out = os.path.join(root, "siril_stack.fit")
     if not os.path.exists(out):
-        sys.exit("Siril failed:\n" + proc.stdout[-2000:])
+        sys.exit("Siril failed:\n" + text[-3000:])
     # one "Execution time" line per command, in script order (register logs two: its two passes)
     secs = []
-    for m in re.finditer(r"Execution time: ([\d.]+) (ms|s)\b", proc.stdout):
+    for m in re.finditer(r"Execution time: ([\d.]+) (ms|s)\b", text):
         secs.append(float(m.group(1)) / (1000 if m.group(2) == "ms" else 1))
     stages = {}
     if len(secs) >= 6:
         stages = {"Load+calibrate+debayer": secs[0] + secs[1], "Registration": secs[2] + secs[3],
                   "Warp": secs[4], "Combine": secs[5]}
-    return out, wall, stages
+    m = re.search(r"(\d+) images have been stacked", text)
+    return out, wall, stages, {"peak_private_mb": mem, "peak_disk_gb": disk,
+                               "frames_stacked": int(m.group(1)) if m else None}
 
 
 def load_linear(path, siril=False):
@@ -185,9 +218,9 @@ def main():
     print(f"{len(lights)} lights; calibration: " + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in cal.items()))
 
     print("Running OriginStack ...")
-    os_path, os_wall, os_phases = run_originstack(args.folder, args.workdir)
+    os_path, os_wall, os_phases, os_res = run_originstack(args.folder, args.workdir)
     print("Running Siril ...")
-    si_path, si_wall, si_stages = run_siril(siril, lights, cal, args.workdir)
+    si_path, si_wall, si_stages, si_res = run_siril(siril, lights, cal, args.workdir)
 
     os_cube, si_cube = load_linear(os_path), load_linear(si_path, siril=True)
     os_fwhm, os_stars = fwhm_and_stars(os_cube)
@@ -200,6 +233,10 @@ def main():
     if no_p4:
         print(f"OriginStack without post-processing (like-for-like):    {no_p4:.1f}  {os_phases}")
     print(f"Siril script total:                                     {si_wall:.1f}  {si_stages}")
+    print("\n=== Resources (private memory summed over all processes; disk = fall in free space) ===")
+    for name, r in (("OriginStack", os_res), ("Siril", si_res)):
+        print(f"{name:<12} peak memory {r['peak_private_mb'] / 1024:6.1f} GB   peak disk {r['peak_disk_gb']:6.1f} GB   "
+              f"frames stacked {r['frames_stacked']} of {len(lights)}")
     print("\n=== Stack quality (same detector on both linear stacks) ===")
     print(f"FWHM  OriginStack {os_fwhm:.2f} px   Siril {si_fwhm:.2f} px      stars {os_stars} / {si_stars}")
     if rows:
@@ -209,8 +246,8 @@ def main():
         print("  Compare at the row whose FWHM is closest to Siril's without being sharper.")
     with open(os.path.join(args.workdir, "results.json"), "w") as fh:
         json.dump({"lights": len(lights), "originstack": {"wall": os_wall, "phases": os_phases, "fwhm": os_fwhm,
-                                                          "stars": os_stars},
-                   "siril": {"wall": si_wall, "stages": si_stages, "fwhm": si_fwhm, "stars": si_stars},
+                                                          "stars": os_stars, **os_res},
+                   "siril": {"wall": si_wall, "stages": si_stages, "fwhm": si_fwhm, "stars": si_stars, **si_res},
                    "noise": {str(k): v[1] for k, v in (rows or {}).items()}}, fh, indent=2)
 
 
