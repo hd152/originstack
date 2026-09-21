@@ -93,6 +93,8 @@ One-time setup (maintainer):
    restrict the policy to release tags.
 3. In GitHub: repo variable `SIGNPATH_ORGANIZATION_ID`, repo secret `SIGNPATH_API_TOKEN`.
 
+Each release needs **two manual approvals** in SignPath (one for the exe, then one for the installer built from it), because the Foundation requires an approver for every signing request. The workflow waits up to two hours for each, so approve them promptly after tagging or the build fails.
+
 Only the top-level exe and installer are signed; the bundled `.pyd`/`.dll` files stay unsigned. The
 workflow fails the release if a signed file's Authenticode status is not `Valid`.
 

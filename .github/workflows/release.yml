@@ -63,6 +63,8 @@ jobs:
           artifact-configuration-slug: exe
           github-artifact-id: ${{ steps.upload-exe.outputs.artifact-id }}
           wait-for-completion: true
+          # SignPath Foundation needs a person to approve every release; the default wait is 10 min
+          wait-for-completion-timeout-in-seconds: 7200
           output-artifact-directory: signed-exe
 
       # Swap the signed exe into the onedir and rebuild the zip, so the zip and
@@ -106,6 +108,8 @@ jobs:
           artifact-configuration-slug: installer
           github-artifact-id: ${{ steps.upload-setup.outputs.artifact-id }}
           wait-for-completion: true
+          # SignPath Foundation needs a person to approve every release; the default wait is 10 min
+          wait-for-completion-timeout-in-seconds: 7200
           output-artifact-directory: signed-setup
 
       - name: Install signed installer
