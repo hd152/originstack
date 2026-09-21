@@ -241,6 +241,22 @@ _FIELD_LABELS = {
 }
 
 
+# Groups and fields hidden until "Show expert options" is ticked: fine-tuning
+# that --auto manages, diagnostics, and features the project's own testing
+# found not to help on typical data. The CLI is unaffected.
+_EXPERT_GROUP_PREFIXES = ('Advanced', 'Diagnostics', 'originvision')
+_EXPERT_DESTS = {'cfa_drizzle', 'nmf_separate', 'starless_process', 'layered_stretch',
+                 'bg_method', 'fix_atmospheric_dispersion', 'distortion_model'}
+
+
+def _is_expert_group(title: str) -> bool:
+    return title.startswith(_EXPERT_GROUP_PREFIXES)
+
+
+def _is_expert_field(field: Dict[str, Any]) -> bool:
+    return field['dest'] in _EXPERT_DESTS or 'experimental' in (field.get('help') or '').lower()
+
+
 def _field_label(field: Dict[str, Any]) -> str:
     dest = field['dest']
     return _FIELD_LABELS.get(dest, dest.replace('_', ' ').capitalize())
@@ -303,14 +319,21 @@ class SetupForm(ttk.Frame):
 
         self._pages: Dict[str, ScrollableFrame] = {}
         self._nav_labels: Dict[str, tk.Label] = {}
+        self._expert_widgets: List[tk.Widget] = []
+        self._current_group: Optional[str] = None
         for group_title in self.schema:
             self._pages[group_title] = ScrollableFrame(content)
             lbl = tk.Label(nav, text=group_title, background=_PANEL, foreground=_TEXT_DIM,
                           font=_FONT, anchor='w', justify='left', wraplength=148,
                           padx=12, pady=9)
-            lbl.pack(fill='x')
             lbl.bind('<Button-1>', lambda _e, g=group_title: self._show_group(g))
             self._nav_labels[group_title] = lbl
+        self._nav = nav
+
+        self.expert_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(nav, text='Show expert options', variable=self.expert_var,
+                        command=self._refresh_expert).pack(side='bottom', anchor='w',
+                                                           padx=8, pady=8)
 
         for group_title, fields in self.schema.items():
             page = self._pages[group_title]
@@ -321,9 +344,31 @@ class SetupForm(ttk.Frame):
             visible_fields = [f for f in fields if f['dest'] not in _COMMON_DESTS]
             row = 0
             for field in visible_fields:
+                first = row
                 row += self._build_field(page.inner, row, field)
+                if _is_expert_field(field):
+                    self._expert_widgets.extend(
+                        w for r in range(first, row) for w in page.inner.grid_slaves(row=r))
 
-        self._show_group(next(iter(self.schema)))
+        self._refresh_expert()
+
+    def _refresh_expert(self) -> None:
+        """Show or hide expert groups/fields. Hidden fields keep their
+        Variables, so ``read_form`` is unaffected -- only visibility changes."""
+        expert = self.expert_var.get()
+        for lbl in self._nav_labels.values():
+            lbl.pack_forget()
+        for g, lbl in self._nav_labels.items():
+            if expert or not _is_expert_group(g):
+                lbl.pack(fill='x')
+        for w in self._expert_widgets:
+            if expert:
+                w.grid()
+            else:
+                w.grid_remove()
+        visible = [g for g in self.schema if expert or not _is_expert_group(g)]
+        if self._current_group not in visible:
+            self._show_group(visible[0])
 
     def _toggle_advanced(self) -> None:
         self._advanced_shown = not self._advanced_shown
@@ -335,6 +380,7 @@ class SetupForm(ttk.Frame):
             self._toggle_btn.configure(text='▸ Additional options')
 
     def _show_group(self, group_title: str) -> None:
+        self._current_group = group_title
         for g, page in self._pages.items():
             selected = g == group_title
             if selected:
