@@ -766,17 +766,41 @@ For the full CLI reference with all flags and defaults, see [PROJECT_SPEC.md](PR
 
 ## Performance
 
-| Scenario | Memory | Time (8-core CPU) |
-|----------|--------|-------------------|
-| 50 × 4096×4096 frames | 0.4–1.2 GB | 30–120 s |
-| Traditional stacker | 10–20 GB | varies |
-| 500 frames (tested) | same 0.4–1.2 GB | ~10× longer |
+Measured end to end on real Celestron Origin data (2048×3056 frames, Windows 11, an 8-core / 16-thread CPU with 16 workers), comparing this release against the development build just before its optimisation work (same data, same config, same machine, run back to back):
 
-Memory usage is bounded by the streaming architecture — frames are loaded one at a time and freed immediately after accumulation.
+| Session | Before | Now |
+|---------|--------|-----|
+| Fireworks Galaxy, 148 × 10 s frames, single session | 3 min 50 s | 2 min 27 s – 2 min 40 s (**~1.5×**) |
+| Orion Nebula, 7 sessions (456 frames) combined hierarchically | 15 min 12 s | 8 min 16 s (**~1.8×**) |
+
+Where the time went on the Fireworks run:
+
+| Phase | Before | Now |
+|-------|--------|-----|
+| Phase 1 — load, calibrate, debayer, quality | 98 s | 51–52 s |
+| Phase 2 — registration | 41 s | 31–40 s |
+| Phase 3 — align + stack | 51 s | 26–33 s |
+| ↳ per-frame alignment (141 frames) | 30 s | 12–15 s |
+
+Drizzle (2×, 29 frames of the same session, Lanczos-3 kernel, just the accumulation loop):
+
+| Mode | Before | Now |
+|------|--------|-----|
+| Resample, `--drizzle-pixfrac 1.0` | 12 s | 11 s |
+| Resample, `--drizzle-pixfrac 0.7` | 49 s | 12 s (**~4×**) |
+| `--drizzle-method splat` (area-overlap drops, opt-in) | — | 2 s (**~6×** the resample loop) |
+
+Notes on reading these numbers:
+
+- The multi-session (hierarchical) win is mostly structural: Phase 4 used to run on every session's stack and then again on the combined one; it now runs once, on the combined stack.
+- Phase 4 on a 2× drizzle output (a 3780×5952 image) still takes roughly 10 minutes and dominates a drizzle run; it was not sped up.
+- Registration timing varies from run to run (31 s and 40 s on identical code), so treat it as unchanged.
+- The final stacks are not bit-for-bit reproducible between two runs of the same code (registration is not deterministic), so speed comparisons were made on timings, with each optimisation separately checked against the code it replaced.
+- Memory stays bounded by the streaming architecture — frames are loaded one at a time and freed after accumulation (about one or two frames resident, plus the aligned-stack memmap on disk), so 500+ frame sessions run in the same working set.
 
 ### Native (Rust) acceleration
 
-[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~42 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and the full `--originvision` inference path (preprocessing + ONNX forward pass via the pure-Rust `tract` runtime — no Python ONNX dependency). A representative sample:
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~56 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and the full `--originvision` inference path (preprocessing + ONNX forward pass via the pure-Rust `tract` runtime — no Python ONNX dependency). A representative sample:
 
 | Kernel | Speedup vs numpy/scipy |
 |--------|------------------------|
@@ -785,14 +809,22 @@ Memory usage is bounded by the streaming architecture — frames are loaded one 
 | Fused patch-weighted + sigma-clip combine | ~100× |
 | Per-frame Lanczos-3 warp (alignment + drizzle resample) | ~5× / ~26× |
 | Malvar debayer (default Phase-1 debayer) | ~2× |
+| Phase 1 calibration (bias/dark/flat/finite check/clip, one pass) | ~4× single-thread (40 → 9 ms) |
+| Bayer hot-pixel repair / hot-pixel map replacement | ~25× / ~55× single-thread (715 → 29 ms / 666 → 12 ms) |
+| RGB hot-pixel repair (luma + median + MAD + replace, fused) | ~22× single-thread (1174 → 52 ms) |
+| Per-frame pre-gradient removal | ~40× (349 → 8 ms) |
+| Debayer stage as a whole (medians, G1/G2 + grid equalisation in place) | ~2.2× under 16 workers (2207 → 1002 ms/frame) |
 | L.A.Cosmic cosmic-ray rejection | ~2× under real parallel load |
-| Median filter (3×3 median network / larger windows) | ~13× / ~26× |
+| Median filter (3×3 network / larger windows) | ~13× / ~26×; the 3×3 picks an AVX2 version at run time (a further ~1.7×) |
 | DBE surface fit + patch sampler | ~2.4× / ~31× |
 | Anisotropic diffusion | ~37× |
 | Batch aperture photometry (`--photometry` / `--photometry-timeseries`) | ~150× |
 | CFA drizzle frame splat (`--cfa-drizzle`) | ~15.7× (407 s → 26 s, 148 frames) |
 | White balance (default Phase 1 step, bit-identical to numpy) | ~6.9× single-thread |
-| Lanczos-3 warp of a rotated frame (alignment, drizzle; bit-identical to the previous kernel) | ~3.5× (2187 → 625 ms/frame) |
+| Lanczos-3 warp of a rotated frame (alignment, drizzle) | ~5× vs the previous kernel (2187 → ~415 ms/frame), and Phase 3 now warps only the common crop |
+| Fused drizzle accumulate / area-overlap splat | ~1.4× (3.9× with pixfrac < 1) / ~6× |
+
+Most Phase 1 kernels are bit-identical to the numpy code they replace; the rotated Lanczos warp takes its weights from an interpolated table (99.985% of output values identical, the rest one ulp off — `ORIGINSTACK_LANCZOS_EXACT=1` restores the closed form). Speedups were measured single-threaded unless noted; under a full worker pool memory bandwidth, not arithmetic, is the limit, which is why the whole-stage figures are smaller than the single-kernel ones.
 
 See CLAUDE.md's "Native (Rust) acceleration" section for the full kernel-by-kernel list.
 
