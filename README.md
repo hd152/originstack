@@ -358,7 +358,7 @@ A native window for anyone who'd rather not memorize CLI flags:
 python desktop_app.py
 ```
 
-On Windows, the packaged build (`OriginStack.exe`, see [Packaging](packaging/README.md)) needs no Python install at all — just double-click it.
+On Windows, the packaged build needs no Python install at all: download `OriginStack-<version>-setup.exe` from the [latest release](https://github.com/hd152/originstack/releases/latest) and run it (per-user install, Start Menu entry, uninstaller). Prefer the zip? **Extract all of it** first and run `OriginStack.exe` from the extracted folder — running the exe from inside the zip preview fails with "Failed to load Python DLL". See [Packaging](packaging/README.md).
 
 The window has two columns:
 - **Left — Setup + Log** — every CLI flag as a form (grouped, auto-generated from the same argument parser the CLI uses, so it never drifts out of sync; directory/output fields get a native picker, hover any field for its full description), then the pipeline phase bar, then the live log — the same output you'd see on the command line.
@@ -522,13 +522,13 @@ Writes PNG overlay images and shift statistics to `_registration_debug/`. Use th
 
 ```bash
 # Dry run: walk the whole tree, score every light, report what would be flagged
-python originstack.py --quality-sweep -d "G:stro\Astrophotography"
+python originstack.py --quality-sweep -d "G:\astro\Astrophotography"
 
 # Apply: rename flagged frames to *.fits.rejected (invisible to stacking)
-python originstack.py --quality-sweep -d "G:stro\Astrophotography" --apply
+python originstack.py --quality-sweep -d "G:\astro\Astrophotography" --apply
 
 # Change your mind: restore every flagged file
-python originstack.py --sweep-undo -d "G:stro\Astrophotography"
+python originstack.py --sweep-undo -d "G:\astro\Astrophotography"
 ```
 
 Uses the exact same quality gate as stacking: hard failures (no stars, SNR < 0.5,

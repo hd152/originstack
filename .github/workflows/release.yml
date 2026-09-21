@@ -40,10 +40,27 @@ jobs:
         shell: pwsh
         run: .\packaging\verify_build.ps1
 
-      - name: Attach zip to existing GitHub Release
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          .\packaging\build_installer.ps1
+
+      - name: Verify the installer installs a working app
+        shell: pwsh
+        run: |
+          $ver = (Get-Content VERSION -Raw).Trim()
+          $dir = Join-Path $env:RUNNER_TEMP 'osinst'
+          $p = Start-Process ".\packaging\dist\OriginStack-$ver-setup.exe" -Wait -PassThru `
+              -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$dir`""
+          if ($p.ExitCode -ne 0) { throw "installer exited $($p.ExitCode)" }
+          .\packaging\verify_build.ps1 -ExePath "$dir\OriginStack.exe"
+
+      - name: Attach zip and installer to existing GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $zip = Get-ChildItem "packaging\dist\OriginStack-*-windows-x64.zip" | Select-Object -First 1
-          gh release upload "${{ github.ref_name }}" $zip.FullName --clobber
+          $setup = Get-ChildItem "packaging\dist\OriginStack-*-setup.exe" | Select-Object -First 1
+          gh release upload "${{ github.ref_name }}" $zip.FullName $setup.FullName --clobber

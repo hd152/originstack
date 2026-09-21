@@ -68,9 +68,20 @@ Not bundled:
   portal (https://www.microsoft.com/en-us/wdsi/filesubmission) after each
   release, which reduces false-positive flagging over time.
 - **Windows only.** No macOS/Linux packaging in this pass.
-- **No installer wizard.** Ships as a zipped folder, not an Inno
-  Setup/MSI installer. A reasonable follow-up if a smoother install
-  experience (Start Menu shortcut, uninstaller entry) is wanted later.
+- **The installer is unsigned too**, so SmartScreen treats `OriginStack-<version>-setup.exe` like the exe.
+- **Run it extracted or installed, never from inside the zip.** Double-clicking `OriginStack.exe` in
+  Explorer's zip view extracts only the exe (into a `...zip.aca` temp folder), not its `_internal\`
+  folder, and fails with "Failed to load Python DLL". Use the installer, or **Extract All** first.
+
+## Installer
+
+`packaging\build_installer.ps1` wraps `dist\OriginStack\` in a normal `OriginStack-<VERSION>-setup.exe`
+with Inno Setup (`packaging\originstack.iss`; a build-time tool only -- `winget install
+JRSoftware.InnoSetup`). It installs per user into `%LOCALAPPDATA%\Programs\OriginStack` with no admin
+prompt (the wizard's usual "for all users" choice is offered), adds a Start Menu entry (and an optional
+desktop shortcut) and an uninstaller. The release workflow builds it after the PyInstaller step, installs
+it silently on the runner, runs `verify_build.ps1` against the *installed* exe, and only then attaches it
+to the release next to the zip.
 
 ## Release automation
 

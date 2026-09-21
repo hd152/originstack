@@ -6,6 +6,16 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-09-20
+
+### Added
+
+- **Windows installer.** Releases now include `OriginStack-<version>-setup.exe` (Inno Setup): a per-user install with a Start Menu entry and an uninstaller, so the app and its `_internal` folder always arrive together. Running `OriginStack.exe` from inside the zip preview failed with "Failed to load Python DLL" because only the exe was extracted. The release workflow installs the built setup silently and runs the packaging verification against the installed app before attaching it.
+
+### Changed
+
+- **README refresh.** New sample images (Whirlpool, Omega Nebula, Orion Nebula, Sagittarius Star Cloud), a rewritten Performance section with the current end-to-end benchmarks, and a shorter introduction.
+
 ## [2.1.0] - 2026-09-20
 
 ### Added
