@@ -15,8 +15,8 @@ from typing import List, Optional
 
 import numpy as np
 from astropy.io import fits
-from scipy import ndimage
 
+from src.background import _gaussian_blur
 from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import build_hot_pixel_map
@@ -511,18 +511,18 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     if masters.get('bias') is not None:
         n_bias = len(frames['bias'])
         sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
-        masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma=sigma_b)
+        masters['bias'] = _gaussian_blur(masters['bias'].astype(np.float32), sigma_b)
     if masters.get('dark') is not None:
         n_dark = len(frames['dark'])
         sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
-        masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
+        masters['dark'] = _gaussian_blur(masters['dark'].astype(np.float32), sigma_d)
     if masters.get('flat') is not None:
         n_flat = len(frames['flat'])
         sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
         flat_raw = masters['flat'].astype(np.float32)
         for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
             ch = flat_raw[r_off::2, c_off::2]
-            flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
+            flat_raw[r_off::2, c_off::2] = _gaussian_blur(ch, sigma_f)
         masters['flat'] = flat_raw
 
     masters['dark_exptime'] = None

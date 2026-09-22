@@ -8,18 +8,22 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
-- **A native Gaussian blur kernel, wired into the highest-traffic callers.** `correlate1d` (the C function
-  behind `scipy.ndimage.gaussian_filter`) was the single largest self-time item in every full-pipeline
-  profile taken this session, spread across ~30 call sites project-wide (DBE, chroma denoising, local
-  contrast, structure-tensor coherence, edge-band correction, and more). Added `gaussian_filter_native`
-  (from-scratch separable reimplementation, `mode='reflect'`, verified against scipy to double-precision
-  rounding) and wired it into `background.py`'s `gaussian_filter_ds` plus its own and `denoising.py`'s
-  highest-traffic direct callers (`reduce_chroma_noise`, `multiscale_local_contrast`,
-  `_structure_tensor_coherence`, DBE's mesh-fallback surface fit) -- ~4x faster at small sigma, ~1.3-1.5x at
-  the large sigmas `gaussian_filter_ds`'s downsampled branch uses, measured in isolation. This is not a full
-  sweep of every direct call site (registration.py, quality.py, moving_objects.py, noise_validation.py and a
-  few others still call scipy directly) -- each has its own sigma/shape assumptions worth checking before
-  switching over, left for a follow-up.
+- **A native Gaussian blur kernel, swept across essentially every 2-D scalar-sigma call site.** `correlate1d`
+  (the C function behind `scipy.ndimage.gaussian_filter`) was the single largest self-time item in every
+  full-pipeline profile taken this session, spread across ~30 call sites project-wide. Added
+  `gaussian_filter_native` (from-scratch separable reimplementation, `mode='reflect'`, verified against scipy
+  to double-precision rounding) behind a `_gaussian_blur` wrapper (`src/background.py`) that preserves the
+  caller's dtype (float32 stays float32 -- a first version of the wrapper silently upcast to float64, caught
+  by a new dtype-parity test before it could inflate memory on every caller) and falls back to scipy for
+  anything the kernel doesn't cover. ~4x faster at small sigma, ~1.3-1.5x at large. Wired into every direct
+  `gaussian_filter` call site that uses a plain scalar sigma on a 2-D array: `background.py`,
+  `denoising.py`, `cli.py` (master bias/dark/flat smoothing), `exposure_fusion.py`, `merge.py`,
+  `moving_objects.py`, `noise_validation.py`, `postprocess.py`, `quality.py`, `registration.py`,
+  `star_removal.py`, `trail_reject.py`. Deliberately left alone: the handful of call sites that pass a
+  per-axis sigma tuple (e.g. `(sigma, sigma, 0)` to blur spatial axes only, or `--fix-atmospheric-dispersion`
+  -adjacent inference preprocessing with its own tight numeric tolerances against a reference implementation)
+  -- the kernel only supports a scalar sigma on a 2-D plane, and those calls already fall back to scipy
+  safely on their own (a tuple sigma raises inside the wrapper's `float(sigma)` cast, caught and handled).
 
 - **Several real perf fixes, found by profiling a full run rather than guessing.** A synthetic-flat build
   (`--flat-from-lights`, auto-triggered whenever no flat frames exist) was silently the single biggest cost

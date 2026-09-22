@@ -591,6 +591,24 @@ def test_gaussian_blur_falls_back_for_non_2d():
     np.testing.assert_array_equal(got, want)
 
 
+def test_gaussian_blur_preserves_input_dtype():
+    """The native kernel always computes in float64 (like every other kernel
+    in this file); _gaussian_blur must cast back down so a float32 caller
+    (several master-calibration and Phase 4 call sites pass float32) doesn't
+    silently get a float64 array back and double its memory footprint."""
+    assert _background_mod._HAS_NATIVE_GAUSSIAN  # sanity: this run actually has native available
+    rng = np.random.default_rng(9)
+    a32 = rng.normal(1000.0, 50.0, (60, 70)).astype(np.float32)
+    out32 = _background_mod._gaussian_blur(a32, 3.0)
+    assert out32.dtype == np.float32
+
+    a64 = a32.astype(np.float64)
+    out64 = _background_mod._gaussian_blur(a64, 3.0)
+    assert out64.dtype == np.float64
+    # same blur either way, just float32-rounded
+    np.testing.assert_allclose(out32.astype(np.float64), out64, rtol=1e-5, atol=1e-3)
+
+
 def test_median_filter_per_channel_matches_combined_axis_scipy_call():
     """postprocess.py's hot-pixel step switched from one scipy
     ndimage.median_filter(stacked, size=(5,5,1)) call (measured 5.1s on a

@@ -23,6 +23,8 @@ from typing import List, Sequence
 import numpy as np
 from scipy.ndimage import gaussian_filter, zoom
 
+from src.background import _gaussian_blur
+
 
 def _fit_shape(x: np.ndarray, target_shape) -> np.ndarray:
     """Pad (edge) or crop x's first two axes to exactly target_shape[:2] --
@@ -93,7 +95,7 @@ def _quality_weights(norm_img: np.ndarray, contrast_w: float, saturation_w: floa
     gray = norm_img.mean(axis=-1)
     # Contrast: a difference-of-Gaussians magnitude, a simple standard
     # stand-in for the paper's own Laplacian-magnitude measure.
-    contrast = np.abs(gaussian_filter(gray, 1.0) - gaussian_filter(gray, 2.0))
+    contrast = np.abs(_gaussian_blur(gray, 1.0) - _gaussian_blur(gray, 2.0))
 
     # Saturation: std across channels -- low for a washed-out/near-grey pixel.
     saturation = norm_img.std(axis=-1)

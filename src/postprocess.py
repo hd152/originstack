@@ -12,6 +12,7 @@ from scipy import ndimage
 from src.background import (
     _border_pixels,
     _dbe_prepare_emission_mask,
+    _gaussian_blur,
     apply_background_extraction,
     dynamic_background_extraction,
     gaussian_filter_ds,
@@ -805,9 +806,9 @@ def postprocess_stack(
                 # minimum.
                 _ring_r = max(4, int(float(psf.shape[0])), int(np.ceil(psf_fwhm * 5.0)))
                 _core = ndimage.binary_dilation(_pts, iterations=_ring_r)
-                deconv_mask = ndimage.gaussian_filter(
+                deconv_mask = _gaussian_blur(
                     _core.astype(np.float32),
-                    sigma=max(3.0, float(_ring_r) * 0.45))
+                    max(3.0, float(_ring_r) * 0.45))
                 _dmx = float(deconv_mask.max())
                 if _dmx > 0:
                     deconv_mask /= _dmx

@@ -75,9 +75,11 @@ _SOURCES_DTYPE = np.dtype([
 # attribute resolution on every call to compute_quality_metrics.
 try:
     from scipy.ndimage import gaussian_filter, laplace, maximum_filter
+
+    from src.background import _gaussian_blur
     _SCIPY_AVAILABLE = True
 except ImportError:
-    laplace = maximum_filter = gaussian_filter = None
+    laplace = maximum_filter = gaussian_filter = _gaussian_blur = None
     _SCIPY_AVAILABLE = False
 
 
@@ -105,7 +107,7 @@ def generate_star_mask(shape: Tuple[int, int], star_positions: Optional[object],
         point_mask = np.zeros(shape, dtype=np.float32)
         # np.maximum.at handles multiple stars landing on the same pixel safely.
         np.maximum.at(point_mask, (ys[in_bounds], xs[in_bounds]), 1.0)
-        blurred = gaussian_filter(point_mask, sigma=sigma)
+        blurred = _gaussian_blur(point_mask, sigma)
         max_val = blurred.max()
         if max_val > 0:
             mask = blurred / max_val  # normalise to [0, 1]

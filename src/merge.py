@@ -200,13 +200,13 @@ def _match_flux_scale(ref: np.ndarray, img: np.ndarray, valid: np.ndarray
     merge is not perturbed by estimator noise. Returns (gain[3], offset[3],
     pixels used in the worst-measured channel).
     """
-    from scipy.ndimage import gaussian_filter
+    from src.background import _gaussian_blur
     gains = np.ones(3)
     offsets = np.zeros(3)
     n_min = None
     for c in range(3):
-        sr = gaussian_filter(ref[:, :, c].astype(np.float32), _SCALE_SMOOTH_SIGMA)
-        si = gaussian_filter(img[:, :, c].astype(np.float32), _SCALE_SMOOTH_SIGMA)
+        sr = _gaussian_blur(ref[:, :, c].astype(np.float32), _SCALE_SMOOTH_SIGMA)
+        si = _gaussian_blur(img[:, :, c].astype(np.float32), _SCALE_SMOOTH_SIGMA)
         vr, vi = sr[valid].astype(np.float64), si[valid].astype(np.float64)
         if vr.size < _SCALE_MIN_PIXELS:
             n_min = 0

@@ -63,11 +63,18 @@ def _gaussian_blur(a: np.ndarray, sigma: float) -> np.ndarray:
     ~4x faster at small sigma, ~1.3-1.5x at the large sigmas
     ``gaussian_filter_ds``'s downsampled branch uses, verified within
     double-precision rounding of scipy's own result (`tests/test_native.py`).
-    2-D float input only; anything else falls back to scipy untouched."""
+    2-D float input only; anything else falls back to scipy untouched.
+
+    Output dtype always matches the input's, same as scipy -- the native
+    kernel always computes in float64 internally (like every other kernel in
+    this file), so a float32 input is cast back down after the blur rather
+    than silently widening every caller's array to float64.
+    """
     if _HAS_NATIVE_GAUSSIAN and a.ndim == 2:
         try:
-            return np.asarray(_native.gaussian_filter_native(np.ascontiguousarray(a, dtype=np.float64),
-                                                              float(sigma)))
+            out = np.asarray(_native.gaussian_filter_native(
+                np.ascontiguousarray(a, dtype=np.float64), float(sigma)))
+            return out.astype(a.dtype, copy=False) if out.dtype != a.dtype else out
         except Exception:
             pass
     return gaussian_filter(a, sigma=sigma)
