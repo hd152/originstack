@@ -7,11 +7,13 @@ import numpy as np
 import pytest
 
 import originstack as astro
+import src.background as _background_mod
 import src.blind_match as _blind_match_mod
 import src.channel_combine as _channel_combine_mod
 import src.debayer as _debayer_mod
 import src.denoising as _denoising_mod
 import src.local_normalize as _local_normalize_mod
+import src.postprocess as _postprocess_mod
 import src.robust_pca as _robust_pca_mod
 import src.stacking as _stacking_mod
 import src.star_removal as _star_removal_mod
@@ -519,6 +521,118 @@ def test_median_filter_native_matches_scipy(size):
     assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
 
 
+@pytest.mark.parametrize("sigma", [0.8, 2.0, 5.0, 24.0, 32.0])
+@pytest.mark.parametrize("shape", [(80, 96), (301, 257)])
+def test_gaussian_filter_native_matches_scipy(sigma, shape):
+    """gaussian_filter_native is a from-scratch separable reimplementation of
+    scipy.ndimage.gaussian_filter's default mode='reflect' -- not a port, so
+    parity is judged by numerical agreement, not shared code. Real-shape
+    profiling showed correlate1d (gaussian_filter1d's C function) as the top
+    self-time item in every profile taken of a full pipeline run this
+    session, spread across ~30 call sites; this kernel and its wiring into
+    background.py's _gaussian_blur / gaussian_filter_ds don't sweep all of
+    them, just the highest-traffic ones."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(4)
+    a = rng.normal(1000.0, 50.0, shape)
+    want = gaussian_filter(a, sigma=sigma)
+    got = np.asarray(native.gaussian_filter_native(a, sigma))
+    # separable-pass floating-point summation order differs from scipy's;
+    # both are exact renditions of the same closed-form kernel, so the gap
+    # is double-precision rounding, not an approximation choice
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+
+
+def test_gaussian_filter_native_zero_sigma_is_passthrough():
+    rng = np.random.default_rng(5)
+    a = rng.normal(size=(20, 30))
+    got = np.asarray(native.gaussian_filter_native(a, 0.0))
+    np.testing.assert_array_equal(got, a)
+
+
+def test_gaussian_filter_native_rejects_non_2d_by_signature():
+    # the numpy binding itself enforces 2D; the Python-side _gaussian_blur
+    # wrapper is what actually gates this in production (see
+    # test_gaussian_blur_falls_back_for_non_2d below)
+    rng = np.random.default_rng(6)
+    a = rng.normal(size=(10, 10, 3))
+    with pytest.raises(Exception):
+        native.gaussian_filter_native(a, 2.0)
+
+
+def test_gaussian_blur_wrapper_matches_scipy_native_and_fallback():
+    """background.py's _gaussian_blur (the wrapper wired into
+    gaussian_filter_ds and swapped into ~10 direct call sites in background.py
+    and denoising.py) must agree with plain scipy whether or not native is
+    available."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(7)
+    a = rng.normal(1000.0, 50.0, (150, 200))
+    want = gaussian_filter(a, sigma=5.0)
+
+    got_native = _background_mod._gaussian_blur(a, 5.0)
+    np.testing.assert_allclose(got_native, want, rtol=1e-9, atol=1e-9)
+
+    had = _background_mod._HAS_NATIVE_GAUSSIAN
+    _background_mod._HAS_NATIVE_GAUSSIAN = False
+    try:
+        got_fallback = _background_mod._gaussian_blur(a, 5.0)
+    finally:
+        _background_mod._HAS_NATIVE_GAUSSIAN = had
+    np.testing.assert_array_equal(got_fallback, want)
+
+
+def test_gaussian_blur_falls_back_for_non_2d():
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(8)
+    a = rng.normal(size=(20, 30, 3))
+    want = gaussian_filter(a, sigma=2.0)
+    got = _background_mod._gaussian_blur(a, 2.0)
+    np.testing.assert_array_equal(got, want)
+
+
+def test_gaussian_blur_preserves_input_dtype():
+    """The native kernel always computes in float64 (like every other kernel
+    in this file); _gaussian_blur must cast back down so a float32 caller
+    (several master-calibration and Phase 4 call sites pass float32) doesn't
+    silently get a float64 array back and double its memory footprint."""
+    assert _background_mod._HAS_NATIVE_GAUSSIAN  # sanity: this run actually has native available
+    rng = np.random.default_rng(9)
+    a32 = rng.normal(1000.0, 50.0, (60, 70)).astype(np.float32)
+    out32 = _background_mod._gaussian_blur(a32, 3.0)
+    assert out32.dtype == np.float32
+
+    a64 = a32.astype(np.float64)
+    out64 = _background_mod._gaussian_blur(a64, 3.0)
+    assert out64.dtype == np.float64
+    # same blur either way, just float32-rounded
+    np.testing.assert_allclose(out32.astype(np.float64), out64, rtol=1e-5, atol=1e-3)
+
+
+def test_median_filter_per_channel_matches_combined_axis_scipy_call():
+    """postprocess.py's hot-pixel step switched from one scipy
+    ndimage.median_filter(stacked, size=(5,5,1)) call (measured 5.1s on a
+    real full-res stack -- scipy's N-D rank filter has no fast path for a
+    size-1 axis) to 3 independent native 2D calls, one per channel. Confirm
+    that's actually equivalent, not just faster."""
+    from scipy import ndimage
+    rng = np.random.default_rng(4)
+    stacked = rng.normal(500, 50, (60, 70, 3)).astype(np.float32)
+    ref = ndimage.median_filter(stacked, size=(5, 5, 1))
+    got = _postprocess_mod._median_filter_per_channel(stacked, 5)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
+
+
+def test_median_filter_per_channel_falls_back_without_native(monkeypatch):
+    from scipy import ndimage
+    rng = np.random.default_rng(5)
+    stacked = rng.normal(500, 50, (40, 50, 3)).astype(np.float32)
+    ref = ndimage.median_filter(stacked, size=(3, 3, 1))
+    monkeypatch.setattr(_postprocess_mod, '_HAS_NATIVE_MEDIAN', False)
+    got = _postprocess_mod._median_filter_per_channel(stacked, 3)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan
@@ -991,6 +1105,96 @@ def test_small_times_wide_rejects_shape_mismatch():
     data = np.ascontiguousarray(rng.normal(0.0, 1.0, (6, 250)))  # N mismatch
     with pytest.raises(ValueError):
         native.small_times_wide(small, data)
+
+
+# ---------------------------------------------------------------------------
+# robust_pca_pre_svd_input / robust_pca_iterate: the fused per-iteration IALM
+# elementwise kernels (see robust_pca.py's robust_pca_decompose). Found by
+# profiling a real --flat-from-lights run where the plain-numpy elementwise
+# arithmetic surrounding the SVD -- not the SVD itself -- was ~80% of the
+# function's wall time.
+# ---------------------------------------------------------------------------
+
+def test_robust_pca_pre_svd_input_matches_numpy():
+    rng = np.random.default_rng(10)
+    n, p = 9, 500
+    d = np.ascontiguousarray(rng.normal(0.0, 5.0, (n, p)))
+    s = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, p)))
+    y = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, p)))
+    mu = 0.37
+    got = np.asarray(native.robust_pca_pre_svd_input(d, s, y, mu))
+    want = d - s + y / mu
+    np.testing.assert_array_equal(got, want)  # same f64 op order -- bit-exact
+
+
+def test_robust_pca_pre_svd_input_rejects_shape_mismatch():
+    rng = np.random.default_rng(11)
+    d = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    s = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    y = np.ascontiguousarray(rng.normal(0.0, 1.0, (4, 100)))  # N mismatch
+    with pytest.raises(ValueError):
+        native.robust_pca_pre_svd_input(d, s, y, 0.5)
+
+
+def test_robust_pca_iterate_matches_numpy():
+    rng = np.random.default_rng(12)
+    n, p = 9, 500
+    d = np.ascontiguousarray(rng.normal(0.0, 5.0, (n, p)))
+    l = np.ascontiguousarray(rng.normal(0.0, 4.0, (n, p)))
+    y0 = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, p)))
+    mu = 0.42
+    lam_over_mu = 0.1
+
+    s_native = np.zeros((n, p))
+    y_native = y0.copy()
+    resid_norm = float(native.robust_pca_iterate(d, l, s_native, y_native, lam_over_mu, mu))
+
+    temp = d - l + y0 / mu
+    s_want = np.sign(temp) * np.maximum(np.abs(temp) - lam_over_mu, 0.0)
+    residual_want = d - l - s_want
+    y_want = y0 + mu * residual_want
+    resid_norm_want = float(np.linalg.norm(residual_want, 'fro'))
+
+    np.testing.assert_array_equal(s_native, s_want)  # per-element op, bit-exact
+    np.testing.assert_array_equal(y_native, y_want)
+    # the norm is a parallel reduction, so only close, not bit-exact -- see
+    # the kernel's own docstring
+    np.testing.assert_allclose(resid_norm, resid_norm_want, rtol=1e-10)
+
+
+def test_robust_pca_iterate_rejects_shape_mismatch():
+    rng = np.random.default_rng(13)
+    d = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    l = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    s = np.zeros((5, 100))
+    y = np.zeros((4, 100))  # N mismatch
+    with pytest.raises(ValueError):
+        native.robust_pca_iterate(d, l, s, y, 0.1, 0.5)
+
+
+def test_robust_pca_decompose_native_matches_numpy_fallback():
+    """End-to-end: robust_pca_decompose's native and numpy-fallback paths
+    must converge to the same low-rank/sparse split, not just agree on the
+    individual fused kernels in isolation."""
+    rng = np.random.default_rng(14)
+    n, p = 10, 800
+    low_rank = np.outer(rng.uniform(0.8, 1.2, n), rng.normal(1000.0, 50.0, p))
+    sparse = np.zeros((n, p))
+    idx = rng.integers(0, n * p, n * p // 50)
+    sparse.flat[idx] = rng.uniform(200.0, 2000.0, len(idx))
+    D = low_rank + sparse + rng.normal(0.0, 5.0, (n, p))
+
+    assert _robust_pca_mod._HAS_NATIVE
+    L_native, S_native = _robust_pca_mod.robust_pca_decompose(D)
+
+    _robust_pca_mod._HAS_NATIVE = False
+    try:
+        L_numpy, S_numpy = _robust_pca_mod.robust_pca_decompose(D)
+    finally:
+        _robust_pca_mod._HAS_NATIVE = True
+
+    np.testing.assert_allclose(L_native, L_numpy, atol=1e-6, rtol=1e-6)
+    np.testing.assert_allclose(S_native, S_numpy, atol=1e-6, rtol=1e-6)
 
 
 # ---------------------------------------------------------------------------

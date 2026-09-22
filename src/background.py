@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 from scipy import ndimage
 from scipy.interpolate import RectBivariateSpline
-from scipy.ndimage import binary_dilation, gaussian_filter, zoom
+from scipy.ndimage import gaussian_filter, zoom
 
 try:
     import astro_native as _native
@@ -51,6 +51,35 @@ except ImportError:
     _gf = None
 
 
+_HAS_NATIVE_GAUSSIAN = HAS_NATIVE and hasattr(_native, 'gaussian_filter_native')
+
+
+def _gaussian_blur(a: np.ndarray, sigma: float) -> np.ndarray:
+    """``gaussian_filter(a, sigma=sigma)`` (mode='reflect', the default and
+    the only mode any caller here uses) routed through the native
+    ``gaussian_filter_native`` kernel when available. `correlate1d` (the C
+    function scipy's gaussian_filter1d calls per axis) was the single
+    largest self-time item in every profile taken of a real session --
+    ~4x faster at small sigma, ~1.3-1.5x at the large sigmas
+    ``gaussian_filter_ds``'s downsampled branch uses, verified within
+    double-precision rounding of scipy's own result (`tests/test_native.py`).
+    2-D float input only; anything else falls back to scipy untouched.
+
+    Output dtype always matches the input's, same as scipy -- the native
+    kernel always computes in float64 internally (like every other kernel in
+    this file), so a float32 input is cast back down after the blur rather
+    than silently widening every caller's array to float64.
+    """
+    if _HAS_NATIVE_GAUSSIAN and a.ndim == 2:
+        try:
+            out = np.asarray(_native.gaussian_filter_native(
+                np.ascontiguousarray(a, dtype=np.float64), float(sigma)))
+            return out.astype(a.dtype, copy=False) if out.dtype != a.dtype else out
+        except Exception:
+            pass
+    return gaussian_filter(a, sigma=sigma)
+
+
 def gaussian_filter_ds(arr: np.ndarray, sigma: float,
                        ds_threshold: float = 24.0) -> np.ndarray:
     """Gaussian blur evaluated on a block-downsampled copy for large sigmas.
@@ -67,24 +96,33 @@ def gaussian_filter_ds(arr: np.ndarray, sigma: float,
     sigma = float(sigma)
     a = np.asarray(arr, dtype=np.float64)
     if sigma < ds_threshold or a.ndim != 2:
-        return gaussian_filter(a, sigma=sigma)
+        return _gaussian_blur(a, sigma)
     ds = 4 if sigma < 96.0 else 8
     H, W = a.shape
     h2, w2 = (H // ds) * ds, (W // ds) * ds
     if h2 < ds or w2 < ds:
-        return gaussian_filter(a, sigma=sigma)
+        return _gaussian_blur(a, sigma)
     coarse = a[:h2, :w2].reshape(h2 // ds, ds, w2 // ds, ds).mean(axis=(1, 3))
-    sm = gaussian_filter(coarse, sigma=sigma / ds)
+    sm = _gaussian_blur(coarse, sigma / ds)
     # Centre-aligned upsample: coarse pixel j represents fine pixels
     # [j*ds, (j+1)*ds), whose centre is j*ds + (ds-1)/2. Plain zoom is
     # corner-aligned and would return the whole field shifted by ~ds/2 px,
     # which multiplied by the field's gradient near bright features is the
     # dominant error term. affine_transform with the matching offset samples
     # the coarse grid at the true block centres.
+    #
+    # order=1 (bilinear), not order=3 (cubic spline): measured 3x faster
+    # (0.336 -> 0.111s/call on a real full-res field, ds=4) and, on a coarse
+    # grid that's already been through this function's own huge Gaussian
+    # blur (the only kind of input this ever upsamples), order=1 vs order=3
+    # differ by a mean 0.001 / max 0.010 against a field std of ~0.75 --
+    # negligible, for the same reason the module docstring gives for the
+    # downsample itself: content this smooth has nothing for cubic's extra
+    # curvature term to recover that bilinear doesn't already get.
     off = -(ds - 1) / (2.0 * ds)
     out = ndimage.affine_transform(
         sm, np.array([1.0 / ds, 1.0 / ds]), offset=[off, off],
-        output_shape=(H, W), order=3, mode='nearest')
+        output_shape=(H, W), order=1, mode='nearest')
     return out
 
 
@@ -313,7 +351,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 
     # Gaussian smooth
     if min(ny, nx) >= 4:
-        bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
+        bg_grid = _gaussian_blur(bg_grid.astype(np.float64), 0.8)
 
     # --- Interpolation to Full Res ---
     grid_y = (np.arange(ny) + 0.5) * cell_h
@@ -363,7 +401,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
     # Final Gaussian blur to suppress high-frequency mesh ripple
     blur_sigma = cell_h * 0.5
     if blur_sigma > 0:
-        background = ndimage.gaussian_filter(background.astype(np.float64), sigma=blur_sigma)
+        background = _gaussian_blur(background.astype(np.float64), blur_sigma)
 
     return np.asarray(background, dtype=np.float32)
 
@@ -638,7 +676,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
 
         if min(ny, nx) >= 4:
-            bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
+            bg_grid = _gaussian_blur(bg_grid.astype(np.float64), 0.8)
 
         grid_y = (np.arange(ny) + 0.5) * (H / ny)
         grid_x = (np.arange(nx) + 0.5) * (W / nx)
@@ -831,9 +869,6 @@ def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
     if frac_bright > 0.005:
         dil_radius = max(15, int(min(H, W) * 0.02))
         r = dil_radius
-        y_idx, x_idx = np.ogrid[-r:r + 1, -r:r + 1]
-        disk = (y_idx ** 2 + x_idx ** 2 <= r ** 2)
-        structure = disk.astype(np.uint8) # Binary dilation expects struct array
 
         remaining_lum = lum_smooth.copy()
         primary_peak = float(np.max(remaining_lum))
@@ -852,8 +887,15 @@ def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
             src_thresh = sky_med + 0.5 * (detect_thresh - sky_med)
             src_binary = (lum_smooth > src_thresh).astype(np.uint8)
 
-            # Use binary_dilation on the binary mask
-            dilated = binary_dilation(src_binary, structure=structure).astype(np.float32)
+            # Dilation by a disk of radius r == "within Euclidean distance r
+            # of a True pixel", so a distance transform gives the exact same
+            # mask as scipy.ndimage.binary_dilation(src_binary, structure=disk)
+            # (verified bit-exact) -- and does it in ~O(H*W), not O(H*W*r^2).
+            # binary_dilation's generic morphology path is fine for a
+            # scattered mask but measured 16s on one real contiguous bright
+            # source at this frame size/radius (a big galaxy/comet core, not
+            # a handful of stars); the EDT route was 0.37s on the same mask.
+            dilated = (ndimage.distance_transform_edt(1 - src_binary) <= r).astype(np.float32)
 
             np.clip(emission + dilated, 0.0, 1.0, out=emission)
             # Blank out processed source
@@ -1307,7 +1349,7 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
         coords, values, H, W, outlier_sigma, max_iter, sigma_px, Hc, Wc, verbose)
 
     surface = zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W]
-    surface = ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+    surface = _gaussian_blur(surface, patch_size * 0.5)
     return np.clip(surface, surf_lo, surf_hi)
 
 
@@ -1338,7 +1380,7 @@ def _polynomial_surface(coords: np.ndarray, values: np.ndarray,
     xx = np.linspace(0.0, 1.0, W)
     grid_y, grid_x = np.meshgrid(yy, xx, indexing='ij')
     surface = poly(grid_y.ravel(), grid_x.ravel()).dot(coeffs).reshape(H, W)
-    return ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+    return _gaussian_blur(surface, patch_size * 0.5)
 
 
 def dynamic_background_extraction(

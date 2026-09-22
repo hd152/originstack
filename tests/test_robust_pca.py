@@ -146,6 +146,109 @@ class TestRobustPcaMaster(unittest.TestCase):
                 self.assertIsNone(robust_pca_master(frames, shape))
 
 
+class TestBayerBlockDownsampleUpsample(unittest.TestCase):
+    """CFA-respecting down/upsample used by robust_pca_master's downsample=
+    parameter (only --flat-from-lights passes it -- see FLAT_FROM_LIGHTS_
+    DOWNSAMPLE's Config docstring for why real dark/bias/flat masters never do)."""
+
+    def test_does_not_mix_bayer_channels(self):
+        # Four constant Bayer sub-planes at very different levels -- a
+        # cross-channel-mixing bug (averaging the raw mosaic directly instead
+        # of each sub-plane independently) would blend these together.
+        from src.robust_pca import bayer_block_downsample
+        img = np.zeros((16, 16))
+        img[0::2, 0::2] = 100.0   # R
+        img[0::2, 1::2] = 500.0   # G1
+        img[1::2, 0::2] = 500.0   # G2
+        img[1::2, 1::2] = 900.0   # B
+        small = bayer_block_downsample(img, 2)
+        self.assertTrue(np.all(small[0::2, 0::2] == 100.0))
+        self.assertTrue(np.all(small[0::2, 1::2] == 500.0))
+        self.assertTrue(np.all(small[1::2, 0::2] == 500.0))
+        self.assertTrue(np.all(small[1::2, 1::2] == 900.0))
+
+    def test_downsample_shrinks_by_the_requested_factor(self):
+        from src.robust_pca import bayer_block_downsample
+        img = np.zeros((64, 96))
+        small = bayer_block_downsample(img, 4)
+        # each sub-plane is (32,48) -> downsampled by 4 -> (8,12) -> reinterleaved (16,24)
+        self.assertEqual(small.shape, (16, 24))
+
+    def test_roundtrip_preserves_a_smooth_pattern(self):
+        # The point of the downsample is to survive exactly this kind of
+        # content (smooth vignetting), not preserve it exactly.
+        from src.robust_pca import bayer_block_downsample, bayer_block_upsample
+        H, W = 200, 300
+        yy, xx = np.mgrid[0:H, 0:W]
+        pattern = 1000.0 - 0.01 * ((yy - H / 2) ** 2 + (xx - W / 2) ** 2)
+        small = bayer_block_downsample(pattern, 4)
+        back = bayer_block_upsample(small, (H, W))
+        self.assertEqual(back.shape, (H, W))
+        rel_err = np.abs(back - pattern).mean() / np.abs(pattern).mean()
+        self.assertLess(rel_err, 0.02)
+
+    def test_downsample_is_a_noop_at_factor_one(self):
+        from src.robust_pca import bayer_block_downsample
+        img = np.random.default_rng(0).normal(size=(20, 20))
+        np.testing.assert_array_equal(bayer_block_downsample(img, 1), img)
+
+
+class TestRobustPcaMasterDownsample(unittest.TestCase):
+    """End-to-end: robust_pca_master(downsample=N) still recovers a real
+    vignetting pattern at full output resolution, not just a smaller one."""
+
+    def _write_frame(self, tmpdir: str, name: str, data: np.ndarray) -> FrameInfo:
+        path = os.path.join(tmpdir, name)
+        _write_fits(path, data)
+        return FrameInfo(path=path, type='light', header={})
+
+    def test_recovers_vignette_at_full_resolution(self):
+        rng = np.random.default_rng(2)
+        shape = (200, 300)  # even dims, real-mosaic-shaped
+        yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
+        # A smooth vignetting-like pattern, per-Bayer-position gain baked in
+        # (R/G1/G2/B different absolute levels) -- a channel-mixing bug in
+        # the downsample would show up as a wrong recovered pattern here,
+        # not just a blurrier one.
+        base = 1000.0 - 0.02 * ((yy - 100) ** 2 + (xx - 150) ** 2)
+        gain = np.ones(shape)
+        gain[0::2, 0::2] = 1.0
+        gain[0::2, 1::2] = 1.9
+        gain[1::2, 0::2] = 1.9
+        gain[1::2, 1::2] = 1.6
+        pattern = base * gain
+
+        with tempfile.TemporaryDirectory() as d:
+            frames = []
+            for i in range(10):
+                frame = pattern + rng.normal(0, 3.0, shape)
+                frames.append(self._write_frame(d, f'f{i}.fits', frame.astype(np.float32)))
+
+            master = robust_pca_master(frames, shape, downsample=Config.FLAT_FROM_LIGHTS_DOWNSAMPLE)
+            self.assertIsNotNone(master)
+            self.assertEqual(master.shape, shape)  # upsampled back to full res
+            self.assertTrue(np.all(np.isfinite(master)))
+            rel_err = np.abs(master - pattern).mean() / np.abs(pattern).mean()
+            self.assertLess(rel_err, 0.15)  # looser than the full-res test -- it's lossy by design
+
+    def test_downsample_one_matches_undownsampled_call(self):
+        # downsample=1 must be exactly the pre-existing code path (no
+        # upsample step, no behavior change for real bias/dark/flat masters
+        # that never pass downsample at all).
+        rng = np.random.default_rng(3)
+        shape = (24, 24)
+        yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
+        pattern = 1000.0 - 0.3 * ((yy - 12) ** 2 + (xx - 12) ** 2)
+        with tempfile.TemporaryDirectory() as d:
+            frames = []
+            for i in range(8):
+                frame = pattern + rng.normal(0, 2.0, shape)
+                frames.append(self._write_frame(d, f'f{i}.fits', frame.astype(np.float32)))
+            master_plain = robust_pca_master(frames, shape)
+            master_ds1 = robust_pca_master(frames, shape, downsample=1)
+            np.testing.assert_array_equal(master_plain, master_ds1)
+
+
 class TestMakeMasterRobustPcaFallback(unittest.TestCase):
     """make_master(method='robust_pca') dispatch and graceful fallback."""
 

@@ -25,9 +25,12 @@ import numpy as np
 
 try:
     from scipy import ndimage
+
+    from src.background import _gaussian_blur
     _HAS_SCIPY = True
 except Exception:  # pragma: no cover
     ndimage = None
+    _gaussian_blur = None
     _HAS_SCIPY = False
 
 
@@ -93,8 +96,8 @@ def consistency_map(a: np.ndarray, b: np.ndarray, smooth: float = 2.0, window: i
     def lum(x):
         return 0.299 * x[:, :, 0] + 0.587 * x[:, :, 1] + 0.114 * x[:, :, 2]
 
-    la = ndimage.gaussian_filter(lum(a).astype(np.float64), smooth)
-    lb = ndimage.gaussian_filter(lum(b).astype(np.float64), smooth)
+    la = _gaussian_blur(lum(a).astype(np.float64), smooth)
+    lb = _gaussian_blur(lum(b).astype(np.float64), smooth)
     m = lambda x: ndimage.uniform_filter(x, window, mode='nearest')
     ma, mb = m(la), m(lb)
     cov = m(la * lb) - ma * mb

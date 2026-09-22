@@ -12,6 +12,7 @@ import numpy as np
 import scipy.fft as sfft
 from scipy import ndimage
 
+from src.background import _gaussian_blur
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import get_logger, safe_print
@@ -1586,9 +1587,11 @@ def run_registration_phase(
         if ref_stars is None:
             try:
                 # 3. Local-maxima fallback — pure scipy, always available
-                from scipy.ndimage import gaussian_filter, maximum_filter
+                from scipy.ndimage import maximum_filter
+
+                from src.background import _gaussian_blur
                 _redet_tried.append('local-maxima')
-                smoothed = gaussian_filter(ref_lum.astype(np.float64), sigma=2.0)
+                smoothed = _gaussian_blur(ref_lum.astype(np.float64), 2.0)
                 bg = float(np.median(smoothed))
                 thresh = bg + 5.0 * max(noise_val, float(np.std(smoothed)) * 0.5)
                 local_max = maximum_filter(smoothed, size=11)
@@ -2196,8 +2199,8 @@ def find_comet_centroid(lum: np.ndarray,
     try:
         sigma_small = Config.COMET_DOG_SIGMA_SMALL
         sigma_large = Config.COMET_DOG_SIGMA_LARGE
-        dog = (ndimage.gaussian_filter(lum64, sigma=sigma_large) -
-               ndimage.gaussian_filter(lum64, sigma=sigma_small))
+        dog = (_gaussian_blur(lum64, sigma_large) -
+               _gaussian_blur(lum64, sigma_small))
         dog = np.clip(dog, 0.0, None)  # keep only positive (bright blob) response
         if dog.max() > 0:
             result = _find_in_map(dog)
@@ -2207,7 +2210,7 @@ def find_comet_centroid(lum: np.ndarray,
         pass
 
     # --- Fallback: original Gaussian-blur + threshold method ---
-    smoothed = ndimage.gaussian_filter(lum64, sigma=smooth_sigma)
+    smoothed = _gaussian_blur(lum64, smooth_sigma)
     result = _find_in_map(smoothed)
     if result is not None:
         return result
@@ -2255,7 +2258,7 @@ def find_extended_source_ellipse(
     lum64 = lum.astype(np.float64)
     if smooth_sigma is None:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
-    lum_smooth = ndimage.gaussian_filter(lum64, sigma=smooth_sigma)
+    lum_smooth = _gaussian_blur(lum64, smooth_sigma)
 
     border = max(4, int(min(H, W) * 0.05))
     edge = np.concatenate([
@@ -2411,7 +2414,7 @@ def find_comet_tail_pa(lum: np.ndarray, nucleus_y: float, nucleus_x: float,
     try:
         H, W = lum.shape
         # Smooth strongly to get a clean gradient at the coma scale
-        smoothed = ndimage.gaussian_filter(lum.astype(np.float64), sigma=max(sample_radius * 0.3, 5.0))
+        smoothed = _gaussian_blur(lum.astype(np.float64), max(sample_radius * 0.3, 5.0))
         # Compute gradient at nucleus location (via sobel or finite differences on the smoothed image)
         gy = ndimage.sobel(smoothed, axis=0)
         gx = ndimage.sobel(smoothed, axis=1)

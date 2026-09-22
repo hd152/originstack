@@ -33,9 +33,12 @@ import numpy as np
 
 try:
     from scipy import ndimage
+
+    from src.background import _gaussian_blur
     _HAS_SCIPY = True
 except Exception:  # pragma: no cover
     ndimage = None
+    _gaussian_blur = None
     _HAS_SCIPY = False
 
 _log = logging.getLogger("originstack")
@@ -82,7 +85,7 @@ def detect_in_residual(residual: np.ndarray, fwhm: float, threshold: float,
 
     The residual is smoothed at the PSF width and divided by its own robust noise
     (MAD), so the threshold is in sigma of the smoothed image."""
-    sm = ndimage.gaussian_filter(residual.astype(np.float32), max(fwhm / 2.355, 0.8))
+    sm = _gaussian_blur(residual.astype(np.float32), max(fwhm / 2.355, 0.8))
     med = float(np.median(sm))
     sig = 1.4826 * float(np.median(np.abs(sm - med)))
     if not np.isfinite(sig) or sig <= 0:

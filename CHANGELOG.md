@@ -6,6 +6,78 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **A native Gaussian blur kernel, swept across essentially every 2-D scalar-sigma call site.** `correlate1d`
+  (the C function behind `scipy.ndimage.gaussian_filter`) was the single largest self-time item in every
+  full-pipeline profile taken this session, spread across ~30 call sites project-wide. Added
+  `gaussian_filter_native` (from-scratch separable reimplementation, `mode='reflect'`, verified against scipy
+  to double-precision rounding) behind a `_gaussian_blur` wrapper (`src/background.py`) that preserves the
+  caller's dtype (float32 stays float32 -- a first version of the wrapper silently upcast to float64, caught
+  by a new dtype-parity test before it could inflate memory on every caller) and falls back to scipy for
+  anything the kernel doesn't cover. ~4x faster at small sigma, ~1.3-1.5x at large. Wired into every direct
+  `gaussian_filter` call site that uses a plain scalar sigma on a 2-D array: `background.py`,
+  `denoising.py`, `cli.py` (master bias/dark/flat smoothing), `exposure_fusion.py`, `merge.py`,
+  `moving_objects.py`, `noise_validation.py`, `postprocess.py`, `quality.py`, `registration.py`,
+  `star_removal.py`, `trail_reject.py`. Deliberately left alone: the handful of call sites that pass a
+  per-axis sigma tuple (e.g. `(sigma, sigma, 0)` to blur spatial axes only, or `--fix-atmospheric-dispersion`
+  -adjacent inference preprocessing with its own tight numeric tolerances against a reference implementation)
+  -- the kernel only supports a scalar sigma on a 2-D plane, and those calls already fall back to scipy
+  safely on their own (a tuple sigma raises inside the wrapper's `float(sigma)` cast, caught and handled).
+
+- **Several real perf fixes, found by profiling a full run rather than guessing.** A synthetic-flat build
+  (`--flat-from-lights`, auto-triggered whenever no flat frames exist) was silently the single biggest cost
+  on a real profiled session -- 126.9s of a 187.8s total, hidden inside an unlabeled "Other (I/O)" bucket in
+  the timing summary. Fixed in stages, each measured before moving to the next:
+  - `robust_pca_decompose`'s per-iteration numpy arithmetic (soft-threshold, residual, `Y` update, norm) was
+    ~12 full-array passes/iteration outside the (already-native) SVD step; fused into two native kernels
+    (`robust_pca_pre_svd_input`, `robust_pca_iterate`), plus routing the L-update's matrix reconstruction
+    through the existing `small_times_wide` kernel instead of a `np.matmul` call that hit this machine's
+    unoptimized reference BLAS. 126.9s -> 45.4s.
+  - The timing summary's "Other (I/O)" bucket was hiding master-calibration building specifically because its
+    timer was gated on real bias/dark/flat frames existing -- `--flat-from-lights` runs precisely when they
+    don't, so it was never timed at all. Now timed unconditionally as its own "Calibration" line.
+  - `--flat-from-lights` now block-averages each of the mosaic's 4 CFA sub-planes independently (never across
+    colours) by 4x before decomposition, upsampling the recovered flat back to full resolution after --
+    a flat's vignetting/dust signal is smooth well above the pixel scale this removes, unlike a real dark or
+    bias master's per-pixel hot pixels, which is why this is `--flat-from-lights`-only. 45.2s -> 3.6s.
+  - DBE's compact-source mask dilation (`_build_emission_mask`) called `scipy.ndimage.binary_dilation` with a
+    large disk structuring element, pathologically slow on one large contiguous bright source (a real galaxy
+    or comet core): 16.2s on a synthetic case matching that shape. Replaced with a distance-transform
+    threshold -- the exact same result (verified bit-exact), computed in near-linear time instead.
+  - Post-processing's first step (per-channel hot-pixel removal) called `scipy.ndimage.median_filter` directly
+    instead of this project's own native per-channel median kernel -- the same class of miss already fixed
+    once elsewhere in the codebase, just never caught here. 5.1s -> ~0.1s (3 native calls, one per channel).
+  - `gaussian_filter_ds`'s large-sigma upsample (used throughout Phase 4: chroma denoising, local contrast,
+    DBE, and more) used cubic interpolation on a grid that had just come out of the function's own huge
+    Gaussian blur, where cubic's extra curvature term recovers nothing real; switched to bilinear, ~3x
+    faster per call, measured difference negligible.
+
+  End to end, the same profiled real session: 3m 7.8s -> 36.9s (~5x). Every change is either bit-exact,
+  measured-equivalent (documented tolerance), or covered by a new native-vs-fallback parity test; one
+  attempted optimisation (finer-grained parallelism in `small_times_wide`) was measured, found to make no
+  difference, and reverted rather than shipped. Full detail, including what was tried and didn't help, in
+  [CLAUDE.md](CLAUDE.md).
+
+- **A separate, unrelated fix from the same session moved the Omega benchmark numbers too.** The first change
+  of the session made per-frame cosmic-ray rejection's >=20-frame auto-skip sub-length-aware (see below) --
+  Omega's real 30s subs cross that new threshold, so a `tools/bench_vs_siril.py` re-run on the real session
+  found the README/website comparison table stale: total time 113s -> 132s (per-frame detection now runs,
+  same documented 39-75% cost), noise 0.99-1.19x Siril's -> 0.87-1.03x (same documented 11-16% quieter
+  benefit). Sunflower and Sculptor's subs (20s, 10s) are under the threshold and unaffected by it, but their
+  Phase 4 time should improve too from the fixes above -- not yet re-measured, flagged as such on both pages
+  rather than left silently stale. README.md and docs/index.html updated with the real Omega numbers.
+
+- **Per-frame cosmic-ray rejection's auto-skip is now sub-length-aware, not just frame-count-aware.**
+  Previously any >=20-frame session with a rejection-based stack method skipped per-frame L.A.Cosmic
+  entirely, on the theory that stack-level sigma-clip catches cosmic rays just as well. True on average, but
+  the noise-vs-softening tradeoff of forcing it back on (documented in the 2.2.4 entry below) tracks sub
+  length: ~0% star softening at 30s subs, +6.8% at 20s, +11.8% at 10s, while the noise win (11-16%) holds
+  across all three. `Config.LACOSMIC_LONG_SUB_EXPTIME_S` (25s) now keeps per-frame detection on even at
+  >=20 frames when the session's median sub exposure is long enough that the softening cost is negligible,
+  instead of always deferring to the frame-count skip. Only three real sessions inform the exact threshold,
+  so it's a starting heuristic, not a calibrated cutoff.
+
 ### Added
 
 - **Self-update check.** The CLI prints one line at the end of a run, and the desktop app shows a small

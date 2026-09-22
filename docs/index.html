@@ -86,22 +86,22 @@
 <main>
 <section id="time">
   <div class="wrap">
-    <h2>A night of frames in under two minutes</h2>
-    <p class="intro measure">The Omega Nebula, 114 frames, on an 8-core desktop: <strong>113 seconds</strong> from the raw files to a finished image. The red block is the part that makes the picture look good; the rest is getting 114 frames to line up.</p>
+    <h2>A night of frames in about two minutes</h2>
+    <p class="intro measure">The Omega Nebula, 114 frames, on an 8-core desktop: <strong>132 seconds</strong> from the raw files to a finished image. The red block is the part that makes the picture look good; the rest is getting 114 frames to line up. These 30-second subs cross this version's threshold for keeping per-frame cosmic-ray detection on through a big session, which is most of why loading takes longer than it used to &mdash; it also quiets the stack, see <a href="#compare">the comparison below</a>.</p>
 
-    <div class="run" role="img" aria-label="Bar showing 113 seconds split into loading and scoring 24.8, registration 8.2, aligning and stacking 20.0, finishing 51.3 and disk and setup 8.8 seconds">
-      <span style="width:21.9%; background:#1d7f86"></span>
-      <span style="width:7.2%; background:#4fa3a8"></span>
-      <span style="width:17.7%; background:#8cc5c8"></span>
-      <span style="width:45.4%; background:#b3312a"></span>
-      <span style="width:7.8%; background:#b9c3cf"></span>
+    <div class="run" role="img" aria-label="Bar showing 132 seconds split into loading and scoring 69.3, registration 8.4, aligning and stacking 20.9, finishing 22.7 and disk and setup 10.7 seconds">
+      <span style="width:52.5%; background:#1d7f86"></span>
+      <span style="width:6.4%; background:#4fa3a8"></span>
+      <span style="width:15.8%; background:#8cc5c8"></span>
+      <span style="width:17.2%; background:#b3312a"></span>
+      <span style="width:8.1%; background:#b9c3cf"></span>
     </div>
     <ul class="legend">
-      <li><i style="background:#1d7f86"></i>Load, calibrate, score<b>24.8 s</b></li>
-      <li><i style="background:#4fa3a8"></i>Register<b>8.2 s</b></li>
-      <li><i style="background:#8cc5c8"></i>Align and stack<b>20.0 s</b></li>
-      <li><i style="background:#b3312a"></i>Finish the image<b>51.3 s</b></li>
-      <li><i style="background:#b9c3cf"></i>Disk and setup<b>8.8 s</b></li>
+      <li><i style="background:#1d7f86"></i>Load, calibrate, score<b>69.3 s</b></li>
+      <li><i style="background:#4fa3a8"></i>Register<b>8.4 s</b></li>
+      <li><i style="background:#8cc5c8"></i>Align and stack<b>20.9 s</b></li>
+      <li><i style="background:#b3312a"></i>Finish the image<b>22.7 s</b></li>
+      <li><i style="background:#b9c3cf"></i>Disk and setup<b>10.7 s</b></li>
     </ul>
 
     <div class="phases">
@@ -161,7 +161,7 @@
       <caption>OriginStack first, Siril second. Stack only means without OriginStack's finishing steps, which Siril does not have.</caption>
       <thead><tr><th>Session</th><th class="n">Stack only</th><th class="n">OriginStack, finished image</th><th class="n">Peak memory</th><th class="n">Star width</th></tr></thead>
       <tbody>
-        <tr><th>Omega, 114 frames</th><td class="n">57 s / 72 s</td><td class="n">110 s</td><td class="n">16.5 / 8.1 GB</td><td class="n">4.40 / 4.56 px</td></tr>
+        <tr><th>Omega, 114 frames</th><td class="n">102 s / 63 s</td><td class="n">132 s</td><td class="n">18.4 / 8.1 GB</td><td class="n">4.39 / 4.56 px</td></tr>
         <tr><th>Sunflower, 158 frames</th><td class="n">106 s / 81 s</td><td class="n">159 s</td><td class="n">16.9 / 8.7 GB</td><td class="n">3.56 / 3.60 px</td></tr>
         <tr><th>Sculptor, 532 frames</th><td class="n">258 s / 150 s</td><td class="n">270 s</td><td class="n">16.7 / 11.2 GB</td><td class="n">2.78 / 2.95 px</td></tr>
       </tbody>
@@ -171,7 +171,7 @@
       <div class="chart">
         <h3>Star width on the same stars (smaller is sharper)</h3>
         <h3 class="sub">Omega</h3>
-        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:67.7%"></i><b>4.40 px</b></div></div>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:67.5%"></i><b>4.39 px</b></div></div>
         <div class="row"><span>Siril</span><div class="track"><i style="width:70.2%"></i><b>4.56 px</b></div></div>
         <div class="row"><span>DeepSkyStacker</span><div class="track"><i style="width:74.3%"></i><b>4.83 px</b></div></div>
         <h3 class="sub">Sunflower</h3>
@@ -186,14 +186,14 @@
       <div class="verdict">
         <h3>What the numbers say</h3>
         <p><strong>Sharpness: OriginStack is as sharp or sharper.</strong> Its stars are 3% narrower than Siril's on Omega, level on Sunflower and 6% narrower on Sculptor. It also used every frame (114, 158 and 532 of 532), where Siril used 111, 157 and 525.</p>
-        <p><strong>Speed: it depends on the session.</strong> OriginStack stacks Omega faster and the two larger sessions more slowly (1.3 times as long on Sunflower, 1.7 on Sculptor). Times move by up to 15% between runs: Siril's Omega ranged from 53 to 72 s across our runs.</p>
-        <p><strong>Noise: Siril is still cleaner.</strong> OriginStack's per-pixel noise is 0.99 to 1.19 times Siril's on Omega, 1.09 to 1.20 on Sunflower and 1.05 to 1.33 on Sculptor, so about level in green and up to a third higher in red and blue. Most of the red/blue gap traces to cosmic-ray and hot-pixel spikes: the debayer filter smears a single-pixel spike further in red/blue than in green, and large sessions skip per-frame cosmic-ray detection in favour of stack-level rejection, which runs too late to fully catch it. Forcing per-frame detection back on closes most of the gap (11 to 16% quieter, measured) but softens stars slightly on shorter sub-exposures and adds 39 to 75% to the stacking time, so it's opt-in rather than the default.</p>
-        <p><strong>Memory does not grow with the session.</strong> OriginStack stayed at 16.5 to 16.9 GB from 114 to 532 frames, set by the number of workers (<code>-j</code> lowers it), while Siril's grew from 8.1 to 11.2 GB. Siril uses less at these sizes. Peak temporary disk was about the same for both, at 18 to 59 GB.</p>
+        <p><strong>Speed: it depends on the session, and now on your sub length.</strong> On Omega, OriginStack's stack-only time is 102 s against Siril's 63 s (1.6 times as long) &mdash; slower than an earlier version of this page reported, because Omega's 30 s subs now cross this version's threshold for keeping per-frame cosmic-ray detection on through a big session (previously skipped by default above ~20 frames); that's most of the extra time, and it's also what closes most of the noise gap below. Sunflower and Sculptor's shorter subs (20 s, 10 s) fall under that threshold and keep the old default, but this version's finishing step is roughly twice as fast for every session regardless of sub length &mdash; their table figures above are from the previous measurement and have not been re-run since this pass. Siril's own time moves by up to 15% between runs: its Omega ranged from 53 to 72 s across our runs, 63 s the latest.</p>
+        <p><strong>Noise: closer than it was, on sessions long enough to earn it.</strong> On Omega, OriginStack's per-pixel noise is now 0.87 to 1.03 times Siril's (was 0.99 to 1.19) &mdash; the same 30 s-sub cosmic-ray fix above, not a separate change. Sunflower and Sculptor's subs are too short to trigger it by default, so their figures (1.09 to 1.20 on Sunflower, 1.05 to 1.33 on Sculptor) stand from the earlier measurement. The underlying cause is the same either way: the debayer filter smears a single-pixel cosmic-ray or hot-pixel spike further in red/blue than in green, and stack-level rejection alone runs too late to fully catch it; per-frame detection catches it before debayering, at a real time cost on long sessions (see Speed above), which is why it is a threshold rather than always on. Force it either way with <code>--cosmic-ray-rejection</code> / <code>--no-cosmic-ray-rejection</code>.</p>
+        <p><strong>Memory does not grow with the session.</strong> OriginStack ranged 16.7 to 18.4 GB across the three sessions (Omega's cosmic-ray pass adds some of that), set by the number of workers (<code>-j</code> lowers it), while Siril's grew from 8.1 to 11.2 GB. Siril uses less at these sizes. Peak temporary disk was about the same for both, at 18 to 59 GB.</p>
         <p><strong>DeepSkyStacker</strong> took 14 min 8 s on Omega, produced stars softer than both others, and at its default settings left hot-pixel streaks and a few misregistered frames.</p>
       </div>
     </div>
 
-    <p class="caveat measure">OriginStack's case is what comes after the stack: it finishes the image in the same run with no setup, explains the night with <a href="advanced.html#diagnostics">diagnostics</a>, runs <a href="advanced.html#workflow">fully offline</a> if you ask, and does the <a href="advanced.html">rest</a> the other tools leave to you. On a plain stack it is now competitive on sharpness and behind Siril on noise and, for larger sessions, on time. These numbers replace earlier ones: an earlier version of this page overstated sharpness because of how stars were chosen for measurement, and OriginStack's stars were then genuinely softer than Siril's until we found a hot-pixel filter that was clipping star cores, by switching steps off one at a time, and fixed it. Three sessions from one camera are a small sample, and both tools were left at default-style settings. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats all of this on your own frames.</p>
+    <p class="caveat measure">OriginStack's case is what comes after the stack: it finishes the image in the same run with no setup, explains the night with <a href="advanced.html#diagnostics">diagnostics</a>, runs <a href="advanced.html#workflow">fully offline</a> if you ask, and does the <a href="advanced.html">rest</a> the other tools leave to you. On a plain stack it is now competitive on sharpness, close to Siril on noise on longer subs where per-frame cosmic-ray detection kicks in, further behind on shorter subs where it doesn't, and behind Siril on time. These numbers replace earlier ones: an earlier version of this page overstated sharpness because of how stars were chosen for measurement, and OriginStack's stars were then genuinely softer than Siril's until we found a hot-pixel filter that was clipping star cores, by switching steps off one at a time, and fixed it. Omega's figures above were refreshed on 2026-09-22 after a performance pass (post-processing roughly twice as fast; a new threshold that keeps per-frame cosmic-ray detection on through long sessions with 25 s+ subs, which is slower but quieter) &mdash; Sunflower and Sculptor still reflect the prior measurement and are due for a re-run. Three sessions from one camera are a small sample, and both tools were left at default-style settings. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats all of this on your own frames.</p>
   </div>
 </section>
 

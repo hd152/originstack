@@ -34,9 +34,12 @@ from src.utils import safe_print
 
 try:
     from scipy.ndimage import binary_dilation, gaussian_filter
+
+    from src.background import _gaussian_blur
     _HAS_SCIPY = True
 except Exception:  # pragma: no cover
     binary_dilation = gaussian_filter = None
+    _gaussian_blur = None
     _HAS_SCIPY = False
 
 try:
@@ -244,11 +247,11 @@ def reject_trails(rgb: np.ndarray, lum: Optional[np.ndarray] = None,
     keep = (~mask).astype(np.float32)
     # Normalised convolution: smooth background from the non-trail pixels only,
     # so the fill never smears trail flux back into the gap.
-    denom = gaussian_filter(keep, sigma=fill_sigma)
+    denom = _gaussian_blur(keep, fill_sigma)
     denom = np.maximum(denom, 1e-6)
     for c in range(3):
         ch = out[:, :, c]
-        bg = gaussian_filter(ch * keep, sigma=fill_sigma) / denom
+        bg = _gaussian_blur(ch * keep, fill_sigma) / denom
         ch[mask] = bg[mask]
         out[:, :, c] = ch
     if verbose:

@@ -15,8 +15,8 @@ from typing import List, Optional
 
 import numpy as np
 from astropy.io import fits
-from scipy import ndimage
 
+from src.background import _gaussian_blur
 from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import build_hot_pixel_map
@@ -366,7 +366,13 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     """
     lights = frames.get('light', [])
     cal_needed = frames.get('dark') or frames.get('flat') or frames.get('bias')
-    cal_start = time.time() if cal_needed else None
+    # Timed unconditionally (not just when cal_needed): --flat-from-lights
+    # builds a synthetic flat from *light* frames when no real flat/dark/bias
+    # exist at all, so cal_needed is False on exactly that path -- gating the
+    # timer on it meant the slowest thing this function can do (a robust_pca
+    # decomposition of sampled lights) was invisible to stats.calibration_time
+    # and fell into the caller's opaque "Other" bucket instead.
+    _build_start = time.time()
     if cal_needed:
         safe_print("\nCreating master calibration frames...")
 
@@ -483,11 +489,13 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
             sample = sample[:Config.ROBUST_PCA_AUTO_MAX_FRAMES]
             safe_print(f"  No flat frames found -- deriving a synthetic flat from "
                        f"{len(sample)} light frames (--flat-from-lights)...")
-            synthetic_flat = make_master(sample, method='robust_pca')
+            synthetic_flat = make_master(sample, method='robust_pca',
+                                         downsample=Config.FLAT_FROM_LIGHTS_DOWNSAMPLE)
             if synthetic_flat is not None:
                 masters['flat'] = synthetic_flat
                 safe_print(f"  ✓ Master flat:  {len(sample)} light frames (synthetic) -> "
-                           f"{synthetic_flat.shape[0]}×{synthetic_flat.shape[1]} (robust_pca)")
+                           f"{synthetic_flat.shape[0]}×{synthetic_flat.shape[1]} (robust_pca, "
+                           f"{Config.FLAT_FROM_LIGHTS_DOWNSAMPLE}x downsampled decomposition)")
             else:
                 safe_print("  Synthetic flat-from-lights failed (too few usable frames) "
                            "-- proceeding without a flat")
@@ -503,18 +511,18 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     if masters.get('bias') is not None:
         n_bias = len(frames['bias'])
         sigma_b = max(1, 30 // max(1, int(np.sqrt(n_bias))))
-        masters['bias'] = ndimage.gaussian_filter(masters['bias'].astype(np.float32), sigma=sigma_b)
+        masters['bias'] = _gaussian_blur(masters['bias'].astype(np.float32), sigma_b)
     if masters.get('dark') is not None:
         n_dark = len(frames['dark'])
         sigma_d = max(1, 20 // max(1, int(np.sqrt(n_dark))))
-        masters['dark'] = ndimage.gaussian_filter(masters['dark'].astype(np.float32), sigma=sigma_d)
+        masters['dark'] = _gaussian_blur(masters['dark'].astype(np.float32), sigma_d)
     if masters.get('flat') is not None:
         n_flat = len(frames['flat'])
         sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
         flat_raw = masters['flat'].astype(np.float32)
         for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
             ch = flat_raw[r_off::2, c_off::2]
-            flat_raw[r_off::2, c_off::2] = ndimage.gaussian_filter(ch, sigma=sigma_f)
+            flat_raw[r_off::2, c_off::2] = _gaussian_blur(ch, sigma_f)
         masters['flat'] = flat_raw
 
     masters['dark_exptime'] = None
@@ -524,9 +532,6 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
                 frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
         except Exception as e:
             safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
-
-    if cal_needed and cal_start is not None and stats is not None:
-        stats.calibration_time = time.time() - cal_start
 
     # Photon-transfer gain / read-noise from raw bias+flat pairs, for the
     # Poisson term in --photometry. Only when photometry is requested and no
@@ -566,6 +571,9 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
             masters['vignette'] = vmap
             safe_print(f"  ✓ Vignette map: {os.path.basename(vignette_path)} "
                        f"({vmap.shape[1]}×{vmap.shape[0]})")
+
+    if stats is not None:
+        stats.calibration_time = time.time() - _build_start
 
     return masters
 

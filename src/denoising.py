@@ -7,7 +7,7 @@ import numpy as np
 from scipy import ndimage
 
 from src import wavelet
-from src.background import _estimate_sky_sigma, gaussian_filter_ds
+from src.background import _estimate_sky_sigma, _gaussian_blur, gaussian_filter_ds
 from src.models import Config
 from src.utils import get_logger, safe_print
 
@@ -60,9 +60,9 @@ def _structure_tensor_coherence(plane: np.ndarray, sigma: float = 1.5) -> np.nda
     *magnitude* alone, not orientation coherence).
     """
     gy, gx = np.gradient(plane.astype(np.float64))
-    jxx = ndimage.gaussian_filter(gx * gx, sigma)
-    jyy = ndimage.gaussian_filter(gy * gy, sigma)
-    jxy = ndimage.gaussian_filter(gx * gy, sigma)
+    jxx = _gaussian_blur(gx * gx, sigma)
+    jyy = _gaussian_blur(gy * gy, sigma)
+    jxy = _gaussian_blur(gx * gy, sigma)
     trace = jxx + jyy
     disc = np.sqrt(np.maximum((jxx - jyy) ** 2 + 4 * jxy ** 2, 0.0))
     lam1 = 0.5 * (trace + disc)
@@ -366,7 +366,7 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
         return img.copy()
 
     # Local contrast map at the smoothing scale
-    smooth_luma = ndimage.gaussian_filter(luma, sigma=smoothing_sigma)
+    smooth_luma = _gaussian_blur(luma, smoothing_sigma)
     contrast = np.abs(luma - smooth_luma)
 
     # YCbCr split (same BT.601 coefficients as the other denoisers)
@@ -381,9 +381,9 @@ def acdnr_denoise(img: np.ndarray, smoothing_sigma: float = 1.5,
     chroma_w = np.exp(-0.5 * (contrast / chroma_thr) ** 2)
 
     # Smooth each YCbCr plane, then adaptively blend
-    Y_smooth  = ndimage.gaussian_filter(Y,  sigma=smoothing_sigma)
-    Cb_smooth = ndimage.gaussian_filter(Cb, sigma=smoothing_sigma)
-    Cr_smooth = ndimage.gaussian_filter(Cr, sigma=smoothing_sigma)
+    Y_smooth  = _gaussian_blur(Y,  smoothing_sigma)
+    Cb_smooth = _gaussian_blur(Cb, smoothing_sigma)
+    Cr_smooth = _gaussian_blur(Cr, smoothing_sigma)
 
     Y_d  = luma_w   * Y_smooth  + (1.0 - luma_w)   * Y
     Cb_d = chroma_w * Cb_smooth + (1.0 - chroma_w) * Cb
@@ -475,7 +475,7 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
     sky_mask = 1.0 - protect  # float [0,1]
 
     result = np.empty_like(img, dtype=np.float64)
-    blurred_weight = ndimage.gaussian_filter(sky_mask, sigma=sigma)
+    blurred_weight = _gaussian_blur(sky_mask, sigma)
     safe_weight = np.maximum(blurred_weight, 1e-9)
 
     # Optional coarse pass — smooths medium-scale colour blotches (walking /
@@ -491,7 +491,7 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
     for c in range(img.shape[2]):
         chroma = img[:, :, c].astype(np.float64) - lum
         # Weighted blur: star pixels contribute 0, background contributes 1
-        smooth_chroma = ndimage.gaussian_filter(chroma * sky_mask, sigma=sigma) / safe_weight
+        smooth_chroma = _gaussian_blur(chroma * sky_mask, sigma) / safe_weight
         # Stars keep original chroma; background gets smoothed chroma
         out_chroma = chroma * protect + smooth_chroma * sky_mask
         if do_large:
@@ -688,7 +688,7 @@ def multiscale_local_contrast(
     for sigma, w in zip(scales, scale_weights):
         if w <= 0 or strength <= 0:
             continue
-        blurred = ndimage.gaussian_filter(detail_src, sigma=float(sigma))
+        blurred = _gaussian_blur(detail_src, float(sigma))
         detail = detail_src - blurred   # high-frequency detail at this scale
         enhanced_lum += strength * w * detail * mask
 

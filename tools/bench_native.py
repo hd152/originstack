@@ -105,6 +105,38 @@ if hasattr(nat, "aperture_photometry_batch"):
         lambda: nat.aperture_photometry_batch(
             apb_img, apb_xs, apb_ys, 6.0, 9.0, 15.0, 4))
 
+# --- Gram-matrix thin-SVD trick: robust-PCA calibration-stack shape ---
+if hasattr(nat, "gram_matrix_wide"):
+    rpca_n, rpca_p = 10, 2048 * 3056  # this project's own real profiled case (--flat-from-lights)
+    rpca_M = np.ascontiguousarray(rng.normal(1000.0, 50.0, (rpca_n, rpca_p)))
+    results["gram_matrix_wide"] = bench(
+        f"gram_matrix_wide (N={rpca_n})", lambda: nat.gram_matrix_wide(rpca_M), reps=2)
+    rpca_small = np.ascontiguousarray(rng.normal(0.0, 1.0, (rpca_n, rpca_n)))
+    results["small_times_wide"] = bench(
+        f"small_times_wide (N={rpca_n})", lambda: nat.small_times_wide(rpca_small, rpca_M), reps=2)
+
+# --- robust_pca_pre_svd_input / robust_pca_iterate: fused IALM per-iteration update ---
+if hasattr(nat, "robust_pca_iterate"):
+    rpca_D = np.ascontiguousarray(rng.normal(1000.0, 50.0, (rpca_n, rpca_p)))
+    rpca_L = np.ascontiguousarray(rng.normal(1000.0, 50.0, (rpca_n, rpca_p)))
+    results["robust_pca_pre_svd_input"] = bench(
+        f"robust_pca_pre_svd_input (N={rpca_n})",
+        lambda: nat.robust_pca_pre_svd_input(
+            rpca_D, np.zeros((rpca_n, rpca_p)), np.zeros((rpca_n, rpca_p)), 0.37),
+        reps=2)
+    results["robust_pca_iterate"] = bench(
+        f"robust_pca_iterate (N={rpca_n})",
+        lambda: nat.robust_pca_iterate(
+            rpca_D, rpca_L, np.zeros((rpca_n, rpca_p)), np.zeros((rpca_n, rpca_p)), 0.1, 0.42),
+        reps=2)
+
+# --- median_filter_native: postprocess.py's per-channel hot-pixel step shape ---
+if hasattr(nat, "median_filter_native"):
+    mf_plane = np.ascontiguousarray(rng.normal(500.0, 50.0, (2033, 3041)).astype(np.float32))
+    results["median_filter_5x5"] = bench(
+        "median_filter_native (5x5, full-res plane)",
+        lambda: nat.median_filter_native(mf_plane, 5))
+
 out = sys.argv[1] if len(sys.argv) > 1 else "bench_results.json"
 with open(out, "w") as f:
     json.dump(results, f, indent=1)
