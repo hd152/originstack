@@ -106,7 +106,8 @@ variable `SIGNPATH_ORGANIZATION_ID` is set, so releases keep working before appr
 
 One-time setup (maintainer):
 1. Apply at https://signpath.org/apply (public repo, OSI licence, a code-signing policy page linked from
-   the README are required).
+   the README are required -- see [`CODE_SIGNING_POLICY.md`](../CODE_SIGNING_POLICY.md), linked from the
+   README's top link bar).
 2. In SignPath create project `originstack` with signing policy `release-signing`, and two artifact
    configurations, both for a GitHub-uploaded zip: `exe` (`<pe-file path="OriginStack.exe">` sign) and
    `installer` (`<pe-file path="OriginStack-*-setup.exe">` sign). Trust the GitHub.com connector and
