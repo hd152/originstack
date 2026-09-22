@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.2.5] - 2026-09-22
+
 ### Changed
 
 - **A native Gaussian blur kernel, swept across essentially every 2-D scalar-sigma call site.** `correlate1d`
