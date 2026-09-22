@@ -10,6 +10,7 @@ class Config:
     """Central configuration for magic numbers and thresholds."""
     HOT_PIXEL_THRESHOLD = 12.0
     HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
+    HOT_PIXEL_STAR_SUPPORT = 3.0     # Bayer hot-pixel test: keep a flagged pixel whose neighbours are > this many sigma high (it is a star)
     CA_MIN_SHIFT_PX = 0.25           # Session CA below this: skip the correction warp entirely
     SESSION_CFA_MIN_FRAMES = 12      # Fewer lights than this: per-frame CFA equalisation, not one session estimate
     SESSION_CFA_PROBE_FRAMES = 8     # Frames spread through the session that the estimate is taken from

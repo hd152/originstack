@@ -789,12 +789,23 @@ def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
 
 
 def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
-                   hot_map: Optional[np.ndarray] = None) -> np.ndarray:
+                   hot_map: Optional[np.ndarray] = None,
+                   star_support: Optional[float] = _DETECT) -> np.ndarray:
     """Bayer-aware hot pixel fix: apply pre-built map and/or statistical detection.
 
     Merged implementation: median_filter is computed once per sub-channel and
     reused for both hot-map replacement and statistical detection, halving the
     number of median filter calls when both are active.
+
+    ``star_support`` (sigma; default ``Config.HOT_PIXEL_STAR_SUPPORT``, ``None`` turns
+    the test off) protects stars from the statistical detector. Each colour plane is
+    half resolution, so a star ~4 px wide is ~2 px wide there and its peak pixel stands
+    far above its 3x3 plane median: without this the peak of every bright star was
+    replaced by that median in every frame, clipping the cores (measured on a real
+    session: stars 18% wider and the stack noisier than with the step off). A flagged
+    pixel is kept when any adjacent mosaic pixel (one pixel away, in another plane) is
+    itself more than ``star_support`` sigma over its own plane's median: a hot pixel is
+    a single-sensor-pixel event and leaves its neighbours normal, a star lifts them.
     """
     if data.ndim != 2:
         return data
@@ -803,6 +814,8 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     do_stat = threshold is not None
     if do_stat and threshold is _DETECT:
         threshold = Config.HOT_PIXEL_BAYER_THRESHOLD
+    if star_support is _DETECT:
+        star_support = Config.HOT_PIXEL_STAR_SUPPORT
 
     # Native: one call, no per-sub-plane temporaries; bit-identical (same f32 ops in
     # the same order). Map and statistics are never asked for together by the
@@ -815,7 +828,9 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
             if has_map:
                 return _native.hot_pixel_bayer(
                     src, np.ascontiguousarray(hot_map, dtype=np.uint8), None)
-            return _native.hot_pixel_bayer(src, None, float(threshold))
+            return _native.hot_pixel_bayer(
+                src, None, float(threshold),
+                None if star_support is None else float(star_support))
         except Exception:
             pass
 
@@ -823,6 +838,10 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     if not has_map and not do_stat:
         return result
 
+    # Pass 1, per sub-plane: median, map replacement, and (for the statistics) the excess
+    # over the median and its sigma. Pass 2 needs every plane's excess at once, because the
+    # star test looks at neighbours that live in the other planes.
+    planes = []
     for dy in range(2):
         for dx in range(2):
             sub = result[dy::2, dx::2]
@@ -839,15 +858,36 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
                     sub[map_mask] = med[map_mask]
                     # sub is a view of result — no need to write back.
 
+            diff = sigma = None
             if do_stat:
                 diff = sub - med
                 mad = np.median(np.abs(diff))
                 sigma = mad * 1.4826
                 if sigma < 1e-6:
-                    continue
-                stat_mask = diff > threshold * sigma
-                if np.any(stat_mask):
-                    sub[stat_mask] = med[stat_mask]
+                    diff = sigma = None
+            planes.append((dy, dx, sub, med, diff, sigma))
+
+    if not do_stat:
+        return result
+
+    near = None
+    if star_support is not None:
+        z = np.zeros(result.shape, dtype=np.float32)
+        for dy, dx, _sub, _med, diff, sigma in planes:
+            if diff is not None and np.isfinite(sigma):
+                z[dy::2, dx::2] = diff / sigma
+        pad = np.full((result.shape[0] + 2, result.shape[1] + 2), -np.inf, dtype=np.float32)
+        pad[1:-1, 1:-1] = z
+        near = np.maximum.reduce([pad[:-2, 1:-1], pad[2:, 1:-1], pad[1:-1, :-2], pad[1:-1, 2:]])
+
+    for dy, dx, sub, med, diff, sigma in planes:
+        if diff is None:
+            continue
+        stat_mask = diff > threshold * sigma
+        if near is not None:
+            stat_mask &= ~(near[dy::2, dx::2] > star_support)
+        if np.any(stat_mask):
+            sub[stat_mask] = med[stat_mask]
 
     return result
 

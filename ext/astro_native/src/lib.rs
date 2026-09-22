@@ -6689,16 +6689,24 @@ fn bayer_plane_median3(data: &[f32], w: usize, hh: usize, ww: usize, py: usize, 
 /// `threshold` (optional): statistical detection per 2x2 sub-plane -- a pixel
 /// whose excess over the plane's 3x3 median exceeds `threshold` times
 /// 1.4826 x the plane's median absolute deviation is replaced by that median.
+/// `star_support` (optional, with `threshold`): a flagged pixel is *kept* when any of
+/// its four adjacent mosaic pixels (one pixel away, in the other colour planes) is
+/// itself more than `star_support` sigma above its own plane's median. A hot pixel is a
+/// single-sensor-pixel event, so its neighbours stay normal; a star lifts its
+/// neighbours with it, and without this test the peak of every bright star was replaced
+/// by its plane median (a star is only ~2 pixels wide in a half-resolution plane), which
+/// clipped the cores and softened and noised the whole stack.
 /// Give one or the other, not both (the numpy path shares one median between
 /// the two; the pipeline never asks for both at once). All arithmetic is f32
 /// in numpy's order, so the result is bit-identical to `_fix_hot_bayer`.
 #[pyfunction]
-#[pyo3(signature = (data, hot_map=None, threshold=None))]
+#[pyo3(signature = (data, hot_map=None, threshold=None, star_support=None))]
 fn hot_pixel_bayer<'py>(
     py: Python<'py>,
     data: PyReadonlyArray2<'py, f32>,
     hot_map: Option<PyReadonlyArray2<'py, u8>>,
     threshold: Option<f32>,
+    star_support: Option<f32>,
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {
     if hot_map.is_some() && threshold.is_some() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -6741,7 +6749,9 @@ fn hot_pixel_bayer<'py>(
             });
         } else if let Some(thr) = threshold {
             let sigma_k = 1.4826f64 as f32;
-            let planes: Vec<Vec<f32>> = (0..4usize)
+            // per plane: (values, 3x3 median, sigma); sigma 0 marks a plane that is left alone
+            // (empty, a NaN made numpy's MAD NaN, or sigma < 1e-6)
+            let stage: Vec<(Vec<f32>, Vec<f32>, f32)> = (0..4usize)
                 .into_par_iter()
                 .map(|q| {
                     let (py_, px) = (q >> 1, q & 1);
@@ -6755,36 +6765,64 @@ fn hot_pixel_bayer<'py>(
                         }
                     }
                     if p.is_empty() {
-                        return p;
+                        return (p, Vec::new(), 0f32);
                     }
                     let med = median_filter_2d_f32(&p, hh, ww, 3);
                     let mut ad: Vec<f32> =
                         p.iter().zip(&med).map(|(a, m)| (a - m).abs()).collect();
-                    // numpy: a NaN anywhere makes the median NaN, so no pixel passes.
                     if ad.iter().any(|v| v.is_nan()) {
-                        return p;
+                        return (p, med, 0f32);
                     }
                     let mad = median_inplace(&mut ad);
                     let sigma = mad * sigma_k;
                     if sigma < 1e-6 {
-                        return p;
+                        return (p, med, 0f32);
                     }
-                    let cut = thr * sigma;
-                    for (v, m) in p.iter_mut().zip(&med) {
-                        if *v - *m > cut {
-                            *v = *m;
-                        }
-                    }
-                    p
+                    (p, med, sigma)
                 })
                 .collect();
             let wws = [(w + 1) / 2, w / 2];
+            // excess over the plane median in units of that plane's sigma, on the mosaic grid
+            let zmos: Option<Vec<f32>> = star_support.map(|_| {
+                let mut z = vec![0f32; h * w];
+                z.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                    let py_ = y & 1;
+                    let i = y >> 1;
+                    for x in 0..w {
+                        let (p, med, sigma) = &stage[py_ * 2 + (x & 1)];
+                        if *sigma > 0f32 {
+                            let k = i * wws[x & 1] + (x >> 1);
+                            row[x] = (p[k] - med[k]) / *sigma;
+                        }
+                    }
+                });
+                z
+            });
             out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
                 let py_ = y & 1;
                 let i = y >> 1;
                 for x in 0..w {
                     let px = x & 1;
-                    row[x] = planes[py_ * 2 + px][i * wws[px] + (x >> 1)];
+                    let (p, med, sigma) = &stage[py_ * 2 + px];
+                    let k = i * wws[px] + (x >> 1);
+                    let v = p[k];
+                    row[x] = v;
+                    if *sigma > 0f32 && v - med[k] > thr * *sigma {
+                        let star = match (&zmos, star_support) {
+                            (Some(z), Some(sup)) => {
+                                let mut near = f32::NEG_INFINITY;
+                                if y > 0 { near = near.max(z[(y - 1) * w + x]); }
+                                if y + 1 < h { near = near.max(z[(y + 1) * w + x]); }
+                                if x > 0 { near = near.max(z[y * w + x - 1]); }
+                                if x + 1 < w { near = near.max(z[y * w + x + 1]); }
+                                near > sup
+                            }
+                            _ => false,
+                        };
+                        if !star {
+                            row[x] = med[k];
+                        }
+                    }
                 }
             });
         }

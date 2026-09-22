@@ -6,6 +6,19 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The statistical Bayer hot-pixel step clipped the cores of bright stars, in every frame.** Each colour plane is half
+  resolution, so a star ~4 px wide is ~2 px wide there, and its peak pixel stands far above its 3x3 plane median; the detector
+  replaced that peak with the median as if it were a hot pixel. A flagged pixel is now kept when any adjacent mosaic pixel (one
+  pixel away, in another colour plane) is itself more than 3 sigma above its own plane's median (`Config.HOT_PIXEL_STAR_SUPPORT`;
+  a hot pixel is a single-sensor-pixel event and leaves its neighbours normal, a star lifts them). Found by switching Phase 1
+  steps off one at a time: with the step off, Omega's stars went from 13% wider than Siril's to 3% sharper. With the fix, on the
+  same three sessions (stars on the same stars in both stacks): Omega 5.12 -> 4.40 px against Siril's 4.56, Sunflower 3.75 -> 3.56
+  against 3.60, Sculptor 3.05 -> 2.78 against 2.95; noise against Siril's, per pixel and channel, fell from 1.01/1.15/1.30 to
+  0.99/1.10/1.19 (Omega), 1.28/1.18/1.32 to 1.15/1.09/1.20 (Sunflower) and 1.49/1.24/1.59 to 1.22/1.05/1.33 (Sculptor). Native
+  kernel `hot_pixel_bayer` gains a `star_support` argument (crate 0.31.0) and the numpy mirror matches it bit for bit.
+
 ### Changed
 
 - **Softening and noise gap investigated; README corrected.** The 2.2.2 note that OriginStack's stack is wider than its own
