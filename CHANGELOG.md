@@ -14,6 +14,20 @@ match the `VERSION` file and `v*` git tags.
   work (so it costs nothing on any run longer than the request itself), fails silently on any error, and
   is skipped automatically under `--offline` or `$ORIGINSTACK_NO_UPDATE_CHECK`.
 
+### Changed
+
+- **The rest of the Siril noise gap is explained, not fixed.** 2.2.3 found stack-level noise in red/blue up to
+  1.3x Siril's with the remainder unexplained; it traces to per-frame cosmic-ray/hot-pixel spikes. Malvar
+  debayering smears a single-pixel spike over more pixels in red/blue than in green (synthetic test: >5-sigma
+  footprint 9 px vs 5 px, plus heavier red<->blue cross-leakage than green's), and sessions with 20+ frames
+  using a rejection stack method skip per-frame `lacosmic` detection by default, relying on stack-level
+  sigma-clip alone -- which runs after debayering, on the already-smeared pixels, and doesn't fully make up
+  for it. Forcing `--cosmic-ray-rejection` on cuts noise 11-16% across all three benchmark sessions, but is a
+  real tradeoff, not a free win: star width vs Siril softens (unchanged on 30s subs, +6.8% on 20s, +11.8% on
+  10s -- worse on shorter subs) and stacking slows 39-75% (worst on the largest session, where Siril already
+  wins on time). The default is unchanged; this is documented in [CLAUDE.md](CLAUDE.md) as an available
+  opt-in rather than shipped as a new default.
+
 ## [2.2.4] - 2026-09-22
 
 ### Fixed
