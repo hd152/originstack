@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Self-update check.** The CLI prints one line at the end of a run, and the desktop app shows a small
+  clickable "Update available" note in the header, when a newer release exists on GitHub. One
+  unauthenticated GET of the public releases API, on a background thread that runs alongside the real
+  work (so it costs nothing on any run longer than the request itself), fails silently on any error, and
+  is skipped automatically under `--offline` or `$ORIGINSTACK_NO_UPDATE_CHECK`.
+
 ## [2.2.4] - 2026-09-22
 
 ### Fixed

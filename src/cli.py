@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from typing import List, Optional
 
@@ -25,7 +26,15 @@ from src.health_check import run_health_check
 from src.io_fits import make_master, save_preview_rgb
 from src.models import Config, ProcessingStats
 from src.pipeline import stack_target
-from src.utils import disable_astropy_network, format_time, print_header, safe_print, setup_logging
+from src.utils import (
+    disable_astropy_network,
+    format_time,
+    print_header,
+    read_version,
+    safe_print,
+    setup_logging,
+    should_check_for_update,
+)
 
 _log = logging.getLogger("originstack")
 
@@ -2532,6 +2541,20 @@ def main():
     args = parse_args()
     apply_network_policy(args)
 
+    # Self-update check: runs in the background for the whole duration of the real
+    # work below, so by the time _print_update_notice looks at it (right after a
+    # successful run), the answer is already there for free on any run that takes
+    # longer than the request itself -- essentially all of them. Never blocks
+    # startup, never delays the pipeline, and is silent on any failure.
+    _update_result: dict = {}
+    if should_check_for_update():
+        def _bg_check():
+            from src.net_query import check_for_update
+            r = check_for_update(read_version())
+            if r:
+                _update_result['info'] = r
+        threading.Thread(target=_bg_check, daemon=True).start()
+
     # Collection maintenance modes: no output path, no stacking.
     if getattr(args, 'sweep_undo', False):
         from src.quality_sweep import undo_quality_sweep
@@ -2577,3 +2600,8 @@ def main():
         import traceback
         traceback.print_exc()
         raise SystemExit(1)
+
+    info = _update_result.get('info')
+    if info:
+        safe_print(f"\n  A newer OriginStack is available: v{info['version']} "
+                   f"(you have v{read_version()}) -- {info['url']}")

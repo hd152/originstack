@@ -423,3 +423,48 @@ def horizons_ephemeris(designation: str, iso_time: str,
         return nums[0], nums[1]
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# GitHub Releases API (self-update check)
+# ---------------------------------------------------------------------------
+
+_GITHUB_API = "https://api.github.com/repos/{repo}/releases/latest"
+
+
+def _parse_version(v: str) -> Optional[Tuple[int, ...]]:
+    """'v2.10.3' / '2.10.3' -> (2, 10, 3); None for anything that doesn't parse
+    (a 'dev' checkout, a malformed tag) so callers skip the comparison rather
+    than guess."""
+    v = v.strip().lstrip("vV")
+    parts = v.split(".")
+    try:
+        return tuple(int(p) for p in parts) if parts and all(p.isdigit() for p in parts) else None
+    except ValueError:
+        return None
+
+
+def check_for_update(current_version: str, repo: str = "hd152/originstack",
+                     timeout: float = 8.0) -> Optional[Dict[str, str]]:
+    """Newer release available on GitHub, or None (up to date, offline, rate-limited,
+    a 'dev'/unparseable current version, or any other failure -- this must never be
+    the reason a run fails or a window doesn't open, so every path back is silent).
+
+    One unauthenticated GET to the public releases API; GitHub requires a
+    User-Agent, which every request in this module already sends. Respects
+    ``set_offline()`` like every other query here.
+    """
+    current = _parse_version(current_version)
+    if current is None:
+        return None
+    try:
+        raw = _http_get(_GITHUB_API.format(repo=repo), timeout=timeout)
+        payload = json.loads(raw.decode("utf-8"))
+        tag = payload.get("tag_name", "")
+        latest = _parse_version(tag)
+        if latest is None or latest <= current:
+            return None
+        return {"version": tag.lstrip("vV"), "url": payload.get("html_url") or
+                f"https://github.com/{repo}/releases/latest"}
+    except Exception:
+        return None

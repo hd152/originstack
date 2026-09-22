@@ -194,6 +194,22 @@ def native_status() -> str:
                 "(build ext/astro_native for ~5-37x on stacking/registration)")
 
 
+def should_check_for_update() -> bool:
+    """Gate for the self-update check (CLI at startup, desktop app on launch): off
+    if $ORIGINSTACK_NO_UPDATE_CHECK is set (any value), or if --offline already put
+    net_query into its no-network mode for this process. The check itself
+    (src.net_query.check_for_update) is a single unauthenticated GET to GitHub's
+    public releases API and fails silent on any error -- this only decides whether
+    it's attempted at all, so a truly offline run never even tries the socket."""
+    if os.environ.get('ORIGINSTACK_NO_UPDATE_CHECK'):
+        return False
+    try:
+        from src.net_query import is_offline
+        return not is_offline()
+    except Exception:
+        return True
+
+
 def format_time(seconds: float) -> str:
     """Format seconds as human-readable time."""
     if seconds < 60:

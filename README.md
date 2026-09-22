@@ -957,8 +957,11 @@ OriginStack works entirely on your machine. It goes online in these cases only, 
 | astrometry.net | `--plate-solve` | The image, to solve its position (needs your API key) |
 | Gaia / VizieR / SIMBAD catalogues | `--photometry`, `--photometry-timeseries`, `--annotate`, catalogue colour calibration | Sky coordinates of the field |
 | JPL Horizons | Comet ephemerides | The comet designation and time |
+| Self-update check | Once per CLI run or desktop-app launch | Nothing — an anonymous GET of GitHub's public releases API, no request parameters, no identifying data |
 
 Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no network requests at all: the target lookup is skipped, and the features in the table that need the network are turned off with a note in the log. Everything else, including the default colour calibration, is computed locally. This is enforced where the requests are made rather than caller by caller, and a test counts real connection attempts.
+
+**The self-update check** is the one thing that isn't gated by `--offline` itself (it runs before a run's settings are even read), but it never blocks anything and fails silently: a background thread checks GitHub once, and if a newer release exists, the CLI prints one line at the end of the run and the desktop app shows a small clickable "Update available" note in the header. Set `ORIGINSTACK_NO_UPDATE_CHECK` (to anything) to disable it outright; it's also skipped automatically whenever `--offline` was used in the same process.
 
 ---
 

@@ -20,8 +20,10 @@ import datetime
 import io
 import os
 import sys
+import threading
 import tkinter as tk
 import traceback
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
 from typing import Any, Dict, List, Optional
@@ -835,10 +837,40 @@ class App:
                 font=(_SANS, 12, 'bold')).pack(side='left', padx=(8, 0), pady=8)
         tk.Label(inner, text=f'v{read_version()}', background=_PANEL, foreground=_TEXT_FAINT,
                 font=_FONT_MONO).pack(side='left', padx=(10, 0), pady=8)
+        self.update_label = tk.Label(inner, text='', background=_PANEL, foreground=_ACCENT,
+                                     font=_FONT, cursor='hand2')
+        self.update_label.pack(side='left', padx=(14, 0), pady=8)
+        self.update_label.bind('<Button-1>', lambda _e: self._open_update_url())
+        self._update_url = ''
+        self._start_update_check()
         self.header_status_var = tk.StringVar(value='Idle')
         tk.Label(inner, textvariable=self.header_status_var, background=_PANEL,
                 foreground=_TEXT_DIM, font=_FONT_MONO).pack(side='right', pady=8)
         tk.Frame(root, background=_LINE, height=1).pack(fill='x', side='top')
+
+    def _start_update_check(self) -> None:
+        """Background self-update check, once per launch. Never blocks the window
+        opening: the network call runs on a daemon thread, and the result (if any)
+        is marshalled back to the header label via root.after -- tkinter widgets
+        may only be touched from the main thread."""
+        from src.utils import read_version, should_check_for_update
+        if not should_check_for_update():
+            return
+
+        def _bg():
+            from src.net_query import check_for_update
+            info = check_for_update(read_version())
+            if info:
+                self.root.after(0, lambda: self._show_update(info))
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _show_update(self, info: Dict[str, str]) -> None:
+        self._update_url = info['url']
+        self.update_label.configure(text=f"Update available: v{info['version']}")
+
+    def _open_update_url(self) -> None:
+        if self._update_url:
+            webbrowser.open(self._update_url)
 
     # ── left column: setup, run controls, progress, log ───────────────
 

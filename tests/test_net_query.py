@@ -218,3 +218,68 @@ class TestHorizonsEphemeris:
         assert radec is not None
         assert "SITE_COORD" in captured["url"]
         assert "COORD_TYPE" in captured["url"]
+
+
+class TestCheckForUpdate:
+    """src.net_query.check_for_update -- the CLI/desktop-app self-update check
+    (src.utils.should_check_for_update gates whether it's called at all)."""
+
+    def _mock_release(self, tag):
+        payload = {"tag_name": tag, "html_url": f"https://github.com/hd152/originstack/releases/tag/{tag}"}
+        return _fake_response(json.dumps(payload).encode())
+
+    def teardown_method(self):
+        net_query.set_offline(False)  # this module's offline flag is process-global
+
+    def test_newer_version_available(self):
+        with mock.patch("urllib.request.urlopen", return_value=self._mock_release("v2.5.0")):
+            info = net_query.check_for_update("2.2.4")
+        assert info == {"version": "2.5.0",
+                        "url": "https://github.com/hd152/originstack/releases/tag/v2.5.0"}
+
+    def test_up_to_date_returns_none(self):
+        with mock.patch("urllib.request.urlopen", return_value=self._mock_release("v2.2.4")):
+            assert net_query.check_for_update("2.2.4") is None
+
+    def test_current_already_newer_than_latest_returns_none(self):
+        """A dev build ahead of the last tagged release should never see itself as outdated."""
+        with mock.patch("urllib.request.urlopen", return_value=self._mock_release("v2.2.0")):
+            assert net_query.check_for_update("2.2.4") is None
+
+    def test_v_prefix_is_optional_on_either_side(self):
+        with mock.patch("urllib.request.urlopen", return_value=self._mock_release("2.5.0")):
+            assert net_query.check_for_update("v2.2.4")["version"] == "2.5.0"
+
+    def test_unparseable_current_version_skips_the_request_entirely(self):
+        with mock.patch("urllib.request.urlopen") as m:
+            assert net_query.check_for_update("dev") is None
+        m.assert_not_called()
+
+    def test_malformed_tag_returns_none(self):
+        with mock.patch("urllib.request.urlopen", return_value=self._mock_release("nightly-build")):
+            assert net_query.check_for_update("2.2.4") is None
+
+    def test_network_error_returns_none(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("no network")):
+            assert net_query.check_for_update("2.2.4") is None
+
+    def test_bad_json_returns_none(self):
+        with mock.patch("urllib.request.urlopen", return_value=_fake_response(b"not json")):
+            assert net_query.check_for_update("2.2.4") is None
+
+    def test_respects_offline_mode(self):
+        net_query.set_offline(True)
+        with mock.patch("urllib.request.urlopen") as m:
+            assert net_query.check_for_update("2.2.4") is None
+        m.assert_not_called()
+
+    def test_repo_argument_is_used_in_the_request_url(self):
+        captured = {}
+
+        def _fake_urlopen(req, timeout=None, context=None):
+            captured["url"] = req.full_url
+            return self._mock_release("v1.0.0")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            net_query.check_for_update("0.1.0", repo="someone/fork")
+        assert "someone/fork" in captured["url"]
