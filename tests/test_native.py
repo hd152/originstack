@@ -2629,3 +2629,19 @@ def test_rotated_warp_weight_table_matches_closed_form():
     assert (a == b).mean() > 0.99
     ulp = np.spacing(np.abs(outs["exact"]).astype(np.float32)).astype(np.float64)
     assert (np.abs(a - b) <= 4 * ulp + 1e-3).all()
+
+
+def test_gpu_quality_pool_size_stays_within_core_budget():
+    """execute_frame_processing's GPU-mode quality-thread-pool sizing --
+    see _gpu_quality_pool_size's own docstring for why this is capped at
+    all (real measured oversubscription on a 4GB card)."""
+    import src.frame_processor as fp
+
+    # GPU workers + quality pool should never together demand more than
+    # the physical core budget.
+    assert fp._gpu_quality_pool_size(n_workers=7, cpu_count=16, n_frames=100) == 9
+    # Never below 1, even if GPU workers alone already meet or exceed cpu_count.
+    assert fp._gpu_quality_pool_size(n_workers=16, cpu_count=16, n_frames=100) == 1
+    assert fp._gpu_quality_pool_size(n_workers=20, cpu_count=16, n_frames=100) == 1
+    # Never more threads than there are frames to process.
+    assert fp._gpu_quality_pool_size(n_workers=2, cpu_count=16, n_frames=3) == 3

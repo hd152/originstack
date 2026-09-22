@@ -8,6 +8,22 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **`--use-gpu` real-hardware finding: currently a net loss on a 4GB card for real sessions, not just a
+  hypothesis.** Measured head-to-head on the same real session, same machine: 54.4s with `--use-gpu` vs
+  ~37s CPU-only. Root cause is mostly architectural, not a quick fix: Phase 1's GPU-mode worker count is
+  capped by VRAM (~7 workers on a 4GB card vs 16 CPU-mode workers), while most of Phase 1's actual
+  work (lacosmic, debayer, star detection) stays CPU-native regardless of `--use-gpu` -- only
+  calibration/hot-pixel/white-balance dispatch to GPU, so the lost worker parallelism isn't compensated.
+  A smaller, real, *fixed* contributor: the GPU-mode quality-metrics thread pool ran uncapped
+  (`os.cpu_count()` threads) concurrently with the GPU worker threads, neither pinned to a single
+  rayon/BLAS thread the way CPU mode's process-pool workers are -- real oversubscription, now capped
+  (`_gpu_quality_pool_size`) so the two pools' thread counts stay near the physical core budget together.
+  Recovered ~0.7s of the ~17s gap -- real, but confirms the worker-count architecture is the dominant
+  cause, not thread pinning. Widening GPU coverage further (e.g. to warp/drizzle) was considered and set
+  aside: it would add more per-worker VRAM demand, shrinking the already-constraining worker count
+  further rather than fixing it. `--use-gpu` stays opt-in; this is documented in CLAUDE.md for anyone
+  picking the architectural question back up.
+
 - **The native Gaussian blur kernel now covers per-channel `(H, W, C)` blurs, not just single 2-D planes.**
   New `gaussian_blur_spatial` (`src/background.py`) blurs each channel independently by looping the
   existing native kernel per channel -- the same per-channel-native-call pattern this project's

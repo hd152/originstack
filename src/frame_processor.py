@@ -665,6 +665,23 @@ def _pin_worker_to_single_thread() -> None:
     os.environ['RAYON_NUM_THREADS'] = str(_RAYON_WORKER_CAP)
 
 
+def _gpu_quality_pool_size(n_workers: int, cpu_count: int, n_frames: int) -> int:
+    """Thread count for ``execute_frame_processing``'s GPU-mode quality pool.
+
+    Runs concurrently with ``n_workers`` GPU threads in the same process --
+    neither pool is rayon/BLAS-thread-pinned the way CPU mode's
+    ``ProcessPoolExecutor`` workers are (that pinning only runs in a fresh
+    subprocess's own initializer, which a ``ThreadPoolExecutor`` never
+    spawns), so an unbounded quality pool stacks a full ``cpu_count`` more OS
+    threads on top of the GPU workers, each independently capable of
+    launching full-core-count native rayon parallelism for its own
+    (still-CPU-only) work -- real oversubscription, measured on a real
+    4GB-card session. Capped so the two pools' thread counts together stay
+    near the physical core budget instead of stacking on top of each other.
+    """
+    return max(1, min(cpu_count - n_workers, n_frames))
+
+
 def _banding_cfg(args) -> Optional[tuple]:
     """(amount, sigma) when --banding-removal is on, else None. Carried to pool
     workers through the initializer (like trail_reject), not the task tuple."""
@@ -1086,9 +1103,11 @@ def execute_frame_processing(
         # When GPU is active, quality metrics (CPU-bound: star detection, FWHM) run
         # in a dedicated CPU pool so GPU workers are never idle waiting for them.
         # GPU workers skip quality (skip_quality=True) and return immediately after
-        # writing to memmap, keeping VRAM freed as quickly as possible.
+        # writing to memmap, keeping VRAM freed as quickly as possible. Pool size
+        # is capped -- see _gpu_quality_pool_size's docstring.
         _use_qpool = gpu.active
-        _n_cpu = min(os.cpu_count() or 4, n)
+        _n_cpu = (_gpu_quality_pool_size(n_workers, os.cpu_count() or 4, n) if _use_qpool
+                  else min(os.cpu_count() or 4, n))
         _qpool = ThreadPoolExecutor(max_workers=_n_cpu) if _use_qpool else None
         _qfuts: Dict[int, Any] = {}   # frame index → quality Future
 
