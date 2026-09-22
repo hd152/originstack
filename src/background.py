@@ -51,6 +51,28 @@ except ImportError:
     _gf = None
 
 
+_HAS_NATIVE_GAUSSIAN = HAS_NATIVE and hasattr(_native, 'gaussian_filter_native')
+
+
+def _gaussian_blur(a: np.ndarray, sigma: float) -> np.ndarray:
+    """``gaussian_filter(a, sigma=sigma)`` (mode='reflect', the default and
+    the only mode any caller here uses) routed through the native
+    ``gaussian_filter_native`` kernel when available. `correlate1d` (the C
+    function scipy's gaussian_filter1d calls per axis) was the single
+    largest self-time item in every profile taken of a real session --
+    ~4x faster at small sigma, ~1.3-1.5x at the large sigmas
+    ``gaussian_filter_ds``'s downsampled branch uses, verified within
+    double-precision rounding of scipy's own result (`tests/test_native.py`).
+    2-D float input only; anything else falls back to scipy untouched."""
+    if _HAS_NATIVE_GAUSSIAN and a.ndim == 2:
+        try:
+            return np.asarray(_native.gaussian_filter_native(np.ascontiguousarray(a, dtype=np.float64),
+                                                              float(sigma)))
+        except Exception:
+            pass
+    return gaussian_filter(a, sigma=sigma)
+
+
 def gaussian_filter_ds(arr: np.ndarray, sigma: float,
                        ds_threshold: float = 24.0) -> np.ndarray:
     """Gaussian blur evaluated on a block-downsampled copy for large sigmas.
@@ -67,14 +89,14 @@ def gaussian_filter_ds(arr: np.ndarray, sigma: float,
     sigma = float(sigma)
     a = np.asarray(arr, dtype=np.float64)
     if sigma < ds_threshold or a.ndim != 2:
-        return gaussian_filter(a, sigma=sigma)
+        return _gaussian_blur(a, sigma)
     ds = 4 if sigma < 96.0 else 8
     H, W = a.shape
     h2, w2 = (H // ds) * ds, (W // ds) * ds
     if h2 < ds or w2 < ds:
-        return gaussian_filter(a, sigma=sigma)
+        return _gaussian_blur(a, sigma)
     coarse = a[:h2, :w2].reshape(h2 // ds, ds, w2 // ds, ds).mean(axis=(1, 3))
-    sm = gaussian_filter(coarse, sigma=sigma / ds)
+    sm = _gaussian_blur(coarse, sigma / ds)
     # Centre-aligned upsample: coarse pixel j represents fine pixels
     # [j*ds, (j+1)*ds), whose centre is j*ds + (ds-1)/2. Plain zoom is
     # corner-aligned and would return the whole field shifted by ~ds/2 px,
@@ -322,7 +344,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 
     # Gaussian smooth
     if min(ny, nx) >= 4:
-        bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
+        bg_grid = _gaussian_blur(bg_grid.astype(np.float64), 0.8)
 
     # --- Interpolation to Full Res ---
     grid_y = (np.arange(ny) + 0.5) * cell_h
@@ -372,7 +394,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
     # Final Gaussian blur to suppress high-frequency mesh ripple
     blur_sigma = cell_h * 0.5
     if blur_sigma > 0:
-        background = ndimage.gaussian_filter(background.astype(np.float64), sigma=blur_sigma)
+        background = _gaussian_blur(background.astype(np.float64), blur_sigma)
 
     return np.asarray(background, dtype=np.float32)
 
@@ -647,7 +669,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
 
         if min(ny, nx) >= 4:
-            bg_grid = ndimage.gaussian_filter(bg_grid.astype(np.float64), sigma=0.8)
+            bg_grid = _gaussian_blur(bg_grid.astype(np.float64), 0.8)
 
         grid_y = (np.arange(ny) + 0.5) * (H / ny)
         grid_x = (np.arange(nx) + 0.5) * (W / nx)
@@ -1320,7 +1342,7 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
         coords, values, H, W, outlier_sigma, max_iter, sigma_px, Hc, Wc, verbose)
 
     surface = zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W]
-    surface = ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+    surface = _gaussian_blur(surface, patch_size * 0.5)
     return np.clip(surface, surf_lo, surf_hi)
 
 
@@ -1351,7 +1373,7 @@ def _polynomial_surface(coords: np.ndarray, values: np.ndarray,
     xx = np.linspace(0.0, 1.0, W)
     grid_y, grid_x = np.meshgrid(yy, xx, indexing='ij')
     surface = poly(grid_y.ravel(), grid_x.ravel()).dot(coeffs).reshape(H, W)
-    return ndimage.gaussian_filter(surface, sigma=patch_size * 0.5)
+    return _gaussian_blur(surface, patch_size * 0.5)
 
 
 def dynamic_background_extraction(

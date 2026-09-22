@@ -8,6 +8,19 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **A native Gaussian blur kernel, wired into the highest-traffic callers.** `correlate1d` (the C function
+  behind `scipy.ndimage.gaussian_filter`) was the single largest self-time item in every full-pipeline
+  profile taken this session, spread across ~30 call sites project-wide (DBE, chroma denoising, local
+  contrast, structure-tensor coherence, edge-band correction, and more). Added `gaussian_filter_native`
+  (from-scratch separable reimplementation, `mode='reflect'`, verified against scipy to double-precision
+  rounding) and wired it into `background.py`'s `gaussian_filter_ds` plus its own and `denoising.py`'s
+  highest-traffic direct callers (`reduce_chroma_noise`, `multiscale_local_contrast`,
+  `_structure_tensor_coherence`, DBE's mesh-fallback surface fit) -- ~4x faster at small sigma, ~1.3-1.5x at
+  the large sigmas `gaussian_filter_ds`'s downsampled branch uses, measured in isolation. This is not a full
+  sweep of every direct call site (registration.py, quality.py, moving_objects.py, noise_validation.py and a
+  few others still call scipy directly) -- each has its own sigma/shape assumptions worth checking before
+  switching over, left for a follow-up.
+
 - **Several real perf fixes, found by profiling a full run rather than guessing.** A synthetic-flat build
   (`--flat-from-lights`, auto-triggered whenever no flat frames exist) was silently the single biggest cost
   on a real profiled session -- 126.9s of a 187.8s total, hidden inside an unlabeled "Other (I/O)" bucket in

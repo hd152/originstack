@@ -2861,6 +2861,106 @@ fn median_filter_native<'py>(
         .into_pyarray(py))
 }
 
+/// `scipy.ndimage.gaussian_filter1d`'s exact 1D kernel: normalized samples of
+/// the Gaussian PDF over `[-radius, radius]`, `radius = floor(truncate*sigma
+/// + 0.5)` -- same formula scipy uses, order-0 (no derivative).
+fn gaussian_kernel1d(sigma: f64, truncate: f64) -> Vec<f64> {
+    let radius = (truncate * sigma + 0.5) as isize;
+    let sigma2 = sigma * sigma;
+    let mut w: Vec<f64> = (-radius..=radius)
+        .map(|x| {
+            let xf = x as f64;
+            (-0.5 * xf * xf / sigma2).exp()
+        })
+        .collect();
+    let sum: f64 = w.iter().sum();
+    for v in w.iter_mut() {
+        *v /= sum;
+    }
+    w
+}
+
+/// Separable Gaussian blur matching `scipy.ndimage.gaussian_filter(data,
+/// sigma, mode='reflect')` (the default mode, and the only one any call site
+/// in this codebase uses) for a scalar `sigma` on a 2D array. Two rayon-
+/// parallel correlate1d-style passes (row-wise, then column-wise) instead of
+/// scipy's generic N-D machinery -- found by profiling a real session:
+/// `correlate1d` (the C function `gaussian_filter1d` calls per axis) was the
+/// single largest self-time item in every profile taken this session, spread
+/// across ~30 call sites project-wide (DBE, chroma denoising, local
+/// contrast, structure-tensor coherence, star-mask generation, registration,
+/// edge-band correction, and more). This kernel is wired into
+/// `background.py`'s `gaussian_filter_ds` (already the single most-reused
+/// choke point among those callers) as a first step, not a full sweep of
+/// every direct `scipy.ndimage.gaussian_filter` call site -- each of those
+/// has its own sigma/shape assumptions worth checking individually before
+/// switching it over. Boundary handling reuses `reflect_idx` (scipy's
+/// edge-duplicating `mode='reflect'`, not numpy's non-duplicating one).
+#[pyfunction]
+#[pyo3(signature = (data, sigma, truncate=4.0))]
+fn gaussian_filter_native<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f64>,
+    sigma: f64,
+    truncate: f64,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w) = (s[0], s[1]);
+    let owned: Vec<f64>;
+    let flat: &[f64] = match arr.as_slice() {
+        Some(sl) => sl,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+
+    if sigma <= 0.0 {
+        let arr2 = numpy::ndarray::Array2::from_shape_vec((h, w), flat.to_vec())
+            .expect("shape mismatch building gaussian_filter_native passthrough");
+        return Ok(arr2.into_pyarray(py));
+    }
+
+    let kernel = gaussian_kernel1d(sigma, truncate);
+    let radius = (kernel.len() / 2) as isize;
+
+    let out = py.detach(|| {
+        // Pass 1: blur along axis 1 (each row independently), parallel over rows.
+        let mut tmp = vec![0f64; h * w];
+        tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+            let row = &flat[y * w..(y + 1) * w];
+            for x in 0..w {
+                let mut acc = 0.0f64;
+                for (k, &kv) in kernel.iter().enumerate() {
+                    let dx = k as isize - radius;
+                    let xi = reflect_idx(x as isize + dx, w);
+                    acc += kv * row[xi];
+                }
+                out_row[x] = acc;
+            }
+        });
+        // Pass 2: blur along axis 0 (each column), parallel over output rows.
+        let mut out = vec![0f64; h * w];
+        out.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+            for x in 0..w {
+                let mut acc = 0.0f64;
+                for (k, &kv) in kernel.iter().enumerate() {
+                    let dy = k as isize - radius;
+                    let yi = reflect_idx(y as isize + dy, h);
+                    acc += kv * tmp[yi * w + x];
+                }
+                out_row[x] = acc;
+            }
+        });
+        out
+    });
+
+    let arr2 = numpy::ndarray::Array2::from_shape_vec((h, w), out)
+        .expect("shape mismatch building gaussian_filter_native output");
+    Ok(arr2.into_pyarray(py))
+}
+
 // ---------------------------------------------------------------------------
 // DBE robust background-surface fit
 // ---------------------------------------------------------------------------
@@ -7687,6 +7787,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
     m.add_function(wrap_pyfunction!(median_filter_native, m)?)?;
+    m.add_function(wrap_pyfunction!(gaussian_filter_native, m)?)?;
     m.add_function(wrap_pyfunction!(dbe_fit_surface, m)?)?;
     m.add_function(wrap_pyfunction!(dbe_sample_patches, m)?)?;
     m.add_function(wrap_pyfunction!(detect_stars_matched_filter, m)?)?;

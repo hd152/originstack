@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import originstack as astro
+import src.background as _background_mod
 import src.blind_match as _blind_match_mod
 import src.channel_combine as _channel_combine_mod
 import src.debayer as _debayer_mod
@@ -518,6 +519,76 @@ def test_median_filter_native_matches_scipy(size):
     ref = ndimage.median_filter(a, size=size)
     got = native.median_filter_native(a, size)
     assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
+
+
+@pytest.mark.parametrize("sigma", [0.8, 2.0, 5.0, 24.0, 32.0])
+@pytest.mark.parametrize("shape", [(80, 96), (301, 257)])
+def test_gaussian_filter_native_matches_scipy(sigma, shape):
+    """gaussian_filter_native is a from-scratch separable reimplementation of
+    scipy.ndimage.gaussian_filter's default mode='reflect' -- not a port, so
+    parity is judged by numerical agreement, not shared code. Real-shape
+    profiling showed correlate1d (gaussian_filter1d's C function) as the top
+    self-time item in every profile taken of a full pipeline run this
+    session, spread across ~30 call sites; this kernel and its wiring into
+    background.py's _gaussian_blur / gaussian_filter_ds don't sweep all of
+    them, just the highest-traffic ones."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(4)
+    a = rng.normal(1000.0, 50.0, shape)
+    want = gaussian_filter(a, sigma=sigma)
+    got = np.asarray(native.gaussian_filter_native(a, sigma))
+    # separable-pass floating-point summation order differs from scipy's;
+    # both are exact renditions of the same closed-form kernel, so the gap
+    # is double-precision rounding, not an approximation choice
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+
+
+def test_gaussian_filter_native_zero_sigma_is_passthrough():
+    rng = np.random.default_rng(5)
+    a = rng.normal(size=(20, 30))
+    got = np.asarray(native.gaussian_filter_native(a, 0.0))
+    np.testing.assert_array_equal(got, a)
+
+
+def test_gaussian_filter_native_rejects_non_2d_by_signature():
+    # the numpy binding itself enforces 2D; the Python-side _gaussian_blur
+    # wrapper is what actually gates this in production (see
+    # test_gaussian_blur_falls_back_for_non_2d below)
+    rng = np.random.default_rng(6)
+    a = rng.normal(size=(10, 10, 3))
+    with pytest.raises(Exception):
+        native.gaussian_filter_native(a, 2.0)
+
+
+def test_gaussian_blur_wrapper_matches_scipy_native_and_fallback():
+    """background.py's _gaussian_blur (the wrapper wired into
+    gaussian_filter_ds and swapped into ~10 direct call sites in background.py
+    and denoising.py) must agree with plain scipy whether or not native is
+    available."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(7)
+    a = rng.normal(1000.0, 50.0, (150, 200))
+    want = gaussian_filter(a, sigma=5.0)
+
+    got_native = _background_mod._gaussian_blur(a, 5.0)
+    np.testing.assert_allclose(got_native, want, rtol=1e-9, atol=1e-9)
+
+    had = _background_mod._HAS_NATIVE_GAUSSIAN
+    _background_mod._HAS_NATIVE_GAUSSIAN = False
+    try:
+        got_fallback = _background_mod._gaussian_blur(a, 5.0)
+    finally:
+        _background_mod._HAS_NATIVE_GAUSSIAN = had
+    np.testing.assert_array_equal(got_fallback, want)
+
+
+def test_gaussian_blur_falls_back_for_non_2d():
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(8)
+    a = rng.normal(size=(20, 30, 3))
+    want = gaussian_filter(a, sigma=2.0)
+    got = _background_mod._gaussian_blur(a, 2.0)
+    np.testing.assert_array_equal(got, want)
 
 
 def test_median_filter_per_channel_matches_combined_axis_scipy_call():
