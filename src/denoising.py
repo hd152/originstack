@@ -7,7 +7,12 @@ import numpy as np
 from scipy import ndimage
 
 from src import wavelet
-from src.background import _estimate_sky_sigma, _gaussian_blur, gaussian_filter_ds
+from src.background import (
+    _estimate_sky_sigma,
+    _gaussian_blur,
+    gaussian_blur_spatial,
+    gaussian_filter_ds,
+)
 from src.models import Config
 from src.utils import get_logger, safe_print
 
@@ -737,9 +742,7 @@ def reduce_stars(
         return img
 
     # Blur per spatial dimension only (channel axis excluded)
-    blurred = ndimage.gaussian_filter(
-        img.astype(np.float64),
-        sigma=(blur_sigma, blur_sigma, 0))
+    blurred = gaussian_blur_spatial(img.astype(np.float64), blur_sigma)
 
     blend = (star_mask * reduction_factor).astype(np.float64)
     mask3 = blend[:, :, np.newaxis]

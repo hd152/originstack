@@ -8,6 +8,16 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **The native Gaussian blur kernel now covers per-channel `(H, W, C)` blurs, not just single 2-D planes.**
+  New `gaussian_blur_spatial` (`src/background.py`) blurs each channel independently by looping the
+  existing native kernel per channel -- the same per-channel-native-call pattern this project's
+  `_median_filter_per_channel` already uses. Wired into `denoising.py::reduce_stars` (the default Phase 4
+  star-reduction step, `--no-star-reduce` to disable) and `exposure_fusion.py`'s Laplacian-pyramid blur
+  (`--hdr-blend-mode fusion`), neither of which the earlier 2-D-only kernel could reach. Measured ~2.8x at
+  a real full-resolution shape. `originvision_infer.py`'s resize prefilter uses the same tuple-sigma
+  pattern but was left on scipy -- it has its own tight numeric tolerances already validated against a
+  reference implementation, and swapping its blur would add unvalidated drift for no clear benefit.
+
 - **DBE's regression-surface upsample switched cubic -> bilinear interpolation.** `_fit_background_surface`
   (the standard, non-dense-field DBE path) blurs its coarse-grid upsample again immediately afterward
   (`sigma=patch_size*0.5`, typically >=32px), which absorbs whatever cubic's extra curvature term would

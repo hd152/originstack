@@ -724,6 +724,62 @@ def test_gaussian_blur_preserves_input_dtype():
     np.testing.assert_allclose(out32.astype(np.float64), out64, rtol=1e-5, atol=1e-3)
 
 
+def test_gaussian_blur_spatial_matches_scipy_per_axis_sigma():
+    """gaussian_blur_spatial replaces this codebase's sigma=(s, s, 0) call
+    sites (star reduction's halo blur -- a default Phase 4 step -- and HDR
+    exposure-fusion's Laplacian pyramid), which _gaussian_blur alone can't
+    route to native since it only accepts a scalar sigma on a 2-D plane."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(10)
+    a = rng.normal(1000.0, 50.0, (60, 70, 3)).astype(np.float64)
+    want = gaussian_filter(a, sigma=(2.5, 2.5, 0))
+    got = _background_mod.gaussian_blur_spatial(a, 2.5)
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+
+
+def test_gaussian_blur_spatial_2d_matches_gaussian_blur():
+    rng = np.random.default_rng(11)
+    a = rng.normal(size=(50, 60))
+    np.testing.assert_array_equal(
+        _background_mod.gaussian_blur_spatial(a, 3.0),
+        _background_mod._gaussian_blur(a, 3.0))
+
+
+def test_gaussian_blur_spatial_falls_back_for_other_ndim():
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(12)
+    a = rng.normal(size=(4, 5, 6, 2))
+    want = gaussian_filter(a, sigma=1.5)
+    got = _background_mod.gaussian_blur_spatial(a, 1.5)
+    np.testing.assert_array_equal(got, want)
+
+
+def test_reduce_stars_matches_original_scipy_three_axis_call():
+    """reduce_stars (default Phase 4 star-reduction step, --no-star-reduce
+    to disable) switched its sigma=(blur_sigma, blur_sigma, 0) blur to
+    gaussian_blur_spatial -- pin its real output against the original raw
+    scipy call, not just the isolated gaussian_blur_spatial kernel."""
+    from scipy.ndimage import gaussian_filter
+
+    rng = np.random.default_rng(13)
+    H, W = 80, 100
+    img = rng.uniform(500.0, 5000.0, (H, W, 3)).astype(np.float32)
+    star_mask = np.zeros((H, W), dtype=np.float32)
+    star_mask[30:36, 40:46] = 1.0
+    star_mask[10:14, 70:74] = 0.6
+
+    blur_sigma = 1.5
+    reduction_factor = 0.4
+    ref_blurred = gaussian_filter(img.astype(np.float64), sigma=(blur_sigma, blur_sigma, 0))
+    blend = (star_mask * reduction_factor).astype(np.float64)
+    mask3 = blend[:, :, np.newaxis]
+    ref = np.clip(img.astype(np.float64) * (1.0 - mask3) + ref_blurred * mask3,
+                 0.0, None).astype(np.float32)
+
+    got = _denoising_mod.reduce_stars(img, star_mask, reduction_factor, blur_sigma)
+    np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-3)
+
+
 def test_median_filter_per_channel_matches_combined_axis_scipy_call():
     """postprocess.py's hot-pixel step switched from one scipy
     ndimage.median_filter(stacked, size=(5,5,1)) call (measured 5.1s on a

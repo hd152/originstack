@@ -21,9 +21,9 @@ from __future__ import annotations
 from typing import List, Sequence
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import zoom
 
-from src.background import _gaussian_blur
+from src.background import _gaussian_blur, gaussian_blur_spatial
 
 
 def _fit_shape(x: np.ndarray, target_shape) -> np.ndarray:
@@ -43,8 +43,7 @@ def _fit_shape(x: np.ndarray, target_shape) -> np.ndarray:
 def _pyr_down(x: np.ndarray) -> np.ndarray:
     """Blur + downsample by 2 in the first two axes; a trailing channel
     axis, if present, is left untouched."""
-    sigma = (1.0, 1.0, 0.0) if x.ndim == 3 else (1.0, 1.0)
-    blurred = gaussian_filter(x, sigma=sigma, mode='reflect')
+    blurred = gaussian_blur_spatial(x, 1.0)
     return blurred[::2, ::2, ...]
 
 
@@ -57,8 +56,7 @@ def _pyr_up(x: np.ndarray, out_shape) -> np.ndarray:
     zoom_factors = (zy, zx, 1.0) if x.ndim == 3 else (zy, zx)
     up = zoom(x, zoom_factors, order=1)
     up = _fit_shape(up, out_shape)
-    sigma = (1.0, 1.0, 0.0) if x.ndim == 3 else (1.0, 1.0)
-    return gaussian_filter(up, sigma=sigma, mode='reflect')
+    return gaussian_blur_spatial(up, 1.0)
 
 
 def _gaussian_pyramid(x: np.ndarray, levels: int) -> List[np.ndarray]:
