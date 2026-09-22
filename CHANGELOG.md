@@ -6,6 +6,48 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.2.4] - 2026-09-22
+
+### Fixed
+
+- **4 Dependabot security alerts.** pyo3 0.23.5 -> 0.29.2 (numpy crate alongside it, since the two track each
+  other): fixed a high-severity out-of-bounds read in `PyList`/`PyTuple` iterators' `nth`/`nth_back`, a
+  missing `Sync` bound on `PyCFunction::new_closure` closures, and an older `PyString::from_object` buffer-
+  overflow risk. `Python::allow_threads` was renamed to `Python::detach` in the new pyo3 (45 call sites,
+  mechanical); the removed `PyObject` type alias is now `Py<PyAny>`. Crate bumped to 0.32.0. The 4th alert
+  (`time`, stack-exhaustion DoS) is a transitive *build-time-only* dependency of `tract-linalg`'s build
+  script, never linked into the compiled binary or fed untrusted input; dismissed with a documented reason
+  rather than destabilizing a working dependency tree over a build-time-only risk.
+- **CodeQL's Rust analysis failed on every run** ("Rust does not support the manual build mode"): switched
+  the whole matrix to `build-mode: none`, which both Python and Rust actually support.
+
+### Added
+
+- **CodeQL security scanning** (Python + Rust) on push, PRs into `main`, and weekly for query updates.
+- **Branch protection on `main`**: required status checks (lint, native, both Python test legs) must pass
+  before any push lands, direct pushes still work once they do. CI now also runs on push to `develop`, since
+  `main` only ever receives fast-forwarded commits from `develop` with no PR.
+- **Dependabot**: alerts and automated security fixes enabled; weekly update checks for pip, the
+  `ext/astro_native` Rust crate, and GitHub Actions (`.github/dependabot.yml`).
+- **Issue templates** (bug report, feature request) and **Discussions**, enabled as the place for "how do
+  I..." questions instead of Issues.
+- **CONTRIBUTING.md**, **CODE_OF_CONDUCT.md** (Contributor Covenant 2.1), **CODEOWNERS**, and CI/release/
+  license badges on the README.
+- **Website: Andromeda Galaxy and Horsehead/Flame Nebula** added to the gallery, stacked with plain
+  `--auto` defaults like the existing samples. (Pleiades and a Ring Nebula session were also stacked but
+  left out -- one was too faint to be worth showing, the other had visible dust-mote artifacts.)
+- **Sky conditions documented**: the README, website and CLAUDE.md now state the real measured Bortle
+  rating (7-9, heavy light pollution, backyard/rooftop) of the sessions behind every sample image, measured
+  with the pipeline's own `estimate_bortle()` rather than assumed.
+
+### Changed
+
+- Routine dependency floor bumps: tqdm >=4.70.1, astropy >=8.0.1, Pillow >=12.3.0, ruff (dev) 0.16.8.
+  actions/checkout, actions/cache, actions/setup-python, actions/upload-artifact, and the SignPath signing
+  action all bumped to their current major versions in the release workflow.
+  (numpy >=2.5.3 and scipy >=1.18.1 were proposed by Dependabot too but declined: both require Python
+  >=3.12, which would silently drop the 3.11 support this project's own CI still tests.)
+
 ## [2.2.3] - 2026-09-22
 
 ### Fixed
