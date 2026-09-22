@@ -8,6 +8,14 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **DBE's entropy filter runs a native kernel instead of a Python loop of ~4000 `np.histogram` calls.**
+  Profiling a real `--auto` run (which sets `entropy_bg=True` for most target types) found this filter --
+  documented as "cheap" in the code it lives next to -- costing 4.2s on its own, because it runs on every
+  DBE pass regardless of session size. Fused into one native pass (`patch_entropy_batch`); not bit-exact
+  (numpy's histogram has a floating-point edge-correction step this doesn't replicate, so entropy values
+  agree to ~3e-4 absolute, immaterial for the median+MAD threshold this feeds). Cut a real profiled run's
+  Post-process time by ~2.6s.
+
 - **`--auto`'s robust_pca auto-upgrade now applies to calibration libraries up to 25 frames, not 10.** The
   threshold was set from a 2026-09-22 benchmark on a synthetic RGB-shaped (2000x3000x3) array that
   overstated real cost -- this camera's actual calibration frames are raw mono FITS (2048x3056, no x3).

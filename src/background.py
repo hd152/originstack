@@ -1135,24 +1135,35 @@ def _filter_sampled_patches(channel: np.ndarray, emission_mask: np.ndarray,
     # binary emission mask missed.  Low-entropy patches (nearly uniform ADU
     # histogram) are genuine sky background samples.
     if use_entropy_weights and len(values) >= 8:
-        H_ch, W_ch = channel.shape
-        ny_g = max(1, H_ch // patch_size)
-        nx_g = max(1, W_ch // patch_size)
-        cell_h_g = H_ch / ny_g
-        cell_w_g = W_ch / nx_g
-        entropies = []
-        for coord in coords:
-            iy = int(np.clip(round(coord[0] * ny_g - 0.5), 0, ny_g - 1))
-            ix = int(np.clip(round(coord[1] * nx_g - 0.5), 0, nx_g - 1))
-            y0 = int(round(iy * cell_h_g))
-            y1 = min(int(round((iy + 1) * cell_h_g)), H_ch)
-            x0 = int(round(ix * cell_w_g))
-            x1 = min(int(round((ix + 1) * cell_w_g)), W_ch)
-            em = emission_mask[y0:y1, x0:x1].ravel()
-            px = channel[y0:y1, x0:x1].ravel()
-            px = px[em < 0.5]
-            entropies.append(_patch_entropy(px))
-        entropies = np.array(entropies, dtype=np.float64)
+        entropies = None
+        if HAS_NATIVE and hasattr(_native, 'patch_entropy_batch'):
+            try:
+                entropies = np.asarray(_native.patch_entropy_batch(
+                    np.ascontiguousarray(channel, dtype=np.float32),
+                    np.ascontiguousarray(emission_mask, dtype=np.float32),
+                    np.ascontiguousarray(coords, dtype=np.float64),
+                    int(patch_size), 16))
+            except Exception:
+                entropies = None
+        if entropies is None:
+            H_ch, W_ch = channel.shape
+            ny_g = max(1, H_ch // patch_size)
+            nx_g = max(1, W_ch // patch_size)
+            cell_h_g = H_ch / ny_g
+            cell_w_g = W_ch / nx_g
+            entropies = []
+            for coord in coords:
+                iy = int(np.clip(round(coord[0] * ny_g - 0.5), 0, ny_g - 1))
+                ix = int(np.clip(round(coord[1] * nx_g - 0.5), 0, nx_g - 1))
+                y0 = int(round(iy * cell_h_g))
+                y1 = min(int(round((iy + 1) * cell_h_g)), H_ch)
+                x0 = int(round(ix * cell_w_g))
+                x1 = min(int(round((ix + 1) * cell_w_g)), W_ch)
+                em = emission_mask[y0:y1, x0:x1].ravel()
+                px = channel[y0:y1, x0:x1].ravel()
+                px = px[em < 0.5]
+                entropies.append(_patch_entropy(px))
+            entropies = np.array(entropies, dtype=np.float64)
         med_ent = float(np.median(entropies))
         mad_ent = float(np.median(np.abs(entropies - med_ent)))
         ent_thresh = med_ent + 2.5 * 1.4826 * max(mad_ent, 1e-9)

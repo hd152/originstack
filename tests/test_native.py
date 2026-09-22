@@ -550,6 +550,121 @@ def test_gaussian_filter_native_zero_sigma_is_passthrough():
     np.testing.assert_array_equal(got, a)
 
 
+def _patch_entropy_ref(pixels, n_bins=16):
+    """The exact Python reference this test pins against --
+    src.background._patch_entropy, duplicated here so the test doesn't
+    depend on background.py's own (possibly-native-routed) call path."""
+    if len(pixels) < 4:
+        return 0.0
+    mn, mx = float(pixels.min()), float(pixels.max())
+    rng = mx - mn
+    if rng < 1e-12:
+        return 0.0
+    counts, _ = np.histogram(pixels, bins=n_bins, range=(mn, mx))
+    probs = counts / float(counts.sum() + 1e-12)
+    probs = probs[probs > 0]
+    return float(-np.sum(probs * np.log2(probs)))
+
+
+def _filter_entropies_ref(channel, emission_mask, patch_size, coords, n_bins=16):
+    H_ch, W_ch = channel.shape
+    ny_g = max(1, H_ch // patch_size)
+    nx_g = max(1, W_ch // patch_size)
+    cell_h_g = H_ch / ny_g
+    cell_w_g = W_ch / nx_g
+    out = []
+    for coord in coords:
+        iy = int(np.clip(round(coord[0] * ny_g - 0.5), 0, ny_g - 1))
+        ix = int(np.clip(round(coord[1] * nx_g - 0.5), 0, nx_g - 1))
+        y0 = int(round(iy * cell_h_g))
+        y1 = min(int(round((iy + 1) * cell_h_g)), H_ch)
+        x0 = int(round(ix * cell_w_g))
+        x1 = min(int(round((ix + 1) * cell_w_g)), W_ch)
+        em = emission_mask[y0:y1, x0:x1].ravel()
+        px = channel[y0:y1, x0:x1].ravel()
+        px = px[em < 0.5]
+        out.append(_patch_entropy_ref(px, n_bins))
+    return np.array(out, dtype=np.float64)
+
+
+def test_patch_entropy_batch_matches_python_reference():
+    """patch_entropy_batch replaces _filter_sampled_patches's Python loop
+    (up to Config.DBE_MAX_SAMPLES=4000 per-patch np.histogram calls) --
+    profiling a real --auto run (entropy_bg=True by default for most target
+    types) found it costing 4.2s on its own. Not bit-exact: numpy's
+    histogram fast path has a floating-point edge-correction pass this
+    doesn't replicate, so an occasional value within ~1 ULP of a bin
+    boundary lands one bin over. Tolerance set from a measured real-shaped
+    case (~3e-4 absolute on O(1) entropy values), which is immaterial for
+    what this feeds (a median+MAD outlier threshold)."""
+    rng = np.random.default_rng(11)
+    H, W = 800, 1200
+    channel = rng.normal(1000.0, 50.0, (H, W)).astype(np.float32)
+    channel[100:120, 200:230] += 5000.0  # a 'star' to give real mask structure
+    emission_mask = np.zeros((H, W), dtype=np.float32)
+    emission_mask[100:120, 200:230] = 1.0
+
+    patch_size = 64
+    ny_g = max(1, H // patch_size)
+    nx_g = max(1, W // patch_size)
+    n_coords = 500
+    coords = np.column_stack([
+        rng.integers(0, ny_g, n_coords) / ny_g + 0.5 / ny_g,
+        rng.integers(0, nx_g, n_coords) / nx_g + 0.5 / nx_g,
+    ]).astype(np.float64)
+
+    ref = _filter_entropies_ref(channel, emission_mask, patch_size, coords)
+    got = np.asarray(native.patch_entropy_batch(channel, emission_mask, coords, patch_size, 16))
+    np.testing.assert_allclose(got, ref, atol=1e-3)
+
+
+def test_patch_entropy_batch_rejects_shape_mismatch():
+    rng = np.random.default_rng(12)
+    channel = rng.normal(size=(40, 50)).astype(np.float32)
+    emission_mask = rng.normal(size=(40, 60)).astype(np.float32)  # W mismatch
+    coords = np.zeros((3, 2), dtype=np.float64)
+    with pytest.raises(ValueError):
+        native.patch_entropy_batch(channel, emission_mask, coords, 16, 16)
+
+
+def test_filter_sampled_patches_native_matches_numpy_fallback():
+    """End-to-end: _filter_sampled_patches's native and numpy-fallback paths
+    must agree, not just the isolated kernel."""
+    rng = np.random.default_rng(13)
+    H, W = 300, 400
+    channel = rng.normal(1000.0, 50.0, (H, W)).astype(np.float32)
+    emission_mask = np.zeros((H, W), dtype=np.float32)
+    patch_size = 32
+    ny_g = max(1, H // patch_size)
+    nx_g = max(1, W // patch_size)
+    n_coords = 40
+    coords = np.column_stack([
+        rng.integers(0, ny_g, n_coords) / ny_g + 0.5 / ny_g,
+        rng.integers(0, nx_g, n_coords) / nx_g + 0.5 / nx_g,
+    ]).astype(np.float64)
+    values = rng.normal(1000.0, 5.0, n_coords)
+    variances = rng.uniform(1.0, 30.0, n_coords)
+
+    assert _background_mod.HAS_NATIVE and hasattr(_background_mod._native, 'patch_entropy_batch')
+    c_native, v_native = _background_mod._filter_sampled_patches(
+        channel, emission_mask, patch_size, coords.copy(), values.copy(), variances.copy(), True)
+
+    had = _background_mod.HAS_NATIVE
+    _background_mod.HAS_NATIVE = False
+    try:
+        c_fallback, v_fallback = _background_mod._filter_sampled_patches(
+            channel, emission_mask, patch_size, coords.copy(), values.copy(), variances.copy(), True)
+    finally:
+        _background_mod.HAS_NATIVE = had
+
+    # Not exact-equality: the native kernel's entropy values differ from the
+    # numpy reference by up to ~3e-4 (see patch_entropy_batch's docstring),
+    # which can shift which side of the median+MAD threshold a patch whose
+    # true entropy sits within that tolerance of it falls on. Check the two
+    # paths agree closely, not bit-for-bit.
+    assert abs(len(c_native) - len(c_fallback)) <= max(2, int(0.1 * n_coords))
+
+
 def test_gaussian_filter_native_rejects_non_2d_by_signature():
     # the numpy binding itself enforces 2D; the Python-side _gaussian_blur
     # wrapper is what actually gates this in production (see
