@@ -2,7 +2,7 @@
 # Core dependencies
 numpy>=1.20
 astropy>=5.0
-scipy>=1.7
+scipy>=1.18.1
 tqdm>=4.65
 Pillow>=9.0
 
