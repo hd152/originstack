@@ -1,0 +1,21 @@
+# Configures GitHub's auto-generated release notes (the "Generate release notes" button, or
+# `gh release create --generate-notes`) — categorizes PRs by label. This is a supplement, not a
+# replacement for this project's own hand-written, CHANGELOG.md-derived release notes.
+changelog:
+  exclude:
+    labels:
+      - dependencies
+      - ci
+  categories:
+    - title: Rust / native extension
+      labels:
+        - rust
+    - title: Bug fixes
+      labels:
+        - bug
+    - title: Enhancements
+      labels:
+        - enhancement
+    - title: Other changes
+      labels:
+        - "*"
