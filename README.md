@@ -31,6 +31,8 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 
 All stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames (`--preset galaxy` for the Whirlpool, `--preset nebula` for the two nebulae, `--preset starfield` for the star cloud -- see [Usage Examples](#usage-examples)). The Orion Nebula is a hierarchical multi-session combine: each night is stacked separately, registered onto the deepest one, merged, and post-processed once.
 
+**Sky conditions.** These are backyard/rooftop sessions under **Bortle 7-9** skies (heavy light pollution, urban/suburban), not a dark site -- measured per session with `estimate_bortle()` (`src/quality.py`, a rough same-equipment sky-glow bucket from calibrated background level vs. exposure/gain; not survey-grade photometry, see the function's docstring for what it isn't). None of the samples above -- or the two added for the [Andromeda Galaxy and Horsehead/Flame Nebula](https://hd152.github.io/originstack/#gallery) gallery entries on the website -- were shot from a dark site. The pipeline's background extraction, sky-floor correction and gradient removal are what make these usable at all under that much sky glow.
+
 ---
 
 ## Sample Output
