@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-09-22
+
 ### Fixed
 
 - **The statistical Bayer hot-pixel step clipped the cores of bright stars, in every frame.** Each colour plane is half
