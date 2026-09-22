@@ -1,0 +1,79 @@
+name: Bug report
+description: Something didn't work right when stacking or processing
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. The more of this you can fill in, the faster it can be tracked down —
+        a lot of bugs here only show up on a specific real session (mount, target, frame count).
+
+  - type: input
+    id: version
+    attributes:
+      label: OriginStack version
+      description: From the title bar (desktop app) or `python originstack.py --version`.
+      placeholder: "2.2.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-run
+    attributes:
+      label: How are you running it?
+      options:
+        - Windows installer / exe
+        - Windows zip (extracted)
+        - Linux tarball
+        - From source (pip install)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - Desktop app (GUI)
+        - Command line
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected instead, and what actually happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command line or settings used
+      description: The full `originstack.py ...` command, or the desktop app's settings (a saved `--config` TOML is even better).
+      render: shell
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Console output / log
+      description: |
+        Paste the run's console output, or attach a log file. On the desktop app, logs are in
+        `%LOCALAPPDATA%\OriginStack\logs\` (Windows) or `~/.local/state/OriginStack/logs/` (Linux).
+        Include the `Native accel: ...` startup line if you have it.
+      render: shell
+
+  - type: textarea
+    id: data
+    attributes:
+      label: About the data
+      description: Camera/telescope, frame count, exposure length, single session or multiple nights, any calibration frames used.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the [CHANGELOG](https://github.com/hd152/originstack/blob/main/CHANGELOG.md) — this isn't a known/fixed issue
+        - label: I'm on the latest release

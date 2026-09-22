@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest something OriginStack doesn't do yet
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The actual imaging/processing problem, not just the feature — there may already be a flag for it (check the [README](https://github.com/hd152/originstack#readme) and [advanced features page](https://hd152.github.io/originstack/advanced.html)).
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like OriginStack to do?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Existing flags, other tools, manual workarounds.

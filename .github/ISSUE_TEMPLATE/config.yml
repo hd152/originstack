@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/hd152/originstack/discussions
+    about: "\"How do I...\", general questions, or just to talk about your results — not a bug report."

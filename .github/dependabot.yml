@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # requirements.txt + the optional requirements-*.txt files
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+
+  # ext/astro_native's Cargo.toml
+  - package-ecosystem: "cargo"
+    directory: "/ext/astro_native"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # actions used in .github/workflows/*.yml
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "ci"
