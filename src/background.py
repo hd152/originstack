@@ -80,6 +80,28 @@ def _gaussian_blur(a: np.ndarray, sigma: float) -> np.ndarray:
     return gaussian_filter(a, sigma=sigma)
 
 
+def gaussian_blur_spatial(a: np.ndarray, sigma: float) -> np.ndarray:
+    """``gaussian_filter(a, sigma=(sigma, sigma, 0))`` for an ``(H, W, C)``
+    array -- blur each channel independently, never across channels --
+    routed through ``_gaussian_blur`` per channel instead of scipy's N-D
+    path. ``_gaussian_blur`` only accepts a scalar sigma on a 2-D plane, so
+    every one of this codebase's ``sigma=(s, s, 0)`` call sites (star
+    reduction's halo blur, HDR exposure-fusion's Laplacian pyramid) fell
+    back to scipy untouched even after ``_gaussian_blur`` existed. Same
+    per-channel-native-call pattern as ``postprocess.py``'s
+    ``_median_filter_per_channel``. 2-D input passes straight through to
+    ``_gaussian_blur``; anything else (no trailing channel axis to split)
+    falls back to plain ``gaussian_filter``."""
+    if a.ndim == 2:
+        return _gaussian_blur(a, sigma)
+    if a.ndim != 3:
+        return gaussian_filter(a, sigma=sigma)
+    out = np.empty_like(a)
+    for c in range(a.shape[2]):
+        out[:, :, c] = _gaussian_blur(a[:, :, c], sigma)
+    return out
+
+
 def gaussian_filter_ds(arr: np.ndarray, sigma: float,
                        ds_threshold: float = 24.0) -> np.ndarray:
     """Gaussian blur evaluated on a block-downsampled copy for large sigmas.
