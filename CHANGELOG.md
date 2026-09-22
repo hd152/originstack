@@ -8,6 +8,14 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **DBE's regression-surface upsample switched cubic -> bilinear interpolation.** `_fit_background_surface`
+  (the standard, non-dense-field DBE path) blurs its coarse-grid upsample again immediately afterward
+  (`sigma=patch_size*0.5`, typically >=32px), which absorbs whatever cubic's extra curvature term would
+  have added -- same reasoning already applied to `gaussian_filter_ds`'s own upsample. Validated directly
+  against real regression-grid output (post-blur mean diff <0.1, max <1.0 ADU), not assumed. A sibling call
+  in `wavelet_background_extraction` (no follow-up blur there) was left alone -- it has no real quality
+  test to validate a change against, only a mocked one, and a synthetic check was inconclusive.
+
 - **DBE's entropy filter runs a native kernel instead of a Python loop of ~4000 `np.histogram` calls.**
   Profiling a real `--auto` run (which sets `entropy_bg=True` for most target types) found this filter --
   documented as "cheap" in the code it lives next to -- costing 4.2s on its own, because it runs on every

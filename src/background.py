@@ -1359,7 +1359,11 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
     coarse, surf_lo, surf_hi = _dbe_regression_coarse_grid(
         coords, values, H, W, outlier_sigma, max_iter, sigma_px, Hc, Wc, verbose)
 
-    surface = zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W]
+    # order=1 (bilinear), not order=3 (cubic): the very next line blurs this
+    # surface again (sigma=patch_size*0.5, typically >=32px), which absorbs
+    # whatever cubic's extra curvature term would have added -- same
+    # reasoning as gaussian_filter_ds's own upsample (see its comment).
+    surface = zoom(coarse, (H / Hc, W / Wc), order=1)[:H, :W]
     surface = _gaussian_blur(surface, patch_size * 0.5)
     return np.clip(surface, surf_lo, surf_hi)
 
@@ -1598,7 +1602,6 @@ def _wavelet_background_surface(coords: np.ndarray, values: np.ndarray,
         safe_print(f"    Wavelet BG: {scales} scales on {Hc}x{Wc} regression grid "
                    f"(cutoff ~{(1 << scales) * stride}px)")
 
-    coarse_approx = np.clip(coarse_approx, surf_lo, surf_hi)
     surface = zoom(coarse_approx, (H / Hc, W / Wc), order=3)[:H, :W]
     return np.clip(surface, surf_lo, surf_hi)
 
