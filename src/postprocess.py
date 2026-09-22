@@ -51,6 +51,43 @@ try:
 except Exception:
     sigma_clipped_stats = None
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE_MEDIAN = True
+except Exception:
+    _native = None
+    _HAS_NATIVE_MEDIAN = False
+
+
+def _median_filter_per_channel(stacked: np.ndarray, size: int) -> np.ndarray:
+    """``scipy.ndimage.median_filter(stacked, size=(size, size, 1))`` --
+    independent per-channel 2D median, not a 3D one -- routed through the
+    native ``median_filter_native`` kernel per channel when available.
+
+    Found by profiling a real stack: the direct combined-axis
+    ``ndimage.median_filter(stacked, size=(5,5,1))`` call (post-process's
+    hot-pixel-removal step, the very first thing Phase 4 does) was 5.1s on a
+    2033x3041x3 frame -- scipy's generic N-D rank-filter machinery has no
+    fast path for a size-1 axis, so it does real (if wasted) work along it.
+    3 independent native 2D calls are both algorithmically correct for this
+    exact shape and match this project's existing per-channel native median
+    filter (`_median_filter3` in `src/debayer.py`; validated at size 5
+    against scipy in `tests/test_native.py::test_median_filter_native_matches_scipy`).
+    """
+    out = np.empty_like(stacked)
+    for c in range(stacked.shape[2]):
+        ch = stacked[:, :, c]
+        med = None
+        if _HAS_NATIVE_MEDIAN and ch.dtype == np.float32:
+            try:
+                med = np.asarray(_native.median_filter_native(np.ascontiguousarray(ch), size))
+            except Exception:
+                med = None
+        if med is None:
+            med = ndimage.median_filter(ch, size=size)
+        out[:, :, c] = med
+    return out
+
 
 def _diag_save(img: np.ndarray, diag_dir: Optional[str], counter: list, slug: str) -> None:
     """Save a float32 FITS snapshot to diag_dir if diagnostic mode is active.
@@ -228,7 +265,7 @@ def postprocess_stack(
         print("\n  Removing residual hot pixels (per-channel)...")
         _hp_start = time.time()
         _hp_fixed = 0
-        _hp_meds = ndimage.median_filter(stacked, size=(5, 5, 1))
+        _hp_meds = _median_filter_per_channel(stacked, 5)
         _hp_diffs = stacked - _hp_meds
         _hp_mads = np.median(np.abs(_hp_diffs), axis=(0, 1))
         _hp_sigmas = np.maximum(_hp_mads * 1.4826, 1e-6)

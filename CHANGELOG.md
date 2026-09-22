@@ -6,6 +6,42 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **Several real perf fixes, found by profiling a full run rather than guessing.** A synthetic-flat build
+  (`--flat-from-lights`, auto-triggered whenever no flat frames exist) was silently the single biggest cost
+  on a real profiled session -- 126.9s of a 187.8s total, hidden inside an unlabeled "Other (I/O)" bucket in
+  the timing summary. Fixed in stages, each measured before moving to the next:
+  - `robust_pca_decompose`'s per-iteration numpy arithmetic (soft-threshold, residual, `Y` update, norm) was
+    ~12 full-array passes/iteration outside the (already-native) SVD step; fused into two native kernels
+    (`robust_pca_pre_svd_input`, `robust_pca_iterate`), plus routing the L-update's matrix reconstruction
+    through the existing `small_times_wide` kernel instead of a `np.matmul` call that hit this machine's
+    unoptimized reference BLAS. 126.9s -> 45.4s.
+  - The timing summary's "Other (I/O)" bucket was hiding master-calibration building specifically because its
+    timer was gated on real bias/dark/flat frames existing -- `--flat-from-lights` runs precisely when they
+    don't, so it was never timed at all. Now timed unconditionally as its own "Calibration" line.
+  - `--flat-from-lights` now block-averages each of the mosaic's 4 CFA sub-planes independently (never across
+    colours) by 4x before decomposition, upsampling the recovered flat back to full resolution after --
+    a flat's vignetting/dust signal is smooth well above the pixel scale this removes, unlike a real dark or
+    bias master's per-pixel hot pixels, which is why this is `--flat-from-lights`-only. 45.2s -> 3.6s.
+  - DBE's compact-source mask dilation (`_build_emission_mask`) called `scipy.ndimage.binary_dilation` with a
+    large disk structuring element, pathologically slow on one large contiguous bright source (a real galaxy
+    or comet core): 16.2s on a synthetic case matching that shape. Replaced with a distance-transform
+    threshold -- the exact same result (verified bit-exact), computed in near-linear time instead.
+  - Post-processing's first step (per-channel hot-pixel removal) called `scipy.ndimage.median_filter` directly
+    instead of this project's own native per-channel median kernel -- the same class of miss already fixed
+    once elsewhere in the codebase, just never caught here. 5.1s -> ~0.1s (3 native calls, one per channel).
+  - `gaussian_filter_ds`'s large-sigma upsample (used throughout Phase 4: chroma denoising, local contrast,
+    DBE, and more) used cubic interpolation on a grid that had just come out of the function's own huge
+    Gaussian blur, where cubic's extra curvature term recovers nothing real; switched to bilinear, ~3x
+    faster per call, measured difference negligible.
+
+  End to end, the same profiled real session: 3m 7.8s -> 36.9s (~5x). Every change is either bit-exact,
+  measured-equivalent (documented tolerance), or covered by a new native-vs-fallback parity test; one
+  attempted optimisation (finer-grained parallelism in `small_times_wide`) was measured, found to make no
+  difference, and reverted rather than shipped. Full detail, including what was tried and didn't help, in
+  [CLAUDE.md](CLAUDE.md).
+
 ### Added
 
 - **Self-update check.** The CLI prints one line at the end of a run, and the desktop app shows a small

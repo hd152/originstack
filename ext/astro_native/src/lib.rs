@@ -4552,6 +4552,16 @@ fn small_times_wide<'py>(
     // naive col-outer/i-inner order would stride by P between consecutive
     // reads -- exactly the huge-stride-read-stream antipattern this file's
     // gather-transpose driver (`row_parallel`) exists to avoid elsewhere.
+    //
+    // Tried and reverted: nested rayon parallelism (also column-chunking
+    // within each row) on the theory that N-way row parallelism leaves cores
+    // idle when N (a frame/calibration-stack count, often ~10-20) is well
+    // under the machine's core count. Measured no improvement (a real
+    // robust-PCA call: 0.41-0.47s/call either way) -- this operation is
+    // memory-bandwidth-bound on this machine, same lesson `gram_matrix_wide`
+    // above already documents for the sibling GEMM in this same trick
+    // (`numpy's own @ got zero benefit from this machine's cores at this
+    // shape`). Kept simple since the added chunking bought nothing real.
     let mut out = vec![0f64; n * p];
     py.detach(|| {
         out.par_chunks_mut(p).enumerate().for_each(|(k, out_row)| {
@@ -4569,6 +4579,145 @@ fn small_times_wide<'py>(
     let arr2 = numpy::ndarray::Array2::from_shape_vec((n, p), out)
         .expect("shape mismatch building small_times_wide output");
     Ok(arr2.into_pyarray(py))
+}
+
+/// Fused `D - S + Y/mu`: the IALM L-update's per-iteration input to the thin
+/// SVD in `_thin_svd_wide` (`src/robust_pca.py::robust_pca_decompose`). The
+/// numpy reference builds this as two full-`(N,P)`-array passes (`Y/mu` into
+/// a temporary, then `D - S + that` into another); profiling a real
+/// `--flat-from-lights` run (N=10, P=6.25M) found `robust_pca_decompose`
+/// spending 100s of its 126s total in exactly this kind of elementwise numpy
+/// arithmetic around the SVD, not in the SVD itself -- this and
+/// `robust_pca_iterate` below fuse that arithmetic into one native pass each,
+/// same category of win as `calibrate_frame_inplace`. Same float64 operation
+/// order as the numpy reference (divide, then left-to-right subtract/add), so
+/// the result is bit-identical.
+#[pyfunction]
+fn robust_pca_pre_svd_input<'py>(
+    py: Python<'py>,
+    d: PyReadonlyArray2<'py, f64>,
+    s: PyReadonlyArray2<'py, f64>,
+    y: PyReadonlyArray2<'py, f64>,
+    mu: f64,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let d_arr = d.as_array();
+    let shape = d_arr.shape().to_vec();
+    if s.as_array().shape() != d_arr.shape() || y.as_array().shape() != d_arr.shape() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "d, s, y must all have the same shape",
+        ));
+    }
+    let d_flat: &[f64] = d_arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("d must be C-contiguous"))?;
+    let s_arr = s.as_array();
+    let s_flat: &[f64] = s_arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("s must be C-contiguous"))?;
+    let y_arr = y.as_array();
+    let y_flat: &[f64] = y_arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("y must be C-contiguous"))?;
+
+    const CH: usize = 1 << 16;
+    let mut out = vec![0f64; d_flat.len()];
+    py.detach(|| {
+        out.par_chunks_mut(CH)
+            .zip(d_flat.par_chunks(CH))
+            .zip(s_flat.par_chunks(CH))
+            .zip(y_flat.par_chunks(CH))
+            .for_each(|(((oc, dc), sc), yc)| {
+                for i in 0..oc.len() {
+                    oc[i] = dc[i] - sc[i] + yc[i] / mu;
+                }
+            });
+    });
+
+    let arr2 = numpy::ndarray::Array2::from_shape_vec((shape[0], shape[1]), out)
+        .expect("shape mismatch building robust_pca_pre_svd_input output");
+    Ok(arr2.into_pyarray(py))
+}
+
+/// Fused IALM S-update + residual + Y-update + residual-norm: the second half
+/// of `robust_pca_decompose`'s per-iteration elementwise arithmetic (see
+/// `robust_pca_pre_svd_input` above for the profiling context). The numpy
+/// reference computes `temp = D - L + Y/mu`, `S = sign(temp) *
+/// max(|temp| - lam/mu, 0)`, `residual = D - L - S`, `Y += mu * residual`,
+/// then `norm(residual, 'fro')` as roughly a dozen separate full-array passes
+/// (each its own temporary); this does all of it in one pass, writing `S` and
+/// `Y` in place (`np.zeros_like(D)`-allocated once by the caller, reused
+/// every iteration -- no repeated `(N,P)` allocation) and returning the
+/// residual's Frobenius norm directly. Per-element arithmetic matches numpy's
+/// operation order exactly (`np.sign` semantics: 0 at exactly 0, not
+/// `f64::signum`'s +-1), so `S`/`Y` are bit-identical to the numpy reference;
+/// the norm is a parallel reduction over chunks and so may differ from
+/// numpy's sequential sum by a few ULPs, same as this file's other
+/// parallel-reduction kernels -- immaterial here since it only feeds a
+/// convergence-tolerance comparison.
+#[pyfunction]
+fn robust_pca_iterate<'py>(
+    py: Python<'py>,
+    d: PyReadonlyArray2<'py, f64>,
+    l: PyReadonlyArray2<'py, f64>,
+    mut s: numpy::PyReadwriteArray2<'py, f64>,
+    mut y: numpy::PyReadwriteArray2<'py, f64>,
+    lam_over_mu: f64,
+    mu: f64,
+) -> PyResult<f64> {
+    let d_arr = d.as_array();
+    let l_arr = l.as_array();
+    if l_arr.shape() != d_arr.shape()
+        || s.as_array().shape() != d_arr.shape()
+        || y.as_array().shape() != d_arr.shape()
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "d, l, s, y must all have the same shape",
+        ));
+    }
+    let d_flat: &[f64] = d_arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("d must be C-contiguous"))?;
+    let l_flat: &[f64] = l_arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("l must be C-contiguous"))?;
+    let s_flat: &mut [f64] = s
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("s must be C-contiguous"))?;
+    let y_flat: &mut [f64] = y
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("y must be C-contiguous"))?;
+
+    const CH: usize = 1 << 16;
+    let sq_sum: f64 = py.detach(|| {
+        d_flat
+            .par_chunks(CH)
+            .zip(l_flat.par_chunks(CH))
+            .zip(s_flat.par_chunks_mut(CH))
+            .zip(y_flat.par_chunks_mut(CH))
+            .map(|(((dc, lc), sc), yc)| {
+                let mut acc = 0.0f64;
+                for i in 0..dc.len() {
+                    let temp = dc[i] - lc[i] + yc[i] / mu;
+                    let abs_temp = temp.abs();
+                    let shrunk = (abs_temp - lam_over_mu).max(0.0);
+                    let sign = if temp > 0.0 {
+                        1.0
+                    } else if temp < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    };
+                    let sval = sign * shrunk;
+                    sc[i] = sval;
+                    let resid = dc[i] - lc[i] - sval;
+                    yc[i] += mu * resid;
+                    acc += resid * resid;
+                }
+                acc
+            })
+            .sum()
+    });
+    Ok(sq_sum.sqrt())
 }
 
 /// Single-pass central moments of a masked (narrowband, continuum) pixel
@@ -7548,6 +7697,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(warp_affine_kernel_table, m)?)?;
     m.add_function(wrap_pyfunction!(gram_matrix_wide, m)?)?;
     m.add_function(wrap_pyfunction!(small_times_wide, m)?)?;
+    m.add_function(wrap_pyfunction!(robust_pca_pre_svd_input, m)?)?;
+    m.add_function(wrap_pyfunction!(robust_pca_iterate, m)?)?;
     m.add_function(wrap_pyfunction!(continuum_scale_moments, m)?)?;
     m.add_function(wrap_pyfunction!(fit_moffat_native, m)?)?;
     m.add_function(wrap_pyfunction!(fit_psf_moffat2d_native, m)?)?;

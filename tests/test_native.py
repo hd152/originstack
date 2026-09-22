@@ -12,6 +12,7 @@ import src.channel_combine as _channel_combine_mod
 import src.debayer as _debayer_mod
 import src.denoising as _denoising_mod
 import src.local_normalize as _local_normalize_mod
+import src.postprocess as _postprocess_mod
 import src.robust_pca as _robust_pca_mod
 import src.stacking as _stacking_mod
 import src.star_removal as _star_removal_mod
@@ -519,6 +520,30 @@ def test_median_filter_native_matches_scipy(size):
     assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
 
 
+def test_median_filter_per_channel_matches_combined_axis_scipy_call():
+    """postprocess.py's hot-pixel step switched from one scipy
+    ndimage.median_filter(stacked, size=(5,5,1)) call (measured 5.1s on a
+    real full-res stack -- scipy's N-D rank filter has no fast path for a
+    size-1 axis) to 3 independent native 2D calls, one per channel. Confirm
+    that's actually equivalent, not just faster."""
+    from scipy import ndimage
+    rng = np.random.default_rng(4)
+    stacked = rng.normal(500, 50, (60, 70, 3)).astype(np.float32)
+    ref = ndimage.median_filter(stacked, size=(5, 5, 1))
+    got = _postprocess_mod._median_filter_per_channel(stacked, 5)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
+
+
+def test_median_filter_per_channel_falls_back_without_native(monkeypatch):
+    from scipy import ndimage
+    rng = np.random.default_rng(5)
+    stacked = rng.normal(500, 50, (40, 50, 3)).astype(np.float32)
+    ref = ndimage.median_filter(stacked, size=(3, 3, 1))
+    monkeypatch.setattr(_postprocess_mod, '_HAS_NATIVE_MEDIAN', False)
+    got = _postprocess_mod._median_filter_per_channel(stacked, 3)
+    assert float(np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))) < 1e-4
+
+
 def test_all_nan_pixel_is_zero():
     d = _stack(n=8, h=4, w=4, c=1, outliers=False)
     d[:, 0, 0, 0] = np.nan
@@ -991,6 +1016,96 @@ def test_small_times_wide_rejects_shape_mismatch():
     data = np.ascontiguousarray(rng.normal(0.0, 1.0, (6, 250)))  # N mismatch
     with pytest.raises(ValueError):
         native.small_times_wide(small, data)
+
+
+# ---------------------------------------------------------------------------
+# robust_pca_pre_svd_input / robust_pca_iterate: the fused per-iteration IALM
+# elementwise kernels (see robust_pca.py's robust_pca_decompose). Found by
+# profiling a real --flat-from-lights run where the plain-numpy elementwise
+# arithmetic surrounding the SVD -- not the SVD itself -- was ~80% of the
+# function's wall time.
+# ---------------------------------------------------------------------------
+
+def test_robust_pca_pre_svd_input_matches_numpy():
+    rng = np.random.default_rng(10)
+    n, p = 9, 500
+    d = np.ascontiguousarray(rng.normal(0.0, 5.0, (n, p)))
+    s = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, p)))
+    y = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, p)))
+    mu = 0.37
+    got = np.asarray(native.robust_pca_pre_svd_input(d, s, y, mu))
+    want = d - s + y / mu
+    np.testing.assert_array_equal(got, want)  # same f64 op order -- bit-exact
+
+
+def test_robust_pca_pre_svd_input_rejects_shape_mismatch():
+    rng = np.random.default_rng(11)
+    d = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    s = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    y = np.ascontiguousarray(rng.normal(0.0, 1.0, (4, 100)))  # N mismatch
+    with pytest.raises(ValueError):
+        native.robust_pca_pre_svd_input(d, s, y, 0.5)
+
+
+def test_robust_pca_iterate_matches_numpy():
+    rng = np.random.default_rng(12)
+    n, p = 9, 500
+    d = np.ascontiguousarray(rng.normal(0.0, 5.0, (n, p)))
+    l = np.ascontiguousarray(rng.normal(0.0, 4.0, (n, p)))
+    y0 = np.ascontiguousarray(rng.normal(0.0, 1.0, (n, p)))
+    mu = 0.42
+    lam_over_mu = 0.1
+
+    s_native = np.zeros((n, p))
+    y_native = y0.copy()
+    resid_norm = float(native.robust_pca_iterate(d, l, s_native, y_native, lam_over_mu, mu))
+
+    temp = d - l + y0 / mu
+    s_want = np.sign(temp) * np.maximum(np.abs(temp) - lam_over_mu, 0.0)
+    residual_want = d - l - s_want
+    y_want = y0 + mu * residual_want
+    resid_norm_want = float(np.linalg.norm(residual_want, 'fro'))
+
+    np.testing.assert_array_equal(s_native, s_want)  # per-element op, bit-exact
+    np.testing.assert_array_equal(y_native, y_want)
+    # the norm is a parallel reduction, so only close, not bit-exact -- see
+    # the kernel's own docstring
+    np.testing.assert_allclose(resid_norm, resid_norm_want, rtol=1e-10)
+
+
+def test_robust_pca_iterate_rejects_shape_mismatch():
+    rng = np.random.default_rng(13)
+    d = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    l = np.ascontiguousarray(rng.normal(0.0, 1.0, (5, 100)))
+    s = np.zeros((5, 100))
+    y = np.zeros((4, 100))  # N mismatch
+    with pytest.raises(ValueError):
+        native.robust_pca_iterate(d, l, s, y, 0.1, 0.5)
+
+
+def test_robust_pca_decompose_native_matches_numpy_fallback():
+    """End-to-end: robust_pca_decompose's native and numpy-fallback paths
+    must converge to the same low-rank/sparse split, not just agree on the
+    individual fused kernels in isolation."""
+    rng = np.random.default_rng(14)
+    n, p = 10, 800
+    low_rank = np.outer(rng.uniform(0.8, 1.2, n), rng.normal(1000.0, 50.0, p))
+    sparse = np.zeros((n, p))
+    idx = rng.integers(0, n * p, n * p // 50)
+    sparse.flat[idx] = rng.uniform(200.0, 2000.0, len(idx))
+    D = low_rank + sparse + rng.normal(0.0, 5.0, (n, p))
+
+    assert _robust_pca_mod._HAS_NATIVE
+    L_native, S_native = _robust_pca_mod.robust_pca_decompose(D)
+
+    _robust_pca_mod._HAS_NATIVE = False
+    try:
+        L_numpy, S_numpy = _robust_pca_mod.robust_pca_decompose(D)
+    finally:
+        _robust_pca_mod._HAS_NATIVE = True
+
+    np.testing.assert_allclose(L_native, L_numpy, atol=1e-6, rtol=1e-6)
+    np.testing.assert_allclose(S_native, S_numpy, atol=1e-6, rtol=1e-6)
 
 
 # ---------------------------------------------------------------------------

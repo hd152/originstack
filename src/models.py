@@ -118,12 +118,23 @@ class Config:
                                      # underdetermined -- make_master falls back to median
     ROBUST_PCA_AUTO_MAX_FRAMES = 10 # --auto only auto-upgrades median->robust_pca for a
                                      # calibration type at or below this frame count.
-                                     # Cost scales O(N^2 x pixels); measured 1264s/~21min
-                                     # at N=20 -- too slow for a silent --auto default at
-                                     # that scale (see _build_masters's comment). At
-                                     # N<=10 that scales to ~(10/20)^2 * 1264s ~= 316s
-                                     # (~5.3min), judged tolerable for --auto; still
-                                     # opt-in via --master-method robust_pca above this
+                                     # Measured 1264s/~21min at N=20 -- too slow for a
+                                     # silent --auto default at that scale (see
+                                     # _build_masters's comment). Cost vs. N was assumed
+                                     # O(N^2 x pixels) (quadratic) when this threshold was
+                                     # first set, giving an estimated ~316s/~5.3min at
+                                     # N<=10 via (10/20)^2 * 1264s; tools/bench_robust_pca_
+                                     # scale.py later measured the real exponent as N^1.42
+                                     # (sub-quadratic -- iteration count evidently doesn't
+                                     # scale down as fast as the per-iteration Gram-matrix
+                                     # cost does), giving ~404s/~6.7min at N=10 on that
+                                     # run (cross-checked against this file's own N=20
+                                     # anchor at 0.85x -- same ballpark, not exact, since
+                                     # it's a different machine/run than the anchor).
+                                     # Still judged tolerable for --auto at N<=10; kept at
+                                     # 10 rather than widened after seeing the real N=15
+                                     # cost (~717s/~12min) -- opt-in via --master-method
+                                     # robust_pca above this frame count regardless
     ROBUST_PCA_MAX_ITERS = 50       # IALM iterations (each is one economy SVD of an
                                      # (N, H*W*C) matrix, via src.robust_pca's
                                      # Gram-matrix-trick + native gram_matrix_wide/
@@ -135,6 +146,36 @@ class Config:
                                      # 2910s/~48.5min pre-optimization. Bounded, not
                                      # adaptive-early-exit beyond the tolerance below)
     ROBUST_PCA_TOL = 1e-7           # Relative Frobenius-norm residual convergence tolerance
+    FLAT_FROM_LIGHTS_DOWNSAMPLE = 4 # --flat-from-lights only (never real bias/dark/flat
+                                     # robust_pca): block-averages each of the 4 Bayer
+                                     # sub-planes by this factor before decomposition,
+                                     # cutting P (and the O(N^2 x P) cost) by ~16x -- the
+                                     # low-rank content this path actually wants (flat-field
+                                     # vignetting, dust motes) is smooth well above a 4-pixel
+                                     # scale, unlike a real dark/bias master's per-pixel hot
+                                     # pixels, which is why this knob doesn't exist for those.
+                                     # Not yet measured end-to-end against a real vignetted
+                                     # session (only against a flat synthetic frame with no
+                                     # vignetting to recover) -- see robust_pca_master's
+                                     # bayer_block_downsample/_upsample for the mechanism.
+
+    # Cosmic-ray rejection auto-skip (see src/debayer.py Sharpness/noise-vs-Siril doc
+    # in CLAUDE.md for the underlying measurement)
+    LACOSMIC_LONG_SUB_EXPTIME_S = 25.0  # Median light EXPTIME (s) at/above which
+                                         # pipeline.py's >=20-frame auto-skip of
+                                         # per-frame L.A.Cosmic is itself skipped (i.e.
+                                         # lacosmic stays on) instead of deferring
+                                         # entirely to stack-level sigma-clip. Forcing
+                                         # lacosmic on measurably cuts stacked noise
+                                         # (11-16% across three real sessions) but softens
+                                         # stars, and that softening cost tracks sub
+                                         # length: ~0% at 30s subs, +6.8% at 20s, +11.8%
+                                         # at 10s. 25s sits between the 20s (still a real
+                                         # cost) and 30s (negligible) measurements --
+                                         # picked, not measured at that exact value; only
+                                         # three real sessions inform this, so treat as a
+                                         # starting heuristic pending more data, not a
+                                         # calibrated cutoff.
 
     # PSF-kernel drizzle resampling
     DRIZZLE_PSF_KERNEL_SIZE = 9     # Tap radius for the drizzle resample kernel when

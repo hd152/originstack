@@ -29,7 +29,7 @@ from src.cleanup import register as _cleanup_register
 from src.debayer import autodetect_bayer_orientation, debayer
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
 from src.io_fits import load_fits, load_frame, populate_fits_header, save_preview_rgb
-from src.models import FrameInfo, ProcessingStats
+from src.models import Config, FrameInfo, ProcessingStats
 from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
 from src.registration import run_registration_phase, select_reference_frame
@@ -511,16 +511,36 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # the single most expensive Phase-1 step. Drizzle has no per-pixel
             # rejection, so it keeps lacosmic. Resolved before the resume
             # branch so checkpoint reloads see the same setting.
+            #
+            # That skip trades away a real noise reduction (11-16% measured on
+            # three real sessions when lacosmic is forced on, from cosmic-ray/
+            # hot-pixel spikes the Malvar debayer smears across more pixels in
+            # R/B than G -- see CLAUDE.md's Sharpness/noise-vs-Siril entry).
+            # The cost of taking that noise win -- star softening -- tracked
+            # sub length on those same sessions (~0% at 30s subs, +6.8% at
+            # 20s, +11.8% at 10s), so on long subs the skip is pure loss: keep
+            # lacosmic on there even at high frame count.
             if getattr(args, 'cosmic_ray_rejection', None) is None:
                 _method = getattr(args, 'stack_method', 'auto')
                 _drizzling = float(getattr(args, 'drizzle_scale', 1.0) or 1.0) > 1.0
-                if n >= 20 and _method != 'mean' and not _drizzling:
+                _exptimes = [float(f.header.get('EXPTIME', 0) or 0) for f in lights]
+                _exptimes = [e for e in _exptimes if e > 0]
+                _median_exptime = float(np.median(_exptimes)) if _exptimes else None
+                _long_subs = (_median_exptime is not None
+                              and _median_exptime >= Config.LACOSMIC_LONG_SUB_EXPTIME_S)
+                if n >= 20 and _method != 'mean' and not _drizzling and not _long_subs:
                     args.cosmic_ray_rejection = False
                     safe_print(f"  NOTE: cosmic-ray rejection skipped: {n} frames with "
                                f"rejection stacking removes cosmic rays per-pixel "
                                f"(force with --cosmic-ray-rejection)")
                 else:
                     args.cosmic_ray_rejection = True
+                    if n >= 20 and _long_subs:
+                        safe_print(f"  NOTE: cosmic-ray rejection kept on despite {n} "
+                                   f"frames: median sub length {_median_exptime:.0f}s "
+                                   f">= {Config.LACOSMIC_LONG_SUB_EXPTIME_S:.0f}s, where "
+                                   f"it measurably cuts stacked noise at ~no star-softening "
+                                   f"cost (disable with --no-cosmic-ray-rejection)")
 
             # ======================================================================
             # PHASE 1: Process & Analyse
@@ -1448,12 +1468,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         print(f"  Sky (Bortle est): ~{int(round(np.median(bortles)))} "
               f"(rough, same-equipment-only estimate from background level)")
     # Per-phase timing with % of wall-clock so the bottleneck is obvious. The
-    # four phases rarely sum to the total — "Other" captures frame discovery,
-    # master-calibration building, plate-solve/WCS, colour calibration, and the
-    # file writes between phases. A large "Other" means the limiter is outside
-    # the four phases (usually I/O: master building or the output/memmap writes).
+    # five phases (Calibration + the four stack phases) rarely sum to the
+    # total — "Other" is what's left over: frame discovery, plate-solve/WCS,
+    # colour calibration, and the file writes between phases. Calibration
+    # (master bias/dark/flat -- including --flat-from-lights's synthetic
+    # flat, the slowest thing that function can do) used to be folded into
+    # "Other" too, sight unseen: a real --auto run with no flat frames spent
+    # 2 of its 3 minutes inside _build_masters and "Other (I/O)" was the only
+    # place that showed, unlabeled, as 69% of the run with no clue why.
     _tt = max(stats.total_time(), 1e-9)
     _phases = [
+        ("Calibration", stats.calibration_time),
         ("Quality+Load", stats.quality_time),
         ("Registration", stats.registration_time),
         ("Stacking", stats.stacking_time),
