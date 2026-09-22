@@ -377,17 +377,17 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
         safe_print("\nCreating master calibration frames...")
 
     # master_method defaults to 'median' and is opt-in only for 'robust_pca' at
-    # real scale -- benchmarked robust_pca_decompose directly (2000x3000x3, 20
-    # frames): 2910s (~48.5 min) pre-optimization, 1264s (~21 min) after
-    # src/robust_pca.py's Gram-matrix-trick SVD (native gram_matrix_wide/
-    # small_times_wide kernels, ~9x over a direct SVD call on this shape,
-    # ~2.3x end-to-end -- the non-SVD per-iteration ops don't benefit and now
-    # dominate more of the budget). Still too slow to silently default for a
-    # real-sized calibration library. Below ROBUST_PCA_AUTO_MAX_FRAMES,
-    # though, cost scales down enough (~5min at N=10) to be a reasonable
-    # --auto default -- gated per calibration type (bias/dark/flat counts
-    # often differ) below, not globally, so one small type doesn't drag a
-    # large one into robust_pca too.
+    # real scale -- an early benchmark on a synthetic 2000x3000x3 (RGB-shaped,
+    # P=18M) array at N=20 gave 2910s pre-optimization, 1264s/~21min after
+    # src/robust_pca.py's Gram-matrix-trick SVD; that shape is larger than any
+    # real calibration frame here (this camera's raw mono FITS are
+    # 2048x3056, P=6.26M, no x3), so it overstated the real cost. Direct
+    # measurement on real mono frames is what actually sets
+    # ROBUST_PCA_AUTO_MAX_FRAMES now -- see that constant's comment in
+    # src/models.py for the current real numbers by N. Below the threshold,
+    # cost is judged a reasonable --auto default -- gated per calibration
+    # type (bias/dark/flat counts often differ) below, not globally, so one
+    # small type doesn't drag a large one into robust_pca too.
     master_method = getattr(args, 'master_method', 'median') or 'median'
     _auto_master = (getattr(args, 'auto', False)
                     and master_method == 'median'
