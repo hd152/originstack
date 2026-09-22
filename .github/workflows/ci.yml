@@ -115,7 +115,7 @@ jobs:
 
       - name: Upload synthetic stack artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci_synthetic_stack_py${{ matrix.python-version }}_${{ github.run_id }}
           path: ci_synthetic_stack.fits
