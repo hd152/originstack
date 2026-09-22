@@ -42,6 +42,25 @@ match the `VERSION` file and `v*` git tags.
   difference, and reverted rather than shipped. Full detail, including what was tried and didn't help, in
   [CLAUDE.md](CLAUDE.md).
 
+- **A separate, unrelated fix from the same session moved the Omega benchmark numbers too.** The first change
+  of the session made per-frame cosmic-ray rejection's >=20-frame auto-skip sub-length-aware (see below) --
+  Omega's real 30s subs cross that new threshold, so a `tools/bench_vs_siril.py` re-run on the real session
+  found the README/website comparison table stale: total time 113s -> 132s (per-frame detection now runs,
+  same documented 39-75% cost), noise 0.99-1.19x Siril's -> 0.87-1.03x (same documented 11-16% quieter
+  benefit). Sunflower and Sculptor's subs (20s, 10s) are under the threshold and unaffected by it, but their
+  Phase 4 time should improve too from the fixes above -- not yet re-measured, flagged as such on both pages
+  rather than left silently stale. README.md and docs/index.html updated with the real Omega numbers.
+
+- **Per-frame cosmic-ray rejection's auto-skip is now sub-length-aware, not just frame-count-aware.**
+  Previously any >=20-frame session with a rejection-based stack method skipped per-frame L.A.Cosmic
+  entirely, on the theory that stack-level sigma-clip catches cosmic rays just as well. True on average, but
+  the noise-vs-softening tradeoff of forcing it back on (documented in the 2.2.4 entry below) tracks sub
+  length: ~0% star softening at 30s subs, +6.8% at 20s, +11.8% at 10s, while the noise win (11-16%) holds
+  across all three. `Config.LACOSMIC_LONG_SUB_EXPTIME_S` (25s) now keeps per-frame detection on even at
+  >=20 frames when the session's median sub exposure is long enough that the softening cost is negligible,
+  instead of always deferring to the frame-count skip. Only three real sessions inform the exact threshold,
+  so it's a starting heuristic, not a calibrated cutoff.
+
 ### Added
 
 - **Self-update check.** The CLI prints one line at the end of a run, and the desktop app shows a small
