@@ -110,3 +110,41 @@ def test_gaussian_filter_ds_bilinear_upsample_matches_full_resolution():
     diff = np.abs(exact - fast)
     assert float(diff.mean()) < 0.5           # field std is ~20 -- this is noise-floor small
     assert float(diff.max()) < 5.0
+
+
+def test_fit_background_surface_bilinear_upsample_matches_cubic():
+    """_fit_background_surface's coarse-grid upsample switched cubic ->
+    bilinear too, on the same reasoning as gaussian_filter_ds's -- the very
+    next line blurs the surface again (sigma=patch_size*0.5), which absorbs
+    whatever cubic's extra curvature term would have added. Check the
+    post-blur surfaces stay close regardless of which interpolation order
+    fed into that blur (a real DBE run through dynamic_background_extraction
+    already exercises this function end-to-end; this pins the specific
+    order=1-vs-3 claim directly, on the same regression-grid machinery
+    _fit_background_surface itself uses, not a synthetic stand-in)."""
+    from scipy.ndimage import zoom
+
+    from src.background import _dbe_regression_coarse_grid, _gaussian_blur
+
+    rng = np.random.default_rng(7)
+    H, W = 420, 640
+    patch_size = 32
+    stride = max(4, patch_size // 4)
+    Hc, Wc = max(4, H // stride), max(4, W // stride)
+
+    n_pts = 500
+    coords = np.column_stack([rng.uniform(0, H, n_pts), rng.uniform(0, W, n_pts)])
+    values = (1000.0 + 40.0 * np.sin(coords[:, 0] / 80.0)
+              + 25.0 * np.cos(coords[:, 1] / 100.0) + rng.normal(0, 8.0, n_pts))
+    sigma_px = 1.25 * patch_size
+
+    coarse, surf_lo, surf_hi = _dbe_regression_coarse_grid(
+        coords, values, H, W, 2.5, 3, sigma_px, Hc, Wc, False)
+
+    blur_sigma = patch_size * 0.5
+    up1 = _gaussian_blur(zoom(coarse, (H / Hc, W / Wc), order=1)[:H, :W], blur_sigma)
+    up3 = _gaussian_blur(zoom(coarse, (H / Hc, W / Wc), order=3)[:H, :W], blur_sigma)
+
+    diff = np.abs(up1 - up3)
+    assert float(diff.mean()) < 0.1
+    assert float(diff.max()) < 1.0
