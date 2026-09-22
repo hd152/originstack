@@ -14,7 +14,7 @@ numpy = "0.29"
 rayon = "1.10"
 # Pure-Rust ONNX inference for the bundled originvision model (no C++ ONNX
 # Runtime, no extra DLL to ship). See the originvision section in lib.rs.
-tract-onnx = "0.21"
+tract-onnx = "0.23"
 
 [profile.release]
 opt-level = 3
