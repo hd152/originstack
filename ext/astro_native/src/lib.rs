@@ -456,7 +456,7 @@ fn sigma_clip_combine<'py>(
 
     // Release the GIL for the compute; arr is a read-only view over the numpy
     // buffer (kept alive by `data`), safe to share across rayon threads.
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         row_parallel(
             &arr,
             h,
@@ -646,7 +646,7 @@ fn online_sigma_clip_combine<'py>(
     let (n, h, w, c) = (shape[0], shape[1], shape[2], shape[3]);
     let n_rejected = std::sync::atomic::AtomicUsize::new(0);
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         row_parallel(
             &arr,
             h,
@@ -715,7 +715,7 @@ fn online_sigma_clip_seed_burnin<'py>(
     let frame_len = h * row_len;
     let n_rejected = std::sync::atomic::AtomicUsize::new(0);
 
-    let (mean_out, m2_out, nacc_out) = py.allow_threads(|| {
+    let (mean_out, m2_out, nacc_out) = py.detach(|| {
         let mut mean_flat = vec![0f64; h * row_len];
         let mut m2_flat = vec![0f64; h * row_len];
         let mut nacc_flat = vec![0f64; h * row_len];
@@ -826,7 +826,7 @@ fn online_sigma_clip_fold_frame<'py>(
     })?;
     let n_rejected = std::sync::atomic::AtomicUsize::new(0);
 
-    py.allow_threads(|| {
+    py.detach(|| {
         mean_slice
             .par_chunks_mut(row_len)
             .zip(m2_slice.par_chunks_mut(row_len))
@@ -868,7 +868,7 @@ fn median_combine<'py>(
     let arr = data.as_array();
     let s = arr.shape();
     let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         row_parallel(&arr, h, w, c, n, || Vec::<f32>::with_capacity(n), |buf, vals| {
             buf.clear();
             buf.extend_from_slice(vals);
@@ -895,7 +895,7 @@ fn percentile_clip_combine<'py>(
     let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
     let wv: Option<Vec<f32>> = weights.map(|x| x.as_array().to_vec());
     let wref = wv.as_deref();
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         row_parallel(&arr, h, w, c, n, || Vec::<f32>::with_capacity(n), |buf, vals| {
             buf.clear();
             buf.extend_from_slice(vals);
@@ -947,7 +947,7 @@ fn esd_combine<'py>(
     let wv: Option<Vec<f32>> = weights.map(|x| x.as_array().to_vec());
     let wref = wv.as_deref();
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         row_parallel(
             &arr,
             h,
@@ -1048,7 +1048,7 @@ fn linear_fit_clip_combine<'py>(
     let wref = wv.as_deref();
     let iters = max_iters.max(1);
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         row_parallel(
             &arr,
             h,
@@ -1194,7 +1194,7 @@ fn ivw_combine<'py>(
         _ => None,
     };
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         row_parallel(&arr, h, w, c, n, || (), |_, vals| {
             let mut acc = 0f64;
             let mut wsum = 0f64;
@@ -1261,7 +1261,7 @@ fn ivw_combine_with_sigma<'py>(
         _ => None,
     };
 
-    let (result, wsum_out) = py.allow_threads(|| {
+    let (result, wsum_out) = py.detach(|| {
         row_parallel_pair(&arr, h, w, c, n, || (), |_, vals| {
             let mut acc = 0f64;
             let mut wsum = 0f64;
@@ -1410,7 +1410,7 @@ fn dwt2_native<'py>(
     // compounds across levels and breaks that bit-exact parity.
     let img64: Vec<f64> = arr.iter().copied().collect();
 
-    let (c_a, c_h, c_v, c_d) = py.allow_threads(|| {
+    let (c_a, c_h, c_v, c_d) = py.detach(|| {
         // Pass 1: axis=0 (per-column) -> La, Lh, each (out_h, w).
         let cols: Vec<(Vec<f64>, Vec<f64>)> = (0..w)
             .into_par_iter()
@@ -1488,7 +1488,7 @@ fn idwt2_native<'py>(
     let cv64: Vec<f64> = cv_arr.iter().copied().collect();
     let cd64: Vec<f64> = cd_arr.iter().copied().collect();
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         // Pass 1: axis=1 (per-row) reconstruction -- La = idwt(cA,cV), Lh = idwt(cH,cD).
         // Both natural-length inputs have in_h rows, out_w columns.
         let mut la = vec![0.0f64; in_h * out_w];
@@ -1597,7 +1597,7 @@ fn hot_pixel_box_replace_native<'py>(
     let data_flat: Vec<f32> = arr.iter().copied().collect();
     let mask_flat: Vec<u8> = mask.as_array().iter().copied().collect();
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         let mut result = data_flat.clone();
         result.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
             for x in 0..w {
@@ -1661,7 +1661,7 @@ fn blind_match_hypotheses<'py>(
     let src_pts: Vec<(f64, f64)> = (0..n).map(|i| (src_arr[[i, 0]], src_arr[[i, 1]])).collect();
     let dst_pts: Vec<(f64, f64)> = (0..m).map(|i| (dst_arr[[i, 0]], dst_arr[[i, 1]])).collect();
 
-    let (best_r, best_t, best_inliers) = py.allow_threads(|| {
+    let (best_r, best_t, best_inliers) = py.detach(|| {
         // Sorted dst pairwise distances (ascending), with original indices --
         // mirrors `order = np.argsort(dst_d)` in the Python reference.
         let mut dst_pairs: Vec<(f64, usize, usize)> = Vec::with_capacity(m * m / 2);
@@ -2067,7 +2067,7 @@ fn warp_affine_lanczos3<'py>(
     };
 
     let mut out = vec![0f32; out_h * out_w * c];
-    py.allow_threads(|| {
+    py.detach(|| {
         out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy_l, out_row)| {
             let oy = oy_l + oy0;
             let mut wy = [0f64; 6];
@@ -2166,7 +2166,7 @@ fn warp_affine_kernel_table<'py>(
     let phases_f = phases as f64;
 
     let mut out = vec![0f32; out_h * out_w * c];
-    py.allow_threads(|| {
+    py.detach(|| {
         out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy, out_row)| {
             for ox in 0..out_w {
                 let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
@@ -2308,7 +2308,7 @@ fn anisotropic_diffusion<'py>(
         }
     };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         for buf in chans.iter_mut() {
             let mut next = vec![0f64; h * w];
             for _ in 0..iterations {
@@ -2407,7 +2407,7 @@ fn patch_weighted_sigma_combine<'py>(
     let frame_len = h * row_len;
 
     let mut out = vec![0f32; h * w * c];
-    py.allow_threads(|| {
+    py.detach(|| {
         out.par_chunks_mut(row_len).enumerate().for_each(|(row, out_row)| {
             // Per-row grid sample coordinate (index + fraction).
             let row_tab: Option<(usize, f32)> = grid_geom.map(|(hf, _, top, _)| {
@@ -2782,7 +2782,7 @@ fn lacosmic_reject_native<'py>(
             .into_pyarray(py));
     }
 
-    py.allow_threads(|| {
+    py.detach(|| {
         for ch in 0..3usize {
             let mut chd = vec![0f32; h * w];
             match flat {
@@ -2855,7 +2855,7 @@ fn median_filter_native<'py>(
             &owned
         }
     };
-    let out = py.allow_threads(|| median_filter_2d_f32(flat, h, w, size));
+    let out = py.detach(|| median_filter_2d_f32(flat, h, w, size));
     Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out)
         .unwrap()
         .into_pyarray(py))
@@ -3007,7 +3007,7 @@ fn dbe_fit_surface<'py>(
     let xs: Vec<f64> = (0..n).map(|i| carr[[i, 1]] * img_w).collect();
     let inv_sigma = 1.0 / sigma_px.max(1e-9);
 
-    let (surface, wrob) = py.allow_threads(|| {
+    let (surface, wrob) = py.detach(|| {
         let mut wr = vec![1.0f64; n];
 
         // IRLS: refit each sample leave-one-out, reweight by Tukey biweight.
@@ -3133,7 +3133,7 @@ fn dbe_sample_patches<'py>(
     let cell_w = w as f64 / nx as f64;
     let bright_cut = sky_ref + 2.0 * sky_std.max(1.0);
 
-    let rows: Vec<Vec<(f64, f64, f64, f64)>> = py.allow_threads(|| {
+    let rows: Vec<Vec<(f64, f64, f64, f64)>> = py.detach(|| {
         (0..ny)
             .into_par_iter()
             .map(|iy| {
@@ -3383,7 +3383,7 @@ fn detect_stars_matched_filter<'py>(
         }
     };
 
-    let rows: Vec<[f64; 10]> = py.allow_threads(|| {
+    let rows: Vec<[f64; 10]> = py.detach(|| {
         let bg_map = local_mesh_stat(lum, h, w, cell, false);
         let sigma_map = local_mesh_stat(lum, h, w, cell, true);
         let resid: Vec<f64> = lum.iter().zip(&bg_map).map(|(&v, &b)| v - b).collect();
@@ -3790,7 +3790,7 @@ fn fit_rigid_ransac<'py>(
     let src_pts: Vec<[f64; 2]> = (0..n).map(|i| [src_arr[[i, 0]], src_arr[[i, 1]]]).collect();
     let dst_pts: Vec<[f64; 2]> = (0..n).map(|i| [dst_arr[[i, 0]], dst_arr[[i, 1]]]).collect();
 
-    let (best_params, best_inliers) = py.allow_threads(|| {
+    let (best_params, best_inliers) = py.detach(|| {
         let mut rng = SplitMix64::new(if seed < 0 { entropy_seed() } else { seed as u64 });
         let mut best_inlier_num = 0usize;
         let mut best_inlier_residuals_sum = f64::INFINITY;
@@ -3994,7 +3994,7 @@ fn debayer_malvar<'py>(
     };
 
     let mut out = vec![0f32; h * w * 3];
-    py.allow_threads(|| {
+    py.detach(|| {
         out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row_out)| {
             let is_r_row = y % 2 == r_r;
             let is_b_row = y % 2 == b_r;
@@ -4186,7 +4186,7 @@ fn debayer_menon2007<'py>(
     let is_r_col: Vec<bool> = (0..w).map(|x| x % 2 == r_c).collect();
     let is_b_col: Vec<bool> = (0..w).map(|x| x % 2 == b_c).collect();
 
-    let (r_final, g_final, b_final) = py.allow_threads(|| {
+    let (r_final, g_final, b_final) = py.detach(|| {
         let is_r: Vec<bool> = (0..n).map(|i| is_r_row[i / w] && is_r_col[i % w]).collect();
         let is_b: Vec<bool> = (0..n).map(|i| is_b_row[i / w] && is_b_col[i % w]).collect();
         let is_g: Vec<bool> = (0..n).map(|i| !is_r[i] && !is_b[i]).collect();
@@ -4417,7 +4417,7 @@ fn bilateral_filter<'py>(
     }
 
     let mut out = vec![0f32; h * w * c];
-    py.allow_threads(|| {
+    py.detach(|| {
         out.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
             let interior_y = y >= radius && y + radius < h;
             let mut center = [0f64; 8];
@@ -4493,7 +4493,7 @@ fn gram_matrix_wide<'py>(
         (0..n).flat_map(|i| (i..n).map(move |j| (i, j))).collect();
 
     let mut out = vec![0f64; n * n];
-    py.allow_threads(|| {
+    py.detach(|| {
         let results: Vec<((usize, usize), f64)> = pairs
             .par_iter()
             .map(|&(i, j)| {
@@ -4553,7 +4553,7 @@ fn small_times_wide<'py>(
     // reads -- exactly the huge-stride-read-stream antipattern this file's
     // gather-transpose driver (`row_parallel`) exists to avoid elsewhere.
     let mut out = vec![0f64; n * p];
-    py.allow_threads(|| {
+    py.detach(|| {
         out.par_chunks_mut(p).enumerate().for_each(|(k, out_row)| {
             let weights = &small_flat[k * n..(k + 1) * n];
             for i in 0..n {
@@ -5427,7 +5427,7 @@ fn aperture_photometry_batch<'py>(
     let mut peak = vec![f64::NAN; n * c];
     let mut area = vec![f64::NAN; n];
 
-    py.allow_threads(|| {
+    py.detach(|| {
         flux.par_chunks_mut(c)
             .zip(sky.par_chunks_mut(c))
             .zip(sky_sig.par_chunks_mut(c))
@@ -5999,7 +5999,7 @@ mod originvision {
         model_path: &str,
         size: usize,
         shape_gate: bool,
-    ) -> PyResult<Option<PyObject>> {
+    ) -> PyResult<Option<Py<PyAny>>> {
         let a = rgb.as_array();
         let sh = a.shape();
         if sh.len() != 3 || sh[2] < 3 || sh[0] == 0 || sh[1] == 0 {
@@ -6021,7 +6021,7 @@ mod originvision {
         // unwinds to a `pyo3_runtime.PanicException` (a `BaseException`,
         // uncatchable by callers' `except Exception`), so convert it to a
         // plain `RuntimeError` here.
-        let outcome = py.allow_threads(|| {
+        let outcome = py.detach(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 compute(&flat, h, w, model_path, size, shape_gate)
             }))
@@ -6194,7 +6194,7 @@ fn cfa_drizzle_frame<'py>(
     let considered = std::sync::atomic::AtomicU64::new(0);
     let rejected = std::sync::atomic::AtomicU64::new(0);
 
-    py.allow_threads(|| {
+    py.detach(|| {
         num_s
             .par_chunks_mut(BAND * row_len)
             .zip(den_s.par_chunks_mut(BAND * row_len))
@@ -6389,7 +6389,7 @@ fn drizzle_accumulate_lanczos3<'py>(
     let wf32 = weight as f32;
     let half_drop = (pixfrac / 2.0).max(1e-6);
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let row = |oy: usize, arow: &mut [f64], mrow: Option<&mut [f64]>, buf: &mut Vec<f32>| {
             buf.resize(out_w * 3, 0.0);
             lanczos3_row_flat(img, h, w, 3, oy, buf, [m00, m01, m10, m11], [o0, o1], &col_tab, 0.0, 0);
@@ -6494,7 +6494,7 @@ fn drizzle_splat_frame<'py>(
     let norm = 1.0 / (4.0 * h * h);
 
     const BAND: usize = 16;
-    py.allow_threads(|| {
+    py.detach(|| {
         num_s
             .par_chunks_mut(BAND * ow * 3)
             .zip(den_s.par_chunks_mut(BAND * ow))
@@ -6630,7 +6630,7 @@ fn calibrate_frame_inplace<'py>(
     let s = dark_scale as f32;
     const CH: usize = 1 << 16;
 
-    let ok = py.allow_threads(|| {
+    let ok = py.detach(|| {
         d.par_chunks_mut(CH)
             .enumerate()
             .map(|(ci, chunk)| {
@@ -6731,7 +6731,7 @@ fn hot_pixel_bayer<'py>(
         }
     }
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         let mut out = d.to_vec();
         if let Some(m) = map {
             out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
@@ -6934,7 +6934,7 @@ fn hot_pixel_rgb<'py>(
     let f: &[f32] = arr
         .as_slice()
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
-    let res = py.allow_threads(|| match hot_rgb_core(f, h, w, threshold) {
+    let res = py.detach(|| match hot_rgb_core(f, h, w, threshold) {
         HotRgb::Degenerate => None,
         HotRgb::Clean(lum) => Some((None, lum)),
         HotRgb::Hot(mut lum, repl) => {
@@ -6965,7 +6965,7 @@ fn hot_pixel_rgb_inplace<'py>(
     let f = rgb
         .as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
-    let lum = py.allow_threads(|| match hot_rgb_core(&*f, h, w, threshold) {
+    let lum = py.detach(|| match hot_rgb_core(&*f, h, w, threshold) {
         HotRgb::Degenerate => None,
         HotRgb::Clean(lum) => Some(lum),
         HotRgb::Hot(mut lum, repl) => {
@@ -6991,7 +6991,7 @@ fn luminance_native<'py>(
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
     let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
     let mut lum = vec![0f32; h * w];
-    py.allow_threads(|| {
+    py.detach(|| {
         lum.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             let src = &f[y * w * 3..(y + 1) * w * 3];
             for x in 0..w {
@@ -7092,7 +7092,7 @@ fn strided_sigma_clipped_median<'py>(
     iters: usize,
 ) -> f64 {
     let v: Vec<f32> = data.as_array().iter().copied().collect();
-    py.allow_threads(|| sigma_clipped_median_f32(&v, sigma, iters))
+    py.detach(|| sigma_clipped_median_f32(&v, sigma, iters))
 }
 
 /// `green_equalize` on a float32 mosaic in place: scale the G2 sub-plane so its
@@ -7111,7 +7111,7 @@ fn green_equalize_inplace<'py>(
     let d = raw
         .as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("raw must be contiguous"))?;
-    Ok(py.allow_threads(|| {
+    Ok(py.detach(|| {
         let (m1, m2) = {
             let dd: &[f32] = &*d;
             let (a, b) = rayon::join(
@@ -7154,7 +7154,7 @@ fn bayer_grid_equalize_inplace<'py>(
     let f = rgb
         .as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("rgb must be contiguous"))?;
-    Ok(py.allow_threads(|| {
+    Ok(py.detach(|| {
         let med: Vec<f64> = (0..4usize)
             .into_par_iter()
             .map(|q| {
@@ -7213,7 +7213,7 @@ fn pre_gradient_apply<'py>(
     let c5cf2: Vec<f64> = cols.iter().map(|&cf| (c5 * cf) * cf).collect();
 
     let mut lum = vec![0f32; h * w];
-    py.allow_threads(|| {
+    py.detach(|| {
         f.par_chunks_mut(w * 3).zip(lum.par_chunks_mut(w)).enumerate().for_each(|(y, (row, lrow))| {
             let rf = y as f64 / h as f64;
             let t1 = c0 + c1 * rf;
@@ -7264,7 +7264,7 @@ fn white_balance_body(
 ) -> Vec<f32> {
     let (f0, f1, f2) = (f[0], f[1], f[2]);
     let mut out = vec![0f32; h * w * 3];
-    py.allow_threads(|| {
+    py.detach(|| {
         // exact max (order-independent), NaN propagating like numpy's max
         let ceiling: f32 = flat
             .par_chunks(w * 3)
@@ -7400,7 +7400,7 @@ fn white_balance_grayworld<'py>(
 /// array is allocated, first-touched and written.
 fn white_balance_body_inplace(py: Python<'_>, flat: &mut [f32], w: usize, f: [f32; 3], divide: bool) {
     let (f0, f1, f2) = (f[0], f[1], f[2]);
-    py.allow_threads(|| {
+    py.detach(|| {
         let ceiling: f32 = flat
             .par_chunks(w * 3)
             .map(|row| {

@@ -1,0 +1,55 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Catches newly-published CodeQL query updates against unchanged code.
+    - cron: '30 4 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+          # ext/astro_native (the PyO3 extension): CodeQL's Rust support needs the crate
+          # actually compiled so the extractor can trace it.
+          - language: rust
+            build-mode: manual
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        if: matrix.language == 'rust'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/astro_native
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build astro_native
+        if: matrix.build-mode == 'manual'
+        working-directory: ext/astro_native
+        run: cargo build --release
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

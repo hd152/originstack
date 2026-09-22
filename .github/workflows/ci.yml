@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    # develop is included because main's branch protection requires these checks to have
+    # already passed on a commit's SHA before it can be pushed there; since main is updated by
+    # fast-forwarding develop (no PR), the commit needs its CI run to happen on develop first.
+    branches: [ main, master, develop ]
   pull_request:
 
 jobs:
