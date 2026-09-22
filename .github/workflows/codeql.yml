@@ -19,36 +19,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - language: python
-            build-mode: none
-          # ext/astro_native (the PyO3 extension): CodeQL's Rust support needs the crate
-          # actually compiled so the extractor can trace it.
-          - language: rust
-            build-mode: manual
+        # build-mode: none for both -- CodeQL's Rust extractor does not support "manual"
+        # (only "none" is valid for rust; "autobuild"/"manual" are compiled-language options
+        # that don't apply to it), so ext/astro_native is analyzed without being built.
+        language: [ python, rust ]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Rust
-        if: matrix.language == 'rust'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build
-        if: matrix.language == 'rust'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ext/astro_native
-
       - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-
-      - name: Build astro_native
-        if: matrix.build-mode == 'manual'
-        working-directory: ext/astro_native
-        run: cargo build --release
+          build-mode: none
 
       - uses: github/codeql-action/analyze@v3
         with:
