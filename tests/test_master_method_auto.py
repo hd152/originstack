@@ -5,7 +5,9 @@ Gated per calibration type (bias/dark/flat counts often differ) on frame
 count in [Config.ROBUST_PCA_MIN_FRAMES, Config.ROBUST_PCA_AUTO_MAX_FRAMES] --
 below that floor robust_pca is underdetermined anyway (make_master's own
 existing fallback), above the ceiling it's too slow to silently add to
---auto's runtime (see _build_masters's comment: benchmarked ~21min at N=20).
+--auto's runtime (see Config.ROBUST_PCA_AUTO_MAX_FRAMES's comment in
+src/models.py for the current real by-N measurements this threshold is set
+from).
 """
 from __future__ import annotations
 

@@ -6,6 +6,17 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--auto`'s robust_pca auto-upgrade now applies to calibration libraries up to 25 frames, not 10.** The
+  threshold was set from a 2026-09-22 benchmark on a synthetic RGB-shaped (2000x3000x3) array that
+  overstated real cost -- this camera's actual calibration frames are raw mono FITS (2048x3056, no x3).
+  Direct measurement on real frames of that real shape, after 2.2.5's robust_pca native-kernel fusion, gave
+  N=10 45s, N=15 89s, N=20 164s, N=25 258s, N=30 377s/~6.3min -- today's N=25 costs less than half of what
+  N=10 cost when 10 was first judged tolerable. Widened to 25 on that basis. `--master-method robust_pca`
+  still applies above this ceiling regardless. See `Config.ROBUST_PCA_AUTO_MAX_FRAMES`'s comment in
+  `src/models.py` for the full measurement.
+
 ## [2.2.5] - 2026-09-22
 
 ### Changed

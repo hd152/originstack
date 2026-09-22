@@ -116,25 +116,33 @@ class Config:
     # Robust-PCA (Principal Component Pursuit) master calibration frames
     ROBUST_PCA_MIN_FRAMES = 5       # Below this, the low-rank/sparse split is
                                      # underdetermined -- make_master falls back to median
-    ROBUST_PCA_AUTO_MAX_FRAMES = 10 # --auto only auto-upgrades median->robust_pca for a
+    ROBUST_PCA_AUTO_MAX_FRAMES = 25 # --auto only auto-upgrades median->robust_pca for a
                                      # calibration type at or below this frame count.
-                                     # Measured 1264s/~21min at N=20 -- too slow for a
-                                     # silent --auto default at that scale (see
-                                     # _build_masters's comment). Cost vs. N was assumed
-                                     # O(N^2 x pixels) (quadratic) when this threshold was
-                                     # first set, giving an estimated ~316s/~5.3min at
-                                     # N<=10 via (10/20)^2 * 1264s; tools/bench_robust_pca_
-                                     # scale.py later measured the real exponent as N^1.42
-                                     # (sub-quadratic -- iteration count evidently doesn't
-                                     # scale down as fast as the per-iteration Gram-matrix
-                                     # cost does), giving ~404s/~6.7min at N=10 on that
-                                     # run (cross-checked against this file's own N=20
-                                     # anchor at 0.85x -- same ballpark, not exact, since
-                                     # it's a different machine/run than the anchor).
-                                     # Still judged tolerable for --auto at N<=10; kept at
-                                     # 10 rather than widened after seeing the real N=15
-                                     # cost (~717s/~12min) -- opt-in via --master-method
-                                     # robust_pca above this frame count regardless
+                                     # History: originally set to 10 after an N=20 real-
+                                     # shape (2048x3056 mono) measurement of 1264s/~21min
+                                     # was judged too slow for a silent --auto default, and
+                                     # N=15's ~717s/~12min (extrapolated then, from a
+                                     # measured N^1.42 exponent) was judged not worth
+                                     # widening for. Both those costs were dominated by
+                                     # robust_pca_decompose's per-iteration plain-numpy
+                                     # elementwise arithmetic -- once that got fused into
+                                     # native kernels (robust_pca_pre_svd_input/_iterate,
+                                     # the L-update matmul routed through small_times_wide;
+                                     # see CHANGELOG "Several real perf fixes"), the SVD
+                                     # step dominates more and the real N-exponent measured
+                                     # steeper (~N^1.91, tools/bench_robust_pca_scale.py) --
+                                     # but the *absolute* cost dropped enough that it no
+                                     # longer matters: direct real-shape measurements
+                                     # (same 2048x3056 mono frames, tested up to N=30 for
+                                     # a fit, not just extrapolated) gave N=10 45s, N=15
+                                     # 89s, N=20 164s, N=25 258s, N=30 377s/~6.3min --
+                                     # i.e. today's N=25 costs less than half of what N=10
+                                     # cost when this threshold was first judged tolerable.
+                                     # Widened to 25 on that basis; N=30's ~6.3min sits
+                                     # right at the old N=10 tolerance bar, so left as the
+                                     # next candidate rather than taken now. Opt-in via
+                                     # --master-method robust_pca above this frame count
+                                     # regardless
     ROBUST_PCA_MAX_ITERS = 50       # IALM iterations (each is one economy SVD of an
                                      # (N, H*W*C) matrix, via src.robust_pca's
                                      # Gram-matrix-trick + native gram_matrix_wide/
