@@ -88,12 +88,14 @@ if (-not (Test-Path $synthDir)) { throw "synthetic_data was not created -- canno
 $outPath = "$env:TEMP\originstack_verify_out.fits"
 $headlessLog = "$env:TEMP\originstack_verify_stdout.txt"
 if (Test-Path $headlessLog) { Remove-Item $headlessLog -Force }
-# --originvision exercises the bundled native scorer (astro_native.originvision_score
-# + src/data/originvision.onnx). It self-disables with a warning if either is
-# missing from the frozen build -- asserted absent below.
+# originvision runs by default now (--no-originvision to disable; no positive
+# flag exists, see cli.py) and exercises the bundled native scorer
+# (astro_native.originvision_score + src/data/originvision.onnx). It
+# self-disables with a warning if either is missing from the frozen build --
+# asserted absent below.
 $headlessArgs = @('--verify-headless', '-d', (Resolve-Path $synthDir).Path, '-o', $outPath,
                   '--parallel', '4', '--debayer-method', 'malvar',
-                  '--white-balance', 'grayworld', '--stack-method', 'median', '--originvision')
+                  '--white-balance', 'grayworld', '--stack-method', 'median')
 $headlessProc = Start-Process -FilePath $ExePath -ArgumentList $headlessArgs -PassThru `
                               -RedirectStandardOutput $headlessLog
 

@@ -2645,3 +2645,39 @@ def test_gpu_quality_pool_size_stays_within_core_budget():
     assert fp._gpu_quality_pool_size(n_workers=20, cpu_count=16, n_frames=100) == 1
     # Never more threads than there are frames to process.
     assert fp._gpu_quality_pool_size(n_workers=2, cpu_count=16, n_frames=3) == 3
+
+
+# ---------------------------------------------------------------------------
+# transient_triage_score (src/transient_triage.py, --transient-triage)
+# ---------------------------------------------------------------------------
+
+import src.transient_triage as _tt_mod  # noqa: E402
+
+_tt_model = _tt_mod.resolve_model_path(None)
+_have_tt = hasattr(native, 'transient_triage_score') and _tt_model is not None
+_tt_skip = pytest.mark.skipif(
+    not _have_tt,
+    reason='native transient_triage_score / bundled model absent -- run '
+          'tools/gen_transient_triage_data.py + tools/train_transient_triage.py')
+
+
+@_tt_skip
+def test_transient_triage_score_native_shape_and_range():
+    rng = np.random.default_rng(3)
+    stamps = rng.normal(0, 1, (5, 3, 31, 31)).astype(np.float32)
+    probs = native.transient_triage_score(stamps, _tt_model, 31)
+    assert len(probs) == 5
+    assert all(0.0 <= p <= 1.0 for p in probs)
+
+
+@_tt_skip
+def test_transient_triage_score_native_empty_batch():
+    stamps = np.zeros((0, 3, 31, 31), dtype=np.float32)
+    assert native.transient_triage_score(stamps, _tt_model, 31) == []
+
+
+@_tt_skip
+def test_transient_triage_score_native_rejects_wrong_shape():
+    stamps = np.zeros((2, 3, 20, 20), dtype=np.float32)  # size mismatch
+    with pytest.raises(ValueError):
+        native.transient_triage_score(stamps, _tt_model, 31)

@@ -6,6 +6,42 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-23
+
+### Added
+
+- **`--transient-triage`**: scores each `--transient-detect` candidate with a small CNN (new/ref/diff
+  stamp triplet, native `tract` inference) for a `real_probability` -- the same real/bogus triage role
+  ZTF's BTSbot / Rubin's DIA play downstream of classical image differencing, and the first amateur
+  stacking tool to do it. Advisory only, never drops a candidate. The bundled model is trained entirely
+  on synthetic data (`tools/gen_transient_triage_data.py` + `tools/train_transient_triage.py`); a
+  companion `tools/mine_real_transient_data.py` mines real cross-session negatives and real-epoch
+  injection positives from a user's own multi-night sessions for future retraining. Native-only for now
+  (no numpy/onnxruntime fallback yet).
+- **Cancel button** in the desktop app. Cooperative (a shared `threading.Event`, not a thread kill):
+  noticed between Phase 1 frames -- usually the longest phase -- and between targets in a multi-session
+  run. Phases 2-4 of a single target aren't interruptible yet.
+
+### Changed
+
+- **`--originvision` is on by default now** (`--no-originvision` to disable -- a single action, same
+  shape as `--auto`/`--no-auto`). A bare `--originvision` on an old command line now errors instead of
+  being a no-op, deliberately: the desktop app's auto-generated form keys purely on argparse dest with
+  no dest-collision handling, so a redundant positive flag alongside the new negative one would have
+  silently duplicated or dropped that field.
+- **`--originvision-workers` default raised 2 -> 8**, measured (not guessed): near-linear scaling on a
+  real full-resolution frame, 2751 ms/frame at 1 worker down to 473 ms at 8 -- the previous default left
+  most of the free GIL-released parallelism the code already claimed on the table.
+
+### Fixed
+
+- **`--transient-detect` no longer hard-refuses two epochs with different pixel dimensions.** Two
+  independently-stacked sessions of the same target routinely differ in shape (different dither pattern,
+  different Phase 3 crop) even though they cover the same field; `_align_reference` now reconciles them
+  onto a common grid first (`src.utils.embed_to_shape`, the same trick `--merge` already used for its own
+  differently-shaped previous stacks), carrying a real valid-data mask through the warp so the padded
+  border reads as uncovered, not real reference data.
+
 ## [2.2.6] - 2026-09-22
 
 ### Changed

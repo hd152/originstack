@@ -197,12 +197,82 @@ def _prep_rgb(rgb: np.ndarray) -> Optional[np.ndarray]:
     return np.ascontiguousarray(arr[:, :, :3], dtype=np.float32)
 
 
+def _downsample_if_large(arr: np.ndarray, max_long_side: int) -> np.ndarray:
+    """Shrink ``arr`` (aspect preserved, no crop) if its longer side exceeds
+    ``max_long_side``, same gaussian-prefiltered bilinear zoom as
+    ``_resize_center_crop`` -- just earlier, before the percentile stretch,
+    and without the crop.
+
+    Measured on a full Origin sensor frame (1936x1096): the percentile
+    stretch + final resize scale with *input* pixel count even though only a
+    256x256 crop is ever used, so at full resolution 85% of a
+    ``score_rgb`` call (1315 -> 196 ms) was spent processing pixels the model
+    never sees. Both backends call this identically (before the
+    native/onnxruntime dispatch below), so native/fallback parity holds and
+    this is a pure precomputation, not a behaviour fork.
+
+    Not free of numerical effect -- a second resampling stage changes the
+    stretch's own percentile estimate and adds another antialiasing pass on
+    top of ``_resize_center_crop``'s. Validated against the un-downsampled
+    path the same way ``_resize_center_crop``'s own cv2->scipy swap was
+    (docstring above): category/defect/stray-light flags unchanged, quality
+    score within the same few-points-on-a-0-400-scale tolerance already
+    accepted there (session-relative only, never an absolute gate).
+    """
+    h, w = arr.shape[:2]
+    long_side = max(h, w)
+    if long_side <= max_long_side:
+        return arr
+    scale = max_long_side / long_side
+    sigma = ((1.0 / scale) - 1.0) / 2.0
+    f = arr
+    if sigma > 0.01:
+        f = ndimage.gaussian_filter(f, (sigma, sigma, 0) if f.ndim == 3 else (sigma, sigma))
+    factor = (scale, scale, 1) if f.ndim == 3 else (scale, scale)
+    return np.ascontiguousarray(ndimage.zoom(f, factor, order=1, mode='reflect'),
+                                dtype=np.float32)
+
+
+# `_resize_center_crop` already needs 2x oversample margin on the shorter
+# side to antialias well into `size`; capping the longer side at this factor
+# leaves that margin on both axes while still discarding the bulk of a
+# full-res frame's pixels before the expensive full-frame percentile scan.
+#
+# Opt-in (score_rgb's fast_preprocess=False by default), not a default-on
+# speedup: measured on a real full-res frame (1370x2833, Fireworks Galaxy),
+# the `reject`/`quality` heads are genuinely resolution-sensitive, not just
+# resampling-noise-sensitive like _resize_center_crop's own cv2->scipy swap
+# (which left them within ~0.002/a few points). Sweeping this factor on that
+# same frame (ms/call, speedup, defect_probability delta, quality_score
+# delta vs. no pre-downsample):
+#   factor=2 (512px):   400ms  7.04x  defect +0.40  quality -160
+#   factor=3 (768px):   413ms  6.82x  defect +0.26  quality  -92
+#   factor=4 (1024px):  492ms  5.72x  defect +0.13  quality  -35
+#   factor=6 (1536px):  822ms  3.42x  defect +0.06  quality  -22
+#   factor=8 (2048px): 1494ms  1.88x  defect +0.04  quality   -3
+# defect_probability swinging by tenths (not thousandths) on one real frame
+# at every tested factor -- including the mild ones -- is enough to flip
+# is_defective on a frame that sits near 0.5, and that flag feeds
+# auto_settings.py's defensive nudges (trail-reject on, stronger chroma
+# denoise), not just a log line. Left off by default pending a decision on
+# whether/how to expose it (a CLI flag, a specific factor) rather than
+# shipping a silent accuracy/speed tradeoff.
+_PREDOWNSAMPLE_FACTOR = 4
+
+
 def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
-              size: int = 256, shape_gate: bool = True) -> Optional[dict]:
+              size: int = 256, shape_gate: bool = True,
+              fast_preprocess: bool = False) -> Optional[dict]:
     """Score an ``(H, W, 3)`` RGB array (any range/dtype -- it's percentile-
     stretched here). Returns the result dict, or ``None`` on any failure
     (logged). Uses the native tract kernel when ``astro_native`` is built,
     otherwise the ``onnxruntime`` fallback.
+
+    ``fast_preprocess`` (default off): pre-downsample large inputs before the
+    percentile stretch (see ``_downsample_if_large``'s docstring for the
+    measured speed-vs-accuracy tradeoff) -- real speedup, but the `reject`/
+    `quality` heads shift more than this project's usual resampling
+    tolerance, so it's opt-in, not the default.
     """
     mp = resolve_model_path(model_path)
     if mp is None:
@@ -210,6 +280,8 @@ def score_rgb(rgb: np.ndarray, *, model_path: Optional[str] = None,
     arr = _prep_rgb(rgb)
     if arr is None:
         return None
+    if fast_preprocess:
+        arr = _downsample_if_large(arr, size * _PREDOWNSAMPLE_FACTOR)
 
     if _HAS_NATIVE_OV:
         try:

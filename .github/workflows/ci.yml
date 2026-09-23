@@ -62,13 +62,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest maturin onnxruntime
+          pip install pytest pytest-xdist maturin onnxruntime
           cd ext/astro_native
           maturin build --release
           pip install --force-reinstall --no-deps target/wheels/astro_native-*.whl
 
       - name: Native kernel + originvision parity tests
-        run: pytest -q tests/test_native.py tests/test_originvision.py
+        run: pytest -q -n auto tests/test_native.py tests/test_originvision.py
 
   test:
     runs-on: ubuntu-latest
@@ -97,7 +97,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pip-audit bandit
+          pip install pytest pytest-xdist pip-audit bandit
 
       - name: Audit dependencies
         run: pip-audit -r requirements.txt
@@ -106,7 +106,7 @@ jobs:
         run: bandit -r src/ -ll -q
 
       - name: Run tests
-        run: pytest -q
+        run: pytest -q -n auto
 
       - name: Smoke run (synthetic)
         run: |

@@ -15,7 +15,9 @@ import math
 import unittest
 
 import numpy as np
+import pytest
 
+import src.transient_triage as _tt_mod
 from src.difference_imaging import (
     Transient,
     _prepare_psf,
@@ -435,9 +437,21 @@ class TestRunTransientDetection(unittest.TestCase):
         self.assertIsNone(run_transient_detection(
             _rgb(new), f"{self.tmp.name}/nope.fits", self.out_path))
 
-    def test_mismatched_frame_sizes_return_none(self):
-        new, ref = self._epochs()
-        self.assertIsNone(self._run(new[:200, :200], ref))
+    def test_mismatched_frame_sizes_are_reconciled_not_rejected(self):
+        """Two independently-stacked sessions of the same target routinely
+        differ in pixel dimensions (different dither pattern, different
+        Phase 3 common-crop) even though they cover the same field -- this
+        used to be a hard failure. `_align_reference` now embeds the smaller
+        epoch onto the other's grid (`src.utils.embed_to_shape`, the same
+        trick `merge.py` uses for a previous stack's own mismatched shape)
+        instead of refusing, and a real transient inside the overlap is
+        still found afterward."""
+        ty, tx = 80.0, 90.0  # inside the 200x200 crop below
+        new, ref = self._epochs(transient=(ty, tx, 14000.0))
+        summary = self._run(new[:200, :200], ref)
+        self.assertIsNotNone(summary, "a shape mismatch must not be a hard failure")
+        best = max(summary['transients'], key=lambda t: t.significance)
+        self.assertLess(math.hypot(best.y - ty, best.x - tx), 3.0)
 
     def test_the_registration_sigma_is_measured_and_floored_not_hardcoded(self):
         """The old code returned a literal 0.3 and reported it as a measured
@@ -493,6 +507,36 @@ class TestRunTransientDetection(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertGreater(summary['covered_fraction'], 0.99)
 
+    def test_stars_beyond_a_smaller_references_extent_are_not_transients(self):
+        """A genuinely smaller reference (a different session's own Phase 3
+        crop, not just a slice of the same array) gets zero-padded onto the
+        new stack's grid before registration (`_align_reference` /
+        `src.utils.embed_to_shape`). Stars in `new` beyond the reference's
+        real extent have nothing to subtract against there -- same failure
+        mode as a rotated reference's empty wedges, just from padding instead
+        of rotation -- and must not be reported as 'brightening' either."""
+        # n_stars kept low relative to the small shape: _wide_field's
+        # rejection sampling (each star >20px from every other) needs real
+        # headroom -- 30 stars in this shape's margins is near the packing
+        # limit and made the sampling loop pathologically slow.
+        stars = _wide_field(n_stars=12, seed=9, shape=(140, 150))
+        edge_stars = [(180.0, 210.0, 9000.0), (190.0, 30.0, 9000.0),
+                     (30.0, 220.0, 9000.0)]
+        new = _render_field((220, 240), stars + edge_stars, fwhm=3.0,
+                            sky=0.0, noise=1.0, seed=51)
+        # A genuinely smaller array -- the reference's own (unpadded) shape,
+        # not new[:140, :150] -- so embedding must zero-pad it, not just crop.
+        ref = _render_field((140, 150), stars, fwhm=3.0, sky=0.0, noise=1.0, seed=50)
+
+        summary = self._run(new, ref)
+
+        self.assertIsNotNone(summary, "a smaller reference must not be a hard failure")
+        self.assertLess(summary['covered_fraction'], 0.95,
+                        "the padded exterior is not reference coverage")
+        self.assertEqual(
+            [t for t in summary['transients'] if t.kind == 'brightening'], [],
+            "stars beyond the reference's real extent are not transients")
+
     def test_outputs_are_written_next_to_the_output_path(self):
         import os
         new, ref = self._epochs(transient=(110.0, 120.0, 14000.0))
@@ -502,6 +546,45 @@ class TestRunTransientDetection(unittest.TestCase):
         for suffix in ('_difference.fits', '_scorr.fits', '_transients.csv'):
             with self.subTest(suffix=suffix):
                 self.assertTrue(os.path.exists(stem + suffix))
+
+    def test_triage_disabled_leaves_real_probability_none_and_off_the_csv(self):
+        new, ref = self._epochs(transient=(110.0, 120.0, 14000.0))
+        summary = self._run(new, ref, triage=False)
+        self.assertIsNotNone(summary)
+        self.assertTrue(all(t.real_probability is None for t in summary['transients']))
+        with open(summary['catalog']) as fh:
+            header = fh.readline()
+        self.assertNotIn('real_probability', header)
+
+    def test_triage_requested_but_unavailable_does_not_crash(self):
+        """--transient-triage without a native backend/model self-disables
+        with a warning (checked via the returned real_probability, not the
+        log) rather than raising -- mirrors --originvision's own gate."""
+        import src.transient_triage as tt_mod
+        had = tt_mod._HAS_NATIVE_TRIAGE
+        tt_mod._HAS_NATIVE_TRIAGE = False
+        try:
+            new, ref = self._epochs(transient=(110.0, 120.0, 14000.0))
+            summary = self._run(new, ref, triage=True)
+        finally:
+            tt_mod._HAS_NATIVE_TRIAGE = had
+        self.assertIsNotNone(summary)
+        self.assertTrue(all(t.real_probability is None for t in summary['transients']))
+
+    @pytest.mark.skipif(
+        not _tt_mod.scoring_backend_available() or _tt_mod.resolve_model_path(None) is None,
+        reason='native transient_triage_score / bundled model absent -- run '
+              'tools/gen_transient_triage_data.py + tools/train_transient_triage.py')
+    def test_triage_populates_real_probability_and_csv_column(self):
+        new, ref = self._epochs(transient=(110.0, 120.0, 14000.0))
+        summary = self._run(new, ref, triage=True)
+        self.assertIsNotNone(summary)
+        self.assertTrue(summary['transients'], "expected at least the injected transient")
+        self.assertTrue(all(t.real_probability is not None for t in summary['transients']))
+        self.assertTrue(all(0.0 <= t.real_probability <= 1.0 for t in summary['transients']))
+        with open(summary['catalog']) as fh:
+            header = fh.readline()
+        self.assertIn('real_probability', header)
 
 
 class TestErodeFootprint(unittest.TestCase):

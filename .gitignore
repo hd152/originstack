@@ -3,6 +3,12 @@ orion-live/
 synthetic_data/
 synthetic_data_mixed/
 
+# transient-triage training data (tools/gen_transient_triage_data.py,
+# tools/mine_real_transient_data.py) -- generated, not committed
+transient_triage_data.npz
+transient_triage_real_data*.npz
+transient_triage_real_work*/
+
 # Claude Code directories
 .claude/
 **/claude/

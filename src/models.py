@@ -6,6 +6,16 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 
+class RunCancelled(Exception):
+    """Raised at a cooperative checkpoint (``args._cancel_event`` set) to
+    unwind a run cleanly -- not a failure. Checked in the Phase 1 per-frame
+    loops (``frame_processor.execute_frame_processing``, the highest-value
+    spot: usually the longest-running phase) and between targets in
+    ``cli.process_directory`` (multi-session/hierarchical runs). Phases 2-4
+    of a single target aren't interruptible yet -- once one starts it runs
+    to completion, same as before this existed."""
+
+
 class Config:
     """Central configuration for magic numbers and thresholds."""
     HOT_PIXEL_THRESHOLD = 12.0

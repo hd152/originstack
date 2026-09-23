@@ -78,6 +78,7 @@ class Transient(NamedTuple):
     x: float
     significance: float          # S_corr value, in sigma
     kind: str                    # 'brightening' | 'fading'
+    real_probability: Optional[float] = None  # --transient-triage; None if not scored
 
 
 def _to_luminance(img: np.ndarray) -> np.ndarray:
@@ -372,15 +373,20 @@ def write_transient_catalog(path: str, transients: Sequence[Transient],
     has_wcs = wcs is not None
     n_failed = 0
     first_error = None
+    has_triage = any(t.real_probability is not None for t in transients)
     with open(path, 'w', newline='', encoding='utf-8') as fh:
         writer = csv.writer(fh)
         header = ['x', 'y', 'significance_sigma', 'kind']
+        if has_triage:
+            header += ['real_probability']
         if has_wcs:
             header += ['ra_deg', 'dec_deg']
         writer.writerow(header)
 
         for t in transients:
             row = [f"{t.x:.2f}", f"{t.y:.2f}", f"{t.significance:.2f}", t.kind]
+            if has_triage:
+                row += [f"{t.real_probability:.3f}" if t.real_probability is not None else '']
             if has_wcs:
                 try:
                     ra, dec = wcs.all_pix2world(t.x, t.y, 0)
@@ -410,54 +416,45 @@ _ASTROMETRIC_SIGMA_FLOOR_PX = 0.3
 _RESIDUAL_MATCH_TOL_PX = 3.0
 
 
-def run_transient_detection(stacked: np.ndarray, reference_path: str,
-                            output_path: str, threshold: float = 5.0,
-                            wcs=None) -> Optional[dict]:
-    """Orchestrate a two-epoch comparison: align, subtract, detect, report.
+class EpochComparison(NamedTuple):
+    """The core two-epoch ZOGY comparison result -- everything
+    ``run_transient_detection`` needs to write its outputs, and everything
+    ``tools/gen_transient_triage_data.py``'s real-data mining mode needs to
+    build training stamps, without going through that function's file I/O."""
+    transients: List[Transient]
+    difference: np.ndarray       # D, NaN outside the reference footprint
+    score_corr: np.ndarray       # S_corr, NaN outside the reference footprint
+    new_lum: np.ndarray          # pedestal-subtracted, not yet warped (it's the reference frame)
+    ref_lum: np.ndarray          # pedestal-subtracted AND warped onto new_lum's grid
+    covered: float
+    measured_axis: Optional[float]
+    astro_sigma_px: float
+    flux_ratio: float
 
-    Returns a summary dict, or None when the comparison could not be set up
-    (missing or non-linear reference, too few stars to estimate a PSF, no
-    overlap). Setup failures are reported and return None; an I/O failure
-    writing the outputs (disk full, read-only directory) *does* raise, so the
-    caller must still guard this -- ``pipeline.py`` does.
+
+def _compare_epochs(stacked: np.ndarray, ref: np.ndarray,
+                    threshold: float = 5.0) -> Optional[EpochComparison]:
+    """Align two RGB (or 2D) epochs, run ZOGY, and detect candidates.
+
+    ``stacked``/``ref`` are raw pixel arrays (RGB or luminance), not yet
+    reduced to luminance or background-subtracted -- this does both, then
+    registration, PSF estimation, ``zogy()`` and ``detect_transients``.
+    Returns ``None`` on any setup failure (logged here), same conditions
+    ``run_transient_detection`` always reported at this call site.
     """
-    from src.io_fits import load_fits
-
-    if not os.path.exists(reference_path):
-        safe_print(f"  WARNING: transient reference not found: {reference_path}")
-        return None
-
-    try:
-        ref, ref_header = load_fits(reference_path)
-    except Exception as exc:
-        safe_print(f"  WARNING: could not read transient reference: {exc}")
-        return None
-
-    # The comparison is only meaningful between two LINEAR stacks. Phase 4's
-    # stretches, denoisers and local contrast break photometric linearity, so
-    # a post-processed reference mismatches the flux scale by a fraction of a
-    # percent -- several sigma on a bright star -- and every star in the field
-    # reports as a confident transient. --merge refuses the same file for the
-    # same reason.
-    if not bool((ref_header or {}).get('RAWSTACK', False)):
-        safe_print(f"  WARNING: {os.path.basename(reference_path)} is not a linear "
-                   f"(pre-post-processing) stack: header RAWSTACK is missing or "
-                   f"False. Pass the main output FITS of a previous run, not the "
-                   f"_processed one -- skipping difference imaging.")
-        return None
-
-    # The pipeline writes RGB planes as (C, H, W); load_fits hands them back
-    # in that order, while everything here works in (H, W, C).
-    ref = np.asarray(ref)
-    if ref.ndim == 3 and ref.shape[0] in (3, 4) and ref.shape[0] < ref.shape[-1]:
-        ref = np.transpose(ref, (1, 2, 0))
-
     new_lum = _to_luminance(stacked)
     ref_lum = _to_luminance(ref)
     if new_lum.shape != ref_lum.shape:
-        safe_print(f"  WARNING: reference epoch is {ref_lum.shape}, this stack is "
-                   f"{new_lum.shape} -- cannot compare different frame sizes")
-        return None
+        # Two independently-stacked sessions of the same target routinely
+        # differ in pixel dimensions -- different dither pattern, different
+        # Phase 3 common-crop -- even though they're the same field. This
+        # used to be a hard failure; `_align_reference` now embeds the
+        # reference onto this stack's own grid (same trick `merge.py` uses
+        # for its differently-shaped previous stacks) before the blind
+        # star-pattern match, which doesn't need or assume equal shapes or
+        # any positional correspondence between the two canvases anyway.
+        safe_print(f"  reference epoch is {ref_lum.shape}, this stack is "
+                   f"{new_lum.shape} -- reconciling onto a common grid")
 
     # ZOGY assumes background-subtracted inputs, so remove each epoch's own
     # sky level rather than trusting them to share one. This is not a
@@ -505,6 +502,86 @@ def run_transient_detection(stacked: np.ndarray, reference_path: str,
     covered = float(valid.mean())
 
     transients = detect_transients(score_corr, threshold=threshold)
+    return EpochComparison(transients=transients, difference=difference,
+                           score_corr=score_corr, new_lum=new_lum, ref_lum=ref_lum,
+                           covered=covered, measured_axis=measured_axis,
+                           astro_sigma_px=astro_sigma_px, flux_ratio=flux_ratio)
+
+
+def run_transient_detection(stacked: np.ndarray, reference_path: str,
+                            output_path: str, threshold: float = 5.0,
+                            wcs=None, triage: bool = False,
+                            triage_model_path: Optional[str] = None) -> Optional[dict]:
+    """Orchestrate a two-epoch comparison: align, subtract, detect, report.
+
+    ``triage`` (``--transient-triage``) additionally scores each candidate
+    with a small CNN (``src/transient_triage.py``) for a ``real_probability``
+    -- advisory only, never drops a candidate.
+
+    Returns a summary dict, or None when the comparison could not be set up
+    (missing or non-linear reference, too few stars to estimate a PSF, no
+    overlap). Setup failures are reported and return None; an I/O failure
+    writing the outputs (disk full, read-only directory) *does* raise, so the
+    caller must still guard this -- ``pipeline.py`` does.
+    """
+    from src.io_fits import load_fits
+
+    if not os.path.exists(reference_path):
+        safe_print(f"  WARNING: transient reference not found: {reference_path}")
+        return None
+
+    try:
+        ref, ref_header = load_fits(reference_path)
+    except Exception as exc:
+        safe_print(f"  WARNING: could not read transient reference: {exc}")
+        return None
+
+    # The comparison is only meaningful between two LINEAR stacks. Phase 4's
+    # stretches, denoisers and local contrast break photometric linearity, so
+    # a post-processed reference mismatches the flux scale by a fraction of a
+    # percent -- several sigma on a bright star -- and every star in the field
+    # reports as a confident transient. --merge refuses the same file for the
+    # same reason.
+    if not bool((ref_header or {}).get('RAWSTACK', False)):
+        safe_print(f"  WARNING: {os.path.basename(reference_path)} is not a linear "
+                   f"(pre-post-processing) stack: header RAWSTACK is missing or "
+                   f"False. Pass the main output FITS of a previous run, not the "
+                   f"_processed one -- skipping difference imaging.")
+        return None
+
+    # The pipeline writes RGB planes as (C, H, W); load_fits hands them back
+    # in that order, while everything here works in (H, W, C).
+    ref = np.asarray(ref)
+    if ref.ndim == 3 and ref.shape[0] in (3, 4) and ref.shape[0] < ref.shape[-1]:
+        ref = np.transpose(ref, (1, 2, 0))
+
+    comparison = _compare_epochs(stacked, ref, threshold=threshold)
+    if comparison is None:
+        return None
+    transients = comparison.transients
+    difference = comparison.difference
+    score_corr = comparison.score_corr
+    new_lum = comparison.new_lum
+    ref_lum = comparison.ref_lum
+    covered = comparison.covered
+    measured_axis = comparison.measured_axis
+    astro_sigma_px = comparison.astro_sigma_px
+    flux_ratio = comparison.flux_ratio
+
+    n_triaged = 0
+    if triage and transients:
+        from src.transient_triage import score_candidates
+        # Recomputed rather than threaded out of `zogy()`'s ZogyResult --
+        # cheap (same robust-sigma estimator, run on arrays already in hand)
+        # and avoids widening that return type for an opt-in feature.
+        sigma_new = estimate_background_sigma(new_lum)
+        sigma_ref = estimate_background_sigma(ref_lum)
+        sigma_diff = estimate_background_sigma(difference)
+        probs = score_candidates(new_lum, ref_lum, difference, transients,
+                                 sigma_new, sigma_ref, sigma_diff,
+                                 model_path=triage_model_path)
+        transients = [t._replace(real_probability=p) for t, p in zip(transients, probs)]
+        n_triaged = sum(1 for p in probs if p is not None)
 
     stem = os.path.splitext(output_path)[0]
     _write_fits_plane(stem + '_difference.fits', difference,
@@ -520,6 +597,16 @@ def run_transient_detection(stacked: np.ndarray, reference_path: str,
     safe_print(f"  Difference imaging: {len(transients)} candidate(s) above "
                f"{threshold:g} sigma ({n_bright} brightening, "
                f"{len(transients) - n_bright} fading)")
+    if triage:
+        if n_triaged:
+            n_likely = sum(1 for t in transients
+                          if t.real_probability is not None and t.real_probability > 0.5)
+            safe_print(f"    triage: {n_triaged}/{len(transients)} scored, "
+                       f"{n_likely} likely real (real_probability > 0.5) -- "
+                       f"advisory only, nothing was dropped")
+        else:
+            safe_print("    triage: requested but unavailable (see warning above) "
+                       "-- candidates left unscored")
     if measured_axis is None:
         reg = (f"registration residual not measurable -- assumed "
                f"{astro_sigma_px:.2f} px/axis")
@@ -563,13 +650,22 @@ def _align_reference(new_lum: np.ndarray, ref_lum: np.ndarray):
 
     Cross-night pairs differ by arbitrary field rotation on an alt-az mount,
     so this goes through the same blind star-pattern matcher ``--merge`` uses
-    rather than assuming a pure translation.
+    rather than assuming a pure translation. The matcher itself needs no
+    positional correspondence between ``new_lum``/``ref_lum`` -- it matches on
+    relative star geometry -- so unequal shapes are reconciled first by
+    embedding ``ref_lum`` onto ``new_lum``'s grid (top-left, zero-padded;
+    ``src.utils.embed_to_shape``, the same trick ``merge.py`` uses for a
+    previous stack whose own shape rarely matches the current run's): a
+    no-op when the shapes already match.
 
     Returns ``(warped_ref, footprint, residual_px, new_stars)`` or None:
 
     - ``footprint`` is the warped reference's coverage in [0, 1] -- the same
-      transform applied to an all-ones image. Outside it the reference is
-      fill, not data.
+      transform applied to a mask of where ``ref_lum`` had real data (ones
+      only inside its own original extent, before any embedding). Outside it
+      the reference is fill, not data -- and that now covers both the warp's
+      own uncovered wedges (field rotation) and any embed-padding border, so
+      neither reads as a bogus "transient" the way an all-ones mask would.
     - ``residual_px`` is the RMS 2D distance between matched star pairs after
       the transform: a real measurement of how well the epochs line up, which
       feeds ZOGY's astrometric noise term. None when too few pairs match to
@@ -579,6 +675,13 @@ def _align_reference(new_lum: np.ndarray, ref_lum: np.ndarray):
     """
     from src.registration import apply_transform
     from src.star_detect import detect_stars_matched_filter
+    from src.utils import embed_to_shape
+
+    ref_valid_mask = np.ones_like(ref_lum, dtype=np.float32)
+    if ref_lum.shape != new_lum.shape:
+        H, W = new_lum.shape
+        ref_valid_mask = embed_to_shape(ref_valid_mask, H, W)
+        ref_lum = embed_to_shape(ref_lum, H, W)
 
     try:
         new_stars = detect_stars_matched_filter(new_lum.astype(np.float32))
@@ -602,8 +705,7 @@ def _align_reference(new_lum: np.ndarray, ref_lum: np.ndarray):
 
     try:
         warped = apply_transform(ref_lum.astype(np.float32), transform=transform)
-        footprint = apply_transform(np.ones_like(ref_lum, dtype=np.float32),
-                                    transform=transform)
+        footprint = apply_transform(ref_valid_mask, transform=transform)
     except Exception as exc:
         _log.debug("transient alignment: warp failed (%s)", exc)
         return None

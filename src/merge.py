@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import Config
+from src.utils import embed_to_shape as _embed_to_shape
 from src.utils import get_logger, safe_print
 
 _log = get_logger()
@@ -55,22 +56,6 @@ def _detect_stars(lum: np.ndarray) -> Optional[Any]:
         return detect_stars_auto(lum, max(noise, 1e-3), background=med)
     except Exception:
         return None
-
-
-def _embed_to_shape(arr: np.ndarray, H: int, W: int) -> np.ndarray:
-    """Place ``arr`` in the top-left of an (H, W[, C]) zero canvas (crop if
-    larger). Pixel coordinates are preserved, so a transform computed on the
-    embedded luminance applies directly to the embedded image."""
-    if arr.shape[0] == H and arr.shape[1] == W:
-        return arr
-    if arr.ndim == 3:
-        out = np.zeros((H, W, arr.shape[2]), dtype=arr.dtype)
-    else:
-        out = np.zeros((H, W), dtype=arr.dtype)
-    h = min(H, arr.shape[0])
-    w = min(W, arr.shape[1])
-    out[:h, :w] = arr[:h, :w]
-    return out
 
 
 def _register_stack(new_lum: np.ndarray, prev_lum: np.ndarray,

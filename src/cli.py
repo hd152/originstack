@@ -942,6 +942,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     produced = []
     _effective_args: dict = {}   # produced stack path -> the args it was made with
     for target_idx, (d, outp) in enumerate(targets, 1):
+        _cancel_event = getattr(args, '_cancel_event', None)
+        if _cancel_event is not None and _cancel_event.is_set():
+            from src.models import RunCancelled
+            raise RunCancelled(f"cancelled before target {target_idx}/{len(targets)}")
         if _baseline is not None:
             _restore_args(args, _baseline)
 
@@ -1828,6 +1832,21 @@ def build_parser() -> argparse.ArgumentParser:
                         'corrected score image (default: 5.0). The score is calibrated '
                         '(source + astrometric noise are propagated), so this is a real '
                         'significance, not an arbitrary cut.')
+    g_post.add_argument('--transient-triage', action='store_true',
+                   help='Score each --transient-detect candidate with a small CNN for a '
+                        'real_probability (real transient vs. cosmic ray / registration-slip '
+                        'dipole / hot pixel) -- the same role ZTF\'s BTSbot / Rubin\'s DIA '
+                        'triage play downstream of classical image differencing. Advisory '
+                        'only: never drops a candidate, just adds a column to '
+                        '<output>_transients.csv. Native-only (astro_native.transient_triage_score, '
+                        'no onnxruntime fallback yet) -- self-disables with a warning if '
+                        'unavailable. The bundled model is trained entirely on synthetic data '
+                        '(tools/gen_transient_triage_data.py + tools/train_transient_triage.py, '
+                        'no labelled real transients exist yet), so treat it as a first cut. '
+                        'Requires --transient-detect.')
+    g_post.add_argument('--transient-triage-model', default=None, metavar='PATH',
+                   help='Override the bundled transient-triage model '
+                        '(src/data/transient_triage.onnx). Requires --transient-triage.')
     g_post.add_argument('--light-pollution-azimuth', type=float, default=0.0,
                    metavar='DEG',
                    help='physical bg-method only: compass azimuth (degrees east of north) '
@@ -1915,21 +1934,33 @@ def build_parser() -> argparse.ArgumentParser:
                         'accepted, rejection_reason)')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
-    g_originvision.add_argument('--originvision', action='store_true',
-                   help='Score the final stacked master with originvision (separately-trained '
-                        'defect/quality/category classifier), run in-process against the '
+    # Single action, no positive `--originvision` flag -- same reason --auto
+    # (src/cli.py:_UNSUPPORTED... see the --no-auto entry above) has none:
+    # desktop_control.py's get_form_schema()/build_argv_from_form() key
+    # purely on argparse dest, with no dest-collision handling, so two
+    # actions sharing one dest would silently double up the GUI field (a
+    # second tk.Variable, one of them dropped) or pick one arbitrarily in
+    # _dest_action_map's dest->action dict. `--originvision` text on an
+    # existing command line now errors (unrecognized argument) rather than
+    # being a redundant no-op -- deliberate, matching --auto's own
+    # no-positive-flag precedent, not an oversight.
+    g_originvision.add_argument('--no-originvision', dest='originvision', action='store_false',
+                   default=True,
+                   help='Disable originvision scoring (defect/quality/category classifier, on '
+                        'by default). Scores the final stacked master in-process against the '
                         'bundled model (src/data/originvision.onnx -- no external folder or '
                         'venv). Inference is the native astro_native kernel (pure-Rust tract, '
                         'nothing extra to install); a source checkout without astro_native '
-                        'falls back to a Python onnxruntime path. When --auto is also active '
-                        '(the default -- pass --no-auto to disable), also samples 3 light '
-                        'frames spread through the session: the sampled category feeds the '
-                        'same target-classification prior SIMBAD/header metadata uses, and a '
-                        'defect flag nudges settings defensively (trail-reject, stronger '
-                        'chroma denoising) -- never auto-rejects a frame, this model is still '
-                        'finishing its first training run. Pair with --originvision-score-all '
-                        'to also score every accepted frame (slower on a large session). '
-                        'Self-disables with a warning when no backend is available.')
+                        'falls back to a Python onnxruntime path -- and self-disables with a '
+                        'warning if neither backend nor the model file is available, so this '
+                        'runs cleanly either way. When --auto is also active (the default -- '
+                        'pass --no-auto to disable), also samples 3 light frames spread through '
+                        'the session: the sampled category feeds the same target-classification '
+                        'prior SIMBAD/header metadata uses, and a defect flag nudges settings '
+                        'defensively (trail-reject, stronger chroma denoising) -- never '
+                        'auto-rejects a frame, this model is still finishing its first training '
+                        'run. Pair with --originvision-score-all to also score every accepted '
+                        'frame (slower on a large session).')
     g_originvision.add_argument('--originvision-score-all', action='store_true',
                    help='Also score every accepted light frame with originvision (not just '
                         'the fast 3-frame sample --originvision always does), logging advisory '
@@ -1939,11 +1970,13 @@ def build_parser() -> argparse.ArgumentParser:
     g_originvision.add_argument('--originvision-model', default=None, metavar='PATH',
                    help='Path to an exported originvision ONNX model, overriding the bundled '
                         'src/data/originvision.onnx (e.g. to test a newer checkpoint).')
-    g_originvision.add_argument('--originvision-workers', type=int, default=2, metavar='N',
-                   help='Thread-pool size for per-frame originvision scoring calls (default: 2). '
+    g_originvision.add_argument('--originvision-workers', type=int, default=8, metavar='N',
+                   help='Thread-pool size for per-frame originvision scoring calls (default: 8). '
                         'Both backends release the GIL during the forward pass (the native '
                         'tract kernel via py.allow_threads), so a thread pool parallelises it '
-                        'without a ProcessPoolExecutor.')
+                        'without a ProcessPoolExecutor -- measured near-linear scaling 1->8 '
+                        'workers on a real frame (2751 -> 473 ms/frame effective at 8), so the '
+                        'previous default of 2 (1415 ms/frame) left real throughput on the table.')
     # Back-compat, hidden: --originvision-dir / --originvision-checkpoint still
     # resolve a model path for command lines written against the pre-in-process
     # layout.
@@ -2471,6 +2504,11 @@ def parse_args(argv=None):
         # too) makes it a silent no-op otherwise, which is easy to mistake
         # for "ran but found nothing" rather than "didn't run at all".
         safe_print("  WARNING: --originvision-score-all has no effect without --originvision")
+
+    if getattr(args, 'transient_triage', False) and not getattr(args, 'transient_detect', None):
+        safe_print("  WARNING: --transient-triage has no effect without --transient-detect")
+    if getattr(args, 'transient_triage_model', None) and not getattr(args, 'transient_triage', False):
+        safe_print("  WARNING: --transient-triage-model has no effect without --transient-triage")
 
     return args
 

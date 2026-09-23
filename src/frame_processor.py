@@ -33,7 +33,7 @@ from src.debayer import (
 from src.frame_discovery import is_nebula_filter
 from src.gpu_context import get_gpu
 from src.io_fits import load_frame
-from src.models import Config, FrameInfo, ProcessingStats
+from src.models import Config, FrameInfo, ProcessingStats, RunCancelled
 from src.quality import compute_quality_metrics, estimate_bortle, validate_image_data
 from src.stacking import lacosmic_reject
 from src.utils import format_time, mp_context, print_quality_table, safe_print
@@ -915,6 +915,17 @@ def _parallel_frame_worker(
     return (frame_idx, metrics_clean, None, timings)
 
 
+def _check_cancel(args: argparse.Namespace) -> None:
+    """Raise ``RunCancelled`` when the GUI's cancel button has been pressed
+    (``RunManager.cancel()``, ``args._cancel_event``). A plain CLI run never
+    sets this, so it's a no-op there. Called between frames -- not inside a
+    worker, which has already committed to processing the frame it picked
+    up -- so cancelling stops new work starting, not work in flight."""
+    ev = getattr(args, '_cancel_event', None)
+    if ev is not None and ev.is_set():
+        raise RunCancelled("cancelled during Phase 1 frame processing")
+
+
 @_with_session_cfa
 def execute_frame_processing(
     lights: List[FrameInfo],
@@ -1025,40 +1036,51 @@ def execute_frame_processing(
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 _wv = _get_ui_events()
                 _wv_done = 0
-                for future in tqdm(as_completed(futures), total=n,
-                                   desc="  Processing", unit="frame",
-                                   disable=args.verbose):
-                    idx = futures[future]
-                    frame_idx, metrics, error, timings = future.result()
-                    _accum(timings)
-                    f = lights[frame_idx]
-                    _wv_done += 1
-                    _wv.progress('Processing frames', _wv_done, n)
-                    _wv.frame_metrics(os.path.basename(f.path), metrics,
-                                      accepted=error is None)
-                    if error:
-                        f.accepted = False
-                        f.metrics = {'error': error}
-                        rejected_reasons[f.path] = error
-                        stats.add_error(f.path, error)
-                        if args.verbose:
-                            print(f'  REJECT {os.path.basename(f.path)}: {error}')
-                    else:
-                        f.metrics = metrics
-                        _publish_frame_thumb(_wv, args,
-                                             os.path.basename(f.path),
-                                             mem_rgb[frame_idx], _wv_thumb_count)
-                        if args.verbose:
-                            m = f.metrics
-                            safe_print(f'    {os.path.basename(f.path)}: '
-                                       f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
-                                       f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
-                                       f'sharpness={m.get("sharpness",0):.0f}')
-                            safe_print(f'      bg={m.get("background",0):.1f}  '
-                                       f'noise={m.get("noise",0):.2f}  '
-                                       f'brightness={m.get("brightness",0):.1f}  '
-                                       f'contrast={m.get("contrast",0):.1f}  '
-                                       f'dynamic_range={m.get("dynamic_range",0):.0f}')
+                try:
+                    for future in tqdm(as_completed(futures), total=n,
+                                       desc="  Processing", unit="frame",
+                                       disable=args.verbose):
+                        _check_cancel(args)
+                        idx = futures[future]
+                        frame_idx, metrics, error, timings = future.result()
+                        _accum(timings)
+                        f = lights[frame_idx]
+                        _wv_done += 1
+                        _wv.progress('Processing frames', _wv_done, n)
+                        _wv.frame_metrics(os.path.basename(f.path), metrics,
+                                          accepted=error is None)
+                        if error:
+                            f.accepted = False
+                            f.metrics = {'error': error}
+                            rejected_reasons[f.path] = error
+                            stats.add_error(f.path, error)
+                            if args.verbose:
+                                safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
+                        else:
+                            f.metrics = metrics
+                            _publish_frame_thumb(_wv, args,
+                                                 os.path.basename(f.path),
+                                                 mem_rgb[frame_idx], _wv_thumb_count)
+                            if args.verbose:
+                                m = f.metrics
+                                safe_print(f'    {os.path.basename(f.path)}: '
+                                           f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
+                                           f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
+                                           f'sharpness={m.get("sharpness",0):.0f}')
+                                safe_print(f'      bg={m.get("background",0):.1f}  '
+                                           f'noise={m.get("noise",0):.2f}  '
+                                           f'brightness={m.get("brightness",0):.1f}  '
+                                           f'contrast={m.get("contrast",0):.1f}  '
+                                           f'dynamic_range={m.get("dynamic_range",0):.0f}')
+                except RunCancelled:
+                    # Cancel every not-yet-started future so the `with` block's
+                    # own shutdown(wait=True) on the way out only waits for
+                    # whatever's already mid-frame in the worker processes --
+                    # not the full remainder of the session (every future was
+                    # submitted upfront, so a plain exit here would otherwise
+                    # wait for all n frames regardless of the cancel).
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
         finally:
             # Release shared memory after all workers are done.
             for shm in shm_blocks:
@@ -1150,54 +1172,66 @@ def execute_frame_processing(
             # quality metrics are computed asynchronously and only printed AFTER
             # this loop, so disabling the bar under -v would leave the whole GPU
             # processing loop with no output at all (looks hung).
-            for future in tqdm(as_completed(futures), total=n,
-                               desc="  Processing", unit="frame",
-                               disable=False):
-                i, metrics, error, lum_arr, timings = future.result()
-                _accum(timings)
-                f = lights[i]
-                if error:
-                    f.accepted = False
-                    f.metrics = {'error': error}
-                    rejected_reasons[f.path] = error
-                    stats.add_error(f.path, error)
-                    if args.verbose:
-                        safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
-                else:
-                    cached_lums[i] = lum_arr
-                    if _use_qpool and lum_arr is not None:
-                        # Submit quality to CPU pool; GPU thread is already freed.
-                        # Its compute time runs concurrently with other frames'
-                        # GPU work and isn't attributable to a single frame here,
-                        # so it is not folded into the per-step totals below —
-                        # the GPU path's timing breakdown is best-effort.
-                        _qfuts[i] = _qpool.submit(
-                            compute_quality_metrics, lum_arr, advanced_metrics=_adv)
-                    else:
-                        f.metrics = metrics
+            try:
+                for future in tqdm(as_completed(futures), total=n,
+                                   desc="  Processing", unit="frame",
+                                   disable=False):
+                    _check_cancel(args)
+                    i, metrics, error, lum_arr, timings = future.result()
+                    _accum(timings)
+                    f = lights[i]
+                    if error:
+                        f.accepted = False
+                        f.metrics = {'error': error}
+                        rejected_reasons[f.path] = error
+                        stats.add_error(f.path, error)
                         if args.verbose:
-                            m = f.metrics
-                            safe_print(f'    {os.path.basename(f.path)}: '
-                                       f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
-                                       f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
-                                       f'sharpness={m.get("sharpness",0):.0f}')
-                            safe_print(f'      bg={m.get("background",0):.1f}  '
-                                       f'noise={m.get("noise",0):.2f}  '
-                                       f'brightness={m.get("brightness",0):.1f}  '
-                                       f'contrast={m.get("contrast",0):.1f}  '
-                                       f'dynamic_range={m.get("dynamic_range",0):.0f}')
-                _completed += 1
-                _wv = _get_ui_events()
-                _wv.progress('Processing frames', _completed, n)
-                if error is None and f.metrics:
-                    _wv.frame_metrics(os.path.basename(f.path), f.metrics)
-                if error is None:
-                    _publish_frame_thumb(_wv, args, os.path.basename(f.path),
-                                         mem_rgb[i], _wv_thumb_count)
-                # Periodically free CuPy's cached memory pool to prevent VRAM exhaustion
-                # from accumulating unused cached blocks across many completed frames.
-                if gpu.active and (_completed % _free_interval == 0):
-                    gpu.free_pool()
+                            safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
+                    else:
+                        cached_lums[i] = lum_arr
+                        if _use_qpool and lum_arr is not None:
+                            # Submit quality to CPU pool; GPU thread is already freed.
+                            # Its compute time runs concurrently with other frames'
+                            # GPU work and isn't attributable to a single frame here,
+                            # so it is not folded into the per-step totals below —
+                            # the GPU path's timing breakdown is best-effort.
+                            _qfuts[i] = _qpool.submit(
+                                compute_quality_metrics, lum_arr, advanced_metrics=_adv)
+                        else:
+                            f.metrics = metrics
+                            if args.verbose:
+                                m = f.metrics
+                                safe_print(f'    {os.path.basename(f.path)}: '
+                                           f'score={m["score"]:.0f}  SNR={m["snr"]:.1f}  '
+                                           f'stars={m["star_count"]}  FWHM={m.get("fwhm",0):.1f}  '
+                                           f'sharpness={m.get("sharpness",0):.0f}')
+                                safe_print(f'      bg={m.get("background",0):.1f}  '
+                                           f'noise={m.get("noise",0):.2f}  '
+                                           f'brightness={m.get("brightness",0):.1f}  '
+                                           f'contrast={m.get("contrast",0):.1f}  '
+                                           f'dynamic_range={m.get("dynamic_range",0):.0f}')
+                    _completed += 1
+                    _wv = _get_ui_events()
+                    _wv.progress('Processing frames', _completed, n)
+                    if error is None and f.metrics:
+                        _wv.frame_metrics(os.path.basename(f.path), f.metrics)
+                    if error is None:
+                        _publish_frame_thumb(_wv, args, os.path.basename(f.path),
+                                             mem_rgb[i], _wv_thumb_count)
+                    # Periodically free CuPy's cached memory pool to prevent VRAM exhaustion
+                    # from accumulating unused cached blocks across many completed frames.
+                    if gpu.active and (_completed % _free_interval == 0):
+                        gpu.free_pool()
+            except RunCancelled:
+                # Same reasoning as the ProcessPool path above: every future
+                # was submitted upfront, so cancel the ones not yet started
+                # before letting the `with` block's own shutdown wait only on
+                # whatever's already in flight.
+                if _use_qpool:
+                    _qpool.shutdown(wait=False, cancel_futures=True)
+                _io_pool.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
 
         # Collect deferred quality results (CPU pool runs while GPU was active)
         if _qfuts:
@@ -1236,6 +1270,7 @@ def execute_frame_processing(
         for i, f in tqdm(enumerate(lights), total=n,
                          desc="  Processing", unit="frame",
                          disable=args.verbose):
+            _check_cancel(args)
             result = _process_single_frame(
                 f.path, f.header, masters, args.debayer_method, args.white_balance,
                 ca_correction=getattr(args, 'ca_correction', False),

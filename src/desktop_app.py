@@ -883,6 +883,9 @@ class App:
         self.start_btn = ttk.Button(run_row, text='Start', style='Accent.TButton',
                                     command=self._on_start)
         self.start_btn.pack(side='left')
+        self.cancel_btn = ttk.Button(run_row, text='Cancel', command=self._on_cancel)
+        self.cancel_btn.pack(side='left', padx=(6, 0))
+        self.cancel_btn.state(['disabled'])
         self.status_var = tk.StringVar(value='Idle')
         ttk.Label(run_row, textvariable=self.status_var, style='Dim.TLabel').pack(
             side='left', padx=10)
@@ -978,10 +981,20 @@ class App:
             self.status_var.set(f"Error: {result.get('error')}")
             return
         self.start_btn.state(['disabled'])
+        self.cancel_btn.state(['!disabled'])
         self.status_var.set('Running…')
         self._shown_log_lines = 0
         self.frames_tree.delete(*self.frames_tree.get_children())
         self.summary_var.set('')
+
+    def _on_cancel(self) -> None:
+        # Cooperative, not instant -- takes effect at the next checkpoint
+        # (RunManager/frame_processor._check_cancel's docstrings). Disabling
+        # the button immediately is the honest signal: pressing it again
+        # wouldn't make the pipeline notice any sooner.
+        self.rm.cancel()
+        self.cancel_btn.state(['disabled'])
+        self.status_var.set('Cancelling…')
 
     def _on_closing(self) -> None:
         if self.rm.is_running():
@@ -1135,13 +1148,18 @@ class App:
         running = self.rm.is_running()
         if running:
             self.start_btn.state(['disabled'])
-            self.header_status_var.set('Running…')
+            self.header_status_var.set('Cancelling…' if self.rm.is_cancelling() else 'Running…')
         else:
             self.start_btn.state(['!disabled'])
-            if snap is not None and snap['run_status'] in ('ok', 'error'):
+            self.cancel_btn.state(['disabled'])
+            if snap is not None and snap['run_status'] in ('ok', 'error', 'cancelled'):
                 done_ok = snap['run_status'] == 'ok'
-                self.status_var.set('Done' if done_ok else f"Failed: {snap['run_error']}")
-                self.header_status_var.set('Complete' if done_ok else 'Failed')
+                if snap['run_status'] == 'cancelled':
+                    self.status_var.set('Cancelled')
+                    self.header_status_var.set('Cancelled')
+                else:
+                    self.status_var.set('Done' if done_ok else f"Failed: {snap['run_error']}")
+                    self.header_status_var.set('Complete' if done_ok else 'Failed')
                 # Edge-triggered (not every poll tick) so it only pops once
                 # per completed run, not repeatedly while the status holds.
                 if done_ok and self._last_run_status != 'ok' and self.open_folder_var.get():

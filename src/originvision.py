@@ -64,7 +64,7 @@ def score_lights_with_originvision(lights: List[FrameInfo], args) -> None:
     model_path = _originvision_model(args)
     if model_path is None:
         return
-    workers = max(1, int(getattr(args, 'originvision_workers', 2)))
+    workers = max(1, int(getattr(args, 'originvision_workers', 8)))
 
     targets = [f for f in lights if f.accepted]
     if not targets:
