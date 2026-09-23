@@ -942,6 +942,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     produced = []
     _effective_args: dict = {}   # produced stack path -> the args it was made with
     for target_idx, (d, outp) in enumerate(targets, 1):
+        _cancel_event = getattr(args, '_cancel_event', None)
+        if _cancel_event is not None and _cancel_event.is_set():
+            from src.models import RunCancelled
+            raise RunCancelled(f"cancelled before target {target_idx}/{len(targets)}")
         if _baseline is not None:
             _restore_args(args, _baseline)
 
@@ -1954,11 +1958,13 @@ def build_parser() -> argparse.ArgumentParser:
     g_originvision.add_argument('--originvision-model', default=None, metavar='PATH',
                    help='Path to an exported originvision ONNX model, overriding the bundled '
                         'src/data/originvision.onnx (e.g. to test a newer checkpoint).')
-    g_originvision.add_argument('--originvision-workers', type=int, default=2, metavar='N',
-                   help='Thread-pool size for per-frame originvision scoring calls (default: 2). '
+    g_originvision.add_argument('--originvision-workers', type=int, default=8, metavar='N',
+                   help='Thread-pool size for per-frame originvision scoring calls (default: 8). '
                         'Both backends release the GIL during the forward pass (the native '
                         'tract kernel via py.allow_threads), so a thread pool parallelises it '
-                        'without a ProcessPoolExecutor.')
+                        'without a ProcessPoolExecutor -- measured near-linear scaling 1->8 '
+                        'workers on a real frame (2751 -> 473 ms/frame effective at 8), so the '
+                        'previous default of 2 (1415 ms/frame) left real throughput on the table.')
     # Back-compat, hidden: --originvision-dir / --originvision-checkpoint still
     # resolve a model path for command lines written against the pre-in-process
     # layout.

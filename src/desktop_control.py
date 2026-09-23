@@ -146,15 +146,34 @@ class RunManager:
     progress through the ``UIEvents`` singleton (``src/ui_events.py``) --
     the desktop app attaches it before entering the tkinter mainloop, so
     it's already active by the time a run starts; only the pipeline work
-    itself needs to move off the GUI's own (main) thread."""
+    itself needs to move off the GUI's own (main) thread.
+
+    Cancellation is cooperative, not a thread kill (CPython threads can't be
+    force-stopped, and Phase 1 workers are real OS processes/subprocesses
+    mid-computation anyway): ``cancel()`` sets a ``threading.Event`` shared
+    onto the run's ``args`` as ``_cancel_event``, and the pipeline notices it
+    at a handful of checkpoints (``frame_processor._check_cancel`` between
+    Phase 1 frames -- usually the longest phase -- and between targets in
+    ``cli.process_directory``). Phases 2-4 of a single target aren't
+    interruptible yet: once one starts, it runs to completion."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.status = 'idle'
         self.thread: Optional[threading.Thread] = None
+        self._cancel_event = threading.Event()
 
     def is_running(self) -> bool:
         return self.status == 'running'
+
+    def is_cancelling(self) -> bool:
+        return self.status == 'running' and self._cancel_event.is_set()
+
+    def cancel(self) -> None:
+        """Request a stop. A no-op if nothing is running; safe to call more
+        than once. Takes effect at the next checkpoint, not instantly."""
+        if self.status == 'running':
+            self._cancel_event.set()
 
     def start(self, form: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
@@ -165,6 +184,7 @@ class RunManager:
             except Exception as e:
                 return {'ok': False, 'error': f'invalid form: {e}'}
             self.status = 'running'
+            self._cancel_event = threading.Event()  # fresh flag per run
         self.thread = threading.Thread(target=self._run, args=(argv,),
                                        name='desktop-run', daemon=True)
         self.thread.start()
@@ -175,6 +195,7 @@ class RunManager:
         import tempfile
 
         from src.cli import apply_post_parse_setup, parse_args, process_directory
+        from src.models import RunCancelled
         from src.ui_events import get_ui_events
         from src.utils import get_logger, safe_print
 
@@ -182,6 +203,7 @@ class RunManager:
         status, error = 'ok', None
         try:
             args = parse_args(argv)
+            args._cancel_event = self._cancel_event
 
             # Default a durable log file for GUI-triggered runs specifically
             # (not in apply_post_parse_setup, which is also the plain CLI's
@@ -199,6 +221,9 @@ class RunManager:
 
             wv.run_started()
             process_directory(args.directory, args.output, args)
+        except RunCancelled:
+            status = 'cancelled'
+            safe_print("  Run cancelled.")
         except (Exception, SystemExit) as e:
             status = 'error'
             error = str(e) or e.__class__.__name__

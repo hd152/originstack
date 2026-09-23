@@ -69,6 +69,27 @@ class TestPreprocessing:
         out = infer_mod._resize_center_crop(img, 128)
         assert out.shape == (128, 128, 3)
 
+    def test_downsample_if_large_is_a_no_op_under_the_cap(self):
+        img = (np.random.default_rng(2).random((100, 150, 3)) * 255).astype(np.float32)
+        out = infer_mod._downsample_if_large(img, max_long_side=200)
+        assert out is img  # identity, not just equal -- no copy when already small
+
+    def test_downsample_if_large_preserves_aspect_and_caps_long_side(self):
+        img = (np.random.default_rng(3).random((1000, 2000, 3)) * 255).astype(np.float32)
+        out = infer_mod._downsample_if_large(img, max_long_side=500)
+        assert out.shape[1] == 500  # long side (width here) hits the cap exactly
+        assert abs(out.shape[0] / out.shape[1] - img.shape[0] / img.shape[1]) < 0.01
+        assert out.dtype == np.float32
+
+    def test_downsample_if_large_never_crops(self):
+        """Unlike _resize_center_crop, this must keep the whole frame --
+        cropping here, before the percentile stretch even runs, would change
+        which pixels the stretch is computed over."""
+        img = (np.random.default_rng(4).random((300, 900, 3)) * 255).astype(np.float32)
+        out = infer_mod._downsample_if_large(img, max_long_side=300)
+        assert out.shape[0] == 100  # short side scaled down, not cropped away
+        assert out.shape[1] == 300
+
 
 class _FakeCatSession:
     """Minimal onnxruntime-style session with only a `category` head, so the
@@ -170,6 +191,25 @@ class TestRealInference:
             assert k in r, k
         assert r['category'] in ('galaxy', 'nebula', 'star_cluster', 'comet')
         assert 0.0 <= r['category_confidence'] <= 1.0
+
+    def test_fast_preprocess_defaults_off_and_matches_explicit_false(self):
+        """The dormant fast_preprocess opt-in must never change behaviour
+        unless a caller explicitly asks for it -- default-arg omission and
+        an explicit False must be identical."""
+        rgb = self._synth_rgb()
+        r_default = infer_mod.score_rgb(rgb)
+        r_explicit_false = infer_mod.score_rgb(rgb, fast_preprocess=False)
+        assert r_default == r_explicit_false
+
+    def test_fast_preprocess_true_actually_changes_the_input(self):
+        """Opting in must take a measurably different (cheaper) path -- a
+        small synthetic frame is already near/under the downsample cap, so
+        scale up first to guarantee the cap actually bites."""
+        big = np.tile(self._synth_rgb(), (3, 3, 1))  # 900x1200, well over 256*4
+        r_full = infer_mod.score_rgb(big)
+        r_fast = infer_mod.score_rgb(big, fast_preprocess=True)
+        assert r_full is not None and r_fast is not None
+        assert r_full['quality_score'] != r_fast['quality_score']
 
     def test_untrained_and_unused_heads_not_surfaced(self):
         """The bundled v4 graph emits 8 outputs incl. `trailing` (untrained,
