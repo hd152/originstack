@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.2.6] - 2026-09-22
+
 ### Changed
 
 - **`--use-gpu` real-hardware finding: currently a net loss on a 4GB card for real sessions, not just a
