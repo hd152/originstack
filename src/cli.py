@@ -1934,21 +1934,33 @@ def build_parser() -> argparse.ArgumentParser:
                         'accepted, rejection_reason)')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
-    g_originvision.add_argument('--originvision', action='store_true',
-                   help='Score the final stacked master with originvision (separately-trained '
-                        'defect/quality/category classifier), run in-process against the '
+    # Single action, no positive `--originvision` flag -- same reason --auto
+    # (src/cli.py:_UNSUPPORTED... see the --no-auto entry above) has none:
+    # desktop_control.py's get_form_schema()/build_argv_from_form() key
+    # purely on argparse dest, with no dest-collision handling, so two
+    # actions sharing one dest would silently double up the GUI field (a
+    # second tk.Variable, one of them dropped) or pick one arbitrarily in
+    # _dest_action_map's dest->action dict. `--originvision` text on an
+    # existing command line now errors (unrecognized argument) rather than
+    # being a redundant no-op -- deliberate, matching --auto's own
+    # no-positive-flag precedent, not an oversight.
+    g_originvision.add_argument('--no-originvision', dest='originvision', action='store_false',
+                   default=True,
+                   help='Disable originvision scoring (defect/quality/category classifier, on '
+                        'by default). Scores the final stacked master in-process against the '
                         'bundled model (src/data/originvision.onnx -- no external folder or '
                         'venv). Inference is the native astro_native kernel (pure-Rust tract, '
                         'nothing extra to install); a source checkout without astro_native '
-                        'falls back to a Python onnxruntime path. When --auto is also active '
-                        '(the default -- pass --no-auto to disable), also samples 3 light '
-                        'frames spread through the session: the sampled category feeds the '
-                        'same target-classification prior SIMBAD/header metadata uses, and a '
-                        'defect flag nudges settings defensively (trail-reject, stronger '
-                        'chroma denoising) -- never auto-rejects a frame, this model is still '
-                        'finishing its first training run. Pair with --originvision-score-all '
-                        'to also score every accepted frame (slower on a large session). '
-                        'Self-disables with a warning when no backend is available.')
+                        'falls back to a Python onnxruntime path -- and self-disables with a '
+                        'warning if neither backend nor the model file is available, so this '
+                        'runs cleanly either way. When --auto is also active (the default -- '
+                        'pass --no-auto to disable), also samples 3 light frames spread through '
+                        'the session: the sampled category feeds the same target-classification '
+                        'prior SIMBAD/header metadata uses, and a defect flag nudges settings '
+                        'defensively (trail-reject, stronger chroma denoising) -- never '
+                        'auto-rejects a frame, this model is still finishing its first training '
+                        'run. Pair with --originvision-score-all to also score every accepted '
+                        'frame (slower on a large session).')
     g_originvision.add_argument('--originvision-score-all', action='store_true',
                    help='Also score every accepted light frame with originvision (not just '
                         'the fast 3-frame sample --originvision always does), logging advisory '

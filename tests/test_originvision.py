@@ -535,9 +535,11 @@ class TestSampleSessionPriors:
 class TestCliOriginvisionResolution:
 
     def _parse(self, tmp_path, *extra):
+        # No explicit --originvision -- it's on by default now (a single
+        # --no-originvision action, same no-positive-flag shape as --auto;
+        # see the flag's own definition in cli.py for why).
         from src import cli
-        return cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
-                               '--originvision', *extra])
+        return cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'), *extra])
 
     @_real_infer
     def test_originvision_stays_enabled_with_bundled_model(self, tmp_path, monkeypatch):

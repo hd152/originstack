@@ -1055,7 +1055,7 @@ def execute_frame_processing(
                             rejected_reasons[f.path] = error
                             stats.add_error(f.path, error)
                             if args.verbose:
-                                print(f'  REJECT {os.path.basename(f.path)}: {error}')
+                                safe_print(f'  REJECT {os.path.basename(f.path)}: {error}')
                         else:
                             f.metrics = metrics
                             _publish_frame_thumb(_wv, args,
