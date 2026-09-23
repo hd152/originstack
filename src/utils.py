@@ -224,6 +224,31 @@ def format_time(seconds: float) -> str:
         return f"{hours}h {mins}m"
 
 
+def embed_to_shape(arr, H: int, W: int):
+    """Place ``arr`` in the top-left of an ``(H, W[, C])`` zero canvas (crop
+    if larger). Pixel coordinates are preserved, so a transform computed on
+    the embedded array applies directly to it.
+
+    Shared by ``merge.py`` (a previous stack's own shape rarely matches the
+    current run's) and ``difference_imaging.py`` (two independently-stacked
+    sessions of the same target routinely differ in pixel dimensions --
+    different dither pattern, different Phase 3 common-crop -- even though
+    they're the same field). A no-op (identity, no copy) when the shape
+    already matches.
+    """
+    import numpy as np
+    if arr.shape[0] == H and arr.shape[1] == W:
+        return arr
+    if arr.ndim == 3:
+        out = np.zeros((H, W, arr.shape[2]), dtype=arr.dtype)
+    else:
+        out = np.zeros((H, W), dtype=arr.dtype)
+    h = min(H, arr.shape[0])
+    w = min(W, arr.shape[1])
+    out[:h, :w] = arr[:h, :w]
+    return out
+
+
 def get_memory_usage_mb() -> float:
     """Get current process memory usage in MB."""
     if HAS_PSUTIL:

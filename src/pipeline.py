@@ -1153,7 +1153,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             run_transient_detection(
                 _transient_src, args.transient_detect, output_path,
                 threshold=float(getattr(args, 'transient_threshold', 5.0)),
-                wcs=_wcs_for_transients)
+                wcs=_wcs_for_transients,
+                triage=bool(getattr(args, 'transient_triage', False)),
+                triage_model_path=getattr(args, 'transient_triage_model', None))
             safe_print(f"  Difference imaging: {time.time() - _td_start:.1f}s")
         except Exception as e:
             # Diagnostic add-on: a failure here must never cost the stack.

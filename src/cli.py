@@ -1828,6 +1828,21 @@ def build_parser() -> argparse.ArgumentParser:
                         'corrected score image (default: 5.0). The score is calibrated '
                         '(source + astrometric noise are propagated), so this is a real '
                         'significance, not an arbitrary cut.')
+    g_post.add_argument('--transient-triage', action='store_true',
+                   help='Score each --transient-detect candidate with a small CNN for a '
+                        'real_probability (real transient vs. cosmic ray / registration-slip '
+                        'dipole / hot pixel) -- the same role ZTF\'s BTSbot / Rubin\'s DIA '
+                        'triage play downstream of classical image differencing. Advisory '
+                        'only: never drops a candidate, just adds a column to '
+                        '<output>_transients.csv. Native-only (astro_native.transient_triage_score, '
+                        'no onnxruntime fallback yet) -- self-disables with a warning if '
+                        'unavailable. The bundled model is trained entirely on synthetic data '
+                        '(tools/gen_transient_triage_data.py + tools/train_transient_triage.py, '
+                        'no labelled real transients exist yet), so treat it as a first cut. '
+                        'Requires --transient-detect.')
+    g_post.add_argument('--transient-triage-model', default=None, metavar='PATH',
+                   help='Override the bundled transient-triage model '
+                        '(src/data/transient_triage.onnx). Requires --transient-triage.')
     g_post.add_argument('--light-pollution-azimuth', type=float, default=0.0,
                    metavar='DEG',
                    help='physical bg-method only: compass azimuth (degrees east of north) '
@@ -2471,6 +2486,11 @@ def parse_args(argv=None):
         # too) makes it a silent no-op otherwise, which is easy to mistake
         # for "ran but found nothing" rather than "didn't run at all".
         safe_print("  WARNING: --originvision-score-all has no effect without --originvision")
+
+    if getattr(args, 'transient_triage', False) and not getattr(args, 'transient_detect', None):
+        safe_print("  WARNING: --transient-triage has no effect without --transient-detect")
+    if getattr(args, 'transient_triage_model', None) and not getattr(args, 'transient_triage', False):
+        safe_print("  WARNING: --transient-triage-model has no effect without --transient-triage")
 
     return args
 
