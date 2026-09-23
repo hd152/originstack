@@ -17,9 +17,16 @@ pip install maturin && (cd ext/astro_native && maturin develop --release)
 ### Run tests
 ```bash
 pytest -q
+# Full suite, parallel (pytest-xdist, in requirements-dev.txt) -- measured 3.2x on a
+# 16-core machine (1665 tests: 169s -> 52s, no isolation issues found)
+pytest -q -n auto
 # Run a single test
 pytest tests/test_core.py::test_calculate_shift_recovery -v
 ```
+`-n auto` is not the default (no `addopts` in `pyproject.toml`) -- deliberately: xdist runs each
+test in a forked worker process, which breaks `--pdb`/`breakpoint()` interactive debugging (a
+worker's stdin isn't wired up for it) and interleaves `-s` print output across workers. CI uses
+`-n auto` on both jobs (`.github/workflows/ci.yml`) where that tradeoff doesn't apply.
 
 ### Lint
 ```bash
