@@ -461,7 +461,9 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
         # image, not a raw CFA mosaic.  Viewers such as Siril use BAYERPAT to
         # detect raw frames and will attempt to debayer the already-processed
         # image if the keyword is present, producing garbage.
-        copy_keys = ['TELESCOP', 'INSTRUME', 'OBSERVER', 'OBJECT', 'DATE-OBS',
+        # TIMEZONE travels with DATE-OBS: Origin stamps DATE-OBS in local time
+        # and readers (utils.obs_time_utc_iso) need the offset to get UTC.
+        copy_keys = ['TELESCOP', 'INSTRUME', 'OBSERVER', 'OBJECT', 'DATE-OBS', 'TIMEZONE',
                      'EXPTIME', 'CCD-TEMP', 'GAIN', 'OFFSET', 'XBINNING', 'YBINNING',
                      'XPIXSZ', 'YPIXSZ', 'FOCALLEN', 'APTDIA']
         for key in copy_keys:

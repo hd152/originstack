@@ -62,7 +62,9 @@ def _pixel_coords(table, header) -> Optional[np.ndarray]:
     except Exception:
         return None
     try:
-        wcs = WCS(header)
+        # .celestial: the stacked product is a (3, H, W) cube, so a bare
+        # WCS(header) is 3-axis and the 2-argument all_world2pix below raises.
+        wcs = WCS(header).celestial
         if "ra" in table.colnames:
             ra = np.array(table["ra"], dtype=float)
             dec = np.array(table["dec"], dtype=float)

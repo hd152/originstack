@@ -503,13 +503,12 @@ def _apply_dynamic_settings(
 ) -> List[str]:
     """Continuous replacement for _apply_target_settings(): every parameter
     is blended across all 8 presets weighted by _blend_weights, instead of
-    looking up one bucket's fixed table. Numeric parameters get a weighted
-    average (renormalized over just the presets that define that
-    parameter); boolean/string parameters -- which can't be fractionally
-    blended -- take the value from whichever contributing preset has the
-    single highest weight (nearest-neighbor-in-signal-space), so the
-    decision still shifts continuously with the signals even though the
-    final choice at any instant is binary.
+    looking up one bucket's fixed table. A preset that does not list a
+    parameter contributes the baseline value args already holds. Numeric
+    parameters get a weighted average; boolean/string parameters -- which
+    can't be fractionally blended -- take the value with the largest total
+    weight, so the decision still shifts continuously with the signals even
+    though the final choice at any instant is binary.
     """
     changes: List[str] = []
     _explicit = getattr(args, '_explicit_cli_dests', set())
@@ -532,18 +531,33 @@ def _apply_dynamic_settings(
                 seen.add(attr)
                 all_attrs.append(attr)
 
+    # A preset that does not list an attr means "leave it at the baseline",
+    # not "abstain": it votes for the value args held before this blend, with
+    # its own weight. Renormalizing over only the listing presets applied a
+    # one-preset value at full strength to every target -- galaxy's coarse
+    # chroma pass (chroma_nr_large_sigma 0 -> 50) on a 97%-star-field blend.
+    # A baseline of None (attr absent from args) has nothing to vote for, so
+    # that attr falls back to the listing presets alone.
     for attr in all_attrs:
-        contributors = [(t, val) for t, rows in _TARGET_SETTINGS.items()
-                        for a, val in rows if a == attr]
-        w_sum = sum(weights.get(t, 0.0) for t, _ in contributors)
+        listed = {t: val for t, rows in _TARGET_SETTINGS.items()
+                  for a, val in rows if a == attr}
+        sample_val = next(iter(listed.values()))
+        baseline = getattr(args, attr, None)
+        votes = [(weights.get(t, 0.0), listed[t] if t in listed else baseline)
+                 for t in _TARGET_SETTINGS
+                 if t in listed or baseline is not None]
+        w_sum = sum(w for w, _ in votes)
         if w_sum <= 0:
             continue
-        sample_val = contributors[0][1]
         if isinstance(sample_val, (bool, str)):
-            best_t, best_val = max(contributors, key=lambda tv: weights.get(tv[0], 0.0))
-            _set(attr, best_val)
+            # Largest total weight per value, not the single heaviest preset:
+            # six presets that leave a flag off outweigh one that turns it on.
+            totals: Dict[object, float] = {}
+            for w, val in votes:
+                totals[val] = totals.get(val, 0.0) + w
+            _set(attr, max(totals, key=totals.get))
         else:
-            blended = sum(weights.get(t, 0.0) * val for t, val in contributors) / w_sum
+            blended = sum(w * float(val) for w, val in votes) / w_sum
             if isinstance(sample_val, int):
                 blended = int(round(blended))
             else:

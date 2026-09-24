@@ -15,6 +15,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from src.color_calibrate import (
     _blackbody_spectrum,
@@ -143,3 +144,43 @@ class TestFitChannelScalesSpcc:
              patch('src.color_calibrate._aperture_flux', return_value=fluxes):
             scales = fit_channel_scales_spcc(img, header, catalog, verbose=False)
         assert all(np.isfinite(s) for s in scales)
+
+
+class TestScalesActuallyCorrectTheCast:
+    """Both fitters used to divide each star's ratio by its own channel median
+    before taking the median, which is always 1 -- so the scales were always
+    (1, 1, 1) and --color-calibrate never changed the image. Here the red
+    channel reads 1.6x too bright: the fitted scales must pull it back."""
+
+    def _run(self, fitter, with_teff):
+        from src.color_calibrate import fit_channel_scales
+        rng = np.random.default_rng(3)
+        n = 40
+        g = rng.uniform(9.0, 12.0, n)
+        bp_rp = rng.uniform(0.3, 1.5, n)
+        cols = {'ra': np.zeros(n), 'dec': np.zeros(n), 'phot_g_mean_mag': g,
+                'phot_bp_mean_mag': g + 0.5 * bp_rp, 'phot_rp_mean_mag': g - 0.5 * bp_rp}
+        if with_teff:
+            cols['teff_gspphot'] = np.full(n, np.nan)   # colour-index fallback for all
+        catalog = _FakeTable(cols)
+        # Measured = the fitter's own expected fluxes x a per-channel gain.
+        from src.color_calibrate import _bp_rp_to_bv
+        bv = _bp_rp_to_bv(bp_rp)
+        expected = np.column_stack([10 ** (-0.4 * (g - 0.5 * bv)), 10 ** (-0.4 * g),
+                                    10 ** (-0.4 * (g + bv))])
+        fluxes = expected * np.array([1.6, 1.0, 1.0]) * 1e7
+        fn = fit_channel_scales_spcc if fitter == 'spcc' else fit_channel_scales
+        with patch('src.color_calibrate._pixel_coords',
+                   return_value=np.zeros((n, 2))), \
+             patch('src.color_calibrate._aperture_flux', return_value=fluxes):
+            return fn(np.ones((64, 64, 3), np.float32), {}, catalog)
+
+    def test_colorindex_scales_undo_a_red_cast(self):
+        r, g, b = self._run('colorindex', with_teff=False)
+        assert r / g == pytest.approx(1 / 1.6, rel=1e-6)
+        assert b / g == pytest.approx(1.0, rel=1e-6)
+
+    def test_spcc_scales_undo_a_red_cast(self):
+        r, g, b = self._run('spcc', with_teff=True)
+        assert r / g == pytest.approx(1 / 1.6, rel=1e-6)
+        assert b / g == pytest.approx(1.0, rel=1e-6)

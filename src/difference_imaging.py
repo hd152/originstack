@@ -276,9 +276,13 @@ def zogy(new: np.ndarray, ref: np.ndarray,
     del d_hat, pd_hat
 
     # --- Noise terms for S_corr (eq. 26-30) ---
-    # Matched-filter kernels for each input image.
-    kn_hat = fr * fn ** 2 * np.conj(pn_hat) * abs_pr2 / denom
-    kr_hat = fn * fr ** 2 * np.conj(pr_hat) * abs_pn2 / denom
+    # Matched-filter kernels for each input image: S = kn*N - kr*R, which is
+    # F_D * D (x) P_D expanded (eq. 28-29). The flux powers were once swapped,
+    # invisible at flux_new == flux_ref == 1 but mis-scaling the variance
+    # whenever the epochs differ (S_corr std 0.4-0.65 on pure noise at a
+    # flux ratio of 3 or 0.3, so a "5 sigma" cut really sat at 8-12 sigma).
+    kn_hat = fn * fr ** 2 * np.conj(pn_hat) * abs_pr2 / denom
+    kr_hat = fr * fn ** 2 * np.conj(pr_hat) * abs_pn2 / denom
     del abs_pn2, abs_pr2, denom, pn_hat, pr_hat
 
     # Variance maps live on the padded grid too. The padding is sky, so it

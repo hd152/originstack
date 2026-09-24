@@ -6,7 +6,6 @@ import copy
 import logging
 import math
 import os
-import re
 import sys
 import tempfile
 import threading
@@ -27,6 +26,7 @@ from src.io_fits import make_master, save_preview_rgb
 from src.models import Config, ProcessingStats
 from src.pipeline import stack_target
 from src.utils import (
+    TZ_OFFSET_RE,
     disable_astropy_network,
     format_time,
     print_header,
@@ -676,10 +676,6 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
 _ROTATION_SPLIT_THRESHOLD_DEG = 3.0
 
 
-# A FITS TIMEZONE value this code can append to DATE-OBS: '-0700', '+05:30'.
-# Anything else ('PDT', 'US/Pacific', '-07:00 (PDT)') would produce an
-# unparseable timestamp and silently disable the rotation prediction.
-_TZ_OFFSET_RE = re.compile(r'[+-]\d{2}:?\d{2}')
 
 
 def _predict_rotation_spread(subdirs: List[str]) -> Optional[float]:
@@ -728,7 +724,7 @@ def _predict_rotation_spread(subdirs: List[str]) -> Optional[float]:
         h0, h1 = lights[0].header or {}, lights[-1].header or {}
 
         offset = str(h0.get('TIMEZONE', '') or '').strip()
-        if offset and not _TZ_OFFSET_RE.fullmatch(offset):
+        if offset and not TZ_OFFSET_RE.fullmatch(offset):
             return _give_up(d, f"TIMEZONE {offset!r} is not a +/-HHMM offset")
 
         ra, dec = math.degrees(si.ra_rad), math.degrees(si.dec_rad)
@@ -1050,9 +1046,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     safe_print(f"    Bias:  pedestal={b_med:.1f} ADU  "
                                f"noise={b_std:.1f} ADU  -> {b_quality}")
                 if masters.get('dark') is not None:
-                    d = masters['dark']
-                    dark_med = float(np.median(d))
-                    dark_peak = float(d.max())
+                    # not `d`: that is the enclosing loop's target directory,
+                    # read again below for args._input_directory
+                    dk = masters['dark']
+                    dark_med = float(np.median(dk))
+                    dark_peak = float(dk.max())
                     dark_et = masters.get('dark_exptime')
                     dark_hdr = frames['dark'][0].header if frames.get('dark') else {}
                     dark_temp_c = dark_hdr.get('CCD-TEMP')

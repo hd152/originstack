@@ -34,7 +34,7 @@ from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
 from src.registration import run_registration_phase, select_reference_frame
 from src.stacking import run_stacking_phase
-from src.utils import format_time, get_memory_usage_mb, header_get_first, print_phase, safe_print
+from src.utils import format_time, get_memory_usage_mb, obs_time_utc_iso, print_phase, safe_print
 
 _log = logging.getLogger("originstack")
 
@@ -170,6 +170,47 @@ def _export_frame_jpegs(final: List[FrameInfo], final_indices: List[int],
         except Exception as e:
             safe_print(f"  WARNING: frame JPEG export failed for {stem}: {e}")
     safe_print(f"  Exported {len(final)} frame JPEGs → {export_dir}")
+
+
+def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
+                             use_simbad: bool) -> None:
+    """Target inference, the originvision session prior, then the
+    auto-advisor: the sequence every path into Phases 2-4 must run, fresh or
+    resumed from any checkpoint phase.
+
+    Inference always runs (the result is written to the FITS header). With
+    --originvision + --auto, a fast 3-frame sample
+    (``sample_session_priors``, not the full-session scorer) feeds the same
+    prior_type/prior_confidence boost as the metadata inference, taking over
+    only when it is more confident -- e.g. a dense star field where metadata
+    gave nothing but originvision still recognizes the galaxy -- and stashes
+    a defect flag for ``_apply_quality_settings``' defensive nudge.
+    """
+    from src.target_inference import infer_target_from_metadata
+    _si = getattr(args, '_session_info', None)
+    name, ttype, conf, src = infer_target_from_metadata(
+        directory, final, use_simbad=use_simbad,
+        session_name=_si.object_name if _si else None)
+    args._inferred_target = name
+    args._inferred_type = ttype
+    args._inferred_confidence = conf
+    args._inferred_source = src
+    if name and ttype and ttype != 'unknown':
+        safe_print(f"\n  Target: {name} [{ttype.replace('_', ' ').title()}]  "
+                   f"conf={conf:.0%}  source={src}")
+
+    prior_type, prior_conf = ttype, conf
+    if getattr(args, 'originvision', False) and getattr(args, 'auto', False):
+        from src.originvision import map_originvision_category, sample_session_priors
+        result = sample_session_priors(final, args)
+        if result:
+            args._originvision_defect_flagged = result.get('defect_flagged', False)
+            mapped_type = map_originvision_category(result.get('category'))
+            mapped_conf = result.get('category_confidence', 0.0)
+            if mapped_type and mapped_conf > prior_conf:
+                prior_type, prior_conf = mapped_type, mapped_conf
+
+    _run_auto_advisor(final, args, prior_type=prior_type, prior_confidence=prior_conf)
 
 
 def _run_auto_advisor(final: List[FrameInfo], args,
@@ -461,17 +502,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # runs with bare CLI defaults — reintroducing colour casts.
             # Recover the metadata prior (folder/header/session) locally so the
             # classifier matches a fresh run; skip Simbad to avoid a network hit.
-            if getattr(args, 'auto', False):
-                from src.target_inference import infer_target_from_metadata
-                _r_name, _r_type, _r_conf, _r_src = infer_target_from_metadata(
-                    _directory, final, use_simbad=False,
-                    session_name=_session_info.object_name if _session_info else None)
-                if _r_name and _r_type and _r_type != 'unknown':
-                    safe_print(f"\n  Target: {_r_name} "
-                               f"[{_r_type.replace('_', ' ').title()}]  "
-                               f"conf={_r_conf:.0%}  source={_r_src}")
-                _run_auto_advisor(final, args,
-                                  prior_type=_r_type, prior_confidence=_r_conf)
+            _infer_target_and_advise(final, args, _directory, use_simbad=False)
 
             if getattr(args, 'photometry_timeseries', False):
                 safe_print("\n  NOTE: --photometry-timeseries needs the registered "
@@ -561,6 +592,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                        rgb_shape=rgb_shape,
                                        lum_shape=lum_shape)
                 stats.quality_time = 0.0
+                # Same sequence as the fresh path and the phase-3 resume:
+                # without it a run resumed at phase 1 or 2 registered, stacked
+                # and post-processed with bare CLI defaults (no --auto presets).
+                _infer_target_and_advise(final, args, _directory, use_simbad=False)
             else:
                 print_phase(1, "Processing & Quality Analysis")
                 phase_start = time.time()
@@ -623,52 +658,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 # Save checkpoint after phase 1
                 save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats)
 
-                # Target inference from metadata (always runs; result written to header)
-                from src.target_inference import infer_target_from_metadata
-                _si = getattr(args, '_session_info', None)
-                _inferred_name, _inferred_type, _inferred_conf, _inferred_src = \
-                    infer_target_from_metadata(
-                        _directory,
-                        final,
-                        use_simbad=not getattr(args, 'offline', False),
-                        session_name=_si.object_name if _si else None,
-                    )
-                args._inferred_target     = _inferred_name
-                args._inferred_type       = _inferred_type
-                args._inferred_confidence = _inferred_conf
-                args._inferred_source     = _inferred_src
-                if _inferred_name and _inferred_type and _inferred_type != 'unknown':
-                    safe_print(
-                        f"\n  Target: {_inferred_name} "
-                        f"[{_inferred_type.replace('_', ' ').title()}]  "
-                        f"conf={_inferred_conf:.0%}  source={_inferred_src}"
-                    )
-
-                # originvision session-level signal (--originvision + --auto): a
-                # fast sample (src/originvision.py::sample_session_priors, NOT
-                # the full-session score_lights_with_originvision below) feeds
-                # the same prior_type/prior_confidence boost mechanism the
-                # metadata/SIMBAD inference above already uses -- only
-                # takes over when it's more confident than that prior (e.g.
-                # a dense star field where metadata gave nothing but
-                # originvision still recognizes the galaxy). Also stashes a
-                # defect flag for _apply_quality_settings' defensive nudge.
-                _prior_type, _prior_conf = _inferred_type, _inferred_conf
-                if getattr(args, 'originvision', False) and getattr(args, 'auto', False):
-                    from src.originvision import map_originvision_category, sample_session_priors
-                    _originvision_result = sample_session_priors(final, args)
-                    if _originvision_result:
-                        args._originvision_defect_flagged = _originvision_result.get(
-                            'defect_flagged', False)
-                        _mapped_type = map_originvision_category(_originvision_result.get('category'))
-                        _mapped_conf = _originvision_result.get('category_confidence', 0.0)
-                        if _mapped_type and _mapped_conf > _prior_conf:
-                            _prior_type, _prior_conf = _mapped_type, _mapped_conf
-
-                # Heuristic auto-advisor
-                _run_auto_advisor(final, args,
-                                  prior_type=_prior_type,
-                                  prior_confidence=_prior_conf)
+                # Target inference + originvision prior + auto-advisor.
+                _infer_target_and_advise(
+                    final, args, _directory,
+                    use_simbad=not getattr(args, 'offline', False))
 
             if not final:
                 print('\n  ERROR: No accepted frames after checkpoint restore!')
@@ -1198,8 +1191,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 and getattr(_si_disp, 'has_gps', False)
                 and getattr(_si_disp, 'has_wcs', False)):
             from src.observing_geometry import zenith_angle_deg
-            _t = header_get_first(hdu.header, ('DATE-OBS', 'DATE_OBS', 'DATEOBS'),
-                                  cast=str) or _si_disp.date_time
+            _t = obs_time_utc_iso(hdu.header, fallback=_si_disp.date_time)
             if _t:
                 _za = zenith_angle_deg(
                     math.degrees(_si_disp.ra_rad), math.degrees(_si_disp.dec_rad),

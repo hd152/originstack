@@ -41,7 +41,7 @@ from typing import Optional
 import numpy as np
 
 from src.photometry_core import _field_centre_and_radius, _id_str, _pixel_coords, aperture_photometry_batch, row_nanmax
-from src.utils import header_get_first
+from src.utils import header_get_first, obs_time_utc_iso
 
 _log = logging.getLogger("originstack")
 
@@ -67,12 +67,9 @@ def _airmass(header, session_info, ra_deg, dec_deg, when=None):
     """
     if session_info is None or not getattr(session_info, "has_gps", False):
         return None
-    time_str = str(when) if when else None
-    if time_str is None:
-        time_str = header_get_first(header, ("DATE-OBS", "DATE_OBS", "DATEOBS"),
-                                    cast=str)
-    if time_str is None:
-        time_str = getattr(session_info, "date_time", None)
+    # obs_time_utc_iso applies the header's TIMEZONE: Origin DATE-OBS is local.
+    time_str = str(when) if when else obs_time_utc_iso(
+        header, fallback=getattr(session_info, "date_time", None))
     if not time_str:
         return None
     from src.observing_geometry import airmass as _airmass_of

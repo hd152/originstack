@@ -701,3 +701,21 @@ class TestDetectTransientsBehaviour(unittest.TestCase):
 
             got = [(t.y, t.x) for t in detect_transients(s, 4.0, sep, cap)]
             self.assertEqual(got, expected, f"trial {trial}")
+
+
+@pytest.mark.parametrize('flux_new', [0.3, 1.0, 3.0])
+def test_score_corr_is_unit_variance_on_pure_noise_at_any_flux_ratio(flux_new):
+    """S_corr is a significance only if it has unit variance on noise. The
+    matched-filter kernels once had their flux powers swapped -- invisible at
+    flux_new == 1, but S_corr std was 0.40-0.65 at ratios of 3 and 0.3, so a
+    '5 sigma' threshold really sat at 8-12 sigma and real transients were
+    missed."""
+    rng = np.random.default_rng(11)
+    shape = (256, 256)
+    new = rng.normal(0.0, 5.0, shape)
+    ref = rng.normal(0.0, 3.0, shape)
+    res = zogy(new, ref, _gaussian_psf(25, 3.0), _gaussian_psf(25, 4.0),
+               sigma_new=5.0, sigma_ref=3.0, flux_new=flux_new, flux_ref=1.0,
+               var_new=np.full(shape, 25.0), var_ref=np.full(shape, 9.0))
+    interior = res.score_corr[32:-32, 32:-32]
+    assert float(np.std(interior)) == pytest.approx(1.0, abs=0.08)

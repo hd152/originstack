@@ -927,6 +927,11 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     return result
 
 
+# Accepted samples a pixel needs before online_sigma_clip_fold_frame starts
+# rejecting. Mirrored by ONLINE_CLIP_MIN_SAMPLES in ext/astro_native/src/lib.rs.
+ONLINE_CLIP_MIN_SAMPLES = 3.0
+
+
 def online_sigma_clip_seed_burnin(burn_stack: np.ndarray, coverage: np.ndarray,
                                    sigma: float = 3.0
                                    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
@@ -1028,10 +1033,14 @@ def online_sigma_clip_fold_frame(mean: np.ndarray, m2: np.ndarray, n_acc: np.nda
     # zero-variance estimate, which would reject it (and every sample after
     # it) forever.
     unseeded = (n_acc <= 0.0) & covered
+    # Below ONLINE_CLIP_MIN_SAMPLES there is no spread to clip against (one
+    # sample has m2 = 0, so every later sample failed the test and the pixel
+    # froze on a single frame): accept unconditionally until then.
+    warming = n_acc < ONLINE_CLIP_MIN_SAMPLES
 
     var_est = m2 / np.maximum(n_acc, 1.0)
     std_est = np.sqrt(np.maximum(var_est, 1e-12))
-    accept = covered & (unseeded | (np.abs(x - mean) <= sigma * std_est))
+    accept = covered & (unseeded | warming | (np.abs(x - mean) <= sigma * std_est))
 
     n_acc_new = np.where(unseeded, 1.0, n_acc + accept)
     delta = x - mean
@@ -1989,6 +1998,11 @@ def wavelet_combine(mem_aligned: np.ndarray, levels: int = 4, sigma: float = 3.0
     return result
 
 
+# Stack methods run_stacking_phase's patch-weighted combine reproduces: plain
+# mean, or a rejection method whose mask it builds before weighting.
+_PATCH_WEIGHTED_METHODS = ('mean', 'sigma_clip', 'winsorized', 'percentile', 'esd')
+
+
 def run_stacking_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -2166,7 +2180,16 @@ def run_stacking_phase(
         # aligned space (not full-res maps): both combine paths sample them
         # bilinearly at full-frame coordinates, so N full-resolution weight
         # maps (~5 GB at 200+ frames) are never materialised.
-        if quality_maps is not None and len(quality_maps) == n_final:
+        # Only for methods the patch path reproduces (mean, or a rejection
+        # method it builds a mask for). median/linear_fit/ivw/wavelet used to
+        # fall in here too and silently became an unrejected weighted mean --
+        # --auto turns patch weighting on at 15+ frames, so a requested
+        # median kept every cosmic ray and trail while the log said "median".
+        _patch_ok = args.stack_method in _PATCH_WEIGHTED_METHODS
+        if quality_maps is not None and len(quality_maps) == n_final and not _patch_ok:
+            safe_print(f"  NOTE: patch weighting is not available for --stack-method "
+                       f"{args.stack_method}; using {args.stack_method} without it")
+        if quality_maps is not None and len(quality_maps) == n_final and _patch_ok:
             print(f"  Patch-weighted mean combine ({n_final} frames × {top},{bottom},{left},{right} crop)...")
             qgrids = np.ascontiguousarray(np.stack(quality_maps), dtype=np.float32)
             qgrid_geom = (float(H), float(W), float(top), float(left))
