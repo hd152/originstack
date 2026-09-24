@@ -6,6 +6,38 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--auto` no longer applies one preset's settings to every target.** A setting only some target
+  presets define was blended over those presets alone, so e.g. the galaxy-only coarse chroma pass,
+  the nebula anisotropic diffusion and `pre_gradient_removal` ran on star fields and clusters too.
+  Presets that don't list a setting now vote for its default. **Expect different `--auto` output**
+  on most targets, and re-save any `_config.toml` you rely on.
+
+### Fixed
+
+- Darks whose exposure differs from the lights are now scaled on the default parallel path (pool
+  workers never received `dark_exptime` and subtracted the dark unscaled, silently).
+- Hierarchical runs: sessions with darks no longer lose their `info.json` metadata (Bayer pattern,
+  WCS, GPS, target name) to a variable-shadowing bug.
+- `--photometry` and `--color-calibrate` work again: the stacked cube's 3-axis WCS made Gaia
+  projection fail silently, and the colour-calibration scale was always exactly 1.
+- With `--auto` on 15+ frames, `--stack-method median`/`linear_fit`/`ivw`/`wavelet` are honoured
+  instead of silently becoming an unrejected patch-weighted mean.
+- Seeded affine star matching failed for any shift over ~5 px (sign error), leaving frames on
+  translation-only registration whenever the blind matcher also failed.
+- Resuming from a phase-1 or phase-2 checkpoint now runs target inference and the `--auto` advisor.
+- Blind PSF estimation (used by `--deconvolve` under `--auto`) no longer flattens the PSF; the
+  broken "blind RL refinement" was removed.
+- `--transient-detect`: S_corr has unit variance when the two epochs' flux scales differ (the ZOGY
+  kernel flux powers were swapped), so thresholds mean what they say.
+- Origin `DATE-OBS` is local time: the `TIMEZONE` keyword is now applied (and kept in the stacked
+  header), fixing the `--fix-atmospheric-dispersion` zenith angle and light-curve MJD/airmass.
+  A below-horizon zenith angle now declines instead of correcting the wrong way.
+- `--stream`: a pixel seeded by a single frame no longer freezes on that frame's value.
+- `--use-gpu`: the next target in the same process no longer reuses the previous target's GPU-side
+  calibration masters.
+
 ## [2.3.0] - 2026-09-23
 
 ### Added

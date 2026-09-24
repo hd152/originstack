@@ -114,9 +114,14 @@ def airmass(ra_deg: float, dec_deg: float, lat_deg: float, lon_deg: float,
 def zenith_angle_deg(ra_deg: float, dec_deg: float, lat_deg: float,
                      lon_deg: float, height_m: float,
                      when_iso: str) -> Optional[float]:
-    """Zenith angle (90 - altitude), or None."""
+    """Zenith angle (90 - altitude), or None -- also None when the target is
+    at or below the horizon, which only happens with a wrong time or site
+    (tan(z) changes sign past 90 deg, so a dispersion correction built on it
+    would shift the channels the wrong way)."""
     aa = altaz(ra_deg, dec_deg, lat_deg, lon_deg, height_m, when_iso)
-    return None if aa is None else 90.0 - aa[0]
+    if aa is None or aa[0] <= 0.0:
+        return None
+    return 90.0 - aa[0]
 
 
 def parallactic_angle_deg(ra_deg: float, dec_deg: float, lat_deg: float,

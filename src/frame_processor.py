@@ -216,13 +216,16 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     _use_gpu_calib = False
     if _gpu_ctx.active and data.ndim == 2:
         _shape = data.shape
-        if _shape not in _gpu_calib_cache:
-            with _gpu_calib_lock:
-                if _shape not in _gpu_calib_cache:
-                    _ensure_gpu_masters(masters, _gpu_ctx)
-                    _gpu_calib_cache[_shape] = _probe_gpu_calibration(
-                        _shape[0], _shape[1], _gpu_ctx, masters)
-        _use_gpu_calib = _gpu_calib_cache.get(_shape, False)
+        with _gpu_calib_lock:
+            # Every frame, not only on a new shape: the next target in the same
+            # process (hierarchical run, second desktop-app job) has the same
+            # sensor size but different masters. The check is an identity
+            # comparison; a change re-uploads and clears the probe cache.
+            _ensure_gpu_masters(masters, _gpu_ctx)
+            if _shape not in _gpu_calib_cache:
+                _gpu_calib_cache[_shape] = _probe_gpu_calibration(
+                    _shape[0], _shape[1], _gpu_ctx, masters)
+            _use_gpu_calib = _gpu_calib_cache[_shape]
 
     # Calibration — preserve negative noise through bias/dark subtraction,
     # clip only once after all steps to avoid cumulative truncation of shadow detail
@@ -524,26 +527,38 @@ _warned_nebula_wb_skip: set = set()  # dedup nebula-filter white-balance-skip no
 _gpu_calib_cache: Dict[Tuple[int, int], bool] = {}
 _gpu_calib_lock = threading.Lock()
 _gpu_masters: Dict[str, Any] = {}        # GPU-resident copies of master arrays
-_gpu_masters_sig: Optional[Tuple] = None  # signature to detect master changes
+_gpu_masters_sig: Optional[Tuple] = None  # the host arrays they were uploaded from
+
+_GPU_MASTER_KEYS = ('bias', 'dark', 'flat', '_flat_norm', 'hot_pixel_map')
 
 
 def _masters_sig(masters: Dict) -> Tuple:
-    """Lightweight signature so we can detect when masters change between sessions."""
-    def _s(key):
-        arr = masters.get(key)
-        return (arr.shape, arr.dtype.str) if isinstance(arr, np.ndarray) else None
-    return (_s('dark'), _s('flat'), _s('bias'))
+    """The host master arrays themselves, compared by identity.
+
+    A (shape, dtype) signature matched every target from the same sensor, so
+    the next target in the process was calibrated with the previous target's
+    GPU-side dark/flat -- even one with no dark at all. Holding the arrays
+    (not their ``id()``) means a freed array's address can't be reused into a
+    false match.
+    """
+    return tuple(masters.get(k) for k in _GPU_MASTER_KEYS)
+
+
+def _same_masters(a: Optional[Tuple], b: Optional[Tuple]) -> bool:
+    return a is not None and b is not None and all(x is y for x, y in zip(a, b))
 
 
 def _ensure_gpu_masters(masters: Dict, gpu) -> None:
-    """Upload master calibration arrays to GPU once per session; re-uploads on change."""
+    """Upload master calibration arrays to GPU; re-uploads (and drops the
+    per-shape calibration probe results) when the host masters change."""
     global _gpu_masters, _gpu_masters_sig
     sig = _masters_sig(masters)
-    if sig == _gpu_masters_sig and _gpu_masters:
+    if _same_masters(sig, _gpu_masters_sig) and _gpu_masters:
         return
+    _gpu_calib_cache.clear()
     xp = gpu.xp
     result: Dict[str, Any] = {}
-    for key in ('bias', 'dark', 'flat', '_flat_norm', 'hot_pixel_map'):
+    for key in _GPU_MASTER_KEYS:
         arr = masters.get(key)
         if isinstance(arr, np.ndarray):
             result[key] = xp.asarray(arr)
@@ -691,9 +706,37 @@ def _banding_cfg(args) -> Optional[tuple]:
             float(getattr(args, 'banding_sigma', 3.0)))
 
 
+def _share_masters(masters: Dict[str, Any]) -> Tuple[list, Dict[str, tuple], Dict[str, Any]]:
+    """Split *masters* for pool workers: numpy arrays go into shared memory
+    (returned as the blocks to unlink plus name -> (shm_name, dtype, shape)
+    specs), everything else -- scalars such as ``dark_exptime`` -- is
+    returned as a plain dict passed through the initializer.
+
+    The scalars used to be dropped, so every worker saw no ``dark_exptime``
+    and subtracted a dark of a different exposure unscaled.
+    """
+    shm_blocks: list = []
+    shm_specs: Dict[str, tuple] = {}
+    scalars: Dict[str, Any] = {}
+    for name, arr in masters.items():
+        if arr is None or name.startswith('_shm_'):
+            continue
+        if not isinstance(arr, np.ndarray):
+            scalars[name] = arr
+            continue
+        arr_c = np.ascontiguousarray(arr)
+        shm = SharedMemory(create=True, size=arr_c.nbytes)
+        shm_arr = np.ndarray(arr_c.shape, dtype=arr_c.dtype, buffer=shm.buf)
+        shm_arr[:] = arr_c
+        shm_blocks.append(shm)
+        shm_specs[name] = (shm.name, arr_c.dtype.str, arr_c.shape)
+    return shm_blocks, shm_specs, scalars
+
+
 def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
                      banding: Optional[tuple] = None,
-                     session_cfa: Optional[dict] = None) -> None:
+                     session_cfa: Optional[dict] = None,
+                     scalar_masters: Optional[Dict[str, Any]] = None) -> None:
     """Initializer for pool workers — attach to shared-memory calibration arrays.
 
     *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
@@ -706,7 +749,7 @@ def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
     _worker_trail_reject = bool(trail_reject)
     _worker_banding = banding
     set_session_cfa(session_cfa)
-    _worker_masters = {}
+    _worker_masters = dict(scalar_masters or {})
     for name, (shm_name, dtype_str, shape) in shm_specs.items():
         shm = SharedMemory(name=shm_name, create=False)
         arr = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
@@ -1000,17 +1043,7 @@ def execute_frame_processing(
 
         # Share calibration arrays via shared memory — zero disk I/O, one copy
         # in RAM shared across all workers (read-only view per worker process).
-        shm_blocks: list = []
-        shm_specs: Dict[str, tuple] = {}
-        for name, arr in masters.items():
-            if arr is None or name.startswith('_shm_') or not isinstance(arr, np.ndarray):
-                continue
-            arr_c = np.ascontiguousarray(arr)
-            shm = SharedMemory(create=True, size=arr_c.nbytes)
-            shm_arr = np.ndarray(arr_c.shape, dtype=arr_c.dtype, buffer=shm.buf)
-            shm_arr[:] = arr_c
-            shm_blocks.append(shm)
-            shm_specs[name] = (shm.name, arr_c.dtype.str, arr_c.shape)
+        shm_blocks, shm_specs, scalar_masters = _share_masters(masters)
 
         _ca = getattr(args, 'ca_correction', False)
         _cr = getattr(args, 'cosmic_ray_rejection', False)
@@ -1032,7 +1065,7 @@ def execute_frame_processing(
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
-                                               _session_cfa)) as pool:
+                                               _session_cfa, scalar_masters)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 _wv = _get_ui_events()
                 _wv_done = 0
@@ -1442,17 +1475,7 @@ def reload_accepted_frames(
         safe_print(f"  Reloading {n} accepted frames ({workers} workers, "
                    f"quality analysis skipped)...")
 
-        shm_blocks: list = []
-        shm_specs: Dict[str, tuple] = {}
-        for name, arr in masters.items():
-            if arr is None or name.startswith('_shm_') or not isinstance(arr, np.ndarray):
-                continue
-            arr_c = np.ascontiguousarray(arr)
-            shm = SharedMemory(create=True, size=arr_c.nbytes)
-            shm_arr = np.ndarray(arr_c.shape, dtype=arr_c.dtype, buffer=shm.buf)
-            shm_arr[:] = arr_c
-            shm_blocks.append(shm)
-            shm_specs[name] = (shm.name, arr_c.dtype.str, arr_c.shape)
+        shm_blocks, shm_specs, scalar_masters = _share_masters(masters)
 
         tasks = [(final[i].path, final_indices[i], args.debayer_method, args.white_balance,
                   mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
@@ -1465,7 +1488,7 @@ def reload_accepted_frames(
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
-                                               _session_cfa)) as pool:
+                                               _session_cfa, scalar_masters)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",

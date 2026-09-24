@@ -158,3 +158,46 @@ class TestRealTrifidRegression:
         w = a._blend_weights(sig, prior_type='emission_nebula', prior_confidence=0.90)
         assert max(w, key=w.get) == 'emission_nebula'
         assert w['emission_nebula'] > 0.5
+
+
+def _parser_args():
+    """Real parser defaults, so every preset attr has a baseline -- the
+    state _apply_dynamic_settings actually runs against."""
+    from src.cli import build_parser
+    ns = build_parser().parse_args(['-d', 'x', '-o', 'y'])
+    ns._explicit_cli_dests = set()
+    return ns
+
+
+class TestUnlistedAttrsKeepBaseline:
+    """A preset that does not list an attr votes for the baseline. Before
+    this, a value only one preset listed was applied at full strength to
+    every target (renormalized over the listing presets alone)."""
+
+    def test_star_field_does_not_inherit_single_preset_settings(self):
+        sig = dict(a._TYPE_ANCHORS['star_field'])
+        sig['fwhm'] = 3.0
+        base = _parser_args()
+        args = _parser_args()
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
+        # galaxy-only / nebula-only settings stay at (or within a few percent
+        # of the preset-vs-default gap from) their defaults
+        for attr in ('denoise_aniso', 'masked_correlation', 'pre_gradient_removal'):
+            assert getattr(args, attr) == getattr(base, attr), attr
+        assert args.chroma_nr_large_sigma < 2.0          # galaxy-only 50; was 50
+        assert args.ghs_hp == pytest.approx(base.ghs_hp, abs=0.005)  # planetary-only 0.92
+        assert abs(args.aniso_iterations - base.aniso_iterations) <= 1
+
+    @pytest.mark.parametrize("ttype", list(a._TYPE_ANCHORS.keys()))
+    def test_anchor_still_gets_its_own_values_with_real_baselines(self, ttype):
+        sig = dict(a._TYPE_ANCHORS[ttype])
+        sig['fwhm'] = 3.0
+        args = _parser_args()
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
+        for attr, expected in a._TARGET_SETTINGS.get(ttype, []):
+            got = getattr(args, attr)
+            if isinstance(expected, bool):
+                assert got == expected, f"{ttype}.{attr}: got {got}, want {expected}"
+            else:
+                tol = max(0.15 * abs(expected), 0.1)
+                assert abs(got - expected) < tol, f"{ttype}.{attr}: got {got}, want ~{expected}"

@@ -73,11 +73,12 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
                         for s in img_positions[:max_stars]])
 
     # Shift img points by initial estimate for better matching.
-    # Initial shift is the amount needed to move 'img' to align with 'ref'.
-    # So img_points = ref_points + shift. To find correspondence, we map
-    # img_points back to ref space: img_points - shift.
+    # initial_shift is calculate_shift's (dy, dx): the shift that moves 'img'
+    # onto 'ref' (ndimage.shift(img, s) aligns it), so ref_points =
+    # img_points + shift. Subtracting it (as this once did) predicted every
+    # star 2*|shift| away, so any seed over ~AFFINE_MATCH_RADIUS/2 px failed.
     shift_vec = np.array([initial_shift[1], initial_shift[0]]) # [sx, sy]
-    img_pts_shifted = img_pts - shift_vec
+    img_pts_shifted = img_pts + shift_vec
 
     tree = cKDTree(ref_pts)
     distances, indices = tree.query(img_pts_shifted, k=1)

@@ -47,7 +47,7 @@ from src.photometry_core import _pixel_coords, aperture_photometry_batch
 def _field_radius_deg(header) -> float:
     """Estimate the field-of-view radius in degrees from WCS."""
     try:
-        wcs = WCS(header)
+        wcs = WCS(header).celestial  # (3, H, W) cube header -> 2-axis
         naxis1 = int(header.get("NAXIS1", 0))
         naxis2 = int(header.get("NAXIS2", 0))
         if naxis1 == 0 or naxis2 == 0:
@@ -236,6 +236,21 @@ def _synthetic_channel_flux_batch(teff_k: np.ndarray, channel_response=None
     return fluxes[0], fluxes[1], fluxes[2]
 
 
+def _channel_correction(meas: np.ndarray, expected: np.ndarray) -> float:
+    """Multiplicative factor that brings a channel's measured star fluxes to
+    the catalogue's expected ones: median(expected / measured).
+
+    ``apply_photometric_calibration`` multiplies the image by this, so a
+    channel reading too bright gets a factor below 1. Units (ADU vs. the
+    catalogue's 10^(-0.4 m)) are common to all three channels and cancel in
+    the callers' mean normalisation. This used to divide each star's ratio by
+    the channel's own median ratio before taking the median -- always 1.0 --
+    so --color-calibrate never changed the image.
+    """
+    ratio = np.maximum(expected, 1e-30) / np.maximum(meas, 1e-30)
+    return float(np.median(ratio))
+
+
 def fit_channel_scales_spcc(img: np.ndarray, header, catalog,
                             channel_response=None,
                             verbose: bool = False) -> Tuple[float, float, float]:
@@ -313,14 +328,9 @@ def fit_channel_scales_spcc(img: np.ndarray, header, catalog,
     flux_r_expected[fallback_mask] = 10.0 ** (-0.4 * fallback_r[fallback_mask])
     flux_b_expected[fallback_mask] = 10.0 ** (-0.4 * fallback_b[fallback_mask])
 
-    def _robust_ratio(meas: np.ndarray, expected: np.ndarray) -> float:
-        ratio = meas / np.maximum(expected, 1e-30)
-        ratio = ratio / np.median(ratio)
-        return float(np.median(ratio))
-
-    scale_r = _robust_ratio(fluxes[:, 0], flux_r_expected)
-    scale_g = _robust_ratio(fluxes[:, 1], flux_g_expected)
-    scale_b = _robust_ratio(fluxes[:, 2], flux_b_expected)
+    scale_r = _channel_correction(fluxes[:, 0], flux_r_expected)
+    scale_g = _channel_correction(fluxes[:, 1], flux_g_expected)
+    scale_b = _channel_correction(fluxes[:, 2], flux_b_expected)
 
     mean_scale = (scale_r + scale_g + scale_b) / 3.0
     if mean_scale > 0:
@@ -403,15 +413,10 @@ def fit_channel_scales(img: np.ndarray, header,
         flux_b_expected = 10.0 ** (-0.4 * k)
 
     # Compute per-star measured ratios vs expected ratios
-    # scale_R = median(flux_R_measured / flux_R_expected) normalised to G
-    def _robust_ratio(meas: np.ndarray, expected: np.ndarray) -> float:
-        ratio = meas / np.maximum(expected, 1e-30)
-        ratio = ratio / np.median(ratio)  # normalise so green ≈ 1
-        return float(np.median(ratio))
-
-    scale_r = _robust_ratio(fluxes[:, 0], flux_r_expected)
-    scale_g = _robust_ratio(fluxes[:, 1], flux_g_expected)
-    scale_b = _robust_ratio(fluxes[:, 2], flux_b_expected)
+    # Per-channel correction = median(expected / measured); mean-normalised below.
+    scale_r = _channel_correction(fluxes[:, 0], flux_r_expected)
+    scale_g = _channel_correction(fluxes[:, 1], flux_g_expected)
+    scale_b = _channel_correction(fluxes[:, 2], flux_b_expected)
 
     # Normalise so that mean(scale) = 1 (preserve overall brightness)
     mean_scale = (scale_r + scale_g + scale_b) / 3.0

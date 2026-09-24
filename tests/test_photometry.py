@@ -268,3 +268,24 @@ def test_bright_unsaturated_cluster_not_flagged(tmp_path):
     n_sat = sum(int(r["saturated"]) for r in rows)
     # At most the single literal-max-pixel star; the bright cluster is fine.
     assert n_sat <= 1
+
+
+def test_pixel_coords_on_the_stacked_cube_header():
+    """The stacked product is a (3, H, W) cube: its header is NAXIS=3, and a
+    bare WCS(header) is 3-axis, so _pixel_coords raised inside its broad
+    except and returned None -- --photometry then skipped every run with
+    'could not project Gaia onto the image'."""
+    from astropy.table import Table
+
+    from src.color_calibrate import _field_radius_deg
+    from src.photometry_core import _pixel_coords
+
+    hdr = fits.PrimaryHDU(np.zeros((3, 100, 120), np.float32)).header
+    hdr.update(CTYPE1='RA---TAN', CTYPE2='DEC--TAN', CRVAL1=10.0, CRVAL2=20.0,
+               CRPIX1=60.5, CRPIX2=50.5, CD1_1=-1e-3, CD1_2=0.0, CD2_1=0.0, CD2_2=1e-3)
+    assert hdr['NAXIS'] == 3
+    xy = _pixel_coords(Table({'ra': [10.0], 'dec': [20.0]}), hdr)
+    assert xy is not None
+    np.testing.assert_allclose(xy[0], [59.5, 49.5], atol=1e-6)   # CRPIX, 0-based
+    # corners are ~0.078 deg from centre; the old fallback returned 0.5
+    assert 0.05 < _field_radius_deg(hdr) < 0.15

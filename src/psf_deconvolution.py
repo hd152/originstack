@@ -228,8 +228,7 @@ def make_synthetic_psf(fwhm: float, psf_size: int = None, model: str = 'gaussian
 
 
 def estimate_psf_blind(img: np.ndarray, star_positions,
-                        psf_size: int = None,
-                        iterations: int = None) -> Tuple[Optional[np.ndarray], float]:
+                        psf_size: int = None) -> Tuple[Optional[np.ndarray], float]:
     """Empirical (model-free) PSF estimation by stacking bright star cutouts.
 
     Instead of fitting a parametric model, this function extracts cutouts
@@ -238,17 +237,18 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
     *actual* on-sky PSF shape, including any asymmetry, coma, or tracking
     errors that a Gaussian/Moffat model cannot capture.
 
-    The ``iterations`` parameter optionally runs Richardson-Lucy blind
-    deconvolution update steps on top of the median-stack PSF to sharpen
-    the estimate.  Each step refines the PSF by computing:
-
-        psf_new = psf * correlate(img / (psf * img), img_reversed)
+    There used to be an optional "blind RL refinement" on top (on by
+    default, 8 iterations). It was not an RL PSF update: it correlated the
+    whole image with the ratio map and blended a 30% patch of that in each
+    step, flattening the PSF into a broad plateau (peak 0.068 -> 0.011, 93%
+    -> 22% of the energy within 3 px on a sigma=1.5 synthetic field). A
+    correct blind update needs an alternating object estimate; the median
+    stack is already the measured PSF, so the refinement was removed.
 
     Args:
         img:            Float32 stacked image (H, W, 3).
         star_positions: Source table from detect_stars_auto.
         psf_size:       Output kernel side length (default Config.RL_PSF_SIZE).
-        iterations:     RL blind update iterations (0 = median stack only).
 
     Returns:
         (psf_kernel, fwhm_pixels) — (None, 0.0) if estimation fails.
@@ -259,8 +259,6 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
 
     if psf_size is None:
         psf_size = Config.RL_PSF_SIZE
-    if iterations is None:
-        iterations = Config.BLIND_PSF_ITERATIONS
 
     H, W = img.shape[:2]
     lum = (img if img.ndim == 2
@@ -318,35 +316,9 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
     psf = np.maximum(psf, 0.0)
     psf /= psf.sum()
 
-    # Optional blind RL refinement (pure scipy.signal, no skimage involved)
-    if iterations > 0:
-        from scipy.signal import fftconvolve
-        lum_pos = lum - lum.min() + 1e-6
-        psf_est = psf.copy()
-        for _ in range(iterations):
-            conv = fftconvolve(lum_pos, psf_est, mode='same')
-            ratio = lum_pos / (conv + 1e-12)
-            update = fftconvolve(ratio, psf_est[::-1, ::-1], mode='same')
-            # PSF update: cross-correlate ratio with lum
-            psf_update = fftconvolve(ratio[::-1, ::-1], lum_pos, mode='same')
-            # Trim to psf_size
-            cy, cx = np.unravel_index(np.argmax(psf_update), psf_update.shape)
-            y0 = max(0, cy - half)
-            x0 = max(0, cx - half)
-            patch = psf_update[y0:y0 + psf_size, x0:x0 + psf_size]
-            if patch.shape == (psf_size, psf_size):
-                patch = np.maximum(patch, 0.0)
-                s = patch.sum()
-                if s > 1e-12:
-                    psf_est = 0.7 * psf_est + 0.3 * patch / s
-
-        psf = np.maximum(psf_est, 0.0)
-        psf /= psf.sum()
-
     # Radial apodization — force the kernel to zero at its edge.
     # An empirical PSF from stacked star cutouts retains non-zero energy in the
-    # square corners (star wings, residual noise), and blind RL refinement can
-    # inject blocky off-centre structure. FFT deconvolution with such a
+    # square corners (star wings, residual noise). FFT deconvolution with such a
     # hard-edged square kernel produces square ringing ("boxes") around every
     # point source. A Tukey (flat-core, cosine-taper) radial window keeps the
     # PSF core/wings intact while tapering the outer edge smoothly to zero,

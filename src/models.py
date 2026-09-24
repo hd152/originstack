@@ -71,9 +71,6 @@ class Config:
                                   # (swept 1.0-2.0 on real data: 1.0-1.25 matches the old RBF's
                                   # large-scale flatness; larger trades flatness for smoothness)
 
-    # Blind PSF estimation
-    BLIND_PSF_ITERATIONS = 8        # RL iterations for PSF update
-
     # Total Variation deconvolution
     TV_LAMBDA = 0.02                # TV regularisation weight
     TV_ITERATIONS = 50              # Gradient descent steps

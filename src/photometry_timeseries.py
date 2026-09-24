@@ -30,7 +30,7 @@ import numpy as np
 
 from src.photometry import _GAIA_BAND_FOR_CHANNEL, _airmass, _read_gain, match_gaia_field
 from src.photometry_core import _id_str, aperture_photometry_batch, row_nanmax
-from src.utils import header_get_first
+from src.utils import header_get_first, obs_time_utc_iso
 
 _log = logging.getLogger("originstack")
 _CH = ("r", "g", "b")
@@ -66,13 +66,16 @@ def _cropped_session_wcs_header(session_info, shape_hw, left, top):
 
 
 def _frame_time_iso(frame, session_info, j, n):
-    """ISO UTC timestamp for sub *j*: the frame's own DATE-OBS if present,
-    else interpolated from the session start + total duration."""
+    """Naive-UTC ISO timestamp for sub *j*: the frame's own DATE-OBS (with
+    its TIMEZONE applied -- Origin stamps local time) if present, else
+    interpolated from the session start + total duration. Always offset-free:
+    astropy Time cannot parse info.json's '-0700', which blanked every MJD."""
     hdr = getattr(frame, "header", {}) or {}
-    own = header_get_first(hdr, ("DATE-OBS", "DATE_OBS", "DATEOBS"), cast=str)
+    own = obs_time_utc_iso(hdr)
     if own:
         return own
-    start = getattr(session_info, "date_time", None) if session_info else None
+    start = obs_time_utc_iso(fallback=getattr(session_info, "date_time", None)
+                             if session_info else None)
     dur_ms = getattr(session_info, "total_duration_ms", None) if session_info else None
     if start and dur_ms and n > 1:
         try:

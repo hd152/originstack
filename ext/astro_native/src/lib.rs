@@ -569,24 +569,33 @@ fn burnin_seed_pixel(
 /// borders uncovered). Running the accept-test against that fabricated state
 /// would reject the first real sample forever; instead initialize directly
 /// from it.
+///
+/// Below `ONLINE_CLIP_MIN_SAMPLES` accepted samples there is no spread to
+/// clip against (one sample has M2 = 0, so every later sample failed the
+/// 1e-6 test and the pixel froze on a single frame), so samples are accepted
+/// unconditionally until the state holds that many.
 #[inline]
 fn fold_pixel(mean: f64, m2: f64, n_acc: f64, x: f64, sigma: f64) -> (f64, f64, f64, bool) {
     if n_acc <= 0.0 {
         return (x, 0.0, 1.0, true);
     }
-    let var_est = m2 / n_acc;
-    let std_est = var_est.max(1e-12).sqrt();
-    if (x - mean).abs() <= sigma * std_est {
-        let n_acc_new = n_acc + 1.0;
-        let delta = x - mean;
-        let new_mean = mean + delta / n_acc_new;
-        let delta2 = x - new_mean;
-        let new_m2 = m2 + delta * delta2;
-        (new_mean, new_m2, n_acc_new, true)
-    } else {
-        (mean, m2, n_acc, false)
+    if n_acc >= ONLINE_CLIP_MIN_SAMPLES {
+        let std_est = (m2 / n_acc).max(1e-12).sqrt();
+        if (x - mean).abs() > sigma * std_est {
+            return (mean, m2, n_acc, false);
+        }
     }
+    let n_acc_new = n_acc + 1.0;
+    let delta = x - mean;
+    let new_mean = mean + delta / n_acc_new;
+    let delta2 = x - new_mean;
+    let new_m2 = m2 + delta * delta2;
+    (new_mean, new_m2, n_acc_new, true)
 }
+
+/// Accepted samples a pixel needs before the online sigma-clip starts
+/// rejecting. Mirrored by `ONLINE_CLIP_MIN_SAMPLES` in src/stacking.py.
+const ONLINE_CLIP_MIN_SAMPLES: f64 = 3.0;
 
 /// Per-pixel online sigma-clip: a MAD-rejected burn-in window (first `k =
 /// min(burn_in, n)` samples) seeds a running (mean, M2) Welford state; each

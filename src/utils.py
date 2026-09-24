@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from typing import Optional
 
@@ -312,6 +313,40 @@ def parse_timestamp(when: str):
     if dt.tzinfo is not None:
         dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
     return dt
+
+
+# A FITS TIMEZONE value that can be appended to DATE-OBS: '-0700', '+05:30'.
+# Anything else ('PDT', 'US/Pacific') would make an unparseable timestamp.
+TZ_OFFSET_RE = re.compile(r'[+-]\d{2}:?\d{2}')
+
+_DATE_OBS_KEYS = ('DATE-OBS', 'DATE_OBS', 'DATEOBS')
+
+
+def obs_time_utc_iso(header=None, fallback=None) -> Optional[str]:
+    """Observation time as a naive-UTC ISO string, or None.
+
+    Celestron Origin lights stamp ``DATE-OBS`` in *local* time with the
+    offset in a separate ``TIMEZONE`` keyword; ``parse_timestamp`` treats an
+    offset-less timestamp as UTC, so reading DATE-OBS alone put every
+    time-dependent result seven hours out (a zenith angle of 150 deg -- below
+    the horizon -- for a target at 72 deg). A valid TIMEZONE is appended when
+    DATE-OBS carries no offset of its own. ``fallback`` (e.g. an info.json
+    ``dateTime`` like ``2026-08-31T20:40:32-0700``) is used when the header
+    has no DATE-OBS. The result has no offset, so astropy ``Time`` parses it
+    too (it rejects ``-0700``).
+    """
+    when = header_get_first(header, _DATE_OBS_KEYS, cast=str) if header is not None else None
+    if when:
+        when = when.strip()
+        tz = str(header.get('TIMEZONE', '') or '').strip()
+        has_time = len(when) > 10          # a bare date takes no offset
+        if (has_time and tz and TZ_OFFSET_RE.fullmatch(tz)
+                and not TZ_OFFSET_RE.search(when[10:]) and not when.endswith('Z')):
+            when += tz
+    else:
+        when = fallback
+    dt = parse_timestamp(when) if when else None
+    return dt.isoformat() if dt is not None else None
 
 
 def header_get_first(header, keys, cast=None, default=None):
