@@ -5956,7 +5956,7 @@ mod originvision {
     use std::sync::{Arc, Mutex, OnceLock};
     use tract_onnx::prelude::*;
 
-    type Runnable = TypedRunnableModel<TypedModel>;
+    type Runnable = Arc<TypedRunnableModel>;
 
     pub struct Session {
         model: Runnable,
@@ -6310,7 +6310,7 @@ mod originvision {
         let mut out: HashMap<&str, Vec<f32>> = HashMap::new();
         for (name, t) in sess.head_order.iter().zip(outputs.iter()) {
             let v = t
-                .to_array_view::<f32>()
+                .to_plain_array_view::<f32>()
                 .map_err(|e| e.to_string())?
                 .iter()
                 .cloned()
@@ -6507,7 +6507,7 @@ mod transient_triage {
     use std::sync::{Arc, Mutex, OnceLock};
     use tract_onnx::prelude::*;
 
-    type Runnable = TypedRunnableModel<TypedModel>;
+    type Runnable = Arc<TypedRunnableModel>;
 
     struct Session {
         model: Runnable,
@@ -6570,7 +6570,7 @@ mod transient_triage {
         let raw = outputs
             .first()
             .ok_or_else(|| "model produced no output".to_string())?
-            .to_array_view::<f32>()
+            .to_plain_array_view::<f32>()
             .map_err(|e| e.to_string())?;
         if raw.len() != n {
             return Err(format!(
