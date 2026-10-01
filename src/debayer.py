@@ -663,11 +663,21 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     if offsets is None:
         raise ValueError(f"Unknown Bayer pattern: {pattern!r}. "
                          f"Expected one of {list(_PATTERN_OFFSETS)}")
-    a = np.asarray(raw, dtype=np.float64)
-    H, W = a.shape
-    if H < 16 or W < 16:
-        return _malvar_raw(raw, pattern)
-    scale = float(np.nanmax(a)) if np.isfinite(a).any() else 1.0
+    if isinstance(raw, np.ndarray) and raw.dtype == np.float32:
+        # the frame max straight off the float32 data: the same value the float64 copy
+        # gave, without writing 50 MB to read one number (one pass, not three)
+        a = None
+        H, W = raw.shape
+        if H < 16 or W < 16:
+            return _malvar_raw(raw, pattern)
+        m = float(np.fmax.reduce(raw, axis=None))        # NaN only if every value is NaN
+        scale = m if (np.isfinite(m) or np.isfinite(raw).any()) else 1.0
+    else:
+        a = np.asarray(raw, dtype=np.float64)
+        H, W = a.shape
+        if H < 16 or W < 16:
+            return _malvar_raw(raw, pattern)
+        scale = float(np.nanmax(a)) if np.isfinite(a).any() else 1.0
     if not scale > 0:
         scale = 1.0
     (ry, rx), _g1, _g2, (by, bx) = offsets
@@ -678,15 +688,35 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
             return _rcd_border(out, raw, pattern)
         except Exception as e:
             _log.debug("native RCD failed (%s); using numpy", e)
+    if a is None:
+        a = np.asarray(raw, dtype=np.float64)
     return _debayer_rcd_numpy(a, offsets, scale, raw, pattern)
+
+
+_RCD_BORDER = 4
+_RCD_BORDER_STRIP = 12     # >= border + Malvar's 2-px reach, with room to spare
 
 
 def _rcd_border(out: np.ndarray, raw: np.ndarray, pattern: str) -> np.ndarray:
     """The 4-px frame border, where RCD's 9-tap statistics do not fit, from Malvar
-    (uncorrected: ``debayer_rcd`` equalises the whole frame afterwards)."""
-    border = _malvar_raw(raw, pattern)
-    b = 4
-    out[:b], out[-b:], out[:, :b], out[:, -b:] = border[:b], border[-b:], border[:, :b], border[:, -b:]
+    (uncorrected: ``debayer_rcd`` equalises the whole frame afterwards).
+
+    Malvar is a 5x5 local kernel, so it runs on four edge strips instead of the
+    whole frame: each strip keeps the frame's own edges, starts on an even row/column
+    (same Bayer phase) and reaches 8 px past the border, so the border values are
+    exactly the full-frame ones -- a full-frame Malvar (75 MB written) was ~30% of
+    the RCD step for 4 px of output."""
+    b, m = _RCD_BORDER, _RCD_BORDER_STRIP
+    H, W = raw.shape[:2]
+    if H < 3 * m or W < 3 * m:
+        border = _malvar_raw(raw, pattern)
+        out[:b], out[-b:], out[:, :b], out[:, -b:] = (border[:b], border[-b:],
+                                                      border[:, :b], border[:, -b:])
+        return out
+    out[:b] = _malvar_raw(raw[:m], pattern)[:b]
+    out[-b:] = _malvar_raw(raw[(H - m) & ~1:], pattern)[-b:]
+    out[:, :b] = _malvar_raw(raw[:, :m], pattern)[:, :b]
+    out[:, -b:] = _malvar_raw(raw[:, (W - m) & ~1:], pattern)[:, -b:]
     return out
 
 
