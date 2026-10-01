@@ -2561,6 +2561,36 @@ def test_white_balance_grayworld_inplace_bit_identical():
     np.testing.assert_array_equal(work2, native.white_balance_apply(img, f, True))
 
 
+@pytest.mark.skipif(not hasattr(native, "white_balance_grayworld_lum_inplace"),
+                    reason="astro_native lacks white_balance_grayworld_lum_inplace")
+def test_white_balance_grayworld_lum_inplace_bit_identical():
+    """Fused WB + luminance == grayworld in place, then luminance of the result."""
+    rng = np.random.default_rng(11)
+    img = np.abs(rng.normal(400, 60, (90, 130, 3))).astype(np.float32) * np.array([1.0, 0.6, 0.8], np.float32)
+    img[7, 9] = 9000.0                                                # a near-clipped star
+    img[20, 30, 1] = 8800.0
+    want = img.copy()
+    native.white_balance_grayworld_inplace(want)
+    want_lum = _debayer_mod.luminance(want)
+    work = img.copy()
+    lum = native.white_balance_grayworld_lum_inplace(work)
+    np.testing.assert_array_equal(work, want)
+    np.testing.assert_array_equal(lum, want_lum)
+    np.testing.assert_array_equal(work, native.white_balance_grayworld(img))   # the copying kernel too
+    # the debayer.py wrapper, and a NaN frame (propagates like the separate steps)
+    work2 = img.copy()
+    out, lum2 = _debayer_mod.white_balance_grayworld_lum(work2)
+    assert out is work2
+    np.testing.assert_array_equal(lum2, want_lum)
+    bad = img.copy()
+    bad[3, 4, 2] = np.nan
+    a, b = bad.copy(), bad.copy()
+    native.white_balance_grayworld_inplace(a)
+    lb = native.white_balance_grayworld_lum_inplace(b)
+    np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(lb, _debayer_mod.luminance(a))
+
+
 @_need_debayer_k
 def test_luminance_native_bit_identical():
     rng = np.random.default_rng(12)

@@ -8189,40 +8189,90 @@ fn white_balance_grayworld<'py>(
     Ok(arr3.into_pyarray(py))
 }
 
+/// Exact max of a contiguous f32 buffer, NaN-propagating like numpy's `max`.
+fn wb_ceiling(flat: &[f32], w: usize) -> f32 {
+    flat.par_chunks(w * 3)
+        .map(|row| {
+            let mut m = f32::NEG_INFINITY;
+            for &v in row {
+                if v.is_nan() {
+                    return f32::NAN;
+                }
+                if v > m {
+                    m = v;
+                }
+            }
+            m
+        })
+        .reduce(
+            || f32::NEG_INFINITY,
+            |a, b| {
+                if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a > b {
+                    a
+                } else {
+                    b
+                }
+            },
+        )
+}
+
+/// Gray-world gains and the frame ceiling from ONE sequential pass: the
+/// per-channel float64 means (row-major, as numpy's `mean(dtype=float64)`)
+/// and the exact max (order-independent, so folding it into this pass changes
+/// nothing). Returns (scale, ceiling).
+fn grayworld_scale_and_ceiling(flat: &[f32], h: usize, w: usize) -> ([f32; 3], f32) {
+    let mut acc = [0f64; 3];
+    let mut m = f32::NEG_INFINITY;
+    let mut nan = false;
+    for px in flat.chunks_exact(3) {
+        acc[0] += px[0] as f64;
+        acc[1] += px[1] as f64;
+        acc[2] += px[2] as f64;
+        for &v in px {
+            if v > m {
+                m = v;
+            }
+            nan |= v.is_nan();
+        }
+    }
+    let n = (h * w) as f64;
+    let mean = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
+    // numpy: mean.mean() on a 3-element float32 array is (m0 + m1) + m2, then / 3
+    let mm = ((mean[0] + mean[1]) + mean[2]) / 3.0f32;
+    let scale = [
+        mm / (mean[0] + 1e-12f32),
+        mm / (mean[1] + 1e-12f32),
+        mm / (mean[2] + 1e-12f32),
+    ];
+    (scale, if nan { f32::NAN } else { m })
+}
+
 /// In-place twin of `white_balance_body`: same per-pixel f32 operations in the same
 /// order, but each output pixel overwrites its input pixel, so no 75 MB output
-/// array is allocated, first-touched and written.
-fn white_balance_body_inplace(py: Python<'_>, flat: &mut [f32], w: usize, f: [f32; 3], divide: bool) {
+/// array is allocated, first-touched and written. `ceiling` skips the max pass
+/// when the caller already has it; `lum` (h*w) also receives the luminance of
+/// each written pixel (`0.299 r + 0.587 g + 0.114 b`, f32 as `luminance_native`),
+/// saving the separate read of the whole image that a recompute costs.
+fn white_balance_body_inplace(
+    py: Python<'_>,
+    flat: &mut [f32],
+    w: usize,
+    f: [f32; 3],
+    divide: bool,
+    ceiling: Option<f32>,
+    lum: Option<&mut [f32]>,
+) {
     let (f0, f1, f2) = (f[0], f[1], f[2]);
+    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
     py.detach(|| {
-        let ceiling: f32 = flat
-            .par_chunks(w * 3)
-            .map(|row| {
-                let mut m = f32::NEG_INFINITY;
-                for &v in row {
-                    if v.is_nan() {
-                        return f32::NAN;
-                    }
-                    if v > m {
-                        m = v;
-                    }
-                }
-                m
-            })
-            .reduce(
-                || f32::NEG_INFINITY,
-                |a, b| {
-                    if a.is_nan() || b.is_nan() {
-                        f32::NAN
-                    } else if a > b {
-                        a
-                    } else {
-                        b
-                    }
-                },
-            );
+        let ceiling = match ceiling {
+            Some(c) => c,
+            None => wb_ceiling(flat, w),
+        };
         let denom = ceiling + 1e-12f32;
-        flat.par_chunks_mut(w * 3).for_each(|row| {
+        let row_fn = |row: &mut [f32], mut lrow: Option<&mut [f32]>| {
             for x in 0..w {
                 let r = row[x * 3];
                 let g = row[x * 3 + 1];
@@ -8246,11 +8296,24 @@ fn white_balance_body_inplace(py: Python<'_>, flat: &mut [f32], w: usize, f: [f3
                 let o0 = s0 * one_minus + peak * sat;
                 let o1 = s1 * one_minus + peak * sat;
                 let o2 = s2 * one_minus + peak * sat;
-                row[x * 3] = if o0 < 0.0 { 0.0 } else { o0 };
-                row[x * 3 + 1] = if o1 < 0.0 { 0.0 } else { o1 };
-                row[x * 3 + 2] = if o2 < 0.0 { 0.0 } else { o2 };
+                let o0 = if o0 < 0.0 { 0.0 } else { o0 };
+                let o1 = if o1 < 0.0 { 0.0 } else { o1 };
+                let o2 = if o2 < 0.0 { 0.0 } else { o2 };
+                row[x * 3] = o0;
+                row[x * 3 + 1] = o1;
+                row[x * 3 + 2] = o2;
+                if let Some(l) = lrow.as_deref_mut() {
+                    l[x] = kr * o0 + kg * o1 + kb * o2;
+                }
             }
-        });
+        };
+        match lum {
+            Some(l) => flat
+                .par_chunks_mut(w * 3)
+                .zip(l.par_chunks_mut(w))
+                .for_each(|(row, lrow)| row_fn(row, Some(lrow))),
+            None => flat.par_chunks_mut(w * 3).for_each(|row| row_fn(row, None)),
+        }
     });
 }
 
@@ -8273,7 +8336,7 @@ fn white_balance_apply_inplace<'py>(
     let flat = img
         .as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
-    white_balance_body_inplace(py, flat, shape[1], [f[0], f[1], f[2]], divide);
+    white_balance_body_inplace(py, flat, shape[1], [f[0], f[1], f[2]], divide, None, None);
     Ok(())
 }
 
@@ -8291,22 +8354,33 @@ fn white_balance_grayworld_inplace<'py>(
         .as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
     let (h, w) = (shape[0], shape[1]);
-    let mut acc = [0f64; 3];
-    for px in flat.chunks_exact(3) {
-        acc[0] += px[0] as f64;
-        acc[1] += px[1] as f64;
-        acc[2] += px[2] as f64;
-    }
-    let n = (h * w) as f64;
-    let mean = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
-    let mm = ((mean[0] + mean[1]) + mean[2]) / 3.0f32;
-    let scale = [
-        mm / (mean[0] + 1e-12f32),
-        mm / (mean[1] + 1e-12f32),
-        mm / (mean[2] + 1e-12f32),
-    ];
-    white_balance_body_inplace(py, flat, w, scale, false);
+    let (scale, ceiling) = grayworld_scale_and_ceiling(flat, h, w);
+    white_balance_body_inplace(py, flat, w, scale, false, Some(ceiling), None);
     Ok(())
+}
+
+/// `white_balance_grayworld_inplace` that also returns the luminance of the
+/// balanced image -- what `luminance_native` would compute from it afterwards,
+/// bit for bit, without reading the 75 MB image a second time. Two passes over
+/// the image in all (statistics, then gain + highlight + luminance) where the
+/// separate steps made four.
+#[pyfunction]
+fn white_balance_grayworld_lum_inplace<'py>(
+    py: Python<'py>,
+    mut img: numpy::PyReadwriteArray3<'py, f32>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let shape = img.as_array().shape().to_vec();
+    if shape[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
+    }
+    let flat = img
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
+    let (h, w) = (shape[0], shape[1]);
+    let (scale, ceiling) = grayworld_scale_and_ceiling(flat, h, w);
+    let mut lum = vec![0f32; h * w];
+    white_balance_body_inplace(py, flat, w, scale, false, Some(ceiling), Some(&mut lum));
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), lum).unwrap().into_pyarray(py))
 }
 
 // ---------------------------------------------------------------------------
@@ -8893,6 +8967,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bayer_grid_equalize_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_apply_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(white_balance_grayworld_lum_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_apply, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

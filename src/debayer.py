@@ -902,6 +902,23 @@ def white_balance_grayworld(rgb: np.ndarray, inplace: bool = False) -> np.ndarra
     return xp.clip(out, 0, None)
 
 
+def white_balance_grayworld_lum(rgb: np.ndarray):
+    """``white_balance_grayworld(rgb, inplace=True)`` followed by ``luminance``, as
+    ``(rgb, lum)``. The native path balances in place and emits the luminance from
+    the same pass (bit-identical to the two calls, one fewer read of the image);
+    anything it does not cover runs the two calls."""
+    if (_HAS_NATIVE and hasattr(_native, 'white_balance_grayworld_lum_inplace')
+            and get_gpu().xp is np and isinstance(rgb, np.ndarray) and rgb.dtype == np.float32
+            and rgb.ndim == 3 and rgb.shape[2] == 3 and rgb.flags['C_CONTIGUOUS']
+            and rgb.flags['WRITEABLE']):
+        try:
+            return rgb, _native.white_balance_grayworld_lum_inplace(rgb)
+        except Exception:
+            pass
+    rgb = white_balance_grayworld(rgb, inplace=True)
+    return rgb, luminance(get_gpu().to_host(rgb))
+
+
 def white_balance_whitepatch(rgb: np.ndarray, pct: Optional[float] = None) -> np.ndarray:
     gpu = get_gpu()
     xp = gpu.xp
