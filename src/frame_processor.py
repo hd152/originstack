@@ -29,6 +29,7 @@ from src.debayer import (
     remove_spikes_bayer,
     set_session_cfa,
     white_balance_grayworld,
+    white_balance_grayworld_lum,
     white_balance_whitepatch,
 )
 from src.frame_discovery import is_nebula_filter
@@ -432,6 +433,13 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # White balance -- skipped under a nebula/light-pollution filter (e.g.
     # FILTER='Nebula'): grayworld/whitepatch both assume a neutral-color scene,
     # which a continuum-suppressing bandpass filter breaks.
+    # wb_lum: luminance emitted by the white-balance pass itself, valid only when
+    # nothing between here and the luminance recompute below touches rgb.
+    wb_lum = None
+    # session-constant CA shifts with no channel to move leave rgb untouched
+    # (apply_chromatic_aberration returns its input), so they do not void wb_lum
+    _ca_noop = ca_shifts is not None and not any(ca_shifts.get(c) is not None for c in (0, 2))
+    _rgb_rewritten_later = (ca_correction and not _ca_noop) or cosmic_ray_rejection or trail_reject
     try:
         if is_nebula_filter(hdr.get('FILTER')):
             if white_balance in ('grayworld', 'whitepatch') and not _warned_nebula_wb_skip:
@@ -439,7 +447,10 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                 safe_print(f"  ℹ Nebula filter detected ({hdr.get('FILTER')}) -- "
                            f"skipping {white_balance} white balance")
         elif white_balance == 'grayworld':
-            rgb = white_balance_grayworld(rgb, inplace=_rgb_owned)
+            if _rgb_owned and not _rgb_rewritten_later:
+                rgb, wb_lum = white_balance_grayworld_lum(rgb)
+            else:
+                rgb = white_balance_grayworld(rgb, inplace=_rgb_owned)
         elif white_balance == 'whitepatch':
             rgb = white_balance_whitepatch(rgb)
     except Exception as e:
@@ -482,7 +493,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
     # Recompute lum only when white balance or post-processing changed the image.
     try:
-        if white_balance != 'none' or ca_correction or cosmic_ray_rejection:
+        if wb_lum is not None:
+            lum = wb_lum
+        elif white_balance != 'none' or ca_correction or cosmic_ray_rejection:
             lum = luminance(rgb)
         else:
             lum = np.asarray(lum)  # ensure host numpy array

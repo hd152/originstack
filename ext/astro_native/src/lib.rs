@@ -2127,6 +2127,61 @@ fn warp_affine_lanczos3<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((out_h, out_w, c), out).unwrap().into_pyarray(py))
 }
 
+/// `warp_affine_lanczos3` writing into a caller-supplied `(out_h, out_w, c)` array
+/// (e.g. one slot of Phase 3's aligned stack) instead of allocating and returning
+/// one -- the caller then has no 70 MB copy to make, and no fresh allocation for
+/// the OS to zero-fill. Contiguous input only (the path Phase 3 takes); each
+/// output row comes from `lanczos3_row_flat`, the same code the allocating
+/// kernel runs, so the result is bit-identical to it.
+#[pyfunction]
+fn warp_affine_lanczos3_into<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    mut out: numpy::PyReadwriteArray3<'py, f32>,
+    mat: [f64; 4],
+    off: [f64; 2],
+    cval: f32,
+    origin: (usize, usize),
+) -> PyResult<()> {
+    let (oy0, ox0) = origin;
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let os = out.as_array().shape().to_vec();
+    let out_w = os[1];
+    if os[2] != c {
+        return Err(pyo3::exceptions::PyValueError::new_err("out must have the input's channel count"));
+    }
+    let img: &[f32] = arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("data must be C-contiguous"))?;
+    let dst: &mut [f32] = out
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be C-contiguous"))?;
+    let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
+    let (o0, o1) = (off[0], off[1]);
+    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if m01 == 0.0 && m10 == 0.0 {
+        let mut wxs = vec![[0f64; 6]; out_w];
+        let mut bxs = vec![0isize; out_w];
+        for ox in 0..out_w {
+            let ix = m11 * (ox + ox0) as f64 + o1;
+            let fx = ix.floor();
+            lanczos6_weights(ix - fx, &mut wxs[ox]);
+            bxs[ox] = fx as isize - 2;
+        }
+        Some((wxs, bxs))
+    } else {
+        None
+    };
+    py.detach(|| {
+        dst.par_chunks_mut(out_w * c).enumerate().for_each(|(oy_l, out_row)| {
+            lanczos3_row_flat(img, h, w, c, oy_l + oy0, out_row, [m00, m01, m10, m11], [o0, o1],
+                              &col_tab, cval, ox0);
+        });
+    });
+    Ok(())
+}
+
 /// Affine warp with an arbitrary precomputed tap-weight table instead of the
 /// fixed Lanczos-3 formula (`warp_affine_lanczos3` above, left untouched) --
 /// lets drizzle resample with a frame's own estimated PSF as a matched
@@ -3566,38 +3621,12 @@ fn separable_blur(img: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
     out
 }
 
-/// Cell-center-aligned bilinear upsample of a (ny, nx) mesh to (h, w).
-/// See src/star_detect.py::_bilinear_upsample for why this is hand-rolled
-/// instead of a generic zoom (corner- vs centre-alignment produced a real
-/// false-positive cluster at the image border during validation).
-fn bilinear_upsample(grid: &[f64], ny: usize, nx: usize, h: usize, w: usize, cell: usize) -> Vec<f64> {
-    let cellf = cell as f64;
-    let mut out = vec![0f64; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
-        let gy = y as f64 / cellf - 0.5;
-        let gy0 = gy.floor().max(0.0).min((ny - 1) as f64) as usize;
-        let gy1 = (gy0 + 1).min(ny - 1);
-        let fy = (gy - gy0 as f64).clamp(0.0, 1.0);
-        for x in 0..w {
-            let gx = x as f64 / cellf - 0.5;
-            let gx0 = gx.floor().max(0.0).min((nx - 1) as f64) as usize;
-            let gx1 = (gx0 + 1).min(nx - 1);
-            let fx = (gx - gx0 as f64).clamp(0.0, 1.0);
-            let v00 = grid[gy0 * nx + gx0];
-            let v01 = grid[gy0 * nx + gx1];
-            let v10 = grid[gy1 * nx + gx0];
-            let v11 = grid[gy1 * nx + gx1];
-            let v0 = v00 * (1.0 - fx) + v01 * fx;
-            let v1 = v10 * (1.0 - fx) + v11 * fx;
-            out_row[x] = v0 * (1.0 - fy) + v1 * fy;
-        }
-    });
-    out
-}
-
-/// Per-cell median (use_mad=false) or 1.4826*MAD sigma (use_mad=true),
-/// upsampled to full resolution and lightly smoothed (sigma = cell*0.3).
-fn local_mesh_stat(img: &[f64], h: usize, w: usize, cell: usize, use_mad: bool) -> Vec<f64> {
+/// Per-cell median (use_mad=false) or 1.4826*MAD sigma (use_mad=true) of an
+/// f32 image, as the smoothed (ny, nx) mesh grid. `mesh_bilinear` evaluates the
+/// cell-centre-aligned upsample of it at any pixel -- the same arithmetic the
+/// numpy mirror's full-resolution `_bilinear_upsample` uses, without
+/// materialising a full-frame f64 map.
+fn local_mesh_grid(img: &[f32], h: usize, w: usize, cell: usize, use_mad: bool) -> (Vec<f64>, usize, usize) {
     let ny = (h / cell.max(1)).max(1);
     let nx = (w / cell.max(1)).max(1);
     let grid: Vec<f64> = (0..ny * nx)
@@ -3611,10 +3640,7 @@ fn local_mesh_stat(img: &[f64], h: usize, w: usize, cell: usize, use_mad: bool) 
             let x1 = if ix == nx - 1 { w } else { (ix + 1) * cell };
             let mut vals: Vec<f32> = Vec::with_capacity((y1 - y0) * (x1 - x0));
             for y in y0..y1 {
-                let base = y * w;
-                for x in x0..x1 {
-                    vals.push(img[base + x] as f32);
-                }
+                vals.extend_from_slice(&img[y * w + x0..y * w + x1]);
             }
             let med = median_inplace(&mut vals) as f64;
             if use_mad {
@@ -3627,11 +3653,30 @@ fn local_mesh_stat(img: &[f64], h: usize, w: usize, cell: usize, use_mad: bool) 
         .collect();
     // Smooth the small mesh grid (blocky-cell artifacts) before upsampling,
     // not the full-resolution field after: same intent (soften cell-to-cell
-    // jumps) at a few thousand times less work -- the grid is ~1500 px, the
-    // full field ~6M. sigma=0.3 grid-cells here is the same *relative*
-    // smoothing as sigma=cell*0.3 was at full resolution.
-    let smoothed_grid = separable_blur(&grid, ny, nx, 0.3);
-    bilinear_upsample(&smoothed_grid, ny, nx, h, w, cell)
+    // jumps) at a few thousand times less work.
+    (separable_blur(&grid, ny, nx, 0.3), ny, nx)
+}
+
+/// (lo, hi, frac) of the cell-centre-aligned bilinear upsample along one axis.
+#[inline(always)]
+fn mesh_axis(i: usize, n: usize, cellf: f64) -> (usize, usize, f64) {
+    let g = i as f64 / cellf - 0.5;
+    let g0 = g.floor().max(0.0).min((n - 1) as f64) as usize;
+    let g1 = (g0 + 1).min(n - 1);
+    (g0, g1, (g - g0 as f64).clamp(0.0, 1.0))
+}
+
+#[inline(always)]
+fn mesh_bilinear(grid: &[f64], nx: usize, ya: (usize, usize, f64), xa: (usize, usize, f64)) -> f64 {
+    let (gy0, gy1, fy) = ya;
+    let (gx0, gx1, fx) = xa;
+    let v00 = grid[gy0 * nx + gx0];
+    let v01 = grid[gy0 * nx + gx1];
+    let v10 = grid[gy1 * nx + gx0];
+    let v11 = grid[gy1 * nx + gx1];
+    let v0 = v00 * (1.0 - fx) + v01 * fx;
+    let v1 = v10 * (1.0 - fx) + v11 * fx;
+    v0 * (1.0 - fy) + v1 * fy
 }
 
 #[pyfunction]
@@ -3647,41 +3692,77 @@ fn detect_stars_matched_filter<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let arr = image.as_array();
     let (h, w) = (arr.shape()[0], arr.shape()[1]);
-    let owned: Vec<f64>;
-    let lum: &[f64] = match arr.as_slice() {
-        Some(s) => {
-            owned = s.iter().map(|&v| v as f64).collect();
-            &owned
-        }
+    let owned: Vec<f32>;
+    let src: &[f32] = match arr.as_slice() {
+        Some(s) => s,
         None => {
-            owned = arr.iter().map(|&v| v as f64).collect();
+            owned = arr.iter().copied().collect();
             &owned
         }
     };
 
+    // Memory-light, same arithmetic as the numpy mirror: the background and
+    // noise maps are evaluated from their small mesh grids where needed instead
+    // of being upsampled to full-frame f64 arrays, the residual is formed row
+    // by row inside the first blur pass, and the second pass divides by the
+    // noise directly. Two full-frame arrays (blur temporary, SNR) instead of
+    // seven; per-pixel sums keep their tap order, so results are identical.
     let rows: Vec<[f64; 10]> = py.detach(|| {
-        let bg_map = local_mesh_stat(lum, h, w, cell, false);
-        let sigma_map = local_mesh_stat(lum, h, w, cell, true);
-        let resid: Vec<f64> = lum.iter().zip(&bg_map).map(|(&v, &b)| v - b).collect();
+        let (bg_grid, ny, nx) = local_mesh_grid(src, h, w, cell, false);
+        let (sg_grid, _, _) = local_mesh_grid(src, h, w, cell, true);
+        let cellf = cell as f64;
+        let xaxis: Vec<(usize, usize, f64)> = (0..w).map(|x| mesh_axis(x, nx, cellf)).collect();
+        let bg_at = |y: usize, x: usize| mesh_bilinear(&bg_grid, nx, mesh_axis(y, ny, cellf), xaxis[x]);
+        let lum = |i: usize| src[i] as f64;
 
-        // A Gaussian is exactly separable: conv2d(img, outer(k1,k1)) ==
-        // conv1d_col(conv1d_row(img, k1), k1), same result at O(2k)
-        // taps/pixel instead of O(k^2). kernel_norm (the SNR noise
-        // normalisation) collapses algebraically too:
-        // sqrt(sum(outer(k1,k1)^2)) == sum(k1^2) exactly (sum_ij
-        // (k1_i k1_j)^2 = (sum k1^2)^2, sqrt of that = sum k1^2).
         let sigma_k = fwhm / 2.3548;
         let k1 = gaussian_kernel_1d(sigma_k);
         let kernel_norm: f64 = k1.iter().map(|&v| v * v).sum();
-        let filtered = separable_blur(&resid, h, w, sigma_k);
+        let half = k1.len() / 2;
 
-        let mut snr_map = vec![0f64; h * w];
-        snr_map.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+        // pass 1 (along rows) on the residual, built per row into a reflect-padded buffer
+        let mut tmp = vec![0f64; h * w];
+        tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+            let ya = mesh_axis(y, ny, cellf);
+            let mut buf = vec![0f64; w + 2 * half];
             for x in 0..w {
-                let sig = (sigma_map[y * w + x] * kernel_norm).max(1e-9);
-                out_row[x] = filtered[y * w + x] / sig;
+                buf[half + x] = lum(y * w + x) - mesh_bilinear(&bg_grid, nx, ya, xaxis[x]);
+            }
+            for k in 0..half {
+                buf[half - 1 - k] = buf[half + reflect_idx(-(k as isize) - 1, w)];
+                buf[half + w + k] = buf[half + reflect_idx((w + k) as isize, w)];
+            }
+            for v in out_row.iter_mut() {
+                *v = 0.0;
+            }
+            for (t, &kv) in k1.iter().enumerate() {
+                let sl = &buf[t..t + w];
+                for x in 0..w {
+                    out_row[x] += kv * sl[x];
+                }
             }
         });
+
+        // pass 2 (along columns) and the SNR, per output row
+        let mut snr_map = vec![0f64; h * w];
+        snr_map.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+            for v in out_row.iter_mut() {
+                *v = 0.0;
+            }
+            for (t, &kv) in k1.iter().enumerate() {
+                let yi = reflect_idx(y as isize + t as isize - half as isize, h);
+                let sl = &tmp[yi * w..(yi + 1) * w];
+                for x in 0..w {
+                    out_row[x] += kv * sl[x];
+                }
+            }
+            let ya = mesh_axis(y, ny, cellf);
+            for x in 0..w {
+                let sig = (mesh_bilinear(&sg_grid, nx, ya, xaxis[x]) * kernel_norm).max(1e-9);
+                out_row[x] /= sig;
+            }
+        });
+        drop(tmp);
 
         // Local-maxima + threshold + border exclusion, row-parallel.
         let footprint = (fwhm.round() as isize).max(3);
@@ -3738,7 +3819,7 @@ fn detect_stars_matched_filter<'py>(
                 let y1 = ((py_ as isize + r + 1).max(0) as usize).min(h);
                 let x0 = (px_ as isize - r).max(0) as usize;
                 let x1 = ((px_ as isize + r + 1).max(0) as usize).min(w);
-                let local_bg = bg_map[py_ * w + px_];
+                let local_bg = bg_at(py_, px_);
 
                 let mut wsum = 0f64;
                 let mut cy = 0f64;
@@ -3747,7 +3828,7 @@ fn detect_stars_matched_filter<'py>(
                 for y in y0..y1 {
                     let row_base = y * w;
                     for x in x0..x1 {
-                        let wv = (lum[row_base + x] - local_bg).max(0.0);
+                        let wv = (lum(row_base + x) - local_bg).max(0.0);
                         if wv > 0.0 {
                             n_positive += 1;
                         }
@@ -3773,7 +3854,7 @@ fn detect_stars_matched_filter<'py>(
                 for y in ry0..ry1 {
                     let row_base = y * w;
                     for x in rx0..rx1 {
-                        let wv = (lum[row_base + x] - local_bg).max(0.0);
+                        let wv = (lum(row_base + x) - local_bg).max(0.0);
                         rwsum += wv;
                         rcy += wv * y as f64;
                         rcx += wv * x as f64;
@@ -3793,7 +3874,7 @@ fn detect_stars_matched_filter<'py>(
                     let row_base = y * w;
                     let dy = y as f64 - cy;
                     for x in x0..x1 {
-                        let wv = (lum[row_base + x] - local_bg).max(0.0);
+                        let wv = (lum(row_base + x) - local_bg).max(0.0);
                         let dx = x as f64 - cx;
                         ixx += wv * dy * dy;
                         iyy += wv * dx * dx;
@@ -3824,7 +3905,7 @@ fn detect_stars_matched_filter<'py>(
                 for y in y0..y1 {
                     let row_base = y * w;
                     for x in x0..x1 {
-                        let v = lum[row_base + x];
+                        let v = lum(row_base + x);
                         if v > peak {
                             peak = v;
                         }
@@ -8163,40 +8244,90 @@ fn white_balance_grayworld<'py>(
     Ok(arr3.into_pyarray(py))
 }
 
+/// Exact max of a contiguous f32 buffer, NaN-propagating like numpy's `max`.
+fn wb_ceiling(flat: &[f32], w: usize) -> f32 {
+    flat.par_chunks(w * 3)
+        .map(|row| {
+            let mut m = f32::NEG_INFINITY;
+            for &v in row {
+                if v.is_nan() {
+                    return f32::NAN;
+                }
+                if v > m {
+                    m = v;
+                }
+            }
+            m
+        })
+        .reduce(
+            || f32::NEG_INFINITY,
+            |a, b| {
+                if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a > b {
+                    a
+                } else {
+                    b
+                }
+            },
+        )
+}
+
+/// Gray-world gains and the frame ceiling from ONE sequential pass: the
+/// per-channel float64 means (row-major, as numpy's `mean(dtype=float64)`)
+/// and the exact max (order-independent, so folding it into this pass changes
+/// nothing). Returns (scale, ceiling).
+fn grayworld_scale_and_ceiling(flat: &[f32], h: usize, w: usize) -> ([f32; 3], f32) {
+    let mut acc = [0f64; 3];
+    let mut m = f32::NEG_INFINITY;
+    let mut nan = false;
+    for px in flat.chunks_exact(3) {
+        acc[0] += px[0] as f64;
+        acc[1] += px[1] as f64;
+        acc[2] += px[2] as f64;
+        for &v in px {
+            if v > m {
+                m = v;
+            }
+            nan |= v.is_nan();
+        }
+    }
+    let n = (h * w) as f64;
+    let mean = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
+    // numpy: mean.mean() on a 3-element float32 array is (m0 + m1) + m2, then / 3
+    let mm = ((mean[0] + mean[1]) + mean[2]) / 3.0f32;
+    let scale = [
+        mm / (mean[0] + 1e-12f32),
+        mm / (mean[1] + 1e-12f32),
+        mm / (mean[2] + 1e-12f32),
+    ];
+    (scale, if nan { f32::NAN } else { m })
+}
+
 /// In-place twin of `white_balance_body`: same per-pixel f32 operations in the same
 /// order, but each output pixel overwrites its input pixel, so no 75 MB output
-/// array is allocated, first-touched and written.
-fn white_balance_body_inplace(py: Python<'_>, flat: &mut [f32], w: usize, f: [f32; 3], divide: bool) {
+/// array is allocated, first-touched and written. `ceiling` skips the max pass
+/// when the caller already has it; `lum` (h*w) also receives the luminance of
+/// each written pixel (`0.299 r + 0.587 g + 0.114 b`, f32 as `luminance_native`),
+/// saving the separate read of the whole image that a recompute costs.
+fn white_balance_body_inplace(
+    py: Python<'_>,
+    flat: &mut [f32],
+    w: usize,
+    f: [f32; 3],
+    divide: bool,
+    ceiling: Option<f32>,
+    lum: Option<&mut [f32]>,
+) {
     let (f0, f1, f2) = (f[0], f[1], f[2]);
+    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
     py.detach(|| {
-        let ceiling: f32 = flat
-            .par_chunks(w * 3)
-            .map(|row| {
-                let mut m = f32::NEG_INFINITY;
-                for &v in row {
-                    if v.is_nan() {
-                        return f32::NAN;
-                    }
-                    if v > m {
-                        m = v;
-                    }
-                }
-                m
-            })
-            .reduce(
-                || f32::NEG_INFINITY,
-                |a, b| {
-                    if a.is_nan() || b.is_nan() {
-                        f32::NAN
-                    } else if a > b {
-                        a
-                    } else {
-                        b
-                    }
-                },
-            );
+        let ceiling = match ceiling {
+            Some(c) => c,
+            None => wb_ceiling(flat, w),
+        };
         let denom = ceiling + 1e-12f32;
-        flat.par_chunks_mut(w * 3).for_each(|row| {
+        let row_fn = |row: &mut [f32], mut lrow: Option<&mut [f32]>| {
             for x in 0..w {
                 let r = row[x * 3];
                 let g = row[x * 3 + 1];
@@ -8220,11 +8351,24 @@ fn white_balance_body_inplace(py: Python<'_>, flat: &mut [f32], w: usize, f: [f3
                 let o0 = s0 * one_minus + peak * sat;
                 let o1 = s1 * one_minus + peak * sat;
                 let o2 = s2 * one_minus + peak * sat;
-                row[x * 3] = if o0 < 0.0 { 0.0 } else { o0 };
-                row[x * 3 + 1] = if o1 < 0.0 { 0.0 } else { o1 };
-                row[x * 3 + 2] = if o2 < 0.0 { 0.0 } else { o2 };
+                let o0 = if o0 < 0.0 { 0.0 } else { o0 };
+                let o1 = if o1 < 0.0 { 0.0 } else { o1 };
+                let o2 = if o2 < 0.0 { 0.0 } else { o2 };
+                row[x * 3] = o0;
+                row[x * 3 + 1] = o1;
+                row[x * 3 + 2] = o2;
+                if let Some(l) = lrow.as_deref_mut() {
+                    l[x] = kr * o0 + kg * o1 + kb * o2;
+                }
             }
-        });
+        };
+        match lum {
+            Some(l) => flat
+                .par_chunks_mut(w * 3)
+                .zip(l.par_chunks_mut(w))
+                .for_each(|(row, lrow)| row_fn(row, Some(lrow))),
+            None => flat.par_chunks_mut(w * 3).for_each(|row| row_fn(row, None)),
+        }
     });
 }
 
@@ -8247,7 +8391,7 @@ fn white_balance_apply_inplace<'py>(
     let flat = img
         .as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
-    white_balance_body_inplace(py, flat, shape[1], [f[0], f[1], f[2]], divide);
+    white_balance_body_inplace(py, flat, shape[1], [f[0], f[1], f[2]], divide, None, None);
     Ok(())
 }
 
@@ -8265,22 +8409,33 @@ fn white_balance_grayworld_inplace<'py>(
         .as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
     let (h, w) = (shape[0], shape[1]);
-    let mut acc = [0f64; 3];
-    for px in flat.chunks_exact(3) {
-        acc[0] += px[0] as f64;
-        acc[1] += px[1] as f64;
-        acc[2] += px[2] as f64;
-    }
-    let n = (h * w) as f64;
-    let mean = [(acc[0] / n) as f32, (acc[1] / n) as f32, (acc[2] / n) as f32];
-    let mm = ((mean[0] + mean[1]) + mean[2]) / 3.0f32;
-    let scale = [
-        mm / (mean[0] + 1e-12f32),
-        mm / (mean[1] + 1e-12f32),
-        mm / (mean[2] + 1e-12f32),
-    ];
-    white_balance_body_inplace(py, flat, w, scale, false);
+    let (scale, ceiling) = grayworld_scale_and_ceiling(flat, h, w);
+    white_balance_body_inplace(py, flat, w, scale, false, Some(ceiling), None);
     Ok(())
+}
+
+/// `white_balance_grayworld_inplace` that also returns the luminance of the
+/// balanced image -- what `luminance_native` would compute from it afterwards,
+/// bit for bit, without reading the 75 MB image a second time. Two passes over
+/// the image in all (statistics, then gain + highlight + luminance) where the
+/// separate steps made four.
+#[pyfunction]
+fn white_balance_grayworld_lum_inplace<'py>(
+    py: Python<'py>,
+    mut img: numpy::PyReadwriteArray3<'py, f32>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let shape = img.as_array().shape().to_vec();
+    if shape[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
+    }
+    let flat = img
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
+    let (h, w) = (shape[0], shape[1]);
+    let (scale, ceiling) = grayworld_scale_and_ceiling(flat, h, w);
+    let mut lum = vec![0f32; h * w];
+    white_balance_body_inplace(py, flat, w, scale, false, Some(ceiling), Some(&mut lum));
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), lum).unwrap().into_pyarray(py))
 }
 
 // ---------------------------------------------------------------------------
@@ -8744,6 +8899,64 @@ unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,
     rcd_core_impl!(src, h, w, scale, r_off, b_off)
 }
 
+/// Linear cross-correlation `c[dy][dx] = sum_p ref[p + d] * img[p]` (zero outside
+/// the frame) for every lag |dy|, |dx| <= radius: the values a zero-padded FFT
+/// correlation has at those lags (src/registration.py::calculate_shift_pyramid_pref,
+/// below the coarsest pyramid level, where the coarse pass has already found the
+/// shift to a few pixels and a full padded FFT -- 2x each axis -- is ~100 ms of
+/// work for 25 numbers). f64 accumulation, parallel over lags.
+#[pyfunction]
+#[pyo3(signature = (reference, image, radius))]
+fn xcorr_window<'py>(
+    py: Python<'py>,
+    reference: PyReadonlyArray2<'py, f32>,
+    image: PyReadonlyArray2<'py, f32>,
+    radius: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let ra = reference.as_array();
+    let ia = image.as_array();
+    if ra.shape() != ia.shape() {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let (h, w) = (ra.shape()[0], ra.shape()[1]);
+    let rs = ra.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("reference must be contiguous"))?;
+    let is = ia.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("image must be contiguous"))?;
+    if radius >= h.max(w) {
+        return Err(pyo3::exceptions::PyValueError::new_err("radius must be smaller than the frame"));
+    }
+    let n = 2 * radius + 1;
+    let r = radius as isize;
+    let vals: Vec<f64> = py.detach(|| {
+        (0..n * n)
+            .into_par_iter()
+            .map(|k| {
+                let dy = (k / n) as isize - r;
+                let dx = (k % n) as isize - r;
+                // p and p + d both inside the frame
+                let y0 = (-dy).max(0) as usize;
+                let y1 = ((h as isize) - dy.max(0)).max(0) as usize;
+                let x0 = (-dx).max(0) as usize;
+                let x1 = ((w as isize) - dx.max(0)).max(0) as usize;
+                let mut acc = 0f64;
+                if x1 > x0 {
+                    for y in y0..y1 {
+                        let ry = (y as isize + dy) as usize;
+                        let a = &rs[ry * w + (x0 as isize + dx) as usize..ry * w + (x1 as isize + dx) as usize];
+                        let b = &is[y * w + x0..y * w + x1];
+                        let mut row = 0f64;
+                        for (u, v) in a.iter().zip(b) {
+                            row += *u as f64 * *v as f64;
+                        }
+                        acc += row;
+                    }
+                }
+                acc
+            })
+            .collect()
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((n, n), vals).unwrap().into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(originvision::originvision_score, m)?)?;
@@ -8765,6 +8978,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hot_pixel_box_replace_native, m)?)?;
     m.add_function(wrap_pyfunction!(blind_match_hypotheses, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
+    m.add_function(wrap_pyfunction!(warp_affine_lanczos3_into, m)?)?;
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
     m.add_function(wrap_pyfunction!(median_filter_native, m)?)?;
@@ -8799,6 +9013,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hot_pixel_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(spike_reject_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
+    m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;
@@ -8808,6 +9023,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bayer_grid_equalize_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_apply_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(white_balance_grayworld_lum_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_apply, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

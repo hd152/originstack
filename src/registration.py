@@ -49,6 +49,8 @@ except Exception:
 
 from src.blind_match import match_rigid_unknown_rotation
 
+_RANSAC_SEED = 0      # fixed: same input, same transform, every run
+
 
 def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
                        initial_shift: Tuple[float, float] = (0.0, 0.0)) -> Optional[Any]:
@@ -91,8 +93,12 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     dst = ref_pts[indices[good]]
 
     try:
+        # Seeded: an unseeded draw can settle on a different inlier set from run to
+        # run, so the same session stacked twice differed at ~1e-4 px in the shifts
+        # (rms 1.7 ADU in the stack) -- reproducible runs are what identity checks need.
         model, inliers = fit_rigid_ransac(
-            src, dst, min_samples=3, residual_threshold=2.0, max_trials=1000)
+            src, dst, min_samples=3, residual_threshold=2.0, max_trials=1000,
+            seed=_RANSAC_SEED)
         if inliers is not None and inliers.sum() >= 3:
             return model
     except Exception:
@@ -159,7 +165,8 @@ def _blind_match_transform(ref_stars: Optional[Any], img_stars: Optional[Any]) -
 def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
                     transform: Optional[Any] = None,
                     local_field: Optional[np.ndarray] = None,
-                    crop: Optional[Tuple[int, int, int, int]] = None) -> np.ndarray:
+                    crop: Optional[Tuple[int, int, int, int]] = None,
+                    out: Optional[np.ndarray] = None) -> np.ndarray:
     """``_apply_transform_impl``'s warp, optionally of only a window of the output.
 
     ``crop=(top, bottom, left, right)`` returns ``warp(img)[top:bottom, left:right]``. The
@@ -168,8 +175,15 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
     warps the full frame and slices. Phase 3 discards everything outside the common crop, so
     warping it was pure waste -- 41% of the pixels on a session with a 1415x2598 crop of
     2048x3056.
+
+    ``out`` (with ``crop``): an array of the window's shape to write the result into,
+    which is returned. The native path warps straight into it (``warp_affine_lanczos3_into``,
+    bit-identical); otherwise the result is computed as usual and copied in.
     """
     if crop is None:
+        if out is not None:
+            out[...] = _apply_transform_impl(img, shift, transform, local_field)
+            return out
         return _apply_transform_impl(img, shift, transform, local_field)
     top, bottom, left, right = (int(v) for v in crop)
     native_ok = (local_field is None and HAS_NATIVE and not get_gpu().active
@@ -187,12 +201,27 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
             else:
                 mat = np.eye(2)
                 off = np.array([-shift[0], -shift[1]], dtype=np.float64)
-            return _native.warp_affine_lanczos3(
-                img, mat.astype(np.float64).ravel().tolist(),
-                off.astype(np.float64).tolist(), bottom - top, right - left, 0.0, (top, left))
+            mat_l = mat.astype(np.float64).ravel().tolist()
+            off_l = off.astype(np.float64).tolist()
+            if (out is not None and hasattr(_native, 'warp_affine_lanczos3_into')
+                    and isinstance(out, np.ndarray) and out.dtype == np.float32
+                    and out.shape == (bottom - top, right - left, img.shape[2])
+                    and out.flags['C_CONTIGUOUS'] and out.flags['WRITEABLE']):
+                _native.warp_affine_lanczos3_into(img, out, mat_l, off_l, 0.0, (top, left))
+                return out
+            res = _native.warp_affine_lanczos3(img, mat_l, off_l, bottom - top, right - left,
+                                               0.0, (top, left))
+            if out is not None:
+                out[...] = res
+                return out
+            return res
         except Exception as exc:
             _log.debug("native windowed warp failed (%s); warping the full frame", exc)
-    return _apply_transform_impl(img, shift, transform, local_field)[top:bottom, left:right]
+    res = _apply_transform_impl(img, shift, transform, local_field)[top:bottom, left:right]
+    if out is not None:
+        out[...] = res
+        return out
+    return res
 
 
 def _apply_transform_impl(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
@@ -680,8 +709,45 @@ def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) ->
         h, w = ref_n.shape
         pad_h, pad_w = sfft.next_fast_len(2 * h), sfft.next_fast_len(2 * w)
         F_ref = sfft.rfft2(ref_n, s=(pad_h, pad_w), workers=1)
-        prepared.append((F_ref, h, w, pad_h, pad_w))
+        prepared.append((F_ref, h, w, pad_h, pad_w, np.ascontiguousarray(ref_n)))
     return prepared
+
+
+# Below the coarsest pyramid level the shift is already known to a couple of
+# pixels (the coarser estimate, doubled), so the correlation is evaluated
+# directly at lags |d| <= _PYRAMID_WINDOW instead of through a full FFT
+# zero-padded to twice each axis (~110 of ~155 ms per frame at the half-res
+# level). Same linear correlation either way; when the best lag sits on the
+# window edge the peak may lie outside it, and the full FFT runs as before.
+_PYRAMID_WINDOW = 2
+
+
+def _xcorr_window_numpy(ref: np.ndarray, img: np.ndarray, radius: int) -> np.ndarray:
+    """numpy mirror of the native ``xcorr_window``: c[dy+r, dx+r] =
+    sum_p ref[p + d] * img[p] over p with p and p + d inside the frame."""
+    h, w = img.shape
+    n = 2 * radius + 1
+    out = np.zeros((n, n))
+    for i, dy in enumerate(range(-radius, radius + 1)):
+        for j, dx in enumerate(range(-radius, radius + 1)):
+            y0, y1 = max(0, -dy), h - max(0, dy)
+            x0, x1 = max(0, -dx), w - max(0, dx)
+            if y1 > y0 and x1 > x0:
+                a = ref[y0 + dy:y1 + dy, x0 + dx:x1 + dx].astype(np.float64)
+                b = img[y0:y1, x0:x1].astype(np.float64)
+                out[i, j] = float(np.sum(a * b))
+    return out
+
+
+def _xcorr_window(ref: np.ndarray, img: np.ndarray, radius: int) -> np.ndarray:
+    if HAS_NATIVE and hasattr(_native, 'xcorr_window'):
+        try:
+            return np.asarray(_native.xcorr_window(np.ascontiguousarray(ref, dtype=np.float32),
+                                                   np.ascontiguousarray(img, dtype=np.float32),
+                                                   int(radius)))
+        except Exception:
+            pass
+    return _xcorr_window_numpy(ref, img, radius)
 
 
 def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float, float]:
@@ -695,17 +761,26 @@ def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float
         img_pyr.append(_downsample_half(img_pyr[-1]))
     total_sy, total_sx = 0.0, 0.0
     for lvl in range(levels - 1, stop - 1, -1):
-        F_ref, h, w, pad_h, pad_w = prepared[lvl]
+        F_ref, h, w, pad_h, pad_w, ref_n = prepared[lvl]
         i = img_pyr[lvl]
         if total_sy != 0.0 or total_sx != 0.0:
             i = _int_shift(i, int(total_sy), int(total_sx))
         img_n = (i - i.mean()).astype(np.float32, copy=False)
-        F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
-        corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
-        peak_flat = int(np.argmax(corr))
-        py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
-        dy = py if py < h else py - pad_h
-        dx = px if px < w else px - pad_w
+        dy = dx = None
+        if lvl < levels - 1:
+            r = _PYRAMID_WINDOW
+            c = _xcorr_window(ref_n, img_n, r)
+            k = int(np.argmax(c))
+            wy, wx = k // c.shape[1] - r, k % c.shape[1] - r
+            if abs(wy) < r and abs(wx) < r:      # interior: the peak is inside the window
+                dy, dx = wy, wx
+        if dy is None:
+            F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
+            corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
+            peak_flat = int(np.argmax(corr))
+            py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
+            dy = py if py < h else py - pad_h
+            dx = px if px < w else px - pad_w
         total_sy += dy
         total_sx += dx
         if lvl > 0:

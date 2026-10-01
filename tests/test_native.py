@@ -2561,6 +2561,36 @@ def test_white_balance_grayworld_inplace_bit_identical():
     np.testing.assert_array_equal(work2, native.white_balance_apply(img, f, True))
 
 
+@pytest.mark.skipif(not hasattr(native, "white_balance_grayworld_lum_inplace"),
+                    reason="astro_native lacks white_balance_grayworld_lum_inplace")
+def test_white_balance_grayworld_lum_inplace_bit_identical():
+    """Fused WB + luminance == grayworld in place, then luminance of the result."""
+    rng = np.random.default_rng(11)
+    img = np.abs(rng.normal(400, 60, (90, 130, 3))).astype(np.float32) * np.array([1.0, 0.6, 0.8], np.float32)
+    img[7, 9] = 9000.0                                                # a near-clipped star
+    img[20, 30, 1] = 8800.0
+    want = img.copy()
+    native.white_balance_grayworld_inplace(want)
+    want_lum = _debayer_mod.luminance(want)
+    work = img.copy()
+    lum = native.white_balance_grayworld_lum_inplace(work)
+    np.testing.assert_array_equal(work, want)
+    np.testing.assert_array_equal(lum, want_lum)
+    np.testing.assert_array_equal(work, native.white_balance_grayworld(img))   # the copying kernel too
+    # the debayer.py wrapper, and a NaN frame (propagates like the separate steps)
+    work2 = img.copy()
+    out, lum2 = _debayer_mod.white_balance_grayworld_lum(work2)
+    assert out is work2
+    np.testing.assert_array_equal(lum2, want_lum)
+    bad = img.copy()
+    bad[3, 4, 2] = np.nan
+    a, b = bad.copy(), bad.copy()
+    native.white_balance_grayworld_inplace(a)
+    lb = native.white_balance_grayworld_lum_inplace(b)
+    np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(lb, _debayer_mod.luminance(a))
+
+
 @_need_debayer_k
 def test_luminance_native_bit_identical():
     rng = np.random.default_rng(12)
@@ -2620,6 +2650,40 @@ def test_apply_transform_crop_matches_slicing_the_full_warp(use_transform):
     field = np.zeros((4, 4, 2), np.float64)
     a = apply_transform(img, local_field=field, crop=crop, **kw)
     assert a.shape == (76, 88, 3)
+
+
+@pytest.mark.skipif(not hasattr(native, "warp_affine_lanczos3_into"),
+                    reason="astro_native lacks warp_affine_lanczos3_into")
+@pytest.mark.parametrize("mat_off", [
+    ([0.9877, -0.1564, 0.1564, 0.9877], [13.7, -6.3]),     # rotation
+    ([1.0, 0.0, 0.0, 1.0], [3.37, -2.21]),                 # translation (separable table path)
+])
+def test_warp_into_matches_the_allocating_warp(mat_off):
+    """Warping into a slot of a stack == the allocating kernel, and only that slot is written."""
+    import os
+    import tempfile
+    mat, off = mat_off
+    rng = np.random.default_rng(23)
+    img = rng.normal(500, 60, (100, 110, 3)).astype(np.float32)
+    want = native.warp_affine_lanczos3(img, mat, off, 70, 80, 0.0, (11, 17))
+    stack = np.full((3, 70, 80, 3), -7.0, np.float32)
+    native.warp_affine_lanczos3_into(img, stack[1], mat, off, 0.0, (11, 17))
+    np.testing.assert_array_equal(stack[1], want)
+    assert (stack[0] == -7.0).all() and (stack[2] == -7.0).all()
+    # a memmap view as the source, and apply_transform's out= path (translation form)
+    if mat[1] == 0.0:
+        from src.registration import apply_transform
+        with tempfile.TemporaryDirectory() as td:
+            mm = np.lib.format.open_memmap(os.path.join(td, "f.npy"), mode="w+",
+                                           dtype=np.float32, shape=(2, 100, 110, 3))
+            mm[1] = img
+            dst = np.zeros((70, 80, 3), np.float32)
+            shift = (-off[0], -off[1])
+            assert apply_transform(mm[1], shift=shift, crop=(11, 81, 17, 97), out=dst) is dst
+            np.testing.assert_array_equal(dst, want)
+            del mm
+    with pytest.raises(ValueError):
+        native.warp_affine_lanczos3_into(img, np.zeros((70, 80, 2), np.float32), mat, off, 0.0, (0, 0))
 
 
 @pytest.mark.skipif(not _HAS_ORIGIN, reason="astro_native warp lacks the window origin")

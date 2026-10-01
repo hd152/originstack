@@ -106,3 +106,33 @@ def test_dispatch_and_cli():
     raw = np.random.default_rng(1).uniform(0, 100, (32, 32)).astype(np.float32)
     np.testing.assert_array_equal(db.debayer(raw, 'RGGB', method='rcd'), db.debayer_rcd(raw, 'RGGB'))
     assert parse_args(['-d', 'x', '--debayer-method', 'rcd']).debayer_method == 'rcd'
+
+
+@pytest.mark.parametrize('pattern', ['RGGB', 'BGGR', 'GRBG', 'GBRG'])
+@pytest.mark.parametrize('shape', [(36, 36), (37, 53), (64, 91), (101, 120)])
+def test_border_strips_equal_full_frame_malvar(pattern, shape):
+    """_rcd_border's edge-strip Malvar == the full-frame Malvar's border, bit for bit
+    (odd sizes put the far strips on an odd start, which must round to keep the phase)."""
+    rng = np.random.default_rng(sum(shape))
+    raw = rng.gamma(2, 400, shape).astype(np.float32)
+    raw[0, 0] = 60000.0
+    full = db._malvar_raw(raw, pattern)
+    got = db._rcd_border(np.zeros(shape + (3,), np.float32), raw, pattern)
+    b = db._RCD_BORDER
+    for sl in (np.s_[:b], np.s_[-b:], np.s_[:, :b], np.s_[:, -b:]):
+        np.testing.assert_array_equal(got[sl], full[sl])
+
+
+def test_float32_scale_matches_the_float64_path():
+    """The frame max read off float32 data == the old float64 copy's, NaN/inf included."""
+    rng = np.random.default_rng(4)
+    raw = rng.gamma(2, 400, (64, 80)).astype(np.float32)
+    raw[3, 3] = np.nan
+    with_inf = raw.copy()
+    with_inf[9, 20] = np.inf
+    for r in (raw, with_inf):
+        np.testing.assert_array_equal(db._rcd_raw(r, 'RGGB'),
+                                      db._rcd_raw(r.astype(np.float64), 'RGGB'))
+    allnan = np.full((32, 32), np.nan, np.float32)
+    np.testing.assert_array_equal(db._rcd_raw(allnan, 'RGGB'),
+                                  db._rcd_raw(allnan.astype(np.float64), 'RGGB'))
