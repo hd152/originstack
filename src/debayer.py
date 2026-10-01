@@ -414,11 +414,12 @@ def get_session_cfa() -> Optional[dict]:
     return _session_cfa
 
 
-def cfa_frame_stats(mosaic: np.ndarray, pattern: str) -> Optional[dict]:
+def cfa_frame_stats(mosaic: np.ndarray, pattern: str, method: str = 'malvar') -> Optional[dict]:
     """What the per-frame path would have measured on this calibrated mosaic:
     the G1/G2 gain ``green_equalize`` applies, then the four 2x2 green
-    deviations ``_equalize_bayer_grid`` removes from the Malvar output. None when
-    the frame fails the same guards (G2 near zero, gain outside +-20%)."""
+    deviations ``_equalize_bayer_grid`` removes from the *method*'s own output
+    (malvar or rcd -- the deviations are a property of the interpolator). None
+    when the frame fails the same guards (G2 near zero, gain outside +-20%)."""
     offsets = _PATTERN_OFFSETS.get(pattern.upper())
     if offsets is None or getattr(mosaic, 'ndim', 0) != 2:
         return None
@@ -429,7 +430,8 @@ def cfa_frame_stats(mosaic: np.ndarray, pattern: str) -> Optional[dict]:
     if g2 <= 1e-6 or abs(g1 / g2 - 1.0) >= 0.2:
         return None
     work[g2_r::2, g2_c::2] *= np.float32(g1 / g2)
-    green = _malvar_raw(work, pattern)[:, :, 1]
+    green = (_malvar_raw(work, pattern) if method == 'malvar'
+             else _rcd_raw(work, pattern))[:, :, 1]
     q = np.array([_sigma_clipped_median(np.ascontiguousarray(green[a::2, b::2]))
                   for a, b in _GRID_PARITY])
     return {'gain': float(g1 / g2), 'grid': (q - q.mean()).tolist()}
@@ -624,12 +626,199 @@ def debayer_menon2007(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     return _equalize_bayer_grid(_debayer_menon2007_numpy(raw, pattern))
 
 
+def debayer_rcd(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+    """RCD demosaic plus the same 2x2 green-grid correction as ``debayer_malvar``
+    (session-constant when measured, per frame otherwise): RCD's interpolated
+    greens are also biased by position, measured ~+-2.5 ADU on real Origin subs
+    (Malvar's ~+-6), which survives stacking as a checkerboard."""
+    out = _rcd_raw(raw, pattern)
+    cfg = _session_cfa
+    if cfg is not None and cfg['pattern'] == pattern.upper():
+        _apply_fixed_grid(out, cfg)
+        return out
+    return _equalize_bayer_grid(out, inplace=True)
+
+
+def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+    """RCD -- Ratio Corrected Demosaicing (Luis Sanz Rodriguez, 2017), the
+    default in Siril, RawTherapee and darktable.
+
+    Green at R/B sites is a gradient-weighted blend of four cardinal estimates,
+    each the neighbouring green scaled by a *ratio* of low-pass-filtered CFA
+    values (so a star's profile is followed rather than averaged over); the
+    horizontal/vertical blend comes from a high-pass colour-difference
+    statistic smoothed over three rows/columns. R at B (and B at R) uses
+    diagonal colour differences the same way, then R/B at green sites use
+    cardinal ones. Unlike Malvar, whose fixed gradient-correction kernels put
+    back almost all of the per-pixel noise in R/B (~0.99 of the input sigma on
+    a pure-noise mosaic), interpolated samples here are averages, so on smooth
+    sky it is quieter at the same star sharpness -- the reason it was added:
+    see CLAUDE.md's Sharpness/noise-vs-Siril entry.
+
+    Values are processed scaled to [0, 1] by the frame maximum (the ratio terms
+    are scale-free; ``eps`` assumes that range) and clipped below at 0. A 4-px
+    border, where the 9-tap statistics do not fit, is taken from Malvar.
+    """
+    offsets = _PATTERN_OFFSETS.get(pattern.upper())
+    if offsets is None:
+        raise ValueError(f"Unknown Bayer pattern: {pattern!r}. "
+                         f"Expected one of {list(_PATTERN_OFFSETS)}")
+    a = np.asarray(raw, dtype=np.float64)
+    H, W = a.shape
+    if H < 16 or W < 16:
+        return _malvar_raw(raw, pattern)
+    scale = float(np.nanmax(a)) if np.isfinite(a).any() else 1.0
+    if not scale > 0:
+        scale = 1.0
+    (ry, rx), _g1, _g2, (by, bx) = offsets
+    if _HAS_NATIVE and hasattr(_native, 'debayer_rcd_native') and isinstance(raw, np.ndarray):
+        try:
+            out = _native.debayer_rcd_native(np.ascontiguousarray(raw, dtype=np.float32),
+                                              scale, (ry, rx), (by, bx))
+            return _rcd_border(out, raw, pattern)
+        except Exception as e:
+            _log.debug("native RCD failed (%s); using numpy", e)
+    return _debayer_rcd_numpy(a, offsets, scale, raw, pattern)
+
+
+def _rcd_border(out: np.ndarray, raw: np.ndarray, pattern: str) -> np.ndarray:
+    """The 4-px frame border, where RCD's 9-tap statistics do not fit, from Malvar
+    (uncorrected: ``debayer_rcd`` equalises the whole frame afterwards)."""
+    border = _malvar_raw(raw, pattern)
+    b = 4
+    out[:b], out[-b:], out[:, :b], out[:, -b:] = border[:b], border[-b:], border[:, :b], border[:, -b:]
+    return out
+
+
+def _debayer_rcd_numpy(a: np.ndarray, offsets, scale: float, raw: np.ndarray,
+                       pattern: str) -> np.ndarray:
+    """numpy mirror of the native ``debayer_rcd_native`` (bit-identical)."""
+    H, W = a.shape
+    # f32 from here on (f64 doubled the memory traffic of the native kernel, which
+    # is bandwidth bound); Python-float constants stay f32 under NEP 50
+    cfa = np.nan_to_num(a / scale).astype(np.float32)
+    eps, epssq = 1e-5, 1e-10
+    P = 5
+    c = np.pad(cfa, P, mode='reflect')
+
+    def s(dy, dx, arr=c):                  # shifted view, aligned with the frame
+        return arr[P + dy:P + dy + H, P + dx:P + dx + W]
+
+    (ry, rx), (g1y, g1x), (g2y, g2x), (by, bx) = offsets
+    yy, xx = np.mgrid[0:H, 0:W]
+    is_r = ((yy % 2) == ry) & ((xx % 2) == rx)
+    is_b = ((yy % 2) == by) & ((xx % 2) == bx)
+    is_g = ~(is_r | is_b)
+    rgb = np.zeros((H, W, 3), dtype=np.float32)
+    rgb[..., 0][is_r] = cfa[is_r]
+    rgb[..., 1][is_g] = cfa[is_g]
+    rgb[..., 2][is_b] = cfa[is_b]
+
+    # Step 1: vertical/horizontal discrimination
+    v_hpf = ((s(-3, 0) - s(-1, 0) - s(1, 0) + s(3, 0)) - 3.0 * (s(-2, 0) + s(2, 0))
+             + 6.0 * s(0, 0)) ** 2
+    h_hpf = ((s(0, -3) - s(0, -1) - s(0, 1) + s(0, 3)) - 3.0 * (s(0, -2) + s(0, 2))
+             + 6.0 * s(0, 0)) ** 2
+    vp, hp = np.pad(v_hpf, P, mode='reflect'), np.pad(h_hpf, P, mode='reflect')
+    v_stat = np.maximum(epssq, s(-1, 0, vp) + s(0, 0, vp) + s(1, 0, vp))
+    h_stat = np.maximum(epssq, s(0, -1, hp) + s(0, 0, hp) + s(0, 1, hp))
+    vh_dir = v_stat / (v_stat + h_stat)
+    vhp = np.pad(vh_dir, P, mode='reflect')
+    vh_nb = 0.25 * (s(-1, -1, vhp) + s(-1, 1, vhp) + s(1, -1, vhp) + s(1, 1, vhp))
+    vh_disc = np.where(np.abs(0.5 - vh_dir) < np.abs(0.5 - vh_nb), vh_nb, vh_dir)
+
+    # Step 2: low-pass filter of the CFA (used at R/B sites)
+    lpf = (s(0, 0) + 0.5 * (s(-1, 0) + s(1, 0) + s(0, -1) + s(0, 1))
+           + 0.25 * (s(-1, -1) + s(-1, 1) + s(1, -1) + s(1, 1)))
+    lp = np.pad(lpf, P, mode='reflect')
+
+    # Step 3: green at R and B
+    n_grad = eps + np.abs(s(-1, 0) - s(1, 0)) + np.abs(s(0, 0) - s(-2, 0)) \
+        + np.abs(s(-1, 0) - s(-3, 0)) + np.abs(s(-2, 0) - s(-4, 0))
+    s_grad = eps + np.abs(s(-1, 0) - s(1, 0)) + np.abs(s(0, 0) - s(2, 0)) \
+        + np.abs(s(1, 0) - s(3, 0)) + np.abs(s(2, 0) - s(4, 0))
+    w_grad = eps + np.abs(s(0, -1) - s(0, 1)) + np.abs(s(0, 0) - s(0, -2)) \
+        + np.abs(s(0, -1) - s(0, -3)) + np.abs(s(0, -2) - s(0, -4))
+    e_grad = eps + np.abs(s(0, -1) - s(0, 1)) + np.abs(s(0, 0) - s(0, 2)) \
+        + np.abs(s(0, 1) - s(0, 3)) + np.abs(s(0, 2) - s(0, 4))
+    l0 = lpf
+
+    def est(dy, dx):
+        ln = s(2 * dy, 2 * dx, lp)
+        return s(dy, dx) * (1.0 + (l0 - ln) / (eps + l0 + ln))
+    n_est, s_est, w_est, e_est = est(-1, 0), est(1, 0), est(0, -1), est(0, 1)
+    v_est = (s_grad * n_est + n_grad * s_est) / (n_grad + s_grad)
+    h_est = (w_grad * e_est + e_grad * w_est) / (e_grad + w_grad)
+    g_rb = np.clip(vh_disc * h_est + (1.0 - vh_disc) * v_est, 0.0, None)
+    rb = ~is_g
+    rgb[..., 1][rb] = g_rb[rb]
+
+    G = np.pad(rgb[..., 1], P, mode='reflect')
+
+    # Step 4.1-4.2: diagonal discrimination at R/B sites
+    p_hpf = ((s(-3, -3) - s(-1, -1) - s(1, 1) + s(3, 3)) - 3.0 * (s(-2, -2) + s(2, 2))
+             + 6.0 * s(0, 0)) ** 2
+    q_hpf = ((s(-3, 3) - s(-1, 1) - s(1, -1) + s(3, -3)) - 3.0 * (s(-2, 2) + s(2, -2))
+             + 6.0 * s(0, 0)) ** 2
+    pp_, qp_ = np.pad(p_hpf, P, mode='reflect'), np.pad(q_hpf, P, mode='reflect')
+    p_stat = np.maximum(epssq, s(-1, -1, pp_) + s(0, 0, pp_) + s(1, 1, pp_))
+    q_stat = np.maximum(epssq, s(-1, 1, qp_) + s(0, 0, qp_) + s(1, -1, qp_))
+    pq_dir = p_stat / (p_stat + q_stat)
+    pqp = np.pad(pq_dir, P, mode='reflect')
+    pq_nb = 0.25 * (s(-1, -1, pqp) + s(-1, 1, pqp) + s(1, -1, pqp) + s(1, 1, pqp))
+    pq_disc = np.where(np.abs(0.5 - pq_dir) < np.abs(0.5 - pq_nb), pq_nb, pq_dir)
+
+    # Step 4.3: R at B sites and B at R sites (diagonal colour differences)
+    for ch, sites in ((0, is_b), (2, is_r)):
+        C = np.pad(rgb[..., ch], P, mode='reflect')
+        nw = eps + np.abs(s(-1, -1, C) - s(1, 1, C)) + np.abs(s(-1, -1, C) - s(-3, -3, C)) \
+            + np.abs(s(0, 0, G) - s(-2, -2, G))
+        ne = eps + np.abs(s(-1, 1, C) - s(1, -1, C)) + np.abs(s(-1, 1, C) - s(-3, 3, C)) \
+            + np.abs(s(0, 0, G) - s(-2, 2, G))
+        sw = eps + np.abs(s(1, -1, C) - s(-1, 1, C)) + np.abs(s(1, -1, C) - s(3, -3, C)) \
+            + np.abs(s(0, 0, G) - s(2, -2, G))
+        se = eps + np.abs(s(1, 1, C) - s(-1, -1, C)) + np.abs(s(1, 1, C) - s(3, 3, C)) \
+            + np.abs(s(0, 0, G) - s(2, 2, G))
+        nw_e = s(-1, -1, C) - s(-1, -1, G)
+        ne_e = s(-1, 1, C) - s(-1, 1, G)
+        sw_e = s(1, -1, C) - s(1, -1, G)
+        se_e = s(1, 1, C) - s(1, 1, G)
+        p_est = (nw * se_e + se * nw_e) / (nw + se)
+        q_est = (ne * sw_e + sw * ne_e) / (ne + sw)
+        val = np.clip(rgb[..., 1] + (1.0 - pq_disc) * p_est + pq_disc * q_est, 0.0, None)
+        rgb[..., ch][sites] = val[sites]
+
+    # Step 4.4: R and B at G sites (cardinal colour differences)
+    for ch in (0, 2):
+        C = np.pad(rgb[..., ch], P, mode='reflect')
+        n_g = eps + np.abs(s(0, 0, G) - s(-2, 0, G)) + np.abs(s(-1, 0, C) - s(1, 0, C)) \
+            + np.abs(s(-1, 0, C) - s(-3, 0, C))
+        s_g = eps + np.abs(s(0, 0, G) - s(2, 0, G)) + np.abs(s(1, 0, C) - s(-1, 0, C)) \
+            + np.abs(s(1, 0, C) - s(3, 0, C))
+        w_g = eps + np.abs(s(0, 0, G) - s(0, -2, G)) + np.abs(s(0, -1, C) - s(0, 1, C)) \
+            + np.abs(s(0, -1, C) - s(0, -3, C))
+        e_g = eps + np.abs(s(0, 0, G) - s(0, 2, G)) + np.abs(s(0, 1, C) - s(0, -1, C)) \
+            + np.abs(s(0, 1, C) - s(0, 3, C))
+        n_e = s(-1, 0, C) - s(-1, 0, G)
+        s_e = s(1, 0, C) - s(1, 0, G)
+        w_e = s(0, -1, C) - s(0, -1, G)
+        e_e = s(0, 1, C) - s(0, 1, G)
+        v_e = (n_g * s_e + s_g * n_e) / (n_g + s_g)
+        h_e = (e_g * w_e + w_g * e_e) / (e_g + w_g)
+        val = np.clip(rgb[..., 1] + (1.0 - vh_disc) * v_e + vh_disc * h_e, 0.0, None)
+        rgb[..., ch][is_g] = val[is_g]
+
+    return _rcd_border((rgb * scale).astype(np.float32), raw, pattern)
+
+
 def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
     """Dispatch to the appropriate debayering method."""
     if method == 'malvar':
         return debayer_malvar(raw, pattern)
     elif method == 'menon2007':
         return debayer_menon2007(raw, pattern)
+    elif method == 'rcd':
+        return debayer_rcd(raw, pattern)
     else:
         return debayer_bilinear(raw, pattern, method)
 
@@ -1029,6 +1218,107 @@ def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.n
 # Legacy aliases for backwards compatibility
 remove_hot_pixels = _fix_hot_mono
 remove_hot_pixels_bayer = lambda data, threshold=_DETECT: fix_hot_pixels(data, mode='bayer', threshold=threshold)
+
+
+def _spike_reject_bayer_numpy(data: np.ndarray, k: float, contrast: float,
+                              support_frac: float):
+    """numpy mirror of the native ``spike_reject_bayer`` (bit-identical: same
+    f32 operations in the same order). See ``remove_spikes_bayer``."""
+    d = np.ascontiguousarray(data, dtype=np.float32)
+    H, W = d.shape
+    out = d.copy()
+    k32, c32, f32 = np.float32(k), np.float32(contrast), np.float32(support_frac)
+    stage, maxes = {}, {}
+    for dy in (0, 1):
+        for dx in (0, 1):
+            P = d[dy::2, dx::2]
+            hh, ww = P.shape
+            if hh < 2 or ww < 2:
+                stage[(dy, dx)] = (None, np.float32(0), np.float32(0))
+                continue
+            pad = np.pad(P, 1, mode='symmetric')      # == reflect_idx (edge repeated)
+            nb = np.stack([pad[1 + oy:1 + oy + hh, 1 + ox:1 + ox + ww]
+                           for oy in (-1, 0, 1) for ox in (-1, 0, 1) if (oy, ox) != (0, 0)])
+            nb.sort(axis=0)
+            m8 = (nb[3] + nb[4]) * np.float32(0.5)
+            maxes[(dy, dx)] = nb[7]
+            if np.isnan(P).any():
+                stage[(dy, dx)] = (m8, np.float32(0), np.float32(0))
+                continue
+            # statistics over every other row/column of the plane (as the kernel)
+            ad = np.abs(P[::2, ::2] - m8[::2, ::2])
+            sigma = np.float32(np.median(ad)) * np.float32(1.4826)
+            bg = np.float32(np.median(P[::2, ::2]))
+            if not sigma >= 1e-6:
+                sigma = np.float32(0)
+            stage[(dy, dx)] = (m8, sigma, bg)
+    bgmap = np.empty_like(d)
+    for (dy, dx), (_, _, bg) in stage.items():
+        bgmap[dy::2, dx::2] = bg
+    above = d - bgmap                                  # each pixel over its own plane median
+    n = 0
+    for (dy, dx), (m8, sigma, bg) in stage.items():
+        if m8 is None or sigma <= 0:
+            continue
+        P = d[dy::2, dx::2]
+        m8max = maxes[(dy, dx)]
+        exc = P - m8
+        lift = m8 - bg
+        denom = np.where(lift > sigma, lift, sigma)
+        cand = (exc > k32 * sigma) & (exc > c32 * denom) & (P > m8max)
+        if not cand.any():
+            continue
+        lim = f32 * (P - bg)
+        ys, xs = np.nonzero(cand)
+        yy, xx = 2 * ys + dy, 2 * xs + dx
+        up = np.zeros(len(ys), np.int32)
+        for oy, ox in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            ny, nx = yy + oy, xx + ox
+            ok = (ny >= 0) & (ny < H) & (nx >= 0) & (nx < W)
+            val = np.full(len(ys), -np.inf, np.float32)
+            val[ok] = above[ny[ok], nx[ok]]
+            up += (val > lim[ys, xs]).astype(np.int32)
+        fl = up < 3
+        out[yy[fl], xx[fl]] = m8[ys[fl], xs[fl]]
+        n += int(fl.sum())
+    return out, n
+
+
+def remove_spikes_bayer(data: np.ndarray, k: Optional[float] = None,
+                        contrast: Optional[float] = None,
+                        support_frac: Optional[float] = None):
+    """Replace sharp single/few-pixel spikes (cosmic rays, residual hot pixels)
+    in a calibrated 2-D mosaic by their same-plane 8-neighbour median, before
+    debayering smears them into their neighbours. Returns ``(cleaned, n)``.
+    A candidate must also be brighter than all 8 same-plane neighbours: on a
+    steep, undersampled star profile a wing pixel otherwise passes the other
+    tests (most of its neighbours are sky), but it always has a brighter
+    same-plane neighbour on the side of the core.
+
+    ``--spike-reject``: a cheap, correctly noise-scaled alternative to per-frame
+    L.A.Cosmic. Noise is measured per Bayer plane from the frame itself (MAD
+    of the pixel-minus-neighbour-median residual over every other row/column),
+    so it needs no gain/read-noise model. A candidate must be significant (``k`` sigma over the median of
+    its 8 same-plane neighbours), sharp (``contrast`` times the neighbours' own
+    lift above the plane median -- a sampled star lifts its 2-px neighbours
+    to a large fraction of its peak), and must not lift 3+ of its 4 adjacent
+    mosaic pixels (a star, even an undersampled one, lifts nearly all of
+    them). Stars survive where ``hot_pixel_bayer``'s star-support rule is
+    needed, but a 2-pixel hit (each pixel lifting the other) is still caught.
+    Measured on a real 20 s Origin sub: ~200 events per frame, 1-2 px each.
+    """
+    k = Config.SPIKE_REJECT_SIGMA if k is None else k
+    contrast = Config.SPIKE_REJECT_CONTRAST if contrast is None else contrast
+    support_frac = Config.SPIKE_REJECT_SUPPORT_FRAC if support_frac is None else support_frac
+    if data.ndim != 2:
+        return data, 0
+    if _HAS_NATIVE and hasattr(_native, 'spike_reject_bayer') and isinstance(data, np.ndarray):
+        try:
+            return _native.spike_reject_bayer(np.ascontiguousarray(data, dtype=np.float32),
+                                              float(k), float(contrast), float(support_frac))
+        except Exception:
+            pass
+    return _spike_reject_bayer_numpy(data, k, contrast, support_frac)
 apply_hot_pixel_map_bayer = lambda data, hot_map: fix_hot_pixels(data, mode='bayer', hot_map=hot_map, threshold=None)
 
 

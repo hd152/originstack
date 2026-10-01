@@ -6,7 +6,58 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Built-in plate solver** (`--plate-solver local`, and the new default `auto`): matches the stack
+  against a local Gaia DR3 star index near the session/header position hint — no API key, about a
+  second per solve, and offline once the index covers the field. Tiles are fetched on first use
+  and cached; `tools/build_star_index.py` pre-fills a region or the whole sky.
+- **`--from-stack STACK.fits`**: re-run post-processing (Phase 4) alone on an earlier run's linear
+  stack, with that run's saved `_config.toml`; command-line flags override it.
+- **`--spike-reject`**: removes 1–2 pixel cosmic-ray/hot-pixel spikes on the raw mosaic before
+  debayering, with noise measured from each frame (native kernel, ~0.17 s/frame single-threaded).
+- **`--gpu-phase1 {auto,on,off}`**: where Phase 1 runs under `--use-gpu`.
+
+### Fixed
+
+- **Large coloured blobs in the background of galaxy images.** `--galaxy-mode`'s target finder
+  picked the biggest region above the sky, which on fields with a residual gradient was the
+  gradient (69% of the frame on one session, 74% on another) instead of the galaxy; background
+  extraction then left that gradient in and the stretch turned it into blotches. It now starts from
+  the galaxy's bright core. With a galaxy exclusion in place, the "faint diffuse emission" rule no
+  longer protects sky gradient either. **Expect different `--auto` output on galaxy targets.**
+- **The output WCS from a Celestron Origin session is now correct.** The `info.json` solve was
+  written mirrored and at the raw frame's centre onto a registered, cropped stack (~60 px off;
+  photometry, annotation and time-series photometry read it). It is now mapped through the
+  registration and the crop and refined against Gaia (0.24 px median on a real stack).
+- **`--cosmic-ray-rejection` (L.A.Cosmic) now removes cosmic rays instead of smoothing the frame.**
+  Its fixed noise model underestimated real noise ~7x and median-replaced ~22% of all pixels; it
+  now measures the noise per frame and replaces only the hits (~550 px per frame). `--auto` no
+  longer keeps it on for subs of 25 s or longer, and where it does want per-frame cosmic-ray removal
+  (fewer than 20 frames, mean stacking, drizzle) it uses the much cheaper `--spike-reject`.
+
+- **`--debayer-method rcd`**: Ratio Corrected Demosaicing (Siril's default) -- now the default; see
+  Changed.
+
 ### Changed
+
+- **The default debayer is now RCD** (`--debayer-method rcd`, Siril's default) instead of Malvar.
+  On two real sessions the stacked R/G/B noise dropped 7-15% for 1.6-2.6% wider stars, and the
+  stack's noise is now at or below Siril's on G/B. Phase 1 is slower (about 1.9 s per frame in the
+  debayer step vs 0.5; a 133-frame run took 1m43s instead of 1m35s). `--debayer-method malvar`
+  restores the previous behaviour. **Expect different output.**
+- **`--from-stack` re-runs are faster**: background extraction and the sky steps are cached
+  next to the input stack and reused while their settings are unchanged.
+- **Faster post-processing**: two background-surface blurs run on a downsampled grid.
+- **`--plate-solve` defaults to the built-in solver**, falling back to astrometry.net only when it
+  fails and an API key is set; `--offline` no longer turns plate solving off.
+- **`--use-gpu` runs Phase 1 on the CPU process pool** unless the card fits one GPU worker per CPU
+  core (`--gpu-phase1 on` to force the old path). On a 4 GB card the VRAM-limited GPU path measured
+  54 s against ~37 s CPU-only on the same session; the GPU is still used for later phases.
+- **Checkpoints are tied to their settings and input files.** Changing a Phase 1 setting or an
+  input file starts fresh; changing only a registration/stacking setting reuses Phase 1. Before,
+  a checkpoint was reused whenever the file names matched, even after `--stack-method` changed.
+  Verified checkpoints no longer expire after 72 hours.
 
 - **`--auto` no longer applies one preset's settings to every target.** A setting only some target
   presets define was blended over those presets alone, so e.g. the galaxy-only coarse chroma pass,

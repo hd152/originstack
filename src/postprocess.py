@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import time
 from typing import List, Optional
@@ -46,6 +47,8 @@ from src.psf_deconvolution import (
 )
 from src.quality import detect_stars_auto, generate_star_mask
 from src.utils import format_time, safe_print
+
+_log = logging.getLogger('originstack')
 
 try:
     from astropy.stats import sigma_clipped_stats
@@ -170,7 +173,8 @@ def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
         from astropy.wcs import WCS
 
         from src.session_info import build_wcs_keywords
-        wcs = WCS(build_wcs_keywords(session))
+        _sw = getattr(args, '_stack_wcs', None)    # mapped onto this stack's grid
+        wcs = WCS({k: v for k, (v, _c) in _sw.items()} if _sw else build_wcs_keywords(session))
         if not wcs.has_celestial:
             return None, 'session WCS has no celestial axes'
     except Exception:
@@ -249,16 +253,15 @@ def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
     return img
 
 
-def postprocess_stack(
-    stacked: np.ndarray,
-    args: argparse.Namespace,
-    final: List[FrameInfo],
-    stats: ProcessingStats,
-) -> np.ndarray:
-    """Apply all post-processing steps to the stacked image and return it."""
-    skip_steps = set(getattr(args, 'skip_step', []) or [])
-    _diag_dir = getattr(args, '_diagnostic_dir', None)
-    _diag_counter = [1]
+def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
+                      final: List[FrameInfo], skip_steps: set,
+                      _diag_dir, _diag_counter: list):
+    """Phase 4 up to and including the sky pedestal: hot pixels, star
+    detection, background extraction, chroma noise, sky floor/residual.
+    Returns (stacked, pp_star_mask, _pp_sources, _bg_excl_mask) -- the only
+    state the rest of postprocess_stack reads -- so --from-stack can cache
+    it (``_EARLY_CACHE``). Keep it that way: a new local this section sets
+    and a later step reads must be added to the return value."""
 
     # Per-channel hot pixel removal
     if 'hot_pixel' not in skip_steps:
@@ -625,6 +628,29 @@ def postprocess_stack(
             stacked = stacked + np.float32(pedestal)
             safe_print(f"  ✓ Sky pedestal: +{pedestal:.2f} "
                        f"(sky sigma={_ped_sigma:.2f})")
+
+    return stacked, pp_star_mask, _pp_sources, _bg_excl_mask
+
+
+def postprocess_stack(
+    stacked: np.ndarray,
+    args: argparse.Namespace,
+    final: List[FrameInfo],
+    stats: ProcessingStats,
+) -> np.ndarray:
+    """Apply all post-processing steps to the stacked image and return it."""
+    skip_steps = set(getattr(args, 'skip_step', []) or [])
+    _diag_dir = getattr(args, '_diagnostic_dir', None)
+    _diag_counter = [1]
+
+    _cached = _early_cache_load(stacked, args, skip_steps, _diag_dir)
+    if _cached is not None:
+        stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _cached
+    else:
+        stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _postprocess_early(
+            stacked, args, final, skip_steps, _diag_dir, _diag_counter)
+        _early_cache_save(stacked, pp_star_mask, _pp_sources, _bg_excl_mask, args,
+                          skip_steps, _diag_dir)
 
     # Denoisers below see only the starless layer when --starless-process is on:
     # with no stars in it they need no star mask (nothing to protect, no halo
@@ -1022,3 +1048,102 @@ def postprocess_stack(
 
     stacked = _sanitize(stacked, "final post-processing")
     return stacked
+
+
+# ---------------------------------------------------------------------------
+# --from-stack: cache of the early Phase 4 steps
+# ---------------------------------------------------------------------------
+# Background extraction, chroma noise and the sky steps are the slow half of
+# Phase 4 and the half a user tweaking denoise/contrast/stretch never changes.
+# postprocess_from_stack sets ``args._pp_early_cache`` (a file next to the input
+# stack); the result of _postprocess_early is reused when the input stack and
+# every args attribute that section reads are unchanged. That attribute list is
+# read from _postprocess_early's own source, so it cannot drift as steps change.
+
+def _early_args_read() -> tuple:
+    import ast
+    import inspect
+    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_postprocess_early)))
+    names = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == 'args':
+            names.add(n.attr)
+        if (isinstance(n, ast.Call) and getattr(n.func, 'id', None) in ('getattr', 'hasattr')
+                and len(n.args) >= 2 and isinstance(n.args[0], ast.Name)
+                and n.args[0].id == 'args' and isinstance(n.args[1], ast.Constant)):
+            names.add(n.args[1].value)
+    return tuple(sorted(names))
+
+
+_EARLY_ARGS: Optional[tuple] = None
+
+
+def _early_cache_key(stacked: np.ndarray, args, skip_steps: set) -> Optional[str]:
+    import hashlib
+    global _EARLY_ARGS
+    if _EARLY_ARGS is None:
+        _EARLY_ARGS = _early_args_read()
+    src = getattr(args, 'from_stack', None)
+    try:
+        st = os.stat(src)
+    except (OSError, TypeError):
+        return None
+    h = hashlib.sha256()
+    h.update(f"{os.path.abspath(src)}|{st.st_size}|{st.st_mtime_ns}|{stacked.shape}".encode())
+    h.update(repr(sorted(skip_steps)).encode())
+    for name in _EARLY_ARGS:
+        h.update(f"|{name}={getattr(args, name, None)!r}".encode())
+    try:
+        from src.utils import read_version
+        h.update(str(read_version()).encode())
+    except Exception:
+        pass
+    return h.hexdigest()
+
+
+def _early_cache_usable(args, _diag_dir) -> bool:
+    # diagnostics/aberration reports write files from inside the early steps
+    return (bool(getattr(args, '_pp_early_cache', None)) and _diag_dir is None
+            and not getattr(args, 'aberration_report', False)
+            and not getattr(args, 'diagnostic', False))
+
+
+def _early_cache_load(stacked, args, skip_steps, _diag_dir):
+    if not _early_cache_usable(args, _diag_dir):
+        return None
+    path = args._pp_early_cache
+    key = _early_cache_key(stacked, args, skip_steps)
+    if key is None or not os.path.exists(path):
+        return None
+    try:
+        import pickle
+        with open(path, 'rb') as fh:
+            blob = pickle.load(fh)  # nosec B301 -- our own file, next to the user's stack
+        if blob.get('key') != key:
+            return None
+        safe_print(f"  Phase 4: background/sky steps reused from {os.path.basename(path)} "
+                   f"(settings unchanged)")
+        return blob['stacked'], blob['star_mask'], blob['sources'], blob['excl_mask']
+    except Exception as e:
+        _log.debug("phase-4 early cache unreadable: %s", e)
+        return None
+
+
+def _early_cache_save(stacked, star_mask, sources, excl_mask, args, skip_steps, _diag_dir):
+    if not _early_cache_usable(args, _diag_dir):
+        return
+    key = _early_cache_key(stacked, args, skip_steps)
+    if key is None:
+        return
+    try:
+        import pickle
+        path = args._pp_early_cache
+        tmp = path + '.tmp'
+        with open(tmp, 'wb') as fh:
+            pickle.dump({'key': key, 'stacked': stacked, 'star_mask': star_mask,
+                         'sources': sources, 'excl_mask': excl_mask}, fh,
+                        protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except Exception as e:
+        _log.debug("phase-4 early cache not written: %s", e)

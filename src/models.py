@@ -21,6 +21,9 @@ class Config:
     HOT_PIXEL_THRESHOLD = 12.0
     HOT_PIXEL_BAYER_THRESHOLD = 5.0  # Lower for Bayer detection (MAD-based, robust)
     HOT_PIXEL_STAR_SUPPORT = 3.0     # Bayer hot-pixel test: keep a flagged pixel whose neighbours are > this many sigma high (it is a star)
+    SPIKE_REJECT_SIGMA = 5.0         # --spike-reject: excess over the 8 same-plane neighbours' median, in plane sigma
+    SPIKE_REJECT_CONTRAST = 5.0      # --spike-reject: excess must also be this many times the neighbours' own lift (sharpness)
+    SPIKE_REJECT_SUPPORT_FRAC = 0.15 # --spike-reject: a 1-px mosaic neighbour above this fraction of the peak 'supports' it; 3+ of 4 = star
     CA_MIN_SHIFT_PX = 0.25           # Session CA below this: skip the correction warp entirely
     SESSION_CFA_MIN_FRAMES = 12      # Fewer lights than this: per-frame CFA equalisation, not one session estimate
     SESSION_CFA_PROBE_FRAMES = 8     # Frames spread through the session that the estimate is taken from
@@ -174,23 +177,6 @@ class Config:
                                      # vignetting to recover) -- see robust_pca_master's
                                      # bayer_block_downsample/_upsample for the mechanism.
 
-    # Cosmic-ray rejection auto-skip (see src/debayer.py Sharpness/noise-vs-Siril doc
-    # in CLAUDE.md for the underlying measurement)
-    LACOSMIC_LONG_SUB_EXPTIME_S = 25.0  # Median light EXPTIME (s) at/above which
-                                         # pipeline.py's >=20-frame auto-skip of
-                                         # per-frame L.A.Cosmic is itself skipped (i.e.
-                                         # lacosmic stays on) instead of deferring
-                                         # entirely to stack-level sigma-clip. Forcing
-                                         # lacosmic on measurably cuts stacked noise
-                                         # (11-16% across three real sessions) but softens
-                                         # stars, and that softening cost tracks sub
-                                         # length: ~0% at 30s subs, +6.8% at 20s, +11.8%
-                                         # at 10s. 25s sits between the 20s (still a real
-                                         # cost) and 30s (negligible) measurements --
-                                         # picked, not measured at that exact value; only
-                                         # three real sessions inform this, so treat as a
-                                         # starting heuristic pending more data, not a
-                                         # calibrated cutoff.
 
     # PSF-kernel drizzle resampling
     DRIZZLE_PSF_KERNEL_SIZE = 9     # Tap radius for the drizzle resample kernel when

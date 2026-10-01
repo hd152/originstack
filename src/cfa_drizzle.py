@@ -268,10 +268,12 @@ def apply_cfa_drizzle(stacked: np.ndarray, mem_rgb: np.ndarray, final_indices,
         safe_print("  --cfa-drizzle skipped: no Bayer pattern known for this session "
                    "(pre-debayered or mono input)")
         return stacked
-    method = getattr(args, 'debayer_method', 'malvar')
-    if method != 'malvar':
-        safe_print(f"  --cfa-drizzle skipped: needs --debayer-method malvar (its output keeps "
-                   f"each channel's raw sample; '{method}' does not guarantee that)")
+    method = getattr(args, 'debayer_method', 'rcd')
+    # malvar and rcd both write each channel's raw sample back unchanged (outside
+    # the 4-px border, which neither keeps); menon2007's refining pass does not
+    if method not in ('malvar', 'rcd'):
+        safe_print(f"  --cfa-drizzle skipped: needs --debayer-method rcd or malvar (their "
+                   f"output keeps each channel's raw sample; '{method}' does not)")
         return stacked
     if displacement_fields is not None and any(f is not None for f in displacement_fields):
         safe_print("  --cfa-drizzle skipped: not supported with --elastic-registration")

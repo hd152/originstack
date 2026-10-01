@@ -4,6 +4,7 @@ Public API
 ----------
 load_session_info(directory) -> Optional[SessionInfo]
 build_wcs_keywords(si)       -> dict   (empty if data insufficient)
+stack_wcs_keywords(si, ...)  -> dict   (the same WCS mapped onto a registered, cropped stack)
 """
 from __future__ import annotations
 
@@ -149,18 +150,19 @@ def build_wcs_keywords(si: 'SessionInfo') -> dict:
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
 
-    # TAN CD matrix: RA increases westward (negative pixel-X), Dec northward (+Y).
-    # Standard FITS CROTA->CD mapping (Greisen & Calabretta) with CDELT1=-psx,
-    # CDELT2=+psy and rotation theta:
-    #   CD1_1 =  CDELT1 cos  CD1_2 = -CDELT2 sin
-    #   CD2_1 =  CDELT1 sin  CD2_2 =  CDELT2 cos
-    # This keeps CD a true scale*rotation (constant determinant -psx*psy). The
-    # previous form mixed psx/psy into the off-diagonals with the wrong signs,
-    # producing a skew that went singular at theta=45deg instead of a rotation.
-    cd1_1 = -psx * cos_t
+    # TAN CD matrix for the Origin's FITS pixel grid: RA increases with +X and
+    # Dec with +Y (determinant +psx*psy), rotated by theta:
+    #   CD1_1 = psx cos  CD1_2 = -psy sin
+    #   CD2_1 = psx sin  CD2_2 =  psy cos
+    # Measured, not assumed: plate-solving raw Origin frames against Gaia
+    # (src/local_solve.py) gives this orientation on every session tried (Crab,
+    # Sunflower: centre within 3", position angle -theta). The previous form used
+    # the textbook east-left CDELT1 = -psx, i.e. a mirrored sky -- correct at the
+    # centre and ~4500" wrong at the corners.
+    cd1_1 = psx * cos_t
     cd1_2 = -psy * sin_t
-    cd2_1 = -psx * sin_t
-    cd2_2 =  psy * cos_t
+    cd2_1 = psx * sin_t
+    cd2_2 = psy * cos_t
 
     return {
         'CTYPE1':   ('RA---TAN', 'WCS axis 1: RA, gnomonic projection'),
@@ -177,6 +179,40 @@ def build_wcs_keywords(si: 'SessionInfo') -> dict:
         'ORIENTAT': (math.degrees(theta), 'Position angle of north (degrees)'),
         'WCSORIG': ('session_info', 'WCS source: session info.json'),
     }
+
+
+def stack_wcs_keywords(si: 'SessionInfo', to_stack, shape_hw) -> dict:
+    """``build_wcs_keywords`` carried onto a registered, cropped stack.
+
+    The info.json solve describes the session's *first* sub (measured: its
+    centre matches a Gaia solve of Light0001 to 3" and later subs drift away
+    from it), while the stack lives on the registration reference's grid,
+    cropped to the common region. *to_stack* maps native (row, col) of that
+    first sub to stack (row, col) -- the registration transform minus the crop
+    (``transparency.to_aligned_yx`` convention). The local Jacobian at the
+    sub's centre carries the CD matrix across, so a rotation between that sub
+    and the reference is honoured. Returns {} when *si* has no WCS.
+    """
+    kw = build_wcs_keywords(si)
+    if not kw:
+        return {}
+    import numpy as np
+    cx, cy = kw['CRPIX1'][0] - 1.0, kw['CRPIX2'][0] - 1.0
+    d = 100.0
+    src = np.array([[cy, cx], [cy, cx + d], [cy + d, cx]])
+    dst = np.asarray(to_stack(src), dtype=np.float64)
+    # J maps native (dx, dy) to stack (dx, dy)
+    J = np.column_stack([(dst[1] - dst[0])[::-1] / d, (dst[2] - dst[0])[::-1] / d])
+    cd = np.array([[kw['CD1_1'][0], kw['CD1_2'][0]], [kw['CD2_1'][0], kw['CD2_2'][0]]])
+    cd_out = cd @ np.linalg.inv(J)
+    out = dict(kw)
+    out['CRPIX1'] = (float(dst[0][1]) + 1.0, 'X reference pixel (1-based)')
+    out['CRPIX2'] = (float(dst[0][0]) + 1.0, 'Y reference pixel (1-based)')
+    for k, v in (('CD1_1', cd_out[0, 0]), ('CD1_2', cd_out[0, 1]),
+                 ('CD2_1', cd_out[1, 0]), ('CD2_2', cd_out[1, 1])):
+        out[k] = (float(v), kw[k][1])
+    out['WCSORIG'] = ('session_info', 'WCS source: session info.json, mapped to the stack')
+    return out
 
 
 # ---------------------------------------------------------------------------

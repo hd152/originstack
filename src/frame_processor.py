@@ -26,6 +26,7 @@ from src.debayer import (
     measure_chromatic_aberration,
     remove_hot_pixels_bayer,
     remove_hot_pixels_rgb_with_lum,
+    remove_spikes_bayer,
     set_session_cfa,
     white_balance_grayworld,
     white_balance_whitepatch,
@@ -191,7 +192,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           ca_shifts: Optional[dict] = None,
                           trail_reject: bool = False,
                           banding: Optional[tuple] = None,
-                          cfa_probe: bool = False) -> Dict[str, Any]:
+                          cfa_probe: bool = False,
+                          allow_gpu: bool = True,
+                          spike_reject: bool = False) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -214,7 +217,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # ── GPU calibration probe: decide once per frame size whether GPU is faster ──
     _gpu_ctx = get_gpu()
     _use_gpu_calib = False
-    if _gpu_ctx.active and data.ndim == 2:
+    if allow_gpu and _gpu_ctx.active and data.ndim == 2:
         _shape = data.shape
         with _gpu_calib_lock:
             # Every frame, not only on a new shape: the next target in the same
@@ -339,6 +342,16 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         return {'error': f'calibration error: {e}'}
     timings['calibrate'], _t = time.perf_counter() - _t, time.perf_counter()
 
+    # --spike-reject: sharp cosmic-ray/hot-pixel spikes on the calibrated mosaic,
+    # before the debayer spreads each over its neighbours (and before the session
+    # CFA probe, so the probe measures the frame the pass will debayer).
+    if spike_reject and isinstance(data, np.ndarray) and data.ndim == 2:
+        try:
+            data, _n_spk = remove_spikes_bayer(data)
+        except Exception:
+            pass
+    timings['spike_reject'], _t = time.perf_counter() - _t, time.perf_counter()
+
     # Row/column banding removal (--banding-removal): on the calibrated mosaic,
     # per colour plane, before debayering spreads a row offset across rows.
     if banding is not None:
@@ -360,7 +373,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             return {'error': None, 'cfa_stats': None}
         _pb = session_bayer or autodetect_bayer_orientation(
             data, hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB')))
-        return {'error': None, 'cfa_stats': cfa_frame_stats(data, _pb), 'cfa_pattern': _pb}
+        return {'error': None, 'cfa_stats': cfa_frame_stats(data, _pb, debayer_method),
+                'cfa_pattern': _pb}
 
     # Debayer
     try:
@@ -520,6 +534,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 _worker_masters: Dict[str, Any] = {}
 _worker_trail_reject: bool = False  # per-session trail-rejection flag for pool workers
 _worker_banding: Optional[tuple] = None  # (amount, sigma) for pool workers, or None
+_worker_spike_reject: bool = False  # --spike-reject flag for pool workers
 _warned_dark_scales: set = set()  # dedup dark-scale mismatch warnings across frames
 _warned_nebula_wb_skip: set = set()  # dedup nebula-filter white-balance-skip notice
 
@@ -680,6 +695,48 @@ def _pin_worker_to_single_thread() -> None:
     os.environ['RAYON_NUM_THREADS'] = str(_RAYON_WORKER_CAP)
 
 
+def phase1_uses_gpu(args: argparse.Namespace) -> bool:
+    """Whether Phase 1 runs its GPU thread path (vs the CPU process pool).
+
+    Only calibration, the hot-pixel map and white balance dispatch to the GPU;
+    debayer, star detection, lacosmic and CFA equalisation stay CPU-native. The
+    GPU thread path's worker count is capped by VRAM (``max_gpu_workers``: ~7
+    on a 4 GB card against 16 CPU workers), which measured 54 s against ~37 s
+    CPU-only on the same real session. ``auto`` therefore keeps the GPU path
+    only when VRAM is not the constraint -- at least one GPU worker per core --
+    or when the run is sequential anyway (``-j 1``: one GPU-calibrated thread
+    beats one CPU thread). Pool workers are spawned without a GPU context, so
+    the CPU pool never touches the card; later phases still use it.
+
+    Decided once per Phase 1 and remembered on ``args._phase1_gpu`` so the
+    session-CFA probe and a checkpoint reload agree with the frame pass.
+    """
+    gpu = get_gpu()
+    if not gpu.active:
+        return False
+    cached = getattr(args, '_phase1_gpu', None)
+    if cached is not None:
+        return bool(cached)
+    mode = getattr(args, 'gpu_phase1', 'auto') or 'auto'
+    if mode == 'on':
+        use = True
+    elif mode == 'off':
+        use = False
+    elif getattr(args, 'parallel', 1) == 1:
+        use = True
+    else:
+        cores = os.cpu_count() or 4
+        gpu_workers = gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
+                                          Config.GPU_VRAM_RESERVE_MB)
+        use = gpu_workers >= cores
+        if not use:
+            safe_print(f"  GPU: Phase 1 on the CPU process pool ({cores} workers) -- "
+                       f"VRAM fits only {gpu_workers} GPU workers and most Phase 1 "
+                       f"work is CPU-native (force with --gpu-phase1 on)")
+    args._phase1_gpu = use
+    return use
+
+
 def _gpu_quality_pool_size(n_workers: int, cpu_count: int, n_frames: int) -> int:
     """Thread count for ``execute_frame_processing``'s GPU-mode quality pool.
 
@@ -736,7 +793,8 @@ def _share_masters(masters: Dict[str, Any]) -> Tuple[list, Dict[str, tuple], Dic
 def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
                      banding: Optional[tuple] = None,
                      session_cfa: Optional[dict] = None,
-                     scalar_masters: Optional[Dict[str, Any]] = None) -> None:
+                     scalar_masters: Optional[Dict[str, Any]] = None,
+                     spike_reject: bool = False) -> None:
     """Initializer for pool workers — attach to shared-memory calibration arrays.
 
     *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
@@ -745,8 +803,9 @@ def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
     not be threaded through the per-frame task tuple.
     """
     _pin_worker_to_single_thread()
-    global _worker_masters, _worker_trail_reject, _worker_banding
+    global _worker_masters, _worker_trail_reject, _worker_banding, _worker_spike_reject
     _worker_trail_reject = bool(trail_reject)
+    _worker_spike_reject = bool(spike_reject)
     _worker_banding = banding
     set_session_cfa(session_cfa)
     _worker_masters = dict(scalar_masters or {})
@@ -849,8 +908,8 @@ def _measure_session_cfa(frames: List[FrameInfo], masters: Dict[str, Any],
     """
     if (not getattr(args, 'session_cfa_eq', True)
             or len(frames) < Config.SESSION_CFA_MIN_FRAMES
-            or getattr(args, 'debayer_method', 'malvar') != 'malvar'
-            or get_gpu().active):
+            or getattr(args, 'debayer_method', 'rcd') not in ('malvar', 'rcd')
+            or phase1_uses_gpu(args)):
         return None
     n = len(frames)
     k = min(Config.SESSION_CFA_PROBE_FRAMES, n)
@@ -858,8 +917,11 @@ def _measure_session_cfa(frames: List[FrameInfo], masters: Dict[str, Any],
     _sb = getattr(args, '_session_bayer', None)
 
     def _one(i: int):
+        # CPU calibration, as the pool workers that will apply the result run it
         return _process_single_frame(frames[i].path, {}, masters, args.debayer_method,
-                                     args.white_balance, session_bayer=_sb, cfa_probe=True)
+                                     args.white_balance, session_bayer=_sb, cfa_probe=True,
+                                     allow_gpu=False,
+                                     spike_reject=getattr(args, 'spike_reject', False))
 
     samples, patterns = [], set()
     try:
@@ -935,7 +997,8 @@ def _parallel_frame_worker(
                                    pre_gradient_removal=pre_gradient_removal,
                                    ca_shifts=ca_shifts,
                                    trail_reject=_worker_trail_reject,
-                                   banding=_worker_banding)
+                                   banding=_worker_banding,
+                                   spike_reject=_worker_spike_reject)
     if result.get('error'):
         return (frame_idx, None, result['error'], None)
 
@@ -1006,8 +1069,10 @@ def execute_frame_processing(
             _step_totals[k] = _step_totals.get(k, 0.0) + v
 
     n = len(lights)
+    if hasattr(args, '_phase1_gpu'):
+        del args._phase1_gpu            # a new Phase 1 re-decides GPU vs CPU pool
     use_process_pool = (getattr(args, 'parallel', 1) != 1
-                        and not get_gpu().active
+                        and not phase1_uses_gpu(args)
                         and n >= 4)
 
     # Pre-compute flat_norm once (with rotation correction) so workers don't redo it.
@@ -1065,7 +1130,8 @@ def execute_frame_processing(
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
-                                               _session_cfa, scalar_masters)) as pool:
+                                               _session_cfa, scalar_masters,
+                                               getattr(args, 'spike_reject', False))) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 _wv = _get_ui_events()
                 _wv_done = 0
@@ -1188,7 +1254,8 @@ def execute_frame_processing(
                     skip_quality=_use_qpool,  # GPU workers skip quality
                     ca_shifts=_ca_shifts,
                     trail_reject=getattr(args, 'trail_reject', False),
-                    banding=_banding_cfg(args))
+                    banding=_banding_cfg(args),
+                    spike_reject=getattr(args, 'spike_reject', False))
             if result.get('error'):
                 return i, None, result['error'], None, None
             mem_rgb[i] = result['rgb']
@@ -1313,7 +1380,8 @@ def execute_frame_processing(
                 pre_gradient_removal=_pgr,
                 ca_shifts=_ca_shifts,
                 trail_reject=getattr(args, 'trail_reject', False),
-                    banding=_banding_cfg(args))
+                    banding=_banding_cfg(args),
+                    spike_reject=getattr(args, 'spike_reject', False))
             _wv = _get_ui_events()
             _wv.progress('Processing frames', i + 1, n)
             if result.get('error'):
@@ -1462,7 +1530,7 @@ def reload_accepted_frames(
         return n_workers
 
     use_process_pool = (getattr(args, 'parallel', 1) != 1
-                        and not gpu.active
+                        and not phase1_uses_gpu(args)
                         and n >= 4
                         and bool(mm_rgb_path and mm_lum_path and rgb_shape and lum_shape))
 
@@ -1488,7 +1556,8 @@ def reload_accepted_frames(
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
-                                               _session_cfa, scalar_masters)) as pool:
+                                               _session_cfa, scalar_masters,
+                                               getattr(args, 'spike_reject', False))) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",
@@ -1552,7 +1621,8 @@ def reload_accepted_frames(
                     preloaded_data=preloaded,
                     ca_shifts=_ca_shifts,
                     trail_reject=_tr,
-                    banding=_banding_cfg(args))
+                    banding=_banding_cfg(args),
+                    spike_reject=getattr(args, 'spike_reject', False))
             if result.get('error'):
                 return j, orig_idx, None, None, result['error']
             return j, orig_idx, result['rgb'], result['lum'], None

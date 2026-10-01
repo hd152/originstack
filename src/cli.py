@@ -852,6 +852,8 @@ def _restore_args(args: argparse.Namespace, baseline: dict) -> None:
 
 
 _ONLINE_FEATURES = ('plate_solve', 'annotate', 'photometry', 'photometry_timeseries', 'color_calibrate')
+# --plate-solve stays on offline with the built-in solver (cached index tiles only)
+_OFFLINE_OK = {'plate_solve': lambda a: getattr(a, 'plate_solver', 'auto') in ('auto', 'local')}
 
 
 def apply_network_policy(args: argparse.Namespace, announce: bool = False) -> bool:
@@ -863,7 +865,8 @@ def apply_network_policy(args: argparse.Namespace, announce: bool = False) -> bo
     offline = bool(getattr(args, 'offline', False))
     net_query.set_offline(offline)
     if offline and announce:
-        dropped = [f for f in _ONLINE_FEATURES if getattr(args, f, False)]
+        dropped = [f for f in _ONLINE_FEATURES if getattr(args, f, False)
+                   and not (f in _OFFLINE_OK and _OFFLINE_OK[f](args))]
         for f in dropped:
             setattr(args, f, False)
         safe_print("  Offline mode: no network requests will be made"
@@ -1347,7 +1350,8 @@ def build_parser() -> argparse.ArgumentParser:
     g_adv = p.add_argument_group('Advanced (most are managed automatically by --auto)')
     g_debug = p.add_argument_group('Diagnostics & debugging')
     g_originvision = p.add_argument_group('originvision scoring (advisory)')
-    g_core.add_argument('-d', '--directory', required=True)
+    g_core.add_argument('-d', '--directory', default=None,
+                   help='Session folder of light frames (required unless --from-stack).')
     g_core.add_argument('-o', '--output', default=None,
                    help='Output FITS path, or a folder (then <session>_stacked.fits and its .jpg '
                         'are generated inside it, never overwriting an existing pair). '
@@ -1710,17 +1714,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Sigma threshold for pixel rejection in sigma_clip/winsorized stacking (default: 3.0)')
     g_stack.add_argument('--rejection-iters', type=int, default=3,
                    help='Number of clipping iterations for sigma_clip stacking (default: 3)')
-    g_frames.add_argument('--debayer-method', choices=['malvar', 'menon2007'], default='malvar',
-                   help='Debayering method (default: malvar; both are native '
-                        'Rust kernels, no external dependency). menon2007 '
-                        '(DDFAPD directional filtering) is higher fidelity '
-                        'than malvar on fine periodic photographic detail in '
-                        'general, but on this codebase\'s synthetic astro '
-                        'benchmark (tools/bench_debayer_quality.py) the gain '
-                        'is modest (~14%% lower MAE on a synthetic starfield) '
-                        'and it is meaningfully slower -- most astro frames '
-                        'are smooth sky + point sources, not fine texture, so '
-                        'malvar remains the default.')
+    g_frames.add_argument('--debayer-method', choices=['rcd', 'malvar', 'menon2007'], default='rcd',
+                   help='Debayering method (all native Rust kernels, no external '
+                        'dependency). rcd (default; Ratio Corrected Demosaicing, also '
+                        'Siril\'s default): on a real 158-frame session its stack had '
+                        '5/15/12%% less R/G/B noise than malvar at 1.6%% wider stars '
+                        'and lower interpolation error on stars; ~1.1 s/frame vs '
+                        'malvar\'s 0.2. malvar (Malvar-He-Cutler, the default before '
+                        '2026-10): fastest, and the only one with session-constant '
+                        'CFA equalisation. menon2007 (DDFAPD directional filtering): '
+                        'higher fidelity on fine periodic detail, slower.')
     g_frames.add_argument('--white-balance', choices=['none', 'grayworld', 'whitepatch'], default='grayworld')
     g_frames.add_argument('--no-bayer-autodetect', dest='bayer_autodetect', action='store_false',
                    default=True,
@@ -1772,8 +1775,16 @@ def build_parser() -> argparse.ArgumentParser:
                                       Config.DRIZZLE_PSF_KERNEL_SIZE))
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
+    g_core.add_argument('--gpu-phase1', choices=['auto', 'on', 'off'], default='auto',
+                   help='With --use-gpu: where Phase 1 frame processing runs. '
+                        '"auto" (default) keeps it on the CPU process pool unless the '
+                        'card fits at least one GPU worker per CPU core -- only '
+                        'calibration/hot-pixel/white balance run on the GPU, and a '
+                        'VRAM-capped worker count measured slower than all CPU cores. '
+                        'The GPU is still used for later phases (e.g. RL deconvolution).')
     g_out.add_argument('--plate-solve', action='store_true',
-                   help='Enable plate solving via astrometry.net (requires ASTROMETRY_API_KEY)')
+                   help='Plate-solve the stack and write a WCS (see --plate-solver; the default '
+                        'solves locally against a Gaia index, no API key needed)')
     g_out.add_argument('--annotate', action='store_true',
                    help='Circle and label bright stars and named deep-sky objects '
                         '(galaxies, nebulae, clusters) on a copy of the preview, via live '
@@ -1912,6 +1923,11 @@ def build_parser() -> argparse.ArgumentParser:
                         'moonlight / light-pollution drift / thin cloud, and sharpens '
                         'sigma-clip). Applies to rejection stack methods (not plain mean '
                         'or drizzle).')
+    g_frames.add_argument('--spike-reject', action='store_true',
+                   help='Replace sharp 1-2 pixel spikes (cosmic rays, residual hot pixels) '
+                        'on the calibrated mosaic before debayering, using noise measured '
+                        'from each frame. Much cheaper than --cosmic-ray-rejection and '
+                        'leaves ordinary sky/star pixels untouched.')
     g_frames.add_argument('--no-cosmic-ray-rejection', dest='cosmic_ray_rejection',
                    action='store_false',
                    help='Disable per-frame cosmic ray rejection (L.A.Cosmic)')
@@ -1982,10 +1998,19 @@ def build_parser() -> argparse.ArgumentParser:
                    metavar='DIR', help=argparse.SUPPRESS)
     g_originvision.add_argument('--originvision-checkpoint', default=None, metavar='PATH',
                    help=argparse.SUPPRESS)
-    g_out.add_argument('--plate-solver', choices=['astap', 'astrometry'], default='astrometry',
-                   help='Plate solver backend: astap (fast, local) or '
-                        'astrometry (nova.astrometry.net, requires API key). '
-                        'ASTAP recommended when the binary is installed (~1 s vs 30–120 s online).')
+    g_out.add_argument('--plate-solver', choices=['auto', 'local', 'astap', 'astrometry'],
+                   default='auto',
+                   help='Plate solver backend. auto (default): the built-in solver against a '
+                        'local Gaia star index, then astrometry.net if that fails and an API key '
+                        'is set. local: built-in only -- needs a position hint (session '
+                        'info.json/header WCS or RA/DEC keywords); index tiles it lacks are '
+                        'downloaded once and cached, or prebuilt with tools/build_star_index.py '
+                        'for fully offline use. astap: the ASTAP binary. astrometry: '
+                        'nova.astrometry.net (requires ASTROMETRY_API_KEY).')
+    g_out.add_argument('--no-wcs-refine', dest='wcs_refine', action='store_false',
+                   help='Do not refine the session info.json WCS against the local Gaia '
+                        'index after stacking (by default it is mapped onto the stack and '
+                        'refined; missing index tiles are fetched once unless --offline).')
     g_out.add_argument('--astap-path', default=None, metavar='PATH',
                    help='Explicit path to the ASTAP binary (auto-detected if omitted)')
     g_comet.add_argument('--comet-mode', action='store_true',
@@ -2146,6 +2171,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Keep the raw pre-post-processing stack after a successful run. '
                         'Re-running skips phases 1–3 so you can iterate on post-processing '
                         'settings quickly.')
+    g_sessions.add_argument('--from-stack', default=None, metavar='STACK.fits',
+                   help='Re-run only Phase 4 (post-processing) on the linear main FITS '
+                        '(RAWSTACK) of an earlier run -- no light frames needed. Settings '
+                        'come from the earlier run\'s <stem>_config.toml when present (so '
+                        '--auto choices carry over) and any flag given here overrides them. Writes '
+                        'the preview (and --export files) for -o, default '
+                        '<stem>_reprocessed; the linear FITS is not modified.')
     g_sessions.add_argument('--no-resume', action='store_true',
                    help='Ignore any existing checkpoint and start from scratch.')
     g_sessions.add_argument('--combine-sessions', action='store_true',
@@ -2416,6 +2448,9 @@ def parse_args(argv=None):
 
     args = p.parse_args(_argv)
     args._explicit_cli_dests = _explicit_dests
+    if not args.directory and not getattr(args, 'from_stack', None):
+        p.error("the following arguments are required: -d/--directory "
+                "(or --from-stack STACK.fits)")
 
     # ── Map the consolidated CLI surface onto the internal per-feature flags
     # (presets, --config, and the auto-advisor all operate on the internal
@@ -2545,7 +2580,17 @@ def apply_post_parse_setup(args: argparse.Namespace) -> None:
     function specifically so the two callers can't drift apart the way they
     already had (the desktop app was silently missing the "no output path
     specified" notice before this was extracted)."""
-    if not args.health_check and not getattr(args, 'dry_run', False):
+    _from_stack = getattr(args, 'from_stack', None)
+    if _from_stack:
+        _stem = os.path.splitext(_from_stack)[0]
+        if not args.output:
+            args.output = _stem + '_reprocessed.fits'
+            safe_print(f"  --from-stack: writing to {os.path.basename(args.output)}")
+        # The earlier run's effective settings (incl. --auto's derived choices),
+        # so Phase 4 starts where that run ended; explicit flags still win.
+        if not getattr(args, 'config', None) and os.path.isfile(_stem + '_config.toml'):
+            args.config = _stem + '_config.toml'
+    elif not args.health_check and not getattr(args, 'dry_run', False):
         if not args.output:
             dir_name = os.path.basename(os.path.abspath(args.directory))
             args.output = f"{dir_name}_stacked.fits"
@@ -2625,6 +2670,17 @@ def main():
     if getattr(args, 'live', False):
         from src.live_stack import run_live_stack
         raise SystemExit(run_live_stack(args))
+
+    # Phase 4 only, on an earlier run's linear stack.
+    if getattr(args, 'from_stack', None):
+        from src.pipeline import postprocess_from_stack
+        try:
+            postprocess_from_stack(args.from_stack, args.output, args)
+            save_effective_config(args, args.output)
+        except (OSError, ValueError) as e:
+            safe_print(f"  ERROR: {e}")
+            raise SystemExit(1)
+        raise SystemExit(0)
 
     # Two-pass streaming stack of an already-complete directory.
     if getattr(args, 'stream', False):

@@ -43,8 +43,40 @@ def _native_usable(data: np.ndarray) -> bool:
             and data.flags['C_CONTIGUOUS'])
 
 
+def lacosmic_noise_model(img: np.ndarray):
+    """Per-channel ``(a, b)`` for ``noise^2 = a + b * max(level, 0)``, measured from
+    the frame: sky sigma from the MAD of lag-4 pixel differences (lag 4 clears the
+    debayer's neighbour correlation), Poisson growth above sky referenced to a
+    near-zero floor (the 0.1th percentile) so ``b = sigma^2 / (sky - floor)``.
+
+    The fixed default (gain 1 e-/ADU, read noise 6.5 ADU) predicted ~139 ADU on a
+    real 20 s Origin sub whose measured noise is ~963, so ``sigclip`` 4.5 was
+    really ~0.65 sigma and lacosmic median-replaced ~22% of all pixels -- a 5x5
+    median smoothing, not cosmic-ray removal. Returns None for non-RGB input.
+    """
+    if img.ndim != 3 or img.shape[2] != 3:
+        return None
+    a, b = [], []
+    for c in range(3):
+        ch = img[::4, :, c]
+        d = (ch[:, 4:] - ch[:, :-4]).astype(np.float64).ravel()
+        d = d[np.isfinite(d)]
+        sig = float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0)) if d.size else 0.0
+        sub = img[::4, ::4, c].astype(np.float64)
+        sub = sub[np.isfinite(sub)]
+        if sub.size == 0 or not sig > 0:
+            sig, sky, floor = 1.0, 0.0, 0.0
+        else:
+            sky = float(np.median(sub))
+            floor = float(np.percentile(sub, 0.1))
+        bb = sig * sig / max(sky - floor, sig)
+        a.append(max(sig * sig - bb * max(sky, 0.0), 0.0))
+        b.append(bb)
+    return a, b
+
+
 def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
-                    gain: float = 1.0, readnoise: float = 6.5) -> np.ndarray:
+                    gain: Optional[float] = None, readnoise: Optional[float] = None) -> np.ndarray:
     """L.A.Cosmic-style cosmic ray rejection for a single RGB frame.
 
     Implements a simplified version of the Laplacian edge detection algorithm
@@ -69,19 +101,27 @@ def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
                  (default 4.5 — conservative to avoid touching star cores).
         objlim: Minimum ratio of S to local-median(S) required for CR flagging
                 (default 5.0).  Increase to flag only sharper spikes.
-        gain: Effective detector gain in e⁻/ADU (default 1.0).  Used in the
-              Poisson noise model; inaccuracy has little effect on detection.
-        readnoise: Read noise in ADU (default 6.5).  Added in quadrature to
-                   the Poisson term.
+        gain, readnoise: a fixed noise model (e-/ADU and ADU). Default None:
+              measure it from the frame (``lacosmic_noise_model``). The old
+              fixed default (1.0, 6.5) underestimated real Origin noise ~7x and
+              turned this into a smoothing filter -- pass both to get it back.
 
     Returns:
         Cleaned float32 RGB image with cosmic rays replaced by local median.
     """
     if img.ndim != 3 or img.shape[2] != 3:
         return img
+    model = None
+    if gain is None or readnoise is None:
+        model = lacosmic_noise_model(img)
+        gain, readnoise = 1.0, 6.5           # unused when model is set
 
     if HAS_NATIVE and img.dtype == np.float32 and img.flags['C_CONTIGUOUS']:
         try:
+            if model is not None:
+                return _native.lacosmic_reject_native(
+                    img, float(sigclip), float(objlim), 1.0, 6.5,
+                    [float(v) for v in model[0]], [float(v) for v in model[1]])
             return _native.lacosmic_reject_native(
                 img, float(sigclip), float(objlim), float(gain), float(readnoise))
         except Exception as exc:
@@ -103,7 +143,10 @@ def lacosmic_reject(img: np.ndarray, sigclip: float = 4.5, objlim: float = 5.0,
 
         # Local median for signal estimate (5x5) and noise model
         med5 = ndimage.median_filter(ch, size=5)
-        noise = np.sqrt(np.maximum(med5, 0.0) / gain + rn_term)
+        if model is not None:
+            noise = np.sqrt(model[0][c] + model[1][c] * np.maximum(med5, 0.0))
+        else:
+            noise = np.sqrt(np.maximum(med5, 0.0) / gain + rn_term)
         noise = np.maximum(noise, 1e-6)
 
         # Normalised detection statistic

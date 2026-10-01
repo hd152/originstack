@@ -23,13 +23,14 @@ from src.checkpoint import (
     restore_frame_state,
     save_checkpoint,
     save_raw_stack,
+    stack_fingerprint,
 )
 from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import autodetect_bayer_orientation, debayer
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
 from src.io_fits import load_fits, load_frame, populate_fits_header, save_preview_rgb
-from src.models import Config, FrameInfo, ProcessingStats
+from src.models import FrameInfo, ProcessingStats
 from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
 from src.registration import run_registration_phase, select_reference_frame
@@ -388,6 +389,68 @@ def _hdr_blend(long_stack: np.ndarray, short_fits_path: str,
     return blended.astype(np.float32)
 
 
+def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
+                      shifts: List, transforms: List, top: int, left: int,
+                      stacked_linear: np.ndarray) -> None:
+    """Put a correct WCS for the stack on ``args._stack_wcs`` (header cards).
+
+    The info.json WCS describes the session's first sub; the stack is on the
+    registration reference's grid, cropped. Written as-is it was ~58 px off on
+    a real stack (0 of 42 Gaia stars within 2 px). Two steps: map that sub's
+    WCS through its own registration transform and the crop
+    (``session_info.stack_wcs_keywords``), then -- unless ``--no-wcs-refine`` --
+    refine it with the local Gaia solver (``local_solve.solve_header``), which
+    fetches missing index tiles only when the run is online. Runs right after
+    Phase 3 so Phase 4's sky model, --photometry-timeseries and the output
+    header all read the same WCS. Never raises.
+    """
+    si = getattr(args, '_session_info', None)
+    if si is None or not si.has_wcs:
+        return
+    try:
+        from astropy.io import fits
+
+        from src.session_info import stack_wcs_keywords
+        from src.transparency import to_aligned_yx
+
+        def _t(f):
+            return str((f.header or {}).get('DATE-OBS') or ''), f.path
+        first = min(lights, key=_t) if lights else None
+        idx = {id(f): j for j, f in enumerate(final)}
+        j = idx.get(id(first)) if first is not None else None
+        exact = j is not None
+        if j is None:
+            j = min(range(len(final)), key=lambda k: _t(final[k])) if final else None
+        scale = float(getattr(args, 'drizzle_scale', 1.0) or 1.0)
+        tr = transforms[j] if (j is not None and transforms and j < len(transforms)) else None
+        sh = shifts[j] if (j is not None and shifts and j < len(shifts)) else None
+
+        def to_stack(yx):
+            a = to_aligned_yx(yx, tr, sh)
+            return (a - np.array([top, left], dtype=np.float64)) * scale
+
+        cards = stack_wcs_keywords(si, to_stack, stacked_linear.shape[:2])
+        if not cards:
+            return
+        how = "mapped through the first sub's registration" if exact else \
+            "mapped through the earliest accepted sub's registration (the first was rejected)"
+        if getattr(args, 'wcs_refine', True):
+            from src.local_solve import solve_header
+            hdr = fits.Header()
+            for k, (v, c) in cards.items():
+                hdr[k] = (v, c)
+            lum = np.ascontiguousarray(stacked_linear.mean(axis=2), dtype=np.float32)
+            if solve_header(lum, hdr, verbose=bool(getattr(args, 'verbose', False))):
+                cards = {k: (hdr[k], hdr.comments[k]) for k in hdr.keys()
+                         if k not in ('PLTSOLVD', 'PLTSOLVR')}
+                how = (f"refined against Gaia ({hdr.get('PLTNSTAR')} stars, "
+                       f"rms {hdr.get('PLTRMS')} px)")
+        args._stack_wcs = cards
+        safe_print(f"  WCS: session info.json solve {how}")
+    except Exception as e:
+        _log.debug("settling the stack WCS failed: %s", e)
+
+
 def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace,
                  masters: Dict[str, Optional[np.ndarray]], stats: ProcessingStats) -> Optional[str]:
     lights = [f for f in frames if f.type == 'light']
@@ -417,8 +480,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     _sigma_out: dict = {}  # populated by run_stacking_phase when --uncertainty-map
     # applies; defined unconditionally since Phase 3 (where it's normally set)
     # is skipped entirely on a >=phase-3 checkpoint resume below.
+    # Settings/input fingerprint: taken before --auto or Phase 1 change args
+    try:
+        _ckpt_fp = stack_fingerprint(args, lights)
+    except Exception as _e:   # never let bookkeeping stop a run
+        _log.debug("checkpoint fingerprint failed: %s", _e)
+        _ckpt_fp = None
     if not getattr(args, 'no_resume', False):
-        _ok, resume_phase, ckpt_state = can_resume(output_path, lights)
+        _ok, resume_phase, ckpt_state = can_resume(output_path, lights, _ckpt_fp)
         # Drizzle must re-run phase 3: the saved raw_stack.npy is at input
         # resolution, not the upscaled drizzle output.  Downgrade so stacking
         # is repeated with the correct drizzle pass.
@@ -503,6 +572,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # Recover the metadata prior (folder/header/session) locally so the
             # classifier matches a fresh run; skip Simbad to avoid a network hit.
             _infer_target_and_advise(final, args, _directory, use_simbad=False)
+            # No transforms on a phase-3 resume: shifts only, then the Gaia refine
+            _settle_stack_wcs(args, lights, final, shifts, [None] * len(final),
+                              top, left, stacked)
 
             if getattr(args, 'photometry_timeseries', False):
                 safe_print("\n  NOTE: --photometry-timeseries needs the registered "
@@ -535,43 +607,35 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
         try:
             # Resolve the cosmic-ray-rejection tri-state (None = auto).
-            # Per-frame L.A.Cosmic earns its cost only when the stack cannot
-            # reject outliers itself: with >=20 frames and any rejection-based
-            # combine, per-pixel stack rejection removes cosmic rays
-            # statistically better than per-frame detection, and lacosmic is
-            # the single most expensive Phase-1 step. Drizzle has no per-pixel
-            # rejection, so it keeps lacosmic. Resolved before the resume
-            # branch so checkpoint reloads see the same setting.
+            # With >= 20 frames and a rejection-based combine, per-pixel stack
+            # rejection removes cosmic rays on its own. Otherwise (few frames,
+            # mean, drizzle -- no per-pixel rejection) they need removing per
+            # frame, and auto uses the cheap mosaic spike rejector
+            # (--spike-reject, ~0.17 s/frame, before the debayer smears them)
+            # rather than L.A.Cosmic (~1 s/frame on the debayered frame);
+            # --cosmic-ray-rejection still asks for L.A.Cosmic explicitly.
             #
-            # That skip trades away a real noise reduction (11-16% measured on
-            # three real sessions when lacosmic is forced on, from cosmic-ray/
-            # hot-pixel spikes the Malvar debayer smears across more pixels in
-            # R/B than G -- see CLAUDE.md's Sharpness/noise-vs-Siril entry).
-            # The cost of taking that noise win -- star softening -- tracked
-            # sub length on those same sessions (~0% at 30s subs, +6.8% at
-            # 20s, +11.8% at 10s), so on long subs the skip is pure loss: keep
-            # lacosmic on there even at high frame count.
+            # History: lacosmic was once kept on for >= 25 s subs because it
+            # "cut stacked noise 11-16%". That was its fixed noise model (gain
+            # 1, RN 6.5 -> ~140 ADU against a real ~960) median-smoothing ~22%
+            # of all pixels; on Sunflower it lowered noise to x0.83 at +6.7%
+            # star width, where a plain Gaussian blur gives the same x0.83 at
+            # +4%. With the noise measured per frame it replaces ~550 px/frame
+            # and changes neither noise nor star width -- so that rule went.
             if getattr(args, 'cosmic_ray_rejection', None) is None:
                 _method = getattr(args, 'stack_method', 'auto')
                 _drizzling = float(getattr(args, 'drizzle_scale', 1.0) or 1.0) > 1.0
-                _exptimes = [float(f.header.get('EXPTIME', 0) or 0) for f in lights]
-                _exptimes = [e for e in _exptimes if e > 0]
-                _median_exptime = float(np.median(_exptimes)) if _exptimes else None
-                _long_subs = (_median_exptime is not None
-                              and _median_exptime >= Config.LACOSMIC_LONG_SUB_EXPTIME_S)
-                if n >= 20 and _method != 'mean' and not _drizzling and not _long_subs:
-                    args.cosmic_ray_rejection = False
-                    safe_print(f"  NOTE: cosmic-ray rejection skipped: {n} frames with "
-                               f"rejection stacking removes cosmic rays per-pixel "
-                               f"(force with --cosmic-ray-rejection)")
-                else:
-                    args.cosmic_ray_rejection = True
-                    if n >= 20 and _long_subs:
-                        safe_print(f"  NOTE: cosmic-ray rejection kept on despite {n} "
-                                   f"frames: median sub length {_median_exptime:.0f}s "
-                                   f">= {Config.LACOSMIC_LONG_SUB_EXPTIME_S:.0f}s, where "
-                                   f"it measurably cuts stacked noise at ~no star-softening "
-                                   f"cost (disable with --no-cosmic-ray-rejection)")
+                args.cosmic_ray_rejection = False
+                if n >= 20 and _method != 'mean' and not _drizzling:
+                    safe_print(f"  NOTE: per-frame cosmic-ray rejection skipped: {n} frames "
+                               f"with rejection stacking remove them per pixel "
+                               f"(force with --cosmic-ray-rejection or --spike-reject)")
+                elif not getattr(args, 'spike_reject', False):
+                    args.spike_reject = True
+                    _why = ('drizzle' if _drizzling else 'mean stacking'
+                            if _method == 'mean' else f'only {n} frames')
+                    safe_print(f"  NOTE: {_why} -- removing cosmic-ray spikes per frame "
+                               f"(--spike-reject; --cosmic-ray-rejection for L.A.Cosmic)")
 
             # ======================================================================
             # PHASE 1: Process & Analyse
@@ -656,7 +720,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                         args.export_frames_dir, args)
 
                 # Save checkpoint after phase 1
-                save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats)
+                save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats,
+                                fingerprint=_ckpt_fp)
 
                 # Target inference + originvision prior + auto-advisor.
                 _infer_target_and_advise(
@@ -751,7 +816,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
                 save_checkpoint(output_path, phase=2, lights=lights, final=final,
                                 shifts=shifts, transforms=transforms,
-                                dither_info=dither_info, stats=stats)
+                                dither_info=dither_info, stats=stats,
+                                fingerprint=_ckpt_fp)
 
             # Resolve 'auto' and legacy --winsorize shorthand
             if args.stack_method == 'auto':
@@ -841,6 +907,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             if getattr(args, 'keep_intermediates', False):
                 _save_blink_frames(final, final_indices, mem_rgb, shifts, transforms,
                                    top, bottom, left, right, output_path)
+
+            # The stack's WCS, before anything below (time-series photometry,
+            # Phase 4's sky model, the output header) reads it.
+            _settle_stack_wcs(args, lights, final, shifts, transforms, top, left, fits_stacked)
 
             # Per-frame differential light curves (needs the registered frames
             # still in mem_rgb, so it runs here rather than in the post-output
@@ -946,7 +1016,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 save_checkpoint(output_path, phase=3, lights=lights, final=final,
                                 shifts=shifts, transforms=transforms,
                                 dither_info=dither_info, stats=stats,
-                                crop=[top, bottom, left, right])
+                                crop=[top, bottom, left, right],
+                                fingerprint=_ckpt_fp)
 
         finally:
             mm_mgr.cleanup()
@@ -1236,13 +1307,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     if getattr(args, 'plate_solve', False):
         if args.verbose:
             print("\n  Attempting plate solving...")
-        solver   = getattr(args, 'plate_solver', 'astrometry')
+        solver   = getattr(args, 'plate_solver', 'auto')
         astap_bin = getattr(args, 'astap_path', None)
         if solve_plate(data_out, hdu.header, output_path,
                        verbose=args.verbose, solver=solver, astap_path=astap_bin):
             hdu.writeto(output_path, overwrite=True)
             _wcs_available = True
-            safe_print("  Plate solved: WCS from astrometry solver")
+            safe_print(f"  Plate solved: WCS from the {hdu.header.get('PLTSOLVR', 'plate')} solver")
         elif _session_has_wcs:
             _wcs_available = True
             safe_print("  Plate solve failed — output keeps WCS from session info.json")
@@ -1501,3 +1572,64 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         cleanup_checkpoint(output_path)
 
     return output_path
+
+
+def postprocess_from_stack(stack_path: str, output_path: str,
+                           args: argparse.Namespace) -> np.ndarray:
+    """``--from-stack``: Phase 4 alone, on the linear main FITS of an earlier run.
+
+    That FITS (``RAWSTACK=True``) is exactly what Phase 3 handed Phase 4, so
+    re-running only the post-processing chain -- the slowest part to iterate on
+    and the one whose settings change most -- needs no light frames, no
+    checkpoint and no memmaps. The earlier run's ``<stem>_config.toml`` (loaded
+    by ``cli.apply_post_parse_setup``) carries ``--auto``'s choices over; the
+    auto-advisor itself is not re-run, since it classifies from per-frame
+    metrics this path does not have. Writes the preview JPEG and any
+    ``--export`` files for *output_path*; the input FITS is left untouched.
+    """
+    from astropy.io import fits
+
+    from src.merge import load_merge_stack
+
+    stacked, _meta = load_merge_stack(stack_path)
+    header = fits.getheader(stack_path)
+    if os.path.abspath(output_path) == os.path.abspath(stack_path):
+        raise ValueError("--from-stack: -o must differ from the input stack "
+                         "(the linear FITS is never overwritten)")
+    safe_print(f"  Linear stack: {os.path.basename(stack_path)} "
+               f"({stacked.shape[0]}x{stacked.shape[1]}, "
+               f"{int(header.get('NFRAMES', 0) or 0)} frames)")
+    if getattr(args, 'config', None):
+        safe_print(f"  Settings: {os.path.basename(args.config)} + command-line overrides")
+    else:
+        safe_print("  Settings: command line only (no <stem>_config.toml next to the "
+                   "stack, so --auto's per-target choices are not available)")
+
+    stats = ProcessingStats()
+    # Background/sky steps are reused from this file while the stack and their
+    # settings are unchanged (postprocess._early_cache_*)
+    args._pp_early_cache = os.path.splitext(stack_path)[0] + '_phase4cache.pkl'
+    print_phase(4, "Post-processing (from an existing linear stack)")
+    t0 = time.time()
+    result = postprocess_stack(stacked, args, [], stats)
+    stats.post_processing_time = time.time() - t0
+
+    if getattr(args, 'output_tiff', False):
+        _save_tiff(result, output_path)
+    if getattr(args, 'output_xisf', False):
+        _save_xisf(result, output_path, header)
+    preview_path = os.path.splitext(output_path)[0] + '.jpg'
+    stretch_method = getattr(args, 'stretch', 'linear')
+    starless = None
+    if getattr(args, 'layered_stretch', False) and stretch_method == 'ghs':
+        from src.star_removal import starless_from_image
+        starless = starless_from_image(result)
+    save_preview_rgb(result, preview_path, stretch=stretch_method,
+                     ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+                     ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
+                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
+                     starless=starless)
+    safe_print(f"  ✓ Preview: {os.path.basename(preview_path)} "
+               f"(Phase 4 {format_time(stats.post_processing_time)})")
+    return result

@@ -2323,14 +2323,57 @@ def find_extended_source_ellipse(
         py, px = np.unravel_index(int(np.argmax(np.where(m, lum_smooth, -np.inf))), lum_smooth.shape)
         return bool(py < border or py >= H - border or px < border or px >= W - border)
 
-    candidates = [i for i, (center_y, center_x) in enumerate(centroids)
-                 if edge_margin_y < center_y < H - edge_margin_y
-                 and edge_margin_x < center_x < W - edge_margin_x
-                 and not _peaks_at_edge(i)]
-    if not candidates:
-        return None
-    peak_label = max(candidates, key=lambda i: sizes[i]) + 1
-    blob = labeled == peak_label
+    def _central(i: int) -> bool:
+        center_y, center_x = centroids[i]
+        return (edge_margin_y < center_y < H - edge_margin_y
+                and edge_margin_x < center_x < W - edge_margin_x
+                and not _peaks_at_edge(i))
+
+    # Seed from a high-significance core, not the largest 1-sigma blob: sky_std is
+    # the scatter of the *smoothed* border, i.e. gradient scale, so a broad residual
+    # gradient clears 1 sigma over most of the frame and wins on area. On a real
+    # galaxy field (Sunflower, 158 frames) that gave a 1427x862 px "galaxy" ellipse
+    # covering 69% of the frame away from M63; DBE then sampled only the rest and
+    # the unmodelled gradient came out of the stretch as large coloured blobs. A
+    # real object's core stands far above the gradient (the emission mask's own
+    # compact-source bar, 5 sigma) and carries the most integrated excess; its
+    # extent is then measured down to 10% of its own peak excess, so a gradient
+    # plateau it happens to touch is not swept in. The moment ellipse below
+    # (3.9x the RMS radius) still reaches well past that level into the halo.
+    hi = lum_smooth > (sky_med + 5.0 * sky_std)
+    lab_hi, n_hi = ndimage.label(hi)
+    blob = None
+    if n_hi:
+        cen_hi = ndimage.center_of_mass(weights, lab_hi, index=range(1, n_hi + 1))
+        # integrated excess: a galaxy core beats a bright star's (small) and a
+        # gradient's (low) on it
+        flux_hi = ndimage.sum(weights, lab_hi, index=range(1, n_hi + 1))
+
+        def _central_hi(i: int) -> bool:
+            cy_, cx_ = cen_hi[i]
+            if not (edge_margin_y < cy_ < H - edge_margin_y
+                    and edge_margin_x < cx_ < W - edge_margin_x):
+                return False
+            m = lab_hi == i + 1
+            py, px = np.unravel_index(int(np.argmax(np.where(m, lum_smooth, -np.inf))), (H, W))
+            return not (py < border or py >= H - border or px < border or px >= W - border)
+
+        cand_hi = [i for i in range(n_hi) if _central_hi(i)]
+        if cand_hi:
+            core = lab_hi == max(cand_hi, key=lambda i: flux_hi[i]) + 1
+            peak = float(lum_smooth[core].max())
+            # 10% of the object's own peak excess: on Sunflower 5% already merged
+            # M63 (108k px region) into the 1.3M px gradient plateau
+            t_obj = sky_med + max(thresh_sigma * sky_std, 0.10 * (peak - sky_med))
+            lab_obj, _ = ndimage.label(lum_smooth > t_obj)
+            ids = np.unique(lab_obj[core])
+            blob = np.isin(lab_obj, ids[ids > 0])
+    if blob is None:
+        # No significant core: the faint-object path (largest central 1-sigma blob)
+        candidates = [i for i in range(n) if _central(i)]
+        if not candidates:
+            return None
+        blob = labeled == max(candidates, key=lambda i: sizes[i]) + 1
 
     # A handful of pixels clearing the threshold by chance (shot noise, a
     # single hot pixel surviving the smooth) isn't an extended source --

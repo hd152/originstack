@@ -30,6 +30,7 @@ _WIDGET_HINTS: Dict[str, str] = {
     'quality_report': 'file-save',
     'astap_path': 'file-open',
     'hdr_combine': 'file-open',
+    'from_stack': 'file-open',
 }
 
 # Flags the desktop app doesn't drive a run through (they either watch/loop
@@ -220,7 +221,13 @@ class RunManager:
             apply_post_parse_setup(args)
 
             wv.run_started()
-            process_directory(args.directory, args.output, args)
+            if getattr(args, 'from_stack', None):
+                from src.cli import save_effective_config
+                from src.pipeline import postprocess_from_stack
+                postprocess_from_stack(args.from_stack, args.output, args)
+                save_effective_config(args, args.output)
+            else:
+                process_directory(args.directory, args.output, args)
         except RunCancelled:
             status = 'cancelled'
             safe_print("  Run cancelled.")

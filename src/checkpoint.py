@@ -14,6 +14,67 @@ from src.utils import safe_print
 # Sentinel for _to_json — module-level so it's not re-created on every call.
 _SKIP = object()
 
+# What a checkpoint's saved state depends on, split by the phase that reads it.
+# A checkpoint used to be matched on the set of light-frame paths alone, so
+# re-running with a different --stack-method, rejection sigma, debayer method
+# (or edited raw files) silently resumed from the old stack. The CLI groups
+# are the source of truth for which flags feed which phase; the extra names
+# are config-file/--auto-managed attributes with no flag of their own.
+_P1_GROUPS = ('Frames & calibration (Phase 1)',)
+_P23_GROUPS = ('Registration & stacking (Phases 2-3)', 'Comet mode')
+_P1_EXTRA = ('cal_dir', 'vignette_map', 'use_gpu', 'gpu_phase1', 'auto', 'preset',
+             'advanced_metrics', 'banding_amount', 'banding_sigma', 'pre_gradient_removal',
+             'max_ellipticity')
+_P23_EXTRA = ('consensus_ref', 'drizzle_psf_wiener_k', 'esd_max_outliers', 'esd_significance',
+              'ibp_relax', 'ivw_gain', 'linear_fit_iters', 'linear_fit_sigma_high',
+              'linear_fit_sigma_low', 'masked_correlation', 'moving_objects_threshold',
+              'no_alignment_centrality', 'no_shift_outlier_filter', 'patch_registration',
+              'percentile_high', 'percentile_low', 'rejection_estimator',
+              'skip_phase_correlation', 'wavelet_combine_levels', 'weight_fwhm',
+              'weight_noise', 'weight_snr', 'weight_stars')
+# In the Phases 2-3 group but only read by Phase 4 / the preview.
+_P23_IGNORE = ('error_aware_stretch', 'uncertainty_propagate', 'uncertainty_realizations')
+
+
+def _group_dests(titles) -> List[str]:
+    from src.cli import build_parser  # lazy: cli imports pipeline imports this module
+    out: List[str] = []
+    for g in build_parser()._action_groups:
+        if g.title in titles:
+            out.extend(a.dest for a in g._group_actions)
+    return out
+
+
+def stack_fingerprint(args, lights: List[FrameInfo]) -> Dict:
+    """Settings and inputs a checkpoint is only valid for.
+
+    ``inputs`` hashes each light's path, size and mtime; ``p1``/``p23`` hold the
+    repr of every setting read by Phase 1 and by Phases 2-3. Computed before
+    --auto mutates anything, so identical command lines give identical prints.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    for f in sorted(lights, key=lambda x: x.path):
+        base = f.path.split('::')[0]           # SER virtual frames share a file
+        try:
+            st = os.stat(base)
+            h.update(f"{f.path}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+        except OSError:
+            h.update(f"{f.path}|missing\n".encode())
+
+    def _vals(names) -> Dict[str, str]:
+        return {n: repr(getattr(args, n, None)) for n in sorted(set(names))}
+
+    p1 = _vals(list(_group_dests(_P1_GROUPS)) + list(_P1_EXTRA))
+    p23 = _vals([d for d in _group_dests(_P23_GROUPS) if d not in _P23_IGNORE]
+                + list(_P23_EXTRA))
+    return {'inputs': h.hexdigest(), 'p1': p1, 'p23': p23}
+
+
+def _changed(saved: Dict[str, str], now: Dict[str, str]) -> List[str]:
+    return sorted(k for k in set(saved) | set(now) if saved.get(k) != now.get(k))
+
 
 def _checkpoint_dir(output_path: str) -> str:
     return os.path.splitext(output_path)[0] + '_checkpoint'
@@ -70,7 +131,8 @@ def save_checkpoint(output_path: str, phase: int,
                     transforms: Optional[List] = None,
                     dither_info: Optional[Dict] = None,
                     stats: Optional[ProcessingStats] = None,
-                    crop: Optional[List[int]] = None) -> None:
+                    crop: Optional[List[int]] = None,
+                    fingerprint: Optional[Dict] = None) -> None:
     """Save pipeline state after a completed phase."""
     ckpt_dir = _checkpoint_dir(output_path)
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -80,6 +142,8 @@ def save_checkpoint(output_path: str, phase: int,
         'timestamp': time.time(),
         'n_lights': len(lights),
     }
+    if fingerprint is not None:
+        state['fingerprint'] = fingerprint
 
     # Save frame info (paths, metrics, accepted status)
     frame_data = []
@@ -263,11 +327,16 @@ def load_checkpoint(output_path: str) -> Optional[Dict]:
         return None
 
 
-def can_resume(output_path: str, lights: List[FrameInfo]) -> Tuple[bool, int, Optional[Dict]]:
+def can_resume(output_path: str, lights: List[FrameInfo],
+               fingerprint: Optional[Dict] = None) -> Tuple[bool, int, Optional[Dict]]:
     """Check if we can resume from a checkpoint.
 
     Returns (can_resume, completed_phase, checkpoint_data).
-    Validates that frame paths match the current input.
+    Validates that frame paths match the current input and, when both the
+    checkpoint and the caller carry a ``stack_fingerprint``, that the light
+    files and the settings each saved phase depends on are unchanged: a
+    Phase 1 setting or an edited file starts fresh, a Phases 2-3 setting
+    resumes after Phase 1 (its accepted-frame list is still valid).
     """
     state = load_checkpoint(output_path)
     if state is None:
@@ -282,7 +351,27 @@ def can_resume(output_path: str, lights: List[FrameInfo]) -> Tuple[bool, int, Op
 
     phase = state.get('phase', 0)
     age_hours = (time.time() - state.get('timestamp', 0)) / 3600
-    if age_hours > 72:
+    saved_fp = state.get('fingerprint')
+    verified = False
+    if saved_fp is not None and fingerprint is not None:
+        if saved_fp.get('inputs') != fingerprint['inputs']:
+            safe_print("  Checkpoint found but light files changed on disk — starting fresh")
+            return False, 0, None
+        p1 = _changed(saved_fp.get('p1', {}), fingerprint['p1'])
+        if p1:
+            safe_print(f"  Checkpoint found but Phase 1 settings changed "
+                       f"({', '.join(p1[:6])}{'...' if len(p1) > 6 else ''}) — starting fresh")
+            return False, 0, None
+        p23 = _changed(saved_fp.get('p23', {}), fingerprint['p23'])
+        if p23 and phase >= 2:
+            safe_print(f"  Checkpoint: registration/stacking settings changed "
+                       f"({', '.join(p23[:6])}{'...' if len(p23) > 6 else ''}) — "
+                       f"reusing Phase 1 only")
+            phase = 1
+        verified = True
+    # A verified checkpoint is valid however old it is (--keep-checkpoint exists
+    # to iterate on Phase 4 over days); an unverifiable legacy one expires.
+    if age_hours > 72 and not verified:
         safe_print(f"  Checkpoint found but too old ({age_hours:.0f}h) — starting fresh")
         return False, 0, None
 

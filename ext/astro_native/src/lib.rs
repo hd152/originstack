@@ -2753,7 +2753,8 @@ fn laplacian_2d_f32(data: &[f32], h: usize, w: usize) -> Vec<f32> {
 /// Output f32. Channels processed sequentially (each internally row-parallel)
 /// since S_med depends on the fully-computed S array.
 #[pyfunction]
-#[pyo3(signature = (data, sigclip=4.5, objlim=5.0, gain=1.0, readnoise=6.5))]
+#[pyo3(signature = (data, sigclip=4.5, objlim=5.0, gain=1.0, readnoise=6.5,
+                    noise_a=None, noise_b=None))]
 fn lacosmic_reject_native<'py>(
     py: Python<'py>,
     data: PyReadonlyArray3<'py, f32>,
@@ -2761,7 +2762,23 @@ fn lacosmic_reject_native<'py>(
     objlim: f64,
     gain: f64,
     readnoise: f64,
+    noise_a: Option<Vec<f64>>,
+    noise_b: Option<Vec<f64>>,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    // Per-channel measured noise model, noise^2 = a[c] + b[c] * max(med5, 0),
+    // replacing the gain/readnoise one when given (src/stacking.py).
+    let per_ch: Option<([f32; 3], [f32; 3])> = match (&noise_a, &noise_b) {
+        (Some(a), Some(b)) if a.len() == 3 && b.len() == 3 => Some((
+            [a[0] as f32, a[1] as f32, a[2] as f32],
+            [b[0] as f32, b[1] as f32, b[2] as f32],
+        )),
+        (None, None) => None,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "noise_a and noise_b must both be 3-element sequences",
+            ))
+        }
+    };
     let arr = data.as_array();
     let s = arr.shape();
     let (h, w, c) = (s[0], s[1], s[2]);
@@ -2818,7 +2835,11 @@ fn lacosmic_reject_native<'py>(
             let mut sarr = vec![0f32; h * w];
             sarr.par_iter_mut().enumerate().for_each(|(i, sv)| {
                 let f = fine[i].max(0.0);
-                let noise = (med5[i].max(0.0) / gain + rn_term).sqrt().max(1e-6);
+                let var = match per_ch {
+                    Some((a, b)) => a[ch] + b[ch] * med5[i].max(0.0),
+                    None => med5[i].max(0.0) / gain + rn_term,
+                };
+                let noise = var.sqrt().max(1e-6);
                 *sv = f / (2.0 * noise);
             });
             let smed = median_filter_2d_f32(&sarr, h, w, 3);
@@ -7382,6 +7403,194 @@ fn hot_pixel_bayer<'py>(
         .into_pyarray(py))
 }
 
+/// Mean of the 4th and 5th smallest of 8 (no NaN): Knuth's optimal 19-comparator
+/// sorting network, branchless min/max. Identical to sorting and averaging.
+#[inline(always)]
+fn med8(mut a: [f32; 8]) -> f32 {
+    #[inline(always)]
+    fn cs(a: &mut [f32; 8], i: usize, j: usize) {
+        let (x, y) = (a[i], a[j]);
+        a[i] = x.min(y);
+        a[j] = x.max(y);
+    }
+    cs(&mut a, 0, 2); cs(&mut a, 1, 3); cs(&mut a, 4, 6); cs(&mut a, 5, 7);
+    cs(&mut a, 0, 4); cs(&mut a, 1, 5); cs(&mut a, 2, 6); cs(&mut a, 3, 7);
+    cs(&mut a, 0, 1); cs(&mut a, 2, 3); cs(&mut a, 4, 5); cs(&mut a, 6, 7);
+    cs(&mut a, 2, 4); cs(&mut a, 3, 5);
+    cs(&mut a, 1, 4); cs(&mut a, 3, 6);
+    cs(&mut a, 1, 2); cs(&mut a, 3, 4); cs(&mut a, 5, 6);
+    (a[3] + a[4]) * 0.5f32
+}
+
+/// Sharp-spike (cosmic ray / residual hot pixel) rejection on a calibrated 2-D
+/// mosaic, before debayering spreads a spike over its neighbours. Returns the
+/// cleaned copy and the number of pixels replaced.
+///
+/// Per 2x2 Bayer sub-plane: `m` = median of the 8 same-plane neighbours
+/// (reflect boundary on the plane, mean of the 4th/5th sorted values), `sigma`
+/// = 1.4826 x median |P - m| and `bg` = the median of P, both over every other
+/// row and column of the plane. A pixel is replaced by
+/// `m` when all hold:
+///   * `v` exceeds all 8 same-plane neighbours -- a star's wing pixel has a
+///     brighter one on the side of the core;
+///   * `v - m > k * sigma` -- significant;
+///   * `v - m > contrast * max(m - bg, sigma)` -- sharp: a PSF-sampled star
+///     lifts its same-plane neighbours (2 px away) to a large fraction of its
+///     peak, a particle hit does not;
+///   * fewer than 3 of the 4 adjacent mosaic pixels (other planes, 1 px away)
+///     are above `support_frac * (v - bg)` over their own plane median -- a
+///     star, even an undersampled one, lifts nearly all of them.
+/// Unlike `hot_pixel_bayer`'s star-support rule, a 2-pixel hit (two adjacent
+/// pixels, each lifting the other) is still caught. All f32, numpy's order;
+/// bit-identical to `debayer._spike_reject_bayer_numpy`.
+#[pyfunction]
+#[pyo3(signature = (data, k, contrast, support_frac))]
+fn spike_reject_bayer<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f32>,
+    k: f32,
+    contrast: f32,
+    support_frac: f32,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, usize)> {
+    let arr = data.as_array();
+    let (h, w) = (arr.shape()[0], arr.shape()[1]);
+    let d: &[f32] = arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("data must be contiguous"))?;
+
+    let (out, n) = py.detach(|| {
+        let sigma_k = 1.4826f64 as f32;
+        // the 8 same-plane neighbours of mosaic pixel (y, x), reflect boundary on the plane
+        let neigh = |y: usize, x: usize| -> [f32; 8] {
+            let (py_, px) = (y & 1, x & 1);
+            let hh = (h - py_ + 1) / 2;
+            let ww = (w - px + 1) / 2;
+            let (i, j) = ((y >> 1) as isize, (x >> 1) as isize);
+            let mut win = [0f32; 8];
+            let mut c = 0;
+            for di in -1isize..=1 {
+                let ii = reflect_idx(i + di, hh);
+                for dj in -1isize..=1 {
+                    if di == 0 && dj == 0 {
+                        continue;
+                    }
+                    win[c] = d[(2 * ii + py_) * w + 2 * reflect_idx(j + dj, ww) + px];
+                    c += 1;
+                }
+            }
+            win
+        };
+        // per plane: (sigma, bg); sigma 0 = leave the plane alone. Statistics from
+        // every other row/column of the plane: a quarter of the median work, and
+        // they only set the threshold scale.
+        let stage: Vec<(f32, f32)> = (0..4usize)
+            .into_par_iter()
+            .map(|q| {
+                let (py_, px) = (q >> 1, q & 1);
+                let hh = (h.saturating_sub(py_) + 1) / 2;
+                let ww = (w.saturating_sub(px) + 1) / 2;
+                if hh < 2 || ww < 2 {
+                    return (0f32, 0f32);
+                }
+                let mut nan = false;
+                for i in 0..hh {
+                    let r = (2 * i + py_) * w + px;
+                    for j in 0..ww {
+                        if d[r + 2 * j].is_nan() {
+                            nan = true;
+                        }
+                    }
+                }
+                if nan {
+                    return (0f32, 0f32);
+                }
+                let mut ad = Vec::with_capacity(((hh + 1) / 2) * ((ww + 1) / 2));
+                let mut sub = Vec::with_capacity(ad.capacity());
+                for i in (0..hh).step_by(2) {
+                    for j in (0..ww).step_by(2) {
+                        let (y, x) = (2 * i + py_, 2 * j + px);
+                        let v = d[y * w + x];
+                        ad.push((v - med8(neigh(y, x))).abs());
+                        sub.push(v);
+                    }
+                }
+                let sigma = median_inplace(&mut ad) * sigma_k;
+                let bg = median_inplace(&mut sub);
+                if !(sigma >= 1e-6) {
+                    return (0f32, bg);
+                }
+                (sigma, bg)
+            })
+            .collect();
+        let mut out = d.to_vec();
+        let n: usize = out
+            .par_chunks_mut(w)
+            .enumerate()
+            .map(|(y, row)| {
+                let mut cnt = 0usize;
+                for x in 0..w {
+                    let (sigma, bg) = stage[(y & 1) * 2 + (x & 1)];
+                    if sigma <= 0f32 {
+                        continue;
+                    }
+                    let v = d[y * w + x];
+                    let win = neigh(y, x);
+                    // m >= min of the 8, so v - min <= k*sigma rules the pixel out exactly;
+                    // and a hit is the brightest of its plane neighbourhood (a star's wing
+                    // pixel has a brighter same-plane neighbour on the side of the core)
+                    let mut lo = win[0];
+                    let mut hi = win[0];
+                    for &u in &win[1..] {
+                        if u < lo {
+                            lo = u;
+                        }
+                        if u > hi {
+                            hi = u;
+                        }
+                    }
+                    if !(v - lo > k * sigma) || !(v > hi) {
+                        continue;
+                    }
+                    let m = med8(win);
+                    let exc = v - m;
+                    if !(exc > k * sigma) {
+                        continue;
+                    }
+                    let lift = m - bg;
+                    let denom = if lift > sigma { lift } else { sigma };
+                    if !(exc > contrast * denom) {
+                        continue;
+                    }
+                    let lim = support_frac * (v - bg);
+                    let mut up = 0;
+                    let mut nb = |yy: usize, xx: usize| {
+                        let bgn = stage[(yy & 1) * 2 + (xx & 1)].1;
+                        if d[yy * w + xx] - bgn > lim {
+                            up += 1;
+                        }
+                    };
+                    if y > 0 { nb(y - 1, x); }
+                    if y + 1 < h { nb(y + 1, x); }
+                    if x > 0 { nb(y, x - 1); }
+                    if x + 1 < w { nb(y, x + 1); }
+                    if up < 3 {
+                        row[x] = m;
+                        cnt += 1;
+                    }
+                }
+                cnt
+            })
+            .sum();
+        (out, n)
+    });
+    Ok((
+        numpy::ndarray::Array2::from_shape_vec((h, w), out)
+            .unwrap()
+            .into_pyarray(py),
+        n,
+    ))
+}
+
 /// Everything `hot_pixel_rgb` decides, before any pixel is written: the luminance,
 /// and (when something exceeded the cut) each flagged pixel's index and its
 /// replacement. f32 arithmetic in numpy's order, box mean in f64.
@@ -8064,6 +8273,319 @@ fn white_balance_grayworld_inplace<'py>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// RCD (Ratio Corrected Demosaicing, L. Sanz Rodriguez) -- src/debayer.py::debayer_rcd
+// ---------------------------------------------------------------------------
+// A line-for-line port of the numpy reference: every stage is computed over the
+// whole frame in f32 (as the numpy mirror; f64 doubled the memory traffic of a
+// bandwidth-bound kernel), intermediate arrays are read through numpy's
+// np.pad(mode='reflect') (== mirror_idx) at the same offsets, and every sum is
+// accumulated in the reference's left-to-right order, so the result is
+// bit-identical. The caller scales the mosaic by its maximum, pastes the 4-px
+// Malvar border and does the dtype work; this returns the interior RGB (H, W, 3)
+// already multiplied back by `scale` and rounded to f32.
+
+// Every array is stored reflect-padded by RCD_P on each side (np.pad(mode='reflect')
+// == mirror_idx), so a tap is a branchless fixed-stride load.
+const RCD_P: usize = 5;
+
+#[inline(always)]
+fn rcd_at(a: &[f32], h: usize, w: usize, y: usize, x: usize, dy: isize, dx: isize) -> f32 {
+    let _ = h;
+    let pw = w + 2 * RCD_P;
+    let i = ((y + RCD_P) as isize + dy) as usize * pw + ((x + RCD_P) as isize + dx) as usize;
+    unsafe { *a.get_unchecked(i) }
+}
+
+#[inline(always)]
+fn rcd_ci(w: usize, y: usize, x: usize) -> usize {
+    (y + RCD_P) * (w + 2 * RCD_P) + x + RCD_P
+}
+
+/// Evaluate f over the frame and return it reflect-padded.
+fn rcd_map<F: Fn(usize, usize) -> f32 + Sync>(h: usize, w: usize, f: F) -> Vec<f32> {
+    let pw = w + 2 * RCD_P;
+    let mut out = vec![0f32; (h + 2 * RCD_P) * pw];
+    out.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
+        if py < RCD_P || py >= h + RCD_P {
+            return;
+        }
+        let y = py - RCD_P;
+        for x in 0..w {
+            row[x + RCD_P] = f(y, x);
+        }
+    });
+    rcd_pad_in_place(&mut out, h, w);
+    out
+}
+
+fn rcd_pad_in_place(a: &mut [f32], h: usize, w: usize) {
+    let pw = w + 2 * RCD_P;
+    // columns, on the frame rows
+    for py in RCD_P..h + RCD_P {
+        let row = &mut a[py * pw..(py + 1) * pw];
+        for k in 0..RCD_P {
+            let xl = mirror_idx(k as isize - RCD_P as isize, w);
+            let xr = mirror_idx((w + k) as isize, w);
+            row[k] = row[xl + RCD_P];
+            row[w + RCD_P + k] = row[xr + RCD_P];
+        }
+    }
+    // whole rows (incl. their padded columns)
+    for k in 0..RCD_P {
+        let yt = mirror_idx(k as isize - RCD_P as isize, h);
+        let yb = mirror_idx((h + k) as isize, h);
+        let (src_t, src_b) = ((yt + RCD_P) * pw, (yb + RCD_P) * pw);
+        a.copy_within(src_t..src_t + pw, k * pw);
+        a.copy_within(src_b..src_b + pw, (h + RCD_P + k) * pw);
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (raw, scale, r_off, b_off))]
+fn debayer_rcd_native<'py>(
+    py: Python<'py>,
+    raw: PyReadonlyArray2<'py, f32>,
+    scale: f64,
+    r_off: (usize, usize),
+    b_off: (usize, usize),
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let arr = raw.as_array();
+    let (h, w) = (arr.shape()[0], arr.shape()[1]);
+    if h < 16 || w < 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err("frame too small for RCD"));
+    }
+    let src: Vec<f32> = arr.iter().copied().collect();
+    let out = py.detach(|| {
+        const EPS: f32 = 1e-5;
+        const EPSSQ: f32 = 1e-10;
+        // np.nan_to_num(a / scale)
+        let cfa_flat: Vec<f32> = src
+            .par_iter()
+            .map(|&v| {
+                // numpy: np.nan_to_num(a / scale) in f64, then .astype(float32)
+                let q = v as f64 / scale;
+                (if q.is_nan() {
+                    0.0
+                } else if q == f64::INFINITY {
+                    f64::MAX
+                } else if q == f64::NEG_INFINITY {
+                    f64::MIN
+                } else {
+                    q
+                }) as f32
+            })
+            .collect();
+        let cfa = rcd_map(h, w, |y, x| cfa_flat[y * w + x]);
+        drop(cfa_flat);
+        let site = |y: usize, x: usize| -> u8 {
+            if (y % 2, x % 2) == r_off {
+                0
+            } else if (y % 2, x % 2) == b_off {
+                2
+            } else {
+                1
+            }
+        };
+        let c = |y: usize, x: usize, dy: isize, dx: isize| rcd_at(&cfa, h, w, y, x, dy, dx);
+
+        // Step 1: vertical/horizontal discrimination
+        let v_hpf = rcd_map(h, w, |y, x| {
+            let t = (c(y, x, -3, 0) - c(y, x, -1, 0) - c(y, x, 1, 0) + c(y, x, 3, 0))
+                - 3.0 * (c(y, x, -2, 0) + c(y, x, 2, 0))
+                + 6.0 * c(y, x, 0, 0);
+            t * t
+        });
+        let h_hpf = rcd_map(h, w, |y, x| {
+            let t = (c(y, x, 0, -3) - c(y, x, 0, -1) - c(y, x, 0, 1) + c(y, x, 0, 3))
+                - 3.0 * (c(y, x, 0, -2) + c(y, x, 0, 2))
+                + 6.0 * c(y, x, 0, 0);
+            t * t
+        });
+        let vh_dir = rcd_map(h, w, |y, x| {
+            let vs = (rcd_at(&v_hpf, h, w, y, x, -1, 0) + rcd_at(&v_hpf, h, w, y, x, 0, 0)
+                + rcd_at(&v_hpf, h, w, y, x, 1, 0))
+                .max(EPSSQ);
+            let hs = (rcd_at(&h_hpf, h, w, y, x, 0, -1) + rcd_at(&h_hpf, h, w, y, x, 0, 0)
+                + rcd_at(&h_hpf, h, w, y, x, 0, 1))
+                .max(EPSSQ);
+            vs / (vs + hs)
+        });
+        drop(v_hpf);
+        drop(h_hpf);
+        let disc = |d: &[f32], y: usize, x: usize| -> f32 {
+            let nb = 0.25
+                * (rcd_at(d, h, w, y, x, -1, -1) + rcd_at(d, h, w, y, x, -1, 1)
+                    + rcd_at(d, h, w, y, x, 1, -1) + rcd_at(d, h, w, y, x, 1, 1));
+            let v = d[rcd_ci(w, y, x)];
+            if (0.5 - v).abs() < (0.5 - nb).abs() { nb } else { v }
+        };
+        let vh_disc = rcd_map(h, w, |y, x| disc(&vh_dir, y, x));
+        drop(vh_dir);
+
+        // Step 2: low-pass filter -- read only at R/B sites (est() steps by 2, and
+        // the mirror keeps parity), so G sites are left at 0
+        let lpf = rcd_map(h, w, |y, x| {
+            if site(y, x) == 1 {
+                return 0.0;
+            }
+            c(y, x, 0, 0)
+                + 0.5 * (c(y, x, -1, 0) + c(y, x, 1, 0) + c(y, x, 0, -1) + c(y, x, 0, 1))
+                + 0.25 * (c(y, x, -1, -1) + c(y, x, -1, 1) + c(y, x, 1, -1) + c(y, x, 1, 1))
+        });
+
+        // Step 3: green at R and B
+        let g = rcd_map(h, w, |y, x| {
+            if site(y, x) == 1 {
+                return cfa[rcd_ci(w, y, x)];
+            }
+            let n_grad = EPS + (c(y, x, -1, 0) - c(y, x, 1, 0)).abs()
+                + (c(y, x, 0, 0) - c(y, x, -2, 0)).abs()
+                + (c(y, x, -1, 0) - c(y, x, -3, 0)).abs()
+                + (c(y, x, -2, 0) - c(y, x, -4, 0)).abs();
+            let s_grad = EPS + (c(y, x, -1, 0) - c(y, x, 1, 0)).abs()
+                + (c(y, x, 0, 0) - c(y, x, 2, 0)).abs()
+                + (c(y, x, 1, 0) - c(y, x, 3, 0)).abs()
+                + (c(y, x, 2, 0) - c(y, x, 4, 0)).abs();
+            let w_grad = EPS + (c(y, x, 0, -1) - c(y, x, 0, 1)).abs()
+                + (c(y, x, 0, 0) - c(y, x, 0, -2)).abs()
+                + (c(y, x, 0, -1) - c(y, x, 0, -3)).abs()
+                + (c(y, x, 0, -2) - c(y, x, 0, -4)).abs();
+            let e_grad = EPS + (c(y, x, 0, -1) - c(y, x, 0, 1)).abs()
+                + (c(y, x, 0, 0) - c(y, x, 0, 2)).abs()
+                + (c(y, x, 0, 1) - c(y, x, 0, 3)).abs()
+                + (c(y, x, 0, 2) - c(y, x, 0, 4)).abs();
+            let l0 = lpf[rcd_ci(w, y, x)];
+            let est = |dy: isize, dx: isize| {
+                let ln = rcd_at(&lpf, h, w, y, x, 2 * dy, 2 * dx);
+                c(y, x, dy, dx) * (1.0 + (l0 - ln) / (EPS + l0 + ln))
+            };
+            let (n_est, s_est, w_est, e_est) = (est(-1, 0), est(1, 0), est(0, -1), est(0, 1));
+            let v_est = (s_grad * n_est + n_grad * s_est) / (n_grad + s_grad);
+            let h_est = (w_grad * e_est + e_grad * w_est) / (e_grad + w_grad);
+            let vd = vh_disc[rcd_ci(w, y, x)];
+            let v = vd * h_est + (1.0 - vd) * v_est;
+            if v < 0.0 { 0.0 } else { v }
+        });
+        drop(lpf);
+
+        // Step 4.1-4.2: diagonal discrimination
+        let p_hpf = rcd_map(h, w, |y, x| {
+            if site(y, x) == 1 {
+                return 0.0;     // diagonal statistics are only read at R/B sites
+            }
+            let t = (c(y, x, -3, -3) - c(y, x, -1, -1) - c(y, x, 1, 1) + c(y, x, 3, 3))
+                - 3.0 * (c(y, x, -2, -2) + c(y, x, 2, 2))
+                + 6.0 * c(y, x, 0, 0);
+            t * t
+        });
+        let q_hpf = rcd_map(h, w, |y, x| {
+            if site(y, x) == 1 {
+                return 0.0;     // diagonal statistics are only read at R/B sites
+            }
+            let t = (c(y, x, -3, 3) - c(y, x, -1, 1) - c(y, x, 1, -1) + c(y, x, 3, -3))
+                - 3.0 * (c(y, x, -2, 2) + c(y, x, 2, -2))
+                + 6.0 * c(y, x, 0, 0);
+            t * t
+        });
+        let pq_dir = rcd_map(h, w, |y, x| {
+            if site(y, x) == 1 {
+                return 0.5;
+            }
+            let ps = (rcd_at(&p_hpf, h, w, y, x, -1, -1) + rcd_at(&p_hpf, h, w, y, x, 0, 0)
+                + rcd_at(&p_hpf, h, w, y, x, 1, 1))
+                .max(EPSSQ);
+            let qs = (rcd_at(&q_hpf, h, w, y, x, -1, 1) + rcd_at(&q_hpf, h, w, y, x, 0, 0)
+                + rcd_at(&q_hpf, h, w, y, x, 1, -1))
+                .max(EPSSQ);
+            ps / (ps + qs)
+        });
+        drop(p_hpf);
+        drop(q_hpf);
+        let pq_disc = rcd_map(h, w, |y, x| disc(&pq_dir, y, x));
+        drop(pq_dir);
+
+        // Step 4.3: R at B sites, B at R sites
+        let own = |want: u8| rcd_map(h, w, |y, x| if site(y, x) == want { cfa[rcd_ci(w, y, x)] } else { 0.0 });
+        let diag = |cc: &[f32], target: u8| -> Vec<f32> {
+            let new = rcd_map(h, w, |y, x| {
+                if site(y, x) != target {
+                    return cc[rcd_ci(w, y, x)];
+                }
+                let cv = |dy, dx| rcd_at(cc, h, w, y, x, dy, dx);
+                let gv = |dy, dx| rcd_at(&g, h, w, y, x, dy, dx);
+                let g0 = g[rcd_ci(w, y, x)];
+                let nw = EPS + (cv(-1, -1) - cv(1, 1)).abs() + (cv(-1, -1) - cv(-3, -3)).abs()
+                    + (g0 - gv(-2, -2)).abs();
+                let ne = EPS + (cv(-1, 1) - cv(1, -1)).abs() + (cv(-1, 1) - cv(-3, 3)).abs()
+                    + (g0 - gv(-2, 2)).abs();
+                let sw = EPS + (cv(1, -1) - cv(-1, 1)).abs() + (cv(1, -1) - cv(3, -3)).abs()
+                    + (g0 - gv(2, -2)).abs();
+                let se = EPS + (cv(1, 1) - cv(-1, -1)).abs() + (cv(1, 1) - cv(3, 3)).abs()
+                    + (g0 - gv(2, 2)).abs();
+                let nw_e = cv(-1, -1) - gv(-1, -1);
+                let ne_e = cv(-1, 1) - gv(-1, 1);
+                let sw_e = cv(1, -1) - gv(1, -1);
+                let se_e = cv(1, 1) - gv(1, 1);
+                let p_est = (nw * se_e + se * nw_e) / (nw + se);
+                let q_est = (ne * sw_e + sw * ne_e) / (ne + sw);
+                let pd = pq_disc[rcd_ci(w, y, x)];
+                let v = g0 + (1.0 - pd) * p_est + pd * q_est;
+                if v < 0.0 { 0.0 } else { v }
+            });
+            new
+        };
+        let r1 = diag(&own(0), 2);
+        let b1 = diag(&own(2), 0);
+        drop(pq_disc);
+
+        // Step 4.4: R and B at G sites
+        let card = |cc: &[f32]| -> Vec<f32> {
+            rcd_map(h, w, |y, x| {
+                if site(y, x) != 1 {
+                    return cc[rcd_ci(w, y, x)];
+                }
+                let cv = |dy, dx| rcd_at(cc, h, w, y, x, dy, dx);
+                let gv = |dy, dx| rcd_at(&g, h, w, y, x, dy, dx);
+                let g0 = g[rcd_ci(w, y, x)];
+                let n_g = EPS + (g0 - gv(-2, 0)).abs() + (cv(-1, 0) - cv(1, 0)).abs()
+                    + (cv(-1, 0) - cv(-3, 0)).abs();
+                let s_g = EPS + (g0 - gv(2, 0)).abs() + (cv(1, 0) - cv(-1, 0)).abs()
+                    + (cv(1, 0) - cv(3, 0)).abs();
+                let w_g = EPS + (g0 - gv(0, -2)).abs() + (cv(0, -1) - cv(0, 1)).abs()
+                    + (cv(0, -1) - cv(0, -3)).abs();
+                let e_g = EPS + (g0 - gv(0, 2)).abs() + (cv(0, 1) - cv(0, -1)).abs()
+                    + (cv(0, 1) - cv(0, 3)).abs();
+                let n_e = cv(-1, 0) - gv(-1, 0);
+                let s_e = cv(1, 0) - gv(1, 0);
+                let w_e = cv(0, -1) - gv(0, -1);
+                let e_e = cv(0, 1) - gv(0, 1);
+                let v_e = (n_g * s_e + s_g * n_e) / (n_g + s_g);
+                let h_e = (e_g * w_e + w_g * e_e) / (e_g + w_g);
+                let vd = vh_disc[rcd_ci(w, y, x)];
+                let v = g0 + (1.0 - vd) * v_e + vd * h_e;
+                if v < 0.0 { 0.0 } else { v }
+            })
+        };
+        let r = card(&r1);
+        let b = card(&b1);
+        let sc = scale as f32;   // numpy: f32 array * Python float is an f32 multiply
+        let mut out = vec![0f32; h * w * 3];
+        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                let i = rcd_ci(w, y, x);
+                row[3 * x] = r[i] * sc;
+                row[3 * x + 1] = g[i] * sc;
+                row[3 * x + 2] = b[i] * sc;
+            }
+        });
+        out
+    });
+    Ok(numpy::ndarray::Array3::from_shape_vec((h, w, 3), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(originvision::originvision_score, m)?)?;
@@ -8117,6 +8639,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(drizzle_splat_frame, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_frame_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_bayer, m)?)?;
+    m.add_function(wrap_pyfunction!(spike_reject_bayer, m)?)?;
+    m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;
