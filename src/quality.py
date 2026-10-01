@@ -214,15 +214,18 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
         inf_count = int(np.isinf(img).sum())
         return False, f"contains {nan_count} NaN and {inf_count} Inf values"
 
-    # Single std computation, reused in the error message.
-    img_std = float(np.std(img))
+    # These are pass/fail gates with wide margins, so the spread statistics come
+    # from a 1-in-9 strided sample (~700k pixels on a full Origin frame): the
+    # full-frame percentile partition was ~70 of this function's ~83 ms per frame.
+    # The maximum, the saturation test and the zero count stay full-frame -- a
+    # handful of saturated or dead pixels is exactly what a sample would miss.
+    sample = np.ascontiguousarray(img[::3, ::3]) if min(img.shape[:2]) >= 64 else img
+    img_std = float(np.std(sample))
     if img_std < 0.1:
         return False, f"flat image (std={img_std:.3f})"
 
-    # Batch percentile call — p100 == max for finite arrays, avoids a
-    # separate np.max traversal.
-    p01, p99, p_max = np.percentile(img, [1, 99, 100])
-    max_val = float(p_max)
+    p01, p99 = np.percentile(sample, [1, 99])
+    max_val = float(np.max(img))
 
     if max_val > 0:
         saturated_fraction = float(np.sum(img >= max_val * 0.999)) / img.size

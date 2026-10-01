@@ -49,6 +49,10 @@ match the `VERSION` file and `v*` git tags.
 - **`--from-stack` re-runs are faster**: background extraction and the sky steps are cached
   next to the input stack and reused while their settings are unchanged.
 - **Faster post-processing**: two background-surface blurs run on a downsampled grid.
+- **Faster runs overall**: the RCD kernel works in cache-sized tiles (2x faster under Phase 1's
+  parallel load), originvision's image preprocessing only computes the pixels it uses (6x faster
+  per scored frame, identical scores), and frame validation samples its statistics. A real
+  158-frame session went from 2m03s to 1m35s.
 - **`--plate-solve` defaults to the built-in solver**, falling back to astrometry.net only when it
   fails and an API key is set; `--offline` no longer turns plate solving off.
 - **`--use-gpu` runs Phase 1 on the CPU process pool** unless the card fits one GPU worker per CPU

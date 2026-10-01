@@ -6126,82 +6126,27 @@ mod originvision {
         out
     }
 
-    /// Separable Gaussian blur over an (h, w, 3) u8 image -> f32, reflect
-    /// boundary, `truncate=4.0` radius (matches scipy.ndimage.gaussian_filter).
-    fn gaussian_blur(img: &[u8], h: usize, w: usize, sigma: f64) -> Vec<f32> {
-        let radius = (4.0 * sigma + 0.5) as isize;
-        let mut kernel = vec![0f64; (2 * radius + 1) as usize];
-        let mut ksum = 0.0;
-        for (idx, kv) in kernel.iter_mut().enumerate() {
-            let x = idx as isize - radius;
-            *kv = (-(x * x) as f64 / (2.0 * sigma * sigma)).exp();
-            ksum += *kv;
-        }
-        for kv in kernel.iter_mut() {
-            *kv /= ksum;
-        }
-        let refl = |i: isize, len: isize| -> usize {
-            // scipy 'reflect' (a b c | c b a), non-edge-duplicating is 'mirror';
-            // gaussian_filter's default is 'reflect' == edge-duplicating.
-            let mut i = i;
-            let n2 = 2 * len;
-            i = ((i % n2) + n2) % n2;
-            if i >= len {
-                i = n2 - 1 - i;
-            }
-            i as usize
-        };
-        let mut tmp = vec![0f32; h * w * 3];
-        // horizontal
-        for y in 0..h {
-            for x in 0..w {
-                for c in 0..3 {
-                    let mut acc = 0.0f64;
-                    for (idx, kv) in kernel.iter().enumerate() {
-                        let xx = refl(x as isize + idx as isize - radius, w as isize);
-                        acc += *kv * img[(y * w + xx) * 3 + c] as f64;
-                    }
-                    tmp[(y * w + x) * 3 + c] = acc as f32;
-                }
-            }
-        }
-        // vertical
-        let mut out = vec![0f32; h * w * 3];
-        for y in 0..h {
-            for x in 0..w {
-                for c in 0..3 {
-                    let mut acc = 0.0f64;
-                    for (idx, kv) in kernel.iter().enumerate() {
-                        let yy = refl(y as isize + idx as isize - radius, h as isize);
-                        acc += *kv * tmp[(yy * w + x) * 3 + c] as f64;
-                    }
-                    out[(y * w + x) * 3 + c] = acc as f32;
-                }
-            }
-        }
-        out
-    }
-
     /// Resize shorter side to `size`, centre-crop to size x size. Downscale
     /// gets a Gaussian pre-blur (sigma = ((1/scale)-1)/2), then bilinear
-    /// resample (input coord = output coord / scale, reflect edges) -- the
+    /// resample (input coord = output coord / scale, clamped edges) -- the
     /// numpy/scipy `_resize_center_crop` this ports uses `zoom(order=1)` with
     /// the same pre-blur; a small pixel drift vs that is expected and covered
     /// by the parity test's tolerance.
+    ///
+    /// Only the centre crop is kept and each kept pixel reads 4 source pixels,
+    /// so the blur is evaluated only on the source rows/columns those reads
+    /// touch (same taps, same order, same f64 sums as a whole-frame blur --
+    /// identical values), and in parallel over rows. A whole-frame blur here was
+    /// ~6.3 s of a ~6.4 s call on a full 2048x3056 Origin frame: its radius
+    /// grows with the downscale factor (sigma 3.5, 29 taps), single-threaded,
+    /// with a modulo per tap.
     fn resize_center_crop(stretched: &[u8], h: usize, w: usize, size: usize) -> Vec<u8> {
+        use rayon::prelude::*;
         let scale = size as f64 / h.min(w) as f64;
-        let f: Vec<f32> = if scale < 1.0 {
-            let sigma = (1.0 / scale - 1.0) / 2.0;
-            if sigma > 0.01 {
-                gaussian_blur(stretched, h, w, sigma)
-            } else {
-                stretched.iter().map(|&v| v as f32).collect()
-            }
-        } else {
-            stretched.iter().map(|&v| v as f32).collect()
-        };
         let nh = (h as f64 * scale).round().max(1.0) as usize;
         let nw = (w as f64 * scale).round().max(1.0) as usize;
+        let top = if nh > size { (nh - size) / 2 } else { 0 };
+        let left = if nw > size { (nw - size) / 2 } else { 0 };
         let clampi = |v: isize, n: usize| -> usize {
             if v < 0 {
                 0
@@ -6211,40 +6156,105 @@ mod originvision {
                 v as usize
             }
         };
-        let mut res = vec![0f32; nh * nw * 3];
-        for oy in 0..nh {
-            let iy = oy as f64 / scale;
-            let y0 = iy.floor();
-            let fy = iy - y0;
-            let y0i = clampi(y0 as isize, h);
-            let y1i = clampi(y0 as isize + 1, h);
-            for ox in 0..nw {
-                let ix = ox as f64 / scale;
-                let x0 = ix.floor();
-                let fx = ix - x0;
-                let x0i = clampi(x0 as isize, w);
-                let x1i = clampi(x0 as isize + 1, w);
-                for c in 0..3 {
-                    let v00 = f[(y0i * w + x0i) * 3 + c] as f64;
-                    let v01 = f[(y0i * w + x1i) * 3 + c] as f64;
-                    let v10 = f[(y1i * w + x0i) * 3 + c] as f64;
-                    let v11 = f[(y1i * w + x1i) * 3 + c] as f64;
-                    let top = v00 * (1.0 - fx) + v01 * fx;
-                    let bot = v10 * (1.0 - fx) + v11 * fx;
-                    res[(oy * nw + ox) * 3 + c] = (top * (1.0 - fy) + bot * fy) as f32;
+        // (index0, index1, frac) per kept output row / column
+        let axis = |o: usize, n: usize| {
+            let i = o as f64 / scale;
+            let i0 = i.floor();
+            (clampi(i0 as isize, n), clampi(i0 as isize + 1, n), i - i0)
+        };
+        let rows: Vec<(usize, usize, f64)> = (0..size).map(|oy| axis((top + oy).min(nh - 1), h)).collect();
+        let cols: Vec<(usize, usize, f64)> = (0..size).map(|ox| axis((left + ox).min(nw - 1), w)).collect();
+        // compact index of every source row / column a kept sample reads
+        let mut ys: Vec<usize> = rows.iter().flat_map(|r| [r.0, r.1]).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        let mut xs: Vec<usize> = cols.iter().flat_map(|c| [c.0, c.1]).collect();
+        xs.sort_unstable();
+        xs.dedup();
+        let ypos = |y: usize| ys.binary_search(&y).unwrap();
+        let xpos = |x: usize| xs.binary_search(&x).unwrap();
+        let (ny, nx) = (ys.len(), xs.len());
+
+        // f at (ys[j], xs[k], c) -> sel[(j * nx + k) * 3 + c]
+        let sigma = if scale < 1.0 { (1.0 / scale - 1.0) / 2.0 } else { 0.0 };
+        let sel: Vec<f32> = if sigma > 0.01 {
+            let radius = (4.0 * sigma + 0.5) as isize;
+            let mut kernel = vec![0f64; (2 * radius + 1) as usize];
+            let mut ksum = 0.0;
+            for (idx, kv) in kernel.iter_mut().enumerate() {
+                let x = idx as isize - radius;
+                *kv = (-(x * x) as f64 / (2.0 * sigma * sigma)).exp();
+                ksum += *kv;
+            }
+            for kv in kernel.iter_mut() {
+                *kv /= ksum;
+            }
+            let refl = |i: isize, len: isize| -> usize {
+                // scipy 'reflect' (edge-duplicating), gaussian_filter's default
+                let n2 = 2 * len;
+                let mut i = ((i % n2) + n2) % n2;
+                if i >= len {
+                    i = n2 - 1 - i;
+                }
+                i as usize
+            };
+            // horizontal pass, every source row but only the kept columns
+            let xtaps: Vec<Vec<usize>> = xs
+                .iter()
+                .map(|&x| (0..kernel.len())
+                    .map(|idx| refl(x as isize + idx as isize - radius, w as isize))
+                    .collect())
+                .collect();
+            let mut tmp = vec![0f32; h * nx * 3];
+            tmp.par_chunks_mut(nx * 3).enumerate().for_each(|(y, row)| {
+                for (k, taps) in xtaps.iter().enumerate() {
+                    for c in 0..3 {
+                        let mut acc = 0.0f64;
+                        for (kv, &xx) in kernel.iter().zip(taps) {
+                            acc += *kv * stretched[(y * w + xx) * 3 + c] as f64;
+                        }
+                        row[k * 3 + c] = acc as f32;
+                    }
+                }
+            });
+            // vertical pass, only the kept rows
+            let mut out = vec![0f32; ny * nx * 3];
+            out.par_chunks_mut(nx * 3).enumerate().for_each(|(j, row)| {
+                let y = ys[j];
+                let ytaps: Vec<usize> = (0..kernel.len())
+                    .map(|idx| refl(y as isize + idx as isize - radius, h as isize))
+                    .collect();
+                for k in 0..nx {
+                    for c in 0..3 {
+                        let mut acc = 0.0f64;
+                        for (kv, &yy) in kernel.iter().zip(&ytaps) {
+                            acc += *kv * tmp[(yy * nx + k) * 3 + c] as f64;
+                        }
+                        row[k * 3 + c] = acc as f32;
+                    }
+                }
+            });
+            out
+        } else {
+            let mut out = vec![0f32; ny * nx * 3];
+            for (j, &y) in ys.iter().enumerate() {
+                for (k, &x) in xs.iter().enumerate() {
+                    for c in 0..3 {
+                        out[(j * nx + k) * 3 + c] = stretched[(y * w + x) * 3 + c] as f32;
+                    }
                 }
             }
-        }
-        let top = if nh > size { (nh - size) / 2 } else { 0 };
-        let left = if nw > size { (nw - size) / 2 } else { 0 };
+            out
+        };
+        let f = |y: usize, x: usize, c: usize| sel[(ypos(y) * nx + xpos(x)) * 3 + c] as f64;
         let mut out = vec![0u8; size * size * 3];
-        for oy in 0..size {
-            let sy = (top + oy).min(nh - 1);
-            for ox in 0..size {
-                let sx = (left + ox).min(nw - 1);
+        for (oy, &(y0i, y1i, fy)) in rows.iter().enumerate() {
+            for (ox, &(x0i, x1i, fx)) in cols.iter().enumerate() {
                 for c in 0..3 {
-                    out[(oy * size + ox) * 3 + c] =
-                        res[(sy * nw + sx) * 3 + c].clamp(0.0, 255.0) as u8;
+                    let top = f(y0i, x0i, c) * (1.0 - fx) + f(y0i, x1i, c) * fx;
+                    let bot = f(y1i, x0i, c) * (1.0 - fx) + f(y1i, x1i, c) * fx;
+                    let v = (top * (1.0 - fy) + bot * fy) as f32;
+                    out[(oy * size + ox) * 3 + c] = v.clamp(0.0, 255.0) as u8;
                 }
             }
         }
@@ -8286,38 +8296,8 @@ fn white_balance_grayworld_inplace<'py>(
 // already multiplied back by `scale` and rounded to f32.
 
 // Every array is stored reflect-padded by RCD_P on each side (np.pad(mode='reflect')
-// == mirror_idx), so a tap is a branchless fixed-stride load.
+// == mirror_idx), so a tap is a plain load from a shifted row slice.
 const RCD_P: usize = 5;
-
-#[inline(always)]
-fn rcd_at(a: &[f32], h: usize, w: usize, y: usize, x: usize, dy: isize, dx: isize) -> f32 {
-    let _ = h;
-    let pw = w + 2 * RCD_P;
-    let i = ((y + RCD_P) as isize + dy) as usize * pw + ((x + RCD_P) as isize + dx) as usize;
-    unsafe { *a.get_unchecked(i) }
-}
-
-#[inline(always)]
-fn rcd_ci(w: usize, y: usize, x: usize) -> usize {
-    (y + RCD_P) * (w + 2 * RCD_P) + x + RCD_P
-}
-
-/// Evaluate f over the frame and return it reflect-padded.
-fn rcd_map<F: Fn(usize, usize) -> f32 + Sync>(h: usize, w: usize, f: F) -> Vec<f32> {
-    let pw = w + 2 * RCD_P;
-    let mut out = vec![0f32; (h + 2 * RCD_P) * pw];
-    out.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
-        if py < RCD_P || py >= h + RCD_P {
-            return;
-        }
-        let y = py - RCD_P;
-        for x in 0..w {
-            row[x + RCD_P] = f(y, x);
-        }
-    });
-    rcd_pad_in_place(&mut out, h, w);
-    out
-}
 
 fn rcd_pad_in_place(a: &mut [f32], h: usize, w: usize) {
     let pw = w + 2 * RCD_P;
@@ -8356,234 +8336,412 @@ fn debayer_rcd_native<'py>(
         return Err(pyo3::exceptions::PyValueError::new_err("frame too small for RCD"));
     }
     let src: Vec<f32> = arr.iter().copied().collect();
-    let out = py.detach(|| {
-        const EPS: f32 = 1e-5;
-        const EPSSQ: f32 = 1e-10;
-        // np.nan_to_num(a / scale)
-        let cfa_flat: Vec<f32> = src
-            .par_iter()
-            .map(|&v| {
-                // numpy: np.nan_to_num(a / scale) in f64, then .astype(float32)
-                let q = v as f64 / scale;
-                (if q.is_nan() {
-                    0.0
-                } else if q == f64::INFINITY {
-                    f64::MAX
-                } else if q == f64::NEG_INFINITY {
-                    f64::MIN
-                } else {
-                    q
-                }) as f32
-            })
-            .collect();
-        let cfa = rcd_map(h, w, |y, x| cfa_flat[y * w + x]);
-        drop(cfa_flat);
-        let site = |y: usize, x: usize| -> u8 {
-            if (y % 2, x % 2) == r_off {
-                0
-            } else if (y % 2, x % 2) == b_off {
-                2
-            } else {
-                1
-            }
-        };
-        let c = |y: usize, x: usize, dy: isize, dx: isize| rcd_at(&cfa, h, w, y, x, dy, dx);
-
-        // Step 1: vertical/horizontal discrimination
-        let v_hpf = rcd_map(h, w, |y, x| {
-            let t = (c(y, x, -3, 0) - c(y, x, -1, 0) - c(y, x, 1, 0) + c(y, x, 3, 0))
-                - 3.0 * (c(y, x, -2, 0) + c(y, x, 2, 0))
-                + 6.0 * c(y, x, 0, 0);
-            t * t
-        });
-        let h_hpf = rcd_map(h, w, |y, x| {
-            let t = (c(y, x, 0, -3) - c(y, x, 0, -1) - c(y, x, 0, 1) + c(y, x, 0, 3))
-                - 3.0 * (c(y, x, 0, -2) + c(y, x, 0, 2))
-                + 6.0 * c(y, x, 0, 0);
-            t * t
-        });
-        let vh_dir = rcd_map(h, w, |y, x| {
-            let vs = (rcd_at(&v_hpf, h, w, y, x, -1, 0) + rcd_at(&v_hpf, h, w, y, x, 0, 0)
-                + rcd_at(&v_hpf, h, w, y, x, 1, 0))
-                .max(EPSSQ);
-            let hs = (rcd_at(&h_hpf, h, w, y, x, 0, -1) + rcd_at(&h_hpf, h, w, y, x, 0, 0)
-                + rcd_at(&h_hpf, h, w, y, x, 0, 1))
-                .max(EPSSQ);
-            vs / (vs + hs)
-        });
-        drop(v_hpf);
-        drop(h_hpf);
-        let disc = |d: &[f32], y: usize, x: usize| -> f32 {
-            let nb = 0.25
-                * (rcd_at(d, h, w, y, x, -1, -1) + rcd_at(d, h, w, y, x, -1, 1)
-                    + rcd_at(d, h, w, y, x, 1, -1) + rcd_at(d, h, w, y, x, 1, 1));
-            let v = d[rcd_ci(w, y, x)];
-            if (0.5 - v).abs() < (0.5 - nb).abs() { nb } else { v }
-        };
-        let vh_disc = rcd_map(h, w, |y, x| disc(&vh_dir, y, x));
-        drop(vh_dir);
-
-        // Step 2: low-pass filter -- read only at R/B sites (est() steps by 2, and
-        // the mirror keeps parity), so G sites are left at 0
-        let lpf = rcd_map(h, w, |y, x| {
-            if site(y, x) == 1 {
-                return 0.0;
-            }
-            c(y, x, 0, 0)
-                + 0.5 * (c(y, x, -1, 0) + c(y, x, 1, 0) + c(y, x, 0, -1) + c(y, x, 0, 1))
-                + 0.25 * (c(y, x, -1, -1) + c(y, x, -1, 1) + c(y, x, 1, -1) + c(y, x, 1, 1))
-        });
-
-        // Step 3: green at R and B
-        let g = rcd_map(h, w, |y, x| {
-            if site(y, x) == 1 {
-                return cfa[rcd_ci(w, y, x)];
-            }
-            let n_grad = EPS + (c(y, x, -1, 0) - c(y, x, 1, 0)).abs()
-                + (c(y, x, 0, 0) - c(y, x, -2, 0)).abs()
-                + (c(y, x, -1, 0) - c(y, x, -3, 0)).abs()
-                + (c(y, x, -2, 0) - c(y, x, -4, 0)).abs();
-            let s_grad = EPS + (c(y, x, -1, 0) - c(y, x, 1, 0)).abs()
-                + (c(y, x, 0, 0) - c(y, x, 2, 0)).abs()
-                + (c(y, x, 1, 0) - c(y, x, 3, 0)).abs()
-                + (c(y, x, 2, 0) - c(y, x, 4, 0)).abs();
-            let w_grad = EPS + (c(y, x, 0, -1) - c(y, x, 0, 1)).abs()
-                + (c(y, x, 0, 0) - c(y, x, 0, -2)).abs()
-                + (c(y, x, 0, -1) - c(y, x, 0, -3)).abs()
-                + (c(y, x, 0, -2) - c(y, x, 0, -4)).abs();
-            let e_grad = EPS + (c(y, x, 0, -1) - c(y, x, 0, 1)).abs()
-                + (c(y, x, 0, 0) - c(y, x, 0, 2)).abs()
-                + (c(y, x, 0, 1) - c(y, x, 0, 3)).abs()
-                + (c(y, x, 0, 2) - c(y, x, 0, 4)).abs();
-            let l0 = lpf[rcd_ci(w, y, x)];
-            let est = |dy: isize, dx: isize| {
-                let ln = rcd_at(&lpf, h, w, y, x, 2 * dy, 2 * dx);
-                c(y, x, dy, dx) * (1.0 + (l0 - ln) / (EPS + l0 + ln))
-            };
-            let (n_est, s_est, w_est, e_est) = (est(-1, 0), est(1, 0), est(0, -1), est(0, 1));
-            let v_est = (s_grad * n_est + n_grad * s_est) / (n_grad + s_grad);
-            let h_est = (w_grad * e_est + e_grad * w_est) / (e_grad + w_grad);
-            let vd = vh_disc[rcd_ci(w, y, x)];
-            let v = vd * h_est + (1.0 - vd) * v_est;
-            if v < 0.0 { 0.0 } else { v }
-        });
-        drop(lpf);
-
-        // Step 4.1-4.2: diagonal discrimination
-        let p_hpf = rcd_map(h, w, |y, x| {
-            if site(y, x) == 1 {
-                return 0.0;     // diagonal statistics are only read at R/B sites
-            }
-            let t = (c(y, x, -3, -3) - c(y, x, -1, -1) - c(y, x, 1, 1) + c(y, x, 3, 3))
-                - 3.0 * (c(y, x, -2, -2) + c(y, x, 2, 2))
-                + 6.0 * c(y, x, 0, 0);
-            t * t
-        });
-        let q_hpf = rcd_map(h, w, |y, x| {
-            if site(y, x) == 1 {
-                return 0.0;     // diagonal statistics are only read at R/B sites
-            }
-            let t = (c(y, x, -3, 3) - c(y, x, -1, 1) - c(y, x, 1, -1) + c(y, x, 3, -3))
-                - 3.0 * (c(y, x, -2, 2) + c(y, x, 2, -2))
-                + 6.0 * c(y, x, 0, 0);
-            t * t
-        });
-        let pq_dir = rcd_map(h, w, |y, x| {
-            if site(y, x) == 1 {
-                return 0.5;
-            }
-            let ps = (rcd_at(&p_hpf, h, w, y, x, -1, -1) + rcd_at(&p_hpf, h, w, y, x, 0, 0)
-                + rcd_at(&p_hpf, h, w, y, x, 1, 1))
-                .max(EPSSQ);
-            let qs = (rcd_at(&q_hpf, h, w, y, x, -1, 1) + rcd_at(&q_hpf, h, w, y, x, 0, 0)
-                + rcd_at(&q_hpf, h, w, y, x, 1, -1))
-                .max(EPSSQ);
-            ps / (ps + qs)
-        });
-        drop(p_hpf);
-        drop(q_hpf);
-        let pq_disc = rcd_map(h, w, |y, x| disc(&pq_dir, y, x));
-        drop(pq_dir);
-
-        // Step 4.3: R at B sites, B at R sites
-        let own = |want: u8| rcd_map(h, w, |y, x| if site(y, x) == want { cfa[rcd_ci(w, y, x)] } else { 0.0 });
-        let diag = |cc: &[f32], target: u8| -> Vec<f32> {
-            let new = rcd_map(h, w, |y, x| {
-                if site(y, x) != target {
-                    return cc[rcd_ci(w, y, x)];
-                }
-                let cv = |dy, dx| rcd_at(cc, h, w, y, x, dy, dx);
-                let gv = |dy, dx| rcd_at(&g, h, w, y, x, dy, dx);
-                let g0 = g[rcd_ci(w, y, x)];
-                let nw = EPS + (cv(-1, -1) - cv(1, 1)).abs() + (cv(-1, -1) - cv(-3, -3)).abs()
-                    + (g0 - gv(-2, -2)).abs();
-                let ne = EPS + (cv(-1, 1) - cv(1, -1)).abs() + (cv(-1, 1) - cv(-3, 3)).abs()
-                    + (g0 - gv(-2, 2)).abs();
-                let sw = EPS + (cv(1, -1) - cv(-1, 1)).abs() + (cv(1, -1) - cv(3, -3)).abs()
-                    + (g0 - gv(2, -2)).abs();
-                let se = EPS + (cv(1, 1) - cv(-1, -1)).abs() + (cv(1, 1) - cv(3, 3)).abs()
-                    + (g0 - gv(2, 2)).abs();
-                let nw_e = cv(-1, -1) - gv(-1, -1);
-                let ne_e = cv(-1, 1) - gv(-1, 1);
-                let sw_e = cv(1, -1) - gv(1, -1);
-                let se_e = cv(1, 1) - gv(1, 1);
-                let p_est = (nw * se_e + se * nw_e) / (nw + se);
-                let q_est = (ne * sw_e + sw * ne_e) / (ne + sw);
-                let pd = pq_disc[rcd_ci(w, y, x)];
-                let v = g0 + (1.0 - pd) * p_est + pd * q_est;
-                if v < 0.0 { 0.0 } else { v }
-            });
-            new
-        };
-        let r1 = diag(&own(0), 2);
-        let b1 = diag(&own(2), 0);
-        drop(pq_disc);
-
-        // Step 4.4: R and B at G sites
-        let card = |cc: &[f32]| -> Vec<f32> {
-            rcd_map(h, w, |y, x| {
-                if site(y, x) != 1 {
-                    return cc[rcd_ci(w, y, x)];
-                }
-                let cv = |dy, dx| rcd_at(cc, h, w, y, x, dy, dx);
-                let gv = |dy, dx| rcd_at(&g, h, w, y, x, dy, dx);
-                let g0 = g[rcd_ci(w, y, x)];
-                let n_g = EPS + (g0 - gv(-2, 0)).abs() + (cv(-1, 0) - cv(1, 0)).abs()
-                    + (cv(-1, 0) - cv(-3, 0)).abs();
-                let s_g = EPS + (g0 - gv(2, 0)).abs() + (cv(1, 0) - cv(-1, 0)).abs()
-                    + (cv(1, 0) - cv(3, 0)).abs();
-                let w_g = EPS + (g0 - gv(0, -2)).abs() + (cv(0, -1) - cv(0, 1)).abs()
-                    + (cv(0, -1) - cv(0, -3)).abs();
-                let e_g = EPS + (g0 - gv(0, 2)).abs() + (cv(0, 1) - cv(0, -1)).abs()
-                    + (cv(0, 1) - cv(0, 3)).abs();
-                let n_e = cv(-1, 0) - gv(-1, 0);
-                let s_e = cv(1, 0) - gv(1, 0);
-                let w_e = cv(0, -1) - gv(0, -1);
-                let e_e = cv(0, 1) - gv(0, 1);
-                let v_e = (n_g * s_e + s_g * n_e) / (n_g + s_g);
-                let h_e = (e_g * w_e + w_g * e_e) / (e_g + w_g);
-                let vd = vh_disc[rcd_ci(w, y, x)];
-                let v = g0 + (1.0 - vd) * v_e + vd * h_e;
-                if v < 0.0 { 0.0 } else { v }
-            })
-        };
-        let r = card(&r1);
-        let b = card(&b1);
-        let sc = scale as f32;   // numpy: f32 array * Python float is an f32 multiply
-        let mut out = vec![0f32; h * w * 3];
-        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
-            for x in 0..w {
-                let i = rcd_ci(w, y, x);
-                row[3 * x] = r[i] * sc;
-                row[3 * x + 1] = g[i] * sc;
-                row[3 * x + 2] = b[i] * sc;
-            }
-        });
-        out
-    });
+    let out = py.detach(|| rcd_strips(&src, h, w, scale, r_off, b_off));
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, 3), out)
         .unwrap()
         .into_pyarray(py))
+}
+
+/// Scratch buffers reused across RCD strips and calls. Every stage array is fully
+/// overwritten (frame rows by the stage, padding by `rcd_pad_in_place`), so a
+/// reused buffer needs no clearing. Without this each strip's ~14 arrays were
+/// fresh allocations the OS zero-fills on first touch: hundreds of MB of zeroing
+/// per frame, which is what made RCD slow under 16 Phase 1 workers.
+static RCD_POOL: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<f32>>>> = std::sync::OnceLock::new();
+
+fn rcd_take(n: usize) -> Vec<f32> {
+    let pool = RCD_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut p) = pool.lock() {
+        if let Some(i) = p.iter().position(|v| v.len() == n) {
+            return p.swap_remove(i);
+        }
+    }
+    vec![0f32; n]
+}
+
+fn rcd_give(v: Vec<f32>) {
+    let pool = RCD_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut p) = pool.lock() {
+        if p.len() < 48 {
+            p.push(v);
+        }
+    }
+}
+
+/// RCD in square tiles of `RCD_TILE` output pixels, each run on its tile plus
+/// `RCD_HALO` pixels around it. Whole-frame stages kept ~14 frame-sized arrays in
+/// flight and streamed ~1.3 GB through memory per frame, so under Phase 1's
+/// workers the kernel was DRAM-bandwidth bound (0.28 s/frame alone, 0.76 s with
+/// 8 processes, 1.26 s with 16, where Malvar stayed at 0.08-0.16). A tile's
+/// arrays (~1.3 MB together) stay in the core's L2. RCD's dependency reach is ~10
+/// px (R/B at G reads R/B 3 px away, which read G 2 px away, which reads the CFA
+/// 4 px away), so pixels more than `RCD_HALO` from a tile's cut edge come out
+/// exactly as in a whole-frame pass; at the frame's own edges the tile's reflect
+/// padding is the frame's. Tiles start on even rows/columns, so the Bayer parity
+/// is unchanged. Bit-identical to the numpy mirror. Buffers come from `RCD_POOL`.
+const RCD_TILE: usize = 128;
+const RCD_HALO: usize = 12;
+
+fn rcd_strips(src: &[f32], h: usize, w: usize, scale: f64,
+              r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
+    if h <= RCD_TILE + 2 * RCD_HALO && w <= RCD_TILE + 2 * RCD_HALO {
+        return rcd_core(src, h, w, scale, r_off, b_off);
+    }
+    // extended span [lo, hi) of tile k along an axis of length n, >= 16 long
+    let span = |k: usize, n: usize| -> (usize, usize, usize) {
+        let s0 = k * RCD_TILE;
+        let len = RCD_TILE.min(n - s0);
+        let mut lo = s0.saturating_sub(RCD_HALO);
+        let mut hi = (s0 + len + RCD_HALO).min(n);
+        if hi - lo < 16 {
+            lo = hi.saturating_sub(16);
+            hi = (lo + 16).min(n);
+        }
+        (lo, hi, len)
+    };
+    let (ty, tx) = ((h + RCD_TILE - 1) / RCD_TILE, (w + RCD_TILE - 1) / RCD_TILE);
+    let mut out = vec![0f32; h * w * 3];
+    // one band of tile rows per task: each band owns its output rows
+    out.par_chunks_mut(RCD_TILE * w * 3).enumerate().for_each(|(ky, band)| {
+        let (y0, y1, rows) = span(ky, h);
+        let sy = ky * RCD_TILE;
+        for kx in 0..tx {
+            let (x0, x1, cols) = span(kx, w);
+            let sx = kx * RCD_TILE;
+            let (th, tw) = (y1 - y0, x1 - x0);
+            let mut tile = rcd_take(th * tw);
+            for r in 0..th {
+                tile[r * tw..(r + 1) * tw].copy_from_slice(&src[(y0 + r) * w + x0..(y0 + r) * w + x1]);
+            }
+            let res = rcd_core(&tile, th, tw, scale, r_off, b_off);
+            rcd_give(tile);
+            for r in 0..rows {
+                let s = ((sy - y0 + r) * tw + (sx - x0)) * 3;
+                let d = (r * w + sx) * 3;
+                band[d..d + cols * 3].copy_from_slice(&res[s..s + cols * 3]);
+            }
+            rcd_give(res);
+        }
+        let _ = ty;
+    });
+    out
+}
+
+/// A row of a padded array at frame row `y` shifted by (dy, dx): `w` values.
+#[inline(always)]
+fn rcd_row(a: &[f32], w: usize, y: usize, dy: isize, dx: isize) -> &[f32] {
+    let pw = w + 2 * RCD_P;
+    let start = ((y + RCD_P) as isize + dy) as usize * pw + (RCD_P as isize + dx) as usize;
+    &a[start..start + w]
+}
+
+/// Fill a padded array row by row (`f(y, out_row)` writes the `w` frame values),
+/// then reflect-pad it. Rows are independent, so they run in parallel.
+fn rcd_rows<F: Fn(usize, &mut [f32]) + Sync>(h: usize, w: usize, f: F) -> Vec<f32> {
+    let pw = w + 2 * RCD_P;
+    let mut out = rcd_take((h + 2 * RCD_P) * pw);
+    out.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
+        if py >= RCD_P && py < h + RCD_P {
+            f(py - RCD_P, &mut row[RCD_P..RCD_P + w]);
+        }
+    });
+    rcd_pad_in_place(&mut out, h, w);
+    out
+}
+
+macro_rules! rcd_core_impl {
+    ($src:ident, $h:ident, $w:ident, $scale:ident, $r_off:ident, $b_off:ident) => {{
+        let (src, h, w, scale, r_off, b_off) = ($src, $h, $w, $scale, $r_off, $b_off);
+    const EPS: f32 = 1e-5;
+    const EPSSQ: f32 = 1e-10;
+    // numpy: np.nan_to_num(a / scale) in f64, then .astype(float32)
+    let cfa = rcd_rows(h, w, |y, o| {
+        let s = &src[y * w..(y + 1) * w];
+        for x in 0..w {
+            let q = s[x] as f64 / scale;
+            o[x] = (if q.is_nan() {
+                0.0
+            } else if q == f64::INFINITY {
+                f64::MAX
+            } else if q == f64::NEG_INFINITY {
+                f64::MIN
+            } else {
+                q
+            }) as f32;
+        }
+    });
+    // site class of (y, x): 0 = R, 1 = G, 2 = B
+    let row_kind = |y: usize| -> (Option<usize>, u8) {
+        if y % 2 == r_off.0 {
+            (Some(r_off.1), 0)
+        } else if y % 2 == b_off.0 {
+            (Some(b_off.1), 2)
+        } else {
+            (None, 1)
+        }
+    };
+    let c = |y, dy, dx| rcd_row(&cfa, w, y, dy, dx);
+
+    // Step 1: vertical/horizontal discrimination
+    let v_hpf = rcd_rows(h, w, |y, o| {
+        let (m3, m2, m1, c0, p1, p2, p3) =
+            (c(y, -3, 0), c(y, -2, 0), c(y, -1, 0), c(y, 0, 0), c(y, 1, 0), c(y, 2, 0), c(y, 3, 0));
+        for x in 0..w {
+            let t = (m3[x] - m1[x] - p1[x] + p3[x]) - 3.0 * (m2[x] + p2[x]) + 6.0 * c0[x];
+            o[x] = t * t;
+        }
+    });
+    let h_hpf = rcd_rows(h, w, |y, o| {
+        let (m3, m2, m1, c0, p1, p2, p3) =
+            (c(y, 0, -3), c(y, 0, -2), c(y, 0, -1), c(y, 0, 0), c(y, 0, 1), c(y, 0, 2), c(y, 0, 3));
+        for x in 0..w {
+            let t = (m3[x] - m1[x] - p1[x] + p3[x]) - 3.0 * (m2[x] + p2[x]) + 6.0 * c0[x];
+            o[x] = t * t;
+        }
+    });
+    let vh_dir = rcd_rows(h, w, |y, o| {
+        let (va, vb, vc) = (rcd_row(&v_hpf, w, y, -1, 0), rcd_row(&v_hpf, w, y, 0, 0),
+                            rcd_row(&v_hpf, w, y, 1, 0));
+        let (ha, hb, hc) = (rcd_row(&h_hpf, w, y, 0, -1), rcd_row(&h_hpf, w, y, 0, 0),
+                            rcd_row(&h_hpf, w, y, 0, 1));
+        for x in 0..w {
+            let vs = (va[x] + vb[x] + vc[x]).max(EPSSQ);
+            let hs = (ha[x] + hb[x] + hc[x]).max(EPSSQ);
+            o[x] = vs / (vs + hs);
+        }
+    });
+    rcd_give(v_hpf);
+    rcd_give(h_hpf);
+    let disc = |d: &[f32]| -> Vec<f32> {
+        rcd_rows(h, w, |y, o| {
+            let (a, b, cc, dd, e) = (rcd_row(d, w, y, -1, -1), rcd_row(d, w, y, -1, 1),
+                                     rcd_row(d, w, y, 1, -1), rcd_row(d, w, y, 1, 1),
+                                     rcd_row(d, w, y, 0, 0));
+            for x in 0..w {
+                let nb = 0.25 * (a[x] + b[x] + cc[x] + dd[x]);
+                let v = e[x];
+                o[x] = if (0.5 - v).abs() < (0.5 - nb).abs() { nb } else { v };
+            }
+        })
+    };
+    let vh_disc = disc(&vh_dir);
+    rcd_give(vh_dir);
+
+    // Step 2: low-pass filter (read only at R/B sites; computed everywhere)
+    let lpf = rcd_rows(h, w, |y, o| {
+        let (c0, n, s, wv, e) = (c(y, 0, 0), c(y, -1, 0), c(y, 1, 0), c(y, 0, -1), c(y, 0, 1));
+        let (nw, ne, sw, se) = (c(y, -1, -1), c(y, -1, 1), c(y, 1, -1), c(y, 1, 1));
+        for x in 0..w {
+            o[x] = c0[x] + 0.5 * (n[x] + s[x] + wv[x] + e[x])
+                + 0.25 * (nw[x] + ne[x] + sw[x] + se[x]);
+        }
+    });
+
+    // Step 3: green at R and B
+    let g = rcd_rows(h, w, |y, o| {
+        let cm = |k: isize| c(y, k, 0);
+        let ch = |k: isize| c(y, 0, k);
+        let (vm4, vm3, vm2, vm1, c0, vp1, vp2, vp3, vp4) =
+            (cm(-4), cm(-3), cm(-2), cm(-1), cm(0), cm(1), cm(2), cm(3), cm(4));
+        let (hm4, hm3, hm2, hm1, hp1, hp2, hp3, hp4) =
+            (ch(-4), ch(-3), ch(-2), ch(-1), ch(1), ch(2), ch(3), ch(4));
+        let l0 = rcd_row(&lpf, w, y, 0, 0);
+        let (ln, ls, lw, le) = (rcd_row(&lpf, w, y, -2, 0), rcd_row(&lpf, w, y, 2, 0),
+                                rcd_row(&lpf, w, y, 0, -2), rcd_row(&lpf, w, y, 0, 2));
+        let vd = rcd_row(&vh_disc, w, y, 0, 0);
+        let (gx, _) = row_kind(y);
+        for x in 0..w {
+            let n_grad = EPS + (vm1[x] - vp1[x]).abs() + (c0[x] - vm2[x]).abs()
+                + (vm1[x] - vm3[x]).abs() + (vm2[x] - vm4[x]).abs();
+            let s_grad = EPS + (vm1[x] - vp1[x]).abs() + (c0[x] - vp2[x]).abs()
+                + (vp1[x] - vp3[x]).abs() + (vp2[x] - vp4[x]).abs();
+            let w_grad = EPS + (hm1[x] - hp1[x]).abs() + (c0[x] - hm2[x]).abs()
+                + (hm1[x] - hm3[x]).abs() + (hm2[x] - hm4[x]).abs();
+            let e_grad = EPS + (hm1[x] - hp1[x]).abs() + (c0[x] - hp2[x]).abs()
+                + (hp1[x] - hp3[x]).abs() + (hp2[x] - hp4[x]).abs();
+            let l = l0[x];
+            let n_est = vm1[x] * (1.0 + (l - ln[x]) / (EPS + l + ln[x]));
+            let s_est = vp1[x] * (1.0 + (l - ls[x]) / (EPS + l + ls[x]));
+            let w_est = hm1[x] * (1.0 + (l - lw[x]) / (EPS + l + lw[x]));
+            let e_est = hp1[x] * (1.0 + (l - le[x]) / (EPS + l + le[x]));
+            let v_est = (s_grad * n_est + n_grad * s_est) / (n_grad + s_grad);
+            let h_est = (w_grad * e_est + e_grad * w_est) / (e_grad + w_grad);
+            let v = vd[x] * h_est + (1.0 - vd[x]) * v_est;
+            let v = if v < 0.0 { 0.0 } else { v };
+            let is_rb = matches!(gx, Some(px) if x & 1 == px);
+            o[x] = if is_rb { v } else { c0[x] };
+        }
+    });
+    rcd_give(lpf);
+
+    // Step 4.1-4.2: diagonal discrimination
+    let p_hpf = rcd_rows(h, w, |y, o| {
+        let (m3, m2, m1, c0, p1, p2, p3) = (c(y, -3, -3), c(y, -2, -2), c(y, -1, -1), c(y, 0, 0),
+                                            c(y, 1, 1), c(y, 2, 2), c(y, 3, 3));
+        for x in 0..w {
+            let t = (m3[x] - m1[x] - p1[x] + p3[x]) - 3.0 * (m2[x] + p2[x]) + 6.0 * c0[x];
+            o[x] = t * t;
+        }
+    });
+    let q_hpf = rcd_rows(h, w, |y, o| {
+        let (m3, m2, m1, c0, p1, p2, p3) = (c(y, -3, 3), c(y, -2, 2), c(y, -1, 1), c(y, 0, 0),
+                                            c(y, 1, -1), c(y, 2, -2), c(y, 3, -3));
+        for x in 0..w {
+            let t = (m3[x] - m1[x] - p1[x] + p3[x]) - 3.0 * (m2[x] + p2[x]) + 6.0 * c0[x];
+            o[x] = t * t;
+        }
+    });
+    let pq_dir = rcd_rows(h, w, |y, o| {
+        let (pa, pb, pc) = (rcd_row(&p_hpf, w, y, -1, -1), rcd_row(&p_hpf, w, y, 0, 0),
+                            rcd_row(&p_hpf, w, y, 1, 1));
+        let (qa, qb, qc) = (rcd_row(&q_hpf, w, y, -1, 1), rcd_row(&q_hpf, w, y, 0, 0),
+                            rcd_row(&q_hpf, w, y, 1, -1));
+        for x in 0..w {
+            let ps = (pa[x] + pb[x] + pc[x]).max(EPSSQ);
+            let qs = (qa[x] + qb[x] + qc[x]).max(EPSSQ);
+            o[x] = ps / (ps + qs);
+        }
+    });
+    rcd_give(p_hpf);
+    rcd_give(q_hpf);
+    let pq_disc = disc(&pq_dir);
+    rcd_give(pq_dir);
+
+    // Step 4.3: R at B sites, B at R sites (from raw R / raw B planes)
+    let own = |want: u8| {
+        rcd_rows(h, w, |y, o| {
+            let c0 = c(y, 0, 0);
+            let (px, kind) = row_kind(y);
+            for x in 0..w {
+                let hit = kind == want && matches!(px, Some(p) if x & 1 == p);
+                o[x] = if hit { c0[x] } else { 0.0 };
+            }
+        })
+    };
+    let diag = |cc: &[f32], target: u8| -> Vec<f32> {
+        rcd_rows(h, w, |y, o| {
+            let cv = |dy, dx| rcd_row(cc, w, y, dy, dx);
+            let gv = |dy, dx| rcd_row(&g, w, y, dy, dx);
+            let (c_nw, c_ne, c_sw, c_se) = (cv(-1, -1), cv(-1, 1), cv(1, -1), cv(1, 1));
+            let (c_nw3, c_ne3, c_sw3, c_se3) = (cv(-3, -3), cv(-3, 3), cv(3, -3), cv(3, 3));
+            let (g_nw2, g_ne2, g_sw2, g_se2) = (gv(-2, -2), gv(-2, 2), gv(2, -2), gv(2, 2));
+            let (g_nw, g_ne, g_sw, g_se) = (gv(-1, -1), gv(-1, 1), gv(1, -1), gv(1, 1));
+            let g0 = gv(0, 0);
+            let c0 = cv(0, 0);
+            let pd = rcd_row(&pq_disc, w, y, 0, 0);
+            let (px, kind) = row_kind(y);
+            for x in 0..w {
+                let nw = EPS + (c_nw[x] - c_se[x]).abs() + (c_nw[x] - c_nw3[x]).abs()
+                    + (g0[x] - g_nw2[x]).abs();
+                let ne = EPS + (c_ne[x] - c_sw[x]).abs() + (c_ne[x] - c_ne3[x]).abs()
+                    + (g0[x] - g_ne2[x]).abs();
+                let sw = EPS + (c_sw[x] - c_ne[x]).abs() + (c_sw[x] - c_sw3[x]).abs()
+                    + (g0[x] - g_sw2[x]).abs();
+                let se = EPS + (c_se[x] - c_nw[x]).abs() + (c_se[x] - c_se3[x]).abs()
+                    + (g0[x] - g_se2[x]).abs();
+                let nw_e = c_nw[x] - g_nw[x];
+                let ne_e = c_ne[x] - g_ne[x];
+                let sw_e = c_sw[x] - g_sw[x];
+                let se_e = c_se[x] - g_se[x];
+                let p_est = (nw * se_e + se * nw_e) / (nw + se);
+                let q_est = (ne * sw_e + sw * ne_e) / (ne + sw);
+                let v = g0[x] + (1.0 - pd[x]) * p_est + pd[x] * q_est;
+                let v = if v < 0.0 { 0.0 } else { v };
+                let hit = kind == target && matches!(px, Some(p) if x & 1 == p);
+                o[x] = if hit { v } else { c0[x] };
+            }
+        })
+    };
+    let o0 = own(0);
+    let r1 = diag(&o0, 2);
+    rcd_give(o0);
+    let o2 = own(2);
+    let b1 = diag(&o2, 0);
+    rcd_give(o2);
+    rcd_give(pq_disc);
+
+    // Step 4.4: R and B at G sites
+    let card = |cc: &[f32]| -> Vec<f32> {
+        rcd_rows(h, w, |y, o| {
+            let cv = |dy, dx| rcd_row(cc, w, y, dy, dx);
+            let gv = |dy, dx| rcd_row(&g, w, y, dy, dx);
+            let (cn, cs, cw, ce) = (cv(-1, 0), cv(1, 0), cv(0, -1), cv(0, 1));
+            let (cn3, cs3, cw3, ce3) = (cv(-3, 0), cv(3, 0), cv(0, -3), cv(0, 3));
+            let (gn2, gs2, gw2, ge2) = (gv(-2, 0), gv(2, 0), gv(0, -2), gv(0, 2));
+            let (gn, gs, gw, ge) = (gv(-1, 0), gv(1, 0), gv(0, -1), gv(0, 1));
+            let g0 = gv(0, 0);
+            let c0 = cv(0, 0);
+            let vd = rcd_row(&vh_disc, w, y, 0, 0);
+            let (px, _) = row_kind(y);
+            for x in 0..w {
+                let n_g = EPS + (g0[x] - gn2[x]).abs() + (cn[x] - cs[x]).abs()
+                    + (cn[x] - cn3[x]).abs();
+                let s_g = EPS + (g0[x] - gs2[x]).abs() + (cs[x] - cn[x]).abs()
+                    + (cs[x] - cs3[x]).abs();
+                let w_g = EPS + (g0[x] - gw2[x]).abs() + (cw[x] - ce[x]).abs()
+                    + (cw[x] - cw3[x]).abs();
+                let e_g = EPS + (g0[x] - ge2[x]).abs() + (ce[x] - cw[x]).abs()
+                    + (ce[x] - ce3[x]).abs();
+                let n_e = cn[x] - gn[x];
+                let s_e = cs[x] - gs[x];
+                let w_e = cw[x] - gw[x];
+                let e_e = ce[x] - ge[x];
+                let v_e = (n_g * s_e + s_g * n_e) / (n_g + s_g);
+                let h_e = (e_g * w_e + w_g * e_e) / (e_g + w_g);
+                let v = g0[x] + (1.0 - vd[x]) * v_e + vd[x] * h_e;
+                let v = if v < 0.0 { 0.0 } else { v };
+                let is_g = !matches!(px, Some(p) if x & 1 == p);
+                o[x] = if is_g { v } else { c0[x] };
+            }
+        })
+    };
+    let r = card(&r1);
+    let b = card(&b1);
+    rcd_give(r1);
+    rcd_give(b1);
+    let sc = scale as f32; // numpy: f32 array * Python float is an f32 multiply
+    let mut out = rcd_take(h * w * 3); // fully overwritten below
+    out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        let (rr, gg, bb) = (rcd_row(&r, w, y, 0, 0), rcd_row(&g, w, y, 0, 0),
+                            rcd_row(&b, w, y, 0, 0));
+        for x in 0..w {
+            row[3 * x] = rr[x] * sc;
+            row[3 * x + 1] = gg[x] * sc;
+            row[3 * x + 2] = bb[x] * sc;
+        }
+    });
+    for v in [cfa, vh_disc, g, r, b] {
+        rcd_give(v);
+    }
+    out
+    }};
+}
+
+/// RCD over the whole frame. Every stage is a branch-free loop over contiguous
+/// row slices (computed at every pixel, then selected per Bayer site, as the
+/// numpy mirror does), so the compiler vectorises it; the per-pixel arithmetic
+/// and its order are the mirror's, so the result is bit-identical.
+fn rcd_core(src: &[f32], h: usize, w: usize, scale: f64,
+            r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
+    // Run-time AVX2 twin, as for the 3x3 median: the crate targets baseline
+    // x86-64, and these loops are where a wider vector pays. No FMA is enabled
+    // and Rust never contracts a*b+c on its own, so both give identical bits.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return unsafe { rcd_core_avx2(src, h, w, scale, r_off, b_off) };
+        }
+    }
+    rcd_core_impl!(src, h, w, scale, r_off, b_off)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,
+                        r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
+    // the macro puts every stage closure lexically inside this function, so
+    // they inherit the target feature
+    rcd_core_impl!(src, h, w, scale, r_off, b_off)
 }
 
 #[pymodule]
