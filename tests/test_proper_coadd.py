@@ -112,3 +112,13 @@ def test_native_and_numpy_paths_agree(field, monkeypatch):
     monkeypatch.setattr(pc, '_native', None)
     b = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False)
     np.testing.assert_allclose(a, b, rtol=0, atol=1e-3 * float(np.std(a)))
+
+
+def test_on_by_default_with_a_single_opt_out():
+    """One store_false action (the desktop form keys on dest; two actions sharing it break that)."""
+    from src.cli import build_parser
+    p = build_parser()
+    assert p.parse_args(['-d', 'x']).proper_coadd is True
+    assert p.parse_args(['-d', 'x', '--no-proper-coadd']).proper_coadd is False
+    acts = [a for a in p._actions if a.dest == 'proper_coadd']
+    assert len(acts) == 1 and acts[0].option_strings == ['--no-proper-coadd']

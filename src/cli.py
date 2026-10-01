@@ -1491,14 +1491,15 @@ def build_parser() -> argparse.ArgumentParser:
                         'sky_residual, sky_pedestal, bilateral, '
                         'acdnr, wavelet (alias: curvelet), deconvolve, star_reduce, local_contrast, '
                         'sky_neutralize, edge_bands, remove_stars, starless_process')
-    g_stack.add_argument('--proper-coadd', dest='proper_coadd', action='store_true',
-                   help='EXPERIMENTAL: combine frames by proper image coaddition (Zackay & '
-                        'Ofek 2017) instead of a weighted mean: each frame is weighted per '
-                        'spatial frequency by its own measured PSF, transparency and noise, '
-                        'so the sharpest frames carry the fine detail. Outliers are first '
-                        'replaced against the normal stack. Needs a rejection stack method '
-                        'and stars to measure the PSF on; falls back to the normal stack '
-                        'otherwise.')
+    g_stack.add_argument('--no-proper-coadd', dest='proper_coadd', action='store_false',
+                   help='Turn off proper image coaddition (Zackay & Ofek 2017), on by default: '
+                        'after the normal stack is built, the same frames are recombined '
+                        "weighting each spatial frequency by each frame's own measured PSF, "
+                        'transparency and noise, so the sharpest frames carry the fine detail '
+                        '(outliers are first replaced against the normal stack). Measured vs '
+                        'the plain stack on three real sessions: stars 1.3-2.7%% narrower, '
+                        'noise equal or lower; costs ~15-40 s. Falls back to the normal stack '
+                        'when no PSF can be measured.')
     g_stack.add_argument('--cfa-drizzle', dest='cfa_drizzle', action='store_true',
                    help='Bayer-aware drizzle: after stacking, recombine each frame\'s '
                         'MEASURED colour samples (never the interpolated ones) onto the '
@@ -2426,7 +2427,7 @@ def build_parser() -> argparse.ArgumentParser:
         starless_process=False,
         layered_stretch=False,
         cfa_drizzle=False,
-        proper_coadd=False,
+        proper_coadd=True,
         transparency_min=0.0,
         lightcurve_analysis=False,
         session_report=False,

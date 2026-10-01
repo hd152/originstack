@@ -43,6 +43,8 @@ from typing import Optional
 
 import numpy as np
 
+from src.utils import safe_print
+
 _log = logging.getLogger("originstack")
 
 try:
@@ -310,7 +312,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     if verbose:
         fw = [psf_fwhm(meas[j][0]) for j in use]
         Fs = [meas[j][1] for j in use]
-        print(f"    proper coadd: {len(use)}/{N} frames, PSF FWHM {np.min(fw):.2f}-{np.max(fw):.2f} px "
+        safe_print(f"    proper coadd: {len(use)}/{N} frames, PSF FWHM {np.min(fw):.2f}-{np.max(fw):.2f} px "
               f"(median {np.median(fw):.2f}), transparency {np.min(Fs):.2f}-{np.max(Fs):.2f}, "
               f"{len(stars)} PSF stars ({time.time() - t0:.1f}s)")
 
@@ -363,6 +365,6 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
         img = sfft.irfft2(R, s=(PH, PW), workers=-1)[_PAD:_PAD + H, _PAD:_PAD + W]
         out[..., c] = (img / np.sqrt(wsum[c]) + sky_acc[c] / wsum[c]).astype(np.float32)
     if verbose:
-        print(f"    proper coadd: combined in {time.time() - t1:.1f}s, "
+        safe_print(f"    proper coadd: combined in {time.time() - t1:.1f}s, "
               f"{n_rep / max(len(use) * H * W * C, 1) * 100:.3f}% of samples replaced as outliers")
     return out
