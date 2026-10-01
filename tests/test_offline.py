@@ -83,13 +83,24 @@ def test_flag_parses_and_defaults_off():
 
 
 def test_policy_turns_online_features_off_and_says_so(capsys):
-    args = argparse.Namespace(offline=True, plate_solve=True, annotate=True, photometry=False,
+    args = argparse.Namespace(offline=True, plate_solve=True, plate_solver='astrometry',
+                              annotate=True, photometry=False,
                               photometry_timeseries=False, color_calibrate=True)
     assert cli.apply_network_policy(args, announce=True) is True
     assert net_query.is_offline()
     assert not (args.plate_solve or args.annotate or args.color_calibrate)
     out = capsys.readouterr().out
     assert 'Offline mode' in out and '--plate-solve' in out and '--annotate' in out
+
+
+@pytest.mark.parametrize('solver', ['auto', 'local'])
+def test_policy_keeps_plate_solve_for_the_local_solver(solver):
+    """The built-in solver works from the cached Gaia index, so --offline keeps it."""
+    args = argparse.Namespace(offline=True, plate_solve=True, plate_solver=solver,
+                              annotate=True, photometry=False,
+                              photometry_timeseries=False, color_calibrate=False)
+    cli.apply_network_policy(args, announce=True)
+    assert args.plate_solve and not args.annotate
 
 
 def test_policy_is_reset_for_the_next_run_in_the_same_process():

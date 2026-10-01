@@ -36,9 +36,20 @@ _log = logging.getLogger("originstack")
 _CH = ("r", "g", "b")
 
 
-def _cropped_session_wcs_header(session_info, shape_hw, left, top):
-    """FITS header carrying the session (Origin) WCS shifted onto the
-    cropped stacked grid, or None if the session provides no WCS."""
+def _cropped_session_wcs_header(session_info, shape_hw, left, top, stack_wcs=None):
+    """FITS header carrying the session (Origin) WCS on the cropped stacked
+    grid, or None if the session provides no WCS. *stack_wcs* (the cards
+    ``pipeline._settle_stack_wcs`` mapped through the registration and refined
+    against Gaia) wins when given; the crop-only shift below is the fallback."""
+    if stack_wcs:
+        from astropy.io import fits
+        h = fits.Header()
+        h["NAXIS"] = 2
+        h["NAXIS1"] = int(shape_hw[1])
+        h["NAXIS2"] = int(shape_hw[0])
+        for key, (val, _c) in stack_wcs.items():
+            h[key] = val
+        return h
     if session_info is None or not getattr(session_info, "has_wcs", False):
         return None
     try:
@@ -136,7 +147,8 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
                               displacement_fields, crop, stacked_linear,
                               session_info, args, output_path) -> Optional[dict]:
     top, bottom, left, right = crop
-    header = _cropped_session_wcs_header(session_info, stacked_linear.shape, left, top)
+    header = _cropped_session_wcs_header(session_info, stacked_linear.shape, left, top,
+                                         stack_wcs=getattr(args, "_stack_wcs", None))
     if header is None:
         _log.info("Time-series photometry: no session info.json WCS -- skipping "
                   "(--plate-solve runs too late in the pipeline for per-frame "

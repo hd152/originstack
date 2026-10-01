@@ -693,7 +693,9 @@ def multiscale_local_contrast(
     for sigma, w in zip(scales, scale_weights):
         if w <= 0 or strength <= 0:
             continue
-        blurred = _gaussian_blur(detail_src, float(sigma))
+        # gaussian_filter_ds: full resolution below its 24 px threshold, a
+        # downsampled blur above (the 40 px base scale)
+        blurred = gaussian_filter_ds(detail_src, float(sigma))
         detail = detail_src - blurred   # high-frequency detail at this scale
         enhanced_lum += strength * w * detail * mask
 

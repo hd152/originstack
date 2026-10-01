@@ -1,8 +1,10 @@
-"""Plate solving via ASTAP (local) or astrometry.net (online).
+"""Plate solving: built-in local solver, ASTAP, or astrometry.net.
 
 Backend selection:
+  --plate-solver auto         Built-in local solver first, then astrometry.net (default)
+  --plate-solver local        Built-in solver against a local Gaia index (src/local_solve.py)
   --plate-solver astap        Fast local solver (ASTAP binary + star database)
-  --plate-solver astrometry   Online nova.astrometry.net (default, requires API key)
+  --plate-solver astrometry   Online nova.astrometry.net (requires API key)
 
 ASTAP is preferred for speed (~1 s vs 30–120 s) and offline use.
 Download ASTAP from: https://www.hnsky.org/astap.htm
@@ -178,7 +180,7 @@ def _try_simbad_identification(header: fits.Header, verbose: bool = False) -> No
 
 def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
                 verbose: bool = False,
-                solver: str = "astrometry",
+                solver: str = "auto",
                 astap_path: Optional[str] = None) -> bool:
     """
     Attempt to plate-solve the stacked image and add WCS + object info to header.
@@ -188,7 +190,8 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
         header: FITS header to update with WCS info
         output_path: Path where FITS file is saved
         verbose: Print detailed progress
-        solver: 'astap' for local ASTAP binary, 'astrometry' for nova.astrometry.net
+        solver: 'auto' (built-in local solver, then astrometry.net), 'local',
+                'astap' for the ASTAP binary, 'astrometry' for nova.astrometry.net
         astap_path: Optional explicit path to the ASTAP binary
 
     Returns:
@@ -202,6 +205,29 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
             lum = 0.299 * image_data[:, :, 0] + 0.587 * image_data[:, :, 1] + 0.114 * image_data[:, :, 2]
     else:
         lum = image_data
+
+    # Built-in solver against the local Gaia index: needs a position hint (an
+    # existing WCS, e.g. the session info.json solve, or RA/DEC keywords).
+    if solver in ("auto", "local"):
+        try:
+            from src.local_solve import solve_header
+            if solve_header(np.asarray(lum, dtype=np.float32), header, verbose=verbose):
+                safe_print(f"  [Plate solving] local Gaia index: {header.get('PLTNSTAR')} stars, "
+                           f"rms {header.get('PLTRMS')} px")
+                _try_simbad_identification(header, verbose=verbose)
+                return True
+        except Exception as e:
+            if verbose:
+                print(f"  [Plate solving] local solver error: {e}")
+        if solver == "local":
+            header['PLTSOLVD'] = (False, 'Local plate solve failed')
+            return False
+        from src import net_query as _nq
+        if _nq.is_offline():
+            header['PLTSOLVD'] = (False, 'Local plate solve failed (offline)')
+            return False
+        if verbose:
+            print("  [Plate solving] local solver failed — trying astrometry.net")
 
     # Try ASTAP first if requested
     if solver == "astap":

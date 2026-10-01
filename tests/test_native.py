@@ -489,17 +489,41 @@ def test_lacosmic_reject_matches_numpy():
             rgb[:, :, c] += g
     rgb = np.ascontiguousarray(rgb)
 
-    ref = _numpy_lacosmic(rgb.copy())
-    got = native.lacosmic_reject_native(rgb.copy(), 4.5, 5.0, 1.0, 6.5)
-    assert got.shape == ref.shape and got.dtype == np.float32
+    a, b = _stacking_mod.lacosmic_noise_model(rgb)
+    # fixed gain/readnoise model, and the per-frame measured one (the default)
+    for ref, got in (
+            (_numpy_lacosmic(rgb.copy(), gain=1.0, readnoise=6.5),
+             native.lacosmic_reject_native(rgb.copy(), 4.5, 5.0, 1.0, 6.5)),
+            (_numpy_lacosmic(rgb.copy()),
+             native.lacosmic_reject_native(rgb.copy(), 4.5, 5.0, 1.0, 6.5, a, b))):
+        assert got.shape == ref.shape and got.dtype == np.float32
+        diff = np.abs(ref.astype(np.float64) - got.astype(np.float64))
+        n_pixels = H * W * 3
+        n_disagree = int(np.sum(diff > 1.0))
+        assert n_disagree < max(5, n_pixels // 10000), (
+            f"{n_disagree}/{n_pixels} pixels disagree on reject/keep — too many for "
+            f"f32 threshold rounding, suggests a real bug")
+        assert float(diff.max()) < 500.0, "a disagreeing pixel is wildly off, not a boundary flip"
 
-    diff = np.abs(ref.astype(np.float64) - got.astype(np.float64))
-    n_pixels = H * W * 3
-    n_disagree = int(np.sum(diff > 1.0))
-    assert n_disagree < max(5, n_pixels // 10000), (
-        f"{n_disagree}/{n_pixels} pixels disagree on reject/keep — too many for "
-        f"f32 threshold rounding, suggests a real bug")
-    assert float(diff.max()) < 500.0, "a disagreeing pixel is wildly off, not a boundary flip"
+
+def test_lacosmic_measured_noise_only_touches_real_spikes():
+    """With the noise measured from the frame, L.A.Cosmic replaces the injected
+    hits and essentially nothing else. The fixed gain-1/RN-6.5 model, on data
+    whose real noise is far above sqrt(signal), replaces a large share of all
+    pixels -- the smoothing the measured model exists to stop."""
+    rng = np.random.default_rng(5)
+    H, W = 200, 220
+    rgb = rng.normal(20000, 900, (H, W, 3)).astype(np.float32)   # Origin-like level/noise
+    ys, xs = rng.integers(5, H - 5, 40), rng.integers(5, W - 5, 40)
+    rgb[ys, xs, 1] += 20000.0
+    rgb = np.ascontiguousarray(rgb)
+    new = astro.lacosmic_reject(rgb.copy())
+    old = astro.lacosmic_reject(rgb.copy(), gain=1.0, readnoise=6.5)
+    changed_new = int((np.abs(new - rgb) > 1e-3).sum())
+    changed_old = int((np.abs(old - rgb) > 1e-3).sum())
+    assert 40 <= changed_new < 100
+    assert np.all(new[ys, xs, 1] < 25000.0)
+    assert changed_old > 0.1 * rgb.size
 
 
 def test_lacosmic_reject_non_rgb_passthrough():

@@ -518,10 +518,14 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
                 if 'INTGTIME' not in header:
                     header['INTGTIME'] = (round(total_s, 1),
                                           'Total integration time (session info, seconds)')
-            # WCS from celestial + FOV + orientation (only when plate solve has not run)
-            if si.has_wcs and 'CTYPE1' not in header:
+            # WCS from celestial + FOV + orientation (only when plate solve has not run).
+            # Prefer the one pipeline._settle_stack_wcs mapped onto this stack's
+            # grid (and refined against Gaia): the raw session WCS describes the
+            # first sub, not the registered, cropped stack.
+            _stack_wcs = getattr(args, '_stack_wcs', None)
+            if (si.has_wcs or _stack_wcs) and 'CTYPE1' not in header:
                 from src.session_info import build_wcs_keywords
-                wcs = build_wcs_keywords(si)
+                wcs = _stack_wcs or build_wcs_keywords(si)
                 for kw, (val, comment) in wcs.items():
                     header[kw] = (val, comment)
 

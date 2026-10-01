@@ -250,7 +250,8 @@ Eight built-in target presets tune all parameters at once:
 ```
 
 ### Advanced Features
-- **Plate solving** via ASTAP or nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
+- **Plate solving** built in, against a local Gaia DR3 index (no API key, works offline once the index covers the field), or via ASTAP / nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
+- **Re-run post-processing only** (`--from-stack STACK.fits`) — Phase 4 on an earlier run's linear stack, with that run's saved settings; no light frames needed
 - **Photometric colour calibration** — gray-locus method (`--photometric-calibration`), or full field-star calibration via Gaia DR3 (`--color-calibrate`)
 - **Aperture photometry** (`--photometry`) — calibrates the stack against Gaia DR3: per-channel zero points (optional colour terms), airmass from the `info.json` GPS + time, a Poisson error term from raw bias/flat pairs, and a `<output>_photometry.csv` star catalogue with magnitudes + uncertainties
 - **Differential light curves** (`--photometry-timeseries`) — aperture-photometers a fixed Gaia star list on every registered sub and ensemble-calibrates, writing per-frame + per-star CSVs with a variability flag; `--photometry-target "RA,DEC"` reports one star
@@ -489,10 +490,7 @@ python originstack.py -d lights/ -o drizzled.fits \
 ### Plate solving + colour calibration
 
 ```bash
-# Set your API key first
-export ASTROMETRY_API_KEY=your_key_here   # Linux/macOS
-set ASTROMETRY_API_KEY=your_key_here      # Windows
-
+# Built-in solver: no API key needed (see "Plate Solving" below)
 python originstack.py -d lights/ -o stacked.fits \
   --plate-solve \
   --color-calibrate \
@@ -735,7 +733,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--config PATH` | Load parameters from TOML file |
 | `--no-auto` | Disable the heuristic target classifier (on by default; detects target type and optimises settings automatically) |
 | `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, linear_fit, ivw, wavelet) |
-| `--debayer-method METHOD` | Debayer algorithm (malvar (default), menon2007) |
+| `--debayer-method METHOD` | Debayer algorithm: rcd (default), malvar, menon2007 |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
 | `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
@@ -753,7 +751,12 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--starless-process` | Denoise / local-contrast / deconvolve a starless copy, add the stars back untouched |
 | `--layered-stretch` | Preview stretch points taken from a starless copy (preview JPEG only) |
 | `--deconvolve {off,rl,rl-sv,tv,sparse}` | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet deconvolution |
-| `--plate-solve` | Plate solve via astrometry.net (requires API key) |
+| `--plate-solve` | Plate solve (built-in local Gaia solver by default; `--plate-solver` picks ASTAP/astrometry.net) |
+| `--from-stack STACK.fits` | Re-run post-processing only, on an earlier run's linear stack |
+| `--spike-reject` | Remove cosmic-ray / hot-pixel spikes on the raw mosaic before debayering (cheap; `--auto` turns it on for < 20 frames, mean stacking or drizzle) |
+| `--frame-store {auto,ram,disk}` | Keep per-session frame arrays in RAM when there is room (auto), always (ram), or in temp files (disk) |
+| `--no-wcs-refine` | Keep the session `info.json` WCS as mapped onto the stack, without the Gaia refinement |
+| `--gpu-phase1 {auto,on,off}` | With `--use-gpu`: run Phase 1 on the GPU or the CPU pool (auto picks) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
@@ -951,12 +954,13 @@ See [QUICK_REFERENCE.md](QUICK_REFERENCE.md) for guidance on interpreting shift 
 
 ## Network use and `--offline`
 
-OriginStack works entirely on your machine. It goes online in these cases only, and never uploads your frames except to astrometry.net when you ask for plate solving:
+OriginStack works entirely on your machine. It goes online in these cases only, and never uploads your frames except to astrometry.net when you choose that plate solver:
 
 | What | When | What is sent |
 |------|------|--------------|
 | SIMBAD lookup of the target | On a normal run, when the object name (from the session file, the FITS `OBJECT` header, or the folder name) is not in the built-in table | The name string only |
-| astrometry.net | `--plate-solve` | The image, to solve its position (needs your API key) |
+| Gaia star index tiles | `--plate-solve` (built-in solver), and on a normal run with a session `info.json` solve (to correct that WCS on the stack; `--no-wcs-refine` turns it off), for sky areas not yet in the local index | Sky coordinates of a 5°×5° tile; tiles are cached, so each area is fetched once |
+| astrometry.net | `--plate-solve --plate-solver astrometry` (or `auto` when the built-in solver fails) | The image, to solve its position (needs your API key) |
 | Gaia / VizieR / SIMBAD catalogues | `--photometry`, `--photometry-timeseries`, `--annotate`, catalogue colour calibration | Sky coordinates of the field |
 | JPL Horizons | Comet ephemerides | The comet designation and time |
 | Self-update check | Once per CLI run or desktop-app launch | Nothing — an anonymous GET of GitHub's public releases API, no request parameters, no identifying data |
@@ -969,13 +973,27 @@ Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no n
 
 ## Plate Solving
 
-Requires a free API key from [nova.astrometry.net](https://nova.astrometry.net/api_help) — no extra package (direct HTTP via `src/net_query.py`).
-
 ```bash
-export ASTROMETRY_API_KEY=your_key_here
-
 python originstack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate
 ```
+
+The default solver (`--plate-solver auto`) is built in: it matches the stack's stars against a
+local Gaia DR3 star index near a position hint — the session `info.json` solve on Celestron Origin
+data, or the `RA`/`DEC`/`OBJCTRA` header keywords — in about a second. Index tiles it doesn't have
+yet are downloaded once from Gaia and cached (`%LOCALAPPDATA%\OriginStack\star_index` on Windows,
+`~/.cache/originstack/star_index` elsewhere, or `$ORIGINSTACK_STAR_INDEX`). For a machine that is
+never online, fill the index ahead of time:
+
+```bash
+python tools/build_star_index.py --all                      # whole sky, ~1650 tiles, ~80 MB
+python tools/build_star_index.py --ra 83.6 --dec 22 --radius 10
+python tools/build_star_index.py --status
+```
+
+With `--offline`, the built-in solver still runs from the cached tiles. If it fails and an
+astrometry.net key is set (`ASTROMETRY_API_KEY`, free from
+[nova.astrometry.net](https://nova.astrometry.net/api_help)), `auto` falls back to
+astrometry.net; `--plate-solver local` never goes online for the image.
 
 When plate solving succeeds, WCS keywords (CRVAL, CRPIX, CD matrix) are written to the FITS header and the field's primary object is identified via the SIMBAD database. The output FITS will then display coordinate grids in DS9, AstroImageJ, PixInsight, and similar tools.
 

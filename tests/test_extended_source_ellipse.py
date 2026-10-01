@@ -143,3 +143,27 @@ class TestGalaxyCenterOverride:
     def test_malformed_string_raises(self):
         with pytest.raises(ValueError):
             parse_galaxy_center_override("not-a-valid-pair")
+
+
+def test_galaxy_beats_a_broad_gradient_plateau():
+    """A residual sky gradient that clears 1 border-sigma over half the frame used
+    to win on area: on a real galaxy field (Sunflower) the 'galaxy' ellipse covered
+    69% of the frame away from the galaxy, and the unmodelled gradient came out of
+    the stretch as large coloured blobs. The galaxy's core is what is significant."""
+    H, W = 600, 900
+    rng = np.random.default_rng(3)
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    plateau = 60.0 * np.exp(-((yy - 420) ** 2 / (2 * 160 ** 2) + (xx - 600) ** 2 / (2 * 260 ** 2)))
+    lum = 1000.0 + plateau + rng.normal(0, 5.0, (H, W))
+    lum += _elongated_blob(H, W, 230, 330, 22.0, 10.0, 35.0, amp=900.0, bg=0.0)
+    cy, cx, a, b, _ = find_extended_source_ellipse(lum.astype(np.float32))
+    assert abs(cy - 230) < 15 and abs(cx - 330) < 15
+    assert np.pi * a * b / (H * W) < 0.10
+
+
+def test_faint_object_without_a_significant_core_still_found():
+    """No core above 5 sigma: the original largest-1-sigma-blob path still runs."""
+    lum = _elongated_blob(300, 300, 150, 150, 30.0, 20.0, 0.0, amp=8.0, bg=1000.0)
+    lum[:, :] += np.random.default_rng(1).normal(0, 0.5, lum.shape).astype(np.float32)
+    r = find_extended_source_ellipse(lum)
+    assert r is not None and abs(r[0] - 150) < 10 and abs(r[1] - 150) < 10

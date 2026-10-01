@@ -578,9 +578,10 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     _feather_protect = None
     if exclusion_mask is not None:
         try:
+            # a blurred binary ellipse: smooth at this sigma, so downsampled from 8 px
             _feather_protect = np.clip(gaussian_filter_ds(
                 np.asarray(exclusion_mask, dtype=np.float64),
-                sigma=max(mesh_size * 0.5, 8.0)), 0.0, 1.0)
+                sigma=max(mesh_size * 0.5, 8.0), ds_threshold=8.0), 0.0, 1.0)
         except Exception:
             _feather_protect = None
     try:
@@ -728,7 +729,11 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         background = spline(np.arange(H), np.arange(W)).astype(np.float64)
         blur_sigma = (H/ny) * 0.5
         if blur_sigma > 0:
-            background = gaussian_filter_ds(background, sigma=blur_sigma)
+            # A spline through a mesh of >= 2*blur_sigma cells has nothing near a
+            # 4x-downsampled grid's Nyquist limit, so the downsampled blur applies
+            # from 8 px, not gaussian_filter_ds's general 24 px threshold (sigma
+            # 16-20 here ran at full resolution: ~1.8 s a call, 9 calls a stack).
+            background = gaussian_filter_ds(background, sigma=blur_sigma, ds_threshold=8.0)
 
         if _feather_protect is not None:
             background = background * (1.0 - _feather_protect)
@@ -852,7 +857,13 @@ def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
         # the target -- let DBE model it as background instead of preserving
         # it as "emission".
         lum_smooth = _flatten_edge_glow(lum_smooth, sky_med, sky_std)
-    emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std)
+    # With a caller-supplied exclusion (galaxy/comet mode) the target is already
+    # protected, so the diffuse-emission rule -- built to save faint nebulosity --
+    # only protects residual sky gradient: on a real galaxy field (Sunflower, 158
+    # frames) it masked 59% of the frame, DBE sampled only the darker remainder,
+    # and the unmodelled gradient came out of the stretch as large coloured blobs.
+    emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std,
+                                         diffuse=exclusion_mask is None)
     if exclusion_mask is not None:
         try:
             excl = np.asarray(exclusion_mask, dtype=np.float32)
@@ -877,7 +888,8 @@ def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
 
 def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
                          lum_smooth: np.ndarray,
-                         sky_med: float, sky_std: float) -> np.ndarray:
+                         sky_med: float, sky_std: float,
+                         diffuse: bool = True) -> np.ndarray:
     """Build a float32 exclusion mask (1 = emission/star, 0 = safe background)."""
     H, W = lum.shape
     emission = np.zeros((H, W), dtype=np.float32)
@@ -936,10 +948,11 @@ def _build_emission_mask(lum: np.ndarray, star_mask: Optional[np.ndarray],
     # so most smooth optical vignetting/gradient is gone by this point --
     # what's left this broad is far more likely real extended emission than
     # gradient residual.
-    diffuse_thresh = sky_med + 1.0 * max(sky_std, 1.0)
-    diffuse_binary = (lum_smooth > diffuse_thresh).astype(np.float32)
-    if diffuse_binary.any():
-        np.clip(emission + diffuse_binary, 0.0, 1.0, out=emission)
+    if diffuse:
+        diffuse_thresh = sky_med + 1.0 * max(sky_std, 1.0)
+        diffuse_binary = (lum_smooth > diffuse_thresh).astype(np.float32)
+        if diffuse_binary.any():
+            np.clip(emission + diffuse_binary, 0.0, 1.0, out=emission)
 
     return emission
 
@@ -1386,7 +1399,9 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
     # whatever cubic's extra curvature term would have added -- same
     # reasoning as gaussian_filter_ds's own upsample (see its comment).
     surface = zoom(coarse, (H / Hc, W / Wc), order=1)[:H, :W]
-    surface = _gaussian_blur(surface, patch_size * 0.5)
+    # bilinear upsample of a grid with >= 12 px cells: same reasoning as the
+    # mesh path's blur in extract_background (was ~3.7 s a channel at full res)
+    surface = gaussian_filter_ds(surface, patch_size * 0.5, ds_threshold=8.0)
     return np.clip(surface, surf_lo, surf_hi)
 
 
