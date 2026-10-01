@@ -46,11 +46,15 @@ except Exception:
 
 
 class _MemmapManager:
-    """Context manager for safe memmap creation and cleanup."""
+    """Context manager for safe memmap creation and cleanup. The per-session
+    frame arrays go through ``self.store`` (src/frame_store.py: RAM when it fits,
+    temp file otherwise); ``create`` stays a plain temp-file memmap."""
 
-    def __init__(self):
+    def __init__(self, frame_store_mode: str = 'auto'):
+        from src.frame_store import FrameStore
         self._files: List[str] = []
         self._memmaps: List = []
+        self.store = FrameStore(frame_store_mode)
 
     def create(self, prefix: str, dtype: str, shape: tuple) -> np.ndarray:
         fd, path = tempfile.mkstemp(suffix='.dat', prefix=prefix)
@@ -82,6 +86,7 @@ class _MemmapManager:
                 pass
             _cleanup_deregister(p)
         self._files.clear()
+        self.store.cleanup()
 
     def __enter__(self):
         return self
@@ -586,7 +591,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         # ======================================================================
         # PHASES 1-3: Normal path (requires memmap)
         # ======================================================================
-        mm_mgr = _MemmapManager()
+        mm_mgr = _MemmapManager(getattr(args, 'frame_store', 'auto'))
         rgb_shape = (n, H_rgb, W_rgb, C)
         lum_shape = (n, H_rgb, W_rgb)
         bytes_needed = (n * H_rgb * W_rgb * C * 4) + (n * H_rgb * W_rgb * 4)
@@ -599,10 +604,18 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                            f"{free_bytes / 1e9:.2f} GB free in {tmpdir}")
         except Exception:
             pass
-        mem_rgb = mm_mgr.create('stack_rgb_', 'float32', rgb_shape)
-        mm_rgb_path = mm_mgr._files[-1]
-        mem_lum = mm_mgr.create('stack_lum_', 'float32', lum_shape)
-        mm_lum_path = mm_mgr._files[-1]
+        # RAM (shared memory: Phase 1's worker processes write into these) when it
+        # fits beside what the workers themselves will use, temp file otherwise
+        _p1_reserve_mb = (os.cpu_count() or 4) * (H_rgb * W_rgb * 4 * 9 / 1e6 + 200)
+        # (auto: these prefer the temp file -- see src/frame_store.py for why)
+        mem_rgb, mm_rgb_path = mm_mgr.store.create('stack_rgb_', 'float32', rgb_shape,
+                                                   shared=True, reserve_mb=_p1_reserve_mb,
+                                                   prefer='disk')
+        mem_lum, mm_lum_path = mm_mgr.store.create('stack_lum_', 'float32', lum_shape,
+                                                   shared=True, reserve_mb=_p1_reserve_mb,
+                                                   prefer='disk')
+        from src.frame_store import announce as _announce_store
+        _announce_store(mm_mgr.store)
         cached_lums: list = [None] * n
 
         try:

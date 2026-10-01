@@ -754,6 +754,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--plate-solve` | Plate solve (built-in local Gaia solver by default; `--plate-solver` picks ASTAP/astrometry.net) |
 | `--from-stack STACK.fits` | Re-run post-processing only, on an earlier run's linear stack |
 | `--spike-reject` | Remove cosmic-ray / hot-pixel spikes on the raw mosaic before debayering (cheap; `--auto` turns it on for < 20 frames, mean stacking or drizzle) |
+| `--frame-store {auto,ram,disk}` | Keep per-session frame arrays in RAM when there is room (auto), always (ram), or in temp files (disk) |
 | `--no-wcs-refine` | Keep the session `info.json` WCS as mapped onto the stack, without the Gaia refinement |
 | `--gpu-phase1 {auto,on,off}` | With `--use-gpu`: run Phase 1 on the GPU or the CPU pool (auto picks) |
 | `--comet-mode` | Dual-register for comet nucleus tracking |

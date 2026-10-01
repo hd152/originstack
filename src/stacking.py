@@ -2150,10 +2150,14 @@ def run_stacking_phase(
                    "doesn't build); falling back to sigma_clip for this run.")
         args.stack_method = 'sigma_clip'
     if use_aligned_memmap:
-        mm_aligned_path = os.path.join(tempfile.gettempdir(), f'stack_aligned_{os.getpid()}.dat')
         crop_h, crop_w = bottom - top, right - left
-        mem_aligned = np.memmap(mm_aligned_path, dtype='float32', mode='w+',
-                                shape=(n_final, crop_h, crop_w, C))
+        # RAM when it fits (src/frame_store.py), temp file otherwise; only this
+        # process's threads touch it, so no shared memory is needed
+        from src.frame_store import FrameStore, announce
+        _aligned_store = FrameStore(getattr(args, 'frame_store', 'auto'))
+        mem_aligned, _ = _aligned_store.create('stack_aligned_', 'float32',
+                                               (n_final, crop_h, crop_w, C), reserve_mb=2000.0)
+        announce(_aligned_store)
 
         gpu = get_gpu()
 
@@ -2403,10 +2407,7 @@ def run_stacking_phase(
                 safe_print(f"  WARNING: moving-object search failed: {_moe}")
 
         del mem_aligned
-        try:
-            os.remove(mm_aligned_path)
-        except Exception:
-            pass
+        _aligned_store.cleanup()
 
     else:
         if drizzle_scale > 1.0:

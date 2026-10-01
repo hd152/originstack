@@ -1007,8 +1007,9 @@ def _parallel_frame_worker(
 
     _t = time.perf_counter()
     try:
-        mem_rgb = np.memmap(mm_rgb_path, dtype='float32', mode='r+', shape=rgb_shape)
-        mem_lum = np.memmap(mm_lum_path, dtype='float32', mode='r+', shape=lum_shape)
+        from src.frame_store import open_frame_array
+        mem_rgb = open_frame_array(mm_rgb_path, 'float32', rgb_shape)
+        mem_lum = open_frame_array(mm_lum_path, 'float32', lum_shape)
         mem_rgb[frame_idx] = result['rgb']
         mem_lum[frame_idx] = result['lum']
         # Flush deferred to main process after all workers complete — flushing

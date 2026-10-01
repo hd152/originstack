@@ -49,6 +49,10 @@ match the `VERSION` file and `v*` git tags.
 - **`--from-stack` re-runs are faster**: background extraction and the sky steps are cached
   next to the input stack and reused while their settings are unchanged.
 - **Faster post-processing**: two background-surface blurs run on a downsampled grid.
+- **Less temp disk use**: the aligned frames are kept in RAM when they fit, leaving 30% of memory
+  free (`--frame-store`, default `auto`; ~10.6 GB less temp disk on a 158-frame session), and
+  Phase 1's frames move to RAM too if the temp disk would otherwise be left nearly full.
+  `--frame-store ram` writes no temp files at all; `disk` restores the old behaviour.
 - **Faster runs overall**: the RCD kernel works in cache-sized tiles (2x faster under Phase 1's
   parallel load), originvision's image preprocessing only computes the pixels it uses (6x faster
   per scored frame, identical scores), and frame validation samples its statistics. A real

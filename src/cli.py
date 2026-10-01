@@ -1775,6 +1775,13 @@ def build_parser() -> argparse.ArgumentParser:
                                       Config.DRIZZLE_PSF_KERNEL_SIZE))
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
+    g_core.add_argument('--frame-store', choices=['auto', 'ram', 'disk'], default='auto',
+                   help='Where the per-session frame arrays live (tens of GB on long '
+                        'sessions). auto (default): the aligned stack in RAM when it fits '
+                        '(30%% of total memory plus room for the workers stays free), the '
+                        'Phase 1 arrays in temp files unless the temp disk would be left '
+                        'short. ram: everything in RAM, no temp files. disk: everything '
+                        'in temp files.')
     g_core.add_argument('--gpu-phase1', choices=['auto', 'on', 'off'], default='auto',
                    help='With --use-gpu: where Phase 1 frame processing runs. '
                         '"auto" (default) keeps it on the CPU process pool unless the '
