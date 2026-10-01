@@ -103,8 +103,9 @@
         <p class="fact">One real session ran from 0.86 to 1.23 against its median.</p></dd></div>
       <div><dt>Satellite and aircraft trails<code>--trail-reject</code></dt>
         <dd><p>Finds line segments in each frame and fills them from the surrounding background before stacking.</p></dd></div>
-      <div><dt>Cosmic rays and hot pixels<code>on by default</code></dt>
-        <dd><p>Hot pixels are handled per frame. With 20 or more frames and a rejecting combine, cosmic rays are removed per pixel by the combine itself, so the slower per-frame detector is skipped.</p></dd></div>
+      <div><dt>Cosmic rays and hot pixels<code>on by default</code> <code>--spike-reject</code></dt>
+        <dd><p>Hot pixels are handled per frame. With 20 or more frames and a rejecting combine, cosmic rays are removed per pixel by the combine itself. With fewer frames, a mean combine or drizzle, a fast detector removes one- and two-pixel spikes from the raw sensor mosaic before demosaicing can smear them.</p>
+        <p class="fact">About 200 spikes per frame on a real 20-second Origin sub, at 0.17 s a frame. <code>--cosmic-ray-rejection</code> still runs the classic L.A.Cosmic detector, which now measures each frame's noise instead of assuming it.</p></dd></div>
       <div><dt>Row and column banding<code>--banding-removal</code></dt>
         <dd><p>Removes faint horizontal or vertical stripes per colour plane after calibration, gated so it does nothing when the pattern is not significant.</p>
         <p class="fact">Real Origin frames carry about 12 ADU of row banding, roughly 3% of the pixel noise.</p></dd></div>
@@ -126,6 +127,9 @@
         <dd><p>Fits dark current against sensor temperature across a whole dark library and evaluates it at each light's temperature, so a small library can cover a wide range.</p></dd></div>
       <div><dt>Gain and read noise from your own frames<code>automatic with photometry</code></dt>
         <dd><p>Estimates the camera gain and read noise from a pair of bias frames and a pair of flats, for the noise terms in photometry.</p></dd></div>
+      <div><dt>Demosaicing with RCD<code>on by default</code> <code>--debayer-method</code></dt>
+        <dd><p>The sensor's colour mosaic is turned into an image with Ratio Corrected Demosaicing, the method Siril, RawTherapee and darktable use. It follows each star's profile instead of averaging across it, and on smooth sky it keeps less of the per-pixel noise than the Malvar method used before.</p>
+        <p class="fact">On two real sessions the stack's noise dropped 7 to 15% per colour for stars 1.6 to 2.6% wider. <code>--debayer-method malvar</code> brings back the previous method.</p></dd></div>
       <div><dt>Session-constant colour-grid equalisation<code>on by default</code></dt>
         <dd><p>The tiny gain difference between a sensor's two green pixels and a faint 2-by-2 pattern left by demosaicing are properties of the sensor, so they are measured once from eight frames instead of on every frame. Debayering became about 2.8 times faster with the stack unchanged to 0.1 ADU. <code>--no-session-cfa-eq</code> restores the per-frame path.</p></dd></div>
     </dl>
@@ -177,8 +181,14 @@
         <dd><p>Compares tonight with an earlier stack using proper image subtraction (ZOGY), which cancels the star residuals a plain subtraction leaves even when the seeing differs. Reports the significance of each candidate in real sigma, and masks the corners that field rotation left uncovered.</p></dd></div>
       <div><dt>Asteroids and other movers<code>--moving-objects</code></dt>
         <dd><p>Links faint detections across different frames into tracks and stacks along them. On a real session with no mover, 1,497 candidate detections produced no false tracks.</p></dd></div>
-      <div><dt>Plate solving, colour calibration, annotation<code>--plate-solve</code> <code>--color-calibrate</code> <code>--annotate</code></dt>
-        <dd><p>Solves the field on astrometry.net, calibrates colour against star spectra, and labels named objects and bright stars on a copy of the preview. These go online when you enable them; <code>--offline</code> turns them off.</p></dd></div>
+      <div><dt>Plate solving, built in<code>--plate-solve</code></dt>
+        <dd><p>Solves the field on your own computer against a Gaia star catalogue, in about a second, with no account or API key. The first time it sees a part of the sky it downloads that area once and keeps it; <code>tools/build_star_index.py</code> fills the whole sky ahead of time (about 80 MB) for a machine that is never online. astrometry.net and ASTAP remain available as <code>--plate-solver</code> choices.</p>
+        <p class="fact">On a real stack the solution put 48 of 54 catalogue stars within 2 pixels of the detected stars, median 0.12 px.</p></dd></div>
+      <div><dt>A correct sky position for Origin sessions<code>on by default</code> <code>--no-wcs-refine</code></dt>
+        <dd><p>The Origin's own solve describes its first frame, not the stacked image, and was being written mirrored and about 60 pixels off. It is now carried through the registration and the crop and refined against the catalogue, so photometry and labels land on the right stars.</p>
+        <p class="fact">Median error on a real stack went from 63 px to 0.24 px.</p></dd></div>
+      <div><dt>Colour calibration, annotation<code>--color-calibrate</code> <code>--annotate</code></dt>
+        <dd><p>Calibrates colour against star spectra, and labels named objects and bright stars on a copy of the preview. These go online when you enable them; <code>--offline</code> turns them off.</p></dd></div>
     </dl>
   </div>
 </section>
@@ -214,11 +224,16 @@
       <div><dt>Target-aware defaults<code>on by default</code> <code>--no-auto</code> <code>--preset</code></dt>
         <dd><p>Classifies your target from the session file, FITS header and folder name, then blends settings smoothly across eight target presets, so something between an emission and a reflection nebula gets a mix instead of a hard jump. Anything you set yourself is left alone.</p></dd></div>
       <div><dt>Resume and reproduce<code>--config</code> <code>checkpoints</code></dt>
-        <dd><p>A run saves a checkpoint after Phase 1, and every run can write its effective settings to a config file to reapply later.</p></dd></div>
+        <dd><p>A run saves a checkpoint after each phase, tied to the settings and files it came from: change a stacking setting and Phase 1 is reused, change a Phase 1 setting or a file and it starts fresh. Every run writes its effective settings to a config file to reapply later.</p></dd></div>
+      <div><dt>Re-run only the finishing<code>--from-stack STACK.fits</code></dt>
+        <dd><p>Re-runs the finishing steps on an earlier run's linear stack with that run's settings, no light frames needed. The background and sky steps are cached next to the stack, so changing a later setting such as the stretch or noise reduction takes seconds.</p>
+        <p class="fact">On a 158-frame session: 108 s for the full run, 28 s from the stack, 8 s with the cache.</p></dd></div>
+      <div><dt>Memory or disk, your machine decides<code>--frame-store</code></dt>
+        <dd><p>The aligned frames are kept in memory when there is room, always leaving 30% of RAM free, and in temporary files otherwise. The rest move to memory too if the temporary disk would otherwise run short.</p></dd></div>
       <div><dt>Fast where it counts<code>astro_native</code></dt>
-        <dd><p>Fifty-seven multi-threaded Rust kernels cover the hot loops, each with a NumPy fallback and a parity test against it. The build reports which is active at startup.</p></dd></div>
+        <dd><p>Sixty-four multi-threaded Rust kernels cover the hot loops, each with a NumPy fallback and a parity test against it. The build reports which is active at startup.</p></dd></div>
       <div><dt>Runs offline<code>--offline</code></dt>
-        <dd><p>Makes no network request at all. Without it, a run may look up a target name it does not recognise on SIMBAD; only the name is sent.</p></dd></div>
+        <dd><p>Makes no network request at all; plate solving keeps working from the star catalogue already on disk. Without it, a run may look up a target name it does not recognise on SIMBAD (only the name is sent) and download catalogue tiles for a part of the sky it has not seen before (only the sky coordinates).</p></dd></div>
       <div><dt>Every input, one folder<code>FITS RAW TIFF XISF SER</code></dt>
         <dd><p>Camera RAW, TIFF, XISF and SER planetary video load through one path and can be mixed in a folder.</p></dd></div>
     </dl>
@@ -240,6 +255,10 @@
         <p>The fit found a coefficient of +0.0007, not significant, so nothing is applied. The optics are effectively distortion-free; the machinery is tested on synthetic data.</p></div>
       <div><h3>Deconvolving the starless layer at low signal</h3>
         <p>On a stack of very noisy frames, the plain image beat both the starless Richardson-Lucy and the sparse method, which rang badly. It is implemented and correct, and not recommended below high signal-to-noise.</p></div>
+      <div><h3>Per-frame cosmic-ray detection as a noise fix</h3>
+        <p>Turning the classic detector on cut the stack's noise by 11 to 16%, so it was kept on for long subs. It turned out to be assuming the wrong noise level and quietly smoothing about a fifth of every frame: a plain blur gives the same noise drop with less loss of sharpness. Fixed, it removes real cosmic rays and no longer changes the noise.</p></div>
+      <div><h3>Turning off quality weighting</h3>
+        <p>A run without it looked 4 to 6% quieter. That run was in fact still weighted; the difference came from the rejection settings. Turned off for real, the stack got noisier, so the weighting stays.</p></div>
       <div><h3>Faster medians by sampling</h3>
         <p>A strided or random subsample of the debayering statistics gave errors as large as the correction itself, because the data has structure with a four-pixel period and the per-frame noise is around 1,100 ADU. The fix was to measure once per session instead.</p></div>
     </div>
