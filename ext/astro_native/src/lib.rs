@@ -8770,6 +8770,64 @@ unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,
     rcd_core_impl!(src, h, w, scale, r_off, b_off)
 }
 
+/// Linear cross-correlation `c[dy][dx] = sum_p ref[p + d] * img[p]` (zero outside
+/// the frame) for every lag |dy|, |dx| <= radius: the values a zero-padded FFT
+/// correlation has at those lags (src/registration.py::calculate_shift_pyramid_pref,
+/// below the coarsest pyramid level, where the coarse pass has already found the
+/// shift to a few pixels and a full padded FFT -- 2x each axis -- is ~100 ms of
+/// work for 25 numbers). f64 accumulation, parallel over lags.
+#[pyfunction]
+#[pyo3(signature = (reference, image, radius))]
+fn xcorr_window<'py>(
+    py: Python<'py>,
+    reference: PyReadonlyArray2<'py, f32>,
+    image: PyReadonlyArray2<'py, f32>,
+    radius: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let ra = reference.as_array();
+    let ia = image.as_array();
+    if ra.shape() != ia.shape() {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let (h, w) = (ra.shape()[0], ra.shape()[1]);
+    let rs = ra.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("reference must be contiguous"))?;
+    let is = ia.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("image must be contiguous"))?;
+    if radius >= h.max(w) {
+        return Err(pyo3::exceptions::PyValueError::new_err("radius must be smaller than the frame"));
+    }
+    let n = 2 * radius + 1;
+    let r = radius as isize;
+    let vals: Vec<f64> = py.detach(|| {
+        (0..n * n)
+            .into_par_iter()
+            .map(|k| {
+                let dy = (k / n) as isize - r;
+                let dx = (k % n) as isize - r;
+                // p and p + d both inside the frame
+                let y0 = (-dy).max(0) as usize;
+                let y1 = ((h as isize) - dy.max(0)).max(0) as usize;
+                let x0 = (-dx).max(0) as usize;
+                let x1 = ((w as isize) - dx.max(0)).max(0) as usize;
+                let mut acc = 0f64;
+                if x1 > x0 {
+                    for y in y0..y1 {
+                        let ry = (y as isize + dy) as usize;
+                        let a = &rs[ry * w + (x0 as isize + dx) as usize..ry * w + (x1 as isize + dx) as usize];
+                        let b = &is[y * w + x0..y * w + x1];
+                        let mut row = 0f64;
+                        for (u, v) in a.iter().zip(b) {
+                            row += *u as f64 * *v as f64;
+                        }
+                        acc += row;
+                    }
+                }
+                acc
+            })
+            .collect()
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((n, n), vals).unwrap().into_pyarray(py))
+}
+
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(originvision::originvision_score, m)?)?;
@@ -8825,6 +8883,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hot_pixel_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(spike_reject_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
+    m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;

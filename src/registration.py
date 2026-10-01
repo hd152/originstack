@@ -680,8 +680,45 @@ def prepare_ref_pyramid(ref: np.ndarray, levels: int = 4, min_size: int = 32) ->
         h, w = ref_n.shape
         pad_h, pad_w = sfft.next_fast_len(2 * h), sfft.next_fast_len(2 * w)
         F_ref = sfft.rfft2(ref_n, s=(pad_h, pad_w), workers=1)
-        prepared.append((F_ref, h, w, pad_h, pad_w))
+        prepared.append((F_ref, h, w, pad_h, pad_w, np.ascontiguousarray(ref_n)))
     return prepared
+
+
+# Below the coarsest pyramid level the shift is already known to a couple of
+# pixels (the coarser estimate, doubled), so the correlation is evaluated
+# directly at lags |d| <= _PYRAMID_WINDOW instead of through a full FFT
+# zero-padded to twice each axis (~110 of ~155 ms per frame at the half-res
+# level). Same linear correlation either way; when the best lag sits on the
+# window edge the peak may lie outside it, and the full FFT runs as before.
+_PYRAMID_WINDOW = 2
+
+
+def _xcorr_window_numpy(ref: np.ndarray, img: np.ndarray, radius: int) -> np.ndarray:
+    """numpy mirror of the native ``xcorr_window``: c[dy+r, dx+r] =
+    sum_p ref[p + d] * img[p] over p with p and p + d inside the frame."""
+    h, w = img.shape
+    n = 2 * radius + 1
+    out = np.zeros((n, n))
+    for i, dy in enumerate(range(-radius, radius + 1)):
+        for j, dx in enumerate(range(-radius, radius + 1)):
+            y0, y1 = max(0, -dy), h - max(0, dy)
+            x0, x1 = max(0, -dx), w - max(0, dx)
+            if y1 > y0 and x1 > x0:
+                a = ref[y0 + dy:y1 + dy, x0 + dx:x1 + dx].astype(np.float64)
+                b = img[y0:y1, x0:x1].astype(np.float64)
+                out[i, j] = float(np.sum(a * b))
+    return out
+
+
+def _xcorr_window(ref: np.ndarray, img: np.ndarray, radius: int) -> np.ndarray:
+    if HAS_NATIVE and hasattr(_native, 'xcorr_window'):
+        try:
+            return np.asarray(_native.xcorr_window(np.ascontiguousarray(ref, dtype=np.float32),
+                                                   np.ascontiguousarray(img, dtype=np.float32),
+                                                   int(radius)))
+        except Exception:
+            pass
+    return _xcorr_window_numpy(ref, img, radius)
 
 
 def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float, float]:
@@ -695,17 +732,26 @@ def calculate_shift_pyramid_pref(prepared: list, img: np.ndarray) -> Tuple[float
         img_pyr.append(_downsample_half(img_pyr[-1]))
     total_sy, total_sx = 0.0, 0.0
     for lvl in range(levels - 1, stop - 1, -1):
-        F_ref, h, w, pad_h, pad_w = prepared[lvl]
+        F_ref, h, w, pad_h, pad_w, ref_n = prepared[lvl]
         i = img_pyr[lvl]
         if total_sy != 0.0 or total_sx != 0.0:
             i = _int_shift(i, int(total_sy), int(total_sx))
         img_n = (i - i.mean()).astype(np.float32, copy=False)
-        F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
-        corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
-        peak_flat = int(np.argmax(corr))
-        py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
-        dy = py if py < h else py - pad_h
-        dx = px if px < w else px - pad_w
+        dy = dx = None
+        if lvl < levels - 1:
+            r = _PYRAMID_WINDOW
+            c = _xcorr_window(ref_n, img_n, r)
+            k = int(np.argmax(c))
+            wy, wx = k // c.shape[1] - r, k % c.shape[1] - r
+            if abs(wy) < r and abs(wx) < r:      # interior: the peak is inside the window
+                dy, dx = wy, wx
+        if dy is None:
+            F_img = sfft.rfft2(img_n, s=(pad_h, pad_w), workers=1)
+            corr = sfft.irfft2(F_ref * np.conj(F_img), s=(pad_h, pad_w), workers=1)
+            peak_flat = int(np.argmax(corr))
+            py, px = peak_flat // corr.shape[1], peak_flat % corr.shape[1]
+            dy = py if py < h else py - pad_h
+            dx = px if px < w else px - pad_w
         total_sy += dy
         total_sx += dx
         if lvl > 0:
