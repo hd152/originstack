@@ -2353,6 +2353,26 @@ def run_stacking_phase(
         else:
             stacked = median_combine(mem_aligned, verbose=args.verbose)
 
+        # --proper-coadd: replace the stack with the Zackay-Ofek proper coadd of the
+        # same aligned frames (src/proper_coadd.py); the stack above is its outlier
+        # reference and the fallback.
+        if getattr(args, 'proper_coadd', False) and n_final >= 3:
+            try:
+                from src.proper_coadd import proper_coadd
+                _fw = [float(f.metrics.get('fwhm', 0) or 0) for f in final if f.metrics]
+                _fw = [x for x in _fw if x > 0]
+                _t_pc = time.time()
+                _pc = proper_coadd(mem_aligned, stacked,
+                                   fwhm=float(np.median(_fw)) if _fw else 5.0,
+                                   verbose=True)
+                if _pc is not None:
+                    stacked = _pc
+                    safe_print(f"  Proper coadd ({format_time(time.time() - _t_pc)})")
+                else:
+                    safe_print("  Proper coadd: PSF could not be measured -- keeping the normal stack")
+            except Exception as _pce:
+                safe_print(f"  WARNING: proper coadd failed ({_pce}); keeping the normal stack")
+
         # --noise-validate: odd/even half-stacks while the aligned frames are
         # still on disk (see src/noise_validation.py).
         if getattr(args, 'noise_validate', False) and n_final >= 6:
