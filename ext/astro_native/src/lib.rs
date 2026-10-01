@@ -3566,38 +3566,12 @@ fn separable_blur(img: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
     out
 }
 
-/// Cell-center-aligned bilinear upsample of a (ny, nx) mesh to (h, w).
-/// See src/star_detect.py::_bilinear_upsample for why this is hand-rolled
-/// instead of a generic zoom (corner- vs centre-alignment produced a real
-/// false-positive cluster at the image border during validation).
-fn bilinear_upsample(grid: &[f64], ny: usize, nx: usize, h: usize, w: usize, cell: usize) -> Vec<f64> {
-    let cellf = cell as f64;
-    let mut out = vec![0f64; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
-        let gy = y as f64 / cellf - 0.5;
-        let gy0 = gy.floor().max(0.0).min((ny - 1) as f64) as usize;
-        let gy1 = (gy0 + 1).min(ny - 1);
-        let fy = (gy - gy0 as f64).clamp(0.0, 1.0);
-        for x in 0..w {
-            let gx = x as f64 / cellf - 0.5;
-            let gx0 = gx.floor().max(0.0).min((nx - 1) as f64) as usize;
-            let gx1 = (gx0 + 1).min(nx - 1);
-            let fx = (gx - gx0 as f64).clamp(0.0, 1.0);
-            let v00 = grid[gy0 * nx + gx0];
-            let v01 = grid[gy0 * nx + gx1];
-            let v10 = grid[gy1 * nx + gx0];
-            let v11 = grid[gy1 * nx + gx1];
-            let v0 = v00 * (1.0 - fx) + v01 * fx;
-            let v1 = v10 * (1.0 - fx) + v11 * fx;
-            out_row[x] = v0 * (1.0 - fy) + v1 * fy;
-        }
-    });
-    out
-}
-
-/// Per-cell median (use_mad=false) or 1.4826*MAD sigma (use_mad=true),
-/// upsampled to full resolution and lightly smoothed (sigma = cell*0.3).
-fn local_mesh_stat(img: &[f64], h: usize, w: usize, cell: usize, use_mad: bool) -> Vec<f64> {
+/// Per-cell median (use_mad=false) or 1.4826*MAD sigma (use_mad=true) of an
+/// f32 image, as the smoothed (ny, nx) mesh grid. `mesh_bilinear` evaluates the
+/// cell-centre-aligned upsample of it at any pixel -- the same arithmetic the
+/// numpy mirror's full-resolution `_bilinear_upsample` uses, without
+/// materialising a full-frame f64 map.
+fn local_mesh_grid(img: &[f32], h: usize, w: usize, cell: usize, use_mad: bool) -> (Vec<f64>, usize, usize) {
     let ny = (h / cell.max(1)).max(1);
     let nx = (w / cell.max(1)).max(1);
     let grid: Vec<f64> = (0..ny * nx)
@@ -3611,10 +3585,7 @@ fn local_mesh_stat(img: &[f64], h: usize, w: usize, cell: usize, use_mad: bool) 
             let x1 = if ix == nx - 1 { w } else { (ix + 1) * cell };
             let mut vals: Vec<f32> = Vec::with_capacity((y1 - y0) * (x1 - x0));
             for y in y0..y1 {
-                let base = y * w;
-                for x in x0..x1 {
-                    vals.push(img[base + x] as f32);
-                }
+                vals.extend_from_slice(&img[y * w + x0..y * w + x1]);
             }
             let med = median_inplace(&mut vals) as f64;
             if use_mad {
@@ -3627,11 +3598,30 @@ fn local_mesh_stat(img: &[f64], h: usize, w: usize, cell: usize, use_mad: bool) 
         .collect();
     // Smooth the small mesh grid (blocky-cell artifacts) before upsampling,
     // not the full-resolution field after: same intent (soften cell-to-cell
-    // jumps) at a few thousand times less work -- the grid is ~1500 px, the
-    // full field ~6M. sigma=0.3 grid-cells here is the same *relative*
-    // smoothing as sigma=cell*0.3 was at full resolution.
-    let smoothed_grid = separable_blur(&grid, ny, nx, 0.3);
-    bilinear_upsample(&smoothed_grid, ny, nx, h, w, cell)
+    // jumps) at a few thousand times less work.
+    (separable_blur(&grid, ny, nx, 0.3), ny, nx)
+}
+
+/// (lo, hi, frac) of the cell-centre-aligned bilinear upsample along one axis.
+#[inline(always)]
+fn mesh_axis(i: usize, n: usize, cellf: f64) -> (usize, usize, f64) {
+    let g = i as f64 / cellf - 0.5;
+    let g0 = g.floor().max(0.0).min((n - 1) as f64) as usize;
+    let g1 = (g0 + 1).min(n - 1);
+    (g0, g1, (g - g0 as f64).clamp(0.0, 1.0))
+}
+
+#[inline(always)]
+fn mesh_bilinear(grid: &[f64], nx: usize, ya: (usize, usize, f64), xa: (usize, usize, f64)) -> f64 {
+    let (gy0, gy1, fy) = ya;
+    let (gx0, gx1, fx) = xa;
+    let v00 = grid[gy0 * nx + gx0];
+    let v01 = grid[gy0 * nx + gx1];
+    let v10 = grid[gy1 * nx + gx0];
+    let v11 = grid[gy1 * nx + gx1];
+    let v0 = v00 * (1.0 - fx) + v01 * fx;
+    let v1 = v10 * (1.0 - fx) + v11 * fx;
+    v0 * (1.0 - fy) + v1 * fy
 }
 
 #[pyfunction]
@@ -3647,41 +3637,77 @@ fn detect_stars_matched_filter<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let arr = image.as_array();
     let (h, w) = (arr.shape()[0], arr.shape()[1]);
-    let owned: Vec<f64>;
-    let lum: &[f64] = match arr.as_slice() {
-        Some(s) => {
-            owned = s.iter().map(|&v| v as f64).collect();
-            &owned
-        }
+    let owned: Vec<f32>;
+    let src: &[f32] = match arr.as_slice() {
+        Some(s) => s,
         None => {
-            owned = arr.iter().map(|&v| v as f64).collect();
+            owned = arr.iter().copied().collect();
             &owned
         }
     };
 
+    // Memory-light, same arithmetic as the numpy mirror: the background and
+    // noise maps are evaluated from their small mesh grids where needed instead
+    // of being upsampled to full-frame f64 arrays, the residual is formed row
+    // by row inside the first blur pass, and the second pass divides by the
+    // noise directly. Two full-frame arrays (blur temporary, SNR) instead of
+    // seven; per-pixel sums keep their tap order, so results are identical.
     let rows: Vec<[f64; 10]> = py.detach(|| {
-        let bg_map = local_mesh_stat(lum, h, w, cell, false);
-        let sigma_map = local_mesh_stat(lum, h, w, cell, true);
-        let resid: Vec<f64> = lum.iter().zip(&bg_map).map(|(&v, &b)| v - b).collect();
+        let (bg_grid, ny, nx) = local_mesh_grid(src, h, w, cell, false);
+        let (sg_grid, _, _) = local_mesh_grid(src, h, w, cell, true);
+        let cellf = cell as f64;
+        let xaxis: Vec<(usize, usize, f64)> = (0..w).map(|x| mesh_axis(x, nx, cellf)).collect();
+        let bg_at = |y: usize, x: usize| mesh_bilinear(&bg_grid, nx, mesh_axis(y, ny, cellf), xaxis[x]);
+        let lum = |i: usize| src[i] as f64;
 
-        // A Gaussian is exactly separable: conv2d(img, outer(k1,k1)) ==
-        // conv1d_col(conv1d_row(img, k1), k1), same result at O(2k)
-        // taps/pixel instead of O(k^2). kernel_norm (the SNR noise
-        // normalisation) collapses algebraically too:
-        // sqrt(sum(outer(k1,k1)^2)) == sum(k1^2) exactly (sum_ij
-        // (k1_i k1_j)^2 = (sum k1^2)^2, sqrt of that = sum k1^2).
         let sigma_k = fwhm / 2.3548;
         let k1 = gaussian_kernel_1d(sigma_k);
         let kernel_norm: f64 = k1.iter().map(|&v| v * v).sum();
-        let filtered = separable_blur(&resid, h, w, sigma_k);
+        let half = k1.len() / 2;
 
-        let mut snr_map = vec![0f64; h * w];
-        snr_map.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+        // pass 1 (along rows) on the residual, built per row into a reflect-padded buffer
+        let mut tmp = vec![0f64; h * w];
+        tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+            let ya = mesh_axis(y, ny, cellf);
+            let mut buf = vec![0f64; w + 2 * half];
             for x in 0..w {
-                let sig = (sigma_map[y * w + x] * kernel_norm).max(1e-9);
-                out_row[x] = filtered[y * w + x] / sig;
+                buf[half + x] = lum(y * w + x) - mesh_bilinear(&bg_grid, nx, ya, xaxis[x]);
+            }
+            for k in 0..half {
+                buf[half - 1 - k] = buf[half + reflect_idx(-(k as isize) - 1, w)];
+                buf[half + w + k] = buf[half + reflect_idx((w + k) as isize, w)];
+            }
+            for v in out_row.iter_mut() {
+                *v = 0.0;
+            }
+            for (t, &kv) in k1.iter().enumerate() {
+                let sl = &buf[t..t + w];
+                for x in 0..w {
+                    out_row[x] += kv * sl[x];
+                }
             }
         });
+
+        // pass 2 (along columns) and the SNR, per output row
+        let mut snr_map = vec![0f64; h * w];
+        snr_map.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+            for v in out_row.iter_mut() {
+                *v = 0.0;
+            }
+            for (t, &kv) in k1.iter().enumerate() {
+                let yi = reflect_idx(y as isize + t as isize - half as isize, h);
+                let sl = &tmp[yi * w..(yi + 1) * w];
+                for x in 0..w {
+                    out_row[x] += kv * sl[x];
+                }
+            }
+            let ya = mesh_axis(y, ny, cellf);
+            for x in 0..w {
+                let sig = (mesh_bilinear(&sg_grid, nx, ya, xaxis[x]) * kernel_norm).max(1e-9);
+                out_row[x] /= sig;
+            }
+        });
+        drop(tmp);
 
         // Local-maxima + threshold + border exclusion, row-parallel.
         let footprint = (fwhm.round() as isize).max(3);
@@ -3738,7 +3764,7 @@ fn detect_stars_matched_filter<'py>(
                 let y1 = ((py_ as isize + r + 1).max(0) as usize).min(h);
                 let x0 = (px_ as isize - r).max(0) as usize;
                 let x1 = ((px_ as isize + r + 1).max(0) as usize).min(w);
-                let local_bg = bg_map[py_ * w + px_];
+                let local_bg = bg_at(py_, px_);
 
                 let mut wsum = 0f64;
                 let mut cy = 0f64;
@@ -3747,7 +3773,7 @@ fn detect_stars_matched_filter<'py>(
                 for y in y0..y1 {
                     let row_base = y * w;
                     for x in x0..x1 {
-                        let wv = (lum[row_base + x] - local_bg).max(0.0);
+                        let wv = (lum(row_base + x) - local_bg).max(0.0);
                         if wv > 0.0 {
                             n_positive += 1;
                         }
@@ -3773,7 +3799,7 @@ fn detect_stars_matched_filter<'py>(
                 for y in ry0..ry1 {
                     let row_base = y * w;
                     for x in rx0..rx1 {
-                        let wv = (lum[row_base + x] - local_bg).max(0.0);
+                        let wv = (lum(row_base + x) - local_bg).max(0.0);
                         rwsum += wv;
                         rcy += wv * y as f64;
                         rcx += wv * x as f64;
@@ -3793,7 +3819,7 @@ fn detect_stars_matched_filter<'py>(
                     let row_base = y * w;
                     let dy = y as f64 - cy;
                     for x in x0..x1 {
-                        let wv = (lum[row_base + x] - local_bg).max(0.0);
+                        let wv = (lum(row_base + x) - local_bg).max(0.0);
                         let dx = x as f64 - cx;
                         ixx += wv * dy * dy;
                         iyy += wv * dx * dx;
@@ -3824,7 +3850,7 @@ fn detect_stars_matched_filter<'py>(
                 for y in y0..y1 {
                     let row_base = y * w;
                     for x in x0..x1 {
-                        let v = lum[row_base + x];
+                        let v = lum(row_base + x);
                         if v > peak {
                             peak = v;
                         }
