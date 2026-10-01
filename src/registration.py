@@ -49,6 +49,8 @@ except Exception:
 
 from src.blind_match import match_rigid_unknown_rotation
 
+_RANSAC_SEED = 0      # fixed: same input, same transform, every run
+
 
 def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any],
                        initial_shift: Tuple[float, float] = (0.0, 0.0)) -> Optional[Any]:
@@ -91,8 +93,12 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
     dst = ref_pts[indices[good]]
 
     try:
+        # Seeded: an unseeded draw can settle on a different inlier set from run to
+        # run, so the same session stacked twice differed at ~1e-4 px in the shifts
+        # (rms 1.7 ADU in the stack) -- reproducible runs are what identity checks need.
         model, inliers = fit_rigid_ransac(
-            src, dst, min_samples=3, residual_threshold=2.0, max_trials=1000)
+            src, dst, min_samples=3, residual_threshold=2.0, max_trials=1000,
+            seed=_RANSAC_SEED)
         if inliers is not None and inliers.sum() >= 3:
             return model
     except Exception:
