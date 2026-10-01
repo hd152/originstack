@@ -165,7 +165,8 @@ def _blind_match_transform(ref_stars: Optional[Any], img_stars: Optional[Any]) -
 def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,
                     transform: Optional[Any] = None,
                     local_field: Optional[np.ndarray] = None,
-                    crop: Optional[Tuple[int, int, int, int]] = None) -> np.ndarray:
+                    crop: Optional[Tuple[int, int, int, int]] = None,
+                    out: Optional[np.ndarray] = None) -> np.ndarray:
     """``_apply_transform_impl``'s warp, optionally of only a window of the output.
 
     ``crop=(top, bottom, left, right)`` returns ``warp(img)[top:bottom, left:right]``. The
@@ -174,8 +175,15 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
     warps the full frame and slices. Phase 3 discards everything outside the common crop, so
     warping it was pure waste -- 41% of the pixels on a session with a 1415x2598 crop of
     2048x3056.
+
+    ``out`` (with ``crop``): an array of the window's shape to write the result into,
+    which is returned. The native path warps straight into it (``warp_affine_lanczos3_into``,
+    bit-identical); otherwise the result is computed as usual and copied in.
     """
     if crop is None:
+        if out is not None:
+            out[...] = _apply_transform_impl(img, shift, transform, local_field)
+            return out
         return _apply_transform_impl(img, shift, transform, local_field)
     top, bottom, left, right = (int(v) for v in crop)
     native_ok = (local_field is None and HAS_NATIVE and not get_gpu().active
@@ -193,12 +201,27 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
             else:
                 mat = np.eye(2)
                 off = np.array([-shift[0], -shift[1]], dtype=np.float64)
-            return _native.warp_affine_lanczos3(
-                img, mat.astype(np.float64).ravel().tolist(),
-                off.astype(np.float64).tolist(), bottom - top, right - left, 0.0, (top, left))
+            mat_l = mat.astype(np.float64).ravel().tolist()
+            off_l = off.astype(np.float64).tolist()
+            if (out is not None and hasattr(_native, 'warp_affine_lanczos3_into')
+                    and isinstance(out, np.ndarray) and out.dtype == np.float32
+                    and out.shape == (bottom - top, right - left, img.shape[2])
+                    and out.flags['C_CONTIGUOUS'] and out.flags['WRITEABLE']):
+                _native.warp_affine_lanczos3_into(img, out, mat_l, off_l, 0.0, (top, left))
+                return out
+            res = _native.warp_affine_lanczos3(img, mat_l, off_l, bottom - top, right - left,
+                                               0.0, (top, left))
+            if out is not None:
+                out[...] = res
+                return out
+            return res
         except Exception as exc:
             _log.debug("native windowed warp failed (%s); warping the full frame", exc)
-    return _apply_transform_impl(img, shift, transform, local_field)[top:bottom, left:right]
+    res = _apply_transform_impl(img, shift, transform, local_field)[top:bottom, left:right]
+    if out is not None:
+        out[...] = res
+        return out
+    return res
 
 
 def _apply_transform_impl(img: np.ndarray, shift: Optional[Tuple[float, float]] = None,

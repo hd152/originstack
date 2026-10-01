@@ -2127,6 +2127,61 @@ fn warp_affine_lanczos3<'py>(
     Ok(numpy::ndarray::Array3::from_shape_vec((out_h, out_w, c), out).unwrap().into_pyarray(py))
 }
 
+/// `warp_affine_lanczos3` writing into a caller-supplied `(out_h, out_w, c)` array
+/// (e.g. one slot of Phase 3's aligned stack) instead of allocating and returning
+/// one -- the caller then has no 70 MB copy to make, and no fresh allocation for
+/// the OS to zero-fill. Contiguous input only (the path Phase 3 takes); each
+/// output row comes from `lanczos3_row_flat`, the same code the allocating
+/// kernel runs, so the result is bit-identical to it.
+#[pyfunction]
+fn warp_affine_lanczos3_into<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray3<'py, f32>,
+    mut out: numpy::PyReadwriteArray3<'py, f32>,
+    mat: [f64; 4],
+    off: [f64; 2],
+    cval: f32,
+    origin: (usize, usize),
+) -> PyResult<()> {
+    let (oy0, ox0) = origin;
+    let arr = data.as_array();
+    let s = arr.shape();
+    let (h, w, c) = (s[0], s[1], s[2]);
+    let os = out.as_array().shape().to_vec();
+    let (out_h, out_w) = (os[0], os[1]);
+    if os[2] != c {
+        return Err(pyo3::exceptions::PyValueError::new_err("out must have the input's channel count"));
+    }
+    let img: &[f32] = arr
+        .as_slice()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("data must be C-contiguous"))?;
+    let dst: &mut [f32] = out
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be C-contiguous"))?;
+    let (m00, m01, m10, m11) = (mat[0], mat[1], mat[2], mat[3]);
+    let (o0, o1) = (off[0], off[1]);
+    let col_tab: Option<(Vec<[f64; 6]>, Vec<isize>)> = if m01 == 0.0 && m10 == 0.0 {
+        let mut wxs = vec![[0f64; 6]; out_w];
+        let mut bxs = vec![0isize; out_w];
+        for ox in 0..out_w {
+            let ix = m11 * (ox + ox0) as f64 + o1;
+            let fx = ix.floor();
+            lanczos6_weights(ix - fx, &mut wxs[ox]);
+            bxs[ox] = fx as isize - 2;
+        }
+        Some((wxs, bxs))
+    } else {
+        None
+    };
+    py.detach(|| {
+        dst.par_chunks_mut(out_w * c).enumerate().for_each(|(oy_l, out_row)| {
+            lanczos3_row_flat(img, h, w, c, oy_l + oy0, out_row, [m00, m01, m10, m11], [o0, o1],
+                              &col_tab, cval, ox0);
+        });
+    });
+    Ok(())
+}
+
 /// Affine warp with an arbitrary precomputed tap-weight table instead of the
 /// fixed Lanczos-3 formula (`warp_affine_lanczos3` above, left untouched) --
 /// lets drizzle resample with a frame's own estimated PSF as a matched
@@ -8923,6 +8978,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hot_pixel_box_replace_native, m)?)?;
     m.add_function(wrap_pyfunction!(blind_match_hypotheses, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
+    m.add_function(wrap_pyfunction!(warp_affine_lanczos3_into, m)?)?;
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
     m.add_function(wrap_pyfunction!(median_filter_native, m)?)?;

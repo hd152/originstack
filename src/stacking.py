@@ -2163,13 +2163,16 @@ def run_stacking_phase(
 
         def _align_one(j):
             with gpu.stream_context():
-                rgb = np.array(mem_rgb[final_indices[j]])
+                # a view, not a copy: the native warp reads the frame store in place and
+                # writes straight into this frame's slot of the aligned stack (two 70 MB
+                # copies and two fresh, OS-zero-filled allocations less per frame)
+                rgb = np.asarray(mem_rgb[final_indices[j]])
                 lf = (displacement_fields[j]
                       if displacement_fields is not None and j < len(displacement_fields)
                       else None)
                 # only the crop is warped (the rest is discarded)
-                mem_aligned[j] = apply_transform(rgb, shift=shifts[j], transform=transforms[j],
-                                                 local_field=lf, crop=(top, bottom, left, right))
+                apply_transform(rgb, shift=shifts[j], transform=transforms[j], local_field=lf,
+                                crop=(top, bottom, left, right), out=mem_aligned[j])
 
         n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                            Config.GPU_VRAM_RESERVE_MB), n_final)
