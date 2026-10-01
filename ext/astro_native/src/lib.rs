@@ -2148,7 +2148,7 @@ fn warp_affine_lanczos3_into<'py>(
     let s = arr.shape();
     let (h, w, c) = (s[0], s[1], s[2]);
     let os = out.as_array().shape().to_vec();
-    let (out_h, out_w) = (os[0], os[1]);
+    let out_w = os[1];
     if os[2] != c {
         return Err(pyo3::exceptions::PyValueError::new_err("out must have the input's channel count"));
     }
