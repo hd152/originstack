@@ -57,7 +57,7 @@ try:
 except Exception:          # pragma: no cover - scipy is a hard dependency in practice
     HAS_SCIPY = False
 
-_STAMP_R = 10            # stamp half-size for the PSF fit (21x21)
+_STAMP_R = 14            # stamp half-size for the PSF fit and aperture flux (29x29)
 _MAX_STARS = 30
 _PSF_R = 24              # half-size of the PSF kernel rendered for the FFT
 _REJECT_K = 5.0
@@ -118,9 +118,9 @@ def select_psf_stars(ref_lum: np.ndarray, fwhm: float) -> np.ndarray:
     idx = np.flatnonzero(ok)
     idx = idx[np.argsort(-peak[idx])]
     keep = []
-    for i in idx:                                       # isolated: nothing brighter within 3 stamps
+    for i in idx:                                       # isolated: nothing bright within 2 stamp radii
         d2 = (ys - ys[i]) ** 2 + (xs - xs[i]) ** 2
-        near = (d2 < (3 * _STAMP_R) ** 2) & (d2 > 0) & (peak > 0.2 * peak[i])
+        near = (d2 < (2 * _STAMP_R) ** 2) & (d2 > 0) & (peak > 0.2 * peak[i])
         if not near.any():
             keep.append(i)
         if len(keep) >= _MAX_STARS:
@@ -150,8 +150,8 @@ def fit_psf(img: np.ndarray, stars: np.ndarray, p0=None):
     """Joint elliptical-Moffat fit to stamps around ``stars`` (``img`` (H, W) luminance
     or (H, W, 3)).
 
-    Returns (params, fluxes) -- fluxes are the per-star integrated model fluxes --
-    or (None, None) when the fit fails or too few stars remain."""
+    Returns (params, fluxes) -- fluxes are per-star aperture sums over the stamp, less
+    the fitted background -- or (None, None) when the fit fails or too few stars remain."""
     if len(stars) < 5:
         return None, None
     r = _STAMP_R
@@ -186,10 +186,12 @@ def fit_psf(img: np.ndarray, stars: np.ndarray, p0=None):
     p = res.x
     if not np.all(np.isfinite(p)) or max(np.exp(p[0]), np.exp(p[1])) > _FWHM_MAX:
         return None, None
-    _, amp, _ = solve(p)
-    big = np.mgrid[-4 * r:4 * r + 1, -4 * r:4 * r + 1].astype(np.float64)
-    integral = float(_moffat_grid(big[0], big[1], p).sum())
-    return p, amp * integral
+    # flux by aperture (the stamp, less the fitted background), not the model's
+    # integral: a smooth model fitted to a trailed star grows heavy wings, and their
+    # integral read 2x the real flux on the trailed frames of a real Omega Nebula
+    # session -- which, through w = F^2 / s^2, weighted those worst frames 4x
+    _, _, bg = solve(p)
+    return p, (S - bg[:, None]).sum(1)
 
 
 def render_psf_into(p, plane: np.ndarray) -> None:
