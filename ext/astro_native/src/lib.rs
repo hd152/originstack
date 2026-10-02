@@ -2126,6 +2126,184 @@ fn lanczos3_row_flat(
                     }
 }
 
+// ---------------------------------------------------------------------------
+// scipy.ndimage order-1 warps, mode='constant' -- bit-identical ports of
+// NI_GeometricTransform (affine_transform) and NI_ZoomShift (shift) in
+// scipy/ndimage/src/ni_interpolation.c (scipy 1.17), order 1, nprepad 0, 2-D.
+// Used by registration._match_frame_stars (the post-registration residual check).
+// ---------------------------------------------------------------------------
+
+/// `map_coordinate(in, len, NI_EXTEND_MIRROR)` for an index past the last one (the
+/// only side a linear tap can leave once its start is inside the frame).
+#[inline]
+fn ni_mirror_hi(idx: f64, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let sz2 = 2 * len as i64 - 2;
+    let mut v = idx;
+    v -= (sz2 * ((v / sz2 as f64) as i64)) as f64;
+    if v >= len as f64 {
+        v = sz2 as f64 - v;
+    }
+    v as usize
+}
+
+/// One axis of an order-1 sample at input coordinate `c` (mode='constant'): None when
+/// scipy takes `cval` (`map_coordinate` sends c < 0 or c > len - 1 to -1, and NaN fails
+/// `cc > -1.0`), else the two tap indices -- the second mirrored if it falls past the
+/// end, where its weight is 0 -- and `get_spline_interpolation_weights(c, 1)`.
+#[inline(always)]
+fn ni_axis1(c: f64, len: usize) -> Option<(usize, usize, f64, f64)> {
+    let mut cc = c;
+    if cc < 0.0 || cc > (len as i64 - 1) as f64 {
+        cc = -1.0;
+    }
+    if !(cc > -1.0) {
+        return None;
+    }
+    let fl = cc.floor();
+    let start = fl as i64 as usize;
+    let x = cc - fl;
+    let w0 = 1.0 - x;
+    let w1 = 1.0 - w0;
+    let i1 = if start + 1 >= len { ni_mirror_hi((start + 1) as f64, len) } else { start + 1 };
+    Some((start, i1, w0, w1))
+}
+
+/// `t = 0; t += (v * wy) * wx` over the four taps in scipy's filter order. When the
+/// sum is NaN it is redone with x86's NaN rule made explicit -- `t + coeff` returns
+/// `t`'s NaN when `t` is NaN, else `coeff`'s -- because two different NaNs can meet
+/// there (an input NaN and the default NaN of `inf * 0` from a weight-0 tap) and LLVM
+/// may swap the operands of a commutative add, which would pick the other one. Each
+/// coeff has at most one NaN operand (the weights are finite), so it needs no such care.
+#[inline(always)]
+fn ni_sample1(src: &[f32], w: usize, ay: (usize, usize, f64, f64), ax: (usize, usize, f64, f64)) -> f64 {
+    let (y0, y1, wy0, wy1) = ay;
+    let (x0, x1, wx0, wx1) = ax;
+    let c = [
+        (src[y0 * w + x0] as f64 * wy0) * wx0,
+        (src[y0 * w + x1] as f64 * wy0) * wx1,
+        (src[y1 * w + x0] as f64 * wy1) * wx0,
+        (src[y1 * w + x1] as f64 * wy1) * wx1,
+    ];
+    let mut t = 0.0f64;
+    t += c[0];
+    t += c[1];
+    t += c[2];
+    t += c[3];
+    if t.is_nan() {
+        t = 0.0;
+        for &k in c.iter() {
+            t = if t.is_nan() {
+                t
+            } else if k.is_nan() {
+                k
+            } else {
+                t + k
+            };
+        }
+    }
+    t
+}
+
+/// `scipy.ndimage.affine_transform(img.astype(np.float64), matrix, offset=offset,
+/// order=1, mode='constant', cval=cval)` for a 2-D float32 `img`, bit for bit (float64
+/// output), without the float64 copy of the input (each tap's float32 -> float64
+/// conversion is exact, as the copy's). Input coordinate per output pixel (oy, ox):
+/// `(offset[i] + oy * m[i][0]) + ox * m[i][1]`, as scipy accumulates it.
+#[pyfunction]
+#[pyo3(signature = (img, matrix, offset, cval=0.0))]
+fn ndimage_affine_order1<'py>(
+    py: Python<'py>,
+    img: PyReadonlyArray2<'py, f32>,
+    matrix: PyReadonlyArray2<'py, f64>,
+    offset: PyReadonlyArray1<'py, f64>,
+    cval: f64,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let a = img.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let m = matrix.as_array();
+    let o = offset.as_array();
+    if m.shape() != [2, 2] || o.len() != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err("matrix must be (2, 2) and offset (2,)"));
+    }
+    let (m00, m01, m10, m11) = (m[[0, 0]], m[[0, 1]], m[[1, 0]], m[[1, 1]]);
+    let (o0, o1) = (o[0], o[1]);
+    let owned: Vec<f32>;
+    let src: &[f32] = match a.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = a.iter().copied().collect();
+            &owned
+        }
+    };
+    let mut out = vec![0f64; h * w];
+    py.detach(|| {
+        out.par_chunks_mut(w.max(1)).enumerate().for_each(|(oy, orow)| {
+            let fy = oy as f64;
+            let (r0, r1) = (o0 + fy * m00, o1 + fy * m10);
+            for (ox, v) in orow.iter_mut().enumerate() {
+                let fx = ox as f64;
+                let cy = r0 + fx * m01;
+                let cx = r1 + fx * m11;
+                *v = match ni_axis1(cy, h) {
+                    None => cval,
+                    Some(ay) => match ni_axis1(cx, w) {
+                        None => cval,
+                        Some(ax) => ni_sample1(src, w, ay, ax),
+                    },
+                };
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out).unwrap().into_pyarray(py))
+}
+
+/// `scipy.ndimage.shift(img, shift, order=1, mode='constant', cval=cval)` for a 2-D
+/// float32 `img`, bit for bit (float32 output: the float64 sum rounded once). scipy's
+/// zoom_shift is called with the negated shift and maps output index k of each axis to
+/// `(double)k + (-shift)`, independently per axis, so the per-axis taps and weights are
+/// tabulated once.
+#[pyfunction]
+#[pyo3(signature = (img, shift, cval=0.0))]
+fn ndimage_shift_order1<'py>(
+    py: Python<'py>,
+    img: PyReadonlyArray2<'py, f32>,
+    shift: (f64, f64),
+    cval: f64,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let a = img.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let owned: Vec<f32>;
+    let src: &[f32] = match a.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = a.iter().copied().collect();
+            &owned
+        }
+    };
+    let (sy, sx) = (-shift.0, -shift.1);
+    let ty: Vec<Option<(usize, usize, f64, f64)>> = (0..h).map(|k| ni_axis1(k as f64 + sy, h)).collect();
+    let tx: Vec<Option<(usize, usize, f64, f64)>> = (0..w).map(|k| ni_axis1(k as f64 + sx, w)).collect();
+    let cv = cval as f32;
+    let mut out = vec![0f32; h * w];
+    py.detach(|| {
+        out.par_chunks_mut(w.max(1)).enumerate().for_each(|(oy, orow)| match ty[oy] {
+            None => orow.fill(cv),
+            Some(ay) => {
+                for (ox, v) in orow.iter_mut().enumerate() {
+                    *v = match tx[ox] {
+                        None => cv,
+                        Some(ax) => ni_sample1(src, w, ay, ax) as f32,
+                    };
+                }
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out).unwrap().into_pyarray(py))
+}
+
 /// Affine warp with Lanczos-3 resampling, matching scipy's
 /// `affine_transform` sampling convention: `out[oy,ox] = in[M @ (oy,ox) + off]`,
 /// out-of-bounds -> `cval`. `mat` is row-major 2x2 `[[m00,m01],[m10,m11]]`
@@ -10415,6 +10593,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hot_pixel_box_replace_native, m)?)?;
     m.add_function(wrap_pyfunction!(blind_match_hypotheses, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
+    m.add_function(wrap_pyfunction!(ndimage_affine_order1, m)?)?;
+    m.add_function(wrap_pyfunction!(ndimage_shift_order1, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3_into, m)?)?;
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;

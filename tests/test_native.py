@@ -3121,3 +3121,65 @@ def test_fused_patch_combine_fast_bit_identical(max_iters):
                         ref = native.patch_weighted_sigma_combine(d, qm, weights, sigma, max_iters, use_mad, g)
                         got = native.patch_weighted_sigma_combine_fast(d, qm, weights, sigma, max_iters, use_mad, g)
                         np.testing.assert_array_equal(got.view(np.uint32), ref.view(np.uint32))
+
+
+@pytest.mark.skipif(not hasattr(native, 'ndimage_affine_order1'),
+                    reason='astro_native without the ndimage order-1 ports')
+def test_ndimage_order1_ports_bit_identical_to_scipy():
+    """ndimage_shift_order1 / ndimage_affine_order1 == scipy.ndimage.shift(float32) /
+    affine_transform(float64 copy), order 1, mode='constant', bit for bit: odd and
+    degenerate shapes, coordinates landing exactly on the last row/column (mirrored tap
+    with weight 0), fully outside, NaN/+-inf/+-0 in the input, rotations, scale/shear."""
+    from scipy import ndimage
+    rng = np.random.default_rng(0)
+
+    def rot(deg, s=1.0):
+        t = np.deg2rad(deg)
+        return np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]]) * s
+
+    mats = [np.eye(2), rot(0.3), rot(9), rot(-9), rot(90), rot(2, 1.01),
+            np.array([[1.0, 0.2], [-0.1, 0.97]])]
+    for h, w in [(1, 1), (1, 7), (7, 1), (2, 2), (3, 5), (17, 23), (64, 97)]:
+        a = rng.normal(1000, 30, (h, w)).astype(np.float32)
+        if h * w > 8:
+            flat = a.ravel()
+            idx = rng.choice(h * w, 6, replace=False)
+            flat[idx[:2]] = np.nan
+            flat[idx[2]], flat[idx[3]], flat[idx[4]] = np.inf, -np.inf, -0.0
+            a[:, -1] = -0.0
+        shifts = [(0.0, 0.0), (0.5, -0.5), (-3.25, 4.75), (2.0000001, -1e-9), (16.0, 22.0),
+                  (1e3, -1e3), (h - 1.0, 0.0), (0.0, w - 1.0), (-(h - 1.0), -(w - 1.0)),
+                  (h - 1.5, w - 0.5)]
+        for s in shifts:
+            want = ndimage.shift(a, shift=s, order=1, mode='constant', cval=0.0)
+            got = native.ndimage_shift_order1(a, s)
+            assert got.dtype == want.dtype == np.float32
+            np.testing.assert_array_equal(got.view(np.uint32), want.view(np.uint32))
+            for M in mats:
+                off = -(M @ np.array([s[0], s[1]]))
+                want = ndimage.affine_transform(a.astype(np.float64), M, offset=off, order=1,
+                                                mode='constant', cval=0.0)
+                got = native.ndimage_affine_order1(a, np.ascontiguousarray(M), off)
+                assert got.dtype == want.dtype == np.float64
+                np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64))
+
+
+def test_residual_warp_matches_scipy_calls(monkeypatch):
+    """registration._residual_warp (the residual check's warp) is bit-identical with
+    and without the native kernels, for the shift and the affine path."""
+    import src.registration as reg
+
+    class _T:
+        def __init__(self, deg):
+            t = np.deg2rad(deg)
+            self.params = np.array([[np.cos(t), -np.sin(t), 0.0], [np.sin(t), np.cos(t), 0.0], [0, 0, 1.0]])
+
+    rng = np.random.default_rng(3)
+    lum = rng.normal(1000, 30, (61, 83)).astype(np.float32)
+    cases = [((3.5, -7.25), None), ((12.0, 4.0), _T(4.0)), ((-30.2, 18.9), _T(-8.5))]
+    got = [reg._residual_warp(lum, s, t) for s, t in cases]
+    monkeypatch.setattr(reg, '_native', None)
+    want = [reg._residual_warp(lum, s, t) for s, t in cases]
+    for g, w in zip(got, want):
+        assert g.dtype == w.dtype
+        np.testing.assert_array_equal(g.view(np.uint8), w.view(np.uint8))

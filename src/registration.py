@@ -1162,6 +1162,30 @@ def _filter_shift_outliers(
     return outlier_mask
 
 
+def _residual_warp(lum: np.ndarray, shift, transform) -> np.ndarray:
+    """``lum`` warped into aligned space for the residual check: scipy's order-1
+    ``shift`` (float32 out) or ``affine_transform`` of the float64 copy (float64 out),
+    mode='constant'. The native ports (``ndimage_shift_order1`` /
+    ``ndimage_affine_order1``) are bit-identical to those calls -- same coordinate
+    arithmetic, edge mirroring and summation order as scipy 1.17's ni_interpolation.c --
+    ~4x faster, and read the float32 frame without the 50 MB float64 copy."""
+    M = None if transform is None else transform.params[:2, :2]
+    offset = None if M is None else -(M @ np.array([shift[0], shift[1]]))
+    if (_native is not None and hasattr(_native, 'ndimage_affine_order1')
+            and isinstance(lum, np.ndarray) and lum.dtype == np.float32 and lum.ndim == 2):
+        try:
+            if M is None:
+                return _native.ndimage_shift_order1(lum, (float(shift[0]), float(shift[1])))
+            return _native.ndimage_affine_order1(lum, np.ascontiguousarray(M, np.float64),
+                                                 np.ascontiguousarray(offset, np.float64))
+        except Exception:
+            pass
+    if M is None:
+        return ndimage.shift(lum, shift=shift, order=1, mode='constant', cval=0.0)
+    return ndimage.affine_transform(lum.astype(np.float64), M, offset=offset,
+                                    order=1, mode='constant', cval=0.0)
+
+
 def _match_frame_stars(
     lum: np.ndarray,
     shift: Tuple[float, float],
@@ -1181,14 +1205,7 @@ def _match_frame_stars(
     star pairs in (x, y) order — or None if fewer than 3 stars matched.
     """
 
-    aligned_lum = ndimage.shift(
-        lum, shift=shift, order=1, mode='constant', cval=0.0
-    ) if transform is None else ndimage.affine_transform(
-        lum.astype(np.float64),
-        transform.params[:2, :2],
-        offset=-(transform.params[:2, :2] @ np.array([shift[0], shift[1]])),
-        order=1, mode='constant', cval=0.0
-    )
+    aligned_lum = _residual_warp(lum, shift, transform)
     frame_stars = registration_stars(aligned_lum, noise_val)
     if frame_stars is None or len(frame_stars) < 3:
         return None
