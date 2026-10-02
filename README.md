@@ -820,7 +820,7 @@ OriginStack first, Siril second. "Stack only" leaves out OriginStack's finishing
 |---------|-----------|-----------------------------|-------------|------------|
 | Omega, 114 frames | 68 s / 86 s | 90 s | 10.6 / 6.5 GB | 4.40 / 4.56 px |
 | Sunflower, 158 frames | 84 s / 106 s | 107 s | 12.8 / 7.8 GB | 3.52 / 3.60 px |
-| Sculptor, 532 frames | 173 s / 195 s | 187 s | 9.2 / 11.2 GB | 2.69 / 3.01 px |
+| Sculptor, 532 frames | 169 s / 195 s | 184 s | 9.2 / 11.2 GB | 2.69 / 3.01 px |
 
 - **Sharpness: sharper than Siril on all three.** On the same stars OriginStack is 4% narrower on Omega, 1.5% on Sunflower and 10% on Sculptor -- from proper image coaddition (on by default; Zackay & Ofek 2017) and a fix to a hot-pixel step that had been flattening the peaks of undersampled stars. It used 114/114, 158/158 and 532/532 frames; Siril used 111, 157 and 525.
 - **Noise: quieter once sharpness is matched.** Blurring each OriginStack channel until its stars are exactly as wide as Siril's, its noise (R/G/B) is 0.81/0.88/0.89x Siril's on Omega, 1.00/0.75/0.93x on Sunflower and 0.97/0.92/0.89x on Sculptor. Unmatched, per pixel, a sharper stack reads noisier (up to 1.28x on Sculptor's blue).
