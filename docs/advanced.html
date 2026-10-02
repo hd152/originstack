@@ -262,6 +262,12 @@
         <p>Turning the classic detector on cut the stack's noise by 11 to 16%, so it was kept on for long subs. It turned out to be assuming the wrong noise level and quietly smoothing about a fifth of every frame: a plain blur gives the same noise drop with less loss of sharpness. Fixed, it removes real cosmic rays and no longer changes the noise.</p></div>
       <div><h3>Turning off quality weighting</h3>
         <p>A run without it looked 4 to 6% quieter. That run was in fact still weighted; the difference came from the rejection settings. Turned off for real, the stack got noisier, so the weighting stays.</p></div>
+      <div><h3>Luminance straight from the raw pixels</h3>
+        <p>Sky colour changes far more slowly than brightness, so dividing each raw pixel by the stack's colour at that spot gives a brightness sample with no demosaicing. In a simulation it cut star-core error by 28 to 44%. On real sessions stars came out 0.6 to 4% wider and noise 10 to 14% higher: at the Origin's sampling the demosaicing loses very little, and its averaging was keeping the noise down. Removed.</p></div>
+      <div><h3>A flat field from the stars alone</h3>
+        <p>The same star seen at different spots on the sensor reveals the sensor's sensitivity there (the "ubercal" method). It worked in a simulation with 10 to 30 degrees of field rotation. In a real session stars move only about 50 pixels and few are bright enough per frame, so even a simple tilt could not be pinned down: its uncertainty was a hundred times the vignetting it was meant to find. Not shipped.</p></div>
+      <div><h3>Weighting frames by a better noise estimate</h3>
+        <p>The two green pixels in each 2&times;2 block give a nearly signal-free noise measurement. It differed from the existing estimate by the same factor (1.24) in every frame, so frame weights would have moved by 0.3%. It found something else instead: the camera's stated gain is about five times off, which was making photometry error bars too small.</p></div>
       <div><h3>Faster medians by sampling</h3>
         <p>A strided or random subsample of the debayering statistics gave errors as large as the correction itself, because the data has structure with a four-pixel period and the per-frame noise is around 1,100 ADU. The fix was to measure once per session instead.</p></div>
     </div>
