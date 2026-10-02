@@ -1003,6 +1003,150 @@ def test_detect_stars_matched_filter_empty_field_no_detections():
     assert len(ref) == 0
 
 
+def _reflect_idx(i, n):
+    """The native kernels' reflect_idx (edge-duplicating, repeated)."""
+    while i < 0 or i >= n:
+        i = -i - 1 if i < 0 else 2 * n - 1 - i
+    return i
+
+
+def _native_gauss_kernel(sigma):
+    import math
+    radius = max(int(math.ceil(3.0 * sigma)), 1)
+    k = [math.exp(-(i * i) / (2.0 * sigma * sigma)) for i in range(-radius, radius + 1)]
+    s = 0.0
+    for v in k:
+        s += v
+    return np.array([v / s for v in k])
+
+
+def _tap_sum(src, k, axis):
+    """sum_t k[t] * src[reflect(i + t - half)] along `axis`, accumulated tap
+    by tap from 0.0 (separate multiply and add) -- the kernels' order."""
+    n = src.shape[axis]
+    half = len(k) // 2
+    acc = np.zeros_like(src)
+    for t, kv in enumerate(k):
+        idx = [_reflect_idx(i + t - half, n) for i in range(n)]
+        acc = acc + kv * np.take(src, idx, axis=axis)
+    return acc
+
+
+def _matched_filter_snr_exact(img, fwhm, cell):
+    """The native detector's SNR map with its exact arithmetic (op order and
+    rounding), as a reference for bit-identity of the banded native pass."""
+    h, w = img.shape
+    ny, nx = max(1, h // cell), max(1, w // cell)
+    med = np.zeros((ny, nx))
+    sig = np.zeros((ny, nx))
+    for iy in range(ny):
+        y1 = h if iy == ny - 1 else (iy + 1) * cell
+        for ix in range(nx):
+            x1 = w if ix == nx - 1 else (ix + 1) * cell
+            vals = img[iy * cell:y1, ix * cell:x1].ravel()
+            m = float(np.median(vals))  # f32 (a + b) / 2, as median_inplace
+            dev = np.abs(vals.astype(np.float64) - m).astype(np.float32)
+            med[iy, ix] = m
+            sig[iy, ix] = 1.4826 * max(float(np.median(dev)), 1e-9)
+    k3 = _native_gauss_kernel(0.3)
+    med = _tap_sum(_tap_sum(med, k3, 1), k3, 0)
+    sig = _tap_sum(_tap_sum(sig, k3, 1), k3, 0)
+
+    def axis(n_pix, n_grid):
+        g = np.arange(n_pix) / float(cell) - 0.5
+        g0 = np.clip(np.floor(g), 0, n_grid - 1).astype(int)
+        g1 = np.minimum(g0 + 1, n_grid - 1)
+        return g0, g1, np.clip(g - g0, 0.0, 1.0)
+
+    gy0, gy1, fy = axis(h, ny)
+    gx0, gx1, fx = axis(w, nx)
+
+    def upsample(grid):
+        r0 = grid[gy0][:, gx0] * (1.0 - fx) + grid[gy0][:, gx1] * fx
+        r1 = grid[gy1][:, gx0] * (1.0 - fx) + grid[gy1][:, gx1] * fx
+        return r0 * (1.0 - fy)[:, None] + r1 * fy[:, None]
+
+    k1 = _native_gauss_kernel(fwhm / 2.3548)
+    kn = 0.0
+    for v in k1:
+        kn += v * v
+    resid = img.astype(np.float64) - upsample(med)
+    filt = _tap_sum(_tap_sum(resid, k1, 1), k1, 0)
+    return filt / np.maximum(upsample(sig) * kn, 1e-9)
+
+
+@pytest.mark.parametrize('h,w,cell,k', [
+    (300, 400, 64, 22.0), (97, 131, 12, 6.0), (61, 700, 17, 8.0), (260, 45, 8, 5.0),
+])
+def test_detect_stars_matched_filter_banded_snr_bit_exact(h, w, cell, k):
+    """detect_stars_matched_filter's blur/SNR/local-max pass runs in row bands
+    with halos (no full-frame arrays). Every candidate it reports -- position
+    order and its SNR (the `sharpness` column, clip(snr/20)) -- must equal an
+    exact-arithmetic full-frame reference, including at band/halo/frame edges
+    (odd sizes, cells that leave short bands)."""
+    from scipy.ndimage import maximum_filter
+    img = _synthetic_starfield(h=h, w=w, n_stars=max(10, h * w // 2000), seed=h + w)
+    fwhm = 5.5
+    snr = _matched_filter_snr_exact(img, fwhm, cell)
+    fp = max(3, int(round(fwhm)))
+    fh = fp // 2
+    border = max(cell // 2, 2 * int(np.ceil(3.0 * fwhm / 2.3548)))
+    is_max = snr >= maximum_filter(snr, size=2 * fh + 1, mode='nearest')
+    cand = is_max & (snr > k)
+    cand[:border] = False
+    cand[max(border, h - border):] = False
+    cand[:, :border] = False
+    cand[:, max(border, w - border):] = False
+    ys, xs = np.nonzero(cand)  # row-major, like the kernel
+    expected = np.clip(snr[ys, xs] / 20.0, 0.0, 1.0)
+    # roundness_max > 1 and min_pixels 0 keep every candidate in the output
+    got = native.detect_stars_matched_filter(img, fwhm, k, cell, 2.0, 0)
+    assert len(expected) > 0
+    assert got.shape[0] == len(expected)
+    assert np.array_equal(got[:, 6], expected)
+
+
+def test_dwt2_native_bit_exact_closed_form():
+    """dwt2_native (row-accumulating axis-0 pass, padded-row axis-1 pass)
+    equals the closed-form tap sum it implements, bit for bit:
+    c[j] = sum_k lo[k] * x[symmetric(offset + 2j - k)], accumulated from 0.0
+    in k order with separate multiply and add -- both filter banks, sizes
+    down to shorter than the filter."""
+    rng = np.random.default_rng(3)
+    for name in ('db4', 'bior1.3'):
+        bank = _wavelet_mod._FILTER_BANKS[name]
+        lo, hi, off = np.asarray(bank.lo_kernel), np.asarray(bank.hi_kernel), bank.offset
+        flen = len(lo)
+        for h, w in ((259, 385), (38, 54), (5, 9), (64, 3), (1, 17)):
+            img = rng.normal(1000.0, 50.0, (h, w))
+
+            def pass_(x, axis):
+                n = x.shape[axis]
+                out_n = (n + flen - 1) // 2
+                a = np.zeros(x.shape[:axis] + (out_n,) + x.shape[axis + 1:])
+                d = np.zeros_like(a)
+                for kk in range(flen):
+                    idx = [_wavelet_sym(off + 2 * j - kk, n) for j in range(out_n)]
+                    v = np.take(x, idx, axis=axis)
+                    a = a + lo[kk] * v
+                    d = d + hi[kk] * v
+                return a, d
+
+            la, lh = pass_(img, 0)
+            ca, cv = pass_(la, 1)
+            ch, cd = pass_(lh, 1)
+            got = native.dwt2_native(img, lo, hi, off)
+            for g, r in zip(got, (ca, ch, cv, cd)):
+                assert g.shape == r.shape
+                assert np.array_equal(g, r), (name, h, w)
+
+
+def _wavelet_sym(i, n):
+    period = 2 * n
+    m = i % period
+    return period - 1 - m if m >= n else m
+
+
 def test_detect_stars_matched_filter_speedup():
     """Native path should be meaningfully faster than the numpy mirror on a
     real-sized field -- not a strict regression gate (timing is

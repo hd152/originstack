@@ -1325,36 +1325,42 @@ fn wavelet_symmetric_idx(i: isize, n: usize) -> usize {
     m as usize
 }
 
-/// Forward 1D DWT of one length-`n` line, accessed via `get`. Exact port of
-/// `_dwt_1d`: `cA[j] = sum_k lo[k] * x[symmetric_idx(offset+2j-k, n)]`, `cD`
-/// analogous with `hi` -- the direct closed form of
-/// `np.convolve(padded, kernel, mode='valid')[offset::2]` with no padding
-/// materialised (derivation in the Rust module's own commit notes: convolve
-/// flips one operand, so `valid[i] = sum_k kernel[k] * padded[i+flen-1-k]`,
-/// and substituting the padding offset collapses to this form).
-fn dwt_1d_line(
-    get: impl Fn(usize) -> f64,
-    n: usize,
-    lo: &[f64],
-    hi: &[f64],
-    offset: usize,
-    out_len: usize,
-    ca_out: &mut [f64],
-    cd_out: &mut [f64],
-) {
-    let flen = lo.len();
-    for j in 0..out_len {
-        let base = offset as isize + 2 * j as isize;
-        let mut a = 0.0f64;
-        let mut d = 0.0f64;
-        for k in 0..flen {
-            let v = get(wavelet_symmetric_idx(base - k as isize, n));
-            a += lo[k] * v;
-            d += hi[k] * v;
-        }
-        ca_out[j] = a;
-        cd_out[j] = d;
+// Forward 1D DWT of a length-`n` line (computed inline in `dwt2_native`):
+// exact port of `_dwt_1d`, `cA[j] = sum_k lo[k] * x[symmetric_idx(offset+2j-k, n)]`,
+// `cD` analogous with `hi` -- the direct closed form of
+// `np.convolve(padded, kernel, mode='valid')[offset::2]` with no padding
+// materialised (convolve flips one operand, so
+// `valid[i] = sum_k kernel[k] * padded[i+flen-1-k]`, and substituting the
+// padding offset collapses to this form).
+
+/// One tap of the forward DWT's axis-0 pass over a whole row:
+/// `a[c] += lk * src[c]; d[c] += hk * src[c]`. Separate multiply and add (no
+/// FMA), so the AVX2 build gives the baseline build's bits.
+#[inline(always)]
+fn dwt_row_accumulate_body(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
+    let n = src.len();
+    let (a, d) = (&mut a[..n], &mut d[..n]);
+    for ((av, dv), &v) in a.iter_mut().zip(d.iter_mut()).zip(src.iter()) {
+        *av += lk * v;
+        *dv += hk * v;
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn dwt_row_accumulate_avx2(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
+    dwt_row_accumulate_body(a, d, src, lk, hk)
+}
+
+fn dwt_row_accumulate(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU reports AVX2.
+            unsafe { return dwt_row_accumulate_avx2(a, d, src, lk, hk) }
+        }
+    }
+    dwt_row_accumulate_body(a, d, src, lk, hk)
 }
 
 /// Inverse 1D DWT of one line. Exact port of `_idwt_1d`: rather than
@@ -1417,48 +1423,70 @@ fn dwt2_native<'py>(
     // against (itself validated bit-exact against real pywt) runs entirely
     // in float64 -- rounding to f32 at each level's Python/Rust boundary
     // compounds across levels and breaks that bit-exact parity.
-    let img64: Vec<f64> = arr.iter().copied().collect();
+    let owned: Vec<f64>;
+    let img64: &[f64] = match arr.as_slice() {
+        Some(s) => s,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
 
+    // Per-sample tap sums as in the closed form above (start at 0.0, add
+    // lo[k]*x[symmetric_idx(base-k)] for k = 0..flen in order, no FMA), laid
+    // out for speed: pass 1 accumulates whole source rows into whole output
+    // rows (contiguous, vectorisable) instead of gathering one strided column
+    // at a time and transposing; pass 2 reads each row through a
+    // symmetric-padded copy so the tap loop has no per-tap index arithmetic.
+    // Bit-identical to the previous per-column/per-tap form.
     let (c_a, c_h, c_v, c_d) = py.detach(|| {
-        // Pass 1: axis=0 (per-column) -> La, Lh, each (out_h, w).
-        let cols: Vec<(Vec<f64>, Vec<f64>)> = (0..w)
-            .into_par_iter()
-            .map(|c| {
-                let get = |i: usize| img64[i * w + c];
-                let mut ca_col = vec![0.0f64; out_h];
-                let mut cd_col = vec![0.0f64; out_h];
-                dwt_1d_line(get, h, &lo, &hi, offset, out_h, &mut ca_col, &mut cd_col);
-                (ca_col, cd_col)
-            })
-            .collect();
+        // Pass 1: axis=0 -> La, Lh, each (out_h, w).
         let mut la = vec![0.0f64; out_h * w];
         let mut lh = vec![0.0f64; out_h * w];
-        for (c, (ca_col, cd_col)) in cols.into_iter().enumerate() {
-            for j in 0..out_h {
-                la[j * w + c] = ca_col[j];
-                lh[j * w + c] = cd_col[j];
-            }
-        }
+        la.par_chunks_mut(w)
+            .zip(lh.par_chunks_mut(w))
+            .enumerate()
+            .for_each(|(j, (la_row, lh_row))| {
+                let base = offset as isize + 2 * j as isize;
+                for k in 0..flen {
+                    let r = wavelet_symmetric_idx(base - k as isize, h);
+                    dwt_row_accumulate(la_row, lh_row, &img64[r * w..(r + 1) * w], lo[k], hi[k]);
+                }
+            });
 
         // Pass 2: axis=1 (per-row) on La -> cA, cV; on Lh -> cH, cD.
+        let ext_len = offset + 2 * out_w.saturating_sub(1) + flen;
+        let row_pass = |src_rows: &[f64], o1: &mut [f64], o2: &mut [f64]| {
+            o1.par_chunks_mut(out_w)
+                .zip(o2.par_chunks_mut(out_w))
+                .enumerate()
+                .for_each(|(r, (a_row, d_row))| {
+                    let line = &src_rows[r * w..(r + 1) * w];
+                    // ext[t] = line[symmetric_idx(t - (flen - 1))]
+                    let ext: Vec<f64> = (0..ext_len)
+                        .map(|t| line[wavelet_symmetric_idx(t as isize - (flen as isize - 1), w)])
+                        .collect();
+                    for j in 0..out_w {
+                        // index base-k  ->  ext[base - k + flen - 1]
+                        let top = offset + 2 * j + flen - 1;
+                        let mut a = 0.0f64;
+                        let mut d = 0.0f64;
+                        for k in 0..flen {
+                            let v = ext[top - k];
+                            a += lo[k] * v;
+                            d += hi[k] * v;
+                        }
+                        a_row[j] = a;
+                        d_row[j] = d;
+                    }
+                });
+        };
         let mut c_a = vec![0.0f64; out_h * out_w];
         let mut c_v = vec![0.0f64; out_h * out_w];
-        c_a.par_chunks_mut(out_w)
-            .zip(c_v.par_chunks_mut(out_w))
-            .enumerate()
-            .for_each(|(r, (ca_row, cv_row))| {
-                let get = |i: usize| la[r * w + i];
-                dwt_1d_line(get, w, &lo, &hi, offset, out_w, ca_row, cv_row);
-            });
+        row_pass(&la, &mut c_a, &mut c_v);
         let mut c_h = vec![0.0f64; out_h * out_w];
         let mut c_d = vec![0.0f64; out_h * out_w];
-        c_h.par_chunks_mut(out_w)
-            .zip(c_d.par_chunks_mut(out_w))
-            .enumerate()
-            .for_each(|(r, (ch_row, cd_row))| {
-                let get = |i: usize| lh[r * w + i];
-                dwt_1d_line(get, w, &lo, &hi, offset, out_w, ch_row, cd_row);
-            });
+        row_pass(&lh, &mut c_h, &mut c_d);
         (c_a, c_h, c_v, c_d)
     });
 
@@ -3626,10 +3654,13 @@ fn separable_blur(img: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
 /// cell-centre-aligned upsample of it at any pixel -- the same arithmetic the
 /// numpy mirror's full-resolution `_bilinear_upsample` uses, without
 /// materialising a full-frame f64 map.
-fn local_mesh_grid(img: &[f32], h: usize, w: usize, cell: usize, use_mad: bool) -> (Vec<f64>, usize, usize) {
+fn local_mesh_grids(img: &[f32], h: usize, w: usize, cell: usize) -> (Vec<f64>, Vec<f64>, usize, usize) {
     let ny = (h / cell.max(1)).max(1);
     let nx = (w / cell.max(1)).max(1);
-    let grid: Vec<f64> = (0..ny * nx)
+    // One gather + selection per cell for both statistics: the median grid
+    // and the MAD grid start from the same cell median, so computing it once
+    // gives the same two grids the two separate passes did.
+    let both: Vec<(f64, f64)> = (0..ny * nx)
         .into_par_iter()
         .map(|idx| {
             let iy = idx / nx;
@@ -3643,18 +3674,66 @@ fn local_mesh_grid(img: &[f32], h: usize, w: usize, cell: usize, use_mad: bool) 
                 vals.extend_from_slice(&img[y * w + x0..y * w + x1]);
             }
             let med = median_inplace(&mut vals) as f64;
-            if use_mad {
-                let mut dev: Vec<f32> = vals.iter().map(|&v| (v as f64 - med).abs() as f32).collect();
-                1.4826 * (median_inplace(&mut dev) as f64).max(1e-9)
-            } else {
-                med
+            for v in vals.iter_mut() {
+                *v = (*v as f64 - med).abs() as f32;
             }
+            (med, 1.4826 * (median_inplace(&mut vals) as f64).max(1e-9))
         })
         .collect();
+    let med_grid: Vec<f64> = both.iter().map(|p| p.0).collect();
+    let mad_grid: Vec<f64> = both.iter().map(|p| p.1).collect();
     // Smooth the small mesh grid (blocky-cell artifacts) before upsampling,
     // not the full-resolution field after: same intent (soften cell-to-cell
     // jumps) at a few thousand times less work.
-    (separable_blur(&grid, ny, nx, 0.3), ny, nx)
+    (separable_blur(&med_grid, ny, nx, 0.3), separable_blur(&mad_grid, ny, nx, 0.3), ny, nx)
+}
+
+/// `mesh_bilinear`'s first (x) interpolation, tabulated for every grid row:
+/// `out[gy*w + x] = grid[gy,gx0]*(1-fx) + grid[gy,gx1]*fx`. Combined per pixel
+/// as `t[gy0]*(1-fy) + t[gy1]*fy` this is exactly `mesh_bilinear`'s arithmetic.
+fn mesh_xinterp_rows(grid: &[f64], ny: usize, nx: usize, xaxis: &[(usize, usize, f64)]) -> Vec<f64> {
+    let w = xaxis.len();
+    let mut out = vec![0f64; ny * w];
+    for gy in 0..ny {
+        let g = &grid[gy * nx..(gy + 1) * nx];
+        for (x, &(gx0, gx1, fx)) in xaxis.iter().enumerate() {
+            out[gy * w + x] = g[gx0] * (1.0 - fx) + g[gx1] * fx;
+        }
+    }
+    out
+}
+
+/// `out[x] = sum_t k[t] * row(t)[x]`, accumulated tap by tap from 0.0.
+/// Separate multiply and add (Rust never contracts to FMA), so the AVX2
+/// build below gives identical bits.
+#[inline(always)]
+fn tap_accumulate_body<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
+    for v in out.iter_mut() {
+        *v = 0.0;
+    }
+    for (t, &kv) in k.iter().enumerate() {
+        let sl = &row(t)[..out.len()];
+        for (o, &s) in out.iter_mut().zip(sl.iter()) {
+            *o += kv * s;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn tap_accumulate_avx2<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
+    tap_accumulate_body(out, k, row)
+}
+
+fn tap_accumulate<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU reports AVX2.
+            unsafe { return tap_accumulate_avx2(out, k, row) }
+        }
+    }
+    tap_accumulate_body(out, k, row)
 }
 
 /// (lo, hi, frac) of the cell-centre-aligned bilinear upsample along one axis.
@@ -3678,6 +3757,10 @@ fn mesh_bilinear(grid: &[f64], nx: usize, ya: (usize, usize, f64), xa: (usize, u
     let v1 = v10 * (1.0 - fx) + v11 * fx;
     v0 * (1.0 - fy) + v1 * fy
 }
+
+/// Output rows per band in `detect_stars_matched_filter`'s blur/SNR/local-max
+/// pass (its per-band scratch is ~(band + ~20) rows x width x 8 bytes, twice).
+const DETECT_BAND: usize = 32;
 
 #[pyfunction]
 #[pyo3(signature = (image, fwhm, k_confirm, cell, roundness_max, min_pixels))]
@@ -3705,107 +3788,133 @@ fn detect_stars_matched_filter<'py>(
     // noise maps are evaluated from their small mesh grids where needed instead
     // of being upsampled to full-frame f64 arrays, the residual is formed row
     // by row inside the first blur pass, and the second pass divides by the
-    // noise directly. Two full-frame arrays (blur temporary, SNR) instead of
-    // seven; per-pixel sums keep their tap order, so results are identical.
+    // noise directly; both passes and the local-max test run in row bands with
+    // cache-sized scratch (no full-frame arrays at all). Per-pixel sums keep
+    // their tap order, so results are identical.
     let rows: Vec<[f64; 10]> = py.detach(|| {
-        let (bg_grid, ny, nx) = local_mesh_grid(src, h, w, cell, false);
-        let (sg_grid, _, _) = local_mesh_grid(src, h, w, cell, true);
+        let (bg_grid, sg_grid, ny, nx) = local_mesh_grids(src, h, w, cell);
         let cellf = cell as f64;
         let xaxis: Vec<(usize, usize, f64)> = (0..w).map(|x| mesh_axis(x, nx, cellf)).collect();
         let bg_at = |y: usize, x: usize| mesh_bilinear(&bg_grid, nx, mesh_axis(y, ny, cellf), xaxis[x]);
         let lum = |i: usize| src[i] as f64;
+        // x-interpolated grid rows: the per-pixel maps below are then one
+        // lerp between two table rows -- mesh_bilinear's arithmetic exactly.
+        let bg_rows = mesh_xinterp_rows(&bg_grid, ny, nx, &xaxis);
+        let sg_rows = mesh_xinterp_rows(&sg_grid, ny, nx, &xaxis);
 
         let sigma_k = fwhm / 2.3548;
         let k1 = gaussian_kernel_1d(sigma_k);
         let kernel_norm: f64 = k1.iter().map(|&v| v * v).sum();
         let half = k1.len() / 2;
 
-        // pass 1 (along rows) on the residual, built per row into a reflect-padded buffer
-        let mut tmp = vec![0f64; h * w];
-        tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
-            let ya = mesh_axis(y, ny, cellf);
-            let mut buf = vec![0f64; w + 2 * half];
+        // Local-maxima + threshold + border exclusion.
+        let footprint = (fwhm.round() as isize).max(3);
+        let fhalf = footprint / 2;
+        let fh = fhalf as usize;
+        let border = (cell / 2).max((2.0 * (3.0 * fwhm / 2.3548).ceil()) as usize);
+
+        // The blur, SNR and local-maximum test run in bands of output rows,
+        // each band computing only the residual-blur rows (pass 1) and SNR rows
+        // (pass 2) its own rows need, in per-thread scratch buffers that stay
+        // in cache -- instead of two full-frame f64 arrays (h*w*8 bytes each,
+        // written once and read back from DRAM). A band recomputes a few
+        // pass-1 rows its neighbour also computes; every value is produced by
+        // the same per-row code with the same tap order, so the SNR map, and
+        // hence the candidate list (in row-major order), is unchanged. Rows
+        // outside the candidate region plus the local-max halo are skipped:
+        // nothing reads them.
+        let y_lo = border;
+        let y_hi = h.saturating_sub(border);
+        let n_bands = if y_hi > y_lo { (y_hi - y_lo + DETECT_BAND - 1) / DETECT_BAND } else { 0 };
+        let pass1_row = |y: usize, out_row: &mut [f64], buf: &mut Vec<f64>| {
+            let (gy0, gy1, fy) = mesh_axis(y, ny, cellf);
+            let b0 = &bg_rows[gy0 * w..(gy0 + 1) * w];
+            let b1 = &bg_rows[gy1 * w..(gy1 + 1) * w];
+            let srow = &src[y * w..(y + 1) * w];
+            buf.resize(w + 2 * half, 0.0);
             for x in 0..w {
-                buf[half + x] = lum(y * w + x) - mesh_bilinear(&bg_grid, nx, ya, xaxis[x]);
+                buf[half + x] = srow[x] as f64 - (b0[x] * (1.0 - fy) + b1[x] * fy);
             }
             for k in 0..half {
                 buf[half - 1 - k] = buf[half + reflect_idx(-(k as isize) - 1, w)];
                 buf[half + w + k] = buf[half + reflect_idx((w + k) as isize, w)];
             }
-            for v in out_row.iter_mut() {
-                *v = 0.0;
-            }
-            for (t, &kv) in k1.iter().enumerate() {
-                let sl = &buf[t..t + w];
-                for x in 0..w {
-                    out_row[x] += kv * sl[x];
-                }
-            }
-        });
-
-        // pass 2 (along columns) and the SNR, per output row
-        let mut snr_map = vec![0f64; h * w];
-        snr_map.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
-            for v in out_row.iter_mut() {
-                *v = 0.0;
-            }
-            for (t, &kv) in k1.iter().enumerate() {
-                let yi = reflect_idx(y as isize + t as isize - half as isize, h);
-                let sl = &tmp[yi * w..(yi + 1) * w];
-                for x in 0..w {
-                    out_row[x] += kv * sl[x];
-                }
-            }
-            let ya = mesh_axis(y, ny, cellf);
-            for x in 0..w {
-                let sig = (mesh_bilinear(&sg_grid, nx, ya, xaxis[x]) * kernel_norm).max(1e-9);
-                out_row[x] /= sig;
-            }
-        });
-        drop(tmp);
-
-        // Local-maxima + threshold + border exclusion, row-parallel.
-        let footprint = (fwhm.round() as isize).max(3);
-        let fhalf = footprint / 2;
-        let border = (cell / 2).max((2.0 * (3.0 * fwhm / 2.3548).ceil()) as usize);
-
-        let candidates: Vec<(usize, usize)> = (0..h)
+            let bref: &[f64] = &buf[..];
+            tap_accumulate(out_row, &k1, |t| &bref[t..t + w]);
+        };
+        let band_candidates: Vec<Vec<(usize, usize, f64)>> = (0..n_bands)
             .into_par_iter()
-            .flat_map_iter(|y| {
-                let mut out = Vec::new();
-                if y < border || y + border >= h {
-                    return out;
-                }
-                for x in border..w.saturating_sub(border) {
-                    let v = snr_map[y * w + x];
-                    if v <= k_confirm {
-                        continue;
+            .map_init(
+                || (Vec::<f64>::new(), Vec::<f64>::new(), Vec::<f64>::new()),
+                |(tmp, snr, buf), bi| {
+                    let c0 = y_lo + bi * DETECT_BAND;
+                    let c1 = (c0 + DETECT_BAND).min(y_hi);
+                    // SNR rows the local-max test reads, and the pass-1 rows
+                    // those need (reflect_idx keeps every index in [t0, t1)).
+                    let s0 = c0.saturating_sub(fh);
+                    let s1 = (c1 + fh).min(h);
+                    let t0 = s0.saturating_sub(half);
+                    let t1 = (s1 + half).min(h);
+
+                    // pass 1 (along rows) on the residual
+                    tmp.resize((t1 - t0) * w, 0.0);
+                    for (i, out_row) in tmp.chunks_mut(w).enumerate() {
+                        pass1_row(t0 + i, out_row, buf);
                     }
-                    let mut is_max = true;
-                    'outer: for dy in -fhalf..=fhalf {
-                        let yi = y as isize + dy;
-                        if yi < 0 || yi >= h as isize {
-                            continue;
+
+                    // pass 2 (along columns) and the SNR
+                    snr.resize((s1 - s0) * w, 0.0);
+                    let tmp_ref: &[f64] = tmp;
+                    for (i, out_row) in snr.chunks_mut(w).enumerate() {
+                        let y = s0 + i;
+                        tap_accumulate(out_row, &k1, |t| {
+                            let yi = reflect_idx(y as isize + t as isize - half as isize, h) - t0;
+                            &tmp_ref[yi * w..(yi + 1) * w]
+                        });
+                        let (gy0, gy1, fy) = mesh_axis(y, ny, cellf);
+                        let s0r = &sg_rows[gy0 * w..(gy0 + 1) * w];
+                        let s1r = &sg_rows[gy1 * w..(gy1 + 1) * w];
+                        for x in 0..w {
+                            let sig = ((s0r[x] * (1.0 - fy) + s1r[x] * fy) * kernel_norm).max(1e-9);
+                            out_row[x] /= sig;
                         }
-                        let row_base = yi as usize * w;
-                        for dx in -fhalf..=fhalf {
-                            let xi = x as isize + dx;
-                            if xi < 0 || xi >= w as isize {
+                    }
+
+                    let mut out = Vec::new();
+                    for y in c0..c1 {
+                        for x in border..w.saturating_sub(border) {
+                            let v = snr[(y - s0) * w + x];
+                            if v <= k_confirm {
                                 continue;
                             }
-                            if snr_map[row_base + xi as usize] > v {
-                                is_max = false;
-                                break 'outer;
+                            let mut is_max = true;
+                            'outer: for dy in -fhalf..=fhalf {
+                                let yi = y as isize + dy;
+                                if yi < 0 || yi >= h as isize {
+                                    continue;
+                                }
+                                let row_base = (yi as usize - s0) * w;
+                                for dx in -fhalf..=fhalf {
+                                    let xi = x as isize + dx;
+                                    if xi < 0 || xi >= w as isize {
+                                        continue;
+                                    }
+                                    if snr[row_base + xi as usize] > v {
+                                        is_max = false;
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                            if is_max {
+                                out.push((y, x, v));
                             }
                         }
                     }
-                    if is_max {
-                        out.push((y, x));
-                    }
-                }
-                out
-            })
+                    out
+                },
+            )
             .collect();
+        let candidates: Vec<(usize, usize, f64)> = band_candidates.into_iter().flatten().collect();
 
         // Per-candidate measurement: local background, two-pass centroid,
         // second moments (shape/roundness). Embarrassingly parallel.
@@ -3814,7 +3923,7 @@ fn detect_stars_matched_filter<'py>(
 
         candidates
             .into_par_iter()
-            .filter_map(|(py_, px_)| {
+            .filter_map(|(py_, px_, snr_v)| {
                 let y0 = (py_ as isize - r).max(0) as usize;
                 let y1 = ((py_ as isize + r + 1).max(0) as usize).min(h);
                 let x0 = (px_ as isize - r).max(0) as usize;
@@ -3912,7 +4021,7 @@ fn detect_stars_matched_filter<'py>(
                         flux += (v - local_bg).max(0.0);
                     }
                 }
-                let sharpness = (snr_map[py_ * w + px_] / 20.0).clamp(0.0, 1.0);
+                let sharpness = (snr_v / 20.0).clamp(0.0, 1.0);
 
                 Some([cx, cy, flux, peak, roundness, roundness, sharpness, a, b, 0.0])
             })

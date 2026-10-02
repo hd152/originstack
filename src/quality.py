@@ -1,6 +1,7 @@
 """Frame quality analysis: star detection, FWHM measurement, quality metrics."""
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Dict, Optional, Tuple
 
@@ -54,8 +55,14 @@ def detect_stars_auto(lum: np.ndarray, noise: float,
     (pure scipy, no dependency at all) for that case, unchanged here.
     """
     from src.star_detect import detect_stars_matched_filter
+    # Float32/float64 input goes in as-is: the native kernel takes float32 and
+    # the numpy mirror casts to float64 itself, so an f32 -> f64 -> f32 round
+    # trip (exact) here only cost two full-frame copies. Other dtypes keep the
+    # float64 cast, whose rounding (e.g. int64 -> f64 -> f32) could differ.
+    if lum.dtype not in (np.float32, np.float64):
+        lum = lum.astype(np.float64)
     try:
-        sources = detect_stars_matched_filter(lum.astype(np.float64))
+        sources = detect_stars_matched_filter(lum)
         return sources if sources is not None and len(sources) > 0 else None
     except Exception as e:
         _log.debug(f"matched-filter detection failed: {type(e).__name__}: {e}")
@@ -449,7 +456,8 @@ def compute_brenner_sharpness(img: np.ndarray) -> float:
            else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
     lum = lum.astype(np.float64)
     diff = lum[:, 2:] - lum[:, :-2]
-    return float(np.mean(diff * diff))
+    np.multiply(diff, diff, out=diff)  # == diff * diff, without a temporary
+    return float(np.mean(diff))
 
 
 def measure_psf_anisotropy(sources) -> Tuple[float, float, str]:
@@ -539,13 +547,19 @@ def compute_multiscale_entropy(img: np.ndarray, levels: int = None) -> float:
         return 0.0
 
     def _band_entropy(band: np.ndarray) -> float:
-        flat = band.ravel().astype(np.float64)
+        # Same operations as (flat / norm) ** 2 -> filter -> sum(p * log2(p)),
+        # done in place: no float64 copy of an already-float64 band, and no
+        # fresh temporary per step (x ** 2 is np.square, i.e. x * x).
+        flat = np.asarray(band, dtype=np.float64).ravel()
         norm = np.linalg.norm(flat)
         if norm < 1e-12:
             return 0.0
-        p = (flat / norm) ** 2
+        p = flat / norm
+        np.multiply(p, p, out=p)
         p = p[p > 1e-15]
-        return float(-np.sum(p * np.log2(p)))
+        plog = np.log2(p)
+        np.multiply(p, plog, out=plog)
+        return float(-np.sum(plog))
 
     # coeffs[0] = approximation; coeffs[1..N] = detail tuples per level
     # Level 1 = finest detail, level N = coarsest detail
@@ -597,6 +611,25 @@ def _build_zernike_matrix(rho: np.ndarray, theta: np.ndarray, max_order: int) ->
     return np.column_stack(cols) if len(cols) > 1 else np.array(cols).T
 
 
+@functools.lru_cache(maxsize=8)
+def _zernike_cutout_basis(d, max_order) -> Tuple[np.ndarray, np.ndarray]:
+    """(unit-disk mask, Zernike basis matrix) for a (2d+1)^2 cutout.
+
+    Cached: the same handful of (radius, order) pairs are used for every frame
+    of a session. Returned arrays are read-only so no caller can corrupt the
+    cache.
+    """
+    yy, xx = np.mgrid[-d:d + 1, -d:d + 1].astype(np.float64)
+    r = np.sqrt(xx ** 2 + yy ** 2)
+    unit_mask = (r <= d)
+    rho_flat = (r[unit_mask] / d).ravel()         # normalised radius in [0,1]
+    theta_flat = np.arctan2(yy[unit_mask], xx[unit_mask]).ravel()
+    Z = _build_zernike_matrix(rho_flat, theta_flat, max_order)
+    unit_mask.flags.writeable = False
+    Z.flags.writeable = False
+    return unit_mask, Z
+
+
 def decompose_psf_zernike(img: np.ndarray, star_positions,
                            cutout_radius: int = None,
                            max_order: int = None) -> Dict:
@@ -643,15 +676,10 @@ def decompose_psf_zernike(img: np.ndarray, star_positions,
     except (KeyError, TypeError):
         sorted_idx = list(range(len(star_positions)))
 
-    # Build pixel grid for the cutout once (reused for every star)
+    # Pixel grid + basis for the cutout: depends only on (radius, order), so
+    # it is built once per process and reused for every star of every frame.
     d = cutout_radius
-    size = 2 * d + 1
-    yy, xx = np.mgrid[-d:d + 1, -d:d + 1].astype(np.float64)
-    r = np.sqrt(xx ** 2 + yy ** 2)
-    unit_mask = (r <= d)
-    rho_flat = (r[unit_mask] / d).ravel()         # normalised radius in [0,1]
-    theta_flat = np.arctan2(yy[unit_mask], xx[unit_mask]).ravel()
-    Z = _build_zernike_matrix(rho_flat, theta_flat, max_order)
+    unit_mask, Z = _zernike_cutout_basis(d, max_order)
 
     all_coeffs = []
     for idx in sorted_idx[:max_stars]:
@@ -760,7 +788,15 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
     img_s_stars = img[::_star_ds, ::_star_ds] if _star_ds > 1 else img
 
     # All percentiles in one pass — p50 replaces a separate np.median call.
-    p01, p50, p75, p95, p99 = np.percentile(img_s, [1, 50, 75, 95, 99])
+    # Percentiles and the median depend only on the multiset of values, not
+    # their order (signed zeros aside, handled below), so the median runs in
+    # place on the scratch copy the percentile call already partitioned (cheap:
+    # its order statistics are already in position) instead of partitioning a
+    # fresh copy; the MAD's deviations are built and partitioned in the same
+    # buffer, in the same element order as before. Same values exactly.
+    _scratch = img_s.copy()
+    p01, p50, p75, p95, p99 = np.percentile(_scratch, [1, 50, 75, 95, 99],
+                                            overwrite_input=True)
     brightness = float(p50)  # median == p50, no extra traversal
 
     mean = float(np.mean(img_s))
@@ -768,8 +804,16 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
 
     # MAD-based background/noise — single pass, no iterative sigma clipping.
     # 1.4826 * MAD is an unbiased estimator of Gaussian sigma.
-    _bg_median = float(np.median(img_s))
-    _bg_mad = float(np.median(np.abs(img_s - _bg_median)))
+    _bg_median = float(np.median(_scratch, overwrite_input=True))
+    if _bg_median == 0.0:
+        # The one order-dependent case: +0.0 and -0.0 compare equal, so which
+        # one a partition lands on depends on the input order. Recompute on the
+        # unpermuted data, as before, to keep the sign bit identical too.
+        _bg_median = float(np.median(img_s))
+    np.subtract(img_s, _bg_median, out=_scratch)
+    np.abs(_scratch, out=_scratch)
+    _bg_mad = float(np.median(_scratch, overwrite_input=True))
+    del _scratch
     background = _bg_median
     noise = max(1.4826 * _bg_mad, 1e-6)
     snr = (p95 - background) / noise
