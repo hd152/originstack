@@ -1003,6 +1003,150 @@ def test_detect_stars_matched_filter_empty_field_no_detections():
     assert len(ref) == 0
 
 
+def _reflect_idx(i, n):
+    """The native kernels' reflect_idx (edge-duplicating, repeated)."""
+    while i < 0 or i >= n:
+        i = -i - 1 if i < 0 else 2 * n - 1 - i
+    return i
+
+
+def _native_gauss_kernel(sigma):
+    import math
+    radius = max(int(math.ceil(3.0 * sigma)), 1)
+    k = [math.exp(-(i * i) / (2.0 * sigma * sigma)) for i in range(-radius, radius + 1)]
+    s = 0.0
+    for v in k:
+        s += v
+    return np.array([v / s for v in k])
+
+
+def _tap_sum(src, k, axis):
+    """sum_t k[t] * src[reflect(i + t - half)] along `axis`, accumulated tap
+    by tap from 0.0 (separate multiply and add) -- the kernels' order."""
+    n = src.shape[axis]
+    half = len(k) // 2
+    acc = np.zeros_like(src)
+    for t, kv in enumerate(k):
+        idx = [_reflect_idx(i + t - half, n) for i in range(n)]
+        acc = acc + kv * np.take(src, idx, axis=axis)
+    return acc
+
+
+def _matched_filter_snr_exact(img, fwhm, cell):
+    """The native detector's SNR map with its exact arithmetic (op order and
+    rounding), as a reference for bit-identity of the banded native pass."""
+    h, w = img.shape
+    ny, nx = max(1, h // cell), max(1, w // cell)
+    med = np.zeros((ny, nx))
+    sig = np.zeros((ny, nx))
+    for iy in range(ny):
+        y1 = h if iy == ny - 1 else (iy + 1) * cell
+        for ix in range(nx):
+            x1 = w if ix == nx - 1 else (ix + 1) * cell
+            vals = img[iy * cell:y1, ix * cell:x1].ravel()
+            m = float(np.median(vals))  # f32 (a + b) / 2, as median_inplace
+            dev = np.abs(vals.astype(np.float64) - m).astype(np.float32)
+            med[iy, ix] = m
+            sig[iy, ix] = 1.4826 * max(float(np.median(dev)), 1e-9)
+    k3 = _native_gauss_kernel(0.3)
+    med = _tap_sum(_tap_sum(med, k3, 1), k3, 0)
+    sig = _tap_sum(_tap_sum(sig, k3, 1), k3, 0)
+
+    def axis(n_pix, n_grid):
+        g = np.arange(n_pix) / float(cell) - 0.5
+        g0 = np.clip(np.floor(g), 0, n_grid - 1).astype(int)
+        g1 = np.minimum(g0 + 1, n_grid - 1)
+        return g0, g1, np.clip(g - g0, 0.0, 1.0)
+
+    gy0, gy1, fy = axis(h, ny)
+    gx0, gx1, fx = axis(w, nx)
+
+    def upsample(grid):
+        r0 = grid[gy0][:, gx0] * (1.0 - fx) + grid[gy0][:, gx1] * fx
+        r1 = grid[gy1][:, gx0] * (1.0 - fx) + grid[gy1][:, gx1] * fx
+        return r0 * (1.0 - fy)[:, None] + r1 * fy[:, None]
+
+    k1 = _native_gauss_kernel(fwhm / 2.3548)
+    kn = 0.0
+    for v in k1:
+        kn += v * v
+    resid = img.astype(np.float64) - upsample(med)
+    filt = _tap_sum(_tap_sum(resid, k1, 1), k1, 0)
+    return filt / np.maximum(upsample(sig) * kn, 1e-9)
+
+
+@pytest.mark.parametrize('h,w,cell,k', [
+    (300, 400, 64, 22.0), (97, 131, 12, 6.0), (61, 700, 17, 8.0), (260, 45, 8, 5.0),
+])
+def test_detect_stars_matched_filter_banded_snr_bit_exact(h, w, cell, k):
+    """detect_stars_matched_filter's blur/SNR/local-max pass runs in row bands
+    with halos (no full-frame arrays). Every candidate it reports -- position
+    order and its SNR (the `sharpness` column, clip(snr/20)) -- must equal an
+    exact-arithmetic full-frame reference, including at band/halo/frame edges
+    (odd sizes, cells that leave short bands)."""
+    from scipy.ndimage import maximum_filter
+    img = _synthetic_starfield(h=h, w=w, n_stars=max(10, h * w // 2000), seed=h + w)
+    fwhm = 5.5
+    snr = _matched_filter_snr_exact(img, fwhm, cell)
+    fp = max(3, int(round(fwhm)))
+    fh = fp // 2
+    border = max(cell // 2, 2 * int(np.ceil(3.0 * fwhm / 2.3548)))
+    is_max = snr >= maximum_filter(snr, size=2 * fh + 1, mode='nearest')
+    cand = is_max & (snr > k)
+    cand[:border] = False
+    cand[max(border, h - border):] = False
+    cand[:, :border] = False
+    cand[:, max(border, w - border):] = False
+    ys, xs = np.nonzero(cand)  # row-major, like the kernel
+    expected = np.clip(snr[ys, xs] / 20.0, 0.0, 1.0)
+    # roundness_max > 1 and min_pixels 0 keep every candidate in the output
+    got = native.detect_stars_matched_filter(img, fwhm, k, cell, 2.0, 0)
+    assert len(expected) > 0
+    assert got.shape[0] == len(expected)
+    assert np.array_equal(got[:, 6], expected)
+
+
+def test_dwt2_native_bit_exact_closed_form():
+    """dwt2_native (row-accumulating axis-0 pass, padded-row axis-1 pass)
+    equals the closed-form tap sum it implements, bit for bit:
+    c[j] = sum_k lo[k] * x[symmetric(offset + 2j - k)], accumulated from 0.0
+    in k order with separate multiply and add -- both filter banks, sizes
+    down to shorter than the filter."""
+    rng = np.random.default_rng(3)
+    for name in ('db4', 'bior1.3'):
+        bank = _wavelet_mod._FILTER_BANKS[name]
+        lo, hi, off = np.asarray(bank.lo_kernel), np.asarray(bank.hi_kernel), bank.offset
+        flen = len(lo)
+        for h, w in ((259, 385), (38, 54), (5, 9), (64, 3), (1, 17)):
+            img = rng.normal(1000.0, 50.0, (h, w))
+
+            def pass_(x, axis):
+                n = x.shape[axis]
+                out_n = (n + flen - 1) // 2
+                a = np.zeros(x.shape[:axis] + (out_n,) + x.shape[axis + 1:])
+                d = np.zeros_like(a)
+                for kk in range(flen):
+                    idx = [_wavelet_sym(off + 2 * j - kk, n) for j in range(out_n)]
+                    v = np.take(x, idx, axis=axis)
+                    a = a + lo[kk] * v
+                    d = d + hi[kk] * v
+                return a, d
+
+            la, lh = pass_(img, 0)
+            ca, cv = pass_(la, 1)
+            ch, cd = pass_(lh, 1)
+            got = native.dwt2_native(img, lo, hi, off)
+            for g, r in zip(got, (ca, ch, cv, cd)):
+                assert g.shape == r.shape
+                assert np.array_equal(g, r), (name, h, w)
+
+
+def _wavelet_sym(i, n):
+    period = 2 * n
+    m = i % period
+    return period - 1 - m if m >= n else m
+
+
 def test_detect_stars_matched_filter_speedup():
     """Native path should be meaningfully faster than the numpy mirror on a
     real-sized field -- not a strict regression gate (timing is
@@ -2363,6 +2507,61 @@ def test_hot_pixel_bayer_statistical_bit_identical(shape, monkeypatch):
     np.testing.assert_array_equal(fast, ref)
 
 
+def _inplace_cases():
+    """Mosaics for hot_pixel_bayer_inplace: odd/tiny shapes, integer data (many tied
+    |diff| values, so the MAD buckets are crowded), sub-1e-6 sigma, stars, NaN."""
+    rng = np.random.default_rng(11)
+    cases = []
+    for shape in [(96, 130), (7, 9), (3, 5), (2, 2), (1, 7), (64, 66), (65, 67), (301, 257)]:
+        raw, _hot, _ = _mosaic(*shape, seed=shape[0] * 7 + shape[1])
+        cases.append(raw)
+        cases.append(np.round(raw / 16.0).astype(np.float32))          # few distinct levels
+    flat = np.full((40, 50), 1000.0, np.float32)
+    flat[5, 7] = 9000.0
+    cases.append(flat)                                                # MAD 0: left alone
+    tiny = (1000.0 + rng.normal(0, 1e-7, (40, 50))).astype(np.float32)
+    cases.append(tiny)                                                # sigma < 1e-6
+    stars, _h, _ = _mosaic(120, 140, seed=4)
+    yy, xx = np.mgrid[0:120, 0:140]
+    for cy, cx in [(30.3, 40.7), (80.5, 100.2), (60, 20)]:
+        stars += (6000 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 1.1 ** 2))).astype(np.float32)
+    cases.append(stars)
+    nan = _mosaic(50, 60, seed=9)[0]
+    nan[10, 11] = np.nan                                              # that plane left alone
+    cases.append(nan)
+    neg = _mosaic(50, 60, seed=10)[0] - 1000.0                        # negative values / -0.0
+    neg[4, 4] = -0.0
+    cases.append(neg)
+    return cases
+
+
+@pytest.mark.skipif(not hasattr(native, "hot_pixel_bayer_inplace"),
+                    reason="astro_native lacks hot_pixel_bayer_inplace")
+@pytest.mark.parametrize("star_support", [3.0, None])
+def test_hot_pixel_bayer_inplace_bit_identical(star_support):
+    for k, raw in enumerate(_inplace_cases()):
+        for thr in (5.0, 2.0):
+            ref = native.hot_pixel_bayer(raw, None, thr, star_support)
+            work = raw.copy()
+            n = native.hot_pixel_bayer_inplace(work, thr, star_support)
+            assert work.tobytes() == ref.tobytes(), (k, thr)
+            assert n == int(np.sum(ref.view(np.uint32) != raw.view(np.uint32))), (k, thr)
+
+
+@pytest.mark.skipif(not hasattr(native, "hot_pixel_bayer_inplace"),
+                    reason="astro_native lacks hot_pixel_bayer_inplace")
+def test_fix_hot_bayer_inplace_matches_numpy(monkeypatch):
+    raw, _hot, _ = _mosaic(97, 131)
+    work = raw.copy()
+    out = _debayer_mod._fix_hot_bayer(work, inplace=True)
+    assert out is work                                                # fixed where it lies
+    monkeypatch.setattr(_debayer_mod, "_HAS_NATIVE", False)
+    ref = _debayer_mod._fix_hot_bayer(raw.copy())
+    np.testing.assert_array_equal(out, ref)
+    with pytest.raises(ValueError):
+        native.hot_pixel_bayer_inplace(np.asfortranarray(raw), 5.0, 3.0)
+
+
 @pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
 def test_hot_pixel_bayer_actually_repairs_hot_pixels():
     raw, hot, _ = _mosaic()
@@ -2769,3 +2968,218 @@ def test_transient_triage_score_native_rejects_wrong_shape():
     stamps = np.zeros((2, 3, 20, 20), dtype=np.float32)  # size mismatch
     with pytest.raises(ValueError):
         native.transient_triage_score(stamps, _tt_model, 31)
+
+
+@pytest.mark.skipif(not hasattr(native, "validate_frame_stats"), reason="astro_native lacks validate_frame_stats")
+def test_validate_frame_stats_matches_numpy_verdicts():
+    """Same (finite, max, zeros, saturated) as validate_image_data's numpy passes."""
+    rng = np.random.default_rng(31)
+    img = rng.gamma(4, 2000, (300, 410)).astype(np.float32)
+    img[:40] = 0.0
+    img[100, 100] = img.max() * 1.0005
+    fin, mx, zeros, sat = native.validate_frame_stats(img)
+    assert fin and mx == img.max() and zeros == img.size - np.count_nonzero(img)
+    assert sat == int(np.sum(img >= float(mx) * 0.999))
+    bad = img.copy()
+    bad[3, 3] = np.inf
+    assert native.validate_frame_stats(bad)[0] is False
+
+
+@pytest.mark.skipif(not hasattr(native, "calibrate_frame_from_be16"), reason="astro_native lacks calibrate_frame_from_be16")
+def test_calibrate_from_be16_matches_load_then_calibrate():
+    import src.debayer as D
+    rng = np.random.default_rng(41)
+    vals = rng.integers(0, 65535, (64, 96)).astype(np.uint16)
+    be = (vals.astype(np.int32) - 32768).astype('>i2')          # FITS: int16 big-endian, BZERO 32768
+    raw = np.frombuffer(be.tobytes(), dtype=np.uint16).reshape(64, 96)
+    bias = rng.normal(500, 3, (64, 96)).astype(np.float32)
+    dark = rng.normal(520, 5, (64, 96)).astype(np.float32)
+    flat = rng.uniform(0.9, 1.1, (64, 96)).astype(np.float32)
+    a, fa = D.calibrate_frame(vals.astype(np.float32), bias, dark, 0.67, flat)
+    b, fb = D.calibrate_frame_be16(raw, 32768.0, bias, dark, 0.67, flat)
+    np.testing.assert_array_equal(a, b)
+    assert fa and fb
+
+
+@pytest.mark.skipif(not hasattr(native, "debayer_rcd_native_into"), reason="astro_native lacks debayer_rcd_native_into")
+def test_rcd_into_buffer_matches_returned_array():
+    import src.debayer as D
+    rng = np.random.default_rng(42)
+    mos = rng.gamma(2, 400, (300, 420)).astype(np.float32)
+    want = D.debayer_rcd(mos, 'RGGB')
+    buf = np.full((300, 420, 3), -1.0, np.float32)
+    got = D.debayer_rcd(mos, 'RGGB', out=buf)
+    assert got is buf
+    np.testing.assert_array_equal(buf, want)
+
+
+@pytest.mark.skipif(not hasattr(native, "debayer_rcd_native_into"), reason="astro_native lacks debayer_rcd_native_into")
+@pytest.mark.parametrize("pattern", ["RGGB", "BGGR", "GRBG", "GBRG"])
+@pytest.mark.parametrize("shape", [(300, 420), (301, 563), (140, 150)])
+def test_rcd_into_fused_grid_matches_separate_grid(pattern, shape):
+    """debayer_rcd_native_into(grid=...) + the border helper == the unfused kernel
+    followed by _apply_fixed_grid, bit for bit (incl. NaN, zeros, odd sizes, tiles
+    cut at odd places)."""
+    import src.debayer as D
+    if not D._rcd_into_takes_grid():
+        pytest.skip("astro_native debayer_rcd_native_into has no grid argument")
+    rng = np.random.default_rng(7)
+    mos = rng.gamma(2, 400, shape).astype(np.float32)
+    mos[5, 7] = np.nan
+    mos[40:44, 60:64] = 0.0
+    cfg = {'pattern': pattern, 'gain': 0.997, 'grid': (3.25, -900.5, -1.75, 0.0),
+           'apply_grid': True, 'n': 8}
+    want = D._rcd_raw(mos, pattern, out=np.empty(shape + (3,), np.float32))
+    D._apply_fixed_grid(want, cfg)
+    got, fused = D._rcd_impl(mos, pattern, np.full(shape + (3,), -1.0, np.float32), cfg['grid'])
+    assert fused
+    np.testing.assert_array_equal(got, want)
+    got2, fused2 = D._rcd_impl(mos, pattern, None, cfg['grid'])     # no out buffer
+    assert fused2
+    np.testing.assert_array_equal(got2, want)
+    D.set_session_cfa(cfg)
+    try:
+        np.testing.assert_array_equal(D.debayer_rcd(mos, pattern), want)
+    finally:
+        D.set_session_cfa(None)
+
+
+@pytest.mark.skipif(not hasattr(native, "patch_brenner_scores"), reason="astro_native lacks patch_brenner_scores")
+def test_patch_brenner_scores_matches_numpy():
+    from src import registration as rg
+    rng = np.random.default_rng(43)
+    lum = rng.gamma(2, 400, (157, 211)).astype(np.float32)
+    a = rg.compute_patch_scores(lum)
+    h = rg.HAS_NATIVE
+    rg.HAS_NATIVE = False
+    try:
+        b = rg.compute_patch_scores(lum)
+    finally:
+        rg.HAS_NATIVE = h
+    np.testing.assert_allclose(a, b, rtol=1e-6)
+
+
+def test_downsample_half_f32_matches_numpy():
+    """downsample_half_f32 == registration._downsample_half's numpy path, bit for bit
+    (odd shapes, NaN, inf, -0.0, large values)."""
+    if not hasattr(native, "downsample_half_f32"):
+        pytest.skip("astro_native without downsample_half_f32")
+    rng = np.random.default_rng(7)
+
+    def ref(arr):
+        h2, w2 = (arr.shape[0] // 2) * 2, (arr.shape[1] // 2) * 2
+        a = arr[:h2, :w2]
+        return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
+
+    for shape in [(2048, 3056), (101, 77), (3, 2), (1, 5)]:
+        a = (rng.normal(1000, 300, shape) * rng.choice([1, 1e4], shape)).astype(np.float32)
+        if a.size > 10:
+            a.flat[::97] = np.nan
+            a.flat[5] = np.inf
+            a.flat[7] = -0.0
+        got = native.downsample_half_f32(a)
+        exp = ref(a)
+        assert got.dtype == np.float32 and got.shape == exp.shape
+        np.testing.assert_array_equal(got.view(np.uint32), exp.view(np.uint32))
+
+
+@pytest.mark.skipif(not hasattr(native, 'patch_weighted_sigma_combine_fast'),
+                    reason='astro_native without patch_weighted_sigma_combine_fast')
+@pytest.mark.parametrize('max_iters', [0, 1, 2, 3, 4, 5])
+def test_fused_patch_combine_fast_bit_identical(max_iters):
+    """patch_weighted_sigma_combine_fast == patch_weighted_sigma_combine bit for bit
+    (NaN positions included): ties, NaN, +-0, all-NaN, MAD-0 pixels, +-inf, outliers,
+    with and without a patch grid / global weights, MAD and std estimators."""
+    rng = np.random.default_rng(11 + max_iters)
+    N, H, W, C = 41, 24, 37, 3
+    d = (rng.normal(1000, 30, (N, H, W, C)) + rng.normal(0, 20, (N, 1, 1, 1))).astype(np.float32)
+    d[rng.random((N, H, W)) < 0.01] += 6000                      # outliers
+    d[rng.random(d.shape) < 0.02] = np.nan                       # scattered NaN
+    d[:, 0, :5] = 1000.0                                         # constant -> MAD 0, std 0
+    d[:, 1, :5] = 1000.0
+    d[::7, 1, :5] = 1003.0                                       # MAD 0, std > 0
+    d[:, 2, :10, 0] = np.round(d[:, 2, :10, 0] / 40) * 40        # heavy ties
+    d[:, 3, :6, 1] = 0.0
+    d[::2, 3, :6, 1] = -0.0                                      # +-0
+    d[:, 3, 6:12, 2] = rng.choice([-0.0, 0.0, 1.0, -1.0], (N, 6)).astype(np.float32)
+    d[:, 4, :4] = np.nan                                         # all NaN
+    d[:2, 5, :4] = np.inf
+    d[2, 5, :4, 0] = -np.inf                                     # +-inf
+    d[:N - 1, 6, :3] = np.nan                                    # a single valid sample
+    d[:N - 2, 7, :3] = np.nan                                    # two valid samples
+    d = np.ascontiguousarray(d)
+    grids = rng.uniform(0.2, 1.0, (N, 6, 9)).astype(np.float32)
+    grids[3] = 0.0                                               # a zero-weight frame
+    full = rng.uniform(0.2, 1.0, (N, H, W)).astype(np.float32)
+    gw = rng.uniform(0.5, 1.5, N).astype(np.float32)
+    geom = (float(H + 10), float(W + 14), 4.0, 6.0)
+    with np.errstate(all='ignore'):
+        for qm, g in ((grids, geom), (full, None)):
+            for weights in (gw, None):
+                for use_mad in (True, False):
+                    for sigma in (2.8, 0.5):
+                        ref = native.patch_weighted_sigma_combine(d, qm, weights, sigma, max_iters, use_mad, g)
+                        got = native.patch_weighted_sigma_combine_fast(d, qm, weights, sigma, max_iters, use_mad, g)
+                        np.testing.assert_array_equal(got.view(np.uint32), ref.view(np.uint32))
+
+
+@pytest.mark.skipif(not hasattr(native, 'ndimage_affine_order1'),
+                    reason='astro_native without the ndimage order-1 ports')
+def test_ndimage_order1_ports_bit_identical_to_scipy():
+    """ndimage_shift_order1 / ndimage_affine_order1 == scipy.ndimage.shift(float32) /
+    affine_transform(float64 copy), order 1, mode='constant', bit for bit: odd and
+    degenerate shapes, coordinates landing exactly on the last row/column (mirrored tap
+    with weight 0), fully outside, NaN/+-inf/+-0 in the input, rotations, scale/shear."""
+    from scipy import ndimage
+    rng = np.random.default_rng(0)
+
+    def rot(deg, s=1.0):
+        t = np.deg2rad(deg)
+        return np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]]) * s
+
+    mats = [np.eye(2), rot(0.3), rot(9), rot(-9), rot(90), rot(2, 1.01),
+            np.array([[1.0, 0.2], [-0.1, 0.97]])]
+    for h, w in [(1, 1), (1, 7), (7, 1), (2, 2), (3, 5), (17, 23), (64, 97)]:
+        a = rng.normal(1000, 30, (h, w)).astype(np.float32)
+        if h * w > 8:
+            flat = a.ravel()
+            idx = rng.choice(h * w, 6, replace=False)
+            flat[idx[:2]] = np.nan
+            flat[idx[2]], flat[idx[3]], flat[idx[4]] = np.inf, -np.inf, -0.0
+            a[:, -1] = -0.0
+        shifts = [(0.0, 0.0), (0.5, -0.5), (-3.25, 4.75), (2.0000001, -1e-9), (16.0, 22.0),
+                  (1e3, -1e3), (h - 1.0, 0.0), (0.0, w - 1.0), (-(h - 1.0), -(w - 1.0)),
+                  (h - 1.5, w - 0.5)]
+        for s in shifts:
+            want = ndimage.shift(a, shift=s, order=1, mode='constant', cval=0.0)
+            got = native.ndimage_shift_order1(a, s)
+            assert got.dtype == want.dtype == np.float32
+            np.testing.assert_array_equal(got.view(np.uint32), want.view(np.uint32))
+            for M in mats:
+                off = -(M @ np.array([s[0], s[1]]))
+                want = ndimage.affine_transform(a.astype(np.float64), M, offset=off, order=1,
+                                                mode='constant', cval=0.0)
+                got = native.ndimage_affine_order1(a, np.ascontiguousarray(M), off)
+                assert got.dtype == want.dtype == np.float64
+                np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64))
+
+
+def test_residual_warp_matches_scipy_calls(monkeypatch):
+    """registration._residual_warp (the residual check's warp) is bit-identical with
+    and without the native kernels, for the shift and the affine path."""
+    import src.registration as reg
+
+    class _T:
+        def __init__(self, deg):
+            t = np.deg2rad(deg)
+            self.params = np.array([[np.cos(t), -np.sin(t), 0.0], [np.sin(t), np.cos(t), 0.0], [0, 0, 1.0]])
+
+    rng = np.random.default_rng(3)
+    lum = rng.normal(1000, 30, (61, 83)).astype(np.float32)
+    cases = [((3.5, -7.25), None), ((12.0, 4.0), _T(4.0)), ((-30.2, 18.9), _T(-8.5))]
+    got = [reg._residual_warp(lum, s, t) for s, t in cases]
+    monkeypatch.setattr(reg, '_native', None)
+    want = [reg._residual_warp(lum, s, t) for s, t in cases]
+    for g, w in zip(got, want):
+        assert g.dtype == w.dtype
+        np.testing.assert_array_equal(g.view(np.uint8), w.view(np.uint8))

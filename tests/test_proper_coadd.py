@@ -122,3 +122,145 @@ def test_on_by_default_with_a_single_opt_out():
     assert p.parse_args(['-d', 'x', '--no-proper-coadd']).proper_coadd is False
     acts = [a for a in p._actions if a.dest == 'proper_coadd']
     assert len(acts) == 1 and acts[0].option_strings == ['--no-proper-coadd']
+
+
+@pytest.mark.skipif(not (_NATIVE and hasattr(pc._native, 'proper_coadd_accum32')),
+                    reason='astro_native lacks proper_coadd_accum32')
+def test_accum32_matches_accum64():
+    rng = np.random.default_rng(5)
+    fm = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
+    ph = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
+    n64, d64 = np.zeros((20, 17), np.complex128), np.zeros((20, 17))
+    n32, d32 = np.zeros((20, 17), np.complex64), np.zeros((20, 17), np.float32)
+    for _ in range(3):
+        pc._native.proper_coadd_accum(n64.view(np.float64), d64, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
+        pc._native.proper_coadd_accum32(n32.view(np.float32), d32, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
+    np.testing.assert_allclose(n32, n64, rtol=1e-6, atol=1e-5)
+    np.testing.assert_allclose(d32, d64, rtol=1e-6)
+
+
+def test_combine_is_deterministic(field):
+    """Per-thread accumulators summed in a fixed order: identical output run to run."""
+    A, _ = field
+    ref = A.mean(0)
+    a = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False)
+    b = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False)
+    np.testing.assert_array_equal(a, b)
+
+
+def test_frame_sky_noise_native_matches_numpy():
+    """astro_native.frame_sky_noise == _sky / _noise per channel, bit for bit."""
+    an = pytest.importorskip("astro_native")
+    if not hasattr(an, "frame_sky_noise"):
+        pytest.skip("astro_native without frame_sky_noise")
+    from src import proper_coadd as pc
+    rng = np.random.default_rng(3)
+    cases = [rng.normal(1000, 30, (203, 417, 3)).astype(np.float32),
+             np.round(rng.normal(50, 4, (64, 90, 3))).astype(np.float32),     # ties
+             rng.normal(0, 1, (40, 50, 3)).astype(np.float32)]                # < 1000 diffs
+    fr = rng.normal(500, 10, (120, 160, 3)).astype(np.float32)
+    fr[rng.random(fr.shape) < 0.05] = np.nan
+    fr[:8, :, 1] = np.inf
+    cases.append(fr)
+    for fr in cases:
+        sky, sig = an.frame_sky_noise(fr)
+        for c in range(3):
+            ref_sky, ref_sig = pc._sky(fr[..., c]), pc._noise(fr[..., c])
+            assert sky[c] == ref_sky
+            assert (sig[c] == ref_sig) or (np.isnan(sig[c]) and np.isnan(ref_sig))
+
+
+_TILED = _NATIVE and pc._tiled_ok(np.zeros((1, 1, 1, 3), np.float32))
+
+
+@pytest.mark.skipif(not _TILED, reason='astro_native lacks the tiled proper_coadd kernels')
+def test_prep_rows_bit_identical_to_prep():
+    """proper_coadd_prep_rows (bands of rows, batches of frames) == proper_coadd_prep."""
+    rng = np.random.default_rng(6)
+    H, W, C, pad = 37, 70, 3, 8
+    frs = [rng.normal(500, 40, (H, W, C)).astype(np.float32) for _ in range(2)]
+    frs[1][10, 10] += 9000
+    ref_sig = rng.normal(0, 30, (C, H, W)).astype(np.float32)
+    ref_sig[:, 20:23, 30:33] += 4000
+    Fs, skies, sig2s = [1.0, 0.9], [[480.0, 510.5, 495.25], [470.0, 505.0, 490.5]], [[1225.0, 1681.0, 1482.25]] * 2
+    PW = W + 2 * pad + 3
+    full = [np.zeros((C, H + 2 * pad, PW), np.float32) for _ in frs]
+    n_full = sum(pc._native.proper_coadd_prep(fr, ref_sig, b, F, sk, s2, 5.0, 0.15, pad)
+                 for fr, b, F, sk, s2 in zip(frs, full, Fs, skies, sig2s))
+    n_rows = 0
+    for y0 in range(0, H, 5):
+        nb = min(5, H - y0)
+        band = np.full((2, C, nb, PW), np.nan, np.float32)            # every element is written
+        n_rows += pc._native.proper_coadd_prep_rows(frs, ref_sig, band, y0, Fs, sum(skies, []),
+                                                    sum(sig2s, []), 5.0, 0.15, pad)
+        for b in range(2):
+            np.testing.assert_array_equal(band[b], full[b][:, pad + y0:pad + y0 + nb])
+    assert n_rows == n_full > 0
+
+
+@pytest.mark.skipif(not _TILED, reason='astro_native lacks the tiled proper_coadd kernels')
+def test_scatter_tiles_and_accum32_tile_match_accum32():
+    """proper_coadd_scatter_tiles is a pure copy into (tile, row, column) blocks, and
+    proper_coadd_accum32_tile on those blocks == proper_coadd_accum32 frame by frame."""
+    rng = np.random.default_rng(7)
+    C, PH, NF, CB, B = 3, 11, 37, 8, 2
+    NT = -(-NF // CB)
+    spec = (rng.normal(size=(B, C + 1, PH, NF)) + 1j * rng.normal(size=(B, C + 1, PH, NF))).astype(np.complex64)
+    tiles = np.zeros((B * (C + 1), NT, PH, CB), np.complex64)
+    for r0 in range(0, PH, 4):                                    # scattered in row bands
+        rows = np.ascontiguousarray(spec[:, :, r0:r0 + 4].reshape(B * (C + 1), -1, NF))
+        pc._native.proper_coadd_scatter_tiles(rows.view(np.float32), tiles.view(np.float32),
+                                              list(range(B * (C + 1))), r0)
+    flat = tiles.transpose(0, 2, 1, 3).reshape(B, C + 1, PH, NT * CB)
+    np.testing.assert_array_equal(flat[..., :NF], spec)
+    wn, wf = rng.uniform(0.5, 2, B * C), rng.uniform(0.5, 2, B * C)
+    n_ref = np.zeros((C, PH, NF), np.complex64)
+    d_ref = np.zeros((C, PH, NF), np.float32)
+    for b in range(B):
+        for c in range(C):
+            pc._native.proper_coadd_accum32(n_ref[c].view(np.float32), d_ref[c], spec[b, c].view(np.float32),
+                                            spec[b, C].view(np.float32), wn[b * C + c], wf[b * C + c])
+    num = np.zeros((C, NT, PH, CB), np.complex64)
+    den = np.zeros((C, NT, PH, CB), np.float32)
+    t5 = tiles.reshape(B, C + 1, NT, PH, CB)
+    for t in range(NT):
+        nb = min(CB, NF - t * CB)
+        blk = np.ascontiguousarray(t5[:, :, t, :, :nb])
+        pc._native.proper_coadd_accum32_tile(num.view(np.float32), den, blk.view(np.float32), t,
+                                             list(wn), list(wf))
+    np.testing.assert_array_equal(num.transpose(0, 2, 1, 3).reshape(C, PH, -1)[..., :NF], n_ref)
+    np.testing.assert_array_equal(den.transpose(0, 2, 1, 3).reshape(C, PH, -1)[..., :NF], d_ref)
+
+
+@pytest.mark.skipif(not _TILED, reason='astro_native lacks the tiled proper_coadd kernels')
+@pytest.mark.parametrize('batch', [1, 2])
+def test_tiled_combine_bit_identical(field, monkeypatch, tmp_path, batch):
+    """The tiled combine (_combine_tiled) gives exactly the per-frame path's output, from
+    RAM and from a memmap, including a frame skipped for unusable noise."""
+    A, _ = field
+    ref = A.mean(0)
+    real_sky_noise = pc._sky_noise
+
+    def sky_noise(fr):                                     # frame 3's noise is unusable
+        sky, sig = real_sky_noise(fr)
+        if np.array_equal(fr, A[3]):
+            sig = np.array([np.nan] * len(sig))
+        return sky, sig
+    monkeypatch.setattr(pc, '_sky_noise', sky_noise)
+    monkeypatch.setattr(pc, '_BATCH', batch)
+    real_ok = pc._tiled_ok
+
+    def run(arr, tiled):
+        monkeypatch.setattr(pc, '_tiled_ok', real_ok if tiled else (lambda a: False))
+        st = {}
+        return pc.proper_coadd(arr, ref, fwhm=5.0, verbose=False, stats=st), st
+    want, st_want = run(A, False)
+    assert st_want['frames'] == A.shape[0] - 1
+    got, st_got = run(A, True)
+    np.testing.assert_array_equal(got, want)
+    assert st_got == st_want
+    mm = np.memmap(tmp_path / 'aligned.dat', np.float32, 'w+', shape=A.shape)
+    mm[:] = A
+    got_mm, _ = run(mm, True)
+    np.testing.assert_array_equal(got_mm, want)
+    del mm

@@ -626,20 +626,31 @@ def debayer_menon2007(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     return _equalize_bayer_grid(_debayer_menon2007_numpy(raw, pattern))
 
 
-def debayer_rcd(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+def debayer_rcd(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] = None) -> np.ndarray:
     """RCD demosaic plus the same 2x2 green-grid correction as ``debayer_malvar``
     (session-constant when measured, per frame otherwise): RCD's interpolated
     greens are also biased by position, measured ~+-2.5 ADU on real Origin subs
     (Malvar's ~+-6), which survives stacking as a checkerboard."""
-    out = _rcd_raw(raw, pattern)
     cfg = _session_cfa
     if cfg is not None and cfg['pattern'] == pattern.upper():
-        _apply_fixed_grid(out, cfg)
+        # session-constant grid: fused into the native kernel's output write when it
+        # can (bit-identical, saves four strided passes over the 75 MB output)
+        out, fused = _rcd_impl(raw, pattern, out, cfg['grid'] if cfg['apply_grid'] else None)
+        if not fused:
+            _apply_fixed_grid(out, cfg)
         return out
+    out = _rcd_raw(raw, pattern, out=out)
     return _equalize_bayer_grid(out, inplace=True)
 
 
-def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+def _rcd_into_takes_grid() -> bool:
+    """Whether the loaded native ``debayer_rcd_native_into`` has the fused ``grid``
+    argument (an older build does not)."""
+    f = getattr(_native, 'debayer_rcd_native_into', None) if _HAS_NATIVE else None
+    return 'grid' in (getattr(f, '__text_signature__', None) or '')
+
+
+def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] = None) -> np.ndarray:
     """RCD -- Ratio Corrected Demosaicing (Luis Sanz Rodriguez, 2017), the
     default in Siril, RawTherapee and darktable.
 
@@ -659,6 +670,15 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     are scale-free; ``eps`` assumes that range) and clipped below at 0. A 4-px
     border, where the 9-tap statistics do not fit, is taken from Malvar.
     """
+    return _rcd_impl(raw, pattern, out, None)[0]
+
+
+def _rcd_impl(raw: np.ndarray, pattern: str, out: Optional[np.ndarray],
+              grid) -> tuple:
+    """``_rcd_raw`` with an optional session grid (``_apply_fixed_grid``'s four
+    offsets) fused into the native output write. Returns ``(rgb, grid_applied)``;
+    ``grid_applied`` is False when the grid was not given or a path without the
+    fusion ran (the caller then applies it as before)."""
     offsets = _PATTERN_OFFSETS.get(pattern.upper())
     if offsets is None:
         raise ValueError(f"Unknown Bayer pattern: {pattern!r}. "
@@ -669,28 +689,45 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
         a = None
         H, W = raw.shape
         if H < 16 or W < 16:
-            return _malvar_raw(raw, pattern)
+            return _malvar_raw(raw, pattern), False
         m = float(np.fmax.reduce(raw, axis=None))        # NaN only if every value is NaN
         scale = m if (np.isfinite(m) or np.isfinite(raw).any()) else 1.0
     else:
         a = np.asarray(raw, dtype=np.float64)
         H, W = a.shape
         if H < 16 or W < 16:
-            return _malvar_raw(raw, pattern)
+            return _malvar_raw(raw, pattern), False
         scale = float(np.nanmax(a)) if np.isfinite(a).any() else 1.0
     if not scale > 0:
         scale = 1.0
     (ry, rx), _g1, _g2, (by, bx) = offsets
     if _HAS_NATIVE and hasattr(_native, 'debayer_rcd_native') and isinstance(raw, np.ndarray):
         try:
-            out = _native.debayer_rcd_native(np.ascontiguousarray(raw, dtype=np.float32),
-                                              scale, (ry, rx), (by, bx))
-            return _rcd_border(out, raw, pattern)
+            src = np.ascontiguousarray(raw, dtype=np.float32)
+            into_ok = (out is not None and hasattr(_native, 'debayer_rcd_native_into')
+                       and isinstance(out, np.ndarray) and out.dtype == np.float32
+                       and out.shape == (H, W, 3) and out.flags['C_CONTIGUOUS']
+                       and out.flags['WRITEABLE'])
+            if grid is not None and _rcd_into_takes_grid():
+                # the kernel writes the whole frame with the grid applied; the Malvar
+                # border then replaces 4 px all round, so only those get it here
+                buf = out if into_ok else np.empty((H, W, 3), dtype=np.float32)
+                _native.debayer_rcd_native_into(src, buf, scale, (ry, rx), (by, bx),
+                                                grid=tuple(float(g) for g in grid))
+                _rcd_border(buf, raw, pattern)
+                _apply_fixed_grid_border(buf, grid)
+                return buf, True
+            if into_ok:
+                # straight into the caller's buffer (Phase 1's frame-store slot)
+                _native.debayer_rcd_native_into(src, out, scale, (ry, rx), (by, bx))
+                return _rcd_border(out, raw, pattern), False
+            res = _native.debayer_rcd_native(src, scale, (ry, rx), (by, bx))
+            return _rcd_border(res, raw, pattern), False
         except Exception as e:
             _log.debug("native RCD failed (%s); using numpy", e)
     if a is None:
         a = np.asarray(raw, dtype=np.float64)
-    return _debayer_rcd_numpy(a, offsets, scale, raw, pattern)
+    return _debayer_rcd_numpy(a, offsets, scale, raw, pattern), False
 
 
 _RCD_BORDER = 4
@@ -718,6 +755,24 @@ def _rcd_border(out: np.ndarray, raw: np.ndarray, pattern: str) -> np.ndarray:
     out[:, :b] = _malvar_raw(raw[:, :m], pattern)[:, :b]
     out[:, -b:] = _malvar_raw(raw[:, (W - m) & ~1:], pattern)[:, -b:]
     return out
+
+
+def _apply_fixed_grid_border(rgb: np.ndarray, grid) -> None:
+    """``_apply_fixed_grid`` on the ``_RCD_BORDER``-px frame border only (four
+    non-overlapping strips, each green value by its global 2x2 parity): the rest of
+    the frame got the grid inside the native kernel."""
+    b = _RCD_BORDER
+    H, W = rgb.shape[:2]
+    green = rgb[:, :, 1]
+    if H <= 2 * b or W <= 2 * b:
+        regions = [(0, H, 0, W)]
+    else:
+        regions = [(0, b, 0, W), (H - b, H, 0, W), (b, H - b, 0, b), (b, H - b, W - b, W)]
+    for y0, y1, x0, x1 in regions:
+        for (a, c), off in zip(_GRID_PARITY, grid):
+            v = green[y0 + (a - y0) % 2:y1:2, x0 + (c - x0) % 2:x1:2]
+            v -= np.float32(off)
+            np.maximum(v, 0, out=v)
 
 
 def _debayer_rcd_numpy(a: np.ndarray, offsets, scale: float, raw: np.ndarray,
@@ -841,14 +896,16 @@ def _debayer_rcd_numpy(a: np.ndarray, offsets, scale: float, raw: np.ndarray,
     return _rcd_border((rgb * scale).astype(np.float32), raw, pattern)
 
 
-def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
-    """Dispatch to the appropriate debayering method."""
+def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear',
+            out: Optional[np.ndarray] = None) -> np.ndarray:
+    """Dispatch to the appropriate debayering method. ``out``: an (H, W, 3) float32 buffer
+    the native RCD path writes into (others ignore it and return a new array)."""
     if method == 'malvar':
         return debayer_malvar(raw, pattern)
     elif method == 'menon2007':
         return debayer_menon2007(raw, pattern)
     elif method == 'rcd':
-        return debayer_rcd(raw, pattern)
+        return debayer_rcd(raw, pattern, out=out)
     else:
         return debayer_bilinear(raw, pattern, method)
 
@@ -949,6 +1006,30 @@ def white_balance_grayworld_lum(rgb: np.ndarray):
     return rgb, luminance(get_gpu().to_host(rgb))
 
 
+def white_balance_grayworld_lum_into(rgb: np.ndarray, lum_out: np.ndarray):
+    """``white_balance_grayworld_lum`` writing the luminance into ``lum_out`` (e.g. the
+    frame store's luminance slot) and returning, from the same pass, what
+    ``quality.validate_image_data`` reads from it: ``(lum_out, native_stats, sample)``
+    with ``native_stats`` = ``validate_frame_stats(lum)`` and ``sample`` =
+    ``lum[::3, ::3]`` (None below 64 px, where validation uses the whole frame).
+    Bit-identical to ``white_balance_grayworld_lum``; None when the native kernel
+    cannot take these arrays (the caller then runs ``white_balance_grayworld_lum``)."""
+    if not (_HAS_NATIVE and hasattr(_native, 'white_balance_grayworld_lum_into')
+            and get_gpu().xp is np and isinstance(rgb, np.ndarray) and rgb.dtype == np.float32
+            and rgb.ndim == 3 and rgb.shape[2] == 3 and rgb.flags['C_CONTIGUOUS']
+            and rgb.flags['WRITEABLE'] and isinstance(lum_out, np.ndarray)
+            and lum_out.dtype == np.float32 and lum_out.shape == rgb.shape[:2]
+            and lum_out.flags['C_CONTIGUOUS'] and lum_out.flags['WRITEABLE']):
+        return None
+    h, w = rgb.shape[:2]
+    sample = np.empty((-(-h // 3), -(-w // 3)), np.float32) if min(h, w) >= 64 else None
+    try:
+        stats = _native.white_balance_grayworld_lum_into(rgb, lum_out, sample, 3)
+    except Exception:
+        return None
+    return lum_out, stats, sample
+
+
 def white_balance_whitepatch(rgb: np.ndarray, pct: Optional[float] = None) -> np.ndarray:
     gpu = get_gpu()
     xp = gpu.xp
@@ -992,7 +1073,8 @@ _DETECT = object()  # sentinel: use default threshold for statistical detection
 
 def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
                    threshold: Optional[float] = _DETECT,
-                   hot_map: Optional[np.ndarray] = None) -> np.ndarray:
+                   hot_map: Optional[np.ndarray] = None,
+                   inplace: bool = False) -> np.ndarray:
     """Unified hot pixel detection and replacement.
 
     Modes:
@@ -1008,13 +1090,14 @@ def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
                    to skip detection (useful when only applying a hot_map).
                    Defaults to the per-mode Config value.
 
-    All modes use MAD-based sigma for robust noise estimation.
+    All modes use MAD-based sigma for robust noise estimation. ``inplace`` (bayer mode
+    only) lets the statistical pass fix ``data`` itself when it can.
     """
     if mode == 'auto':
         mode = 'bayer' if data.ndim == 2 else 'rgb'
 
     if mode == 'bayer':
-        return _fix_hot_bayer(data, threshold, hot_map)
+        return _fix_hot_bayer(data, threshold, hot_map, inplace=inplace)
     elif mode == 'rgb':
         rgb_fixed, _lum = _fix_hot_rgb(data, threshold)
         return rgb_fixed
@@ -1026,7 +1109,8 @@ def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
 
 def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
                    hot_map: Optional[np.ndarray] = None,
-                   star_support: Optional[float] = _DETECT) -> np.ndarray:
+                   star_support: Optional[float] = _DETECT,
+                   inplace: bool = False) -> np.ndarray:
     """Bayer-aware hot pixel fix: apply pre-built map and/or statistical detection.
 
     Merged implementation: median_filter is computed once per sub-channel and
@@ -1042,6 +1126,10 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     pixel is kept when any adjacent mosaic pixel (one pixel away, in another plane) is
     itself more than ``star_support`` sigma over its own plane's median: a hot pixel is
     a single-sensor-pixel event and leaves its neighbours normal, a star lifts them.
+
+    ``inplace=True`` (statistical pass, no map, a C-contiguous writable float32 array the
+    caller owns) fixes ``data`` itself through the native ``hot_pixel_bayer_inplace``:
+    the same result bit for bit in two streaming passes and no frame-sized output.
     """
     if data.ndim != 2:
         return data
@@ -1057,6 +1145,16 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     # the same order). Map and statistics are never asked for together by the
     # pipeline, and the numpy path shares one median between them, so that
     # combination stays on numpy.
+    if (inplace and do_stat and not has_map and _HAS_NATIVE
+            and hasattr(_native, 'hot_pixel_bayer_inplace') and isinstance(data, np.ndarray)
+            and data.dtype == np.float32 and data.flags['C_CONTIGUOUS']
+            and data.flags['WRITEABLE']):
+        try:
+            _native.hot_pixel_bayer_inplace(
+                data, float(threshold), None if star_support is None else float(star_support))
+            return data
+        except Exception:
+            pass
     if (_HAS_NATIVE and hasattr(_native, 'hot_pixel_bayer') and isinstance(data, np.ndarray)
             and (has_map or do_stat) and not (has_map and do_stat)):
         try:
@@ -1264,7 +1362,8 @@ def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.n
 
 # Legacy aliases for backwards compatibility
 remove_hot_pixels = _fix_hot_mono
-remove_hot_pixels_bayer = lambda data, threshold=_DETECT: fix_hot_pixels(data, mode='bayer', threshold=threshold)
+remove_hot_pixels_bayer = lambda data, threshold=_DETECT, inplace=False: fix_hot_pixels(
+    data, mode='bayer', threshold=threshold, inplace=inplace)
 
 
 def _spike_reject_bayer_numpy(data: np.ndarray, k: float, contrast: float,
@@ -1380,6 +1479,36 @@ def luminance(rgb):
         except Exception:
             pass
     return 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+
+def calibrate_frame_be16(raw, bzero, bias, dark, dark_scale, flat_norm, out=None):
+    """``calibrate_frame`` on a raw BITPIX=16 block from ``io_fits.read_fits_be16``:
+    byte swap, + BZERO, the float32 conversion and the calibration in one native pass
+    (the same per-pixel operations, so identical to load_fits + calibrate_frame).
+
+    ``out`` (optional): a C-contiguous float32 array of ``raw``'s shape to write into
+    instead of a fresh one -- every element is overwritten, and a reused buffer skips
+    the OS zero-filling a new 25 MB allocation on first touch."""
+    masters = [m for m in (bias, dark, flat_norm) if m is not None]
+    if (_HAS_NATIVE and hasattr(_native, 'calibrate_frame_from_be16')
+            and all(isinstance(m, np.ndarray) and m.dtype == np.float32
+                    and m.flags['C_CONTIGUOUS'] for m in masters)):
+        try:
+            if not (isinstance(out, np.ndarray) and out.shape == raw.shape
+                    and out.dtype == np.float32 and out.flags['C_CONTIGUOUS']
+                    and out.flags['WRITEABLE']):
+                out = np.empty(raw.shape, np.float32)
+            finite = _native.calibrate_frame_from_be16(
+                np.ascontiguousarray(raw).reshape(-1), float(bzero), out.reshape(-1),
+                None if bias is None else bias.reshape(-1),
+                None if dark is None else dark.reshape(-1),
+                float(dark_scale),
+                None if flat_norm is None else flat_norm.reshape(-1))
+            return out, bool(finite)
+        except Exception:
+            pass
+    data = (raw.byteswap().view(np.int16).astype(np.int32) + int(bzero)).astype(np.float32)
+    return calibrate_frame(data, bias, dark, dark_scale, flat_norm)
 
 
 def calibrate_frame(data, bias, dark, dark_scale, flat_norm):

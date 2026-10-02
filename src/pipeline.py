@@ -178,8 +178,29 @@ def _export_frame_jpegs(final: List[FrameInfo], final_indices: List[int],
     safe_print(f"  Exported {len(final)} frame JPEGs → {export_dir}")
 
 
+def _prefetch_session_lookups(lights: List[FrameInfo], args, directory: str,
+                              use_simbad: bool):
+    """Start target inference (a SIMBAD lookup: ~1.3 s of network) and the originvision
+    session sample (~0.9 s) in background threads before Phase 1: both read only headers
+    and raw files, and they used to run on the critical path after it. Returns the
+    futures for ``_infer_target_and_advise(prefetched=...)``."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.target_inference import infer_target_from_metadata
+    _si = getattr(args, '_session_info', None)
+    ex = ThreadPoolExecutor(max_workers=2, thread_name_prefix='prefetch')
+    fut_t = ex.submit(infer_target_from_metadata, directory, list(lights), use_simbad=use_simbad,
+                      session_name=_si.object_name if _si else None)
+    fut_o = None
+    if getattr(args, 'originvision', False) and getattr(args, 'auto', False):
+        from src.originvision import session_sample_results
+        fut_o = ex.submit(session_sample_results, list(lights), args)
+    ex.shutdown(wait=False)
+    return fut_t, fut_o
+
+
 def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
-                             use_simbad: bool) -> None:
+                             use_simbad: bool, prefetched=None) -> None:
     """Target inference, the originvision session prior, then the
     auto-advisor: the sequence every path into Phases 2-4 must run, fresh or
     resumed from any checkpoint phase.
@@ -194,9 +215,15 @@ def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
     """
     from src.target_inference import infer_target_from_metadata
     _si = getattr(args, '_session_info', None)
-    name, ttype, conf, src = infer_target_from_metadata(
-        directory, final, use_simbad=use_simbad,
-        session_name=_si.object_name if _si else None)
+    fut_t, fut_o = prefetched if prefetched is not None else (None, None)
+    try:
+        name, ttype, conf, src = fut_t.result() if fut_t is not None else (None,) * 4
+    except Exception:
+        fut_t = None
+    if fut_t is None:
+        name, ttype, conf, src = infer_target_from_metadata(
+            directory, final, use_simbad=use_simbad,
+            session_name=_si.object_name if _si else None)
     args._inferred_target = name
     args._inferred_type = ttype
     args._inferred_confidence = conf
@@ -207,8 +234,14 @@ def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
 
     prior_type, prior_conf = ttype, conf
     if getattr(args, 'originvision', False) and getattr(args, 'auto', False):
-        from src.originvision import map_originvision_category, sample_session_priors
-        result = sample_session_priors(final, args)
+        from src.originvision import map_originvision_category, sample_session_priors, summarize_session_sample
+        if fut_o is not None:
+            try:
+                result = summarize_session_sample(fut_o.result())
+            except Exception:
+                result = sample_session_priors(final, args)
+        else:
+            result = sample_session_priors(final, args)
         if result:
             args._originvision_defect_flagged = result.get('defect_flagged', False)
             mapped_type = map_originvision_category(result.get('category'))
@@ -676,6 +709,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             else:
                 print_phase(1, "Processing & Quality Analysis")
                 phase_start = time.time()
+                try:
+                    _prefetched = _prefetch_session_lookups(
+                        lights, args, _directory, use_simbad=not getattr(args, 'offline', False))
+                except Exception:
+                    _prefetched = None
 
                 execute_frame_processing(
                     lights, masters, args,
@@ -739,7 +777,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 # Target inference + originvision prior + auto-advisor.
                 _infer_target_and_advise(
                     final, args, _directory,
-                    use_simbad=not getattr(args, 'offline', False))
+                    use_simbad=not getattr(args, 'offline', False), prefetched=_prefetched)
 
             if not final:
                 print('\n  ERROR: No accepted frames after checkpoint restore!')
@@ -1061,7 +1099,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                 fingerprint=_ckpt_fp)
 
         finally:
-            mm_mgr.cleanup()
+            # Unmapping and deleting the frame store (~65 GB on a 532-frame session) took
+            # ~9 s on the critical path; nothing reads it after this point, so it runs in
+            # a background thread (non-daemon: the interpreter waits for it at exit, and
+            # src.cleanup's at-exit sweep still covers any file it could not remove).
+            import threading as _threading
+            _threading.Thread(target=mm_mgr.cleanup, name='frame-store-cleanup',
+                              daemon=False).start()
         # end: if resume_phase < 3
 
     # ======================================================================

@@ -170,6 +170,12 @@ def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
     signal, computed separately from (and not a replacement for)
     score_lights_with_originvision's own per-frame advisory scoring.
     """
+    return summarize_session_sample(session_sample_results(lights, args))
+
+
+def session_sample_results(lights: List[FrameInfo], args) -> Optional[tuple]:
+    """The scoring half of ``sample_session_priors``: raw per-frame results, no output --
+    so it can run in a background thread during Phase 1 (it reads only the raw files)."""
     if not getattr(args, 'originvision', False):
         return None
     model_path = _originvision_model(args)
@@ -197,9 +203,15 @@ def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
                     pass
     except Exception:
         return None
-    if not results:
-        return None
+    return (results, len(idxs)) if results else None
 
+
+def summarize_session_sample(sample) -> Optional[dict]:
+    """The reporting half of ``sample_session_priors``: vote, flag, print, return.
+    ``sample`` is ``session_sample_results``' (results, n_attempted) or None."""
+    if not sample:
+        return None
+    results, n_attempted = sample
     # Category: majority vote across samples, ties broken by mean confidence.
     by_category: dict = {}
     for r in results:
@@ -216,7 +228,7 @@ def sample_session_priors(lights: List[FrameInfo], args) -> Optional[dict]:
         or float(r.get('defect_probability', 0.0)) > 0.5
         for r in results)
 
-    safe_print(f"\n  originvision (session sample, {len(results)}/{len(idxs)} frame(s)): "
+    safe_print(f"\n  originvision (session sample, {len(results)}/{n_attempted} frame(s)): "
                f"category={category} conf={confidence:.0%}"
                + ("  [defect signal flagged]" if defect_flagged else ""))
 

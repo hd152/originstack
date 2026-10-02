@@ -210,6 +210,54 @@ def noise_ratios(os_cube, siril_cube, blur_sigmas=(0.0, 0.5, 0.75, 1.0)):
     return rows
 
 
+def matched_noise(os_cube, siril_cube, sigmas=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0)):
+    """Per channel: OriginStack's noise / Siril's after blurring OriginStack's channel until
+    its stars are exactly as wide as Siril's (shared-star width ratio interpolated to 1.0).
+    A sharper stack is noisier per pixel, so this -- not the raw per-pixel ratio -- says
+    which stack is quieter at the same resolution. Returns [(width ratio, noise ratio at
+    matched width), ...] for R, G, B, or None if the stacks cannot be matched."""
+    from common_star_fwhm import common_star_fwhm
+    from scipy import ndimage as ndi
+
+    from src.blind_match import match_rigid_unknown_rotation
+    from src.star_detect import detect_stars_matched_filter as detect
+
+    def stars(c):
+        st = detect(c.mean(0) - np.median(c.mean(0)))
+        return st[np.argsort(-st["flux"])]
+
+    m = match_rigid_unknown_rotation(stars(siril_cube), stars(os_cube), max_stars=60, pixel_tol=2.0)
+    if m is None:
+        return None
+    p = m.params
+    matrix = np.array([[p[1, 1], p[1, 0]], [p[0, 1], p[0, 0]]])
+    offset = [p[1, 2], p[0, 2]]
+    on = np.stack([ndi.affine_transform(os_cube[i], matrix, offset=offset, output_shape=siril_cube.shape[1:],
+                                        order=3, mode="nearest") for i in range(3)])
+    sl = (slice(200, -200), slice(200, -200))
+    out = []
+    for c in range(3):
+        a, b = ndi.gaussian_filter(on[c][sl], 4), ndi.gaussian_filter(siril_cube[c][sl], 4)
+        gain = np.linalg.lstsq(np.c_[a.ravel(), np.ones(a.size)], b.ravel(), rcond=None)[0][0]
+        rows = []
+        for sg in sigmas:
+            bl = ndi.gaussian_filter(on[c], sg) if sg else on[c]
+            r = common_star_fwhm(np.repeat(bl[None], 3, 0), np.repeat(siril_cube[c][None], 3, 0))
+            if r is None:
+                continue
+            rows.append((r["ratio_a_over_b"], gain * lag4_noise(bl[sl]) / lag4_noise(siril_cube[c][sl])))
+        if not rows:
+            out.append((float("nan"), float("nan")))
+            continue
+        w = np.array([r[0] for r in rows]); nz = np.array([r[1] for r in rows])
+        if w[0] >= 1.0:
+            at1 = float(nz[0])          # already as wide as Siril's: nothing to blur
+        else:
+            at1 = float(np.interp(1.0, w, nz)) if w.min() <= 1.0 <= w.max() else float("nan")
+        out.append((float(w[0]), at1))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("folder", help="folder with Light*.fits and optional bias*/dark*/flat* FITS files")
@@ -274,11 +322,19 @@ def main():
         print("\nOriginStack noise / Siril noise (R, G, B); rows after 0 blur OriginStack's stack, for reference only:")
         for sigma, (fw, r) in rows.items():
             print(f"  blur sigma {sigma:<4} FWHM {fw:5.2f}   {r[0]:.2f} {r[1]:.2f} {r[2]:.2f}")
+    mn = matched_noise(os_cube, si_cube)
+    if mn:
+        print()
+        print("Per channel (R, G, B): OriginStack's star width / Siril's, and its noise / Siril's after "
+              "blurring each channel to Siril's star width (the like-for-like noise figure):")
+        for name, (w, nz) in zip("RGB", mn):
+            print(f"  {name}: width ratio {w:.3f}   noise at matched width {nz:.2f}")
     with open(os.path.join(args.workdir, "results.json"), "w") as fh:
         json.dump({"lights": len(lights), "originstack": {"wall": os_wall, "phases": os_phases, "fwhm": os_fwhm,
                                                           "stars": os_stars, **os_res},
                    "siril": {"wall": si_wall, "stages": si_stages, "fwhm": si_fwhm, "stars": si_stars, **si_res},
-                   "noise": {str(k): v[1] for k, v in (rows or {}).items()}}, fh, indent=2)
+                   "noise": {str(k): v[1] for k, v in (rows or {}).items()},
+                   "matched_noise": mn}, fh, indent=2)
 
 
 if __name__ == "__main__":

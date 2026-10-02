@@ -38,12 +38,28 @@ from src.utils import safe_print
 
 _log = logging.getLogger('originstack')
 
-RESERVE_FRAC = 0.30          # of total RAM, always left free
+# Of total RAM, always left free. 0.30 kept a 532-frame Sculptor session's 14.7 GB
+# aligned stack on disk (Windows counted ~38 of 64 GB as available after Phase 1's
+# 53 GB of dirty temp-file pages): alignment 32.5 -> 16.2 s and the whole stacking
+# phase 85.8 -> 63.0 s with it in RAM, while 0.20 still leaves ~13 GB for everything else.
+RESERVE_FRAC = 0.20
 SHM_PREFIX = 'shm:'
 
 
 class _RamArray(np.ndarray):
     """ndarray that accepts the memmap API the pipeline uses (``flush``)."""
+
+    def flush(self) -> None:
+        pass
+
+
+class _ScratchMemmap(np.memmap):
+    """Temp-file memmap whose ``flush`` is a no-op. The file is scratch: it is
+    deleted at cleanup, never reopened after a crash (checkpoints do not point at
+    it), and every process maps the same file, which the OS keeps coherent across
+    views. Flushing only forced a synchronous writeback: on a 532-frame session the
+    aligned stack's flush took ~29 s of a 58 s alignment, writing 14.7 GB that was
+    read straight back from the page cache and then deleted."""
 
     def flush(self) -> None:
         pass
@@ -125,7 +141,7 @@ class FrameStore:
             _cleanup_register(path)
         except Exception:
             pass
-        mm = np.memmap(path, dtype=dt, mode='w+', shape=shape)
+        mm = _ScratchMemmap(path, dtype=dt, mode='w+', shape=shape)
         self._files.append(path)
         self._memmaps.append(mm)
         self.placement[prefix] = f'disk ({nbytes / 1e9:.1f} GB)'

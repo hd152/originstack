@@ -320,6 +320,78 @@ fn sigma_clip_mask(
     }
 }
 
+/// `sigma_clip_mask` with `use_mad = true`, with less work per iteration and the same
+/// `active` bit for bit: the median is selected in place on `gather` (the active
+/// samples in frame order, exactly the copy `center_spread` selects on), the
+/// deviations are taken from that reordered buffer (an order statistic of non-NaN,
+/// non-negative values does not depend on input order), and the survivor count and
+/// the "anything rejected" test are one pass. The `spread < 1e-12` fallback re-gathers
+/// the samples in frame order for `std_pop`, whose f64 sum is order-dependent. A sample
+/// that is +-inf can make a deviation NaN, which the quickselect orders by position, so
+/// such a pixel-channel takes `sigma_clip_mask` itself.
+fn sigma_clip_mask_fast(
+    vals: &[f32],
+    sigma: f32,
+    max_iters: usize,
+    active: &mut [bool],
+    gather: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
+) {
+    let n = vals.len();
+    let mut inf = false;
+    for i in 0..n {
+        let v = vals[i];
+        active[i] = !v.is_nan();
+        inf |= v.is_infinite();
+    }
+    if inf {
+        sigma_clip_mask(vals, sigma, max_iters, true, active, gather, scratch);
+        return;
+    }
+    for _ in 0..max_iters {
+        gather.clear();
+        for i in 0..n {
+            if active[i] {
+                gather.push(vals[i]);
+            }
+        }
+        if gather.is_empty() {
+            break;
+        }
+        let center = median_inplace(gather);
+        scratch.clear();
+        scratch.extend(gather.iter().map(|&x| (x - center).abs()));
+        let mut spread = median_inplace(scratch) * 1.4826;
+        if spread < 1e-12 {
+            gather.clear();
+            for i in 0..n {
+                if active[i] {
+                    gather.push(vals[i]);
+                }
+            }
+            spread = std_pop(gather); // fallback
+        }
+        let thresh = sigma * spread;
+        let mut survivors = 0usize;
+        let mut any_out = false;
+        for i in 0..n {
+            if active[i] {
+                let ok = (vals[i] - center).abs() <= thresh;
+                survivors += ok as usize;
+                any_out |= !ok;
+            }
+        }
+        if survivors == 0 || !any_out {
+            break;
+        }
+        for i in 0..n {
+            if active[i] && (vals[i] - center).abs() > thresh {
+                active[i] = false;
+            }
+        }
+    }
+}
+
 /// Combine one pixel's N samples. `vals`/`weights` are length N; NaN samples are
 /// treated as already-rejected.
 #[allow(clippy::too_many_arguments)]
@@ -1325,36 +1397,42 @@ fn wavelet_symmetric_idx(i: isize, n: usize) -> usize {
     m as usize
 }
 
-/// Forward 1D DWT of one length-`n` line, accessed via `get`. Exact port of
-/// `_dwt_1d`: `cA[j] = sum_k lo[k] * x[symmetric_idx(offset+2j-k, n)]`, `cD`
-/// analogous with `hi` -- the direct closed form of
-/// `np.convolve(padded, kernel, mode='valid')[offset::2]` with no padding
-/// materialised (derivation in the Rust module's own commit notes: convolve
-/// flips one operand, so `valid[i] = sum_k kernel[k] * padded[i+flen-1-k]`,
-/// and substituting the padding offset collapses to this form).
-fn dwt_1d_line(
-    get: impl Fn(usize) -> f64,
-    n: usize,
-    lo: &[f64],
-    hi: &[f64],
-    offset: usize,
-    out_len: usize,
-    ca_out: &mut [f64],
-    cd_out: &mut [f64],
-) {
-    let flen = lo.len();
-    for j in 0..out_len {
-        let base = offset as isize + 2 * j as isize;
-        let mut a = 0.0f64;
-        let mut d = 0.0f64;
-        for k in 0..flen {
-            let v = get(wavelet_symmetric_idx(base - k as isize, n));
-            a += lo[k] * v;
-            d += hi[k] * v;
-        }
-        ca_out[j] = a;
-        cd_out[j] = d;
+// Forward 1D DWT of a length-`n` line (computed inline in `dwt2_native`):
+// exact port of `_dwt_1d`, `cA[j] = sum_k lo[k] * x[symmetric_idx(offset+2j-k, n)]`,
+// `cD` analogous with `hi` -- the direct closed form of
+// `np.convolve(padded, kernel, mode='valid')[offset::2]` with no padding
+// materialised (convolve flips one operand, so
+// `valid[i] = sum_k kernel[k] * padded[i+flen-1-k]`, and substituting the
+// padding offset collapses to this form).
+
+/// One tap of the forward DWT's axis-0 pass over a whole row:
+/// `a[c] += lk * src[c]; d[c] += hk * src[c]`. Separate multiply and add (no
+/// FMA), so the AVX2 build gives the baseline build's bits.
+#[inline(always)]
+fn dwt_row_accumulate_body(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
+    let n = src.len();
+    let (a, d) = (&mut a[..n], &mut d[..n]);
+    for ((av, dv), &v) in a.iter_mut().zip(d.iter_mut()).zip(src.iter()) {
+        *av += lk * v;
+        *dv += hk * v;
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn dwt_row_accumulate_avx2(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
+    dwt_row_accumulate_body(a, d, src, lk, hk)
+}
+
+fn dwt_row_accumulate(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU reports AVX2.
+            unsafe { return dwt_row_accumulate_avx2(a, d, src, lk, hk) }
+        }
+    }
+    dwt_row_accumulate_body(a, d, src, lk, hk)
 }
 
 /// Inverse 1D DWT of one line. Exact port of `_idwt_1d`: rather than
@@ -1417,48 +1495,70 @@ fn dwt2_native<'py>(
     // against (itself validated bit-exact against real pywt) runs entirely
     // in float64 -- rounding to f32 at each level's Python/Rust boundary
     // compounds across levels and breaks that bit-exact parity.
-    let img64: Vec<f64> = arr.iter().copied().collect();
+    let owned: Vec<f64>;
+    let img64: &[f64] = match arr.as_slice() {
+        Some(s) => s,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
 
+    // Per-sample tap sums as in the closed form above (start at 0.0, add
+    // lo[k]*x[symmetric_idx(base-k)] for k = 0..flen in order, no FMA), laid
+    // out for speed: pass 1 accumulates whole source rows into whole output
+    // rows (contiguous, vectorisable) instead of gathering one strided column
+    // at a time and transposing; pass 2 reads each row through a
+    // symmetric-padded copy so the tap loop has no per-tap index arithmetic.
+    // Bit-identical to the previous per-column/per-tap form.
     let (c_a, c_h, c_v, c_d) = py.detach(|| {
-        // Pass 1: axis=0 (per-column) -> La, Lh, each (out_h, w).
-        let cols: Vec<(Vec<f64>, Vec<f64>)> = (0..w)
-            .into_par_iter()
-            .map(|c| {
-                let get = |i: usize| img64[i * w + c];
-                let mut ca_col = vec![0.0f64; out_h];
-                let mut cd_col = vec![0.0f64; out_h];
-                dwt_1d_line(get, h, &lo, &hi, offset, out_h, &mut ca_col, &mut cd_col);
-                (ca_col, cd_col)
-            })
-            .collect();
+        // Pass 1: axis=0 -> La, Lh, each (out_h, w).
         let mut la = vec![0.0f64; out_h * w];
         let mut lh = vec![0.0f64; out_h * w];
-        for (c, (ca_col, cd_col)) in cols.into_iter().enumerate() {
-            for j in 0..out_h {
-                la[j * w + c] = ca_col[j];
-                lh[j * w + c] = cd_col[j];
-            }
-        }
+        la.par_chunks_mut(w)
+            .zip(lh.par_chunks_mut(w))
+            .enumerate()
+            .for_each(|(j, (la_row, lh_row))| {
+                let base = offset as isize + 2 * j as isize;
+                for k in 0..flen {
+                    let r = wavelet_symmetric_idx(base - k as isize, h);
+                    dwt_row_accumulate(la_row, lh_row, &img64[r * w..(r + 1) * w], lo[k], hi[k]);
+                }
+            });
 
         // Pass 2: axis=1 (per-row) on La -> cA, cV; on Lh -> cH, cD.
+        let ext_len = offset + 2 * out_w.saturating_sub(1) + flen;
+        let row_pass = |src_rows: &[f64], o1: &mut [f64], o2: &mut [f64]| {
+            o1.par_chunks_mut(out_w)
+                .zip(o2.par_chunks_mut(out_w))
+                .enumerate()
+                .for_each(|(r, (a_row, d_row))| {
+                    let line = &src_rows[r * w..(r + 1) * w];
+                    // ext[t] = line[symmetric_idx(t - (flen - 1))]
+                    let ext: Vec<f64> = (0..ext_len)
+                        .map(|t| line[wavelet_symmetric_idx(t as isize - (flen as isize - 1), w)])
+                        .collect();
+                    for j in 0..out_w {
+                        // index base-k  ->  ext[base - k + flen - 1]
+                        let top = offset + 2 * j + flen - 1;
+                        let mut a = 0.0f64;
+                        let mut d = 0.0f64;
+                        for k in 0..flen {
+                            let v = ext[top - k];
+                            a += lo[k] * v;
+                            d += hi[k] * v;
+                        }
+                        a_row[j] = a;
+                        d_row[j] = d;
+                    }
+                });
+        };
         let mut c_a = vec![0.0f64; out_h * out_w];
         let mut c_v = vec![0.0f64; out_h * out_w];
-        c_a.par_chunks_mut(out_w)
-            .zip(c_v.par_chunks_mut(out_w))
-            .enumerate()
-            .for_each(|(r, (ca_row, cv_row))| {
-                let get = |i: usize| la[r * w + i];
-                dwt_1d_line(get, w, &lo, &hi, offset, out_w, ca_row, cv_row);
-            });
+        row_pass(&la, &mut c_a, &mut c_v);
         let mut c_h = vec![0.0f64; out_h * out_w];
         let mut c_d = vec![0.0f64; out_h * out_w];
-        c_h.par_chunks_mut(out_w)
-            .zip(c_d.par_chunks_mut(out_w))
-            .enumerate()
-            .for_each(|(r, (ch_row, cd_row))| {
-                let get = |i: usize| lh[r * w + i];
-                dwt_1d_line(get, w, &lo, &hi, offset, out_w, ch_row, cd_row);
-            });
+        row_pass(&lh, &mut c_h, &mut c_d);
         (c_a, c_h, c_v, c_d)
     });
 
@@ -2026,6 +2126,184 @@ fn lanczos3_row_flat(
                     }
 }
 
+// ---------------------------------------------------------------------------
+// scipy.ndimage order-1 warps, mode='constant' -- bit-identical ports of
+// NI_GeometricTransform (affine_transform) and NI_ZoomShift (shift) in
+// scipy/ndimage/src/ni_interpolation.c (scipy 1.17), order 1, nprepad 0, 2-D.
+// Used by registration._match_frame_stars (the post-registration residual check).
+// ---------------------------------------------------------------------------
+
+/// `map_coordinate(in, len, NI_EXTEND_MIRROR)` for an index past the last one (the
+/// only side a linear tap can leave once its start is inside the frame).
+#[inline]
+fn ni_mirror_hi(idx: f64, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let sz2 = 2 * len as i64 - 2;
+    let mut v = idx;
+    v -= (sz2 * ((v / sz2 as f64) as i64)) as f64;
+    if v >= len as f64 {
+        v = sz2 as f64 - v;
+    }
+    v as usize
+}
+
+/// One axis of an order-1 sample at input coordinate `c` (mode='constant'): None when
+/// scipy takes `cval` (`map_coordinate` sends c < 0 or c > len - 1 to -1, and NaN fails
+/// `cc > -1.0`), else the two tap indices -- the second mirrored if it falls past the
+/// end, where its weight is 0 -- and `get_spline_interpolation_weights(c, 1)`.
+#[inline(always)]
+fn ni_axis1(c: f64, len: usize) -> Option<(usize, usize, f64, f64)> {
+    let mut cc = c;
+    if cc < 0.0 || cc > (len as i64 - 1) as f64 {
+        cc = -1.0;
+    }
+    if !(cc > -1.0) {
+        return None;
+    }
+    let fl = cc.floor();
+    let start = fl as i64 as usize;
+    let x = cc - fl;
+    let w0 = 1.0 - x;
+    let w1 = 1.0 - w0;
+    let i1 = if start + 1 >= len { ni_mirror_hi((start + 1) as f64, len) } else { start + 1 };
+    Some((start, i1, w0, w1))
+}
+
+/// `t = 0; t += (v * wy) * wx` over the four taps in scipy's filter order. When the
+/// sum is NaN it is redone with x86's NaN rule made explicit -- `t + coeff` returns
+/// `t`'s NaN when `t` is NaN, else `coeff`'s -- because two different NaNs can meet
+/// there (an input NaN and the default NaN of `inf * 0` from a weight-0 tap) and LLVM
+/// may swap the operands of a commutative add, which would pick the other one. Each
+/// coeff has at most one NaN operand (the weights are finite), so it needs no such care.
+#[inline(always)]
+fn ni_sample1(src: &[f32], w: usize, ay: (usize, usize, f64, f64), ax: (usize, usize, f64, f64)) -> f64 {
+    let (y0, y1, wy0, wy1) = ay;
+    let (x0, x1, wx0, wx1) = ax;
+    let c = [
+        (src[y0 * w + x0] as f64 * wy0) * wx0,
+        (src[y0 * w + x1] as f64 * wy0) * wx1,
+        (src[y1 * w + x0] as f64 * wy1) * wx0,
+        (src[y1 * w + x1] as f64 * wy1) * wx1,
+    ];
+    let mut t = 0.0f64;
+    t += c[0];
+    t += c[1];
+    t += c[2];
+    t += c[3];
+    if t.is_nan() {
+        t = 0.0;
+        for &k in c.iter() {
+            t = if t.is_nan() {
+                t
+            } else if k.is_nan() {
+                k
+            } else {
+                t + k
+            };
+        }
+    }
+    t
+}
+
+/// `scipy.ndimage.affine_transform(img.astype(np.float64), matrix, offset=offset,
+/// order=1, mode='constant', cval=cval)` for a 2-D float32 `img`, bit for bit (float64
+/// output), without the float64 copy of the input (each tap's float32 -> float64
+/// conversion is exact, as the copy's). Input coordinate per output pixel (oy, ox):
+/// `(offset[i] + oy * m[i][0]) + ox * m[i][1]`, as scipy accumulates it.
+#[pyfunction]
+#[pyo3(signature = (img, matrix, offset, cval=0.0))]
+fn ndimage_affine_order1<'py>(
+    py: Python<'py>,
+    img: PyReadonlyArray2<'py, f32>,
+    matrix: PyReadonlyArray2<'py, f64>,
+    offset: PyReadonlyArray1<'py, f64>,
+    cval: f64,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let a = img.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let m = matrix.as_array();
+    let o = offset.as_array();
+    if m.shape() != [2, 2] || o.len() != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err("matrix must be (2, 2) and offset (2,)"));
+    }
+    let (m00, m01, m10, m11) = (m[[0, 0]], m[[0, 1]], m[[1, 0]], m[[1, 1]]);
+    let (o0, o1) = (o[0], o[1]);
+    let owned: Vec<f32>;
+    let src: &[f32] = match a.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = a.iter().copied().collect();
+            &owned
+        }
+    };
+    let mut out = vec![0f64; h * w];
+    py.detach(|| {
+        out.par_chunks_mut(w.max(1)).enumerate().for_each(|(oy, orow)| {
+            let fy = oy as f64;
+            let (r0, r1) = (o0 + fy * m00, o1 + fy * m10);
+            for (ox, v) in orow.iter_mut().enumerate() {
+                let fx = ox as f64;
+                let cy = r0 + fx * m01;
+                let cx = r1 + fx * m11;
+                *v = match ni_axis1(cy, h) {
+                    None => cval,
+                    Some(ay) => match ni_axis1(cx, w) {
+                        None => cval,
+                        Some(ax) => ni_sample1(src, w, ay, ax),
+                    },
+                };
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out).unwrap().into_pyarray(py))
+}
+
+/// `scipy.ndimage.shift(img, shift, order=1, mode='constant', cval=cval)` for a 2-D
+/// float32 `img`, bit for bit (float32 output: the float64 sum rounded once). scipy's
+/// zoom_shift is called with the negated shift and maps output index k of each axis to
+/// `(double)k + (-shift)`, independently per axis, so the per-axis taps and weights are
+/// tabulated once.
+#[pyfunction]
+#[pyo3(signature = (img, shift, cval=0.0))]
+fn ndimage_shift_order1<'py>(
+    py: Python<'py>,
+    img: PyReadonlyArray2<'py, f32>,
+    shift: (f64, f64),
+    cval: f64,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let a = img.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let owned: Vec<f32>;
+    let src: &[f32] = match a.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = a.iter().copied().collect();
+            &owned
+        }
+    };
+    let (sy, sx) = (-shift.0, -shift.1);
+    let ty: Vec<Option<(usize, usize, f64, f64)>> = (0..h).map(|k| ni_axis1(k as f64 + sy, h)).collect();
+    let tx: Vec<Option<(usize, usize, f64, f64)>> = (0..w).map(|k| ni_axis1(k as f64 + sx, w)).collect();
+    let cv = cval as f32;
+    let mut out = vec![0f32; h * w];
+    py.detach(|| {
+        out.par_chunks_mut(w.max(1)).enumerate().for_each(|(oy, orow)| match ty[oy] {
+            None => orow.fill(cv),
+            Some(ay) => {
+                for (ox, v) in orow.iter_mut().enumerate() {
+                    *v = match tx[ox] {
+                        None => cv,
+                        Some(ax) => ni_sample1(src, w, ay, ax) as f32,
+                    };
+                }
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out).unwrap().into_pyarray(py))
+}
+
 /// Affine warp with Lanczos-3 resampling, matching scipy's
 /// `affine_transform` sampling convention: `out[oy,ox] = in[M @ (oy,ox) + off]`,
 /// out-of-bounds -> `cval`. `mat` is row-major 2x2 `[[m00,m01],[m10,m11]]`
@@ -2440,6 +2718,41 @@ fn patch_weighted_sigma_combine<'py>(
     use_mad: bool,
     grid_geom: Option<(f64, f64, f64, f64)>,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    patch_weighted_sigma_combine_impl(py, data, qmaps, gweights, sigma, max_iters, use_mad, grid_geom, false)
+}
+
+/// `patch_weighted_sigma_combine`, faster and bit-identical: the MAD sigma-clip does
+/// fewer passes per iteration (`sigma_clip_mask_fast`), and with a patch grid the four
+/// grid corners every frame needs are tabulated once per row and grid column instead of
+/// four indexed lookups per frame per pixel (same f32 bilinear expression, same f64
+/// weight product).
+#[pyfunction]
+#[pyo3(signature = (data, qmaps, gweights=None, sigma=3.0, max_iters=3, use_mad=true, grid_geom=None))]
+fn patch_weighted_sigma_combine_fast<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    qmaps: PyReadonlyArray3<'py, f32>,
+    gweights: Option<PyReadonlyArray1<'py, f32>>,
+    sigma: f32,
+    max_iters: usize,
+    use_mad: bool,
+    grid_geom: Option<(f64, f64, f64, f64)>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    patch_weighted_sigma_combine_impl(py, data, qmaps, gweights, sigma, max_iters, use_mad, grid_geom, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn patch_weighted_sigma_combine_impl<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    qmaps: PyReadonlyArray3<'py, f32>,
+    gweights: Option<PyReadonlyArray1<'py, f32>>,
+    sigma: f32,
+    max_iters: usize,
+    use_mad: bool,
+    grid_geom: Option<(f64, f64, f64, f64)>,
+    fast: bool,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
     let arr = data.as_array();
     let qm = qmaps.as_array();
     let s = arr.shape();
@@ -2488,6 +2801,24 @@ fn patch_weighted_sigma_combine<'py>(
             let mut gather: Vec<f32> = Vec::with_capacity(n);
             let mut scratch: Vec<f32> = Vec::with_capacity(n);
             let mut reject_count = vec![0u32; n]; // per-frame rejected-channel count
+            // fast path, patch grid: corners[(gx0 * n + f)] = this row's four grid
+            // values around grid column gx0 for frame f
+            let corners: Vec<[f32; 4]> = match (&row_tab, fast) {
+                (Some((gy0, _)), true) => {
+                    let gy1 = (gy0 + 1).min(qh - 1);
+                    let mut t = Vec::with_capacity(qw * n);
+                    for gx0 in 0..qw {
+                        let gx1 = (gx0 + 1).min(qw - 1);
+                        for f in 0..n {
+                            t.push([qm[[f, *gy0, gx0]], qm[[f, *gy0, gx1]],
+                                    qm[[f, gy1, gx0]], qm[[f, gy1, gx1]]]);
+                        }
+                    }
+                    t
+                }
+                _ => Vec::new(),
+            };
+            let gw64: Vec<f64> = (0..n).map(|f| gwref.map(|g| g[f] as f64).unwrap_or(1.0)).collect();
             let inv_c = 1.0f64 / c as f64;
 
             // Per-pixel combine given contiguous per-channel sample slices in
@@ -2501,7 +2832,11 @@ fn patch_weighted_sigma_combine<'py>(
                 }
                 for ch in 0..c {
                     let chan = &block[(p * c + ch) * n..][..n];
-                    sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch);
+                    if fast && use_mad {
+                        sigma_clip_mask_fast(chan, sigma, max_iters, active, gather, scratch);
+                    } else {
+                        sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch);
+                    }
                     for f in 0..n {
                         if !active[f] {
                             reject_count[f] += 1;
@@ -2510,6 +2845,25 @@ fn patch_weighted_sigma_combine<'py>(
                 }
                 let mut wsum = 0f64;
                 let mut accs = [0f64; 8]; // supports up to 8 channels
+                if let (false, Some((_, fy)), Some((gx0s, fxs))) = (corners.is_empty(), &row_tab, &col_tab) {
+                    let (fx, fy) = (fxs[col], *fy);
+                    let cell = &corners[gx0s[col] * n..(gx0s[col] + 1) * n];
+                    for f in 0..n {
+                        let rej_frac = reject_count[f] as f64 * inv_c;
+                        let [q00, q01, q10, q11] = cell[f];
+                        let top_v = q00 + (q01 - q00) * fx;
+                        let bot_v = q10 + (q11 - q10) * fx;
+                        let qwt = (top_v + (bot_v - top_v) * fy) as f64;
+                        let wt = qwt * gw64[f] * (1.0 - rej_frac);
+                        if wt == 0.0 {
+                            continue;
+                        }
+                        for ch in 0..c {
+                            accs[ch] += wt * block[(p * c + ch) * n + f] as f64;
+                        }
+                        wsum += wt;
+                    }
+                } else {
                 for f in 0..n {
                     let rej_frac = reject_count[f] as f64 * inv_c;
                     let qwt = match (&row_tab, &col_tab) {
@@ -2536,6 +2890,7 @@ fn patch_weighted_sigma_combine<'py>(
                         accs[ch] += wt * block[(p * c + ch) * n + f] as f64;
                     }
                     wsum += wt;
+                }
                 }
                 let denom = if wsum > 1e-12 { wsum } else { 1e-12 };
                 for ch in 0..c {
@@ -3626,10 +3981,13 @@ fn separable_blur(img: &[f64], h: usize, w: usize, sigma: f64) -> Vec<f64> {
 /// cell-centre-aligned upsample of it at any pixel -- the same arithmetic the
 /// numpy mirror's full-resolution `_bilinear_upsample` uses, without
 /// materialising a full-frame f64 map.
-fn local_mesh_grid(img: &[f32], h: usize, w: usize, cell: usize, use_mad: bool) -> (Vec<f64>, usize, usize) {
+fn local_mesh_grids(img: &[f32], h: usize, w: usize, cell: usize) -> (Vec<f64>, Vec<f64>, usize, usize) {
     let ny = (h / cell.max(1)).max(1);
     let nx = (w / cell.max(1)).max(1);
-    let grid: Vec<f64> = (0..ny * nx)
+    // One gather + selection per cell for both statistics: the median grid
+    // and the MAD grid start from the same cell median, so computing it once
+    // gives the same two grids the two separate passes did.
+    let both: Vec<(f64, f64)> = (0..ny * nx)
         .into_par_iter()
         .map(|idx| {
             let iy = idx / nx;
@@ -3643,18 +4001,66 @@ fn local_mesh_grid(img: &[f32], h: usize, w: usize, cell: usize, use_mad: bool) 
                 vals.extend_from_slice(&img[y * w + x0..y * w + x1]);
             }
             let med = median_inplace(&mut vals) as f64;
-            if use_mad {
-                let mut dev: Vec<f32> = vals.iter().map(|&v| (v as f64 - med).abs() as f32).collect();
-                1.4826 * (median_inplace(&mut dev) as f64).max(1e-9)
-            } else {
-                med
+            for v in vals.iter_mut() {
+                *v = (*v as f64 - med).abs() as f32;
             }
+            (med, 1.4826 * (median_inplace(&mut vals) as f64).max(1e-9))
         })
         .collect();
+    let med_grid: Vec<f64> = both.iter().map(|p| p.0).collect();
+    let mad_grid: Vec<f64> = both.iter().map(|p| p.1).collect();
     // Smooth the small mesh grid (blocky-cell artifacts) before upsampling,
     // not the full-resolution field after: same intent (soften cell-to-cell
     // jumps) at a few thousand times less work.
-    (separable_blur(&grid, ny, nx, 0.3), ny, nx)
+    (separable_blur(&med_grid, ny, nx, 0.3), separable_blur(&mad_grid, ny, nx, 0.3), ny, nx)
+}
+
+/// `mesh_bilinear`'s first (x) interpolation, tabulated for every grid row:
+/// `out[gy*w + x] = grid[gy,gx0]*(1-fx) + grid[gy,gx1]*fx`. Combined per pixel
+/// as `t[gy0]*(1-fy) + t[gy1]*fy` this is exactly `mesh_bilinear`'s arithmetic.
+fn mesh_xinterp_rows(grid: &[f64], ny: usize, nx: usize, xaxis: &[(usize, usize, f64)]) -> Vec<f64> {
+    let w = xaxis.len();
+    let mut out = vec![0f64; ny * w];
+    for gy in 0..ny {
+        let g = &grid[gy * nx..(gy + 1) * nx];
+        for (x, &(gx0, gx1, fx)) in xaxis.iter().enumerate() {
+            out[gy * w + x] = g[gx0] * (1.0 - fx) + g[gx1] * fx;
+        }
+    }
+    out
+}
+
+/// `out[x] = sum_t k[t] * row(t)[x]`, accumulated tap by tap from 0.0.
+/// Separate multiply and add (Rust never contracts to FMA), so the AVX2
+/// build below gives identical bits.
+#[inline(always)]
+fn tap_accumulate_body<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
+    for v in out.iter_mut() {
+        *v = 0.0;
+    }
+    for (t, &kv) in k.iter().enumerate() {
+        let sl = &row(t)[..out.len()];
+        for (o, &s) in out.iter_mut().zip(sl.iter()) {
+            *o += kv * s;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn tap_accumulate_avx2<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
+    tap_accumulate_body(out, k, row)
+}
+
+fn tap_accumulate<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU reports AVX2.
+            unsafe { return tap_accumulate_avx2(out, k, row) }
+        }
+    }
+    tap_accumulate_body(out, k, row)
 }
 
 /// (lo, hi, frac) of the cell-centre-aligned bilinear upsample along one axis.
@@ -3678,6 +4084,10 @@ fn mesh_bilinear(grid: &[f64], nx: usize, ya: (usize, usize, f64), xa: (usize, u
     let v1 = v10 * (1.0 - fx) + v11 * fx;
     v0 * (1.0 - fy) + v1 * fy
 }
+
+/// Output rows per band in `detect_stars_matched_filter`'s blur/SNR/local-max
+/// pass (its per-band scratch is ~(band + ~20) rows x width x 8 bytes, twice).
+const DETECT_BAND: usize = 32;
 
 #[pyfunction]
 #[pyo3(signature = (image, fwhm, k_confirm, cell, roundness_max, min_pixels))]
@@ -3705,107 +4115,133 @@ fn detect_stars_matched_filter<'py>(
     // noise maps are evaluated from their small mesh grids where needed instead
     // of being upsampled to full-frame f64 arrays, the residual is formed row
     // by row inside the first blur pass, and the second pass divides by the
-    // noise directly. Two full-frame arrays (blur temporary, SNR) instead of
-    // seven; per-pixel sums keep their tap order, so results are identical.
+    // noise directly; both passes and the local-max test run in row bands with
+    // cache-sized scratch (no full-frame arrays at all). Per-pixel sums keep
+    // their tap order, so results are identical.
     let rows: Vec<[f64; 10]> = py.detach(|| {
-        let (bg_grid, ny, nx) = local_mesh_grid(src, h, w, cell, false);
-        let (sg_grid, _, _) = local_mesh_grid(src, h, w, cell, true);
+        let (bg_grid, sg_grid, ny, nx) = local_mesh_grids(src, h, w, cell);
         let cellf = cell as f64;
         let xaxis: Vec<(usize, usize, f64)> = (0..w).map(|x| mesh_axis(x, nx, cellf)).collect();
         let bg_at = |y: usize, x: usize| mesh_bilinear(&bg_grid, nx, mesh_axis(y, ny, cellf), xaxis[x]);
         let lum = |i: usize| src[i] as f64;
+        // x-interpolated grid rows: the per-pixel maps below are then one
+        // lerp between two table rows -- mesh_bilinear's arithmetic exactly.
+        let bg_rows = mesh_xinterp_rows(&bg_grid, ny, nx, &xaxis);
+        let sg_rows = mesh_xinterp_rows(&sg_grid, ny, nx, &xaxis);
 
         let sigma_k = fwhm / 2.3548;
         let k1 = gaussian_kernel_1d(sigma_k);
         let kernel_norm: f64 = k1.iter().map(|&v| v * v).sum();
         let half = k1.len() / 2;
 
-        // pass 1 (along rows) on the residual, built per row into a reflect-padded buffer
-        let mut tmp = vec![0f64; h * w];
-        tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
-            let ya = mesh_axis(y, ny, cellf);
-            let mut buf = vec![0f64; w + 2 * half];
+        // Local-maxima + threshold + border exclusion.
+        let footprint = (fwhm.round() as isize).max(3);
+        let fhalf = footprint / 2;
+        let fh = fhalf as usize;
+        let border = (cell / 2).max((2.0 * (3.0 * fwhm / 2.3548).ceil()) as usize);
+
+        // The blur, SNR and local-maximum test run in bands of output rows,
+        // each band computing only the residual-blur rows (pass 1) and SNR rows
+        // (pass 2) its own rows need, in per-thread scratch buffers that stay
+        // in cache -- instead of two full-frame f64 arrays (h*w*8 bytes each,
+        // written once and read back from DRAM). A band recomputes a few
+        // pass-1 rows its neighbour also computes; every value is produced by
+        // the same per-row code with the same tap order, so the SNR map, and
+        // hence the candidate list (in row-major order), is unchanged. Rows
+        // outside the candidate region plus the local-max halo are skipped:
+        // nothing reads them.
+        let y_lo = border;
+        let y_hi = h.saturating_sub(border);
+        let n_bands = if y_hi > y_lo { (y_hi - y_lo + DETECT_BAND - 1) / DETECT_BAND } else { 0 };
+        let pass1_row = |y: usize, out_row: &mut [f64], buf: &mut Vec<f64>| {
+            let (gy0, gy1, fy) = mesh_axis(y, ny, cellf);
+            let b0 = &bg_rows[gy0 * w..(gy0 + 1) * w];
+            let b1 = &bg_rows[gy1 * w..(gy1 + 1) * w];
+            let srow = &src[y * w..(y + 1) * w];
+            buf.resize(w + 2 * half, 0.0);
             for x in 0..w {
-                buf[half + x] = lum(y * w + x) - mesh_bilinear(&bg_grid, nx, ya, xaxis[x]);
+                buf[half + x] = srow[x] as f64 - (b0[x] * (1.0 - fy) + b1[x] * fy);
             }
             for k in 0..half {
                 buf[half - 1 - k] = buf[half + reflect_idx(-(k as isize) - 1, w)];
                 buf[half + w + k] = buf[half + reflect_idx((w + k) as isize, w)];
             }
-            for v in out_row.iter_mut() {
-                *v = 0.0;
-            }
-            for (t, &kv) in k1.iter().enumerate() {
-                let sl = &buf[t..t + w];
-                for x in 0..w {
-                    out_row[x] += kv * sl[x];
-                }
-            }
-        });
-
-        // pass 2 (along columns) and the SNR, per output row
-        let mut snr_map = vec![0f64; h * w];
-        snr_map.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
-            for v in out_row.iter_mut() {
-                *v = 0.0;
-            }
-            for (t, &kv) in k1.iter().enumerate() {
-                let yi = reflect_idx(y as isize + t as isize - half as isize, h);
-                let sl = &tmp[yi * w..(yi + 1) * w];
-                for x in 0..w {
-                    out_row[x] += kv * sl[x];
-                }
-            }
-            let ya = mesh_axis(y, ny, cellf);
-            for x in 0..w {
-                let sig = (mesh_bilinear(&sg_grid, nx, ya, xaxis[x]) * kernel_norm).max(1e-9);
-                out_row[x] /= sig;
-            }
-        });
-        drop(tmp);
-
-        // Local-maxima + threshold + border exclusion, row-parallel.
-        let footprint = (fwhm.round() as isize).max(3);
-        let fhalf = footprint / 2;
-        let border = (cell / 2).max((2.0 * (3.0 * fwhm / 2.3548).ceil()) as usize);
-
-        let candidates: Vec<(usize, usize)> = (0..h)
+            let bref: &[f64] = &buf[..];
+            tap_accumulate(out_row, &k1, |t| &bref[t..t + w]);
+        };
+        let band_candidates: Vec<Vec<(usize, usize, f64)>> = (0..n_bands)
             .into_par_iter()
-            .flat_map_iter(|y| {
-                let mut out = Vec::new();
-                if y < border || y + border >= h {
-                    return out;
-                }
-                for x in border..w.saturating_sub(border) {
-                    let v = snr_map[y * w + x];
-                    if v <= k_confirm {
-                        continue;
+            .map_init(
+                || (Vec::<f64>::new(), Vec::<f64>::new(), Vec::<f64>::new()),
+                |(tmp, snr, buf), bi| {
+                    let c0 = y_lo + bi * DETECT_BAND;
+                    let c1 = (c0 + DETECT_BAND).min(y_hi);
+                    // SNR rows the local-max test reads, and the pass-1 rows
+                    // those need (reflect_idx keeps every index in [t0, t1)).
+                    let s0 = c0.saturating_sub(fh);
+                    let s1 = (c1 + fh).min(h);
+                    let t0 = s0.saturating_sub(half);
+                    let t1 = (s1 + half).min(h);
+
+                    // pass 1 (along rows) on the residual
+                    tmp.resize((t1 - t0) * w, 0.0);
+                    for (i, out_row) in tmp.chunks_mut(w).enumerate() {
+                        pass1_row(t0 + i, out_row, buf);
                     }
-                    let mut is_max = true;
-                    'outer: for dy in -fhalf..=fhalf {
-                        let yi = y as isize + dy;
-                        if yi < 0 || yi >= h as isize {
-                            continue;
+
+                    // pass 2 (along columns) and the SNR
+                    snr.resize((s1 - s0) * w, 0.0);
+                    let tmp_ref: &[f64] = tmp;
+                    for (i, out_row) in snr.chunks_mut(w).enumerate() {
+                        let y = s0 + i;
+                        tap_accumulate(out_row, &k1, |t| {
+                            let yi = reflect_idx(y as isize + t as isize - half as isize, h) - t0;
+                            &tmp_ref[yi * w..(yi + 1) * w]
+                        });
+                        let (gy0, gy1, fy) = mesh_axis(y, ny, cellf);
+                        let s0r = &sg_rows[gy0 * w..(gy0 + 1) * w];
+                        let s1r = &sg_rows[gy1 * w..(gy1 + 1) * w];
+                        for x in 0..w {
+                            let sig = ((s0r[x] * (1.0 - fy) + s1r[x] * fy) * kernel_norm).max(1e-9);
+                            out_row[x] /= sig;
                         }
-                        let row_base = yi as usize * w;
-                        for dx in -fhalf..=fhalf {
-                            let xi = x as isize + dx;
-                            if xi < 0 || xi >= w as isize {
+                    }
+
+                    let mut out = Vec::new();
+                    for y in c0..c1 {
+                        for x in border..w.saturating_sub(border) {
+                            let v = snr[(y - s0) * w + x];
+                            if v <= k_confirm {
                                 continue;
                             }
-                            if snr_map[row_base + xi as usize] > v {
-                                is_max = false;
-                                break 'outer;
+                            let mut is_max = true;
+                            'outer: for dy in -fhalf..=fhalf {
+                                let yi = y as isize + dy;
+                                if yi < 0 || yi >= h as isize {
+                                    continue;
+                                }
+                                let row_base = (yi as usize - s0) * w;
+                                for dx in -fhalf..=fhalf {
+                                    let xi = x as isize + dx;
+                                    if xi < 0 || xi >= w as isize {
+                                        continue;
+                                    }
+                                    if snr[row_base + xi as usize] > v {
+                                        is_max = false;
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                            if is_max {
+                                out.push((y, x, v));
                             }
                         }
                     }
-                    if is_max {
-                        out.push((y, x));
-                    }
-                }
-                out
-            })
+                    out
+                },
+            )
             .collect();
+        let candidates: Vec<(usize, usize, f64)> = band_candidates.into_iter().flatten().collect();
 
         // Per-candidate measurement: local background, two-pass centroid,
         // second moments (shape/roundness). Embarrassingly parallel.
@@ -3814,7 +4250,7 @@ fn detect_stars_matched_filter<'py>(
 
         candidates
             .into_par_iter()
-            .filter_map(|(py_, px_)| {
+            .filter_map(|(py_, px_, snr_v)| {
                 let y0 = (py_ as isize - r).max(0) as usize;
                 let y1 = ((py_ as isize + r + 1).max(0) as usize).min(h);
                 let x0 = (px_ as isize - r).max(0) as usize;
@@ -3912,7 +4348,7 @@ fn detect_stars_matched_filter<'py>(
                         flux += (v - local_bg).max(0.0);
                     }
                 }
-                let sharpness = (snr_map[py_ * w + px_] / 20.0).clamp(0.0, 1.0);
+                let sharpness = (snr_v / 20.0).clamp(0.0, 1.0);
 
                 Some([cx, cy, flux, peak, roundness, roundness, sharpness, a, b, 0.0])
             })
@@ -7324,6 +7760,114 @@ fn calibrate_frame_inplace<'py>(
     Ok(ok)
 }
 
+/// Load + calibrate fused: `raw` holds a FITS BITPIX=16 data block's bytes read as
+/// native u16 (so each value is byte-swapped here); the physical value is the signed
+/// 16-bit integer plus `bzero` (0 or 32768 -- exact in f32, as astropy's uint16 path
+/// gives). Then exactly `calibrate_frame_inplace`'s per-pixel steps, written to `out`.
+/// Replaces astropy's read + conversion (~30 ms) and one full pass of the calibration.
+/// Returns False when a value came out non-finite, like `calibrate_frame_inplace`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn calibrate_frame_from_be16<'py>(
+    py: Python<'py>,
+    raw: PyReadonlyArray1<'py, u16>,
+    bzero: f64,
+    mut out: numpy::PyReadwriteArray1<'py, f32>,
+    bias: Option<PyReadonlyArray1<'py, f32>>,
+    dark: Option<PyReadonlyArray1<'py, f32>>,
+    dark_scale: f64,
+    flat_norm: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<bool> {
+    let r = raw.as_slice()?;
+    let d = out
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be contiguous"))?;
+    let n = d.len();
+    if r.len() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err("raw/out size mismatch"));
+    }
+    let b = opt_master(&bias, n)?;
+    let dk = opt_master(&dark, n)?;
+    let fl = opt_master(&flat_norm, n)?;
+    let s = dark_scale as f32;
+    let z = bzero as i32;
+    const CH: usize = 1 << 16;
+    let ok = py.detach(|| {
+        d.par_chunks_mut(CH)
+            .enumerate()
+            .map(|(ci, chunk)| {
+                let base = ci * CH;
+                let mut ok = true;
+                for (k, v) in chunk.iter_mut().enumerate() {
+                    let i = base + k;
+                    let mut x = ((r[i].swap_bytes() as i16) as i32 + z) as f32;
+                    if let Some(b) = b {
+                        x -= b[i];
+                    }
+                    if let Some(dk) = dk {
+                        x -= dk[i] * s;
+                        if let Some(b) = b {
+                            x += b[i] * s;
+                        }
+                    }
+                    if let Some(fl) = fl {
+                        x /= fl[i];
+                    }
+                    if !x.is_finite() {
+                        ok = false;
+                    }
+                    *v = if x < 0.0 { 0.0 } else { x };
+                }
+                ok
+            })
+            .reduce(|| true, |a, b| a && b)
+    });
+    Ok(ok)
+}
+
+/// `registration.compute_patch_scores`: per patch of an (ny, nx) grid (patch ph x pw,
+/// the last row/column of patches ending at ny*ph / nx*pw like the numpy loop), the mean of
+/// (lum[y, x+2] - lum[y, x])^2 over the patch's own columns, in f64. Reads the float32
+/// luminance directly (the numpy version made a float64 copy of the whole frame first);
+/// parallel over patch rows. Values agree with numpy up to summation order (~1e-15).
+#[pyfunction]
+fn patch_brenner_scores<'py>(
+    py: Python<'py>,
+    lum: PyReadonlyArray2<'py, f32>,
+    ph: usize,
+    pw: usize,
+    ny: usize,
+    nx: usize,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let a = lum.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let s = a.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("lum must be contiguous"))?;
+    let mut out = vec![0f32; ny * nx];
+    py.detach(|| {
+        out.par_chunks_mut(nx).enumerate().for_each(|(iy, row)| {
+            let y0 = iy * ph;
+            let y1 = ((iy + 1) * ph).min(h);
+            for ix in 0..nx {
+                let x0 = ix * pw;
+                let x1 = ((ix + 1) * pw).min(w);
+                if (y1 - y0) * (x1 - x0) < 4 || x1 - x0 < 3 {
+                    continue;
+                }
+                let mut acc = 0.0f64;
+                for y in y0..y1 {
+                    let r = &s[y * w..(y + 1) * w];
+                    for x in x0..x1 - 2 {
+                        let d = r[x + 2] as f64 - r[x] as f64;
+                        acc += d * d;
+                    }
+                }
+                row[ix] = (acc / ((y1 - y0) * (x1 - x0 - 2)) as f64) as f32;
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((ny, nx), out).unwrap().into_pyarray(py))
+}
+
 /// 3x3 median at plane position (i, j) of the (py, px) Bayer sub-plane of a
 /// row-major `w`-wide mosaic, reflect boundary on the sub-plane (scipy
 /// `mode='reflect'`), exactly what `median_filter(sub, size=3)` returns there.
@@ -7492,6 +8036,373 @@ fn hot_pixel_bayer<'py>(
     Ok(numpy::ndarray::Array2::from_shape_vec((h, w), out)
         .unwrap()
         .into_pyarray(py))
+}
+
+/// Reused diff-plane buffers for `hot_pixel_bayer_inplace` (fully overwritten each
+/// call, so a reused one needs no clearing; a fresh 25 MB one is zero-filled by the
+/// OS on first touch).
+static HOTPIX_POOL: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<f32>>>> = std::sync::OnceLock::new();
+
+fn hotpix_take(n: usize) -> Vec<f32> {
+    let pool = HOTPIX_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut p) = pool.lock() {
+        if let Some(i) = p.iter().position(|v| v.len() == n) {
+            return p.swap_remove(i);
+        }
+    }
+    let mut v = Vec::with_capacity(n);
+    // SAFETY: every element is written by pass 1 before it is read
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        v.set_len(n)
+    };
+    v
+}
+
+fn hotpix_give(v: Vec<f32>) {
+    let pool = HOTPIX_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut p) = pool.lock() {
+        if p.len() < 4 {
+            p.push(v);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HpPtr(*mut f32);
+unsafe impl Send for HpPtr {}
+unsafe impl Sync for HpPtr {}
+
+/// |diff| histogram resolution: buckets are the top 12 bits of the non-negative f32
+/// pattern (exponent + 3 mantissa bits), so bucket order is value order.
+const HP_SHIFT: u32 = 19;
+const HP_NB: usize = 1 << (31 - HP_SHIFT);
+const HP_COPIES: usize = 4;
+
+/// 3x3 median at plane position (i, j) of the (py, px) Bayer sub-plane, computed exactly
+/// as `median_filter_2d_f32(plane, hh, ww, 3)` does there: the median9 network in the
+/// interior, reflect + comparator sort on the plane's border rows and columns.
+#[inline]
+fn bayer_plane_median3_as_filter(data: &[f32], w: usize, hh: usize, ww: usize, py: usize,
+                                 px: usize, i: usize, j: usize) -> f32 {
+    let mut win = [0f32; 9];
+    if i >= 1 && i + 1 < hh && j >= 1 && j + 1 < ww {
+        let mut k = 0;
+        for ii in i - 1..=i + 1 {
+            let r = (2 * ii + py) * w + px;
+            for jj in j - 1..=j + 1 {
+                win[k] = data[r + 2 * jj];
+                k += 1;
+            }
+        }
+        return median9(&mut win);
+    }
+    let mut k = 0;
+    for di in -1isize..=1 {
+        let ii = reflect_idx(i as isize + di, hh);
+        for dj in -1isize..=1 {
+            let jj = reflect_idx(j as isize + dj, ww);
+            win[k] = data[(2 * ii + py) * w + 2 * jj + px];
+            k += 1;
+        }
+    }
+    win.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    win[4]
+}
+
+/// `hot_pixel_bayer(data, threshold=..., star_support=...)` (statistical mode) done in
+/// place, with the same result bit for bit, in two streaming passes instead of ~10:
+///
+/// 1. per plane row (all four planes of a row chunk at once, so each mosaic row is read
+///    from DRAM once): the 3x3 plane median (the same median9 network / border sort as
+///    `median_filter_2d_f32`), `diff = value - median` (the f32 the old kernel formed for
+///    its MAD, its threshold test and its star-support z) into a pooled plane-layout
+///    buffer, and a histogram of |diff| by its top f32 bits;
+/// 2. the histogram says which bucket(s) hold the median |diff| (the MAD), so one pass
+///    over the diffs collects just those buckets' values -- sorted, they give the exact
+///    order statistics `median_inplace` returned -- and every pixel whose diff exceeds the
+///    threshold at the bucket's lower edge (a superset: f32 multiplication by a positive
+///    constant is monotonic).
+///
+/// The candidates then get the exact test (`diff > thr * sigma`), the star-support test
+/// (neighbour z = its diff / its plane's sigma, as before) and, if flagged, their plane
+/// median recomputed from the untouched input; the replacements are written last.
+/// Returns the number of pixels replaced.
+#[pyfunction]
+#[pyo3(signature = (data, threshold, star_support=None))]
+fn hot_pixel_bayer_inplace<'py>(
+    py: Python<'py>,
+    mut data: numpy::PyReadwriteArray2<'py, f32>,
+    threshold: f32,
+    star_support: Option<f32>,
+) -> PyResult<usize> {
+    let (h, w) = {
+        let s = data.as_array();
+        if !s.is_standard_layout() {
+            return Err(pyo3::exceptions::PyValueError::new_err("data must be C-contiguous"));
+        }
+        (s.shape()[0], s.shape()[1])
+    };
+    let d: &mut [f32] = data
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("data must be contiguous"))?;
+    let thr = threshold;
+    let n_fixed = py.detach(|| {
+        let sigma_k = 1.4826f64 as f32;
+        let hhs = [(h + 1) / 2, h / 2];
+        let wws = [(w + 1) / 2, w / 2];
+        let dims: [(usize, usize); 4] = [(hhs[0], wws[0]), (hhs[0], wws[1]), (hhs[1], wws[0]), (hhs[1], wws[1])];
+        let mut offs = [0usize; 4];
+        for q in 1..4 {
+            offs[q] = offs[q - 1] + dims[q - 1].0 * dims[q - 1].1;
+        }
+        let mut diff = hotpix_take(h * w);
+        let dp = HpPtr(diff.as_mut_ptr());
+        let src: &[f32] = &*d;
+
+        // ---- pass 1: median, diff, histogram ----
+        let nrows = hhs[0];
+        let nt = rayon::current_num_threads().max(1);
+        let chunk = nrows.div_ceil(4 * nt).max(8);
+        let nchunks = nrows.div_ceil(chunk);
+        let (hist, nan) = (0..nchunks)
+            .into_par_iter()
+            .map(|c| {
+                let dp = dp;
+                // HP_COPIES interleaved sub-histograms per plane: neighbouring pixels mostly
+                // fall in the same bucket, and a single counter would serialise on its own
+                // increments
+                let mut hist = vec![0u32; 4 * HP_COPIES * HP_NB];
+                let mut nan = [false; 4];
+                let i0 = c * chunk;
+                let i1 = (i0 + chunk).min(nrows);
+                // per plane, the last three plane rows deinterleaved from the mosaic (slot r % 3)
+                let mut ring: [Vec<f32>; 4] = Default::default();
+                let mut ring_row = [[usize::MAX; 3]; 4];
+                let mut medbuf: Vec<f32> = vec![0f32; wws[0]];
+                for i in i0..i1 {
+                    for q in 0..4 {
+                        let (py_, px) = (q >> 1, q & 1);
+                        let (hh, ww) = dims[q];
+                        if ww == 0 || i >= hh {
+                            continue;
+                        }
+                        {
+                            let rg = &mut ring[q];
+                            if rg.len() != 3 * ww {
+                                rg.resize(3 * ww, 0f32);
+                            }
+                            let lo = if i >= 1 { i - 1 } else { i };
+                            let hi = (i + 1).min(hh - 1);
+                            for r in lo..=hi {
+                                let slot = r % 3;
+                                if ring_row[q][slot] != r {
+                                    let s0 = (2 * r + py_) * w + px;
+                                    for (j, v) in rg[slot * ww..(slot + 1) * ww].iter_mut().enumerate() {
+                                        *v = src[s0 + 2 * j];
+                                    }
+                                    ring_row[q][slot] = r;
+                                }
+                            }
+                        }
+                        let rg = &ring[q];
+                        let cur = (i % 3) * ww;
+                        let med = &mut medbuf[..ww];
+                        if i >= 1 && i + 1 < hh && ww >= 3 {
+                            median3_interior(((i - 1) % 3) * ww, cur, ((i + 1) % 3) * ww, ww, rg, med);
+                            med[0] = bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, 0);
+                            med[ww - 1] =
+                                bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, ww - 1);
+                        } else {
+                            for (j, m) in med.iter_mut().enumerate() {
+                                *m = bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, j);
+                            }
+                        }
+                        // SAFETY: plane q row i is written only by the chunk owning row i
+                        let out = unsafe {
+                            std::slice::from_raw_parts_mut(dp.0.add(offs[q] + i * ww), ww)
+                        };
+                        let p = &rg[cur..cur + ww];
+                        let hq = &mut hist[q * HP_COPIES * HP_NB..(q + 1) * HP_COPIES * HP_NB];
+                        let mut any_nan = false;
+                        for j in 0..ww {
+                            let dv = p[j] - med[j];
+                            out[j] = dv;
+                            any_nan |= dv.is_nan();
+                            hq[(j & (HP_COPIES - 1)) * HP_NB
+                                + ((dv.to_bits() & 0x7FFF_FFFF) >> HP_SHIFT) as usize] += 1;
+                        }
+                        nan[q] |= any_nan;
+                    }
+                }
+                let mut h1 = vec![0u32; 4 * HP_NB];
+                for q in 0..4 {
+                    for k in 0..HP_COPIES {
+                        let src_h = &hist[(q * HP_COPIES + k) * HP_NB..(q * HP_COPIES + k + 1) * HP_NB];
+                        for (a, b) in h1[q * HP_NB..(q + 1) * HP_NB].iter_mut().zip(src_h) {
+                            *a += *b;
+                        }
+                    }
+                }
+                (h1, nan)
+            })
+            .reduce(
+                || (vec![0u32; 4 * HP_NB], [false; 4]),
+                |(mut a, mut na), (b, nb)| {
+                    for (x, y) in a.iter_mut().zip(&b) {
+                        *x += *y;
+                    }
+                    for q in 0..4 {
+                        na[q] |= nb[q];
+                    }
+                    (a, na)
+                },
+            );
+        let diff_ro: &[f32] = &diff;
+
+        // ---- MAD bucket(s) and candidate bound per plane ----
+        // (ranks, lowest bucket, highest bucket, count below the lowest, candidate bound)
+        let mut plan: [Option<(usize, usize, usize, u64, f32)>; 4] = [None; 4];
+        for q in 0..4 {
+            let n = dims[q].0 * dims[q].1;
+            if n == 0 || nan[q] {
+                continue;
+            }
+            let hq = &hist[q * HP_NB..(q + 1) * HP_NB];
+            let mid = n / 2;
+            let r_lo = if n % 2 == 1 { mid } else { mid - 1 };
+            let (mut b_lo, mut b_hi) = (usize::MAX, usize::MAX);
+            let mut below_lo = 0u64;
+            let mut cum = 0u64;
+            for (b, &c) in hq.iter().enumerate() {
+                let next = cum + c as u64;
+                if b_lo == usize::MAX && (r_lo as u64) < next {
+                    b_lo = b;
+                    below_lo = cum;
+                }
+                if (mid as u64) < next {
+                    b_hi = b;
+                    break;
+                }
+                cum = next;
+            }
+            // the largest value bucket b_hi can hold: a plane whose sigma is < 1e-6 even
+            // then is left alone, as before
+            let top = f32::from_bits((((b_hi as u32) + 1) << HP_SHIFT) - 1);
+            if b_hi + 1 < HP_NB && !(top * sigma_k >= 1e-6) {
+                continue;
+            }
+            let edge = f32::from_bits((b_lo as u32) << HP_SHIFT);
+            // superset bound; a non-positive threshold would reverse the monotonicity
+            let cthr = if thr > 0f32 { thr * (edge * sigma_k) } else { f32::NEG_INFINITY };
+            plan[q] = Some((mid, b_lo, b_hi, below_lo, cthr));
+        }
+
+        // ---- pass 2: the MAD buckets' values and the candidates ----
+        let mut tasks: Vec<(usize, usize, usize)> = Vec::new();
+        const CH2: usize = 1 << 16;
+        for q in 0..4 {
+            if plan[q].is_some() {
+                let n = dims[q].0 * dims[q].1;
+                let mut s = 0;
+                while s < n {
+                    tasks.push((q, s, (s + CH2).min(n)));
+                    s += CH2;
+                }
+            }
+        }
+        let parts: Vec<(usize, Vec<f32>, Vec<u32>)> = tasks
+            .par_iter()
+            .map_init(
+                || (vec![0f32; CH2], vec![0u32; CH2]),
+                |(vb, cb), &(q, s, e)| {
+                    let (_, b_lo, b_hi, _, cthr) = plan[q].unwrap();
+                    let (blo, span) = (b_lo as u32, (b_hi - b_lo) as u32);
+                    let sl = &diff_ro[offs[q] + s..offs[q] + e];
+                    // branch-free compaction: write every element, advance only on a hit
+                    let (mut nv, mut nc) = (0usize, 0usize);
+                    for (k, &v) in sl.iter().enumerate() {
+                        let b = (v.to_bits() & 0x7FFF_FFFF) >> HP_SHIFT;
+                        vb[nv] = v.abs();
+                        nv += (b.wrapping_sub(blo) <= span) as usize;
+                        cb[nc] = (s + k) as u32;
+                        nc += (v > cthr) as usize;
+                    }
+                    (q, vb[..nv].to_vec(), cb[..nc].to_vec())
+                },
+            )
+            .collect();
+        let mut sigma = [0f32; 4];
+        let mut vals_q: [Vec<f32>; 4] = Default::default();
+        let mut cands: Vec<(usize, u32)> = Vec::new();
+        for (q, v, c) in parts {
+            vals_q[q].extend_from_slice(&v);
+            cands.extend(c.into_iter().map(|k| (q, k)));
+        }
+        for q in 0..4 {
+            if let Some((mid, _, _, below, _)) = plan[q] {
+                let n = dims[q].0 * dims[q].1;
+                let v = &mut vals_q[q];
+                // the same order statistics `median_inplace` read off (select, then the
+                // largest of the left part for an even count)
+                let r = mid - below as usize;
+                let (left, &mut m, _) = v.select_nth_unstable_by(r, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mad = if n % 2 == 1 {
+                    m
+                } else {
+                    let lo = left.iter().fold(f32::NEG_INFINITY, |acc, &x| if x > acc { x } else { acc });
+                    0.5 * (lo + m)
+                };
+                let s = mad * sigma_k;
+                if s >= 1e-6 {
+                    sigma[q] = s;
+                }
+            }
+        }
+
+        // ---- exact test, star support, replacement value (from the untouched input) ----
+        let z = |yy: usize, xx: usize| -> f32 {
+            let q = (yy & 1) * 2 + (xx & 1);
+            if sigma[q] > 0f32 {
+                diff_ro[offs[q] + (yy >> 1) * dims[q].1 + (xx >> 1)] / sigma[q]
+            } else {
+                0f32
+            }
+        };
+        let fixes: Vec<(usize, f32)> = cands
+            .par_iter()
+            .filter_map(|&(q, k)| {
+                let s = sigma[q];
+                let v = diff_ro[offs[q] + k as usize];
+                if !(s > 0f32 && v > thr * s) {
+                    return None;
+                }
+                let (hh, ww) = dims[q];
+                let (i, j) = (k as usize / ww, k as usize % ww);
+                let (py_, px) = (q >> 1, q & 1);
+                let (y, x) = (2 * i + py_, 2 * j + px);
+                if let Some(sup) = star_support {
+                    let mut near = f32::NEG_INFINITY;
+                    if y > 0 { near = near.max(z(y - 1, x)); }
+                    if y + 1 < h { near = near.max(z(y + 1, x)); }
+                    if x > 0 { near = near.max(z(y, x - 1)); }
+                    if x + 1 < w { near = near.max(z(y, x + 1)); }
+                    if near > sup {
+                        return None;
+                    }
+                }
+                Some((y * w + x, bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, j)))
+            })
+            .collect();
+        hotpix_give(diff);
+        for &(idx, m) in &fixes {
+            d[idx] = m;
+        }
+        fixes.len()
+    });
+    Ok(n_fixed)
 }
 
 /// Mean of the 4th and 5th smallest of 8 (no NaN): Knuth's optimal 19-comparator
@@ -8310,6 +9221,49 @@ fn grayworld_scale_and_ceiling(flat: &[f32], h: usize, w: usize) -> ([f32; 3], f
 /// when the caller already has it; `lum` (h*w) also receives the luminance of
 /// each written pixel (`0.299 r + 0.587 g + 0.114 b`, f32 as `luminance_native`),
 /// saving the separate read of the whole image that a recompute costs.
+/// One row of `white_balance_body_inplace`: gains, highlight desaturation toward the
+/// pixel's peak above 0.8 of `denom`, clip at 0, and (`lrow`) the luminance of the
+/// written pixel. Shared by every in-place white-balance kernel so the f32 operations
+/// exist once.
+#[inline(always)]
+fn wb_row(row: &mut [f32], mut lrow: Option<&mut [f32]>, w: usize, f: [f32; 3], divide: bool, denom: f32) {
+    let (f0, f1, f2) = (f[0], f[1], f[2]);
+    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
+    for x in 0..w {
+        let r = row[x * 3];
+        let g = row[x * 3 + 1];
+        let b = row[x * 3 + 2];
+        let peak = if r.is_nan() || g.is_nan() || b.is_nan() {
+            f32::NAN
+        } else {
+            let mut p = r;
+            if g > p { p = g; }
+            if b > p { p = b; }
+            p
+        };
+        let t = (peak / denom - 0.8f32) / 0.2f32;
+        let sat = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t };
+        let one_minus = 1.0f32 - sat;
+        let (s0, s1, s2) = if divide {
+            (r / f0, g / f1, b / f2)
+        } else {
+            (r * f0, g * f1, b * f2)
+        };
+        let o0 = s0 * one_minus + peak * sat;
+        let o1 = s1 * one_minus + peak * sat;
+        let o2 = s2 * one_minus + peak * sat;
+        let o0 = if o0 < 0.0 { 0.0 } else { o0 };
+        let o1 = if o1 < 0.0 { 0.0 } else { o1 };
+        let o2 = if o2 < 0.0 { 0.0 } else { o2 };
+        row[x * 3] = o0;
+        row[x * 3 + 1] = o1;
+        row[x * 3 + 2] = o2;
+        if let Some(l) = lrow.as_deref_mut() {
+            l[x] = kr * o0 + kg * o1 + kb * o2;
+        }
+    }
+}
+
 fn white_balance_body_inplace(
     py: Python<'_>,
     flat: &mut [f32],
@@ -8319,49 +9273,13 @@ fn white_balance_body_inplace(
     ceiling: Option<f32>,
     lum: Option<&mut [f32]>,
 ) {
-    let (f0, f1, f2) = (f[0], f[1], f[2]);
-    let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
     py.detach(|| {
         let ceiling = match ceiling {
             Some(c) => c,
             None => wb_ceiling(flat, w),
         };
         let denom = ceiling + 1e-12f32;
-        let row_fn = |row: &mut [f32], mut lrow: Option<&mut [f32]>| {
-            for x in 0..w {
-                let r = row[x * 3];
-                let g = row[x * 3 + 1];
-                let b = row[x * 3 + 2];
-                let peak = if r.is_nan() || g.is_nan() || b.is_nan() {
-                    f32::NAN
-                } else {
-                    let mut p = r;
-                    if g > p { p = g; }
-                    if b > p { p = b; }
-                    p
-                };
-                let t = (peak / denom - 0.8f32) / 0.2f32;
-                let sat = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t };
-                let one_minus = 1.0f32 - sat;
-                let (s0, s1, s2) = if divide {
-                    (r / f0, g / f1, b / f2)
-                } else {
-                    (r * f0, g * f1, b * f2)
-                };
-                let o0 = s0 * one_minus + peak * sat;
-                let o1 = s1 * one_minus + peak * sat;
-                let o2 = s2 * one_minus + peak * sat;
-                let o0 = if o0 < 0.0 { 0.0 } else { o0 };
-                let o1 = if o1 < 0.0 { 0.0 } else { o1 };
-                let o2 = if o2 < 0.0 { 0.0 } else { o2 };
-                row[x * 3] = o0;
-                row[x * 3 + 1] = o1;
-                row[x * 3 + 2] = o2;
-                if let Some(l) = lrow.as_deref_mut() {
-                    l[x] = kr * o0 + kg * o1 + kb * o2;
-                }
-            }
-        };
+        let row_fn = |row: &mut [f32], lrow: Option<&mut [f32]>| wb_row(row, lrow, w, f, divide, denom);
         match lum {
             Some(l) => flat
                 .par_chunks_mut(w * 3)
@@ -8438,6 +9356,113 @@ fn white_balance_grayworld_lum_inplace<'py>(
     Ok(numpy::ndarray::Array2::from_shape_vec((h, w), lum).unwrap().into_pyarray(py))
 }
 
+/// `white_balance_grayworld_lum_inplace` writing the luminance into `lum` (h, w) --
+/// e.g. the frame store's luminance slot, so no fresh 25 MB array is allocated and
+/// then copied there -- and, from each luminance row while it is in cache, what
+/// `quality.validate_image_data` reads from the luminance:
+/// * `validate_frame_stats(lum)`'s tuple (all finite, max, zero count, saturated
+///   count), exactly: the max and counts are order-independent, and the saturated
+///   count rescans only the rows whose own max reaches `f32(max * 0.999)`;
+/// * with `sample` (ceil(h/step), ceil(w/step)), `lum[::step, ::step]`.
+/// The image and luminance are bit-identical to `white_balance_grayworld_lum_inplace`.
+#[pyfunction]
+#[pyo3(signature = (img, lum, sample=None, step=3))]
+fn white_balance_grayworld_lum_into<'py>(
+    py: Python<'py>,
+    mut img: numpy::PyReadwriteArray3<'py, f32>,
+    mut lum: numpy::PyReadwriteArray2<'py, f32>,
+    sample: Option<numpy::PyReadwriteArray2<'py, f32>>,
+    step: usize,
+) -> PyResult<(bool, f32, u64, u64)> {
+    let shape = img.as_array().shape().to_vec();
+    if shape[2] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
+    }
+    let (h, w) = (shape[0], shape[1]);
+    if lum.as_array().shape() != [h, w] || step == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("lum must be (h, w)"));
+    }
+    let (sh, sw) = (h.div_ceil(step), w.div_ceil(step));
+    let mut sample = sample;
+    if let Some(sm) = sample.as_ref() {
+        if sm.as_array().shape() != [sh, sw] {
+            return Err(pyo3::exceptions::PyValueError::new_err("sample must be (ceil(h/step), ceil(w/step))"));
+        }
+    }
+    let flat = img
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
+    let ls = lum
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("lum must be C-contiguous"))?;
+    let mut sm_slice: Option<&mut [f32]> = match sample.as_mut() {
+        Some(sm) => Some(sm.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("sample must be C-contiguous"))?),
+        None => None,
+    };
+    let (scale, ceiling) = grayworld_scale_and_ceiling(flat, h, w);
+    let denom = ceiling + 1e-12f32;
+    let mut row_max = vec![0f32; h];
+    let mut dummy = vec![0f32; h.div_ceil(step)]; // sample rows when no sample is wanted
+    Ok(py.detach(|| {
+        // one task per group of `step` rows: balance + luminance, the rows' stats, and
+        // the group's sample row (its first row, every step-th column)
+        let has_sample = sm_slice.is_some();
+        let srows: Vec<&mut [f32]> = match sm_slice.as_deref_mut() {
+            Some(sv) => sv.chunks_mut(sw).collect(),
+            None => dummy.chunks_mut(1).collect(),
+        };
+        let (finite, zeros) = flat
+            .par_chunks_mut(w * 3 * step)
+            .zip(ls.par_chunks_mut(w * step))
+            .zip(row_max.par_chunks_mut(step))
+            .zip(srows.into_par_iter())
+            .map(|(((rows, lrows), maxes), srow)| {
+                let mut fin = true;
+                let mut z = 0u64;
+                for (k, (row, lrow)) in rows.chunks_mut(w * 3).zip(lrows.chunks_mut(w)).enumerate() {
+                    wb_row(row, Some(&mut *lrow), w, scale, false, denom);
+                    let mut m = f32::NEG_INFINITY;
+                    for &v in lrow.iter() {
+                        if !v.is_finite() {
+                            fin = false;
+                        }
+                        if v > m {
+                            m = v;
+                        }
+                        if v == 0.0 {
+                            z += 1;
+                        }
+                    }
+                    maxes[k] = m;
+                    if k == 0 && has_sample {
+                        for (j, v) in lrow.iter().step_by(step).enumerate() {
+                            srow[j] = *v;
+                        }
+                    }
+                }
+                (fin, z)
+            })
+            .reduce(|| (true, 0u64), |a, b| (a.0 && b.0, a.1 + b.1));
+        let mut mx = f32::NEG_INFINITY;
+        for &m in row_max.iter() {
+            if m > mx {
+                mx = m;
+            }
+        }
+        if !finite {
+            return (false, mx, zeros, 0u64);
+        }
+        let thr = (mx as f64 * 0.999) as f32;
+        let sat: u64 = ls
+            .par_chunks(w)
+            .zip(row_max.par_iter())
+            .filter(|(_, &m)| m >= thr)
+            .map(|(row, _)| row.iter().filter(|&&v| v >= thr).count() as u64)
+            .sum();
+        (true, mx, zeros, sat)
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // RCD (Ratio Corrected Demosaicing, L. Sanz Rodriguez) -- src/debayer.py::debayer_rcd
 // ---------------------------------------------------------------------------
@@ -8490,11 +9515,56 @@ fn debayer_rcd_native<'py>(
     if h < 16 || w < 16 {
         return Err(pyo3::exceptions::PyValueError::new_err("frame too small for RCD"));
     }
-    let src: Vec<f32> = arr.iter().copied().collect();
-    let out = py.detach(|| rcd_strips(&src, h, w, scale, r_off, b_off));
+    let owned: Vec<f32>;
+    let src: &[f32] = match arr.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+    let out = py.detach(|| rcd_strips(src, h, w, scale, r_off, b_off));
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, 3), out)
         .unwrap()
         .into_pyarray(py))
+}
+
+/// `debayer_rcd_native` writing into `out` (h, w, 3), e.g. a frame-store slot.
+/// `grid`: the session's four 2x2 green offsets (`_GRID_PARITY` order), subtracted
+/// and clipped as `debayer.py::_apply_fixed_grid` does, fused into the output write.
+#[pyfunction]
+#[pyo3(signature = (raw, out, scale, r_off, b_off, grid=None))]
+#[allow(clippy::too_many_arguments)]
+fn debayer_rcd_native_into<'py>(
+    py: Python<'py>,
+    raw: PyReadonlyArray2<'py, f32>,
+    mut out: numpy::PyReadwriteArray3<'py, f32>,
+    scale: f64,
+    r_off: (usize, usize),
+    b_off: (usize, usize),
+    grid: Option<(f64, f64, f64, f64)>,
+) -> PyResult<()> {
+    let arr = raw.as_array();
+    let (h, w) = (arr.shape()[0], arr.shape()[1]);
+    if h < 16 || w < 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err("frame too small for RCD"));
+    }
+    if out.as_array().shape() != [h, w, 3] {
+        return Err(pyo3::exceptions::PyValueError::new_err("out must be (h, w, 3)"));
+    }
+    let owned: Vec<f32>;
+    let src: &[f32] = match arr.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+    let dst = out.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be contiguous"))?;
+    // np.float32(off): each offset rounded to f32 once, as numpy does
+    let grid = grid.map(|(a, b, c, d)| [a as f32, b as f32, c as f32, d as f32]);
+    py.detach(|| rcd_strips_into(src, h, w, scale, r_off, b_off, grid, dst));
+    Ok(())
 }
 
 /// Scratch buffers reused across RCD strips and calls. Every stage array is fully
@@ -8523,7 +9593,7 @@ fn rcd_give(v: Vec<f32>) {
     }
 }
 
-/// RCD in square tiles of `RCD_TILE` output pixels, each run on its tile plus
+/// RCD in tiles of `RCD_TILE` x `RCD_TILE_X` output pixels, each run on its tile plus
 /// `RCD_HALO` pixels around it. Whole-frame stages kept ~14 frame-sized arrays in
 /// flight and streamed ~1.3 GB through memory per frame, so under Phase 1's
 /// workers the kernel was DRAM-bandwidth bound (0.28 s/frame alone, 0.76 s with
@@ -8535,17 +9605,98 @@ fn rcd_give(v: Vec<f32>) {
 /// padding is the frame's. Tiles start on even rows/columns, so the Bayer parity
 /// is unchanged. Bit-identical to the numpy mirror. Buffers come from `RCD_POOL`.
 const RCD_TILE: usize = 128;
+/// Tile width: 128 x 256 tiles (halo overhead 1.30x the output instead of 1.41x for
+/// 128 x 128) measured ~15-20% faster on real 2048x3056 frames, alone (2 threads) and
+/// with 8 Phase 1 processes x 2 threads; 320-384 wide was the same, 512 slower.
+const RCD_TILE_X: usize = 256;
 const RCD_HALO: usize = 12;
 
 fn rcd_strips(src: &[f32], h: usize, w: usize, scale: f64,
               r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
-    if h <= RCD_TILE + 2 * RCD_HALO && w <= RCD_TILE + 2 * RCD_HALO {
-        return rcd_core(src, h, w, scale, r_off, b_off);
+    let mut out = rcd_take(h * w * 3); // fully overwritten
+    rcd_strips_into(src, h, w, scale, r_off, b_off, None, &mut out);
+    out
+}
+
+/// `debayer.py::_apply_fixed_grid` on one green value: `v -= f32(off)` then
+/// `np.maximum(v, 0)` (NaN stays NaN, -0.0 and negatives become +0.0).
+#[inline(always)]
+fn rcd_grid_sub(v: f32, off: f32) -> f32 {
+    let v = v - off;
+    if v > 0.0 || v.is_nan() { v } else { 0.0 }
+}
+
+/// Write `rows` x `cols` output pixels from the padded tile planes (tile rows from
+/// `ty0`, columns from `tx0`; `tw` = tile width) into `dst` (row stride `dstride`
+/// floats, interleaved RGB): each value times `sc` (numpy: f32 array * Python float
+/// is an f32 multiply), then -- with `grid` -- green minus the session's 2x2 offset
+/// for its global parity (`_GRID_PARITY` order: (0,0), (0,1), (1,0), (1,1)), clipped
+/// as `_apply_fixed_grid` does. `gy0`/`gx0`: global coordinates of the first pixel.
+/// The same f32 operations in the same order as debayer + `_apply_fixed_grid`, so
+/// fusing the grid here is bit-identical and saves its four strided passes over
+/// the 75 MB output.
+#[allow(clippy::too_many_arguments)]
+fn rcd_emit(planes: &(Vec<f32>, Vec<f32>, Vec<f32>), tw: usize, ty0: usize, tx0: usize,
+            rows: usize, cols: usize, sc: f32, grid: Option<[f32; 4]>, gy0: usize, gx0: usize,
+            dst: &mut [f32], dstride: usize) {
+    let (r, g, b) = planes;
+    for row in 0..rows {
+        let (rr, gg, bb) = (&rcd_row(r, tw, ty0 + row, 0, 0)[tx0..tx0 + cols],
+                            &rcd_row(g, tw, ty0 + row, 0, 0)[tx0..tx0 + cols],
+                            &rcd_row(b, tw, ty0 + row, 0, 0)[tx0..tx0 + cols]);
+        let o = &mut dst[row * dstride..row * dstride + cols * 3];
+        match grid {
+            None => {
+                for x in 0..cols {
+                    o[3 * x] = rr[x] * sc;
+                    o[3 * x + 1] = gg[x] * sc;
+                    o[3 * x + 2] = bb[x] * sc;
+                }
+            }
+            Some(gd) => {
+                let py = (gy0 + row) & 1;
+                // offsets for even / odd local columns of this row
+                let (oe, oo) = if gx0 & 1 == 0 { (gd[2 * py], gd[2 * py + 1]) }
+                               else { (gd[2 * py + 1], gd[2 * py]) };
+                for x in 0..cols {
+                    let off = if x & 1 == 0 { oe } else { oo };
+                    o[3 * x] = rr[x] * sc;
+                    o[3 * x + 1] = rcd_grid_sub(gg[x] * sc, off);
+                    o[3 * x + 2] = bb[x] * sc;
+                }
+            }
+        }
+    }
+}
+
+fn rcd_give_planes(p: (Vec<f32>, Vec<f32>, Vec<f32>)) {
+    rcd_give(p.0);
+    rcd_give(p.1);
+    rcd_give(p.2);
+}
+
+/// `rcd_strips` writing into a caller-supplied (h, w, 3) buffer -- e.g. the frame's own
+/// slot of Phase 1's frame store, so neither a fresh 75 MB output (zero-filled by the OS
+/// on first touch) nor a copy into the store is needed. Each tile's planes are written
+/// straight into `out` (no per-tile interleaved buffer), with the optional fused grid.
+#[allow(clippy::too_many_arguments)]
+fn rcd_strips_into(src: &[f32], h: usize, w: usize, scale: f64,
+                   r_off: (usize, usize), b_off: (usize, usize), grid: Option<[f32; 4]>,
+                   out: &mut [f32]) {
+    let sc = scale as f32;
+    let (tyl, txl) = (RCD_TILE, RCD_TILE_X);
+    if h <= tyl + 2 * RCD_HALO && w <= txl + 2 * RCD_HALO {
+        let planes = rcd_core(src, h, w, scale, r_off, b_off);
+        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+            rcd_emit(&planes, w, y, 0, 1, w, sc, grid, y, 0, row, w * 3);
+        });
+        rcd_give_planes(planes);
+        return;
     }
     // extended span [lo, hi) of tile k along an axis of length n, >= 16 long
-    let span = |k: usize, n: usize| -> (usize, usize, usize) {
-        let s0 = k * RCD_TILE;
-        let len = RCD_TILE.min(n - s0);
+    let span = |k: usize, n: usize, t: usize| -> (usize, usize, usize) {
+        let s0 = k * t;
+        let len = t.min(n - s0);
         let mut lo = s0.saturating_sub(RCD_HALO);
         let mut hi = (s0 + len + RCD_HALO).min(n);
         if hi - lo < 16 {
@@ -8554,32 +9705,26 @@ fn rcd_strips(src: &[f32], h: usize, w: usize, scale: f64,
         }
         (lo, hi, len)
     };
-    let (ty, tx) = ((h + RCD_TILE - 1) / RCD_TILE, (w + RCD_TILE - 1) / RCD_TILE);
-    let mut out = vec![0f32; h * w * 3];
+    let tx = w.div_ceil(txl);
     // one band of tile rows per task: each band owns its output rows
-    out.par_chunks_mut(RCD_TILE * w * 3).enumerate().for_each(|(ky, band)| {
-        let (y0, y1, rows) = span(ky, h);
-        let sy = ky * RCD_TILE;
+    out.par_chunks_mut(tyl * w * 3).enumerate().for_each(|(ky, band)| {
+        let (y0, y1, rows) = span(ky, h, tyl);
+        let sy = ky * tyl;
         for kx in 0..tx {
-            let (x0, x1, cols) = span(kx, w);
-            let sx = kx * RCD_TILE;
+            let (x0, x1, cols) = span(kx, w, txl);
+            let sx = kx * txl;
             let (th, tw) = (y1 - y0, x1 - x0);
             let mut tile = rcd_take(th * tw);
             for r in 0..th {
                 tile[r * tw..(r + 1) * tw].copy_from_slice(&src[(y0 + r) * w + x0..(y0 + r) * w + x1]);
             }
-            let res = rcd_core(&tile, th, tw, scale, r_off, b_off);
+            let planes = rcd_core(&tile, th, tw, scale, r_off, b_off);
             rcd_give(tile);
-            for r in 0..rows {
-                let s = ((sy - y0 + r) * tw + (sx - x0)) * 3;
-                let d = (r * w + sx) * 3;
-                band[d..d + cols * 3].copy_from_slice(&res[s..s + cols * 3]);
-            }
-            rcd_give(res);
+            rcd_emit(&planes, tw, sy - y0, sx - x0, rows, cols, sc, grid, sy, sx,
+                     &mut band[sx * 3..], w * 3);
+            rcd_give_planes(planes);
         }
-        let _ = ty;
     });
-    out
 }
 
 /// A row of a padded array at frame row `y` shifted by (dy, dx): `w` values.
@@ -8854,30 +9999,20 @@ macro_rules! rcd_core_impl {
     let b = card(&b1);
     rcd_give(r1);
     rcd_give(b1);
-    let sc = scale as f32; // numpy: f32 array * Python float is an f32 multiply
-    let mut out = rcd_take(h * w * 3); // fully overwritten below
-    out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
-        let (rr, gg, bb) = (rcd_row(&r, w, y, 0, 0), rcd_row(&g, w, y, 0, 0),
-                            rcd_row(&b, w, y, 0, 0));
-        for x in 0..w {
-            row[3 * x] = rr[x] * sc;
-            row[3 * x + 1] = gg[x] * sc;
-            row[3 * x + 2] = bb[x] * sc;
-        }
-    });
-    for v in [cfa, vh_disc, g, r, b] {
+    for v in [cfa, vh_disc] {
         rcd_give(v);
     }
-    out
+    (r, g, b)
     }};
 }
 
-/// RCD over the whole frame. Every stage is a branch-free loop over contiguous
+/// RCD over the whole frame, returning the padded R, G, B planes (unscaled; see
+/// `rcd_emit_rows`). Every stage is a branch-free loop over contiguous
 /// row slices (computed at every pixel, then selected per Bayer site, as the
 /// numpy mirror does), so the compiler vectorises it; the per-pixel arithmetic
 /// and its order are the mirror's, so the result is bit-identical.
 fn rcd_core(src: &[f32], h: usize, w: usize, scale: f64,
-            r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
+            r_off: (usize, usize), b_off: (usize, usize)) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     // Run-time AVX2 twin, as for the 3x3 median: the crate targets baseline
     // x86-64, and these loops are where a wider vector pays. No FMA is enabled
     // and Rust never contracts a*b+c on its own, so both give identical bits.
@@ -8893,10 +10028,64 @@ fn rcd_core(src: &[f32], h: usize, w: usize, scale: f64,
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,
-                        r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
+                        r_off: (usize, usize), b_off: (usize, usize)) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     // the macro puts every stage closure lexically inside this function, so
     // they inherit the target feature
     rcd_core_impl!(src, h, w, scale, r_off, b_off)
+}
+
+/// Per-channel sky and noise of one aligned (H, W, C) frame for the proper coadd,
+/// bit-identical to `proper_coadd._sky` / `_noise`:
+///   sky   = median of the finite samples of ch[::4, ::4]
+///   noise = f64(1.4826f32 * MAD(d)) / sqrt(2), d = finite (row[x+4] - row[x]) over
+///           rows ch[::4]; NaN when fewer than 1000 differences
+/// Medians are exact order statistics (even count: (a + b) / 2 in f32, as numpy).
+/// Gathers its own strided samples: numpy built ~8 temporaries per channel
+/// (~40 ms of the coadd's ~108 ms per frame).
+#[pyfunction]
+fn frame_sky_noise<'py>(py: Python<'py>, frame: PyReadonlyArray3<'py, f32>) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    let fa = frame.as_array();
+    let (h, w, c) = (fa.shape()[0], fa.shape()[1], fa.shape()[2]);
+    let fr = fa.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("frame must be contiguous"))?;
+    let res: Vec<(f64, f64)> = py.detach(|| {
+        (0..c).into_par_iter().map(|ch| {
+            let mut s: Vec<f32> = Vec::with_capacity(h.div_ceil(4) * w.div_ceil(4));
+            for y in (0..h).step_by(4) {
+                let row = &fr[y * w * c..(y + 1) * w * c];
+                for x in (0..w).step_by(4) {
+                    let v = row[x * c + ch];
+                    if v.is_finite() {
+                        s.push(v);
+                    }
+                }
+            }
+            let sky = median_inplace(&mut s) as f64;
+            let mut d: Vec<f32> = Vec::with_capacity(h.div_ceil(4) * w.saturating_sub(4));
+            if w > 4 {
+                for y in (0..h).step_by(4) {
+                    let row = &fr[y * w * c..(y + 1) * w * c];
+                    for x in 0..w - 4 {
+                        let v = row[(x + 4) * c + ch] - row[x * c + ch];
+                        if v.is_finite() {
+                            d.push(v);
+                        }
+                    }
+                }
+            }
+            let noise = if d.len() < 1000 {
+                f64::NAN
+            } else {
+                let m = median_inplace(&mut d);
+                for v in d.iter_mut() {
+                    *v = (*v - m).abs();
+                }
+                let mad = median_inplace(&mut d);
+                (1.4826f32 * mad) as f64 / 2f64.sqrt()
+            };
+            (sky, noise)
+        }).collect()
+    });
+    Ok((res.iter().map(|r| r.0).collect(), res.iter().map(|r| r.1).collect()))
 }
 
 /// Proper coadd (src/proper_coadd.py), per frame: reject each sample against the
@@ -9015,6 +10204,315 @@ fn proper_coadd_accum<'py>(
     Ok(())
 }
 
+/// `proper_coadd_accum` with float32 accumulators (each producer thread keeps its own
+/// and they are summed once at the end, instead of every frame going through one
+/// shared float64 accumulator on the main thread). The per-element arithmetic is f64;
+/// only the running sums are stored in f32 -- 531 frames of relative precision 1e-7
+/// leave ~1e-5 relative, far below the stack's own noise.
+#[pyfunction]
+fn proper_coadd_accum32<'py>(
+    py: Python<'py>,
+    mut num: numpy::PyReadwriteArray2<'py, f32>,
+    mut den: numpy::PyReadwriteArray2<'py, f32>,
+    fm: PyReadonlyArray2<'py, f32>,
+    ph: PyReadonlyArray2<'py, f32>,
+    wnum: f64,
+    wden: f64,
+) -> PyResult<()> {
+    let ns = num.as_array().shape().to_vec();
+    if den.as_array().shape() != [ns[0], ns[1] / 2] || fm.as_array().shape() != &ns[..]
+        || ph.as_array().shape() != &ns[..] || ns[1] % 2 != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let row = ns[1];
+    let nm = num.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("num must be contiguous"))?;
+    let dn = den.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("den must be contiguous"))?;
+    let f = fm.as_slice()?;
+    let p = ph.as_slice()?;
+    py.detach(|| {
+        nm.par_chunks_mut(row).zip(dn.par_chunks_mut(row / 2)).enumerate().for_each(|(y, (nr, dr))| {
+            let fr = &f[y * row..(y + 1) * row];
+            let pr = &p[y * row..(y + 1) * row];
+            for i in 0..row / 2 {
+                let (a, b) = (fr[2 * i] as f64, fr[2 * i + 1] as f64);
+                let (c, d) = (pr[2 * i] as f64, pr[2 * i + 1] as f64);
+                nr[2 * i] = (nr[2 * i] as f64 + wnum * (a * c + b * d)) as f32;
+                nr[2 * i + 1] = (nr[2 * i + 1] as f64 + wnum * (b * c - a * d)) as f32;
+                dr[i] = (dr[i] as f64 + wden * (c * c + d * d)) as f32;
+            }
+        });
+    });
+    Ok(())
+}
+
+/// `proper_coadd_prep` for a band of data rows `y0 .. y0 + nb` of a batch of B frames,
+/// into a small buffer `band` (B, C, nb, PW): each row is written whole -- `pad`
+/// zeros, the rejected and sky-subtracted samples, zeros to PW -- so the buffer can be
+/// reused band after band and FFT'd while it is still in cache (the full padded planes
+/// were ~43 MB per frame written once and read back once by the FFT), and the
+/// reference row is read once for the whole batch. `f` has one entry per frame, `sky`
+/// and `sig2` B*C (frame-major). Same f32 operations as `proper_coadd_prep`, so the
+/// rows are bit-identical to that kernel's. Sequential: the combine pass runs one frame
+/// batch per thread. Returns the number of replaced samples.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn proper_coadd_prep_rows<'py>(
+    py: Python<'py>,
+    frames: Vec<PyReadonlyArray3<'py, f32>>,
+    ref_sig: PyReadonlyArray3<'py, f32>,
+    mut band: numpy::PyReadwriteArray4<'py, f32>,
+    y0: usize,
+    f: Vec<f32>,
+    sky: Vec<f32>,
+    sig2: Vec<f32>,
+    k: f32,
+    frac: f32,
+    pad: usize,
+) -> PyResult<u64> {
+    let ra = ref_sig.as_array();
+    let (c, h, w) = (ra.shape()[0], ra.shape()[1], ra.shape()[2]);
+    let nbat = frames.len();
+    let bshape = band.as_array().shape().to_vec();
+    let (nb, pw) = (bshape[2], bshape[3]);
+    if bshape[0] != nbat || bshape[1] != c || pw < w + pad || y0 + nb > h
+        || f.len() != nbat || sky.len() != nbat * c || sig2.len() != nbat * c {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let mut frs: Vec<&[f32]> = Vec::with_capacity(nbat);
+    for fr in frames.iter() {
+        if fr.as_array().shape() != [h, w, c] {
+            return Err(pyo3::exceptions::PyValueError::new_err("frame shape mismatch"));
+        }
+        frs.push(fr.as_slice().map_err(|_| pyo3::exceptions::PyValueError::new_err("frames must be contiguous"))?);
+    }
+    let rs = ra.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("ref_sig must be contiguous"))?;
+    let bs = band.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("band must be contiguous"))?;
+    let n = py.detach(|| {
+        let mut cnt = 0u64;
+        for r in 0..nb {
+            let y = y0 + r;
+            for ch in 0..c {
+                let rr = &rs[(ch * h + y) * w..(ch * h + y + 1) * w];
+                for (b, fr) in frs.iter().enumerate() {
+                    let (fb, sk, s2) = (f[b], sky[b * c + ch], sig2[b * c + ch]);
+                    let o = ((b * c + ch) * nb + r) * pw;
+                    let row = &mut bs[o..o + pw];
+                    row[..pad].fill(0.0);
+                    row[pad + w..].fill(0.0);
+                    let src = &fr[y * w * c..(y + 1) * w * c];
+                    cnt += pc_prep_row(src, rr, &mut row[pad..pad + w], c, ch, fb, sk, s2, k, frac);
+                }
+            }
+        }
+        cnt
+    });
+    Ok(n)
+}
+
+/// Proper coadd's column-tiled spectrum layout: copy rows `row0 .. row0 + nr` of the
+/// row-FFT'd planes `src` (P, nr, 2 NF) (interleaved complex64) into plane
+/// `planes[p]` of `tiles` (Q, NT, PH, 2 CB): tile `t` holds spectrum columns
+/// `t*CB .. (t+1)*CB` of every row contiguously, so the column FFT and the
+/// accumulation read 144 KB blocks instead of one 128-byte piece per row (those
+/// strided reads were the part of the combine pass that did not scale past 2 threads).
+/// A pure copy. Sequential.
+#[pyfunction]
+fn proper_coadd_scatter_tiles<'py>(
+    py: Python<'py>,
+    src: PyReadonlyArray3<'py, f32>,
+    mut tiles: numpy::PyReadwriteArray4<'py, f32>,
+    planes: Vec<usize>,
+    row0: usize,
+) -> PyResult<()> {
+    let ss = src.as_array().shape().to_vec();
+    let ts = tiles.as_array().shape().to_vec();
+    let (np_, nr, nf2) = (ss[0], ss[1], ss[2]);
+    let (nq, nt, ph, cb2) = (ts[0], ts[1], ts[2], ts[3]);
+    if planes.len() != np_ || planes.iter().any(|&q| q >= nq) || row0 + nr > ph
+        || nt * cb2 < nf2 || (nt - 1) * cb2 >= nf2 {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let sv = src.as_slice()?;
+    let tv = tiles.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("tiles must be contiguous"))?;
+    py.detach(|| {
+        for (p, &q) in planes.iter().enumerate() {
+            for t in 0..nt {
+                let c0 = t * cb2;
+                let wdt = cb2.min(nf2 - c0);
+                for r in 0..nr {
+                    let s0 = (p * nr + r) * nf2 + c0;
+                    let d0 = ((q * nt + t) * ph + row0 + r) * cb2;
+                    tv[d0..d0 + wdt].copy_from_slice(&sv[s0..s0 + wdt]);
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// `proper_coadd_accum32` over one column tile for every channel and a batch of B
+/// frames: `bspec` (B, C + 1, PH, 2 nb) is the interleaved float view of the tile's
+/// column-FFT'd spectra (per frame channels 0..C-1, the PSF last), `wnum`/`wden` the
+/// B*C weights (frame-major), `num` (C, NT, PH, 2 CB) and `den` (C, NT, PH, CB) the
+/// float32 accumulators in the same tiled layout (nb <= CB valid columns). Each
+/// accumulator element takes the B frames' updates in batch order with
+/// `proper_coadd_accum32`'s arithmetic (f64 add, rounded to f32 after every frame), so
+/// the sums are bit-identical to accumulating the frames one at a time -- but the
+/// accumulators are read and written once per batch instead of once per frame.
+/// Sequential: the combine pass runs one frame batch per thread.
+#[pyfunction]
+fn proper_coadd_accum32_tile<'py>(
+    py: Python<'py>,
+    mut num: numpy::PyReadwriteArray4<'py, f32>,
+    mut den: numpy::PyReadwriteArray4<'py, f32>,
+    bspec: numpy::PyReadonlyArray4<'py, f32>,
+    t: usize,
+    wnum: Vec<f64>,
+    wden: Vec<f64>,
+) -> PyResult<()> {
+    let ns = num.as_array().shape().to_vec();
+    let bsh = bspec.as_array().shape().to_vec();
+    let (c, nt, ph, cbw) = (ns[0], ns[1], ns[2], ns[3] / 2);
+    let (nbat, nb) = (bsh[0], bsh[3] / 2);
+    if den.as_array().shape() != [c, nt, ph, cbw] || ns[3] % 2 != 0 || bsh[3] % 2 != 0
+        || bsh[1] != c + 1 || bsh[2] != ph || t >= nt || nb > cbw
+        || wnum.len() != nbat * c || wden.len() != nbat * c {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let nm = num.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("num must be contiguous"))?;
+    let dn = den.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("den must be contiguous"))?;
+    let bs = bspec.as_slice()?;
+    let plane = ph * 2 * nb;
+    py.detach(|| {
+        for ch in 0..c {
+            for y in 0..ph {
+                let o = ((ch * nt + t) * ph + y) * cbw;
+                let nr = &mut nm[2 * o..2 * (o + nb)];
+                let dr = &mut dn[o..o + nb];
+                // frames in batch order, each over the whole tile row (in L1): every
+                // element still takes its B updates in order, and the inner loop is
+                // independent per element, so it vectorises
+                for b in 0..nbat {
+                    let base = b * (c + 1) * plane + y * 2 * nb;
+                    let fr = &bs[base + ch * plane..base + ch * plane + 2 * nb];
+                    let pr = &bs[base + c * plane..base + c * plane + 2 * nb];
+                    pc_accum_row(nr, dr, fr, pr, wnum[b * c + ch], wden[b * c + ch]);
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// One row of `proper_coadd_prep_rows` (channel `ch` of an interleaved (W, C) source
+/// row): `proper_coadd_prep`'s f32 operations. Returns the number of replaced samples.
+#[allow(clippy::too_many_arguments)]
+fn pc_prep_row(src: &[f32], rr: &[f32], out: &mut [f32], c: usize, ch: usize,
+               fb: f32, sk: f32, s2: f32, k: f32, frac: f32) -> u64 {
+    let mut cnt = 0u64;
+    for x in 0..out.len() {
+        let v = src[x * c + ch] - sk;
+        let e = rr[x] * fb;
+        let resid = v - e;
+        let mut t = if e > 0.0 { e } else { 0.0 };
+        t *= frac;
+        t = t * t;
+        t += s2;
+        let bad = resid.abs() > k * t.sqrt();
+        out[x] = if bad { e } else { v };
+        cnt += bad as u64;
+    }
+    cnt
+}
+
+/// One tile row of `proper_coadd_accum32_tile` for one frame: `proper_coadd_accum32`'s
+/// per-element arithmetic (f64, rounded to f32 after the add), independent per element.
+fn pc_accum_row(nr: &mut [f32], dr: &mut [f32], fr: &[f32], pr: &[f32], wn: f64, wd: f64) {
+    for i in 0..dr.len() {
+        let (fa, fb) = (fr[2 * i] as f64, fr[2 * i + 1] as f64);
+        let (pc, pd) = (pr[2 * i] as f64, pr[2 * i + 1] as f64);
+        nr[2 * i] = (nr[2 * i] as f64 + wn * (fa * pc + fb * pd)) as f32;
+        nr[2 * i + 1] = (nr[2 * i + 1] as f64 + wn * (fb * pc - fa * pd)) as f32;
+        dr[i] = (dr[i] as f64 + wd * (pc * pc + pd * pd)) as f32;
+    }
+}
+
+/// `quality.validate_image_data`'s full-frame passes in two parallel sweeps instead of
+/// four numpy passes with full-size temporaries: (all finite, max, zero count,
+/// saturated count) with saturated = values >= `f32(max * 0.999)` (numpy compares the
+/// float32 frame with that Python float rounded to float32). The max and the counts
+/// are exact; when a value is not finite, the counts are not computed (the caller
+/// reports the NaN/Inf counts itself).
+#[pyfunction]
+fn validate_frame_stats<'py>(py: Python<'py>, img: PyReadonlyArray2<'py, f32>) -> PyResult<(bool, f32, u64, u64)> {
+    let a = img.as_array();
+    let w = a.shape()[1].max(1);
+    let owned: Vec<f32>;
+    let s: &[f32] = match a.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = a.iter().copied().collect();
+            &owned
+        }
+    };
+    Ok(py.detach(|| {
+        let (finite, mx, zeros) = s
+            .par_chunks(w)
+            .map(|row| {
+                let mut fin = true;
+                let mut m = f32::NEG_INFINITY;
+                let mut z = 0u64;
+                for &v in row {
+                    if !v.is_finite() {
+                        fin = false;
+                    }
+                    if v > m {
+                        m = v;
+                    }
+                    if v == 0.0 {
+                        z += 1;
+                    }
+                }
+                (fin, m, z)
+            })
+            .reduce(|| (true, f32::NEG_INFINITY, 0u64), |x, y| (x.0 && y.0, if x.1 > y.1 { x.1 } else { y.1 }, x.2 + y.2));
+        if !finite {
+            return (false, mx, zeros, 0u64);
+        }
+        let thr = (mx as f64 * 0.999) as f32;
+        let sat: u64 = s.par_chunks(w).map(|row| row.iter().filter(|&&v| v >= thr).count() as u64).sum();
+        (true, mx, zeros, sat)
+    }))
+}
+
+/// 2x box downsample of an (H, W) float32 image, bit-identical to
+/// `registration._downsample_half`: even-cropped, out = (((a00 + a10) + a01) + a11) * 0.25
+/// in f32 -- numpy's operation order. One read pass instead of numpy's three
+/// strided adds and temporaries. Single-threaded: callers run it from many
+/// Python threads at once (the pyramid pass), so rayon here would only contend.
+#[pyfunction]
+fn downsample_half_f32<'py>(py: Python<'py>, img: PyReadonlyArray2<'py, f32>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let a = img.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let src = a.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("image must be C-contiguous"))?;
+    let (h2, w2) = (h / 2, w / 2);
+    let out: Vec<f32> = py.detach(|| {
+        let mut o = vec![0f32; h2 * w2];
+        for y in 0..h2 {
+            let r0 = &src[2 * y * w..2 * y * w + w];
+            let r1 = &src[(2 * y + 1) * w..(2 * y + 1) * w + w];
+            let orow = &mut o[y * w2..(y + 1) * w2];
+            for x in 0..w2 {
+                orow[x] = (((r0[2 * x] + r1[2 * x]) + r0[2 * x + 1]) + r1[2 * x + 1]) * 0.25f32;
+            }
+        }
+        o
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h2, w2), out)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        .into_pyarray(py))
+}
+
 /// Linear cross-correlation `c[dy][dx] = sum_p ref[p + d] * img[p]` (zero outside
 /// the frame) for every lag |dy|, |dx| <= radius: the values a zero-padded FFT
 /// correlation has at those lags (src/registration.py::calculate_shift_pyramid_pref,
@@ -9082,6 +10580,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(online_sigma_clip_seed_burnin, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_fold_frame, m)?)?;
     m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine_fast, m)?)?;
     m.add_function(wrap_pyfunction!(median_combine, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
@@ -9094,6 +10593,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hot_pixel_box_replace_native, m)?)?;
     m.add_function(wrap_pyfunction!(blind_match_hypotheses, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3, m)?)?;
+    m.add_function(wrap_pyfunction!(ndimage_affine_order1, m)?)?;
+    m.add_function(wrap_pyfunction!(ndimage_shift_order1, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_lanczos3_into, m)?)?;
     m.add_function(wrap_pyfunction!(anisotropic_diffusion, m)?)?;
     m.add_function(wrap_pyfunction!(lacosmic_reject_native, m)?)?;
@@ -9126,12 +10627,23 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(drizzle_accumulate_lanczos3, m)?)?;
     m.add_function(wrap_pyfunction!(drizzle_splat_frame, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_frame_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_frame_from_be16, m)?)?;
+    m.add_function(wrap_pyfunction!(patch_brenner_scores, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_bayer, m)?)?;
+    m.add_function(wrap_pyfunction!(hot_pixel_bayer_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(spike_reject_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
+    m.add_function(wrap_pyfunction!(debayer_rcd_native_into, m)?)?;
     m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
+    m.add_function(wrap_pyfunction!(downsample_half_f32, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;
+    m.add_function(wrap_pyfunction!(proper_coadd_accum32, m)?)?;
+    m.add_function(wrap_pyfunction!(proper_coadd_prep_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(proper_coadd_scatter_tiles, m)?)?;
+    m.add_function(wrap_pyfunction!(proper_coadd_accum32_tile, m)?)?;
+    m.add_function(wrap_pyfunction!(frame_sky_noise, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_frame_stats, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;
@@ -9142,6 +10654,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(white_balance_apply_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld_lum_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(white_balance_grayworld_lum_into, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_apply, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

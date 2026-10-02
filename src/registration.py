@@ -657,6 +657,11 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
 
 def _downsample_half(arr: np.ndarray) -> np.ndarray:
     """2x box-downsample (even-cropped 2x2 average)."""
+    if (HAS_NATIVE and hasattr(_native, 'downsample_half_f32') and isinstance(arr, np.ndarray)
+            and arr.dtype == np.float32 and arr.ndim == 2 and arr.flags.c_contiguous):
+        # one read pass, same f32 operation order (bit-identical); numpy made three
+        # strided adds with temporaries -- most of the reference-selection pass
+        return _native.downsample_half_f32(arr)
     h2 = (arr.shape[0] // 2) * 2
     w2 = (arr.shape[1] // 2) * 2
     a = arr[:h2, :w2]
@@ -1030,7 +1035,8 @@ def select_reference_frame(
     def _get_lum(orig_idx: int) -> np.ndarray:
         if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
             return np.asarray(cached_lums[orig_idx], dtype=np.float32)
-        return np.array(mem_lum[orig_idx], dtype=np.float32)
+        # a view, not a copy: only its 2x downsample is read (pyramid levels >= 1)
+        return np.asarray(mem_lum[orig_idx], dtype=np.float32)
 
     # Tentative reference: highest quality frame (for consistent pyramid base)
     tentative_best = max(final, key=lambda f: f.metrics.get('score', 0.0))
@@ -1156,6 +1162,30 @@ def _filter_shift_outliers(
     return outlier_mask
 
 
+def _residual_warp(lum: np.ndarray, shift, transform) -> np.ndarray:
+    """``lum`` warped into aligned space for the residual check: scipy's order-1
+    ``shift`` (float32 out) or ``affine_transform`` of the float64 copy (float64 out),
+    mode='constant'. The native ports (``ndimage_shift_order1`` /
+    ``ndimage_affine_order1``) are bit-identical to those calls -- same coordinate
+    arithmetic, edge mirroring and summation order as scipy 1.17's ni_interpolation.c --
+    ~4x faster, and read the float32 frame without the 50 MB float64 copy."""
+    M = None if transform is None else transform.params[:2, :2]
+    offset = None if M is None else -(M @ np.array([shift[0], shift[1]]))
+    if (_native is not None and hasattr(_native, 'ndimage_affine_order1')
+            and isinstance(lum, np.ndarray) and lum.dtype == np.float32 and lum.ndim == 2):
+        try:
+            if M is None:
+                return _native.ndimage_shift_order1(lum, (float(shift[0]), float(shift[1])))
+            return _native.ndimage_affine_order1(lum, np.ascontiguousarray(M, np.float64),
+                                                 np.ascontiguousarray(offset, np.float64))
+        except Exception:
+            pass
+    if M is None:
+        return ndimage.shift(lum, shift=shift, order=1, mode='constant', cval=0.0)
+    return ndimage.affine_transform(lum.astype(np.float64), M, offset=offset,
+                                    order=1, mode='constant', cval=0.0)
+
+
 def _match_frame_stars(
     lum: np.ndarray,
     shift: Tuple[float, float],
@@ -1175,14 +1205,7 @@ def _match_frame_stars(
     star pairs in (x, y) order — or None if fewer than 3 stars matched.
     """
 
-    aligned_lum = ndimage.shift(
-        lum, shift=shift, order=1, mode='constant', cval=0.0
-    ) if transform is None else ndimage.affine_transform(
-        lum.astype(np.float64),
-        transform.params[:2, :2],
-        offset=-(transform.params[:2, :2] @ np.array([shift[0], shift[1]])),
-        order=1, mode='constant', cval=0.0
-    )
+    aligned_lum = _residual_warp(lum, shift, transform)
     frame_stars = registration_stars(aligned_lum, noise_val)
     if frame_stars is None or len(frame_stars) < 3:
         return None
@@ -1360,6 +1383,14 @@ def compute_patch_scores(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
     """
     H, W = lum.shape[:2]
     ph, pw, ny, nx = _patch_grid_geometry(H, W, grid_size)
+    if (HAS_NATIVE and hasattr(_native, 'patch_brenner_scores') and isinstance(lum, np.ndarray)
+            and lum.ndim == 2 and lum.dtype == np.float32):
+        try:
+            # same patches and sums, read from the float32 frame without a float64 copy
+            # (69 ms per frame under Phase 1's load); equal up to summation order
+            return _native.patch_brenner_scores(np.ascontiguousarray(lum), ph, pw, ny, nx)
+        except Exception:
+            pass
     patch_scores = np.zeros((ny, nx), dtype=np.float32)
     lum_f = lum.astype(np.float64)
     for iy in range(ny):
@@ -1716,12 +1747,24 @@ def run_registration_phase(
             and pyramid_shifts is not None
             and len(final) >= 10):
         try:
-            ps_arr = np.array(pyramid_shifts, dtype=np.float64)
-            median_sy = float(np.median(ps_arr[:, 0]))
-            median_sx = float(np.median(ps_arr[:, 1]))
-            dists = np.sqrt((ps_arr[:, 0] - median_sy) ** 2 +
-                            (ps_arr[:, 1] - median_sx) ** 2)
-            best_j = int(np.argmin(dists))
+            # The middle of the session *in time*: on an alt-az mount field rotation and
+            # drift both grow with time, so the mid-session frame minimises the largest
+            # rotation and offset to every other frame -- which is what sets the common
+            # crop. The old rule (frame nearest the median *pyramid* shift) broke under
+            # rotation: translation-only shifts of frames rotated against the tentative
+            # reference are meaningless, and when better-measured star peaks moved the
+            # tentative reference to the session's end, the 'consensus' frame landed at an
+            # extreme and the crop shrank 18% on a 532-frame Sculptor session. Best
+            # quality within the middle 20% of the session.
+            from src.moving_objects import frame_times_min
+            t = frame_times_min(final)
+            span = float(t.max() - t.min()) if len(t) else 0.0
+            t_mid = float(np.median(t))
+            near = np.flatnonzero(np.abs(t - t_mid) <= max(0.1 * span, 1e-9))
+            if near.size == 0:
+                near = np.array([int(np.argmin(np.abs(t - t_mid)))])
+            q = np.array([float(final[k].metrics.get('score', 0.0) or 0.0) for k in near])
+            best_j = int(near[int(np.argmax(q))])
             new_best_idx = final_indices[best_j]
             if new_best_idx != best_idx:
                 best = final[best_j]
@@ -1743,7 +1786,7 @@ def run_registration_phase(
                 if new_ref_stars is not None and len(new_ref_stars) > 0:
                     ref_stars = new_ref_stars
                 safe_print(f"  Consensus reference: {os.path.basename(best.path)} "
-                           f"(shift closest to median)")
+                           f"(best quality in the middle of the session)")
         except Exception as _ce:
             _log.debug("Consensus ref failed: %s", _ce)
 

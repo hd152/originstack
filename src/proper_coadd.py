@@ -37,6 +37,7 @@ matched filters do not wrap around the edges.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -59,12 +60,28 @@ try:
 except Exception:          # pragma: no cover - scipy is a hard dependency in practice
     HAS_SCIPY = False
 
-_STAMP_R = 14            # stamp half-size for the PSF fit and aperture flux (29x29)
+try:
+    # scipy.fft's own pocketfft binding: the same transforms as sfft.rfft2 (which calls
+    # exactly this), but it takes ``out`` -- the combine pass FFTs into preallocated
+    # buffers instead of allocating (and page-faulting in) ~86 MB of spectra per frame.
+    # Private API, so the combine pass falls back to sfft.rfft2 when it is missing.
+    from scipy.fft._pocketfft import pypocketfft as _pfft
+except Exception:          # pragma: no cover
+    _pfft = None
+
+_STAMP_R = 14            # stamp half-size for the aperture flux and background (29x29)
+_FIT_R = 8               # core half-size the shape is fitted on (17x17)
+_FIT_STARS = 15          # brightest stars used for the shape fit
 _MAX_STARS = 30
 _PSF_R = 24              # half-size of the PSF kernel rendered for the FFT
 _REJECT_K = 5.0
 _SIGNAL_FRAC = 0.15
 _PAD = 32                # >= _PSF_R: linear, not circular, convolution at the edges
+# combine pass, tiled path: frames per accumulator pass, data rows per prep/row-FFT band,
+# spectrum columns per tile (see _combine_tiled)
+_BATCH = 1
+_ROW_BAND = 8
+_COL_TILE = 16
 
 
 _BETA_MIN, _BETA_MAX = 1.5, 20.0
@@ -157,10 +174,20 @@ def fit_psf(img: np.ndarray, stars: np.ndarray, p0=None):
     if len(stars) < 5:
         return None, None
     r = _STAMP_R
-    S, DY, DX = star_stamps(img, stars)
+    S_all, DY_all, DX_all = star_stamps(img, stars)
+    # the shape is fitted on the brightest stars' cores only (select_psf_stars returns
+    # them brightest first): 6x fewer pixels per model evaluation; the faint stars and
+    # the outer stamp add little to four shape parameters but cost most of the time.
+    # Fluxes below still use every star's full stamp.
+    nf = min(len(stars), _FIT_STARS)
+    w = 2 * r + 1
+    core = np.zeros((w, w), bool)
+    core[r - _FIT_R:r + _FIT_R + 1, r - _FIT_R:r + _FIT_R + 1] = True
+    core = core.ravel()
+    S, DY, DX = S_all[:nf][:, core], DY_all[:nf][:, core], DX_all[:nf][:, core]
     ones = np.ones(S.shape[1])
 
-    def solve(p):
+    def solve(p, S=S, DY=DY, DX=DX):
         G = _moffat_grid(DY, DX, p)                     # (n_stars, n_pix)
         # per star: [amp, bg] by least squares on [G, 1]
         gg = (G * G).sum(1)
@@ -192,8 +219,8 @@ def fit_psf(img: np.ndarray, stars: np.ndarray, p0=None):
     # integral: a smooth model fitted to a trailed star grows heavy wings, and their
     # integral read 2x the real flux on the trailed frames of a real Omega Nebula
     # session -- which, through w = F^2 / s^2, weighted those worst frames 4x
-    _, _, bg = solve(p)
-    return p, (S - bg[:, None]).sum(1)
+    _, _, bg = solve(p, S_all, DY_all, DX_all)
+    return p, (S_all - bg[:, None]).sum(1)
 
 
 def render_psf_into(p, plane: np.ndarray) -> None:
@@ -252,47 +279,208 @@ def _noise(ch: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
 
 
+def _tiled_ok(aligned) -> bool:
+    return (_pfft is not None and _native_ok(aligned)
+            and all(hasattr(_native, f) for f in ('proper_coadd_prep_rows', 'proper_coadd_scatter_tiles',
+                                                   'proper_coadd_accum32_tile')))
+
+
+def _combine_tiled(aligned, frames, meas, ref_sig, PH: int, PW: int):
+    """One combine thread's share of the proper coadd: ``frames`` (in order) accumulated
+    into its own float32 sums. Returns (num complex64 (C, PH, NF), den float32, s_w,
+    s_w2f, s_sky, n_bad, n_rep) -- bit-identical to the per-frame path in
+    ``proper_coadd`` (every FFT is pocketfft's own, every accumulator element takes the
+    same f64-add-then-round updates in the same frame order).
+
+    The per-frame path is memory-bound: six threads stopped scaling at ~43 ms per frame
+    on a 532-frame session against ~70 ms of single-thread work. Here the traffic is cut
+    instead of the work:
+
+    * prep + row FFT in bands of ``_ROW_BAND`` data rows into a small buffer (in cache),
+      for ``_BATCH`` frames at once so each reference row is read once per batch;
+    * the row spectra are stored column-tiled, (tile, row, ``_COL_TILE`` columns), so
+      the column FFT reads contiguous 144 KB blocks, not one 128-byte piece per row;
+    * the column FFT of a tile goes to a small buffer and is accumulated from there, B
+      frames per pass over the accumulators (also tiled, converted back at the end);
+    * all FFT output goes into preallocated buffers (pocketfft's ``out``);
+    * a frame in RAM is read in place; a memmapped one is still copied once (the
+      sequential read is what made a disk-backed stack fast) into a reused buffer.
+    """
+    N, H, W, C = aligned.shape
+    B, RB, CB, R = _BATCH, _ROW_BAND, _COL_TILE, _PSF_R
+    NF = PW // 2 + 1
+    NT = -(-NF // CB)
+    copy_in = isinstance(aligned, np.memmap)
+    psf = np.zeros((PH, PW), np.float32)
+    psf_spec = np.empty((2, R + 1, NF), np.complex64)
+    tiles = np.zeros((B * (C + 1), NT, PH, CB), np.complex64)   # rows never written stay zero
+    tiles_f = tiles.view(np.float32)
+    tiles5 = tiles.reshape(B, C + 1, NT, PH, CB)
+    a_num = np.zeros((C, NT, PH, CB), np.complex64)
+    a_den = np.zeros((C, NT, PH, CB), np.float32)
+    s_w = np.zeros(C); s_w2f = np.zeros(C); s_sky = np.zeros(C)
+    frbuf = [None] * B
+    bufs = {}
+    nbad = nrep = 0
+
+    def flush(batch):
+        nonlocal nrep
+        nbat = len(batch)
+        frs = [b[0] for b in batch]
+        Fl = [float(np.float32(b[1])) for b in batch]
+        skyl = [float(np.float32(v)) for b in batch for v in b[2]]
+        s2l = [float(np.float32(v ** 2)) for b in batch for v in b[3]]
+        wn = [b[1] / b[3][c] ** 2 for b in batch for c in range(C)]
+        wf = [b[1] * b[1] / b[3][c] ** 2 for b in batch for c in range(C)]
+        dplanes = [bi * (C + 1) + c for bi in range(nbat) for c in range(C)]
+        for y0 in range(0, H, RB):
+            nb = min(RB, H - y0)
+            key = ('row', nbat, nb)
+            if key not in bufs:
+                bufs[key] = (np.empty((nbat, C, nb, PW), np.float32),
+                             np.empty((nbat * C, nb, NF), np.complex64))
+            band, rspec = bufs[key]
+            nrep += int(_native.proper_coadd_prep_rows(frs, ref_sig, band, y0, Fl, skyl, s2l,
+                                                       _REJECT_K, _SIGNAL_FRAC, _PAD))
+            _pfft.r2c(band.reshape(nbat * C, nb, PW), (2,), True, 0, rspec, 1)
+            _native.proper_coadd_scatter_tiles(rspec.view(np.float32), tiles_f, dplanes, _PAD + y0)
+        for t in range(NT):
+            nb = min(CB, NF - t * CB)
+            key = ('col', nbat, nb)
+            if key not in bufs:
+                bufs[key] = np.empty((nbat, C + 1, PH, nb), np.complex64)
+            cspec = bufs[key]
+            _pfft.c2c(tiles5[:nbat, :, t, :, :nb], (2,), True, 0, cspec, 1)
+            _native.proper_coadd_accum32_tile(a_num.view(np.float32), a_den, cspec.view(np.float32), t, wn, wf)
+
+    batch = []
+    for j in frames:
+        p, F = meas[j]
+        fr = aligned[j]
+        if copy_in or not fr.flags.c_contiguous:
+            slot = len(batch)
+            if frbuf[slot] is None:
+                frbuf[slot] = np.empty((H, W, C), np.float32)
+            np.copyto(frbuf[slot], fr)
+            fr = frbuf[slot]
+        sky, sig = _sky_noise(fr)
+        if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
+            nbad += 1
+            continue
+        # this frame's PSF spectrum rows: only the first R+1 and last R rows are non-zero
+        render_psf_into(p, psf)
+        q = len(batch) * (C + 1) + C
+        _pfft.r2c(psf[:R + 1], (1,), True, 0, psf_spec[0], 1)
+        _pfft.r2c(psf[PH - R:], (1,), True, 0, psf_spec[1, :R], 1)
+        _native.proper_coadd_scatter_tiles(psf_spec[0:1].view(np.float32), tiles_f, [q], 0)
+        _native.proper_coadd_scatter_tiles(psf_spec[1:2, :R].view(np.float32), tiles_f, [q], PH - R)
+        for c in range(C):
+            wf = F * F / sig[c] ** 2
+            s_w[c] += wf
+            s_w2f[c] += wf * wf / F
+            s_sky[c] += wf * sky[c] / F
+        batch.append((fr, F, sky, sig))
+        if len(batch) == B:
+            flush(batch)
+            batch = []
+    if batch:
+        flush(batch)
+    num = a_num.transpose(0, 2, 1, 3).reshape(C, PH, NT * CB)[:, :, :NF]
+    den = a_den.transpose(0, 2, 1, 3).reshape(C, PH, NT * CB)[:, :, :NF]
+    return num, den, s_w, s_w2f, s_sky, nbad, nrep
+
+
+def _sky_noise(fr: np.ndarray):
+    """(sky, noise) per channel of an (H, W, C) frame: ``_sky`` / ``_noise`` per channel, or
+    the bit-identical native kernel (numpy's ~8 temporaries per channel were ~40 ms of a
+    ~108 ms frame in the combine pass)."""
+    if (_native is not None and hasattr(_native, 'frame_sky_noise')
+            and fr.dtype == np.float32 and fr.ndim == 3 and fr.flags.c_contiguous):
+        sky, sig = _native.frame_sky_noise(fr)
+        return np.array(sky), np.array(sig)
+    C = fr.shape[-1]
+    return (np.array([_sky(fr[..., c]) for c in range(C)]),
+            np.array([_noise(fr[..., c]) for c in range(C)]))
+
+
+class FrameMeasurer:
+    """Per-frame PSF / flux / sky / noise measurement on fixed PSF stars, so that it can
+    run inside the alignment loop while each freshly warped frame is still in memory
+    (re-reading the aligned stack for it cost 22 s on a 531-frame session whose aligned
+    stack had gone to disk). Stars come from one aligned frame -- the brightest isolated
+    ones are plenty -- and transparency is relative to the median frame, so nothing here
+    needs the finished stack."""
+
+    def __init__(self, stars: np.ndarray, p0):
+        self.stars = stars
+        self.p0 = p0
+
+    @classmethod
+    def from_frame(cls, frame: np.ndarray, fwhm: float) -> Optional["FrameMeasurer"]:
+        fr = np.asarray(frame, np.float32)
+        lum = (0.299 * fr[..., 0] + 0.587 * fr[..., 1] + 0.114 * fr[..., 2]) if fr.shape[-1] == 3 else fr[..., 0]
+        stars = select_psf_stars(lum, fwhm)
+        p0, _ = fit_psf(lum, stars)
+        return None if p0 is None else cls(stars, p0)
+
+    def measure(self, frame):
+        """(psf params, star fluxes) -- star stamps only, a few MB of a frame. Sky and noise
+        need the whole frame and are measured in the combine pass, which reads it anyway
+        (on a 531-frame session whose aligned stack was on disk, the strided reads they
+        made here cost more than the PSF fits)."""
+        C = frame.shape[-1]
+        p, flux = fit_psf(frame if C == 3 else frame[..., 0], self.stars, p0=self.p0)
+        if p is None:
+            return None
+        return p, flux
+
+
 def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
                  workers: Optional[int] = None, verbose: bool = True,
-                 stats: Optional[dict] = None) -> Optional[np.ndarray]:
+                 stats: Optional[dict] = None, premeasured=None) -> Optional[np.ndarray]:
     """Proper coadd of ``aligned`` (N, H, W, C) float32 onto ``reference``'s grid.
 
     ``reference`` is the normal stack of the same frames (rejection reference and PSF
-    star positions). Returns float32 (H, W, C), or None when the PSF could not be
-    measured (the caller keeps the normal stack)."""
+    star positions). ``premeasured`` = (FrameMeasurer, [measure() result per frame])
+    skips the measuring pass (done during alignment). Returns float32 (H, W, C), or
+    None when the PSF could not be measured (the caller keeps the normal stack)."""
     if not HAS_SCIPY:
         return None
     t0 = time.time()
     N, H, W, C = aligned.shape
     ref = np.asarray(reference, np.float32)
     ref_lum = (0.299 * ref[..., 0] + 0.587 * ref[..., 1] + 0.114 * ref[..., 2]) if C == 3 else ref[..., 0]
-    stars = select_psf_stars(ref_lum, fwhm)
-    p_ref, flux_ref = fit_psf(ref_lum, stars)
-    if p_ref is None:
-        _log.info("proper coadd: PSF fit on the reference stack failed")
-        return None
+    if premeasured is not None:
+        measurer, raw = premeasured
+        stars = measurer.stars
+        _, flux_ref = fit_psf(ref_lum, stars, p0=measurer.p0)
+        if flux_ref is None:
+            flux_ref = np.full(len(stars), np.nan)
+    else:
+        stars = select_psf_stars(ref_lum, fwhm)
+        p_ref, flux_ref = fit_psf(ref_lum, stars)
+        if p_ref is None:
+            _log.info("proper coadd: PSF fit on the reference stack failed")
+            return None
     ref_sky = np.array([_sky(ref[..., c]) for c in range(C)])
 
     # --- per-frame measurements ------------------------------------------------
     def measure(j):
-        fr = aligned[j]                                  # a view: only stamps and samples are read
-        p, flux = fit_psf(fr if C == 3 else fr[..., 0], stars, p0=p_ref)
-        if p is None:
-            return None
-        sky = np.array([_sky(fr[..., c]) for c in range(C)])
-        sig = np.array([_noise(fr[..., c]) for c in range(C)])
-        return p, flux, sky, sig
+        return FrameMeasurer(stars, p_ref).measure(aligned[j])   # stamps and samples only
 
-    nw = workers or 8
-    with ThreadPoolExecutor(max_workers=nw) as ex:
-        raw = list(ex.map(measure, range(N)))
+    # 2 threads: the fit is ~6 ms of small-array numpy/scipy calls per frame and holds
+    # the GIL most of the time -- 8 threads took 9.8 ms per frame, 2 take 5.4 (532-frame
+    # session: 8.9 -> ~3 s). Results do not depend on the thread count (ex.map keeps order).
+    nw = workers or 2
+    if premeasured is None:
+        with ThreadPoolExecutor(max_workers=nw) as ex:
+            raw = list(ex.map(measure, range(N)))
     # Transparency from the frames' own fits: each star's flux over its median across
     # frames, median over stars. Not against the reference stack's fit -- that stack
     # blends frames of different seeing, is no Moffat, and its model flux was biased
     # by ~2% (synthetic field), which went straight into the output's flux scale. The
     # output is therefore on the median frame's scale.
-    fit_ok = [j for j, m in enumerate(raw) if m is not None and np.all(np.isfinite(m[3]))
-              and np.all(m[3] > 0)]
+    fit_ok = [j for j, m in enumerate(raw) if m is not None]
     meas = [None] * N
     if len(fit_ok) >= 3:
         FL = np.array([raw[j][1] for j in fit_ok])                 # (frames, stars)
@@ -300,7 +488,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
         for i, j in enumerate(fit_ok):
             ok = np.isfinite(FL[i]) & (FL[i] > 0) & (norm > 0)
             if ok.sum() >= 5:
-                meas[j] = (raw[j][0], float(np.median(FL[i, ok] / norm[ok])), raw[j][2], raw[j][3])
+                meas[j] = (raw[j][0], float(np.median(FL[i, ok] / norm[ok])))
         # the reference stack only feeds the outlier test: map it onto that scale
         okr = (flux_ref > 0) & (norm > 0) & np.isfinite(norm)
         ref_to_frame = float(np.median(norm[okr] / flux_ref[okr])) if okr.sum() >= 5 else 1.0
@@ -326,42 +514,85 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     wsum = np.zeros(C)
     w2_over_f = np.zeros(C)     # for the Poisson factor: sum w_j^2 / F_j
     sky_acc = np.zeros(C)
-    n_rep = 0
     ref_sig = np.ascontiguousarray(np.stack([(ref[..., c] - np.float32(ref_sky[c]))
                                             * np.float32(ref_to_frame) for c in range(C)]))
-    # planes 0..C-1: the frame's channels, zero-padded; plane C: its PSF (FFT origin
-    # at [0, 0]). One batched transform per frame.
-    planes = np.zeros((C + 1, PH, PW), np.float32)
     native = _native_ok(aligned)
-    # one transform per thread: pocketfft's own `workers` did not parallelise these
-    # (4 planes 144 ms with any setting; 4 threads 47 ms)
-    fft_pool = ThreadPoolExecutor(max_workers=C + 1)
-    t1 = time.time()
-    for j in use:
-        p, F, sky, sig = meas[j]
-        fr = np.asarray(aligned[j])
-        render_psf_into(p, planes[C])
-        sky32 = [float(np.float32(v)) for v in sky]
-        sig2 = [float(np.float32(v ** 2)) for v in sig]
-        if native:
-            n_rep += _native.proper_coadd_prep(fr, ref_sig, planes[:C], float(np.float32(F)), sky32,
-                                               sig2, _REJECT_K, _SIGNAL_FRAC, _PAD)
-        else:
-            n_rep += _prep_numpy(fr, ref_sig, planes[:C], F, sky, sig, H, W)
-        spec = list(fft_pool.map(lambda i: sfft.rfft2(planes[i], workers=1), range(C + 1)))
-        Ph = spec[C]
-        for c in range(C):
-            wn, wf = F / sig[c] ** 2, F * F / sig[c] ** 2
+    # Each thread takes every k-th frame (in order) and does the whole job for it --
+    # sky/noise, reject + sky-subtract into zero-padded planes (0..C-1 the channels,
+    # C the PSF with its centre on the FFT origin), one FFT per plane -- and adds it into
+    # its own float32 accumulators; the per-thread sums are added in a fixed order at
+    # the end, so the result does not depend on scheduling. One shared float64
+    # accumulator on the main thread used to serialise ~18 ms of every frame.
+    import threading
+    n_thr = max(2, min(6, (os.cpu_count() or 8) // 2, len(use)))
+    lock = threading.Lock()
+    n_rep_box = [0]
+    acc32 = native and hasattr(_native, 'proper_coadd_accum32')
+
+    def worker(k):
+        planes = np.zeros((C + 1, PH, PW), np.float32)
+        a_num = np.zeros((C,) + fshape, np.complex64 if acc32 else np.complex128)
+        a_den = np.zeros((C,) + fshape, np.float32 if acc32 else np.float64)
+        s_w = np.zeros(C); s_w2f = np.zeros(C); s_sky = np.zeros(C)
+        nbad = nrep = 0
+        for j in use[k::n_thr]:
+            p, F = meas[j]
+            # one sequential read into RAM: the strided sky/noise samples below touched
+            # nearly every page of a disk-backed aligned frame once per channel (34 s of
+            # a 531-frame session's 37 s proper coadd)
+            fr = np.array(aligned[j])
+            sky, sig = _sky_noise(fr)
+            if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
+                nbad += 1
+                continue
+            render_psf_into(p, planes[C])
             if native:
-                _native.proper_coadd_accum(num[c].view(np.float64), den[c], spec[c].view(np.float32),
-                                           Ph.view(np.float32), wn, wf)
+                nrep += int(_native.proper_coadd_prep(fr, ref_sig, planes[:C], float(np.float32(F)),
+                                                      [float(np.float32(v)) for v in sky],
+                                                      [float(np.float32(v ** 2)) for v in sig],
+                                                      _REJECT_K, _SIGNAL_FRAC, _PAD))
             else:
-                num[c] += wn * (spec[c] * np.conj(Ph))
-                den[c] += wf * (Ph.real.astype(np.float64) ** 2 + Ph.imag.astype(np.float64) ** 2)
-            wsum[c] += wf
-            w2_over_f[c] += wf * wf / F
-            sky_acc[c] += wf * sky[c] / F
-    fft_pool.shutdown()
+                nrep += _prep_numpy(fr, ref_sig, planes[:C], F, sky, sig, H, W)
+            spec = [sfft.rfft2(planes[i], workers=1) for i in range(C + 1)]
+            Ph = spec[C]
+            for c in range(C):
+                wn, wf = F / sig[c] ** 2, F * F / sig[c] ** 2
+                if acc32:
+                    _native.proper_coadd_accum32(a_num[c].view(np.float32), a_den[c], spec[c].view(np.float32),
+                                                 Ph.view(np.float32), wn, wf)
+                elif native:
+                    _native.proper_coadd_accum(a_num[c].view(np.float64), a_den[c], spec[c].view(np.float32),
+                                               Ph.view(np.float32), wn, wf)
+                else:
+                    a_num[c] += wn * (spec[c] * np.conj(Ph))
+                    a_den[c] += wf * (Ph.real.astype(np.float64) ** 2 + Ph.imag.astype(np.float64) ** 2)
+                s_w[c] += wf
+                s_w2f[c] += wf * wf / F
+                s_sky[c] += wf * sky[c] / F
+        del planes
+        with lock:
+            n_rep_box[0] += nrep
+        return a_num, a_den, s_w, s_w2f, s_sky, nbad
+
+    def worker_tiled(k):
+        *part, nrep = _combine_tiled(aligned, use[k::n_thr], meas, ref_sig, PH, PW)
+        with lock:
+            n_rep_box[0] += nrep
+        return tuple(part)
+
+    t1 = time.time()
+    with ThreadPoolExecutor(max_workers=n_thr) as ex:
+        parts = list(ex.map(worker_tiled if acc32 and _tiled_ok(aligned) else worker, range(n_thr)))
+    n_bad_noise = 0
+    for a_num, a_den, s_w, s_w2f, s_sky, nbad in parts:          # fixed order: deterministic
+        num += a_num
+        den += a_den
+        wsum += s_w
+        w2_over_f += s_w2f
+        sky_acc += s_sky
+        n_bad_noise += nbad
+    del parts
+    n_rep = n_rep_box[0]
     out = np.empty((H, W, C), np.float32)
     for c in range(C):
         R = num[c] / np.sqrt(np.maximum(den[c], 1e-300))
@@ -375,5 +606,5 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
         # own Poisson coefficient: at zero frequency the output is sum w_j (M_j / F_j) /
         # sum w_j with var(M_j / F_j) = f k / F_j, so var = f k * sum(w^2 / F) / (sum w)^2
         stats['poisson_factor'] = (w2_over_f / np.maximum(wsum, 1e-300) ** 2).tolist()
-        stats['frames'] = len(use)
+        stats['frames'] = len(use) - n_bad_noise
     return out

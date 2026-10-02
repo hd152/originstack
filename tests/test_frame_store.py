@@ -42,7 +42,7 @@ def test_auto_aligned_prefers_ram_when_it_fits(mem, disk):
 
 
 def test_auto_respects_the_memory_reserve(mem, disk):
-    mem['avail'] = 20_000.0                   # 30% of 64 GB reserve = 19.2 GB
+    mem['avail'] = 13_000.0                   # 20% of 64 GB reserve = 12.8 GB
     s = fs.FrameStore('auto')
     a, spec = s.create('aligned_', 'float32', (1, 1000, 1000, 1), reserve_mb=1_000.0)
     assert _placed(s, 'aligned_') == 'disk' and os.path.exists(spec)
