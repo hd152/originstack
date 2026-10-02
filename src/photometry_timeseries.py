@@ -28,7 +28,8 @@ from typing import Optional
 
 import numpy as np
 
-from src.photometry import _GAIA_BAND_FOR_CHANNEL, _airmass, _read_gain, match_gaia_field
+from src.noise_model import temporal_noise
+from src.photometry import _GAIA_BAND_FOR_CHANNEL, _airmass, _read_gain, match_gaia_field, poisson_coefficients
 from src.photometry_core import _id_str, aperture_photometry_batch, row_nanmax
 from src.utils import header_get_first, obs_time_utc_iso
 
@@ -166,14 +167,21 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
     n_star = len(gm.x)
     gaia_mag = {c: getattr(gm, _GAIA_BAND_FOR_CHANNEL[c.upper()]) for c in _CH}
     gain = _read_gain(header, args)
+    # single (aligned) frames: no stack factor
+    pcoef, pcoef_src = poisson_coefficients(header, args, stacked=False)
 
     flux = np.full((n_frames, n_star, 3), np.nan)
-    ferr = np.full((n_frames, n_star, 3), np.nan)
     fpeak = np.full((n_frames, n_star), np.nan)
     mjd = np.full(n_frames, np.nan)
     airmass = np.full(n_frames, np.nan)
     fnames = []
     obs_ceiling = 0.0     # max pixel value actually seen across the subs
+    area_all = np.full(n_star, np.nan)
+    sig_ann = np.full((n_frames, n_star, 3), np.nan)
+    sig_t = np.full((n_frames, 3), np.nan)        # per-pixel temporal noise of each frame
+    corr_r = []                                    # block-sum correlation factor, per frame pair
+    blk = max(4, int(round(np.sqrt(np.pi) * float(gm.ap_radius))))   # block of the aperture's area
+    prev = None
 
     for j in range(n_frames):
         idx = final_indices[j]
@@ -188,16 +196,46 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
         f, _sky, sig, pk, area = aperture_photometry_batch(
             sub, gm.x, gm.y, float(gm.ap_radius), gm.r_in, gm.r_out)
         flux[j] = f
-        var = area[:, None] * (sig ** 2)
-        if gain is not None:
-            var = var + np.clip(f, 0.0, None) / gain
-        ferr[j] = np.sqrt(np.clip(var, 1e-12, None))
+        area_all = area
+        sig_ann[j] = sig
+        if prev is not None:
+            st, r = temporal_noise(sub, prev, (blk,))
+            r = r.get(blk)
+            sig_t[j] = st
+            if j == 1:
+                sig_t[0] = st
+            if r is not None:
+                corr_r.append(r)
+        prev = sub
         fpeak[j] = row_nanmax(pk, np.zeros(n_star))
         iso = _frame_time_iso(final[j], session_info, j, n_frames)
         mjd[j] = _to_mjd(iso)
         airmass[j] = _airmass(header, session_info, gm.field_ra, gm.field_dec,
                               when=iso) or np.nan
         fnames.append(os.path.basename(getattr(final[j], "path", f"frame{j}")))
+
+    # Errors. The sky term is the frame's *temporal* per-pixel noise (consecutive aligned
+    # frames differenced, so static structure -- faint sources, background ripples --
+    # cancels) times the aperture area times R, the correlated-noise factor of an
+    # aperture-sized block sum: debayering and the registration warp correlate
+    # neighbouring pixels, so area x sigma_pixel^2 understated the noise of the sum (a
+    # real Sunflower series: constant faint stars at reduced chi^2 4-5). Plus the Poisson
+    # term, f x k with k from the session's own noise model.
+    R = np.nanmedian(np.array(corr_r), axis=0) if corr_r else np.ones(3)
+    R = np.where(np.isfinite(R) & (R > 0), R, 1.0)
+    from src.utils import safe_print
+    safe_print(f"    errors: temporal sky noise x correlated-noise factor R {R[0]:.2f}/{R[1]:.2f}/{R[2]:.2f} "
+               f"(R/G/B, {blk}x{blk} blocks)"
+               + ("" if pcoef is None else f" + Poisson term ({pcoef_src})"))
+    use_t = np.isfinite(sig_t).all(axis=1)
+    sky_var = np.where(use_t[:, None, None], (sig_t ** 2 * R)[:, None, :], sig_ann ** 2)
+    # the annulus sky level subtracted from the aperture carries the same correlated
+    # noise: var(sum - area * mean_annulus) = area sigma^2 R (1 + area / n_annulus)
+    n_ann = np.pi * (float(gm.r_out) ** 2 - float(gm.r_in) ** 2)
+    var = area_all[None, :, None] * sky_var * (1.0 + area_all[None, :, None] / max(n_ann, 1.0))
+    if pcoef is not None:
+        var = var + np.clip(flux, 0.0, None) * pcoef[None, None, :]
+    ferr = np.sqrt(np.clip(var, 1e-12, None))
 
     # Instrumental magnitudes.
     with np.errstate(invalid="ignore", divide="ignore"):
