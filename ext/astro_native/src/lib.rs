@@ -9059,6 +9059,60 @@ unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,
     rcd_core_impl!(src, h, w, scale, r_off, b_off)
 }
 
+/// Per-channel sky and noise of one aligned (H, W, C) frame for the proper coadd,
+/// bit-identical to `proper_coadd._sky` / `_noise`:
+///   sky   = median of the finite samples of ch[::4, ::4]
+///   noise = f64(1.4826f32 * MAD(d)) / sqrt(2), d = finite (row[x+4] - row[x]) over
+///           rows ch[::4]; NaN when fewer than 1000 differences
+/// Medians are exact order statistics (even count: (a + b) / 2 in f32, as numpy).
+/// Gathers its own strided samples: numpy built ~8 temporaries per channel
+/// (~40 ms of the coadd's ~108 ms per frame).
+#[pyfunction]
+fn frame_sky_noise<'py>(py: Python<'py>, frame: PyReadonlyArray3<'py, f32>) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    let fa = frame.as_array();
+    let (h, w, c) = (fa.shape()[0], fa.shape()[1], fa.shape()[2]);
+    let fr = fa.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("frame must be contiguous"))?;
+    let res: Vec<(f64, f64)> = py.detach(|| {
+        (0..c).into_par_iter().map(|ch| {
+            let mut s: Vec<f32> = Vec::with_capacity(h.div_ceil(4) * w.div_ceil(4));
+            for y in (0..h).step_by(4) {
+                let row = &fr[y * w * c..(y + 1) * w * c];
+                for x in (0..w).step_by(4) {
+                    let v = row[x * c + ch];
+                    if v.is_finite() {
+                        s.push(v);
+                    }
+                }
+            }
+            let sky = median_inplace(&mut s) as f64;
+            let mut d: Vec<f32> = Vec::with_capacity(h.div_ceil(4) * w.saturating_sub(4));
+            if w > 4 {
+                for y in (0..h).step_by(4) {
+                    let row = &fr[y * w * c..(y + 1) * w * c];
+                    for x in 0..w - 4 {
+                        let v = row[(x + 4) * c + ch] - row[x * c + ch];
+                        if v.is_finite() {
+                            d.push(v);
+                        }
+                    }
+                }
+            }
+            let noise = if d.len() < 1000 {
+                f64::NAN
+            } else {
+                let m = median_inplace(&mut d);
+                for v in d.iter_mut() {
+                    *v = (*v - m).abs();
+                }
+                let mad = median_inplace(&mut d);
+                (1.4826f32 * mad) as f64 / 2f64.sqrt()
+            };
+            (sky, noise)
+        }).collect()
+    });
+    Ok((res.iter().map(|r| r.0).collect(), res.iter().map(|r| r.1).collect()))
+}
+
 /// Proper coadd (src/proper_coadd.py), per frame: reject each sample against the
 /// normal stack on this frame's flux scale and write the sky-subtracted frame into
 /// each channel's zero-padded FFT buffer -- one pass instead of ~10 numpy passes
@@ -9385,6 +9439,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum32, m)?)?;
+    m.add_function(wrap_pyfunction!(frame_sky_noise, m)?)?;
     m.add_function(wrap_pyfunction!(validate_frame_stats, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;

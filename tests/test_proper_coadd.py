@@ -146,3 +146,25 @@ def test_combine_is_deterministic(field):
     a = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False)
     b = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False)
     np.testing.assert_array_equal(a, b)
+
+
+def test_frame_sky_noise_native_matches_numpy():
+    """astro_native.frame_sky_noise == _sky / _noise per channel, bit for bit."""
+    an = pytest.importorskip("astro_native")
+    if not hasattr(an, "frame_sky_noise"):
+        pytest.skip("astro_native without frame_sky_noise")
+    from src import proper_coadd as pc
+    rng = np.random.default_rng(3)
+    cases = [rng.normal(1000, 30, (203, 417, 3)).astype(np.float32),
+             np.round(rng.normal(50, 4, (64, 90, 3))).astype(np.float32),     # ties
+             rng.normal(0, 1, (40, 50, 3)).astype(np.float32)]                # < 1000 diffs
+    fr = rng.normal(500, 10, (120, 160, 3)).astype(np.float32)
+    fr[rng.random(fr.shape) < 0.05] = np.nan
+    fr[:8, :, 1] = np.inf
+    cases.append(fr)
+    for fr in cases:
+        sky, sig = an.frame_sky_noise(fr)
+        for c in range(3):
+            ref_sky, ref_sig = pc._sky(fr[..., c]), pc._noise(fr[..., c])
+            assert sky[c] == ref_sky
+            assert (sig[c] == ref_sig) or (np.isnan(sig[c]) and np.isnan(ref_sig))

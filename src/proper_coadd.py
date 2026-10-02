@@ -265,6 +265,19 @@ def _noise(ch: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
 
 
+def _sky_noise(fr: np.ndarray):
+    """(sky, noise) per channel of an (H, W, C) frame: ``_sky`` / ``_noise`` per channel, or
+    the bit-identical native kernel (numpy's ~8 temporaries per channel were ~40 ms of a
+    ~108 ms frame in the combine pass)."""
+    if (_native is not None and hasattr(_native, 'frame_sky_noise')
+            and fr.dtype == np.float32 and fr.ndim == 3 and fr.flags.c_contiguous):
+        sky, sig = _native.frame_sky_noise(fr)
+        return np.array(sky), np.array(sig)
+    C = fr.shape[-1]
+    return (np.array([_sky(fr[..., c]) for c in range(C)]),
+            np.array([_noise(fr[..., c]) for c in range(C)]))
+
+
 class FrameMeasurer:
     """Per-frame PSF / flux / sky / noise measurement on fixed PSF stars, so that it can
     run inside the alignment loop while each freshly warped frame is still in memory
@@ -400,8 +413,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
             # nearly every page of a disk-backed aligned frame once per channel (34 s of
             # a 531-frame session's 37 s proper coadd)
             fr = np.array(aligned[j])
-            sky = np.array([_sky(fr[..., c]) for c in range(C)])
-            sig = np.array([_noise(fr[..., c]) for c in range(C)])
+            sky, sig = _sky_noise(fr)
             if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
                 nbad += 1
                 continue
