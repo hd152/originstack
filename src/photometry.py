@@ -21,9 +21,9 @@ photometry catalogue:
 Scope for this first cut: single stacked frame -> one catalogue + one
 zero point per channel. No per-sub time series / light curves (that needs
 a per-frame photometry pass the streaming stacker does not currently keep
-frames around for) and no photon-transfer gain estimation from the
-calibration frames -- the Poisson error term is only included when the
-header carries a real GAIN/EGAIN (e-/ADU). Everything here is derivable
+frames around for). The Poisson error term comes from ``poisson_coefficients``:
+--photometry-gain, else the session's own measured noise model, else a PTC or
+FITS gain, scaled by the stack's Poisson factor. Everything here is derivable
 from the lights + info.json + a Gaia query; absolute all-sky accuracy is
 bounded by the OSC channel<->passband mismatch and the single-airmass fit
 (extinction k defaults to nominal per-band values, override with
@@ -304,6 +304,49 @@ def _read_gain(header, args=None):
     return hdr_gain if (hdr_gain is not None and hdr_gain > 0) else None
 
 
+def poisson_coefficients(header, args=None, stacked: bool = True):
+    """Per-channel (R, G, B) coefficient c such that a source of flux f (in this image's
+    ADU) has shot-noise variance ``f * c``; plus a label for where it came from, or
+    (None, None) when nothing is known.
+
+    In order: ``--photometry-gain``; the noise model measured on this session's own
+    frames (``args._noise_model_k``, src/noise_model.py -- in the processed image's
+    units, white balance and flat included); a PTC gain from bias+flat pairs; the FITS
+    gain. A gain g gives c = 1 / g. For a stack (``stacked``) c is multiplied by the
+    stack's Poisson factor -- sum w^2 / (sum w)^2 for a weighted mean, the exact value
+    for proper coadd -- recorded by the stacking phase as ``args._stack_poisson_factor``,
+    else 1 / NFRAMES: the shot noise of an average of N frames is N times smaller in
+    variance, which ``f / gain`` alone left out (158x too large on a 158-frame stack).
+    """
+    c, src = None, None
+    override = getattr(args, "photometry_gain", None) if args is not None else None
+    try:
+        if override is not None and float(override) > 0:
+            c, src = np.full(3, 1.0 / float(override)), "--photometry-gain"
+    except (TypeError, ValueError):
+        pass
+    if c is None and args is not None and getattr(args, "_noise_model_k", None):
+        k = np.asarray(args._noise_model_k, dtype=float)
+        if k.shape == (3,) and np.all(np.isfinite(k) & (k > 0)):
+            c, src = k, "noise model (same-colour pixel pairs)"
+    if c is None:
+        g = _read_gain(header, args)
+        if g:
+            c = np.full(3, 1.0 / g)
+            src = "PTC (bias+flat pairs)" if getattr(args, "_ptc_gain_e_per_adu", None) else "FITS gain"
+    if c is None:
+        return None, None
+    if stacked:
+        pf = getattr(args, "_stack_poisson_factor", None) if args is not None else None
+        if pf is not None and len(pf) == 3:
+            c = c * np.asarray(pf, dtype=float)
+        else:
+            n = header_get_first(header, ("NFRAMES",), cast=float) if header is not None else None
+            if n and n > 1:
+                c = c / n
+    return c, src
+
+
 def _photometer_matched(gm, img_rgb, header, args, session_info):
     """Aperture-photometer a matched Gaia field on one image and fit the
     per-channel zero point (+ optional colour term). Returns a dict with
@@ -312,6 +355,11 @@ def _photometer_matched(gm, img_rgb, header, args, session_info):
     airmass = _airmass(header, session_info, gm.field_ra, gm.field_dec)
     k, X = _resolve_extinction(args, airmass)
     gain = _read_gain(header, args)
+    pcoef, pcoef_src = poisson_coefficients(header, args, stacked=True)
+    from src.noise_model import corr_factor_at
+    corr = corr_factor_at(getattr(args, "_noise_corr_R", None) or {}, gm.ap_radius) if args is not None else None
+    corr = np.ones(3) if corr is None else corr
+    n_ann = max(np.pi * (float(gm.r_out) ** 2 - float(gm.r_in) ** 2), 1.0)
 
     flux, sky, sky_sig, ap_peak, area = aperture_photometry_batch(
         img_rgb, gm.x, gm.y, float(gm.ap_radius), gm.r_in, gm.r_out)
@@ -341,9 +389,13 @@ def _photometer_matched(gm, img_rgb, header, args, session_info):
         ok = np.isfinite(f) & (f > 0)
         mi = np.where(ok, -2.5 * np.log10(np.where(ok, f, 1.0)), np.nan)
         m_inst[ch] = mi
-        var = area * (sky_sig[:, ci] ** 2)
-        if gain is not None:
-            var = var + np.clip(f, 0, None) / gain
+        # correlated noise: debayering and registration correlate neighbouring pixels, so
+        # an aperture sum (and the annulus mean subtracted from it) is noisier than
+        # area x per-pixel variance by R (src/noise_model.py; ~3 in G, ~5 in R/B on
+        # Origin data). Without it constant stars in a light curve read reduced chi^2 ~4.
+        var = area * (sky_sig[:, ci] ** 2) * corr[ci] * (1.0 + area / n_ann)
+        if pcoef is not None:
+            var = var + np.clip(f, 0, None) * pcoef[ci]
         se = np.sqrt(np.clip(var, 1e-12, None))
         s = np.where(ok, f / se, np.nan)
         snr[ch] = s
@@ -396,6 +448,9 @@ def _photometer_matched(gm, img_rgb, header, args, session_info):
     return {
         "rows": rows, "fit": fit, "k": k, "X": X, "airmass": airmass,
         "ref_color": ref_color, "fit_ct": fit_ct, "gain": gain,
+        "poisson_coef": None if pcoef is None else [float(v) for v in pcoef],
+        "noise_corr_R": [float(v) for v in corr],
+        "poisson_source": pcoef_src,
     }
 
 
@@ -447,6 +502,9 @@ def run_photometry(linear_img: np.ndarray, header, args, session_info,
         "color_terms_fitted": any(v["ct_fitted"] for v in phot["fit"].values()),
         "ref_color": round(phot["ref_color"], 4),
         "gain_e_per_adu": round(phot["gain"], 4) if phot["gain"] else None,
+        "poisson_coef": phot.get("poisson_coef"),
+        "noise_corr_R": phot.get("noise_corr_R"),
+        "poisson_source": phot.get("poisson_source"),
         "zeropoints": {c: {"zp": round(v["zp"], 4),
                            "zp_err": round(v["zp_err"], 4),
                            "ct": round(v["ct"], 4),
@@ -467,9 +525,15 @@ def format_photometry_summary(summary: dict) -> str:
     else:
         lines.append("    airmass: unknown (no site GPS / timestamp) -- "
                      "extinction folded into the zero point")
-    if summary.get("gain_e_per_adu"):
-        lines.append(f"    gain {summary['gain_e_per_adu']} e-/ADU -> Poisson "
-                     "term included in per-star errors")
+    if summary.get("poisson_coef"):
+        pc = summary["poisson_coef"]
+        lines.append(f"    Poisson term from {summary.get('poisson_source')}: variance = flux x "
+                     f"{pc[0]:.3g}/{pc[1]:.3g}/{pc[2]:.3g} (R/G/B)")
+    else:
+        lines.append("    no gain known -- per-star errors are sky noise only")
+    if summary.get("noise_corr_R") and any(abs(v - 1) > 1e-6 for v in summary["noise_corr_R"]):
+        r = summary["noise_corr_R"]
+        lines.append(f"    sky term x correlated-noise factor {r[0]:.2f}/{r[1]:.2f}/{r[2]:.2f} (R/G/B)")
     if summary.get("color_terms_requested") and not summary.get("color_terms_fitted"):
         lines.append("    colour terms requested but too few stars to fit a "
                      "slope -- fell back to a plain zero-point median")

@@ -2353,6 +2353,12 @@ def run_stacking_phase(
         else:
             stacked = median_combine(mem_aligned, verbose=args.verbose)
 
+        # Poisson factor of the stack (photometry's shot-noise term): for a weighted
+        # mean, var = f k * sum w^2 / (sum w)^2 with k the frames' own coefficient.
+        # Proper coadd below replaces it with its own exact value.
+        _w = np.asarray(weights, np.float64) if weights is not None else np.ones(n_final)
+        args._stack_poisson_factor = [float((_w ** 2).sum() / max(_w.sum(), 1e-300) ** 2)] * C
+
         # --proper-coadd: replace the stack with the Zackay-Ofek proper coadd of the
         # same aligned frames (src/proper_coadd.py); the stack above is its outlier
         # reference and the fallback.
@@ -2362,11 +2368,14 @@ def run_stacking_phase(
                 _fw = [float(f.metrics.get('fwhm', 0) or 0) for f in final if f.metrics]
                 _fw = [x for x in _fw if x > 0]
                 _t_pc = time.time()
+                _pc_stats = {}
                 _pc = proper_coadd(mem_aligned, stacked,
                                    fwhm=float(np.median(_fw)) if _fw else 5.0,
-                                   verbose=True)
+                                   verbose=True, stats=_pc_stats)
                 if _pc is not None:
                     stacked = _pc
+                    if _pc_stats.get('poisson_factor'):
+                        args._stack_poisson_factor = list(_pc_stats['poisson_factor'])
                     safe_print(f"  Proper coadd ({format_time(time.time() - _t_pc)})")
                 else:
                     safe_print("  Proper coadd: PSF could not be measured -- keeping the normal stack")

@@ -253,7 +253,8 @@ def _noise(ch: np.ndarray) -> float:
 
 
 def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
-                 workers: Optional[int] = None, verbose: bool = True) -> Optional[np.ndarray]:
+                 workers: Optional[int] = None, verbose: bool = True,
+                 stats: Optional[dict] = None) -> Optional[np.ndarray]:
     """Proper coadd of ``aligned`` (N, H, W, C) float32 onto ``reference``'s grid.
 
     ``reference`` is the normal stack of the same frames (rejection reference and PSF
@@ -323,6 +324,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     num = np.zeros((C,) + fshape, np.complex128)
     den = np.zeros((C,) + fshape, np.float64)
     wsum = np.zeros(C)
+    w2_over_f = np.zeros(C)     # for the Poisson factor: sum w_j^2 / F_j
     sky_acc = np.zeros(C)
     n_rep = 0
     ref_sig = np.ascontiguousarray(np.stack([(ref[..., c] - np.float32(ref_sky[c]))
@@ -357,6 +359,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
                 num[c] += wn * (spec[c] * np.conj(Ph))
                 den[c] += wf * (Ph.real.astype(np.float64) ** 2 + Ph.imag.astype(np.float64) ** 2)
             wsum[c] += wf
+            w2_over_f[c] += wf * wf / F
             sky_acc[c] += wf * sky[c] / F
     fft_pool.shutdown()
     out = np.empty((H, W, C), np.float32)
@@ -367,4 +370,10 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     if verbose:
         safe_print(f"    proper coadd: combined in {time.time() - t1:.1f}s, "
               f"{n_rep / max(len(use) * H * W * C, 1) * 100:.3f}% of samples replaced as outliers")
+    if stats is not None:
+        # Poisson variance of a source of flux f in the output, per unit of the frames'
+        # own Poisson coefficient: at zero frequency the output is sum w_j (M_j / F_j) /
+        # sum w_j with var(M_j / F_j) = f k / F_j, so var = f k * sum(w^2 / F) / (sum w)^2
+        stats['poisson_factor'] = (w2_over_f / np.maximum(wsum, 1e-300) ** 2).tolist()
+        stats['frames'] = len(use)
     return out

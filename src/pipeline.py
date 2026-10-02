@@ -925,6 +925,34 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # Phase 4's sky model, the output header) reads it.
             _settle_stack_wcs(args, lights, final, shifts, transforms, top, left, fits_stacked)
 
+            # Shot-noise model for photometry's error bars, measured on the processed
+            # frames while they are still in mem_rgb (src/noise_model.py): the FITS
+            # EGAIN of Origin data is ~5x off and the stack carries no gain at all.
+            if ((getattr(args, 'photometry', False) or getattr(args, 'photometry_timeseries', False))
+                    and getattr(args, '_session_bayer', None)
+                    and getattr(args, 'debayer_method', 'rcd') in ('rcd', 'malvar')):
+                try:
+                    from src.noise_model import format_noise_model, measure_noise_model
+                    _nm = measure_noise_model(mem_rgb, final_indices, args._session_bayer)
+                    if _nm is not None:
+                        args._noise_model_k = [float(v) for v in _nm['k']]
+                        safe_print(format_noise_model(_nm))
+                    # correlated-noise factor of aperture sums, for the stack's photometry
+                    # (the aligned frames are gone by then): two aligned middle frames
+                    if len(final_indices) >= 2:
+                        from src.noise_model import temporal_noise
+                        from src.registration import apply_transform as _at
+                        _m = len(final_indices) // 2
+                        _pair = [np.asarray(_at(np.asarray(mem_rgb[final_indices[i]], np.float32),
+                                                shift=shifts[i], transform=transforms[i],
+                                                crop=(top, bottom, left, right)), np.float32)
+                                 for i in (_m - 1, _m)]
+                        _, _rs = temporal_noise(_pair[0], _pair[1])
+                        if _rs:
+                            args._noise_corr_R = {int(b): [float(v) for v in r] for b, r in _rs.items()}
+                except Exception as _nme:
+                    _log.debug("noise model failed: %s", _nme)
+
             # Per-frame differential light curves (needs the registered frames
             # still in mem_rgb, so it runs here rather than in the post-output
             # section; uses the session info.json WCS).
