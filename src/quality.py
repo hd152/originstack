@@ -71,6 +71,13 @@ _SOURCES_DTYPE = np.dtype([
 ])
 
 
+try:
+    import astro_native as _native
+    _HAS_NATIVE = True
+except Exception:
+    _native = None
+    _HAS_NATIVE = False
+
 # Module-level imports for scipy — avoids repeated sys.modules lookups and
 # attribute resolution on every call to compute_quality_metrics.
 try:
@@ -198,6 +205,18 @@ def measure_fwhm(img: np.ndarray, star_positions: Optional[object], cutout_radiu
     return float(np.median(fwhms)) if fwhms else 0.0
 
 
+def _validate_native(img):
+    """(all finite, max, zero count, saturated count) from one native call, or None.
+    Same verdicts as the numpy passes (exact max and counts); float32 2-D frames only."""
+    if not (_HAS_NATIVE and hasattr(_native, 'validate_frame_stats') and isinstance(img, np.ndarray)
+            and img.dtype == np.float32 and img.ndim == 2):
+        return None
+    try:
+        return _native.validate_frame_stats(img)
+    except Exception:
+        return None
+
+
 def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional[str]]:
     """Validate image data for common issues. Returns (is_valid, error_message).
 
@@ -208,8 +227,9 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
       np.max traversal.
     - Zero boolean array computed once and reused for the fraction check.
     """
+    native = _validate_native(img)
     # One isfinite pass — NaN/Inf counts only paid for on the failure path.
-    if not np.isfinite(img).all():
+    if (not native[0]) if native is not None else (not np.isfinite(img).all()):
         nan_count = int(np.isnan(img).sum())
         inf_count = int(np.isinf(img).sum())
         return False, f"contains {nan_count} NaN and {inf_count} Inf values"
@@ -225,15 +245,17 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
         return False, f"flat image (std={img_std:.3f})"
 
     p01, p99 = np.percentile(sample, [1, 99])
-    max_val = float(np.max(img))
+    max_val = float(native[1]) if native is not None else float(np.max(img))
 
     if max_val > 0:
-        saturated_fraction = float(np.sum(img >= max_val * 0.999)) / img.size
+        n_sat = native[3] if native is not None else np.sum(img >= max_val * 0.999)
+        saturated_fraction = float(n_sat) / img.size
         if saturated_fraction > 0.95:
             return False, f"saturated ({saturated_fraction*100:.1f}% at max)"
 
     # count_nonzero avoids allocating a full boolean array.
-    zero_fraction = (img.size - np.count_nonzero(img)) / img.size
+    n_zero = native[2] if native is not None else img.size - np.count_nonzero(img)
+    zero_fraction = n_zero / img.size
     if zero_fraction > 0.5:
         return False, f"mostly zeros ({zero_fraction*100:.1f}%)"
 

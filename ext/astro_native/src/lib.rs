@@ -9056,6 +9056,54 @@ fn proper_coadd_accum32<'py>(
     Ok(())
 }
 
+/// `quality.validate_image_data`'s full-frame passes in two parallel sweeps instead of
+/// four numpy passes with full-size temporaries: (all finite, max, zero count,
+/// saturated count) with saturated = values >= `f32(max * 0.999)` (numpy compares the
+/// float32 frame with that Python float rounded to float32). The max and the counts
+/// are exact; when a value is not finite, the counts are not computed (the caller
+/// reports the NaN/Inf counts itself).
+#[pyfunction]
+fn validate_frame_stats<'py>(py: Python<'py>, img: PyReadonlyArray2<'py, f32>) -> PyResult<(bool, f32, u64, u64)> {
+    let a = img.as_array();
+    let w = a.shape()[1].max(1);
+    let owned: Vec<f32>;
+    let s: &[f32] = match a.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = a.iter().copied().collect();
+            &owned
+        }
+    };
+    Ok(py.detach(|| {
+        let (finite, mx, zeros) = s
+            .par_chunks(w)
+            .map(|row| {
+                let mut fin = true;
+                let mut m = f32::NEG_INFINITY;
+                let mut z = 0u64;
+                for &v in row {
+                    if !v.is_finite() {
+                        fin = false;
+                    }
+                    if v > m {
+                        m = v;
+                    }
+                    if v == 0.0 {
+                        z += 1;
+                    }
+                }
+                (fin, m, z)
+            })
+            .reduce(|| (true, f32::NEG_INFINITY, 0u64), |x, y| (x.0 && y.0, if x.1 > y.1 { x.1 } else { y.1 }, x.2 + y.2));
+        if !finite {
+            return (false, mx, zeros, 0u64);
+        }
+        let thr = (mx as f64 * 0.999) as f32;
+        let sat: u64 = s.par_chunks(w).map(|row| row.iter().filter(|&&v| v >= thr).count() as u64).sum();
+        (true, mx, zeros, sat)
+    }))
+}
+
 /// Linear cross-correlation `c[dy][dx] = sum_p ref[p + d] * img[p]` (zero outside
 /// the frame) for every lag |dy|, |dx| <= radius: the values a zero-padded FFT
 /// correlation has at those lags (src/registration.py::calculate_shift_pyramid_pref,
@@ -9174,6 +9222,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum32, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_frame_stats, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;

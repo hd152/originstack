@@ -1716,12 +1716,24 @@ def run_registration_phase(
             and pyramid_shifts is not None
             and len(final) >= 10):
         try:
-            ps_arr = np.array(pyramid_shifts, dtype=np.float64)
-            median_sy = float(np.median(ps_arr[:, 0]))
-            median_sx = float(np.median(ps_arr[:, 1]))
-            dists = np.sqrt((ps_arr[:, 0] - median_sy) ** 2 +
-                            (ps_arr[:, 1] - median_sx) ** 2)
-            best_j = int(np.argmin(dists))
+            # The middle of the session *in time*: on an alt-az mount field rotation and
+            # drift both grow with time, so the mid-session frame minimises the largest
+            # rotation and offset to every other frame -- which is what sets the common
+            # crop. The old rule (frame nearest the median *pyramid* shift) broke under
+            # rotation: translation-only shifts of frames rotated against the tentative
+            # reference are meaningless, and when better-measured star peaks moved the
+            # tentative reference to the session's end, the 'consensus' frame landed at an
+            # extreme and the crop shrank 18% on a 532-frame Sculptor session. Best
+            # quality within the middle 20% of the session.
+            from src.moving_objects import frame_times_min
+            t = frame_times_min(final)
+            span = float(t.max() - t.min()) if len(t) else 0.0
+            t_mid = float(np.median(t))
+            near = np.flatnonzero(np.abs(t - t_mid) <= max(0.1 * span, 1e-9))
+            if near.size == 0:
+                near = np.array([int(np.argmin(np.abs(t - t_mid)))])
+            q = np.array([float(final[k].metrics.get('score', 0.0) or 0.0) for k in near])
+            best_j = int(near[int(np.argmax(q))])
             new_best_idx = final_indices[best_j]
             if new_best_idx != best_idx:
                 best = final[best_j]
@@ -1743,7 +1755,7 @@ def run_registration_phase(
                 if new_ref_stars is not None and len(new_ref_stars) > 0:
                     ref_stars = new_ref_stars
                 safe_print(f"  Consensus reference: {os.path.basename(best.path)} "
-                           f"(shift closest to median)")
+                           f"(best quality in the middle of the session)")
         except Exception as _ce:
             _log.debug("Consensus ref failed: %s", _ce)
 

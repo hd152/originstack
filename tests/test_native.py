@@ -2769,3 +2769,18 @@ def test_transient_triage_score_native_rejects_wrong_shape():
     stamps = np.zeros((2, 3, 20, 20), dtype=np.float32)  # size mismatch
     with pytest.raises(ValueError):
         native.transient_triage_score(stamps, _tt_model, 31)
+
+
+@pytest.mark.skipif(not hasattr(native, "validate_frame_stats"), reason="astro_native lacks validate_frame_stats")
+def test_validate_frame_stats_matches_numpy_verdicts():
+    """Same (finite, max, zeros, saturated) as validate_image_data's numpy passes."""
+    rng = np.random.default_rng(31)
+    img = rng.gamma(4, 2000, (300, 410)).astype(np.float32)
+    img[:40] = 0.0
+    img[100, 100] = img.max() * 1.0005
+    fin, mx, zeros, sat = native.validate_frame_stats(img)
+    assert fin and mx == img.max() and zeros == img.size - np.count_nonzero(img)
+    assert sat == int(np.sum(img >= float(mx) * 0.999))
+    bad = img.copy()
+    bad[3, 3] = np.inf
+    assert native.validate_frame_stats(bad)[0] is False
