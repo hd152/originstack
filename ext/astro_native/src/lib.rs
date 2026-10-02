@@ -7324,6 +7324,114 @@ fn calibrate_frame_inplace<'py>(
     Ok(ok)
 }
 
+/// Load + calibrate fused: `raw` holds a FITS BITPIX=16 data block's bytes read as
+/// native u16 (so each value is byte-swapped here); the physical value is the signed
+/// 16-bit integer plus `bzero` (0 or 32768 -- exact in f32, as astropy's uint16 path
+/// gives). Then exactly `calibrate_frame_inplace`'s per-pixel steps, written to `out`.
+/// Replaces astropy's read + conversion (~30 ms) and one full pass of the calibration.
+/// Returns False when a value came out non-finite, like `calibrate_frame_inplace`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn calibrate_frame_from_be16<'py>(
+    py: Python<'py>,
+    raw: PyReadonlyArray1<'py, u16>,
+    bzero: f64,
+    mut out: numpy::PyReadwriteArray1<'py, f32>,
+    bias: Option<PyReadonlyArray1<'py, f32>>,
+    dark: Option<PyReadonlyArray1<'py, f32>>,
+    dark_scale: f64,
+    flat_norm: Option<PyReadonlyArray1<'py, f32>>,
+) -> PyResult<bool> {
+    let r = raw.as_slice()?;
+    let d = out
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be contiguous"))?;
+    let n = d.len();
+    if r.len() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err("raw/out size mismatch"));
+    }
+    let b = opt_master(&bias, n)?;
+    let dk = opt_master(&dark, n)?;
+    let fl = opt_master(&flat_norm, n)?;
+    let s = dark_scale as f32;
+    let z = bzero as i32;
+    const CH: usize = 1 << 16;
+    let ok = py.detach(|| {
+        d.par_chunks_mut(CH)
+            .enumerate()
+            .map(|(ci, chunk)| {
+                let base = ci * CH;
+                let mut ok = true;
+                for (k, v) in chunk.iter_mut().enumerate() {
+                    let i = base + k;
+                    let mut x = ((r[i].swap_bytes() as i16) as i32 + z) as f32;
+                    if let Some(b) = b {
+                        x -= b[i];
+                    }
+                    if let Some(dk) = dk {
+                        x -= dk[i] * s;
+                        if let Some(b) = b {
+                            x += b[i] * s;
+                        }
+                    }
+                    if let Some(fl) = fl {
+                        x /= fl[i];
+                    }
+                    if !x.is_finite() {
+                        ok = false;
+                    }
+                    *v = if x < 0.0 { 0.0 } else { x };
+                }
+                ok
+            })
+            .reduce(|| true, |a, b| a && b)
+    });
+    Ok(ok)
+}
+
+/// `registration.compute_patch_scores`: per patch of an (ny, nx) grid (patch ph x pw,
+/// the last row/column of patches ending at ny*ph / nx*pw like the numpy loop), the mean of
+/// (lum[y, x+2] - lum[y, x])^2 over the patch's own columns, in f64. Reads the float32
+/// luminance directly (the numpy version made a float64 copy of the whole frame first);
+/// parallel over patch rows. Values agree with numpy up to summation order (~1e-15).
+#[pyfunction]
+fn patch_brenner_scores<'py>(
+    py: Python<'py>,
+    lum: PyReadonlyArray2<'py, f32>,
+    ph: usize,
+    pw: usize,
+    ny: usize,
+    nx: usize,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let a = lum.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let s = a.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("lum must be contiguous"))?;
+    let mut out = vec![0f32; ny * nx];
+    py.detach(|| {
+        out.par_chunks_mut(nx).enumerate().for_each(|(iy, row)| {
+            let y0 = iy * ph;
+            let y1 = ((iy + 1) * ph).min(h);
+            for ix in 0..nx {
+                let x0 = ix * pw;
+                let x1 = ((ix + 1) * pw).min(w);
+                if (y1 - y0) * (x1 - x0) < 4 || x1 - x0 < 3 {
+                    continue;
+                }
+                let mut acc = 0.0f64;
+                for y in y0..y1 {
+                    let r = &s[y * w..(y + 1) * w];
+                    for x in x0..x1 - 2 {
+                        let d = r[x + 2] as f64 - r[x] as f64;
+                        acc += d * d;
+                    }
+                }
+                row[ix] = (acc / ((y1 - y0) * (x1 - x0 - 2)) as f64) as f32;
+            }
+        });
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((ny, nx), out).unwrap().into_pyarray(py))
+}
+
 /// 3x3 median at plane position (i, j) of the (py, px) Bayer sub-plane of a
 /// row-major `w`-wide mosaic, reflect boundary on the sub-plane (scipy
 /// `mode='reflect'`), exactly what `median_filter(sub, size=3)` returns there.
@@ -8490,11 +8598,49 @@ fn debayer_rcd_native<'py>(
     if h < 16 || w < 16 {
         return Err(pyo3::exceptions::PyValueError::new_err("frame too small for RCD"));
     }
-    let src: Vec<f32> = arr.iter().copied().collect();
-    let out = py.detach(|| rcd_strips(&src, h, w, scale, r_off, b_off));
+    let owned: Vec<f32>;
+    let src: &[f32] = match arr.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+    let out = py.detach(|| rcd_strips(src, h, w, scale, r_off, b_off));
     Ok(numpy::ndarray::Array3::from_shape_vec((h, w, 3), out)
         .unwrap()
         .into_pyarray(py))
+}
+
+/// `debayer_rcd_native` writing into `out` (h, w, 3), e.g. a frame-store slot.
+#[pyfunction]
+fn debayer_rcd_native_into<'py>(
+    py: Python<'py>,
+    raw: PyReadonlyArray2<'py, f32>,
+    mut out: numpy::PyReadwriteArray3<'py, f32>,
+    scale: f64,
+    r_off: (usize, usize),
+    b_off: (usize, usize),
+) -> PyResult<()> {
+    let arr = raw.as_array();
+    let (h, w) = (arr.shape()[0], arr.shape()[1]);
+    if h < 16 || w < 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err("frame too small for RCD"));
+    }
+    if out.as_array().shape() != [h, w, 3] {
+        return Err(pyo3::exceptions::PyValueError::new_err("out must be (h, w, 3)"));
+    }
+    let owned: Vec<f32>;
+    let src: &[f32] = match arr.as_slice() {
+        Some(x) => x,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+    let dst = out.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be contiguous"))?;
+    py.detach(|| rcd_strips_into(src, h, w, scale, r_off, b_off, dst));
+    Ok(())
 }
 
 /// Scratch buffers reused across RCD strips and calls. Every stage array is fully
@@ -8542,6 +8688,22 @@ fn rcd_strips(src: &[f32], h: usize, w: usize, scale: f64,
     if h <= RCD_TILE + 2 * RCD_HALO && w <= RCD_TILE + 2 * RCD_HALO {
         return rcd_core(src, h, w, scale, r_off, b_off);
     }
+    let mut out = vec![0f32; h * w * 3];
+    rcd_strips_into(src, h, w, scale, r_off, b_off, &mut out);
+    out
+}
+
+/// `rcd_strips` writing into a caller-supplied (h, w, 3) buffer -- e.g. the frame's own
+/// slot of Phase 1's frame store, so neither a fresh 75 MB output (zero-filled by the OS
+/// on first touch) nor a copy into the store is needed.
+fn rcd_strips_into(src: &[f32], h: usize, w: usize, scale: f64,
+                   r_off: (usize, usize), b_off: (usize, usize), out: &mut [f32]) {
+    if h <= RCD_TILE + 2 * RCD_HALO && w <= RCD_TILE + 2 * RCD_HALO {
+        let res = rcd_core(src, h, w, scale, r_off, b_off);
+        out.copy_from_slice(&res[..h * w * 3]);
+        rcd_give(res);
+        return;
+    }
     // extended span [lo, hi) of tile k along an axis of length n, >= 16 long
     let span = |k: usize, n: usize| -> (usize, usize, usize) {
         let s0 = k * RCD_TILE;
@@ -8555,7 +8717,6 @@ fn rcd_strips(src: &[f32], h: usize, w: usize, scale: f64,
         (lo, hi, len)
     };
     let (ty, tx) = ((h + RCD_TILE - 1) / RCD_TILE, (w + RCD_TILE - 1) / RCD_TILE);
-    let mut out = vec![0f32; h * w * 3];
     // one band of tile rows per task: each band owns its output rows
     out.par_chunks_mut(RCD_TILE * w * 3).enumerate().for_each(|(ky, band)| {
         let (y0, y1, rows) = span(ky, h);
@@ -8579,7 +8740,6 @@ fn rcd_strips(src: &[f32], h: usize, w: usize, scale: f64,
         }
         let _ = ty;
     });
-    out
 }
 
 /// A row of a padded array at frame row `y` shifted by (dy, dx): `w` values.
@@ -9215,9 +9375,12 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(drizzle_accumulate_lanczos3, m)?)?;
     m.add_function(wrap_pyfunction!(drizzle_splat_frame, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_frame_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_frame_from_be16, m)?)?;
+    m.add_function(wrap_pyfunction!(patch_brenner_scores, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(spike_reject_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
+    m.add_function(wrap_pyfunction!(debayer_rcd_native_into, m)?)?;
     m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;

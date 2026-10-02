@@ -2784,3 +2784,46 @@ def test_validate_frame_stats_matches_numpy_verdicts():
     bad = img.copy()
     bad[3, 3] = np.inf
     assert native.validate_frame_stats(bad)[0] is False
+
+
+@pytest.mark.skipif(not hasattr(native, "calibrate_frame_from_be16"), reason="astro_native lacks calibrate_frame_from_be16")
+def test_calibrate_from_be16_matches_load_then_calibrate():
+    import src.debayer as D
+    rng = np.random.default_rng(41)
+    vals = rng.integers(0, 65535, (64, 96)).astype(np.uint16)
+    be = (vals.astype(np.int32) - 32768).astype('>i2')          # FITS: int16 big-endian, BZERO 32768
+    raw = np.frombuffer(be.tobytes(), dtype=np.uint16).reshape(64, 96)
+    bias = rng.normal(500, 3, (64, 96)).astype(np.float32)
+    dark = rng.normal(520, 5, (64, 96)).astype(np.float32)
+    flat = rng.uniform(0.9, 1.1, (64, 96)).astype(np.float32)
+    a, fa = D.calibrate_frame(vals.astype(np.float32), bias, dark, 0.67, flat)
+    b, fb = D.calibrate_frame_be16(raw, 32768.0, bias, dark, 0.67, flat)
+    np.testing.assert_array_equal(a, b)
+    assert fa and fb
+
+
+@pytest.mark.skipif(not hasattr(native, "debayer_rcd_native_into"), reason="astro_native lacks debayer_rcd_native_into")
+def test_rcd_into_buffer_matches_returned_array():
+    import src.debayer as D
+    rng = np.random.default_rng(42)
+    mos = rng.gamma(2, 400, (300, 420)).astype(np.float32)
+    want = D.debayer_rcd(mos, 'RGGB')
+    buf = np.full((300, 420, 3), -1.0, np.float32)
+    got = D.debayer_rcd(mos, 'RGGB', out=buf)
+    assert got is buf
+    np.testing.assert_array_equal(buf, want)
+
+
+@pytest.mark.skipif(not hasattr(native, "patch_brenner_scores"), reason="astro_native lacks patch_brenner_scores")
+def test_patch_brenner_scores_matches_numpy():
+    from src import registration as rg
+    rng = np.random.default_rng(43)
+    lum = rng.gamma(2, 400, (157, 211)).astype(np.float32)
+    a = rg.compute_patch_scores(lum)
+    h = rg.HAS_NATIVE
+    rg.HAS_NATIVE = False
+    try:
+        b = rg.compute_patch_scores(lum)
+    finally:
+        rg.HAS_NATIVE = h
+    np.testing.assert_allclose(a, b, rtol=1e-6)

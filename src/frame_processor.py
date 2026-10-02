@@ -17,6 +17,7 @@ from src.debayer import (
     apply_hot_pixel_map_bayer,
     autodetect_bayer_orientation,
     calibrate_frame,
+    calibrate_frame_be16,
     cfa_frame_stats,
     combine_cfa_stats,
     correct_chromatic_aberration,
@@ -195,7 +196,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           banding: Optional[tuple] = None,
                           cfa_probe: bool = False,
                           allow_gpu: bool = True,
-                          spike_reject: bool = False) -> Dict[str, Any]:
+                          spike_reject: bool = False,
+                          out_rgb: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
@@ -204,11 +206,20 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     timings: Dict[str, float] = {}
     _t = time.perf_counter()
 
+    _be16 = None        # BZERO when `data` is a raw BITPIX=16 block still to be converted
     try:
         if preloaded_data is not None:
             data, hdr = preloaded_data
         else:
-            data, hdr = load_frame(path)
+            _fast = None
+            if not (allow_gpu and get_gpu().active):
+                from src.io_fits import read_fits_be16
+                _fast = read_fits_be16(path)
+            if _fast is not None:
+                # converted and calibrated in one native pass below
+                data, _be16, hdr = _fast
+            else:
+                data, hdr = load_frame(path)
     except Exception as e:
         return {'error': f'load error: {e}'}
     if data is None or data.size == 0:
@@ -334,7 +345,11 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
             # Bias, scaled dark, flat, non-finite check and the clip at zero, in one
             # pass when native (src/debayer.py::calibrate_frame).
-            data, _finite = calibrate_frame(data, bias_arr, dark_arr, dark_scale, flat_norm)
+            if _be16 is not None:
+                data, _finite = calibrate_frame_be16(data, _be16, bias_arr, dark_arr, dark_scale,
+                                                     flat_norm)
+            else:
+                data, _finite = calibrate_frame(data, bias_arr, dark_arr, dark_scale, flat_norm)
             if not _finite:
                 return {'error': 'calibration produced non-finite values'}
             if data.ndim == 2 and masters.get('hot_pixel_map') is not None:
@@ -399,8 +414,10 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             # Malvar/VNG run on native/numpy, not cupy — transfer D→H if data is on GPU
             if debayer_method != 'bilinear' and hasattr(data, 'get'):
                 data = data.get()
-            rgb = debayer(data, pattern=bayer, method=debayer_method)
-            _rgb_owned = True      # fresh from the debayer: safe to edit in place
+            # out_rgb: this frame's own frame-store slot (pool workers) -- the native RCD
+            # writes there directly, so no 75 MB output buffer and no copy into the store
+            rgb = debayer(data, pattern=bayer, method=debayer_method, out=out_rgb)
+            _rgb_owned = True      # fresh from the debayer (or our own slot): editable in place
         else:
             rgb = data
             _rgb_owned = False     # the loaded array itself
@@ -422,7 +439,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             # at matched sharpness, its noise went from 1.07/0.89/1.01 to 0.93/0.88/0.86 x
             # Siril's. Pre-debayered input and the GPU calibration path (no mosaic pass)
             # keep it.
-            lum = luminance(np.ascontiguousarray(rgb))
+            lum = None          # computed below only if white balance does not emit it
         else:
             rgb, lum = remove_hot_pixels_rgb_with_lum(rgb, inplace=_rgb_owned)
     except Exception as e:
@@ -512,8 +529,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     try:
         if wb_lum is not None:
             lum = wb_lum
-        elif white_balance != 'none' or ca_correction or cosmic_ray_rejection:
-            lum = luminance(rgb)
+        elif white_balance != 'none' or ca_correction or cosmic_ray_rejection or lum is None:
+            lum = luminance(np.ascontiguousarray(rgb))
         else:
             lum = np.asarray(lum)  # ensure host numpy array
     except Exception as e:
@@ -1048,7 +1065,11 @@ def _parallel_frame_worker(
         # measured, so its initializer could not carry them)
         set_session_cfa(args_tuple[15])
     global _worker_masters
+    from src.frame_store import open_frame_array
+    mem_rgb = open_frame_array(mm_rgb_path, 'float32', rgb_shape)
+    slot = mem_rgb[frame_idx]
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
+                                   out_rgb=slot,
                                    ca_correction=ca_correction,
                                    cosmic_ray_rejection=cosmic_ray_rejection,
                                    advanced_metrics=advanced_metrics,
@@ -1067,10 +1088,12 @@ def _parallel_frame_worker(
 
     _t = time.perf_counter()
     try:
-        from src.frame_store import open_frame_array
-        mem_rgb = open_frame_array(mm_rgb_path, 'float32', rgb_shape)
         mem_lum = open_frame_array(mm_lum_path, 'float32', lum_shape)
-        mem_rgb[frame_idx] = result['rgb']
+        rgb = result['rgb']
+        in_place = (isinstance(rgb, np.ndarray) and rgb.shape == slot.shape
+                    and rgb.__array_interface__['data'][0] == slot.__array_interface__['data'][0])
+        if not in_place:            # a step replaced the debayered array: copy it in
+            mem_rgb[frame_idx] = rgb
         mem_lum[frame_idx] = result['lum']
         # Flush deferred to main process after all workers complete — flushing
         # the entire memmap on every frame causes excessive concurrent I/O.

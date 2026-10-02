@@ -1360,6 +1360,14 @@ def compute_patch_scores(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
     """
     H, W = lum.shape[:2]
     ph, pw, ny, nx = _patch_grid_geometry(H, W, grid_size)
+    if (HAS_NATIVE and hasattr(_native, 'patch_brenner_scores') and isinstance(lum, np.ndarray)
+            and lum.ndim == 2 and lum.dtype == np.float32):
+        try:
+            # same patches and sums, read from the float32 frame without a float64 copy
+            # (69 ms per frame under Phase 1's load); equal up to summation order
+            return _native.patch_brenner_scores(np.ascontiguousarray(lum), ph, pw, ny, nx)
+        except Exception:
+            pass
     patch_scores = np.zeros((ny, nx), dtype=np.float32)
     lum_f = lum.astype(np.float64)
     for iy in range(ny):

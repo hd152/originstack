@@ -626,12 +626,12 @@ def debayer_menon2007(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     return _equalize_bayer_grid(_debayer_menon2007_numpy(raw, pattern))
 
 
-def debayer_rcd(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+def debayer_rcd(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] = None) -> np.ndarray:
     """RCD demosaic plus the same 2x2 green-grid correction as ``debayer_malvar``
     (session-constant when measured, per frame otherwise): RCD's interpolated
     greens are also biased by position, measured ~+-2.5 ADU on real Origin subs
     (Malvar's ~+-6), which survives stacking as a checkerboard."""
-    out = _rcd_raw(raw, pattern)
+    out = _rcd_raw(raw, pattern, out=out)
     cfg = _session_cfa
     if cfg is not None and cfg['pattern'] == pattern.upper():
         _apply_fixed_grid(out, cfg)
@@ -639,7 +639,7 @@ def debayer_rcd(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     return _equalize_bayer_grid(out, inplace=True)
 
 
-def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] = None) -> np.ndarray:
     """RCD -- Ratio Corrected Demosaicing (Luis Sanz Rodriguez, 2017), the
     default in Siril, RawTherapee and darktable.
 
@@ -683,9 +683,15 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     (ry, rx), _g1, _g2, (by, bx) = offsets
     if _HAS_NATIVE and hasattr(_native, 'debayer_rcd_native') and isinstance(raw, np.ndarray):
         try:
-            out = _native.debayer_rcd_native(np.ascontiguousarray(raw, dtype=np.float32),
-                                              scale, (ry, rx), (by, bx))
-            return _rcd_border(out, raw, pattern)
+            src = np.ascontiguousarray(raw, dtype=np.float32)
+            if (out is not None and hasattr(_native, 'debayer_rcd_native_into')
+                    and isinstance(out, np.ndarray) and out.dtype == np.float32
+                    and out.shape == (H, W, 3) and out.flags['C_CONTIGUOUS'] and out.flags['WRITEABLE']):
+                # straight into the caller's buffer (Phase 1's frame-store slot)
+                _native.debayer_rcd_native_into(src, out, scale, (ry, rx), (by, bx))
+                return _rcd_border(out, raw, pattern)
+            res = _native.debayer_rcd_native(src, scale, (ry, rx), (by, bx))
+            return _rcd_border(res, raw, pattern)
         except Exception as e:
             _log.debug("native RCD failed (%s); using numpy", e)
     if a is None:
@@ -841,14 +847,16 @@ def _debayer_rcd_numpy(a: np.ndarray, offsets, scale: float, raw: np.ndarray,
     return _rcd_border((rgb * scale).astype(np.float32), raw, pattern)
 
 
-def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear') -> np.ndarray:
-    """Dispatch to the appropriate debayering method."""
+def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear',
+            out: Optional[np.ndarray] = None) -> np.ndarray:
+    """Dispatch to the appropriate debayering method. ``out``: an (H, W, 3) float32 buffer
+    the native RCD path writes into (others ignore it and return a new array)."""
     if method == 'malvar':
         return debayer_malvar(raw, pattern)
     elif method == 'menon2007':
         return debayer_menon2007(raw, pattern)
     elif method == 'rcd':
-        return debayer_rcd(raw, pattern)
+        return debayer_rcd(raw, pattern, out=out)
     else:
         return debayer_bilinear(raw, pattern, method)
 
@@ -1380,6 +1388,29 @@ def luminance(rgb):
         except Exception:
             pass
     return 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+
+def calibrate_frame_be16(raw, bzero, bias, dark, dark_scale, flat_norm):
+    """``calibrate_frame`` on a raw BITPIX=16 block from ``io_fits.read_fits_be16``:
+    byte swap, + BZERO, the float32 conversion and the calibration in one native pass
+    (the same per-pixel operations, so identical to load_fits + calibrate_frame)."""
+    masters = [m for m in (bias, dark, flat_norm) if m is not None]
+    if (_HAS_NATIVE and hasattr(_native, 'calibrate_frame_from_be16')
+            and all(isinstance(m, np.ndarray) and m.dtype == np.float32
+                    and m.flags['C_CONTIGUOUS'] for m in masters)):
+        try:
+            out = np.empty(raw.shape, np.float32)
+            finite = _native.calibrate_frame_from_be16(
+                np.ascontiguousarray(raw).reshape(-1), float(bzero), out.reshape(-1),
+                None if bias is None else bias.reshape(-1),
+                None if dark is None else dark.reshape(-1),
+                float(dark_scale),
+                None if flat_norm is None else flat_norm.reshape(-1))
+            return out, bool(finite)
+        except Exception:
+            pass
+    data = (raw.byteswap().view(np.int16).astype(np.int32) + int(bzero)).astype(np.float32)
+    return calibrate_frame(data, bias, dark, dark_scale, flat_norm)
 
 
 def calibrate_frame(data, bias, dark, dark_scale, flat_norm):

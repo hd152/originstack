@@ -110,6 +110,35 @@ def load_fits(path: str) -> Tuple[np.ndarray, dict]:
     return data, hdr
 
 
+def read_fits_be16(path: str):
+    """(raw, bzero, header dict) for a plain 2-D BITPIX=16 FITS image (BSCALE 1, BZERO 0
+    or 32768, no BLANK), with ``raw`` the data block's bytes as native uint16 (still
+    big-endian: ``debayer.calibrate_frame_be16`` swaps them while it calibrates). None
+    for anything else -- the caller then uses ``load_frame``. The physical values are
+    exactly what ``load_fits`` returns; reading the block directly skips astropy's
+    conversion (~30 ms of the ~34 ms it took per Origin frame)."""
+    if not str(path).lower().endswith(('.fits', '.fit', '.fts')):
+        return None
+    try:
+        with fits.open(path, memmap=False, lazy_load_hdus=True) as hd:
+            h = hd[0].header
+            if (h.get('NAXIS') != 2 or h.get('BITPIX') != 16 or 'BLANK' in h
+                    or float(h.get('BSCALE', 1.0)) != 1.0
+                    or float(h.get('BZERO', 0.0)) not in (0.0, 32768.0)
+                    or h.get('XTENSION') is not None):
+                return None
+            off = hd.fileinfo(0)['datLoc']
+            H, W = int(h['NAXIS2']), int(h['NAXIS1'])
+            hdr = dict(h)
+            bzero = float(h.get('BZERO', 0.0))
+        raw = np.fromfile(path, dtype=np.uint16, count=H * W, offset=off)
+        if raw.size != H * W:
+            return None
+        return raw.reshape(H, W), bzero, hdr
+    except Exception:
+        return None
+
+
 def make_master(frames: List[FrameInfo], method: str = 'median',
                 downsample: int = 1) -> Optional[np.ndarray]:
     """Create master calibration frame using streaming (mean), memmap (median),
