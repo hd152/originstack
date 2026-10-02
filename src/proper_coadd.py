@@ -60,6 +60,15 @@ try:
 except Exception:          # pragma: no cover - scipy is a hard dependency in practice
     HAS_SCIPY = False
 
+try:
+    # scipy.fft's own pocketfft binding: the same transforms as sfft.rfft2 (which calls
+    # exactly this), but it takes ``out`` -- the combine pass FFTs into preallocated
+    # buffers instead of allocating (and page-faulting in) ~86 MB of spectra per frame.
+    # Private API, so the combine pass falls back to sfft.rfft2 when it is missing.
+    from scipy.fft._pocketfft import pypocketfft as _pfft
+except Exception:          # pragma: no cover
+    _pfft = None
+
 _STAMP_R = 14            # stamp half-size for the aperture flux and background (29x29)
 _FIT_R = 8               # core half-size the shape is fitted on (17x17)
 _FIT_STARS = 15          # brightest stars used for the shape fit
@@ -68,6 +77,11 @@ _PSF_R = 24              # half-size of the PSF kernel rendered for the FFT
 _REJECT_K = 5.0
 _SIGNAL_FRAC = 0.15
 _PAD = 32                # >= _PSF_R: linear, not circular, convolution at the edges
+# combine pass, tiled path: frames per accumulator pass, data rows per prep/row-FFT band,
+# spectrum columns per tile (see _combine_tiled)
+_BATCH = 1
+_ROW_BAND = 8
+_COL_TILE = 16
 
 
 _BETA_MIN, _BETA_MAX = 1.5, 20.0
@@ -265,6 +279,117 @@ def _noise(ch: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
 
 
+def _tiled_ok(aligned) -> bool:
+    return (_pfft is not None and _native_ok(aligned)
+            and all(hasattr(_native, f) for f in ('proper_coadd_prep_rows', 'proper_coadd_scatter_tiles',
+                                                   'proper_coadd_accum32_tile')))
+
+
+def _combine_tiled(aligned, frames, meas, ref_sig, PH: int, PW: int):
+    """One combine thread's share of the proper coadd: ``frames`` (in order) accumulated
+    into its own float32 sums. Returns (num complex64 (C, PH, NF), den float32, s_w,
+    s_w2f, s_sky, n_bad, n_rep) -- bit-identical to the per-frame path in
+    ``proper_coadd`` (every FFT is pocketfft's own, every accumulator element takes the
+    same f64-add-then-round updates in the same frame order).
+
+    The per-frame path is memory-bound: six threads stopped scaling at ~43 ms per frame
+    on a 532-frame session against ~70 ms of single-thread work. Here the traffic is cut
+    instead of the work:
+
+    * prep + row FFT in bands of ``_ROW_BAND`` data rows into a small buffer (in cache),
+      for ``_BATCH`` frames at once so each reference row is read once per batch;
+    * the row spectra are stored column-tiled, (tile, row, ``_COL_TILE`` columns), so
+      the column FFT reads contiguous 144 KB blocks, not one 128-byte piece per row;
+    * the column FFT of a tile goes to a small buffer and is accumulated from there, B
+      frames per pass over the accumulators (also tiled, converted back at the end);
+    * all FFT output goes into preallocated buffers (pocketfft's ``out``);
+    * a frame in RAM is read in place; a memmapped one is still copied once (the
+      sequential read is what made a disk-backed stack fast) into a reused buffer.
+    """
+    N, H, W, C = aligned.shape
+    B, RB, CB, R = _BATCH, _ROW_BAND, _COL_TILE, _PSF_R
+    NF = PW // 2 + 1
+    NT = -(-NF // CB)
+    copy_in = isinstance(aligned, np.memmap)
+    psf = np.zeros((PH, PW), np.float32)
+    psf_spec = np.empty((2, R + 1, NF), np.complex64)
+    tiles = np.zeros((B * (C + 1), NT, PH, CB), np.complex64)   # rows never written stay zero
+    tiles_f = tiles.view(np.float32)
+    tiles5 = tiles.reshape(B, C + 1, NT, PH, CB)
+    a_num = np.zeros((C, NT, PH, CB), np.complex64)
+    a_den = np.zeros((C, NT, PH, CB), np.float32)
+    s_w = np.zeros(C); s_w2f = np.zeros(C); s_sky = np.zeros(C)
+    frbuf = [None] * B
+    bufs = {}
+    nbad = nrep = 0
+
+    def flush(batch):
+        nonlocal nrep
+        nbat = len(batch)
+        frs = [b[0] for b in batch]
+        Fl = [float(np.float32(b[1])) for b in batch]
+        skyl = [float(np.float32(v)) for b in batch for v in b[2]]
+        s2l = [float(np.float32(v ** 2)) for b in batch for v in b[3]]
+        wn = [b[1] / b[3][c] ** 2 for b in batch for c in range(C)]
+        wf = [b[1] * b[1] / b[3][c] ** 2 for b in batch for c in range(C)]
+        dplanes = [bi * (C + 1) + c for bi in range(nbat) for c in range(C)]
+        for y0 in range(0, H, RB):
+            nb = min(RB, H - y0)
+            key = ('row', nbat, nb)
+            if key not in bufs:
+                bufs[key] = (np.empty((nbat, C, nb, PW), np.float32),
+                             np.empty((nbat * C, nb, NF), np.complex64))
+            band, rspec = bufs[key]
+            nrep += int(_native.proper_coadd_prep_rows(frs, ref_sig, band, y0, Fl, skyl, s2l,
+                                                       _REJECT_K, _SIGNAL_FRAC, _PAD))
+            _pfft.r2c(band.reshape(nbat * C, nb, PW), (2,), True, 0, rspec, 1)
+            _native.proper_coadd_scatter_tiles(rspec.view(np.float32), tiles_f, dplanes, _PAD + y0)
+        for t in range(NT):
+            nb = min(CB, NF - t * CB)
+            key = ('col', nbat, nb)
+            if key not in bufs:
+                bufs[key] = np.empty((nbat, C + 1, PH, nb), np.complex64)
+            cspec = bufs[key]
+            _pfft.c2c(tiles5[:nbat, :, t, :, :nb], (2,), True, 0, cspec, 1)
+            _native.proper_coadd_accum32_tile(a_num.view(np.float32), a_den, cspec.view(np.float32), t, wn, wf)
+
+    batch = []
+    for j in frames:
+        p, F = meas[j]
+        fr = aligned[j]
+        if copy_in or not fr.flags.c_contiguous:
+            slot = len(batch)
+            if frbuf[slot] is None:
+                frbuf[slot] = np.empty((H, W, C), np.float32)
+            np.copyto(frbuf[slot], fr)
+            fr = frbuf[slot]
+        sky, sig = _sky_noise(fr)
+        if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
+            nbad += 1
+            continue
+        # this frame's PSF spectrum rows: only the first R+1 and last R rows are non-zero
+        render_psf_into(p, psf)
+        q = len(batch) * (C + 1) + C
+        _pfft.r2c(psf[:R + 1], (1,), True, 0, psf_spec[0], 1)
+        _pfft.r2c(psf[PH - R:], (1,), True, 0, psf_spec[1, :R], 1)
+        _native.proper_coadd_scatter_tiles(psf_spec[0:1].view(np.float32), tiles_f, [q], 0)
+        _native.proper_coadd_scatter_tiles(psf_spec[1:2, :R].view(np.float32), tiles_f, [q], PH - R)
+        for c in range(C):
+            wf = F * F / sig[c] ** 2
+            s_w[c] += wf
+            s_w2f[c] += wf * wf / F
+            s_sky[c] += wf * sky[c] / F
+        batch.append((fr, F, sky, sig))
+        if len(batch) == B:
+            flush(batch)
+            batch = []
+    if batch:
+        flush(batch)
+    num = a_num.transpose(0, 2, 1, 3).reshape(C, PH, NT * CB)[:, :, :NF]
+    den = a_den.transpose(0, 2, 1, 3).reshape(C, PH, NT * CB)[:, :, :NF]
+    return num, den, s_w, s_w2f, s_sky, nbad, nrep
+
+
 def _sky_noise(fr: np.ndarray):
     """(sky, noise) per channel of an (H, W, C) frame: ``_sky`` / ``_noise`` per channel, or
     the bit-identical native kernel (numpy's ~8 temporaries per channel were ~40 ms of a
@@ -449,9 +574,15 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
             n_rep_box[0] += nrep
         return a_num, a_den, s_w, s_w2f, s_sky, nbad
 
+    def worker_tiled(k):
+        *part, nrep = _combine_tiled(aligned, use[k::n_thr], meas, ref_sig, PH, PW)
+        with lock:
+            n_rep_box[0] += nrep
+        return tuple(part)
+
     t1 = time.time()
     with ThreadPoolExecutor(max_workers=n_thr) as ex:
-        parts = list(ex.map(worker, range(n_thr)))
+        parts = list(ex.map(worker_tiled if acc32 and _tiled_ok(aligned) else worker, range(n_thr)))
     n_bad_noise = 0
     for a_num, a_den, s_w, s_w2f, s_sky, nbad in parts:          # fixed order: deterministic
         num += a_num
