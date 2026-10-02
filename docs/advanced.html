@@ -77,6 +77,9 @@
       <div><dt>Nine ways to combine<code>--stack-method</code></dt>
         <dd><p>Mean, median, sigma-clip, winsorized, percentile, ESD, linear-fit clipping, inverse-variance weighted, and a wavelet-domain combine. The default, <code>auto</code>, picks one for you. Rejection uses a robust spread estimate (MAD) by default.</p>
         <p class="fact">Linear-fit clipping is modelled on PixInsight's method; it copes better with non-Gaussian tails than a plain sigma clip.</p></dd></div>
+      <div><dt>Proper image coaddition<code>on by default</code> <code>--no-proper-coadd</code></dt>
+        <dd><p>After the normal stack is built, the same frames are recombined so that each scale of detail is weighted by how sharp, transparent and noisy each frame was: the best-seeing frames carry the fine detail, and every frame still adds to the smooth parts (Zackay &amp; Ofek, 2017). Each frame's star shape, transparency and noise are measured, not assumed, and outliers are removed against the normal stack first.</p>
+        <p class="fact">On three real sessions: stars 1.3 to 2.7% narrower than the plain stack, with noise equal or lower, for 15 to 40 s more. A trailed-frame bug found on the way &mdash; streaked stars read as twice as bright, so the worst frames counted four times over &mdash; was fixed by measuring brightness in an aperture.</p></dd></div>
       <div><dt>Optimal weighting and an error map<code>--stack-method ivw</code> <code>--uncertainty-map</code></dt>
         <dd><p>Weights each frame by the inverse of its own measured noise variance, the best linear combination for that noise model. With the error map on, it also writes the standard error of every pixel as a second FITS file.</p></dd></div>
       <div><dt>Drizzle<code>--drizzle-scale 2</code> <code>--drizzle-method splat</code></dt>

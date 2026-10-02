@@ -105,10 +105,10 @@ def run_sampled(cmd, disk_path, **kw):
     return proc.returncode, "".join(chunks), time.time() - t0, peak_mem / 2**20, peak_disk / 2**30
 
 
-def run_originstack(folder, workdir):
+def run_originstack(folder, workdir, extra=()):
     out = os.path.join(workdir, "originstack.fits")
     rc, text, wall, mem, disk = run_sampled(
-        [sys.executable, os.path.join(ROOT, "originstack.py"), "-d", folder, "-o", out], workdir)
+        [sys.executable, os.path.join(ROOT, "originstack.py"), "-d", folder, "-o", out, *extra], workdir)
     if rc != 0 or not os.path.exists(out):
         sys.exit("OriginStack failed:\n" + text[-3000:])
     phases = {}
@@ -215,17 +215,35 @@ def main():
     ap.add_argument("folder", help="folder with Light*.fits and optional bias*/dark*/flat* FITS files")
     ap.add_argument("--workdir", default="bench_out")
     ap.add_argument("--siril", help="path to siril-cli")
+    ap.add_argument("--os-args", default="",
+                    help='extra OriginStack flags, one quoted string (e.g. "--proper-coadd")')
+    ap.add_argument("--reuse-siril", action="store_true",
+                    help="reuse the Siril stack (and its timings) already in --workdir instead of "
+                         "re-running Siril -- for comparing several OriginStack settings to one Siril run")
     args = ap.parse_args()
 
     lights, cal = split_inputs(args.folder)
     os.makedirs(args.workdir, exist_ok=True)
-    siril = find_siril(args.siril)
+    siril = None if args.reuse_siril else find_siril(args.siril)
     print(f"{len(lights)} lights; calibration: " + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in cal.items()))
 
-    print("Running OriginStack ...")
-    os_path, os_wall, os_phases, os_res = run_originstack(args.folder, args.workdir)
-    print("Running Siril ...")
-    si_path, si_wall, si_stages, si_res = run_siril(siril, lights, cal, args.workdir)
+    import shlex
+    extra = shlex.split(args.os_args)
+    print("Running OriginStack" + (f" ({' '.join(extra)})" if extra else "") + " ...")
+    os_path, os_wall, os_phases, os_res = run_originstack(args.folder, args.workdir, extra)
+    si_meta = os.path.join(args.workdir, "siril_run.json")
+    si_saved = os.path.join(args.workdir, "siril", "siril_stack.fit")
+    if args.reuse_siril and os.path.exists(si_saved) and os.path.exists(si_meta):
+        print("Reusing the Siril stack in --workdir ...")
+        with open(si_meta) as fh:
+            m = json.load(fh)
+        si_path, si_wall, si_stages, si_res = si_saved, m["wall"], m["stages"], m["res"]
+    else:
+        print("Running Siril ...")
+        si_path, si_wall, si_stages, si_res = run_siril(siril or find_siril(args.siril), lights, cal,
+                                                        args.workdir)
+        with open(si_meta, "w") as fh:
+            json.dump({"wall": si_wall, "stages": si_stages, "res": si_res}, fh)
 
     os_cube, si_cube = load_linear(os_path), load_linear(si_path, siril=True)
     os_fwhm, os_stars = fwhm_and_stars(os_cube)

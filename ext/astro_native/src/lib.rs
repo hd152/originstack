@@ -8899,6 +8899,122 @@ unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,
     rcd_core_impl!(src, h, w, scale, r_off, b_off)
 }
 
+/// Proper coadd (src/proper_coadd.py), per frame: reject each sample against the
+/// normal stack on this frame's flux scale and write the sky-subtracted frame into
+/// each channel's zero-padded FFT buffer -- one pass instead of ~10 numpy passes
+/// over a strided channel view. Same f32 operations in numpy's order, so the
+/// buffers are bit-identical to the numpy path:
+///   exp = ref_sig * f; resid = (x - sky) - exp; t = (max(exp, 0) * frac)^2 + sig2
+///   bad = |resid| > k * sqrt(t);  out = bad ? exp : x - sky
+/// `frame` (H, W, C), `ref_sig` (C, H, W) = reference stack minus its sky,
+/// `bufs` (C, PH, PW) written at offset (pad, pad) (the rest is left as is).
+/// Returns the number of replaced samples.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn proper_coadd_prep<'py>(
+    py: Python<'py>,
+    frame: PyReadonlyArray3<'py, f32>,
+    ref_sig: PyReadonlyArray3<'py, f32>,
+    mut bufs: numpy::PyReadwriteArray3<'py, f32>,
+    f: f32,
+    sky: Vec<f32>,
+    sig2: Vec<f32>,
+    k: f32,
+    frac: f32,
+    pad: usize,
+) -> PyResult<u64> {
+    let fa = frame.as_array();
+    let (h, w, c) = (fa.shape()[0], fa.shape()[1], fa.shape()[2]);
+    let ra = ref_sig.as_array();
+    if ra.shape() != [c, h, w] || sky.len() != c || sig2.len() != c {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let bshape = bufs.as_array().shape().to_vec();
+    let (ph, pw) = (bshape[1], bshape[2]);
+    if bshape[0] != c || ph < h + pad || pw < w + pad {
+        return Err(pyo3::exceptions::PyValueError::new_err("buffer too small"));
+    }
+    let fr = fa.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("frame must be contiguous"))?;
+    let rs = ra.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("ref_sig must be contiguous"))?;
+    let bs = bufs.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("bufs must be contiguous"))?;
+    let n = py.detach(|| {
+        let mut total = 0u64;
+        for (ch, plane) in bs.chunks_mut(ph * pw).enumerate() {
+            let (sk, s2) = (sky[ch], sig2[ch]);
+            let refc = &rs[ch * h * w..(ch + 1) * h * w];
+            total += plane[pad * pw..(pad + h) * pw]
+                .par_chunks_mut(pw)
+                .enumerate()
+                .map(|(y, row)| {
+                    let mut cnt = 0u64;
+                    let out = &mut row[pad..pad + w];
+                    let rr = &refc[y * w..(y + 1) * w];
+                    let src = &fr[y * w * c..(y + 1) * w * c];
+                    for x in 0..w {
+                        let v = src[x * c + ch] - sk;
+                        let e = rr[x] * f;
+                        let resid = v - e;
+                        let mut t = if e > 0.0 { e } else { 0.0 };
+                        t *= frac;
+                        t = t * t;
+                        t += s2;
+                        if resid.abs() > k * t.sqrt() {
+                            out[x] = e;
+                            cnt += 1;
+                        } else {
+                            out[x] = v;
+                        }
+                    }
+                    cnt
+                })
+                .sum::<u64>();
+        }
+        total
+    });
+    Ok(n)
+}
+
+/// Proper coadd accumulation for one frame and channel, fused:
+/// `num += wnum * fm * conj(ph)` and `den += wden * |ph|^2`, in f64.
+/// Complex arrays are passed as their interleaved float views (`.view(float32)` of
+/// complex64, `.view(float64)` of complex128).
+#[pyfunction]
+fn proper_coadd_accum<'py>(
+    py: Python<'py>,
+    mut num: numpy::PyReadwriteArray2<'py, f64>,
+    mut den: numpy::PyReadwriteArray2<'py, f64>,
+    fm: PyReadonlyArray2<'py, f32>,
+    ph: PyReadonlyArray2<'py, f32>,
+    wnum: f64,
+    wden: f64,
+) -> PyResult<()> {
+    let ns = num.as_array().shape().to_vec();
+    if den.as_array().shape() != [ns[0], ns[1] / 2] || fm.as_array().shape() != &ns[..]
+        || ph.as_array().shape() != &ns[..] || ns[1] % 2 != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let row = ns[1];
+    let nm = num.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("num must be contiguous"))?;
+    let dn = den.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("den must be contiguous"))?;
+    let f = fm.as_slice()?;
+    let p = ph.as_slice()?;
+    py.detach(|| {
+        nm.par_chunks_mut(row).zip(dn.par_chunks_mut(row / 2)).enumerate().for_each(|(y, (nr, dr))| {
+            let fr = &f[y * row..(y + 1) * row];
+            let pr = &p[y * row..(y + 1) * row];
+            for i in 0..row / 2 {
+                let (a, b) = (fr[2 * i] as f64, fr[2 * i + 1] as f64);
+                let (c, d) = (pr[2 * i] as f64, pr[2 * i + 1] as f64);
+                // (a + bi)(c - di)
+                nr[2 * i] += wnum * (a * c + b * d);
+                nr[2 * i + 1] += wnum * (b * c - a * d);
+                dr[i] += wden * (c * c + d * d);
+            }
+        });
+    });
+    Ok(())
+}
+
 /// Linear cross-correlation `c[dy][dx] = sum_p ref[p + d] * img[p]` (zero outside
 /// the frame) for every lag |dy|, |dx| <= radius: the values a zero-padded FFT
 /// correlation has at those lags (src/registration.py::calculate_shift_pyramid_pref,
@@ -9014,6 +9130,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spike_reject_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
     m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
+    m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
+    m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;
