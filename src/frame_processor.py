@@ -214,6 +214,10 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     if data is None or data.size == 0:
         return {'error': 'empty data array'}
     timings['load'], _t = time.perf_counter() - _t, time.perf_counter()
+    # True once hot pixels have been fixed on the mosaic itself (map + statistical
+    # pass with the star-support rule); the luminance-based RGB pass after the
+    # debayer is then skipped -- see the hot-pixel step below
+    _bayer_hot_fixed = False
 
     # ── GPU calibration probe: decide once per frame size whether GPU is faster ──
     _gpu_ctx = get_gpu()
@@ -339,6 +343,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                     data = apply_hot_pixel_map_bayer(data, hot_map)
             if data.ndim == 2:
                 data = remove_hot_pixels_bayer(data)
+                _bayer_hot_fixed = True
     except Exception as e:
         return {'error': f'calibration error: {e}'}
     timings['calibrate'], _t = time.perf_counter() - _t, time.perf_counter()
@@ -407,7 +412,19 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     try:
         if rgb.ndim != 3 or rgb.shape[2] < 1:
             return {'error': f'Invalid RGB shape: {rgb.shape}'}
-        rgb, lum = remove_hot_pixels_rgb_with_lum(rgb, inplace=_rgb_owned)
+        if _bayer_hot_fixed and _rgb_owned:
+            # Hot pixels were already fixed on this frame's mosaic, where a star's
+            # neighbouring samples protect it. The RGB pass flags any luminance pixel far
+            # above its 3x3 median -- which is the peak of every undersampled star: on a
+            # real Sculptor frame (FWHM ~2.7 px) 82% of the pixels it replaced were within
+            # 3 px of a star centre and 24 of the 30 brightest stars lost their peak (to a
+            # median 77%). Without it the stack's stars were 3% narrower against Siril and,
+            # at matched sharpness, its noise went from 1.07/0.89/1.01 to 0.93/0.88/0.86 x
+            # Siril's. Pre-debayered input and the GPU calibration path (no mosaic pass)
+            # keep it.
+            lum = luminance(np.ascontiguousarray(rgb))
+        else:
+            rgb, lum = remove_hot_pixels_rgb_with_lum(rgb, inplace=_rgb_owned)
     except Exception as e:
         return {'error': f'hot pixel removal error: {e}'}
     timings['hotpix'], _t = time.perf_counter() - _t, time.perf_counter()
@@ -674,7 +691,28 @@ def _probe_gpu_calibration(H: int, W: int, gpu, masters: Dict) -> bool:
 _RAYON_WORKER_CAP = 1
 
 
-def _pin_worker_to_single_thread() -> None:
+def phase1_layout(args, n: int) -> Tuple[int, int]:
+    """(worker processes, native threads per worker) for Phase 1's process pool.
+
+    Default: one process per *physical* core, with each worker's Rust kernels using the
+    remaining logical cores (8 x 2 on an 8-core / 16-thread CPU). 16 single-threaded
+    processes held 16 whole frames at once -- 16.5 GB peak on a 178-frame Sculptor
+    subset against Siril's 6.5-11 GB -- while sharing 8 cores' memory bandwidth; 8 x 2
+    measured 8.9 GB at a Phase 1 time within run-to-run noise (34.6 vs 32.5 s; 4 x 4:
+    5.8 GB but 50 s). An explicit -j N keeps N single-threaded workers, as before."""
+    logical = os.cpu_count() or 4
+    if getattr(args, 'parallel', 0) and args.parallel > 0:
+        return max(1, min(args.parallel, n)), _RAYON_WORKER_CAP
+    try:
+        import psutil
+        physical = psutil.cpu_count(logical=False) or max(1, logical // 2)
+    except Exception:
+        physical = max(1, logical // 2)
+    workers = max(1, min(physical, n))
+    return workers, max(1, logical // workers)
+
+
+def _pin_worker_to_single_thread(rayon_threads: int = _RAYON_WORKER_CAP) -> None:
     """Bound (not necessarily eliminate) each worker process's internal
     threading, so Phase 1's ProcessPoolExecutor parallelism (one process per
     worker, already using all cores) isn't multiplied by each worker ALSO
@@ -705,7 +743,7 @@ def _pin_worker_to_single_thread() -> None:
     for var in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
                'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
         os.environ[var] = '1'
-    os.environ['RAYON_NUM_THREADS'] = str(_RAYON_WORKER_CAP)
+    os.environ['RAYON_NUM_THREADS'] = str(max(1, int(rayon_threads)))
 
 
 def phase1_uses_gpu(args: argparse.Namespace) -> bool:
@@ -807,7 +845,7 @@ def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
                      banding: Optional[tuple] = None,
                      session_cfa: Optional[dict] = None,
                      scalar_masters: Optional[Dict[str, Any]] = None,
-                     spike_reject: bool = False) -> None:
+                     spike_reject: bool = False, rayon_threads: int = _RAYON_WORKER_CAP) -> None:
     """Initializer for pool workers — attach to shared-memory calibration arrays.
 
     *shm_specs* maps master name → (shm_name, dtype_str, shape).  Workers
@@ -815,7 +853,7 @@ def _init_worker_shm(shm_specs: Dict[str, tuple], trail_reject: bool = False,
     *trail_reject* is a per-session flag stashed in a module global so it need
     not be threaded through the per-frame task tuple.
     """
-    _pin_worker_to_single_thread()
+    _pin_worker_to_single_thread(rayon_threads)
     global _worker_masters, _worker_trail_reject, _worker_banding, _worker_spike_reject
     _worker_trail_reject = bool(trail_reject)
     _worker_spike_reject = bool(spike_reject)
@@ -993,13 +1031,22 @@ def _fmt_ca(s: Optional[Tuple[float, float]]) -> str:
     return f"({s[1]:+.2f}, {s[0]:+.2f})px" if s is not None else "none"
 
 
+def _worker_ready() -> None:
+    """No-op pool task: submitting one per worker makes the executor spawn them all now."""
+    return None
+
+
 def _parallel_frame_worker(
         args_tuple: tuple) -> Tuple[int, Optional[dict], Optional[str], Optional[dict]]:
     """Worker function for ProcessPoolExecutor. Must be module-level for pickling."""
     (path, frame_idx, debayer_method, white_balance,
      mm_rgb_path, mm_lum_path, rgb_shape, lum_shape,
      ca_correction, cosmic_ray_rejection, advanced_metrics, session_bayer,
-     pre_gradient_removal, skip_quality, ca_shifts) = args_tuple
+     pre_gradient_removal, skip_quality, ca_shifts) = args_tuple[:15]
+    if len(args_tuple) > 15:
+        # session CFA values sent with the task (the pool was started before they were
+        # measured, so its initializer could not carry them)
+        set_session_cfa(args_tuple[15])
     global _worker_masters
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    ca_correction=ca_correction,
@@ -1093,12 +1140,15 @@ def execute_frame_processing(
     _build_flat_norm(masters, lights)
     if hasattr(args, '_session_cfa'):
         del args._session_cfa           # a new Phase 1 measures its own session
-    _session_cfa = _prepare_session_cfa(lights, masters, args)
+    # The process pool is started first and its workers spawn and import while the
+    # session probes (CFA statistics, chromatic aberration) run; on Windows the spawn
+    # alone took ~3 s and used to wait for them.
+    _session_cfa = None if use_process_pool else _prepare_session_cfa(lights, masters, args)
 
     if use_process_pool:
         # Auto: use all cores (RAM cap below governs the real limit). The old
         # hard cap of 8 throttled Phase 1 on high-core machines; -j N overrides.
-        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n)
+        workers, _rayon_threads = phase1_layout(args, n)
 
         # Cap workers so total frame-data memory stays within available RAM.
         # Each worker peak: raw Bayer + calibration intermediates (~3×raw) + RGB + Python overhead.
@@ -1118,7 +1168,7 @@ def execute_frame_processing(
             pass
 
         _worker_count_used = max(workers, 1)
-        print(f"  Processing {n} frames in parallel ({workers} workers)...")
+        print(f"  Processing {n} frames in parallel ({workers} workers x {_rayon_threads} native threads)...")
 
         # Share calibration arrays via shared memory — zero disk I/O, one copy
         # in RAM shared across all workers (read-only view per worker process).
@@ -1130,22 +1180,28 @@ def execute_frame_processing(
         _sb = getattr(args, '_session_bayer', None)
         _pgr = getattr(args, 'pre_gradient_removal', False)
         _tr = getattr(args, 'trail_reject', False)
-        _ca_shifts = _measure_session_ca(lights, args) if _ca else None
-        if _ca_shifts is not None:
-            safe_print(f"  CA correction: session-constant shifts "
-                       f"R={_fmt_ca(_ca_shifts.get(0))} B={_fmt_ca(_ca_shifts.get(2))} "
-                       f"(measured once, applied per frame)")
-        tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
-                  mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb, _pgr, False,
-                  _ca_shifts)
-                 for i in range(n)]
 
         try:
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context(),
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
-                                               _session_cfa, scalar_masters,
-                                               getattr(args, 'spike_reject', False))) as pool:
+                                               None, scalar_masters,
+                                               getattr(args, 'spike_reject', False),
+                                               _rayon_threads)) as pool:
+                # start every worker now (one trivial task each): they spawn and import
+                # while the main process measures the session below
+                for _ in range(workers):
+                    pool.submit(_worker_ready)
+                _session_cfa = _prepare_session_cfa(lights, masters, args)
+                _ca_shifts = _measure_session_ca(lights, args) if _ca else None
+                if _ca_shifts is not None:
+                    safe_print(f"  CA correction: session-constant shifts "
+                               f"R={_fmt_ca(_ca_shifts.get(0))} B={_fmt_ca(_ca_shifts.get(2))} "
+                               f"(measured once, applied per frame)")
+                tasks = [(lights[i].path, i, args.debayer_method, args.white_balance,
+                          mm_rgb_path, mm_lum_path, rgb_shape, lum_shape, _ca, _cr, _adv, _sb, _pgr,
+                          False, _ca_shifts, _session_cfa)
+                         for i in range(n)]
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 _wv = _get_ui_events()
                 _wv_done = 0
@@ -1551,7 +1607,7 @@ def reload_accepted_frames(
     n_failed = 0
 
     if use_process_pool:
-        workers = args.parallel if args.parallel > 0 else min(os.cpu_count() or 4, n)
+        workers, _rayon_threads = phase1_layout(args, n)
         workers = _worker_count_cap(workers)
 
         safe_print(f"  Reloading {n} accepted frames ({workers} workers, "
@@ -1571,7 +1627,8 @@ def reload_accepted_frames(
                                      initializer=_init_worker_shm,
                                      initargs=(shm_specs, _tr, _banding_cfg(args),
                                                _session_cfa, scalar_masters,
-                                               getattr(args, 'spike_reject', False))) as pool:
+                                               getattr(args, 'spike_reject', False),
+                                               _rayon_threads)) as pool:
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",

@@ -122,3 +122,27 @@ def test_on_by_default_with_a_single_opt_out():
     assert p.parse_args(['-d', 'x', '--no-proper-coadd']).proper_coadd is False
     acts = [a for a in p._actions if a.dest == 'proper_coadd']
     assert len(acts) == 1 and acts[0].option_strings == ['--no-proper-coadd']
+
+
+@pytest.mark.skipif(not (_NATIVE and hasattr(pc._native, 'proper_coadd_accum32')),
+                    reason='astro_native lacks proper_coadd_accum32')
+def test_accum32_matches_accum64():
+    rng = np.random.default_rng(5)
+    fm = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
+    ph = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
+    n64, d64 = np.zeros((20, 17), np.complex128), np.zeros((20, 17))
+    n32, d32 = np.zeros((20, 17), np.complex64), np.zeros((20, 17), np.float32)
+    for _ in range(3):
+        pc._native.proper_coadd_accum(n64.view(np.float64), d64, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
+        pc._native.proper_coadd_accum32(n32.view(np.float32), d32, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
+    np.testing.assert_allclose(n32, n64, rtol=1e-6, atol=1e-5)
+    np.testing.assert_allclose(d32, d64, rtol=1e-6)
+
+
+def test_combine_is_deterministic(field):
+    """Per-thread accumulators summed in a fixed order: identical output run to run."""
+    A, _ = field
+    ref = A.mean(0)
+    a = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False)
+    b = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False)
+    np.testing.assert_array_equal(a, b)

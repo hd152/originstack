@@ -9015,6 +9015,47 @@ fn proper_coadd_accum<'py>(
     Ok(())
 }
 
+/// `proper_coadd_accum` with float32 accumulators (each producer thread keeps its own
+/// and they are summed once at the end, instead of every frame going through one
+/// shared float64 accumulator on the main thread). The per-element arithmetic is f64;
+/// only the running sums are stored in f32 -- 531 frames of relative precision 1e-7
+/// leave ~1e-5 relative, far below the stack's own noise.
+#[pyfunction]
+fn proper_coadd_accum32<'py>(
+    py: Python<'py>,
+    mut num: numpy::PyReadwriteArray2<'py, f32>,
+    mut den: numpy::PyReadwriteArray2<'py, f32>,
+    fm: PyReadonlyArray2<'py, f32>,
+    ph: PyReadonlyArray2<'py, f32>,
+    wnum: f64,
+    wden: f64,
+) -> PyResult<()> {
+    let ns = num.as_array().shape().to_vec();
+    if den.as_array().shape() != [ns[0], ns[1] / 2] || fm.as_array().shape() != &ns[..]
+        || ph.as_array().shape() != &ns[..] || ns[1] % 2 != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
+    }
+    let row = ns[1];
+    let nm = num.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("num must be contiguous"))?;
+    let dn = den.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("den must be contiguous"))?;
+    let f = fm.as_slice()?;
+    let p = ph.as_slice()?;
+    py.detach(|| {
+        nm.par_chunks_mut(row).zip(dn.par_chunks_mut(row / 2)).enumerate().for_each(|(y, (nr, dr))| {
+            let fr = &f[y * row..(y + 1) * row];
+            let pr = &p[y * row..(y + 1) * row];
+            for i in 0..row / 2 {
+                let (a, b) = (fr[2 * i] as f64, fr[2 * i + 1] as f64);
+                let (c, d) = (pr[2 * i] as f64, pr[2 * i + 1] as f64);
+                nr[2 * i] = (nr[2 * i] as f64 + wnum * (a * c + b * d)) as f32;
+                nr[2 * i + 1] = (nr[2 * i + 1] as f64 + wnum * (b * c - a * d)) as f32;
+                dr[i] = (dr[i] as f64 + wden * (c * c + d * d)) as f32;
+            }
+        });
+    });
+    Ok(())
+}
+
 /// Linear cross-correlation `c[dy][dx] = sum_p ref[p + d] * img[p]` (zero outside
 /// the frame) for every lag |dy|, |dx| <= radius: the values a zero-padded FFT
 /// correlation has at those lags (src/registration.py::calculate_shift_pyramid_pref,
@@ -9132,6 +9173,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;
+    m.add_function(wrap_pyfunction!(proper_coadd_accum32, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(pre_gradient_apply, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb_inplace, m)?)?;
