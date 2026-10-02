@@ -320,6 +320,78 @@ fn sigma_clip_mask(
     }
 }
 
+/// `sigma_clip_mask` with `use_mad = true`, with less work per iteration and the same
+/// `active` bit for bit: the median is selected in place on `gather` (the active
+/// samples in frame order, exactly the copy `center_spread` selects on), the
+/// deviations are taken from that reordered buffer (an order statistic of non-NaN,
+/// non-negative values does not depend on input order), and the survivor count and
+/// the "anything rejected" test are one pass. The `spread < 1e-12` fallback re-gathers
+/// the samples in frame order for `std_pop`, whose f64 sum is order-dependent. A sample
+/// that is +-inf can make a deviation NaN, which the quickselect orders by position, so
+/// such a pixel-channel takes `sigma_clip_mask` itself.
+fn sigma_clip_mask_fast(
+    vals: &[f32],
+    sigma: f32,
+    max_iters: usize,
+    active: &mut [bool],
+    gather: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
+) {
+    let n = vals.len();
+    let mut inf = false;
+    for i in 0..n {
+        let v = vals[i];
+        active[i] = !v.is_nan();
+        inf |= v.is_infinite();
+    }
+    if inf {
+        sigma_clip_mask(vals, sigma, max_iters, true, active, gather, scratch);
+        return;
+    }
+    for _ in 0..max_iters {
+        gather.clear();
+        for i in 0..n {
+            if active[i] {
+                gather.push(vals[i]);
+            }
+        }
+        if gather.is_empty() {
+            break;
+        }
+        let center = median_inplace(gather);
+        scratch.clear();
+        scratch.extend(gather.iter().map(|&x| (x - center).abs()));
+        let mut spread = median_inplace(scratch) * 1.4826;
+        if spread < 1e-12 {
+            gather.clear();
+            for i in 0..n {
+                if active[i] {
+                    gather.push(vals[i]);
+                }
+            }
+            spread = std_pop(gather); // fallback
+        }
+        let thresh = sigma * spread;
+        let mut survivors = 0usize;
+        let mut any_out = false;
+        for i in 0..n {
+            if active[i] {
+                let ok = (vals[i] - center).abs() <= thresh;
+                survivors += ok as usize;
+                any_out |= !ok;
+            }
+        }
+        if survivors == 0 || !any_out {
+            break;
+        }
+        for i in 0..n {
+            if active[i] && (vals[i] - center).abs() > thresh {
+                active[i] = false;
+            }
+        }
+    }
+}
+
 /// Combine one pixel's N samples. `vals`/`weights` are length N; NaN samples are
 /// treated as already-rejected.
 #[allow(clippy::too_many_arguments)]
@@ -2440,6 +2512,41 @@ fn patch_weighted_sigma_combine<'py>(
     use_mad: bool,
     grid_geom: Option<(f64, f64, f64, f64)>,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    patch_weighted_sigma_combine_impl(py, data, qmaps, gweights, sigma, max_iters, use_mad, grid_geom, false)
+}
+
+/// `patch_weighted_sigma_combine`, faster and bit-identical: the MAD sigma-clip does
+/// fewer passes per iteration (`sigma_clip_mask_fast`), and with a patch grid the four
+/// grid corners every frame needs are tabulated once per row and grid column instead of
+/// four indexed lookups per frame per pixel (same f32 bilinear expression, same f64
+/// weight product).
+#[pyfunction]
+#[pyo3(signature = (data, qmaps, gweights=None, sigma=3.0, max_iters=3, use_mad=true, grid_geom=None))]
+fn patch_weighted_sigma_combine_fast<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    qmaps: PyReadonlyArray3<'py, f32>,
+    gweights: Option<PyReadonlyArray1<'py, f32>>,
+    sigma: f32,
+    max_iters: usize,
+    use_mad: bool,
+    grid_geom: Option<(f64, f64, f64, f64)>,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    patch_weighted_sigma_combine_impl(py, data, qmaps, gweights, sigma, max_iters, use_mad, grid_geom, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn patch_weighted_sigma_combine_impl<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray4<'py, f32>,
+    qmaps: PyReadonlyArray3<'py, f32>,
+    gweights: Option<PyReadonlyArray1<'py, f32>>,
+    sigma: f32,
+    max_iters: usize,
+    use_mad: bool,
+    grid_geom: Option<(f64, f64, f64, f64)>,
+    fast: bool,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
     let arr = data.as_array();
     let qm = qmaps.as_array();
     let s = arr.shape();
@@ -2488,6 +2595,24 @@ fn patch_weighted_sigma_combine<'py>(
             let mut gather: Vec<f32> = Vec::with_capacity(n);
             let mut scratch: Vec<f32> = Vec::with_capacity(n);
             let mut reject_count = vec![0u32; n]; // per-frame rejected-channel count
+            // fast path, patch grid: corners[(gx0 * n + f)] = this row's four grid
+            // values around grid column gx0 for frame f
+            let corners: Vec<[f32; 4]> = match (&row_tab, fast) {
+                (Some((gy0, _)), true) => {
+                    let gy1 = (gy0 + 1).min(qh - 1);
+                    let mut t = Vec::with_capacity(qw * n);
+                    for gx0 in 0..qw {
+                        let gx1 = (gx0 + 1).min(qw - 1);
+                        for f in 0..n {
+                            t.push([qm[[f, *gy0, gx0]], qm[[f, *gy0, gx1]],
+                                    qm[[f, gy1, gx0]], qm[[f, gy1, gx1]]]);
+                        }
+                    }
+                    t
+                }
+                _ => Vec::new(),
+            };
+            let gw64: Vec<f64> = (0..n).map(|f| gwref.map(|g| g[f] as f64).unwrap_or(1.0)).collect();
             let inv_c = 1.0f64 / c as f64;
 
             // Per-pixel combine given contiguous per-channel sample slices in
@@ -2501,7 +2626,11 @@ fn patch_weighted_sigma_combine<'py>(
                 }
                 for ch in 0..c {
                     let chan = &block[(p * c + ch) * n..][..n];
-                    sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch);
+                    if fast && use_mad {
+                        sigma_clip_mask_fast(chan, sigma, max_iters, active, gather, scratch);
+                    } else {
+                        sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch);
+                    }
                     for f in 0..n {
                         if !active[f] {
                             reject_count[f] += 1;
@@ -2510,6 +2639,25 @@ fn patch_weighted_sigma_combine<'py>(
                 }
                 let mut wsum = 0f64;
                 let mut accs = [0f64; 8]; // supports up to 8 channels
+                if let (false, Some((_, fy)), Some((gx0s, fxs))) = (corners.is_empty(), &row_tab, &col_tab) {
+                    let (fx, fy) = (fxs[col], *fy);
+                    let cell = &corners[gx0s[col] * n..(gx0s[col] + 1) * n];
+                    for f in 0..n {
+                        let rej_frac = reject_count[f] as f64 * inv_c;
+                        let [q00, q01, q10, q11] = cell[f];
+                        let top_v = q00 + (q01 - q00) * fx;
+                        let bot_v = q10 + (q11 - q10) * fx;
+                        let qwt = (top_v + (bot_v - top_v) * fy) as f64;
+                        let wt = qwt * gw64[f] * (1.0 - rej_frac);
+                        if wt == 0.0 {
+                            continue;
+                        }
+                        for ch in 0..c {
+                            accs[ch] += wt * block[(p * c + ch) * n + f] as f64;
+                        }
+                        wsum += wt;
+                    }
+                } else {
                 for f in 0..n {
                     let rej_frac = reject_count[f] as f64 * inv_c;
                     let qwt = match (&row_tab, &col_tab) {
@@ -2536,6 +2684,7 @@ fn patch_weighted_sigma_combine<'py>(
                         accs[ch] += wt * block[(p * c + ch) * n + f] as f64;
                     }
                     wsum += wt;
+                }
                 }
                 let denom = if wsum > 1e-12 { wsum } else { 1e-12 };
                 for ch in 0..c {
@@ -9577,6 +9726,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(online_sigma_clip_seed_burnin, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_fold_frame, m)?)?;
     m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine, m)?)?;
+    m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine_fast, m)?)?;
     m.add_function(wrap_pyfunction!(median_combine, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(esd_combine, m)?)?;
