@@ -6,8 +6,17 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-02
+
 ### Added
 
+- **Proper image coaddition, on by default** (`--no-proper-coadd` to turn off): after the normal
+  stack, the same aligned frames are recombined weighting each spatial frequency by that frame's own
+  measured PSF, transparency and noise (Zackay & Ofek 2017). Sharper stars at no noise cost on the
+  three benchmark sessions (shared-star width 0.97-0.99x the plain stack). **Expect different output.**
+- **Photometry error bars from a measured noise model**: gain measured from the session's own frames
+  (the Origin's header `EGAIN` is ~5x off), plus the correlated noise debayering and registration
+  add to an aperture sum. Light-curve reduced chi-squared on constant stars 3.97 -> 1.49.
 - **Built-in plate solver** (`--plate-solver local`, and the new default `auto`): matches the stack
   against a local Gaia DR3 star index near the session/header position hint — no API key, about a
   second per solve, and offline once the index covers the field. Tiles are fetched on first use
@@ -17,30 +26,28 @@ match the `VERSION` file and `v*` git tags.
 - **`--spike-reject`**: removes 1–2 pixel cosmic-ray/hot-pixel spikes on the raw mosaic before
   debayering, with noise measured from each frame (native kernel, ~0.17 s/frame single-threaded).
 - **`--gpu-phase1 {auto,on,off}`**: where Phase 1 runs under `--use-gpu`.
-
-### Fixed
-
-- **Large coloured blobs in the background of galaxy images.** `--galaxy-mode`'s target finder
-  picked the biggest region above the sky, which on fields with a residual gradient was the
-  gradient (69% of the frame on one session, 74% on another) instead of the galaxy; background
-  extraction then left that gradient in and the stretch turned it into blotches. It now starts from
-  the galaxy's bright core. With a galaxy exclusion in place, the "faint diffuse emission" rule no
-  longer protects sky gradient either. **Expect different `--auto` output on galaxy targets.**
-- **The output WCS from a Celestron Origin session is now correct.** The `info.json` solve was
-  written mirrored and at the raw frame's centre onto a registered, cropped stack (~60 px off;
-  photometry, annotation and time-series photometry read it). It is now mapped through the
-  registration and the crop and refined against Gaia (0.24 px median on a real stack).
-- **`--cosmic-ray-rejection` (L.A.Cosmic) now removes cosmic rays instead of smoothing the frame.**
-  Its fixed noise model underestimated real noise ~7x and median-replaced ~22% of all pixels; it
-  now measures the noise per frame and replaces only the hits (~550 px per frame). `--auto` no
-  longer keeps it on for subs of 25 s or longer, and where it does want per-frame cosmic-ray removal
-  (fewer than 20 frames, mean stacking, drizzle) it uses the much cheaper `--spike-reject`.
-
 - **`--debayer-method rcd`**: Ratio Corrected Demosaicing (Siril's default) -- now the default; see
   Changed.
 
 ### Changed
 
+- **Faster than Siril on all three benchmark sessions, with the same stacks.** Back to back on one
+  machine: Omega 68 vs 86 s, Sunflower 84 vs 106 s, Sculptor (532 frames) 169 vs 195 s (Sculptor took
+  240 s before this release). The second round of this work changed no output: every native kernel
+  is bit-identical to the code it replaced, checked on whole stacks. Highlights: calibration, Bayer
+  hot pixels, debayer, white balance and quality metrics each do fewer full-frame passes; scratch
+  temp files are no longer force-flushed (~29 s of a 58 s alignment); the proper-coadd and
+  sigma-clip combines and the registration residual check's warp are native and cache-friendly.
+- **Half the memory on big sessions**: Phase 1 runs one process per physical core, with the native
+  kernels using the remaining logical cores, instead of one single-threaded process per logical
+  core (Sculptor peak 16.8 -> 9.2 GB). `-j N` keeps N single-threaded workers.
+- **`--auto`'s consensus reference frame is the best one in the middle 20% of the session by time**,
+  instead of the frame nearest the median pyramid shift (meaningless under field rotation), which
+  could leave the reference at the end of the session and shrink the output crop (18% on one
+  session). **Expect a different crop on some sessions.**
+- **Gaia/VizieR cone searches are ordered brightest-first**: without `ORDER BY`, `TOP n` returned an
+  arbitrary subset, so the same stack matched 72-78 stars on different runs; now 342 every time.
+- **Registration is reproducible run to run**: the affine RANSAC is seeded.
 - **The default debayer is now RCD** (`--debayer-method rcd`, Siril's default) instead of Malvar.
   On two real sessions the stacked R/G/B noise dropped 7-15% for 1.6-2.6% wider stars, and the
   stack's noise is now at or below Siril's on G/B. Phase 1 is slower (about 1.9 s per frame in the
@@ -49,7 +56,7 @@ match the `VERSION` file and `v*` git tags.
 - **`--from-stack` re-runs are faster**: background extraction and the sky steps are cached
   next to the input stack and reused while their settings are unchanged.
 - **Faster post-processing**: two background-surface blurs run on a downsampled grid.
-- **Less temp disk use**: the aligned frames are kept in RAM when they fit, leaving 30% of memory
+- **Less temp disk use**: the aligned frames are kept in RAM when they fit, leaving 20% of memory
   free (`--frame-store`, default `auto`; ~10.6 GB less temp disk on a 158-frame session), and
   Phase 1's frames move to RAM too if the temp disk would otherwise be left nearly full.
   `--frame-store ram` writes no temp files at all; `disk` restores the old behaviour.
@@ -75,6 +82,26 @@ match the `VERSION` file and `v*` git tags.
 
 ### Fixed
 
+- **Star peaks are no longer flattened in every frame.** The luminance-based RGB hot-pixel pass
+  flagged the centre of every undersampled star (82% of the pixels it replaced on a real frame were
+  within 3 px of a star). It is now skipped once hot pixels were fixed on the mosaic, where a
+  star-support rule protects stars. This was most of an apparent red/blue noise gap against Siril.
+  **Expect sharper, brighter star cores.**
+- **Large coloured blobs in the background of galaxy images.** `--galaxy-mode`'s target finder
+  picked the biggest region above the sky, which on fields with a residual gradient was the
+  gradient (69% of the frame on one session, 74% on another) instead of the galaxy; background
+  extraction then left that gradient in and the stretch turned it into blotches. It now starts from
+  the galaxy's bright core. With a galaxy exclusion in place, the "faint diffuse emission" rule no
+  longer protects sky gradient either. **Expect different `--auto` output on galaxy targets.**
+- **The output WCS from a Celestron Origin session is now correct.** The `info.json` solve was
+  written mirrored and at the raw frame's centre onto a registered, cropped stack (~60 px off;
+  photometry, annotation and time-series photometry read it). It is now mapped through the
+  registration and the crop and refined against Gaia (0.24 px median on a real stack).
+- **`--cosmic-ray-rejection` (L.A.Cosmic) now removes cosmic rays instead of smoothing the frame.**
+  Its fixed noise model underestimated real noise ~7x and median-replaced ~22% of all pixels; it
+  now measures the noise per frame and replaces only the hits (~550 px per frame). `--auto` no
+  longer keeps it on for subs of 25 s or longer, and where it does want per-frame cosmic-ray removal
+  (fewer than 20 frames, mean stacking, drizzle) it uses the much cheaper `--spike-reject`.
 - Darks whose exposure differs from the lights are now scaled on the default parallel path (pool
   workers never received `dark_exptime` and subtracted the dark unscaled, silently).
 - Hierarchical runs: sessions with darks no longer lose their `info.json` metadata (Bayer pattern,
