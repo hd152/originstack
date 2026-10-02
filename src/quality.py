@@ -224,7 +224,8 @@ def _validate_native(img):
         return None
 
 
-def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional[str]]:
+def validate_image_data(img: np.ndarray, name: str = "", native_stats=None,
+                        sample=None) -> Tuple[bool, Optional[str]]:
     """Validate image data for common issues. Returns (is_valid, error_message).
 
     Performance improvements vs original:
@@ -234,7 +235,10 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
       np.max traversal.
     - Zero boolean array computed once and reused for the fraction check.
     """
-    native = _validate_native(img)
+    # native_stats / sample: validate_frame_stats(img) and img[::3, ::3], when the caller
+    # already has them (debayer.white_balance_grayworld_lum_into computes both while
+    # writing the luminance)
+    native = native_stats if native_stats is not None else _validate_native(img)
     # One isfinite pass — NaN/Inf counts only paid for on the failure path.
     if (not native[0]) if native is not None else (not np.isfinite(img).all()):
         nan_count = int(np.isnan(img).sum())
@@ -246,7 +250,8 @@ def validate_image_data(img: np.ndarray, name: str = "") -> Tuple[bool, Optional
     # full-frame percentile partition was ~70 of this function's ~83 ms per frame.
     # The maximum, the saturation test and the zero count stay full-frame -- a
     # handful of saturated or dead pixels is exactly what a sample would miss.
-    sample = np.ascontiguousarray(img[::3, ::3]) if min(img.shape[:2]) >= 64 else img
+    if sample is None:
+        sample = np.ascontiguousarray(img[::3, ::3]) if min(img.shape[:2]) >= 64 else img
     img_std = float(np.std(sample))
     if img_std < 0.1:
         return False, f"flat image (std={img_std:.3f})"

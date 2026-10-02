@@ -31,6 +31,7 @@ from src.debayer import (
     set_session_cfa,
     white_balance_grayworld,
     white_balance_grayworld_lum,
+    white_balance_grayworld_lum_into,
     white_balance_whitepatch,
 )
 from src.frame_discovery import is_nebula_filter
@@ -197,8 +198,12 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           cfa_probe: bool = False,
                           allow_gpu: bool = True,
                           spike_reject: bool = False,
-                          out_rgb: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                          out_rgb: Optional[np.ndarray] = None,
+                          out_lum: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
+
+    ``out_lum``: this frame's luminance frame-store slot (pool workers); when the
+    white-balance pass emits the luminance it writes it there directly.
 
     Returns dict with keys: 'rgb', 'lum', 'metrics', 'error'.
     Used by both sequential and parallel paths.
@@ -472,6 +477,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # wb_lum: luminance emitted by the white-balance pass itself, valid only when
     # nothing between here and the luminance recompute below touches rgb.
     wb_lum = None
+    wb_validate = None   # (native stats, sample) of wb_lum, from the same pass
     # session-constant CA shifts with no channel to move leave rgb untouched
     # (apply_chromatic_aberration returns its input), so they do not void wb_lum
     _ca_noop = ca_shifts is not None and not any(ca_shifts.get(c) is not None for c in (0, 2))
@@ -484,7 +490,13 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                            f"skipping {white_balance} white balance")
         elif white_balance == 'grayworld':
             if _rgb_owned and not _rgb_rewritten_later:
-                rgb, wb_lum = white_balance_grayworld_lum(rgb)
+                _into = (white_balance_grayworld_lum_into(rgb, out_lum)
+                         if out_lum is not None else None)
+                if _into is not None:
+                    wb_lum, _wb_stats, _wb_sample = _into
+                    wb_validate = (_wb_stats, _wb_sample)
+                else:
+                    rgb, wb_lum = white_balance_grayworld_lum(rgb)
             else:
                 rgb = white_balance_grayworld(rgb, inplace=_rgb_owned)
         elif white_balance == 'whitepatch':
@@ -547,7 +559,12 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             pass
     timings['pre_gradient_removal'], _t = time.perf_counter() - _t, time.perf_counter()
 
-    is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
+    if wb_validate is not None and lum is wb_lum:      # nothing has replaced it since
+        is_valid, validation_error = validate_image_data(lum, os.path.basename(path),
+                                                         native_stats=wb_validate[0],
+                                                         sample=wb_validate[1])
+    else:
+        is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
     timings['validate'], _t = time.perf_counter() - _t, time.perf_counter()
@@ -1086,8 +1103,11 @@ def _parallel_frame_worker(
     from src.frame_store import open_frame_array
     mem_rgb = open_frame_array(mm_rgb_path, 'float32', rgb_shape)
     slot = mem_rgb[frame_idx]
+    mem_lum = open_frame_array(mm_lum_path, 'float32', lum_shape)
+    lum_slot = mem_lum[frame_idx]
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    out_rgb=slot,
+                                   out_lum=lum_slot,
                                    ca_correction=ca_correction,
                                    cosmic_ray_rejection=cosmic_ray_rejection,
                                    advanced_metrics=advanced_metrics,
@@ -1106,16 +1126,17 @@ def _parallel_frame_worker(
 
     _t = time.perf_counter()
     try:
-        mem_lum = open_frame_array(mm_lum_path, 'float32', lum_shape)
+        def _is(a, b):
+            return (isinstance(a, np.ndarray) and a.shape == b.shape
+                    and a.__array_interface__['data'][0] == b.__array_interface__['data'][0])
         rgb = result['rgb']
-        in_place = (isinstance(rgb, np.ndarray) and rgb.shape == slot.shape
-                    and rgb.__array_interface__['data'][0] == slot.__array_interface__['data'][0])
-        if not in_place:            # a step replaced the debayered array: copy it in
+        if not _is(rgb, slot):          # a step replaced the debayered array: copy it in
             mem_rgb[frame_idx] = rgb
-        mem_lum[frame_idx] = result['lum']
+        if not _is(result['lum'], lum_slot):    # the white-balance pass may have written it
+            mem_lum[frame_idx] = result['lum']
         # Flush deferred to main process after all workers complete — flushing
         # the entire memmap on every frame causes excessive concurrent I/O.
-        del mem_rgb, mem_lum
+        del mem_rgb, mem_lum, slot, lum_slot
     except Exception as e:
         return (frame_idx, None, f'memmap write error: {e}', None)
     timings['memmap_write'] = time.perf_counter() - _t

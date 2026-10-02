@@ -957,6 +957,30 @@ def white_balance_grayworld_lum(rgb: np.ndarray):
     return rgb, luminance(get_gpu().to_host(rgb))
 
 
+def white_balance_grayworld_lum_into(rgb: np.ndarray, lum_out: np.ndarray):
+    """``white_balance_grayworld_lum`` writing the luminance into ``lum_out`` (e.g. the
+    frame store's luminance slot) and returning, from the same pass, what
+    ``quality.validate_image_data`` reads from it: ``(lum_out, native_stats, sample)``
+    with ``native_stats`` = ``validate_frame_stats(lum)`` and ``sample`` =
+    ``lum[::3, ::3]`` (None below 64 px, where validation uses the whole frame).
+    Bit-identical to ``white_balance_grayworld_lum``; None when the native kernel
+    cannot take these arrays (the caller then runs ``white_balance_grayworld_lum``)."""
+    if not (_HAS_NATIVE and hasattr(_native, 'white_balance_grayworld_lum_into')
+            and get_gpu().xp is np and isinstance(rgb, np.ndarray) and rgb.dtype == np.float32
+            and rgb.ndim == 3 and rgb.shape[2] == 3 and rgb.flags['C_CONTIGUOUS']
+            and rgb.flags['WRITEABLE'] and isinstance(lum_out, np.ndarray)
+            and lum_out.dtype == np.float32 and lum_out.shape == rgb.shape[:2]
+            and lum_out.flags['C_CONTIGUOUS'] and lum_out.flags['WRITEABLE']):
+        return None
+    h, w = rgb.shape[:2]
+    sample = np.empty((-(-h // 3), -(-w // 3)), np.float32) if min(h, w) >= 64 else None
+    try:
+        stats = _native.white_balance_grayworld_lum_into(rgb, lum_out, sample, 3)
+    except Exception:
+        return None
+    return lum_out, stats, sample
+
+
 def white_balance_whitepatch(rgb: np.ndarray, pct: Optional[float] = None) -> np.ndarray:
     gpu = get_gpu()
     xp = gpu.xp
