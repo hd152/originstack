@@ -631,12 +631,23 @@ def debayer_rcd(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray
     (session-constant when measured, per frame otherwise): RCD's interpolated
     greens are also biased by position, measured ~+-2.5 ADU on real Origin subs
     (Malvar's ~+-6), which survives stacking as a checkerboard."""
-    out = _rcd_raw(raw, pattern, out=out)
     cfg = _session_cfa
     if cfg is not None and cfg['pattern'] == pattern.upper():
-        _apply_fixed_grid(out, cfg)
+        # session-constant grid: fused into the native kernel's output write when it
+        # can (bit-identical, saves four strided passes over the 75 MB output)
+        out, fused = _rcd_impl(raw, pattern, out, cfg['grid'] if cfg['apply_grid'] else None)
+        if not fused:
+            _apply_fixed_grid(out, cfg)
         return out
+    out = _rcd_raw(raw, pattern, out=out)
     return _equalize_bayer_grid(out, inplace=True)
+
+
+def _rcd_into_takes_grid() -> bool:
+    """Whether the loaded native ``debayer_rcd_native_into`` has the fused ``grid``
+    argument (an older build does not)."""
+    f = getattr(_native, 'debayer_rcd_native_into', None) if _HAS_NATIVE else None
+    return 'grid' in (getattr(f, '__text_signature__', None) or '')
 
 
 def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] = None) -> np.ndarray:
@@ -659,6 +670,15 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] =
     are scale-free; ``eps`` assumes that range) and clipped below at 0. A 4-px
     border, where the 9-tap statistics do not fit, is taken from Malvar.
     """
+    return _rcd_impl(raw, pattern, out, None)[0]
+
+
+def _rcd_impl(raw: np.ndarray, pattern: str, out: Optional[np.ndarray],
+              grid) -> tuple:
+    """``_rcd_raw`` with an optional session grid (``_apply_fixed_grid``'s four
+    offsets) fused into the native output write. Returns ``(rgb, grid_applied)``;
+    ``grid_applied`` is False when the grid was not given or a path without the
+    fusion ran (the caller then applies it as before)."""
     offsets = _PATTERN_OFFSETS.get(pattern.upper())
     if offsets is None:
         raise ValueError(f"Unknown Bayer pattern: {pattern!r}. "
@@ -669,14 +689,14 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] =
         a = None
         H, W = raw.shape
         if H < 16 or W < 16:
-            return _malvar_raw(raw, pattern)
+            return _malvar_raw(raw, pattern), False
         m = float(np.fmax.reduce(raw, axis=None))        # NaN only if every value is NaN
         scale = m if (np.isfinite(m) or np.isfinite(raw).any()) else 1.0
     else:
         a = np.asarray(raw, dtype=np.float64)
         H, W = a.shape
         if H < 16 or W < 16:
-            return _malvar_raw(raw, pattern)
+            return _malvar_raw(raw, pattern), False
         scale = float(np.nanmax(a)) if np.isfinite(a).any() else 1.0
     if not scale > 0:
         scale = 1.0
@@ -684,19 +704,30 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] =
     if _HAS_NATIVE and hasattr(_native, 'debayer_rcd_native') and isinstance(raw, np.ndarray):
         try:
             src = np.ascontiguousarray(raw, dtype=np.float32)
-            if (out is not None and hasattr(_native, 'debayer_rcd_native_into')
-                    and isinstance(out, np.ndarray) and out.dtype == np.float32
-                    and out.shape == (H, W, 3) and out.flags['C_CONTIGUOUS'] and out.flags['WRITEABLE']):
+            into_ok = (out is not None and hasattr(_native, 'debayer_rcd_native_into')
+                       and isinstance(out, np.ndarray) and out.dtype == np.float32
+                       and out.shape == (H, W, 3) and out.flags['C_CONTIGUOUS']
+                       and out.flags['WRITEABLE'])
+            if grid is not None and _rcd_into_takes_grid():
+                # the kernel writes the whole frame with the grid applied; the Malvar
+                # border then replaces 4 px all round, so only those get it here
+                buf = out if into_ok else np.empty((H, W, 3), dtype=np.float32)
+                _native.debayer_rcd_native_into(src, buf, scale, (ry, rx), (by, bx),
+                                                grid=tuple(float(g) for g in grid))
+                _rcd_border(buf, raw, pattern)
+                _apply_fixed_grid_border(buf, grid)
+                return buf, True
+            if into_ok:
                 # straight into the caller's buffer (Phase 1's frame-store slot)
                 _native.debayer_rcd_native_into(src, out, scale, (ry, rx), (by, bx))
-                return _rcd_border(out, raw, pattern)
+                return _rcd_border(out, raw, pattern), False
             res = _native.debayer_rcd_native(src, scale, (ry, rx), (by, bx))
-            return _rcd_border(res, raw, pattern)
+            return _rcd_border(res, raw, pattern), False
         except Exception as e:
             _log.debug("native RCD failed (%s); using numpy", e)
     if a is None:
         a = np.asarray(raw, dtype=np.float64)
-    return _debayer_rcd_numpy(a, offsets, scale, raw, pattern)
+    return _debayer_rcd_numpy(a, offsets, scale, raw, pattern), False
 
 
 _RCD_BORDER = 4
@@ -724,6 +755,24 @@ def _rcd_border(out: np.ndarray, raw: np.ndarray, pattern: str) -> np.ndarray:
     out[:, :b] = _malvar_raw(raw[:, :m], pattern)[:, :b]
     out[:, -b:] = _malvar_raw(raw[:, (W - m) & ~1:], pattern)[:, -b:]
     return out
+
+
+def _apply_fixed_grid_border(rgb: np.ndarray, grid) -> None:
+    """``_apply_fixed_grid`` on the ``_RCD_BORDER``-px frame border only (four
+    non-overlapping strips, each green value by its global 2x2 parity): the rest of
+    the frame got the grid inside the native kernel."""
+    b = _RCD_BORDER
+    H, W = rgb.shape[:2]
+    green = rgb[:, :, 1]
+    if H <= 2 * b or W <= 2 * b:
+        regions = [(0, H, 0, W)]
+    else:
+        regions = [(0, b, 0, W), (H - b, H, 0, W), (b, H - b, 0, b), (b, H - b, W - b, W)]
+    for y0, y1, x0, x1 in regions:
+        for (a, c), off in zip(_GRID_PARITY, grid):
+            v = green[y0 + (a - y0) % 2:y1:2, x0 + (c - x0) % 2:x1:2]
+            v -= np.float32(off)
+            np.maximum(v, 0, out=v)
 
 
 def _debayer_rcd_numpy(a: np.ndarray, offsets, scale: float, raw: np.ndarray,

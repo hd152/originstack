@@ -3013,6 +3013,37 @@ def test_rcd_into_buffer_matches_returned_array():
     np.testing.assert_array_equal(buf, want)
 
 
+@pytest.mark.skipif(not hasattr(native, "debayer_rcd_native_into"), reason="astro_native lacks debayer_rcd_native_into")
+@pytest.mark.parametrize("pattern", ["RGGB", "BGGR", "GRBG", "GBRG"])
+@pytest.mark.parametrize("shape", [(300, 420), (301, 563), (140, 150)])
+def test_rcd_into_fused_grid_matches_separate_grid(pattern, shape):
+    """debayer_rcd_native_into(grid=...) + the border helper == the unfused kernel
+    followed by _apply_fixed_grid, bit for bit (incl. NaN, zeros, odd sizes, tiles
+    cut at odd places)."""
+    import src.debayer as D
+    if not D._rcd_into_takes_grid():
+        pytest.skip("astro_native debayer_rcd_native_into has no grid argument")
+    rng = np.random.default_rng(7)
+    mos = rng.gamma(2, 400, shape).astype(np.float32)
+    mos[5, 7] = np.nan
+    mos[40:44, 60:64] = 0.0
+    cfg = {'pattern': pattern, 'gain': 0.997, 'grid': (3.25, -900.5, -1.75, 0.0),
+           'apply_grid': True, 'n': 8}
+    want = D._rcd_raw(mos, pattern, out=np.empty(shape + (3,), np.float32))
+    D._apply_fixed_grid(want, cfg)
+    got, fused = D._rcd_impl(mos, pattern, np.full(shape + (3,), -1.0, np.float32), cfg['grid'])
+    assert fused
+    np.testing.assert_array_equal(got, want)
+    got2, fused2 = D._rcd_impl(mos, pattern, None, cfg['grid'])     # no out buffer
+    assert fused2
+    np.testing.assert_array_equal(got2, want)
+    D.set_session_cfa(cfg)
+    try:
+        np.testing.assert_array_equal(D.debayer_rcd(mos, pattern), want)
+    finally:
+        D.set_session_cfa(None)
+
+
 @pytest.mark.skipif(not hasattr(native, "patch_brenner_scores"), reason="astro_native lacks patch_brenner_scores")
 def test_patch_brenner_scores_matches_numpy():
     from src import registration as rg

@@ -9089,7 +9089,11 @@ fn debayer_rcd_native<'py>(
 }
 
 /// `debayer_rcd_native` writing into `out` (h, w, 3), e.g. a frame-store slot.
+/// `grid`: the session's four 2x2 green offsets (`_GRID_PARITY` order), subtracted
+/// and clipped as `debayer.py::_apply_fixed_grid` does, fused into the output write.
 #[pyfunction]
+#[pyo3(signature = (raw, out, scale, r_off, b_off, grid=None))]
+#[allow(clippy::too_many_arguments)]
 fn debayer_rcd_native_into<'py>(
     py: Python<'py>,
     raw: PyReadonlyArray2<'py, f32>,
@@ -9097,6 +9101,7 @@ fn debayer_rcd_native_into<'py>(
     scale: f64,
     r_off: (usize, usize),
     b_off: (usize, usize),
+    grid: Option<(f64, f64, f64, f64)>,
 ) -> PyResult<()> {
     let arr = raw.as_array();
     let (h, w) = (arr.shape()[0], arr.shape()[1]);
@@ -9115,7 +9120,9 @@ fn debayer_rcd_native_into<'py>(
         }
     };
     let dst = out.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be contiguous"))?;
-    py.detach(|| rcd_strips_into(src, h, w, scale, r_off, b_off, dst));
+    // np.float32(off): each offset rounded to f32 once, as numpy does
+    let grid = grid.map(|(a, b, c, d)| [a as f32, b as f32, c as f32, d as f32]);
+    py.detach(|| rcd_strips_into(src, h, w, scale, r_off, b_off, grid, dst));
     Ok(())
 }
 
@@ -9145,7 +9152,7 @@ fn rcd_give(v: Vec<f32>) {
     }
 }
 
-/// RCD in square tiles of `RCD_TILE` output pixels, each run on its tile plus
+/// RCD in tiles of `RCD_TILE` x `RCD_TILE_X` output pixels, each run on its tile plus
 /// `RCD_HALO` pixels around it. Whole-frame stages kept ~14 frame-sized arrays in
 /// flight and streamed ~1.3 GB through memory per frame, so under Phase 1's
 /// workers the kernel was DRAM-bandwidth bound (0.28 s/frame alone, 0.76 s with
@@ -9157,33 +9164,98 @@ fn rcd_give(v: Vec<f32>) {
 /// padding is the frame's. Tiles start on even rows/columns, so the Bayer parity
 /// is unchanged. Bit-identical to the numpy mirror. Buffers come from `RCD_POOL`.
 const RCD_TILE: usize = 128;
+/// Tile width: 128 x 256 tiles (halo overhead 1.30x the output instead of 1.41x for
+/// 128 x 128) measured ~15-20% faster on real 2048x3056 frames, alone (2 threads) and
+/// with 8 Phase 1 processes x 2 threads; 320-384 wide was the same, 512 slower.
+const RCD_TILE_X: usize = 256;
 const RCD_HALO: usize = 12;
 
 fn rcd_strips(src: &[f32], h: usize, w: usize, scale: f64,
               r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
-    if h <= RCD_TILE + 2 * RCD_HALO && w <= RCD_TILE + 2 * RCD_HALO {
-        return rcd_core(src, h, w, scale, r_off, b_off);
-    }
-    let mut out = vec![0f32; h * w * 3];
-    rcd_strips_into(src, h, w, scale, r_off, b_off, &mut out);
+    let mut out = rcd_take(h * w * 3); // fully overwritten
+    rcd_strips_into(src, h, w, scale, r_off, b_off, None, &mut out);
     out
+}
+
+/// `debayer.py::_apply_fixed_grid` on one green value: `v -= f32(off)` then
+/// `np.maximum(v, 0)` (NaN stays NaN, -0.0 and negatives become +0.0).
+#[inline(always)]
+fn rcd_grid_sub(v: f32, off: f32) -> f32 {
+    let v = v - off;
+    if v > 0.0 || v.is_nan() { v } else { 0.0 }
+}
+
+/// Write `rows` x `cols` output pixels from the padded tile planes (tile rows from
+/// `ty0`, columns from `tx0`; `tw` = tile width) into `dst` (row stride `dstride`
+/// floats, interleaved RGB): each value times `sc` (numpy: f32 array * Python float
+/// is an f32 multiply), then -- with `grid` -- green minus the session's 2x2 offset
+/// for its global parity (`_GRID_PARITY` order: (0,0), (0,1), (1,0), (1,1)), clipped
+/// as `_apply_fixed_grid` does. `gy0`/`gx0`: global coordinates of the first pixel.
+/// The same f32 operations in the same order as debayer + `_apply_fixed_grid`, so
+/// fusing the grid here is bit-identical and saves its four strided passes over
+/// the 75 MB output.
+#[allow(clippy::too_many_arguments)]
+fn rcd_emit(planes: &(Vec<f32>, Vec<f32>, Vec<f32>), tw: usize, ty0: usize, tx0: usize,
+            rows: usize, cols: usize, sc: f32, grid: Option<[f32; 4]>, gy0: usize, gx0: usize,
+            dst: &mut [f32], dstride: usize) {
+    let (r, g, b) = planes;
+    for row in 0..rows {
+        let (rr, gg, bb) = (&rcd_row(r, tw, ty0 + row, 0, 0)[tx0..tx0 + cols],
+                            &rcd_row(g, tw, ty0 + row, 0, 0)[tx0..tx0 + cols],
+                            &rcd_row(b, tw, ty0 + row, 0, 0)[tx0..tx0 + cols]);
+        let o = &mut dst[row * dstride..row * dstride + cols * 3];
+        match grid {
+            None => {
+                for x in 0..cols {
+                    o[3 * x] = rr[x] * sc;
+                    o[3 * x + 1] = gg[x] * sc;
+                    o[3 * x + 2] = bb[x] * sc;
+                }
+            }
+            Some(gd) => {
+                let py = (gy0 + row) & 1;
+                // offsets for even / odd local columns of this row
+                let (oe, oo) = if gx0 & 1 == 0 { (gd[2 * py], gd[2 * py + 1]) }
+                               else { (gd[2 * py + 1], gd[2 * py]) };
+                for x in 0..cols {
+                    let off = if x & 1 == 0 { oe } else { oo };
+                    o[3 * x] = rr[x] * sc;
+                    o[3 * x + 1] = rcd_grid_sub(gg[x] * sc, off);
+                    o[3 * x + 2] = bb[x] * sc;
+                }
+            }
+        }
+    }
+}
+
+fn rcd_give_planes(p: (Vec<f32>, Vec<f32>, Vec<f32>)) {
+    rcd_give(p.0);
+    rcd_give(p.1);
+    rcd_give(p.2);
 }
 
 /// `rcd_strips` writing into a caller-supplied (h, w, 3) buffer -- e.g. the frame's own
 /// slot of Phase 1's frame store, so neither a fresh 75 MB output (zero-filled by the OS
-/// on first touch) nor a copy into the store is needed.
+/// on first touch) nor a copy into the store is needed. Each tile's planes are written
+/// straight into `out` (no per-tile interleaved buffer), with the optional fused grid.
+#[allow(clippy::too_many_arguments)]
 fn rcd_strips_into(src: &[f32], h: usize, w: usize, scale: f64,
-                   r_off: (usize, usize), b_off: (usize, usize), out: &mut [f32]) {
-    if h <= RCD_TILE + 2 * RCD_HALO && w <= RCD_TILE + 2 * RCD_HALO {
-        let res = rcd_core(src, h, w, scale, r_off, b_off);
-        out.copy_from_slice(&res[..h * w * 3]);
-        rcd_give(res);
+                   r_off: (usize, usize), b_off: (usize, usize), grid: Option<[f32; 4]>,
+                   out: &mut [f32]) {
+    let sc = scale as f32;
+    let (tyl, txl) = (RCD_TILE, RCD_TILE_X);
+    if h <= tyl + 2 * RCD_HALO && w <= txl + 2 * RCD_HALO {
+        let planes = rcd_core(src, h, w, scale, r_off, b_off);
+        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+            rcd_emit(&planes, w, y, 0, 1, w, sc, grid, y, 0, row, w * 3);
+        });
+        rcd_give_planes(planes);
         return;
     }
     // extended span [lo, hi) of tile k along an axis of length n, >= 16 long
-    let span = |k: usize, n: usize| -> (usize, usize, usize) {
-        let s0 = k * RCD_TILE;
-        let len = RCD_TILE.min(n - s0);
+    let span = |k: usize, n: usize, t: usize| -> (usize, usize, usize) {
+        let s0 = k * t;
+        let len = t.min(n - s0);
         let mut lo = s0.saturating_sub(RCD_HALO);
         let mut hi = (s0 + len + RCD_HALO).min(n);
         if hi - lo < 16 {
@@ -9192,29 +9264,25 @@ fn rcd_strips_into(src: &[f32], h: usize, w: usize, scale: f64,
         }
         (lo, hi, len)
     };
-    let (ty, tx) = ((h + RCD_TILE - 1) / RCD_TILE, (w + RCD_TILE - 1) / RCD_TILE);
+    let tx = w.div_ceil(txl);
     // one band of tile rows per task: each band owns its output rows
-    out.par_chunks_mut(RCD_TILE * w * 3).enumerate().for_each(|(ky, band)| {
-        let (y0, y1, rows) = span(ky, h);
-        let sy = ky * RCD_TILE;
+    out.par_chunks_mut(tyl * w * 3).enumerate().for_each(|(ky, band)| {
+        let (y0, y1, rows) = span(ky, h, tyl);
+        let sy = ky * tyl;
         for kx in 0..tx {
-            let (x0, x1, cols) = span(kx, w);
-            let sx = kx * RCD_TILE;
+            let (x0, x1, cols) = span(kx, w, txl);
+            let sx = kx * txl;
             let (th, tw) = (y1 - y0, x1 - x0);
             let mut tile = rcd_take(th * tw);
             for r in 0..th {
                 tile[r * tw..(r + 1) * tw].copy_from_slice(&src[(y0 + r) * w + x0..(y0 + r) * w + x1]);
             }
-            let res = rcd_core(&tile, th, tw, scale, r_off, b_off);
+            let planes = rcd_core(&tile, th, tw, scale, r_off, b_off);
             rcd_give(tile);
-            for r in 0..rows {
-                let s = ((sy - y0 + r) * tw + (sx - x0)) * 3;
-                let d = (r * w + sx) * 3;
-                band[d..d + cols * 3].copy_from_slice(&res[s..s + cols * 3]);
-            }
-            rcd_give(res);
+            rcd_emit(&planes, tw, sy - y0, sx - x0, rows, cols, sc, grid, sy, sx,
+                     &mut band[sx * 3..], w * 3);
+            rcd_give_planes(planes);
         }
-        let _ = ty;
     });
 }
 
@@ -9490,30 +9558,20 @@ macro_rules! rcd_core_impl {
     let b = card(&b1);
     rcd_give(r1);
     rcd_give(b1);
-    let sc = scale as f32; // numpy: f32 array * Python float is an f32 multiply
-    let mut out = rcd_take(h * w * 3); // fully overwritten below
-    out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
-        let (rr, gg, bb) = (rcd_row(&r, w, y, 0, 0), rcd_row(&g, w, y, 0, 0),
-                            rcd_row(&b, w, y, 0, 0));
-        for x in 0..w {
-            row[3 * x] = rr[x] * sc;
-            row[3 * x + 1] = gg[x] * sc;
-            row[3 * x + 2] = bb[x] * sc;
-        }
-    });
-    for v in [cfa, vh_disc, g, r, b] {
+    for v in [cfa, vh_disc] {
         rcd_give(v);
     }
-    out
+    (r, g, b)
     }};
 }
 
-/// RCD over the whole frame. Every stage is a branch-free loop over contiguous
+/// RCD over the whole frame, returning the padded R, G, B planes (unscaled; see
+/// `rcd_emit_rows`). Every stage is a branch-free loop over contiguous
 /// row slices (computed at every pixel, then selected per Bayer site, as the
 /// numpy mirror does), so the compiler vectorises it; the per-pixel arithmetic
 /// and its order are the mirror's, so the result is bit-identical.
 fn rcd_core(src: &[f32], h: usize, w: usize, scale: f64,
-            r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
+            r_off: (usize, usize), b_off: (usize, usize)) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     // Run-time AVX2 twin, as for the 3x3 median: the crate targets baseline
     // x86-64, and these loops are where a wider vector pays. No FMA is enabled
     // and Rust never contracts a*b+c on its own, so both give identical bits.
@@ -9529,7 +9587,7 @@ fn rcd_core(src: &[f32], h: usize, w: usize, scale: f64,
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,
-                        r_off: (usize, usize), b_off: (usize, usize)) -> Vec<f32> {
+                        r_off: (usize, usize), b_off: (usize, usize)) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     // the macro puts every stage closure lexically inside this function, so
     // they inherit the target feature
     rcd_core_impl!(src, h, w, scale, r_off, b_off)
