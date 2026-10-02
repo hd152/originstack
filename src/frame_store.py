@@ -53,6 +53,18 @@ class _RamArray(np.ndarray):
         pass
 
 
+class _ScratchMemmap(np.memmap):
+    """Temp-file memmap whose ``flush`` is a no-op. The file is scratch: it is
+    deleted at cleanup, never reopened after a crash (checkpoints do not point at
+    it), and every process maps the same file, which the OS keeps coherent across
+    views. Flushing only forced a synchronous writeback: on a 532-frame session the
+    aligned stack's flush took ~29 s of a 58 s alignment, writing 14.7 GB that was
+    read straight back from the page cache and then deleted."""
+
+    def flush(self) -> None:
+        pass
+
+
 def _available_mb() -> Tuple[Optional[float], Optional[float]]:
     try:
         import psutil
@@ -129,7 +141,7 @@ class FrameStore:
             _cleanup_register(path)
         except Exception:
             pass
-        mm = np.memmap(path, dtype=dt, mode='w+', shape=shape)
+        mm = _ScratchMemmap(path, dtype=dt, mode='w+', shape=shape)
         self._files.append(path)
         self._memmaps.append(mm)
         self.placement[prefix] = f'disk ({nbytes / 1e9:.1f} GB)'
