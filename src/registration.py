@@ -657,6 +657,11 @@ def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
 
 def _downsample_half(arr: np.ndarray) -> np.ndarray:
     """2x box-downsample (even-cropped 2x2 average)."""
+    if (HAS_NATIVE and hasattr(_native, 'downsample_half_f32') and isinstance(arr, np.ndarray)
+            and arr.dtype == np.float32 and arr.ndim == 2 and arr.flags.c_contiguous):
+        # one read pass, same f32 operation order (bit-identical); numpy made three
+        # strided adds with temporaries -- most of the reference-selection pass
+        return _native.downsample_half_f32(arr)
     h2 = (arr.shape[0] // 2) * 2
     w2 = (arr.shape[1] // 2) * 2
     a = arr[:h2, :w2]
@@ -1030,7 +1035,8 @@ def select_reference_frame(
     def _get_lum(orig_idx: int) -> np.ndarray:
         if cached_lums is not None and orig_idx < len(cached_lums) and cached_lums[orig_idx] is not None:
             return np.asarray(cached_lums[orig_idx], dtype=np.float32)
-        return np.array(mem_lum[orig_idx], dtype=np.float32)
+        # a view, not a copy: only its 2x downsample is read (pyramid levels >= 1)
+        return np.asarray(mem_lum[orig_idx], dtype=np.float32)
 
     # Tentative reference: highest quality frame (for consistent pyramid base)
     tentative_best = max(final, key=lambda f: f.metrics.get('score', 0.0))

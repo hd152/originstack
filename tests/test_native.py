@@ -3057,3 +3057,27 @@ def test_patch_brenner_scores_matches_numpy():
     finally:
         rg.HAS_NATIVE = h
     np.testing.assert_allclose(a, b, rtol=1e-6)
+
+
+def test_downsample_half_f32_matches_numpy():
+    """downsample_half_f32 == registration._downsample_half's numpy path, bit for bit
+    (odd shapes, NaN, inf, -0.0, large values)."""
+    if not hasattr(native, "downsample_half_f32"):
+        pytest.skip("astro_native without downsample_half_f32")
+    rng = np.random.default_rng(7)
+
+    def ref(arr):
+        h2, w2 = (arr.shape[0] // 2) * 2, (arr.shape[1] // 2) * 2
+        a = arr[:h2, :w2]
+        return (a[::2, ::2] + a[1::2, ::2] + a[::2, 1::2] + a[1::2, 1::2]) * 0.25
+
+    for shape in [(2048, 3056), (101, 77), (3, 2), (1, 5)]:
+        a = (rng.normal(1000, 300, shape) * rng.choice([1, 1e4], shape)).astype(np.float32)
+        if a.size > 10:
+            a.flat[::97] = np.nan
+            a.flat[5] = np.inf
+            a.flat[7] = -0.0
+        got = native.downsample_half_f32(a)
+        exp = ref(a)
+        assert got.dtype == np.float32 and got.shape == exp.shape
+        np.testing.assert_array_equal(got.view(np.uint32), exp.view(np.uint32))

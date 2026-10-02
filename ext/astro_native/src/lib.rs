@@ -10044,6 +10044,34 @@ fn validate_frame_stats<'py>(py: Python<'py>, img: PyReadonlyArray2<'py, f32>) -
     }))
 }
 
+/// 2x box downsample of an (H, W) float32 image, bit-identical to
+/// `registration._downsample_half`: even-cropped, out = (((a00 + a10) + a01) + a11) * 0.25
+/// in f32 -- numpy's operation order. One read pass instead of numpy's three
+/// strided adds and temporaries. Single-threaded: callers run it from many
+/// Python threads at once (the pyramid pass), so rayon here would only contend.
+#[pyfunction]
+fn downsample_half_f32<'py>(py: Python<'py>, img: PyReadonlyArray2<'py, f32>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let a = img.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let src = a.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("image must be C-contiguous"))?;
+    let (h2, w2) = (h / 2, w / 2);
+    let out: Vec<f32> = py.detach(|| {
+        let mut o = vec![0f32; h2 * w2];
+        for y in 0..h2 {
+            let r0 = &src[2 * y * w..2 * y * w + w];
+            let r1 = &src[(2 * y + 1) * w..(2 * y + 1) * w + w];
+            let orow = &mut o[y * w2..(y + 1) * w2];
+            for x in 0..w2 {
+                orow[x] = (((r0[2 * x] + r1[2 * x]) + r0[2 * x + 1]) + r1[2 * x + 1]) * 0.25f32;
+            }
+        }
+        o
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((h2, w2), out)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        .into_pyarray(py))
+}
+
 /// Linear cross-correlation `c[dy][dx] = sum_p ref[p + d] * img[p]` (zero outside
 /// the frame) for every lag |dy|, |dx| <= radius: the values a zero-padded FFT
 /// correlation has at those lags (src/registration.py::calculate_shift_pyramid_pref,
@@ -10163,6 +10191,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native_into, m)?)?;
     m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
+    m.add_function(wrap_pyfunction!(downsample_half_f32, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum32, m)?)?;
