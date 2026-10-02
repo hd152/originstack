@@ -1191,7 +1191,7 @@ def execute_frame_processing(
             pass
 
         _worker_count_used = max(workers, 1)
-        print(f"  Processing {n} frames in parallel ({workers} workers x {_rayon_threads} native threads)...")
+        safe_print(f"  Processing {n} frames in parallel ({workers} workers x {_rayon_threads} native threads)...")
 
         # Share calibration arrays via shared memory — zero disk I/O, one copy
         # in RAM shared across all workers (read-only view per worker process).
