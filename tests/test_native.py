@@ -3081,3 +3081,43 @@ def test_downsample_half_f32_matches_numpy():
         exp = ref(a)
         assert got.dtype == np.float32 and got.shape == exp.shape
         np.testing.assert_array_equal(got.view(np.uint32), exp.view(np.uint32))
+
+
+@pytest.mark.skipif(not hasattr(native, 'patch_weighted_sigma_combine_fast'),
+                    reason='astro_native without patch_weighted_sigma_combine_fast')
+@pytest.mark.parametrize('max_iters', [0, 1, 2, 3, 4, 5])
+def test_fused_patch_combine_fast_bit_identical(max_iters):
+    """patch_weighted_sigma_combine_fast == patch_weighted_sigma_combine bit for bit
+    (NaN positions included): ties, NaN, +-0, all-NaN, MAD-0 pixels, +-inf, outliers,
+    with and without a patch grid / global weights, MAD and std estimators."""
+    rng = np.random.default_rng(11 + max_iters)
+    N, H, W, C = 41, 24, 37, 3
+    d = (rng.normal(1000, 30, (N, H, W, C)) + rng.normal(0, 20, (N, 1, 1, 1))).astype(np.float32)
+    d[rng.random((N, H, W)) < 0.01] += 6000                      # outliers
+    d[rng.random(d.shape) < 0.02] = np.nan                       # scattered NaN
+    d[:, 0, :5] = 1000.0                                         # constant -> MAD 0, std 0
+    d[:, 1, :5] = 1000.0
+    d[::7, 1, :5] = 1003.0                                       # MAD 0, std > 0
+    d[:, 2, :10, 0] = np.round(d[:, 2, :10, 0] / 40) * 40        # heavy ties
+    d[:, 3, :6, 1] = 0.0
+    d[::2, 3, :6, 1] = -0.0                                      # +-0
+    d[:, 3, 6:12, 2] = rng.choice([-0.0, 0.0, 1.0, -1.0], (N, 6)).astype(np.float32)
+    d[:, 4, :4] = np.nan                                         # all NaN
+    d[:2, 5, :4] = np.inf
+    d[2, 5, :4, 0] = -np.inf                                     # +-inf
+    d[:N - 1, 6, :3] = np.nan                                    # a single valid sample
+    d[:N - 2, 7, :3] = np.nan                                    # two valid samples
+    d = np.ascontiguousarray(d)
+    grids = rng.uniform(0.2, 1.0, (N, 6, 9)).astype(np.float32)
+    grids[3] = 0.0                                               # a zero-weight frame
+    full = rng.uniform(0.2, 1.0, (N, H, W)).astype(np.float32)
+    gw = rng.uniform(0.5, 1.5, N).astype(np.float32)
+    geom = (float(H + 10), float(W + 14), 4.0, 6.0)
+    with np.errstate(all='ignore'):
+        for qm, g in ((grids, geom), (full, None)):
+            for weights in (gw, None):
+                for use_mad in (True, False):
+                    for sigma in (2.8, 0.5):
+                        ref = native.patch_weighted_sigma_combine(d, qm, weights, sigma, max_iters, use_mad, g)
+                        got = native.patch_weighted_sigma_combine_fast(d, qm, weights, sigma, max_iters, use_mad, g)
+                        np.testing.assert_array_equal(got.view(np.uint32), ref.view(np.uint32))

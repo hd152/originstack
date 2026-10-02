@@ -2255,7 +2255,10 @@ def run_stacking_phase(
                     _w32 = (weights.astype(np.float32, copy=False)
                             if weights is not None else None)
                     _use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
-                    stacked = _native.patch_weighted_sigma_combine(
+                    # _fast: same output bit for bit, ~10% quicker (older crates lack it)
+                    _pwsc = getattr(_native, 'patch_weighted_sigma_combine_fast',
+                                    _native.patch_weighted_sigma_combine)
+                    stacked = _pwsc(
                         mem_aligned, qgrids, _w32, float(args.rejection_sigma),
                         int(args.rejection_iters), _use_mad, qgrid_geom)
                     safe_print(f"    [rust] fused patch-weighted + sigma-clip combine "
