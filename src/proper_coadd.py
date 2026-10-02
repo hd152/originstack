@@ -343,7 +343,10 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     def measure(j):
         return FrameMeasurer(stars, p_ref).measure(aligned[j])   # stamps and samples only
 
-    nw = workers or 8
+    # 2 threads: the fit is ~6 ms of small-array numpy/scipy calls per frame and holds
+    # the GIL most of the time -- 8 threads took 9.8 ms per frame, 2 take 5.4 (532-frame
+    # session: 8.9 -> ~3 s). Results do not depend on the thread count (ex.map keeps order).
+    nw = workers or 2
     if premeasured is None:
         with ThreadPoolExecutor(max_workers=nw) as ex:
             raw = list(ex.map(measure, range(N)))
