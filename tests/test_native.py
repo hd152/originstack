@@ -2363,6 +2363,61 @@ def test_hot_pixel_bayer_statistical_bit_identical(shape, monkeypatch):
     np.testing.assert_array_equal(fast, ref)
 
 
+def _inplace_cases():
+    """Mosaics for hot_pixel_bayer_inplace: odd/tiny shapes, integer data (many tied
+    |diff| values, so the MAD buckets are crowded), sub-1e-6 sigma, stars, NaN."""
+    rng = np.random.default_rng(11)
+    cases = []
+    for shape in [(96, 130), (7, 9), (3, 5), (2, 2), (1, 7), (64, 66), (65, 67), (301, 257)]:
+        raw, _hot, _ = _mosaic(*shape, seed=shape[0] * 7 + shape[1])
+        cases.append(raw)
+        cases.append(np.round(raw / 16.0).astype(np.float32))          # few distinct levels
+    flat = np.full((40, 50), 1000.0, np.float32)
+    flat[5, 7] = 9000.0
+    cases.append(flat)                                                # MAD 0: left alone
+    tiny = (1000.0 + rng.normal(0, 1e-7, (40, 50))).astype(np.float32)
+    cases.append(tiny)                                                # sigma < 1e-6
+    stars, _h, _ = _mosaic(120, 140, seed=4)
+    yy, xx = np.mgrid[0:120, 0:140]
+    for cy, cx in [(30.3, 40.7), (80.5, 100.2), (60, 20)]:
+        stars += (6000 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 1.1 ** 2))).astype(np.float32)
+    cases.append(stars)
+    nan = _mosaic(50, 60, seed=9)[0]
+    nan[10, 11] = np.nan                                              # that plane left alone
+    cases.append(nan)
+    neg = _mosaic(50, 60, seed=10)[0] - 1000.0                        # negative values / -0.0
+    neg[4, 4] = -0.0
+    cases.append(neg)
+    return cases
+
+
+@pytest.mark.skipif(not hasattr(native, "hot_pixel_bayer_inplace"),
+                    reason="astro_native lacks hot_pixel_bayer_inplace")
+@pytest.mark.parametrize("star_support", [3.0, None])
+def test_hot_pixel_bayer_inplace_bit_identical(star_support):
+    for k, raw in enumerate(_inplace_cases()):
+        for thr in (5.0, 2.0):
+            ref = native.hot_pixel_bayer(raw, None, thr, star_support)
+            work = raw.copy()
+            n = native.hot_pixel_bayer_inplace(work, thr, star_support)
+            assert work.tobytes() == ref.tobytes(), (k, thr)
+            assert n == int(np.sum(ref.view(np.uint32) != raw.view(np.uint32))), (k, thr)
+
+
+@pytest.mark.skipif(not hasattr(native, "hot_pixel_bayer_inplace"),
+                    reason="astro_native lacks hot_pixel_bayer_inplace")
+def test_fix_hot_bayer_inplace_matches_numpy(monkeypatch):
+    raw, _hot, _ = _mosaic(97, 131)
+    work = raw.copy()
+    out = _debayer_mod._fix_hot_bayer(work, inplace=True)
+    assert out is work                                                # fixed where it lies
+    monkeypatch.setattr(_debayer_mod, "_HAS_NATIVE", False)
+    ref = _debayer_mod._fix_hot_bayer(raw.copy())
+    np.testing.assert_array_equal(out, ref)
+    with pytest.raises(ValueError):
+        native.hot_pixel_bayer_inplace(np.asfortranarray(raw), 5.0, 3.0)
+
+
 @pytest.mark.skipif(not _HAS_FUSED, reason="astro_native lacks the fused Phase-1 kernels")
 def test_hot_pixel_bayer_actually_repairs_hot_pixels():
     raw, hot, _ = _mosaic()

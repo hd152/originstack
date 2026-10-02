@@ -347,7 +347,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             # pass when native (src/debayer.py::calibrate_frame).
             if _be16 is not None:
                 data, _finite = calibrate_frame_be16(data, _be16, bias_arr, dark_arr, dark_scale,
-                                                     flat_norm)
+                                                     flat_norm, out=_mosaic_buffer(data.shape))
             else:
                 data, _finite = calibrate_frame(data, bias_arr, dark_arr, dark_scale, flat_norm)
             if not _finite:
@@ -357,7 +357,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                 if hot_map.shape == data.shape:
                     data = apply_hot_pixel_map_bayer(data, hot_map)
             if data.ndim == 2:
-                data = remove_hot_pixels_bayer(data)
+                # in place unless `data` is still the caller's preloaded array
+                data = remove_hot_pixels_bayer(
+                    data, inplace=preloaded_data is None or data is not preloaded_data[0])
                 _bayer_hot_fixed = True
     except Exception as e:
         return {'error': f'calibration error: {e}'}
@@ -588,6 +590,22 @@ _warned_nebula_wb_skip: set = set()  # dedup nebula-filter white-balance-skip no
 # GPU calibration probe cache — probed once per unique frame size per session
 _gpu_calib_cache: Dict[Tuple[int, int], bool] = {}
 _gpu_calib_lock = threading.Lock()
+
+# Per-thread scratch for the calibrated mosaic of the fused BITPIX=16 load+calibrate:
+# that mosaic lives only inside one `_process_single_frame` call (hot pixels are fixed
+# in place, green equalisation is in place, the debayer reads it into its own output),
+# so reusing one buffer skips a fresh 25 MB allocation the OS zero-fills on first touch.
+_mosaic_scratch = threading.local()
+
+
+def _mosaic_buffer(shape) -> np.ndarray:
+    buf = getattr(_mosaic_scratch, 'buf', None)
+    if buf is None or buf.shape != tuple(shape):
+        buf = np.empty(shape, np.float32)
+        _mosaic_scratch.buf = buf
+    return buf
+
+
 _gpu_masters: Dict[str, Any] = {}        # GPU-resident copies of master arrays
 _gpu_masters_sig: Optional[Tuple] = None  # the host arrays they were uploaded from
 

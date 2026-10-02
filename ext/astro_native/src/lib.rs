@@ -7602,6 +7602,373 @@ fn hot_pixel_bayer<'py>(
         .into_pyarray(py))
 }
 
+/// Reused diff-plane buffers for `hot_pixel_bayer_inplace` (fully overwritten each
+/// call, so a reused one needs no clearing; a fresh 25 MB one is zero-filled by the
+/// OS on first touch).
+static HOTPIX_POOL: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<f32>>>> = std::sync::OnceLock::new();
+
+fn hotpix_take(n: usize) -> Vec<f32> {
+    let pool = HOTPIX_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut p) = pool.lock() {
+        if let Some(i) = p.iter().position(|v| v.len() == n) {
+            return p.swap_remove(i);
+        }
+    }
+    let mut v = Vec::with_capacity(n);
+    // SAFETY: every element is written by pass 1 before it is read
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        v.set_len(n)
+    };
+    v
+}
+
+fn hotpix_give(v: Vec<f32>) {
+    let pool = HOTPIX_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut p) = pool.lock() {
+        if p.len() < 4 {
+            p.push(v);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HpPtr(*mut f32);
+unsafe impl Send for HpPtr {}
+unsafe impl Sync for HpPtr {}
+
+/// |diff| histogram resolution: buckets are the top 12 bits of the non-negative f32
+/// pattern (exponent + 3 mantissa bits), so bucket order is value order.
+const HP_SHIFT: u32 = 19;
+const HP_NB: usize = 1 << (31 - HP_SHIFT);
+const HP_COPIES: usize = 4;
+
+/// 3x3 median at plane position (i, j) of the (py, px) Bayer sub-plane, computed exactly
+/// as `median_filter_2d_f32(plane, hh, ww, 3)` does there: the median9 network in the
+/// interior, reflect + comparator sort on the plane's border rows and columns.
+#[inline]
+fn bayer_plane_median3_as_filter(data: &[f32], w: usize, hh: usize, ww: usize, py: usize,
+                                 px: usize, i: usize, j: usize) -> f32 {
+    let mut win = [0f32; 9];
+    if i >= 1 && i + 1 < hh && j >= 1 && j + 1 < ww {
+        let mut k = 0;
+        for ii in i - 1..=i + 1 {
+            let r = (2 * ii + py) * w + px;
+            for jj in j - 1..=j + 1 {
+                win[k] = data[r + 2 * jj];
+                k += 1;
+            }
+        }
+        return median9(&mut win);
+    }
+    let mut k = 0;
+    for di in -1isize..=1 {
+        let ii = reflect_idx(i as isize + di, hh);
+        for dj in -1isize..=1 {
+            let jj = reflect_idx(j as isize + dj, ww);
+            win[k] = data[(2 * ii + py) * w + 2 * jj + px];
+            k += 1;
+        }
+    }
+    win.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    win[4]
+}
+
+/// `hot_pixel_bayer(data, threshold=..., star_support=...)` (statistical mode) done in
+/// place, with the same result bit for bit, in two streaming passes instead of ~10:
+///
+/// 1. per plane row (all four planes of a row chunk at once, so each mosaic row is read
+///    from DRAM once): the 3x3 plane median (the same median9 network / border sort as
+///    `median_filter_2d_f32`), `diff = value - median` (the f32 the old kernel formed for
+///    its MAD, its threshold test and its star-support z) into a pooled plane-layout
+///    buffer, and a histogram of |diff| by its top f32 bits;
+/// 2. the histogram says which bucket(s) hold the median |diff| (the MAD), so one pass
+///    over the diffs collects just those buckets' values -- sorted, they give the exact
+///    order statistics `median_inplace` returned -- and every pixel whose diff exceeds the
+///    threshold at the bucket's lower edge (a superset: f32 multiplication by a positive
+///    constant is monotonic).
+///
+/// The candidates then get the exact test (`diff > thr * sigma`), the star-support test
+/// (neighbour z = its diff / its plane's sigma, as before) and, if flagged, their plane
+/// median recomputed from the untouched input; the replacements are written last.
+/// Returns the number of pixels replaced.
+#[pyfunction]
+#[pyo3(signature = (data, threshold, star_support=None))]
+fn hot_pixel_bayer_inplace<'py>(
+    py: Python<'py>,
+    mut data: numpy::PyReadwriteArray2<'py, f32>,
+    threshold: f32,
+    star_support: Option<f32>,
+) -> PyResult<usize> {
+    let (h, w) = {
+        let s = data.as_array();
+        if !s.is_standard_layout() {
+            return Err(pyo3::exceptions::PyValueError::new_err("data must be C-contiguous"));
+        }
+        (s.shape()[0], s.shape()[1])
+    };
+    let d: &mut [f32] = data
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("data must be contiguous"))?;
+    let thr = threshold;
+    let n_fixed = py.detach(|| {
+        let sigma_k = 1.4826f64 as f32;
+        let hhs = [(h + 1) / 2, h / 2];
+        let wws = [(w + 1) / 2, w / 2];
+        let dims: [(usize, usize); 4] = [(hhs[0], wws[0]), (hhs[0], wws[1]), (hhs[1], wws[0]), (hhs[1], wws[1])];
+        let mut offs = [0usize; 4];
+        for q in 1..4 {
+            offs[q] = offs[q - 1] + dims[q - 1].0 * dims[q - 1].1;
+        }
+        let mut diff = hotpix_take(h * w);
+        let dp = HpPtr(diff.as_mut_ptr());
+        let src: &[f32] = &*d;
+
+        // ---- pass 1: median, diff, histogram ----
+        let nrows = hhs[0];
+        let nt = rayon::current_num_threads().max(1);
+        let chunk = nrows.div_ceil(4 * nt).max(8);
+        let nchunks = nrows.div_ceil(chunk);
+        let (hist, nan) = (0..nchunks)
+            .into_par_iter()
+            .map(|c| {
+                let dp = dp;
+                // HP_COPIES interleaved sub-histograms per plane: neighbouring pixels mostly
+                // fall in the same bucket, and a single counter would serialise on its own
+                // increments
+                let mut hist = vec![0u32; 4 * HP_COPIES * HP_NB];
+                let mut nan = [false; 4];
+                let i0 = c * chunk;
+                let i1 = (i0 + chunk).min(nrows);
+                // per plane, the last three plane rows deinterleaved from the mosaic (slot r % 3)
+                let mut ring: [Vec<f32>; 4] = Default::default();
+                let mut ring_row = [[usize::MAX; 3]; 4];
+                let mut medbuf: Vec<f32> = vec![0f32; wws[0]];
+                for i in i0..i1 {
+                    for q in 0..4 {
+                        let (py_, px) = (q >> 1, q & 1);
+                        let (hh, ww) = dims[q];
+                        if ww == 0 || i >= hh {
+                            continue;
+                        }
+                        {
+                            let rg = &mut ring[q];
+                            if rg.len() != 3 * ww {
+                                rg.resize(3 * ww, 0f32);
+                            }
+                            let lo = if i >= 1 { i - 1 } else { i };
+                            let hi = (i + 1).min(hh - 1);
+                            for r in lo..=hi {
+                                let slot = r % 3;
+                                if ring_row[q][slot] != r {
+                                    let s0 = (2 * r + py_) * w + px;
+                                    for (j, v) in rg[slot * ww..(slot + 1) * ww].iter_mut().enumerate() {
+                                        *v = src[s0 + 2 * j];
+                                    }
+                                    ring_row[q][slot] = r;
+                                }
+                            }
+                        }
+                        let rg = &ring[q];
+                        let cur = (i % 3) * ww;
+                        let med = &mut medbuf[..ww];
+                        if i >= 1 && i + 1 < hh && ww >= 3 {
+                            median3_interior(((i - 1) % 3) * ww, cur, ((i + 1) % 3) * ww, ww, rg, med);
+                            med[0] = bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, 0);
+                            med[ww - 1] =
+                                bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, ww - 1);
+                        } else {
+                            for (j, m) in med.iter_mut().enumerate() {
+                                *m = bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, j);
+                            }
+                        }
+                        // SAFETY: plane q row i is written only by the chunk owning row i
+                        let out = unsafe {
+                            std::slice::from_raw_parts_mut(dp.0.add(offs[q] + i * ww), ww)
+                        };
+                        let p = &rg[cur..cur + ww];
+                        let hq = &mut hist[q * HP_COPIES * HP_NB..(q + 1) * HP_COPIES * HP_NB];
+                        let mut any_nan = false;
+                        for j in 0..ww {
+                            let dv = p[j] - med[j];
+                            out[j] = dv;
+                            any_nan |= dv.is_nan();
+                            hq[(j & (HP_COPIES - 1)) * HP_NB
+                                + ((dv.to_bits() & 0x7FFF_FFFF) >> HP_SHIFT) as usize] += 1;
+                        }
+                        nan[q] |= any_nan;
+                    }
+                }
+                let mut h1 = vec![0u32; 4 * HP_NB];
+                for q in 0..4 {
+                    for k in 0..HP_COPIES {
+                        let src_h = &hist[(q * HP_COPIES + k) * HP_NB..(q * HP_COPIES + k + 1) * HP_NB];
+                        for (a, b) in h1[q * HP_NB..(q + 1) * HP_NB].iter_mut().zip(src_h) {
+                            *a += *b;
+                        }
+                    }
+                }
+                (h1, nan)
+            })
+            .reduce(
+                || (vec![0u32; 4 * HP_NB], [false; 4]),
+                |(mut a, mut na), (b, nb)| {
+                    for (x, y) in a.iter_mut().zip(&b) {
+                        *x += *y;
+                    }
+                    for q in 0..4 {
+                        na[q] |= nb[q];
+                    }
+                    (a, na)
+                },
+            );
+        let diff_ro: &[f32] = &diff;
+
+        // ---- MAD bucket(s) and candidate bound per plane ----
+        // (ranks, lowest bucket, highest bucket, count below the lowest, candidate bound)
+        let mut plan: [Option<(usize, usize, usize, u64, f32)>; 4] = [None; 4];
+        for q in 0..4 {
+            let n = dims[q].0 * dims[q].1;
+            if n == 0 || nan[q] {
+                continue;
+            }
+            let hq = &hist[q * HP_NB..(q + 1) * HP_NB];
+            let mid = n / 2;
+            let r_lo = if n % 2 == 1 { mid } else { mid - 1 };
+            let (mut b_lo, mut b_hi) = (usize::MAX, usize::MAX);
+            let mut below_lo = 0u64;
+            let mut cum = 0u64;
+            for (b, &c) in hq.iter().enumerate() {
+                let next = cum + c as u64;
+                if b_lo == usize::MAX && (r_lo as u64) < next {
+                    b_lo = b;
+                    below_lo = cum;
+                }
+                if (mid as u64) < next {
+                    b_hi = b;
+                    break;
+                }
+                cum = next;
+            }
+            // the largest value bucket b_hi can hold: a plane whose sigma is < 1e-6 even
+            // then is left alone, as before
+            let top = f32::from_bits((((b_hi as u32) + 1) << HP_SHIFT) - 1);
+            if b_hi + 1 < HP_NB && !(top * sigma_k >= 1e-6) {
+                continue;
+            }
+            let edge = f32::from_bits((b_lo as u32) << HP_SHIFT);
+            // superset bound; a non-positive threshold would reverse the monotonicity
+            let cthr = if thr > 0f32 { thr * (edge * sigma_k) } else { f32::NEG_INFINITY };
+            plan[q] = Some((mid, b_lo, b_hi, below_lo, cthr));
+        }
+
+        // ---- pass 2: the MAD buckets' values and the candidates ----
+        let mut tasks: Vec<(usize, usize, usize)> = Vec::new();
+        const CH2: usize = 1 << 16;
+        for q in 0..4 {
+            if plan[q].is_some() {
+                let n = dims[q].0 * dims[q].1;
+                let mut s = 0;
+                while s < n {
+                    tasks.push((q, s, (s + CH2).min(n)));
+                    s += CH2;
+                }
+            }
+        }
+        let parts: Vec<(usize, Vec<f32>, Vec<u32>)> = tasks
+            .par_iter()
+            .map_init(
+                || (vec![0f32; CH2], vec![0u32; CH2]),
+                |(vb, cb), &(q, s, e)| {
+                    let (_, b_lo, b_hi, _, cthr) = plan[q].unwrap();
+                    let (blo, span) = (b_lo as u32, (b_hi - b_lo) as u32);
+                    let sl = &diff_ro[offs[q] + s..offs[q] + e];
+                    // branch-free compaction: write every element, advance only on a hit
+                    let (mut nv, mut nc) = (0usize, 0usize);
+                    for (k, &v) in sl.iter().enumerate() {
+                        let b = (v.to_bits() & 0x7FFF_FFFF) >> HP_SHIFT;
+                        vb[nv] = v.abs();
+                        nv += (b.wrapping_sub(blo) <= span) as usize;
+                        cb[nc] = (s + k) as u32;
+                        nc += (v > cthr) as usize;
+                    }
+                    (q, vb[..nv].to_vec(), cb[..nc].to_vec())
+                },
+            )
+            .collect();
+        let mut sigma = [0f32; 4];
+        let mut vals_q: [Vec<f32>; 4] = Default::default();
+        let mut cands: Vec<(usize, u32)> = Vec::new();
+        for (q, v, c) in parts {
+            vals_q[q].extend_from_slice(&v);
+            cands.extend(c.into_iter().map(|k| (q, k)));
+        }
+        for q in 0..4 {
+            if let Some((mid, _, _, below, _)) = plan[q] {
+                let n = dims[q].0 * dims[q].1;
+                let v = &mut vals_q[q];
+                // the same order statistics `median_inplace` read off (select, then the
+                // largest of the left part for an even count)
+                let r = mid - below as usize;
+                let (left, &mut m, _) = v.select_nth_unstable_by(r, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mad = if n % 2 == 1 {
+                    m
+                } else {
+                    let lo = left.iter().fold(f32::NEG_INFINITY, |acc, &x| if x > acc { x } else { acc });
+                    0.5 * (lo + m)
+                };
+                let s = mad * sigma_k;
+                if s >= 1e-6 {
+                    sigma[q] = s;
+                }
+            }
+        }
+
+        // ---- exact test, star support, replacement value (from the untouched input) ----
+        let z = |yy: usize, xx: usize| -> f32 {
+            let q = (yy & 1) * 2 + (xx & 1);
+            if sigma[q] > 0f32 {
+                diff_ro[offs[q] + (yy >> 1) * dims[q].1 + (xx >> 1)] / sigma[q]
+            } else {
+                0f32
+            }
+        };
+        let fixes: Vec<(usize, f32)> = cands
+            .par_iter()
+            .filter_map(|&(q, k)| {
+                let s = sigma[q];
+                let v = diff_ro[offs[q] + k as usize];
+                if !(s > 0f32 && v > thr * s) {
+                    return None;
+                }
+                let (hh, ww) = dims[q];
+                let (i, j) = (k as usize / ww, k as usize % ww);
+                let (py_, px) = (q >> 1, q & 1);
+                let (y, x) = (2 * i + py_, 2 * j + px);
+                if let Some(sup) = star_support {
+                    let mut near = f32::NEG_INFINITY;
+                    if y > 0 { near = near.max(z(y - 1, x)); }
+                    if y + 1 < h { near = near.max(z(y + 1, x)); }
+                    if x > 0 { near = near.max(z(y, x - 1)); }
+                    if x + 1 < w { near = near.max(z(y, x + 1)); }
+                    if near > sup {
+                        return None;
+                    }
+                }
+                Some((y * w + x, bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, j)))
+            })
+            .collect();
+        hotpix_give(diff);
+        for &(idx, m) in &fixes {
+            d[idx] = m;
+        }
+        fixes.len()
+    });
+    Ok(n_fixed)
+}
+
 /// Mean of the 4th and 5th smallest of 8 (no NaN): Knuth's optimal 19-comparator
 /// sorting network, branchless min/max. Identical to sorting and averaging.
 #[inline(always)]
@@ -9432,6 +9799,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calibrate_frame_from_be16, m)?)?;
     m.add_function(wrap_pyfunction!(patch_brenner_scores, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_bayer, m)?)?;
+    m.add_function(wrap_pyfunction!(hot_pixel_bayer_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(spike_reject_bayer, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native_into, m)?)?;

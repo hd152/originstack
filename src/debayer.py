@@ -1000,7 +1000,8 @@ _DETECT = object()  # sentinel: use default threshold for statistical detection
 
 def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
                    threshold: Optional[float] = _DETECT,
-                   hot_map: Optional[np.ndarray] = None) -> np.ndarray:
+                   hot_map: Optional[np.ndarray] = None,
+                   inplace: bool = False) -> np.ndarray:
     """Unified hot pixel detection and replacement.
 
     Modes:
@@ -1016,13 +1017,14 @@ def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
                    to skip detection (useful when only applying a hot_map).
                    Defaults to the per-mode Config value.
 
-    All modes use MAD-based sigma for robust noise estimation.
+    All modes use MAD-based sigma for robust noise estimation. ``inplace`` (bayer mode
+    only) lets the statistical pass fix ``data`` itself when it can.
     """
     if mode == 'auto':
         mode = 'bayer' if data.ndim == 2 else 'rgb'
 
     if mode == 'bayer':
-        return _fix_hot_bayer(data, threshold, hot_map)
+        return _fix_hot_bayer(data, threshold, hot_map, inplace=inplace)
     elif mode == 'rgb':
         rgb_fixed, _lum = _fix_hot_rgb(data, threshold)
         return rgb_fixed
@@ -1034,7 +1036,8 @@ def fix_hot_pixels(data: np.ndarray, mode: str = 'auto',
 
 def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
                    hot_map: Optional[np.ndarray] = None,
-                   star_support: Optional[float] = _DETECT) -> np.ndarray:
+                   star_support: Optional[float] = _DETECT,
+                   inplace: bool = False) -> np.ndarray:
     """Bayer-aware hot pixel fix: apply pre-built map and/or statistical detection.
 
     Merged implementation: median_filter is computed once per sub-channel and
@@ -1050,6 +1053,10 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     pixel is kept when any adjacent mosaic pixel (one pixel away, in another plane) is
     itself more than ``star_support`` sigma over its own plane's median: a hot pixel is
     a single-sensor-pixel event and leaves its neighbours normal, a star lifts them.
+
+    ``inplace=True`` (statistical pass, no map, a C-contiguous writable float32 array the
+    caller owns) fixes ``data`` itself through the native ``hot_pixel_bayer_inplace``:
+    the same result bit for bit in two streaming passes and no frame-sized output.
     """
     if data.ndim != 2:
         return data
@@ -1065,6 +1072,16 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
     # the same order). Map and statistics are never asked for together by the
     # pipeline, and the numpy path shares one median between them, so that
     # combination stays on numpy.
+    if (inplace and do_stat and not has_map and _HAS_NATIVE
+            and hasattr(_native, 'hot_pixel_bayer_inplace') and isinstance(data, np.ndarray)
+            and data.dtype == np.float32 and data.flags['C_CONTIGUOUS']
+            and data.flags['WRITEABLE']):
+        try:
+            _native.hot_pixel_bayer_inplace(
+                data, float(threshold), None if star_support is None else float(star_support))
+            return data
+        except Exception:
+            pass
     if (_HAS_NATIVE and hasattr(_native, 'hot_pixel_bayer') and isinstance(data, np.ndarray)
             and (has_map or do_stat) and not (has_map and do_stat)):
         try:
@@ -1272,7 +1289,8 @@ def _fix_hot_mono(img: np.ndarray, threshold: Optional[float] = _DETECT) -> np.n
 
 # Legacy aliases for backwards compatibility
 remove_hot_pixels = _fix_hot_mono
-remove_hot_pixels_bayer = lambda data, threshold=_DETECT: fix_hot_pixels(data, mode='bayer', threshold=threshold)
+remove_hot_pixels_bayer = lambda data, threshold=_DETECT, inplace=False: fix_hot_pixels(
+    data, mode='bayer', threshold=threshold, inplace=inplace)
 
 
 def _spike_reject_bayer_numpy(data: np.ndarray, k: float, contrast: float,
@@ -1390,16 +1408,23 @@ def luminance(rgb):
     return 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
 
-def calibrate_frame_be16(raw, bzero, bias, dark, dark_scale, flat_norm):
+def calibrate_frame_be16(raw, bzero, bias, dark, dark_scale, flat_norm, out=None):
     """``calibrate_frame`` on a raw BITPIX=16 block from ``io_fits.read_fits_be16``:
     byte swap, + BZERO, the float32 conversion and the calibration in one native pass
-    (the same per-pixel operations, so identical to load_fits + calibrate_frame)."""
+    (the same per-pixel operations, so identical to load_fits + calibrate_frame).
+
+    ``out`` (optional): a C-contiguous float32 array of ``raw``'s shape to write into
+    instead of a fresh one -- every element is overwritten, and a reused buffer skips
+    the OS zero-filling a new 25 MB allocation on first touch."""
     masters = [m for m in (bias, dark, flat_norm) if m is not None]
     if (_HAS_NATIVE and hasattr(_native, 'calibrate_frame_from_be16')
             and all(isinstance(m, np.ndarray) and m.dtype == np.float32
                     and m.flags['C_CONTIGUOUS'] for m in masters)):
         try:
-            out = np.empty(raw.shape, np.float32)
+            if not (isinstance(out, np.ndarray) and out.shape == raw.shape
+                    and out.dtype == np.float32 and out.flags['C_CONTIGUOUS']
+                    and out.flags['WRITEABLE']):
+                out = np.empty(raw.shape, np.float32)
             finite = _native.calibrate_frame_from_be16(
                 np.ascontiguousarray(raw).reshape(-1), float(bzero), out.reshape(-1),
                 None if bias is None else bias.reshape(-1),
