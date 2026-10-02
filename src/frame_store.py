@@ -38,7 +38,11 @@ from src.utils import safe_print
 
 _log = logging.getLogger('originstack')
 
-RESERVE_FRAC = 0.30          # of total RAM, always left free
+# Of total RAM, always left free. 0.30 kept a 532-frame Sculptor session's 14.7 GB
+# aligned stack on disk (Windows counted ~38 of 64 GB as available after Phase 1's
+# 53 GB of dirty temp-file pages): alignment 32.5 -> 16.2 s and the whole stacking
+# phase 85.8 -> 63.0 s with it in RAM, while 0.20 still leaves ~13 GB for everything else.
+RESERVE_FRAC = 0.20
 SHM_PREFIX = 'shm:'
 
 

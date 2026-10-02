@@ -1037,7 +1037,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         if frames['dark'] or frames['flat'] or frames['bias']:
             try:
                 if masters.get('bias') is not None:
-                    b = masters['bias']
+                    # every 3rd pixel each way (an odd stride visits all four Bayer
+                    # positions): this is an
+                    # informational report, and full-frame statistics of three 6 MP
+                    # masters cost ~1 s on every run
+                    b = masters['bias'][::3, ::3]
                     b_med = float(np.median(b))
                     b_std = float(np.std(b))
                     if b_std < 20:
@@ -1052,7 +1056,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     # not `d`: that is the enclosing loop's target directory,
                     # read again below for args._input_directory
                     dk = masters['dark']
-                    dark_med = float(np.median(dk))
+                    dark_med = float(np.median(dk[::3, ::3]))
                     dark_peak = float(dk.max())
                     dark_et = masters.get('dark_exptime')
                     dark_hdr = frames['dark'][0].header if frames.get('dark') else {}
@@ -1092,12 +1096,12 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                                            f"lights ISO={majority_iso} — dark may not cancel sensor noise correctly")
                 if masters.get('flat') is not None:
                     flat = masters['flat']
-                    flat_med = float(np.median(flat))
+                    flat_med = float(np.median(flat[::3, ::3]))
                     if flat_med > 0:
                         bayer_labels = ['R', 'G1', 'G2', 'B']
                         bayer_ratios = []
                         for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                            ch_med = float(np.median(flat[r_off::2, c_off::2]))
+                            ch_med = float(np.median(flat[r_off::2, c_off::2][::2, ::2]))
                             bayer_ratios.append(ch_med / flat_med)
                         ratio_str = '/'.join(
                             f'{lbl}={r:.3f}'

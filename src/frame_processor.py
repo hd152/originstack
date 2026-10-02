@@ -1192,8 +1192,21 @@ def execute_frame_processing(
                 # while the main process measures the session below
                 for _ in range(workers):
                     pool.submit(_worker_ready)
+                # The two session probes are independent: measure them concurrently. The
+                # session CFA values are installed only after both finish, so the CA
+                # measurement's green_equalize never sees them half-way (deterministic).
+                with ThreadPoolExecutor(max_workers=2) as _pre:
+                    _f_cfa = (None if hasattr(args, '_session_cfa')
+                              else _pre.submit(_measure_session_cfa, lights, masters, args))
+                    _f_ca = _pre.submit(_measure_session_ca, lights, args) if _ca else None
+                    _ca_shifts = _f_ca.result() if _f_ca is not None else None
+                    if _f_cfa is not None:
+                        args._session_cfa = _f_cfa.result()
+                        if args._session_cfa is not None:
+                            safe_print(f"  CFA equalisation: session-constant from "
+                                       f"{args._session_cfa['n']} frames ({_fmt_cfa(args._session_cfa)}) "
+                                       f"-- replaces per-frame medians")
                 _session_cfa = _prepare_session_cfa(lights, masters, args)
-                _ca_shifts = _measure_session_ca(lights, args) if _ca else None
                 if _ca_shifts is not None:
                     safe_print(f"  CA correction: session-constant shifts "
                                f"R={_fmt_ca(_ca_shifts.get(0))} B={_fmt_ca(_ca_shifts.get(2))} "

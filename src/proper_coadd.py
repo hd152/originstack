@@ -396,7 +396,10 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
         nbad = nrep = 0
         for j in use[k::n_thr]:
             p, F = meas[j]
-            fr = np.asarray(aligned[j])
+            # one sequential read into RAM: the strided sky/noise samples below touched
+            # nearly every page of a disk-backed aligned frame once per channel (34 s of
+            # a 531-frame session's 37 s proper coadd)
+            fr = np.array(aligned[j])
             sky = np.array([_sky(fr[..., c]) for c in range(C)])
             sig = np.array([_noise(fr[..., c]) for c in range(C)])
             if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):

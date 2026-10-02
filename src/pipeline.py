@@ -1099,7 +1099,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                 fingerprint=_ckpt_fp)
 
         finally:
-            mm_mgr.cleanup()
+            # Unmapping and deleting the frame store (~65 GB on a 532-frame session) took
+            # ~9 s on the critical path; nothing reads it after this point, so it runs in
+            # a background thread (non-daemon: the interpreter waits for it at exit, and
+            # src.cleanup's at-exit sweep still covers any file it could not remove).
+            import threading as _threading
+            _threading.Thread(target=mm_mgr.cleanup, name='frame-store-cleanup',
+                              daemon=False).start()
         # end: if resume_phase < 3
 
     # ======================================================================
