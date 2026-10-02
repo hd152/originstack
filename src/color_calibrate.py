@@ -110,7 +110,7 @@ def query_2mass_stars(header, max_stars: int = 500):
     table = net_query.vizier_cone_search(
         ra, dec, radius_deg, catalog="II/246/out",
         columns=["RAJ2000", "DEJ2000", "Jmag", "Hmag", "Kmag"],
-        max_rows=max_stars)
+        max_rows=max_stars, order_by="Jmag")
     if table is None or len(table) == 0:
         return None
     return table if len(table) >= 10 else None

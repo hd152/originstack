@@ -187,8 +187,15 @@ _SIMBAD_TAP = "https://simbad.cds.unistra.fr/simbad/sim-tap/sync"
 
 def gaia_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
                      columns: List[str], max_rows: int = 500,
-                     require_not_null: Optional[List[str]] = None):
-    """Gaia DR3 cone search. Returns an astropy Table or None."""
+                     require_not_null: Optional[List[str]] = None,
+                     order_by: Optional[str] = "phot_g_mean_mag"):
+    """Gaia DR3 cone search, brightest first. Returns an astropy Table or None.
+
+    ``order_by`` matters: ``TOP n`` without an ``ORDER BY`` lets the server return any
+    n rows of a cone that holds more, a different subset on each call -- the same stack
+    matched 72 to 78 Gaia stars on four runs of identical code. Brightest-first is also
+    what every caller wants (the detected stars are the bright ones). ``None`` keeps
+    the server's order."""
     cols = ", ".join(columns)
     where_extra = ""
     if require_not_null:
@@ -204,13 +211,19 @@ def gaia_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
         f"WHERE 1=CONTAINS(POINT('ICRS',ra,dec),"
         f"CIRCLE('ICRS',{float(ra_deg)},{float(dec_deg)},{float(radius_deg)})){where_extra}"
     )
+    if order_by:
+        if not order_by.replace("_", "").isalnum():
+            raise ValueError(f"bad order_by column: {order_by!r}")
+        adql += f" ORDER BY {order_by} ASC"
     return tap_query(_GAIA_TAP, adql)
 
 
 def vizier_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
-                       catalog: str, columns: List[str], max_rows: int = 500):
+                       catalog: str, columns: List[str], max_rows: int = 500,
+                       order_by: Optional[str] = None):
     """VizieR catalogue cone search (e.g. catalog='II/246/out' for 2MASS PSC).
-    Returns an astropy Table or None."""
+    Returns an astropy Table or None. Pass ``order_by`` (a magnitude column) whenever
+    ``max_rows`` can truncate the cone -- see ``gaia_cone_search``."""
     cols = ", ".join(columns)
     # See gaia_cone_search: ADQL over HTTP, not local SQL; coordinates are
     # float()-cast, catalog/cols come from this codebase's own call sites.
@@ -219,6 +232,10 @@ def vizier_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
         f"WHERE 1=CONTAINS(POINT('ICRS',RAJ2000,DEJ2000),"
         f"CIRCLE('ICRS',{float(ra_deg)},{float(dec_deg)},{float(radius_deg)}))"
     )
+    if order_by:
+        if not order_by.replace("_", "").isalnum():
+            raise ValueError(f"bad order_by column: {order_by!r}")
+        adql += f' ORDER BY "{order_by}" ASC'
     return tap_query(_VIZIER_TAP, adql)
 
 

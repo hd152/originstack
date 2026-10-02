@@ -108,6 +108,25 @@ class TestGaiaVizierSimbadQueries:
         assert "gaiadr3.gaia_source" in adql
         assert "CONTAINS" in adql
         assert "IS NOT NULL" in adql
+        # TOP n without ORDER BY returns an arbitrary subset of a crowded cone, a
+        # different one per call (72-78 matches for one stack on four runs)
+        assert adql.rstrip().endswith("ORDER BY phot_g_mean_mag ASC")
+        assert adql.index("WHERE") < adql.index("ORDER BY")
+
+    def test_cone_search_order_by_is_validated_and_optional(self):
+        captured = []
+
+        def _fake_urlopen(req, timeout=None, context=None):
+            captured.append(urllib.parse.parse_qs(req.data.decode())["QUERY"][0])
+            return _fake_response(json.dumps({"metadata": [{"name": "ra"}], "data": [[1.0]]}).encode())
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            net_query.gaia_cone_search(1.0, 2.0, 0.1, columns=["ra"], order_by=None)
+            net_query.vizier_cone_search(1.0, 2.0, 0.1, "II/246/out", ["RAJ2000"], order_by="Jmag")
+        assert "ORDER BY" not in captured[0]
+        assert captured[1].rstrip().endswith('ORDER BY "Jmag" ASC')
+        with pytest.raises(ValueError):
+            net_query.gaia_cone_search(1.0, 2.0, 0.1, columns=["ra"], order_by="g; DROP")
 
     def test_simbad_name_lookup_escapes_quotes(self):
         payload = {"metadata": [{"name": "main_id"}, {"name": "otype"}],
