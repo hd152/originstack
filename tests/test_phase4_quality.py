@@ -324,3 +324,22 @@ def test_early_cache_key_changes_with_pixels(tmp_path):
     scaled = img * np.array([0.8, 1.0, 1.2], np.float32)
     assert _early_cache_key(scaled, args, set()) != k1
     assert _early_cache_key(img.copy(), args, set()) == k1
+
+
+# ---------------------------------------------------------------- DBE under a large exclusion
+
+def test_dbe_radial_fill_follows_a_vignetting_dome_under_a_large_exclusion():
+    from src.background import dynamic_background_extraction
+    rng = np.random.default_rng(4)
+    H, W = 400, 600
+    yy, xx = np.mgrid[:H, :W]
+    r2 = ((yy - H / 2) ** 2 + (xx - W / 2) ** 2) / (0.5 * np.hypot(H, W)) ** 2
+    dome = 1000.0 + 600.0 * (1.0 - r2)                     # peaks in the middle
+    img = np.repeat(dome[..., None], 3, axis=2) + rng.normal(0, 5, (H, W, 3))
+    excl = (((yy - H / 2) / 120.0) ** 2 + ((xx - W / 2) / 180.0) ** 2) <= 1.0  # ~28% of frame
+    out = dynamic_background_extraction(img.astype(np.float32), exclusion_mask=excl.astype(float))
+    inside = out[excl].mean(axis=0)
+    assert np.all(np.abs(inside) < 40.0)                   # dome removed under the object
+    small = (((yy - H / 2) / 40.0) ** 2 + ((xx - W / 2) / 60.0) ** 2) <= 1.0
+    from src import background as bgm
+    assert small.mean() < bgm._RADIAL_FILL_MIN_FRAC          # small regions keep the local fit
