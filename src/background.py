@@ -1435,6 +1435,86 @@ def _polynomial_surface(coords: np.ndarray, values: np.ndarray,
     return _gaussian_blur(surface, patch_size * 0.5)
 
 
+_RADIAL_FILL_MIN_FRAC = 0.10
+
+
+def _fill_exclusion_radial(background: np.ndarray, coords: np.ndarray,
+                           values: np.ndarray, exclusion_mask: np.ndarray,
+                           patch_size: int) -> np.ndarray:
+    """Replace the background model under a caller's exclusion region
+    (``--galaxy-mode``/``--comet-mode``) with a vignetting-shaped fit, feathered
+    into the local model.
+
+    The local-regression surface is locally *linear*: under a large excluded
+    region it can only carry the rim's trend inward. A background that peaks
+    under the object -- colour-dependent vignetting centred on the frame,
+    where the galaxy usually is -- then leaves a dome under the exclusion (a
+    red slab on a real Pinwheel stack, R 6-9x G next to the galaxy) and the
+    rim is over-corrected (dark holes either side). There the ellipse covered
+    a third of the frame, and a free quadratic through the surrounding
+    patches was unconstrained in the middle (it bent the wrong way). The model
+    here is a plane plus ``a r^2 + b r^4`` about the frame centre -- the shape
+    of vignetting -- which the samples on every side of a central object pin
+    down. Its level is matched to the local model just outside the region,
+    and it is clipped to the samples' range plus their spread.
+    """
+    excl = np.asarray(exclusion_mask) > 0.5
+    # Only for a large region: on Sunflower/Whirlpool (exclusion ~5% of the
+    # frame) the local fit already bridges it and this made the sky's colour
+    # mottle ~10% worse; Pinwheel's was 34%.
+    if excl.mean() < _RADIAL_FILL_MIN_FRAC or len(coords) < 12:
+        return background
+    H, W = background.shape
+    cy0, cx0, R = (H - 1) / 2.0, (W - 1) / 2.0, 0.5 * float(np.hypot(H, W))
+
+    def design(y, x):
+        u, v = (y - cy0) / R, (x - cx0) / R
+        r2 = u * u + v * v
+        return np.column_stack([np.ones_like(u), u, v, r2, r2 * r2])
+
+    # coords are normalised (y / H, x / W), as everywhere in DBE
+    A = design(coords[:, 0] * H, coords[:, 1] * W)
+    bvals = values.astype(np.float64)
+    keep = np.ones(len(bvals), bool)
+    coef = None
+    for _ in range(5):
+        if keep.sum() < 8:
+            break
+        coef, *_ = np.linalg.lstsq(A[keep], bvals[keep], rcond=None)
+        res = bvals - A @ coef
+        sig = 1.4826 * float(np.median(np.abs(res[keep] - np.median(res[keep])))) + 1e-9
+        new = np.abs(res) < 3.0 * sig
+        if np.array_equal(new, keep):
+            break
+        keep = new
+    if coef is None:
+        return background
+    lo, hi = np.percentile(bvals[keep], [2, 98])
+    spread = hi - lo
+    d_out = ndimage.distance_transform_edt(~excl)
+    feather = max(2.0 * patch_size, 1.0)
+    region = d_out <= feather
+    ry, rx = np.nonzero(region)
+    ya, yb, xa, xb = ry.min(), ry.max() + 1, rx.min(), rx.max() + 1
+    step = max(4, patch_size // 4)
+    gy = np.arange(ya, yb, step, dtype=np.float64)
+    gx = np.arange(xa, xb, step, dtype=np.float64)
+    GY, GX = np.meshgrid(gy, gx, indexing='ij')
+    q = (design(GY.ravel(), GX.ravel()) @ coef).reshape(GY.shape)
+    q = zoom(q, ((yb - ya) / q.shape[0], (xb - xa) / q.shape[1]), order=1)[:yb - ya, :xb - xa]
+    sub_bg = background[ya:yb, xa:xb]
+    d_sub = d_out[ya:yb, xa:xb]
+    rim = (d_sub > 0.5 * feather) & (d_sub <= feather)
+    if rim.any():
+        q = q + float(np.median(sub_bg[rim] - q[rim]))
+    q = np.clip(q, lo - spread, hi + spread)
+    w = np.clip(1.0 - d_sub / feather, 0.0, 1.0)
+    w = w * w * (3.0 - 2.0 * w)                                     # smoothstep
+    out = background.copy()
+    out[ya:yb, xa:xb] = w * q + (1.0 - w) * sub_bg
+    return out
+
+
 def dynamic_background_extraction(
         rgb: np.ndarray,
         patch_size: int = Config.DBE_PATCH_SIZE,
@@ -1526,6 +1606,9 @@ def dynamic_background_extraction(
                 coords, values, H, W,
                 outlier_sigma=outlier_sigma, max_iter=outlier_iters,
                 patch_size=patch_size, verbose=verbose)
+            if exclusion_mask is not None:
+                background = _fill_exclusion_radial(
+                    background, coords, values, exclusion_mask, patch_size)
 
         subtracted = channel - background
         if verbose:
