@@ -126,7 +126,7 @@ PHASE 4: POST-PROCESSING
   Correcting sky residuals...
   [OK] Sky residual correction (35.1s)
 
-  Applying star reduction (factor=0.40, blur_sigma=1.5)...
+  Applying star reduction (amount=0.40, FWHM 3.9 px -> ~3.3)...
   [OK] Star reduction (0.9s)
 
   Applying multiscale local contrast enhancement (strength=0.70)...
@@ -220,9 +220,9 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 10. ❌ ACDNR adaptive contrast denoising — `--denoiser acdnr`
 11. ❌ Perona-Malik anisotropic diffusion — `--denoiser aniso` (native/Rust accelerated)
 12. ❌ Subtractive Chromatic Noise Reduction — `--scnr`
-13. ❌ Photometric colour calibration — `--photometric-calibration`
+13. ❌ Photometric colour calibration — `--photometric-calibration` (gray-locus; skipped when the stack was already calibrated against Gaia, see below)
 14. ❌ Deconvolution — `--deconvolve rl|tv|rl-sv|sparse` (RL is GPU-accelerated with `--use-gpu`; `rl-sv` is spatially-variant, `sparse` is FISTA in this project's wavelet basis)
-15. ✅ Star reduction (softens star cores) — `--no-star-reduce` to disable
+15. ✅ Star reduction (narrows each star's profile, keeping its peak, colour and the surrounding noise) — `--no-star-reduce` to disable
 16. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
 17. ✅ Edge-band correction (`--skip-step edge_bands`) — removes the sky excess that rises toward the frame edges, then the final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
 
@@ -252,7 +252,8 @@ Eight built-in target presets tune all parameters at once:
 ### Advanced Features
 - **Plate solving** built in, against a local Gaia DR3 index (no API key, works offline once the index covers the field), or via ASTAP / nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
 - **Re-run post-processing only** (`--from-stack STACK.fits`) — Phase 4 on an earlier run's linear stack, with that run's saved settings; no light frames needed
-- **Photometric colour calibration** — gray-locus method (`--photometric-calibration`), or full field-star calibration via Gaia DR3 (`--color-calibrate`)
+- **Colour calibration against Gaia DR3** — on by default when the stack has a sky position (the session solve, refined against Gaia) and the run is online: each star's measured colour is fitted against its Gaia BP-RP on the linear stack, and the channels scaled so a Sun-like (G2V) star is white. `--no-color-calibrate` turns it off; the gray-locus method (`--photometric-calibration`) is the fallback
+- **Colour-preserving stretch** (`--stretch-color preserve`, default) — the preview curve is applied to brightness only, so stars and galaxy cores keep their colour instead of washing out to white; `--stretch-color channel` restores the old per-channel curve
 - **Aperture photometry** (`--photometry`) — calibrates the stack against Gaia DR3: per-channel zero points (optional colour terms), airmass from the `info.json` GPS + time, a Poisson error term from raw bias/flat pairs, and a `<output>_photometry.csv` star catalogue with magnitudes + uncertainties
 - **Differential light curves** (`--photometry-timeseries`) — aperture-photometers a fixed Gaia star list on every registered sub and ensemble-calibrates, writing per-frame + per-star CSVs with a variability flag; `--photometry-target "RA,DEC"` reports one star
 - **Banding removal** (`--banding-removal`) — per-row/column offsets removed from each calibrated Bayer frame before debayering, per colour plane, only where significant; a clean frame is left essentially untouched
@@ -493,7 +494,6 @@ python originstack.py -d lights/ -o drizzled.fits \
 # Built-in solver: no API key needed (see "Plate Solving" below)
 python originstack.py -d lights/ -o stacked.fits \
   --plate-solve \
-  --color-calibrate \
   -v
 ```
 
@@ -707,6 +707,8 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Luma denoising (wavelet) | ✅ on | `--denoiser none` |
 | Chroma noise reduction | ✅ on | `--no-chroma-nr` |
 | Star reduction | ✅ on | `--no-star-reduce` |
+| Colour calibration against Gaia (online, needs a sky position) | ✅ on | `--no-color-calibrate` |
+| Colour-preserving stretch | ✅ on | `--stretch-color channel` |
 | Star removal (writes a `_starless.fits` sidecar; main output keeps stars) | ❌ off | `--remove-stars` |
 | Local contrast enhancement | ✅ on | `--no-local-contrast` |
 | Chromatic aberration correction | ✅ on | `--no-ca-correction` |
@@ -961,11 +963,11 @@ OriginStack works entirely on your machine. It goes online in these cases only, 
 | SIMBAD lookup of the target | On a normal run, when the object name (from the session file, the FITS `OBJECT` header, or the folder name) is not in the built-in table | The name string only |
 | Gaia star index tiles | `--plate-solve` (built-in solver), and on a normal run with a session `info.json` solve (to correct that WCS on the stack; `--no-wcs-refine` turns it off), for sky areas not yet in the local index | Sky coordinates of a 5°×5° tile; tiles are cached, so each area is fetched once |
 | astrometry.net | `--plate-solve --plate-solver astrometry` (or `auto` when the built-in solver fails) | The image, to solve its position (needs your API key) |
-| Gaia / VizieR / SIMBAD catalogues | `--photometry`, `--photometry-timeseries`, `--annotate`, catalogue colour calibration | Sky coordinates of the field |
+| Gaia / VizieR / SIMBAD catalogues | Colour calibration on a normal run with a sky position (`--no-color-calibrate` turns it off); `--photometry`, `--photometry-timeseries`, `--annotate` | Sky coordinates of the field |
 | JPL Horizons | Comet ephemerides | The comet designation and time |
 | Self-update check | Once per CLI run or desktop-app launch | Nothing — an anonymous GET of GitHub's public releases API, no request parameters, no identifying data |
 
-Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no network requests at all: the target lookup is skipped, and the features in the table that need the network are turned off with a note in the log. Everything else, including the default colour calibration, is computed locally. This is enforced where the requests are made rather than caller by caller, and a test counts real connection attempts.
+Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no network requests at all: the target lookup is skipped, and the features in the table that need the network are turned off with a note in the log. Everything else is computed locally; colour falls back to the field's own star colours (white balance and, where a preset enables it, the gray-locus calibration). This is enforced where the requests are made rather than caller by caller, and a test counts real connection attempts.
 
 **The self-update check** is the one thing that isn't gated by `--offline` itself (it runs before a run's settings are even read), but it never blocks anything and fails silently: a background thread checks GitHub once, and if a newer release exists, the CLI prints one line at the end of the run and the desktop app shows a small clickable "Update available" note in the header. Set `ORIGINSTACK_NO_UPDATE_CHECK` (to anything) to disable it outright; it's also skipped automatically whenever `--offline` was used in the same process.
 
@@ -974,7 +976,7 @@ Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no n
 ## Plate Solving
 
 ```bash
-python originstack.py -d lights/ -o stacked.fits --plate-solve --color-calibrate
+python originstack.py -d lights/ -o stacked.fits --plate-solve
 ```
 
 The default solver (`--plate-solver auto`) is built in: it matches the stack's stars against a

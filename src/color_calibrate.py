@@ -439,6 +439,108 @@ def fit_channel_scales(img: np.ndarray, header,
     return scale_r, scale_g, scale_b
 
 
+# Gaia BP-RP of the Sun (Casagrande & VandenBerg 2018: 0.82). A star of this
+# colour is rendered white by ``fit_channel_scales_solar``.
+SOLAR_BP_RP = 0.82
+
+
+def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
+                             min_stars: int = 15):
+    """Per-channel scales that render a solar-colour (G2V) star white.
+
+    For every detected, isolated, unsaturated star matched to Gaia DR3
+    (``photometry.match_gaia_field``), the instrumental colour indices
+    ``-2.5 log10(B/R)`` and ``-2.5 log10(G/R)`` are measured by aperture
+    photometry with a local sky annulus and fitted against Gaia BP-RP with a
+    Theil-Sen line. The fitted indices at BP-RP = 0.82 are the colour this
+    stack gives the Sun; the scales cancel them, so a G2V star comes out with
+    B = G = R -- the white reference PixInsight's (S)PCC uses by default.
+
+    Unlike ``fit_channel_scales`` it fits a colour *relation* rather than
+    assuming one (no B-V transformation, no guessed R band), uses only stars
+    that are actually detected and well measured, and sizes the aperture from
+    the measured FWHM.
+
+    Returns ``((s_R, s_G, s_B), info)`` with G fixed at 1, or ``None`` when too
+    few good stars are found or the result is implausible (a channel scale
+    outside 0.5-2).
+    """
+    from scipy import stats
+
+    from src.photometry import match_gaia_field
+    gm = match_gaia_field(img, header, verbose=verbose)
+    if gm is None:
+        return None
+    bp_rp = gm.bp - gm.rp
+    lum = np.asarray(img, dtype=np.float64).mean(axis=2)
+    sat = 0.6 * float(np.percentile(lum, 99.99))
+    xs, ys = gm.x, gm.y
+    d2 = (xs[:, None] - xs[None, :]) ** 2 + (ys[:, None] - ys[None, :]) ** 2
+    np.fill_diagonal(d2, np.inf)
+    isolated = d2.min(axis=1) > (2.0 * gm.r_out) ** 2 if len(xs) > 1 else np.ones(len(xs), bool)
+    ok = (np.isfinite(bp_rp) & (bp_rp > -0.3) & (bp_rp < 2.5)
+          & (gm.det_peak < sat) & isolated)
+    if ok.sum() < min_stars:
+        if verbose:
+            print(f"  [colour cal] {int(ok.sum())} usable Gaia stars (< {min_stars})")
+        return None
+    flux, _sky, sky_sigma, _peak, area = aperture_photometry_batch(
+        np.ascontiguousarray(img, dtype=np.float32), xs[ok], ys[ok],
+        float(gm.ap_radius), float(gm.r_in), float(gm.r_out))
+    snr = flux / np.maximum(sky_sigma * np.sqrt(area)[:, None], 1e-12)
+    good = np.all(np.isfinite(flux) & (flux > 0) & (snr > 20.0), axis=1)
+    if good.sum() < min_stars:
+        if verbose:
+            print(f"  [colour cal] {int(good.sum())} stars with SNR > 20 (< {min_stars})")
+        return None
+    f = flux[good]
+    c = bp_rp[ok][good]
+    ci_br = -2.5 * np.log10(f[:, 2] / f[:, 0])
+    ci_gr = -2.5 * np.log10(f[:, 1] / f[:, 0])
+    s_br, i_br = stats.theilslopes(ci_br, c)[:2]
+    s_gr, i_gr = stats.theilslopes(ci_gr, c)[:2]
+    br_sun = i_br + s_br * SOLAR_BP_RP
+    gr_sun = i_gr + s_gr * SOLAR_BP_RP
+    # Multiply B by 10^(0.4 br_sun) and G by 10^(0.4 gr_sun) relative to R so
+    # the Sun's B/R and G/R become 1, then normalise G to 1.
+    s_r, s_g, s_b = 1.0, 10.0 ** (0.4 * gr_sun), 10.0 ** (0.4 * br_sun)
+    s_r, s_b, s_g = s_r / s_g, s_b / s_g, 1.0
+    resid = ci_br - (i_br + s_br * c)
+    info = dict(n=int(good.sum()), slope_br=float(s_br), slope_gr=float(s_gr),
+                scatter_br=float(1.4826 * np.median(np.abs(resid - np.median(resid)))))
+    if not all(0.5 <= v <= 2.0 for v in (s_r, s_b)):
+        if verbose:
+            print(f"  [colour cal] implausible scales R={s_r:.3f} B={s_b:.3f} -- not applied")
+        return None
+    return (float(s_r), float(s_g), float(s_b)), info
+
+
+def calibrate_linear_stack(img: np.ndarray, header, method: str = 'solar',
+                           verbose: bool = False):
+    """Colour-calibrate a *linear* stack in place before Phase 4.
+
+    Returns ``(scales, info)`` (``info`` is a short description for the log)
+    or ``None`` when no calibration was applied. ``method`` 'solar' is
+    ``fit_channel_scales_solar``; 'colorindex' and 'spcc' are the older fits
+    in ``run_photometric_calibration``.
+    """
+    if method == 'solar':
+        fit = fit_channel_scales_solar(img, header, verbose=verbose)
+        if fit is None:
+            return None
+        scales, d = fit
+        info = (f"{d['n']} Gaia stars, white = G2V, B-R scatter "
+                f"{d['scatter_br']:.3f} mag")
+    else:
+        _, scales = run_photometric_calibration(img, header, verbose=verbose, method=method)
+        if scales == (1.0, 1.0, 1.0):
+            return None
+        info = f"method {method}"
+    for c, s in enumerate(scales):
+        img[:, :, c] *= np.float32(s)
+    return scales, info
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

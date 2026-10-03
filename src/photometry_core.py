@@ -26,16 +26,33 @@ _APB_SUBPIX = 4  # aperture-edge supersampling factor (native + numpy paths)
 # WCS helpers
 # ---------------------------------------------------------------------------
 
+def _celestial_wcs(header):
+    """``WCS(header).celestial`` with astropy's header-fix warnings silenced.
+
+    Building a WCS from a stack header emits ``FITSFixedWarning`` ('datfix',
+    'cdfix'), and astropy's warning handler iterates ``sys.modules``. While
+    another thread imports a module that raises ``RuntimeError: dictionary
+    changed size during iteration`` -- which the fail-soft callers here turned
+    into "no usable WCS", silently skipping colour calibration and photometry.
+    """
+    import warnings
+
+    from astropy.wcs import WCS
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return WCS(header).celestial
+
+
 def _field_centre_and_radius(header, shape):
     """(ra_deg, dec_deg, search_radius_deg, plate_scale_arcsec) from the WCS,
     or None when the header carries no usable celestial WCS."""
     try:
-        from astropy.wcs import WCS
+        from astropy.wcs import WCS  # noqa: F401  (availability check)
         from astropy.wcs.utils import proj_plane_pixel_scales
     except Exception:
         return None
     try:
-        w = WCS(header).celestial
+        w = _celestial_wcs(header)
         if not w.has_celestial:
             return None
         H, W = shape[:2]
@@ -58,13 +75,13 @@ def _pixel_coords(table, header) -> Optional[np.ndarray]:
     0-based pixel coordinates, or None.
     """
     try:
-        from astropy.wcs import WCS
+        from astropy.wcs import WCS  # noqa: F401  (availability check)
     except Exception:
         return None
     try:
         # .celestial: the stacked product is a (3, H, W) cube, so a bare
         # WCS(header) is 3-axis and the 2-argument all_world2pix below raises.
-        wcs = WCS(header).celestial
+        wcs = _celestial_wcs(header)
         if "ra" in table.colnames:
             ra = np.array(table["ra"], dtype=float)
             dec = np.array(table["dec"], dtype=float)

@@ -427,6 +427,70 @@ def _hdr_blend(long_stack: np.ndarray, short_fits_path: str,
     return blended.astype(np.float32)
 
 
+def _stack_wcs_header(args):
+    """The settled stack WCS (``args._stack_wcs``) as an astropy Header, or None."""
+    cards = getattr(args, '_stack_wcs', None)
+    if not cards:
+        return None
+    from astropy.io import fits
+    hdr = fits.Header()
+    for k, (v, c) in cards.items():
+        hdr[k] = (v, c)
+    return hdr
+
+
+def _colour_calibrate_stack(args, stacked: np.ndarray, *also, header=None) -> None:
+    """Gaia colour calibration of the linear stack, in place (``stacked`` and any
+    other arrays in ``also`` -- the linear FITS copy). Remembers the scales on
+    ``args._colcal_scales`` for the header. Never fails the run."""
+    args._colcal_scales = None
+    if not getattr(args, 'color_calibrate', False):
+        return
+    hdr = header if header is not None else _stack_wcs_header(args)
+    if hdr is None:
+        safe_print("\n  Colour calibration: no stack WCS -- skipped")
+        return
+    t0 = time.time()
+    try:
+        from src.color_calibrate import calibrate_linear_stack
+        res = calibrate_linear_stack(stacked, hdr,
+                                     method=getattr(args, 'color_calibrate_method', 'solar'),
+                                     verbose=bool(getattr(args, 'verbose', False)))
+    except Exception as e:
+        safe_print(f"\n  WARNING: colour calibration failed: {e}")
+        return
+    if res is None:
+        safe_print("\n  Colour calibration: not enough well-measured Gaia stars -- skipped")
+        return
+    scales, info = res
+    for arr in also:
+        if arr is not None and arr is not stacked:
+            for c, s in enumerate(scales):
+                arr[:, :, c] *= np.float32(s)
+    args._colcal_scales = scales
+    safe_print(f"\n  Colour calibration: R x{scales[0]:.3f} G x{scales[1]:.3f} "
+               f"B x{scales[2]:.3f} ({info}, {format_time(time.time() - t0)})")
+
+
+def prepare_linear_for_phase4(args, stacked: np.ndarray, header) -> None:
+    """``--from-stack``'s step between loading the linear FITS and Phase 4:
+    colour-calibrate a stack that was not calibrated when it was made, or
+    take the scales a calibrated one records (so Phase 4 knows the colour is
+    already Gaia-referenced)."""
+    if header.get('COLCAL', False):
+        args._colcal_scales = tuple(float(header.get(f'COLCAL_{c}', 1.0)) for c in 'RGB')
+    else:
+        _colour_calibrate_stack(args, stacked, header=header)
+
+
+def _colcal_header(header, scales) -> None:
+    if not scales:
+        return
+    header['COLCAL'] = (True, 'Gaia colour calibration applied (linear)')
+    for ch, s in zip('RGB', scales):
+        header[f'COLCAL_{ch}'] = (round(float(s), 4), f'{ch} scale factor')
+
+
 def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
                       shifts: List, transforms: List, top: int, left: int,
                       stacked_linear: np.ndarray) -> None:
@@ -1136,6 +1200,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             elif _n_total >= 20 and _precap > 2.0:
                 args.preview_black_sigma = 2.0
 
+    # Colour calibration against Gaia, on the LINEAR stack: before Phase 4 so
+    # post-processing and the preview work on calibrated colour, and applied to
+    # the linear FITS too (a per-channel scale keeps it linear, RAWSTACK).
+    _colour_calibrate_stack(args, stacked, fits_stacked)
+
     # ======================================================================
     # PHASE 4: Post-processing
     # ======================================================================
@@ -1256,6 +1325,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stacked_shape=stacked.shape, shifts=shifts,
         masters=masters, dither_info=dither_info,
         post_processed=False)
+    _colcal_header(hdu.header, getattr(args, '_colcal_scales', None))
     if merge_info is not None:
         from src.merge import apply_merge_header
         apply_merge_header(hdu.header, merge_info)
@@ -1464,32 +1534,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             safe_print("\n  Photometry: no WCS available (needs --plate-solve or a "
                        "session solve) -- skipping")
 
-    if getattr(args, 'color_calibrate', False) and _wcs_available:
-        safe_print("\n  Applying photometric colour calibration...")
-        cc_start = time.time()
-        try:
-            from src.color_calibrate import run_photometric_calibration
-            stacked_cc, scales = run_photometric_calibration(
-                stacked, hdu.header, verbose=args.verbose,
-                method=getattr(args, 'color_calibrate_method', 'colorindex'))
-            if scales != (1.0, 1.0, 1.0):
-                stacked = stacked_cc
-                hdu.data = np.transpose(stacked.astype(np.float32), (2, 0, 1))
-                hdu.header['COLCAL'] = (True, 'Photometric colour calibration applied')
-                hdu.header['COLCAL_R'] = (round(scales[0], 4), 'R scale factor')
-                hdu.header['COLCAL_G'] = (round(scales[1], 4), 'G scale factor')
-                hdu.header['COLCAL_B'] = (round(scales[2], 4), 'B scale factor')
-                hdu.writeto(output_path, overwrite=True)
-                safe_print(
-                    f"  Colour calibration: "
-                    f"R={scales[0]:.4f} G={scales[1]:.4f} B={scales[2]:.4f} "
-                    f"({format_time(time.time() - cc_start)})"
-                )
-            else:
-                safe_print("  Colour calibration: no correction applied (scale≈1.0)")
-        except Exception as e:
-            safe_print(f"  WARNING: colour calibration failed: {e}")
-
     # TIFF export
     if getattr(args, 'output_tiff', False):
         _save_tiff(stacked, output_path)
@@ -1533,7 +1577,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
-                     starless=_preview_starless)
+                     starless=_preview_starless,
+                     color=getattr(args, 'stretch_color', 'preserve'))
 
     if getattr(args, 'originvision', False):
         # originvision_infer's FITS path assumes a raw (undebayered) single-plane
@@ -1690,6 +1735,8 @@ def postprocess_from_stack(stack_path: str, output_path: str,
         safe_print("  Settings: command line only (no <stem>_config.toml next to the "
                    "stack, so --auto's per-target choices are not available)")
 
+    prepare_linear_for_phase4(args, stacked, header)
+
     stats = ProcessingStats()
     # Background/sky steps are reused from this file while the stack and their
     # settings are unchanged (postprocess._early_cache_*)
@@ -1714,7 +1761,8 @@ def postprocess_from_stack(stack_path: str, output_path: str,
                      ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
-                     starless=starless)
+                     starless=starless,
+                     color=getattr(args, 'stretch_color', 'preserve'))
     safe_print(f"  ✓ Preview: {os.path.basename(preview_path)} "
                f"(Phase 4 {format_time(stats.post_processing_time)})")
     return result

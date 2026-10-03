@@ -31,3 +31,18 @@ def _no_star_index_downloads(tmp_path_factory, monkeypatch):
         return None
     _no_fetch.__wrapped__ = getattr(local_solve.fetch_tile, '__wrapped__', local_solve.fetch_tile)
     monkeypatch.setattr(local_solve, 'fetch_tile', _no_fetch)
+
+
+@pytest.fixture(autouse=True)
+def _no_colour_calibration_queries(monkeypatch):
+    """Colour calibration is on by default and queries Gaia DR3 for the stack's
+    field. Pipeline tests get no calibration (and no network); tests of it
+    restore the real function from ``__wrapped__``."""
+    from src import color_calibrate
+    real = getattr(color_calibrate.calibrate_linear_stack, '__wrapped__',
+                   color_calibrate.calibrate_linear_stack)
+
+    def _none(*a, **k):
+        return None
+    _none.__wrapped__ = real
+    monkeypatch.setattr(color_calibrate, 'calibrate_linear_stack', _none)

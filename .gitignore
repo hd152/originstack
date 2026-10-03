@@ -97,3 +97,7 @@ sample/**/*.json
 # Native (Rust) build output
 ext/**/target/
 *.whl
+
+# Phase 4 harness data/output (tools/bench_phase4.py)
+bench_phase4_data/
+bench_phase4_out/
