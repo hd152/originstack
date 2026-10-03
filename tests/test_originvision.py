@@ -535,11 +535,22 @@ class TestSampleSessionPriors:
 class TestCliOriginvisionResolution:
 
     def _parse(self, tmp_path, *extra):
-        # No explicit --originvision -- it's on by default now (a single
-        # --no-originvision action, same no-positive-flag shape as --auto;
-        # see the flag's own definition in cli.py for why).
+        # originvision is opt-in (--originvision); the resolution tests below
+        # are about what happens once it is on.
         from src import cli
-        return cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'), *extra])
+        return cli.parse_args(['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits'),
+                               '--originvision', *extra])
+
+    def test_off_by_default_and_old_opt_out_still_accepted(self, tmp_path):
+        from src import cli
+        base = ['-d', str(tmp_path), '-o', str(tmp_path / 'o.fits')]
+        assert cli.parse_args(base).originvision is False
+        assert cli.parse_args(base + ['--no-originvision']).originvision is False
+
+    def test_desktop_form_maps_to_the_visible_flag(self):
+        from src.desktop_control import build_argv_from_form
+        assert '--originvision' in build_argv_from_form({'originvision': True})
+        assert '--no-originvision' not in build_argv_from_form({'originvision': True})
 
     @_real_infer
     def test_originvision_stays_enabled_with_bundled_model(self, tmp_path, monkeypatch):
