@@ -752,6 +752,83 @@ def reduce_stars(
     return np.clip(result, 0.0, None).astype(np.float32)
 
 
+def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
+                 max_stars: int = 3000) -> np.ndarray:
+    """Make stars smaller without blurring them (Phase 4 star reduction).
+
+    ``reduce_stars`` blends each star core toward a blurred copy, which lowers
+    the peak but *widens* the profile -- on the stacks scored by
+    ``tools/bench_phase4.py`` the presets that enable it came out with stars
+    several percent wider than the linear stack. This narrows the profile
+    instead. Per star (brightest ``max_stars``, detected well above the noise):
+
+      * local background ``B`` = per-channel median of an annulus just outside
+        the star, so a galaxy or nebula under the star stays background;
+      * ``e`` = the star's light above ``B``, lightly smoothed (sigma 0.7 px) so
+        the operation acts on the star's profile, not on its noise;
+      * keep the fraction ``(e / A) ** amount`` of it (``A`` = the star's
+        peak): 1 at the core, falling in the wings. For a Gaussian profile
+        this gives a Gaussian with FWHM / sqrt(1 + amount) and the same peak;
+        ``amount`` 0.5 is ~18% narrower.
+
+    Only the smooth star light is removed -- the pixel noise is left as it was,
+    so the sky around a star keeps its texture (no smooth discs) -- and the
+    removal is tapered to zero at 2.5 FWHM. Star colour is kept (each channel
+    loses the same fraction).
+
+    Args:
+        img:     (H, W, 3) float32, linear.
+        sources: star table with ``xcentroid``/``ycentroid``/``flux``.
+        fwhm:    stack FWHM in px.
+        amount:  0 = off; 0.3-0.8 typical.
+    """
+    amount = float(max(amount, 0.0))
+    if sources is None or len(sources) == 0 or amount <= 0.0 or img.ndim != 3:
+        return img
+    out = np.array(img, dtype=np.float32, copy=True)
+    H, W = out.shape[:2]
+    fwhm = float(np.clip(fwhm, 1.5, 15.0))
+    R = 2.5 * fwhm
+    Rb = int(np.ceil(R + max(3.0, fwhm)))
+    yy, xx = np.mgrid[-Rb:Rb + 1, -Rb:Rb + 1]
+    rr = np.hypot(yy, xx)
+    ann = (rr > R + 0.5) & (rr <= Rb)
+    taper = np.clip((R - rr) / max(0.5 * fwhm, 1.0), 0.0, 1.0)
+    lw = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    sky_sigma = max(float(_estimate_sky_sigma(img)), 1e-6)
+
+    xs = np.asarray(sources['xcentroid'], dtype=np.float64)
+    ys = np.asarray(sources['ycentroid'], dtype=np.float64)
+    try:
+        order = np.argsort(-np.asarray(sources['flux'], dtype=np.float64))
+    except (KeyError, ValueError):
+        order = np.arange(len(xs))
+    n_done = 0
+    for i in order[:max_stars]:
+        cx, cy = int(round(xs[i])), int(round(ys[i]))
+        if cy - Rb < 0 or cx - Rb < 0 or cy + Rb >= H or cx + Rb >= W:
+            continue
+        cut = out[cy - Rb:cy + Rb + 1, cx - Rb:cx + Rb + 1]
+        B = np.median(cut[ann], axis=0)
+        e = cut - B
+        es = np.stack([_gaussian_blur(e[..., c], 0.7) for c in range(3)], axis=2)
+        el = es @ lw
+        A = float(el[rr <= 1.5].max())
+        if A < 5.0 * sky_sigma:
+            continue
+        keep = np.clip(el / A, 0.0, 1.0) ** amount
+        removed = (1.0 - keep) * taper
+        # Never take a pixel below its local background: the smoothed light
+        # can exceed a pixel's own (a dip between two stars, a noise low),
+        # and a near-zero result made local contrast's ratio blow up.
+        cut -= np.minimum(np.clip(es, 0.0, None) * removed[..., None],
+                          np.clip(e, 0.0, None))
+        n_done += 1
+    if n_done == 0:
+        return img
+    return out
+
+
 def anisotropic_diffusion(img: np.ndarray, iterations: int = 20,
                            kappa: float = 30.0, gamma: float = 0.1,
                            option: int = 1,

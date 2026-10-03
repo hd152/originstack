@@ -60,6 +60,17 @@ class Config:
     RL_PSF_MIN_STARS = 5           # Min successful fits for reliable PSF
     RL_PSF_SIZE = 31               # Output PSF kernel size (odd)
     RL_DEFAULT_ITERATIONS = 15     # Default Richardson-Lucy iterations
+    # Anisotropic diffusion edge threshold, in units of the image's sky sigma
+    # (postprocess._aniso_kappa). It was a fixed 30 ADU, which against stack
+    # sky sigmas of ~35-100+ ADU meant a different filter on every session.
+    # 1.0 trades noise against detail. tools/bench_denoise_quality.py's
+    # curvelet+aniso chain (option 2, 15 iterations, six synthetic scenes):
+    # fine structure kept 0.95-1.0 at 0.5, 0.80-0.93 at 1.0 (0.80 on the noisy
+    # nebula), 0.62-0.84 at 2.0. tools/bench_phase4.py on real nebula stacks:
+    # display sky noise roughly halves per doubling (Veil 6.1 / 3.0 / 1.5,
+    # Crab 2.7 / 1.4 / 0.6 at 0.5 / 1 / 2). The old fixed 30 ADU was 3 sigma on
+    # Veil, 0.65 on Crab and 0.3 on Trifid -- three different filters.
+    ANISO_KAPPA_SIGMA = 1.0
     BORDER_FRAC = 0.12             # Fraction of image border used for sky reference
 
     # Dynamic Background Extraction (DBE)

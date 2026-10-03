@@ -296,10 +296,17 @@ def _quiet(fn: Callable, *a, **k):
 
 
 def _aniso_after(first: Callable) -> Callable:
-    """--auto nebula/PN preset chain: primary, then aniso(option=2, 15 it)."""
+    """--auto nebula/PN preset chain: primary, then aniso(option=2, 15 it).
+    ``p`` is kappa in units of the input's sky sigma; None = what postprocess
+    passes by default (``postprocess._aniso_kappa`` with no explicit value)."""
     def run(img, mask, p):
-        x = first(img, mask, p)
-        return dn.anisotropic_diffusion(x, iterations=15, kappa=30.0, gamma=0.1,
+        x = first(img, mask, None)
+        if p is None:
+            from src.postprocess import _aniso_kappa
+            kappa = _aniso_kappa(img, None)
+        else:
+            kappa = p * dn._estimate_sky_sigma(img)
+        return dn.anisotropic_diffusion(x, iterations=15, kappa=kappa, gamma=0.1,
                                         option=2, star_mask=mask)
     return run
 
@@ -333,7 +340,8 @@ DENOISERS: Dict[str, Tuple[Callable, object, Sequence, str]] = {
     # What --auto runs for emission/reflection nebulae (rule 14 keeps
     # preset-enabled aniso on top of the primary)
     'chain:curvelet+aniso': (_aniso_after(
-        lambda im, m, p: dn.directional_wavelet_denoise(im, star_mask=m)), None, [],
+        lambda im, m, p: dn.directional_wavelet_denoise(im, star_mask=m)), None,
+        [0.25, 0.5, 1.0, 2.0, 3.0],
         '--auto emission/reflection nebula'),
 }
 

@@ -13,6 +13,7 @@ from scipy import ndimage
 from src.background import (
     _border_pixels,
     _dbe_prepare_emission_mask,
+    _estimate_sky_sigma,
     _gaussian_blur,
     apply_background_extraction,
     dynamic_background_extraction,
@@ -31,9 +32,9 @@ from src.denoising import (
     multiscale_local_contrast,
     radial_renormalize,
     reduce_chroma_noise,
-    reduce_stars,
     remove_star_halos,
     scnr,
+    shrink_stars,
 )
 from src.models import Config, FrameInfo, ProcessingStats
 from src.photometric_calibration import photometric_color_calibrate
@@ -208,6 +209,30 @@ def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
     # too narrow, a failed fit, a fit that did not help -- and only one of them
     # is "at this field size".
     return (result, '') if result is not None else (None, reason)
+
+
+def _aniso_kappa(img: np.ndarray, kappa_sigma: Optional[float]) -> float:
+    """Perona-Malik edge threshold in ADU: ``kappa_sigma`` (default
+    ``Config.ANISO_KAPPA_SIGMA``) times the image's sky sigma, so the filter
+    does the same thing on a quiet stack as on a noisy one."""
+    k = Config.ANISO_KAPPA_SIGMA if kappa_sigma is None else float(kappa_sigma)
+    return k * max(float(_estimate_sky_sigma(img)), 1e-6)
+
+
+def _stack_fwhm(stacked: np.ndarray, sources, final) -> float:
+    """FWHM measured on the stack itself (``--from-stack`` has no frames), else
+    the frames' median, else 4 px."""
+    if sources is not None and len(sources) > 0:
+        try:
+            from src.quality import measure_fwhm
+            lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
+                   + 0.114 * stacked[:, :, 2])
+            f = float(measure_fwhm(lum, sources))
+            if 1.0 <= f <= 20.0:
+                return f
+        except Exception as exc:
+            _log.debug("stack FWHM measurement failed: %s", exc)
+    return _median_fwhm(final)
 
 
 def _median_fwhm(final, default: float = 4.0) -> float:
@@ -643,14 +668,16 @@ def postprocess_stack(
     _diag_dir = getattr(args, '_diagnostic_dir', None)
     _diag_counter = [1]
 
-    _cached = _early_cache_load(stacked, args, skip_steps, _diag_dir)
+    _cache_key = (_early_cache_key(stacked, args, skip_steps)
+                  if _early_cache_usable(args, _diag_dir) else None)
+    _cached = _early_cache_load(_cache_key, args, _diag_dir)
     if _cached is not None:
         stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _cached
     else:
         stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _postprocess_early(
             stacked, args, final, skip_steps, _diag_dir, _diag_counter)
-        _early_cache_save(stacked, pp_star_mask, _pp_sources, _bg_excl_mask, args,
-                          skip_steps, _diag_dir)
+        _early_cache_save(_cache_key, stacked, pp_star_mask, _pp_sources, _bg_excl_mask,
+                          args, _diag_dir)
 
     # Denoisers below see only the starless layer when --starless-process is on:
     # with no stars in it they need no star mask (nothing to protect, no halo
@@ -710,7 +737,7 @@ def postprocess_stack(
     if getattr(args, 'denoise_aniso', False) and 'aniso' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_aniso_denoise')
         aniso_iters = getattr(args, 'aniso_iterations', 20)
-        aniso_kappa = getattr(args, 'aniso_kappa', 30.0)
+        aniso_kappa = _aniso_kappa(stacked, getattr(args, 'aniso_kappa_sigma', None))
         aniso_gamma = getattr(args, 'aniso_gamma', 0.1)
         aniso_opt = getattr(args, 'aniso_option', 1)
         safe_print(f"\n  Applying anisotropic diffusion "
@@ -737,7 +764,13 @@ def postprocess_stack(
         safe_print(f"  ✓ SCNR ({format_time(time.time() - scnr_start)})")
 
     # 6.95. Photometric color calibration
-    if getattr(args, 'photometric_calibration', False) and 'photo_cal' not in skip_steps:
+    # The gray-locus step makes the *median* star neutral; once the linear
+    # stack was calibrated against Gaia (a G2V star white), it would only
+    # pull that back toward the field's median colour.
+    if getattr(args, '_colcal_scales', None) and getattr(args, 'photometric_calibration', False):
+        safe_print("\n  Gray-locus colour calibration skipped: colour already "
+                   "calibrated against Gaia")
+    elif getattr(args, 'photometric_calibration', False) and 'photo_cal' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_photo_cal')
         print("\n  Applying photometric color calibration (gray-locus method)...")
         pc_start = time.time()
@@ -898,15 +931,17 @@ def postprocess_stack(
                 stacked = stacked + _dc_stars
             stacked = _sanitize(stacked, "deconvolution")
 
-    # 8. Star reduction
+    # 8. Star reduction: narrow each star's profile (shrink_stars). This used
+    # to blend star cores toward a blurred copy (reduce_stars), which lowers
+    # the peak but widens the star -- the opposite of reducing it.
     if getattr(args, 'star_reduce', False) and 'star_reduce' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_star_reduce')
         sr_factor = float(getattr(args, 'star_reduce_factor', 0.4))
-        sr_sigma = float(getattr(args, 'star_reduce_sigma', 1.5))
-        print(f"\n  Applying star reduction (factor={sr_factor:.2f}, blur_sigma={sr_sigma:.1f})...")
+        sr_fwhm = _stack_fwhm(stacked, _pp_sources, final)
+        print(f"\n  Applying star reduction (amount={sr_factor:.2f}, "
+              f"FWHM {sr_fwhm:.1f} px -> ~{sr_fwhm / np.sqrt(1.0 + sr_factor):.1f})...")
         sr_start = time.time()
-        stacked = reduce_stars(stacked, pp_star_mask, reduction_factor=sr_factor,
-                               blur_sigma=sr_sigma)
+        stacked = shrink_stars(stacked, _pp_sources, sr_fwhm, amount=sr_factor)
         safe_print(f"  ✓ Star reduction ({format_time(time.time() - sr_start)})")
 
     # 9. Multiscale local contrast enhancement
@@ -1092,6 +1127,10 @@ def _early_cache_key(stacked: np.ndarray, args, skip_steps: set) -> Optional[str
     h = hashlib.sha256()
     h.update(f"{os.path.abspath(src)}|{st.st_size}|{st.st_mtime_ns}|{stacked.shape}".encode())
     h.update(repr(sorted(skip_steps)).encode())
+    # The pixels as handed to Phase 4, not just the file: --from-stack may
+    # change them first (colour calibration of an uncalibrated stack), and a
+    # key on the file alone returned the uncalibrated early steps.
+    h.update(np.ascontiguousarray(stacked[::7, ::7]).tobytes())
     for name in _EARLY_ARGS:
         h.update(f"|{name}={getattr(args, name, None)!r}".encode())
     try:
@@ -1109,12 +1148,11 @@ def _early_cache_usable(args, _diag_dir) -> bool:
             and not getattr(args, 'diagnostic', False))
 
 
-def _early_cache_load(stacked, args, skip_steps, _diag_dir):
-    if not _early_cache_usable(args, _diag_dir):
+def _early_cache_load(key, args, _diag_dir):
+    if key is None or not _early_cache_usable(args, _diag_dir):
         return None
     path = args._pp_early_cache
-    key = _early_cache_key(stacked, args, skip_steps)
-    if key is None or not os.path.exists(path):
+    if not os.path.exists(path):
         return None
     try:
         import pickle
@@ -1130,11 +1168,10 @@ def _early_cache_load(stacked, args, skip_steps, _diag_dir):
         return None
 
 
-def _early_cache_save(stacked, star_mask, sources, excl_mask, args, skip_steps, _diag_dir):
-    if not _early_cache_usable(args, _diag_dir):
-        return
-    key = _early_cache_key(stacked, args, skip_steps)
-    if key is None:
+def _early_cache_save(key, stacked, star_mask, sources, excl_mask, args, _diag_dir):
+    # ``key`` is computed from the *input* pixels, before the early steps
+    # change them in place.
+    if key is None or not _early_cache_usable(args, _diag_dir):
         return
     try:
         import pickle

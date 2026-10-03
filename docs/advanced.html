@@ -190,8 +190,10 @@
       <div><dt>A correct sky position for Origin sessions<code>on by default</code> <code>--no-wcs-refine</code></dt>
         <dd><p>The Origin's own solve describes its first frame, not the stacked image, and was being written mirrored and about 60 pixels off. It is now carried through the registration and the crop and refined against the catalogue, so photometry and labels land on the right stars.</p>
         <p class="fact">Median error on a real stack went from 63 px to 0.24 px.</p></dd></div>
-      <div><dt>Colour calibration, annotation<code>--color-calibrate</code> <code>--annotate</code></dt>
-        <dd><p>Calibrates colour against star spectra, and labels named objects and bright stars on a copy of the preview. These go online when you enable them; <code>--offline</code> turns them off.</p></dd></div>
+      <div><dt>Colour calibration against Gaia<code>on by default</code> <code>--no-color-calibrate</code></dt>
+        <dd><p>Measures the colour of each catalogued star in the linear stack, fits it against the star's Gaia colour, and scales the channels so a Sun-like star is white. It needs a sky position for the stack and goes online for the catalogue; <code>--offline</code> turns it off.</p></dd></div>
+      <div><dt>Annotation<code>--annotate</code></dt>
+        <dd><p>Labels named objects and bright stars on a copy of the preview. Goes online when you enable it; <code>--offline</code> turns it off.</p></dd></div>
     </dl>
   </div>
 </section>

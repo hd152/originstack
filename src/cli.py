@@ -1284,10 +1284,12 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                                  ghs_sp=float(getattr(_pa, 'ghs_sp', 0.15)),
                                  ghs_hp=float(getattr(_pa, 'ghs_hp', 0.95)),
                                  black_sigma=float(getattr(_pa, 'preview_black_sigma', 0.0)),
-                                 starless=_pstarless)
+                                 starless=_pstarless,
+                                 color=getattr(_pa, 'stretch_color', 'preserve'))
             else:
                 save_preview_rgb(combined, preview_path,
-                                 stretch=getattr(args, 'stretch', 'linear'))
+                                 stretch=getattr(args, 'stretch', 'linear'),
+                                 color=getattr(args, 'stretch_color', 'preserve'))
 
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
@@ -1904,6 +1906,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Disable chroma noise reduction')
     g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
                    help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
+    g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='preserve',
+                   help='How the ghs/arcsinh stretch treats colour (default: preserve). '
+                        'preserve: the curve is applied to luminance and each pixel keeps '
+                        'its RGB ratios, so stars and bright cores keep their colour. '
+                        'channel: the curve is applied to each channel separately (the '
+                        'behaviour before 2.5), which renders bright objects whiter.')
     g_out.add_argument('--preview-black-sigma', type=float, default=0.0,
                    help='Preview black point, in sky-sigma above the sky median '
                         '(default: 0.0). Higher (e.g. 2.0) clips background noise '
@@ -2079,14 +2087,21 @@ def build_parser() -> argparse.ArgumentParser:
                         'single spatial mask, avoiding the seam a threshold blend can leave at '
                         'the transition band; costs more (several pyramid levels of '
                         'Gaussian-filter passes).')
-    g_out.add_argument('--color-calibrate', action='store_true',
-                   help='Apply photometric colour calibration after plate solving '
-                        '(queries Gaia DR3). Requires --plate-solve.')
-    g_out.add_argument('--color-calibrate-method', choices=['colorindex', 'spcc'],
-                   default='colorindex',
-                   help='Colour calibration algorithm for --color-calibrate (default: '
-                        'colorindex). colorindex: fixed Gaia BP-RP -> B-V colour-index '
-                        'formula. spcc: spectrophotometric-style -- integrates a '
+    g_out.add_argument('--no-color-calibrate', dest='color_calibrate', action='store_false',
+                   help='Do not colour-calibrate the stack against Gaia DR3. By default, '
+                        'when the stack has a WCS (the session solve, refined against '
+                        'Gaia) and the run is online, star colours are measured on the '
+                        'linear stack before post-processing and the channels scaled so '
+                        'a solar-colour star renders white.')
+    # Old command lines: calibration is on by default now (hidden, no-op).
+    g_out.add_argument('--color-calibrate', dest='color_calibrate', action='store_true',
+                   help=argparse.SUPPRESS)
+    g_out.add_argument('--color-calibrate-method', choices=['solar', 'colorindex', 'spcc'],
+                   default='solar',
+                   help='Colour calibration algorithm (default: solar). solar: fit each '
+                        "star's measured B/R and G/R against Gaia BP-RP and scale so a "
+                        'G2V star (BP-RP 0.82) is white. colorindex: fixed Gaia BP-RP -> '
+                        'B-V colour-index formula. spcc: spectrophotometric-style -- integrates a '
                         'blackbody spectrum at each star\'s Gaia teff_gspphot against '
                         'per-channel response curves (falls back to colorindex per-star '
                         'when a star has no Teff estimate). Uses generic Gaussian R/G/B '
@@ -2336,7 +2351,7 @@ def build_parser() -> argparse.ArgumentParser:
         denoise_acdnr_sigma=1.5,
         denoise_acdnr_k=3.0,
         aniso_iterations=20,
-        aniso_kappa=30.0,
+        aniso_kappa_sigma=Config.ANISO_KAPPA_SIGMA,
         aniso_gamma=0.1,
         aniso_option=1,
         # Deconvolution tuning

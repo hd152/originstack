@@ -225,13 +225,84 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         return np.median(np.stack(imgs, axis=0), axis=0).astype(np.float32)
 
 
+def colour_preserving_stretch(rgb: np.ndarray, lum_stretched: np.ndarray,
+                              black: float, white: float,
+                              sky_sigma: float) -> np.ndarray:
+    """Apply a luminance curve to an RGB image without changing its hue.
+
+    A curve applied to each channel separately is not colour-preserving, even
+    with one shared black/white point: a nonlinear curve compresses the
+    brighter channel more, so every star and bright core is pushed toward
+    white and hue drifts with brightness (on the real stacks scored by
+    ``tools/bench_phase4.py`` the stars' display colour spread was 17-29% of
+    their linear colour spread). Here the curve ``T`` is applied to luminance
+    only and every channel is scaled by the same ``T(n) / n`` (Lupton et al.
+    2004), so each pixel keeps its RGB ratios and its luminance is ``T``.
+    Two corrections keep the result displayable:
+
+    * gamut: a saturated colour whose luminance maps near 1 has a channel
+      above 1. Rather than clipping that channel (a hue shift) or
+      desaturating toward grey (which turns every bright star core white,
+      since a core at the white point has ``T = 1``), the pixel is divided by
+      its largest channel (Lupton et al.'s rescale): hue and saturation are
+      kept and only that pixel's luminance drops below ``T``.
+    * noise floor: near the black point a channel's ratio to luminance is
+      mostly noise, which the per-pixel scale would render as colour speckle.
+      Chroma fades in over the first 3 sky sigma above black (grey below).
+
+    ``lum_stretched`` is the curve evaluated on the image's luminance with the
+    same ``black``/``white`` points; ``sky_sigma`` is the luminance sky sigma.
+    """
+    span = max(float(white) - float(black), 1e-12)
+    w = np.array([0.299, 0.587, 0.114])
+    cn = (rgb.astype(np.float64) - float(black)) / span
+    n = cn @ w
+    T = np.asarray(lum_stretched, dtype=np.float64)
+    pos = n > 1e-9
+    k = np.where(pos, T / np.where(pos, n, 1.0), 0.0)
+    out = cn * k[..., None]
+    Tg = T[..., None]
+    n_gate = max(3.0 * float(sky_sigma) / span, 1e-9)
+    g = np.clip(n / n_gate, 0.0, 1.0)[..., None]
+    out = Tg + g * (out - Tg)
+    # A negative channel (a pixel bluer/redder than the black point allows):
+    # desaturate toward grey at constant luminance until it reaches 0.
+    mn = out.min(axis=2, keepdims=True)
+    s_lo = np.where(mn < 0.0, Tg / np.maximum(Tg - mn, 1e-12), 1.0)
+    out = Tg + np.clip(s_lo, 0.0, 1.0) * (out - Tg)
+    # Over-range: rescale by the largest channel (keeps hue and saturation).
+    mx = out.max(axis=2, keepdims=True)
+    out = out / np.maximum(mx, 1.0)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
 def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_b: float = 8.0, ghs_sp: float = 0.15,
                          ghs_hp: float = 0.95,
-                         black_sigma: float = 0.0) -> Optional[np.ndarray]:
+                         black_sigma: float = 0.0,
+                         color: str = 'preserve') -> Optional[np.ndarray]:
     """Stretch an HWC float32 image to display uint8 (the shared core of the
     preview JPEG file writer and the live web view). Returns None when the
     required stretch backend is unavailable."""
+    out = render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
+    if out is None:
+        return None
+    return np.clip(out * 255, 0, 255).astype(np.uint8)
+
+
+def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
+                         ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                         ghs_hp: float = 0.95,
+                         black_sigma: float = 0.0,
+                         color: str = 'preserve') -> Optional[np.ndarray]:
+    """The display stretch of ``render_preview_uint8`` before quantisation:
+    HWC float in [0, 1]. ``tools/bench_phase4.py`` scores this.
+
+    ``color`` (ghs/arcsinh only): 'preserve' (default) applies the curve to
+    luminance and keeps each pixel's RGB ratios (``colour_preserving_stretch``);
+    'channel' applies it to each channel separately (the behaviour before
+    2026-10, which whitens stars and bright cores)."""
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
     if stretch == 'ghs':
@@ -259,11 +330,17 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
         # is fine. 99.5 keeps stars comfortably white while giving diffuse
         # signal several times more of the normalized range to live in.
         unified_white = float(np.percentile(lum, 99.5))
-        for c in range(3):
-            out[:, :, c] = generalized_hyperbolic_stretch(
-                rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
-                black_point=unified_black, white_point=unified_white)
-        out = np.clip(out * 255, 0, 255).astype(np.uint8)
+        if color == 'preserve':
+            out = colour_preserving_stretch(
+                rgb, generalized_hyperbolic_stretch(
+                    lum, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+                    black_point=unified_black, white_point=unified_white),
+                unified_black, unified_white, _bg_sigma)
+        else:
+            for c in range(3):
+                out[:, :, c] = generalized_hyperbolic_stretch(
+                    rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+                    black_point=unified_black, white_point=unified_white)
     elif stretch == 'arcsinh':
         # Arcsinh stretch — unified luminance-based normalization to preserve color
         out = np.zeros_like(rgb)
@@ -274,11 +351,16 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
         # percentile: saturated-star pixels otherwise set a white point far
         # above any extended structure, burying diffuse signal near-black.
         unified_white = float(np.percentile(lum, 99.5))
-        for c in range(3):
-            out[:, :, c] = arcsinh_stretch(rgb[:, :, c],
-                                           black_point=unified_black,
-                                           white_point=unified_white)
-        out = np.clip(out * 255, 0, 255).astype(np.uint8)
+        if color == 'preserve':
+            out = colour_preserving_stretch(
+                rgb, arcsinh_stretch(lum, black_point=unified_black,
+                                     white_point=unified_white),
+                unified_black, unified_white, _bg_sigma)
+        else:
+            for c in range(3):
+                out[:, :, c] = arcsinh_stretch(rgb[:, :, c],
+                                               black_point=unified_black,
+                                               white_point=unified_white)
     else:
         # Linear percentile stretch (original behaviour)
         out = np.zeros_like(rgb)
@@ -286,14 +368,13 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
             lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
             lo = max(lo, 0.0)  # Don't let negative noise expand the display range
             out[:, :, c] = _rescale_intensity(rgb[:, :, c], lo, hi)
-        out = np.clip(out * 255, 0, 255).astype(np.uint8)
     return out
 
 
 def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
                                  ghs_b: float = 8.0, ghs_sp: float = 0.15,
-                                 ghs_hp: float = 0.95, black_sigma: float = 0.0
-                                 ) -> np.ndarray:
+                                 ghs_hp: float = 0.95, black_sigma: float = 0.0,
+                                 color: str = 'preserve') -> np.ndarray:
     """GHS preview whose black and white points come from the starless layer.
 
     One stretch has to pick a single white point, and on a starry frame the
@@ -324,11 +405,19 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
     # full image) -- the core blows out and the noise floor is stretched to
     # grain. 99.9 keeps the arms and outer disk visible without either.
     white = float(np.percentile(lum_s, 99.9))
-    out = np.zeros(rgb.shape, dtype=np.float32)
-    for c in range(3):
-        out[:, :, c] = generalized_hyperbolic_stretch(
-            rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
-            black_point=black, white_point=white)
+    if color == 'preserve':
+        lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        out = colour_preserving_stretch(
+            rgb, generalized_hyperbolic_stretch(
+                lum, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+                black_point=black, white_point=white),
+            black, white, sigma)
+    else:
+        out = np.zeros(rgb.shape, dtype=np.float32)
+        for c in range(3):
+            out[:, :, c] = generalized_hyperbolic_stretch(
+                rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+                black_point=black, white_point=white)
     return np.clip(out * 255, 0, 255).astype(np.uint8)
 
 
@@ -351,7 +440,8 @@ def _preview_pil_image(out: np.ndarray, max_dim: int):
 def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_b: float = 8.0, ghs_sp: float = 0.15,
                      ghs_hp: float = 0.95, black_sigma: float = 0.0,
-                     starless: Optional[np.ndarray] = None) -> None:
+                     starless: Optional[np.ndarray] = None,
+                     color: str = 'preserve') -> None:
     """Write the preview JPEG. ``starless`` (same shape as ``rgb``), with
     ``stretch='ghs'``, switches to the layered stretch -- see
     ``render_preview_layered_uint8``."""
@@ -360,10 +450,11 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
         return
     if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
         out = render_preview_layered_uint8(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                           ghs_hp=ghs_hp, black_sigma=black_sigma)
+                                           ghs_hp=ghs_hp, black_sigma=black_sigma,
+                                           color=color)
     else:
         out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                   ghs_hp=ghs_hp, black_sigma=black_sigma)
+                                   ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
     if out is None:
         return
     img = _preview_pil_image(out, Config.PREVIEW_MAX_DIMENSION)
@@ -395,7 +486,8 @@ def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:
 def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
                        ghs_b: float = 8.0, ghs_sp: float = 0.15,
                        ghs_hp: float = 0.95, black_sigma: float = 0.0,
-                       max_dim: int = 1024, desaturate: float = 0.0) -> Optional[bytes]:
+                       max_dim: int = 1024, desaturate: float = 0.0,
+                       color: str = 'preserve') -> Optional[bytes]:
     """Stretched preview JPEG as bytes (for the live web view).
 
     ``desaturate`` (0-1) blends the stretched result toward luminance -- see
@@ -405,7 +497,7 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
     if Image is None:
         return None
     out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                               ghs_hp=ghs_hp, black_sigma=black_sigma)
+                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
     if out is None:
         return None
     out = _desaturate_preview_uint8(out, desaturate)
