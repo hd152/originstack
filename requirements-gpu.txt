@@ -1,4 +1,5 @@
-# Optional GPU requirements (install only on machines with compatible CUDA/toolkit)
-cython
-# Example CuPy wheel for CUDA 11.x - choose appropriate wheel for your CUDA version
-# cupy-cuda11x
+# Optional GPU acceleration (--use-gpu). Needs an NVIDIA GPU and CUDA drivers.
+# Install the prebuilt CuPy wheel matching your CUDA version (no build tools needed):
+#   pip install cupy-cuda12x      # CUDA 12.x
+#   pip install cupy-cuda11x      # CUDA 11.x
+# Left commented: pip cannot pick the right wheel for your CUDA install by itself.
