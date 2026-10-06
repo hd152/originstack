@@ -6,6 +6,26 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Faint targets no longer render as a field of white speckles.** The preview's white point was
+  the 99.5th brightness percentile, which on a small galaxy in an empty field sits only 5-7 sky
+  sigmas above the sky (measured on Black Eye and Sunflower), so sky noise was stretched across the
+  whole display range and the galaxy core clipped to a flat blob. The white point is now at least
+  50 sky sigmas above the sky, and the stretch's focus point follows it down (at most 3x), so
+  galaxy disks, rings and arms show on a clean sky. Frames where the percentile was already higher
+  (frame-filling nebulae) are unchanged. **Expect darker, cleaner previews of small targets.**
+- **Bright stars are no longer blue discs.** Gaia colour calibration scaled each channel of
+  saturated star cores, which are clipped equally in R/G/B, so every bright star turned the colour
+  of the gain ratio (blue, with the gains these sessions get). Cores near a clipped plateau now stay
+  neutral, in the post-processed image and in the saved linear FITS.
+
+### Added
+
+- **`tools/bench_vs_origin.py`**: compares a stack with the Celestron Origin's own
+  `FinalStackedMaster.tiff` (star width on the same stars, noise at star scale, side-by-side PNG);
+  `--siril-stack` adds a Siril stack of the same lights.
+
 ### Removed
 
 - **originvision scoring** (`--originvision`, `--originvision-score-all`, `--originvision-model`,

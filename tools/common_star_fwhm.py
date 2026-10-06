@@ -54,9 +54,14 @@ def _luma(cube):
     return lum - np.median(lum)
 
 
-def common_star_fwhm(cube_a, cube_b, max_stars=400):
+def common_star_fwhm(cube_a, cube_b, max_stars=400, exclude_b=None):
     """FWHM of the same stars in two (3, H, W) linear stacks. Returns a dict with the median
-    FWHM of each (a, b), their spread (IQR), the star count, and the median per-star ratio a/b."""
+    FWHM of each (a, b), their spread (IQR), the star count, and the median per-star ratio a/b.
+
+    ``exclude_b`` (optional bool (H, W) mask on b's grid): skip any star whose cutout touches
+    it. For a stack that clips (e.g. a 16-bit TIFF on a large pedestal), pass its clipped
+    pixels: a star clipped in one channel only can pass the luminance saturation test below
+    and fit wider than it is."""
     from src.blind_match import match_rigid_unknown_rotation
     from src.star_detect import detect_stars_matched_filter as detect
 
@@ -83,6 +88,10 @@ def common_star_fwhm(cube_a, cube_b, max_stars=400):
 
     fa, fb = [], []
     for i in keep:
+        if exclude_b is not None:
+            xi, yi = int(round(xs[i])), int(round(ys[i]))
+            if exclude_b[max(yi - _HALF, 0):yi + _HALF + 1, max(xi - _HALF, 0):xi + _HALF + 1].any():
+                continue
         rb = _gauss_fit(lb, xs[i], ys[i])
         if rb is None or rb[2] >= sat_b or rb[1] < 40 * 1.0:
             continue

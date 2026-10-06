@@ -225,6 +225,27 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         return np.median(np.stack(imgs, axis=0), axis=0).astype(np.float32)
 
 
+def _preview_white(lum: np.ndarray, sky: float, sigma: float, percentile: float,
+                   black: float) -> Tuple[float, float]:
+    """Preview white point, and the factor to scale GHS's symmetry point by.
+
+    White is the given luminance percentile, but never closer to the sky than
+    ``Config.PREVIEW_WHITE_MIN_SIGMA`` sky sigmas: on a small target in an empty
+    field the percentile is barely above sky, which stretched the sky noise across
+    the whole display range (see the Config note). Raising white by a factor puts
+    the target's light that much lower in the normalised range, below where the
+    curve's contrast is focused (SP), so SP follows it down -- by at most 3x:
+    with SP / 3 the galaxies' outer disks and arms came back on a still-clean sky
+    (Black Eye, Sunflower), while a black point at the sky brought the speckle
+    back."""
+    from src.models import Config
+    pct = float(np.percentile(lum, percentile))
+    white = max(pct, float(sky) + Config.PREVIEW_WHITE_MIN_SIGMA * float(sigma))
+    span = white - float(black)
+    sp_scale = 1.0 if pct >= white or span <= 0 else max((pct - float(black)) / span, 1.0 / 3.0)
+    return white, sp_scale
+
+
 def colour_preserving_stretch(rgb: np.ndarray, lum_stretched: np.ndarray,
                               black: float, white: float,
                               sky_sigma: float) -> np.ndarray:
@@ -329,7 +350,8 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # visually indistinguishable from sky even though the pixel data
         # is fine. 99.5 keeps stars comfortably white while giving diffuse
         # signal several times more of the normalized range to live in.
-        unified_white = float(np.percentile(lum, 99.5))
+        unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
+        ghs_sp = ghs_sp * _sp_scale
         if color == 'preserve':
             out = colour_preserving_stretch(
                 rgb, generalized_hyperbolic_stretch(
@@ -350,7 +372,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # See the 'ghs' branch above for why 99.5 rather than a higher
         # percentile: saturated-star pixels otherwise set a white point far
         # above any extended structure, burying diffuse signal near-black.
-        unified_white = float(np.percentile(lum, 99.5))
+        unified_white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
         if color == 'preserve':
             out = colour_preserving_stretch(
                 rgb, arcsinh_stretch(lum, black_point=unified_black,
@@ -404,7 +426,8 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
     # disk (measured on a real stack: white 338 vs 679 at 99.9 vs 1177 for the
     # full image) -- the core blows out and the noise floor is stretched to
     # grain. 99.9 keeps the arms and outer disk visible without either.
-    white = float(np.percentile(lum_s, 99.9))
+    white, _sp_scale = _preview_white(lum_s, med, sigma, 99.9, black)
+    ghs_sp = ghs_sp * _sp_scale
     if color == 'preserve':
         lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
         out = colour_preserving_stretch(
