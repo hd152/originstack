@@ -14,6 +14,7 @@ here.
 from __future__ import annotations
 
 import argparse
+import re
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -36,6 +37,99 @@ _WIDGET_HINTS: Dict[str, str] = {
 # Flags the desktop app doesn't drive a run through (they either watch/loop
 # forever with no cancel support yet, or exit without stacking).
 _UNSUPPORTED_DESTS = {'live', 'stream', 'quality_sweep', 'sweep_undo'}
+
+
+# One-line descriptions shown under a field in the desktop form, written for
+# a photographer rather than for the command line. Only fields whose help
+# text does not summarise well get one here: the help leads with a bare
+# heading ("Processing preset."), describes the *negating* flag of a checkbox
+# ("Disable the auto advisor"), or is too technical for the form. Every other
+# field's line comes from summarize_help(). Keys must be real dests
+# (tests/test_desktop_setup_form.py checks).
+_FIELD_SUMMARIES: Dict[str, str] = {
+    'directory': 'The folder with your light frames (calibration frames can sit alongside).',
+    'output': 'Where to save the stack. Leave blank to save next to the light frames.',
+    'preset': 'A starting point for the settings: quick, quality, or tuned for a target type.',
+    'auto': 'Recognises the target after the first pass and picks settings for it. '
+            'Anything you change here still wins.',
+    'stack_method': 'How frames are combined and outliers (satellites, cosmic rays) rejected. '
+                    'auto picks for the session.',
+    'denoiser': 'Noise reduction applied to the finished stack. auto picks for the target.',
+    'deconvolve_mode': 'Sharpen fine detail by undoing the blur of seeing and optics. '
+                       'Best on bright, high-SNR targets.',
+    'drizzle_scale': 'Upscale the output (e.g. 2 for twice the resolution). '
+                     'Needs many dithered frames.',
+    'trail_reject': 'Find and erase satellite and aircraft trails in each frame.',
+    'use_gpu': 'Use an NVIDIA GPU (CuPy) where it helps. Usually no faster on small cards.',
+    'parallel': 'Frames processed at once. 0 = automatic, 1 = one at a time.',
+    'originvision': 'Score a few frames with the bundled image classifier '
+                    '(advisory; nudges --auto).',
+    'debayer_method': 'How colour is rebuilt from the sensor mosaic. rcd is sharpest and quietest.',
+    'white_balance': 'How the colour balance of each frame is set before stacking.',
+    'verbose': 'Print more detail in the log.',
+    'no_registration': 'Stack frames without aligning them (only for already-aligned data).',
+    'directional_protect_strength': 'How strongly noise reduction protects filaments and '
+                                    'spiral arms (0-1).',
+    'skip_step': 'Turn off named post-processing steps (comma-separated).',
+    'plate_solve': 'Work out exactly where in the sky the image points '
+                   '(needed for labels and photometry).',
+    'annotate': 'Save a copy of the preview with stars and named objects labelled '
+                '(needs internet).',
+    'photometry': 'Measure star brightnesses against Gaia and save a calibrated catalogue (CSV).',
+    'export': 'Extra file formats to save alongside the FITS: tiff, xisf.',
+    'stretch': 'How the preview JPEG is brightened from the linear stack.',
+    'merge': 'Add earlier stacks of the same target to this one (their linear FITS files).',
+    'session_cfa_eq': 'Measure sensor colour offsets once per session (faster). '
+                      'Untick to re-measure on every frame.',
+}
+
+_ABBREV_END = re.compile(r'\b(e\.g|i\.e|vs|etc|approx|cf)$', re.IGNORECASE)
+_NEGATION = re.compile(r"^(disable|do not|don't|turn off|skip)\s+", re.IGNORECASE)
+
+
+def summarize_help(help_text: str, kind: str, limit: int = 120) -> str:
+    """First sentence of an argparse help string, trimmed for display under a
+    form field. Stops at the first top-level '.', ';' or ':' (not inside
+    parentheses, not after "e.g.", and not at a short leading heading such
+    as "Bayer-aware drizzle:"), drops a dangling "(default: ..." and caps the
+    length. A checkbox for a store_false flag shows the *enabled* state, so
+    its "Disable X" help becomes "X."; any other wording is dropped rather
+    than shown backwards next to a ticked box."""
+    text = ' '.join((help_text or '').split())
+    if not text:
+        return ''
+    end, depth = len(text), 0
+    for i, ch in enumerate(text):
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth = max(0, depth - 1)
+        elif depth == 0 and ch in '.;:' and (i + 1 == len(text) or text[i + 1] == ' '):
+            head = text[:i]
+            if ch == '.' and _ABBREV_END.search(head):
+                continue
+            if ch == ':' and len(head) < 40:
+                continue
+            end = i
+            break
+    s = text[:end].strip()
+    # The input already shows the default: drop "(default: x)" and an
+    # unbalanced trailing "(default: ..." cut off by the sentence end.
+    s = re.sub(r'\s*\(default:[^)]*\)', '', s)
+    # Pointers into the source ("(see foo in src/debayer.py)") mean nothing here.
+    s = re.sub(r'\s*\([^)]*\.py\b[^)]*\)', '', s)
+    s = re.sub(r'\s*\([^)]*$', '', s).strip()
+    if kind == 'bool_false':
+        m = _NEGATION.match(s)
+        if not m:
+            return ''
+        s = s[m.end():]
+        s = s[:1].upper() + s[1:]
+    if len(s) > limit:
+        s = s[:limit].rsplit(' ', 1)[0].rstrip(',;:-') + '…'
+    if s and not s.endswith(('.', '…', '?')):
+        s += '.'
+    return s
 
 
 def _field_for_action(action: argparse.Action) -> Optional[Dict[str, Any]]:
@@ -72,6 +166,7 @@ def _field_for_action(action: argparse.Action) -> Optional[Dict[str, Any]]:
         'default': default,
         'help': action.help or '',
         'widget': _WIDGET_HINTS.get(action.dest),
+        'summary': _FIELD_SUMMARIES.get(action.dest) or summarize_help(action.help or '', kind),
     }
 
 
@@ -142,6 +237,21 @@ def build_argv_from_form(form: Dict[str, Any]) -> List[str]:
     return argv
 
 
+def _default_output_beside_lights(form: Dict[str, Any]) -> Dict[str, Any]:
+    """A blank Output file means "next to the light-frames folder". The CLI's
+    default is ``<session>_stacked.fits`` in the *working directory*, which
+    for a desktop app is wherever it was launched from (the source checkout,
+    or the install folder of the packaged build). Passing the folder's parent
+    as ``-o`` uses the CLI's folder-output mode: ``<session>_stacked.fits``
+    there, never overwriting an existing stack."""
+    import os
+    directory = str(form.get('directory') or '').strip()
+    if str(form.get('output') or '').strip() or not directory or form.get('from_stack'):
+        return form
+    parent = os.path.dirname(os.path.abspath(directory.rstrip('/\\')))
+    return {**form, 'output': os.path.join(parent, '')}
+
+
 class RunManager:
     """Runs one pipeline job at a time on a background thread, publishing
     progress through the ``UIEvents`` singleton (``src/ui_events.py``) --
@@ -180,6 +290,7 @@ class RunManager:
         with self._lock:
             if self.status == 'running':
                 return {'ok': False, 'error': 'a run is already in progress'}
+            form = _default_output_beside_lights(form)
             try:
                 argv = build_argv_from_form(form)
             except Exception as e:

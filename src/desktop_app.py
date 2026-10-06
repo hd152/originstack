@@ -120,6 +120,11 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
     style.configure('TLabel', background=_BG, foreground=_TEXT)
     style.configure('Dim.TLabel', background=_BG, foreground=_TEXT_DIM)
     style.configure('Faint.TLabel', background=_BG, foreground=_TEXT_FAINT)
+    # Setup form: the one-line description under each field, the dot marking
+    # a field changed from its default, and that field's "reset" link.
+    style.configure('Hint.TLabel', background=_BG, foreground=_TEXT_DIM, font=(_SANS, 8))
+    style.configure('Changed.TLabel', background=_BG, foreground=_ACCENT, font=_FONT)
+    style.configure('Reset.TLabel', background=_BG, foreground=_ACCENT2, font=(_SANS, 8))
     style.configure('Header.TLabel', background=_BG, foreground=_TEXT,
                     font=(_SANS, 14, 'bold'))
     style.configure('Accent.TLabel', background=_BG, foreground=_ACCENT,
@@ -208,8 +213,9 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
 
 
 class ScrollableFrame(ttk.Frame):
-    """A vertically-scrollable container -- some Setup tabs have 20+ fields
-    and won't fit the window at once."""
+    """A vertically-scrollable container -- the Setup form (with a field's
+    description under it, and the additional options expanded) is taller
+    than the window."""
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -218,14 +224,31 @@ class ScrollableFrame(ttk.Frame):
         self.inner = ttk.Frame(canvas)
         self.inner.bind('<Configure>',
                         lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
-        canvas.create_window((0, 0), window=self.inner, anchor='nw')
+        window = canvas.create_window((0, 0), window=self.inner, anchor='nw')
+        # The inner frame follows the canvas width (it would otherwise keep
+        # its requested width), so fields fill it and description lines can
+        # wrap to it.
+        canvas.bind('<Configure>', lambda e: canvas.itemconfigure(window, width=e.width))
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
 
+        self.canvas = canvas
+
         def _wheel(event):
-            canvas.yview_scroll(-1 * (event.delta // 120), 'units')
+            # bind_all sees every wheel event in the app: scroll only when
+            # the pointer is over this frame, not the log or the preview.
+            if str(event.widget).startswith(str(canvas)):
+                canvas.yview_scroll(-1 * (event.delta // 120), 'units')
         canvas.bind_all('<MouseWheel>', _wheel, add='+')
+
+    def scroll_to(self, widget: tk.Widget) -> None:
+        """Scroll so *widget* (a descendant of ``inner``) is at the top."""
+        self.update_idletasks()
+        total = self.inner.winfo_height()
+        if total > 0:
+            y = widget.winfo_rooty() - self.inner.winfo_rooty()
+            self.canvas.yview_moveto(max(0.0, y / total))
 
 
 #  Shown directly on the main form, in this order -- everything else lives
@@ -235,7 +258,7 @@ class ScrollableFrame(ttk.Frame):
 # output, and the handful of settings that most change the result) while
 # the other ~110 flags are fine-tuning most runs never need.
 _COMMON_DESTS = ['directory', 'output', 'preset', 'auto', 'stack_method',
-                 'denoiser', 'deconvolve', 'drizzle_scale', 'trail_reject',
+                 'denoiser', 'deconvolve_mode', 'drizzle_scale', 'trail_reject',
                  'use_gpu', 'parallel', 'originvision']
 
 # Human field labels. Anything not listed falls back to the dest name with
@@ -252,6 +275,14 @@ _FIELD_LABELS = {
     'plate_solve': 'Plate solve',
     'color_calibrate': 'Colour calibrate',
     'remove_stars': 'Starless sidecar',
+    'deconvolve_mode': 'Deconvolution',
+    'session_cfa_eq': 'Session colour equalisation',
+    'ca_correction': 'Chromatic aberration fix',
+    'cfa_drizzle': 'Bayer drizzle',
+    'dark_temp_model': 'Dark temperature model',
+    'super_res_iters': 'Super-resolution passes',
+    'bg_method': 'Background method',
+    'scnr': 'SCNR (green removal)',
 }
 
 
@@ -271,6 +302,10 @@ def _is_expert_field(field: Dict[str, Any]) -> bool:
     return field['dest'] in _EXPERT_DESTS or 'experimental' in (field.get('help') or '').lower()
 
 
+# Required paths: being set is not a change worth marking.
+_NO_CHANGE_MARK = {'directory', 'output'}
+
+
 def _field_label(field: Dict[str, Any]) -> str:
     dest = field['dest']
     return _FIELD_LABELS.get(dest, dest.replace('_', ' ').capitalize())
@@ -284,12 +319,23 @@ class SetupForm(ttk.Frame):
     look at ~10 fields, not the full ~120-flag surface. Field kinds
     (``bool_true``/``bool_false``/``select``/``list``/``number``/``text``)
     and path widgets (``dir``/``file-open``/``file-save``) come straight
-    from the schema; nothing here needs to know about individual flags."""
+    from the schema; nothing here needs to know about individual flags.
 
-    def __init__(self, parent):
+    Each field shows its one-line ``summary`` under it (the full help stays
+    in the label's tooltip), a dot and a "reset" link once it differs from
+    its default, and the additional options can be searched by label, flag
+    or help text across every group (expert ones included -- someone who
+    types "dispersion" is looking for it)."""
+
+    def __init__(self, parent, on_expand=None):
         super().__init__(parent)
         from src.desktop_control import get_form_schema
         self.schema = get_form_schema()
+        # Called with the toggle bar after "Additional options" opens, so a
+        # scrolling container can bring the section into view.
+        self._on_expand = on_expand
+        # parent -> [(hint label, inline)], rewrapped to the parent's width.
+        self._hints: Dict[tk.Widget, List[Any]] = {}
         self.vars: Dict[str, tk.Variable] = {}
         # The value each Variable was initialized with -- read_form() only
         # emits a dest whose value has actually changed from this. Without
@@ -303,6 +349,9 @@ class SetupForm(ttk.Frame):
         # reported "galaxy detail lost to denoising" bug: the auto-advisor's
         # galaxy-specific denoiser choice never got a chance to apply.
         self._initial: Dict[str, Any] = {}
+        # dest -> {'widgets', 'group', 'expert', 'haystack', 'dot', 'reset'}
+        # for every field built (common fields have group None).
+        self._fields: Dict[str, Dict[str, Any]] = {}
         self.dir_count_var = tk.StringVar(value='')
         all_fields = {f['dest']: f for fields in self.schema.values() for f in fields}
 
@@ -312,12 +361,18 @@ class SetupForm(ttk.Frame):
         for dest in _COMMON_DESTS:
             field = all_fields.get(dest)
             if field is not None:
-                row += self._build_field(common_frame, row, field)
+                row += self._build_field(common_frame, row, field, group=None)
 
+        bar = ttk.Frame(self)
+        bar.pack(fill='x', pady=(10, 0))
+        self._bar = bar
         self._advanced_shown = False
-        self._toggle_btn = ttk.Button(self, text='▸ Additional options',
-                                      command=self._toggle_advanced)
-        self._toggle_btn.pack(fill='x', pady=(10, 0), anchor='w')
+        self._toggle_btn = ttk.Button(bar, text='', command=self._toggle_advanced)
+        self._toggle_btn.pack(side='left', fill='x', expand=True)
+        self.search_var = tk.StringVar(value='')
+        ttk.Entry(bar, textvariable=self.search_var, width=22).pack(side='right', padx=(8, 0))
+        ttk.Label(bar, text='Search settings', style='Dim.TLabel').pack(side='right')
+        self.search_var.trace_add('write', lambda *_: self._on_search())
 
         # A sidebar of group names, not a Notebook of horizontal tabs: this
         # form has 8 groups with names like "Registration & stacking
@@ -330,13 +385,16 @@ class SetupForm(ttk.Frame):
         nav.pack_propagate(False)
         content = ttk.Frame(self._advanced_body)
         content.pack(side='left', fill='both', expand=True, padx=(10, 0))
+        self._no_match = ttk.Label(content, text='No settings match.', style='Dim.TLabel')
 
-        self._pages: Dict[str, ScrollableFrame] = {}
+        # Plain frames: the whole form scrolls in the App's ScrollableFrame
+        # (a scroll area per page nested inside that one fought it for the
+        # mouse wheel).
+        self._pages: Dict[str, ttk.Frame] = {}
         self._nav_labels: Dict[str, tk.Label] = {}
-        self._expert_widgets: List[tk.Widget] = []
         self._current_group: Optional[str] = None
         for group_title in self.schema:
-            self._pages[group_title] = ScrollableFrame(content)
+            self._pages[group_title] = ttk.Frame(content)
             lbl = tk.Label(nav, text=group_title, background=_PANEL, foreground=_TEXT_DIM,
                           font=_FONT, anchor='w', justify='left', wraplength=148,
                           padx=12, pady=9)
@@ -349,49 +407,91 @@ class SetupForm(ttk.Frame):
                         command=self._refresh_expert).pack(side='bottom', anchor='w',
                                                            padx=8, pady=8)
 
+        # One widget per dest: a second widget would create a second
+        # Variable, and read_form() would silently drop whichever one the
+        # user didn't touch last. Common fields are already built; a dest
+        # two flags share (--cosmic-ray-rejection / --no-cosmic-ray-rejection)
+        # gets the widget of its *last* action, the one
+        # build_argv_from_form's dest map resolves it to.
+        last = {f['dest']: f for fields in self.schema.values() for f in fields}
         for group_title, fields in self.schema.items():
             page = self._pages[group_title]
-            # Skip anything already on the main form -- building a second
-            # widget for the same dest would create a second Variable, and
-            # read_form() would silently drop whichever one the user didn't
-            # touch last.
-            visible_fields = [f for f in fields if f['dest'] not in _COMMON_DESTS]
             row = 0
-            for field in visible_fields:
-                first = row
-                row += self._build_field(page.inner, row, field)
-                if _is_expert_field(field):
-                    self._expert_widgets.extend(
-                        w for r in range(first, row) for w in page.inner.grid_slaves(row=r))
+            for field in fields:
+                if field['dest'] not in self._fields and last[field['dest']] is field:
+                    row += self._build_field(page, row, field, group=group_title)
 
+        self._refresh_toggle_text()
         self._refresh_expert()
 
+    # ── visibility: expert toggle and search ───────────────────────────
+
     def _refresh_expert(self) -> None:
-        """Show or hide expert groups/fields. Hidden fields keep their
-        Variables, so ``read_form`` is unaffected -- only visibility changes."""
+        """Show or hide expert groups/fields (or, while a search is active,
+        the matching fields). Hidden fields keep their Variables, so
+        ``read_form`` is unaffected -- only visibility changes."""
         expert = self.expert_var.get()
+        terms = self.search_var.get().lower().split()
+        matches: Dict[str, int] = {g: 0 for g in self.schema}
+        for info in self._fields.values():
+            if info['group'] is None:
+                continue
+            if terms:
+                visible = all(t in info['haystack'] for t in terms)
+            else:
+                visible = expert or not info['expert']
+            if visible:
+                matches[info['group']] += 1
+            for w in info['widgets']:
+                if visible:
+                    w.grid()
+                else:
+                    w.grid_remove()
+
         for lbl in self._nav_labels.values():
             lbl.pack_forget()
+        if terms:
+            visible_groups = [g for g in self.schema if matches[g]]
+        else:
+            visible_groups = [g for g in self.schema if expert or not _is_expert_group(g)]
         for g, lbl in self._nav_labels.items():
-            if expert or not _is_expert_group(g):
+            if g in visible_groups:
+                lbl.configure(text=f'{g}  ({matches[g]})' if terms else g)
                 lbl.pack(fill='x')
-        for w in self._expert_widgets:
-            if expert:
-                w.grid()
-            else:
-                w.grid_remove()
-        visible = [g for g in self.schema if expert or not _is_expert_group(g)]
-        if self._current_group not in visible:
-            self._show_group(visible[0])
+
+        if not visible_groups:
+            self._current_group = None
+            for page in self._pages.values():
+                page.pack_forget()
+            self._no_match.pack(anchor='nw', pady=8)
+            return
+        self._no_match.pack_forget()
+        self._show_group(self._current_group if self._current_group in visible_groups
+                         else visible_groups[0])
+
+    def _on_search(self) -> None:
+        if self.search_var.get().strip() and not self._advanced_shown:
+            self._toggle_advanced()
+        self._refresh_expert()
 
     def _toggle_advanced(self) -> None:
         self._advanced_shown = not self._advanced_shown
         if self._advanced_shown:
             self._advanced_body.pack(fill='both', expand=True, pady=(8, 0))
-            self._toggle_btn.configure(text='▾ Additional options')
         else:
             self._advanced_body.pack_forget()
-            self._toggle_btn.configure(text='▸ Additional options')
+        self._refresh_toggle_text()
+        if self._advanced_shown and self._on_expand is not None:
+            self._on_expand(self._bar)
+
+    def _refresh_toggle_text(self) -> None:
+        """'▸ Additional options · 2 changed' -- a change made behind the
+        collapsed section stays visible from the main form."""
+        n = sum(1 for d, info in self._fields.items()
+                if info['group'] is not None and self._is_changed(d))
+        arrow = '▾' if self._advanced_shown else '▸'
+        suffix = f'  ·  {n} changed' if n else ''
+        self._toggle_btn.configure(text=f'{arrow} Additional options{suffix}')
 
     def _show_group(self, group_title: str) -> None:
         self._current_group = group_title
@@ -405,15 +505,25 @@ class SetupForm(ttk.Frame):
                 background=_LINE_SOFT if selected else _PANEL,
                 foreground=_TEXT if selected else _TEXT_DIM)
 
-    def _build_field(self, parent, row: int, field: Dict[str, Any]) -> None:
+    # ── fields ─────────────────────────────────────────────────────────
+
+    def _build_field(self, parent, row: int, field: Dict[str, Any],
+                     group: Optional[str]) -> int:
+        """Grid one field into *parent* from *row*: column 0 the changed
+        dot, 1 the label, 2 the input, 3 a Browse button (paths), 4 the
+        reset link; the description on the next row. Returns rows used."""
         dest, kind = field['dest'], field['kind']
+        widgets: List[tk.Widget] = []
+        dot = ttk.Label(parent, text='', style='Changed.TLabel', width=2)
+        dot.grid(row=row, column=0, sticky='e', pady=(5, 0))
+        widgets.append(dot)
         # Human label from the dest, never the raw "--flag" (and never the
         # *negating* flag for bool_false fields like dest 'auto' / flag
         # '--no-auto', which would read backwards next to a checked box).
         label = ttk.Label(parent, text=_field_label(field))
-        label.grid(row=row, column=0, sticky='w', padx=(4, 8), pady=3)
-        # Tooltip keeps the CLI flag name discoverable now that the visible
-        # label no longer shows it.
+        label.grid(row=row, column=1, sticky='w', padx=(0, 8), pady=(5, 0))
+        widgets.append(label)
+        # Tooltip keeps the CLI flag name and the full help discoverable.
         _tip = field.get('help') or ''
         _flag = field.get('flag')
         if _flag:
@@ -421,46 +531,106 @@ class SetupForm(ttk.Frame):
         if _tip:
             _Tooltip(label, _tip)
 
-        rows_used = 1
+        summary = field.get('summary') or ''
+        inline_hint = None
         if kind in ('bool_true', 'bool_false'):
             var = tk.BooleanVar(value=bool(field['default']))
-            ttk.Checkbutton(parent, variable=var).grid(row=row, column=1,
-                                                       sticky='w', pady=3)
+            # The description sits beside a checkbox, not under it: a row
+            # saved per checkbox keeps the form short.
+            w = ttk.Frame(parent)
+            ttk.Checkbutton(w, variable=var).pack(side='left')
+            if summary:
+                inline_hint = ttk.Label(w, text=summary, style='Hint.TLabel',
+                                        wraplength=360, justify='left')
+                inline_hint.pack(side='left', padx=(4, 0))
+            w.grid(row=row, column=2, columnspan=2, sticky='w', pady=(5, 0))
         elif kind == 'select':
             var = tk.StringVar(value='' if field['default'] is None else str(field['default']))
-            cb = ttk.Combobox(parent, textvariable=var, state='readonly',
-                              values=[''] + [str(c) for c in (field['choices'] or [])],
-                              width=14)
-            cb.grid(row=row, column=1, sticky='we', pady=3)
+            w = ttk.Combobox(parent, textvariable=var, state='readonly',
+                             values=[''] + [str(c) for c in (field['choices'] or [])],
+                             width=14)
+            w.grid(row=row, column=2, sticky='we', pady=(5, 0))
         else:
             default = field['default']
             text = ', '.join(default) if isinstance(default, list) else \
                    ('' if default is None else str(default))
             var = tk.StringVar(value=text)
-            # Small char width -- the field grows to fill column 1 (weighted)
+            # Small char width -- the field grows to fill column 2 (weighted)
             # when there's room, but this keeps the left pane able to shrink
             # so the horizontal sash can hold an even split with the preview.
-            entry = ttk.Entry(parent, textvariable=var, width=12)
-            entry.grid(row=row, column=1, sticky='we', pady=3)
+            w = ttk.Entry(parent, textvariable=var, width=12)
+            w.grid(row=row, column=2, sticky='we', pady=(5, 0))
             widget_hint = field.get('widget')
             if widget_hint:
-                ttk.Button(parent, text='Browse…', width=9,
-                          command=lambda d=dest, v=var, w=widget_hint:
-                              self._browse(d, v, w)).grid(row=row, column=2, padx=4, pady=3)
-            if dest == 'directory':
-                var.trace_add('write', lambda *_: self._rescan_directory())
-                count_label = ttk.Label(parent, textvariable=self.dir_count_var,
-                                        style='Dim.TLabel')
-                # A row of its own -- sharing row+1 with the next field
-                # (grid allows it, but the two widgets would overlap on
-                # screen the moment this label actually has text) --
-                # reserved by the caller's row cursor via the returned count.
-                count_label.grid(row=row + 1, column=1, columnspan=2, sticky='w')
-                rows_used = 2
-        parent.grid_columnconfigure(1, weight=1)
+                b = ttk.Button(parent, text='Browse…', width=9,
+                               command=lambda d=dest, v=var, h=widget_hint:
+                                   self._browse(d, v, h))
+                b.grid(row=row, column=3, padx=(4, 0), pady=(5, 0))
+                widgets.append(b)
+        widgets.append(w)
+
+        reset = ttk.Label(parent, text='', style='Reset.TLabel', cursor='hand2')
+        reset.grid(row=row, column=4, sticky='w', padx=(6, 0), pady=(5, 0))
+        reset.bind('<Button-1>', lambda _e, d=dest: self._reset(d))
+        widgets.append(reset)
+
+        rows_used = 1
+        hint = inline_hint
+        if summary and hint is None:
+            hint = ttk.Label(parent, text=summary, style='Hint.TLabel',
+                             wraplength=360, justify='left')
+            hint.grid(row=row + 1, column=1, columnspan=4, sticky='w')
+            widgets.append(hint)
+            rows_used += 1
+        if hint is not None:
+            if parent not in self._hints:
+                self._hints[parent] = []
+                parent.bind('<Configure>', self._rewrap, add='+')
+            self._hints[parent].append((hint, hint is inline_hint))
+        if dest == 'directory':
+            # The frame count found in the folder replaces the description.
+            var.trace_add('write', lambda *_: self._rescan_directory())
+            if hint is not None:
+                self.dir_count_var.trace_add(
+                    'write', lambda *_, h=hint, t=summary:
+                        h.configure(text=self.dir_count_var.get() or t))
+        parent.grid_columnconfigure(2, weight=1)
+
         self.vars[dest] = var
         self._initial[dest] = var.get()
+        self._fields[dest] = {
+            'widgets': widgets, 'group': group, 'dot': dot, 'reset': reset,
+            'expert': _is_expert_field(field) or (group is not None and _is_expert_group(group)),
+            # Not the full help: it mentions related features ("drizzle"
+            # appears in the help of half the registration options), so a
+            # search would list everything near a topic, not the setting.
+            'haystack': ' '.join([_field_label(field), field.get('flag') or '', dest,
+                                  summary, ' '.join(str(c) for c in field.get('choices') or [])
+                                  ]).replace('_', ' ').lower(),
+        }
+        if dest not in _NO_CHANGE_MARK:
+            var.trace_add('write', lambda *_, d=dest: self._mark_changed(d))
         return rows_used
+
+    def _rewrap(self, event) -> None:
+        """Wrap a container's description lines to its current width (a
+        line beside a checkbox starts further right)."""
+        for hint, inline in self._hints.get(event.widget, []):
+            hint.configure(wraplength=max(160, event.width - (260 if inline else 60)))
+
+    def _is_changed(self, dest: str) -> bool:
+        return self.vars[dest].get() != self._initial.get(dest)
+
+    def _mark_changed(self, dest: str) -> None:
+        info = self._fields[dest]
+        changed = self._is_changed(dest)
+        info['dot'].configure(text='●' if changed else '')
+        info['reset'].configure(text='reset' if changed else '')
+        if info['group'] is not None:
+            self._refresh_toggle_text()
+
+    def _reset(self, dest: str) -> None:
+        self.vars[dest].set(self._initial[dest])
 
     def _browse(self, dest: str, var: tk.Variable, widget_hint: str) -> None:
         if widget_hint == 'dir':
@@ -821,6 +991,21 @@ class App:
         paned.bind('<Configure>', _pin_split, add='+')
         root.after(80, _pin_split)
 
+        # The vertical split on the left: the run controls, pipeline bar and
+        # a usable log (~300 px) below, the Setup form gets the rest (at
+        # least half).
+        self._vsplit_pinned = False
+
+        def _pin_vsplit(_evt=None):
+            if self._vsplit_pinned:
+                return
+            h = self._vpaned.winfo_height()
+            if h > 1:
+                self._vpaned.sashpos(0, max(h // 2, h - 300))
+                self._vsplit_pinned = True
+        self._vpaned.bind('<Configure>', _pin_vsplit, add='+')
+        root.after(80, _pin_vsplit)
+
         root.protocol('WM_DELETE_WINDOW', self._on_closing)
         root.after(self.POLL_MS, self._poll)
 
@@ -875,8 +1060,20 @@ class App:
     # ── left column: setup, run controls, progress, log ───────────────
 
     def _build_left(self, parent: ttk.Frame) -> None:
-        self.form = SetupForm(parent)
-        self.form.pack(fill='both', expand=True)
+        # The Setup form (with descriptions, and the additional options
+        # open) is taller than the window, so it scrolls in its own pane
+        # above the run controls and log, which must never be pushed off
+        # screen. The sash between them is pinned once the window is mapped
+        # (see _pin_vsplit), the same way the left/right split is.
+        vpaned = ttk.PanedWindow(parent, orient='vertical')
+        vpaned.pack(fill='both', expand=True)
+        setup = ScrollableFrame(vpaned)
+        self.form = SetupForm(setup.inner, on_expand=setup.scroll_to)
+        self.form.pack(fill='both', expand=True, padx=(0, 6))
+        parent = ttk.Frame(vpaned)
+        vpaned.add(setup, weight=1)
+        vpaned.add(parent, weight=1)
+        self._vpaned = vpaned
 
         run_row = ttk.Frame(parent)
         run_row.pack(fill='x', pady=10)
