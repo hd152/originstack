@@ -8,8 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 pip install -r requirements.txt
 pip install pytest
-# Optional: GPU support (requires CUDA)
-pip install -r requirements-gpu.txt
+# Optional: GPU support (NVIDIA + CUDA): the CuPy wheel for your CUDA version
+pip install cupy-cuda12x   # see requirements-gpu.txt
 # Optional: native (Rust) acceleration — see "Native (Rust) acceleration" below
 pip install maturin && (cd ext/astro_native && maturin develop --release)
 ```

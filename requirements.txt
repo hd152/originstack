@@ -19,6 +19,19 @@ Pillow>=12.3.0
 #   TIFF input support (16/32-bit linear TIFF lights, e.g. from N.I.N.A./SharpCap/PixInsight):
 #     tifffile>=2023.1   — read TIFF images; also used to write --export tiff output
 #
+#   Mosaic stitching (--mosaic):
+#     reproject          — WCS reprojection of the per-panel stacks
+#
+#   HTTPS certificate store:
+#     certifi            — used for Gaia/SIMBAD/astrometry.net lookups when installed; some
+#                          Python installs (seen on Windows) have no usable default CA store
+#
+#   TOML --config files on Python 3.10 (3.11+ has tomllib built in):
+#     tomli
+#
+#   Native (Rust) acceleration — not a pip package; build ext/astro_native/ with maturin
+#   (see README "Native (Rust) acceleration"). Everything has a NumPy fallback.
+#
 #   XISF input (PixInsight's native format) and SER (FireCapture/SharpCap planetary
 #   video) support need no extra packages — both are read with a built-in parser.
 #
@@ -40,11 +53,11 @@ Pillow>=12.3.0
 #     - compute_multiscale_entropy's db4 wavelet decomposition (src/wavelet.py,
 #       extended from the bior1.3-only version to also carry db4's filter
 #       bank; forward-only, bit-exact vs pywt.wavedec2, see tests/test_wavelet.py)
-#     - Wavelet denoising (--denoise, bior1.3) was already native/numpy
+#     - Wavelet denoising (--denoiser wavelet, bior1.3) was already native/numpy
 #       (src/wavelet.py)
 #
-#   opencv-python is NOT used anywhere in this codebase. Bilateral filter and Malvar
-#   debayer are native Rust kernels (numpy fallback if astro_native isn't built); VNG
+#   opencv-python is NOT used anywhere in this codebase. Bilateral filter and the
+#   RCD/Malvar/Menon debayers are native Rust kernels (numpy fallback if astro_native isn't built); VNG
 #   debayer was removed once it became a pure alias for Malvar.
 #
 #   Star detection: matched-filter (src/star_detect.py) is the only backend -- no extra
@@ -52,16 +65,19 @@ Pillow>=12.3.0
 #   path (2026-07): matched-filter is faster than SEP and at least as accurate on real
 #   archive data.
 #
-#   PSF / deconvolution (--deconvolve rl): parametric Moffat/Gaussian fitting via
-#   scipy.optimize.curve_fit, no extra package needed. photutils.psf.EPSFBuilder (empirical
+#   PSF / deconvolution (--deconvolve rl): parametric Moffat/Gaussian fitting, native
+#   (scipy.optimize.curve_fit fallback), no extra package needed. photutils.psf.EPSFBuilder (empirical
 #   PSF) was removed (2026-07) along with its dependency.
 #
-#   GPU acceleration:
-#     cupy-cudaXXx       — GPU acceleration (--use-gpu); see requirements-gpu.txt
+#   GPU acceleration (--use-gpu): the CuPy wheel for your CUDA version, e.g.
+#     cupy-cuda12x       — see requirements-gpu.txt
 #
 #   pywebview is NOT used anywhere in this codebase (2026-08). The desktop app
 #   (python desktop_app.py) is a native tkinter window (stdlib) -- no WebView2
 #   Runtime or other external UI toolkit needed.
+#
+#   onnxruntime is NOT used: --transient-triage runs on the native kernel's pure-Rust
+#   tract runtime (the originvision classifier that also used it was removed in 2.6).
 #
 #   astroquery is NOT used anywhere in this codebase (2026-07). Every network
 #   catalogue/service lookup it used to provide is direct HTTP now

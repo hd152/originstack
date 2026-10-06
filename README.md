@@ -13,7 +13,7 @@
 
 [**Website**](https://hd152.github.io/originstack/) · [Download](https://github.com/hd152/originstack/releases/latest) · [Changelog](CHANGELOG.md) · [Code signing policy](CODE_SIGNING_POLICY.md)
 
-OriginStack is a full-featured Python pipeline for stacking and processing astronomical images, built from scratch: no OpenCV, scikit-image, PyWavelets, astroalign, astroquery or ONNX runtime — just NumPy, SciPy, Astropy and Pillow. The hot paths run in **Rust**: ~56 multi-threaded native kernels, ~5–150× faster than NumPy/SciPy, about 1.5–1.8× faster end to end on real sessions (see [Performance](#performance)), with a pure-NumPy fallback wherever the module isn't built. It was designed for the Celestron Origin smart telescope but works with any OSC/DSLR/mirrorless camera. Reads FITS, camera RAW (CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ — needs `rawpy`), TIFF (needs `tifffile`), XISF, and SER (planetary/lucky-imaging video) — mix and match formats freely within one input directory. The core design principle is a **streaming architecture**: frames are loaded, processed, and freed one at a time, so memory usage stays constant regardless of how many frames you have.
+OriginStack is a full-featured Python pipeline for stacking and processing astronomical images, built from scratch: no OpenCV, scikit-image, PyWavelets, astroalign, astroquery or ONNX runtime — just NumPy, SciPy, Astropy and Pillow. The hot paths run in **Rust**: 80+ multi-threaded native kernels, ~5–150× faster than NumPy/SciPy, about 1.5–1.8× faster end to end on real sessions (see [Performance](#performance)), with a pure-NumPy fallback wherever the module isn't built. It was designed for the Celestron Origin smart telescope but works with any OSC/DSLR/mirrorless camera. Reads FITS, camera RAW (CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ — needs `rawpy`), TIFF (needs `tifffile`), XISF, and SER (planetary/lucky-imaging video) — mix and match formats freely within one input directory. The core design principle is a **streaming architecture**: frames are loaded, processed, and freed one at a time, so memory usage stays constant regardless of how many frames you have.
 
 ---
 
@@ -38,19 +38,15 @@ All stacked and processed entirely with OriginStack from raw Celestron Origin FI
 ## Sample Output
 
 <details>
-<summary>Click to expand — verbose run on 300 Whirlpool Galaxy frames</summary>
+<summary>Click to expand — a default run on 81 Black Eye Galaxy frames (excerpts)</summary>
 
 ```
-======================================================================
-Astrophotography FITS Stacker
-======================================================================
-Input:  lights/Whirlpool_Galaxy
-Output: whirlpool.fits
-  Compute: CPU
+Input:  C:/source/Astrophotography/Black_Eye_Galaxy_2026-03-14_21-20-36
+Native accel: astro_native ACTIVE - Rust kernels (stacking combine, Lanczos warp, aniso diffusion)
 
 Discovering frames...
   Mode: Single folder
-  Found 303 FITS files: 300 lights, 1 darks, 1 flats, 1 bias
+  Found 84 FITS files: 81 lights, 1 darks, 1 flats, 1 bias
 
 Creating master calibration frames...
   [OK] Master bias:  1 frames -> 2048x3056
@@ -58,99 +54,67 @@ Creating master calibration frames...
   [OK] Master flat:  1 frames -> 2048x3056
   [OK] Hot pixel map: 214576 pixels from dark frame
     Bias:  pedestal=4990.7 ADU  noise=0.8 ADU  -> Good (low read noise)
-    Dark:  median=4917.1 ADU  temp=31.3°C  exp=30.0s  ISO=200  -> OK
-    Flat:  R=0.765/G1=1.114/G2=1.122/B=0.922  vignetting=3.4%  -> Good
+    Dark:  median=4917.1 ADU  (163.9030 ADU/s)  temp=31.3°C/88.3°F  exp=30.0s  ISO=200  -> Poor (warm sensor — cool camera or use shorter darks)
+    Flat:  R=0.819/G1=1.192/G2=1.201/B=0.987  vignetting=3.4%  -> Good (low vignetting)
+  Session info (info.json):  object='Black Eye Galaxy'  bayer=RGGB  WCS=yes  GPS=yes
 
 ======================================================================
 PHASE 1: PROCESSING & QUALITY ANALYSIS
 ======================================================================
-  Processing 300 frames in parallel (8 workers)...
+  Processing 81 frames in parallel (5 workers x 2 native threads)...
+  CFA equalisation: session-constant from 8 frames (G2 gain 1.00142, 2x2 green offsets -0.66, +0.85, +0.85, -1.05 ADU)
+  [OK] Accepted: 80/81 (98.8%)
+  [X] Rejected: 1 (Statistical outlier: 1)
 
-  Frame Quality Details:
-  ---------------------------------------------------------------------------------------------------------------
-  Frame                            Bright       Bg   Noise   SNR  Stars   FWHM    Sharp      Score  St
-  ---------------------------------------------------------------------------------------------------------------
-  Light0001.fits                   4558.1   4558.1  101.99   1.7     78    7.0   236280       56.4   [OK]
-  Light0002.fits                   4531.2   4531.2  101.13   1.7     77    7.0   224233       56.4   [OK]
-  Light0003.fits                   4499.2   4499.2  104.04   1.6     73    7.1   248395       53.5   [OK]
-  Light0004.fits                   4491.5   4491.5  100.00   1.7     72    6.8   217981       58.1   [OK]
-  Light0005.fits                   4458.1   4458.1  104.04   1.6     71    6.6   244558       57.8   [OK]
-  ...
-  ---------------------------------------------------------------------------------------------------------------
-  [OK] Accepted: 287/300 (95.7%)
-  [X] Rejected:  13 (quality threshold)
+  Target: Black Eye Galaxy [Galaxy]  conf=100%  source=session
 
-  Target: Whirlpool Galaxy [Galaxy]  conf=90%  source=header
+  Auto Advisor: detected 'Galaxy'
+    Blend: 75% Galaxy, 4% Globular Cluster, 4% Planetary Nebula
+  Applied auto settings:
+    * galaxy_mode  False -> True
+    * stack_method  'auto' -> 'sigma_clip'
+    * rejection_sigma  3.0 -> 2.8
+    ...
 
 ======================================================================
 PHASE 2: REGISTRATION
 ======================================================================
-  Reference frame: Light0009.fits (score=60.9)
-  Calculating shifts for 287 frames...
-    Light0001.fits: affine shift=(-6.0, +5.1) px, rotation=+0.000 deg
-    Light0002.fits: affine shift=(-2.6, +1.4) px, rotation=+0.000 deg
-    Light0003.fits: affine shift=(-1.8, +1.1) px, rotation=-0.003 deg
-    Light0004.fits: affine shift=(-0.4, +0.4) px, rotation=-0.003 deg
-    Light0005.fits: affine shift=(+0.0, +0.0) px, rotation=+0.000 deg  [reference]
-    ...
-  Shift statistics:
-    X: mean=+13.7px, std=16.1px, range=[-6.0, +33.9]
-    Y: mean=-11.7px, std=13.8px, range=[-30.4, +5.1]
-    Magnitude: mean=20.8px, max=43.3px
-  Dither pattern detected — sigma_clip stacking recommended
-  Tip: dithered data detected — add --drizzle-scale 2.0 for super-resolution
+  Reference frame: Light0055.fits (score=45.4)
+  Consensus reference: Light0045.fits (best quality in the middle of the session)
+  Residual RMS threshold: 6.0px (adaptive: ref FWHM=7.1px, SNR=1.7)
+  Transparency (relative flux of a fixed star ensemble, session median = 1.00): min 0.96  p10 0.98  max 1.03
 
 ======================================================================
 PHASE 3: STACKING
 ======================================================================
-  Method: sigma_clip (sigma=3.0, iters=3, estimator=MAD)
-  Quality weights: min=0.937, max=1.000, mean=0.972
-  Tiled sigma-clip: 96 tiles of 256x256
+  Method: sigma_clip
+    [rust] fused patch-weighted + sigma-clip combine (4.4s)
+    proper coadd: 80/80 frames, PSF FWHM 6.97-8.55 px (median 7.94), transparency 0.90-1.11
+  WCS: session info.json solve refined against Gaia (94 stars, rms 0.422 px)
+
+  Colour calibration: R x0.739 G x1.000 B x1.114 (48 Gaia stars, white = G2V, B-R scatter 0.074 mag)
 
 ======================================================================
 PHASE 4: POST-PROCESSING
 ======================================================================
-  Removing residual hot pixels (per-channel)...
-  [OK] Per-channel hot pixel removal: 144 pixels fixed (5.9s)
-    Post-processing star mask: 115 stars
-
-  Applying Dynamic Background Extraction (patch=64px, RBF thin-plate-spline)...
-  [OK] Dynamic Background Extraction (24.5s)
-
-  Applying chroma noise reduction (sigma=2.0)...
-  [OK] Chroma noise reduction (1.8s)
-
-  Applying adaptive wavelet denoising (BayesShrink, chroma_factor=2.0)...
-  [OK] Wavelet denoise (2.1s)
-
-  Correcting sky residuals...
-  [OK] Sky residual correction (35.1s)
-
-  Applying star reduction (amount=0.40, FWHM 3.9 px -> ~3.3)...
-  [OK] Star reduction (0.9s)
-
-  Applying multiscale local contrast enhancement (strength=0.70)...
-  [OK] Local contrast enhancement (3.2s)
-
-  Output size: 3036x2030 (cropped 20x18 pixels)
+  [OK] Per-channel hot pixel removal: 34 pixels fixed (1.2s)
+  [OK] Dynamic Background Extraction (8.7s)
+  [OK] Chroma noise reduction (1.6s)
+  [OK] Sky pedestal: +702.11 (sky sigma=87.70)
+  [OK] Directional wavelet denoise (2.3s)
+  [OK] Star reduction (0.6s)
+  [OK] Local contrast enhancement (1.6s)
+  [OK] Sky flattened + neutralised to grey
 
 ======================================================================
 SUMMARY
 ======================================================================
-  Frames analyzed:  300
-  Frames stacked:   287 (95.7%)
-  Integration time: 2h 23m
-  Output:           whirlpool.fits (3036x2030x3)
-  Preview:          whirlpool.jpg (ghs stretch)
-  Avg FWHM:         6.73 px (best: 6.38)
-  Avg SNR:          1.7  (best: 1.7)
-  Processing time:  18m 42s
-    Quality+Load:   4m 21s
-    Registration:   3m 15s
-    Stacking:       1m 44s
-    Post-process:   9m 22s
-  Peak memory:      1477.4 MB
-======================================================================
+  Frames stacked:   80 (98.8%)
+  Integration time: 26.7 minutes
+  Output:           Black_Eye_Galaxy_2026-03-14_21-20-36_stacked.fits (2034x2989x3)
+  Avg FWHM:         8.17 px (best: 6.95)
+  Avg SNR:          1.7 (best: 1.8)
+  Processing time:  2m 43.2s
 ```
 
 </details>
@@ -186,22 +150,27 @@ SUMMARY
 - **Session-wide distortion model** (`--distortion-model`, off by default) — one radial distortion (two coefficients) fitted from every frame's star matches and applied as per-frame corrections in the same single resample pass; only applied if it clearly helps on frames the fit did not see
 - **Elastic (non-rigid) local registration** (`--elastic-registration`, off by default) — fits a smooth per-frame local displacement field from matched-star residuals, correcting spatially-varying distortion (differential atmospheric refraction, field rotation, tube flexure) a single global affine can't. Composed into the same single resample pass as the affine warp (no extra blur pass), and works under `--drizzle-scale` too
 
-### Stacking Methods (7)
+### Stacking Methods
 | Method | Best For |
 |--------|----------|
-| `auto` *(default)* | Selects automatically based on frame count |
+| `auto` *(default)* | Percentile rejection under 15 frames, sigma-clip above (tighter from 20 frames) |
 | `sigma_clip` | Most sessions (MAD-based iterative rejection) |
-| `percentile` | Fewer than 8 frames |
-| `esd` | Fewer than 15 frames (Grubbs/ESD statistical test) |
-| `winsorized` | Like sigma_clip but clips to boundary |
+| `winsorized` | Like sigma_clip but clips to the boundary instead of rejecting |
+| `percentile` | Small sessions: reject outside a percentile range |
+| `esd` | Small sessions (generalized ESD / Grubbs test) |
+| `linear_fit` | Linear Fit Clipping (robust to non-Gaussian tails) |
+| `ivw` | Inverse-variance weighting by each frame's measured noise, no rejection (`--uncertainty-map` writes the per-pixel error) |
+| `wavelet` | Wavelet-subband combine |
 | `median` | Robust, no tuning required |
 | `mean` | Fastest, no rejection |
 
-Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-3 sub-pixel accumulation by default; `--drizzle-kernel {psf,magic}` swaps in a PSF-matched or ringing-free Magic-Kernel footprint, and `--super-res-iters N` adds iterative back-projection refinement. `--drizzle-method splat` uses true area-overlap drops instead of a Lanczos gather (~6x faster, softer, no ringing); the default resample path now accumulates in one native pass (1.4x, 3.9x with `--drizzle-pixfrac < 1`, same output).
+After the combine, **proper image coaddition** (Zackay & Ofek 2017, on by default, `--no-proper-coadd` to turn off) recombines the frames weighting each spatial frequency by that frame's measured PSF, transparency and noise: sharper stars at no noise cost on the benchmark sessions.
+
+Drizzle super-resolution (`--drizzle-scale 2.0`) uses Lanczos-3 sub-pixel accumulation by default; `--drizzle-kernel {psf,magic}` swaps in a PSF-matched or ringing-free Magic-Kernel footprint, and `--super-res-iters N` adds iterative back-projection refinement. `--drizzle-method splat` uses true area-overlap drops instead of a Lanczos gather (~6x faster, softer, no ringing); the default resample path accumulates in one native pass (1.4x, 3.9x with `--drizzle-pixfrac < 1`, same output).
 
 ### Quality Filtering
 - Per-frame metrics: brightness, contrast, star count, FWHM, SNR, composite score
-- Percentile-based rejection (default: keep best 75%, `--quality-threshold`)
+- Score-based rejection: frames scoring below 50% of the session's 90th-percentile reference are dropped (`--quality-threshold`)
 - Hard rejection: blank, corrupt, or severely underexposed frames
 - Quality-weighted stacking (SNR, FWHM, star count weighting)
 
@@ -236,18 +205,20 @@ Opt-in variants of the chain: `--starless-process` runs the denoisers and local 
 > cores, MMT erased fine structure, BM3D was slow and licence-encumbered.
 
 ### Presets
-Eight built-in target presets tune all parameters at once:
+Eight built-in presets set a group of parameters at once (any flag you pass still wins). `--auto` (on by default) then tunes the rest for the detected target, so a preset is rarely needed:
 
 ```bash
---preset galaxy       # GHS stretch, star reduction, bilateral filter
---preset nebula       # GHS stretch, curvelet + ACDNR denoising
---preset narrowband   # Tuned for Ha/OIII/SII narrow-band data
---preset starfield    # No star reduction, minimal processing
---preset planetary    # No background extraction, deconvolution enabled
---preset lunar        # Linear stretch, no star reduction
---preset quick        # Mean stack, minimal post-processing (fastest)
---preset quality      # All denoisers, sigma-clip, deconvolution (best output)
+--preset galaxy       # sigma-clip, deconvolution, star reduction, stronger GHS stretch
+--preset nebula       # sigma-clip 2.5, wavelet + ACDNR denoising, stronger GHS stretch
+--preset narrowband   # tuned for Ha/OIII/SII: tighter rejection, no chroma NR
+--preset starfield    # no star reduction or local contrast, gentle stretch
+--preset planetary    # mean stack, no background extraction, deconvolution
+--preset lunar        # mean stack, no background extraction, linear stretch
+--preset quick        # mean stack (no outlier rejection), lighter processing (fastest)
+--preset quality      # sigma-clip 2.5, per-frame cosmic-ray rejection, deconvolution (slower)
 ```
+
+`--preset quality` is not "the best": the defaults are the settings measured to help. Its per-frame cosmic-ray pass costs minutes for well under 1% change on deep rejection stacks, and deconvolution did not help at typical Celestron Origin signal-to-noise.
 
 ### Advanced Features
 - **Plate solving** built in, against a local Gaia DR3 index (no API key, works offline once the index covers the field), or via ASTAP / nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
@@ -267,7 +238,7 @@ Eight built-in target presets tune all parameters at once:
 - **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges. Stacks from different exposure/ISO are mapped onto one flux scale first and weighted by measured noise, not frame count
 - **Multi-session (hierarchical) runs post-process the combined stack** — the combined output goes through Phase 4 with the reference session's settings, and the reference grid is the session with the most integration time
-- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`) with phase progress, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, before/after wipe compare) while stacking — see [Desktop App](#desktop-app) below
+- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`): pick the target from picture cards and a run mode, see what the run will do before you start, then follow phase progress, the log, per-frame quality and an interactive preview (zoom/pan, before/after wipe compare) — see [Desktop App](#desktop-app) below
 - **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
@@ -281,7 +252,7 @@ Eight built-in target presets tune all parameters at once:
 
 ## Installation
 
-Requires Python 3.10+ (the optional native extension targets the CPython 3.10 ABI).
+Requires Python 3.10+ (CI tests 3.11 and 3.12; the optional native extension targets the CPython 3.10 ABI).
 
 ```bash
 # 1. Clone the repo
@@ -296,29 +267,32 @@ source .venv/bin/activate       # Linux/macOS
 # 3. Install core dependencies
 pip install -r requirements.txt
 
-# 4. Optional: GPU support (requires CUDA toolkit)
-pip install -r requirements-gpu.txt
-
-# 5. Optional: plate solving
-pip install -r requirements-astrometry.txt
-
-# 6. Optional: native (Rust) acceleration for stacking + registration
-#    Needs a Rust toolchain + maturin. See "Native (Rust) acceleration" below.
+# 4. Optional but recommended: native (Rust) acceleration of the hot paths
+#    (otherwise they run in NumPy). Needs a Rust toolchain + maturin.
+#    See "Native (Rust) acceleration" below.
+pip install maturin
 cd ext/astro_native && maturin develop --release   # into a venv
+
+# 5. Optional: GPU support (NVIDIA + CUDA) -- pick the CuPy wheel for your CUDA version
+pip install cupy-cuda12x
 ```
+
+Plate solving needs nothing extra: the built-in solver uses a local Gaia star index (see [Plate Solving](#plate-solving)).
 
 **Optional dependencies** — all gracefully degraded when absent:
 
 | Package | Feature |
 |---------|---------|
 | `psutil` | Memory-adaptive worker/memmap sizing (guarded with a fixed fallback everywhere) |
-| `cupy-cuda*` | GPU acceleration (registration warp, Richardson-Lucy deconvolution) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
 | `tifffile` | TIFF input and `--export tiff` output |
-| `reproject` | Mosaic stitching |
-| `astro_native` (Rust) | ~44 native kernels: stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted), Lanczos warp (alignment+drizzle), L.A.Cosmic, median filters, DBE, anisotropic diffusion, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, 2D wavelet transform, blind star-pattern match, BM3D block-matching fallback, hot-pixel fix/replace, 1D + 2D Moffat/Gaussian PSF fits, and `--transient-triage` inference (pure-Rust `tract` ONNX) |
+| `reproject` | Mosaic stitching (`--mosaic`) |
+| `certifi` | Up-to-date CA certificates for the HTTPS lookups (Gaia, SIMBAD, astrometry.net), on systems whose own store is missing or stale |
+| `tomli` | Reading `--config` TOML files on Python 3.10 (3.11+ has `tomllib` built in) |
+| `cupy-cuda*` | GPU acceleration (`--use-gpu`; see [GPU Acceleration](#gpu-acceleration)) |
+| `astro_native` (Rust) | 80+ native kernels: stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, proper coaddition), Lanczos warp (alignment + drizzle), RCD / Malvar / Menon2007 debayer, calibration and hot-pixel passes, L.A.Cosmic, median filters, DBE, anisotropic diffusion, bilateral filter, matched-filter star detection, rigid-transform RANSAC, 2D wavelet transform, blind star-pattern match, 1D + 2D Moffat/Gaussian PSF fits, aperture photometry, and `--transient-triage` inference (pure-Rust `tract` ONNX) |
 
-`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/Menon2007 debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`, also native; NLM denoising, Richardson-Lucy's CPU fallback, and satellite-trail detection are native/numpy now; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — no dependency for any of them.
+`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — the debayers and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`, also native; Richardson-Lucy's CPU fallback and satellite-trail detection are native/numpy; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — no dependency for any of them.
 
 ---
 
@@ -342,19 +316,21 @@ Shows per-frame brightness, contrast, star count, SNR, and shift magnitude as ea
 
 ### Auto target detection
 
-```bash
-python originstack.py -d lights/ -o stacked.fits --auto
-```
-
-Analyses your frames and applies optimised settings for the detected target type (galaxy, nebula, star field, etc.) — no manual tuning required.
-
-### Hierarchical session (multiple targets in one night)
+`--auto` is **on by default**: after Phase 1 it recognises the target (from the session `info.json`, the FITS `OBJECT` header, the folder name and SIMBAD, then the frames themselves) and tunes the settings for it. Tell it what you imaged with `--target-type` when it guesses wrong, or turn it off with `--no-auto`:
 
 ```bash
-python originstack.py -d session/ -o combined.fits --debug intermediates -v
+python originstack.py -d lights/ -o stacked.fits --target-type globular_cluster
 ```
 
-Where `session/` contains one subfolder per target. Each subfolder is stacked independently with its own calibration frames, then combined into a single output.
+Explicit flags always win over what `--auto` picks.
+
+### Several sessions of the same target
+
+```bash
+python originstack.py -d m51_sessions/ -o m51.fits -v
+```
+
+Where `m51_sessions/` contains one subfolder per night. The sessions are pooled into one stack, or, when field rotation between them would crop the corners, stacked separately and merged onto one grid. See [Folder Organization Modes](#folder-organization-modes).
 
 ---
 
@@ -369,8 +345,16 @@ python desktop_app.py
 On Windows, the packaged build needs no Python install at all: download `OriginStack-<version>-setup.exe` from the [latest release](https://github.com/hd152/originstack/releases/latest) and run it (per-user install, Start Menu entry, uninstaller). Prefer the zip? **Extract all of it** first and run `OriginStack.exe` from the extracted folder — running the exe from inside the zip preview fails with "Failed to load Python DLL". On Linux, download `OriginStack-<version>-linux-x64.tar.gz` (and its `.sha256`) from the same page, extract it and run `./install.sh` (per-user install, application-menu entry, `./install.sh --uninstall` to remove); it needs glibc 2.35 or newer and has had less real-world use than the Windows build. See [Packaging](packaging/README.md).
 
 The window has two columns:
-- **Left — Setup + Log** — the CLI flags as a form (grouped, auto-generated from the same argument parser the CLI uses, so it never drifts out of sync; directory/output fields get a native picker, hover any field for its full description). Diagnostics, fine-tuning and experimental options stay hidden until you tick **Expert options**. Below the form come the pipeline phase bar and the live log — the same output you'd see on the command line.
-- **Right — Preview + frames** — the stacked result, updated live at each milestone: scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a per-frame thumbnail strip and a running table of per-frame quality (score, SNR, star count, FWHM) as Phase 1 scores each light.
+- **Left — Setup + Log**
+  - Pick the light-frames folder; the app counts the frames and suggests the target from the session's `info.json`, FITS header or folder name.
+  - **What did you image?** Picture cards (Auto-detect, Galaxy, Nebula, Star cluster, Star field, Comet) and **How should it run?** (Full quality, or Quick look for a faster check).
+  - The most-used settings, each with a one-line description. **Additional options** holds the rest of the CLI flags, grouped and searchable; the form is generated from the same argument parser the CLI uses, so it never drifts out of sync. A dot and a **reset** link mark anything changed from its default. Diagnostics and experimental options stay hidden until you tick **Expert options**.
+  - Below, in a pane you can resize: Start, the pipeline phase bar and the live log — the same output you'd see on the command line.
+- **Right — Preview + frames**
+  - Before a run: an example result for the chosen target, and a **This run** summary of what Start will do (frames, target, mode, changed settings, output file).
+  - During and after a run: the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a per-frame thumbnail strip and a running table of per-frame quality (score, SNR, star count, FWHM).
+
+Leave **Output file** blank and the stack is saved next to the light-frames folder, never overwriting an earlier one.
 
 Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
 
@@ -381,25 +365,15 @@ Closing the window while a run is in progress asks for confirmation first; a nat
 ### Galaxy (e.g., M51, M81)
 
 ```bash
-python originstack.py -d lights/ -o galaxy.fits \
-  --preset galaxy \
-  --debayer-method malvar \
-  --stack-method sigma_clip \
-  --rejection-sigma 2.8 \
-  --deconvolve rl \
-  -v
+python originstack.py -d lights/ -o galaxy.fits --target-type galaxy -v
 ```
 
-The `galaxy` preset applies GHS stretching and star reduction. Adding `--deconvolve rl` sharpens fine detail in spiral arms.
+`--target-type galaxy` tells `--auto` what it is (it would usually work it out from the session anyway): the galaxy's halo is kept out of background extraction, and stars are trimmed. `--deconvolve rl` can sharpen spiral arms on bright, high signal-to-noise data; on typical Celestron Origin sessions it was measured not to help.
 
 ### Emission nebula (e.g., Orion, Rosette)
 
 ```bash
-python originstack.py -d lights/ -o nebula.fits \
-  --preset nebula \
-  --denoiser mmt \
-  --stretch ghs \
-  -v
+python originstack.py -d lights/ -o nebula.fits --target-type emission_nebula -v
 ```
 
 ### Narrow-band (Ha/OIII/SII)
@@ -439,28 +413,11 @@ and keeps post-processing minimal so points stay sharp and colour-true.
 ### Globular cluster (e.g., M13, M4) / reflection nebula (e.g., M78)
 
 ```bash
-python originstack.py -d lights/ -o cluster.fits \
-  --preset starfield \
-  --auto \
-  -v
+python originstack.py -d lights/ -o cluster.fits --target-type globular_cluster -v
+python originstack.py -d lights/ -o m78.fits --target-type reflection_nebula -v
 ```
 
-Neither has a dedicated preset — `starfield` (no star reduction) plus
-`--auto` gets you the rest: the classifier detects `globular_cluster` or
-`reflection_nebula` from the frame's star density/colour signature and
-blends in matching denoise/stretch settings on top.
-
-### Maximum quality
-
-```bash
-python originstack.py -d lights/ -o best.fits \
-  --preset quality \
-  --debayer-method malvar \
-  --denoiser mmt \
-  --deconvolve rl \
-  --stack-method sigma_clip --rejection-sigma 2.5 \
-  -v
-```
+Neither has a preset; `--target-type` gives `--auto` the type, and it blends in matching denoise/stretch settings.
 
 ### Incremental stacking — add tonight's frames to a saved stack
 
@@ -474,8 +431,10 @@ python originstack.py -d night2/ -o m51_v2.fits --auto --merge m51.fits -v
 
 Each previous stack is registered onto the new session's grid (handles
 cross-night field rotation via a blind rigid star-pattern match, no
-assumption about the angle) and combined as a per-pixel `NFRAMES`-weighted
-mean. The output chains into future merges.
+assumption about the angle), mapped onto the new stack's flux scale (so
+sessions with different exposure or ISO combine correctly), and combined as a
+per-pixel mean weighted by each stack's measured noise. The output chains into
+future merges.
 
 ### Super-resolution drizzle (requires dithered frames)
 
@@ -486,7 +445,9 @@ python originstack.py -d lights/ -o drizzled.fits \
   -v
 ```
 
-### Plate solving + colour calibration
+### Plate solving
+
+Colour calibration against Gaia needs no flag: it is on by default whenever the stack has a sky position (a Celestron Origin session always does) and the run is online.
 
 ```bash
 # Built-in solver: no API key needed (see "Plate Solving" below)
@@ -537,7 +498,7 @@ python originstack.py --sweep-undo -d "G:\astro\Astrophotography"
 
 Uses the exact same quality gate as stacking: hard failures (no stars, SNR < 0.5,
 near-zero contrast), statistical outliers vs each folder, and scores below
-`--quality-threshold`%% of the folder's 90th-percentile reference.
+`--quality-threshold`% of the folder's 90th-percentile reference.
 
 ### Health check without stacking
 
@@ -547,21 +508,25 @@ python originstack.py -d lights/ --health-check
 
 Analyses calibration quality (bias noise, dark thermal current, flat vignetting) and reports any ISO or dimension mismatches — without actually stacking anything.
 
-### Save a config file for reuse
+### Reuse a run's settings
+
+Every run saves its effective settings next to the output as `<output>_config.toml` (including what `--auto` chose):
 
 ```bash
-# First run with --dry-run to see resolved parameters
-python originstack.py -d lights/ -o stacked.fits --preset galaxy --deconvolve --dry-run
+# See the resolved parameters without processing anything
+python originstack.py -d lights/ -o stacked.fits --target-type galaxy --dry-run
 
-# Then use --config to reapply the same settings
-python originstack.py -d lights/ -o stacked.fits --config my_settings.toml
+# Reapply an earlier run's settings to new data
+python originstack.py -d lights2/ -o stacked2.fits --config stacked_config.toml
 ```
+
+A saved config fixes `--auto`'s choices for the session it came from; re-running with `--auto` on different data is not the same thing.
 
 ---
 
 ## Folder Organization Modes
 
-OriginStack supports four ways of organizing your input files. The first two are auto-detected; the last two require an explicit flag.
+OriginStack supports three ways of organizing your input files. Single folder and multiple sessions are auto-detected; mosaic needs a flag. Different targets go in separate runs.
 
 ---
 
@@ -587,74 +552,41 @@ OriginStack builds master calibration frames from any bias/dark/flat files it fi
 
 ---
 
-### Mode 2 — Hierarchical (multiple targets, auto-detected)
+### Mode 2 — Several sessions of one target (auto-detected)
 
-Use this when you have captured several different targets in one night and want them each stacked separately. Create one subfolder per target. OriginStack detects subfolders automatically — no flag required.
-
-```
-session/
-├── M31/
-│   ├── dark_001.fit
-│   ├── flat_001.fit
-│   ├── info.json          (optional — Celestron Origin metadata)
-│   └── light_001.fit ... light_NNN.fit
-├── M42/
-│   ├── dark_001.fit
-│   ├── info.json
-│   └── light_001.fit ... light_NNN.fit
-└── NGC7000/
-    └── light_001.fit ... light_NNN.fit   (no calibration — OK)
-```
-
-```bash
-python originstack.py -d session/ -o combined.fits -v
-```
-
-Each subfolder is stacked independently (its own calibration frames, quality analysis, and registration pass), then the per-target stacks are combined into the output FITS. Use `--debug intermediates` to also save the individual per-target stacks alongside the combined output.
-
-**`info.json` support:** If a subfolder contains an `info.json` from the Celestron Origin app, OriginStack reads the target name, Bayer pattern, and WCS (RA/Dec/FOV/orientation) from it automatically. Each subfolder's `info.json` is loaded independently, so different subfolders can cover different sky coordinates.
-
----
-
-### Mode 3 — Combine sessions (`--combine-sessions`)
-
-Use this when you have captured the **same target across multiple nights** and want a single unified deep stack. Every light frame from every subfolder is pooled into one registration and stacking pass.
+Use this for the **same target across several nights**. Create one subfolder per session.
 
 ```
 m51_sessions/
 ├── 2024-04-01/
-│   ├── info.json
+│   ├── info.json          (optional — Celestron Origin metadata)
 │   └── light_001.fit ... light_NNN.fit
 ├── 2024-04-03/
+│   ├── dark_001.fit
 │   ├── info.json
 │   └── light_001.fit ... light_NNN.fit
 └── 2024-04-07/
-    ├── dark_001.fit      (shared calibration)
     ├── flat_001.fit
     ├── info.json
     └── light_001.fit ... light_NNN.fit
 ```
 
 ```bash
-python originstack.py -d m51_sessions/ -o m51_deep.fits --combine-sessions -v
+python originstack.py -d m51_sessions/ -o m51_deep.fits -v
 ```
 
-All calibration frames across all subfolders are merged into shared masters, then every light frame is quality-analysed, registered, and stacked together as if they came from a single session. This is the best approach for maximising integration time on a single target.
+OriginStack predicts from each session's metadata how far the field rotates between sessions (an alt-az mount rotates the field as the target tracks) and picks one of two ways to stack:
 
-**When to use vs. hierarchical mode:**
+- **Pooled** (`--combine-sessions` to force): every light from every session is quality-analysed, registered and stacked together, with all calibration frames merged into shared masters. Used when the sessions line up.
+- **Stacked separately, then merged** (`--hierarchical` to force): used when the sessions differ by more than 3° of field rotation beyond what any one session spans, because pooling would crop the output to the small region every frame covers. Each session is stacked on its own (its own calibration, quality analysis and registration), the stacks are registered onto the one with the most integration time by a rotation-agnostic star match, and post-processing runs once on the combined stack.
 
-| | Hierarchical (default) | Combine sessions |
-|---|---|---|
-| Multiple targets in `-d` | ✅ each stacked separately | ❌ only one target |
-| Same target, multiple nights | produces separate stacks | ✅ one deep unified stack |
-| Per-target calibration | ✅ each subfolder independent | merged into shared masters |
-| Memory usage | bounded per target | all frames pooled; larger |
+If the metadata can't be read, the sessions are pooled and the log says so.
 
-**Bayer pattern check:** If `info.json` files across subfolders report different Bayer patterns (e.g., mixing cameras), OriginStack will print a warning before stacking proceeds. Per-frame FITS headers always take priority over `info.json` defaults.
+**`info.json` support:** If a subfolder contains an `info.json` from the Celestron Origin app, OriginStack reads the target name, Bayer pattern, GPS position and WCS (RA/Dec/FOV/orientation) from it automatically. If the sessions report different Bayer patterns (e.g. mixing cameras), a warning is printed before stacking; per-frame FITS headers always take priority over `info.json` defaults.
 
 ---
 
-### Mode 4 — Mosaic (`--mosaic`)
+### Mode 3 — Mosaic (`--mosaic`)
 
 Use this when your subfolders are **adjacent sky panels** of the same large target, and you want them stitched into a single wide-field image using WCS reprojection.
 
@@ -679,7 +611,7 @@ Each subfolder is first stacked independently (phases 1–4), then all panel sta
 
 **Requirements:**
 - `pip install reproject` — WCS-based reprojection library
-- Every panel must have a valid WCS: either from `info.json` (Celestron Origin) or from plate solving (`--plate-solve`)
+- Every panel must have a valid WCS: either from `info.json` (Celestron Origin) or from plate solving (`--mosaic` turns `--plate-solve` on)
 - If any panel is missing a WCS, the mosaic step is skipped with a warning
 
 ---
@@ -688,10 +620,10 @@ Each subfolder is first stacked independently (phases 1–4), then all panel sta
 
 | What's in `-d` | Mode selected |
 |---|---|
-| FITS files directly in the directory | **Single folder** (auto) |
-| Subdirectories containing FITS files | **Hierarchical** (auto) |
-| Subdirectories + `--combine-sessions` flag | **Combine sessions** |
-| Subdirectories + `--mosaic` flag | **Mosaic** |
+| FITS files directly in the directory | **Single folder** |
+| Subdirectories containing FITS files | **Several sessions**: pooled, or stacked separately and merged when field rotation would crop the corners |
+| Subdirectories + `--combine-sessions` / `--hierarchical` | **Several sessions**, forced pooled / forced separate-then-merge |
+| Subdirectories + `--mosaic` | **Mosaic** |
 
 ---
 
@@ -702,6 +634,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Feature | Default | Disable with |
 |---------|---------|-------------|
 | Background extraction (DBE) | ✅ on | `--no-background-extraction` |
+| Proper image coaddition | ✅ on | `--no-proper-coadd` |
 | Luma denoising (wavelet) | ✅ on | `--denoiser none` |
 | Chroma noise reduction | ✅ on | `--no-chroma-nr` |
 | Star reduction | ✅ on | `--no-star-reduce` |
@@ -714,7 +647,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Quality filtering | ✅ on | `--no-quality-filter` |
 | Affine registration | ✅ on | `--no-affine` |
 | Elastic local registration | ⬜ off | `--elastic-registration` |
-| Primary denoiser choice | auto (curvelet) | `--denoiser {curvelet,wavelet,acdnr,bilateral,aniso,none}` |
+| Primary denoiser choice | auto (wavelet) | `--denoiser {wavelet,acdnr,bilateral,aniso,none}` |
 | Deconvolution | ❌ off | `--deconvolve {rl,rl-sv,tv,sparse}` |
 
 ---
@@ -727,15 +660,16 @@ python originstack.py -d <dir> -o <output.fits> [options]
 
 | Flag | Description |
 |------|-------------|
-| `-d, --directory` | Input directory (required) |
-| `-o, --output` | Output FITS path (required unless `--health-check` or `--dry-run`) |
+| `-d, --directory` | Input directory (required unless `--from-stack`) |
+| `-o, --output` | Output FITS path, or a folder to write `<session>_stacked.fits` into (default: `<session>_stacked.fits` in the current folder) |
 | `--preset NAME` | Apply named preset (quick, quality, galaxy, nebula, narrowband, starfield, planetary, lunar) |
 | `--config PATH` | Load parameters from TOML file |
 | `--no-auto` | Disable the heuristic target classifier (on by default; detects target type and optimises settings automatically) |
+| `--target-type TYPE` | Tell `--auto` what you imaged: galaxy, emission_nebula, reflection_nebula, planetary_nebula, globular_cluster, star_field, wide_field |
 | `--stack-method METHOD` | Stacking algorithm (auto, mean, median, sigma_clip, percentile, esd, winsorized, linear_fit, ivw, wavelet) |
 | `--debayer-method METHOD` | Debayer algorithm: rcd (default), malvar, menon2007 |
 | `--white-balance METHOD` | White balance (grayworld, whitepatch, none) |
-| `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet) |
+| `--bg-method METHOD` | Background extraction (dbe, mesh, wavelet; physical is experimental) |
 | `--drizzle-scale N` | Super-resolution scale (1.0 = off, 2.0 = 2×) |
 | `--elastic-registration` | Local (non-rigid) displacement correction on top of the global affine (off by default) |
 | `--distortion-model` | One radial distortion for the whole session, applied per frame (off by default; skipped with `--elastic-registration`) |
@@ -757,7 +691,9 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--frame-store {auto,ram,disk}` | Keep per-session frame arrays in RAM when there is room (auto), always (ram), or in temp files (disk) |
 | `--no-wcs-refine` | Keep the session `info.json` WCS as mapped onto the stack, without the Gaia refinement |
 | `--gpu-phase1 {auto,on,off}` | With `--use-gpu`: run Phase 1 on the GPU or the CPU pool (auto picks) |
-| `--comet-mode` | Dual-register for comet nucleus tracking |
+| `--comet-mode` | Also stack on the comet nucleus (`<output>_comet.fits`) |
+| `--offline` | Make no network requests at all |
+| `--no-proper-coadd` | Plain combine only, without proper image coaddition |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |
 | `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
 | `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
@@ -837,7 +773,7 @@ Things these numbers do not show: three sessions from one camera are a small sam
 
 ### Native (Rust) acceleration
 
-[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of ~56 hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and `--transient-triage` inference (pure-Rust `tract` ONNX runtime — no Python ONNX dependency). A representative sample:
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of 80+ hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and `--transient-triage` inference (pure-Rust `tract` ONNX runtime — no Python ONNX dependency). A representative sample:
 
 | Kernel | Speedup vs numpy/scipy |
 |--------|------------------------|
@@ -845,7 +781,7 @@ Things these numbers do not show: three sessions from one camera are a small sam
 | `esd_combine` / `percentile_clip_combine` / `median_combine` | ~24× / ~13× / ~6× |
 | Fused patch-weighted + sigma-clip combine | ~100× |
 | Per-frame Lanczos-3 warp (alignment + drizzle resample) | ~5× / ~26× |
-| Malvar debayer (default Phase-1 debayer) | ~2× |
+| Malvar debayer | ~2× |
 | Phase 1 calibration (bias/dark/flat/finite check/clip, one pass) | ~4× single-thread (40 → 9 ms) |
 | Bayer hot-pixel repair / hot-pixel map replacement | ~25× / ~55× single-thread (715 → 29 ms / 666 → 12 ms) |
 | RGB hot-pixel repair (luma + median + MAD + replace, fused) | ~22× single-thread (1174 → 52 ms) |
@@ -879,7 +815,13 @@ At runtime the startup banner reports `Native accel: astro_native vX ACTIVE …`
 
 ### Iterating on the same data
 
-Re-running the *same* `-o` output with `--keep-checkpoint` makes subsequent runs **skip Phases 1–3 entirely** (load the saved raw stack, redo only post-processing) — the fastest way to tune stretch/denoise settings.
+`--from-stack STACK.fits` re-runs only post-processing (Phase 4) on an earlier run's linear output, with that run's saved settings; flags you pass override them. No light frames are needed, and the slow early steps are cached next to the stack, so a re-run takes seconds to tens of seconds:
+
+```bash
+python originstack.py --from-stack stacked.fits -o tweak.fits --stretch arcsinh
+```
+
+An interrupted run resumes from its last checkpoint. With `--keep-checkpoint` the checkpoint also survives a successful run, so a re-run with different stacking settings reuses Phase 1 and one with different post-processing settings reuses Phases 1-3.
 
 ---
 
@@ -902,7 +844,9 @@ originstack.py                  ← thin backward-compatibility entry point
     ├── io_fits.py              ← FITS load/save, master frame creation
     ├── frame_discovery.py      ← automatic frame classification
     ├── auto_settings.py        ← heuristic target classifier (--auto)
-    ├── plate_solve.py          ← astrometry.net + SIMBAD
+    ├── plate_solve.py          ← built-in Gaia solver, ASTAP, astrometry.net
+    ├── desktop_app.py          ← the desktop app window (tkinter)
+    ├── desktop_control.py      ← desktop app: form schema, form → CLI args, run manager
     ├── gpu_context.py          ← CPU/GPU abstraction (numpy ↔ cupy)
     ├── models.py               ← Config, FrameInfo, ProcessingStats
     ├── health_check.py         ← calibration analysis
@@ -916,8 +860,13 @@ See [PROJECT_SPEC.md](PROJECT_SPEC.md) for a detailed architecture and feature r
 ## Testing
 
 ```bash
-pip install pytest
+pip install -r requirements-dev.txt   # pytest, pytest-xdist, ruff
 pytest -q
+pytest -q -n auto                     # parallel, ~3x faster
+
+# Lint (both gated in CI)
+python -m ruff check .
+python tools/lint_conventions.py
 
 # Run a specific test
 pytest tests/test_core.py::test_calculate_shift_recovery -v
@@ -1004,22 +953,22 @@ python originstack.py -d lights/ -o stacked.fits --plate-solve --plate-solver as
 
 ## GPU Acceleration
 
-This project supports GPU acceleration using CuPy. To enable GPU acceleration:
+GPU acceleration uses CuPy and is opt-in (`--use-gpu`).
 
-1. Install CuPy:
+1. Install the CuPy wheel for your CUDA version, e.g.:
    ```bash
-   pip install cupy-cuda11x  # Replace `11x` with your CUDA version
+   pip install cupy-cuda12x   # or cupy-cuda11x
    ```
 2. Ensure your system has a compatible NVIDIA GPU and CUDA drivers installed.
 
-### Example Workflow with GPU Acceleration
 ```bash
 python originstack.py -d lights/ -o stacked.fits --use-gpu
 ```
 
-### Notes
-- GPU acceleration is experimental and may not cover all code paths.
-- Fallback to CPU occurs automatically if GPU is unavailable.
+Notes:
+- On a 4 GB card, `--use-gpu` measured *slower* than CPU-only on a real session, because most of Phase 1 is CPU work and the GPU path limited the worker count. Phase 1 therefore runs on the CPU process pool unless the card can host one GPU worker per CPU core (`--gpu-phase1 on` forces it); later phases still use the GPU.
+- Not available in the packaged desktop app (it would need your own CUDA install).
+- Falls back to CPU automatically if no GPU is available.
 
 ## License
 
