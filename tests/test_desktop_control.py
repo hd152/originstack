@@ -150,6 +150,30 @@ class TestRunManager(unittest.TestCase):
             mock_pd.assert_called_once_with('foo', 'bar.fits', mock_pd.call_args[0][2])
         self.assertEqual(rm.status, 'ok')
 
+    def test_blank_output_goes_beside_the_light_frames_folder(self):
+        # Not the working directory: the CLI default is <session>_stacked.fits
+        # in cwd, which for the desktop app is wherever it was launched from.
+        import os
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            session = os.path.join(tmp, 'M51_session')
+            os.makedirs(session)
+            open(os.path.join(tmp, 'M51_session_stacked.fits'), 'w').close()  # never overwritten
+            rm = RunManager()
+            with patch('src.cli.process_directory') as mock_pd:
+                self.assertTrue(rm.start({'directory': session})['ok'])
+                rm.thread.join(timeout=5)
+            self.assertEqual(os.path.normcase(mock_pd.call_args[0][1]),
+                             os.path.normcase(os.path.join(tmp, 'M51_session_stacked_2.fits')))
+
+    def test_explicit_output_is_kept(self):
+        from src.desktop_control import _default_output_beside_lights
+        form = {'directory': 'C:/data/M51', 'output': 'D:/out/x.fits'}
+        self.assertEqual(_default_output_beside_lights(form), form)
+        self.assertEqual(_default_output_beside_lights({'from_stack': 'a.fits'}),
+                         {'from_stack': 'a.fits'})
+
     def test_start_transitions_to_error_on_pipeline_exception(self):
         from unittest.mock import patch
         rm = RunManager()
