@@ -140,3 +140,83 @@ def test_search_filters_across_groups_and_includes_expert(form):
     assert not _visible(form, 'fix_atmospheric_dispersion')
     assert _visible(form, 'banding_removal')
     assert form._no_match.winfo_manager() == ''
+
+
+# ── target cards and run mode ──────────────────────────────────────────
+
+def _argv(form):
+    from src.desktop_control import build_argv_from_form
+    return build_argv_from_form(form.read_form())
+
+
+def test_target_cards_set_target_type_or_comet_mode(form):
+    assert form.goal.selected_target() == 'auto' and _argv(form) == []
+    form.goal.pick_target('galaxy')
+    assert _argv(form) == ['--target-type', 'galaxy']
+    form.goal.pick_target('comet')
+    assert _argv(form) == ['--comet-mode']
+    form.goal.pick_target('auto')
+    assert _argv(form) == []
+
+
+def test_run_mode_sets_the_preset(form):
+    assert form.goal.selected_mode() == 'full'
+    form.goal.pick_mode('quick')
+    assert _argv(form) == ['--preset', 'quick']
+    form.goal.pick_mode('full')
+    assert _argv(form) == []
+
+
+def test_cards_follow_the_fields_set_elsewhere(form):
+    form.vars['target_type'].set('globular_cluster')
+    assert form.goal.selected_target() == 'cluster'
+    form.vars['target_type'].set('planetary_nebula')  # no card for it
+    assert form.goal.selected_target() is None
+    form.vars['preset'].set('narrowband')
+    assert form.goal.selected_mode() is None
+
+
+def test_card_picks_are_not_counted_as_changed_settings(form):
+    form.goal.pick_target('nebula')
+    form.goal.pick_mode('quick')
+    assert 'changed' not in form._toggle_btn.cget('text')
+    assert form.changed_settings() == []
+
+
+def test_preset_is_not_on_the_main_form(form):
+    assert form._fields['preset']['group'] is not None
+
+
+def test_suggestion_badges_the_inferred_card(form):
+    form.goal.set_suggestion('reflection_nebula', 'M78')
+    assert form.goal.cards['nebula'].badge.cget('text') == 'SUGGESTED'
+    assert 'M78' in form.goal.cards['auto'].text.cget('text')
+    form.goal.pick_target('nebula')  # chosen: no badge needed
+    assert form.goal.cards['nebula'].badge.cget('text') == ''
+
+
+def test_example_images_exist_and_follow_the_suggestion(form):
+    from src.desktop_app import _EXAMPLES_DIR, _TARGET_CARDS
+    for card in _TARGET_CARDS:
+        if card[5]:
+            assert (_EXAMPLES_DIR / card[5]).is_file()
+    assert form.goal.example() == (None, '')  # auto, nothing suggested
+    form.goal.set_suggestion('galaxy', None)
+    path, caption = form.goal.example()
+    assert path.name == 'galaxy.jpg' and caption
+
+
+def test_describe_run(form, tmp_path):
+    session = tmp_path / 'M51'
+    session.mkdir()
+    form.vars['directory'].set(str(session))
+    form.goal.pick_target('galaxy')
+    form.goal.pick_mode('quick')
+    form.vars['trail_reject'].set(True)
+    rows = dict(form.describe_run())
+    assert rows['Target'] == 'Galaxy (your choice)'
+    assert rows['Mode'].startswith('Quick look')
+    assert rows['Changed'] == 'Trail rejection'
+    assert rows['Output'].startswith(str(tmp_path / 'M51_stacked.fits'))
+    form.vars['auto'].set(False)
+    assert dict(form.describe_run())['Target'].startswith('Auto advisor off')

@@ -2241,6 +2241,13 @@ def build_parser() -> argparse.ArgumentParser:
                         'apply optimised settings automatically (on by default, no API key '
                         'required). Explicit CLI flags you pass still override whatever '
                         'the advisor would have picked.')
+    g_core.add_argument('--target-type', default=None,
+                   choices=['galaxy', 'emission_nebula', 'reflection_nebula',
+                            'planetary_nebula', 'globular_cluster', 'star_field',
+                            'wide_field'],
+                   help='What you imaged. --auto uses it in place of the type it would infer '
+                        'from the session, FITS header, folder name or SIMBAD (it still tunes '
+                        'from the measured frames). No effect with --no-auto.')
     g_post.add_argument('--scnr', action='store_true',
                    help='Apply Subtractive Chromatic Noise Reduction to suppress green '
                         'cast artefacts common in OSC/DSLR images under light pollution.')
@@ -2571,6 +2578,8 @@ def parse_args(argv=None):
         # for "ran but found nothing" rather than "didn't run at all".
         safe_print("  WARNING: --originvision-score-all has no effect without --originvision")
 
+    if getattr(args, 'target_type', None) and not getattr(args, 'auto', True):
+        safe_print("  WARNING: --target-type has no effect with --no-auto")
     if getattr(args, 'transient_triage', False) and not getattr(args, 'transient_detect', None):
         safe_print("  WARNING: --transient-triage has no effect without --transient-detect")
     if getattr(args, 'transient_triage_model', None) and not getattr(args, 'transient_triage', False):

@@ -26,7 +26,7 @@ import traceback
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _log_dir() -> Path:
@@ -257,7 +257,7 @@ class ScrollableFrame(ttk.Frame):
 # the ones almost every run touches (where the lights are, what to call the
 # output, and the handful of settings that most change the result) while
 # the other ~110 flags are fine-tuning most runs never need.
-_COMMON_DESTS = ['directory', 'output', 'preset', 'auto', 'stack_method',
+_COMMON_DESTS = ['directory', 'output', 'auto', 'stack_method',
                  'denoiser', 'deconvolve_mode', 'drizzle_scale', 'trail_reject',
                  'use_gpu', 'parallel', 'originvision']
 
@@ -311,6 +311,242 @@ def _field_label(field: Dict[str, Any]) -> str:
     return _FIELD_LABELS.get(dest, dest.replace('_', ' ').capitalize())
 
 
+# ── Setup: "what did you image?" cards and the run mode ─────────────
+
+_EXAMPLES_DIR = Path(__file__).resolve().parent / 'data' / 'examples'
+
+# key, title, description, target_type value, comet_mode value, example file,
+# example caption. A card is only a view over the target_type/comet_mode
+# fields (the same Variables the Additional options widgets use), so a pick
+# reaches the run through read_form() like any other change. Descriptions
+# say only what auto_settings._TARGET_SETTINGS does for that type.
+_TARGET_CARDS = (
+    ('auto', 'Auto-detect',
+     'Recognised from the session, header or folder name, then the frames.',
+     '', False, None, None),
+    ('galaxy', 'Galaxy',
+     'Keeps the faint halo out of background removal; trims star size.',
+     'galaxy', False, 'galaxy.jpg', 'Example galaxy: Whirlpool Galaxy (M51), Celestron Origin'),
+    ('nebula', 'Nebula',
+     'Diffuse emission: a gentler stretch, stars kept full size.',
+     'emission_nebula', False, 'nebula.jpg', 'Example nebula: Omega Nebula (M17), Celestron Origin'),
+    ('cluster', 'Star cluster',
+     'Dense clusters: a dark sky background, stars kept full size.',
+     'globular_cluster', False, None, None),
+    ('starfield', 'Star field',
+     'Rich star fields and Milky Way regions; light local contrast.',
+     'star_field', False, 'starfield.jpg',
+     'Example star field: Sagittarius Star Cloud (M24), Celestron Origin'),
+    ('comet', 'Comet',
+     'Also stacks on the moving nucleus (saved as a second _comet image).',
+     '', True, None, None),
+)
+# Inferred target types -> the card that shows them.
+_TYPE_TO_CARD = {'galaxy': 'galaxy', 'emission_nebula': 'nebula', 'reflection_nebula': 'nebula',
+                 'planetary_nebula': 'nebula', 'globular_cluster': 'cluster',
+                 'star_field': 'starfield', 'wide_field': 'starfield'}
+
+# key, title, description, preset value. Only two: the default settings are
+# the measured best, and --preset quality forces per-frame L.A.Cosmic (~2.5
+# min for <0.3% change) and deconvolution (no help at typical Origin SNR), so
+# offering it as "best quality" would sell a slower run, not a better one.
+_RUN_MODES = (
+    ('full', 'Full quality', 'Recommended. Every step that measured as an improvement.', ''),
+    ('quick', 'Quick look', 'Faster check: no outlier rejection, lighter processing.', 'quick'),
+)
+# Fields the cards and run mode set; not counted as "changed" settings.
+_PICKER_DESTS = {'target_type', 'comet_mode', 'preset'}
+
+_THUMB = (132, 84)
+
+
+def _card_thumbnail(card: tuple):
+    """A PhotoImage for a card: its example result scaled down, or a small
+    drawing for cards without one. None without Pillow."""
+    try:
+        from PIL import Image, ImageDraw, ImageFilter, ImageTk
+    except ImportError:
+        return None
+    key, example = card[0], card[5]
+    w, h = _THUMB
+    if example and (_EXAMPLES_DIR / example).exists():
+        im = Image.open(_EXAMPLES_DIR / example).convert('RGB')
+        # Centre crop to the thumbnail's aspect, a little zoomed in.
+        sw, sh = im.size
+        cw = int(sw * 0.7)
+        ch = int(cw * h / w)
+        im = im.crop(((sw - cw) // 2, (sh - ch) // 2, (sw + cw) // 2, (sh + ch) // 2))
+        return ImageTk.PhotoImage(im.resize(_THUMB, Image.LANCZOS))
+
+    import random
+    im = Image.new('RGB', _THUMB, (6, 7, 10))
+    d = ImageDraw.Draw(im)
+    rnd = random.Random(7)
+    for _ in range(50):
+        v = rnd.randrange(60, 190)
+        d.point((rnd.randrange(w), rnd.randrange(h)), fill=(v, v, v))
+    if key == 'cluster':
+        for _ in range(260):
+            x, y = rnd.gauss(w / 2, w / 9), rnd.gauss(h / 2, h / 7)
+            v = rnd.randrange(150, 255)
+            d.point((x, y), fill=(v, v, int(v * 0.9)))
+        glow = Image.new('L', _THUMB, 0)
+        ImageDraw.Draw(glow).ellipse((w / 2 - 14, h / 2 - 14, w / 2 + 14, h / 2 + 14), fill=90)
+        im.paste((255, 240, 210), mask=glow.filter(ImageFilter.GaussianBlur(8)))
+    elif key == 'comet':
+        tail = Image.new('L', _THUMB, 0)
+        ImageDraw.Draw(tail).polygon([(92, 36), (8, 6), (6, 26)], fill=110)
+        im.paste((120, 220, 200), mask=tail.filter(ImageFilter.GaussianBlur(6)))
+        head = Image.new('L', _THUMB, 0)
+        ImageDraw.Draw(head).ellipse((82, 26, 102, 46), fill=255)
+        im.paste((190, 255, 230), mask=head.filter(ImageFilter.GaussianBlur(4)))
+    else:  # auto
+        d.text((w / 2 - 14, h / 2 - 6), 'AUTO', fill=(232, 230, 223))
+    return ImageTk.PhotoImage(im)
+
+
+class _Choice(tk.Frame):
+    """A clickable bordered card: optional picture, title, optional badge,
+    description. ``set_state`` switches the border between selected and not."""
+
+    def __init__(self, parent, title: str, text: str, on_click, photo=None):
+        super().__init__(parent, background=_LINE, padx=1, pady=1, cursor='hand2')
+        self.body = tk.Frame(self, background=_PANEL)
+        self.body.pack(fill='both', expand=True)
+        self.photo = photo  # keep-alive ref
+        if photo is not None:
+            tk.Label(self.body, image=photo, background=_PANEL, borderwidth=0).pack(
+                padx=6, pady=(6, 3))
+        row = tk.Frame(self.body, background=_PANEL)
+        row.pack(fill='x', padx=8, pady=(4 if photo is None else 0, 0))
+        tk.Label(row, text=title, background=_PANEL, foreground=_TEXT,
+                 font=_FONT_BOLD).pack(side='left')
+        self.badge = tk.Label(row, text='', background=_PANEL, foreground='#04161a',
+                              font=(_SANS, 7, 'bold'), padx=0)
+        self.badge.pack(side='right')
+        self.text = tk.Label(self.body, text=text, background=_PANEL, foreground=_TEXT_DIM,
+                             font=(_SANS, 8), wraplength=140, justify='left', anchor='w')
+        self.text.pack(fill='x', padx=8, pady=(0, 7))
+        for w in self._descendants(self):
+            w.bind('<Button-1>', lambda _e: on_click())
+
+    @staticmethod
+    def _descendants(w):
+        yield w
+        for c in w.winfo_children():
+            yield from _Choice._descendants(c)
+
+    def set_state(self, selected: bool) -> None:
+        self.configure(background=_ACCENT if selected else _LINE,
+                       padx=2 if selected else 1, pady=2 if selected else 1)
+
+    def set_badge(self, text: str) -> None:
+        self.badge.configure(text=text, padx=4 if text else 0,
+                             background=_ACCENT2 if text else _PANEL)
+
+
+class GoalPicker(ttk.Frame):
+    """The two questions at the top of the Setup form: what was imaged
+    (target cards) and how to run (full quality / quick look). Both write
+    the existing ``target_type``/``comet_mode``/``preset`` Variables, and
+    follow them when they are changed from Additional options instead."""
+
+    def __init__(self, parent, vars_: Dict[str, tk.Variable], on_pick=None):
+        super().__init__(parent)
+        self.vars = vars_
+        self._on_pick = on_pick
+        self.suggested: Optional[str] = None
+
+        ttk.Label(self, text='WHAT DID YOU IMAGE?', style='TLabelframe.Label').pack(
+            anchor='w', pady=(10, 4))
+        grid = ttk.Frame(self)
+        grid.pack(fill='x')
+        self.cards: Dict[str, _Choice] = {}
+        for i, card in enumerate(_TARGET_CARDS):
+            c = _Choice(grid, card[1], card[2], lambda c=card: self.pick_target(c[0]),
+                        photo=_card_thumbnail(card))
+            c.grid(row=i // 3, column=i % 3, padx=3, pady=3, sticky='nsew')
+            self.cards[card[0]] = c
+        for col in range(3):
+            grid.grid_columnconfigure(col, weight=1, uniform='card')
+
+        ttk.Label(self, text='HOW SHOULD IT RUN?', style='TLabelframe.Label').pack(
+            anchor='w', pady=(12, 4))
+        modes = ttk.Frame(self)
+        modes.pack(fill='x')
+        self.modes: Dict[str, _Choice] = {}
+        for i, (key, title, text, _preset) in enumerate(_RUN_MODES):
+            m = _Choice(modes, title, text, lambda k=key: self.pick_mode(k))
+            m.text.configure(wraplength=220)
+            m.grid(row=0, column=i, padx=3, sticky='nsew')
+            modes.grid_columnconfigure(i, weight=1, uniform='mode')
+            self.modes[key] = m
+
+        for dest in _PICKER_DESTS:
+            self.vars[dest].trace_add('write', lambda *_: self.refresh())
+        self.refresh()
+
+    # ── selection ──────────────────────────────────────────────────────
+
+    def selected_target(self) -> Optional[str]:
+        """The card matching the fields, or None for a type no card shows
+        (planetary nebula, reflection nebula... chosen in Additional options)."""
+        if self.vars['comet_mode'].get():
+            return 'comet'
+        tt = self.vars['target_type'].get()
+        for card in _TARGET_CARDS:
+            if card[3] == tt and not card[4]:
+                return card[0]
+        return None
+
+    def selected_mode(self) -> Optional[str]:
+        preset = self.vars['preset'].get()
+        return next((m[0] for m in _RUN_MODES if m[3] == preset), None)
+
+    def pick_target(self, key: str) -> None:
+        card = next(c for c in _TARGET_CARDS if c[0] == key)
+        self.vars['target_type'].set(card[3])
+        self.vars['comet_mode'].set(card[4])
+        if self._on_pick is not None:
+            self._on_pick()
+
+    def pick_mode(self, key: str) -> None:
+        self.vars['preset'].set(next(m[3] for m in _RUN_MODES if m[0] == key))
+        if self._on_pick is not None:
+            self._on_pick()
+
+    def set_suggestion(self, target_type: Optional[str], name: Optional[str]) -> None:
+        """Badge the card matching what the session/header says, and tell the
+        Auto-detect card what it will use."""
+        self.suggested = _TYPE_TO_CARD.get(target_type or '')
+        auto_text = _TARGET_CARDS[0][2]
+        if self.suggested and target_type:
+            from src.auto_settings import TARGET_LABELS
+            label = TARGET_LABELS.get(target_type, target_type)
+            auto_text = f'Will start from: {label}' + (f' ({name})' if name else '') + '.'
+        self.cards['auto'].text.configure(text=auto_text)
+        self.refresh()
+
+    def refresh(self) -> None:
+        target, mode = self.selected_target(), self.selected_mode()
+        for key, card in self.cards.items():
+            card.set_state(key == target)
+            card.set_badge('SUGGESTED' if key == self.suggested and key != target else '')
+        for key, m in self.modes.items():
+            m.set_state(key == mode)
+
+    def example(self) -> Tuple[Optional[Path], str]:
+        """The example image and caption for the selected card (or the
+        suggested one under Auto-detect)."""
+        key = self.selected_target()
+        if key == 'auto' and self.suggested:
+            key = self.suggested
+        card = next((c for c in _TARGET_CARDS if c[0] == key), None)
+        if card and card[5] and (_EXAMPLES_DIR / card[5]).exists():
+            return _EXAMPLES_DIR / card[5], card[6]
+        return None, ''
+
+
 class SetupForm(ttk.Frame):
     """Auto-built from ``desktop_control.get_form_schema()``. A fixed set of
     common fields (``_COMMON_DESTS``) sits directly on the form; every other
@@ -327,8 +563,17 @@ class SetupForm(ttk.Frame):
     or help text across every group (expert ones included -- someone who
     types "dispersion" is looking for it)."""
 
-    def __init__(self, parent, on_expand=None):
+    def __init__(self, parent, on_expand=None, on_change=None):
         super().__init__(parent)
+        # Called (once per burst of edits, at idle) after any field changes,
+        # so the App can refresh its "This run" summary and example image.
+        self._on_change = on_change
+        self._change_pending = False
+        self._labels: Dict[str, str] = {}
+        self._data_summary = ''
+        # (name, type, source) the session/header/folder suggest for the
+        # chosen folder -- local lookups only, no SIMBAD from the form.
+        self.inferred: Tuple[Optional[str], Optional[str], Optional[str]] = (None, None, None)
         from src.desktop_control import get_form_schema
         self.schema = get_form_schema()
         # Called with the toggle bar after "Additional options" opens, so a
@@ -358,10 +603,13 @@ class SetupForm(ttk.Frame):
         common_frame = ttk.Frame(self)
         common_frame.pack(fill='x')
         row = 0
+        goal_row = 0
         for dest in _COMMON_DESTS:
             field = all_fields.get(dest)
             if field is not None:
                 row += self._build_field(common_frame, row, field, group=None)
+            if dest == 'output':
+                goal_row, row = row, row + 1  # the target cards and run mode go here
 
         bar = ttk.Frame(self)
         bar.pack(fill='x', pady=(10, 0))
@@ -420,6 +668,11 @@ class SetupForm(ttk.Frame):
             for field in fields:
                 if field['dest'] not in self._fields and last[field['dest']] is field:
                     row += self._build_field(page, row, field, group=group_title)
+
+        # Built last: it drives the target_type/comet_mode/preset Variables
+        # created with their Additional options widgets above.
+        self.goal = GoalPicker(common_frame, self.vars, on_pick=self._notify_change)
+        self.goal.grid(row=goal_row, column=0, columnspan=5, sticky='we', pady=(0, 8))
 
         self._refresh_toggle_text()
         self._refresh_expert()
@@ -488,7 +741,7 @@ class SetupForm(ttk.Frame):
         """'▸ Additional options · 2 changed' -- a change made behind the
         collapsed section stays visible from the main form."""
         n = sum(1 for d, info in self._fields.items()
-                if info['group'] is not None and self._is_changed(d))
+                if info['group'] is not None and d not in _PICKER_DESTS and self._is_changed(d))
         arrow = '▾' if self._advanced_shown else '▸'
         suffix = f'  ·  {n} changed' if n else ''
         self._toggle_btn.configure(text=f'{arrow} Additional options{suffix}')
@@ -598,6 +851,8 @@ class SetupForm(ttk.Frame):
 
         self.vars[dest] = var
         self._initial[dest] = var.get()
+        self._labels[dest] = _field_label(field)
+        var.trace_add('write', lambda *_: self._notify_change())
         self._fields[dest] = {
             'widgets': widgets, 'group': group, 'dot': dot, 'reset': reset,
             'expert': _is_expert_field(field) or (group is not None and _is_expert_group(group)),
@@ -632,6 +887,69 @@ class SetupForm(ttk.Frame):
     def _reset(self, dest: str) -> None:
         self.vars[dest].set(self._initial[dest])
 
+    def _notify_change(self) -> None:
+        if self._on_change is not None and not self._change_pending:
+            self._change_pending = True
+            self.after_idle(self._fire_change)
+
+    def _fire_change(self) -> None:
+        self._change_pending = False
+        self._on_change()
+
+    def changed_settings(self) -> List[str]:
+        """Labels of the settings changed from their defaults, not counting
+        the folder/output or what the cards and run mode set."""
+        return [self._labels[d] for d in self._fields
+                if d not in _PICKER_DESTS and d not in _NO_CHANGE_MARK and self._is_changed(d)]
+
+    def describe_run(self) -> List[Tuple[str, str]]:
+        """(heading, text) rows describing what Start will do with the
+        current form -- the App's "This run" panel."""
+        from src.auto_settings import TARGET_LABELS
+        v = {d: var.get() for d, var in self.vars.items()}
+        directory = str(v.get('directory') or '').strip()
+        rows = [('Frames', self._data_summary or
+                 ('No light frames found in that folder.' if directory
+                  else 'Choose the folder with your light frames.'))]
+
+        name, inf_type, src = self.inferred
+        auto = bool(v.get('auto', True))
+        if v.get('comet_mode'):
+            target = 'Comet: a second stack aligned on the nucleus'
+        elif not auto:
+            target = 'Auto advisor off: no tuning for the target'
+        elif v.get('target_type'):
+            target = f"{TARGET_LABELS.get(v['target_type'], v['target_type'])} (your choice)"
+        elif inf_type and inf_type != 'unknown':
+            target = (f"Auto-detect: starts from {TARGET_LABELS.get(inf_type, inf_type)}"
+                      + (f" ({name}, from the {src})" if name else '')
+                      + ', then checks the frames')
+        else:
+            target = 'Auto-detect from the frames after the first pass'
+        rows.append(('Target', target))
+
+        mode = self.goal.selected_mode()
+        rows.append(('Mode', next((f'{m[1]}. {m[2]}' for m in _RUN_MODES if m[0] == mode),
+                                  f"Preset: {v.get('preset')}")))
+
+        changed = self.changed_settings()
+        if changed:
+            shown = ', '.join(changed[:4]) + (f' and {len(changed) - 4} more'
+                                             if len(changed) > 4 else '')
+            rows.append(('Changed', shown))
+        else:
+            rows.append(('Changed', 'Nothing; defaults' + (', tuned by --auto' if auto else '')))
+
+        output = str(v.get('output') or '').strip()
+        if output:
+            rows.append(('Output', output))
+        elif directory:
+            folder = os.path.abspath(directory.rstrip('/\\'))
+            rows.append(('Output', os.path.join(os.path.dirname(folder),
+                                                os.path.basename(folder) + '_stacked.fits')
+                         + '  (next to the folder; never overwrites)'))
+        return rows
+
     def _browse(self, dest: str, var: tk.Variable, widget_hint: str) -> None:
         if widget_hint == 'dir':
             path = filedialog.askdirectory()
@@ -645,12 +963,17 @@ class SetupForm(ttk.Frame):
 
     def _rescan_directory(self) -> None:
         directory = self.vars['directory'].get().strip()
+        self._data_summary = ''
+        self.inferred = (None, None, None)
         if not directory or not os.path.isdir(directory):
             self.dir_count_var.set('')
+            self.goal.set_suggestion(None, None)
             return
         try:
             from src.frame_discovery import discover_frames
-            counts = {k: len(v) for k, v in discover_frames(directory).items()}
+            found = discover_frames(directory)
+            counts = {k: len(v) for k, v in found.items()}
+            lights = list(found.get('light', []))
             if sum(counts.values()) == 0:
                 subdirs = [os.path.join(directory, d) for d in os.listdir(directory)
                           if os.path.isdir(os.path.join(directory, d))]
@@ -658,10 +981,28 @@ class SetupForm(ttk.Frame):
                     sub_counts = discover_frames(d)
                     for k, v in sub_counts.items():
                         counts[k] = counts.get(k, 0) + len(v)
-            parts = ', '.join(f'{v} {k}' for k, v in counts.items() if v)
-            self.dir_count_var.set(parts or 'no frames found')
+            parts = ', '.join(f"{v} {k}{'s' if v != 1 and not k.endswith('s') else ''}"
+                              for k, v in counts.items() if v)
+            self._data_summary = parts
+            text = parts or 'no frames found'
+            if lights:
+                # The same local lookups the run starts with (info.json name,
+                # FITS OBJECT, folder name), but never SIMBAD from here.
+                from src.session_info import load_session_info
+                from src.target_inference import infer_target_from_metadata
+                si = load_session_info(directory)
+                name, ttype, _conf, src = infer_target_from_metadata(
+                    directory, lights, use_simbad=False,
+                    session_name=si.object_name if si else None)
+                if ttype == 'unknown':
+                    ttype = None
+                self.inferred = (name, ttype, src)
+                if name:
+                    text += f'  ·  {name}' + (f', from the {src}' if src else '')
+            self.dir_count_var.set(text)
         except Exception:
             self.dir_count_var.set('')
+        self.goal.set_suggestion(self.inferred[1], self.inferred[0])
 
     def read_form(self) -> Dict[str, Any]:
         """``{dest: value}`` for fields the user actually changed from their
@@ -1008,6 +1349,7 @@ class App:
 
         root.protocol('WM_DELETE_WINDOW', self._on_closing)
         root.after(self.POLL_MS, self._poll)
+        self._on_form_change()
 
     def _build_header(self, root: tk.Tk) -> None:
         from src.utils import read_version
@@ -1068,7 +1410,8 @@ class App:
         vpaned = ttk.PanedWindow(parent, orient='vertical')
         vpaned.pack(fill='both', expand=True)
         setup = ScrollableFrame(vpaned)
-        self.form = SetupForm(setup.inner, on_expand=setup.scroll_to)
+        self.form = SetupForm(setup.inner, on_expand=setup.scroll_to,
+                              on_change=self._on_form_change)
         self.form.pack(fill='both', expand=True, padx=(0, 6))
         parent = ttk.Frame(vpaned)
         vpaned.add(setup, weight=1)
@@ -1163,11 +1506,20 @@ class App:
         self.frames_tree.tag_configure('bad', foreground=_BAD)
         self.frames_tree.pack(fill='x')
 
-        summary_frame = ttk.LabelFrame(parent, text='COMPLETE')
-        summary_frame.pack(fill='x', pady=6)
+        # Before a run (and after any change once one has finished) this is
+        # "This run": what Start will do with the form. After a run it is the
+        # run's summary.
+        self.summary_frame = ttk.LabelFrame(parent, text='THIS RUN')
+        # Packed ahead of the preview so it gets its rows first; packed last it
+        # was squeezed to two lines below the (empty, before a run) frame lists.
+        self.summary_frame.pack(fill='x', pady=6, side='bottom', before=preview_frame)
         self.summary_var = tk.StringVar(value='')
-        ttk.Label(summary_frame, textvariable=self.summary_var, justify='left').pack(
-            anchor='w', padx=4, pady=4)
+        self.summary_label = ttk.Label(self.summary_frame, textvariable=self.summary_var,
+                                       justify='left')
+        self.plan_frame = ttk.Frame(self.summary_frame)
+        self.plan_frame.pack(fill='x', padx=4, pady=4)
+        self.plan_frame.grid_columnconfigure(1, weight=1)
+        self._show_plan = True
 
     # ── run control ─────────────────────────────────────────────────────
 
@@ -1183,6 +1535,36 @@ class App:
         self._shown_log_lines = 0
         self.frames_tree.delete(*self.frames_tree.get_children())
         self.summary_var.set('')
+        self._show_plan = False
+        self.summary_frame.configure(text='COMPLETE')
+        self.plan_frame.pack_forget()
+        self.summary_label.pack(anchor='w', padx=4, pady=4)
+
+    def _on_form_change(self) -> None:
+        """The form changed: show what Start would now do, and the example
+        result for the chosen target until a run's own previews arrive."""
+        if self.rm.is_running():
+            return
+        self._show_plan = True
+        self.summary_frame.configure(text='THIS RUN')
+        self.summary_label.pack_forget()
+        self.plan_frame.pack(fill='x', padx=4, pady=4)
+        for child in self.plan_frame.winfo_children():
+            child.destroy()
+        for i, (head, text) in enumerate(self.form.describe_run()):
+            ttk.Label(self.plan_frame, text=head, style='Dim.TLabel').grid(
+                row=i, column=0, sticky='nw', padx=(0, 12), pady=1)
+            ttk.Label(self.plan_frame, text=text, wraplength=520, justify='left').grid(
+                row=i, column=1, sticky='w', pady=1)
+        if self.preview.current_slug in ('', 'example'):
+            path, caption = self.form.goal.example()
+            if path is not None:
+                try:
+                    self.preview.load_slot(path.read_bytes(), 'example', caption)
+                except Exception:
+                    self.preview.clear()
+            elif self.preview.current_slug == 'example':
+                self.preview.clear()
 
     def _on_cancel(self) -> None:
         # Cooperative, not instant -- takes effect at the next checkpoint
@@ -1321,8 +1703,8 @@ class App:
             if data:
                 self.frame_strip.add_thumb(f['id'], f['name'], data)
 
-        # summary
-        if snap['summary']:
+        # summary (unless the form changed since: then it shows "This run")
+        if snap['summary'] and not self._show_plan:
             lines = [f"{k}: {v}" for k, v in snap['summary'].items()]
             self.summary_var.set('\n'.join(lines))
 

@@ -224,11 +224,18 @@ def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
         name, ttype, conf, src = infer_target_from_metadata(
             directory, final, use_simbad=use_simbad,
             session_name=_si.object_name if _si else None)
+    # --target-type: the user said what it is. Full confidence, so neither
+    # the metadata guess nor the originvision sample below can displace it.
+    if getattr(args, 'target_type', None):
+        ttype, conf, src = args.target_type, 1.0, 'user'
     args._inferred_target = name
     args._inferred_type = ttype
     args._inferred_confidence = conf
     args._inferred_source = src
-    if name and ttype and ttype != 'unknown':
+    if ttype and ttype != 'unknown' and src == 'user':
+        safe_print(f"\n  Target: {name or 'unnamed'} [{ttype.replace('_', ' ').title()}]  "
+                   f"(set with --target-type)")
+    elif name and ttype and ttype != 'unknown':
         safe_print(f"\n  Target: {name} [{ttype.replace('_', ' ').title()}]  "
                    f"conf={conf:.0%}  source={src}")
 
