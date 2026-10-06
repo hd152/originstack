@@ -536,9 +536,56 @@ def calibrate_linear_stack(img: np.ndarray, header, method: str = 'solar',
         if scales == (1.0, 1.0, 1.0):
             return None
         info = f"method {method}"
+    apply_scales_inplace(img, scales)
+    return scales, info
+
+
+def _clipped_weight(img: np.ndarray):
+    """Per pixel, 0..1: how close it is to a clipped plateau, or None if the
+    stack has none. A channel has a plateau when ``Config.CLIP_PLATEAU_MIN_STARS``
+    separate regions sit within 2% of its maximum: saturated star cores stack to
+    nearly one level, while a smooth unclipped galaxy core is a single region
+    (counting pixels instead would neutralise it). Ramps from 0 at 80% of the
+    plateau to 1 at it, like the white balance step's
+    ``debayer._desaturate_near_clipped_highlights``."""
+    from scipy import ndimage as ndi
+
+    from src.models import Config
+    frac = None
+    for c in range(img.shape[2]):
+        ch = img[:, :, c]
+        top = float(np.nanmax(ch))
+        if not np.isfinite(top) or top <= 0:
+            continue
+        _, n_regions = ndi.label(ch >= 0.98 * top)
+        if n_regions < Config.CLIP_PLATEAU_MIN_STARS:
+            continue
+        f = ch / np.float32(top)
+        frac = f if frac is None else np.maximum(frac, f)
+    if frac is None:
+        return None
+    return np.clip((frac - 0.8) / 0.2, 0.0, 1.0)
+
+
+def apply_scales_inplace(img: np.ndarray, scales) -> np.ndarray:
+    """Multiply each channel by its colour-calibration scale, keeping clipped
+    star cores neutral.
+
+    A saturated core is clipped equally in R/G/B (white balance already made it
+    neutral), so scaling it per channel turns it a colour it never had: with a
+    Gaia fit of R x0.72, B x1.09 every bright star became a blue disc, and the
+    colour-preserving stretch kept that blue. Pixels near a clipped plateau are
+    blended towards their brightest scaled channel instead."""
+    weight = _clipped_weight(img)
     for c, s in enumerate(scales):
         img[:, :, c] *= np.float32(s)
-    return scales, info
+    if weight is not None:
+        sel = weight > 0
+        w = weight[sel][:, None].astype(np.float32)
+        px = img[sel]
+        neutral = px.max(axis=1, keepdims=True)
+        img[sel] = px * (1 - w) + neutral * w
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -556,10 +603,7 @@ def apply_photometric_calibration(img: np.ndarray,
     Returns:
         Calibrated (H, W, 3) float32 image.
     """
-    result = img.astype(np.float32, copy=True)
-    for c, s in enumerate(scales):
-        result[:, :, c] *= s
-    return result
+    return apply_scales_inplace(img.astype(np.float32, copy=True), scales)
 
 
 def run_photometric_calibration(img: np.ndarray, header,

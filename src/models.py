@@ -39,6 +39,21 @@ class Config:
     MIN_RECOMMENDED_FRAMES = 10
     PREVIEW_JPEG_QUALITY = 95
     PREVIEW_STRETCH_PERCENTILES = (1, 99)
+    # Lowest preview white point, in sky sigma above the sky median. The white
+    # point is the 99.5th luminance percentile, which on a small target in an
+    # empty field (a galaxy covering ~0.5% of the frame) falls on barely-above-sky
+    # pixels: measured 5.3 sigma (Black Eye) and 6.8 sigma (Sunflower), so sky
+    # noise spanned the whole display range (a field of white speckles) and the
+    # galaxy core clipped flat. 50 sigma shows their rings/arms on a clean sky;
+    # frames where the percentile is already higher (Crab +70 sigma) are
+    # unchanged, Hercules (+37) nearly so. 100 sigma started to dim the galaxies.
+    PREVIEW_WHITE_MIN_SIGMA = 50.0
+    # Colour calibration of a stack with clipped star cores: a channel has a
+    # clipped plateau when at least this many separate regions (stars) sit within
+    # 2% of its maximum. Saturated cores stack to nearly one level (six on a real
+    # Sunflower stack within 1.7%); a smooth unclipped galaxy core near the
+    # maximum is one region, and unclipped star peaks rarely agree to 2%.
+    CLIP_PLATEAU_MIN_STARS = 3
     PREVIEW_MAX_DIMENSION = 8192
     TILE_SIZE = 256  # Tile size for tiled sigma-clip (pixels)
     FWHM_CUTOUT_RADIUS = 10  # Cutout radius for FWHM measurement

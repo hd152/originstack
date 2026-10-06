@@ -441,10 +441,10 @@ def _colour_calibrate_stack(args, stacked: np.ndarray, *also, header=None) -> No
         safe_print("\n  Colour calibration: not enough well-measured Gaia stars -- skipped")
         return
     scales, info = res
+    from src.color_calibrate import apply_scales_inplace
     for arr in also:
         if arr is not None and arr is not stacked:
-            for c, s in enumerate(scales):
-                arr[:, :, c] *= np.float32(s)
+            apply_scales_inplace(arr, scales)
     args._colcal_scales = scales
     safe_print(f"\n  Colour calibration: R x{scales[0]:.3f} G x{scales[1]:.3f} "
                f"B x{scales[2]:.3f} ({info}, {format_time(time.time() - t0)})")

@@ -771,6 +771,21 @@ How star width is measured matters more than it looks. It is a Gaussian fit to e
 
 Things these numbers do not show: three sessions from one camera are a small sample; Siril and DeepSkyStacker have many settings that were left alone; and DeepSkyStacker was not re-run after the fix.
 
+### Compared with the Celestron Origin's own stack
+
+Every Celestron Origin session folder also holds the telescope's own result, `FinalStackedMaster.tiff`. Same lights, four sessions from one Origin, OriginStack at its defaults. Reproduce with [`tools/bench_vs_origin.py`](tools/bench_vs_origin.py).
+
+| Session | Star width, OriginStack vs Origin (same stars) | Noise at star scale R/G/B, OriginStack / Origin |
+|---------|-------------------------------|---------------------------------|
+| Black Eye Galaxy, 80 × 20 s | 8.15 vs 8.38 px (4% sharper) | 1.00 / 1.04 / 1.06 |
+| Sunflower Galaxy, 158 × 20 s | 3.54 vs 4.25 px (17% sharper) | 0.96 / 0.93 / 0.95 |
+| Crab Nebula, 133 frames | 2.54 vs 3.50 px (27% sharper) | 1.00 / 0.92 / 0.95 |
+| Hercules Cluster, 56 frames | 5.67 vs 5.98 px (5% sharper) | 0.99 / 0.96 / 1.01 |
+
+- **Sharper on every session and every channel**, most in blue (up to 40% narrower on the Crab), at about the same noise.
+- **How it was measured.** The Origin's TIFF is linear but sits on a large pedestal (sky about 30000 of 65535 in green and blue), so bright cores clip; its channels were put on OriginStack's flux scale with one gain per channel, measured where it is linear, and clipped stars were left out. Widths are fitted on the same stars, each image on its own pixel grid. Noise is measured at the scale of a star (high-passed, then smoothed with a star-sized kernel): with stars this oversampled, per-pixel noise mostly reflects how much a stack smooths, not what you can see. Each noise ratio rests on a fitted gain, so read it as ±5-10%.
+- **Not shown in the table:** the Origin's TIFF has its background gradients removed before it is saved, while OriginStack removes them in post-processing, so its linear stack still shows them. The finished images differ in rendering too; this comparison found two faults in OriginStack's (a speckled sky on small targets and blue saturated stars, fixed in the next release) and was re-run after the fixes. Four sessions from one telescope are a small sample.
+
 ### Native (Rust) acceleration
 
 [`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of 80+ hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and `--transient-triage` inference (pure-Rust `tract` ONNX runtime — no Python ONNX dependency). A representative sample:
