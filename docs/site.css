@@ -94,6 +94,7 @@ p { margin: 0 0 1em; }
 section { padding-block: clamp(56px, 9vw, 120px); }
 section + section { border-top: 1px solid var(--line); }
 h2 { font-size: clamp(1.9rem, 4vw, 3.1rem); font-variation-settings: "wdth" 92; max-width: 22ch; }
+h2.again { margin-top: 72px; }
 .intro { margin-top: 18px; color: var(--slate); }
 .intro strong { color: var(--ink); font-weight: 600; }
 

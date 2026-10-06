@@ -194,6 +194,60 @@
     </div>
 
     <p class="caveat measure">OriginStack's case is what comes after the stack: it finishes the image in the same run with no setup, explains the night with <a href="advanced.html#diagnostics">diagnostics</a>, solves the sky position on your own computer, runs <a href="advanced.html#workflow">fully offline</a> if you ask, and does the <a href="advanced.html">rest</a> the other tools leave to you. On a plain stack it is now sharper than Siril on all three sessions, quieter once sharpness is matched, and faster on all three. All three sessions were re-measured on 2026-10-02 with this version; the DeepSkyStacker figure is from an earlier run and was not repeated. These numbers have been corrected before: an earlier version of this page overstated sharpness because of how stars were chosen for measurement, and another credited a noise improvement to cosmic-ray detection that was really smoothing. Three sessions from one camera are a small sample, and both tools were left at default-style settings. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats all of this on your own frames.</p>
+
+    <h2 id="vs-origin" class="again">And with the telescope's own stack</h2>
+    <p class="intro measure">Every Celestron Origin session folder also holds the telescope's own result, <code>FinalStackedMaster.tiff</code>. Four sessions, the same lights for all three: the Black Eye Galaxy (81 &times; 20 s), the Sunflower Galaxy (158 &times; 20 s), the Crab Nebula (133 frames) and the Hercules Cluster (56 frames). OriginStack at its defaults, Siril with the settings above.</p>
+
+    <table class="wide">
+      <caption>Star width on the same stars, OriginStack against each. Noise is at the scale of a star, red/green/blue, OriginStack divided by the other.</caption>
+      <thead><tr><th>Session</th><th class="n">vs Origin: star width</th><th class="n">vs Origin: noise</th><th class="n">vs Siril: star width</th><th class="n">vs Siril: noise</th></tr></thead>
+      <tbody>
+        <tr><th>Black Eye, 81 frames</th><td class="n">8.15 / 8.38 px</td><td class="n">1.00 / 1.04 / 1.06</td><td class="n">8.21 / 8.26 px</td><td class="n">0.94 / 1.09 / 0.97</td></tr>
+        <tr><th>Sunflower, 158 frames</th><td class="n">3.54 / 4.25 px</td><td class="n">0.96 / 0.93 / 0.95</td><td class="n">3.50 / 3.58 px</td><td class="n">1.02 / 1.03 / 1.02</td></tr>
+        <tr><th>Crab, 133 frames</th><td class="n">2.54 / 3.50 px</td><td class="n">1.00 / 0.92 / 0.95</td><td class="n">2.54 / 2.77 px</td><td class="n">1.04 / 0.99 / 1.01</td></tr>
+        <tr><th>Hercules, 56 frames</th><td class="n">5.67 / 5.98 px</td><td class="n">0.99 / 0.96 / 1.01</td><td class="n">5.68 / 5.74 px</td><td class="n">1.00 / 1.04 / 1.01</td></tr>
+      </tbody>
+    </table>
+
+    <div class="split">
+      <div class="chart">
+        <h3>Star width relative to OriginStack's, on the same stars (smaller is sharper)</h3>
+        <h3 class="sub">Black Eye Galaxy</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:69.5%"></i><b>1.01</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:71.5%"></i><b>1.04</b></div></div>
+        <h3 class="sub">Sunflower Galaxy</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:70.0%"></i><b>1.02</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:83.1%"></i><b>1.20</b></div></div>
+        <h3 class="sub">Crab Nebula</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:74.7%"></i><b>1.08</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:94.0%"></i><b>1.36</b></div></div>
+        <h3 class="sub">Hercules Cluster</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:69.8%"></i><b>1.01</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:72.7%"></i><b>1.05</b></div></div>
+        <small>1.00 is OriginStack. Each tool is measured against OriginStack on the stars both fit well, each image on its own pixel grid.</small>
+      </div>
+
+      <div class="verdict">
+        <h3>What the numbers say</h3>
+        <p><strong>Sharpness: the same order on every session.</strong> OriginStack, then Siril, then the Origin. The telescope's own stack is the softest of the three: its stars are 4% wider than OriginStack's on the Black Eye, 17% on the Sunflower, 27% on the Crab and 5% on the Hercules Cluster, and most of that is in blue. Siril sits close to OriginStack, 1 to 8% wider.</p>
+        <p><strong>Noise: a tie.</strong> Measured at the scale of a star &mdash; the noise that decides how faint a star you can see &mdash; all three are within a few percent of each other in every channel. OriginStack's extra sharpness costs nothing in noise.</p>
+        <p><strong>What the Origin does better out of the box:</strong> its saved image already has the sky gradients removed. OriginStack removes them in its finishing steps; Siril's stack here has none.</p>
+        <p><strong>It found two faults in OriginStack.</strong> Putting the finished images side by side showed a speckled sky on small, faint targets and blue discs on saturated stars. Both are fixed, and the numbers above were measured again afterwards.</p>
+      </div>
+    </div>
+
+    <div class="figs">
+      <figure class="wide">
+        <img src="img/vs-origin-crab.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer.">
+        <figcaption>The Crab Nebula at full resolution, from the same 133 frames, all three given the same stretch. The Origin's own stack (left) is visibly softer; Siril and OriginStack are close, with OriginStack's stars 8% narrower.</figcaption>
+      </figure>
+    </div>
+
+    <p class="caveat measure">How it was measured: the Origin's TIFF is linear but sits on a large pedestal, so its brightest star cores clip; each stack was put on OriginStack's brightness scale with one gain per colour channel, measured where the image is linear, and clipped stars were left out. Noise ratios rest on that gain, so read them as plus or minus 5 to 10%. Four sessions from one telescope are a small sample. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> repeats it on your own frames.</p>
   </div>
 </section>
 

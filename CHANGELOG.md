@@ -23,7 +23,8 @@ match the `VERSION` file and `v*` git tags.
 ### Added
 
 - **`tools/bench_vs_origin.py`**: compares a stack with the Celestron Origin's own
-  `FinalStackedMaster.tiff` (star width on the same stars, noise at star scale, side-by-side PNG).
+  `FinalStackedMaster.tiff` (star width on the same stars, noise at star scale, side-by-side PNG);
+  `--siril-stack` adds a Siril stack of the same lights.
 
 ### Removed
 

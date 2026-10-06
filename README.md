@@ -771,20 +771,20 @@ How star width is measured matters more than it looks. It is a Gaussian fit to e
 
 Things these numbers do not show: three sessions from one camera are a small sample; Siril and DeepSkyStacker have many settings that were left alone; and DeepSkyStacker was not re-run after the fix.
 
-### Compared with the Celestron Origin's own stack
+### Compared with the Celestron Origin's own stack (and Siril)
 
-Every Celestron Origin session folder also holds the telescope's own result, `FinalStackedMaster.tiff`. Same lights, four sessions from one Origin, OriginStack at its defaults. Reproduce with [`tools/bench_vs_origin.py`](tools/bench_vs_origin.py).
+Every Celestron Origin session folder also holds the telescope's own result, `FinalStackedMaster.tiff`. Same lights, four sessions from one Origin; OriginStack at its defaults, Siril with the settings of the comparison above (winsorized sigma clip 3/3, same bias/dark/flat). Reproduce with [`tools/bench_vs_origin.py`](tools/bench_vs_origin.py) (`--siril-stack` adds Siril).
 
-| Session | Star width, OriginStack vs Origin (same stars) | Noise at star scale R/G/B, OriginStack / Origin |
-|---------|-------------------------------|---------------------------------|
-| Black Eye Galaxy, 80 × 20 s | 8.15 vs 8.38 px (4% sharper) | 1.00 / 1.04 / 1.06 |
-| Sunflower Galaxy, 158 × 20 s | 3.54 vs 4.25 px (17% sharper) | 0.96 / 0.93 / 0.95 |
-| Crab Nebula, 133 frames | 2.54 vs 3.50 px (27% sharper) | 1.00 / 0.92 / 0.95 |
-| Hercules Cluster, 56 frames | 5.67 vs 5.98 px (5% sharper) | 0.99 / 0.96 / 1.01 |
+| Session | Star width, OriginStack vs Origin | Noise at star scale R/G/B, OriginStack / Origin | Star width, OriginStack vs Siril | Noise at star scale R/G/B, OriginStack / Siril |
+|---------|------|------|------|------|
+| Black Eye Galaxy, 81 × 20 s | 8.15 vs 8.38 px (4% sharper) | 1.00 / 1.04 / 1.06 | 8.21 vs 8.26 px (0.7% sharper) | 0.94 / 1.09 / 0.97 |
+| Sunflower Galaxy, 158 × 20 s | 3.54 vs 4.25 px (17% sharper) | 0.96 / 0.93 / 0.95 | 3.50 vs 3.58 px (1.5% sharper) | 1.02 / 1.03 / 1.02 |
+| Crab Nebula, 133 frames | 2.54 vs 3.50 px (27% sharper) | 1.00 / 0.92 / 0.95 | 2.54 vs 2.77 px (8% sharper) | 1.04 / 0.99 / 1.01 |
+| Hercules Cluster, 56 frames | 5.67 vs 5.98 px (5% sharper) | 0.99 / 0.96 / 1.01 | 5.68 vs 5.74 px (1% sharper) | 1.00 / 1.04 / 1.01 |
 
-- **Sharper on every session and every channel**, most in blue (up to 40% narrower on the Crab), at about the same noise.
-- **How it was measured.** The Origin's TIFF is linear but sits on a large pedestal (sky about 30000 of 65535 in green and blue), so bright cores clip; its channels were put on OriginStack's flux scale with one gain per channel, measured where it is linear, and clipped stars were left out. Widths are fitted on the same stars, each image on its own pixel grid. Noise is measured at the scale of a star (high-passed, then smoothed with a star-sized kernel): with stars this oversampled, per-pixel noise mostly reflects how much a stack smooths, not what you can see. Each noise ratio rests on a fitted gain, so read it as ±5-10%.
-- **Not shown in the table:** the Origin's TIFF has its background gradients removed before it is saved, while OriginStack removes them in post-processing, so its linear stack still shows them. The finished images differ in rendering too; this comparison found two faults in OriginStack's (a speckled sky on small targets and blue saturated stars, fixed in the next release) and was re-run after the fixes. Four sessions from one telescope are a small sample.
+- **Sharpness ranks the same way on every session: OriginStack, then Siril, then the Origin**, which is softest of the three by a wide margin on Sunflower and the Crab (most in blue: up to 40% wider than OriginStack's on the Crab). **Noise at star scale is a tie** across all three, within the method's precision. Frames used: OriginStack 80/158/133/56, Siril 81/157/129/56.
+- **How it was measured.** The Origin's TIFF is linear but sits on a large pedestal (sky about 30000 of 65535 in green and blue), so bright cores clip. Each other stack is put on OriginStack's flux scale with one gain per channel, measured where it is linear, and the Origin's clipped stars are left out. Widths are fitted on the same stars in each pair, each image on its own pixel grid, so OriginStack's width differs slightly between the two columns. Noise is measured at the scale of a star (high-passed, then smoothed with a star-sized kernel): with stars this oversampled, per-pixel noise mostly reflects how much a stack smooths, not what you can see. Each noise ratio rests on a fitted gain, so read it as ±5-10%.
+- **Not shown in the table:** the Origin removes background gradients before saving its TIFF; OriginStack does that in post-processing (its linear stack still shows them), and Siril's script here does no post-processing. The finished images differ in rendering too: this comparison found two faults in OriginStack's (a speckled sky on small targets and blue saturated stars), fixed and re-measured. Four sessions from one telescope are a small sample.
 
 ### Native (Rust) acceleration
 
