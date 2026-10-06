@@ -46,6 +46,8 @@ packaging/.build_venv/
 # Images used by the project website (docs/index.html)
 !docs/img/*.jpg
 !docs/img/*.png
+# Example results shown on the desktop app's target cards.
+!src/data/examples/*.jpg
 
 # Temporary files
 *.tmp

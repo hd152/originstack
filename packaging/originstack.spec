@@ -30,6 +30,10 @@ datas += [(str(ROOT / 'VERSION'), '.')]
 # relative to its own __file__, so PyInstaller's module graph never sees the
 # file. ~11 MB. No onnxruntime in the bundle -- inference is fully native.
 datas += [(str(ROOT / 'src' / 'data' / 'originvision.onnx'), 'src/data')]
+# The --transient-triage model, loaded by path the same way (src/transient_triage.py).
+datas += [(str(ROOT / 'src' / 'data' / 'transient_triage.onnx'), 'src/data')]
+# Example results on the desktop app's target cards (src/desktop_app.py, by path).
+datas += [(str(ROOT / 'src' / 'data' / 'examples'), 'src/data/examples')]
 
 # The window icon. The EXE resource below sets the taskbar/Explorer icon, but
 # desktop_app.py also calls root.iconbitmap() with a path relative to its own

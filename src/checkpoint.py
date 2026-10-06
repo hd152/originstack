@@ -31,7 +31,9 @@ _P23_EXTRA = ('consensus_ref', 'drizzle_psf_wiener_k', 'esd_max_outliers', 'esd_
               'no_alignment_centrality', 'no_shift_outlier_filter', 'patch_registration',
               'percentile_high', 'percentile_low', 'rejection_estimator',
               'skip_phase_correlation', 'wavelet_combine_levels', 'weight_fwhm',
-              'weight_noise', 'weight_snr', 'weight_stars')
+              'weight_noise', 'weight_snr', 'weight_stars',
+              # Core flag, but --auto derives the stacking settings from it.
+              'target_type')
 # In the Phases 2-3 group but only read by Phase 4 / the preview.
 _P23_IGNORE = ('error_aware_stretch', 'uncertainty_propagate', 'uncertainty_realizations')
 
