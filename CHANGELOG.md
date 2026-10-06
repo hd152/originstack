@@ -6,6 +6,35 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-05
+
+### Changed
+
+- **Colour-preserving stretch, on by default** (`--stretch-color channel` restores the old
+  per-channel curve): hue error on bright pixels drops from 3-7.5 degrees to ~0.05 degrees, and
+  star colours track the linear stack more closely on all six benchmark stacks.
+  **Expect different output.**
+- **Star reduction now narrows stars** instead of blurring them: stars come out at 0.84-0.87x their
+  linear width, where the old halo blur widened them 6-18%.
+- **Gaia colour calibration runs by default** on the linear stack before post-processing
+  (`--no-color-calibrate` to turn off): a G2V star renders within +-0.03 mag of white on 4 of 5
+  test stacks (the Crab is still off). **Expect different colour balance.**
+- **Anisotropic diffusion's threshold is 1.0x the measured sky sigma** instead of a fixed 30 ADU,
+  which ranged from 0.3 to 3 sigma depending on the session.
+- **originvision scoring is now opt-in** (`--originvision`); it was on by default. Old command
+  lines with `--no-originvision` and saved configs with `originvision = true` keep working.
+
+### Fixed
+
+- **Galaxies covering a large part of the frame no longer come out as a saturated red slab with
+  dark holes beside it.** With `--galaxy-mode`'s exclusion over a centre-peaked, colour-dependent
+  vignetting, background extraction could only extend the rim's trend inward. When the exclusion
+  covers 10% or more of the frame, the background under it is now a vignetting-shaped radial fit
+  (a real M33 stack: large-scale chroma mottle 26.4 -> 4.9).
+- The old `--color-calibrate` wrote the post-processed image into the linear (`RAWSTACK`) FITS.
+- `--from-stack`'s early-step cache ignored changes to the stack's pixels.
+- An astropy warning race could report "no usable WCS" on a stack that had one.
+
 ## [2.4.0] - 2026-10-02
 
 ### Added
