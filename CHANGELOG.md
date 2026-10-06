@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-06
+
 ### Fixed
 
 - **Faint targets no longer render as a field of white speckles.** The preview's white point was
@@ -19,8 +21,26 @@ match the `VERSION` file and `v*` git tags.
   saturated star cores, which are clipped equally in R/G/B, so every bright star turned the colour
   of the gain ratio (blue, with the gains these sessions get). Cores near a clipped plateau now stay
   neutral, in the post-processed image and in the saved linear FITS.
+- Desktop app: Deconvolution was missing from the main form (it was listed under the wrong
+  option name), and of the two "Cosmic ray rejection" checkboxes the visible one did nothing.
+- Desktop app: a blank Output file saved the stack in the folder the app was started from (the
+  install folder, for the packaged app); it now goes next to the light-frames folder, never
+  overwriting an earlier stack.
+- The packaged app now includes the `--transient-triage` model; without it the feature switched
+  itself off.
 
 ### Added
+
+- **Desktop app: "What did you image?" and "How should it run?"** Picture cards for Auto-detect,
+  Galaxy, Nebula, Star cluster, Star field and Comet (choosing a folder marks the card its session
+  file or header suggests), and Full quality or Quick look. Before a run the preview shows an
+  example result for the target and a **This run** panel says what Start will do.
+- **Desktop app: easier settings.** A one-line description under every setting, a marker and a
+  reset link on anything changed from its default, a count of changed hidden settings, and a search
+  box across all of them. The settings scroll in their own pane, so Start and the log stay visible.
+- **`--target-type`** (galaxy, emission_nebula, reflection_nebula, planetary_nebula,
+  globular_cluster, star_field, wide_field): tell `--auto` what you imaged instead of letting it
+  infer the type; it still tunes from the frames.
 
 - **`tools/bench_vs_origin.py`**: compares a stack with the Celestron Origin's own
   `FinalStackedMaster.tiff` (star width on the same stars, noise at star scale, side-by-side PNG);
