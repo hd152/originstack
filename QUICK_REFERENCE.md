@@ -157,7 +157,6 @@ Frame 003 likely had a focus adjustment or brief cloud. The quality filter rejec
 | Layered preview stretch | ❌ | `--layered-stretch` |
 | Plate solving | ❌ | `--plate-solve` |
 | Galaxy exclusion masking | auto for galaxy targets | `--galaxy-mode` / `--galaxy-center X,Y` |
-| originvision-assisted classification | ❌ | `--originvision` (bundled model, native inference) |
 
 ---
 

@@ -165,8 +165,8 @@ for _m in ["tqdm", "psutil", "cupy"]:
     except Exception:
         sys.modules.setdefault(_m, types.ModuleType(_m))
 
-# Same conditional treatment as astropy above: seven other test modules
-# (test_aberration, test_annotation, test_io_xisf, test_originvision,
+# Same conditional treatment as astropy above: six other test modules
+# (test_aberration, test_annotation, test_io_xisf,
 # test_self_supervised_calibration, test_tiff_export_pillow_fallback,
 # test_ui_events) use real Pillow, and a leaked stub whose Image.fromarray
 # returns a MagicMock would break them depending only on import order.

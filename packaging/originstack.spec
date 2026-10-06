@@ -25,12 +25,9 @@ for pkg in ('rawpy',):
 
 datas += [(str(ROOT / 'VERSION'), '.')]
 
-# The bundled originvision model. astro_native.originvision_score (pure-Rust
-# tract) loads it by path; src/originvision_infer.py resolves that path
-# relative to its own __file__, so PyInstaller's module graph never sees the
-# file. ~11 MB. No onnxruntime in the bundle -- inference is fully native.
-datas += [(str(ROOT / 'src' / 'data' / 'originvision.onnx'), 'src/data')]
-# The --transient-triage model, loaded by path the same way (src/transient_triage.py).
+# The --transient-triage model. astro_native.transient_triage_score (pure-Rust
+# tract) loads it by a path src/transient_triage.py resolves relative to its own
+# __file__, so PyInstaller's module graph never sees the file.
 datas += [(str(ROOT / 'src' / 'data' / 'transient_triage.onnx'), 'src/data')]
 # Example results on the desktop app's target cards (src/desktop_app.py, by path).
 datas += [(str(ROOT / 'src' / 'data' / 'examples'), 'src/data/examples')]

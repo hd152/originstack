@@ -4,13 +4,10 @@
 astro_native.transient_triage_score / src/transient_triage.py).
 
 ``torch`` is a script-local optional dependency, not part of this project's
-runtime dependencies -- model training happens outside the shipped package,
-the same stance ``src/data/originvision.onnx`` itself was trained under (see
-vendor/originvision/README.md).
+runtime dependencies -- model training happens outside the shipped package.
 
 The model is deliberately small (a handful of conv layers) given the tiny
-31x31x3 input and a synthetic-only training set -- there is no reason to
-reach for originvision's 256x256-real-photograph-classifier capacity here.
+31x31x3 input and a synthetic-only training set.
 
 Usage:
     pip install torch onnx
@@ -31,8 +28,7 @@ except ImportError as exc:  # pragma: no cover - environment-dependent
     raise SystemExit(
         "tools/train_transient_triage.py needs torch, which is not part of "
         "this project's runtime dependencies (model training happens outside "
-        "the shipped package -- see vendor/originvision/README.md for the "
-        "same stance on originvision.onnx). Install it with: pip install torch"
+        "the shipped package). Install it with: pip install torch"
     ) from exc
 
 
@@ -138,8 +134,7 @@ def main():
 
     # Lightweight provenance metadata -- astro_native's kernel doesn't read
     # it (it takes `size` as an explicit call argument and applies sigmoid
-    # itself), but it mirrors originvision.onnx's own metadata_props and
-    # matters for a future re-train/re-sync. Best-effort: onnx is not a
+    # itself), but it records how the model was made, for a future re-train. Best-effort: onnx is not a
     # project dependency either.
     try:
         import onnx
