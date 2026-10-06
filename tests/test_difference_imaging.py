@@ -559,7 +559,7 @@ class TestRunTransientDetection(unittest.TestCase):
     def test_triage_requested_but_unavailable_does_not_crash(self):
         """--transient-triage without a native backend/model self-disables
         with a warning (checked via the returned real_probability, not the
-        log) rather than raising -- mirrors --originvision's own gate."""
+        log) rather than raising."""
         import src.transient_triage as tt_mod
         had = tt_mod._HAS_NATIVE_TRIAGE
         tt_mod._HAS_NATIVE_TRIAGE = False

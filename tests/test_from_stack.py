@@ -38,7 +38,7 @@ def test_runs_phase4_writes_preview_and_leaves_input_alone(tmp_path):
     src = str(tmp_path / 'm51.fits')
     _linear_stack(src)
     before = open(src, 'rb').read()
-    args = _args(['--from-stack', src, '--no-originvision', '--stretch', 'arcsinh'])
+    args = _args(['--from-stack', src, '--stretch', 'arcsinh'])
     assert args.output == str(tmp_path / 'm51_reprocessed.fits')
     out = postprocess_from_stack(src, args.output, args)
     assert out.shape == (160, 200, 3)
@@ -60,7 +60,7 @@ def test_uses_the_earlier_runs_config_with_cli_overrides(tmp_path):
 def test_refuses_a_post_processed_or_same_path_output(tmp_path):
     src = str(tmp_path / 'done.fits')
     _linear_stack(src, rawstack=False)
-    args = _args(['--from-stack', src, '--no-originvision'])
+    args = _args(['--from-stack', src])
     with pytest.raises(ValueError, match='RAWSTACK'):
         postprocess_from_stack(src, args.output, args)
     src2 = str(tmp_path / 'ok.fits')
@@ -74,7 +74,7 @@ def test_early_phase4_cache_hit_matches_and_settings_invalidate(tmp_path, capsys
     _linear_stack(src, seed=3)
     outs = []
     for extra in ([], ['--stretch', 'ghs'], ['--bg-method', 'mesh']):
-        args = _args(['--from-stack', src, '--no-originvision'] + extra)
+        args = _args(['--from-stack', src] + extra)
         capsys.readouterr()
         outs.append(postprocess_from_stack(src, args.output, args))
         outs[-1] = (outs[-1], 'reused from' in capsys.readouterr().out)
@@ -82,7 +82,7 @@ def test_early_phase4_cache_hit_matches_and_settings_invalidate(tmp_path, capsys
     assert not hit0 and hit1 and not hit2          # stretch is late; bg method is early
     assert os.path.exists(str(tmp_path / 'm33_phase4cache.pkl'))
     # a cache hit reproduces the early steps exactly (only the late ones differ here)
-    args = _args(['--from-stack', src, '--no-originvision'])
+    args = _args(['--from-stack', src])
     again = postprocess_from_stack(src, args.output, args)
     np.testing.assert_array_equal(again, first)
 

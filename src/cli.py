@@ -841,9 +841,7 @@ def _restore_args(args: argparse.Namespace, baseline: dict) -> None:
     later, so a stale one leaks exactly like the skip_step bug above, one
     layer further out: ``_ptc_gain_e_per_adu`` (set only when that target had
     bias + flat pairs) would hand a calibration-less target the previous
-    target's measured gain for --photometry's Poisson term, and
-    ``_originvision_defect_flagged`` would nudge a clean session into
-    --trail-reject because a previous one was trailed.
+    target's measured gain for --photometry's Poisson term.
     """
     for key in set(vars(args)) - set(baseline):
         delattr(args, key)
@@ -1344,6 +1342,17 @@ def _realization_count(text: str) -> int:
     return value
 
 
+
+class _RemovedFlag(argparse.Action):
+    """A flag whose feature was removed: accepted (and any value consumed) so
+    old command lines keep parsing, recorded on ``args._removed_flags`` for a
+    single notice, otherwise ignored."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        flags = set(getattr(namespace, '_removed_flags', None) or ())
+        flags.add(option_string)
+        namespace._removed_flags = flags
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description='Streaming FITS stacker')
     g_core = p.add_argument_group('Core')
@@ -1355,7 +1364,6 @@ def build_parser() -> argparse.ArgumentParser:
     g_comet = p.add_argument_group('Comet mode')
     g_adv = p.add_argument_group('Advanced (most are managed automatically by --auto)')
     g_debug = p.add_argument_group('Diagnostics & debugging')
-    g_originvision = p.add_argument_group('originvision scoring (advisory)')
     g_core.add_argument('-d', '--directory', default=None,
                    help='Session folder of light frames (required unless --from-stack).')
     g_core.add_argument('-o', '--output', default=None,
@@ -1976,53 +1984,17 @@ def build_parser() -> argparse.ArgumentParser:
                         'accepted, rejection_reason)')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
-    # Opt-in since 2026-10 (was on by default). The old opt-out stays accepted
-    # as a hidden no-op so existing command lines keep working. It is added
-    # *before* --originvision: desktop_control.py's _dest_action_map keys on
-    # dest and the last action wins, so the form gets the visible flag (hidden
-    # SUPPRESS actions are left out of the form itself); argparse takes the
-    # default from the first action, hence default=False on both.
-    g_originvision.add_argument('--no-originvision', dest='originvision', action='store_false',
-                   default=False, help=argparse.SUPPRESS)
-    g_originvision.add_argument('--originvision', dest='originvision', action='store_true',
-                   default=False,
-                   help='Enable originvision scoring (defect/quality/category classifier, off '
-                        'by default). Scores the final stacked master in-process against the '
-                        'bundled model (src/data/originvision.onnx -- no external folder or '
-                        'venv). Inference is the native astro_native kernel (pure-Rust tract, '
-                        'nothing extra to install); a source checkout without astro_native '
-                        'falls back to a Python onnxruntime path -- and self-disables with a '
-                        'warning if neither backend nor the model file is available. When '
-                        '--auto is also active (the default), also samples 3 light frames '
-                        'spread through the session: the sampled category feeds the same '
-                        'target-classification prior SIMBAD/header metadata uses, and a defect '
-                        'flag nudges settings defensively (trail-reject, stronger chroma '
-                        'denoising) -- never auto-rejects a frame. Pair with '
-                        '--originvision-score-all to also score every accepted frame (slower '
-                        'on a large session).')
-    g_originvision.add_argument('--originvision-score-all', action='store_true',
-                   help='Also score every accepted light frame with originvision (not just '
-                        'the fast 3-frame sample --originvision always does), logging advisory '
-                        'per-frame defect/stray-light flags and below-average quality_score '
-                        'outliers. Slower on a large session (a decode + debayer + stretch + '
-                        'resize + forward pass per frame). Requires --originvision.')
-    g_originvision.add_argument('--originvision-model', default=None, metavar='PATH',
-                   help='Path to an exported originvision ONNX model, overriding the bundled '
-                        'src/data/originvision.onnx (e.g. to test a newer checkpoint).')
-    g_originvision.add_argument('--originvision-workers', type=int, default=8, metavar='N',
-                   help='Thread-pool size for per-frame originvision scoring calls (default: 8). '
-                        'Both backends release the GIL during the forward pass (the native '
-                        'tract kernel via py.allow_threads), so a thread pool parallelises it '
-                        'without a ProcessPoolExecutor -- measured near-linear scaling 1->8 '
-                        'workers on a real frame (2751 -> 473 ms/frame effective at 8), so the '
-                        'previous default of 2 (1415 ms/frame) left real throughput on the table.')
-    # Back-compat, hidden: --originvision-dir / --originvision-checkpoint still
-    # resolve a model path for command lines written against the pre-in-process
-    # layout.
-    g_originvision.add_argument('--originvision-dir', default=os.environ.get('ORIGINVISION_DIR'),
-                   metavar='DIR', help=argparse.SUPPRESS)
-    g_originvision.add_argument('--originvision-checkpoint', default=None, metavar='PATH',
-                   help=argparse.SUPPRESS)
+    # originvision (the bundled defect/quality/category classifier) was removed
+    # in 2.6. Its flags stay accepted, hidden, so old command lines and saved
+    # _config.toml files keep working; apply_post_parse_setup prints one notice.
+    p.add_argument('--originvision', '--no-originvision', dest='originvision',
+                   action=_RemovedFlag, nargs=0, default=False, help=argparse.SUPPRESS)
+    p.add_argument('--originvision-score-all', dest='originvision_score_all',
+                   action=_RemovedFlag, nargs=0, default=False, help=argparse.SUPPRESS)
+    for _flag in ('--originvision-model', '--originvision-workers', '--originvision-dir',
+                  '--originvision-checkpoint'):
+        p.add_argument(_flag, action=_RemovedFlag, nargs=1, default=None,
+                       help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['auto', 'local', 'astap', 'astrometry'],
                    default='auto',
                    help='Plate solver backend. auto (default): the built-in solver against a '
@@ -2539,44 +2511,9 @@ def parse_args(argv=None):
     args.keep_intermediates = 'intermediates' in _dbg
     args.export_masks = 'masks' in _dbg
 
-    if args.originvision:
-        from src.originvision_infer import backend_name, resolve_model_path, scoring_backend_available
-
-        # Back-compat: --originvision-model wins; otherwise honour the old
-        # --originvision-checkpoint, then derive from --originvision-dir's layout.
-        if not args.originvision_model:
-            if args.originvision_checkpoint:
-                args.originvision_model = args.originvision_checkpoint
-            elif args.originvision_dir:
-                args.originvision_model = os.path.join(
-                    args.originvision_dir, 'checkpoints', 'model.onnx')
-
-        if not scoring_backend_available():
-            safe_print("  WARNING: --originvision has no inference backend "
-                       "(build ext/astro_native, or pip install onnxruntime) "
-                       "-- disabling originvision scoring")
-            args.originvision = False
-        elif args.originvision_model and not os.path.isfile(args.originvision_model):
-            # An explicit override that doesn't exist is a hard error -- never
-            # silently fall back to the bundled model (resolve_model_path
-            # would), the user asked for a specific file.
-            safe_print(f"  WARNING: --originvision model not found: {args.originvision_model} "
-                       f"-- disabling originvision scoring")
-            args.originvision = False
-        elif resolve_model_path(args.originvision_model) is None:
-            safe_print("  WARNING: --originvision has no model (bundled "
-                       "src/data/originvision.onnx missing) -- disabling originvision scoring")
-            args.originvision = False
-        else:
-            safe_print(f"  originvision: {backend_name()} backend")
-
-    if getattr(args, 'originvision_score_all', False) and not args.originvision:
-        # Covers both "never passed --originvision" and "--originvision got disabled
-        # just above for missing/bad paths" -- either way score_all's own
-        # gate (originvision AND originvision_score_all, checked in src/originvision.py
-        # too) makes it a silent no-op otherwise, which is easy to mistake
-        # for "ran but found nothing" rather than "didn't run at all".
-        safe_print("  WARNING: --originvision-score-all has no effect without --originvision")
+    if getattr(args, '_removed_flags', None):
+        safe_print("  NOTE: originvision scoring was removed in 2.6; ignoring "
+                   + ', '.join(sorted(args._removed_flags)) + ".")
 
     if getattr(args, 'target_type', None) and not getattr(args, 'auto', True):
         safe_print("  WARNING: --target-type has no effect with --no-auto")

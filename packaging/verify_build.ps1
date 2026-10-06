@@ -88,11 +88,6 @@ if (-not (Test-Path $synthDir)) { throw "synthetic_data was not created -- canno
 $outPath = "$env:TEMP\originstack_verify_out.fits"
 $headlessLog = "$env:TEMP\originstack_verify_stdout.txt"
 if (Test-Path $headlessLog) { Remove-Item $headlessLog -Force }
-# originvision runs by default now (--no-originvision to disable; no positive
-# flag exists, see cli.py) and exercises the bundled native scorer
-# (astro_native.originvision_score + src/data/originvision.onnx). It
-# self-disables with a warning if either is missing from the frozen build --
-# asserted absent below.
 $headlessArgs = @('--verify-headless', '-d', (Resolve-Path $synthDir).Path, '-o', $outPath,
                   '--parallel', '4', '--debayer-method', 'malvar',
                   '--white-balance', 'grayworld', '--stack-method', 'median')
@@ -119,16 +114,6 @@ if (-not (Test-Path $outPath)) {
     throw "--verify-headless did not produce $outPath -- run failed (check console/log output above)"
 }
 Write-Host "Phase 1 multiprocessing check passed (no extra GUI windows)"
-
-# Bundled originvision scorer: must not have self-disabled in the frozen build.
-if (Test-Path $headlessLog) {
-    $astroLog = Get-Content $headlessLog -Raw
-    if ($astroLog -match 'disabling originvision scoring') {
-        throw "--originvision self-disabled in the packaged build -- the native " +
-              "astro_native.originvision_score kernel or src/data/originvision.onnx is missing"
-    }
-    Write-Host "Bundled --originvision scorer loaded (no self-disable warning)"
-}
 
 # ── 3. Graceful shutdown: confirm nothing is left running ─────────────────
 Get-Process -Name $exeName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue

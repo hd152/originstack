@@ -55,15 +55,9 @@ SYNTH="$ROOT/synthetic_data"
 [ -d "$SYNTH" ] || ( cd "$ROOT" && "$PY" tools/create_synthetic.py )
 [ -d "$SYNTH" ] || { echo "ERROR: synthetic_data was not created" >&2; exit 1; }
 OUT="$STATE/verify_out.fits"
-# originvision runs by default now (--no-originvision to disable; no positive
-# flag exists, see cli.py) and exercises the bundled native scorer and model file.
 "$EXE" --verify-headless -d "$SYNTH" -o "$OUT" --parallel 4 --debayer-method malvar \
     --white-balance grayworld --stack-method median >"$STATE/headless.out" 2>&1 || {
     echo "ERROR: --verify-headless failed"; tail -40 "$STATE/headless.out"; exit 1; }
 [ -s "$OUT" ] || { echo "ERROR: --verify-headless did not produce $OUT"; tail -40 "$STATE/headless.out"; exit 1; }
-if grep -qi "originvision.*\(disabled\|unavailable\|not found\)" "$STATE/headless.out"; then
-    echo "ERROR: --originvision self-disabled in the frozen build (native scorer or model missing)"
-    grep -i originvision "$STATE/headless.out" | head; exit 1
-fi
 echo "Headless stack passed ($(stat -c %s "$OUT") bytes)"
 echo "Linux build verified."

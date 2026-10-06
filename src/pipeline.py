@@ -180,42 +180,31 @@ def _export_frame_jpegs(final: List[FrameInfo], final_indices: List[int],
 
 def _prefetch_session_lookups(lights: List[FrameInfo], args, directory: str,
                               use_simbad: bool):
-    """Start target inference (a SIMBAD lookup: ~1.3 s of network) and the originvision
-    session sample (~0.9 s) in background threads before Phase 1: both read only headers
-    and raw files, and they used to run on the critical path after it. Returns the
-    futures for ``_infer_target_and_advise(prefetched=...)``."""
+    """Start target inference (a SIMBAD lookup: ~1.3 s of network) in a background
+    thread before Phase 1: it reads only headers, and it used to run on the critical
+    path after it. Returns the future for ``_infer_target_and_advise(prefetched=...)``."""
     from concurrent.futures import ThreadPoolExecutor
 
     from src.target_inference import infer_target_from_metadata
     _si = getattr(args, '_session_info', None)
-    ex = ThreadPoolExecutor(max_workers=2, thread_name_prefix='prefetch')
+    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix='prefetch')
     fut_t = ex.submit(infer_target_from_metadata, directory, list(lights), use_simbad=use_simbad,
                       session_name=_si.object_name if _si else None)
-    fut_o = None
-    if getattr(args, 'originvision', False) and getattr(args, 'auto', False):
-        from src.originvision import session_sample_results
-        fut_o = ex.submit(session_sample_results, list(lights), args)
     ex.shutdown(wait=False)
-    return fut_t, fut_o
+    return fut_t
 
 
 def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
                              use_simbad: bool, prefetched=None) -> None:
-    """Target inference, the originvision session prior, then the
-    auto-advisor: the sequence every path into Phases 2-4 must run, fresh or
-    resumed from any checkpoint phase.
+    """Target inference, then the auto-advisor: the sequence every path into
+    Phases 2-4 must run, fresh or resumed from any checkpoint phase.
 
-    Inference always runs (the result is written to the FITS header). With
-    --originvision + --auto, a fast 3-frame sample
-    (``sample_session_priors``, not the full-session scorer) feeds the same
-    prior_type/prior_confidence boost as the metadata inference, taking over
-    only when it is more confident -- e.g. a dense star field where metadata
-    gave nothing but originvision still recognizes the galaxy -- and stashes
-    a defect flag for ``_apply_quality_settings``' defensive nudge.
+    Inference always runs (the result is written to the FITS header); its
+    type and confidence are the advisor's prior.
     """
     from src.target_inference import infer_target_from_metadata
     _si = getattr(args, '_session_info', None)
-    fut_t, fut_o = prefetched if prefetched is not None else (None, None)
+    fut_t = prefetched
     try:
         name, ttype, conf, src = fut_t.result() if fut_t is not None else (None,) * 4
     except Exception:
@@ -224,8 +213,7 @@ def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
         name, ttype, conf, src = infer_target_from_metadata(
             directory, final, use_simbad=use_simbad,
             session_name=_si.object_name if _si else None)
-    # --target-type: the user said what it is. Full confidence, so neither
-    # the metadata guess nor the originvision sample below can displace it.
+    # --target-type: the user said what it is, at full confidence.
     if getattr(args, 'target_type', None):
         ttype, conf, src = args.target_type, 1.0, 'user'
     args._inferred_target = name
@@ -239,24 +227,7 @@ def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
         safe_print(f"\n  Target: {name} [{ttype.replace('_', ' ').title()}]  "
                    f"conf={conf:.0%}  source={src}")
 
-    prior_type, prior_conf = ttype, conf
-    if getattr(args, 'originvision', False) and getattr(args, 'auto', False):
-        from src.originvision import map_originvision_category, sample_session_priors, summarize_session_sample
-        if fut_o is not None:
-            try:
-                result = summarize_session_sample(fut_o.result())
-            except Exception:
-                result = sample_session_priors(final, args)
-        else:
-            result = sample_session_priors(final, args)
-        if result:
-            args._originvision_defect_flagged = result.get('defect_flagged', False)
-            mapped_type = map_originvision_category(result.get('category'))
-            mapped_conf = result.get('category_confidence', 0.0)
-            if mapped_type and mapped_conf > prior_conf:
-                prior_type, prior_conf = mapped_type, mapped_conf
-
-    _run_auto_advisor(final, args, prior_type=prior_type, prior_confidence=prior_conf)
+    _run_auto_advisor(final, args, prior_type=ttype, prior_confidence=conf)
 
 
 def _run_auto_advisor(final: List[FrameInfo], args,
@@ -845,7 +816,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 save_checkpoint(output_path, phase=1, lights=lights, final=final, stats=stats,
                                 fingerprint=_ckpt_fp)
 
-                # Target inference + originvision prior + auto-advisor.
+                # Target inference + auto-advisor.
                 _infer_target_and_advise(
                     final, args, _directory,
                     use_simbad=not getattr(args, 'offline', False), prefetched=_prefetched)
@@ -854,18 +825,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 print('\n  ERROR: No accepted frames after checkpoint restore!')
                 mm_mgr.cleanup()
                 return None
-
-            # Runs here (not inside the branches above) so it fires exactly
-            # once regardless of whether Phase 1 just ran or was restored
-            # from a checkpoint -- lights[*].accepted is mutated in place by
-            # restore_frame_state either way. Opt-in separately from plain
-            # --originvision (--originvision-score-all): scoring every accepted frame
-            # is a decode + debayer + stretch + resize + forward pass each,
-            # which adds up on a large session -- --originvision alone only pays
-            # that cost 3x total, via sample_session_priors above.
-            if getattr(args, 'originvision', False) and getattr(args, 'originvision_score_all', False):
-                from src.originvision import score_lights_with_originvision
-                score_lights_with_originvision(lights, args)
 
             # ======================================================================
             # PHASE 2: Registration
@@ -1586,19 +1545,6 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
                      starless=_preview_starless,
                      color=getattr(args, 'stretch_color', 'preserve'))
-
-    if getattr(args, 'originvision', False):
-        # originvision_infer's FITS path assumes a raw (undebayered) single-plane
-        # Bayer light frame -- our output FITS is an already-debayered
-        # (3, H, W) RGB cube, which its single-frame debayer would mangle.
-        # Score whichever already-rendered non-FITS image is available
-        # instead: the linear TIFF export when present (--export tiff), else
-        # the preview JPEG this call just wrote (always available, stretched).
-        from src.originvision import score_master_with_originvision
-        _tiff_path = os.path.splitext(output_path)[0] + '.tiff'
-        _master_image = _tiff_path if getattr(args, 'output_tiff', False) else preview_path
-        score_master_with_originvision(_master_image, args,
-                                   getattr(args, '_inferred_type', None))
 
     if getattr(args, 'annotate', False):
         if _wcs_available:

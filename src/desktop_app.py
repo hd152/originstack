@@ -259,7 +259,7 @@ class ScrollableFrame(ttk.Frame):
 # the other ~110 flags are fine-tuning most runs never need.
 _COMMON_DESTS = ['directory', 'output', 'auto', 'stack_method',
                  'denoiser', 'deconvolve_mode', 'drizzle_scale', 'trail_reject',
-                 'use_gpu', 'parallel', 'originvision']
+                 'use_gpu', 'parallel']
 
 # Human field labels. Anything not listed falls back to the dest name with
 # underscores spaced and the first letter capitalised ("stack_method" ->
@@ -269,7 +269,6 @@ _FIELD_LABELS = {
     'output': 'Output file',
     'parallel': 'Workers',
     'use_gpu': 'Use GPU',
-    'originvision': 'originvision scoring',
     'trail_reject': 'Trail rejection',
     'drizzle_scale': 'Drizzle scale',
     'plate_solve': 'Plate solve',
@@ -289,7 +288,7 @@ _FIELD_LABELS = {
 # Groups and fields hidden until "Show expert options" is ticked: fine-tuning
 # that --auto manages, diagnostics, and features the project's own testing
 # found not to help on typical data. The CLI is unaffected.
-_EXPERT_GROUP_PREFIXES = ('Advanced', 'Diagnostics', 'originvision')
+_EXPERT_GROUP_PREFIXES = ('Advanced', 'Diagnostics')
 _EXPERT_DESTS = {'cfa_drizzle', 'nmf_separate', 'starless_process', 'layered_stretch',
                  'bg_method', 'fix_atmospheric_dispersion', 'distortion_model'}
 

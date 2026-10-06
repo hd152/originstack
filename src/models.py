@@ -223,10 +223,6 @@ class Config:
                                      # range, so 0.02 is a conservative middle default,
                                      # not a hard optimum
 
-    # originvision (in-process defect/quality/category classifier, --originvision)
-    ORIGINVISION_OUTLIER_SIGMA = 2.0    # Session-relative quality_score flag threshold
-                                     # (advisory logging only -- see src/originvision.py)
-
 
 @dataclass
 class FrameInfo:

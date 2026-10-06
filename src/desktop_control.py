@@ -62,8 +62,6 @@ _FIELD_SUMMARIES: Dict[str, str] = {
     'trail_reject': 'Find and erase satellite and aircraft trails in each frame.',
     'use_gpu': 'Use an NVIDIA GPU (CuPy) where it helps. Usually no faster on small cards.',
     'parallel': 'Frames processed at once. 0 = automatic, 1 = one at a time.',
-    'originvision': 'Score a few frames with the bundled image classifier '
-                    '(advisory; nudges --auto).',
     'debayer_method': 'How colour is rebuilt from the sensor mosaic. rcd is sharpest and quietest.',
     'white_balance': 'How the colour balance of each frame is set before stacking.',
     'verbose': 'Print more detail in the log.',

@@ -6,8 +6,7 @@ registration-slip dipoles and hot pixels all surface as candidates alongside
 genuine transients. This scores each candidate with a small CNN -- the same
 role ZTF's BTSbot / Rubin's DIA triage play downstream of classical image
 differencing -- and attaches a ``real_probability`` to it. Advisory only: it
-never drops a candidate, exactly like ``originvision.py`` never touches
-``FrameInfo.accepted``/``metrics['score']``.
+never drops a candidate.
 
 Native-only for now, deliberately -- unlike every other native kernel in this
 project, there is no numpy/onnxruntime fallback yet (see the module docstring
@@ -100,9 +99,8 @@ def build_stamps(new_lum: np.ndarray, ref_lum: np.ndarray,
     Channels are ``new``, ``ref``, ``difference`` (the standard real/bogus
     "triplet"), each normalized by its own frame-level robust sigma so a
     candidate's stamp is architecture-agnostic across sessions of different
-    noise level -- not the ``originvision`` percentile stretch, which is for
-    photographic display and would destroy the physical sigma units ZOGY's
-    own significance already relies on.
+    noise level -- not a percentile display stretch, which would destroy the
+    physical sigma units ZOGY's own significance already relies on.
     """
     n = len(positions)
     out = np.zeros((n, 3, size, size), dtype=np.float32)

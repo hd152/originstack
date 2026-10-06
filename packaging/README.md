@@ -28,9 +28,7 @@ windows-x64.zip` for distribution.
 
 Verify the build actually works (launches the real exe, confirms the window
 appears, confirms `astro_native` loaded rather than silently falling back to
-numpy, runs a real stack with multiple parallel workers -- with
-`--originvision` on, so a self-disable warning fails the check if the native
-scorer or `originvision.onnx` didn't make it into the bundle -- and
+numpy, runs a real stack with multiple parallel workers, and
 confirms no extra GUI windows open -- regression guard for a real bug that
 shipped once: a frozen ProcessPoolExecutor worker without
 `multiprocessing.freeze_support()` re-launches the whole app instead of
@@ -46,18 +44,17 @@ Bundled: numpy, astropy, scipy, tqdm, Pillow, psutil, rawpy (camera RAW),
 tifffile (TIFF I/O), tkinter (the desktop app's UI toolkit, stdlib),
 `astro_native` (built from a real `maturin build --release` wheel, not the
 dev-mode `maturin develop` editable install -- see `originstack.spec`'s
-comments for why that distinction matters for PyInstaller), and the
-`src/data/originvision.onnx` model (~11 MB) for `--originvision`.
+comments for why that distinction matters for PyInstaller), the
+`src/data/transient_triage.onnx` model (~100 KB) for `--transient-triage`, and
+the example images on the desktop app's target cards (`src/data/examples/`).
 
 Not bundled:
 - `cupy`/GPU acceleration -- not viable in a generic packaged exe (requires
   the end user's own CUDA install); the app degrades to CPU gracefully
   (`src/gpu_context.py`), so `--use-gpu` isn't available in the packaged
   build.
-- `onnxruntime` -- `--originvision` inference is the native
-  `astro_native.originvision_score` kernel (pure-Rust `tract`) in the
-  packaged app; the Python `onnxruntime` path is only a source-checkout
-  fallback for when `ext/astro_native/` isn't built.
+- `onnxruntime` -- `--transient-triage` inference is the native
+  `astro_native.transient_triage_score` kernel (pure-Rust `tract`).
 
 ## Known limitations
 

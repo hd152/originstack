@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Removed
+
+- **originvision scoring** (`--originvision`, `--originvision-score-all`, `--originvision-model`,
+  `--originvision-workers`): the bundled defect/quality/category classifier, its 11 MB model and
+  its native inference kernel. The flags are still accepted and ignored with a one-line notice,
+  so old command lines and saved configs keep working.
+
 ## [2.5.0] - 2026-10-05
 
 ### Changed

@@ -28,7 +28,6 @@ without it (see `CLAUDE.md`'s "Optional dependencies" section).
 |---|---|---|
 | [rawpy](https://github.com/letmaik/rawpy) | Camera RAW input (`src/io_raw.py`) | MIT (wraps [LibRaw](https://www.libraw.org/), dual LGPL-2.1 / CDDL-1.0 — rawpy's own docs note its GPL2/GPL3 demosaic packs are deliberately excluded as GPL-incompatible with MIT) |
 | [tifffile](https://www.cgohlke.com/) | TIFF input/output (`src/io_tiff.py`, `--export tiff`) | BSD-3-Clause |
-| [onnxruntime](https://onnxruntime.ai/) | `--originvision` inference **fallback** for a source checkout without `astro_native` built (the packaged app uses the native Rust `tract` kernel instead — see the Rust section) | MIT |
 | [CuPy](https://cupy.dev/) | GPU acceleration (`--use-gpu`) | MIT |
 | [Cython](https://cython.org/) | Build dependency for some CuPy wheels (`requirements-gpu.txt`) | Apache-2.0 |
 
@@ -56,16 +55,15 @@ Notable families in that closure:
   Python-binding and array/parallelism layer. MIT OR Apache-2.0 (numpy: BSD-2-Clause).
 - **tract-onnx and its `tract-*` siblings** (`tract-core`, `tract-hir`,
   `tract-linalg`, `tract-data`, `tract-nnef`, `tract-onnx-opl`) — the pure-Rust ONNX
-  inference runtime used by the `--originvision` native kernel (`mod originvision` in
-  `lib.rs`). MIT OR Apache-2.0 (Sonos). Pulls the bulk of the ~147: `prost`/protobuf
+  inference runtime used by the `--transient-triage` native kernel (`mod transient_triage`
+  in `lib.rs`). MIT OR Apache-2.0 (Sonos). Pulls the bulk of the ~147: `prost`/protobuf
   codegen, `smallvec`, `num-*`, `anyhow`, `nom`, `flate2`/`miniz_oxide`, `getrandom`,
   `half`, `scan_fmt`, etc. — all in the permissive set above.
 
 Neither pyo3, tract, nor any of their dependencies are linked into or distributed with
 the Python package unless you build `astro_native` yourself (`maturin develop --release`
 or `maturin build --release`) — see CLAUDE.md for build instructions. The numpy
-fallback path has no Rust dependency at all, and `--originvision` then falls back to
-the Python `onnxruntime` package (MIT, listed under optional dependencies above).
+fallback path has no Rust dependency at all (`--transient-triage` is then unavailable).
 
 ## Validation-only (not distributed, not a runtime dependency)
 
