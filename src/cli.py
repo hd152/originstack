@@ -1976,33 +1976,30 @@ def build_parser() -> argparse.ArgumentParser:
                         'accepted, rejection_reason)')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
-    # Single action, no positive `--originvision` flag -- same reason --auto
-    # (src/cli.py:_UNSUPPORTED... see the --no-auto entry above) has none:
-    # desktop_control.py's get_form_schema()/build_argv_from_form() key
-    # purely on argparse dest, with no dest-collision handling, so two
-    # actions sharing one dest would silently double up the GUI field (a
-    # second tk.Variable, one of them dropped) or pick one arbitrarily in
-    # _dest_action_map's dest->action dict. `--originvision` text on an
-    # existing command line now errors (unrecognized argument) rather than
-    # being a redundant no-op -- deliberate, matching --auto's own
-    # no-positive-flag precedent, not an oversight.
+    # Opt-in since 2026-10 (was on by default). The old opt-out stays accepted
+    # as a hidden no-op so existing command lines keep working. It is added
+    # *before* --originvision: desktop_control.py's _dest_action_map keys on
+    # dest and the last action wins, so the form gets the visible flag (hidden
+    # SUPPRESS actions are left out of the form itself); argparse takes the
+    # default from the first action, hence default=False on both.
     g_originvision.add_argument('--no-originvision', dest='originvision', action='store_false',
-                   default=True,
-                   help='Disable originvision scoring (defect/quality/category classifier, on '
+                   default=False, help=argparse.SUPPRESS)
+    g_originvision.add_argument('--originvision', dest='originvision', action='store_true',
+                   default=False,
+                   help='Enable originvision scoring (defect/quality/category classifier, off '
                         'by default). Scores the final stacked master in-process against the '
                         'bundled model (src/data/originvision.onnx -- no external folder or '
                         'venv). Inference is the native astro_native kernel (pure-Rust tract, '
                         'nothing extra to install); a source checkout without astro_native '
                         'falls back to a Python onnxruntime path -- and self-disables with a '
-                        'warning if neither backend nor the model file is available, so this '
-                        'runs cleanly either way. When --auto is also active (the default -- '
-                        'pass --no-auto to disable), also samples 3 light frames spread through '
-                        'the session: the sampled category feeds the same target-classification '
-                        'prior SIMBAD/header metadata uses, and a defect flag nudges settings '
-                        'defensively (trail-reject, stronger chroma denoising) -- never '
-                        'auto-rejects a frame, this model is still finishing its first training '
-                        'run. Pair with --originvision-score-all to also score every accepted '
-                        'frame (slower on a large session).')
+                        'warning if neither backend nor the model file is available. When '
+                        '--auto is also active (the default), also samples 3 light frames '
+                        'spread through the session: the sampled category feeds the same '
+                        'target-classification prior SIMBAD/header metadata uses, and a defect '
+                        'flag nudges settings defensively (trail-reject, stronger chroma '
+                        'denoising) -- never auto-rejects a frame. Pair with '
+                        '--originvision-score-all to also score every accepted frame (slower '
+                        'on a large session).')
     g_originvision.add_argument('--originvision-score-all', action='store_true',
                    help='Also score every accepted light frame with originvision (not just '
                         'the fast 3-frame sample --originvision always does), logging advisory '
