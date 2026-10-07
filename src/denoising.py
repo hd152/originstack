@@ -593,12 +593,21 @@ def generalized_hyperbolic_stretch(
     return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
-# Percentile at which the local-contrast detail source is clipped, so a bright
-# star's flux cannot smear outward through the blur and carve a dark ring in
-# the nebulosity around it. Chosen by measurement on a real stack: p99 cuts the
-# ring from -6.1% to -0.5% while keeping ~81% of the contrast gain; p97/p95
-# remove the ring entirely but progressively undo the enhancement itself.
+# Percentile, among the pixels clearly above sky, at which the local-contrast
+# detail source is clipped, so a bright star's flux cannot smear outward through
+# the blur and carve a dark ring in the nebulosity around it. Also the
+# percentile at which the mid-tone mask's highlight protection starts.
 _DETAIL_CLIP_PERCENTILE = 99.0
+# Noise coring of each detail layer: |detail| below LO x its own sky sigma gets
+# no boost, above HI gets the full boost, linear in between.
+_LC_CORE_LO, _LC_CORE_HI = 1.0, 3.0
+
+
+def _robust_sigma(x: np.ndarray) -> float:
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return 0.0
+    return float(1.4826 * np.median(np.abs(x - np.median(x))))
 
 
 def multiscale_local_contrast(
@@ -609,94 +618,106 @@ def multiscale_local_contrast(
         star_mask: Optional[np.ndarray] = None,
         detail_clip_percentile: Optional[float] = _DETAIL_CLIP_PERCENTILE
         ) -> np.ndarray:
-    """Multiscale local contrast enhancement (MLCE) for galaxy structure.
+    """Multiscale local contrast enhancement (MLCE) for galaxy/nebula structure.
 
-    Applies luminance-domain unsharp masking simultaneously at fine, medium,
-    and coarse spatial scales with a mid-tone protection mask that:
+    Luminance-domain unsharp masking at fine, medium and coarse scales, applied
+    through a mid-tone mask (0 on sky, 1 on the object, back to 0 on the
+    brightest cores) and RGB rebuilt by the luminance ratio (hue kept).
 
-      • Suppresses enhancement in the sky background (avoids amplifying noise).
-      • Protects bright nuclei and star cores from ringing or blowout.
-      • Focuses full enhancement on the mid-tone range where galaxy spiral arms,
-        dust lanes, and star-forming regions live.
+    Three things keep it from amplifying noise (measured with
+    ``tools/bench_phase4.py`` on Sunflower, Whirlpool and Crab stacks, 2026-10;
+    the earlier version raised display sky noise 1.77x / 1.79x / 1.18x and
+    added *no* structure to the two galaxies):
 
-    For the Black Eye Galaxy (M64) the medium scale (σ ≈ 12 px) is the most
-    valuable: it precisely targets the width of the characteristic dark dust
-    band, creating the stark contrast that makes this galaxy recognisable.
+      * The mask is built from a 2 px-smoothed luminance with thresholds in
+        that image's own noise (robust sigma of its departure from a 40 px
+        blur, on the fainter half of the pixels). It used to come from the
+        per-pixel luminance against ``_estimate_sky_sigma``, an adjacent-pixel
+        estimate that reads far too low after the wavelet denoiser has
+        correlated neighbouring pixels -- the mask switched on across the sky
+        on every upward noise excursion.
+      * The highlight cap and the detail-source clip are percentiles of the
+        pixels clearly *above sky*, not of the whole frame: on a galaxy filling
+        2.5% of the frame the whole-frame 97th percentile sat below the galaxy,
+        so the mask was zero on the galaxy itself.
+      * Each detail layer is cored against its own sky sigma (|detail| under
+        1 sigma gets no boost, full boost from 3).
+
+    Result: display sky noise 1.02-1.06x of no enhancement on the galaxies,
+    structure (2-12 px band on the object) +29-30%; on Crab structure per
+    unit sky noise 13.4 -> 19.6 (was 12.8).
 
     Args:
         img:           Float32 stacked RGB image (H, W, 3), linear scale.
         strength:      Overall enhancement multiplier (0 = off, 1 = full).
-                       Typical range 0.4–0.9 for galaxy imaging.
-        scales:        Gaussian σ values (px) for each detail layer.
-                       Default (2, 12, 40) = fine / medium / coarse.
-        scale_weights: Relative weight of each scale (sum need not equal 1).
-                       Default gives primary weight to the medium-scale layer.
-        star_mask:     Float mask (1 = star core).  Star pixels receive no
-                       contrast enhancement — their halos must not grow.
-
-        detail_clip_percentile: Percentile at which the detail source is
-                       clipped (the bright-star collar guard, see below).
-                       ``None`` disables it -- correct for an image that has
-                       no stars in it (the ``--starless-process`` layer).
+        scales:        Gaussian sigma values (px) for each detail layer.
+        scale_weights: Relative weight of each scale.
+        star_mask:     Float mask (1 = star core). Star pixels receive no
+                       enhancement -- their halos must not grow.
+        detail_clip_percentile: Percentile of the above-sky pixels at which the
+                       detail source is clipped (the bright-star collar guard).
+                       ``None`` disables it -- correct for an image with no
+                       stars in it (the ``--starless-process`` layer).
 
     Returns:
         Enhanced float32 image (H, W, 3), non-negative.
     """
     lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
            + 0.114 * img[:, :, 2]).astype(np.float64)
+    if strength <= 0:
+        return np.clip(img, 0.0, None).astype(np.float32)
 
-    # Mid-tone protection mask —————————————————————————————————————————————
-    # Ramp from 0 at the sky floor to 1 over 2×sky_sigma, then ramp back
-    # to 0 as we approach the top 3% (bright nucleus / saturated stars).
-    sky_sigma = float(_estimate_sky_sigma(img))
-    sky_floor = float(np.median(lum)) + 1.5 * sky_sigma
-    highlight_cap = float(np.percentile(lum, 97))
+    # Mid-tone mask from a smoothed luminance, in its own noise units
+    lum_m = _gaussian_blur(lum, 2.0)
+    med = float(np.median(lum_m))
+    low = lum_m < med
+    resid = (lum_m - gaussian_filter_ds(lum_m, 40.0))[low]
+    s_m = _robust_sigma(resid[::7]) if resid.size else 0.0
+    if s_m <= 0:
+        s_m = max(_robust_sigma(lum_m[::7, ::7]), 1e-6)
+    floor = med + 1.5 * s_m
+    ramp = 2.0 * s_m
+    mask = np.clip((lum_m - floor) / ramp, 0.0, 1.0)
 
-    # Low ramp: 0 at sky_floor → 1 at sky_floor + 2*sky_sigma
-    low_ramp_range = max(2.0 * sky_sigma, 1e-6)
-    mask = np.clip((lum - sky_floor) / low_ramp_range, 0.0, 1.0)
+    above = lum_m[::3, ::3]
+    above = above[above > floor + ramp]
+    if above.size > 100:
+        cap = float(np.percentile(above, 99.0))
+    else:
+        cap = float(np.percentile(lum_m, 97))
+    hi_transition = max((cap - floor) * 0.2, 1.0)
+    mask *= np.clip(1.0 - (lum_m - cap) / hi_transition, 0.0, 1.0)
 
-    # High ramp: 1 below highlight_cap → 0 at highlight_cap + 0.2*(cap-floor)
-    hi_transition = max((highlight_cap - sky_floor) * 0.2, 1.0)
-    mask *= np.clip(1.0 - (lum - highlight_cap) / hi_transition, 0.0, 1.0)
-
-    # Star protection: no enhancement at star core positions
     if star_mask is not None:
         mask *= (1.0 - star_mask.astype(np.float64))
 
-    # Detail is measured against a PEAK-CLIPPED luminance ————————————————————
-    # Otherwise a bright star's flux leaks into its own background estimate:
-    # blurring at these scales smears the core outward, so in the annulus just
-    # beyond the protected core `blurred` far exceeds `lum`, `detail` goes
-    # strongly negative, and the enhancement *subtracts* real nebulosity --
-    # a black collar around every bright star, starting exactly where core
-    # protection stops.
-    #
-    # Measured on a real Lagoon stack at the strength --auto selects for an
-    # emission nebula (0.749): the background around bright stars darkened by
-    # 6.1% on average and 14.2% at worst. Clipping the detail source at the
-    # 99th percentile caps how much stellar flux can smear outward and brings
-    # that to 0.5% / 1.8%, while retaining ~81% of the contrast gain away from
-    # stars. Clipping harder (p97, p95) removes the ring completely but walks
-    # the enhancement back toward doing nothing at all.
-    #
-    # Note this deliberately does NOT key off `star_mask`: that mask is a
-    # narrow fwhm-3 core covering ~0.4% of pixels, far smaller than the wings
-    # that actually pollute a sigma-12 blur. An earlier attempt to fix this by
-    # infilling masked pixels measured beautifully on a synthetic scene with a
-    # hard disk mask and changed real output by 0.01%.
-    detail_src = lum if detail_clip_percentile is None else np.minimum(
-        lum, float(np.percentile(lum, detail_clip_percentile)))
+    # Detail is measured against a peak-clipped luminance: otherwise a bright
+    # star's flux leaks into its own background estimate -- the blur smears the
+    # core outward, ``detail`` goes strongly negative just beyond the protected
+    # core and the enhancement subtracts real nebulosity (a dark collar; 6.1%
+    # mean / 14.2% worst on a real Lagoon stack before this guard existed). It
+    # deliberately does not key off ``star_mask``: that is a narrow core mask,
+    # far smaller than the wings that pollute a sigma-12 blur.
+    if detail_clip_percentile is None:
+        detail_src = lum
+    elif above.size > 100:
+        detail_src = np.minimum(lum, float(np.percentile(above, detail_clip_percentile)))
+    else:
+        detail_src = np.minimum(lum, float(np.percentile(lum, detail_clip_percentile)))
 
-    # Multiscale detail injection ——————————————————————————————————————————
+    sky = mask == 0
     enhanced_lum = lum.copy()
     for sigma, w in zip(scales, scale_weights):
-        if w <= 0 or strength <= 0:
+        if w <= 0:
             continue
         # gaussian_filter_ds: full resolution below its 24 px threshold, a
         # downsampled blur above (the 40 px base scale)
-        blurred = gaussian_filter_ds(detail_src, float(sigma))
-        detail = detail_src - blurred   # high-frequency detail at this scale
+        detail = detail_src - gaussian_filter_ds(detail_src, float(sigma))
+        sd = _robust_sigma(detail[sky][::5]) if sky.any() else _robust_sigma(detail[::5, ::5])
+        if sd > 0:
+            core = np.clip((np.abs(detail) / sd - _LC_CORE_LO) / (_LC_CORE_HI - _LC_CORE_LO),
+                           0.0, 1.0)
+            detail = detail * core
         enhanced_lum += strength * w * detail * mask
 
     # Reconstruct RGB by the luminance ratio (hue/saturation preserved)

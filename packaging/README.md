@@ -60,7 +60,8 @@ Not bundled:
 
 - **Unsigned until SignPath is set up.** Without the SignPath variables below, releases are unsigned and
   Windows SmartScreen and some antivirus engines flag them on first run. See "Code signing".
-- **Windows only.** No macOS/Linux packaging in this pass.
+- **Platforms.** Windows (zip + installer), Linux (tarball) and macOS (unsigned `.app` zip) -- see the
+  sections below.
 - **Run it extracted or installed, never from inside the zip.** Double-clicking `OriginStack.exe` in
   Explorer's zip view extracts only the exe (into a `...zip.aca` temp folder), not its `_internal\`
   folder, and fails with "Failed to load Python DLL". Use the installer, or **Extract All** first.
@@ -84,6 +85,43 @@ Tk via `uv python install 3.12` and Rust via `rustup`; a Python whose Tcl/Tk liv
 needs `LD_LIBRARY_PATH` pointing at its `lib/` while building, or the bundle misses `libtcl9tk9.0.so`.
 `verify_build.sh` exists because both of the problems found this way -- that missing library and a Phase 1 deadlock
 from `fork` -- only showed up by running the built bundle.
+
+## macOS
+
+`packaging/build_macos.sh` builds the same PyInstaller spec on macOS; on `darwin` the spec also wraps the
+onedir in `OriginStack.app` (`BUNDLE`), and the script packs it with `ditto` (which keeps the bundle's
+symlinks; `zip -r` does not) as `OriginStack-<VERSION>-macos-<arch>.zip` (+ `.sha256`), `<arch>` being the
+build machine's `arm64` or `x86_64` -- there is no universal2 build. The `.icns` is generated from
+`assets/icon.png` with `sips` + `iconutil`; if that fails the app gets the generic icon. astro_native is built
+as a real wheel for the host architecture, without `target-cpu=native` (the script refuses it).
+`packaging/verify_build_macos.sh` is the counterpart of `verify_build.ps1`: it launches the app and checks it
+stays up with no crash log and that the startup log says the native kernels are active (`SKIP_GUI_CHECK=1`
+skips this part), then runs `--verify-headless` with four workers on `tools/create_synthetic.py` data and
+requires a FITS, exit code 0, and exactly one startup-log line (a second one means a spawned worker re-ran
+the app: the `freeze_support()` regression). Logs go to `~/Library/Logs/OriginStack/`.
+
+Needs a Python **with tkinter** (python.org and `actions/setup-python` builds include Tk; Homebrew's needs
+`brew install python-tk`), a Rust toolchain and the Xcode command-line tools. The release workflow builds on
+`macos-14` (arm64) and `macos-15-intel` (x86_64; GitHub retired `macos-13`). The minimum macOS the app runs on
+is set by the wheels pip picks on the build machine (scipy's arm64 Accelerate wheels need macOS 14), not only by
+`MACOSX_DEPLOYMENT_TARGET` (11.0, which covers the Rust wheel). To try it without a release, run the "Release"
+workflow by hand from the Actions tab; both macOS jobs keep their zip as a workflow artifact.
+
+**Unsigned and not notarized.** PyInstaller ad-hoc signs the binaries (Apple silicon will not run unsigned
+code at all), but there is no Developer ID signature, so Gatekeeper blocks the first launch of a downloaded
+copy ("cannot be opened because the developer cannot be verified" / "is damaged"). Either right-click (or
+Control-click) `OriginStack.app` > **Open** > **Open** once, or clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/OriginStack.app
+```
+
+Adding signing later needs an Apple Developer Program membership ($99/year): import a "Developer ID
+Application" certificate into a temporary keychain on the runner (from repo secrets), pass
+`codesign_identity='Developer ID Application: ...'` and an entitlements file to `EXE`/`BUNDLE` in
+`originstack.spec` (hardened runtime needs at least `com.apple.security.cs.allow-unsigned-executable-memory`
+and `com.apple.security.cs.disable-library-validation` for a PyInstaller app), then notarize the zip with
+`xcrun notarytool submit --wait` and `xcrun stapler staple OriginStack.app` before re-zipping.
 
 ## Installer
 
@@ -118,8 +156,8 @@ workflow fails the release if a signed file's Authenticode status is not `Valid`
 
 ## Release automation
 
-`.github/workflows/release.yml` builds and attaches the Windows zip to an
-already-existing GitHub Release on any `v*` tag push -- it does **not**
+`.github/workflows/release.yml` builds and attaches the Windows zip and installer, the Linux
+tarball and the two macOS zips to an already-existing GitHub Release on any `v*` tag push -- it does **not**
 create the release itself (matching this repo's established manual
 `gh release create` workflow). Create the release first, then push the tag
 (or push the tag after creating the release, either order works as long as

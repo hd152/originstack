@@ -11,8 +11,13 @@ on a plain CLI run.
 
 Design (keeps the streaming, low-memory model):
   * The first accepted frame is the registration reference and seeds the
-    accumulators. Every later frame is aligned to it (translation via the
-    pyramid + phase-correlation cascade, seeded from the previous shift).
+    accumulators. Every later frame is aligned to it: a translation from the
+    pyramid + phase-correlation cascade (seeded from the previous shift)
+    seeds a rigid star match (rotation + translation), with a blind
+    star-pattern match as fallback -- an alt-az mount's field rotates through
+    the night (~2 deg/h near the meridian), which a translation-only live
+    stack smeared into arcs toward the corners. Translation is the fallback
+    when no star match passes Phase 2's sanity limits.
   * Two full-frame float64 buffers only: ``acc`` (Σ weight·pixel) and ``wsum``
     (Σ weight, per pixel, honouring each frame's valid coverage after the
     shift). The live stack is ``acc / wsum`` — O(1) memory in the frame count.
@@ -67,6 +72,8 @@ class LiveStacker:
         self.masters = masters
         self.wv = webview
         self.ref_lum: Optional[np.ndarray] = None
+        self.ref_stars = None
+        self.n_rotated = 0
         self.acc: Optional[np.ndarray] = None     # (H, W, C) float64 Σ w·px
         self.wsum: Optional[np.ndarray] = None    # (H, W) float64 Σ w
         self.n = 0
@@ -82,6 +89,7 @@ class LiveStacker:
         """Process one light frame and fold it into the running stack.
         Returns True if the frame was accepted."""
         from src.frame_processor import _process_single_frame
+        from src.full_field import frame_coverage
         from src.registration import apply_transform, calculate_shift
 
         try:
@@ -125,6 +133,7 @@ class LiveStacker:
         if self.ref_lum is None:
             # First frame becomes the reference and seeds the accumulators.
             self.ref_lum = lum
+            self.ref_stars = self._stars(lum, metrics)
             self.acc = rgb.astype(np.float64) * weight
             self.wsum = np.full(lum.shape, weight, dtype=np.float64)
         else:
@@ -146,10 +155,16 @@ class LiveStacker:
                     self.wv.frame_metrics(os.path.basename(path), metrics, accepted=False)
                 return False
             self.seed_shift = (sy, sx)
-            aligned = apply_transform(rgb, shift=(sy, sx))
-            # Coverage: pixels the shift filled from outside the frame are 0.
-            cov = _ndi.shift(np.ones((H, W), dtype=np.float32), shift=(sy, sx),
-                             order=0, mode='constant', cval=0.0) > 0.5
+            tf = self._rigid(lum, metrics, (sy, sx))
+            if tf is not None:
+                self.n_rotated += 1
+                aligned = apply_transform(rgb, transform=tf, crop=(0, H, 0, W))
+            else:
+                aligned = apply_transform(rgb, shift=(sy, sx), crop=(0, H, 0, W))
+            # Coverage: output pixels whose source lies inside the frame (the warp
+            # reads zeros beyond it, which must not drag the mean down).
+            cov = frame_coverage(None if tf is not None else (sy, sx), tf,
+                                 np.arange(H), np.arange(W), H, W)
             w_pix = cov.astype(np.float64) * weight
             self.acc += aligned.astype(np.float64) * w_pix[:, :, None]
             self.wsum += w_pix
@@ -162,6 +177,38 @@ class LiveStacker:
 
         self._publish(os.path.basename(path), metrics)
         return True
+
+    def _stars(self, lum: np.ndarray, metrics: dict):
+        from src.registration import registration_stars
+        try:
+            return registration_stars(lum, float(metrics.get('noise', 1.0) or 1.0),
+                                      metrics.get('_star_sources'))
+        except Exception:
+            return None
+
+    def _rigid(self, lum: np.ndarray, metrics: dict, seed: Tuple[float, float]):
+        """Rotation + translation onto the reference from the two star catalogs
+        (Phase 2's own matchers and sanity limits), or None."""
+        from src.models import Config
+        from src.registration import HAS_SKIMAGE_TRANSFORM, _blind_match_transform, match_stars_affine
+        if (not HAS_SKIMAGE_TRANSFORM or self.ref_stars is None
+                or getattr(self.args, 'no_affine', False)):
+            return None
+        stars = self._stars(lum, metrics)
+        if stars is None or len(stars) < 3:
+            return None
+        tf = match_stars_affine(self.ref_stars, stars, initial_shift=seed)
+        if tf is None:
+            tf = _blind_match_transform(self.ref_stars, stars)
+        if tf is None:
+            return None
+        H, W = lum.shape
+        rot = abs(np.degrees(np.arctan2(tf.params[1, 0], tf.params[0, 0])))
+        if (abs(tf.params[0, 2]) > Config.MAX_REALISTIC_SHIFT_FRAC * W
+                or abs(tf.params[1, 2]) > Config.MAX_REALISTIC_SHIFT_FRAC * H
+                or rot > Config.AFFINE_MAX_ROTATION_DEG):
+            return None
+        return tf
 
     def current_stack(self) -> Optional[np.ndarray]:
         if self.acc is None:

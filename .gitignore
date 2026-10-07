@@ -29,6 +29,8 @@ env/
 ENV/
 .venv/
 packaging/.build_venv/
+packaging/.build_venv_macos/
+packaging/build_macos/
 
 # FITS and image output files — never publish raw or processed data
 *.fits

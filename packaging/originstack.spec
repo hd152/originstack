@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for OriginStack's desktop app.
 
-Build via packaging/build_windows.ps1 (which sets up the packaging venv,
-builds ext/astro_native as a real wheel, and invokes PyInstaller against this
-spec) rather than running `pyinstaller` directly against this file.
+Build via packaging/build_windows.ps1, build_linux.sh or build_macos.sh (which
+set up the packaging venv, build ext/astro_native as a real wheel, and invoke
+PyInstaller against this spec) rather than running `pyinstaller` directly
+against this file. One spec for all three platforms: the Windows build is
+unchanged; macOS additionally wraps the onedir in an .app (BUNDLE, below).
 """
+import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -166,7 +170,10 @@ exe = EXE(
     console=False,  # windowed -- this is why runtime_hook_stdout.py and
                      # src/desktop_app.py's _fatal() dialog exist: there is
                      # no console for a bare print()/traceback to reach.
-    icon=str(ROOT / 'packaging' / 'icon.ico'),
+    # .ico is the Windows exe resource; Linux has no exe icon, and on macOS the
+    # icon belongs to the .app (BUNDLE below), not the inner executable.
+    icon=str(ROOT / 'packaging' / 'icon.ico') if sys.platform == 'win32' else None,
+    argv_emulation=False,  # macOS only: --verify-headless argv must arrive untouched
 )
 
 coll = COLLECT(
@@ -181,3 +188,26 @@ coll = COLLECT(
                             # scipy/astropy payload to a temp dir on every
                             # launch, multi-second delay each time).
 )
+
+# macOS: wrap the onedir in OriginStack.app. Unsigned except for PyInstaller's
+# own ad-hoc signature (required to run on Apple silicon at all); see
+# packaging/README.md ("macOS") for Gatekeeper and how to add real signing.
+# The .icns is generated from assets/icon.png by build_macos.sh (sips +
+# iconutil) and handed over in ORIGINSTACK_ICNS; without it the app gets the
+# generic icon rather than failing the build.
+if sys.platform == 'darwin':
+    _icns = os.environ.get('ORIGINSTACK_ICNS', '')
+    _version = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
+    app = BUNDLE(
+        coll,
+        name='OriginStack.app',
+        icon=_icns if _icns and Path(_icns).is_file() else None,
+        bundle_identifier='io.github.hd152.originstack',
+        version=_version,
+        info_plist={
+            'CFBundleName': 'OriginStack',
+            'CFBundleDisplayName': 'OriginStack',
+            'CFBundleShortVersionString': _version,
+            'NSHighResolutionCapable': True,
+        },
+    )
