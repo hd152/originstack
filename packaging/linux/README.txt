@@ -26,5 +26,5 @@ Not tested on macOS. This build has had less real-world use than the Windows ins
 something does not work, please open an issue at https://github.com/hd152/originstack/issues and
 attach the log.
 
-Project: https://github.com/hd152/originstack   Website: https://hd152.github.io/originstack/
+Project: https://github.com/hd152/originstack   Website: https://originstack.site/
 Licence: MIT
