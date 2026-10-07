@@ -49,6 +49,7 @@ p { margin: 0 0 1em; }
   text-wrap: balance;
   margin-top: clamp(20px, 4vw, 52px);
 }
+.hero h1 .kicker { display: block; margin-bottom: .45em; font-size: clamp(1rem, 1.5vw, 1.2rem); font-weight: 600; font-variation-settings: "wdth" 100; letter-spacing: .01em; color: #9fb0c6; text-wrap: pretty; }
 .hero .lede { font-size: clamp(1.1rem, 1.6vw, 1.32rem); max-width: 56ch; color: #bfcadb; margin: 22px 0 0; }
 .actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 30px; align-items: center; }
 .btn {
