@@ -32,12 +32,26 @@ CRASH="$LOGDIR/desktop_app_crash.log"
 APP_PID=""
 HL_PID=""
 cleanup() {
-    [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null || true
-    [ -n "$HL_PID" ] && kill "$HL_PID" 2>/dev/null || true
-    pkill -f "$EXE" 2>/dev/null || true
+    [ -n "$APP_PID" ] && kill -9 "$APP_PID" 2>/dev/null || true
+    [ -n "$HL_PID" ] && kill -9 "$HL_PID" 2>/dev/null || true
+    pkill -9 -f "$EXE" 2>/dev/null || true
     rm -rf "$STATE"
 }
 trap cleanup EXIT
+
+# Stop a process without ever waiting unboundedly: TERM, up to 10 s, then KILL. A bare
+# `kill; wait` hung a CI job for an hour (2026-10, macos-15-intel): the GUI app survived TERM,
+# so `wait` never returned and only the job's own cancellation ended it.
+stop_pid() {   # $1 = pid
+    kill "$1" 2>/dev/null || return 0
+    for _ in $(seq 1 20); do
+        kill -0 "$1" 2>/dev/null || { wait "$1" 2>/dev/null || true; return 0; }
+        sleep 0.5
+    done
+    echo "WARNING: OriginStack (pid $1) ignored SIGTERM for 10 s; sending SIGKILL"
+    kill -9 "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
+}
 
 check_native() {   # $1 = log line
     case "$1" in
@@ -64,8 +78,7 @@ if [ -z "${SKIP_GUI_CHECK:-}" ]; then
     [ -f "$LOG" ] || { echo "ERROR: no startup log at $LOG"; cat "$STATE/app.out"; exit 1; }
     check_native "$(tail -1 "$LOG")"
     echo "App running; $(tail -1 "$LOG" | sed 's/^\[[^]]*\] //')"
-    kill "$APP_PID" 2>/dev/null || true
-    wait "$APP_PID" 2>/dev/null || true
+    stop_pid "$APP_PID"
     APP_PID=""
     rm -f "$LOG"
 fi
