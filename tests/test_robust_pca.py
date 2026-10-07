@@ -131,15 +131,11 @@ class TestRobustPcaMaster(unittest.TestCase):
             frames = [_write_frame('flat', d, f'f{i}.fits',
                                         np.full(shape, float(100 + i), dtype=np.float32))
                      for i in range(Config.ROBUST_PCA_MIN_FRAMES + 1)]
-            fake_mem = mock.MagicMock()
-            fake_mem.available = 1  # forces the memory guard to trip
-            # create=True: mock.patch normally requires the target attribute
-            # to already exist. GitHub Actions' ubuntu-latest runners have a
-            # psutil install that's missing virtual_memory (a real, normally
-            # always-present psutil API) -- without create=True this test
-            # fails there at the patch itself, before robust_pca_master's
-            # own except-Exception fallback (the thing under test) ever runs.
-            with mock.patch('psutil.virtual_memory', return_value=fake_mem, create=True):
+            fake_psutil = mock.MagicMock()
+            fake_psutil.virtual_memory.return_value.available = 1  # trips the guard
+            # Injected through sys.modules: psutil is optional and CI does not
+            # install it, so patching 'psutil.virtual_memory' cannot import it.
+            with mock.patch.dict('sys.modules', {'psutil': fake_psutil}):
                 self.assertIsNone(robust_pca_master(frames, shape))
 
 
