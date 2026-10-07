@@ -678,6 +678,49 @@ _ROTATION_SPLIT_THRESHOLD_DEG = 3.0
 
 
 
+def _measured_rotation_spread(subdirs: List[str]) -> Optional[float]:
+    """Avoidable field rotation from the frames' own plate-solved orientation
+    (``CROTA2`` on the first and last light of each session), or None unless
+    every session has it.
+
+    Preferred over the parallactic-angle model below, which on every Origin
+    session on the development machine (28 of them) predicted far more
+    rotation than the frames show: two Whirlpool nights predicted 27 deg
+    apart were 0.7-1.2 deg apart by star matching and by ``CROTA2`` (5.87 vs
+    6.57-7.02), and a 2 h session turned 0.45 deg. The default path then split
+    sessions that pool with almost no crop loss. A real rotation shows up in
+    ``CROTA2`` too, so this stays right where the model is right.
+    """
+    angles: List[float] = []
+    per_session: List[float] = []
+    ref: Optional[float] = None
+    for d in subdirs:
+        try:
+            lights = sorted(discover_frames(d).get('light', []), key=lambda f: f.path)
+        except Exception:
+            return None
+        if not lights:
+            return None
+        session: List[float] = []
+        for fi in (lights[0], lights[-1]):
+            try:
+                a = float((fi.header or {}).get('CROTA2'))
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(a):
+                return None
+            if ref is None:
+                ref = a
+            # unwrap onto the first angle's branch (359.6 and 6.0 are 6.4 apart)
+            session.append(ref + ((a - ref + 180.0) % 360.0 - 180.0))
+        angles.extend(session)
+        per_session.append(max(session) - min(session))
+    if not angles:
+        return None
+    total = max(angles) - min(angles)
+    return max(0.0, total - max(per_session))
+
+
 def _predict_rotation_spread(subdirs: List[str]) -> Optional[float]:
     """Field rotation spanned by a set of sessions, in degrees, or None.
 
@@ -691,7 +734,10 @@ def _predict_rotation_spread(subdirs: List[str]) -> Optional[float]:
     in parallactic angle. Pooling frames from sessions at different hour
     angles therefore throws away the corners: measured at 26.8 degrees across
     five real Lagoon sessions, about 860 px of corner displacement and 42% of
-    the frame. Returns None when the metadata needed isn't there, which is
+    the frame. When every session's lights carry a plate-solved ``CROTA2``,
+    that measurement is used instead (``_measured_rotation_spread``: the
+    model over-predicted by an order of magnitude on real Origin data).
+    Returns None when the metadata needed isn't there, which is
     the caller's cue to keep the previous behaviour rather than guess; the
     specific reason goes to the debug log, and the caller says that the
     prediction could not be made.
@@ -702,6 +748,10 @@ def _predict_rotation_spread(subdirs: List[str]) -> Optional[float]:
     def _give_up(d, why):
         _log.debug("rotation prediction unavailable for %s: %s", d, why)
         return None
+
+    measured = _measured_rotation_spread(subdirs)
+    if measured is not None:
+        return measured
 
     angles: List[float] = []
     per_session: List[float] = []
@@ -1514,6 +1564,17 @@ def build_parser() -> argparse.ArgumentParser:
                         'the plain stack on three real sessions: stars 1.3-2.7%% narrower, '
                         'noise equal or lower; costs ~15-40 s. Falls back to the normal stack '
                         'when no PSF can be measured.')
+    g_stack.add_argument('--full-field', dest='full_field', type=float, nargs='?',
+                         const=0.5, default=None, metavar='FRAC',
+                   help='Keep the field outside the common crop. The normal stack covers '
+                        'only the rectangle EVERY frame covers, which field rotation on an '
+                        'alt-az mount shrinks; this extends it to the largest rectangle in '
+                        'which every pixel is covered by at least FRAC of the frames '
+                        '(default 0.5), combining each outer pixel from the frames that '
+                        'cover it. Depth is not uniform: edges are noisier '
+                        '(<output>_coverage.fits records the per-pixel frame count). Not '
+                        'with --drizzle-scale > 1, --cfa-drizzle, --elastic-registration, '
+                        '--comet-mode or --uncertainty-map.')
     g_stack.add_argument('--cfa-drizzle', dest='cfa_drizzle', action='store_true',
                    help='Bayer-aware drizzle: after stacking, recombine each frame\'s '
                         'MEASURED colour samples (never the interpolated ones) onto the '

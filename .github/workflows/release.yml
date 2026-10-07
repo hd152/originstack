@@ -3,8 +3,8 @@ name: Release (desktop app builds)
 on:
   push:
     tags: ['v*']
-  # Manual run: builds and verifies the Linux bundle and keeps it as a workflow artifact
-  # (nothing is attached to a release). Lets the Linux job be tested without tagging.
+  # Manual run: builds and verifies the Linux and macOS bundles and keeps them as workflow
+  # artifacts (nothing is attached to a release). Lets those jobs be tested without tagging.
   workflow_dispatch:
 
 jobs:
@@ -202,3 +202,72 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${GITHUB_REF_NAME}"             packaging/dist/OriginStack-*-linux-x64.tar.gz             packaging/dist/OriginStack-*-linux-x64.tar.gz.sha256 --clobber
+
+  # macOS .app, one per architecture, each built natively on its own runner (no cross-compile,
+  # no universal2: every compiled wheel pip installs is single-arch anyway). Unsigned and not
+  # notarized -- see packaging/README.md ("macOS"). macos-13 (the last Intel image of its line)
+  # was retired by GitHub in Dec 2025; macos-15-intel is the Intel label that replaced it.
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/astro_native
+          key: macos-${{ matrix.arch }}
+
+      - name: Check runner architecture and Tk
+        run: |
+          [ "$(uname -m)" = "${{ matrix.arch }}" ] || { echo "runner is $(uname -m), expected ${{ matrix.arch }}"; exit 1; }
+          python -c "import platform, tkinter; tkinter.Tcl(); print(platform.machine(), 'tkinter', tkinter.TkVersion)"
+
+      - name: Verify VERSION matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(tr -d '[:space:]' < VERSION)"
+          [ "$tag" = "$ver" ] || { echo "Tag v$tag does not match VERSION file ($ver)"; exit 1; }
+
+      - name: Build
+        run: bash ./packaging/build_macos.sh
+
+      - name: Verify the app runs
+        run: bash ./packaging/verify_build_macos.sh
+
+      - name: Keep the app as a workflow artifact (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: OriginStack-macos-${{ matrix.arch }}
+          path: |
+            packaging/dist/OriginStack-*-macos-${{ matrix.arch }}.zip
+            packaging/dist/OriginStack-*-macos-${{ matrix.arch }}.zip.sha256
+
+      - name: Attach zip and checksum to existing GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" packaging/dist/OriginStack-*-macos-${{ matrix.arch }}.zip packaging/dist/OriginStack-*-macos-${{ matrix.arch }}.zip.sha256 --clobber

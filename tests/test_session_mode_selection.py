@@ -33,7 +33,7 @@ except Exception:
 
 def _write_session(root, name, times, ra_deg=271.0, dec_deg=-24.36,
                    lat=33.83, lon=-117.79, with_gps=True, with_wcs=True,
-                   include_flat=False, tz='-0700'):
+                   include_flat=False, tz='-0700', crota2=None):
     """A minimal session directory: info.json plus dated light frames."""
     d = os.path.join(root, name)
     os.makedirs(d, exist_ok=True)
@@ -60,6 +60,8 @@ def _write_session(root, name, times, ra_deg=271.0, dec_deg=-24.36,
         hdu.header['DATE-OBS'] = t
         hdu.header['TIMEZONE'] = tz
         hdu.header['EXPTIME'] = 30.0
+        if crota2 is not None:
+            hdu.header['CROTA2'] = crota2[i]
         hdu.writeto(os.path.join(d, f'Light{i:04d}.fits'), overwrite=True)
 
     if include_flat:
@@ -106,6 +108,36 @@ class TestPredictRotationSpread(unittest.TestCase):
         spread = _predict_rotation_spread([a, b])
         self.assertIsNotNone(spread)
         self.assertGreater(spread, _ROTATION_SPLIT_THRESHOLD_DEG)
+
+    def test_measured_orientation_overrides_the_model(self):
+        # Real Origin data: two Whirlpool nights the model put 27 deg apart had
+        # CROTA2 5.87 -> 5.91 and 6.57 -> 7.02 -- under a degree.
+        a = _write_session(self.root, 'a', ['2026-08-31T20:40:35', '2026-08-31T21:10:35'],
+                           crota2=[5.87, 5.91])
+        b = _write_session(self.root, 'b', ['2026-08-31T23:40:35', '2026-09-01T00:10:35'],
+                           crota2=[6.57, 7.02])
+        spread = _predict_rotation_spread([a, b])
+        self.assertAlmostEqual(spread, (7.02 - 5.87) - 0.45, places=6)
+
+    def test_measured_orientation_unwraps_across_zero(self):
+        a = _write_session(self.root, 'a', ['2026-08-31T20:40:35', '2026-08-31T21:10:35'],
+                           crota2=[359.62, 359.63])
+        b = _write_session(self.root, 'b', ['2026-08-31T23:40:35', '2026-09-01T00:10:35'],
+                           crota2=[6.70, 6.65])
+        self.assertAlmostEqual(_predict_rotation_spread([a, b]), 7.08 - 0.05, places=6)
+
+    def test_a_real_measured_rotation_still_splits(self):
+        a = _write_session(self.root, 'a', ['2026-08-31T20:40:35', '2026-08-31T21:10:35'],
+                           crota2=[10.0, 12.0])
+        b = _write_session(self.root, 'b', ['2026-08-31T23:40:35', '2026-09-01T00:10:35'],
+                           crota2=[30.0, 33.0])
+        self.assertGreater(_predict_rotation_spread([a, b]), _ROTATION_SPLIT_THRESHOLD_DEG)
+
+    def test_missing_crota2_in_one_session_falls_back_to_the_model(self):
+        a = _write_session(self.root, 'a', ['2026-08-31T20:40:35', '2026-08-31T21:10:35'],
+                           crota2=[5.87, 5.91])
+        b = _write_session(self.root, 'b', ['2026-08-31T23:40:35', '2026-09-01T00:10:35'])
+        self.assertGreater(_predict_rotation_spread([a, b]), _ROTATION_SPLIT_THRESHOLD_DEG)
 
     def test_calibration_frames_do_not_poison_the_time_span(self):
         """A flat's DATE-OBS is '0-00-00T00:00:00'.

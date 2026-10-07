@@ -469,6 +469,50 @@ def _colcal_header(header, scales) -> None:
         header[f'COLCAL_{ch}'] = (round(float(s), 4), f'{ch} scale factor')
 
 
+def _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts, transforms,
+                      displacement_fields, H, W, C, crop, output_path, stats):
+    """``--full-field``: extend the stack past the common crop (src/full_field.py).
+    Returns (stacked, crop) on the extended rectangle, or None to keep the normal stack."""
+    blockers = [name for name, on in (
+        ('--drizzle-scale > 1', float(getattr(args, 'drizzle_scale', 1.0) or 1.0) > 1.0),
+        ('--cfa-drizzle', getattr(args, 'cfa_drizzle', False)),
+        ('--elastic-registration', displacement_fields is not None),
+        ('--comet-mode', getattr(args, 'comet_mode', False)),
+        ('--uncertainty-map', getattr(args, 'uncertainty_map', False)),
+    ) if on]
+    if blockers:
+        safe_print(f"  Full field: skipped (not supported with {', '.join(blockers)})")
+        return None
+    if mem_rgb is None or len(final_indices) < 3:
+        return None
+    from src.full_field import extend_full_field
+    scores = np.array([f.metrics.get('score', 1.0) for f in final], dtype=np.float64)
+    weights = np.sqrt(scores / max(scores.max(), 1e-9))
+    try:
+        res = extend_full_field(stacked, mem_rgb, final_indices, shifts, transforms,
+                                H, W, C, crop, weights, args, frac=float(args.full_field))
+    except Exception as exc:
+        safe_print(f"  WARNING: full field failed ({exc}); keeping the common crop")
+        _log.debug("full field failed", exc_info=True)
+        return None
+    if res is None:
+        return None
+    out, rect, coverage = res
+    stats.output_shape = (rect[1] - rect[0], rect[3] - rect[2])
+    stats.cropped_pixels = (H - stats.output_shape[0], W - stats.output_shape[1])
+    try:
+        from astropy.io import fits
+        cov_path = os.path.splitext(output_path)[0] + '_coverage.fits'
+        hdu = fits.PrimaryHDU(coverage.astype(np.int16))
+        hdu.header['NFRAMES'] = (len(final_indices), 'Frames in the stack')
+        hdu.header['COMMENT'] = 'Frames covering each pixel (--full-field)'
+        hdu.writeto(cov_path, overwrite=True)
+        safe_print(f"  Coverage map: {os.path.basename(cov_path)}")
+    except Exception as exc:
+        _log.debug("coverage map not written: %s", exc)
+    return out, rect
+
+
 def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
                       shifts: List, transforms: List, top: int, left: int,
                       stacked_linear: np.ndarray) -> None:
@@ -976,6 +1020,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 psf_kernel_table=psf_kernel_table,
                 psf=psf_estimate,
                 sigma_out=_sigma_out)
+
+            if getattr(args, 'full_field', None):
+                _ff = _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts,
+                                        transforms, displacement_fields, H, W, C,
+                                        (top, bottom, left, right), output_path, stats)
+                if _ff is not None:
+                    stacked, (top, bottom, left, right) = _ff
+                    fits_stacked = stacked.copy()
 
             stats.stacking_time = time.time() - phase_start
 
