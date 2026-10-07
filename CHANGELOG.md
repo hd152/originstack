@@ -6,6 +6,36 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-10-07
+
+### Fixed
+
+- **Local contrast no longer adds grain to the sky, and now actually enhances small galaxies.**
+  The step decided where to enhance from noisy per-pixel brightness, so it switched on wherever
+  sky noise spiked; and on a galaxy covering a few percent of the frame its highlight cutoff sat
+  below the galaxy, so the galaxy itself got nothing. Measured on real stacks (display, against
+  local contrast off): sky noise 1.77x / 1.79x / 1.18x -> 1.06x / 1.02x / 0.72x (Sunflower /
+  Whirlpool / Crab), galaxy structure 0.96x / 0.97x -> 1.30x / 1.29x. **Expect cleaner skies
+  and crisper arms on galaxies.**
+- **Multi-night folders pool when they should.** Deciding whether to stack nights together or
+  separately used a textbook prediction of field rotation that, on every Origin session tested,
+  predicted far more rotation than the frames show (27 degrees predicted, ~1 measured, for two
+  Whirlpool nights). It now uses the orientation the Origin plate-solved for each frame
+  (`CROTA2`) when every session has it. **Some multi-night folders that were stacked
+  separately will now be pooled into one deeper stack.**
+- **Live stacking follows field rotation.** It registered by translation only, so over a long
+  session stars toward the edges turned into arcs; it now matches stars for rotation as well.
+
+### Added
+
+- **`--full-field [FRAC]`** keeps the edges the normal stack crops away: the output grows to the
+  largest rectangle covered by at least FRAC (default 0.5) of the frames, each added pixel
+  combined from the frames that cover it, with a `<output>_coverage.fits` map of how many frames
+  each pixel used. +5-10% of the frame on the sessions tested; edge stars are ~5% softer than the
+  centre. Opt-in.
+- **macOS app** (Apple Silicon and Intel), unsigned: on first launch, right-click the app and
+  choose Open.
+
 ## [2.6.0] - 2026-10-06
 
 ### Fixed
