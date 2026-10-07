@@ -43,9 +43,9 @@
 }
 </script>
 <link rel="icon" href="img/favicon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..600&display=swap" rel="stylesheet">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" as="image" type="image/webp" imagesrcset="img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" imagesizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))" fetchpriority="high">
 <link rel="stylesheet" href="site.css">
 </head>
 <body>
@@ -53,7 +53,7 @@
 <header class="hero">
   <div class="wrap">
     <div class="bar">
-      <img src="img/logo-dark.png" alt="OriginStack" width="920" height="256">
+      <picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="Sections">
         <a href="#time">Speed</a>
         <a href="#app">The app</a>
@@ -74,8 +74,8 @@
     <p class="fine">Windows 10 or 11, 64-bit, free and MIT licensed. The installer is not code-signed yet, so SmartScreen may warn you: choose More info, then Run anyway.</p>
 
     <div class="wipe" id="wipe" role="group" aria-label="Comparison of one frame and the finished stack">
-      <img class="after" src="img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="The Omega Nebula after stacking 114 frames and processing: bright red gas with dark lanes against a dense star field.">
-      <img class="before" src="img/omega-nebula-m17-single-frame-celestron-origin.jpg" width="1600" height="1103" alt="One 30-second frame of the same field, stretched to be visible: grainy, with the nebula faint against a noisy purple sky.">
+      <picture><source type="image/webp" srcset="img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img class="after" fetchpriority="high" src="img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="The Omega Nebula after stacking 114 frames and processing: bright red gas with dark lanes against a dense star field."></picture>
+      <img class="before" src="img/omega-nebula-m17-single-frame-celestron-origin.jpg" srcset="img/omega-nebula-m17-single-frame-celestron-origin-800.jpg 800w, img/omega-nebula-m17-single-frame-celestron-origin-1200.jpg 1200w, img/omega-nebula-m17-single-frame-celestron-origin.jpg 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))" width="1600" height="1103" alt="One 30-second frame of the same field, stretched to be visible: grainy, with the nebula faint against a noisy purple sky.">
       <span class="line"></span>
       <span class="grip" aria-hidden="true">&lt;&gt;</span>
       <span class="cap l">One 30-second frame, stretched</span>
@@ -135,19 +135,19 @@
 
     <div class="shots">
       <figure class="shot big">
-        <img src="img/app-running.png" width="1600" height="1029" loading="lazy" alt="The OriginStack window during a run: the folder and output on the left with picture cards for the target type and the run mode, three of four pipeline phases marked done and the log below; on the right a preview of the Sunflower Galaxy part-way through post-processing, a strip of frame thumbnails and a table of per-frame scores.">
+        <picture><source type="image/webp" srcset="img/app-running-800.webp 800w, img/app-running-1200.webp 1200w, img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/app-running.png" width="1600" height="1029" loading="lazy" alt="The OriginStack window during a run: the folder and output on the left with picture cards for the target type and the run mode, three of four pipeline phases marked done and the log below; on the right a preview of the Sunflower Galaxy part-way through post-processing, a strip of frame thumbnails and a table of per-frame scores."></picture>
         <figcaption>Part-way through the Sunflower run. Phases 1 to 3 are done, and the preview follows each finishing step as it happens.</figcaption>
       </figure>
       <figure class="shot s7">
-        <img src="img/app-setup.png" width="1600" height="1029" loading="lazy" alt="The OriginStack window before a run: a folder chosen with its frame counts and the target name from the session file under it, picture cards for Auto-detect, Galaxy (marked Suggested), Nebula, Star cluster, Star field and Comet, a choice of Full quality or Quick look, an example galaxy image in the preview, and a This run summary of frames, target, mode, changed settings and output file.">
+        <picture><source type="image/webp" srcset="img/app-setup-800.webp 800w, img/app-setup-1200.webp 1200w, img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="img/app-setup.png" width="1600" height="1029" loading="lazy" alt="The OriginStack window before a run: a folder chosen with its frame counts and the target name from the session file under it, picture cards for Auto-detect, Galaxy (marked Suggested), Nebula, Star cluster, Star field and Comet, a choice of Full quality or Quick look, an example galaxy image in the preview, and a This run summary of frames, target, mode, changed settings and output file."></picture>
         <figcaption>Before a run. Pick a folder and the app counts your frames, reads the target from the session and suggests a card; the preview shows an example result and This run says exactly what Start will do.</figcaption>
       </figure>
       <figure class="shot s5">
-        <img src="img/app-done.png" width="800" height="983" loading="lazy" alt="The preview and frame panels after the run finished, showing the final image of the Sunflower Galaxy and a summary: 158 of 158 frames stacked in 3 minutes 35 seconds.">
+        <picture><source type="image/webp" srcset="img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="img/app-done.png" width="800" height="983" loading="lazy" alt="The preview and frame panels after the run finished, showing the final image of the Sunflower Galaxy and a summary: 158 of 158 frames stacked in 3 minutes 35 seconds."></picture>
         <figcaption>When it finishes you can zoom and pan the result, or wipe between the linear stack and the finished image.</figcaption>
       </figure>
       <figure class="shot s7">
-        <img src="img/app-expert.png" width="800" height="627" loading="lazy" alt="The Additional options panel with a search box and a list of groups, showing registration and stacking options such as proper image coaddition, banding removal and the distortion model, each with a one-line description.">
+        <picture><source type="image/webp" srcset="img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="img/app-expert.png" width="800" height="627" loading="lazy" alt="The Additional options panel with a search box and a list of groups, showing registration and stacking options such as proper image coaddition, banding removal and the distortion model, each with a one-line description."></picture>
         <figcaption>Around a hundred more options sit under Additional options, each with a one-line description and a search box to find them; the rarer ones stay hidden until you tick Expert options.</figcaption>
       </figure>
     </div>
@@ -244,7 +244,7 @@
 
     <div class="figs">
       <figure class="wide">
-        <img src="img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer.">
+        <picture><source type="image/webp" srcset="img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer."></picture>
         <figcaption>The Crab Nebula at full resolution, from the same 133 frames, all three given the same stretch. The Origin's own stack (left) is visibly softer; Siril and OriginStack are close, with OriginStack's stars 8% narrower.</figcaption>
       </figure>
     </div>
@@ -258,12 +258,12 @@
     <h2>Made with it</h2>
     <p class="intro measure">All from raw Celestron Origin frames, stacked and processed by OriginStack, under measured <strong>Bortle 7-9</strong> skies (heavy light pollution, backyard/rooftop, not a dark site) -- see the <a href="https://github.com/hd152/originstack#readme">README</a> for the per-image measurements and method.</p>
     <div class="gallery">
-      <figure><img src="img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="803" loading="lazy" alt="The Whirlpool Galaxy, a face-on spiral with a smaller companion galaxy."><figcaption>Whirlpool Galaxy (M51)</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 59vw"><img src="img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="803" loading="lazy" alt="The Whirlpool Galaxy, a face-on spiral with a smaller companion galaxy."></picture><figcaption>Whirlpool Galaxy (M51)</figcaption></figure>
       <div class="stack">
-        <figure><img src="img/orion-nebula-m42-celestron-origin.jpg" width="1200" height="811" loading="lazy" alt="The Orion Nebula with its bright central cloud and surrounding gas."><figcaption>Orion Nebula (M42), seven sessions combined</figcaption></figure>
-        <figure><img src="img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="A dense field of stars in Sagittarius with dark dust lanes."><figcaption>Sagittarius Star Cloud (M24), 138 × 10 s</figcaption></figure>
-        <figure><img src="img/andromeda-galaxy-m31-celestron-origin.jpg" width="1200" height="774" loading="lazy" alt="The Andromeda Galaxy, a bright spiral core with a dust lane and two companion galaxies."><figcaption>Andromeda Galaxy (M31), 183 × 10 s</figcaption></figure>
-        <figure><img src="img/horsehead-flame-nebula-celestron-origin.jpg" width="1200" height="961" loading="lazy" alt="The Flame Nebula's glowing gas and dark dust lane near Alnitak, with the Horsehead Nebula's dark notch visible in the dust lane."><figcaption>Horsehead / Flame Nebula region, 213 × 10 s</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="img/orion-nebula-m42-celestron-origin-800.webp 800w, img/orion-nebula-m42-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="img/orion-nebula-m42-celestron-origin.jpg" width="1200" height="811" loading="lazy" alt="The Orion Nebula with its bright central cloud and surrounding gas."></picture><figcaption>Orion Nebula (M42), seven sessions combined</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="A dense field of stars in Sagittarius with dark dust lanes."></picture><figcaption>Sagittarius Star Cloud (M24), 138 × 10 s</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="img/andromeda-galaxy-m31-celestron-origin-800.webp 800w, img/andromeda-galaxy-m31-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="img/andromeda-galaxy-m31-celestron-origin.jpg" width="1200" height="774" loading="lazy" alt="The Andromeda Galaxy, a bright spiral core with a dust lane and two companion galaxies."></picture><figcaption>Andromeda Galaxy (M31), 183 × 10 s</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="img/horsehead-flame-nebula-celestron-origin-800.webp 800w, img/horsehead-flame-nebula-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="img/horsehead-flame-nebula-celestron-origin.jpg" width="1200" height="961" loading="lazy" alt="The Flame Nebula's glowing gas and dark dust lane near Alnitak, with the Horsehead Nebula's dark notch visible in the dust lane."></picture><figcaption>Horsehead / Flame Nebula region, 213 × 10 s</figcaption></figure>
       </div>
     </div>
   </div>

@@ -67,6 +67,15 @@ or `maturin build --release`) — see CLAUDE.md for build instructions. The nump
 fallback path has no Rust dependency at all (`--transient-triage` is then unavailable, as it
 is in any build without the `triage` feature).
 
+## Website fonts (served with the project website, `docs/fonts/`)
+
+| Font | Used for | License |
+|---|---|---|
+| [Bricolage Grotesque](https://github.com/ateliertriay/bricolage) | Headings and labels on the website | SIL Open Font License 1.1 ([docs/fonts/OFL-bricolagegrotesque.txt](docs/fonts/OFL-bricolagegrotesque.txt)) |
+| [Source Serif 4](https://github.com/adobe-fonts/source-serif) | Body text on the website | SIL Open Font License 1.1 ([docs/fonts/OFL-sourceserif4.txt](docs/fonts/OFL-sourceserif4.txt)) |
+
+Self-hosted copies of the Latin and Latin Extended subsets Google Fonts serves; not part of the application.
+
 ## Validation-only (not distributed, not a runtime dependency)
 
 | Package | Used for | License |
