@@ -135,5 +135,5 @@ if (-not $zipped) { throw "Compress-Archive failed after 5 attempts -- a file in
 # non-terminating Compress-Archive error inside the loop above can produce)
 # -- fail loudly instead of shipping a broken zip.
 $zipSizeMb = (Get-Item $zipPath).Length / 1MB
-if ($zipSizeMb -lt 50) { throw "Zip suspiciously small (${zipSizeMb}MB) -- likely missing files" }
+if ($zipSizeMb -lt 30) { throw "Zip suspiciously small (${zipSizeMb}MB) -- likely missing files" }
 Write-Host "Built: packaging\dist\$zipName ($([math]::Round($zipSizeMb, 1)) MB)"

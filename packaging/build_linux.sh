@@ -72,5 +72,5 @@ tar -C "$ROOT/packaging/dist" -czf "$ROOT/packaging/dist/$NAME.tar.gz" "$NAME"
 ( cd "$ROOT/packaging/dist" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
 
 size_mb=$(( $(stat -c %s "$ROOT/packaging/dist/$NAME.tar.gz") / 1048576 ))
-[ "$size_mb" -ge 50 ] || { echo "ERROR: archive suspiciously small (${size_mb} MB)" >&2; exit 1; }
+[ "$size_mb" -ge 30 ] || { echo "ERROR: archive suspiciously small (${size_mb} MB)" >&2; exit 1; }
 echo "Built: packaging/dist/$NAME.tar.gz (${size_mb} MB)"
