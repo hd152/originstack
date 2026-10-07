@@ -32,9 +32,8 @@
 }
 </script>
 <link rel="icon" href="img/favicon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..600&display=swap" rel="stylesheet">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="site.css">
 </head>
 <body>
@@ -42,7 +41,7 @@
 <header class="hero slim">
   <div class="wrap">
     <div class="bar">
-      <a href="./"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></a>
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
       <nav aria-label="Pages">
         <a href="./">Home</a>
         <a href="advanced.html">Advanced</a>
@@ -111,7 +110,7 @@
     <p class="intro measure">On four Origin sessions, with the same frames, the telescope's own stack had stars 3 to 38% wider than OriginStack's, while noise was within a few percent. The Origin's file does have one advantage: its sky gradients are already removed. OriginStack removes them in its finishing steps.</p>
     <div class="figs">
       <figure class="wide">
-        <img src="img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer.">
+        <picture><source type="image/webp" srcset="img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer."></picture>
         <figcaption>The Crab Nebula from the same 133 frames, all given the same stretch: the Origin's own stack (left), Siril, and OriginStack.</figcaption>
       </figure>
     </div>

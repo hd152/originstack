@@ -17,9 +17,8 @@
 <meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="img/favicon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..600&display=swap" rel="stylesheet">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="site.css">
 </head>
 <body>
@@ -27,7 +26,7 @@
 <header class="hero slim">
   <div class="wrap">
     <div class="bar">
-      <a href="./"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></a>
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
       <nav aria-label="Pages">
         <a href="./">Home</a>
         <a href="stack-celestron-origin.html">Guide</a>
