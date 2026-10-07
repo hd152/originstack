@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to stack Celestron Origin images on your computer</title>
+<meta name="description" content="Step by step: take a Celestron Origin session folder, stack its raw FITS frames on your own computer with bias, dark and flat calibration, and get a sharper image than the telescope's own FinalStackedMaster.tiff. Free.">
+<meta name="author" content="Tom Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://hd152.github.io/originstack/stack-celestron-origin.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://hd152.github.io/originstack/stack-celestron-origin.html">
+<meta property="og:title" content="How to stack Celestron Origin images on your computer">
+<meta property="og:description" content="Restack the raw frames from a Celestron Origin session on your own computer, free, and get sharper stars than the telescope's own stack.">
+<meta property="og:image" content="https://hd152.github.io/originstack/img/vs-origin-crab.jpg">
+<meta property="og:image:alt" content="The Crab Nebula from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "How to stack Celestron Origin images on your computer",
+  "description": "Restack the raw FITS frames from a Celestron Origin session on your own computer with OriginStack, a free, open-source astrophotography stacker.",
+  "url": "https://hd152.github.io/originstack/stack-celestron-origin.html",
+  "image": "https://hd152.github.io/originstack/img/vs-origin-crab.jpg",
+  "author": { "@type": "Person", "name": "Tom Davenport" },
+  "about": { "@type": "SoftwareApplication", "name": "OriginStack", "url": "https://hd152.github.io/originstack/" },
+  "datePublished": "2026-10-07",
+  "dateModified": "2026-10-07"
+}
+</script>
+<link rel="icon" href="img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400..600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>How to stack Celestron Origin images on your computer</h1>
+    <p class="lede">The Origin stacks as it goes, but it also keeps every raw frame it took. Stacking those frames again on a computer, with proper calibration and alignment, gives a sharper and cleaner image than the one the telescope saves. This guide does it with OriginStack, which is free and runs on your own machine.</p>
+    <p class="toc">
+      <a href="#folder">What is in a session folder</a>
+      <a href="#steps">Stacking it, step by step</a>
+      <a href="#nights">Several nights</a>
+      <a href="#why">Why restack at all</a>
+      <a href="#problems">If something goes wrong</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="folder">
+  <div class="wrap">
+    <h2>What is in a Celestron Origin session folder</h2>
+    <p class="intro measure">Each imaging session gets its own folder, named after the target and the start time, for example <code>Black_Eye_Galaxy_2026-03-14_21-20-36</code>. Copy the whole folder to your computer and leave its contents as they are. OriginStack recognises each file by itself.</p>
+    <dl class="feat">
+      <div><dt>The light frames<code>Light0001.fits ...</code></dt>
+        <dd><p>One FITS file per exposure. These are the raw sensor data, still in the camera's colour mosaic, and they are what gets stacked.</p></dd></div>
+      <div><dt>Calibration frames<code>bias, dark, flat</code></dt>
+        <dd><p>Bias, dark and flat frames, when the session has them. They record the sensor's offset, its heat signal and hot pixels, and the optics' vignetting. OriginStack builds master frames from them and corrects every light with them. A session without them still stacks; it just skips that correction.</p></dd></div>
+      <div><dt>Session information<code>info.json</code></dt>
+        <dd><p>Written by the Origin: the target name, the colour pattern of the sensor, your GPS position, and where in the sky the telescope was pointing. OriginStack uses it to name the target, choose settings for it, and place the stack on the sky.</p></dd></div>
+      <div><dt>The telescope's own stack<code>FinalStackedMaster.tiff</code></dt>
+        <dd><p>The image the Origin built during the session. OriginStack ignores it, so it never gets stacked in as another frame.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>Stacking it, step by step</h2>
+    <dl class="feat">
+      <div><dt>1. Install OriginStack<code>Windows, Linux</code></dt>
+        <dd><p>Download the setup file from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a> and run it. It needs no account and no Python. The installer is not code-signed yet, so Windows SmartScreen may warn you: choose More info, then Run anyway. Linux and from-source instructions are on the <a href="./#get">home page</a>.</p></dd></div>
+      <div><dt>2. Pick the session folder</dt>
+        <dd><p>Open the app and choose the folder you copied. It counts the frames and reads the target name from <code>info.json</code>.</p></dd></div>
+      <div><dt>3. Say what you imaged</dt>
+        <dd><p>Pick Galaxy, Nebula, Star cluster, Star field or Comet, or leave it on Auto-detect. The app suggests one from the session. Choose Full quality, or Quick look for a faster check.</p></dd></div>
+      <div><dt>4. Press Start</dt>
+        <dd><p>The frames are calibrated, scored, aligned (including the slow field rotation an alt-az mount like the Origin produces), stacked with outlier rejection, and finished: gradients, colour and noise are handled and the result is stretched for viewing. A session of about a hundred frames takes a minute or two on a recent 8-core desktop. The preview follows each step as it happens.</p></dd></div>
+      <div><dt>5. Use the result</dt>
+        <dd><p>Leave the output blank and the stack is saved next to the session folder, never overwriting an earlier one. You get a JPEG to look at and share, and a FITS file that stays linear, for further work in other software or for merging with another night later.</p></dd></div>
+    </dl>
+    <p class="plain measure">Prefer the command line? The same run is <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="nights">
+  <div class="wrap">
+    <h2>Several nights on one target</h2>
+    <p class="intro measure">Put each night's session folder inside one parent folder and pick the parent. Because the Origin's field rotates as a target tracks, nights rarely line up exactly. OriginStack reads each session's metadata first and either pools all the frames or stacks each night on its own and joins them with a rotation-proof star match, whichever keeps more of the picture. To add tonight's frames to a stack you already made, use <code>--merge</code>. Details are on the <a href="advanced.html#rotation">advanced page</a>.</p>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <h2>Why restack instead of using FinalStackedMaster.tiff</h2>
+    <p class="intro measure">On four Origin sessions, with the same frames, the telescope's own stack had stars 3 to 38% wider than OriginStack's, while noise was within a few percent. The Origin's file does have one advantage: its sky gradients are already removed. OriginStack removes them in its finishing steps.</p>
+    <div class="figs">
+      <figure class="wide">
+        <img src="img/vs-origin-crab.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer.">
+        <figcaption>The Crab Nebula from the same 133 frames, all given the same stretch: the Origin's own stack (left), Siril, and OriginStack.</figcaption>
+      </figure>
+    </div>
+    <p class="caveat measure">The full measurements, the method and a comparison with Siril and DeepSkyStacker are on the <a href="./#vs-origin">home page</a>. Four sessions from one telescope are a small sample; <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> repeats the comparison on your own frames.</p>
+  </div>
+</section>
+
+<section id="problems">
+  <div class="wrap">
+    <h2>If something goes wrong</h2>
+    <dl class="feat">
+      <div><dt>It found no frames</dt>
+        <dd><p>Pick the folder that holds the <code>Light*.fits</code> files themselves, or a folder of session folders, not a folder above that.</p></dd></div>
+      <div><dt>It picked the wrong kind of target</dt>
+        <dd><p>Choose the card yourself instead of Auto-detect. On the command line, pass <code>--target-type</code>.</p></dd></div>
+      <div><dt>You have no internet connection</dt>
+        <dd><p>Stacking works offline. Tick Offline in the app, or pass <code>--offline</code>, and OriginStack makes no network requests at all.</p></dd></div>
+      <div><dt>Anything else</dt>
+        <dd><p>Open an <a href="https://github.com/hd152/originstack/issues">issue on GitHub</a> with the log from the app's lower-left pane.</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the MIT licence.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="advanced.html">Advanced features</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a></span>
+  </div>
+</footer>
+</body>
+</html>
