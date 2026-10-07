@@ -10,7 +10,6 @@ from src import wavelet
 from src.background import (
     _estimate_sky_sigma,
     _gaussian_blur,
-    gaussian_blur_spatial,
     gaussian_filter_ds,
 )
 from src.models import Config
@@ -727,58 +726,13 @@ def multiscale_local_contrast(
     return np.clip(result, 0.0, None).astype(np.float32)
 
 
-def reduce_stars(
-        img: np.ndarray,
-        star_mask: np.ndarray,
-        reduction_factor: float = 0.4,
-        blur_sigma: float = 1.5) -> np.ndarray:
-    """Reduce star prominence to improve galaxy-to-star visual balance.
-
-    Stars in galaxy images compete visually with the delicate structure of
-    spiral arms and dust lanes.  This function softens star cores by blending
-    the original image with a Gaussian-blurred version at star positions,
-    making stars appear slightly smaller and less dominant without erasing them.
-
-    The effect is purposefully subtle: star colours and relative brightnesses
-    are preserved; only their apparent angular size is reduced.  This is the
-    same technique used in post-processing tools like StarXTerminator (when
-    operated in 'reduce' mode rather than 'remove' mode).
-
-    Args:
-        img:              Float32 stacked RGB image (H, W, 3).
-        star_mask:        Float mask (1 = star core, 0 = background).
-                          If None, returns the image unchanged.
-        reduction_factor: Blend fraction toward the blurred image at star
-                          positions (0 = no change, 1 = full blur).
-                          Typical: 0.3–0.6 for subtle to moderate reduction.
-        blur_sigma:       Gaussian blur radius for the replacement (px).
-                          Larger values give softer but dimmer star cores.
-
-    Returns:
-        Float32 image (H, W, 3) with reduced star sizes, non-negative.
-    """
-    if star_mask is None:
-        return img
-
-    reduction_factor = float(np.clip(reduction_factor, 0.0, 1.0))
-    if reduction_factor <= 0.0:
-        return img
-
-    # Blur per spatial dimension only (channel axis excluded)
-    blurred = gaussian_blur_spatial(img.astype(np.float64), blur_sigma)
-
-    blend = (star_mask * reduction_factor).astype(np.float64)
-    mask3 = blend[:, :, np.newaxis]
-    result = img.astype(np.float64) * (1.0 - mask3) + blurred * mask3
-    return np.clip(result, 0.0, None).astype(np.float32)
-
-
 def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
                  max_stars: int = 3000) -> np.ndarray:
     """Make stars smaller without blurring them (Phase 4 star reduction).
 
-    ``reduce_stars`` blends each star core toward a blurred copy, which lowers
-    the peak but *widens* the profile -- on the stacks scored by
+    The old ``reduce_stars`` (removed) blended each star core toward a
+    blurred copy, which lowered the peak but *widened* the profile -- on
+    the stacks scored by
     ``tools/bench_phase4.py`` the presets that enable it came out with stars
     several percent wider than the linear stack. This narrows the profile
     instead. Per star (brightest ``max_stars``, detected well above the noise):

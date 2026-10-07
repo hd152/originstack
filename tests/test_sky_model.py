@@ -27,6 +27,7 @@ from src.sky_model import (
     SkyGeometry,
     _airmass_array,
     _corner_gradient,
+    _illuminated_fraction,
     altaz_from_equatorial,
     angular_separation_deg,
     basis_condition,
@@ -38,10 +39,10 @@ from src.sky_model import (
     gmst_deg,
     julian_date,
     light_pollution_brightness,
-    moon_illuminated_fraction,
+    moon_phase_angle_deg,
     moon_position,
     moonlight_brightness,
-    remove_physical_sky,
+    remove_physical_sky_with_reason,
     sun_position,
     van_rhijn,
     zodiacal_brightness,
@@ -197,7 +198,7 @@ class TestEphemerisAgainstAstropy(unittest.TestCase):
     def test_moon_illumination_tracks_the_synodic_month(self):
         """Full at opposition, new at conjunction, one cycle per ~29.53 d."""
         jd0 = julian_date('2026-01-03 10:00:00')     # near full moon
-        fracs = [moon_illuminated_fraction(jd0 + d) for d in range(0, 30)]
+        fracs = [_illuminated_fraction(moon_phase_angle_deg(jd0 + d)) for d in range(0, 30)]
         self.assertGreater(max(fracs), 0.95)
         self.assertLess(min(fracs), 0.1)
 
@@ -376,7 +377,7 @@ class TestDoesNotEatExtendedSignal(unittest.TestCase):
     **Scope.** These call ``fit_sky_model`` directly on a 1.5 degree fixture --
     the realistic telescope-field regime where the components are nearly
     collinear, which is what makes non-negativity load-bearing. Production
-    would not reach this fit at that size: ``remove_physical_sky`` declines
+    would not reach this fit at that size: ``remove_physical_sky_with_reason`` declines
     anything under ``_MIN_FIELD_OF_VIEW_DEG`` before fitting. So this
     characterises the fitter's safety in the hardest regime (and guards the
     wide-field path against the same failure), not a path a user can hit at
@@ -497,7 +498,7 @@ class TestRefusesWhenItCannotHelp(unittest.TestCase):
     basis carries no discriminating power at that scale. Physical sky
     components vary on ten-degree scales; a narrow field's gradient is mostly
     instrumental (vignetting, amp glow) and unrepresentable by a sky model.
-    ``remove_physical_sky`` therefore measures whether it actually flattened
+    ``remove_physical_sky_with_reason`` therefore measures whether it actually flattened
     the background and returns None when it did not.
 
     There are now two gates in front of it. A *field-size* gate declines
@@ -530,9 +531,9 @@ class TestRefusesWhenItCannotHelp(unittest.TestCase):
     def test_declines_when_there_is_no_gradient_to_remove(self):
         """Nothing to improve -> decline, rather than inject a tilt."""
         img = np.full((80, 80, 3), 1000.0, dtype=np.float32)
-        self.assertIsNone(remove_physical_sky(
+        self.assertIsNone(remove_physical_sky_with_reason(
             img, self._wcs(8.0, (80, 80)), 33.83, -117.79,
-            '2026-08-31T20:40:32-0700'))
+            '2026-08-31T20:40:32-0700')[0])
 
     def test_applies_when_it_genuinely_flattens_the_background(self):
         """The other side of the same guard: a gradient it can fit is fitted."""
@@ -541,9 +542,9 @@ class TestRefusesWhenItCannotHelp(unittest.TestCase):
         img = np.stack([1000.0 + 60.0 * (yy / h) + 20.0 * (xx / w)] * 3,
                        axis=-1).astype(np.float32)
 
-        result = remove_physical_sky(
+        result = remove_physical_sky_with_reason(
             img, self._wcs(8.0, (h, w)), 33.83, -117.79,
-            '2026-08-31T20:40:32-0700')
+            '2026-08-31T20:40:32-0700')[0]
 
         self.assertIsNotNone(result)
         self.assertLess(_corner_gradient(result['image']), _corner_gradient(img))

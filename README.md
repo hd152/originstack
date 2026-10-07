@@ -21,12 +21,12 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 
 | Galaxy | Emission Nebula |
 |:---:|:---:|
-| ![Whirlpool Galaxy (M51)](sample/whirlz1.jpg) | ![Omega Nebula (M17)](sample/omega1.jpg) |
+| ![Whirlpool Galaxy (M51)](docs/img/whirlz1.jpg) | ![Omega Nebula (M17)](docs/img/omega-stack.jpg) |
 | *Whirlpool Galaxy (M51)* | *Omega Nebula (M17), 114 x 30 s* |
 
 | Emission / Reflection Nebula | Star Cloud |
 |:---:|:---:|
-| ![Orion Nebula (M42)](sample/orion1.jpg) | ![Sagittarius Star Cloud (M24)](sample/sgr1.jpg) |
+| ![Orion Nebula (M42)](docs/img/orion1.jpg) | ![Sagittarius Star Cloud (M24)](docs/img/sgr1.jpg) |
 | *Orion Nebula (M42), seven sessions combined* | *Sagittarius Star Cloud (M24), 138 x 10 s* |
 
 All stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames (`--preset galaxy` for the Whirlpool, `--preset nebula` for the two nebulae, `--preset starfield` for the star cloud -- see [Usage Examples](#usage-examples)). The Orion Nebula is a hierarchical multi-session combine: each night is stacked separately, registered onto the deepest one, merged, and post-processed once.
@@ -290,7 +290,7 @@ Plate solving needs nothing extra: the built-in solver uses a local Gaia star in
 | `certifi` | Up-to-date CA certificates for the HTTPS lookups (Gaia, SIMBAD, astrometry.net), on systems whose own store is missing or stale |
 | `tomli` | Reading `--config` TOML files on Python 3.10 (3.11+ has `tomllib` built in) |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see [GPU Acceleration](#gpu-acceleration)) |
-| `astro_native` (Rust) | 80+ native kernels: stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, proper coaddition), Lanczos warp (alignment + drizzle), RCD / Malvar / Menon2007 debayer, calibration and hot-pixel passes, L.A.Cosmic, median filters, DBE, anisotropic diffusion, bilateral filter, matched-filter star detection, rigid-transform RANSAC, 2D wavelet transform, blind star-pattern match, 1D + 2D Moffat/Gaussian PSF fits, aperture photometry, and `--transient-triage` inference (pure-Rust `tract` ONNX) |
+| `astro_native` (Rust) | 80+ native kernels: stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, proper coaddition), Lanczos warp (alignment + drizzle), RCD / Malvar / Menon2007 debayer, calibration and hot-pixel passes, L.A.Cosmic, median filters, DBE, anisotropic diffusion, bilateral filter, matched-filter star detection, rigid-transform RANSAC, 2D wavelet transform, blind star-pattern match, 1D + 2D Moffat/Gaussian PSF fits, aperture photometry, and — only in a build with the `triage` Cargo feature (off by default, so not in release builds; `maturin build --release --features triage`) — `--transient-triage` inference (pure-Rust `tract` ONNX) |
 
 `opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — the debayers and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration (arbitrary field rotation between nights) is `src/blind_match.py`, also native; Richardson-Lucy's CPU fallback and satellite-trail detection are native/numpy; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — no dependency for any of them.
 
@@ -788,7 +788,7 @@ Every Celestron Origin session folder also holds the telescope's own result, `Fi
 
 ### Native (Rust) acceleration
 
-[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of 80+ hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and `--transient-triage` inference (pure-Rust `tract` ONNX runtime — no Python ONNX dependency). A representative sample:
+[`ext/astro_native/`](ext/astro_native/) is an optional PyO3/maturin crate of 80+ hot-path kernels, each with a numpy fallback (absent module → pure-Python path). It covers the Phase-1 calibration/cosmic-ray/debayer hot paths, the Phase-2/3 warp + combine hot path, drizzle, background extraction, star detection, RANSAC, several denoisers, the photometry aperture loop, PSF profile fitting, and `--transient-triage` inference (pure-Rust `tract` ONNX runtime — no Python ONNX dependency). The triage path is behind the Cargo feature `triage`, off by default and not in release builds; without it `--transient-triage` disables itself with a warning. A representative sample:
 
 | Kernel | Speedup vs numpy/scipy |
 |--------|------------------------|
@@ -812,9 +812,9 @@ Every Celestron Origin session folder also holds the telescope's own result, `Fi
 | Lanczos-3 warp of a rotated frame (alignment, drizzle) | ~5× vs the previous kernel (2187 → ~415 ms/frame), and Phase 3 now warps only the common crop |
 | Fused drizzle accumulate / area-overlap splat | ~1.4× (3.9× with pixfrac < 1) / ~6× |
 
-Most Phase 1 kernels are bit-identical to the numpy code they replace; the rotated Lanczos warp takes its weights from an interpolated table (99.985% of output values identical, the rest one ulp off — `ORIGINSTACK_LANCZOS_EXACT=1` restores the closed form). Speedups were measured single-threaded unless noted; under a full worker pool memory bandwidth, not arithmetic, is the limit, which is why the whole-stage figures are smaller than the single-kernel ones.
+Most Phase 1 kernels are bit-identical to the numpy code they replace; the rotated Lanczos warp takes its weights from an interpolated table (99.985% of output values identical, the rest one ulp off). Speedups were measured single-threaded unless noted; under a full worker pool memory bandwidth, not arithmetic, is the limit, which is why the whole-stage figures are smaller than the single-kernel ones.
 
-See CLAUDE.md's "Native (Rust) acceleration" section for the full kernel-by-kernel list.
+See [dev-notes/native-kernels.md](dev-notes/native-kernels.md) for the full kernel-by-kernel notes.
 
 Build (needs a Rust toolchain + `pip install maturin`):
 
@@ -824,6 +824,8 @@ cd ext/astro_native && maturin develop --release
 # system Python (no venv): build a wheel and install it
 cd ext/astro_native && python -m maturin build --release
 pip install --force-reinstall target/wheels/astro_native-*.whl
+# add --transient-triage support (tract ONNX runtime, longer first build):
+python -m maturin build --release --features triage
 ```
 
 At runtime the startup banner reports `Native accel: astro_native vX ACTIVE …`, and each accelerated step logs a `[rust] …` line. The aligned stack is a float32 memmap that Rust views zero-copy, so the streaming memory model is preserved. GPU (`--use-gpu`) additionally accelerates the registration warp and Richardson-Lucy deconvolution via cupy.

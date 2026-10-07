@@ -100,24 +100,6 @@ def _shrink(band: np.ndarray, se: np.ndarray) -> np.ndarray:
     return band * np.clip((z - 1.5) / 2.0, 0.0, 1.0)
 
 
-def banding_strength(mosaic: np.ndarray, sigma: float = 3.0, smooth: int = 65
-                     ) -> Tuple[float, float, float]:
-    """(row_rms, col_rms, pixel_noise) in ADU for a 2-D mosaic or one plane.
-
-    For deciding whether the correction is worth turning on: banding matters
-    when its rms is a sizeable fraction of the per-pixel noise divided by
-    sqrt(row length) -- i.e. when it is visible against what averaging a row
-    would give. Uses the raw (unshrunk) band so a clean frame reads ~0."""
-    plane = np.asarray(mosaic, dtype=np.float32)
-    if plane.ndim == 3:
-        plane = plane.mean(axis=2)
-    rb, _ = _band_series(plane, 1, sigma, smooth)
-    cb, _ = _band_series(plane, 0, sigma, smooth)
-    dd = np.diff(plane, axis=1)
-    noise = 1.4826 * float(np.median(np.abs(dd - np.median(dd)))) / np.sqrt(2.0)
-    return float(np.sqrt(np.mean(rb ** 2))), float(np.sqrt(np.mean(cb ** 2))), noise
-
-
 def remove_banding_2d(plane: np.ndarray, amount: float = 1.0, sigma: float = 3.0,
                       smooth: int = 65, rows: bool = True, cols: bool = True
                       ) -> np.ndarray:

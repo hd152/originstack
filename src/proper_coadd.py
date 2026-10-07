@@ -44,7 +44,7 @@ from typing import Optional
 
 import numpy as np
 
-from src.utils import safe_print
+from src.utils import diff_mad_sigma, safe_print
 
 _log = logging.getLogger("originstack")
 
@@ -238,7 +238,7 @@ def render_psf_into(p, plane: np.ndarray) -> None:
 
 def _native_ok(aligned) -> bool:
     return (_native is not None and hasattr(_native, 'proper_coadd_prep')
-            and hasattr(_native, 'proper_coadd_accum')
+            and hasattr(_native, 'proper_coadd_accum32')
             and getattr(aligned, 'dtype', None) == np.float32)
 
 
@@ -276,7 +276,7 @@ def _noise(ch: np.ndarray) -> float:
     d = d[np.isfinite(d)]
     if d.size < 1000:
         return float('nan')
-    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+    return diff_mad_sigma(d)
 
 
 def _tiled_ok(aligned) -> bool:
@@ -415,14 +415,6 @@ class FrameMeasurer:
         self.stars = stars
         self.p0 = p0
 
-    @classmethod
-    def from_frame(cls, frame: np.ndarray, fwhm: float) -> Optional["FrameMeasurer"]:
-        fr = np.asarray(frame, np.float32)
-        lum = (0.299 * fr[..., 0] + 0.587 * fr[..., 1] + 0.114 * fr[..., 2]) if fr.shape[-1] == 3 else fr[..., 0]
-        stars = select_psf_stars(lum, fwhm)
-        p0, _ = fit_psf(lum, stars)
-        return None if p0 is None else cls(stars, p0)
-
     def measure(self, frame):
         """(psf params, star fluxes) -- star stamps only, a few MB of a frame. Sky and noise
         need the whole frame and are measured in the combine pass, which reads it anyway
@@ -527,7 +519,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     n_thr = max(2, min(6, (os.cpu_count() or 8) // 2, len(use)))
     lock = threading.Lock()
     n_rep_box = [0]
-    acc32 = native and hasattr(_native, 'proper_coadd_accum32')
+    acc32 = native
 
     def worker(k):
         planes = np.zeros((C + 1, PH, PW), np.float32)
@@ -560,9 +552,6 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
                 if acc32:
                     _native.proper_coadd_accum32(a_num[c].view(np.float32), a_den[c], spec[c].view(np.float32),
                                                  Ph.view(np.float32), wn, wf)
-                elif native:
-                    _native.proper_coadd_accum(a_num[c].view(np.float64), a_den[c], spec[c].view(np.float32),
-                                               Ph.view(np.float32), wn, wf)
                 else:
                     a_num[c] += wn * (spec[c] * np.conj(Ph))
                     a_den[c] += wf * (Ph.real.astype(np.float64) ** 2 + Ph.imag.astype(np.float64) ** 2)

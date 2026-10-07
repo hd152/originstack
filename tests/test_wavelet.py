@@ -1,6 +1,6 @@
 """Tests for src/wavelet.py -- native bior1.3 2D wavelet transform, replacing
-PyWavelets for src/denoising.py's wavelet_denoise/adaptive_wavelet_denoise
-(the only wavelet family either function ever uses).
+PyWavelets for src/denoising.py's wavelet denoiser (directional_wavelet_denoise,
+which only uses this family).
 
 Validated bit-exact against real PyWavelets (pywt.wavedec2/waverec2,
 pywt.dwt_max_level, pywt.threshold) across many image sizes (even/odd

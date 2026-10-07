@@ -36,8 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import Config
+from src.utils import diff_mad_sigma, get_logger, safe_print
 from src.utils import embed_to_shape as _embed_to_shape
-from src.utils import get_logger, safe_print
 
 _log = get_logger()
 
@@ -168,7 +168,7 @@ def _pixel_noise(ch: np.ndarray, valid: np.ndarray) -> float:
     if int(pair.sum()) < 1000:
         return float('nan')
     d = (ch[:, L:].astype(np.float64) - ch[:, :-L])[pair]
-    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+    return diff_mad_sigma(d)
 
 
 def _match_flux_scale(ref: np.ndarray, img: np.ndarray, valid: np.ndarray

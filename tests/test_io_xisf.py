@@ -9,14 +9,8 @@ import unittest
 
 import numpy as np
 
-from src.io_xisf import is_xisf_file, read_xisf, read_xisf_header
+from src.io_xisf import read_xisf, read_xisf_header
 from src.xisf_writer import write_xisf
-
-
-class TestIsXisfFile(unittest.TestCase):
-    def test_extension(self):
-        self.assertTrue(is_xisf_file('stack.xisf'))
-        self.assertFalse(is_xisf_file('stack.fits'))
 
 
 class TestRoundTrip(unittest.TestCase):

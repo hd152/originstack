@@ -57,15 +57,16 @@ read the message rather than working around it.
 - **No bare `print()`** in library code under `src/` — use `safe_print` (OS003, warning-level).
 - **Claims need a measurement.** If a change is described as faster, more accurate, or fixing a real
   bug, say what was measured and how (synthetic test, real session, before/after numbers). See
-  `CLAUDE.md` for the level of detail expected — it's the project's own memory of what's been tried,
-  measured, and sometimes reverted.
+  [dev-notes/](dev-notes/) for the level of detail expected — it's the project's own memory of what's
+  been tried, measured, and sometimes reverted.
 
-## What CLAUDE.md is
+## CLAUDE.md and dev-notes/
 
-`CLAUDE.md` is a working log of the codebase for AI coding assistance, but it doubles as the most
-detailed source of "why is it built this way" for a human contributor too — worth reading before a
-non-trivial change, especially in `src/background.py`, `src/registration.py`, or anything in
-"Native (Rust) acceleration."
+`CLAUDE.md` is a compact guide for AI coding assistance: commands, module map, and the rules that
+must hold. The detailed "why is it built this way" record -- measurements, investigations, what was
+tried and reverted -- lives in [dev-notes/](dev-notes/), worth reading before a non-trivial change,
+especially in `src/background.py`, `src/registration.py`, or the native kernels
+(`dev-notes/native-kernels.md`).
 
 ## License
 

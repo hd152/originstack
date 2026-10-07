@@ -44,21 +44,6 @@ class RigidTransform:
     def __init__(self, params: np.ndarray):
         self.params = params
 
-    @classmethod
-    def from_rotation_translation(cls, rotation: float,
-                                  translation: Tuple[float, float]) -> 'RigidTransform':
-        """Build directly from a rotation angle (radians) + translation --
-        exact port of skimage.transform.EuclideanTransform's
-        ``_rt2matrix(rotation, translation, n_dims=2)``, used to wrap
-        astroalign's own (rotation, translation) result the same way the
-        old EuclideanTransform(rotation=..., translation=...) constructor
-        call did."""
-        cos_r, sin_r = np.cos(rotation), np.sin(rotation)
-        params = np.eye(3)
-        params[:2, :2] = [[cos_r, -sin_r], [sin_r, cos_r]]
-        params[0, 2], params[1, 2] = translation
-        return cls(params)
-
 
 def _umeyama_2d(src: np.ndarray, dst: np.ndarray) -> Optional[np.ndarray]:
     """2D rigid (no scale) least-squares fit, Umeyama (1991). Identical

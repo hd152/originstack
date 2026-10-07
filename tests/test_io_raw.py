@@ -14,16 +14,6 @@ import numpy as np
 from src import io_raw
 
 
-class TestIsRawFile(unittest.TestCase):
-    def test_known_extensions(self):
-        for ext in ('.cr2', '.CR3', '.nef', '.arw', '.dng', '.orf', '.raf'):
-            self.assertTrue(io_raw.is_raw_file(f'frame{ext}'), ext)
-
-    def test_non_raw_extensions(self):
-        for ext in ('.fits', '.fit', '.tiff', '.jpg'):
-            self.assertFalse(io_raw.is_raw_file(f'frame{ext}'), ext)
-
-
 class TestBayerPatternStr(unittest.TestCase):
     def test_standard_rggb(self):
         raw = mock.Mock()

@@ -47,9 +47,10 @@ $py = "$venvPath\Scripts\python.exe"
 #    documents but doesn't install (psutil/rawpy/tifffile are commented-out
 #    "optional" there -- the packaged exe bundles all three for a real
 #    astrophotography workflow: psutil for memory-adaptive worker sizing,
-#    rawpy/tifffile for input formats). ONNX inference (--transient-triage)
-#    is the native astro_native kernel (pure-Rust tract, built below) -- no
-#    onnxruntime in the packaged app. The desktop app's own UI (tkinter) is
+#    rawpy/tifffile for input formats). --transient-triage is NOT in the
+#    packaged app: its native kernel (pure-Rust tract) is behind the crate's
+#    optional `triage` feature, which the build below leaves off (~24 MB
+#    saved); the app warns and skips scoring. The desktop app's own UI (tkinter) is
 #    stdlib -- nothing extra to install for it.
 & $py -m pip install -r "$Root\requirements.txt"
 & $py -m pip install "psutil>=5.9" "rawpy>=0.19" "tifffile>=2023.1" `
@@ -59,7 +60,7 @@ if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 # 3. Build astro_native as a REAL wheel (not `maturin develop`'s editable
 #    install, which PyInstaller's analysis cannot see into) and install it.
 #    Deliberately do NOT set RUSTFLAGS=target-cpu=native here -- CLAUDE.md's
-#    own native-build docs warn that flag produces a wheel that "may use
+#    native-build docs warn that flag produces a wheel that "may use
 #    instructions older CPUs lack" and must not be redistributed.
 Push-Location "$Root\ext\astro_native"
 try {
@@ -73,6 +74,7 @@ try {
     # bug, caught only by actually checking astro_native.__version__ against
     # Cargo.toml after install, not by anything build-time output shows.
     Remove-Item "target\wheels\astro_native-*.whl" -Force -ErrorAction SilentlyContinue
+    # No `--features triage`: see step 2.
     & $py -m maturin build --release
     if ($LASTEXITCODE -ne 0) { throw "maturin build failed" }
     $wheels = Get-ChildItem "target\wheels\astro_native-*.whl"

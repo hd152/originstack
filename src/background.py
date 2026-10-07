@@ -328,7 +328,6 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
         # Polynomial degree selection
         # Ensure enough points for degree 3 (10 params) or fallback to degree 2 (6 params)
         min_samples_poly3 = 15
-        min_samples_poly2 = 6
         is_poly3 = len(y_good) >= min_samples_poly3
 
         if is_poly3:

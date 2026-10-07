@@ -13,22 +13,22 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
 import common_star_fwhm as cs  # noqa: E402
 
+from tests._helpers import star_field  # noqa: E402
+
 K = 2.3548
 
 
-def _field(sigma, shift=(0.0, 0.0), seed=0, shape=(700, 900), noise=8.0, sat=False):
+def _field(sigma, shift=(0.0, 0.0), seed=0, shape=(700, 900), noise=8.0):
     """A (3, H, W) cube of the same star grid, Gaussian stars of the given sigma, shifted."""
-    rng = np.random.default_rng(seed)
-    yy, xx = np.mgrid[:shape[0], :shape[1]]
-    img = np.full(shape, 500.0)
-    stars = np.random.default_rng(1)        # same positions and brightnesses for every call
+    pos = np.random.default_rng(1)          # same positions and brightnesses for every call
+    stars = []
     for gy in range(40, shape[0] - 40, 60):
         for gx in range(40, shape[1] - 40, 60):
-            y = gy + stars.uniform(-10, 10) + shift[0]
-            x = gx + stars.uniform(-10, 10) + shift[1]
-            amp = stars.uniform(600, 4000)
-            img += amp * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * sigma ** 2))
-    img += rng.normal(0, noise, shape)
+            y = gy + pos.uniform(-10, 10) + shift[0]
+            x = gx + pos.uniform(-10, 10) + shift[1]
+            stars.append((y, x, pos.uniform(600, 4000)))
+    img = star_field(shape, stars, sigma, bg=500.0, noise=noise,
+                     rng=np.random.default_rng(seed), dtype=np.float64)
     return np.stack([img, img, img]).astype(np.float32)
 
 

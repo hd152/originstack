@@ -1,8 +1,8 @@
 """Per-frame transparency from a fixed star ensemble."""
 import numpy as np
 
-from src.affine_fit import RigidTransform
 from src.transparency import match_flux_ratio, measure_transparency, to_aligned_yx, transparency_keep_mask
+from tests._rigid_helpers import rigid_transform
 
 _DT = np.dtype([('xcentroid', 'f8'), ('ycentroid', 'f8'), ('flux', 'f8')])
 
@@ -27,7 +27,7 @@ class _F:
 
 
 def test_to_aligned_inverts_apply_transform_convention():
-    tf = RigidTransform.from_rotation_translation(np.deg2rad(3.0), (11.0, -7.0))
+    tf = rigid_transform(np.deg2rad(3.0), (11.0, -7.0))
     from src.registration import apply_transform
     img = np.zeros((300, 400), np.float32)
     img[120:123, 210:213] = 1000.0                    # a blob at native (121, 211)
@@ -50,7 +50,7 @@ def test_shift_convention():
 def test_recovers_the_flux_ratio_under_rotation_and_shift():
     y, x, flux = _field()
     ref = _stars(y, x, flux)
-    tf = RigidTransform.from_rotation_translation(np.deg2rad(2.0), (9.0, -5.0))
+    tf = rigid_transform(np.deg2rad(2.0), (9.0, -5.0))
     # native positions of the same stars in a rotated/shifted frame: invert the map
     R = tf.params[:2, :2]
     t_rc = np.array([tf.params[1, 2], tf.params[0, 2]])

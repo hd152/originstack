@@ -26,7 +26,7 @@ from src.sky_model import (
     fit_sky_model,
     gmst_deg,
     julian_date,
-    remove_physical_sky,
+    remove_physical_sky_with_reason,
 )
 
 try:
@@ -88,8 +88,8 @@ class TestFieldOfViewGate(unittest.TestCase):
     def test_narrow_field_is_declined_before_any_fitting(self):
         yy, _ = np.mgrid[0:60, 0:60]
         img = np.repeat((1000.0 + yy)[:, :, None], 3, axis=2).astype(np.float32)
-        self.assertIsNone(remove_physical_sky(
-            img, _wcs(1.0, (60, 60)), *_SITE, '2026-08-31T20:40:32-0700'))
+        self.assertIsNone(remove_physical_sky_with_reason(
+            img, _wcs(1.0, (60, 60)), *_SITE, '2026-08-31T20:40:32-0700')[0])
 
     def test_condition_number_falls_as_the_field_widens(self):
         """The measurement the 5-degree threshold came from."""
@@ -114,8 +114,8 @@ class TestGateRunsBeforeAnyGeometryWork(unittest.TestCase):
         img = np.ones((60, 60, 3), dtype=np.float32)
         with mock.patch.object(sky_model, 'build_geometry') as geometry, \
                 mock.patch.object(sky_model, 'build_basis') as basis:
-            result = remove_physical_sky(
-                img, _wcs(1.0, (60, 60)), *_SITE, '2026-08-31T20:40:32-0700')
+            result = remove_physical_sky_with_reason(
+                img, _wcs(1.0, (60, 60)), *_SITE, '2026-08-31T20:40:32-0700')[0]
 
         self.assertIsNone(result)
         geometry.assert_not_called()
@@ -268,7 +268,7 @@ class TestNnlsFailureDeclines(unittest.TestCase):
         img, wcs = self._wide_setup()
         with mock.patch.object(sky_model, '_nnls', side_effect=RuntimeError("boom")), \
                 self.assertLogs('originstack', level='WARNING') as logs:
-            result = remove_physical_sky(img, wcs, *_SITE, '2026-08-31T20:40:32-0700')
+            result = remove_physical_sky_with_reason(img, wcs, *_SITE, '2026-08-31T20:40:32-0700')[0]
 
         self.assertIsNone(result, "a failed fit must hand back to DBE, not raise")
         self.assertTrue(any('fit failed' in m for m in logs.output),

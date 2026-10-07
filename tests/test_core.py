@@ -1,40 +1,23 @@
-import os
-import tempfile
-
 import numpy as np
-from astropy.io import fits
 from scipy.signal import fftconvolve
 
 from originstack import (
-    Config,
     FrameInfo,
-    _lanczos_resample_frame,
     calculate_shift,
     compute_quality_metrics,
-    debayer_bilinear,
-    drizzle_combine,
     estimate_psf,
     make_synthetic_psf,
     richardson_lucy_deconvolve,
     select_matching_darks,
 )
+from tests._helpers import add_gaussian_stars, star_field
 
 
 def make_star_image(shape=(64, 64), centers=((32, 32),), amp=1000.0):
     im = np.zeros(shape, dtype=np.float32)
-    for y, x in centers:
-        yy, xx = np.indices(shape)
-        r2 = (yy - y) ** 2 + (xx - x) ** 2
-        im += amp * np.exp(-r2 / (2.0 * 2.0 ** 2))
+    add_gaussian_stars(im, [(y, x, amp) for y, x in centers], sigma=2.0)
     im += 100.0
     return im
-
-
-def test_debayer_bilinear_shape():
-    raw = np.zeros((10, 10), dtype=np.float32)
-    raw[0::2, 0::2] = 100
-    rgb = debayer_bilinear(raw, pattern='RGGB')
-    assert rgb.shape == (10, 10, 3)
 
 
 def test_calculate_shift_recovery():
@@ -96,15 +79,9 @@ def _make_star_field_rgb(shape=(128, 128), n_stars=15, sigma=2.0, amp=500.0, bg=
     """Create an RGB star field with known Gaussian PSF for testing."""
     rng = np.random.RandomState(42)
     margin = 20
-    lum = np.full(shape, bg, dtype=np.float64)
-    positions = []
-    for _ in range(n_stars):
-        y = rng.randint(margin, shape[0] - margin)
-        x = rng.randint(margin, shape[1] - margin)
-        positions.append((y, x))
-        yy, xx = np.indices(shape)
-        r2 = (yy - y) ** 2.0 + (xx - x) ** 2.0
-        lum += amp * np.exp(-r2 / (2.0 * sigma ** 2))
+    positions = [(rng.randint(margin, shape[0] - margin), rng.randint(margin, shape[1] - margin))
+                 for _ in range(n_stars)]
+    lum = star_field(shape, [(y, x, amp) for y, x in positions], sigma, bg=bg, dtype=np.float64)
     rgb = np.stack([lum, lum, lum], axis=2).astype(np.float32)
     return rgb, positions
 
@@ -222,67 +199,6 @@ def test_richardson_lucy_star_mask():
     np.testing.assert_allclose(result, rgb, atol=0.05)
 
 
-# ---------------------------------------------------------------------------
-# Drizzle / Lanczos Resampling Tests
-# ---------------------------------------------------------------------------
-
-def test_lanczos_resample_identity():
-    """Resampling at scale=1 with zero shift should approximate the input."""
-    img = np.random.RandomState(0).rand(20, 20).astype(np.float32)
-    result = _lanczos_resample_frame(img, (0.0, 0.0), scale=1.0,
-                                      out_h=20, out_w=20)
-    # Interior pixels should be very close (edges may differ due to boundary)
-    np.testing.assert_allclose(result[2:-2, 2:-2], img[2:-2, 2:-2], atol=0.01)
-
-
-def test_drizzle_scale_output_shape():
-    """Drizzle at 2x should produce an output with doubled dimensions."""
-    img = np.random.RandomState(0).rand(10, 10, 3).astype(np.float32)
-    result = drizzle_combine([img], [(0.0, 0.0)], scale=2.0)
-    assert result.shape == (20, 20, 3), f"Expected (20,20,3), got {result.shape}"
-
-
-def test_drizzle_fractional_scale():
-    """Drizzle at 1.5x should produce correctly sized output."""
-    img = np.random.RandomState(0).rand(10, 10, 3).astype(np.float32)
-    result = drizzle_combine([img], [(0.0, 0.0)], scale=1.5)
-    assert result.shape == (15, 15, 3), f"Expected (15,15,3), got {result.shape}"
-
-
-def test_drizzle_scale_one_mean_combine():
-    """Scale=1.0 should fall through to weighted mean combine."""
-    rng = np.random.RandomState(0)
-    img1 = rng.rand(10, 10, 3).astype(np.float32) * 100
-    img2 = rng.rand(10, 10, 3).astype(np.float32) * 100
-    result = drizzle_combine([img1, img2], [(0.0, 0.0), (0.0, 0.0)], scale=1.0)
-    expected = ((img1.astype(np.float64) + img2.astype(np.float64)) / 2.0).astype(np.float32)
-    np.testing.assert_allclose(result, expected, atol=1e-4)
-
-
-def test_drizzle_weighted():
-    """Weighted drizzle at scale=1 should match manual weighted average."""
-    rng = np.random.RandomState(0)
-    img1 = rng.rand(10, 10, 3).astype(np.float32) * 100
-    img2 = rng.rand(10, 10, 3).astype(np.float32) * 100
-    weights = np.array([1.0, 3.0])
-    result = drizzle_combine([img1, img2], [(0.0, 0.0), (0.0, 0.0)],
-                              scale=1.0, weights=weights)
-    expected = ((img1.astype(np.float64) * 1.0 + img2.astype(np.float64) * 3.0) / 4.0).astype(np.float32)
-    np.testing.assert_allclose(result, expected, atol=1e-4)
-
-
-def test_drizzle_smooth_gradient():
-    """Lanczos drizzle on a smooth gradient should produce a smooth upscaled result."""
-    # Create a smooth horizontal gradient
-    grad = np.linspace(0, 1, 20, dtype=np.float32)
-    img = np.broadcast_to(grad[np.newaxis, :, np.newaxis], (20, 20, 3)).copy()
-    result = drizzle_combine([img], [(0.0, 0.0)], scale=2.0)
-    # Check monotonicity along horizontal axis (interior only)
-    mid_row = result[20, 4:-4, 0]
-    diffs = np.diff(mid_row)
-    assert np.all(diffs >= -1e-4), "Upscaled gradient should be monotonically increasing"
-
-
 # ---------- select_matching_darks tests ----------
 
 def _make_frame(ftype, iso=None, exptime=None, naxis1=100, naxis2=100):
@@ -350,39 +266,3 @@ def test_select_matching_darks_iso_over_exposure():
     assert len(selected) == 2
     for d in selected:
         assert d.header['ISOSPEED'] == 800
-
-
-def test_affine_sanity_guard_rejects_bad_ransac_fit():
-    # Regression test: match_stars_affine's RANSAC can converge on a
-    # confidently wrong star correspondence (bad seed, few stars, repeating
-    # pattern) and return a huge, obviously-wrong transform -- observed on
-    # real data as a 708px shift / 21.5deg rotation "successful" affine fit
-    # that used to sail through _register_one completely unchecked (the
-    # magnitude guard only existed on the calculate_shift fallback branch).
-    # This test mirrors the exact guard formula added to the affine branch.
-    from src.affine_fit import RigidTransform
-    W, H = 3056, 2048
-
-    def is_unrealistic(tf):
-        tx, ty = tf.params[0, 2], tf.params[1, 2]
-        rot_deg = abs(np.degrees(np.arctan2(tf.params[1, 0], tf.params[0, 0])))
-        return (abs(tx) > Config.MAX_REALISTIC_SHIFT_FRAC * W
-                or abs(ty) > Config.MAX_REALISTIC_SHIFT_FRAC * H
-                or rot_deg > Config.AFFINE_MAX_ROTATION_DEG)
-
-    bad = RigidTransform.from_rotation_translation(np.radians(21.526), (708.7, -35.8))
-    assert is_unrealistic(bad)
-
-    # A real single-frame affine correction: sub-pixel-to-few-px shift,
-    # a small fraction of a degree of field rotation -- must NOT be flagged.
-    good = RigidTransform.from_rotation_translation(np.radians(0.15), (3.2, -1.8))
-    assert not is_unrealistic(good)
-
-    # Rotation-only failure mode: small shift but way too much rotation
-    # (e.g. matched against the wrong star cluster) must also be caught.
-    # Rotation value kept comfortably above AFFINE_MAX_ROTATION_DEG (raised
-    # from 5 to 20 deg after real alt-az sessions showed genuine field
-    # rotation up to ~13 deg was being wrongly rejected as "bad RANSAC").
-    bad_rotation_only = RigidTransform.from_rotation_translation(np.radians(25.0),
-                                                                  (2.0, -1.0))
-    assert is_unrealistic(bad_rotation_only)

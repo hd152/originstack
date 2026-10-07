@@ -47,12 +47,20 @@ def _field_centre_and_radius(header, shape):
     """(ra_deg, dec_deg, search_radius_deg, plate_scale_arcsec) from the WCS,
     or None when the header carries no usable celestial WCS."""
     try:
-        from astropy.wcs import WCS  # noqa: F401  (availability check)
+        w = _celestial_wcs(header)
+    except Exception:
+        return None
+    return _wcs_centre_and_radius(w, shape)
+
+
+def _wcs_centre_and_radius(w, shape):
+    """``_field_centre_and_radius`` for an already-built celestial WCS. The
+    search radius is the half-diagonal x 1.15, so it covers the frame corners."""
+    try:
         from astropy.wcs.utils import proj_plane_pixel_scales
     except Exception:
         return None
     try:
-        w = _celestial_wcs(header)
         if not w.has_celestial:
             return None
         H, W = shape[:2]

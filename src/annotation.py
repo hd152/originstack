@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.photometry_core import _celestial_wcs, _wcs_centre_and_radius
 from src.utils import safe_print
 
 try:
@@ -48,32 +49,18 @@ def _build_wcs(header) -> Optional[object]:
     if 'CTYPE1' not in header or 'CRVAL1' not in header:
         return None
     try:
-        import warnings
-
-        from astropy.wcs import WCS
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')  # FITSFixedWarning on minor header quirks
-            wcs = WCS(header, naxis=2)
-        if not wcs.has_celestial:
-            return None
-        return wcs
+        wcs = _celestial_wcs(header)
     except Exception as exc:
         safe_print(f"  Annotate: could not build WCS from header ({exc})")
         return None
+    return wcs if wcs.has_celestial else None
 
 
-def _field_center_and_radius(wcs, shape: Tuple[int, int]) -> Tuple[float, float, float]:
-    """(ra_center_deg, dec_center_deg, radius_deg) covering the full frame,
-    from the WCS's own pixel scale -- no assumption about instrument/FOV."""
-    h, w = shape
-    center = wcs.all_pix2world([[w / 2.0, h / 2.0]], 0)[0]
-    ra_c, dec_c = float(center[0]), float(center[1])
-    corners = wcs.all_pix2world([[0, 0], [w, 0], [0, h], [w, h]], 0)
-    dists = [
-        np.hypot((c[0] - ra_c) * np.cos(np.radians(dec_c)), c[1] - dec_c)
-        for c in corners
-    ]
-    return ra_c, dec_c, float(max(dists))
+def _field_center_and_radius(wcs, shape: Tuple[int, int]) -> Optional[Tuple[float, float, float]]:
+    """(ra_center_deg, dec_center_deg, radius_deg) covering the full frame
+    (corners included), from the WCS's own pixel scale; None if unusable."""
+    c = _wcs_centre_and_radius(wcs, shape)
+    return None if c is None else c[:3]
 
 
 def query_annotation_objects(
@@ -188,7 +175,11 @@ def run_annotation(stacked: np.ndarray, header, output_path: str, args) -> bool:
         return False
 
     h, w = stacked.shape[:2]
-    ra_c, dec_c, radius = _field_center_and_radius(wcs, (h, w))
+    field = _field_center_and_radius(wcs, (h, w))
+    if field is None:
+        safe_print("  Annotate: could not compute the field centre from the WCS -- skipping")
+        return False
+    ra_c, dec_c, radius = field
     safe_print(f"  Annotate: querying SIMBAD ({radius:.2f} deg radius around "
                f"RA={ra_c:.3f} Dec={dec_c:.3f}) ...")
 

@@ -20,6 +20,8 @@ import unittest
 import numpy as np
 from astropy.io import fits
 
+from tests._helpers import add_gaussian_stars, write_fits
+
 # ---------------------------------------------------------------------------
 # Helpers shared by all end-to-end tests
 # ---------------------------------------------------------------------------
@@ -66,7 +68,7 @@ def _make_minimal_args(**overrides) -> argparse.Namespace:
         skip_step=[
             'hot_pixel', 'background', 'chroma_nr', 'sky_floor',
             'wavelet', 'sky_residual', 'sky_pedestal',
-            'nlm', 'bilateral', 'mmt', 'acdnr',
+            'bilateral', 'acdnr',
             'deconvolve', 'star_reduce', 'local_contrast', 'sky_neutralize',
         ],
         background_extraction=False,
@@ -75,13 +77,8 @@ def _make_minimal_args(**overrides) -> argparse.Namespace:
         bg_filter_size=3,
         bg_clip_sigma=3.0,
         denoise=False,
-
-
-
-
         denoise_bilateral=False,
         denoise_bilateral_sigma_space=3.0,
-
         denoise_acdnr=False,
         deconvolve=False,
         star_reduce=False,
@@ -113,14 +110,6 @@ def _make_minimal_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
-def _write_fits(path: str, data: np.ndarray, header: dict | None = None) -> None:
-    hdr = fits.Header()
-    if header:
-        for k, v in header.items():
-            hdr[k] = v
-    fits.writeto(path, data.astype(np.float32), header=hdr, overwrite=True)
-
-
 def _make_synthetic_bayer(shape=(128, 128), star_cy=64, star_cx=64,
                            amp=4000.0, bg=200.0,
                            noise_sigma=8.0, rng: np.random.Generator | None = None) -> np.ndarray:
@@ -132,7 +121,6 @@ def _make_synthetic_bayer(shape=(128, 128), star_cy=64, star_cx=64,
     if rng is None:
         rng = np.random.default_rng(0)
     H, W = shape
-    yy, xx = np.indices(shape)
 
     # Uniform background — different per Bayer channel to mimic realistic data
     raw = np.zeros(shape, dtype=np.float32)
@@ -142,8 +130,7 @@ def _make_synthetic_bayer(shape=(128, 128), star_cy=64, star_cx=64,
     raw[1::2, 1::2] = bg * 0.7   # B
 
     # Primary star at (star_cy, star_cx) — sigma=3 px
-    raw += (amp * np.exp(-((yy - star_cy) ** 2 + (xx - star_cx) ** 2)
-                          / (2 * 3.0 ** 2))).astype(np.float32)
+    add_gaussian_stars(raw, [(star_cy, star_cx, amp)], sigma=3.0)
 
     # Secondary stars well away from centre — spread to corners
     margin = 16
@@ -154,9 +141,7 @@ def _make_synthetic_bayer(shape=(128, 128), star_cy=64, star_cx=64,
         (H - margin, W - margin),
         (H // 3, W // 2),
     ]
-    for sy, sx in secondary_positions:
-        raw += (amp * 0.6 * np.exp(-((yy - sy) ** 2 + (xx - sx) ** 2)
-                                    / (2 * 2.5 ** 2))).astype(np.float32)
+    add_gaussian_stars(raw, [(sy, sx, amp * 0.6) for sy, sx in secondary_positions], sigma=2.5)
 
     raw += rng.normal(0.0, noise_sigma, shape).astype(np.float32)
     return np.clip(raw, 0.0, None)
@@ -178,7 +163,7 @@ def _create_synthetic_dataset(tmpdir: str,
     for i in range(3):
         d = rng.normal(50.0, 1.5, (H, W)).astype(np.float32)
         p = os.path.join(tmpdir, f'dark_{i:03d}.fits')
-        _write_fits(p, d, {'EXPTIME': 120.0, 'ISOSPEED': 800})
+        write_fits(p, d, {'EXPTIME': 120.0, 'ISOSPEED': 800})
         dark_files.append(p)
 
     flat_files = []
@@ -189,7 +174,7 @@ def _create_synthetic_dataset(tmpdir: str,
         r = np.sqrt((yy - H // 2) ** 2 + (xx - W // 2) ** 2)
         f *= np.clip(1.0 - 0.0003 * r, 0.85, 1.0)
         p = os.path.join(tmpdir, f'flat_{i:03d}.fits')
-        _write_fits(p, f, {'EXPTIME': 0.5})
+        write_fits(p, f, {'EXPTIME': 0.5})
         flat_files.append(p)
 
     # ---- Light frames ----
@@ -202,7 +187,7 @@ def _create_synthetic_dataset(tmpdir: str,
             rng=rng,
         )
         p = os.path.join(tmpdir, f'light_{i:03d}.fits')
-        _write_fits(p, raw, {
+        write_fits(p, raw, {
             'BAYERPAT': 'RGGB',
             'EXPTIME': 120.0,
             'ISOSPEED': 800,
@@ -231,7 +216,6 @@ def _make_synthetic_bayer_piecewise(shape, base_cy, base_cx,
     if rng is None:
         rng = np.random.default_rng(0)
     H, W = shape
-    yy, xx = np.indices(shape)
     raw = np.zeros(shape, dtype=np.float32)
     raw[0::2, 0::2] = bg * 1.0
     raw[0::2, 1::2] = bg * 1.3
@@ -243,12 +227,10 @@ def _make_synthetic_bayer_piecewise(shape, base_cy, base_cx,
     group_b_base = [(-80, 20), (-80, 80), (80, 20), (80, 80),
                     (-20, 60), (20, 60), (0, 100), (40, 40)]
 
-    for base, offset in ((group_a_base, group_a_offset), (group_b_base, group_b_offset)):
-        for dy, dx in base:
-            cy = base_cy + dy + offset[0]
-            cx = base_cx + dx + offset[1]
-            raw += (amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2)
-                                  / (2 * 3.0 ** 2))).astype(np.float32)
+    stars = [(base_cy + dy + offset[0], base_cx + dx + offset[1], amp)
+             for base, offset in ((group_a_base, group_a_offset), (group_b_base, group_b_offset))
+             for dy, dx in base]
+    add_gaussian_stars(raw, stars, sigma=3.0)
 
     raw += rng.normal(0.0, noise_sigma, shape).astype(np.float32)
     return np.clip(raw, 0.0, None)
@@ -266,7 +248,7 @@ def _create_piecewise_dataset(tmpdir: str, n_lights: int = 8) -> dict:
     for i in range(3):
         d = rng.normal(50.0, 1.5, (H, W)).astype(np.float32)
         p = os.path.join(tmpdir, f'pw_dark_{i:03d}.fits')
-        _write_fits(p, d, {'EXPTIME': 120.0, 'ISOSPEED': 800})
+        write_fits(p, d, {'EXPTIME': 120.0, 'ISOSPEED': 800})
         dark_files.append(p)
 
     flat_files = []
@@ -276,7 +258,7 @@ def _create_piecewise_dataset(tmpdir: str, n_lights: int = 8) -> dict:
         r = np.sqrt((yy - H // 2) ** 2 + (xx - W // 2) ** 2)
         f *= np.clip(1.0 - 0.0002 * r, 0.85, 1.0)
         p = os.path.join(tmpdir, f'pw_flat_{i:03d}.fits')
-        _write_fits(p, f, {'EXPTIME': 0.5})
+        write_fits(p, f, {'EXPTIME': 0.5})
         flat_files.append(p)
 
     shifts_yx = [(0, 0), (2, -1), (-1, 2), (1, 1),
@@ -292,7 +274,7 @@ def _create_piecewise_dataset(tmpdir: str, n_lights: int = 8) -> dict:
             rng=rng,
         )
         p = os.path.join(tmpdir, f'pw_light_{i:03d}.fits')
-        _write_fits(p, raw, {'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800})
+        write_fits(p, raw, {'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800})
         light_files.append(p)
 
     return {'dark': dark_files, 'flat': flat_files, 'light': light_files, 'H': H, 'W': W}
@@ -302,369 +284,193 @@ def _create_piecewise_dataset(tmpdir: str, n_lights: int = 8) -> dict:
 # End-to-end test cases
 # ---------------------------------------------------------------------------
 
+def _frames_and_masters(paths: dict, calibrate: bool = True):
+    """FrameInfo list for the lights plus a masters dict (median dark/flat
+    from the dataset, or none)."""
+    from src.io_fits import make_master
+    from src.models import FrameInfo
+
+    size = {'NAXIS1': paths['W'], 'NAXIS2': paths['H']}
+    lights = [FrameInfo(path=p, type='light',
+                        header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800, **size})
+              for p in paths['light']]
+    if not calibrate:
+        return lights, {'dark': None, 'flat': None, 'bias': None}
+    darks = [FrameInfo(path=p, type='dark', header={'EXPTIME': 120.0, 'ISOSPEED': 800, **size})
+             for p in paths['dark']]
+    flats = [FrameInfo(path=p, type='flat', header={'EXPTIME': 0.5, **size})
+             for p in paths['flat']]
+    return lights, {'dark': make_master(darks, method='median'),
+                    'flat': make_master(flats, method='median'),
+                    'bias': None, 'dark_exptime': 120.0}
+
+
+def _stack(tmpdir: str, paths: dict, name: str = 'stacked.fits',
+           calibrate: bool = True, **overrides):
+    """Run stack_target; return (result, output_path, stats)."""
+    from src.models import ProcessingStats
+    from src.pipeline import stack_target
+
+    lights, masters = _frames_and_masters(paths, calibrate)
+    output_path = os.path.join(tmpdir, name)
+    stats = ProcessingStats()
+    result = stack_target(lights, output_path, _make_minimal_args(**overrides),
+                          masters, stats)
+    return result, output_path, stats
+
+
+def _load_hwc(path: str) -> np.ndarray:
+    """Read a stacked FITS as float64 (H, W, C)."""
+    with fits.open(path, memmap=False) as hdul:
+        data = hdul[0].data.copy().astype(np.float64)
+    return np.transpose(data, (1, 2, 0)) if data.ndim == 3 and data.shape[0] == 3 else data
+
+
 class TestE2EBasicStack(unittest.TestCase):
     """Run the full pipeline on a tiny synthetic dataset and validate outputs."""
 
-    def _run_pipeline(self, tmpdir: str, paths: dict,
-                      **args_overrides) -> tuple[str, np.ndarray]:
-        """Invoke stack_target; return (output_path, stacked_rgb)."""
-        from src.io_fits import make_master
-        from src.models import FrameInfo, ProcessingStats
-        from src.pipeline import stack_target
+    @classmethod
+    def setUpClass(cls):
+        # One default calibrated stack, shared by the checks that only read it.
+        cls._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        cls.paths = _create_synthetic_dataset(cls._tmp.name)
+        cls.result, cls.output_path, cls.stats = _stack(cls._tmp.name, cls.paths)
 
-        # Build FrameInfo lists
-        light_frames = [
-            FrameInfo(path=p, type='light',
-                      header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800,
-                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['light']
-        ]
-        dark_frames = [
-            FrameInfo(path=p, type='dark',
-                      header={'EXPTIME': 120.0, 'ISOSPEED': 800,
-                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['dark']
-        ]
-        flat_frames = [
-            FrameInfo(path=p, type='flat',
-                      header={'EXPTIME': 0.5,
-                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['flat']
-        ]
-
-        master_dark = make_master(dark_frames, method='median')
-        master_flat = make_master(flat_frames, method='median')
-
-        masters = {
-            'dark': master_dark,
-            'flat': master_flat,
-            'bias': None,
-            'dark_exptime': 120.0,
-        }
-
-        output_path = os.path.join(tmpdir, 'stacked.fits')
-        args = _make_minimal_args(**args_overrides)
-        stats = ProcessingStats()
-        all_frames = light_frames  # pipeline expects light frames only
-
-        result = stack_target(all_frames, output_path, args, masters, stats)
-        return result, output_path
-
-    # ------------------------------------------------------------------
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
 
     def test_output_file_created(self):
         """stack_target must produce a FITS file on disk."""
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir)
-            result, output_path = self._run_pipeline(tmpdir, paths)
-            self.assertIsNotNone(result, "stack_target returned None")
-            self.assertTrue(os.path.exists(output_path),
-                            f"Output FITS not found: {output_path}")
+        self.assertIsNotNone(self.result, "stack_target returned None")
+        self.assertTrue(os.path.exists(self.output_path),
+                        f"Output FITS not found: {self.output_path}")
 
-    def test_output_fits_loadable(self):
-        """Output FITS must be openable and contain numeric data."""
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir)
-            _, output_path = self._run_pipeline(tmpdir, paths)
-            if not os.path.exists(output_path):
-                self.skipTest("Output file not produced — skipping shape/value checks")
-            with fits.open(output_path, memmap=False) as hdul:
-                data = hdul[0].data.copy()
-            self.assertIsNotNone(data)
-            self.assertTrue(np.all(np.isfinite(data)),
-                            "Stacked FITS contains non-finite values")
+    def test_output_is_finite_3_channel(self):
+        """Output FITS must be openable, finite, and 3-channel."""
+        with fits.open(self.output_path, memmap=False) as hdul:
+            data = hdul[0].data.copy()
+        self.assertTrue(np.all(np.isfinite(data)), "Stacked FITS contains non-finite values")
+        self.assertEqual(data.ndim, 3, f"Unexpected stacked FITS shape: {data.shape}")
+        self.assertEqual(min(data.shape), 3, f"Expected 3 channels, got shape {data.shape}")
 
-    def test_output_shape_is_3_H_W(self):
-        """Stacked FITS should be a 3-channel image stored as (3, H, W)."""
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir)
-            _, output_path = self._run_pipeline(tmpdir, paths)
-            if not os.path.exists(output_path):
-                self.skipTest("Output file not produced")
-            with fits.open(output_path, memmap=False) as hdul:
-                data = hdul[0].data.copy()
-            # Pipeline saves as (3, H, W) or (H, W, 3); accept either
-            if data.ndim == 3:
-                n_channels = min(data.shape)
-                self.assertEqual(n_channels, 3,
-                                 f"Expected 3 channels, got shape {data.shape}")
-            else:
-                self.fail(f"Unexpected stacked FITS shape: {data.shape}")
+    def test_accepted_frames_count_in_stats(self):
+        """ProcessingStats should record that frames were accepted."""
+        self.assertGreater(self.stats.accepted_frames, 0,
+                           "No frames were accepted by the pipeline")
 
     def test_stacking_reduces_noise(self):
-        """The stacked image should have lower per-pixel noise than a single frame.
-
-        Strategy: compare the standard deviation of the sky background in the
-        stacked result vs. the first individual light frame (after debayering).
-        """
+        """Sky-corner noise of the stack must be below a single debayered frame's."""
         from src.debayer import debayer_bilinear
         from src.io_fits import load_fits
 
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir, n_lights=8)
-            _, output_path = self._run_pipeline(tmpdir, paths)
-            if not os.path.exists(output_path):
-                self.skipTest("Output file not produced")
-
-            # Noise in stacked image (sky corner, green channel)
-            with fits.open(output_path, memmap=False) as hdul:
-                stacked = hdul[0].data.copy().astype(np.float32)
-            if stacked.shape[0] == 3:
-                stacked = np.transpose(stacked, (1, 2, 0))   # → (H, W, 3)
-            H, W = stacked.shape[:2]
-            crop = stacked[5:H // 4, 5:W // 4, 1]  # green channel, corner
-            stack_noise = float(np.std(crop))
-
-            # Noise in a single raw frame (debayered, same corner)
-            raw, _ = load_fits(paths['light'][0])
-            single_rgb = debayer_bilinear(raw, pattern='RGGB')
-            single_crop = single_rgb[5:H // 4, 5:W // 4, 1]
-            single_noise = float(np.std(single_crop))
-
-            # Stacking should reduce noise; allow generous tolerance
-            self.assertLess(stack_noise, single_noise,
-                            f"Stacked noise ({stack_noise:.2f}) ≥ single-frame noise "
-                            f"({single_noise:.2f}) — stacking not improving SNR")
+        stacked = _load_hwc(self.output_path)
+        H, W = stacked.shape[:2]
+        stack_noise = float(np.std(stacked[5:H // 4, 5:W // 4, 1]))  # green, corner
+        raw, _ = load_fits(self.paths['light'][0])
+        single = debayer_bilinear(raw, pattern='RGGB')
+        single_noise = float(np.std(single[5:H // 4, 5:W // 4, 1]))
+        self.assertLess(stack_noise, single_noise,
+                        f"Stacked noise ({stack_noise:.2f}) >= single-frame noise "
+                        f"({single_noise:.2f}) -- stacking not improving SNR")
 
     def test_star_centroid_in_expected_region(self):
         """The brightest region of the stacked image should be near the centre."""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir,
-                                              shifts_yx=[(0, 0)] * 6)  # no dither
-            _, output_path = self._run_pipeline(tmpdir, paths,
-                                                no_registration=True)  # aligned by construction
-            if not os.path.exists(output_path):
-                self.skipTest("Output file not produced")
+            paths = _create_synthetic_dataset(tmpdir, shifts_yx=[(0, 0)] * 6)  # no dither
+            _, output_path, _ = _stack(tmpdir, paths, no_registration=True)
+            stacked = _load_hwc(output_path)
+        H, W = stacked.shape[:2]
+        peak_y, peak_x = np.unravel_index(int(np.argmax(stacked.mean(axis=2))), (H, W))
+        # Star was placed at (H//2, W//2); allow +-20 px
+        self.assertAlmostEqual(peak_y, H // 2, delta=20)
+        self.assertAlmostEqual(peak_x, W // 2, delta=20)
 
-            with fits.open(output_path, memmap=False) as hdul:
-                stacked = hdul[0].data.copy().astype(np.float32)
-            if stacked.shape[0] == 3:
-                stacked = np.transpose(stacked, (1, 2, 0))
-            H, W = stacked.shape[:2]
-
-            # Find peak brightness location in the stacked luminance
-            lum = stacked.mean(axis=2)
-            peak_flat = int(np.argmax(lum))
-            peak_y, peak_x = peak_flat // W, peak_flat % W
-
-            # Star was placed at (H//2, W//2); allow ±20 px tolerance
-            tolerance = 20
-            self.assertAlmostEqual(peak_y, H // 2, delta=tolerance,
-                                   msg=f"Star Y centroid {peak_y} far from expected {H // 2}")
-            self.assertAlmostEqual(peak_x, W // 2, delta=tolerance,
-                                   msg=f"Star X centroid {peak_x} far from expected {W // 2}")
-
-    def test_sigma_clip_stacking(self):
-        """Pipeline should complete with sigma_clip stack method."""
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir)
-            _, output_path = self._run_pipeline(tmpdir, paths,
-                                                stack_method='sigma_clip')
-            self.assertTrue(os.path.exists(output_path),
-                            "Output FITS not produced with sigma_clip method")
-
-    def test_median_stacking(self):
-        """Pipeline should complete with median stack method."""
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir)
-            _, output_path = self._run_pipeline(tmpdir, paths,
-                                                stack_method='median')
-            self.assertTrue(os.path.exists(output_path),
-                            "Output FITS not produced with median method")
+    def test_other_stack_methods_complete(self):
+        for method in ('sigma_clip', 'median'):
+            with self.subTest(method=method), \
+                    tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+                paths = _create_synthetic_dataset(tmpdir)
+                _, output_path, _ = _stack(tmpdir, paths, stack_method=method)
+                self.assertTrue(os.path.exists(output_path))
 
     def test_no_calibration_frames(self):
         """Pipeline should complete even without dark/flat masters."""
-        from src.models import FrameInfo, ProcessingStats
-        from src.pipeline import stack_target
-
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             paths = _create_synthetic_dataset(tmpdir)
-            light_frames = [
-                FrameInfo(path=p, type='light',
-                          header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800,
-                                   'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-                for p in paths['light']
-            ]
-            masters = {'dark': None, 'flat': None, 'bias': None}
-            output_path = os.path.join(tmpdir, 'stacked_nocal.fits')
-            args = _make_minimal_args()
-            stats = ProcessingStats()
-            result = stack_target(light_frames, output_path, args, masters, stats)
+            result, output_path, stats = _stack(tmpdir, paths, calibrate=False)
             self.assertIsNotNone(result)
             self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(stats.accepted_frames, 0)
 
     def test_single_light_frame(self):
         """A single frame should still produce a valid output."""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir, n_lights=1,
-                                              shifts_yx=[(0, 0)])
-            _, output_path = self._run_pipeline(tmpdir, paths)
+            paths = _create_synthetic_dataset(tmpdir, n_lights=1, shifts_yx=[(0, 0)])
+            _, output_path, _ = _stack(tmpdir, paths)
             self.assertTrue(os.path.exists(output_path),
                             "Output FITS not produced for single-frame stack")
-
-    def test_accepted_frames_count_in_stats(self):
-        """ProcessingStats should record that frames were accepted."""
-        from src.io_fits import make_master
-        from src.models import FrameInfo, ProcessingStats
-        from src.pipeline import stack_target
-
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir, n_lights=4)
-            light_frames = [
-                FrameInfo(path=p, type='light',
-                          header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800,
-                                   'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-                for p in paths['light']
-            ]
-            masters = {'dark': None, 'flat': None, 'bias': None}
-            output_path = os.path.join(tmpdir, 'stacked.fits')
-            args = _make_minimal_args()
-            stats = ProcessingStats()
-            stack_target(light_frames, output_path, args, masters, stats)
-            self.assertGreater(stats.accepted_frames, 0,
-                               "No frames were accepted by the pipeline")
 
 
 class TestE2ERegistration(unittest.TestCase):
     """Validate that registration produces a measurably sharper result."""
 
     def test_registered_stack_sharper_than_unregistered(self):
-        """Stacking with registration should yield better star sharpness than
-        naive mean of misaligned frames."""
+        """Registered stack's star peak must not fall below a naive stack of
+        frames dithered by +-6 px (a smeared star has a lower peak)."""
         H, W = 128, 128
-        rng = np.random.default_rng(99)
-        # Shifts of ±6 pixels — large enough to visibly blur an unregistered stack
         shifts_yx = [(0, 0), (6, 0), (-6, 0), (0, 6), (0, -6), (3, -3)]
-
-        def _stack_noise(frames_rgb: list) -> float:
-            """Naive mean of a list of (H,W,3) arrays → luminance std near star."""
-            arr = np.mean(frames_rgb, axis=0)
-            lum = arr.mean(axis=2)
-            cy, cx = H // 2, W // 2
-            region = lum[cy - 8:cy + 8, cx - 8:cx + 8]
-            return float(np.std(region))
-
-        from src.debayer import debayer_bilinear
-
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             paths = _create_synthetic_dataset(tmpdir, shifts_yx=shifts_yx)
+            _, out_reg, _ = _stack(tmpdir, paths, 'stacked_reg.fits', calibrate=False,
+                                   no_registration=False)
+            _, out_noreg, _ = _stack(tmpdir, paths, 'stacked_noreg.fits', calibrate=False,
+                                     no_registration=True)
 
-            # Run pipeline WITH registration
-            from src.io_fits import load_fits, make_master
-            from src.models import FrameInfo, ProcessingStats
-            from src.pipeline import stack_target
-
-            light_frames = [
-                FrameInfo(path=p, type='light',
-                          header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0,
-                                   'NAXIS1': W, 'NAXIS2': H})
-                for p in paths['light']
-            ]
-            masters = {'dark': None, 'flat': None, 'bias': None}
-            output_reg = os.path.join(tmpdir, 'stacked_reg.fits')
-            args_reg = _make_minimal_args(no_registration=False, stack_method='mean')
-            stack_target(light_frames, output_reg, args_reg, masters,
-                         ProcessingStats())
-
-            # Run pipeline WITHOUT registration
-            output_noreg = os.path.join(tmpdir, 'stacked_noreg.fits')
-            args_noreg = _make_minimal_args(no_registration=True, stack_method='mean')
-            stack_target(light_frames, output_noreg, args_noreg, masters,
-                         ProcessingStats())
-
-            if not (os.path.exists(output_reg) and os.path.exists(output_noreg)):
-                self.skipTest("One or both output files not produced")
-
-            from astropy.io import fits as afits
-
-            def _lum_near_star(path: str) -> np.ndarray:
-                with afits.open(path, memmap=False) as hdul:
-                    d = hdul[0].data.copy().astype(np.float32)
-                if d.shape[0] == 3:
-                    d = np.transpose(d, (1, 2, 0))
+            def _peak_near_star(path: str) -> float:
+                d = _load_hwc(path)
                 cy, cx = H // 2, W // 2
-                return d[cy - 10:cy + 10, cx - 10:cx + 10].mean(axis=2)
+                return float(d[cy - 10:cy + 10, cx - 10:cx + 10].mean(axis=2).max())
 
-            reg_region = _lum_near_star(output_reg)
-            noreg_region = _lum_near_star(output_noreg)
-
-            # Registered: star is sharp → higher max relative to mean
-            reg_peak = float(reg_region.max())
-            noreg_peak = float(noreg_region.max())
-            # Registered peak should be at least as high as unregistered peak
-            # (misaligned stack smears the star → lower peak)
-            self.assertGreaterEqual(reg_peak, noreg_peak * 0.90,
-                                    f"Registered peak ({reg_peak:.1f}) significantly "
-                                    f"lower than unregistered ({noreg_peak:.1f})")
+            reg_peak, noreg_peak = _peak_near_star(out_reg), _peak_near_star(out_noreg)
+        self.assertGreaterEqual(reg_peak, noreg_peak * 0.90,
+                                f"Registered peak ({reg_peak:.1f}) significantly "
+                                f"lower than unregistered ({noreg_peak:.1f})")
 
 
-class TestE2EDrizzlePixfrac(unittest.TestCase):
-    """drizzle_pixfrac must actually shrink each frame's footprint, not be a no-op."""
+class DrizzleRunMixin:
+    """`_run_drizzle` for TestCase subclasses. Holds no tests, so subclasses
+    (here and in test_defer_phase4.py) do not re-run inherited ones."""
 
     def _run_drizzle(self, tmpdir: str, paths: dict, pixfrac: float, **overrides) -> np.ndarray:
-        from src.io_fits import make_master
-        from src.models import FrameInfo, ProcessingStats
-        from src.pipeline import stack_target
-
-        light_frames = [
-            FrameInfo(path=p, type='light',
-                      header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800,
-                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['light']
-        ]
-        dark_frames = [
-            FrameInfo(path=p, type='dark',
-                      header={'EXPTIME': 120.0, 'ISOSPEED': 800,
-                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['dark']
-        ]
-        flat_frames = [
-            FrameInfo(path=p, type='flat',
-                      header={'EXPTIME': 0.5, 'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['flat']
-        ]
-        masters = {
-            'dark': make_master(dark_frames, method='median'),
-            'flat': make_master(flat_frames, method='median'),
-            'bias': None,
-            'dark_exptime': 120.0,
-        }
-        output_path = os.path.join(tmpdir, f'stacked_pf{pixfrac}_{len(os.listdir(tmpdir))}.fits')
-        args = _make_minimal_args(drizzle_scale=2.0, drizzle_pixfrac=pixfrac,
-                                  stack_method='mean', **overrides)
-        stack_target(light_frames, output_path, args, masters, ProcessingStats())
+        name = f'stacked_pf{pixfrac}_{len(os.listdir(tmpdir))}.fits'
+        _, output_path, _ = _stack(tmpdir, paths, name, drizzle_scale=2.0,
+                                   drizzle_pixfrac=pixfrac, stack_method='mean', **overrides)
         if not os.path.exists(output_path):
             self.skipTest("Output file not produced")
-        with fits.open(output_path, memmap=False) as hdul:
-            data = hdul[0].data.copy().astype(np.float64)
-        return np.transpose(data, (1, 2, 0)) if data.shape[0] == 3 else data
+        return _load_hwc(output_path)
 
-    def test_pixfrac_changes_output(self):
-        """A shrunken footprint (pixfrac<1) must produce a different result
-        than the full-footprint default (pixfrac=1) -- this was previously a
-        dead CLI flag with zero effect on the actual drizzle path."""
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_synthetic_dataset(tmpdir, n_lights=4)
-            full = self._run_drizzle(tmpdir, paths, pixfrac=1.0)
-            shrunk = self._run_drizzle(tmpdir, paths, pixfrac=0.3)
-            self.assertFalse(np.allclose(full, shrunk, atol=1e-6),
-                             "drizzle_pixfrac had no effect on the output")
 
-    def test_small_pixfrac_leaves_more_uncovered_pixels(self):
-        """Shrinking the footprint below the dither spacing should leave more
-        output pixels with zero coverage (holes) than the full-footprint case."""
+class TestE2EDrizzlePixfrac(DrizzleRunMixin, unittest.TestCase):
+    """drizzle_pixfrac must actually shrink each frame's footprint, not be a no-op."""
+
+    def test_pixfrac_shrinks_footprint(self):
+        """pixfrac<1 must change the result (it was once a dead CLI flag), and a
+        footprint below the dither spacing must leave more zero-coverage holes."""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             paths = _create_synthetic_dataset(tmpdir, n_lights=4)
             full = self._run_drizzle(tmpdir, paths, pixfrac=1.0)
             shrunk = self._run_drizzle(tmpdir, paths, pixfrac=0.2)
-            holes_full = float(np.mean(full.sum(axis=2) == 0.0))
-            holes_shrunk = float(np.mean(shrunk.sum(axis=2) == 0.0))
-            self.assertGreater(holes_shrunk, holes_full,
-                               f"Small pixfrac ({holes_shrunk:.3f} zero-frac) should leave "
-                               f"more holes than pixfrac=1 ({holes_full:.3f} zero-frac)")
+        self.assertFalse(np.allclose(full, shrunk, atol=1e-6),
+                         "drizzle_pixfrac had no effect on the output")
+        holes_full = float(np.mean(full.sum(axis=2) == 0.0))
+        holes_shrunk = float(np.mean(shrunk.sum(axis=2) == 0.0))
+        self.assertGreater(holes_shrunk, holes_full,
+                           f"Small pixfrac ({holes_shrunk:.3f} zero-frac) should leave "
+                           f"more holes than pixfrac=1 ({holes_full:.3f} zero-frac)")
 
 
-class TestE2EDrizzleFusedAndSplat(TestE2EDrizzlePixfrac):
+class TestE2EDrizzleFusedAndSplat(DrizzleRunMixin, unittest.TestCase):
     """The fused native accumulate must reproduce the warp-then-add path bit
     for bit, and --drizzle-method splat must produce a comparable image."""
 
@@ -719,43 +525,13 @@ class TestE2EElasticRegistration(unittest.TestCase):
     --optical-flow feature it replaces (silently dropped under drizzle)."""
 
     def _run(self, tmpdir: str, paths: dict, **overrides) -> np.ndarray:
-        from src.io_fits import make_master
-        from src.models import FrameInfo, ProcessingStats
-        from src.pipeline import stack_target
-
-        light_frames = [
-            FrameInfo(path=p, type='light',
-                      header={'BAYERPAT': 'RGGB', 'EXPTIME': 120.0, 'ISOSPEED': 800,
-                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['light']
-        ]
-        dark_frames = [
-            FrameInfo(path=p, type='dark',
-                      header={'EXPTIME': 120.0, 'ISOSPEED': 800,
-                               'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['dark']
-        ]
-        flat_frames = [
-            FrameInfo(path=p, type='flat',
-                      header={'EXPTIME': 0.5, 'NAXIS1': paths['W'], 'NAXIS2': paths['H']})
-            for p in paths['flat']
-        ]
-        masters = {
-            'dark': make_master(dark_frames, method='median'),
-            'flat': make_master(flat_frames, method='median'),
-            'bias': None,
-            'dark_exptime': 120.0,
-        }
         suffix = 'on' if overrides.get('elastic_registration') else 'off'
         suffix += f"_dz{overrides.get('drizzle_scale', 1.0)}"
-        output_path = os.path.join(tmpdir, f'stacked_elastic_{suffix}.fits')
-        args = _make_minimal_args(stack_method='mean', **overrides)
-        stack_target(light_frames, output_path, args, masters, ProcessingStats())
+        _, output_path, _ = _stack(tmpdir, paths, f'stacked_elastic_{suffix}.fits',
+                                   stack_method='mean', **overrides)
         if not os.path.exists(output_path):
             self.skipTest("Output file not produced")
-        with fits.open(output_path, memmap=False) as hdul:
-            data = hdul[0].data.copy().astype(np.float64)
-        return np.transpose(data, (1, 2, 0)) if data.shape[0] == 3 else data
+        return _load_hwc(output_path)
 
     @staticmethod
     def _group_peaks(img: np.ndarray) -> tuple[float, float]:
@@ -763,22 +539,15 @@ class TestE2EElasticRegistration(unittest.TestCase):
         w = lum.shape[1]
         return float(lum[:, :w // 2].max()), float(lum[:, w // 2:].max())
 
-    def test_elastic_registration_changes_output(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            paths = _create_piecewise_dataset(tmpdir, n_lights=8)
-            off = self._run(tmpdir, paths, elastic_registration=False)
-            on = self._run(tmpdir, paths, elastic_registration=True)
-            # A fitted field adds crop margin (calc_common_crop's
-            # extra_margin_px), so the two outputs are usually different
-            # shapes too -- that alone already proves the flag did something.
-            changed = off.shape != on.shape or not np.allclose(off, on, atol=1e-6)
-            self.assertTrue(changed, "--elastic-registration had no effect on the output")
-
     def test_elastic_registration_sharpens_both_groups(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             paths = _create_piecewise_dataset(tmpdir, n_lights=8)
             off = self._run(tmpdir, paths, elastic_registration=False)
             on = self._run(tmpdir, paths, elastic_registration=True)
+            # A fitted field adds crop margin (calc_common_crop's
+            # extra_margin_px), so the outputs usually differ in shape too.
+            changed = off.shape != on.shape or not np.allclose(off, on, atol=1e-6)
+            self.assertTrue(changed, "--elastic-registration had no effect on the output")
             peak_a_off, peak_b_off = self._group_peaks(off)
             peak_a_on, peak_b_on = self._group_peaks(on)
             # A misaligned (smeared) star has a lower peak than a sharp one;
@@ -803,6 +572,3 @@ class TestE2EElasticRegistration(unittest.TestCase):
             self.assertTrue(changed,
                             "--elastic-registration had no effect under --drizzle-scale 2.0")
 
-
-if __name__ == '__main__':
-    unittest.main()

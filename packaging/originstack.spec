@@ -29,10 +29,11 @@ for pkg in ('rawpy',):
 
 datas += [(str(ROOT / 'VERSION'), '.')]
 
-# The --transient-triage model. astro_native.transient_triage_score (pure-Rust
-# tract) loads it by a path src/transient_triage.py resolves relative to its own
-# __file__, so PyInstaller's module graph never sees the file.
-datas += [(str(ROOT / 'src' / 'data' / 'transient_triage.onnx'), 'src/data')]
+# The --transient-triage model (src/data/transient_triage.onnx) is deliberately
+# not bundled: release builds compile astro_native without its optional `triage`
+# feature, so transient_triage_score does not exist and the model could not be
+# used (the app warns and skips scoring). If a build ever enables the feature,
+# add: datas += [(str(ROOT / 'src' / 'data' / 'transient_triage.onnx'), 'src/data')]
 # Example results on the desktop app's target cards (src/desktop_app.py, by path).
 datas += [(str(ROOT / 'src' / 'data' / 'examples'), 'src/data/examples')]
 

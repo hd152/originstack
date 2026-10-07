@@ -34,8 +34,8 @@ without it (see `CLAUDE.md`'s "Optional dependencies" section).
 ## Rust — native extension build dependencies
 
 [ext/astro_native/](ext/astro_native/) (the optional `astro_native` PyO3 module — see
-CLAUDE.md's "Native (Rust) acceleration") is built from a transitive closure of
-**~147 crates** (`cargo metadata`, 2026-09). Every one is permissive — no copyleft,
+CLAUDE.md's "Native (Rust) build") is built from a transitive closure of
+**~30 crates** by default, **~120** with the optional `triage` feature (`cargo tree`, 2026-10). Every one is permissive — no copyleft,
 nothing non-commercial. License breakdown:
 
 | License class | Count (approx.) |
@@ -56,14 +56,16 @@ Notable families in that closure:
 - **tract-onnx and its `tract-*` siblings** (`tract-core`, `tract-hir`,
   `tract-linalg`, `tract-data`, `tract-nnef`, `tract-onnx-opl`) — the pure-Rust ONNX
   inference runtime used by the `--transient-triage` native kernel (`mod transient_triage`
-  in `lib.rs`). MIT OR Apache-2.0 (Sonos). Pulls the bulk of the ~147: `prost`/protobuf
+  in `lib.rs`), compiled only with `--features triage` (off by default and in release
+  builds). MIT OR Apache-2.0 (Sonos). Pulls the bulk of the feature build's ~120: `prost`/protobuf
   codegen, `smallvec`, `num-*`, `anyhow`, `nom`, `flate2`/`miniz_oxide`, `getrandom`,
   `half`, `scan_fmt`, etc. — all in the permissive set above.
 
 Neither pyo3, tract, nor any of their dependencies are linked into or distributed with
 the Python package unless you build `astro_native` yourself (`maturin develop --release`
 or `maturin build --release`) — see CLAUDE.md for build instructions. The numpy
-fallback path has no Rust dependency at all (`--transient-triage` is then unavailable).
+fallback path has no Rust dependency at all (`--transient-triage` is then unavailable, as it
+is in any build without the `triage` feature).
 
 ## Validation-only (not distributed, not a runtime dependency)
 

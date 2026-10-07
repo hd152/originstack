@@ -1285,7 +1285,6 @@ def execute_frame_processing(
                                        desc="  Processing", unit="frame",
                                        disable=args.verbose):
                         _check_cancel(args)
-                        idx = futures[future]
                         frame_idx, metrics, error, timings = future.result()
                         _accum(timings)
                         f = lights[frame_idx]

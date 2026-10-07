@@ -1412,7 +1412,6 @@ def build_parser() -> argparse.ArgumentParser:
     g_out = p.add_argument_group('Output, preview & plate solving')
     g_sessions = p.add_argument_group('Multi-session, merge & checkpoint')
     g_comet = p.add_argument_group('Comet mode')
-    g_adv = p.add_argument_group('Advanced (most are managed automatically by --auto)')
     g_debug = p.add_argument_group('Diagnostics & debugging')
     g_core.add_argument('-d', '--directory', default=None,
                    help='Session folder of light frames (required unless --from-stack).')

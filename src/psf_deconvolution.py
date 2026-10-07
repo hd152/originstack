@@ -130,7 +130,6 @@ def estimate_psf(img: np.ndarray, star_positions,
 
     H, W = img.shape[:2]
     lum = img if img.ndim == 2 else (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
-    img_max = float(lum.max())
 
     # Sort by flux (brightest first), skip saturated
     try:

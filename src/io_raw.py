@@ -8,7 +8,6 @@ Supported extensions: CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, PEF, 3FR, …
 """
 from __future__ import annotations
 
-import os
 from typing import Tuple
 
 import numpy as np
@@ -35,10 +34,6 @@ try:
 except Exception:
     _rawpy = None  # type: ignore[assignment]
     HAS_RAWPY = False
-
-
-def is_raw_file(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in RAW_EXTENSIONS
 
 
 # ---------------------------------------------------------------------------

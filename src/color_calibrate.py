@@ -194,36 +194,16 @@ def _default_channel_response(channel: str, wavelengths_nm: np.ndarray) -> np.nd
     return np.exp(-0.5 * ((wavelengths_nm - center) / _DEFAULT_BAND_SIGMA_NM) ** 2)
 
 
-def synthetic_channel_flux(teff_k: float, channel_response=None) -> Tuple[float, float, float]:
-    """Integrate a blackbody spectrum at ``teff_k`` against R/G/B channel
-    response curves. ``channel_response(channel: str, wavelengths_nm) ->
-    array`` lets a caller supply real sensor QE x filter transmission
-    curves; defaults to ``_default_channel_response``.
-
-    Returns (flux_R, flux_G, flux_B) in arbitrary but mutually-comparable
-    units (only ratios between channels are ever used downstream).
-    """
-    wl = _SPCC_WAVELENGTHS_NM
-    spec = _blackbody_spectrum(float(teff_k), wl)
-    resp_fn = channel_response or _default_channel_response
-    fluxes = []
-    for ch in ('R', 'G', 'B'):
-        resp = resp_fn(ch, wl)
-        fluxes.append(float(_TRAPZ(spec * resp, wl)))
-    return tuple(fluxes)
-
-
 def _synthetic_channel_flux_batch(teff_k: np.ndarray, channel_response=None
                                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Vectorized form of ``synthetic_channel_flux`` for many stars at
-    once. ``fit_channel_scales_spcc`` used to call the scalar version once
-    per matched star (up to ~500 per Gaia query) in a Python loop; the
-    blackbody spectrum and its integration against each channel response
-    both broadcast cleanly across stars, so this replaces that loop with 4
-    vectorized calls total (1 spectrum + 3 channel integrations) regardless
-    of star count. ``synthetic_channel_flux`` itself is kept as the
-    scalar, single-star API (used directly by callers that only have one
-    temperature and by its own tests) rather than folded into this.
+    """Integrate a blackbody spectrum at each ``teff_k`` against R/G/B
+    channel response curves, for many stars at once (the spectrum and its
+    integration broadcast across stars). ``channel_response(channel: str,
+    wavelengths_nm) -> array`` lets a caller supply real sensor QE x filter
+    transmission curves; defaults to ``_default_channel_response``.
+
+    Returns (flux_R, flux_G, flux_B) arrays in arbitrary but mutually
+    comparable units (only ratios between channels are used downstream).
     """
     wl = _SPCC_WAVELENGTHS_NM
     teff_arr = np.asarray(teff_k, dtype=np.float64)
@@ -301,11 +281,9 @@ def fit_channel_scales_spcc(img: np.ndarray, header, catalog,
     flux_r_expected = np.empty(n)
     flux_b_expected = np.empty(n)
 
-    # Vectorized over all stars at once (previously a per-star Python loop
-    # calling synthetic_channel_flux individually -- up to ~500 iterations
-    # per Gaia query): _synthetic_channel_flux_batch computes the blackbody
-    # spectrum and its 3 channel integrations for every candidate star in 4
-    # calls total, independent of star count.
+    # Vectorized over all stars at once: _synthetic_channel_flux_batch
+    # computes the blackbody spectrum and its 3 channel integrations for
+    # every candidate star in 4 calls total, independent of star count.
     has_teff = np.isfinite(teff) & (teff >= 2000.0) & (teff <= 50000.0)
     use_bb = np.zeros(n, dtype=bool)
     if np.any(has_teff):

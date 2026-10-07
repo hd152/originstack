@@ -10,82 +10,82 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 
 ## Module Inventory
 
-| Module | Lines | Contents |
-|--------|-------|----------|
-| `src/gpu_context.py` | 270 | `GpuContext`, CUDA stream contexts, `get_gpu()` singleton |
-| `src/models.py` | 215 | `Config`, `FrameInfo`, `ProcessingStats` |
-| `src/utils.py` | 214 | Print helpers, `format_time`, `get_memory_usage_mb`, `native_status()` |
-| `src/io_fits.py` | 575 | FITS load/save, `load_frame` (format dispatcher), `make_master`, `populate_fits_header` |
-| `src/robust_pca.py` | 224 | Robust PCA (Principal Component Pursuit) master calibration frames (`--master-method robust_pca`); same decomposition backs `--flat-from-lights` — see feature 35 |
-| `src/dark_temp_model.py` | 124 | Temperature-interpolated dark current model (`--dark-temp-model`) — see feature 34 |
-| `src/io_raw.py` | 204 | Camera RAW load (rawpy) — CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ |
-| `src/io_tiff.py` | 88 | TIFF load (tifffile) |
-| `src/io_xisf.py` | 192 | XISF 1.0 load (hand-rolled, no dependency) |
-| `src/io_ser.py` | 200 | SER (planetary video) load — one file expands to many virtual frames |
-| `src/frame_discovery.py` | 299 | `discover_frames`, `classify_frame`, `select_matching_darks` |
-| `src/debayer.py` | 928 | Debayering (Malvar/Menon2007), hot pixels, white balance, CA correction, `autodetect_bayer_orientation` |
-| `src/matched_filter.py` | 55 | Point-source matched filter (`--matched-filter`) — post-stack SNR-optimal detection map, see feature 28 |
-| `src/atmospheric_dispersion.py` | 117 | Software atmospheric dispersion correction (`--fix-atmospheric-dispersion`, experimental, not wired into `--auto`) |
-| `src/vignette_calib.py` | 77 | Per-instrument vignetting/background calibration map load + apply (`--vignette-map`; built offline by `tools/build_vignette_map.py`) |
-| `src/quality.py` | 902 | `compute_quality_metrics`, star detection, FWHM, `estimate_bortle` |
-| `src/star_detect.py` | 270 | `detect_stars_matched_filter` — default star detector, native Rust + numpy mirror |
-| `src/affine_fit.py` | 202 | `fit_rigid_ransac` — 2D rigid-transform RANSAC, native + numpy |
-| `src/phase_correlate.py` | 103 | `phase_cross_correlation` — subpixel FFT registration |
-| `src/blind_match.py` | 230 | `match_rigid_unknown_rotation` — blind (unknown-rotation) star match, used by `--merge` |
-| `src/psf_deconvolution.py` | 719 | PSF estimation (Moffat/Gaussian), Richardson-Lucy (global + spatially-variant), TV, `sparse_wavelet_deconvolve` |
-| `src/background.py` | 1506 | DBE (robust local regression, Rust-accelerated), mesh/wavelet sky extraction, residual removal, exclusion-mask support (`--galaxy-mode`) |
-| `src/denoising.py` | 1789 | Curvelet-inspired directional wavelet (BayesShrink), ACDNR, bilateral, aniso, `--variance-stabilize`, star reduction, local contrast |
-| `src/wavelet.py` | 258 | `wavedec2`/`waverec2` — native 2D wavelet transform (bior1.3 + db4) |
-| `src/registration.py` | 2421 | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase`, `fit_displacement_field` (`--elastic-registration`) |
-| `src/stacking.py` | 2607 | Sigma-clip, percentile, ESD, linear-fit, IVW, wavelet-subband, drizzle (Lanczos-3/PSF-matched/Magic Kernel), IBP super-res, `run_stacking_phase` |
-| `src/frame_processor.py` | 1494 | Parallel workers, `execute_frame_processing`, `quality_gate` |
-| `src/postprocess.py` | 877 | `postprocess_stack` — up to 20-step post-processing chain |
-| `src/aberration.py` | 313 | Field aberration/tilt inspector (`--aberration-report`) — see feature 37 |
-| `src/dither_report.py` | 112 | Dither-coverage uniformity diagnostic (`--dither-report`) — see feature 38 |
-| `src/star_repair.py` | 163 | Saturated star core repair (`--repair-stars`) — see feature 39 |
-| `src/star_removal.py` | 128 | Star removal, opt-in (`--remove-stars`) — see feature 40 |
-| `src/trail_reject.py` | 243 | Satellite/aircraft trail rejection (`--trail-reject`) — see feature 41 |
-| `src/local_normalize.py` | 118 | Per-frame Local Normalization (`--local-normalize`), pre-combine — see feature 42 |
-| `src/live_stack.py` | 339 | Real-time stacking (`--live`) — see feature 44 |
-| `src/stream_stack.py` | 498 | Two-pass streaming stack of an already-complete directory (`--stream`) — see feature 43 |
-| `src/ui_events.py` | 375 | In-process UI event/state sink for the desktop app — log/phase/progress state, named milestone previews with on-demand re-stretch, per-frame thumbnail ring |
-| `src/desktop_control.py` | 220 | Desktop-app control layer — form schema introspection, form-to-argv translation, `RunManager` |
-| `src/desktop_app.py` | 1031 | Native tkinter desktop app (`python desktop_app.py`) — Setup form, live progress/log, interactive preview (zoom/pan/re-stretch/wipe compare/thumbnail ring) |
-| `src/native_dialog.py` | 48 | Native Windows message boxes via ctypes — fatal-error / close-confirm dialogs for the packaged desktop app |
-| `src/notify.py` | 70 | Best-effort native Windows balloon-tip notification (no-op elsewhere) |
-| `src/channel_combine.py` | 625 | `combine` subcommand — LRGB/narrowband palettes, SCNR, continuum subtraction |
-| `src/exposure_fusion.py` | 153 | Mertens multiresolution exposure fusion (`--hdr-blend-mode fusion`) — see feature 22 |
-| `src/source_separation.py` | 148 | NMF star/nebula source separation (`--nmf-separate`) — see feature 45 |
-| `src/auto_settings.py` | 943 | Heuristic target classifier, `apply_auto_settings` (`--auto`) |
-| `src/target_inference.py` | 670 | Target type inference — heuristic galaxy/nebula/starfield classification |
-| `src/health_check.py` | 191 | Frame consistency and calibration quality analysis |
-| `src/session_info.py` | 208 | Session metadata reader (Celestron Origin `info.json` — GPS, filter, ISO, orientation) |
-| `src/plate_solve.py` | 343 | Astrometry.net + ASTAP + SIMBAD identification |
-| `src/net_query.py` | 398 | Direct-HTTP replacements for astroquery services (Gaia, VizieR, SIMBAD, astrometry.net, JPL Horizons) — stdlib urllib, no dependency |
-| `src/color_calibrate.py` | 572 | Photometric colour calibration using plate-solved star colours (`--color-calibrate`, `--color-calibrate-method {colorindex,spcc}`) |
-| `src/photometric_calibration.py` | 181 | Gray-locus photometric colour calibration (`--photometric-calibration`) |
-| `src/annotation.py` | 224 | Object annotation (`--annotate`) — see feature 20 |
-| `src/mosaic.py` | 320 | WCS-based mosaic stitching (`--mosaic`) |
-| `src/checkpoint.py` | 327 | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
-| `src/merge.py` | 279 | Incremental stacking — register + weighted-merge previous linear stacks (`--merge`) |
-| `src/quality_sweep.py` | 270 | Collection quality sweep — recursive scoring + reversible flagging (`--quality-sweep`) |
-| `src/xisf_writer.py` | 107 | XISF 1.0 format writer (`--export xisf`) |
-| `src/cleanup.py` | 47 | Global temp-file registry — auto-remove all registered paths on exit or interrupt |
-| `src/banding.py` | ~190 | Row/column banding removal (`--banding-removal`) — per Bayer plane, neighbour-difference noise, local highlight cut, sort-based median + Savitzky-Golay trend, significance-gated |
-| `src/transparency.py` | ~180 | Per-frame transparency from a fixed star ensemble (`--transparency-min`); `to_aligned_yx` (the inverse of `apply_transform`'s convention, tested against it) |
-| `src/distortion.py` | ~260 | Session-wide radial distortion model (`--distortion-model`): fit, significance test on held-out frames, analytic per-frame displacement fields |
-| `src/session_report.py` | ~400 | Session diagnostics PNG/CSV (`--session-report`), drift/rotation/periodic-tracking/focus analysis; PIL-only plotting |
-| `src/noise_validation.py` | ~150 | Odd/even half-stack noise map + consistency map (`--noise-validate`) |
-| `src/moving_objects.py` | ~330 | Moving-object detection, velocity-space linking, tracked stacking (`--moving-objects`) |
-| `src/lightcurve_analysis.py` | ~260 | Lomb-Scargle period + BLS/trapezoid transit analysis of light curves (`--lightcurve-analysis`); uses astropy.timeseries |
-| `src/cfa_drizzle.py` | ~300 | Bayer-aware drizzle (`--cfa-drizzle`), native `cfa_drizzle_frame` kernel + numpy mirror |
-| `src/pipeline.py` | 1197 | Four-phase orchestrator, `stack_target` |
-| `src/cli.py` | 1911 | `process_directory`, `parse_args`, `main` |
-| `originstack.py` | 179 | Backward-compatibility re-export shim |
-| `desktop_app.py` (root) | 24 | Thin root shim — `from src.desktop_app import main` |
-| `ext/astro_native/` (Rust) | ~6300 | Optional PyO3/maturin crate v0.30 (~56 kernels, numpy fallback when absent): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind star-pattern match, 2D wavelet transform, hot-pixel fix/replace, CFA-drizzle splat, fused white balance, robust-PCA Gram-matrix SVD, continuum-subtraction moments, 1D + 2D Moffat/Gaussian PSF fits, and the **`--transient-triage` inference path** (ONNX forward pass via pure-Rust `tract` — see feature 46) |
+| Module | Contents |
+|--------|----------|
+| `src/gpu_context.py` | `GpuContext`, CUDA stream contexts, `get_gpu()` singleton |
+| `src/models.py` | `Config`, `FrameInfo`, `ProcessingStats` |
+| `src/utils.py` | Print helpers, `format_time`, `get_memory_usage_mb`, `native_status()` |
+| `src/io_fits.py` | FITS load/save, `load_frame` (format dispatcher), `make_master`, `populate_fits_header` |
+| `src/robust_pca.py` | Robust PCA (Principal Component Pursuit) master calibration frames (`--master-method robust_pca`); same decomposition backs `--flat-from-lights` — see feature 35 |
+| `src/dark_temp_model.py` | Temperature-interpolated dark current model (`--dark-temp-model`) — see feature 34 |
+| `src/io_raw.py` | Camera RAW load (rawpy) — CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ |
+| `src/io_tiff.py` | TIFF load (tifffile) |
+| `src/io_xisf.py` | XISF 1.0 load (hand-rolled, no dependency) |
+| `src/io_ser.py` | SER (planetary video) load — one file expands to many virtual frames |
+| `src/frame_discovery.py` | `discover_frames`, `classify_frame`, `select_matching_darks` |
+| `src/debayer.py` | Debayering (RCD default, Malvar, Menon2007), hot pixels, white balance, CA correction, `autodetect_bayer_orientation` |
+| `src/matched_filter.py` | Point-source matched filter (`--matched-filter`) — post-stack SNR-optimal detection map, see feature 28 |
+| `src/atmospheric_dispersion.py` | Software atmospheric dispersion correction (`--fix-atmospheric-dispersion`, experimental, not wired into `--auto`) |
+| `src/vignette_calib.py` | Per-instrument vignetting/background calibration map load + apply (`--vignette-map`; built offline by `tools/build_vignette_map.py`) |
+| `src/quality.py` | `compute_quality_metrics`, star detection, FWHM, `estimate_bortle` |
+| `src/star_detect.py` | `detect_stars_matched_filter` — default star detector, native Rust + numpy mirror |
+| `src/affine_fit.py` | `fit_rigid_ransac` — 2D rigid-transform RANSAC, native + numpy |
+| `src/phase_correlate.py` | `phase_cross_correlation` — subpixel FFT registration |
+| `src/blind_match.py` | `match_rigid_unknown_rotation` — blind (unknown-rotation) star match, used by `--merge` |
+| `src/psf_deconvolution.py` | PSF estimation (Moffat/Gaussian), Richardson-Lucy (global + spatially-variant), TV, `sparse_wavelet_deconvolve` |
+| `src/background.py` | DBE (robust local regression, Rust-accelerated), mesh/wavelet sky extraction, residual removal, exclusion-mask support (`--galaxy-mode`) |
+| `src/denoising.py` | Curvelet-inspired directional wavelet (BayesShrink), ACDNR, bilateral, aniso, `--variance-stabilize`, star reduction, local contrast |
+| `src/wavelet.py` | `wavedec2`/`waverec2` — native 2D wavelet transform (bior1.3 + db4) |
+| `src/registration.py` | `calculate_shift`, affine/RANSAC, `calc_common_crop`, `run_registration_phase`, `fit_displacement_field` (`--elastic-registration`) |
+| `src/stacking.py` | Sigma-clip, percentile, ESD, linear-fit, IVW, wavelet-subband, drizzle (Lanczos-3/PSF-matched/Magic Kernel), IBP super-res, `run_stacking_phase` |
+| `src/frame_processor.py` | Parallel workers, `execute_frame_processing`, `quality_gate` |
+| `src/postprocess.py` | `postprocess_stack` — up to 20-step post-processing chain |
+| `src/aberration.py` | Field aberration/tilt inspector (`--aberration-report`) — see feature 37 |
+| `src/dither_report.py` | Dither-coverage uniformity diagnostic (`--dither-report`) — see feature 38 |
+| `src/star_repair.py` | Saturated star core repair (`--repair-stars`) — see feature 39 |
+| `src/star_removal.py` | Star removal, opt-in (`--remove-stars`) — see feature 40 |
+| `src/trail_reject.py` | Satellite/aircraft trail rejection (`--trail-reject`) — see feature 41 |
+| `src/local_normalize.py` | Per-frame Local Normalization (`--local-normalize`), pre-combine — see feature 42 |
+| `src/live_stack.py` | Real-time stacking (`--live`) — see feature 44 |
+| `src/stream_stack.py` | Two-pass streaming stack of an already-complete directory (`--stream`) — see feature 43 |
+| `src/ui_events.py` | In-process UI event/state sink for the desktop app — log/phase/progress state, named milestone previews, per-frame thumbnail ring |
+| `src/desktop_control.py` | Desktop-app control layer — form schema introspection, form-to-argv translation, `RunManager` |
+| `src/desktop_app.py` | Native tkinter desktop app (`python desktop_app.py`) — Setup form, live progress/log, interactive preview (zoom/pan/wipe compare/thumbnail ring) |
+| `src/native_dialog.py` | Native Windows message boxes via ctypes — fatal-error / close-confirm dialogs for the packaged desktop app |
+| `src/notify.py` | Best-effort native Windows balloon-tip notification (no-op elsewhere) |
+| `src/channel_combine.py` | `combine` subcommand — LRGB/narrowband palettes, SCNR, continuum subtraction |
+| `src/exposure_fusion.py` | Mertens multiresolution exposure fusion (`--hdr-blend-mode fusion`) — see feature 22 |
+| `src/source_separation.py` | NMF star/nebula source separation (`--nmf-separate`) — see feature 45 |
+| `src/auto_settings.py` | Heuristic target classifier, `apply_auto_settings` (`--auto`) |
+| `src/target_inference.py` | Target type inference — heuristic galaxy/nebula/starfield classification |
+| `src/health_check.py` | Frame consistency and calibration quality analysis |
+| `src/session_info.py` | Session metadata reader (Celestron Origin `info.json` — GPS, filter, ISO, orientation) |
+| `src/plate_solve.py` | Astrometry.net + ASTAP + SIMBAD identification |
+| `src/net_query.py` | Direct-HTTP replacements for astroquery services (Gaia, VizieR, SIMBAD, astrometry.net, JPL Horizons) — stdlib urllib, no dependency |
+| `src/color_calibrate.py` | Photometric colour calibration using plate-solved star colours (`--color-calibrate`, `--color-calibrate-method {colorindex,spcc}`) |
+| `src/photometric_calibration.py` | Gray-locus photometric colour calibration (`--photometric-calibration`) |
+| `src/annotation.py` | Object annotation (`--annotate`) — see feature 20 |
+| `src/mosaic.py` | WCS-based mosaic stitching (`--mosaic`) |
+| `src/checkpoint.py` | Checkpoint save/load for pre-post-processing stack (`--keep-checkpoint`) |
+| `src/merge.py` | Incremental stacking — register + weighted-merge previous linear stacks (`--merge`) |
+| `src/quality_sweep.py` | Collection quality sweep — recursive scoring + reversible flagging (`--quality-sweep`) |
+| `src/xisf_writer.py` | XISF 1.0 format writer (`--export xisf`) |
+| `src/cleanup.py` | Global temp-file registry — auto-remove all registered paths on exit or interrupt |
+| `src/banding.py` | Row/column banding removal (`--banding-removal`) — per Bayer plane, neighbour-difference noise, local highlight cut, sort-based median + Savitzky-Golay trend, significance-gated |
+| `src/transparency.py` | Per-frame transparency from a fixed star ensemble (`--transparency-min`); `to_aligned_yx` (the inverse of `apply_transform`'s convention, tested against it) |
+| `src/distortion.py` | Session-wide radial distortion model (`--distortion-model`): fit, significance test on held-out frames, analytic per-frame displacement fields |
+| `src/session_report.py` | Session diagnostics PNG/CSV (`--session-report`), drift/rotation/periodic-tracking/focus analysis; PIL-only plotting |
+| `src/noise_validation.py` | Odd/even half-stack noise map + consistency map (`--noise-validate`) |
+| `src/moving_objects.py` | Moving-object detection, velocity-space linking, tracked stacking (`--moving-objects`) |
+| `src/lightcurve_analysis.py` | Lomb-Scargle period + BLS/trapezoid transit analysis of light curves (`--lightcurve-analysis`); uses astropy.timeseries |
+| `src/cfa_drizzle.py` | Bayer-aware drizzle (`--cfa-drizzle`), native `cfa_drizzle_frame` kernel + numpy mirror |
+| `src/pipeline.py` | Four-phase orchestrator, `stack_target` |
+| `src/cli.py` | `process_directory`, `parse_args`, `main` |
+| `originstack.py` | Backward-compatibility re-export shim |
+| `desktop_app.py` (root) | Thin root shim — `from src.desktop_app import main` |
+| `ext/astro_native/` (Rust) | Optional PyO3/maturin crate (80+ kernels, numpy fallback when absent): stacking combines (incl. Linear Fit Clipping, inverse-variance-weighted, online streaming sigma-clip, proper coaddition), fused patch-weighted combine, Lanczos-3 warp (alignment + drizzle) and PSF-matched-kernel warp, anisotropic diffusion, L.A.Cosmic, median filter, DBE surface fit + patch sampler, RCD + Malvar + Menon2007 debayer, bilateral filter, matched-filter star detection, rigid-transform RANSAC, blind star-pattern match, 2D wavelet transform, hot-pixel fix/replace, CFA-drizzle splat, fused white balance, robust-PCA Gram-matrix SVD, continuum-subtraction moments, 1D + 2D Moffat/Gaussian PSF fits, and, only in builds with the Cargo feature `triage` (off by default; `maturin build --release --features triage`), the `--transient-triage` inference path (ONNX forward pass via pure-Rust `tract`) |
 
-**Total: ~30,000 lines** (Python, `src/` alone; excludes the Rust crate). Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
+Tests in `tests/test_core.py` import symbols directly from `originstack`; `tests/test_native.py` covers the Rust kernels (auto-skips if unbuilt).
 
 ---
 
@@ -165,7 +165,7 @@ Phase 4  ──  Post-Processing
 
 - **Auto-detection**: from FITS headers (`BAYERPAT`, `COLORTYP`); `--no-bayer-autodetect` disables a secondary row-orientation check (some capture software writes a `BAYERPAT` that doesn't match the actual row orientation — checked once per session against the reference frame's G1/G2 balance and corrected if it exceeds the sensor-noise range)
 - **Supported patterns**: RGGB, BGGR, GRBG, GBRG (default: RGGB)
-- **Algorithm**: `--debayer-method {malvar,menon2007}` (default: `malvar`), both native Rust kernels with a numpy fallback, no external dependency. `malvar` — Malvar-He-Cutler, a single fused per-pixel gather. `menon2007` — Menon (2007) DDFAPD directional filtering, higher fidelity on fine periodic detail but ~4-5x slower even natively; a synthetic-astro-frame benchmark shows only a modest gain on typical smooth-sky-plus-point-source astro data, so `malvar` stays the default. Both validated bit-exact against the `colour-demosaicing` reference package. (`bilinear` — pure NumPy — still exists internally as the base function but isn't CLI-reachable; `vng`, formerly OpenCV's Variable Number of Gradients, was removed once it became a pure alias for `malvar`.)
+- **Algorithm**: `--debayer-method {rcd,malvar,menon2007}` (default: `rcd` since 2026-10), all native Rust kernels with a numpy fallback, no external dependency. `rcd` — Ratio Corrected Demosaicing (the Siril/RawTherapee/darktable default), the default since 2026-10: lower error than Malvar on synthetic scenes and ~10% less retained noise, at ~4x Malvar's debayer time; validated against synthetic ground truth. `malvar` — Malvar-He-Cutler, a single fused per-pixel gather, fastest (the default until 2026-10). `menon2007` — Menon (2007) DDFAPD directional filtering, ~4-5x slower than Malvar even natively, with only a modest gain on typical smooth-sky-plus-point-source astro data. Malvar and Menon2007 are validated bit-exact against the `colour-demosaicing` reference package. (`bilinear` — pure NumPy — still exists internally as the base function but isn't CLI-reachable; `vng`, formerly OpenCV's Variable Number of Gradients, was removed once it became a pure alias for `malvar`.)
 - **Green equalization**: corrects G1/G2 channel mismatch in CMOS sensors
 - **Output**: RGB images in (H, W, 3) float32 format
 
@@ -402,7 +402,7 @@ mean-variance relationship.
 
 - Native tkinter window (stdlib, no external UI toolkit or runtime dependency) — replaced a `pywebview`-wrapped local HTTP dashboard (2026-08)
 - Setup form auto-built from the CLI's own argument parser (one tab per argparse group), so it can't drift out of sync with the flags it exposes
-- Live phase stepper with timings, active-loop progress bar, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, live re-stretch from a retained linear source, before/after wipe-slider compare, per-frame thumbnail ring), and a completion summary card
+- Live phase stepper with timings, active-loop progress bar, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, before/after wipe-slider compare, per-frame thumbnail ring), and a completion summary card
 - Zero overhead on a plain CLI run: the underlying event-sink singleton's publish methods are no-ops until the desktop app attaches it; preview JPEG encoding is throttled
 - Closing the window mid-run asks for confirmation; a native OS notification fires on completion
 
@@ -621,7 +621,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--debayer-method {malvar,menon2007}` | malvar | Both native Rust kernels; menon2007 is higher fidelity, ~4-5x slower |
+| `--debayer-method {rcd,malvar,menon2007}` | rcd | All native Rust kernels; malvar is fastest (the default until 2026-10), menon2007 ~4-5x slower than malvar |
 | `--no-bayer-autodetect` | on | Disable the Bayer row-orientation autodetection check |
 | `--white-balance` | grayworld | none, grayworld, whitepatch |
 | `--quality-threshold N` | 50 | Reject frames scoring below N% of the session reference |
@@ -656,7 +656,7 @@ with `--config` (keys listed per feature above and in `parse_args`
 | `--distortion-model` | off | Session-wide radial distortion, applied per frame (skipped with `--elastic-registration`) |
 | `--transparency-min N` | 0 | Drop frames whose relative transparency is below N (0 = measure and report only) |
 | `--banding-removal` | off | Row/column banding removal per calibrated Bayer frame (`banding_amount`, `banding_sigma` via `--config`) |
-| `--cfa-drizzle` | off | Recombine measured Bayer samples (uses `--drizzle-scale` / `--drizzle-pixfrac`; needs `--debayer-method malvar`) |
+| `--cfa-drizzle` | off | Recombine measured Bayer samples (uses `--drizzle-scale` / `--drizzle-pixfrac`; needs `--debayer-method malvar` or `rcd`) |
 | `--noise-validate` | off | Odd/even half-stacks: `<output>_noise.fits`, `<output>_consistency.fits` |
 | `--moving-objects` / `--moving-objects-stack` | off | Asteroid-like mover search -> `<output>_moving_objects.csv` (+ `_moving_N.fits`) |
 
@@ -800,9 +800,9 @@ python originstack.py -d lights/ -o m51.fits --auto --galaxy-mode --galaxy-cente
 | `reproject` | Mosaic WCS reprojection (`--mosaic`) |
 | `tifffile` | TIFF input and 32-bit TIFF output (`--export tiff`) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…); RAW files are silently excluded from discovery when absent |
-| `astro_native` (Rust) | ~44 native kernels + `--transient-triage` ONNX inference; numpy fallback when absent (see below) |
+| `astro_native` (Rust) | 80+ native kernels; numpy fallback when absent. `--transient-triage` ONNX inference only with the `triage` Cargo feature (off by default) |
 
-`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — Malvar/Menon2007 debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration is `src/blind_match.py`, also native; NLM denoising and Richardson-Lucy's CPU fallback are native/numpy now; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — none of them need an external dependency.
+`opencv-python`, `astroalign`, `scikit-image`, `PyWavelets`, and `astroquery` are not used anywhere in this codebase — RCD/Malvar/Menon2007 debayer and the bilateral filter are native Rust kernels (numpy fallback if `astro_native` isn't built); `--merge`'s cross-night registration is `src/blind_match.py`, also native; NLM denoising and Richardson-Lucy's CPU fallback are native/numpy now; the wavelet denoiser and multiscale-entropy seeing metric's transform are native (`src/wavelet.py`); every network catalogue lookup (astrometry.net, Gaia, VizieR, SIMBAD, JPL Horizons) is direct HTTP via `src/net_query.py` (stdlib urllib) — none of them need an external dependency.
 
 ---
 
@@ -813,10 +813,10 @@ python originstack.py -d lights/ -o m51.fits --auto --galaxy-mode --galaxy-cente
 - Use `--no-registration` for pre-aligned frames
 
 **Debayering:**
-- Both `--debayer-method` choices (`malvar` default, `menon2007`) are native Rust kernels with a numpy fallback; the internal `bilinear` base function isn't CLI-reachable and exists only as a fallback path, so this is a non-issue in practice
+- All `--debayer-method` choices (`rcd` default, `malvar`, `menon2007`) are native Rust kernels with a numpy fallback; the internal `bilinear` base function isn't CLI-reachable and exists only as a fallback path, so this is a non-issue in practice
 
 **Hierarchical mode:**
-- Targets with very different crop amounts produce shape mismatches — handled by resizing to minimum common dimensions (minor quality trade-off)
+- Per-session stacks of different shapes are zero-padded onto the reference grid and registered with the rotation-aware blind star match (`merge.merge_previous_stacks`); a failed match raises with the per-session stacks kept on disk
 - Consider processing targets with very different field-of-views separately
 
 **Drizzle:**

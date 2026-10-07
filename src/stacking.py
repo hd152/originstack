@@ -17,7 +17,7 @@ from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import format_time, get_logger, safe_print
+from src.utils import diff_mad_sigma, format_time, get_logger, safe_print
 
 try:
     from tqdm import tqdm
@@ -61,7 +61,7 @@ def lacosmic_noise_model(img: np.ndarray):
         ch = img[::4, :, c]
         d = (ch[:, 4:] - ch[:, :-4]).astype(np.float64).ravel()
         d = d[np.isfinite(d)]
-        sig = float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0)) if d.size else 0.0
+        sig = diff_mad_sigma(d) if d.size else 0.0
         sub = img[::4, ::4, c].astype(np.float64)
         sub = sub[np.isfinite(sub)]
         if sub.size == 0 or not sig > 0:
@@ -249,67 +249,6 @@ def _adaptive_tile_size(N: int, C: int) -> int:
         # CI runner with a broken/partial psutil) -- fall back to the
         # unscaled default tile size either way.
         return default
-
-
-def _lanczos_resample_frame(img: np.ndarray, shift: Tuple[float, float],
-                            scale: float, out_h: int, out_w: int,
-                            lanczos_a: int = 3) -> np.ndarray:
-    """Resample a single frame onto an upscaled output grid using Lanczos interpolation.
-
-    Maps each output pixel back to fractional input coordinates (accounting for
-    the sub-pixel shift), then applies a separable Lanczos-a kernel. The native
-    path (HAS_NATIVE, lanczos_a==3, RGB input) uses the true Lanczos-3 Rust
-    kernel; otherwise falls back to scipy.ndimage.map_coordinates with
-    order=5 (quintic B-spline, closely approximating Lanczos-3).
-    """
-    H, W = img.shape[:2]
-    C = img.shape[2] if img.ndim == 3 else 1
-
-    # Native path: the mapping is the diagonal affine
-    #   input = diag(1/scale) @ output - shift
-    # which the Rust Lanczos-3 warp handles on its separable fast path, all
-    # channels in one pass. True Lanczos-3 rather than the quintic-spline
-    # approximation below.
-    if HAS_NATIVE and lanczos_a == 3 and img.ndim == 3:
-        try:
-            inv = 1.0 / scale
-            res = _native.warp_affine_lanczos3(
-                np.ascontiguousarray(img, dtype=np.float32),
-                [inv, 0.0, 0.0, inv],
-                [-float(shift[0]), -float(shift[1])],
-                int(out_h), int(out_w), 0.0)
-            return res.astype(np.float64)
-        except Exception:
-            pass
-
-    # Output coordinates -> input coordinates (inverse mapping)
-    # output pixel (oy, ox) corresponds to input ((oy / scale) - shift_y, (ox / scale) - shift_x)
-    oy = np.arange(out_h, dtype=np.float64)
-    ox = np.arange(out_w, dtype=np.float64)
-    iy = oy / scale - shift[0]
-    ix = ox / scale - shift[1]
-
-    # Use scipy's map_coordinates with order=5 (quintic spline ~= Lanczos-3)
-    # This is much faster than a pure Python Lanczos loop
-    spline_order = min(5, lanczos_a + 2)  # order 5 for Lanczos-3
-
-    coords_y, coords_x = np.meshgrid(iy, ix, indexing='ij')
-
-    if img.ndim == 3:
-        img64 = img.astype(np.float64)
-        result = np.empty((out_h, out_w, C), dtype=np.float64)
-        for c in range(C):
-            result[:, :, c] = ndimage.map_coordinates(
-                img64[:, :, c],
-                [coords_y, coords_x],
-                order=spline_order, mode='constant', cval=0.0)
-    else:
-        result = ndimage.map_coordinates(
-            img.astype(np.float64),
-            [coords_y, coords_x],
-            order=spline_order, mode='constant', cval=0.0)
-
-    return result
 
 
 def _build_wiener_sharpen_kernel(psf: np.ndarray, halo: int,
@@ -628,103 +567,6 @@ def iterative_back_projection(stacked: np.ndarray, mem_rgb: np.ndarray,
                       f"mean|update|={float(np.mean(np.abs(update))):.4f}")
 
     return estimate.astype(np.float32)
-
-
-def drizzle_combine(aligned_list: List[np.ndarray], shifts: List[Tuple[float, float]],
-                    scale: float = 1.0, weights: Optional[np.ndarray] = None,
-                    drop_size: float = 0.7, pixfrac: float = 1.0) -> np.ndarray:
-    """Drizzle combine with Lanczos interpolation and fractional sub-pixel shifts.
-
-    Each input frame is resampled onto an upscaled output grid using high-order
-    spline interpolation (approximating Lanczos-3).  Fractional sub-pixel shifts
-    are preserved, yielding genuine super-resolution when dithered data is
-    available.
-
-    Parameters
-    ----------
-    aligned_list : list of ndarray
-        Input frames (H, W, C), already cropped to common region.
-    shifts : list of (dy, dx) tuples
-        Sub-pixel registration shifts for each frame.
-    scale : float
-        Output scale factor (e.g. 2.0 for 2x super-resolution).
-    weights : ndarray, optional
-        Per-frame quality weights.  If None, uniform weighting is used.
-    drop_size : float
-        Pixel fraction (pixfrac) — controls the effective footprint of each
-        input pixel on the output grid.  Smaller values (0.5-0.7) yield
-        sharper results at the cost of noise.  1.0 = no shrinking.
-    """
-    if not aligned_list:
-        raise ValueError("drizzle_combine: aligned_list is empty")
-
-    if scale <= 1.0:
-        # No upscaling — weighted mean combine
-        acc = None
-        total_w = 0.0
-        for i, im in enumerate(aligned_list):
-            w = float(weights[i]) if weights is not None else 1.0
-            if acc is None:
-                acc = np.zeros_like(im, dtype=np.float64)
-            acc += im.astype(np.float64) * w
-            total_w += w
-        return (acc / max(total_w, 1e-12)).astype(np.float32)
-
-    H, W = aligned_list[0].shape[:2]
-    C = aligned_list[0].shape[2] if aligned_list[0].ndim == 3 else 1
-    out_h = int(round(H * scale))
-    out_w = int(round(W * scale))
-
-    is_3d = aligned_list[0].ndim == 3
-    acc = np.zeros((out_h, out_w, C) if is_3d else (out_h, out_w), dtype=np.float64)
-    weight_map = np.zeros_like(acc, dtype=np.float64)
-
-    # Output coordinate arrays (reused for each frame's coverage check)
-    _oy = np.arange(out_h, dtype=np.float64)
-    _ox = np.arange(out_w, dtype=np.float64)
-
-    for i, (im, sh) in enumerate(zip(aligned_list, shifts)):
-        w = float(weights[i]) if weights is not None else 1.0
-        resampled = _lanczos_resample_frame(im, sh, scale, out_h, out_w)
-
-        # Compute coverage mask analytically: output pixel (oy, ox) maps to
-        # input (iy, ix) = (oy/scale - sh[0], ox/scale - sh[1]).  A pixel is
-        # valid when both coordinates fall inside the input frame boundaries.
-        iy = _oy / scale - sh[0]
-        ix = _ox / scale - sh[1]
-        valid = (
-            (iy[:, np.newaxis] >= 0) & (iy[:, np.newaxis] < H) &
-            (ix[np.newaxis, :] >= 0) & (ix[np.newaxis, :] < W)
-        )
-
-        if pixfrac < 1.0:
-            # Tent-kernel pixfrac weight: each output pixel's contribution falls
-            # off toward the edge of the input pixel's footprint.
-            half_drop = pixfrac * scale / 2.0
-            iy_frac = np.abs((iy - np.round(iy)) * scale)  # (out_h,)
-            ix_frac = np.abs((ix - np.round(ix)) * scale)  # (out_w,)
-            w_y = np.maximum(0.0, 1.0 - iy_frac / max(half_drop, 1e-12))
-            w_x = np.maximum(0.0, 1.0 - ix_frac / max(half_drop, 1e-12))
-            pixfrac_weight = w_y[:, np.newaxis] * w_x[np.newaxis, :]  # (out_h, out_w)
-            if is_3d:
-                valid3 = valid[:, :, np.newaxis]
-                pfw3 = pixfrac_weight[:, :, np.newaxis]
-                acc += np.where(valid3, resampled * w * pfw3, 0.0)
-                weight_map += np.where(valid3, w * pfw3, 0.0)
-            else:
-                acc += np.where(valid, resampled * w * pixfrac_weight, 0.0)
-                weight_map += np.where(valid, w * pixfrac_weight, 0.0)
-        else:
-            if is_3d:
-                valid3 = valid[:, :, np.newaxis]
-                acc += np.where(valid3, resampled * w, 0.0)
-                weight_map += np.where(valid3, w, 0.0)
-            else:
-                acc += np.where(valid, resampled * w, 0.0)
-                weight_map += np.where(valid, w, 0.0)
-
-    weight_map[weight_map == 0] = 1.0
-    return (acc / weight_map).astype(np.float32)
 
 
 def _sigma_clip_tile(tile: np.ndarray, sigma: float, max_iters: int,
@@ -2255,10 +2097,7 @@ def run_stacking_phase(
                     _w32 = (weights.astype(np.float32, copy=False)
                             if weights is not None else None)
                     _use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
-                    # _fast: same output bit for bit, ~10% quicker (older crates lack it)
-                    _pwsc = getattr(_native, 'patch_weighted_sigma_combine_fast',
-                                    _native.patch_weighted_sigma_combine)
-                    stacked = _pwsc(
+                    stacked = _native.patch_weighted_sigma_combine_fast(
                         mem_aligned, qgrids, _w32, float(args.rejection_sigma),
                         int(args.rejection_iters), _use_mad, qgrid_geom)
                     safe_print(f"    [rust] fused patch-weighted + sigma-clip combine "
