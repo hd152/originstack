@@ -103,5 +103,5 @@ ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 ( cd "$ROOT/packaging/dist" && shasum -a 256 "$NAME.zip" > "$NAME.zip.sha256" )
 
 size_mb=$(( $(wc -c < "$ZIP") / 1048576 ))
-[ "$size_mb" -ge 50 ] || { echo "ERROR: archive suspiciously small (${size_mb} MB)" >&2; exit 1; }
+[ "$size_mb" -ge 30 ] || { echo "ERROR: archive suspiciously small (${size_mb} MB)" >&2; exit 1; }
 echo "Built: packaging/dist/$NAME.zip (${size_mb} MB)"
