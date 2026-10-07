@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from src.affine_fit import RigidTransform
 from src.session_report import (
     analyze_tracking,
     analyze_trends,
@@ -12,6 +11,7 @@ from src.session_report import (
     summary_lines,
     write_session_report,
 )
+from tests._rigid_helpers import rigid_transform
 
 
 def _t(n=120, minutes=30.0, seed=0):
@@ -72,7 +72,7 @@ def _frames(n=40, seed=5):
                      'ellipticity': 0.1, 'transparency': 1.0 + rng.normal(0, 0.02),
                      'reg_residual_px': 1.8, 'star_count': 80, 'noise': 400, 'score': 0.9})
         frames.append(f)
-        tfs.append(RigidTransform.from_rotation_translation(np.deg2rad(0.05 * j), (0.3 * j, -0.1 * j)))
+        tfs.append(rigid_transform(np.deg2rad(0.05 * j), (0.3 * j, -0.1 * j)))
         shifts.append((0.0, 0.0))
     return frames, shifts, tfs
 

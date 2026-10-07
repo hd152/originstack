@@ -44,8 +44,7 @@ Bundled: numpy, astropy, scipy, tqdm, Pillow, psutil, rawpy (camera RAW),
 tifffile (TIFF I/O), tkinter (the desktop app's UI toolkit, stdlib),
 `astro_native` (built from a real `maturin build --release` wheel, not the
 dev-mode `maturin develop` editable install -- see `originstack.spec`'s
-comments for why that distinction matters for PyInstaller), the
-`src/data/transient_triage.onnx` model (~100 KB) for `--transient-triage`, and
+comments for why that distinction matters for PyInstaller), and
 the example images on the desktop app's target cards (`src/data/examples/`).
 
 Not bundled:
@@ -53,8 +52,11 @@ Not bundled:
   the end user's own CUDA install); the app degrades to CPU gracefully
   (`src/gpu_context.py`), so `--use-gpu` isn't available in the packaged
   build.
-- `onnxruntime` -- `--transient-triage` inference is the native
-  `astro_native.transient_triage_score` kernel (pure-Rust `tract`).
+- `--transient-triage` scoring -- its native kernel
+  (`astro_native.transient_triage_score`, pure-Rust `tract`) is behind the
+  crate's optional `triage` Cargo feature, which release builds leave off (it
+  is ~24 MB of the binary); the packaged app warns and skips scoring. A source
+  build can enable it with `maturin build --release --features triage`.
 
 ## Known limitations
 

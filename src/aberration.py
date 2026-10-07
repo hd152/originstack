@@ -235,16 +235,15 @@ def analyze_field_aberration(
             diag.append(f'Uneven field ({spread:.0f}% FWHM spread) — mild tilt/spacing.')
     summary['diagnosis'] = diag
 
-    if verbose or True:
-        safe_print("  Field aberration inspector:")
-        safe_print(f"    Stars measured: {len(all_fwhm)}  |  FWHM median "
-                   f"{summary['fwhm_median']:.2f}px  (best {summary['fwhm_min']:.2f} / "
-                   f"worst {summary['fwhm_max']:.2f}, spread {spread:.0f}%)")
-        safe_print(f"    Median ellipticity: {summary['ellipticity_median']:.2f}"
-                   + (f"  |  tilt grad {tilt_grad:.2f}px toward {tilt_dir}"
-                      if tilt_dir else ""))
-        for d in diag:
-            safe_print(f"    → {d}")
+    safe_print("  Field aberration inspector:")
+    safe_print(f"    Stars measured: {len(all_fwhm)}  |  FWHM median "
+               f"{summary['fwhm_median']:.2f}px  (best {summary['fwhm_min']:.2f} / "
+               f"worst {summary['fwhm_max']:.2f}, spread {spread:.0f}%)")
+    safe_print(f"    Median ellipticity: {summary['ellipticity_median']:.2f}"
+               + (f"  |  tilt grad {tilt_grad:.2f}px toward {tilt_dir}"
+                  if tilt_dir else ""))
+    for d in diag:
+        safe_print(f"    → {d}")
 
     if output_png and _HAS_PIL:
         try:

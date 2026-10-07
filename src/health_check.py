@@ -173,12 +173,6 @@ def run_health_check(frames: dict, masters: dict, directory: str) -> None:
         for w in warnings_hc:
             safe_print(f"    ⚠  {w}")
         safe_print("")
-    critical = any(
-        keyword in w.lower()
-        for w in warnings_hc
-        for keyword in ("mixed dimensions", "cannot stack", "differ from lights")
-        if "dimensions" in w.lower()
-    )
     if "Light frames have mixed dimensions" in warnings_hc or not lights:
         safe_print("  STATUS: CANNOT STACK — critical issues must be resolved first")
     elif len(warnings_hc) == 0:

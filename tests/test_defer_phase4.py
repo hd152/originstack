@@ -11,10 +11,9 @@ import unittest
 from unittest import mock
 
 import numpy as np
-from astropy.io import fits
 
 import src.cli as cli
-from tests.test_e2e import TestE2EDrizzlePixfrac, _create_synthetic_dataset
+from tests.test_e2e import DrizzleRunMixin, _create_synthetic_dataset
 
 
 class TestCliSetsDeferFlag(unittest.TestCase):
@@ -57,7 +56,7 @@ class TestCliSetsDeferFlag(unittest.TestCase):
         self.assertEqual(self._flags(0, fits_in_root=True), [False])
 
 
-class TestStackTargetHonoursDeferFlag(TestE2EDrizzlePixfrac):
+class TestStackTargetHonoursDeferFlag(DrizzleRunMixin, unittest.TestCase):
     def _count_phase4(self, **overrides):
         import src.pipeline as pl
         calls = []

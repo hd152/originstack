@@ -39,7 +39,9 @@ DEFAULT_STAMP_SIZE = 31
 
 
 def scoring_backend_available() -> bool:
-    """True when the native kernel is built. No fallback exists yet."""
+    """True when astro_native was built with the ``triage`` Cargo feature
+    (``maturin build --release --features triage``; off by default). No
+    fallback exists yet."""
     return _HAS_NATIVE_TRIAGE
 
 
@@ -126,7 +128,10 @@ def score_candidates(new_lum: np.ndarray, ref_lum: np.ndarray,
     if not _HAS_NATIVE_TRIAGE:
         logger.warning("transient triage requested but astro_native's "
                        "transient_triage_score is unavailable -- skipping "
-                       "(no candidates will be scored)")
+                       "(no candidates will be scored). It is built only with "
+                       "the crate's optional 'triage' feature: rebuild with "
+                       "`cd ext/astro_native && maturin build --release "
+                       "--features triage` and install the wheel")
         return [None] * len(transients)
 
     mp = resolve_model_path(model_path)

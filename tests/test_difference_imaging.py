@@ -573,7 +573,8 @@ class TestRunTransientDetection(unittest.TestCase):
 
     @pytest.mark.skipif(
         not _tt_mod.scoring_backend_available() or _tt_mod.resolve_model_path(None) is None,
-        reason='native transient_triage_score / bundled model absent -- run '
+        reason='native transient_triage_score / bundled model absent -- build astro_native '
+              'with `maturin build --release --features triage`, or run '
               'tools/gen_transient_triage_data.py + tools/train_transient_triage.py')
     def test_triage_populates_real_probability_and_csv_column(self):
         new, ref = self._epochs(transient=(110.0, 120.0, 14000.0))

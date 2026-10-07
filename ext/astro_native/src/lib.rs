@@ -13,15 +13,33 @@ use numpy::{
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-/// Median of a slice via quickselect (O(n), vs O(n log n) full sort). Exact
-/// order statistics, so values match the numpy/sort-based reference bit-for-bit:
-/// odd N -> k-th element; even N -> mean of the two middle order statistics
-/// (the second is the max of the left partition after select_nth).
+/// f32/f64 for `median_inplace`.
+trait MedianFloat: Copy + PartialOrd + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> {
+    const NAN: Self;
+    const NEG_INFINITY: Self;
+    const HALF: Self;
+}
+impl MedianFloat for f32 {
+    const NAN: f32 = f32::NAN;
+    const NEG_INFINITY: f32 = f32::NEG_INFINITY;
+    const HALF: f32 = 0.5;
+}
+impl MedianFloat for f64 {
+    const NAN: f64 = f64::NAN;
+    const NEG_INFINITY: f64 = f64::NEG_INFINITY;
+    const HALF: f64 = 0.5;
+}
+
+/// Median of a slice via quickselect (O(n), vs O(n log n) full sort), in the
+/// slice's own precision (f32 or f64). Exact order statistics, so values match
+/// the numpy/sort-based reference bit-for-bit: odd N -> k-th element; even N ->
+/// mean of the two middle order statistics (the second is the max of the left
+/// partition after select_nth). Empty -> NaN.
 #[inline]
-fn median_inplace(v: &mut [f32]) -> f32 {
+fn median_inplace<T: MedianFloat>(v: &mut [T]) -> T {
     let n = v.len();
     if n == 0 {
-        return f32::NAN;
+        return T::NAN;
     }
     let mid = n / 2;
     let (_, &mut m, _) =
@@ -29,15 +47,15 @@ fn median_inplace(v: &mut [f32]) -> f32 {
     if n % 2 == 1 {
         m
     } else {
-        // (mid-1)-th order statistic = max of the left partition, using the
-        // same comparator ordering as the select (NaN compares Equal).
-        let mut lo = f32::NEG_INFINITY;
+        // (mid-1)-th order statistic = max of the left partition (NaN never
+        // compares greater, as with the select's comparator).
+        let mut lo = T::NEG_INFINITY;
         for &x in v[..mid].iter() {
-            if x.partial_cmp(&lo) == Some(std::cmp::Ordering::Greater) {
+            if x > lo {
                 lo = x;
             }
         }
-        0.5 * (lo + m)
+        T::HALF * (lo + m)
     }
 }
 
@@ -133,7 +151,8 @@ fn gather_tile(n: usize) -> usize {
     (32768 / n.max(1)).clamp(16, 256)
 }
 
-/// Row-parallel driver with a blocked gather-transpose.
+/// Row-parallel driver with a blocked gather-transpose, for a `work` closure
+/// producing `K` per-pixel outputs (one per output buffer).
 ///
 /// The naive per-pixel gather reads each pixel's N samples with a stride of a
 /// whole frame (H*W*C floats — tens of MB): N concurrent read streams, which
@@ -141,7 +160,7 @@ fn gather_tile(n: usize) -> usize {
 /// `T` pixels we copy each frame's contiguous row segment (sequential, one
 /// stream at a time) into an L2-resident pixel-major block, then hand `work`
 /// contiguous `&block[p*n..(p+1)*n]` slices.
-fn row_parallel<S, Init, Work>(
+fn row_parallel_k<const K: usize, S, Init, Work>(
     arr: &numpy::ndarray::ArrayView4<'_, f32>,
     h: usize,
     w: usize,
@@ -149,19 +168,27 @@ fn row_parallel<S, Init, Work>(
     n: usize,
     init: Init,
     work: Work,
-) -> Vec<f32>
+) -> [Vec<f32>; K]
 where
     S: Send,
     Init: Fn() -> S + Sync,
-    Work: Fn(&mut S, &[f32]) -> f32 + Sync,
+    Work: Fn(&mut S, &[f32]) -> [f32; K] + Sync,
 {
     let row_len = w * c;
     let frame_len = h * row_len;
     let tile = gather_tile(n);
     let data: Option<&[f32]> = arr.as_slice();
 
-    let mut out = vec![0f32; h * row_len];
-    out.par_chunks_mut(row_len).enumerate().for_each(|(row, out_row)| {
+    let mut outs: [Vec<f32>; K] = std::array::from_fn(|_| vec![0f32; h * row_len]);
+    if row_len == 0 {
+        return outs;
+    }
+    // One entry per image row: that row's slice of each of the K outputs.
+    let mut chunks: Vec<_> = outs.iter_mut().map(|o| o.chunks_mut(row_len)).collect();
+    let rows: Vec<[&mut [f32]; K]> = (0..h)
+        .map(|_| std::array::from_fn(|j| chunks[j].next().unwrap()))
+        .collect();
+    rows.into_par_iter().enumerate().for_each(|(row, out_rows)| {
         let mut state = init();
         let mut block = vec![0f32; tile * n];
         match data {
@@ -178,7 +205,10 @@ where
                         }
                     }
                     for p in 0..t {
-                        out_row[start + p] = work(&mut state, &block[p * n..(p + 1) * n]);
+                        let r = work(&mut state, &block[p * n..(p + 1) * n]);
+                        for j in 0..K {
+                            out_rows[j][start + p] = r[j];
+                        }
                     }
                     start += t;
                 }
@@ -192,21 +222,19 @@ where
                     for k in 0..n {
                         vals[k] = arr[[k, row, wj, cj]];
                     }
-                    out_row[col] = work(&mut state, &vals[..n]);
+                    let r = work(&mut state, &vals[..n]);
+                    for j in 0..K {
+                        out_rows[j][col] = r[j];
+                    }
                 }
             }
         }
     });
-    out
+    outs
 }
 
-/// Sibling of `row_parallel` for a `work` closure that produces two
-/// per-pixel outputs instead of one (e.g. a combined value plus its own
-/// summed weight) -- same gather-transpose driver, same tiling, just two
-/// output buffers filled together instead of one. Kept separate from
-/// `row_parallel` (rather than adding an output-count generic to it)
-/// so every existing single-output caller's signature is untouched.
-fn row_parallel_pair<S, Init, Work>(
+/// `row_parallel_k` with a single output.
+fn row_parallel<S, Init, Work>(
     arr: &numpy::ndarray::ArrayView4<'_, f32>,
     h: usize,
     w: usize,
@@ -214,61 +242,14 @@ fn row_parallel_pair<S, Init, Work>(
     n: usize,
     init: Init,
     work: Work,
-) -> (Vec<f32>, Vec<f32>)
+) -> Vec<f32>
 where
     S: Send,
     Init: Fn() -> S + Sync,
-    Work: Fn(&mut S, &[f32]) -> (f32, f32) + Sync,
+    Work: Fn(&mut S, &[f32]) -> f32 + Sync,
 {
-    let row_len = w * c;
-    let frame_len = h * row_len;
-    let tile = gather_tile(n);
-    let data: Option<&[f32]> = arr.as_slice();
-
-    let mut out_a = vec![0f32; h * row_len];
-    let mut out_b = vec![0f32; h * row_len];
-    out_a.par_chunks_mut(row_len)
-        .zip(out_b.par_chunks_mut(row_len))
-        .enumerate()
-        .for_each(|(row, (out_row_a, out_row_b))| {
-            let mut state = init();
-            let mut block = vec![0f32; tile * n];
-            match data {
-                Some(flat) => {
-                    let row_base = row * row_len;
-                    let mut start = 0usize;
-                    while start < row_len {
-                        let t = tile.min(row_len - start);
-                        for k in 0..n {
-                            let src = &flat[k * frame_len + row_base + start..][..t];
-                            for (p, &v) in src.iter().enumerate() {
-                                block[p * n + k] = v;
-                            }
-                        }
-                        for p in 0..t {
-                            let (a, b) = work(&mut state, &block[p * n..(p + 1) * n]);
-                            out_row_a[start + p] = a;
-                            out_row_b[start + p] = b;
-                        }
-                        start += t;
-                    }
-                }
-                None => {
-                    let vals = &mut block[..n];
-                    for col in 0..row_len {
-                        let wj = col / c;
-                        let cj = col % c;
-                        for k in 0..n {
-                            vals[k] = arr[[k, row, wj, cj]];
-                        }
-                        let (a, b) = work(&mut state, &vals[..n]);
-                        out_row_a[col] = a;
-                        out_row_b[col] = b;
-                    }
-                }
-            }
-        });
-    (out_a, out_b)
+    let [out] = row_parallel_k::<1, _, _, _>(arr, h, w, c, n, init, |s, v| [work(s, v)]);
+    out
 }
 
 /// Fill `active[i]` = survives sigma-clip (same iteration as the numpy
@@ -560,10 +541,8 @@ fn sigma_clip_combine<'py>(
 /// n_rejected)`. `n_acc` is clamped to >=1 and carried forward as state (not
 /// just at the point of division) -- matches the numpy reference, where an
 /// all-rejected burn-in window still yields a defined (phantom-count)
-/// running estimate rather than a divide-by-zero. Shared by
-/// `online_sigma_clip_pixel` (whole-array kernel) and
-/// `online_sigma_clip_seed_burnin` (streaming kernel) so both stay bit-for-bit
-/// identical on the burn-in math.
+/// running estimate rather than a divide-by-zero. Used by
+/// `online_sigma_clip_seed_burnin` (streaming kernel).
 ///
 /// `valid[i]` = sample `i` was actually covered by that frame's warp (not a
 /// zero-fill pixel from an out-of-frame shift/rotation) -- invalid samples
@@ -633,8 +612,7 @@ fn burnin_seed_pixel(
 /// Single-sample Welford accept-test + update for ONE pixel: given the
 /// current running state and one new value, either fold it in (returns the
 /// updated state, `true`) or leave the state unchanged (returns it as-is,
-/// `false`). Shared by `online_sigma_clip_pixel` and
-/// `online_sigma_clip_fold_frame`.
+/// `false`). Used by `online_sigma_clip_fold_frame`.
 ///
 /// `n_acc<=0` is the "unseeded" sentinel `burnin_seed_pixel` returns for a
 /// pixel no burn-in frame covered (large/drifting dithers can leave 100+ px
@@ -669,93 +647,8 @@ fn fold_pixel(mean: f64, m2: f64, n_acc: f64, x: f64, sigma: f64) -> (f64, f64, 
 /// rejecting. Mirrored by `ONLINE_CLIP_MIN_SAMPLES` in src/stacking.py.
 const ONLINE_CLIP_MIN_SAMPLES: f64 = 3.0;
 
-/// Per-pixel online sigma-clip: a MAD-rejected burn-in window (first `k =
-/// min(burn_in, n)` samples) seeds a running (mean, M2) Welford state; each
-/// remaining sample is tested against that running estimate before being
-/// folded in, done in f64 to match numpy's float64 accumulation. Returns
-/// (combined, rejected_sample_count).
-#[inline]
-fn online_sigma_clip_pixel(
-    vals: &[f32],
-    sigma: f32,
-    burn_in: usize,
-    all_valid: &[bool],
-    scratch: &mut Vec<f32>,
-) -> (f32, usize) {
-    let n = vals.len();
-    let k = burn_in.min(n).max(1);
-    let sigma = sigma as f64;
-
-    let (mut mean, mut m2, mut n_acc, mut n_rejected) =
-        burnin_seed_pixel(&vals[..k], &all_valid[..k], sigma, scratch);
-
-    for &v in &vals[k..] {
-        let (new_mean, new_m2, new_n_acc, accepted) = fold_pixel(mean, m2, n_acc, v as f64, sigma);
-        mean = new_mean;
-        m2 = new_m2;
-        n_acc = new_n_acc;
-        if !accepted {
-            n_rejected += 1;
-        }
-    }
-
-    (mean as f32, n_rejected)
-}
-
-/// Online (single-pass) sigma-clip combine of an `(N,H,W,C)` float32 stack,
-/// for throughput comparison against the batch `sigma_clip_combine` above.
-/// Still takes the whole `(N,H,W,C)` array (reuses the same gather-transpose
-/// row-parallel driver as the batch kernels), so this measures compute cost
-/// only -- it does not exercise the frame-at-a-time streaming I/O the
-/// production `--stream` path (`online_sigma_clip_seed_burnin` +
-/// `online_sigma_clip_fold_frame` below) actually uses. Exploratory /
-/// benchmark-only; not called from the production stacking path.
-///
-/// Returns `(combined, n_rejected, n_total)` where `n_rejected` is a
-/// pixel-*sample* count (summed over all pixels and frames) and `n_total`
-/// is the frame count.
-#[pyfunction]
-#[pyo3(signature = (data, sigma=3.0, burn_in=10))]
-fn online_sigma_clip_combine<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray4<'py, f32>,
-    sigma: f32,
-    burn_in: usize,
-) -> PyResult<(Bound<'py, PyArray3<f32>>, usize, usize)> {
-    let arr = data.as_array();
-    let shape = arr.shape();
-    let (n, h, w, c) = (shape[0], shape[1], shape[2], shape[3]);
-    let n_rejected = std::sync::atomic::AtomicUsize::new(0);
-
-    let out = py.detach(|| {
-        row_parallel(
-            &arr,
-            h,
-            w,
-            c,
-            n,
-            || (vec![true; n], Vec::<f32>::with_capacity(n)),
-            |(all_valid, scratch), vals| {
-                let (combined, rejected) =
-                    online_sigma_clip_pixel(vals, sigma, burn_in, all_valid, scratch);
-                n_rejected.fetch_add(rejected, std::sync::atomic::Ordering::Relaxed);
-                combined
-            },
-        )
-    });
-
-    let out_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), out)
-        .expect("shape mismatch building output");
-    Ok((
-        out_arr.into_pyarray(py),
-        n_rejected.load(std::sync::atomic::Ordering::Relaxed),
-        n,
-    ))
-}
-
 /// Seed a running Welford (mean, M2, n_acc) state from a small `(K,H,W,C)`
-/// burn-in stack via one MAD-reject pass -- the burn-in half of
-/// `online_sigma_clip_pixel`/`burnin_seed_pixel`, run once over the whole
+/// burn-in stack via one MAD-reject pass -- `burnin_seed_pixel`, run once over the whole
 /// buffered window. `K` is expected small and bounded (e.g. 10 -- the
 /// streaming product's burn-in size, not the N-samples-per-pixel gather
 /// problem `row_parallel` solves for), so this uses a plain per-pixel gather
@@ -764,9 +657,7 @@ fn online_sigma_clip_combine<'py>(
 /// `coverage` is `(K,H,W)` float32 (>=0.5 = that frame's warp actually
 /// covers this pixel), one mask per burn-in frame -- a burn-in window mixes
 /// several frames' warps, each with its own out-of-frame zero-fill region
-/// (large dithers/shifts easily reach 100+ px on real sessions), so unlike
-/// the whole-array kernel above (which has no coverage concept and always
-/// treats every sample as valid) this MUST exclude uncovered samples from
+/// (large dithers/shifts easily reach 100+ px on real sessions), so this MUST exclude uncovered samples from
 /// the median/MAD/mean/M2 computation per `burnin_seed_pixel`'s `valid` gate
 /// -- otherwise zero-fill pixels masquerade as real (very dark) samples at
 /// every frame's border.
@@ -1252,6 +1143,36 @@ fn linear_fit_clip_combine<'py>(
 // `gain` is supplied) and so isn't reducible to a single static-weight numpy
 // broadcast the way a per-frame-constant weighted mean would be.
 
+/// One pixel's inverse-variance weighting, shared by `ivw_combine` and
+/// `ivw_combine_with_sigma`: returns `(sum w*x, sum w)` in f64.
+#[inline]
+fn ivw_pixel(
+    vals: &[f32],
+    noise2: &[f64],
+    shot_model: Option<(&Vec<f64>, f64)>,
+    wref: Option<&[f32]>,
+) -> (f64, f64) {
+    let mut acc = 0f64;
+    let mut wsum = 0f64;
+    for k in 0..vals.len() {
+        let var = match shot_model {
+            Some((sk, g)) => {
+                let shot = ((vals[k] as f64) - sk[k]).max(0.0) / g;
+                noise2[k] + shot
+            }
+            None => noise2[k],
+        };
+        let var = var.max(1e-12);
+        let mut wt = 1.0 / var;
+        if let Some(qw) = wref {
+            wt *= qw[k] as f64;
+        }
+        acc += wt * vals[k] as f64;
+        wsum += wt;
+    }
+    (acc, wsum)
+}
+
 #[pyfunction]
 #[pyo3(signature = (data, noise, sky=None, gain=None, weights=None))]
 fn ivw_combine<'py>(
@@ -1277,24 +1198,7 @@ fn ivw_combine<'py>(
 
     let out = py.detach(|| {
         row_parallel(&arr, h, w, c, n, || (), |_, vals| {
-            let mut acc = 0f64;
-            let mut wsum = 0f64;
-            for k in 0..n {
-                let var = match shot_model {
-                    Some((sk, g)) => {
-                        let shot = ((vals[k] as f64) - sk[k]).max(0.0) / g;
-                        noise2[k] + shot
-                    }
-                    None => noise2[k],
-                };
-                let var = var.max(1e-12);
-                let mut wt = 1.0 / var;
-                if let Some(qw) = wref {
-                    wt *= qw[k] as f64;
-                }
-                acc += wt * vals[k] as f64;
-                wsum += wt;
-            }
+            let (acc, wsum) = ivw_pixel(vals, &noise2, shot_model, wref);
             if wsum <= 0.0 {
                 0.0
             } else {
@@ -1313,12 +1217,7 @@ fn ivw_combine<'py>(
 /// kernel's own `wsum` was never exposed. A separate function rather than
 /// adding an output-mode flag to `ivw_combine` itself, so that already-
 /// shipped, tested kernel's signature and call sites are untouched by an
-/// opt-in diagnostic path. Necessarily duplicates `ivw_combine`'s per-pixel
-/// weighting loop (there's no cheap way to share it while also returning a
-/// second output through `row_parallel`'s single-output contract) --
-/// accepted for the same reason this file keeps native kernels and their
-/// numpy mirrors as separate, independently-readable implementations
-/// rather than forcing a shared abstraction across a codepath boundary.
+/// opt-in diagnostic path. The per-pixel weighting is the shared `ivw_pixel`.
 #[pyfunction]
 #[pyo3(signature = (data, noise, sky=None, gain=None, weights=None))]
 fn ivw_combine_with_sigma<'py>(
@@ -1342,28 +1241,11 @@ fn ivw_combine_with_sigma<'py>(
         _ => None,
     };
 
-    let (result, wsum_out) = py.detach(|| {
-        row_parallel_pair(&arr, h, w, c, n, || (), |_, vals| {
-            let mut acc = 0f64;
-            let mut wsum = 0f64;
-            for k in 0..n {
-                let var = match shot_model {
-                    Some((sk, g)) => {
-                        let shot = ((vals[k] as f64) - sk[k]).max(0.0) / g;
-                        noise2[k] + shot
-                    }
-                    None => noise2[k],
-                };
-                let var = var.max(1e-12);
-                let mut wt = 1.0 / var;
-                if let Some(qw) = wref {
-                    wt *= qw[k] as f64;
-                }
-                acc += wt * vals[k] as f64;
-                wsum += wt;
-            }
+    let [result, wsum_out] = py.detach(|| {
+        row_parallel_k::<2, _, _, _>(&arr, h, w, c, n, || (), |_, vals| {
+            let (acc, wsum) = ivw_pixel(vals, &noise2, shot_model, wref);
             let result = if wsum <= 0.0 { 0.0 } else { (acc / wsum) as f32 };
-            (result, wsum as f32)
+            [result, wsum as f32]
         })
     });
     let result_arr = numpy::ndarray::Array3::from_shape_vec((h, w, c), result)
@@ -1382,23 +1264,12 @@ fn ivw_combine_with_sigma<'py>(
 // pad-then-np.apply_along_axis-then-np.convolve (which loops in pure Python
 // over every row/column -- see that module's docstring for why the exact
 // convolve-vs-correlate orientation of each kernel matters and how it was
-// determined). No padded array is ever materialised: `wavelet_symmetric_idx`
-// computes the symmetric ("whole-point", edge-duplicating -- numpy's
-// mode='symmetric') boundary index directly.
-
-#[inline]
-fn wavelet_symmetric_idx(i: isize, n: usize) -> usize {
-    let n_i = n as isize;
-    let period = 2 * n_i;
-    let mut m = i.rem_euclid(period);
-    if m >= n_i {
-        m = period - 1 - m;
-    }
-    m as usize
-}
+// determined). No padded array is ever materialised: `reflect_idx` computes
+// the symmetric (edge-duplicating -- numpy's mode='symmetric', scipy's
+// mode='reflect') boundary index directly, for any overshoot.
 
 // Forward 1D DWT of a length-`n` line (computed inline in `dwt2_native`):
-// exact port of `_dwt_1d`, `cA[j] = sum_k lo[k] * x[symmetric_idx(offset+2j-k, n)]`,
+// exact port of `_dwt_1d`, `cA[j] = sum_k lo[k] * x[reflect_idx(offset+2j-k, n)]`,
 // `cD` analogous with `hi` -- the direct closed form of
 // `np.convolve(padded, kernel, mode='valid')[offset::2]` with no padding
 // materialised (convolve flips one operand, so
@@ -1505,7 +1376,7 @@ fn dwt2_native<'py>(
     };
 
     // Per-sample tap sums as in the closed form above (start at 0.0, add
-    // lo[k]*x[symmetric_idx(base-k)] for k = 0..flen in order, no FMA), laid
+    // lo[k]*x[reflect_idx(base-k)] for k = 0..flen in order, no FMA), laid
     // out for speed: pass 1 accumulates whole source rows into whole output
     // rows (contiguous, vectorisable) instead of gathering one strided column
     // at a time and transposing; pass 2 reads each row through a
@@ -1521,7 +1392,7 @@ fn dwt2_native<'py>(
             .for_each(|(j, (la_row, lh_row))| {
                 let base = offset as isize + 2 * j as isize;
                 for k in 0..flen {
-                    let r = wavelet_symmetric_idx(base - k as isize, h);
+                    let r = reflect_idx(base - k as isize, h);
                     dwt_row_accumulate(la_row, lh_row, &img64[r * w..(r + 1) * w], lo[k], hi[k]);
                 }
             });
@@ -1534,9 +1405,9 @@ fn dwt2_native<'py>(
                 .enumerate()
                 .for_each(|(r, (a_row, d_row))| {
                     let line = &src_rows[r * w..(r + 1) * w];
-                    // ext[t] = line[symmetric_idx(t - (flen - 1))]
+                    // ext[t] = line[reflect_idx(t - (flen - 1))]
                     let ext: Vec<f64> = (0..ext_len)
-                        .map(|t| line[wavelet_symmetric_idx(t as isize - (flen as isize - 1), w)])
+                        .map(|t| line[reflect_idx(t as isize - (flen as isize - 1), w)])
                         .collect();
                     for j in 0..out_w {
                         // index base-k  ->  ext[base - k + flen - 1]
@@ -1651,28 +1522,6 @@ fn idwt2_native<'py>(
 // precision concern like the wavelet kernel), matching numpy's internal
 // promotion for median/std of a float32 input.
 
-#[inline]
-fn median_f64_scratch(v: &mut [f64]) -> f64 {
-    let n = v.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    let mid = n / 2;
-    let (_, &mut m, _) =
-        v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    if n % 2 == 1 {
-        m
-    } else {
-        let mut lo = f64::NEG_INFINITY;
-        for &x in v[..mid].iter() {
-            if x > lo {
-                lo = x;
-            }
-        }
-        0.5 * (lo + m)
-    }
-}
-
 #[pyfunction]
 fn sigma_clipped_median_native(data: PyReadonlyArray1<'_, f32>, sigma: f64, iters: usize) -> f64 {
     let v: Vec<f32> = data.as_array().iter().copied().collect();
@@ -1691,7 +1540,7 @@ fn sigma_clipped_median_native(data: PyReadonlyArray1<'_, f32>, sigma: f64, iter
 // almost nowhere. This computes the 3x3 box mean only at masked positions.
 // Boundary convention is scipy.ndimage's default `mode='reflect'` for
 // uniform_filter/median_filter, which (confusingly) is the *duplicate-edge*
-// reflection -- the same convention as `wavelet_symmetric_idx` above (numpy
+// reflection -- the same convention as `reflect_idx` (numpy
 // `pad(mode='symmetric')`), reused here rather than redefined.
 
 #[pyfunction]
@@ -1716,9 +1565,9 @@ fn hot_pixel_box_replace_native<'py>(
                 for ch in 0..c {
                     let mut acc = 0.0f64;
                     for dy in -1isize..=1 {
-                        let yy = wavelet_symmetric_idx(y as isize + dy, h);
+                        let yy = reflect_idx(y as isize + dy, h);
                         for dx in -1isize..=1 {
-                            let xx = wavelet_symmetric_idx(x as isize + dx, w);
+                            let xx = reflect_idx(x as isize + dx, w);
                             acc += data_flat[(yy * w + xx) * c + ch] as f64;
                         }
                     }
@@ -1947,7 +1796,7 @@ fn lanczos6_weights(r: f64, out: &mut [f64; 6]) {
 // float32 output of a 2048x3056 rotated warp is bit-identical to the closed form, the rest
 // differs by one ulp (max abs 4.9e-4 on values up to ~6000), and it is 1.53x faster
 // (638 -> 416 ms per frame, single thread). Sums stay exactly 1 (the Lagrange coefficients
-// sum to 1). ORIGINSTACK_LANCZOS_EXACT=1 restores the closed form, for A/B checks.
+// sum to 1).
 const LUT_N: usize = 512;
 
 fn lanczos_lut() -> &'static Vec<[f64; 6]> {
@@ -1970,11 +1819,6 @@ fn lanczos_lut() -> &'static Vec<[f64; 6]> {
     })
 }
 
-fn lut_enabled() -> bool {
-    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var("ORIGINSTACK_LANCZOS_EXACT").map(|v| v != "1").unwrap_or(true))
-}
-
 #[inline]
 fn lanczos6_weights_lut(r: f64, out: &mut [f64; 6]) {
     if r == 0.0 {
@@ -1993,15 +1837,6 @@ fn lanczos6_weights_lut(r: f64, out: &mut [f64; 6]) {
     let (a, b, c, d) = (&tab[j], &tab[j + 1], &tab[j + 2], &tab[j + 3]);
     for k in 0..6 {
         out[k] = cm1 * a[k] + c0 * b[k] + c1 * c[k] + c2 * d[k];
-    }
-}
-
-#[inline]
-fn lw(r: f64, out: &mut [f64; 6]) {
-    if lut_enabled() {
-        lanczos6_weights_lut(r, out);
-    } else {
-        lanczos6_weights(r, out);
     }
 }
 
@@ -2035,7 +1870,7 @@ fn lanczos3_row_flat(
                                 if ox == 0 {
                                     let iy = m00 * oy as f64 + o0;
                                     let fy = iy.floor();
-                                    lw(iy - fy, &mut wy);
+                                    lanczos6_weights_lut(iy - fy, &mut wy);
                                 }
                                 let iy = m00 * oy as f64 + o0;
                                 (&wy, &wxs[ox], iy.floor() as isize - 2, bxs[ox])
@@ -2045,8 +1880,8 @@ fn lanczos3_row_flat(
                                 let ix = m10 * oy as f64 + m11 * oxg + o1;
                                 let fy = iy.floor();
                                 let fx = ix.floor();
-                                lw(iy - fy, &mut wy);
-                                lw(ix - fx, &mut wx);
+                                lanczos6_weights_lut(iy - fy, &mut wy);
+                                lanczos6_weights_lut(ix - fx, &mut wx);
                                 (&wy, &wx, fy as isize - 2, fx as isize - 2)
                             };
                         let interior = base_y >= 0
@@ -2706,26 +2541,12 @@ fn anisotropic_diffusion<'py>(
 /// ((row+top)*(gh-1)/(h_full-1), (col+left)*(gw-1)/(w_full-1)) — the same
 /// corner-aligned mapping scipy `zoom(order=1)` uses, so it matches the old
 /// upsample-then-crop path without ever materialising N full-res maps.
-#[pyfunction]
-#[pyo3(signature = (data, qmaps, gweights=None, sigma=3.0, max_iters=3, use_mad=true, grid_geom=None))]
-fn patch_weighted_sigma_combine<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray4<'py, f32>,
-    qmaps: PyReadonlyArray3<'py, f32>,
-    gweights: Option<PyReadonlyArray1<'py, f32>>,
-    sigma: f32,
-    max_iters: usize,
-    use_mad: bool,
-    grid_geom: Option<(f64, f64, f64, f64)>,
-) -> PyResult<Bound<'py, PyArray3<f32>>> {
-    patch_weighted_sigma_combine_impl(py, data, qmaps, gweights, sigma, max_iters, use_mad, grid_geom, false)
-}
-
-/// `patch_weighted_sigma_combine`, faster and bit-identical: the MAD sigma-clip does
-/// fewer passes per iteration (`sigma_clip_mask_fast`), and with a patch grid the four
-/// grid corners every frame needs are tabulated once per row and grid column instead of
-/// four indexed lookups per frame per pixel (same f32 bilinear expression, same f64
-/// weight product).
+///
+/// The MAD sigma-clip uses `sigma_clip_mask_fast` (fewer passes per iteration), and
+/// with a patch grid the four grid corners every frame needs are tabulated once per
+/// row and grid column (same f32 bilinear expression, same f64 weight product as a
+/// direct per-frame lookup). (The `_fast` suffix is historical: the slower original
+/// `patch_weighted_sigma_combine` was removed in crate 0.53.0.)
 #[pyfunction]
 #[pyo3(signature = (data, qmaps, gweights=None, sigma=3.0, max_iters=3, use_mad=true, grid_geom=None))]
 fn patch_weighted_sigma_combine_fast<'py>(
@@ -2738,7 +2559,7 @@ fn patch_weighted_sigma_combine_fast<'py>(
     use_mad: bool,
     grid_geom: Option<(f64, f64, f64, f64)>,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
-    patch_weighted_sigma_combine_impl(py, data, qmaps, gweights, sigma, max_iters, use_mad, grid_geom, true)
+    patch_weighted_sigma_combine_impl(py, data, qmaps, gweights, sigma, max_iters, use_mad, grid_geom)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2751,7 +2572,6 @@ fn patch_weighted_sigma_combine_impl<'py>(
     max_iters: usize,
     use_mad: bool,
     grid_geom: Option<(f64, f64, f64, f64)>,
-    fast: bool,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
     let arr = data.as_array();
     let qm = qmaps.as_array();
@@ -2801,10 +2621,10 @@ fn patch_weighted_sigma_combine_impl<'py>(
             let mut gather: Vec<f32> = Vec::with_capacity(n);
             let mut scratch: Vec<f32> = Vec::with_capacity(n);
             let mut reject_count = vec![0u32; n]; // per-frame rejected-channel count
-            // fast path, patch grid: corners[(gx0 * n + f)] = this row's four grid
+            // patch grid: corners[(gx0 * n + f)] = this row's four grid
             // values around grid column gx0 for frame f
-            let corners: Vec<[f32; 4]> = match (&row_tab, fast) {
-                (Some((gy0, _)), true) => {
+            let corners: Vec<[f32; 4]> = match &row_tab {
+                Some((gy0, _)) => {
                     let gy1 = (gy0 + 1).min(qh - 1);
                     let mut t = Vec::with_capacity(qw * n);
                     for gx0 in 0..qw {
@@ -2832,7 +2652,7 @@ fn patch_weighted_sigma_combine_impl<'py>(
                 }
                 for ch in 0..c {
                     let chan = &block[(p * c + ch) * n..][..n];
-                    if fast && use_mad {
+                    if use_mad {
                         sigma_clip_mask_fast(chan, sigma, max_iters, active, gather, scratch);
                     } else {
                         sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch);
@@ -2864,25 +2684,11 @@ fn patch_weighted_sigma_combine_impl<'py>(
                         wsum += wt;
                     }
                 } else {
+                // full-resolution weights (no patch grid)
                 for f in 0..n {
                     let rej_frac = reject_count[f] as f64 * inv_c;
-                    let qwt = match (&row_tab, &col_tab) {
-                        (Some((gy0, fy)), Some((gx0s, fxs))) => {
-                            let (gx0, fx) = (gx0s[col], fxs[col]);
-                            let gy1 = (gy0 + 1).min(qh - 1);
-                            let gx1 = (gx0 + 1).min(qw - 1);
-                            let q00 = qm[[f, *gy0, gx0]];
-                            let q01 = qm[[f, *gy0, gx1]];
-                            let q10 = qm[[f, gy1, gx0]];
-                            let q11 = qm[[f, gy1, gx1]];
-                            let top_v = q00 + (q01 - q00) * fx;
-                            let bot_v = q10 + (q11 - q10) * fx;
-                            (top_v + (bot_v - top_v) * fy) as f64
-                        }
-                        _ => qm[[f, row, col]] as f64,
-                    };
-                    let gwt = gwref.map(|g| g[f] as f64).unwrap_or(1.0);
-                    let wt = qwt * gwt * (1.0 - rej_frac);
+                    let qwt = qm[[f, row, col]] as f64;
+                    let wt = qwt * gw64[f] * (1.0 - rej_frac);
                     if wt == 0.0 {
                         continue;
                     }
@@ -5640,7 +5446,7 @@ fn fit_moffat_lm(r: &[f64], v: &[f64]) -> Option<(f64, f64, f64)> {
         return None;
     }
     let mut rs: Vec<f64> = r.to_vec();
-    let alpha0 = median_f64_scratch(&mut rs).max(1.0);
+    let alpha0 = median_inplace(&mut rs).max(1.0);
 
     let lower = [amp0 * 0.5, 0.5, 1.0];
     let upper = [amp0 * 50.0, 50.0, 8.0];
@@ -6035,7 +5841,7 @@ fn mesh_median_grid<'py>(
             if cell.is_empty() {
                 f64::NAN
             } else {
-                median_f64_scratch(&mut cell)
+                median_inplace(&mut cell)
             }
         })
         .collect();
@@ -6279,7 +6085,7 @@ fn radial_bin_median<'py>(
 
     let profile: Vec<f64> = buckets
         .into_par_iter()
-        .map(|mut v| if v.is_empty() { 0.0 } else { median_f64_scratch(&mut v) })
+        .map(|mut v| if v.is_empty() { 0.0 } else { median_inplace(&mut v) })
         .collect();
 
     Ok(profile.into_pyarray(py))
@@ -6492,6 +6298,10 @@ fn aperture_photometry_batch<'py>(
 // this file: a source checkout without astro_native built simply can't use
 // --transient-triage until one is added (self-disables with a warning, see
 // src/transient_triage.py).
+//
+// Behind the `triage` Cargo feature (off by default: tract is ~24 MB of the
+// binary). Build with `maturin build --release --features triage` to get it.
+#[cfg(feature = "triage")]
 mod transient_triage {
     use pyo3::prelude::*;
     use std::collections::HashMap;
@@ -8081,9 +7891,9 @@ fn hot_rgb_core(f: &[f32], h: usize, w: usize, threshold: f64) -> HotRgb {
             for ch in 0..3usize {
                 let mut acc = 0.0f64;
                 for dy in -1isize..=1 {
-                    let yy = wavelet_symmetric_idx(y as isize + dy, h);
+                    let yy = reflect_idx(y as isize + dy, h);
                     for dx in -1isize..=1 {
-                        let xx = wavelet_symmetric_idx(x as isize + dx, w);
+                        let xx = reflect_idx(x as isize + dx, w);
                         acc += f[(yy * w + xx) * 3 + ch] as f64;
                     }
                 }
@@ -8728,29 +8538,6 @@ fn white_balance_body_inplace(
             None => flat.par_chunks_mut(w * 3).for_each(|row| row_fn(row, None)),
         }
     });
-}
-
-/// `white_balance_apply` writing into `img` itself.
-#[pyfunction]
-fn white_balance_apply_inplace<'py>(
-    py: Python<'py>,
-    mut img: numpy::PyReadwriteArray3<'py, f32>,
-    factors: PyReadonlyArray1<'py, f32>,
-    divide: bool,
-) -> PyResult<()> {
-    let shape = img.as_array().shape().to_vec();
-    if shape[2] != 3 {
-        return Err(pyo3::exceptions::PyValueError::new_err("img must have 3 channels"));
-    }
-    let f = factors.as_slice()?;
-    if f.len() != 3 {
-        return Err(pyo3::exceptions::PyValueError::new_err("factors must have 3 entries"));
-    }
-    let flat = img
-        .as_slice_mut()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("img must be C-contiguous"))?;
-    white_balance_body_inplace(py, flat, shape[1], [f[0], f[1], f[2]], divide, None, None);
-    Ok(())
 }
 
 /// `white_balance_grayworld` writing into `img` itself (same float64-accumulated means).
@@ -9604,49 +9391,11 @@ fn proper_coadd_prep<'py>(
 }
 
 /// Proper coadd accumulation for one frame and channel, fused:
-/// `num += wnum * fm * conj(ph)` and `den += wden * |ph|^2`, in f64.
-/// Complex arrays are passed as their interleaved float views (`.view(float32)` of
-/// complex64, `.view(float64)` of complex128).
-#[pyfunction]
-fn proper_coadd_accum<'py>(
-    py: Python<'py>,
-    mut num: numpy::PyReadwriteArray2<'py, f64>,
-    mut den: numpy::PyReadwriteArray2<'py, f64>,
-    fm: PyReadonlyArray2<'py, f32>,
-    ph: PyReadonlyArray2<'py, f32>,
-    wnum: f64,
-    wden: f64,
-) -> PyResult<()> {
-    let ns = num.as_array().shape().to_vec();
-    if den.as_array().shape() != [ns[0], ns[1] / 2] || fm.as_array().shape() != &ns[..]
-        || ph.as_array().shape() != &ns[..] || ns[1] % 2 != 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err("shape mismatch"));
-    }
-    let row = ns[1];
-    let nm = num.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("num must be contiguous"))?;
-    let dn = den.as_slice_mut().map_err(|_| pyo3::exceptions::PyValueError::new_err("den must be contiguous"))?;
-    let f = fm.as_slice()?;
-    let p = ph.as_slice()?;
-    py.detach(|| {
-        nm.par_chunks_mut(row).zip(dn.par_chunks_mut(row / 2)).enumerate().for_each(|(y, (nr, dr))| {
-            let fr = &f[y * row..(y + 1) * row];
-            let pr = &p[y * row..(y + 1) * row];
-            for i in 0..row / 2 {
-                let (a, b) = (fr[2 * i] as f64, fr[2 * i + 1] as f64);
-                let (c, d) = (pr[2 * i] as f64, pr[2 * i + 1] as f64);
-                // (a + bi)(c - di)
-                nr[2 * i] += wnum * (a * c + b * d);
-                nr[2 * i + 1] += wnum * (b * c - a * d);
-                dr[i] += wden * (c * c + d * d);
-            }
-        });
-    });
-    Ok(())
-}
-
-/// `proper_coadd_accum` with float32 accumulators (each producer thread keeps its own
-/// and they are summed once at the end, instead of every frame going through one
-/// shared float64 accumulator on the main thread). The per-element arithmetic is f64;
+/// `num += wnum * fm * conj(ph)` and `den += wden * |ph|^2`. Complex arrays are passed
+/// as their interleaved float views (`.view(float32)` of complex64). Float32
+/// accumulators (each producer thread keeps its own and they are summed once at the
+/// end; the old shared float64 `proper_coadd_accum` was removed in crate 0.53.0).
+/// The per-element arithmetic is f64;
 /// only the running sums are stored in f32 -- 531 frames of relative precision 1e-7
 /// leave ~1e-5 relative, far below the stack's own noise.
 #[pyfunction]
@@ -10013,12 +9762,11 @@ fn xcorr_window<'py>(
 
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(feature = "triage")]
     m.add_function(wrap_pyfunction!(transient_triage::transient_triage_score, m)?)?;
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
-    m.add_function(wrap_pyfunction!(online_sigma_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_seed_burnin, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_fold_frame, m)?)?;
-    m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine, m)?)?;
     m.add_function(wrap_pyfunction!(patch_weighted_sigma_combine_fast, m)?)?;
     m.add_function(wrap_pyfunction!(median_combine, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_clip_combine, m)?)?;
@@ -10076,7 +9824,6 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
     m.add_function(wrap_pyfunction!(downsample_half_f32, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
-    m.add_function(wrap_pyfunction!(proper_coadd_accum, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum32, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_prep_rows, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_scatter_tiles, m)?)?;
@@ -10090,7 +9837,6 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(strided_sigma_clipped_median, m)?)?;
     m.add_function(wrap_pyfunction!(green_equalize_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(bayer_grid_equalize_inplace, m)?)?;
-    m.add_function(wrap_pyfunction!(white_balance_apply_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld_lum_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(white_balance_grayworld_lum_into, m)?)?;

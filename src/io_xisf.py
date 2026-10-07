@@ -22,7 +22,6 @@ spec so it can also read files from other tools):
 """
 from __future__ import annotations
 
-import os
 import struct
 import xml.etree.ElementTree as ET
 from typing import Tuple
@@ -41,10 +40,6 @@ _SAMPLE_DTYPES = {
     'Float32': np.float32,
     'Float64': np.float64,
 }
-
-
-def is_xisf_file(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in XISF_EXTENSIONS
 
 
 def _find_image_element(root: ET.Element) -> ET.Element:

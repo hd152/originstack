@@ -631,7 +631,6 @@ def _apply_quality_settings(
     n           = int(sig['n_frames'])
     snr         = sig['snr']
     fwhm        = sig['fwhm']
-    sc          = sig['star_count']
     strehl      = sig.get('strehl', 0.0)
     dispersion  = sig.get('dispersion', 0.0)
     med_ellip   = sig.get('median_ellipticity', 0.0)

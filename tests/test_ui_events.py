@@ -29,7 +29,7 @@ class TestInactiveNoOp(unittest.TestCase):
         ui.run_finished('error', 'boom')
         self.assertEqual(ui._state['log'], [])
         self.assertEqual(ui._state['phase'], 0)
-        self.assertIsNone(ui._preview_bytes)
+        self.assertEqual(ui._preview_version, 0)
         self.assertEqual(ui._state['run_status'], 'idle')
         self.assertIsNone(ui._state['run_error'])
 
@@ -67,7 +67,7 @@ class TestRunState(unittest.TestCase):
     def test_run_started_clears_previews_and_thumbnails(self):
         self.ui.preview(_synth_rgb(), "Final", slot='final', min_interval=0.0)
         self.ui.frame_preview("light_001.fits", _synth_rgb())
-        self.assertIsNotNone(self.ui._preview_bytes)
+        self.assertEqual(self.ui._preview_caption, 'Final')
         self.assertTrue(self.ui._named)
         self.assertTrue(self.ui._frame_thumbs)
         pv, nv, fv = (self.ui._preview_version, self.ui._named_version,
@@ -75,7 +75,6 @@ class TestRunState(unittest.TestCase):
 
         self.ui.run_started()
 
-        self.assertIsNone(self.ui._preview_bytes)
         self.assertEqual(self.ui._preview_caption, '')
         self.assertEqual(len(self.ui._named), 0)
         self.assertEqual(self.ui._latest_slug, '')
@@ -155,17 +154,9 @@ class TestNamedSlotsAndSnapshot(unittest.TestCase):
         snap = self.ui.snapshot()
         slugs = [n['slug'] for n in snap['named']]
         self.assertIn('final', slugs)
-        self.assertTrue(snap['named'][0]['src'])  # linear source retained
         self.assertEqual(snap['latest_slug'], 'final')
         data = self.ui.named_jpeg('final')
         self.assertEqual(data[:2], b'\xff\xd8')  # JPEG magic
-
-    def test_preview_endpoint_equivalent(self):
-        self.assertIsNone(self.ui.preview_jpeg())
-        self.ui.preview(_synth_rgb(), "test cap", min_interval=0.0)
-        data = self.ui.preview_jpeg()
-        self.assertGreater(len(data), 1000)
-        self.assertEqual(data[:2], b'\xff\xd8')
 
     def test_frame_thumbnail(self):
         self.ui.frame_preview("light_001.fits", _synth_rgb())
@@ -174,14 +165,6 @@ class TestNamedSlotsAndSnapshot(unittest.TestCase):
         fid = snap['frames_img'][0]['id']
         data = self.ui.frame_jpeg(fid)
         self.assertEqual(data[:2], b'\xff\xd8')
-
-    def test_restretch_from_source(self):
-        """Re-stretch re-encodes the retained linear source with new params."""
-        self.ui.preview(_synth_rgb(), "Final", slot='final', min_interval=0.0)
-        data = self.ui.restretch('final', {'stretch': 'ghs', 'b': 3, 'sp': 0.2,
-                                           'hp': 0.9, 'black': 1.0})
-        self.assertEqual(data[:2], b'\xff\xd8')
-        self.assertIsNone(self.ui.restretch('nope', {}))
 
 
 class TestFrameThumbRing(unittest.TestCase):

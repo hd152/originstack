@@ -6,6 +6,32 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--transient-triage` now needs a native build with the `triage` feature.** The `tract` ONNX
+  runtime behind it moved behind a Cargo feature that is off by default, so release builds and a
+  plain `maturin build --release` no longer include it (smaller binary, faster first build). Build
+  with `cd ext/astro_native && python -m maturin build --release --features triage` to use it;
+  without it `--transient-triage` disables itself with a warning and `--transient-detect` runs as
+  before.
+
+### Removed
+
+- Unused internal code, no change to results: Python `stacking.drizzle_combine` and
+  `_lanczos_resample_frame`; `registration.compute_patch_quality_map`, `patch_scores_to_map`,
+  `apply_shift`; `denoising.reduce_stars` (`shrink_stars` is the star-reduction step);
+  `debayer.remove_hot_pixels_rgb`; `color_calibrate.synthetic_channel_flux`;
+  `banding.banding_strength`; `sky_model.remove_physical_sky` (use
+  `remove_physical_sky_with_reason`) and `moon_illuminated_fraction`; `ui_events.restretch`,
+  `preview_jpeg` and the retained preview source; the desktop preview's `replace_pixels`; the
+  `io_*.is_*_file` helpers; `frame_store` `release()`. Native: `online_sigma_clip_combine`,
+  `white_balance_apply_inplace`, the older `patch_weighted_sigma_combine`, the float64
+  `proper_coadd_accum`, and the `ORIGINSTACK_LANCZOS_EXACT` switch.
+- `tools/benchmark.py` and `tools/reprocess_bg.py`.
+- The `sample/` folder; the README's example images now come from `docs/img/`.
+- Developer notes (measurement history, per-kernel details, Siril and Phase 4 investigations)
+  moved out of `CLAUDE.md` into `dev-notes/`.
+
 ## [2.7.0] - 2026-10-07
 
 ### Fixed

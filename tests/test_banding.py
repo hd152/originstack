@@ -3,7 +3,7 @@ import argparse
 
 import numpy as np
 
-from src.banding import banding_strength, remove_banding_2d, remove_banding_bayer, remove_banding_rgb
+from src.banding import remove_banding_2d, remove_banding_bayer, remove_banding_rgb
 from src.frame_processor import _banding_cfg
 
 
@@ -74,14 +74,6 @@ def _plane(H=400, W=500, seed=0, row_sigma=0.0):
     clean = 1000 + 0.02 * yy + rng.normal(0, 10, (H, W))
     rows = rng.normal(0, row_sigma, H) if row_sigma else np.zeros(H)
     return clean.astype(np.float32), (clean + rows[:, None]).astype(np.float32), rows
-
-
-def test_strength_reads_high_on_banded_and_near_zero_on_clean():
-    clean, bad, _ = _plane(row_sigma=8.0)
-    rr_bad, _, noise = banding_strength(bad)
-    rr_clean, _, _ = banding_strength(clean)
-    assert rr_bad > 3 * rr_clean and rr_bad > 4.0
-    assert noise > 0
 
 
 def test_mono_and_rgb_paths():

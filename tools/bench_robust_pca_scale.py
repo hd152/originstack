@@ -1,6 +1,6 @@
 """Benchmark src.robust_pca.robust_pca_decompose's wall-clock cost vs. frame count N,
 to check whether Config.ROBUST_PCA_AUTO_MAX_FRAMES (currently 10, based on a single
-N=20/P=18M anchor documented in CLAUDE.md: 1264s) can be safely widened for --auto.
+N=20/P=18M anchor documented in dev-notes/native-kernels.md: 1264s) can be safely widened for --auto.
 
 Running the full N=20, P=18,000,000 (2000x3000x3) case directly takes ~21 minutes per
 the existing measurement -- too slow to redo here per candidate N. Instead this measures
@@ -32,7 +32,7 @@ except Exception as e:
 rng = np.random.default_rng(7)
 
 REAL_P = 2000 * 3000 * 3  # matches the documented N=20 anchor's frame shape
-ANCHOR_N, ANCHOR_SECONDS = 20, 1264.0  # from CLAUDE.md / src/robust_pca.py docstring
+ANCHOR_N, ANCHOR_SECONDS = 20, 1264.0  # from dev-notes/native-kernels.md / src/robust_pca.py docstring
 
 
 def make_calib_stack(n: int, p: int) -> np.ndarray:

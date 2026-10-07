@@ -16,7 +16,6 @@ key (the same mechanism already used for FITS/RAW) to override this.
 """
 from __future__ import annotations
 
-import os
 from typing import Tuple
 
 import numpy as np
@@ -29,10 +28,6 @@ try:
 except Exception:
     _tifffile = None  # type: ignore[assignment]
     HAS_TIFFFILE = False
-
-
-def is_tiff_file(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in TIFF_EXTENSIONS
 
 
 def read_tiff_header(path: str) -> dict:

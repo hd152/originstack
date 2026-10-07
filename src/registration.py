@@ -597,9 +597,6 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
         debug_info.append(f"fft_xcorr error: {type(e).__name__}")
 
     # Fallback to centroid difference — compute all percentile thresholds in one pass
-    best_shift = (0.0, 0.0)
-    best_score = float('inf')
-
     _pcts = list(Config.CENTROID_PERCENTILES)
     _ref_thresholds = np.percentile(ref, _pcts)
     _img_thresholds = np.percentile(img, _pcts)
@@ -631,10 +628,6 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
     if verbose and debug_info:
         print("      [CRITICAL: no registration method succeeded] " + " | ".join(debug_info))
     return 0.0, 0.0
-
-
-def apply_shift(img: np.ndarray, shift: Tuple[float, float]) -> np.ndarray:
-    return ndimage.shift(img, shift=shift, order=3, mode='constant', cval=0.0, prefilter=True)
 
 
 def _fft_shift_single(ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
@@ -1405,96 +1398,6 @@ def compute_patch_scores(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
     return patch_scores
 
 
-def patch_scores_to_map(patch_scores: np.ndarray, H: int, W: int) -> np.ndarray:
-    """Normalise a coarse patch-score grid and upsample it to (H, W)."""
-    patch_scores = patch_scores.astype(np.float32, copy=True)
-    ny, nx = patch_scores.shape
-    pmax = patch_scores.max()
-    if pmax > 1e-12:
-        patch_scores /= pmax
-    if ny == H and nx == W:
-        return patch_scores
-    zoom_y = H / ny
-    zoom_x = W / nx
-    quality_map = ndimage.zoom(patch_scores, (zoom_y, zoom_x), order=1)
-    quality_map = np.clip(quality_map, 0.0, 1.0).astype(np.float32)
-    # Ensure exact output shape (zoom can differ by 1 pixel due to rounding)
-    if quality_map.shape != (H, W):
-        from scipy.ndimage import map_coordinates
-        gy = np.linspace(0, ny - 1, H)
-        gx = np.linspace(0, nx - 1, W)
-        coords_y, coords_x = np.meshgrid(gy, gx, indexing='ij')
-        quality_map = map_coordinates(
-            patch_scores.astype(np.float64),
-            [coords_y, coords_x], order=1, mode='nearest'
-        ).astype(np.float32)
-        np.clip(quality_map, 0.0, 1.0, out=quality_map)
-    return quality_map
-
-
-def compute_patch_quality_map(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
-    """Divide luminance frame into a grid and compute per-patch Brenner sharpness.
-
-    Returns a float32 (H, W) array where each pixel holds the normalised quality
-    weight of its patch.  The map is bilinearly interpolated from the patch grid
-    to full resolution so it can be used as a per-pixel stacking weight.
-
-    Higher values indicate sharper, better-seeing patches (suitable for
-    weighted stacking in the lucky imaging paradigm).
-    """
-    from src.models import Config
-    if grid_size is None:
-        grid_size = Config.PATCH_GRID_SIZE
-    min_patch = Config.PATCH_MIN_SIZE
-
-    H, W = lum.shape[:2]
-    # Enforce minimum patch size; fall back to 1x1 grid if image is tiny
-    ph = max(H // grid_size, min_patch)
-    pw = max(W // grid_size, min_patch)
-    ny = max(H // ph, 1)
-    nx = max(W // pw, 1)
-
-    patch_scores = np.zeros((ny, nx), dtype=np.float32)
-    lum_f = lum.astype(np.float64)
-
-    for iy in range(ny):
-        for ix in range(nx):
-            y0, y1 = iy * ph, min((iy + 1) * ph, H)
-            x0, x1 = ix * pw, min((ix + 1) * pw, W)
-            patch = lum_f[y0:y1, x0:x1]
-            if patch.size < 4:
-                continue
-            diff = patch[:, 2:] - patch[:, :-2]
-            patch_scores[iy, ix] = float(np.mean(diff * diff))
-
-    # Normalise to [0, 1]
-    pmax = patch_scores.max()
-    if pmax > 1e-12:
-        patch_scores /= pmax
-
-    # Upsample patch grid to full frame resolution via bilinear interpolation
-    if ny == H and nx == W:
-        return patch_scores
-
-    zoom_y = H / ny
-    zoom_x = W / nx
-    quality_map = ndimage.zoom(patch_scores, (zoom_y, zoom_x), order=1)
-    quality_map = np.clip(quality_map, 0.0, 1.0).astype(np.float32)
-    # Ensure exact output shape (zoom can differ by 1 pixel due to rounding)
-    if quality_map.shape != (H, W):
-        from scipy.ndimage import map_coordinates
-        gy = np.linspace(0, ny - 1, H)
-        gx = np.linspace(0, nx - 1, W)
-        coords_y, coords_x = np.meshgrid(gy, gx, indexing='ij')
-        quality_map = map_coordinates(
-            patch_scores.astype(np.float64),
-            [coords_y, coords_x], order=1, mode='nearest'
-        ).astype(np.float32)
-        np.clip(quality_map, 0.0, 1.0, out=quality_map)
-
-    return quality_map
-
-
 def fit_displacement_field(ref_xy: np.ndarray, frame_xy: np.ndarray,
                            H: int, W: int) -> Optional[np.ndarray]:
     """Fit a smooth (Gc, Gc, 2) local displacement field (dy, dx) from sparse
@@ -2076,7 +1979,6 @@ def run_registration_phase(
                 f.metrics['reg_residual_px'] = round(rms, 3)
         if (n_res_failed > 0 and not getattr(args, 'no_reg_residual_check', False)
                 and getattr(args, 'reg_residual_reject', False)):
-            rejected_by_residual = [j for j, p in enumerate(res_passed) if not p]
             safe_print(
                 f"  Residual rejection (--reg-residual-reject): "
                 f"removing {n_res_failed} frame(s)"
@@ -2738,7 +2640,6 @@ def run_comet_registration_phase(
                         pixscale_arcsec = abs(float(pixscale))
                         if pixscale_arcsec < 0.001:  # CDELT1 is in degrees
                             pixscale_arcsec *= 3600.0
-                        exptime = float(hdr0.get('EXPTIME', 60.0) or 60.0)
                         # Angular velocity per frame interval (very rough)
                         ang_per_frame_arcsec = ang_sep_deg * 3600.0 / n_frames
                         trailing_px = ang_per_frame_arcsec / max(pixscale_arcsec, 1e-6)
@@ -2776,13 +2677,6 @@ def run_comet_registration_phase(
         sy = ref_cy - cy
         sx = ref_cx - cx
         return j, (sy, sx), (cy, cx)
-
-    gpu = get_gpu()
-    n_workers = min(
-        gpu.max_gpu_workers(Config.GPU_FFT_WORKER_MB, Config.GPU_VRAM_RESERVE_MB)
-        if gpu.active else (os.cpu_count() or 4),
-        len(final),
-    )
 
     print(f"  [Comet] Tracking nucleus in {len(final)} frames...")
     # Process sequentially to allow linear seed extrapolation

@@ -151,7 +151,7 @@ def _save_sidecar_fits(img: np.ndarray, output_path: str, suffix: str) -> None:
 def _apply_physical_sky(stacked: np.ndarray, args, star_mask, exclusion_mask):
     """Fit and subtract the physical sky model.
 
-    Returns ``(result, reason)``: ``result`` is the ``remove_physical_sky``
+    Returns ``(result, reason)``: ``result`` is the ``remove_physical_sky_with_reason``
     dict, or None with ``reason`` explaining which of the two very different
     failure modes occurred. Distinguishing them matters -- "your session has
     no GPS" and "this model cannot help at this field size" call for opposite

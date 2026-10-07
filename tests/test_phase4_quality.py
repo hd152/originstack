@@ -247,7 +247,7 @@ def test_shrink_stars_narrows_without_blurring_or_touching_noise():
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools'))
     from common_star_fwhm import _gauss_fit
 
-    from src.denoising import reduce_stars, shrink_stars
+    from src.denoising import shrink_stars
     img, src, pos = _star_grid()
     lum = lambda a: a @ LUMA  # noqa: E731
     out = shrink_stars(img, src, 3.77, amount=0.5)
@@ -263,12 +263,6 @@ def test_shrink_stars_narrows_without_blurring_or_touching_noise():
         r0 = (img[y, x] - 500)[2] / (img[y, x] - 500)[0]
         r1 = (out[y, x] - 500)[2] / (out[y, x] - 500)[0]
         assert r1 == pytest.approx(r0, rel=0.05)
-    # The old blur-blend widened the same stars
-    from src.quality import generate_star_mask
-    mask = generate_star_mask(img.shape[:2], src, fwhm=4.0)
-    old = reduce_stars(img, mask, reduction_factor=0.5, blur_sigma=1.5)
-    f_old = np.array([_gauss_fit(lum(old), x, y)[0] for y, x in pos])
-    assert np.median(f_old / f0) > 1.0
 
 
 def test_shrink_stars_noop_cases():

@@ -16,16 +16,6 @@ except Exception:
     HAS_TIFFFILE = False
 
 
-class TestIsTiffFile(unittest.TestCase):
-    def test_known_extensions(self):
-        self.assertTrue(io_tiff.is_tiff_file('frame.tif'))
-        self.assertTrue(io_tiff.is_tiff_file('frame.TIFF'))
-
-    def test_non_tiff_extensions(self):
-        self.assertFalse(io_tiff.is_tiff_file('frame.fits'))
-        self.assertFalse(io_tiff.is_tiff_file('frame.cr2'))
-
-
 @unittest.skipUnless(HAS_TIFFFILE, "tifffile not installed")
 class TestReadTiffRoundTrip(unittest.TestCase):
     def setUp(self):

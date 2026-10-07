@@ -1,7 +1,5 @@
 """Tests for src/denoising.py's bilateral filter -- replaces cv2.bilateralFilter,
-the last cv2-only feature in this codebase with no fallback (VNG debayer already
-aliased to Malvar, NLM already preferred skimage.restoration). This codebase now
-has no cv2 dependency at all.
+the last cv2-only feature in this codebase; there is no cv2 dependency left.
 
 Native/numpy parity is exact (same mirror_idx / np.pad(mode='reflect') boundary
 convention on both sides -- see src/denoising.py's _bilateral_filter_numpy and

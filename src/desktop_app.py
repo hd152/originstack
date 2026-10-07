@@ -1109,13 +1109,6 @@ class PreviewCanvas(ttk.Frame):
         self._img_b = Image.open(io.BytesIO(jpeg_bytes)).convert('RGB') if jpeg_bytes else None
         self.redraw()
 
-    def replace_pixels(self, jpeg_bytes: bytes) -> None:
-        """Swap the currently-viewed image (e.g. after a re-stretch) without
-        resetting pan/zoom, unlike ``load_slot``."""
-        from PIL import Image
-        self._img_a = Image.open(io.BytesIO(jpeg_bytes)).convert('RGB')
-        self.redraw()
-
     def clear(self) -> None:
         """Drop the displayed image(s) -- called when a new run starts so the
         viewer doesn't keep showing the previous run's stack."""

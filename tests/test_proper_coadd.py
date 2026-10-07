@@ -93,15 +93,16 @@ def test_native_prep_bit_identical_to_numpy():
 
 @pytest.mark.skipif(not _NATIVE, reason='astro_native lacks proper_coadd kernels')
 def test_native_accum_matches_numpy():
+    """One accumulate step from zero: f64 arithmetic, then a single f32 rounding."""
     rng = np.random.default_rng(4)
     fm = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
     ph = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
-    num = np.zeros((20, 17), np.complex128)
-    den = np.zeros((20, 17))
-    pc._native.proper_coadd_accum(num.view(np.float64), den, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
+    num = np.zeros((20, 17), np.complex64)
+    den = np.zeros((20, 17), np.float32)
+    pc._native.proper_coadd_accum32(num.view(np.float32), den, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
     want = 0.7 * fm.astype(np.complex128) * np.conj(ph.astype(np.complex128))
-    np.testing.assert_allclose(num, want, rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(den, 1.3 * np.abs(ph.astype(np.complex128)) ** 2, rtol=1e-12)
+    np.testing.assert_array_equal(num, want.astype(np.complex64))
+    np.testing.assert_array_equal(den, (1.3 * np.abs(ph.astype(np.complex128)) ** 2).astype(np.float32))
 
 
 @pytest.mark.skipif(not _NATIVE, reason='astro_native lacks proper_coadd kernels')
@@ -124,17 +125,19 @@ def test_on_by_default_with_a_single_opt_out():
     assert len(acts) == 1 and acts[0].option_strings == ['--no-proper-coadd']
 
 
-@pytest.mark.skipif(not (_NATIVE and hasattr(pc._native, 'proper_coadd_accum32')),
-                    reason='astro_native lacks proper_coadd_accum32')
-def test_accum32_matches_accum64():
+@pytest.mark.skipif(not _NATIVE, reason='astro_native lacks proper_coadd kernels')
+def test_accum32_matches_numpy_f64_accumulation():
+    """Several frames into float32 accumulators vs the numpy fallback's float64 sums."""
     rng = np.random.default_rng(5)
-    fm = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
-    ph = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
     n64, d64 = np.zeros((20, 17), np.complex128), np.zeros((20, 17))
     n32, d32 = np.zeros((20, 17), np.complex64), np.zeros((20, 17), np.float32)
-    for _ in range(3):
-        pc._native.proper_coadd_accum(n64.view(np.float64), d64, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
-        pc._native.proper_coadd_accum32(n32.view(np.float32), d32, fm.view(np.float32), ph.view(np.float32), 0.7, 1.3)
+    for i in range(3):
+        fm = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
+        ph = (rng.normal(size=(20, 17)) + 1j * rng.normal(size=(20, 17))).astype(np.complex64)
+        wn, wf = 0.7 + i, 1.3
+        n64 += wn * (fm * np.conj(ph))
+        d64 += wf * (ph.real.astype(np.float64) ** 2 + ph.imag.astype(np.float64) ** 2)
+        pc._native.proper_coadd_accum32(n32.view(np.float32), d32, fm.view(np.float32), ph.view(np.float32), wn, wf)
     np.testing.assert_allclose(n32, n64, rtol=1e-6, atol=1e-5)
     np.testing.assert_allclose(d32, d64, rtol=1e-6)
 

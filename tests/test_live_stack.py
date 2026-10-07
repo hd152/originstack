@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from src.live_stack import _HAS_SCIPY, LiveStacker, _stack_snr
+from tests._helpers import write_rgb_star_frame
 
 pytestmark = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
 
@@ -20,27 +21,8 @@ def _args():
         preview_black_sigma=0.0)
 
 
-def _write_star_frame(path, H=160, W=160, shift=(0, 0), n_stars=45, seed=0):
-    """Write a (3,H,W) RGB FITS star field (+ broad nebula), optionally shifted."""
-    from astropy.io import fits
-    rng = np.random.default_rng(seed)
-    img = np.full((H, W), 100.0, np.float32)
-    # Broad nebula so the frame has real dynamic range / structure to register.
-    yy, xx = np.mgrid[0:H, 0:W]
-    img += (300.0 * np.exp(-(((xx - W / 2) / (W * 0.3)) ** 2
-                            + ((yy - H / 2) / (H * 0.3)) ** 2))).astype(np.float32)
-    gy, gx = np.mgrid[-4:5, -4:5]
-    g = np.exp(-(gx * gx + gy * gy) / (2 * 1.5 ** 2))
-    # fixed star positions (same sky), shifted per frame
-    star_rng = np.random.default_rng(999)
-    for _ in range(n_stars):
-        y0 = star_rng.integers(20, H - 20) + shift[0]
-        x0 = star_rng.integers(20, W - 20) + shift[1]
-        if 4 <= y0 < H - 4 and 4 <= x0 < W - 4:
-            img[y0 - 4:y0 + 5, x0 - 4:x0 + 5] += (5000 * g).astype(np.float32)
-    img += rng.standard_normal((H, W)).astype(np.float32) * 5.0
-    cube = np.stack([img, img, img], axis=2).astype(np.float32)  # (H,W,3) HWC
-    fits.PrimaryHDU(data=cube).writeto(path, overwrite=True)
+def _write_star_frame(path, shift=(0, 0), seed=0):
+    write_rgb_star_frame(path, shift=shift, seed=seed, bg=100.0)
 
 
 def test_stack_snr_increases_with_signal():

@@ -24,28 +24,12 @@ from typing import Any, Dict, Optional
 _MAX_LOG_LINES = 500
 _MAX_FRAME_ROWS = 60
 _MAX_FRAME_THUMBS = 24     # per-frame preview ring
-_MAX_NAMED = 16            # retained milestone previews (with float source)
-_SRC_MAX_DIM = 1000        # downsized float source kept for re-stretch
+_MAX_NAMED = 16            # retained milestone previews
 
 
 def _slugify(text: str) -> str:
     s = re.sub(r'[^a-z0-9]+', '-', str(text).lower()).strip('-')
     return s or 'preview'
-
-
-def _downsize_f16(rgb, max_dim: int):
-    """Decimate an HWC float image to <= max_dim and store as float16 to bound
-    the memory kept for on-demand re-stretch. Aliasing is acceptable for a
-    preview source."""
-    import numpy as np
-    a = np.asarray(rgb)
-    if a.ndim == 2:
-        a = a[:, :, None]
-    h, w = a.shape[:2]
-    step = max(1, int(max(h, w) // max_dim))
-    if step > 1:
-        a = a[::step, ::step]
-    return a.astype(np.float16)
 
 
 class UIEvents:
@@ -55,10 +39,9 @@ class UIEvents:
         self._version = 0          # bumped on every state change (GUI polls this)
         # latest preview (back-compat single slot)
         self._preview_version = 0
-        self._preview_bytes: Optional[bytes] = None
         self._preview_caption = ""
         self._last_preview_time = 0.0
-        # named milestone previews: slug -> {caption, ver, jpeg, src(f16), kw}
+        # named milestone previews: slug -> {caption, ver, jpeg}
         self._named: "OrderedDict[str, dict]" = OrderedDict()
         self._named_version = 0
         self._latest_slug = ""
@@ -179,9 +162,8 @@ class UIEvents:
                 min_interval: float = 2.0) -> None:
         """Publish a stretched preview of an HWC float32 image. Encoding is
         throttled so frequent milestones don't spend time on JPEG encodes.
-        The float source is retained (downsized) so the viewer can re-stretch
-        it on demand, and the preview is registered as a named slot so it can
-        be picked for before/after compare."""
+        The preview is registered as a named slot so it can be picked for
+        before/after compare."""
         if not self.active:
             return
         now = time.time()
@@ -195,23 +177,18 @@ class UIEvents:
             return
         if not data:
             return
-        try:
-            src = _downsize_f16(rgb, _SRC_MAX_DIM)
-        except Exception:
-            src = None
         slug = _slugify(slot or caption)
         with self._lock:
-            self._preview_bytes = data
             self._preview_caption = caption
             self._preview_version += 1
             self._last_preview_time = now
             # register / update the named slot
             self._named_version += 1
             self._named[slug] = {'caption': caption, 'ver': self._named_version,
-                                 'jpeg': data, 'src': src, 'kw': kw}
+                                 'jpeg': data}
             self._named.move_to_end(slug)
             self._latest_slug = slug
-            # evict oldest sources beyond the cap (keep 'final' + newest)
+            # evict oldest slots beyond the cap (keep 'final' + newest)
             while len(self._named) > _MAX_NAMED:
                 for k in list(self._named.keys()):
                     if k != 'final' and k != self._latest_slug:
@@ -279,11 +256,10 @@ class UIEvents:
             self._state['run_status'] = 'running'
             self._state['run_error'] = None
             # Drop every preview from the previous run: the single back-compat
-            # slot, the retained milestone slots (+ their f16 re-stretch
-            # sources), and the per-frame thumbnail ring. Version counters are
+            # slot, the retained milestone slots and the per-frame thumbnail
+            # ring. Version counters are
             # bumped, not reset, so the GUI's poll loop sees the change and
             # redraws an empty viewer instead of showing last run's images.
-            self._preview_bytes = None
             self._preview_caption = ''
             self._preview_version += 1
             self._last_preview_time = 0.0
@@ -320,34 +296,6 @@ class UIEvents:
         except Exception:
             pass
 
-    # ── re-stretch (on-demand, from retained float source) ────────────────
-
-    def restretch(self, slug: str, params: dict) -> Optional[bytes]:
-        """Re-render a retained milestone at new stretch params. Returns JPEG
-        bytes (same as ``preview()``'s stored format) -- the GUI layer
-        decodes them into a display image; kept as bytes here rather than a
-        PIL Image so this method's tested behavior is unchanged from
-        ``WebView.restretch()``."""
-        with self._lock:
-            slot = self._named.get(slug)
-            src = slot['src'] if slot else None
-        if src is None:
-            return None
-        try:
-            import numpy as np
-
-            from src.io_fits import preview_jpeg_bytes
-            f = np.asarray(src, dtype=np.float32)
-            return preview_jpeg_bytes(
-                f, max_dim=_SRC_MAX_DIM,
-                stretch=params.get('stretch', 'ghs'),
-                ghs_b=float(params.get('b', 8.0)),
-                ghs_sp=float(params.get('sp', 0.15)),
-                ghs_hp=float(params.get('hp', 0.95)),
-                black_sigma=float(params.get('black', 0.0)))
-        except Exception:
-            return None
-
     # ── snapshot for the GUI's poll loop ───────────────────────────────────
 
     def snapshot(self) -> Dict[str, Any]:
@@ -364,17 +312,12 @@ class UIEvents:
             snap['preview_caption'] = self._preview_caption
             snap['latest_slug'] = self._latest_slug
             snap['named_version'] = self._named_version
-            snap['named'] = [{'slug': k, 'caption': v['caption'],
-                              'ver': v['ver'], 'src': v['src'] is not None}
+            snap['named'] = [{'slug': k, 'caption': v['caption'], 'ver': v['ver']}
                              for k, v in self._named.items()]
             snap['frames_img_version'] = self._frame_thumbs_version
             snap['frames_img'] = [{'id': v['id'], 'name': v['name']}
                                   for v in self._frame_thumbs.values()]
             return snap
-
-    def preview_jpeg(self) -> Optional[bytes]:
-        with self._lock:
-            return self._preview_bytes
 
     def named_jpeg(self, slug: str) -> Optional[bytes]:
         with self._lock:

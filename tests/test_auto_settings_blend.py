@@ -15,23 +15,10 @@ Three concerns:
 """
 from __future__ import annotations
 
-import argparse
-
 import pytest
 
 from src import auto_settings as a
-
-
-def _args(**overrides):
-    base = dict(
-        _explicit_cli_dests=set(), stack_method='auto', deconvolve=True,
-        debayer_method='malvar',
-        denoise_acdnr=False,
-        deconvolve_tv=False, patch_registration=False,
-        consensus_ref=False, preview_black_sigma=0.0,
-    )
-    base.update(overrides)
-    return argparse.Namespace(**base)
+from tests._helpers import auto_args as _args
 
 
 class TestBlendWeights:

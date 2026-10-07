@@ -81,7 +81,7 @@ class TestApplyTransformLocalField(unittest.TestCase):
     """
 
     def test_composed_warp_samples_expected_source_point(self):
-        from src.affine_fit import RigidTransform
+        from tests._rigid_helpers import rigid_transform
 
         H, W = 128, 128
         rng = np.random.default_rng(3)
@@ -99,7 +99,7 @@ class TestApplyTransformLocalField(unittest.TestCase):
 
         angle = np.deg2rad(4.0)
         tx, ty = 5.0, -3.0
-        transform = RigidTransform.from_rotation_translation(angle, (tx, ty))
+        transform = rigid_transform(angle, (tx, ty))
 
         dy0, dx0 = 2.5, -1.5  # constant local field applied everywhere
         field = np.zeros((Config.LOCAL_WARP_GRID_SIZE,

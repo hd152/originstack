@@ -150,15 +150,6 @@ class FrameStore:
     def report(self) -> str:
         return ', '.join(f"{k.rstrip('_')}: {v}" for k, v in self.placement.items())
 
-    def release(self, spec_or_array) -> None:
-        """Free one array early (the aligned stack once combined)."""
-        if isinstance(spec_or_array, str) and spec_or_array.startswith(SHM_PREFIX):
-            name = spec_or_array[len(SHM_PREFIX):]
-            for shm in list(self._shms):
-                if shm.name == name:
-                    _close_shm(shm)
-                    self._shms.remove(shm)
-
     def cleanup(self) -> None:
         import gc
         for mm in self._memmaps:

@@ -14,14 +14,16 @@ import tempfile
 import unittest
 
 import numpy as np
-from astropy.io import fits
 
 from src.models import Config, FrameInfo
 from src.robust_pca import robust_pca_decompose, robust_pca_master
+from tests._helpers import write_fits
 
 
-def _write_fits(path: str, data: np.ndarray) -> None:
-    fits.writeto(path, data.astype(np.float32), overwrite=True)
+def _write_frame(ftype: str, tmpdir: str, name: str, data: np.ndarray) -> FrameInfo:
+    path = os.path.join(tmpdir, name)
+    write_fits(path, data)
+    return FrameInfo(path=path, type=ftype, header={})
 
 
 class TestRobustPcaDecompose(unittest.TestCase):
@@ -63,11 +65,6 @@ class TestRobustPcaDecompose(unittest.TestCase):
 
 class TestRobustPcaMaster(unittest.TestCase):
 
-    def _write_frame(self, tmpdir: str, name: str, data: np.ndarray) -> FrameInfo:
-        path = os.path.join(tmpdir, name)
-        _write_fits(path, data)
-        return FrameInfo(path=path, type='flat', header={})
-
     def test_master_shape_and_finite(self):
         rng = np.random.default_rng(1)
         shape = (24, 24)
@@ -82,7 +79,7 @@ class TestRobustPcaMaster(unittest.TestCase):
                 if i == 3:
                     # One frame has a localized dust-donut-like anomaly.
                     frame[5:9, 5:9] -= 300.0
-                frames.append(self._write_frame(d, f'f{i}.fits', frame.astype(np.float32)))
+                frames.append(_write_frame('flat', d, f'f{i}.fits', frame.astype(np.float32)))
 
             master = robust_pca_master(frames, shape)
             self.assertIsNotNone(master)
@@ -95,7 +92,7 @@ class TestRobustPcaMaster(unittest.TestCase):
     def test_returns_none_below_min_frames(self):
         shape = (16, 16)
         with tempfile.TemporaryDirectory() as d:
-            frames = [self._write_frame(d, f'f{i}.fits',
+            frames = [_write_frame('flat', d, f'f{i}.fits',
                                         np.full(shape, 100.0, dtype=np.float32))
                      for i in range(Config.ROBUST_PCA_MIN_FRAMES - 1)]
             self.assertIsNone(robust_pca_master(frames, shape))
@@ -107,10 +104,10 @@ class TestRobustPcaMaster(unittest.TestCase):
         # np.stack, just skip the offending frame.
         shape = (24, 24)
         with tempfile.TemporaryDirectory() as d:
-            frames = [self._write_frame(d, f'f{i}.fits',
+            frames = [_write_frame('flat', d, f'f{i}.fits',
                                         np.full(shape, float(100 + i), dtype=np.float32))
                      for i in range(Config.ROBUST_PCA_MIN_FRAMES + 1)]
-            frames.append(self._write_frame(d, 'bad_shape.fits',
+            frames.append(_write_frame('flat', d, 'bad_shape.fits',
                                              np.full((12, 12), 999.0, dtype=np.float32)))
             master = robust_pca_master(frames, shape)
             self.assertIsNotNone(master)
@@ -124,25 +121,21 @@ class TestRobustPcaMaster(unittest.TestCase):
                 data = np.full(shape, float(100 + i), dtype=np.float32)
                 if i == 0:
                     data[0, 0] = np.nan
-                frames.append(self._write_frame(d, f'f{i}.fits', data))
+                frames.append(_write_frame('flat', d, f'f{i}.fits', data))
             self.assertIsNone(robust_pca_master(frames, shape))
 
     def test_falls_back_when_memory_insufficient(self):
         from unittest import mock
         shape = (24, 24)
         with tempfile.TemporaryDirectory() as d:
-            frames = [self._write_frame(d, f'f{i}.fits',
+            frames = [_write_frame('flat', d, f'f{i}.fits',
                                         np.full(shape, float(100 + i), dtype=np.float32))
                      for i in range(Config.ROBUST_PCA_MIN_FRAMES + 1)]
-            fake_mem = mock.MagicMock()
-            fake_mem.available = 1  # forces the memory guard to trip
-            # create=True: mock.patch normally requires the target attribute
-            # to already exist. GitHub Actions' ubuntu-latest runners have a
-            # psutil install that's missing virtual_memory (a real, normally
-            # always-present psutil API) -- without create=True this test
-            # fails there at the patch itself, before robust_pca_master's
-            # own except-Exception fallback (the thing under test) ever runs.
-            with mock.patch('psutil.virtual_memory', return_value=fake_mem, create=True):
+            fake_psutil = mock.MagicMock()
+            fake_psutil.virtual_memory.return_value.available = 1  # trips the guard
+            # Injected through sys.modules: psutil is optional and CI does not
+            # install it, so patching 'psutil.virtual_memory' cannot import it.
+            with mock.patch.dict('sys.modules', {'psutil': fake_psutil}):
                 self.assertIsNone(robust_pca_master(frames, shape))
 
 
@@ -197,11 +190,6 @@ class TestRobustPcaMasterDownsample(unittest.TestCase):
     """End-to-end: robust_pca_master(downsample=N) still recovers a real
     vignetting pattern at full output resolution, not just a smaller one."""
 
-    def _write_frame(self, tmpdir: str, name: str, data: np.ndarray) -> FrameInfo:
-        path = os.path.join(tmpdir, name)
-        _write_fits(path, data)
-        return FrameInfo(path=path, type='light', header={})
-
     def test_recovers_vignette_at_full_resolution(self):
         rng = np.random.default_rng(2)
         shape = (200, 300)  # even dims, real-mosaic-shaped
@@ -222,7 +210,7 @@ class TestRobustPcaMasterDownsample(unittest.TestCase):
             frames = []
             for i in range(10):
                 frame = pattern + rng.normal(0, 3.0, shape)
-                frames.append(self._write_frame(d, f'f{i}.fits', frame.astype(np.float32)))
+                frames.append(_write_frame('light', d, f'f{i}.fits', frame.astype(np.float32)))
 
             master = robust_pca_master(frames, shape, downsample=Config.FLAT_FROM_LIGHTS_DOWNSAMPLE)
             self.assertIsNotNone(master)
@@ -243,7 +231,7 @@ class TestRobustPcaMasterDownsample(unittest.TestCase):
             frames = []
             for i in range(8):
                 frame = pattern + rng.normal(0, 2.0, shape)
-                frames.append(self._write_frame(d, f'f{i}.fits', frame.astype(np.float32)))
+                frames.append(_write_frame('light', d, f'f{i}.fits', frame.astype(np.float32)))
             master_plain = robust_pca_master(frames, shape)
             master_ds1 = robust_pca_master(frames, shape, downsample=1)
             np.testing.assert_array_equal(master_plain, master_ds1)
@@ -252,15 +240,10 @@ class TestRobustPcaMasterDownsample(unittest.TestCase):
 class TestMakeMasterRobustPcaFallback(unittest.TestCase):
     """make_master(method='robust_pca') dispatch and graceful fallback."""
 
-    def _write_frame(self, tmpdir: str, name: str, data: np.ndarray) -> FrameInfo:
-        path = os.path.join(tmpdir, name)
-        _write_fits(path, data)
-        return FrameInfo(path=path, type='dark', header={})
-
     def test_falls_back_to_median_below_min_frames(self):
         from src.io_fits import make_master
         with tempfile.TemporaryDirectory() as d:
-            frames = [self._write_frame(d, f'f{i}.fits',
+            frames = [_write_frame('dark', d, f'f{i}.fits',
                                         np.full((16, 16), float(100 + i), dtype=np.float32))
                      for i in range(3)]
             rpca_master = make_master(frames, method='robust_pca')
@@ -272,7 +255,7 @@ class TestMakeMasterRobustPcaFallback(unittest.TestCase):
         from src.io_fits import make_master
         shape = (16, 16)
         with tempfile.TemporaryDirectory() as d:
-            frames = [self._write_frame(d, f'f{i}.fits',
+            frames = [_write_frame('dark', d, f'f{i}.fits',
                                         np.full(shape, float(100 + i), dtype=np.float32))
                      for i in range(Config.ROBUST_PCA_MIN_FRAMES + 2)]
             master = make_master(frames, method='robust_pca')

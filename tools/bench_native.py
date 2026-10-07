@@ -66,7 +66,7 @@ d100 = make_stack(100, 256, 256)
 qm = np.ascontiguousarray(rng.uniform(0.2, 1.0, (100, 256, 256)).astype(np.float32))
 gw = rng.uniform(0.5, 1.5, 100).astype(np.float32)
 results["patch_weighted"] = bench(
-    "patch_weighted_sigma", lambda: nat.patch_weighted_sigma_combine(d100, qm, gw, 3.0, 3, True))
+    "patch_weighted_sigma", lambda: nat.patch_weighted_sigma_combine_fast(d100, qm, gw, 3.0, 3, True))
 
 # --- warp: full-size frame, shift-only and small rotation ---
 img = np.ascontiguousarray(rng.normal(500, 50, (2048, 3056, 3)).astype(np.float32))

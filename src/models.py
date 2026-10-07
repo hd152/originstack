@@ -31,7 +31,6 @@ class Config:
     MERGE_MIN_CORRELATION = 0.15     # --merge: min aligned-vs-new luminance correlation
     WHITE_PATCH_PERCENTILE = 99.5
     CROP_MARGIN = 2
-    XCORR_DOWNSCALE_TARGET = 256  # Target size for cross-correlation
     CENTROID_PERCENTILES = [95, 90, 85, 80]
     QUALITY_LOW_BRIGHTNESS = 10
     QUALITY_LOW_CONTRAST = 1

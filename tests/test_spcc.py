@@ -20,8 +20,8 @@ import pytest
 from src.color_calibrate import (
     _blackbody_spectrum,
     _default_channel_response,
+    _synthetic_channel_flux_batch,
     fit_channel_scales_spcc,
-    synthetic_channel_flux,
 )
 
 
@@ -56,6 +56,11 @@ class TestBlackbodySpectrum:
         spec = _blackbody_spectrum(5778.0, wl)
         assert np.all(np.isfinite(spec))
         assert np.all(spec >= 0.0)
+
+
+def synthetic_channel_flux(teff_k, channel_response=None):
+    return tuple(float(f[0]) for f in _synthetic_channel_flux_batch(
+        np.array([teff_k]), channel_response=channel_response))
 
 
 class TestSyntheticChannelFlux:

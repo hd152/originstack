@@ -1,6 +1,6 @@
 [package]
 name = "astro_native"
-version = "0.52.0"
+version = "0.53.0"
 edition = "2021"
 description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
 
@@ -14,13 +14,21 @@ numpy = "0.29"
 rayon = "1.10"
 # Pure-Rust ONNX inference for the --transient-triage model (no C++ ONNX
 # Runtime, no extra DLL to ship). See `mod transient_triage` in lib.rs.
-tract-onnx = "0.23"
+# Optional: only built with `--features triage` (~24 MB of the binary and
+# ~120 transitive crates). Release packaging builds without it.
+tract-onnx = { version = "0.23", optional = true }
+
+[features]
+default = []
+# `maturin build --release --features triage` adds
+# astro_native.transient_triage_score (--transient-triage).
+triage = ["dep:tract-onnx"]
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-# NOT "abort": tract parses an external .onnx file (bundled, or a user
+# NOT "abort" -- needed only when built with `--features triage`: tract parses an external .onnx file (bundled, or a user
 # --transient-triage-model), and a malformed model must surface as a Python
 # exception via pyo3's panic guard, not SIGABRT the whole process. The
 # arithmetic kernels never panic; this only matters for the model loader.

@@ -169,10 +169,19 @@ class TestDebayerPatterns(unittest.TestCase):
         # R (from red sub-channel) should still be reconstructed as red
         self.assertGreater(r, b)
 
-    def test_output_shape_is_h_w_3(self):
-        raw = np.zeros((64, 64), dtype=np.float32)
+    def test_shape_and_dtype_all_patterns(self):
+        raw = np.random.default_rng(1).uniform(0, 1000, (64, 64)).astype(np.float32)
+        for pat in ('RGGB', 'BGGR', 'GRBG', 'GBRG'):
+            with self.subTest(pattern=pat):
+                rgb = self.debayer(raw, pattern=pat)
+                self.assertEqual(rgb.shape, (64, 64, 3))
+                self.assertEqual(rgb.dtype, np.float32)
+
+    def test_values_within_input_range(self):
+        raw = np.random.default_rng(1).uniform(0, 1000, (64, 64)).astype(np.float32)
         rgb = self.debayer(raw, pattern='RGGB')
-        self.assertEqual(rgb.shape, (64, 64, 3))
+        self.assertGreaterEqual(float(rgb.min()), float(raw.min()) - 20.0)
+        self.assertLessEqual(float(rgb.max()), float(raw.max()) + 20.0)
 
     def test_uniform_bayer_gives_uniform_rgb(self):
         """All-constant raw → all channels equal after debayer."""
@@ -304,103 +313,6 @@ class TestHotPixels(unittest.TestCase):
         self.assertEqual(result.shape, img.shape)
         self.assertEqual(result.dtype, np.float32)
 
-
-# ===========================================================================
-# 4. Registration helpers (src/registration.py)
-# ===========================================================================
-
-class TestApplyShift(unittest.TestCase):
-
-    def setUp(self):
-        from src.registration import apply_shift
-        self.apply_shift = apply_shift
-
-    def _star_lum(self, shape=(64, 64), cy=32, cx=32, amp=1000.0) -> np.ndarray:
-        yy, xx = np.indices(shape)
-        return (amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / 8.0)).astype(np.float32)
-
-    def test_shifted_image_peak_moves_correctly(self):
-        """Shifting by (dy, dx) should move the star centroid by that amount."""
-        img = self._star_lum((64, 64), cy=32, cx=32)
-        dy, dx = 5.0, -4.0
-        shifted = self.apply_shift(img, (dy, dx))
-        peak_y, peak_x = np.unravel_index(np.argmax(shifted), shifted.shape)
-        self.assertAlmostEqual(float(peak_y), 32 + dy, delta=1.5)
-        self.assertAlmostEqual(float(peak_x), 32 + dx, delta=1.5)
-
-    def test_zero_shift_returns_same(self):
-        img = self._star_lum()
-        result = self.apply_shift(img, (0.0, 0.0))
-        np.testing.assert_allclose(result, img, atol=0.1)
-
-    def test_output_shape_preserved(self):
-        img = np.random.rand(48, 56).astype(np.float32)
-        result = self.apply_shift(img, (3.0, -2.0))
-        self.assertEqual(result.shape, img.shape)
-
-
-class TestCalcCommonCropFallback(unittest.TestCase):
-
-    def setUp(self):
-        from src.registration import calc_common_crop
-        self.calc_crop = calc_common_crop
-
-    def test_large_shifts_fallback_to_full_frame(self):
-        """When shifts exceed the image, fallback to (0, H, 0, W)."""
-        shifts = [(0.0, 0.0), (200.0, 200.0)]  # shift > image dims
-        top, bot, left, right = self.calc_crop(shifts, (100, 100))
-        # Fallback: full frame
-        self.assertEqual((top, bot, left, right), (0, 100, 0, 100))
-
-
-class TestDetectDitherSpread(unittest.TestCase):
-
-    def setUp(self):
-        from src.registration import detect_dither
-        self.detect_dither = detect_dither
-
-    def test_spread_positions_dithered(self):
-        """10 spread positions with no sequential autocorrelation should be detected as dithered."""
-        # Generated with rng seed=1 uniform(-15,15) — verified to pass all detection criteria
-        shifts = [(0.4, 13.5), (-10.7, 13.5), (-5.6, -2.3), (9.8, -2.7),
-                  (1.5, -14.2), (7.6, 1.1), (-5.1, 8.7), (-5.9, -1.4),
-                  (-11.0, -2.9), (-8.9, -7.1)]
-        result = self.detect_dither(shifts)
-        self.assertTrue(result['is_dithered'])
-
-class TestSigmaClipCombineNumerics(unittest.TestCase):
-
-    def setUp(self):
-        from src.stacking import sigma_clip_combine
-        self.combine = sigma_clip_combine
-
-    def _stack(self, *frames):
-        """Stack a list of 2D arrays into a (N, H, W, 1) data cube."""
-        return np.stack([f[:, :, np.newaxis] for f in frames], axis=0)
-
-    def test_uniform_stack_gives_correct_mean(self):
-        """All identical frames should return the frame value."""
-        data = np.full((5, 8, 8, 1), 250.0, dtype=np.float32)
-        result = self.combine(data)
-        np.testing.assert_allclose(result, 250.0, atol=1.0)
-
-    def test_two_frames_no_rejection(self):
-        """Two frames that differ should both contribute (not enough to sigma-clip)."""
-        a = np.full((8, 8, 1), 100.0, dtype=np.float32)
-        b = np.full((8, 8, 1), 200.0, dtype=np.float32)
-        data = np.stack([a, b], axis=0)
-        result = self.combine(data)
-        np.testing.assert_allclose(result, 150.0, atol=2.0)
-
-    def test_weighted_combine(self):
-        """Higher-weight frames should pull the mean closer to their values."""
-        a = np.full((8, 8, 1), 100.0, dtype=np.float32)
-        b = np.full((8, 8, 1), 200.0, dtype=np.float32)
-        data = np.stack([a, b], axis=0)
-        weights = np.array([3.0, 1.0])
-        result = self.combine(data, weights=weights)
-        # Weighted mean = (100*3 + 200*1) / 4 = 125
-        np.testing.assert_allclose(result, 125.0, atol=5.0)
 
 class TestPercentileClipCombine(unittest.TestCase):
 

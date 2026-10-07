@@ -1,13 +1,12 @@
 """Additional unit tests covering background, denoising, quality, stacking, and health check."""
 from __future__ import annotations
 
-import io
-import sys
 import unittest
 
 import numpy as np
 
 from src.models import FrameInfo
+from tests._helpers import add_gaussian_stars
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,11 +22,7 @@ def _star_lum(shape=(64, 64), centers=None, amp=500.0, bg=50.0) -> np.ndarray:
     if centers is None:
         centers = [(16, 16), (48, 48)]
     img = np.full(shape, bg, dtype=np.float32)
-    yy, xx = np.indices(shape)
-    for cy, cx in centers:
-        r2 = (yy - cy) ** 2 + (xx - cx) ** 2
-        img += amp * np.exp(-r2 / (2 * 2.0 ** 2))
-    return img
+    return add_gaussian_stars(img, [(cy, cx, amp) for cy, cx in centers], sigma=2.0)
 
 
 def _star_rgb(h=64, w=64, centers=None, amp=500.0, bg=50.0) -> np.ndarray:
@@ -37,18 +32,6 @@ def _star_rgb(h=64, w=64, centers=None, amp=500.0, bg=50.0) -> np.ndarray:
 
 def _make_frame(header: dict, frame_type: str = 'light') -> FrameInfo:
     return FrameInfo(path='dummy.fits', type=frame_type, header=header)
-
-
-def _capture(func, *args, **kwargs):
-    """Run func, capture and return stdout as a string."""
-    buf = io.StringIO()
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        func(*args, **kwargs)
-    finally:
-        sys.stdout = old
-    return buf.getvalue()
 
 
 # ===========================================================================
@@ -331,47 +314,6 @@ class TestAdaptiveWaveletDenoise(unittest.TestCase):
         self.assertLess(float(np.std(denoised - clean)), float(np.std(noisy - clean)))
 
 
-class TestArcSinhStretch(unittest.TestCase):
-
-    def setUp(self):
-        from src.denoising import arcsinh_stretch
-        self.stretch = arcsinh_stretch
-
-    def test_output_in_unit_range(self):
-        img = _star_rgb().astype(np.float32)
-        result = self.stretch(img)
-        self.assertGreaterEqual(float(result.min()), 0.0)
-        self.assertLessEqual(float(result.max()), 1.0)
-
-    def test_shape_preserved(self):
-        img = _star_rgb(32, 48)
-        result = self.stretch(img)
-        self.assertEqual(result.shape, img.shape)
-
-    def test_zero_image_returns_zeros(self):
-        img = np.zeros((32, 32, 3), dtype=np.float32)
-        result = self.stretch(img)
-        np.testing.assert_array_equal(result, np.zeros_like(result))
-
-    def test_brighter_pixel_maps_higher(self):
-        """The arcsinh stretch is monotonic: a brighter pixel must map higher,
-        provided neither pixel is saturated to 1.0."""
-        rng = np.random.default_rng(20)
-        # Uniform background; moderate star amplitudes that stay below the 99.8th
-        # percentile white point so neither pixel clips to 1.0.
-        img = rng.normal(200, 10, (64, 64, 3)).astype(np.float32)
-        img[10, 10, :] += 30.0
-        img[20, 20, :] += 80.0
-        result = self.stretch(img)
-        self.assertGreater(float(result[20, 20, 0]), float(result[10, 10, 0]))
-
-    def test_explicit_factor_accepted(self):
-        img = _star_rgb()
-        result = self.stretch(img, factor=10.0)
-        self.assertGreaterEqual(float(result.min()), 0.0)
-        self.assertLessEqual(float(result.max()), 1.0)
-
-
 class TestReduceChromaNoiseEffect(unittest.TestCase):
 
     def setUp(self):
@@ -406,7 +348,6 @@ class TestGenerateStarMask(unittest.TestCase):
 
     def _mock_sources(self, positions):
         """Return a minimal _SOURCES_DTYPE-compatible structured array."""
-        import numpy.lib.recfunctions as rf
         yc = np.array([p[0] for p in positions], dtype=np.float64)
         xc = np.array([p[1] for p in positions], dtype=np.float64)
         # Use a simple structured array
@@ -739,11 +680,12 @@ class TestLACosmicReject(unittest.TestCase):
 # Health check
 # ===========================================================================
 
-class TestRunHealthCheck(unittest.TestCase):
+class TestRunHealthCheck:
 
-    def setUp(self):
+    def _run(self, capsys, frames, masters):
         from src.health_check import run_health_check
-        self.run_health_check = run_health_check
+        run_health_check(frames, masters, 'dummy_dir')
+        return capsys.readouterr().out
 
     def _light(self, **kwargs) -> FrameInfo:
         hdr = {'NAXIS1': 800, 'NAXIS2': 600, 'EXPTIME': 120.0,
@@ -757,13 +699,11 @@ class TestRunHealthCheck(unittest.TestCase):
         hdr.update(kwargs)
         return _make_frame(hdr, 'dark')
 
-    def test_no_lights_reports_cannot_stack(self):
-        out = _capture(self.run_health_check,
-                       {'light': [], 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('CANNOT STACK', out)
+    def test_no_lights_reports_cannot_stack(self, capsys):
+        out = self._run(capsys, {'light': [], 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'CANNOT STACK' in out
 
-    def test_consistent_lights_reports_ready(self):
+    def test_consistent_lights_reports_ready(self, capsys):
         """Enough consistent lights with matching calibration frames → READY."""
         from src.models import Config
         n = Config.MIN_RECOMMENDED_FRAMES
@@ -772,83 +712,60 @@ class TestRunHealthCheck(unittest.TestCase):
         flats  = [_make_frame({'NAXIS1': 800, 'NAXIS2': 600}, 'flat')]
         biases = [_make_frame({'NAXIS1': 800, 'NAXIS2': 600}, 'bias')]
         masters = {'dark_exptime': 120.0}
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': darks, 'flat': flats, 'bias': biases},
-                       masters, 'dummy_dir')
-        self.assertIn('READY TO STACK', out)
+        out = self._run(capsys, {'light': lights, 'dark': darks, 'flat': flats, 'bias': biases}, masters)
+        assert 'READY TO STACK' in out
 
-    def test_mixed_iso_triggers_warning(self):
+    def test_mixed_iso_triggers_warning(self, capsys):
         lights = [self._light(ISOSPEED=800) for _ in range(3)]
         lights += [self._light(ISOSPEED=1600) for _ in range(2)]
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('ISO', out)
+        out = self._run(capsys, {'light': lights, 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'ISO' in out
 
-    def test_mixed_dimensions_warns(self):
+    def test_mixed_dimensions_warns(self, capsys):
         lights = [self._light(NAXIS1=800, NAXIS2=600) for _ in range(3)]
         lights += [self._light(NAXIS1=1600, NAXIS2=1200) for _ in range(2)]
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('INCONSISTENT', out)
+        out = self._run(capsys, {'light': lights, 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'INCONSISTENT' in out
 
-    def test_no_darks_warns(self):
+    def test_no_darks_warns(self, capsys):
         lights = [self._light() for _ in range(5)]
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('dark', out.lower())
+        out = self._run(capsys, {'light': lights, 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'dark' in out.lower()
 
-    def test_no_flats_warns(self):
+    def test_no_flats_warns(self, capsys):
         lights = [self._light() for _ in range(5)]
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('flat', out.lower())
+        out = self._run(capsys, {'light': lights, 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'flat' in out.lower()
 
-    def test_dark_exposure_mismatch_warns(self):
+    def test_dark_exposure_mismatch_warns(self, capsys):
         lights = [self._light(EXPTIME=120.0) for _ in range(3)]
         darks  = [self._dark(EXPTIME=60.0)]
         masters = {'dark_exptime': 60.0}
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': darks, 'flat': [], 'bias': []},
-                       masters, 'dummy_dir')
-        self.assertIn('exposure', out.lower())
+        out = self._run(capsys, {'light': lights, 'dark': darks, 'flat': [], 'bias': []}, masters)
+        assert 'exposure' in out.lower()
 
-    def test_dark_dimension_mismatch_warns(self):
+    def test_dark_dimension_mismatch_warns(self, capsys):
         lights = [self._light(NAXIS1=800, NAXIS2=600) for _ in range(3)]
         darks  = [self._dark(NAXIS1=1600, NAXIS2=1200)]
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': darks, 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('differ', out.lower())
+        out = self._run(capsys, {'light': lights, 'dark': darks, 'flat': [], 'bias': []}, {})
+        assert 'differ' in out.lower()
 
-    def test_low_frame_count_warns(self):
+    def test_low_frame_count_warns(self, capsys):
         lights = [self._light()]   # just one frame
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('recommended', out.lower())
+        out = self._run(capsys, {'light': lights, 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'recommended' in out.lower()
 
-    def test_mixed_exposure_warns(self):
+    def test_mixed_exposure_warns(self, capsys):
         lights = [self._light(EXPTIME=120.0) for _ in range(3)]
         lights += [self._light(EXPTIME=60.0) for _ in range(2)]
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('exposure', out.lower())
+        out = self._run(capsys, {'light': lights, 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'exposure' in out.lower()
 
-    def test_temperature_recorded_in_output(self):
+    def test_temperature_recorded_in_output(self, capsys):
         lights = [self._light(**{'CCD-TEMP': -10.0}) for _ in range(3)]
-        out = _capture(self.run_health_check,
-                       {'light': lights, 'dark': [], 'flat': [], 'bias': []},
-                       {}, 'dummy_dir')
-        self.assertIn('temp', out.lower())
+        out = self._run(capsys, {'light': lights, 'dark': [], 'flat': [], 'bias': []}, {})
+        assert 'temp' in out.lower()
 
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestPreviewBlackSigmaDepthScaling(unittest.TestCase):
@@ -886,46 +803,6 @@ class TestPreviewBlackSigmaDepthScaling(unittest.TestCase):
 
     def test_negative_preset_untouched(self):
         self.assertEqual(self._run(12, -0.5), -0.5)
-
-
-class TestPatchScoresPhase1Split(unittest.TestCase):
-    """compute_patch_scores (Phase 1) + patch_scores_to_map (Phase 2) must
-    reproduce compute_patch_quality_map exactly for an unshifted frame, and
-    place weight correctly after a coarse-grid shift. The old path warped the
-    full-res frame with cval=0 before scoring, so the sky->0 border step
-    inflated border-patch Brenner scores and poisoned the per-frame max
-    normalisation for strongly dithered frames; the split path scores before
-    shifting and avoids that entirely."""
-
-    def test_zero_shift_matches_legacy_exactly(self):
-        from src.registration import compute_patch_quality_map, compute_patch_scores, patch_scores_to_map
-        rng = np.random.default_rng(0)
-        lum = rng.normal(1000, 50, (512, 768)).astype(np.float32)
-        legacy = compute_patch_quality_map(lum)
-        split = patch_scores_to_map(compute_patch_scores(lum), 512, 768)
-        np.testing.assert_allclose(split, legacy, rtol=0, atol=1e-6)
-
-    def test_shifted_grid_moves_weight(self):
-        from scipy import ndimage
-
-        from src.registration import _patch_grid_geometry, compute_patch_scores, patch_scores_to_map
-        rng = np.random.default_rng(1)
-        H, W = 512, 768
-        lum = rng.normal(1000, 5, (H, W)).astype(np.float32)
-        # One sharp textured block -> one dominant patch
-        lum[64:128, 64:128] += rng.normal(0, 400, (64, 64)).astype(np.float32)
-        grid = compute_patch_scores(lum)
-        ph, pw, _, _ = _patch_grid_geometry(H, W)
-        # Shift by exactly one patch down/right
-        g = ndimage.shift(grid.astype(np.float32), shift=(1.0, 1.0),
-                          order=1, mode='nearest')
-        m = patch_scores_to_map(g, H, W)
-        iy, ix = np.unravel_index(np.argmax(grid), grid.shape)
-        peak = np.unravel_index(np.argmax(m), m.shape)
-        # Peak of the full-res map should sit ~one patch below/right of the
-        # original patch center.
-        self.assertAlmostEqual(peak[0] / ph, iy + 1, delta=1.0)
-        self.assertAlmostEqual(peak[1] / pw, ix + 1, delta=1.0)
 
 
 class TestSinglePrimaryLumaDenoiser(unittest.TestCase):

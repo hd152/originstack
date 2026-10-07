@@ -1,50 +1,8 @@
-"""
-Comprehensive test suite for originstack.py
-============================================
-Requires: numpy, scipy  (both ship in this environment)
-Optional: pytest (falls back to unittest if absent)
-
-Run with:
-    python test_main.py            # unittest runner
-    pytest test_main.py -v         # if pytest is installed
-
-Test classes
-------------
-TestClassifyFrame         – frame-type heuristics (name / header / edge cases)
-TestFormatTime            – human-readable time formatter
-TestValidateImageData     – image corruption / sanity checks
-TestComputeQualityMetrics – per-frame photometric metrics
-TestDebayerBilinear       – bilinear Bayer demosaicing
-TestDebayerDispatch       – debayer() method dispatcher
-TestWhiteBalance          – grayworld & whitepatch white balance
-TestRemoveHotPixels       – luminance-based & Bayer-aware hot-pixel removal
-TestBuildHotPixelMap      – hot-pixel map from master dark
-TestApplyHotPixelMapBayer – hot-pixel map application
-TestCalcCommonCrop        – translation-only common-crop calculation
-TestSigmaClipTile         – per-tile MAD sigma-clip kernel
-TestSigmaClipCombine      – full tiled sigma-clip combine
-TestDetectDither          – shift-pattern / dither classifier
-TestArcsinhStretch        – arcsinh preview stretch
-TestLocalNormalize        – local normalisation
-TestReduceChromaNoise     – chroma noise reduction
-TestApplyTransform        – image shift / affine transform
-TestDrizzleCombine        – drizzle combiner (scale 1 and scale > 1)
-TestProcessingStats       – ProcessingStats dataclass helpers
-TestGpuContext            – CPU path of GpuContext
-TestFrameInfo             – FrameInfo dataclass
-TestMakeMasterLogic       – make_master() mean / median logic
-TestDiscoverFrames        – FITS discovery + classification from disk
-TestCalculateShift        – registration shift calculation
-TestSafePrint             – Unicode fallback in safe_print
-TestConfigConstants       – sanity checks on Config magic numbers
-TestEndToEnd              – full mini-pipeline smoke tests
-"""
+"""Unit tests for the public API re-exported by originstack.py."""
 
 from __future__ import annotations
 
 import os
-import pickle
-import sys
 import tempfile
 import types
 import unittest
@@ -53,154 +11,9 @@ from unittest import mock
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Minimal astropy stub (so the module loads without a real astropy install)
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Stub classes at module level so pickle can serialise them
-# ---------------------------------------------------------------------------
-
-class _FakeHeader(dict):
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value[0] if isinstance(value, tuple) else value)
-
-
-class _FakePrimaryHDU:
-    def __init__(self, data=None, header=None):
-        self.data = data
-        self.header = header if header is not None else _FakeHeader()
-
-
-class _FakeHDUList:
-    def __init__(self, hdus):
-        self._hdus = list(hdus)
-
-    def __getitem__(self, idx):
-        return self._hdus[idx]
-
-    def __len__(self):
-        return len(self._hdus)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        pass
-
-    def writeto(self, path, overwrite=False):
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
-
-
-def _fake_fits_open(path, memmap=True):
-    with open(path, "rb") as f:
-        return pickle.load(f)
-
-
-def _sigma_clipped_stats_stub(data, sigma=3.0, maxiters=5):
-    arr = np.asarray(data).ravel().astype(np.float64)
-    for _ in range(int(maxiters)):
-        med = float(np.median(arr))
-        std = float(np.std(arr))
-        if std < 1e-12:
-            break
-        arr = arr[np.abs(arr - med) < sigma * std]
-        if arr.size == 0:
-            break
-    med = float(np.median(arr)) if arr.size else 0.0
-    std = float(np.std(arr)) if arr.size else 0.0
-    return float(np.mean(arr)) if arr.size else 0.0, med, std
-
-
-def _make_astropy_stub():
-    astropy_mod = types.ModuleType("astropy")
-
-    io_mod = types.ModuleType("astropy.io")
-    fits_mod = types.ModuleType("astropy.io.fits")
-
-    fits_mod.Header = _FakeHeader
-    fits_mod.PrimaryHDU = _FakePrimaryHDU
-    fits_mod.HDUList = _FakeHDUList
-    fits_mod.open = _fake_fits_open
-    io_mod.fits = fits_mod
-    astropy_mod.io = io_mod
-
-    stats_mod = types.ModuleType("astropy.stats")
-    stats_mod.sigma_clipped_stats = _sigma_clipped_stats_stub
-    astropy_mod.stats = stats_mod
-    return astropy_mod, io_mod, fits_mod, stats_mod
-
-
-# Only stub astropy when it is genuinely unavailable. These go into
-# sys.modules at import time and are never removed, so an unconditional
-# setdefault poisons every test module imported after this one: whichever
-# file lands first wins, and the loser gets a fake astropy.io.fits with no
-# .writeto. The full suite passes today only because some earlier import
-# happens to pull in the real package first -- run
-# `pytest tests/test_main.py tests/test_unit_extended.py` on its own and
-# seven tests fail with "module 'astropy.io.fits' has no attribute
-# 'writeto'". astropy is a hard requirement (requirements.txt), so in any
-# normal environment this branch is dead and the real package is used.
-try:
-    import astropy.io.fits  # noqa: F401
-    import astropy.stats  # noqa: F401
-except Exception:
-    _astropy_stub, _io_stub, _fits_stub, _stats_stub = _make_astropy_stub()
-    sys.modules.setdefault("astropy", _astropy_stub)
-    sys.modules.setdefault("astropy.io", _io_stub)
-    sys.modules.setdefault("astropy.io.fits", _fits_stub)
-    sys.modules.setdefault("astropy.stats", _stats_stub)
-
-# Same conditional treatment for the remaining optional packages. An
-# unconditional setdefault here shadowed a genuinely installed psutil and tqdm
-# with empty modules for the whole session (verified: `psutil` had no
-# `virtual_memory`, `tqdm` no `tqdm`), so every memory-adaptive path ran its
-# degraded fallback whichever test file happened to import first.
-# tqdm and psutil are declared dependencies, so this branch is dead in a
-# normal environment; cupy is genuinely optional and usually absent.
-for _m in ["tqdm", "psutil", "cupy"]:
-    try:
-        __import__(_m)
-    except Exception:
-        sys.modules.setdefault(_m, types.ModuleType(_m))
-
-# Same conditional treatment as astropy above: six other test modules
-# (test_aberration, test_annotation, test_io_xisf,
-# test_self_supervised_calibration, test_tiff_export_pillow_fallback,
-# test_ui_events) use real Pillow, and a leaked stub whose Image.fromarray
-# returns a MagicMock would break them depending only on import order.
-try:
-    import PIL.Image  # noqa: F401
-except Exception:
-    _pil = types.ModuleType("PIL")
-    _pil_img = types.ModuleType("PIL.Image")
-    _pil_img.fromarray = lambda arr: mock.MagicMock()
-    _pil.Image = _pil_img
-    sys.modules.setdefault("PIL", _pil)
-    sys.modules.setdefault("PIL.Image", _pil_img)
-
-# ---- Import module under test ----
-_orig_stdout = sys.stdout
-_devnull = open(os.devnull, "w")
-sys.stdout = _devnull
-try:
-    import importlib.util
-    _candidates = [
-        Path(__file__).parent / "originstack.py",
-        Path(__file__).parent.parent / "originstack.py",
-        Path("/mnt/user-data/uploads/originstack.py"),
-    ]
-    _src = next(p for p in _candidates if p.exists())
-    _spec = importlib.util.spec_from_file_location("originstack", str(_src))
-    astro = importlib.util.module_from_spec(_spec)
-    sys.modules["originstack"] = astro
-    _spec.loader.exec_module(astro)
-finally:
-    sys.stdout = _orig_stdout
-    _devnull.close()
-
+import originstack as astro
 import src.gpu_context as _gpu_mod
+from tests._helpers import add_gaussian_stars, write_fits
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -209,24 +22,12 @@ import src.gpu_context as _gpu_mod
 def _star_field(H=64, W=64, n_stars=5, seed=42, bg=100.0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     img = rng.normal(bg, 5.0, (H, W)).astype(np.float32)
-    for _ in range(n_stars):
-        cy, cx = rng.integers(5, H - 5), rng.integers(5, W - 5)
-        yy, xx = np.ogrid[:H, :W]
-        img += 600.0 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / 4.0)
-    return img.clip(0).astype(np.float32)
+    stars = [(rng.integers(5, H - 5), rng.integers(5, W - 5), 600.0) for _ in range(n_stars)]
+    return add_gaussian_stars(img, stars, sigma=np.sqrt(2.0)).clip(0)
 
 
 def _rgb(H=64, W=64, seed=42) -> np.ndarray:
     return np.random.default_rng(seed).uniform(100, 1000, (H, W, 3)).astype(np.float32)
-
-
-def _write_fits(data: np.ndarray, path: str, header_extra=None):
-    from astropy.io import fits
-    hdu = fits.PrimaryHDU(data.astype(np.float32))
-    if header_extra:
-        for k, v in header_extra.items():
-            hdu.header[k] = v
-    fits.HDUList([hdu]).writeto(path, overwrite=True)
 
 
 # ---------------------------------------------------------------------------
@@ -366,44 +167,6 @@ class TestComputeQualityMetrics(unittest.TestCase):
         self.assertAlmostEqual(
             astro.compute_quality_metrics(img)["brightness"], 123.0, delta=2.0
         )
-
-
-class TestDebayerBilinear(unittest.TestCase):
-    def setUp(self):
-        self._gpu = _gpu_mod._gpu
-        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
-        self.raw = np.random.default_rng(1).uniform(0, 1000, (64, 64)).astype(np.float32)
-
-    def tearDown(self):
-        _gpu_mod._gpu = self._gpu
-
-    def test_output_shape(self):
-        self.assertEqual(astro.debayer_bilinear(self.raw).shape, (64, 64, 3))
-
-    def test_output_dtype(self):
-        self.assertEqual(astro.debayer_bilinear(self.raw).dtype, np.float32)
-
-    def test_all_bayer_patterns(self):
-        for pat in ("RGGB", "BGGR", "GRBG", "GBRG"):
-            self.assertEqual(
-                astro.debayer_bilinear(self.raw, pattern=pat).shape,
-                (64, 64, 3), f"shape wrong for {pat}"
-            )
-
-    def test_values_within_range(self):
-        out = astro.debayer_bilinear(self.raw)
-        lo, hi = float(self.raw.min()), float(self.raw.max())
-        self.assertGreaterEqual(float(out.min()), lo - 20.0)
-        self.assertLessEqual(float(out.max()), hi + 20.0)
-
-    def test_uniform_raw_uniform_output(self):
-        raw = np.full((64, 64), 500.0, dtype=np.float32)
-        out = astro.debayer_bilinear(raw)
-        # bilinear splits 4 raw pixels into 3 channels with kernel normalisation;
-        # for uniform RGGB input each channel converges to the mean value (500)
-        # divided by the number of sub-samples the kernel sees (4), so ≈125.
-        # Just check shape and no NaN/Inf instead of an absolute value.
-        self.assertTrue(np.all(np.isfinite(out)))
 
 
 class TestDebayerDispatch(unittest.TestCase):
@@ -549,12 +312,6 @@ class TestRemoveHotPixels(unittest.TestCase):
         img = np.random.default_rng(4).uniform(90, 110, (32, 32)).astype(np.float32)
         self.assertEqual(astro.remove_hot_pixels_bayer(img).shape, img.shape)
 
-    def test_rgb_hot_pixel_corrected(self):
-        img = np.full((32, 32, 3), 100.0, dtype=np.float32)
-        img[16, 16, :] = 50000.0
-        out = astro.remove_hot_pixels_rgb(img, threshold=5.0)
-        self.assertLess(float(out[16, 16, 0]), 50000.0)
-
     def test_bayer_normal_pixels_near_unchanged(self):
         img = np.random.default_rng(5).uniform(490, 510, (64, 64)).astype(np.float32)
         img[30, 30] = 65000.0
@@ -627,6 +384,10 @@ class TestCalcCommonCrop(unittest.TestCase):
     def test_crop_region_valid(self):
         shifts = [(3.0, 2.0), (-1.0, 4.0), (0.0, -2.0)]
         top, bottom, left, right = astro.calc_common_crop(shifts, (80, 80))
+        self.assertGreaterEqual(top, 0)
+        self.assertLessEqual(bottom, 80)
+        self.assertGreaterEqual(left, 0)
+        self.assertLessEqual(right, 80)
         self.assertLess(top, bottom)
         self.assertLess(left, right)
 
@@ -635,6 +396,10 @@ class TestCalcCommonCrop(unittest.TestCase):
         top, bottom, left, right = astro.calc_common_crop(shifts, (100, 100))
         self.assertLessEqual(top, bottom)
         self.assertLessEqual(left, right)
+
+    def test_shifts_beyond_frame_fall_back_to_full_frame(self):
+        crop = astro.calc_common_crop([(0.0, 0.0), (200.0, 200.0)], (100, 100))
+        self.assertEqual(crop, (0, 100, 0, 100))
 
 
 class TestSigmaClipTile(unittest.TestCase):
@@ -707,6 +472,21 @@ class TestSigmaClipCombine(unittest.TestCase):
         data = np.random.default_rng(12).uniform(100, 200, (1, 8, 8, 3)).astype(np.float32)
         np.testing.assert_allclose(astro.sigma_clip_combine(data), data[0], atol=0.2)
 
+    def test_uniform_stack_gives_frame_value(self):
+        data = np.full((5, 8, 8, 1), 250.0, dtype=np.float32)
+        np.testing.assert_allclose(astro.sigma_clip_combine(data), 250.0, atol=1.0)
+
+    def test_two_frames_both_contribute(self):
+        data = np.stack([np.full((8, 8, 1), 100.0, dtype=np.float32),
+                         np.full((8, 8, 1), 200.0, dtype=np.float32)], axis=0)
+        np.testing.assert_allclose(astro.sigma_clip_combine(data), 150.0, atol=2.0)
+
+    def test_weights_pull_mean(self):
+        data = np.stack([np.full((8, 8, 1), 100.0, dtype=np.float32),
+                         np.full((8, 8, 1), 200.0, dtype=np.float32)], axis=0)
+        out = astro.sigma_clip_combine(data, weights=np.array([3.0, 1.0]))
+        np.testing.assert_allclose(out, 125.0, atol=5.0)  # (100*3 + 200) / 4
+
 
 class TestDetectDither(unittest.TestCase):
     def test_zero_shifts_aligned(self):
@@ -733,6 +513,14 @@ class TestDetectDither(unittest.TestCase):
         shifts = [(float(rng.uniform(-10, 10)), float(rng.uniform(-10, 10))) for _ in range(20)]
         r = astro.detect_dither(shifts)
         self.assertGreater(r["mean_magnitude"], 1.0)
+        self.assertIn(r["pattern"], ("dithered", "tracking_drift", "aligned"))
+
+    def test_spread_positions_dithered(self):
+        # rng seed=1 uniform(-15, 15): spread, no sequential autocorrelation.
+        shifts = [(0.4, 13.5), (-10.7, 13.5), (-5.6, -2.3), (9.8, -2.7),
+                  (1.5, -14.2), (7.6, 1.1), (-5.1, 8.7), (-5.9, -1.4),
+                  (-11.0, -2.9), (-8.9, -7.1)]
+        self.assertTrue(astro.detect_dither(shifts)["is_dithered"])
 
     def test_is_dithered_is_bool(self):
         r = astro.detect_dither([(0.0, 0.0)] * 5)
@@ -816,32 +604,6 @@ class TestApplyTransform(unittest.TestCase):
         peak_before = int(np.argmax(img[:, :, 0].max(axis=1)))
         peak_after = int(np.argmax(out[:, :, 0].max(axis=1)))
         self.assertGreaterEqual(peak_after, peak_before)
-
-
-class TestDrizzleCombine(unittest.TestCase):
-    def _imgs(self, N=4, H=16, W=16, C=3):
-        rng = np.random.default_rng(15)
-        return [rng.uniform(100, 200, (H, W, C)).astype(np.float32) for _ in range(N)]
-
-    def test_scale1_equals_mean(self):
-        imgs = self._imgs()
-        out = astro.drizzle_combine(imgs, [(0.0, 0.0)] * len(imgs), scale=1)
-        np.testing.assert_allclose(out, np.mean(imgs, axis=0).astype(np.float32), atol=0.5)
-
-    def test_scale2_output_shape(self):
-        imgs = self._imgs()
-        out = astro.drizzle_combine(imgs, [(0.0, 0.0)] * len(imgs), scale=2)
-        self.assertEqual(out.shape, (32, 32, 3))
-
-    def test_scale1_output_shape(self):
-        imgs = self._imgs()
-        out = astro.drizzle_combine(imgs, [(0.0, 0.0)] * len(imgs), scale=1)
-        self.assertEqual(out.shape, (16, 16, 3))
-
-    def test_output_dtype(self):
-        imgs = self._imgs()
-        out = astro.drizzle_combine(imgs, [(0.0, 0.0)] * len(imgs), scale=1)
-        self.assertEqual(out.dtype, np.float32)
 
 
 class TestProcessingStats(unittest.TestCase):
@@ -1023,39 +785,13 @@ class TestFrameInfo(unittest.TestCase):
         self.assertEqual(fi.shift, (3.0, -1.5))
 
 
-class TestMakeMasterLogic(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-
-    def _frame(self, value, name):
-        path = os.path.join(self.tmp, name)
-        _write_fits(np.full((8, 8), value, dtype=np.float32), path)
-        return astro.FrameInfo(path=path, type="dark", header={})
-
-    def test_empty_returns_none(self):
-        self.assertIsNone(astro.make_master([], method="mean"))
-
-    def test_single_frame_mean(self):
-        result = astro.make_master([self._frame(300.0, "f0.fit")], method="mean")
-        self.assertIsNotNone(result)
-        np.testing.assert_allclose(result, 300.0, atol=1.0)
-
-    def test_multiple_frames_mean(self):
-        frames = [self._frame(v, f"f{i}.fit") for i, v in enumerate([100.0, 200.0, 300.0])]
-        np.testing.assert_allclose(astro.make_master(frames, method="mean"), 200.0, atol=1.0)
-
-    def test_median_correct(self):
-        frames = [self._frame(v, f"f{i}.fit") for i, v in enumerate([100.0, 200.0, 900.0])]
-        np.testing.assert_allclose(astro.make_master(frames, method="median"), 200.0, atol=1.0)
-
-
 class TestDiscoverFrames(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.data = np.ones((8, 8), dtype=np.float32) * 50.0
 
     def _write(self, name):
-        _write_fits(self.data, os.path.join(self.tmp, name))
+        write_fits(os.path.join(self.tmp, name), self.data)
 
     def test_light_discovery(self):
         self._write("light_001.fit")
@@ -1095,15 +831,6 @@ class TestCalculateShift(unittest.TestCase):
         sy, sx = astro.calculate_shift(img, img)
         self.assertLess(abs(sy), 2.0)
         self.assertLess(abs(sx), 2.0)
-
-    def test_known_shift_recovered(self):
-        from scipy import ndimage
-        ref = _star_field(64, 64) + 200.0
-        dy, dx = 3.0, -2.0
-        shifted = ndimage.shift(ref, shift=(dy, dx), mode='constant', cval=0.0)
-        sy, sx = astro.calculate_shift(ref, shifted, skip_phase_cc=True)
-        self.assertAlmostEqual(sy, -dy, delta=2.0)
-        self.assertAlmostEqual(sx, -dx, delta=2.0)
 
     def test_returns_finite(self):
         ref = _star_field(64, 64) + 100.0
@@ -1201,101 +928,3 @@ class TestConfigConstants(unittest.TestCase):
 
     def test_min_recommended_frames_positive(self):
         self.assertGreater(astro.Config.MIN_RECOMMENDED_FRAMES, 0)
-
-
-class TestEndToEnd(unittest.TestCase):
-    """Full mini-pipeline smoke tests."""
-
-    def setUp(self):
-        self._gpu = _gpu_mod._gpu
-        _gpu_mod._gpu = astro.GpuContext(use_gpu=False)
-        self.tmp = tempfile.mkdtemp()
-
-    def tearDown(self):
-        _gpu_mod._gpu = self._gpu
-
-    def test_sigma_clip_on_data_with_outlier(self):
-        data = np.random.default_rng(20).uniform(100, 200, (10, 8, 8, 3)).astype(np.float32)
-        data[0, :, :, :] += 10000.0
-        out = astro.sigma_clip_combine(data, sigma=3.0, max_iters=3)
-        self.assertEqual(out.shape, (8, 8, 3))
-        self.assertLess(float(out.mean()), 5000.0)
-
-    def test_debayer_wb_combine_pipeline(self):
-        rng = np.random.default_rng(21)
-        raws = [rng.uniform(100, 1000, (32, 32)).astype(np.float32) for _ in range(4)]
-        rgbs = [astro.white_balance_grayworld(astro.debayer(r)) for r in raws]
-        out = astro.sigma_clip_combine(np.stack(rgbs, axis=0), sigma=3.0)
-        self.assertEqual(out.shape, (32, 32, 3))
-        self.assertTrue(np.all(np.isfinite(out)))
-
-    def test_hot_pixel_bayer_then_debayer_clean(self):
-        raw = np.random.default_rng(22).uniform(100, 1000, (64, 64)).astype(np.float32)
-        raw[30, 30] = 65000.0
-        cleaned = astro.remove_hot_pixels_bayer(raw, threshold=5.0)
-        rgb = astro.debayer(cleaned, method="bilinear")
-        self.assertEqual(rgb.shape, (64, 64, 3))
-        self.assertTrue(np.all(np.isfinite(rgb)))
-
-    def test_crop_bounds_inside_image(self):
-        H, W = 64, 64
-        shifts = [(4.0, 3.0), (-2.0, -1.0), (0.0, 2.0)]
-        top, bottom, left, right = astro.calc_common_crop(shifts, (H, W))
-        self.assertGreaterEqual(top, 0)
-        self.assertLessEqual(bottom, H)
-        self.assertGreaterEqual(left, 0)
-        self.assertLessEqual(right, W)
-        self.assertLess(top, bottom)
-        self.assertLess(left, right)
-
-    def test_quality_metrics_on_star_field(self):
-        m = astro.compute_quality_metrics(_star_field(64, 64) + 200.0)
-        self.assertGreater(m["brightness"], 0)
-        self.assertGreater(m["score"], 0)
-        self.assertGreater(m["dynamic_range"], 0)
-
-    def test_arcsinh_per_channel(self):
-        rgb = _rgb(32, 32) + 100.0
-        for c in range(3):
-            out = astro.arcsinh_stretch(rgb[:, :, c])
-            self.assertGreaterEqual(float(out.min()), 0.0)
-            self.assertLessEqual(float(out.max()), 1.0 + 1e-5)
-
-    def test_make_master_then_hot_pixel_correction(self):
-        frames = []
-        for i, v in enumerate([300.0, 310.0, 290.0]):
-            path = os.path.join(self.tmp, f"dark_{i}.fit")
-            _write_fits(np.full((16, 16), v, dtype=np.float32), path)
-            frames.append(astro.FrameInfo(path=path, type="dark", header={}))
-        master = astro.make_master(frames, method="mean")
-        self.assertIsNotNone(master)
-        cleaned = astro.remove_hot_pixels_bayer(master)
-        self.assertEqual(cleaned.shape, master.shape)
-        np.testing.assert_allclose(cleaned, master, atol=5.0)
-
-    def test_drizzle_scale2_then_sigma_clip(self):
-        rng = np.random.default_rng(23)
-        imgs = [rng.uniform(100, 200, (8, 8, 1)).astype(np.float32) for _ in range(4)]
-        drizzled = astro.drizzle_combine(imgs, [(0.0, 0.0)] * 4, scale=2)
-        batch = np.stack([drizzled] * 3, axis=0)
-        out = astro.sigma_clip_combine(batch, sigma=3.0)
-        self.assertEqual(out.shape, (16, 16, 1))
-
-    def test_detect_dither_on_random_shifts(self):
-        rng = np.random.default_rng(24)
-        shifts = [(float(rng.uniform(-8, 8)), float(rng.uniform(-8, 8))) for _ in range(15)]
-        result = astro.detect_dither(shifts)
-        self.assertIn(result["pattern"], ("dithered", "tracking_drift", "aligned"))
-        self.assertIsInstance(result["is_dithered"], bool)
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    loader = unittest.TestLoader()
-    suite = loader.loadTestsFromModule(sys.modules[__name__])
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    sys.exit(0 if result.wasSuccessful() else 1)

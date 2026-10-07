@@ -294,11 +294,6 @@ def _illuminated_fraction(phase_angle_deg: float) -> float:
     return float((1.0 + math.cos(phase_angle_deg * _DEG)) / 2.0)
 
 
-def moon_illuminated_fraction(jd: float) -> float:
-    """Fraction of the lunar disc illuminated, 0 (new) to 1 (full)."""
-    return _illuminated_fraction(moon_phase_angle_deg(jd))
-
-
 # ---------------------------------------------------------------------------
 # Sky brightness components (relative shape, not absolute calibration)
 # ---------------------------------------------------------------------------
@@ -646,7 +641,7 @@ def _nnls(design: np.ndarray, data: np.ndarray) -> np.ndarray:
     Clamping *after* the fact does not restore the constraint. The one
     situation that triggered the substitution was therefore exactly the one
     where the answer could not be trusted, and it was logged at debug level
-    only. A failure now propagates, and ``remove_physical_sky`` turns it into
+    only. A failure now propagates, and ``remove_physical_sky_with_reason`` turns it into
     "decline and let DBE run", which is what every other way of not helping
     already does. scipy is a hard dependency of this project, so a missing
     import is not a case worth degrading through either.
@@ -670,7 +665,7 @@ _MIN_GRADIENT_IMPROVEMENT = 0.95
 
 # Field of view (degrees, longest axis) below which the sky components carry
 # too little structure to be worth fitting. From a measured condition-number
-# sweep -- see the gate in remove_physical_sky. This is roughly 300 mm on
+# sweep -- see the gate in remove_physical_sky_with_reason. This is roughly 300 mm on
 # APS-C; shorter lenses qualify, telescopes generally do not.
 _MIN_FIELD_OF_VIEW_DEG = 5.0
 
@@ -754,19 +749,6 @@ def describe_fit(coeffs: np.ndarray, names: List[str],
     parts = [f"{n} {100.0 * abs(c) / total:.0f}%"
              for n, c in sorted(varying, key=lambda t: -abs(t[1])) if abs(c) / total > 0.01]
     return "sky model: " + ", ".join(parts)
-
-
-def remove_physical_sky(image: np.ndarray, wcs, lat_deg: float, lon_deg: float,
-                        when_iso: str, mask: Optional[np.ndarray] = None,
-                        lp_source_az_deg: float = 0.0
-                        ) -> Optional[Dict]:
-    """Fit and subtract the physical sky model; ``None`` when it declines.
-
-    A thin wrapper over ``remove_physical_sky_with_reason``, which says *why*.
-    Kept for callers that only need the result.
-    """
-    return remove_physical_sky_with_reason(
-        image, wcs, lat_deg, lon_deg, when_iso, mask, lp_source_az_deg)[0]
 
 
 def remove_physical_sky_with_reason(

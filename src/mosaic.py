@@ -141,7 +141,12 @@ def _load_panel(path: str) -> Tuple[np.ndarray, fits.Header]:
 
 def _panel_wcs(hdr: fits.Header) -> "WCS":
     """Extract a 2-axis celestial WCS from a panel header."""
-    wcs = WCS(hdr)
+    import warnings
+    # Silence astropy's FITSFixedWarning: its handler iterates sys.modules and
+    # can raise under a concurrent import (see photometry_core._celestial_wcs).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wcs = WCS(hdr)
     # Prefer the celestial sub-WCS; fall back to full WCS if .celestial is empty
     cel = wcs.celestial
     if cel.naxis == 2:

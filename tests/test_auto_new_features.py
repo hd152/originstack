@@ -17,37 +17,16 @@ import pytest
 from src import auto_settings as a
 from src.cli import _build_masters
 from src.models import Config
-
-
-def _args(**overrides):
-    base = dict(
-        _explicit_cli_dests=set(), stack_method='auto', deconvolve=True,
-        debayer_method='malvar',
-        denoise_acdnr=False,
-        denoise_curvelet=False, deconvolve_tv=False,
-        patch_registration=False, consensus_ref=False, preview_black_sigma=0.0,
-        variance_stabilize=False, drizzle_scale=1.0, drizzle_kernel='lanczos3',
-        hdr_combine=None, hdr_blend_mode='threshold',
-        color_calibrate=False, color_calibrate_method='colorindex',
-    )
-    base.update(overrides)
-    return argparse.Namespace(**base)
+from tests._helpers import auto_args as _args
 
 
 class TestCurveletForFilamentTargets:
 
-    def test_emission_nebula_anchor_prefers_curvelet(self):
-        sig = dict(a._TYPE_ANCHORS['emission_nebula'])
-        weights = a._blend_weights(sig)
+    @pytest.mark.parametrize('ttype', ['emission_nebula', 'reflection_nebula'])
+    def test_nebula_anchor_prefers_curvelet(self, ttype):
+        sig = dict(a._TYPE_ANCHORS[ttype])
         args = _args()
-        a._apply_dynamic_settings(sig, weights, args)
-        assert args.denoise_curvelet is True
-
-    def test_reflection_nebula_anchor_prefers_curvelet(self):
-        sig = dict(a._TYPE_ANCHORS['reflection_nebula'])
-        weights = a._blend_weights(sig)
-        args = _args()
-        a._apply_dynamic_settings(sig, weights, args)
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
         assert args.denoise_curvelet is True
 
     def test_galaxy_anchor_prefers_curvelet_over_acdnr(self):
@@ -83,25 +62,11 @@ class TestGalaxySkipsSkyResidual:
     real Lagoon Nebula session, so the auto-advisor adds it to skip_step
     whenever the galaxy + emission + reflection blend weight dominates."""
 
-    def test_galaxy_anchor_adds_sky_residual_to_skip_step(self):
-        sig = dict(a._TYPE_ANCHORS['galaxy'])
-        weights = a._blend_weights(sig)
+    @pytest.mark.parametrize('ttype', ['galaxy', 'emission_nebula', 'reflection_nebula'])
+    def test_extended_target_anchor_adds_sky_residual_to_skip_step(self, ttype):
+        sig = dict(a._TYPE_ANCHORS[ttype])
         args = _args(skip_step=None)
-        a._apply_dynamic_settings(sig, weights, args)
-        assert args.skip_step == ['sky_residual']
-
-    def test_emission_nebula_anchor_adds_sky_residual_to_skip_step(self):
-        sig = dict(a._TYPE_ANCHORS['emission_nebula'])
-        weights = a._blend_weights(sig)
-        args = _args(skip_step=None)
-        a._apply_dynamic_settings(sig, weights, args)
-        assert args.skip_step == ['sky_residual']
-
-    def test_reflection_nebula_anchor_adds_sky_residual_to_skip_step(self):
-        sig = dict(a._TYPE_ANCHORS['reflection_nebula'])
-        weights = a._blend_weights(sig)
-        args = _args(skip_step=None)
-        a._apply_dynamic_settings(sig, weights, args)
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
         assert args.skip_step == ['sky_residual']
 
     def test_non_galaxy_anchor_leaves_skip_step_untouched(self):

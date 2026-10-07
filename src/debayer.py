@@ -664,7 +664,7 @@ def _rcd_raw(raw: np.ndarray, pattern: str = 'RGGB', out: Optional[np.ndarray] =
     back almost all of the per-pixel noise in R/B (~0.99 of the input sigma on
     a pure-noise mosaic), interpolated samples here are averages, so on smooth
     sky it is quieter at the same star sharpness -- the reason it was added:
-    see CLAUDE.md's Sharpness/noise-vs-Siril entry.
+    see dev-notes/siril-comparison.md.
 
     Values are processed scaled to [0, 1] by the frame maximum (the ratio terms
     are scale-free; ``eps`` assumes that range) and clipped below at 0. A 4-px
@@ -1687,17 +1687,9 @@ def apply_chromatic_aberration(rgb: np.ndarray, shifts: dict) -> np.ndarray:
     return result
 
 
-def remove_hot_pixels_rgb(rgb: np.ndarray, threshold: Optional[float] = None) -> np.ndarray:
-    """Detect hot pixels on luminance, fix all 3 channels. Returns corrected RGB."""
-    if threshold is None:
-        threshold = Config.HOT_PIXEL_THRESHOLD
-    rgb_fixed, _lum = _fix_hot_rgb(rgb, threshold=threshold)
-    return rgb_fixed
-
-
 def remove_hot_pixels_rgb_with_lum(rgb: np.ndarray, threshold: Optional[float] = None,
                                    inplace: bool = False):
-    """Like remove_hot_pixels_rgb but also returns the luminance as (rgb_fixed, lum).
+    """Detect hot pixels on luminance, fix all 3 channels; returns (rgb_fixed, lum).
 
     Use this in performance-critical paths to avoid recomputing luminance after
     hot pixel removal. ``inplace=True`` lets the native path write the (few) repaired

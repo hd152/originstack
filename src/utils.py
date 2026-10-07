@@ -349,6 +349,14 @@ def obs_time_utc_iso(header=None, fallback=None) -> Optional[str]:
     return dt.isoformat() if dt is not None else None
 
 
+def diff_mad_sigma(d) -> float:
+    """Per-pixel Gaussian sigma from a 1-D array of pixel-pair differences
+    (e.g. pixels a few columns apart): 1.4826 * MAD(d) / sqrt(2). Stars and
+    nebulosity are a small tail the MAD ignores."""
+    import numpy as np
+    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+
+
 def header_get_first(header, keys, cast=None, default=None):
     """First present, non-None value among ``keys`` in a FITS-header-like
     mapping (anything with ``.get``). With ``cast`` given, the value is run
