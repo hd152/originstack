@@ -166,10 +166,46 @@ def _windows(rect, core, feather) -> List[Tuple[int, int, int, int]]:
     return out
 
 
+def frame_sky_offsets(mem_rgb, final_indices, shifts, transforms, core, weights,
+                      n_grid: int = 64) -> np.ndarray:
+    """(n, C) per-frame sky level minus the weighted mean of those levels.
+
+    A core pixel averages every frame, so a sky level that drifts through the
+    session averages out. An outer pixel averages only the frames that reach it,
+    and which frames reach an edge follows the drift over the night -- a
+    time-biased subset. On a real 158-frame Sunflower session the sky fell 27%
+    (19.4k -> 15.0k ADU) and the added strip came out ~550 ADU (~9 noise sigma)
+    darker than the core, rendering as a black band. Subtracting each frame's
+    offset before combining puts every subset on the all-frame sky level.
+
+    Each frame is sampled at the *same* sky positions (an n_grid x n_grid grid
+    over the core, mapped into the frame), so field structure cannot leak in as
+    the frames drift; a median over the frame's own area did exactly that."""
+    ct, cb, cl, cr = core
+    gy = np.linspace(ct + 2, cb - 3, n_grid)
+    gx = np.linspace(cl + 2, cr - 3, n_grid)
+    oy, ox = np.meshgrid(gy, gx, indexing='ij')
+    meds = []
+    for j, idx in enumerate(final_indices):
+        rgb = mem_rgb[idx]
+        mat, off = _src_mapping(shifts[j], transforms[j])
+        sr = np.rint(mat[0, 0] * oy + mat[0, 1] * ox + off[0]).astype(int)
+        sc = np.rint(mat[1, 0] * oy + mat[1, 1] * ox + off[1]).astype(int)
+        Hs, Ws = rgb.shape[0], rgb.shape[1]
+        ok = (sr >= 0) & (sr < Hs) & (sc >= 0) & (sc < Ws)
+        a = np.asarray(rgb[sr[ok], sc[ok]], dtype=np.float32)
+        meds.append(np.nanmedian(a, axis=0))
+    meds = np.asarray(meds, np.float64)
+    w = np.asarray(weights, np.float64)
+    w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
+    return (meds - (w[:, None] * meds).sum(0)).astype(np.float32)
+
+
 def _combine_window(win, mem_rgb, final_indices, shifts, transforms, H, W, C,
-                    weights, sigma, iters):
+                    weights, sigma, iters, sky_off=None):
     """Weighted sigma-clipped mean of the frames covering ``win``, plus the
-    per-pixel frame count. Uncovered samples are NaN."""
+    per-pixel frame count. Uncovered samples are NaN. ``sky_off`` ((n, C)) is
+    subtracted from each frame first (``frame_sky_offsets``)."""
     from src.registration import apply_transform
     from src.stacking import sigma_clip_combine
     t, b, lft, rgt = win
@@ -194,6 +230,8 @@ def _combine_window(win, mem_rgb, final_indices, shifts, transforms, H, W, C,
                 rgb = np.ascontiguousarray(rgb, dtype=np.float32)
             apply_transform(rgb, shift=shifts[j], transform=transforms[j],
                             crop=(t + r0, t + r1, lft, rgt), out=stack[k])
+            if sky_off is not None:
+                stack[k] -= sky_off[j]
             stack[k][~covs[j][r0:r1]] = np.nan
         out[r0:r1] = sigma_clip_combine(stack, sigma=sigma, max_iters=iters,
                                         weights=np.asarray(weights, np.float32)[use],
@@ -263,9 +301,10 @@ def extend_full_field(stacked: np.ndarray, mem_rgb, final_indices, shifts, trans
     out = np.zeros((B - T, R - L, C), np.float32)
     have = np.zeros((B - T, R - L), bool)
     coverage = np.full((B - T, R - L), len(final_indices), np.int32)
+    sky_off = frame_sky_offsets(mem_rgb, final_indices, shifts, transforms, core, weights)
     for win in _windows(rect, core, feather):
         part, cnt = _combine_window(win, mem_rgb, final_indices, shifts, transforms,
-                                    H, W, C, weights, sigma, iters)
+                                    H, W, C, weights, sigma, iters, sky_off)
         sl = (slice(win[0] - T, win[1] - T), slice(win[2] - L, win[3] - L))
         out[sl] = part
         have[sl] = True

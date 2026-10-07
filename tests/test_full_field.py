@@ -124,3 +124,36 @@ def test_gain_fit_is_not_diluted_by_noise():
     g, o = ff._fit_gain_offset(src, ref)
     assert abs(g - 1.3) < 0.03
     assert abs(o + 200) < 40
+
+
+def test_sky_drift_through_the_session_does_not_offset_the_edges():
+    """The sky changes through the night while the pointing drifts, so the frames
+    that reach an edge come from one end of the session. Without per-frame sky
+    matching the edge took that subset's sky level (real Sunflower session:
+    sky fell 27%, the added strip came out ~9 noise sigma dark)."""
+    rng = np.random.default_rng(5)
+    H, W, n, pad = 160, 224, 16, 24
+    yy, xx = np.mgrid[0:H + 2 * pad, 0:W + 2 * pad]
+    scene = (1000 + 0.2 * yy + 0.1 * xx).astype(np.float32)
+    offs = [(0, int(round(-20 + 40 * k / (n - 1)))) for k in range(n)]  # drift left->right
+    sky = [400.0 * (1 - k / (n - 1)) for k in range(n)]                  # sky falls
+    frames = []
+    for (dy, dx), sk in zip(offs, sky):
+        f = scene[pad + dy:pad + dy + H, pad + dx:pad + dx + W][..., None].repeat(3, -1) + sk
+        frames.append(np.ascontiguousarray(f + rng.normal(0, 2.0, (H, W, 3)), np.float32))
+    ref_off = offs[n // 2]
+    shifts = [(float(dy - ref_off[0]), float(dx - ref_off[1])) for dy, dx in offs]
+    core = calc_common_crop(shifts, (H, W))
+    aligned = np.stack([apply_transform(f, shift=s, crop=core) for f, s in zip(frames, shifts)])
+    core_stack = aligned.mean(0).astype(np.float32)
+    truth = scene[pad + ref_off[0]:pad + ref_off[0] + H,
+                  pad + ref_off[1]:pad + ref_off[1] + W] + float(np.mean(sky))
+    args = SimpleNamespace(rejection_sigma=3.0, rejection_iters=3)
+    out, (t, b, l, r), _ = ff.extend_full_field(core_stack, frames, list(range(n)), shifts,
+                                                [None] * n, H, W, 3, core, np.ones(n), args,
+                                                frac=0.5)
+    ct, cb, cl, cr = core
+    assert l < cl and r > cr
+    for cols in (slice(0, cl - l), slice(cr - l, r - l)):          # left and right strips
+        err = out[ct - t:cb - t, cols, 1] - truth[ct:cb, l:r][:, cols]
+        assert abs(float(np.median(err))) < 5.0, float(np.median(err))
