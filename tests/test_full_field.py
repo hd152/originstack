@@ -108,3 +108,19 @@ def test_extend_recovers_scene_outside_the_core():
     fe = min(ff.FEATHER_PX, (cb - ct) // 4, (cr - cl) // 4) + 1
     np.testing.assert_array_equal(out[ct - t + fe:cb - t - fe, cl - l + fe:cr - l - fe],
                                   core_stack[fe:-fe, fe:-fe])
+
+
+def test_gain_fit_is_not_diluted_by_noise():
+    """Two noisy copies of a mostly-flat sky with a few stars: the fitted gain is the
+    true one. The unsmoothed fit on sky pixels this replaced read ~0.5 on real data."""
+    rng = np.random.default_rng(2)
+    H, W = 64, 2000
+    yy, xx = np.mgrid[:H, :W].astype(float)
+    truth = np.full((H, W), 1000.0)
+    for y, x in zip(rng.uniform(5, H - 5, 40), rng.uniform(5, W - 5, 40)):
+        truth += 2000 * np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / (2 * 2.0 ** 2))
+    src = (truth + rng.normal(0, 60, truth.shape)).astype(np.float32)
+    ref = (1.3 * truth - 200 + rng.normal(0, 60, truth.shape)).astype(np.float32)
+    g, o = ff._fit_gain_offset(src, ref)
+    assert abs(g - 1.3) < 0.03
+    assert abs(o + 200) < 40

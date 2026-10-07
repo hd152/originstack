@@ -488,12 +488,9 @@ def _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts, tran
     from src.full_field import extend_full_field
     scores = np.array([f.metrics.get('score', 1.0) for f in final], dtype=np.float64)
     weights = np.sqrt(scores / max(scores.max(), 1e-9))
-    fw = [float(f.metrics.get('fwhm', 0) or 0) for f in final if f.metrics]
-    fw = [x for x in fw if x > 0]
     try:
         res = extend_full_field(stacked, mem_rgb, final_indices, shifts, transforms,
-                                H, W, C, crop, weights, args, frac=float(args.full_field),
-                                fwhm=float(np.median(fw)) if fw else 5.0)
+                                H, W, C, crop, weights, args, frac=float(args.full_field))
     except Exception as exc:
         safe_print(f"  WARNING: full field failed ({exc}); keeping the common crop")
         _log.debug("full field failed", exc_info=True)

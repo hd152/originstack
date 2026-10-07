@@ -11,36 +11,51 @@ rectangle in which every pixel is covered by at least ``frac`` of the frames:
 
   * The core (the normal common crop) is the normal stack, untouched -- proper
     coadd, patch weighting and every rejection method stay as they were.
-  * Outside it each pixel combines only the frames that cover it. When the core
-    is a proper coadd (``--proper-coadd``, the default) the outside is one too:
-    the same per-frame PSF / transparency / noise model (measured here on star
-    stamps and sky crops warped from each frame, ``measure_frames``), the same
-    per-frequency weights, written as a *normalised convolution* so that partial
-    coverage works --
-
-        out = IFFT(sum_j w_j G_j FFT(m_j N_j)) / IFFT(sum_j w_j G_j FFT(m_j))
-
-    with N_j = (M_j - sky_j) / F_j, w_j = F_j^2 / s_j^2, m_j the frame's coverage
-    mask and G_j = conj(P_j) / sqrt(sum_k w_k |P_k|^2 / sum_k w_k). With every
-    frame covering a pixel this is exactly proper coadd's ``R / sqrt(sum w)``.
-    A plain clipped mean there was ~5-7% softer than the core and, with the
-    gain fit below as it was, half as noisy in R and B: a visible texture step
-    at the old crop edge after the stretch (see ``_coadd_window``).
-    Otherwise (no proper coadd, or the PSF could not be measured) it is a
-    weighted sigma-clipped mean of the covering frames (``sigma_clip_combine``'s
-    native kernel treats NaN samples as rejected from the start).
+  * Outside it each pixel is a weighted sigma-clipped mean of only the frames
+    that cover it (``sigma_clip_combine``'s native kernel already treats NaN
+    samples as rejected from the start, so uncovered samples are NaN).
   * The outer combine is matched to the core per channel (gain + offset, fitted
-    on a band inside the core where both exist, on smoothed pixels) and
-    feathered in over ``FEATHER_PX``.
+    on smoothed pixels of a band inside the core where both exist -- proper
+    coadd puts the core on the median frame's flux scale) and feathered in
+    over ``FEATHER_PX``.
+
+**Texture at the old crop edge (measured 2026-10, two-night M101, 240 frames,
+core = proper coadd).** The visible step was mostly a gain-fit bug, not the
+combine: an unsmoothed least-squares slope on sky pixels is diluted by the
+noise in the extension (``_fit_gain_offset``), g = 0.52 / 1.00 / 0.56 for R/G/B
+against a true ~1.0, so the outside came out at ~0.6-0.7x the core's pixel
+noise (and contrast). With the fit on smoothed pixels the clipped mean's pixel
+noise matches the core's (lag-1 0.95-0.98x, the same lag-4/lag-1 ratio) and its
+stars are ~5% wider (joint Moffat FWHM 5.90 vs 5.62 px on the same-brightness
+stars just inside; same-star FWHM 1.05-1.07x on an in-core band). Tried to close
+that 5%, none kept:
+
+  * Proper coadd outside as a normalised convolution (per-frame conj(P_j) filters
+    applied to coverage-masked frames, divided by the same filters applied to
+    the masks). Exact where every frame covers (in-core band: FWHM ratio 1.004,
+    noise identical, rms difference 21 ADU against 95 ADU pixel noise), but its
+    per-frequency normalisation belongs to the contributing set, and the high
+    frequencies are carried by a few sharp frames (PSF FWHM 2.9-8.1 px): where
+    5% of the frames were missing the pixel noise halved (0.3-0.6x in corners).
+    Interpolating between norms of a few real covering sets went the other way
+    (1.6x). Cost +55 s on top of the 14 s plain extension.
+  * Proper coadd per 64 px tile from the frames covering the whole tile
+    (exact per tile, blended): no smoothing, FWHM matched, but dropping the
+    partially covering frames raised the noise 10-20% where coverage changes
+    (they carry 4% of the weight on average, 24% at worst), and ~4x the FFT
+    work of the core's proper coadd per output pixel (~25 s per strip).
+  * One filter on the clipped mean, the MTF ratio sqrt(sum w|P|^2 / sum w) /
+    (sum w P / sum w): noise x2.4 -- proper coadd reweights frames per
+    frequency, which no filter on the mean reproduces. A Wiener-regularised
+    Gaussian deconvolution sized to the FWHM gap: FWHM ratio 1.018 at noise
+    x1.75, 0.986 at x1.47.
 
 Depth is no longer uniform: an edge pixel covered by half the frames is ~1.4x
 noisier. ``<output>_coverage.fits`` records the per-pixel frame count.
 """
 from __future__ import annotations
 
-import os
-from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
@@ -58,15 +73,6 @@ FEATHER_PX = 32
 GRID_STEP = 8
 # Output rows per combine band (memory: N x band x width x 3 float32).
 _BAND_BUDGET_BYTES = 768 * 1024 * 1024
-# Coadd path: context around each tile (>= proper coadd's PSF kernel radius, so a
-# tile's kept pixels see every frame sample their filters reach), and the zero
-# padding of the FFT grid (linear, not circular, convolution).
-_TILE_MARGIN = 32
-_FFT_PAD = 32
-# Sky/noise crops per frame for the coadd path: a _SKY_GRID x _SKY_GRID grid of
-# _SKY_CROP px squares inside the core.
-_SKY_GRID = 4
-_SKY_CROP = 128
 
 
 def _src_mapping(shift, transform) -> Tuple[np.ndarray, np.ndarray]:
@@ -196,237 +202,6 @@ def _combine_window(win, mem_rgb, final_indices, shifts, transforms, H, W, C,
     return out, count
 
 
-def _lum(a: np.ndarray) -> np.ndarray:
-    a = np.asarray(a, np.float32)
-    return (0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]) if a.shape[-1] == 3 else a[..., 0]
-
-
-def _frame_rgb(mem_rgb, idx) -> np.ndarray:
-    rgb = np.asarray(mem_rgb[idx])
-    if rgb.dtype != np.float32 or not rgb.flags['C_CONTIGUOUS']:
-        rgb = np.ascontiguousarray(rgb, dtype=np.float32)
-    return rgb
-
-
-def measure_frames(stacked: np.ndarray, mem_rgb, final_indices, shifts, transforms,
-                   core: Tuple[int, int, int, int], fwhm: float = 5.0) -> Optional[dict]:
-    """Proper coadd's per-frame model, measured without warping whole frames.
-
-    PSF stars are picked on the core stack (``proper_coadd.select_psf_stars``); for
-    every frame only their 29x29 stamps are warped (into a one-row mosaic that
-    ``fit_psf`` reads like a frame), plus a grid of sky crops for the sky level and
-    lag-4 noise. Transparency is each star's flux over its median across frames,
-    exactly as ``proper_coadd`` does, so the result is on the median frame's flux
-    scale like the core. Returns {'use', 'psf', 'F', 'sky' (n, C), 'sig' (n, C)} or
-    None when the PSF cannot be measured."""
-    from src import proper_coadd as pc
-    from src.registration import apply_transform
-    ct, cb, cl, cr = core
-    C = stacked.shape[-1]
-    lum = _lum(stacked)
-    stars = pc.select_psf_stars(lum, fwhm)
-    if len(stars) < 5:
-        return None
-    p_ref, _ = pc.fit_psf(lum, stars)
-    if p_ref is None:
-        return None
-    r = pc._STAMP_R
-    sw = 2 * r + 1
-    iy = np.round(stars[:, 0]).astype(int)
-    ix = np.round(stars[:, 1]).astype(int)
-    mstars = np.stack([r + (stars[:, 0] - iy),
-                       np.arange(len(stars)) * sw + r + (stars[:, 1] - ix)], axis=1)
-    hh, ww = cb - ct, cr - cl
-    cs = min(_SKY_CROP, hh // (_SKY_GRID + 1), ww // (_SKY_GRID + 1))
-    sky_at = [(ct + int((i + 0.5) * hh / _SKY_GRID) - cs // 2,
-               cl + int((k + 0.5) * ww / _SKY_GRID) - cs // 2)
-              for i in range(_SKY_GRID) for k in range(_SKY_GRID)]
-
-    def one(j):
-        rgb = _frame_rgb(mem_rgb, final_indices[j])
-        mosaic = np.empty((sw, sw * len(stars), C), np.float32)
-        for s_, (y, x) in enumerate(zip(iy, ix)):
-            apply_transform(rgb, shift=shifts[j], transform=transforms[j],
-                            crop=(ct + y - r, ct + y + r + 1, cl + x - r, cl + x + r + 1),
-                            out=mosaic[:, s_ * sw:(s_ + 1) * sw])
-        p, flux = pc.fit_psf(mosaic, mstars, p0=p_ref)
-        crops = np.empty((len(sky_at), cs, cs, C), np.float32)
-        for q, (y0, x0) in enumerate(sky_at):
-            apply_transform(rgb, shift=shifts[j], transform=transforms[j],
-                            crop=(y0, y0 + cs, x0, x0 + cs), out=crops[q])
-        sky = np.array([float(np.median(crops[..., c])) for c in range(C)])
-        d = (crops[:, :, 4:] - crops[:, :, :-4]).reshape(-1, C)
-        sig = np.array([1.4826 * float(np.median(np.abs(d[:, c] - np.median(d[:, c])))) / np.sqrt(2.0)
-                        for c in range(C)])
-        return p, flux, sky, sig
-
-    with ThreadPoolExecutor(max_workers=2) as ex:      # GIL-bound fits, as in proper_coadd
-        raw = list(ex.map(one, range(len(final_indices))))
-    n = len(raw)
-    fit_ok = [j for j in range(n) if raw[j][0] is not None]
-    if len(fit_ok) < 3:
-        return None
-    FL = np.array([raw[j][1] for j in fit_ok])
-    with np.errstate(invalid='ignore'):
-        norm = np.nanmedian(np.where(FL > 0, FL, np.nan), axis=0)
-    F = np.full(n, np.nan)
-    for i, j in enumerate(fit_ok):
-        ok = np.isfinite(FL[i]) & (FL[i] > 0) & (norm > 0)
-        if ok.sum() >= 5:
-            F[j] = float(np.median(FL[i, ok] / norm[ok]))
-    sky = np.array([raw[j][2] for j in range(n)])
-    sig = np.array([raw[j][3] for j in range(n)])
-    use = [j for j in range(n) if np.isfinite(F[j]) and F[j] > 0.05
-           and np.all(np.isfinite(sig[j])) and np.all(sig[j] > 0)]
-    if len(use) < 3:
-        return None
-    return {'use': use, 'psf': [raw[j][0] for j in range(n)], 'F': F, 'sky': sky, 'sig': sig}
-
-
-def _tiles(win, H, W, budget_px: int):
-    """Split ``win`` along its long axis into tiles; each is (kept, padded), where
-    ``padded`` adds ``_TILE_MARGIN`` px of context (clipped to the frame)."""
-    t, b, lft, rgt = win
-    m = _TILE_MARGIN
-    out = []
-    if (rgt - lft) >= (b - t):
-        rows = min(b + m, H) - max(t - m, 0)
-        step = max(64, budget_px // max(rows, 1) - 2 * m)
-        for c0 in range(lft, rgt, step):
-            c1 = min(rgt, c0 + step)
-            out.append(((t, b, c0, c1), (max(t - m, 0), min(b + m, H), max(c0 - m, 0), min(c1 + m, W))))
-    else:
-        cols = min(rgt + m, W) - max(lft - m, 0)
-        step = max(64, budget_px // max(cols, 1) - 2 * m)
-        for r0 in range(t, b, step):
-            r1 = min(b, r0 + step)
-            out.append(((r0, r1, lft, rgt), (max(r0 - m, 0), min(r1 + m, H), max(lft - m, 0), min(rgt + m, W))))
-    return out
-
-
-def _coadd_window(win, mem_rgb, final_indices, shifts, transforms, H, W, C, model,
-                  sigma, iters):
-    """Proper coadd of ``win`` from the frames covering it, as a normalised convolution
-    (see the module docstring), plus the per-pixel count of frames used.
-
-    Each frame's samples are flux-normalised and sky-subtracted, cleaned against a
-    clipped mean of the same samples exactly as proper coadd cleans against the
-    normal stack (``k * sqrt(s^2 + (0.15 * signal)^2)``), zeroed where the frame does
-    not cover, and filtered by w_j conj(P_j); the frame's coverage mask goes through
-    the same filter, and the ratio of the two sums renormalises every pixel by the
-    weight that actually reached it."""
-    import scipy.fft as sfft
-
-    from src import proper_coadd as pc
-    from src.registration import apply_transform
-    from src.stacking import sigma_clip_combine
-    use = model['use']
-    F, sky, sig, psf = model['F'], model['sky'], model['sig'], model['psf']
-    t, b, lft, rgt = win
-    out = np.zeros((b - t, rgt - lft, C), np.float32)
-    count = np.zeros((b - t, rgt - lft), np.int32)
-    budget_px = int(_BAND_BUDGET_BYTES // max(len(use) * C * 4, 1))
-    wts = np.array([[F[j] ** 2 / sig[j, c] ** 2 for c in range(C)] for j in use])     # (n_use, C)
-    w_ref = (F[use] ** 2 / np.mean(sig[use] ** 2, axis=1)).astype(np.float32)
-    pad = _FFT_PAD
-    n_thr = max(1, min(6, (os.cpu_count() or 8) // 2, len(use)))
-    for kept, padded in _tiles(win, H, W, budget_px):
-        pt, pb, pl, pr = padded
-        h, w = pb - pt, pr - pl
-        rows, cols = np.arange(pt, pb), np.arange(pl, pr)
-        covs = [frame_coverage(shifts[j], transforms[j], rows, cols, H, W) for j in use]
-        here = [k for k, cv in enumerate(covs) if cv.any()]
-        if not here:
-            continue
-        stack = np.empty((len(here), h, w, C), np.float32)
-        for i, k in enumerate(here):
-            j = use[k]
-            apply_transform(_frame_rgb(mem_rgb, final_indices[j]), shift=shifts[j],
-                            transform=transforms[j], crop=padded, out=stack[i])
-            stack[i] -= sky[j].astype(np.float32)
-            stack[i] *= np.float32(1.0 / F[j])
-            stack[i][~covs[k]] = np.nan
-        # outlier reference: clipped mean of the flux-normalised samples
-        ref = sigma_clip_combine(stack, sigma=sigma, max_iters=iters, weights=w_ref[here], use_mad=True)
-        ref_tol = (np.float32(pc._SIGNAL_FRAC) * np.maximum(ref, 0)) ** 2
-        PH = sfft.next_fast_len(h + 2 * pad, real=True)
-        PW = sfft.next_fast_len(w + 2 * pad, real=True)
-        fshape = (PH, PW // 2 + 1)
-        ones_spec = None
-        if any(covs[k].all() for k in here):
-            buf = np.zeros((PH, PW), np.float32)
-            buf[pad:pad + h, pad:pad + w] = 1.0
-            ones_spec = sfft.rfft2(buf, workers=1)
-        pos = {k: i for i, k in enumerate(here)}
-
-        def worker(part):
-            num = np.zeros((C,) + fshape, np.complex64)
-            den = np.zeros((C,) + fshape, np.complex64)
-            dt2 = np.zeros((C,) + fshape, np.float32)
-            ppl = np.zeros((PH, PW), np.float32)
-            buf = np.zeros((PH, PW), np.float32)
-            inner = buf[pad:pad + h, pad:pad + w]
-            for k in part:
-                ppl[:] = 0
-                pc.render_psf_into(psf[use[k]], ppl)
-                Ph = sfft.rfft2(ppl, workers=1)
-                p2 = Ph.real ** 2 + Ph.imag ** 2
-                for c in range(C):
-                    dt2[c] += np.float32(wts[k, c]) * p2
-                if k not in pos:          # the global PSF norm counts every frame
-                    continue
-                cPh = np.conj(Ph)
-                fr = stack[pos[k]]
-                cov = covs[k]
-                if cov.all():
-                    ms = ones_spec
-                else:
-                    buf[:] = 0
-                    inner[...] = cov
-                    ms = sfft.rfft2(buf, workers=1)
-                ms = cPh * ms
-                s2 = (sig[use[k]] / F[use[k]]) ** 2
-                for c in range(C):
-                    x = fr[..., c]
-                    rc = ref[..., c]
-                    with np.errstate(invalid='ignore'):
-                        bad = np.abs(x - rc) > np.float32(pc._REJECT_K) * np.sqrt(ref_tol[..., c] + np.float32(s2[c]))
-                    buf[:] = 0
-                    np.copyto(inner, x)
-                    inner[bad] = rc[bad]          # NaN compares False: covered samples only
-                    inner[~cov] = 0
-                    wk = np.float32(wts[k, c])
-                    num[c] += wk * (cPh * sfft.rfft2(buf, workers=1))
-                    den[c] += wk * ms
-            return num, den, dt2
-
-        with ThreadPoolExecutor(max_workers=n_thr) as ex:
-            parts = list(ex.map(worker, [list(range(len(use)))[i::n_thr] for i in range(n_thr)]))
-        num, den, dt2 = parts[0]
-        for p_num, p_den, p_dt2 in parts[1:]:                 # fixed order: deterministic
-            num += p_num
-            den += p_den
-            dt2 += p_dt2
-        del parts
-        stack = None          # free the tile stack before the inverse FFTs
-        kt, kb, kl, kr = kept
-        ks = (slice(kt - pt, kb - pt), slice(kl - pl, kr - pl))
-        for c in range(C):
-            dt = np.sqrt(np.maximum(dt2[c] / np.float32(wts[:, c].sum()), np.float32(1e-20)))
-            a = sfft.irfft2(num[c] / dt, s=(PH, PW), workers=-1)[pad:pad + h, pad:pad + w][ks]
-            d = sfft.irfft2(den[c] / dt, s=(PH, PW), workers=-1)[pad:pad + h, pad:pad + w][ks]
-            skyw = float(np.sum(wts[:, c] * sky[use, c] / F[use]) / wts[:, c].sum())
-            wsum_here = float(wts[here, c].sum())
-            # where hardly any weight reaches the pixel the ratio is unstable: use the
-            # clipped mean there (inside the chosen rectangle, >= frac of the frames
-            # cover every pixel, so this is a guard, not a path)
-            good = d > 0.1 * wsum_here
-            val = np.where(good, a / np.where(good, d, 1.0), ref[..., c][ks])
-            out[kt - t:kb - t, kl - lft:kr - lft, c] = (val + skyw).astype(np.float32)
-        count[kt - t:kb - t, kl - lft:kr - lft] = np.sum([covs[k][ks] for k in here], axis=0)
-    return out, count
-
-
 def _fit_gain_offset(src: np.ndarray, ref: np.ndarray, smooth: float = 3.0) -> Tuple[float, float]:
     """Robust ref ~ g*src + o on the overlap, fitted on Gaussian-smoothed pixels.
 
@@ -468,12 +243,9 @@ def _fit_gain_offset(src: np.ndarray, ref: np.ndarray, smooth: float = 3.0) -> T
 
 def extend_full_field(stacked: np.ndarray, mem_rgb, final_indices, shifts, transforms,
                       H: int, W: int, C: int, core: Tuple[int, int, int, int], weights,
-                      args, frac: float = 0.5, fwhm: float = 5.0):
+                      args, frac: float = 0.5):
     """Return (stacked, (top, bottom, left, right), coverage) on the extended
-    rectangle, or None when there is nothing to extend.
-
-    With ``args.proper_coadd`` the outside is a proper coadd too (``_coadd_window``);
-    ``fwhm`` (the frames' median, px) seeds its PSF-star detection."""
+    rectangle, or None when there is nothing to extend."""
     import time
     t0 = time.time()
     transforms = list(transforms) if transforms is not None else [None] * len(shifts)
@@ -488,31 +260,12 @@ def extend_full_field(stacked: np.ndarray, mem_rgb, final_indices, shifts, trans
     sigma = float(getattr(args, 'rejection_sigma', 3.0) or 3.0)
     iters = int(getattr(args, 'rejection_iters', 3) or 3)
 
-    model = None
-    if getattr(args, 'proper_coadd', False):
-        t_m = time.time()
-        try:
-            model = measure_frames(stacked, mem_rgb, final_indices, shifts, transforms, core, fwhm)
-        except Exception as exc:
-            _log.debug("full field: frame model failed (%s)", exc, exc_info=True)
-            model = None
-        if model is None:
-            safe_print("  Full field: PSF could not be measured -- the outside is a clipped mean "
-                       "(softer and less noisy than the proper-coadded core)")
-        else:
-            _log.debug("full field: frame model for %d/%d frames in %.1fs",
-                       len(model['use']), len(final_indices), time.time() - t_m)
-
     out = np.zeros((B - T, R - L, C), np.float32)
     have = np.zeros((B - T, R - L), bool)
     coverage = np.full((B - T, R - L), len(final_indices), np.int32)
     for win in _windows(rect, core, feather):
-        if model is not None:
-            part, cnt = _coadd_window(win, mem_rgb, final_indices, shifts, transforms,
-                                      H, W, C, model, sigma, iters)
-        else:
-            part, cnt = _combine_window(win, mem_rgb, final_indices, shifts, transforms,
-                                        H, W, C, weights, sigma, iters)
+        part, cnt = _combine_window(win, mem_rgb, final_indices, shifts, transforms,
+                                    H, W, C, weights, sigma, iters)
         sl = (slice(win[0] - T, win[1] - T), slice(win[2] - L, win[3] - L))
         out[sl] = part
         have[sl] = True
@@ -542,6 +295,5 @@ def extend_full_field(stacked: np.ndarray, mem_rgb, final_indices, shifts, trans
     safe_print(f"  Full field: {cr - cl}x{cb - ct} -> {R - L}x{B - T} px "
                f"(+{100.0 * gain_px / ((cb - ct) * (cr - cl)):.0f}% area; every pixel in >= "
                f"{max(3, int(np.ceil(frac * len(final_indices))))} of {len(final_indices)} "
-               f"frames; {'proper coadd' if model is not None else 'clipped mean'}; "
-               f"{format_time(time.time() - t0)})")
+               f"frames; {format_time(time.time() - t0)})")
     return out, rect, coverage
