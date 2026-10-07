@@ -6,14 +6,29 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-10-07
+
+A leaner release: a native module a tenth the size, a pile of dead code gone, and a website at
+[originstack.site](https://originstack.site/).
+
 ### Changed
 
+- **Much smaller native module.** `astro_native` shrank from 26.6 MB to 2.7 MB (and from 129 Rust
+  dependencies to about 30) by dropping the `tract` ONNX runtime from the default build; every
+  kernel's output is bit-identical to 2.7.0.
 - **`--transient-triage` now needs a native build with the `triage` feature.** The `tract` ONNX
   runtime behind it moved behind a Cargo feature that is off by default, so release builds and a
   plain `maturin build --release` no longer include it (smaller binary, faster first build). Build
   with `cd ext/astro_native && python -m maturin build --release --features triage` to use it;
   without it `--transient-triage` disables itself with a warning and `--transient-detect` runs as
   before.
+
+### Fixed
+
+- **Mosaic panels no longer hit a rare WCS failure.** Reading each panel's sky position could
+  fail when astropy's header-fix warning raced with an import in another thread, and the panel
+  was then treated as having no position; the warning is now silenced there as it already was
+  for photometry.
 
 ### Removed
 
