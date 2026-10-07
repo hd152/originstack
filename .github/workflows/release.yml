@@ -217,6 +217,9 @@ jobs:
           - runner: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    # A normal run is ~25 min (the Rust build dominates); without a cap a hang runs to
+    # GitHub's 6 h default before anyone finds out.
+    timeout-minutes: 45
     permissions:
       contents: write
     env:
