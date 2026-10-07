@@ -71,7 +71,15 @@
       <a class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Download for Windows</a>
       <a class="btn quiet" href="https://github.com/hd152/originstack">View the source on GitHub</a>
     </div>
-    <p class="fine">Windows 10 or 11, 64-bit, free and MIT licensed. The installer is not code-signed yet, so SmartScreen may warn you: choose More info, then Run anyway.</p>
+    <p class="platforms">All downloads:
+      <a href="https://github.com/hd152/originstack/releases/latest" data-asset="-setup\.exe$">Windows</a> &middot;
+      <a href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-arm64\.zip$">Mac (Apple silicon)</a> &middot;
+      <a href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-x86_64\.zip$">Mac (Intel)</a> &middot;
+      <a href="https://github.com/hd152/originstack/releases/latest" data-asset="-linux-x64\.tar\.gz$">Linux</a>
+    </p>
+    <p class="fine" id="fine-win">Windows 10 or 11, 64-bit, free and MIT licensed. The installer is not code-signed yet, so SmartScreen may warn you: choose More info, then Run anyway.</p>
+    <p class="fine" id="fine-mac" hidden>macOS, free and MIT licensed. The Apple silicon build needs macOS 14 or later. The app is not signed by Apple yet, so macOS blocks the first launch: Control-click OriginStack in Applications and choose Open, or allow it under System Settings, Privacy &amp; Security, Open Anyway. <a href="#mac">Details</a></p>
+    <p class="fine" id="fine-linux" hidden>Linux x86-64 with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later), free and MIT licensed. Extract it and run <code>./install.sh</code>. <a href="#get">Details</a></p>
 
     <div class="wipe" id="wipe" role="group" aria-label="Comparison of one frame and the finished stack">
       <picture><source type="image/webp" srcset="img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img class="after" fetchpriority="high" src="img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="The Omega Nebula after stacking 114 frames and processing: bright red gas with dark lanes against a dense star field."></picture>
@@ -278,6 +286,13 @@
         <p>Free stacking software for Windows 10 and 11. Download the setup file from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a> and run it. It installs for your user only, adds a Start Menu entry and an uninstaller, and needs no Python.</p>
         <p>Prefer the zip? Use Extract All first, then run OriginStack.exe from the extracted folder. Running it from inside the zip fails.</p>
       </div>
+      <div id="mac">
+        <h3>macOS app</h3>
+        <p>Download the zip for your Mac from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a>: <code>macos-arm64</code> for Apple silicon (M1 and later, needs macOS 14 or later) or <code>macos-x86_64</code> for an Intel Mac. Open the zip and drag OriginStack into Applications. It needs no Python.</p>
+        <p>The app is not signed by Apple yet, so macOS blocks the first launch. Control-click OriginStack and choose Open, then Open again; on macOS 15 and later, try to open it once, then choose Open Anyway under System Settings, Privacy &amp; Security. Or clear the download flag in Terminal:</p>
+<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
+        <p>The Mac builds have had less real-world use than the Windows build.</p>
+      </div>
       <div>
         <h3>Linux bundle</h3>
         <p>Download <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a>, extract it and run the installer. It installs for your user only, adds an application-menu entry, and needs no Python or root.</p>
@@ -336,16 +351,48 @@ python desktop_app.py</pre>
     });
   }
 
-  // Point the download button at the newest installer; the static link still works without this.
+  // Pick the visitor's platform for the main button; the static links (latest release page)
+  // still work without this. Phones and tablets keep the Windows default.
+  var plat = 'win';
+  try {
+    var p = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') + ' ' + navigator.userAgent;
+    var touch = navigator.maxTouchPoints > 1;
+    if (/Mac/.test(p) && !touch) {
+      plat = 'mac-arm64';
+      // Chrome and Firefox name the GPU; Safari says "Apple GPU" on every Mac, so Intel
+      // Macs on Safari get the Apple silicon button and the Intel link next to it.
+      try {
+        var gl = document.createElement('canvas').getContext('webgl');
+        var ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        var gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
+        if (/Intel|AMD|Radeon/i.test(gpu)) plat = 'mac-x86_64';
+      } catch (e) {}
+    } else if (/Linux/.test(p) && !/Android/.test(p)) {
+      plat = 'linux';
+    }
+  } catch (e) {}
+  var label = { 'win': 'Windows', 'mac-arm64': 'Mac (Apple silicon)', 'mac-x86_64': 'Mac (Intel)', 'linux': 'Linux' }[plat];
+  var want = { 'win': /-setup\.exe$/, 'mac-arm64': /-macos-arm64\.zip$/, 'mac-x86_64': /-macos-x86_64\.zip$/, 'linux': /-linux-x64\.tar\.gz$/ }[plat];
+  var dl = document.getElementById('download');
+  dl.textContent = 'Download for ' + label;
+  if (plat !== 'win') {
+    document.getElementById('fine-win').hidden = true;
+    document.getElementById(plat === 'linux' ? 'fine-linux' : 'fine-mac').hidden = false;
+  }
   try {
     fetch('https://api.github.com/repos/hd152/originstack/releases/latest')
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (rel) {
         if (!rel) return;
-        var a = document.getElementById('download');
-        var setup = (rel.assets || []).filter(function (x) { return /-setup\.exe$/.test(x.name); })[0];
-        if (setup) a.href = setup.browser_download_url;
-        a.textContent = 'Download OriginStack ' + String(rel.tag_name).replace(/^v/, '') + ' for Windows';
+        var assets = rel.assets || [];
+        function find(re) { return assets.filter(function (x) { return re.test(x.name); })[0]; }
+        var mine = find(want);
+        if (mine) dl.href = mine.browser_download_url;
+        dl.textContent = 'Download OriginStack ' + String(rel.tag_name).replace(/^v/, '') + ' for ' + label;
+        Array.prototype.forEach.call(document.querySelectorAll('.platforms a[data-asset]'), function (a) {
+          var x = find(new RegExp(a.getAttribute('data-asset')));
+          if (x) a.href = x.browser_download_url;
+        });
       }).catch(function () {});
   } catch (e) {}
 })();
