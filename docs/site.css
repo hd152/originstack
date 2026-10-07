@@ -118,6 +118,8 @@ p { margin: 0 0 1em; }
 .btn.primary:hover { background: var(--ha-dark); color: #fff; }
 .btn.quiet { border-color: rgba(232, 237, 245, .5); color: #e8edf5; }
 .btn.quiet:hover { border-color: #e8edf5; background: rgba(232, 237, 245, .08); }
+.platforms { margin: 16px 0 0; font-family: var(--display); font-size: 1rem; color: #9fb0c6; }
+.platforms a { color: #e8edf5; text-underline-offset: .2em; white-space: nowrap; }
 .fine { font-size: .98rem; color: #9fb0c6; margin: 14px 0 0; max-width: 62ch; }
 
 /* before / after wipe */
