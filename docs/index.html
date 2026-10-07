@@ -16,12 +16,12 @@
 <meta property="og:url" content="https://hd152.github.io/originstack/">
 <meta property="og:title" content="OriginStack: free Celestron Origin astrophotography stacker">
 <meta property="og:description" content="Fainter detail, tighter stars, cleaner sky. Free, open-source stacking and processing for the Celestron Origin and other colour cameras.">
-<meta property="og:image" content="https://hd152.github.io/originstack/img/omega-stack.jpg">
+<meta property="og:image" content="https://hd152.github.io/originstack/img/omega-nebula-m17-stacked-celestron-origin.jpg">
 <meta property="og:image:alt" content="The Omega Nebula stacked from 114 frames of 30 seconds with OriginStack">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="OriginStack: free Celestron Origin astrophotography stacker">
 <meta name="twitter:description" content="114 frames of 30 seconds, one image. Free, open-source stacking and processing for astrophotography.">
-<meta name="twitter:image" content="https://hd152.github.io/originstack/img/omega-stack.jpg">
+<meta name="twitter:image" content="https://hd152.github.io/originstack/img/omega-nebula-m17-stacked-celestron-origin.jpg">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -37,7 +37,7 @@
   "isAccessibleForFree": true,
   "downloadUrl": "https://github.com/hd152/originstack/releases/latest",
   "codeRepository": "https://github.com/hd152/originstack",
-  "image": "https://hd152.github.io/originstack/img/omega-stack.jpg",
+  "image": "https://hd152.github.io/originstack/img/omega-nebula-m17-stacked-celestron-origin.jpg",
   "author": { "@type": "Person", "name": "Tom Davenport" },
   "keywords": "astrophotography, image stacking, Celestron Origin, FITS, calibration, drizzle, plate solving"
 }
@@ -64,8 +64,8 @@
       </nav>
     </div>
 
-    <h1>Fainter detail, tighter stars, cleaner sky.</h1>
-    <p class="lede">OriginStack stacks and processes astrophotography frames from a Celestron Origin or any colour camera. It runs on your own computer, needs no account, and only goes online to look up a target name it does not recognise or for optional steps such as plate solving.</p>
+    <h1><span class="kicker">Free astrophotography stacking software for the Celestron Origin</span> Fainter detail, tighter stars, cleaner sky.</h1>
+    <p class="lede">OriginStack stacks and processes the raw FITS files from a Celestron Origin, or frames from any colour camera, into one finished image. It runs on your own computer, needs no account, and only goes online to look up a target name it does not recognise or for optional steps such as plate solving.</p>
 
     <div class="actions">
       <a class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Download for Windows</a>
@@ -74,8 +74,8 @@
     <p class="fine">Windows 10 or 11, 64-bit, free and MIT licensed. The installer is not code-signed yet, so SmartScreen may warn you: choose More info, then Run anyway.</p>
 
     <div class="wipe" id="wipe" role="group" aria-label="Comparison of one frame and the finished stack">
-      <img class="after" src="img/omega-stack.jpg" width="1600" height="1103" alt="The Omega Nebula after stacking 114 frames and processing: bright red gas with dark lanes against a dense star field.">
-      <img class="before" src="img/omega-one-frame.jpg" width="1600" height="1103" alt="One 30-second frame of the same field, stretched to be visible: grainy, with the nebula faint against a noisy purple sky.">
+      <img class="after" src="img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="The Omega Nebula after stacking 114 frames and processing: bright red gas with dark lanes against a dense star field.">
+      <img class="before" src="img/omega-nebula-m17-single-frame-celestron-origin.jpg" width="1600" height="1103" alt="One 30-second frame of the same field, stretched to be visible: grainy, with the nebula faint against a noisy purple sky.">
       <span class="line"></span>
       <span class="grip" aria-hidden="true">&lt;&gt;</span>
       <span class="cap l">One 30-second frame, stretched</span>
@@ -131,7 +131,7 @@
 <section id="app">
   <div class="wrap">
     <h2>Watch it work, or skip the settings</h2>
-    <p class="intro measure">Point the app at a folder of frames, say what you imaged (or let it work that out), and press Start. Every setting has a one-line explanation, and the defaults choose the rest for your target. These are real screens from stacking the Sunflower Galaxy frames used in the comparisons below.</p>
+    <p class="intro measure">Point the app at a folder of frames, say what you imaged (or let it work that out), and press Start. Every setting has a one-line explanation, and the defaults choose the rest for your target. These are real screens from stacking the Sunflower Galaxy frames used in the comparisons below. New to processing Celestron Origin images? The <a href="stack-celestron-origin.html">step-by-step guide</a> starts from the session folder the telescope saves.</p>
 
     <div class="shots">
       <figure class="shot big">
@@ -244,7 +244,7 @@
 
     <div class="figs">
       <figure class="wide">
-        <img src="img/vs-origin-crab.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer.">
+        <img src="img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Three crops of the Crab Nebula at full resolution from the same frames: the Celestron Origin's own stack, Siril's and OriginStack's, all given the same stretch. The Origin's stars and the nebula's filaments are visibly softer.">
         <figcaption>The Crab Nebula at full resolution, from the same 133 frames, all three given the same stretch. The Origin's own stack (left) is visibly softer; Siril and OriginStack are close, with OriginStack's stars 8% narrower.</figcaption>
       </figure>
     </div>
@@ -258,12 +258,12 @@
     <h2>Made with it</h2>
     <p class="intro measure">All from raw Celestron Origin frames, stacked and processed by OriginStack, under measured <strong>Bortle 7-9</strong> skies (heavy light pollution, backyard/rooftop, not a dark site) -- see the <a href="https://github.com/hd152/originstack#readme">README</a> for the per-image measurements and method.</p>
     <div class="gallery">
-      <figure><img src="img/whirlz1.jpg" width="1200" height="803" loading="lazy" alt="The Whirlpool Galaxy, a face-on spiral with a smaller companion galaxy."><figcaption>Whirlpool Galaxy (M51)</figcaption></figure>
+      <figure><img src="img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="803" loading="lazy" alt="The Whirlpool Galaxy, a face-on spiral with a smaller companion galaxy."><figcaption>Whirlpool Galaxy (M51)</figcaption></figure>
       <div class="stack">
-        <figure><img src="img/orion1.jpg" width="1200" height="811" loading="lazy" alt="The Orion Nebula with its bright central cloud and surrounding gas."><figcaption>Orion Nebula (M42), seven sessions combined</figcaption></figure>
-        <figure><img src="img/sgr1.jpg" width="1200" height="729" loading="lazy" alt="A dense field of stars in Sagittarius with dark dust lanes."><figcaption>Sagittarius Star Cloud (M24), 138 × 10 s</figcaption></figure>
-        <figure><img src="img/andromeda1.jpg" width="1200" height="774" loading="lazy" alt="The Andromeda Galaxy, a bright spiral core with a dust lane and two companion galaxies."><figcaption>Andromeda Galaxy (M31), 183 × 10 s</figcaption></figure>
-        <figure><img src="img/horsehead1.jpg" width="1200" height="961" loading="lazy" alt="The Flame Nebula's glowing gas and dark dust lane near Alnitak, with the Horsehead Nebula's dark notch visible in the dust lane."><figcaption>Horsehead / Flame Nebula region, 213 × 10 s</figcaption></figure>
+        <figure><img src="img/orion-nebula-m42-celestron-origin.jpg" width="1200" height="811" loading="lazy" alt="The Orion Nebula with its bright central cloud and surrounding gas."><figcaption>Orion Nebula (M42), seven sessions combined</figcaption></figure>
+        <figure><img src="img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="A dense field of stars in Sagittarius with dark dust lanes."><figcaption>Sagittarius Star Cloud (M24), 138 × 10 s</figcaption></figure>
+        <figure><img src="img/andromeda-galaxy-m31-celestron-origin.jpg" width="1200" height="774" loading="lazy" alt="The Andromeda Galaxy, a bright spiral core with a dust lane and two companion galaxies."><figcaption>Andromeda Galaxy (M31), 183 × 10 s</figcaption></figure>
+        <figure><img src="img/horsehead-flame-nebula-celestron-origin.jpg" width="1200" height="961" loading="lazy" alt="The Flame Nebula's glowing gas and dark dust lane near Alnitak, with the Horsehead Nebula's dark notch visible in the dust lane."><figcaption>Horsehead / Flame Nebula region, 213 × 10 s</figcaption></figure>
       </div>
     </div>
   </div>
@@ -275,7 +275,7 @@
     <div class="get">
       <div>
         <h3>Windows installer</h3>
-        <p>Download the setup file from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a> and run it. It installs for your user only, adds a Start Menu entry and an uninstaller, and needs no Python.</p>
+        <p>Free stacking software for Windows 10 and 11. Download the setup file from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a> and run it. It installs for your user only, adds a Start Menu entry and an uninstaller, and needs no Python.</p>
         <p>Prefer the zip? Use Extract All first, then run OriginStack.exe from the extracted folder. Running it from inside the zip fails.</p>
       </div>
       <div>
@@ -301,7 +301,7 @@ python desktop_app.py</pre>
       </div>
       <div>
         <h3>What it reads</h3>
-        <p>Celestron Origin FITS, and colour-camera frames as FITS, camera RAW (Canon, Nikon, Sony and others, needs rawpy), TIFF and XISF. SER video is supported for planetary work. Mix formats freely in one folder.</p>
+        <p>Celestron Origin raw files (the FITS frames in each session folder, with their <code>info.json</code>), and colour-camera frames as FITS, camera RAW (Canon, Nikon, Sony and others, needs rawpy), TIFF and XISF. SER video is supported for planetary work. Mix formats freely in one folder.</p>
         <p>Want it fully offline? Pass <code>--offline</code>, or tick it in the app, and OriginStack makes no network requests at all.</p>
       </div>
     </div>
