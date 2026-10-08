@@ -197,6 +197,29 @@ def test_solar_fit_with_camera_slopes_on_a_sparse_field(monkeypatch):
     np.testing.assert_allclose(sb * gain[2], sg * gain[1], rtol=0.03)
 
 
+def test_solar_fit_requeries_fainter_on_a_saturated_rich_field(monkeypatch):
+    # the brightest-first catalogue rows of a rich field are all saturated: query again
+    # from just fainter than the faintest saturated star
+    import dataclasses
+
+    import src.photometry as ph
+    from src import color_calibrate as cc
+    img, gm, gain = _star_field_with_colour_law()
+    ceiling = float(img.mean(axis=2).max())
+    bright = dataclasses.replace(gm, det_peak=np.full(len(gm.x), 2.0 * ceiling),
+                                 g=np.linspace(9.0, 12.5, len(gm.x)))
+    calls = []
+
+    def fake(*a, min_g=None, **k):
+        calls.append(min_g)
+        return bright if min_g is None else gm
+    monkeypatch.setattr(ph, 'match_gaia_field', fake)
+    res = cc.fit_channel_scales_solar(img, header=None)
+    assert len(calls) == 2 and calls[0] is None and 12.0 < calls[1] <= 12.5
+    (sr, sg, sb), info = res
+    np.testing.assert_allclose(sb * gain[2], sg * gain[1], rtol=0.03)
+
+
 def test_solar_fit_ignores_camera_slopes_when_stars_suffice(monkeypatch):
     import src.photometry as ph
     from src import color_calibrate as cc

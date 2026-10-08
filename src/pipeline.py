@@ -497,6 +497,30 @@ def _shared_crop(a: np.ndarray, crop_a, b: np.ndarray, crop_b):
     return (a[t - ta:bt - ta, lft - la:rt - la], b[t - tb:bt - tb, lft - lb:rt - lb])
 
 
+def _raw_gain_for_noise_model(args, lights, masters):
+    """(gain e- per raw ADU, source label, pedestal ADU) for src/noise_model.py, or
+    (None, None, None). The camera profile's gain when this session agreed with it;
+    otherwise the two-point photon-transfer estimate on this session's raw lights.
+    The pedestal is the master bias's median, else the profile's."""
+    from src import camera_profile as cp
+    cam = getattr(args, '_camera', None)
+    ped = None
+    bias = masters.get('bias') if masters else None
+    if bias is not None:
+        ped = float(np.median(np.asarray(bias)[::8, ::8]))
+    elif cam:
+        ped = cp.table_pedestal(cp.load_profile(cam['model']), cam.get('iso'))
+    if ped is None:
+        return None, None, None
+    if cam and cam.get('gain'):
+        return float(cam['gain']), f"camera profile {cam['label']}", ped
+    pattern = getattr(args, '_session_bayer', None) or 'RGGB'
+    g = cp.measure_raw_gain([f.path for f in lights], pattern, ped)
+    if g is None or not np.isfinite(g).any():
+        return None, None, None
+    return float(np.nanmedian(g)), "measured on this session's raw lights", ped
+
+
 def _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts, transforms,
                       displacement_fields, H, W, C, crop, output_path, stats):
     """``--full-field``: extend the stack past the common crop (src/full_field.py).
@@ -1097,10 +1121,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     and getattr(args, 'debayer_method', 'rcd') in ('rcd', 'malvar')):
                 try:
                     from src.noise_model import format_noise_model, measure_noise_model
-                    _nm = measure_noise_model(mem_rgb, final_indices, args._session_bayer)
+                    _g, _src, _ped = _raw_gain_for_noise_model(args, lights, masters)
+                    _nm = (measure_noise_model(mem_rgb, final_indices, [f.path for f in final],
+                                               args._session_bayer, _g, _ped)
+                           if _g else None)
                     if _nm is not None:
                         args._noise_model_k = [float(v) for v in _nm['k']]
-                        safe_print(format_noise_model(_nm))
+                        safe_print(format_noise_model(_nm, _src))
                     # correlated-noise factor of aperture sums, for the stack's photometry
                     # (the aligned frames are gone by then): two aligned middle frames
                     if len(final_indices) >= 2:

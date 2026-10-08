@@ -10,42 +10,69 @@ from src import noise_model as nm
 from src.debayer import _rcd_raw
 
 
-def _frames(n=8, gain=0.02, wb=(1.6, 1.0, 1.5), seed=0, shape=(240, 320)):
-    """Debayered RGGB frames whose raw samples are Poisson electrons / gain, scaled per
-    channel by ``wb`` (as white balance does), with a sky gradient, stars and a dark
-    offset (a constant, which the slope must ignore)."""
+def _session(tmp_path, n=6, gain=0.02, wb=(1.6, 1.0, 1.5), pedestal=500.0, seed=0,
+             shape=(320, 400)):
+    """Raw RGGB lights on disk (Poisson electrons / gain + pedestal, under 30%
+    vignetting) and the processed frames Phase 1 would make of them: pedestal off,
+    flat-fielded, white-balanced, RCD-debayered. The flat makes the sky uniform while
+    its noise still grows toward the corners -- the case a variance-vs-signal slope on
+    processed frames got wrong."""
+    from astropy.io import fits
     rng = np.random.default_rng(seed)
     H, W = shape
     yy, xx = np.mgrid[:H, :W]
+    flat = 1.0 - 0.3 * (((yy - H / 2) / H) ** 2 + ((xx - W / 2) / W) ** 2) * 4
     chan = np.empty(shape, int)
     chan[0::2, 0::2], chan[0::2, 1::2], chan[1::2, 0::2], chan[1::2, 1::2] = 0, 1, 1, 2
-    out = []
+    paths, frames = [], []
     for j in range(n):
-        sky_e = 300 + 80 * j + 150 * (xx / W) + 60 * (yy / H)       # electrons, varies within/across frames
-        img_e = sky_e.copy()
-        for _ in range(25):
-            y, x = rng.uniform(10, H - 10), rng.uniform(10, W - 10)
-            img_e += 4000 * np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / 4.0)
-        e = rng.poisson(img_e).astype(np.float64)
-        adu = e / gain + 50.0                                      # + a dark-current offset
-        adu *= np.asarray(wb)[chan]
-        out.append(_rcd_raw(adu.astype(np.float32), 'RGGB'))
-    return out
+        e = rng.poisson((400.0 + 30 * j) * flat).astype(np.float64)
+        raw = e / gain + pedestal
+        p = tmp_path / f"Light{j:04d}.fits"
+        fits.PrimaryHDU(raw.astype(np.float32)).writeto(p)
+        paths.append(str(p))
+        proc = (raw - pedestal) / flat * np.asarray(wb)[chan]
+        frames.append(_rcd_raw(proc.astype(np.float32), 'RGGB'))
+    # the coefficient varies across a flat-fielded frame (higher in the corners); the
+    # model reports its median over the interior it samples (2 x the per-plane border)
+    b = 2 * min(100, H // 16, W // 16)
+    want = np.array([np.median(wb[c] / flat[b:-b, b:-b]) for c in range(3)]) / gain
+    return frames, paths, want
 
 
-def test_noise_model_recovers_gain_and_white_balance():
-    gain, wb = 0.02, (1.6, 1.0, 1.5)
-    frames = _frames(gain=gain, wb=wb)
-    m = nm.measure_noise_model(frames, range(len(frames)), 'RGGB')
-    assert m is not None
-    want = np.asarray(wb) / gain          # var per ADU of signal: k_c = w_c / g
-    np.testing.assert_allclose(m['k'], want, rtol=0.06)
+def test_noise_model_from_raw_gain_and_processing_scale(tmp_path):
+    frames, paths, want = _session(tmp_path)
+    m = nm.measure_noise_model(frames, range(len(frames)), paths, 'RGGB', 0.02, 500.0)
+    assert m is not None and m['frames'] >= 3
+    np.testing.assert_allclose(m['k'], want, rtol=0.02)
 
 
-def test_noise_model_declines_without_a_pattern():
-    frames = _frames(n=3)
-    assert nm.measure_noise_model(frames, range(3), '') is None
-    assert nm.measure_noise_model(frames, [], 'RGGB') is None
+def test_noise_model_declines_without_pattern_or_gain(tmp_path):
+    frames, paths, _ = _session(tmp_path, n=2)
+    assert nm.measure_noise_model(frames, range(2), paths, '', 0.02, 500.0) is None
+    assert nm.measure_noise_model(frames, range(2), paths, 'RGGB', None, 500.0) is None
+    assert nm.measure_noise_model(frames, [], [], 'RGGB', 0.02, 500.0) is None
+    assert nm.measure_noise_model(frames, range(2), paths[:1], 'RGGB', 0.02, 500.0) is None
+
+
+def test_raw_gain_source_order(monkeypatch):
+    import argparse
+
+    from src import camera_profile as cp
+    from src.pipeline import _raw_gain_for_noise_model
+    lights = [types.SimpleNamespace(path='a'), types.SimpleNamespace(path='b')]
+    masters = {'bias': np.full((64, 64), 4990.0, np.float32)}
+    args = argparse.Namespace(_camera={'gain': 0.0165, 'label': 'Origin178', 'model': 'Origin178',
+                                       'iso': 200}, _session_bayer='RGGB')
+    g, src, ped = _raw_gain_for_noise_model(args, lights, masters)
+    assert g == pytest.approx(0.0165) and 'camera profile' in src and ped == pytest.approx(4990.0)
+    # no usable profile gain: measured on the session's raw lights
+    monkeypatch.setattr(cp, 'measure_raw_gain', lambda *a, **k: np.array([0.031, 0.030, 0.032]))
+    args._camera = None
+    g, src, ped = _raw_gain_for_noise_model(args, lights, masters)
+    assert g == pytest.approx(0.031) and 'measured' in src
+    # no bias and no profile: no pedestal, no model
+    assert _raw_gain_for_noise_model(args, lights, {'bias': None}) == (None, None, None)
 
 
 def test_temporal_noise_white_and_correlated():
