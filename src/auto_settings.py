@@ -642,13 +642,16 @@ def _apply_quality_settings(
             # subsumes what used to be a separate 'trimmed_mean' method --
             # same reject-tails-then-average operation).
             _set('stack_method', 'percentile')
-        elif n < 20:
+        else:
+            # 3.0 sigma / 3 iterations for every N >= 15. The tighter 2.8 / 4 that
+            # used to apply from 20 frames was 4-7% noisier at equal star width
+            # with proper coadd off (Sunflower) -- and coadd falls back to this
+            # stack when it cannot measure a PSF -- and with coadd on it made no
+            # difference (<= 0.1% on 6 of 7 sessions; Markarian's Chain 0.7%
+            # wider, 0.9% noisier).
             _set('stack_method', 'sigma_clip')
             _set('rejection_sigma', 3.0)
-        else:
-            _set('stack_method', 'sigma_clip')
-            _set('rejection_sigma', 2.8)
-            _set('rejection_iters', 4)
+            _set('rejection_iters', 3)
 
     # Consensus reference frame: enable for large frame counts (≥20)
     if n >= 20 and not getattr(args, 'consensus_ref', False):

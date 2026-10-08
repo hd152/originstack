@@ -80,3 +80,43 @@ def test_cfa_probe_calibrates_on_the_cpu(monkeypatch):
     frames = [argparse.Namespace(path=f'f{i}.fits') for i in range(20)]
     fp._measure_session_cfa(frames, {}, args)
     assert seen and all(v is False for v in seen)
+
+
+def test_session_ca_probe_survives_a_device_array_debayer(monkeypatch):
+    # With --use-gpu the main process's debayer returns a cupy array; the probe
+    # must bring it to host, or every sample is lost and each Phase 1 worker
+    # measures CA per frame (3.3 s/frame on a real session).
+    import argparse
+
+    import numpy as np
+
+    import src.frame_processor as fp
+    from src.models import FrameInfo
+
+    class Device:                       # stands in for a cupy array
+        def __init__(self, a):
+            self.a = a
+
+        def __array__(self, *a, **k):
+            raise TypeError('Implicit conversion to a NumPy array is not allowed')
+
+    class FakeGpu:
+        active = True
+
+        def to_host(self, x):
+            return x.a if isinstance(x, Device) else x
+
+    raw = np.random.default_rng(0).normal(100, 5, (64, 64)).astype(np.float32)
+    monkeypatch.setattr(fp, 'get_gpu', lambda: FakeGpu())
+    monkeypatch.setattr(fp, 'load_frame', lambda p: (raw, {'BAYERPAT': 'RGGB'}))
+    monkeypatch.setattr(fp, 'green_equalize', lambda d, pattern='RGGB': d)
+    monkeypatch.setattr(fp, 'debayer', lambda d, pattern='RGGB', method='bilinear':
+                        Device(np.repeat(d[..., None], 3, axis=2)))
+    seen = []
+    monkeypatch.setattr(fp, 'measure_chromatic_aberration',
+                        lambda rgb, **k: seen.append(type(rgb)) or {0: (0.0, 0.0), 2: (0.0, 0.0)})
+    args = argparse.Namespace(ca_correction=True, _session_bayer='RGGB')
+    frames = [FrameInfo(path=f'f{i}.fits', type='light', header={}) for i in range(20)]
+    out = fp._measure_session_ca(frames, args)
+    assert seen and all(t is np.ndarray for t in seen)
+    assert out is not None

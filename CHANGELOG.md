@@ -6,7 +6,31 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--transient-triage` works in every build, with a retrained model.** It used to need a native
+  build with an optional feature that release builds leave out, so it never ran in the app; it now
+  runs in plain numpy from the same model file. The model is retrained on real two-night pairs
+  (sources injected with each night's own PSF) as well as synthetic ones: on a target left out of
+  training it separates injected sources from real subtraction artefacts with ROC AUC 0.95-0.999,
+  where the old synthetic-only model scored 0.59-0.77. `tools/gen_transient_triage_real.py` builds
+  that training data from your own night pairs.
+- **`--auto` rejects at 3.0 sigma / 3 iterations from 20 frames up** (was 2.8 / 4). With proper
+  coadd on, the difference was within 0.1% on 6 of 7 sessions; when proper coadd is off or falls
+  back, 2.8 / 4 was 4-7% noisier at the same star width.
+
 ### Fixed
+
+- **`--use-gpu` was ~4x slower than CPU-only** (Sunflower: 344-368 s against 90-100 s on a 4 GB
+  card). The session chromatic-aberration probe lost its samples on the GPU, so every frame was
+  measured separately, and alignment used a GPU spline warp with only as many workers as VRAM
+  allowed. Both now run as without the GPU: 92-93 s, and a bit-identical stack.
+- **Colour calibration on dense, reddened fields.** The brightest-first Gaia query can return a
+  thin magnitude slice (Crab: G 13.1-13.8, 32 usable stars), and the fit then extrapolated a noisy
+  slope to the solar colour. When the usable stars span less than 1.5 mag it queries once more,
+  deeper (Crab: 65 stars; a solar-colour star renders -0.11 instead of -0.19). Calibration is now
+  skipped when star colours scatter by more than 0.2 mag about the fit (a crowded star cloud such
+  as M24), rather than applied.
 
 - **Colour calibration on rich star fields.** In a dense cluster like M37 the brightest Gaia stars
   are all saturated in 20 s subs, so the calibration found nothing usable and was skipped. It now

@@ -422,6 +422,31 @@ def fit_channel_scales(img: np.ndarray, header,
 SOLAR_BP_RP = 0.82
 
 
+_SOLAR_WANT_STARS = 150
+# The deeper query only pays when the first returned a thin magnitude slice
+# (Crab 0.7 mag); Whirlpool/Trifid (wider slices) gained no fitted stars from it.
+_SOLAR_THIN_SLICE_MAG = 1.5
+_SOLAR_DEEP_ROWS = 3000      # one deeper query: ~12 s against ~8 s for the first
+# Robust B-R scatter about the fitted line above which the photometry is not
+# trusted (crowding): real fields measured 0.05-0.10, M24's star cloud 0.36.
+_SOLAR_MAX_SCATTER = 0.2
+
+
+def _merge_gaia_matches(a, b):
+    """``a`` plus the stars of ``b`` (a fainter slice of the same field) that do
+    not land on a detection ``a`` already matched."""
+    from dataclasses import replace
+
+    from scipy.spatial import cKDTree
+    if len(a.x):
+        d, _ = cKDTree(np.c_[a.x, a.y]).query(np.c_[b.x, b.y])
+        new = d > max(3.0, 2.0 * a.fwhm)
+    else:
+        new = np.ones(len(b.x), bool)
+    fields = ('source_id', 'ra', 'dec', 'x', 'y', 'g', 'bp', 'rp', 'det_peak')
+    return replace(a, **{f: np.concatenate([getattr(a, f), getattr(b, f)[new]]) for f in fields})
+
+
 def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
                              min_stars: int = 15, slope_prior=None,
                              min_prior_stars: int = 6):
@@ -494,6 +519,24 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
                       f"re-queried Gaia from G > {g_min:.1f}")
             gm = deeper
             bp_rp, base, ok = select(gm)
+    # The query is brightest-first and capped, so a dense field returns a thin
+    # magnitude slice: Crab matched only G 13.1-13.8 and kept 32 stars. On a
+    # reddened field the fit then extrapolates from red stars to BP-RP 0.82 on a
+    # noisy slope -- the solar colour came out 0.04 mag off what ~1000 stars from
+    # four slices agreed on (every slice within 0.03 of the others). Query deeper
+    # once (the network round trip, not the matching, is the cost).
+    g_ok = gm.g[ok]
+    thin = ok.sum() < 8 or float(np.nanmax(g_ok) - np.nanmin(g_ok)) < _SOLAR_THIN_SLICE_MAG
+    if ok.sum() < _SOLAR_WANT_STARS and thin and np.isfinite(np.nanmax(gm.g)):
+        deeper = match_gaia_field(img, header, verbose=verbose, max_rows=_SOLAR_DEEP_ROWS,
+                                  min_g=float(np.nanmax(gm.g)))
+        if deeper is not None:
+            gm = _merge_gaia_matches(gm, deeper)
+            bp_rp, base, ok = select(gm)
+            if verbose:
+                from src.utils import safe_print
+                safe_print(f"  [colour cal] deeper Gaia query: {int(ok.sum())} usable "
+                           f"stars to G {float(np.nanmax(gm.g)):.1f}")
     xs, ys = gm.x, gm.y
     if ok.sum() < need:
         if verbose:
@@ -530,6 +573,11 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
     info = dict(n=int(good.sum()), slope_br=float(s_br), slope_gr=float(s_gr),
                 prior=bool(prior_used),
                 scatter_br=float(1.4826 * np.median(np.abs(resid - np.median(resid)))))
+    if info['scatter_br'] > _SOLAR_MAX_SCATTER:
+        if verbose:
+            print(f"  [colour cal] star colours scatter {info['scatter_br']:.2f} mag about "
+                  f"the fit (> {_SOLAR_MAX_SCATTER}; crowded field?) -- not applied")
+        return None
     if not all(0.5 <= v <= 2.0 for v in (s_r, s_b)):
         if verbose:
             print(f"  [colour cal] implausible scales R={s_r:.3f} B={s_b:.3f} -- not applied")

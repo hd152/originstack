@@ -186,7 +186,10 @@ def apply_transform(img: np.ndarray, shift: Optional[Tuple[float, float]] = None
             return out
         return _apply_transform_impl(img, shift, transform, local_field)
     top, bottom, left, right = (int(v) for v in crop)
-    native_ok = (local_field is None and HAS_NATIVE and not get_gpu().active
+    # Native even with --use-gpu: the multithreaded Lanczos-3 kernel is the validated
+    # warp, and cupy's order-3 spline ran alignment at 0.8 frames/s on a 4 GB card
+    # (VRAM-capped workers) against 10 on the CPU.
+    native_ok = (local_field is None and HAS_NATIVE
                  and isinstance(img, np.ndarray) and img.dtype == np.float32
                  and img.flags['C_CONTIGUOUS'] and img.ndim == 3
                  and hasattr(_native, 'warp_affine_lanczos3')
@@ -310,7 +313,11 @@ def _apply_transform_impl(img: np.ndarray, shift: Optional[Tuple[float, float]] 
             img = img[:, :, 0]
         return img
 
-    if gpu.active:
+    # The GPU only for warps the native kernel cannot do (an elastic field, a
+    # non-float32 or device-resident input): see apply_transform's windowed path.
+    native_can = (local_field is None and HAS_NATIVE and isinstance(img, np.ndarray)
+                  and img.dtype == np.float32 and img.flags['C_CONTIGUOUS'])
+    if gpu.active and not native_can:
         try:
             result = _run(gpu.xp, gpu.xndimage, gpu.to_device(img))
             out = gpu.to_host(result)

@@ -121,7 +121,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `uncertainty.py` | Monte Carlo Phase 4 uncertainty (`--uncertainty-propagate`), confidence map, `--error-aware-stretch` |
 | `color_calibrate.py` / `photometric_calibration.py` | Gaia colour calibration on the linear stack, on by default (`--no-color-calibrate`, methods solar/colorindex/spcc); gray-locus white balance |
 | `channel_combine.py` | `combine` subcommand: LRGB/SHO/HOO, SCNR, `--continuum` subtraction |
-| `difference_imaging.py` / `transient_triage.py` | ZOGY subtraction + detection (`--transient-detect REF.fits`); CNN triage (`--transient-triage`, needs a `triage`-feature native build) |
+| `difference_imaging.py` / `transient_triage.py` | ZOGY subtraction + detection (`--transient-detect REF.fits`); CNN triage (`--transient-triage`; numpy forward pass reading the bundled ONNX, native tract kernel in a `triage`-feature build) |
 | `photometry_core.py` | `aperture_photometry_batch`, WCS helpers (`_celestial_wcs`, `_pixel_coords`, `_field_centre_and_radius`) shared by photometry, colour calibration, annotation, mosaic |
 | `camera_profile.py` | Camera identified from the FITS `CAMERA` keyword (`Origin178-<unit>`); shipped per-model constants in `src/data/camera_profiles/<model>.json`: raw gain per ISO (Origin178: 0.0165 / 0.0064 e-/ADU at ISO 200 / 500; header `EGAIN` is ~4.5x high), checked on two of the session's own lights before photometry uses it (`resolve_camera` -> `args._camera`, `verify_gain`); colour slopes vs Gaia BP-RP, used by the solar colour fit only with 6-14 stars. Measurements and the not-shipped CFA prior / per-unit library in [camera-profile](dev-notes/camera-profile.md); `tools/measure_camera_profile.py` re-measures |
 | `photometry.py` / `photometry_timeseries.py` / `lightcurve_analysis.py` / `gain_ptc.py` | `--photometry`; `--photometry-timeseries`; `--lightcurve-analysis`; PTC gain from bias/flat pairs |
@@ -166,7 +166,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 - Never hold all frames in memory unless `frame_store` decided they fit (available RAM minus 20% of total minus worker reserve). Output must be bit-identical across RAM/disk placement (`tests/test_frame_store.py`). Shared-memory arrays are opened in workers with `track=False`.
 
 **Native (Rust) kernels** ([ext/astro_native/](ext/astro_native/), details in [dev-notes/native-kernels.md](dev-notes/native-kernels.md))
-- Every kernel needs a numpy mirror (fallback) and a parity test in `tests/test_native.py` (auto-skips without the module); OS004 lints for test references. Exception: transient triage, native-only and behind the Cargo feature `triage` (off by default; `maturin build --release --features triage`); `--transient-triage` self-disables without it.
+- Every kernel needs a numpy mirror (fallback) and a parity test in `tests/test_native.py` (auto-skips without the module); OS004 lints for test references. Transient triage's native kernel sits behind the Cargo feature `triage` (off by default; `maturin build --release --features triage`); its fallback is `transient_triage._score_numpy`, which reads the ONNX weights itself and supports only the `TriageNet` architecture.
 - Default is bit-identity with the numpy path: same f32 ops in the same order, no FMA; numpy 2 does `f32_array * python_float` in f32, so round scalars to f32 first; `np.median` of an even count is `(a+b)/2` in f32. Where identity is impossible (parallel reductions, histogram edges), say so and test with tolerance.
 - **Measure numpy's real baseline before porting.** Ports win when numpy/scipy does something wasteful (Python loops, full-frame work for a sparse result, needless copies), not by default.
 - Releases build for baseline x86-64; never ship `-C target-cpu=native`. Use run-time `is_x86_feature_detected!` twins (no FMA) for SIMD.
@@ -198,7 +198,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 - Registration RANSAC is seeded (`_RANSAC_SEED`) so two identical runs are bit-identical. Session reports use the frame *centre's* displacement, not the transform's corner translation.
 - A flat's `DATE-OBS` is `'0-00-00T00:00:00'`; take light headers from `discover_frames`. A FITS `TIMEZONE` is validated as `+/-HHMM` before use.
 - Mono SER/XISF are replicated to 3 channels at load; a mono TIFF is ambiguous and treated as Bayer unless a `.json` sidecar gives `bayerPattern`.
-- `--use-gpu` measured slower than CPU on a 4 GB card; Phase 1 goes to the CPU pool unless VRAM allows `os.cpu_count()` GPU workers (`args._phase1_gpu`).
+- `--use-gpu` on a 4 GB GTX 1650 Ti (2026-10, Sunflower): 344-368 s against 90-100 s CPU-only, until two fixes; now 92-93 s with a bit-identical linear stack. (1) The session CA probe debayers in the main process, which returned a cupy array; `np.ascontiguousarray` raised inside a bare `except`, so every worker measured CA per frame (3.3 s/frame) -- `_measure_session_ca` now calls `to_host`. (2) Phase 3 used cupy's order-3 spline warp with VRAM-capped workers (7, 0.8 frames/s vs 16 at ~10); the native Lanczos-3 warp now wins whenever it can run, the GPU only for elastic fields or without the native module. Phase 1 goes to the CPU pool unless VRAM allows `os.cpu_count()` GPU workers (`args._phase1_gpu`). Opt-in still: no gain measured either.
 - Cancel is cooperative (`args._cancel_event`, checked between Phase 1 frames and between targets); pools are shut down with `cancel_futures=True`.
 
 ### Tried and reverted — don't retry blind
@@ -207,10 +207,11 @@ Details in the linked notes.
 - Sort-based MAD sigma-clip / sort-once u32 keys for patch-weighted combine: 13-45% slower than quickselect.
 - Windowed selection predicted from the neighbour pixel; radix-histogram median: no faster.
 - Native rustfft `rfft2_batch` for proper coadd; Moffat closed-form spectrum; batched/AVX2 coadd accumulate; `FILE_ATTRIBUTE_TEMPORARY`; Phase 1 arrays in RAM; file writes instead of memmap slot assignment.
+- Pre-touching frame-store pages from a parent thread: a worker still faults every page in its own view (60-99 vs 68-72 ms per 75 MB slot; floor 10 ms) ([pipeline-notes](dev-notes/pipeline-notes.md)).
 - Measuring proper-coadd PSFs inside the alignment loop (GIL contention).
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).
 - RCD per-Bayer-site stages (stops vectorising); RCD strips without a buffer pool.
-- `--cfa-drizzle` as a default; demosaic-free luminance; ubercal flat from stars ([siril-comparison](dev-notes/siril-comparison.md)).
+- `--cfa-drizzle` as a default; demosaic-free luminance ([siril-comparison](dev-notes/siril-comparison.md)); ubercal flat from stars, single- and multi-night -- unconstrained on the 13 local sessions (<= 0.4 deg rotation per session, <= 0.5 deg between nights); untested on strongly rotating data such as the Lagoon set ([native-kernels](dev-notes/native-kernels.md)).
 - Per-frame lacosmic as a noise reducer (it was smoothing; fixed noise model now) ([siril-comparison](dev-notes/siril-comparison.md)).
 - Proper coadd outside the core in `--full-field` (normalised convolution, per-tile, MTF filter, Wiener) ([module-notes](dev-notes/module-notes.md)).
 - Widening `--use-gpu` coverage (fewer VRAM-bound workers); GPU stays opt-in.

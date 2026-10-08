@@ -557,9 +557,23 @@ class TestRunTransientDetection(unittest.TestCase):
         self.assertNotIn('real_probability', header)
 
     def test_triage_requested_but_unavailable_does_not_crash(self):
-        """--transient-triage without a native backend/model self-disables
-        with a warning (checked via the returned real_probability, not the
-        log) rather than raising."""
+        """--transient-triage with no usable model self-disables with a
+        warning (checked via the returned real_probability, not the log)
+        rather than raising."""
+        import src.transient_triage as tt_mod
+        had = tt_mod.resolve_model_path
+        tt_mod.resolve_model_path = lambda explicit=None: None
+        try:
+            new, ref = self._epochs(transient=(110.0, 120.0, 14000.0))
+            summary = self._run(new, ref, triage=True)
+        finally:
+            tt_mod.resolve_model_path = had
+        self.assertIsNotNone(summary)
+        self.assertTrue(all(t.real_probability is None for t in summary['transients']))
+
+    def test_triage_scores_without_the_native_kernel(self):
+        """The numpy backend scores every candidate when the native kernel
+        (``triage`` Cargo feature, absent from release builds) is missing."""
         import src.transient_triage as tt_mod
         had = tt_mod._HAS_NATIVE_TRIAGE
         tt_mod._HAS_NATIVE_TRIAGE = False
@@ -569,7 +583,9 @@ class TestRunTransientDetection(unittest.TestCase):
         finally:
             tt_mod._HAS_NATIVE_TRIAGE = had
         self.assertIsNotNone(summary)
-        self.assertTrue(all(t.real_probability is None for t in summary['transients']))
+        self.assertTrue(summary['transients'])
+        self.assertTrue(all(t.real_probability is not None and 0.0 <= t.real_probability <= 1.0
+                            for t in summary['transients']))
 
     @pytest.mark.skipif(
         not _tt_mod.scoring_backend_available() or _tt_mod.resolve_model_path(None) is None,

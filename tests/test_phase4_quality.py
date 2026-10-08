@@ -215,7 +215,9 @@ def test_solar_fit_requeries_fainter_on_a_saturated_rich_field(monkeypatch):
         return bright if min_g is None else gm
     monkeypatch.setattr(ph, 'match_gaia_field', fake)
     res = cc.fit_channel_scales_solar(img, header=None)
-    assert len(calls) == 2 and calls[0] is None and 12.0 < calls[1] <= 12.5
+    # (a third call is the deeper query a thin magnitude slice triggers; it adds
+    # nothing here, every star of it is already matched)
+    assert len(calls) >= 2 and calls[0] is None and 12.0 < calls[1] <= 12.5
     (sr, sg, sb), info = res
     np.testing.assert_allclose(sb * gain[2], sg * gain[1], rtol=0.03)
 
@@ -387,3 +389,16 @@ def test_dbe_radial_fill_follows_a_vignetting_dome_under_a_large_exclusion():
     small = (((yy - H / 2) / 40.0) ** 2 + ((xx - W / 2) / 60.0) ** 2) <= 1.0
     from src import background as bgm
     assert small.mean() < bgm._RADIAL_FILL_MIN_FRAC          # small regions keep the local fit
+
+
+def test_solar_fit_declines_when_star_colours_scatter(monkeypatch):
+    # crowded-field photometry (M24): measured colours unrelated to the catalogue's
+    import dataclasses
+
+    import src.photometry as ph
+    from src import color_calibrate as cc
+    img, gm, _gain = _star_field_with_colour_law()
+    perm = np.random.default_rng(3).permutation(len(gm.x))
+    scrambled = dataclasses.replace(gm, bp=gm.bp[perm], rp=gm.rp[perm])
+    monkeypatch.setattr(ph, 'match_gaia_field', lambda *a, **k: scrambled)
+    assert cc.fit_channel_scales_solar(img, header=None) is None

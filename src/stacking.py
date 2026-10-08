@@ -2016,9 +2016,13 @@ def run_stacking_phase(
                 apply_transform(rgb, shift=shifts[j], transform=transforms[j], local_field=lf,
                                 crop=(top, bottom, left, right), out=mem_aligned[j])
 
+        from src.registration import HAS_NATIVE as _warp_native
+        # VRAM caps workers only when the GPU really warps (no native kernel, or
+        # elastic fields); the native warp runs on the CPU with --use-gpu too.
+        _gpu_warps = gpu.active and (not _warp_native or displacement_fields is not None)
         n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                            Config.GPU_VRAM_RESERVE_MB), n_final)
-                   if gpu.active else min(os.cpu_count() or 4, n_final))
+                   if _gpu_warps else min(os.cpu_count() or 4, n_final))
         # Cap alignment workers so concurrent frame reads/writes don't thrash the
         # disk when available RAM is below the total working-set size.
         # Each worker needs: one source frame + one transformed frame in memory.
@@ -2564,9 +2568,11 @@ def run_stacking_phase(
                     return j, apply_transform(rgb, shift=shifts[j], transform=transforms[j],
                                              local_field=lf, crop=(top, bottom, left, right))
 
+            from src.registration import HAS_NATIVE as _warp_native
+            _gpu_warps = gpu.active and (not _warp_native or displacement_fields is not None)
             n_workers = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                                   Config.GPU_VRAM_RESERVE_MB), n_final)
-                         if gpu.active else min(os.cpu_count() or 4, n_final))
+                         if _gpu_warps else min(os.cpu_count() or 4, n_final))
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
                 futures = {executor.submit(_align_crop, j): j for j in range(n_final)}
                 for future in tqdm(as_completed(futures), total=n_final,
