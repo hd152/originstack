@@ -180,12 +180,39 @@ def test_solar_fit_declines_with_too_few_stars(monkeypatch):
     assert cc.fit_channel_scales_solar(img, header=None) is None
 
 
+def test_solar_fit_with_camera_slopes_on_a_sparse_field(monkeypatch):
+    # too few stars for a free fit: the camera profile's slopes leave only the
+    # intercepts to fit (src/camera_profile.py colour_slopes)
+    import src.photometry as ph
+    from src import color_calibrate as cc
+    # a field large enough that the 99.99th-percentile saturation guard sits on
+    # the sky, as on a real frame, not on the eight star peaks
+    img, gm, gain = _star_field_with_colour_law(n=10, H=1500)
+    monkeypatch.setattr(ph, 'match_gaia_field', lambda *a, **k: gm)
+    res = cc.fit_channel_scales_solar(img, header=None, slope_prior=(1.1, 0.5))
+    assert res is not None
+    (sr, sg, sb), info = res
+    assert info['prior'] and info['n'] < 15
+    np.testing.assert_allclose(sr * gain[0], sg * gain[1], rtol=0.03)
+    np.testing.assert_allclose(sb * gain[2], sg * gain[1], rtol=0.03)
+
+
+def test_solar_fit_ignores_camera_slopes_when_stars_suffice(monkeypatch):
+    import src.photometry as ph
+    from src import color_calibrate as cc
+    img, gm, gain = _star_field_with_colour_law()
+    monkeypatch.setattr(ph, 'match_gaia_field', lambda *a, **k: gm)
+    (sr, sg, sb), info = cc.fit_channel_scales_solar(img, header=None, slope_prior=(0.3, 0.1))
+    assert not info['prior'] and info['slope_br'] == pytest.approx(1.1, abs=0.1)
+    np.testing.assert_allclose(sb * gain[2], sg * gain[1], rtol=0.03)
+
+
 def test_colour_calibrate_stack_scales_both_arrays(monkeypatch):
     from src import color_calibrate as cc
     from src import pipeline
     monkeypatch.setattr(cc, 'calibrate_linear_stack', cc.calibrate_linear_stack.__wrapped__)
     monkeypatch.setattr(cc, 'fit_channel_scales_solar',
-                        lambda img, header, verbose=False: ((0.5, 1.0, 2.0), dict(
+                        lambda img, header, verbose=False, slope_prior=None: ((0.5, 1.0, 2.0), dict(
                             n=20, slope_br=1.0, slope_gr=0.5, scatter_br=0.05)))
     stacked = np.ones((4, 4, 3), np.float32)
     fits_copy = stacked.copy()

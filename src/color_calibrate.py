@@ -423,7 +423,8 @@ SOLAR_BP_RP = 0.82
 
 
 def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
-                             min_stars: int = 15):
+                             min_stars: int = 15, slope_prior=None,
+                             min_prior_stars: int = 6):
     """Per-channel scales that render a solar-colour (G2V) star white.
 
     For every detected, isolated, unsaturated star matched to Gaia DR3
@@ -438,6 +439,14 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
     assuming one (no B-V transformation, no guessed R band), uses only stars
     that are actually detected and well measured, and sizes the aperture from
     the measured FWHM.
+
+    ``slope_prior`` = (slope_BR, slope_GR): the camera's instrumental colour slopes
+    against BP-RP from its profile (src/camera_profile.py ``colour_slopes``). They
+    are a property of the sensor's spectral response -- per-channel scales (white
+    balance, flat, transparency) move only the intercepts -- so with fewer than
+    ``min_stars`` good stars, but at least ``min_prior_stars``, the fit keeps the
+    profile's slopes and fits only the intercepts (a median). A free fit is still
+    used whenever there are enough stars.
 
     Returns ``((s_R, s_G, s_B), info)`` with G fixed at 1, or ``None`` when too
     few good stars are found or the result is implausible (a channel scale
@@ -456,27 +465,41 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
     d2 = (xs[:, None] - xs[None, :]) ** 2 + (ys[:, None] - ys[None, :]) ** 2
     np.fill_diagonal(d2, np.inf)
     isolated = d2.min(axis=1) > (2.0 * gm.r_out) ** 2 if len(xs) > 1 else np.ones(len(xs), bool)
-    ok = (np.isfinite(bp_rp) & (bp_rp > -0.3) & (bp_rp < 2.5)
-          & (gm.det_peak < sat) & isolated)
-    if ok.sum() < min_stars:
+    base = np.isfinite(bp_rp) & (bp_rp > -0.3) & (bp_rp < 2.5) & isolated
+    ok = base & (gm.det_peak < sat)
+    need = min_stars if slope_prior is None else min(min_stars, min_prior_stars)
+    if ok.sum() < need:
+        # On a sparse field the 99.99th percentile is the sky itself, so 0.6x it sits
+        # below every star's peak (which includes the sky) and nothing passes. Then
+        # judge saturation against the data ceiling, above the sky.
+        sky = float(np.median(lum[::4, ::4]))
+        ceil = sky + 0.7 * (float(np.nanmax(lum)) - sky)
+        ok = base & (gm.det_peak < ceil)
+    if ok.sum() < need:
         if verbose:
-            print(f"  [colour cal] {int(ok.sum())} usable Gaia stars (< {min_stars})")
+            print(f"  [colour cal] {int(ok.sum())} usable Gaia stars (< {need})")
         return None
     flux, _sky, sky_sigma, _peak, area = aperture_photometry_batch(
         np.ascontiguousarray(img, dtype=np.float32), xs[ok], ys[ok],
         float(gm.ap_radius), float(gm.r_in), float(gm.r_out))
     snr = flux / np.maximum(sky_sigma * np.sqrt(area)[:, None], 1e-12)
     good = np.all(np.isfinite(flux) & (flux > 0) & (snr > 20.0), axis=1)
-    if good.sum() < min_stars:
+    if good.sum() < need:
         if verbose:
-            print(f"  [colour cal] {int(good.sum())} stars with SNR > 20 (< {min_stars})")
+            print(f"  [colour cal] {int(good.sum())} stars with SNR > 20 (< {need})")
         return None
     f = flux[good]
     c = bp_rp[ok][good]
     ci_br = -2.5 * np.log10(f[:, 2] / f[:, 0])
     ci_gr = -2.5 * np.log10(f[:, 1] / f[:, 0])
-    s_br, i_br = stats.theilslopes(ci_br, c)[:2]
-    s_gr, i_gr = stats.theilslopes(ci_gr, c)[:2]
+    prior_used = good.sum() < min_stars
+    if prior_used:
+        s_br, s_gr = (float(v) for v in slope_prior)
+        i_br = float(np.median(ci_br - s_br * c))
+        i_gr = float(np.median(ci_gr - s_gr * c))
+    else:
+        s_br, i_br = stats.theilslopes(ci_br, c)[:2]
+        s_gr, i_gr = stats.theilslopes(ci_gr, c)[:2]
     br_sun = i_br + s_br * SOLAR_BP_RP
     gr_sun = i_gr + s_gr * SOLAR_BP_RP
     # Multiply B by 10^(0.4 br_sun) and G by 10^(0.4 gr_sun) relative to R so
@@ -485,6 +508,7 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
     s_r, s_b, s_g = s_r / s_g, s_b / s_g, 1.0
     resid = ci_br - (i_br + s_br * c)
     info = dict(n=int(good.sum()), slope_br=float(s_br), slope_gr=float(s_gr),
+                prior=bool(prior_used),
                 scatter_br=float(1.4826 * np.median(np.abs(resid - np.median(resid)))))
     if not all(0.5 <= v <= 2.0 for v in (s_r, s_b)):
         if verbose:
@@ -494,7 +518,7 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
 
 
 def calibrate_linear_stack(img: np.ndarray, header, method: str = 'solar',
-                           verbose: bool = False):
+                           verbose: bool = False, slope_prior=None):
     """Colour-calibrate a *linear* stack in place before Phase 4.
 
     Returns ``(scales, info)`` (``info`` is a short description for the log)
@@ -503,12 +527,13 @@ def calibrate_linear_stack(img: np.ndarray, header, method: str = 'solar',
     in ``run_photometric_calibration``.
     """
     if method == 'solar':
-        fit = fit_channel_scales_solar(img, header, verbose=verbose)
+        fit = fit_channel_scales_solar(img, header, verbose=verbose, slope_prior=slope_prior)
         if fit is None:
             return None
         scales, d = fit
         info = (f"{d['n']} Gaia stars, white = G2V, B-R scatter "
-                f"{d['scatter_br']:.3f} mag")
+                f"{d['scatter_br']:.3f} mag"
+                + (", colour slopes from the camera profile" if d.get('prior') else ""))
     else:
         _, scales = run_photometric_calibration(img, header, verbose=verbose, method=method)
         if scales == (1.0, 1.0, 1.0):

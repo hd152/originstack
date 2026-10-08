@@ -430,10 +430,12 @@ def _colour_calibrate_stack(args, stacked: np.ndarray, *also, header=None) -> No
         return
     t0 = time.time()
     try:
+        from src.camera_profile import colour_slopes
         from src.color_calibrate import calibrate_linear_stack
         res = calibrate_linear_stack(stacked, hdr,
                                      method=getattr(args, 'color_calibrate_method', 'solar'),
-                                     verbose=bool(getattr(args, 'verbose', False)))
+                                     verbose=bool(getattr(args, 'verbose', False)),
+                                     slope_prior=colour_slopes(getattr(args, '_camera', None)))
     except Exception as e:
         safe_print(f"\n  WARNING: colour calibration failed: {e}")
         return
@@ -668,6 +670,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         safe_print("  ".join(_si_parts))
     else:
         safe_print(f"  Session info: no info.json found in {os.path.basename(_directory)!r}")
+
+    # Camera profile (src/camera_profile.py): the model's measured gain -- the Origin's
+    # FITS EGAIN is ~4.7x off -- checked on two of this session's lights when
+    # photometry will use it.
+    try:
+        from src.camera_profile import resolve_camera
+        resolve_camera(lights, args, verify=bool(getattr(args, 'photometry', False)
+                                                 or getattr(args, 'photometry_timeseries', False)))
+    except Exception as _ce:
+        args._camera = None
+        _log.debug("camera profile failed: %s", _ce)
 
     # Probe first frame for dimensions
     first_data, first_hdr = load_frame(lights[0].path)

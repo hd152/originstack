@@ -38,6 +38,8 @@ datas += [(str(ROOT / 'VERSION'), '.')]
 datas += [(str(ROOT / 'src' / 'data' / 'examples'), 'src/data/examples')]
 # Desktop-app translations (src/i18n.py reads src/locales/<code>.json by path).
 datas += [(str(ROOT / 'src' / 'locales'), 'src/locales')]
+# Camera profiles (src/camera_profile.py reads them by path).
+datas += [(str(ROOT / 'src' / 'data' / 'camera_profiles'), 'src/data/camera_profiles')]
 
 # The window icon. The EXE resource below sets the taskbar/Explorer icon, but
 # desktop_app.py also calls root.iconbitmap() with a path relative to its own
