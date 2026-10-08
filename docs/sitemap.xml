@@ -1,27 +1,319 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
     <loc>https://originstack.site/</loc>
     <lastmod>2026-10-07</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>1.0</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
   </url>
   <url>
-    <loc>https://originstack.site/advanced.html</loc>
+    <loc>https://originstack.site/de/</loc>
     <lastmod>2026-10-07</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/es/</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/fr/</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/it/</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/pt-br/</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/ja/</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/zh-cn/</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/"/>
   </url>
   <url>
     <loc>https://originstack.site/stack-celestron-origin.html</loc>
     <lastmod>2026-10-07</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/de/stack-celestron-origin.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/es/stack-celestron-origin.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/fr/stack-celestron-origin.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/it/stack-celestron-origin.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/pt-br/stack-celestron-origin.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/ja/stack-celestron-origin.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/zh-cn/stack-celestron-origin.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html"/>
   </url>
   <url>
     <loc>https://originstack.site/privacy.html</loc>
     <lastmod>2026-10-07</lastmod>
-    <changefreq>yearly</changefreq>
-    <priority>0.3</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/de/privacy.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/es/privacy.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/fr/privacy.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/it/privacy.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/pt-br/privacy.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/ja/privacy.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/zh-cn/privacy.html</loc>
+    <lastmod>2026-10-07</lastmod>
+    <xhtml:link rel="alternate" hreflang="en" href="https://originstack.site/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://originstack.site/de/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://originstack.site/es/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://originstack.site/fr/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="it" href="https://originstack.site/it/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://originstack.site/ja/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/privacy.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://originstack.site/privacy.html"/>
+  </url>
+  <url>
+    <loc>https://originstack.site/advanced.html</loc>
+    <lastmod>2026-10-07</lastmod>
   </url>
 </urlset>

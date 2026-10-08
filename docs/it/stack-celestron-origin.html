@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Come integrare le immagini del Celestron Origin sul tuo computer</title>
+<meta name="description" content="Passo per passo: prendi una cartella di sessione del Celestron Origin, integra i suoi frame FITS grezzi sul tuo computer con calibrazione bias, dark e flat, e ottieni un&#x27;immagine più nitida del FinalStackedMaster.tiff prodotto dal telescopio. Gratis.">
+<meta name="author" content="Tom Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/it/stack-celestron-origin.html">
+<meta property="og:locale" content="it_IT">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/it/stack-celestron-origin.html">
+<meta property="og:title" content="Come integrare le immagini del Celestron Origin sul tuo computer">
+<meta property="og:description" content="Reintegra i frame grezzi di una sessione del Celestron Origin sul tuo computer, gratis, e ottieni stelle più nitide dello stack del telescopio.">
+<meta property="og:image" content="https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg">
+<meta property="og:image:alt" content="La Nebulosa del Granchio dagli stessi frame: lo stack del Celestron Origin, quello di Siril e quello di OriginStack">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "inLanguage": "it",
+  "headline": "Come integrare le immagini del Celestron Origin sul tuo computer",
+  "description": "Reintegra i frame FITS grezzi di una sessione del Celestron Origin sul tuo computer con OriginStack, uno stacker per astrofotografia gratuito e open source.",
+  "url": "https://originstack.site/stack-celestron-origin.html",
+  "image": "https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg",
+  "author": {
+    "@type": "Person",
+    "name": "Tom Davenport"
+  },
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "OriginStack",
+    "url": "https://originstack.site/"
+  },
+  "datePublished": "2026-10-07",
+  "dateModified": "2026-10-07"
+}
+</script>
+<link rel="icon" href="../img/favicon.png">
+<link rel="preload" href="../fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pagine">
+        <a href="./">Home</a> <a href="../advanced.html">Avanzate</a> <a href="./#get">Installazione</a>
+      </nav>
+    </div>
+    <h1>Come integrare le immagini del Celestron Origin sul tuo computer</h1>
+    <p class="lede">L'Origin integra man mano, ma conserva anche ogni frame grezzo che ha scattato. Integrare di nuovo quei frame su un computer, con una calibrazione e un allineamento accurati, dà un'immagine più nitida e pulita di quella salvata dal telescopio. Questa guida lo fa con OriginStack, che è gratuito e funziona sul tuo computer.</p>
+    <p class="toc">
+      <a href="#folder">Cosa c'è in una cartella di sessione</a> <a href="#steps">Lo stacking, passo per passo</a> <a href="#nights">Più notti</a> <a href="#why">Perché reintegrare</a> <a href="#problems">Se qualcosa va storto</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="folder">
+  <div class="wrap">
+    <h2>Cosa c'è in una cartella di sessione del Celestron Origin</h2>
+    <p class="intro measure">Ogni sessione di ripresa ha la propria cartella, con il nome del soggetto e l'ora di inizio, per esempio <code>Black_Eye_Galaxy_2026-03-14_21-20-36</code>. Copia l'intera cartella sul tuo computer e lasciane il contenuto così com'è. OriginStack riconosce da solo ogni file.</p>
+    <dl class="feat">
+      <div><dt>I light<code>Light0001.fits ...</code></dt>
+        <dd><p>Un file FITS per esposizione. Sono i dati grezzi del sensore, ancora nel mosaico di colori della camera, ed è ciò che viene integrato.</p></dd></div>
+      <div><dt>Frame di calibrazione<code>bias, dark, flat</code></dt>
+        <dd><p>Frame bias, dark e flat, quando la sessione li contiene. Registrano l'offset del sensore, il suo segnale termico e i pixel caldi, e la vignettatura dell'ottica. OriginStack ne costruisce dei master e corregge ogni light con essi. Una sessione che ne è priva si integra comunque; semplicemente salta quella correzione.</p></dd></div>
+      <div><dt>Informazioni di sessione<code>info.json</code></dt>
+        <dd><p>Scritto dall'Origin: il nome del soggetto, lo schema di colori del sensore, la tua posizione GPS e il punto del cielo a cui era puntato il telescopio. OriginStack lo usa per dare il nome al soggetto, scegliere le impostazioni adatte e collocare lo stack nel cielo.</p></dd></div>
+      <div><dt>Lo stack del telescopio<code>FinalStackedMaster.tiff</code></dt>
+        <dd><p>L'immagine costruita dall'Origin durante la sessione. OriginStack la ignora, così non viene mai integrata come un frame in più.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>Lo stacking, passo per passo</h2>
+    <dl class="feat">
+      <div><dt>1. Installa OriginStack<code>Windows, macOS, Linux</code></dt>
+        <dd><p>Su Windows, scarica il file di installazione dall'<a data-goatcounter-click="release-page-stack-celestron-origin" href="https://github.com/hd152/originstack/releases/latest">ultima release</a> ed eseguilo. Il programma di installazione non è ancora firmato digitalmente, quindi SmartScreen potrebbe avvisarti: scegli Ulteriori informazioni, poi Esegui comunque. Su un Mac, scarica dalla stessa pagina lo zip per Apple silicon o Intel e trascina OriginStack in Applicazioni; il primo avvio richiede un'approvazione in più, descritta insieme ai passaggi per Linux nella <a href="./#get">home page</a>. Non richiede account né Python.</p></dd></div>
+      <div><dt>2. Scegli la cartella di sessione</dt>
+        <dd><p>Apri l'app e scegli la cartella che hai copiato. Conta i frame e legge il nome del soggetto da <code>info.json</code>.</p></dd></div>
+      <div><dt>3. Di' cosa hai ripreso</dt>
+        <dd><p>Scegli Galassia, Nebulosa, Ammasso stellare, Campo stellare o Cometa, oppure lascia Rilevamento automatico. L'app ne suggerisce uno in base alla sessione. Scegli Qualità piena, o Anteprima rapida per un controllo più veloce.</p></dd></div>
+      <div><dt>4. Premi Avvia</dt>
+        <dd><p>I frame vengono calibrati, valutati, allineati (compresa la lenta rotazione di campo prodotta da una montatura alt-az come quella dell'Origin), integrati con rigetto degli outlier e rifiniti: vengono trattati gradienti, colore e rumore e al risultato viene applicato uno stretch per la visualizzazione. Una sessione di circa cento frame richiede un minuto o due su un desktop recente a 8 core. L'anteprima segue ogni passaggio man mano che avviene.</p></dd></div>
+      <div><dt>5. Usa il risultato</dt>
+        <dd><p>Lascia vuoto il campo di output e lo stack viene salvato accanto alla cartella di sessione, senza mai sovrascriverne uno precedente. Ottieni un JPEG da guardare e condividere, e un file FITS che resta lineare, per ulteriori lavorazioni in altri software o da unire in seguito a un'altra notte.</p></dd></div>
+    </dl>
+    <p class="plain measure">Preferisci la riga di comando? La stessa esecuzione è <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="nights">
+  <div class="wrap">
+    <h2>Più notti sullo stesso soggetto</h2>
+    <p class="intro measure">Metti la cartella di sessione di ogni notte dentro un'unica cartella superiore e scegli quest'ultima. Poiché il campo dell'Origin ruota mentre insegue un soggetto, le notti raramente combaciano esattamente. OriginStack legge prima i metadati di ogni sessione e poi unisce tutti i frame oppure integra ogni notte separatamente e le congiunge con un abbinamento stellare immune alla rotazione, scegliendo l'opzione che conserva più immagine. Per aggiungere i frame di stanotte a uno stack che hai già fatto, usa <code>--merge</code>. I dettagli sono nella <a href="../advanced.html#rotation">pagina avanzata</a>.</p>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <h2>Perché reintegrare invece di usare FinalStackedMaster.tiff</h2>
+    <p class="intro measure">Su quattro sessioni dell'Origin, con gli stessi frame, lo stack del telescopio aveva stelle più larghe dal 3 al 38% rispetto a quelle di OriginStack, mentre il rumore era entro pochi punti percentuali. Il file dell'Origin ha però un vantaggio: i gradienti del cielo sono già rimossi. OriginStack li rimuove nei suoi passaggi di finitura.</p>
+    <div class="figs">
+      <figure class="wide">
+        <picture><source type="image/webp" srcset="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Tre ritagli della Nebulosa del Granchio a piena risoluzione dagli stessi frame: lo stack del Celestron Origin, quello di Siril e quello di OriginStack, tutti con lo stesso stretch. Le stelle e i filamenti della nebulosa dell&#x27;Origin sono visibilmente più morbidi."></picture>
+        <figcaption>La Nebulosa del Granchio dagli stessi 133 frame, tutti con lo stesso stretch: lo stack dell'Origin (a sinistra), Siril e OriginStack.</figcaption>
+      </figure>
+    </div>
+    <p class="caveat measure">Le misure complete, il metodo e un confronto con Siril e DeepSkyStacker sono nella <a href="./#vs-origin">home page</a>. Quattro sessioni da un solo telescopio sono un campione piccolo; <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> ripete il confronto sui tuoi frame.</p>
+  </div>
+</section>
+
+<section id="problems">
+  <div class="wrap">
+    <h2>Se qualcosa va storto</h2>
+    <dl class="feat">
+      <div><dt>Non ha trovato frame</dt>
+        <dd><p>Scegli la cartella che contiene direttamente i file <code>Light*.fits</code>, o una cartella di cartelle di sessione, non una cartella di livello superiore.</p></dd></div>
+      <div><dt>Ha scelto il tipo di soggetto sbagliato</dt>
+        <dd><p>Scegli tu la scheda invece di Rilevamento automatico. Dalla riga di comando, passa <code>--target-type</code>.</p></dd></div>
+      <div><dt>Non hai una connessione internet</dt>
+        <dd><p>Lo stacking funziona offline. Spunta Offline nell'app, o passa <code>--offline</code>, e OriginStack non effettua alcuna richiesta di rete.</p></dd></div>
+      <div><dt>Qualsiasi altra cosa</dt>
+        <dd><p>Apri una <a href="https://github.com/hd152/originstack/issues">issue su GitHub</a> con il log del riquadro in basso a sinistra dell'app.</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack è software libero con licenza MIT.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="../advanced.html">Funzioni avanzate</a> &nbsp; <a data-goatcounter-click="source-github-stack-celestron-origin" href="https://github.com/hd152/originstack">Codice sorgente</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Segnala un problema</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../stack-celestron-origin.html" hreflang="en" lang="en">English</a> <a href="../de/stack-celestron-origin.html" hreflang="de" lang="de">Deutsch</a> <a href="../es/stack-celestron-origin.html" hreflang="es" lang="es">Español</a> <a href="../fr/stack-celestron-origin.html" hreflang="fr" lang="fr">Français</a> <a href="../it/stack-celestron-origin.html" hreflang="it" lang="it" aria-current="true">Italiano</a> <a href="../pt-br/stack-celestron-origin.html" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/stack-celestron-origin.html" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/stack-celestron-origin.html" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+</body>
+</html>

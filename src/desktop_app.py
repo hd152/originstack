@@ -28,6 +28,8 @@ from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.i18n import N_, _
+
 
 def _log_dir() -> Path:
     r"""Per-user log folder: %LOCALAPPDATA%\OriginStack\logs on Windows, ~/Library/Logs
@@ -101,6 +103,17 @@ _MONO = 'Consolas' if sys.platform == 'win32' else 'DejaVu Sans Mono'
 _FONT = (_SANS, 9)
 _FONT_BOLD = (_SANS, 9, 'bold')
 _FONT_MONO = (_MONO, 9)
+_CJK_SANS = {'ja': 'Yu Gothic UI', 'zh_CN': 'Microsoft YaHei UI'}
+
+
+def _set_fonts(language: str) -> None:
+    """Use a face with the language's glyphs on Windows: Segoe UI has no CJK
+    characters, and Tk's per-glyph fallback mixes mismatched faces."""
+    global _SANS, _FONT, _FONT_BOLD
+    if sys.platform == 'win32' and language in _CJK_SANS:
+        _SANS = _CJK_SANS[language]
+        _FONT = (_SANS, 9)
+        _FONT_BOLD = (_SANS, 9, 'bold')
 
 
 def _apply_theme(root: tk.Tk) -> ttk.Style:
@@ -265,23 +278,23 @@ _COMMON_DESTS = ['directory', 'output', 'auto', 'stack_method',
 # underscores spaced and the first letter capitalised ("stack_method" ->
 # "Stack method"). Only the cases where that reads badly are overridden.
 _FIELD_LABELS = {
-    'directory': 'Light frames',
-    'output': 'Output file',
-    'parallel': 'Workers',
-    'use_gpu': 'Use GPU',
-    'trail_reject': 'Trail rejection',
-    'drizzle_scale': 'Drizzle scale',
-    'plate_solve': 'Plate solve',
-    'color_calibrate': 'Colour calibrate',
-    'remove_stars': 'Starless sidecar',
-    'deconvolve_mode': 'Deconvolution',
-    'session_cfa_eq': 'Session colour equalisation',
-    'ca_correction': 'Chromatic aberration fix',
-    'cfa_drizzle': 'Bayer drizzle',
-    'dark_temp_model': 'Dark temperature model',
-    'super_res_iters': 'Super-resolution passes',
-    'bg_method': 'Background method',
-    'scnr': 'SCNR (green removal)',
+    'directory': N_('Light frames'),
+    'output': N_('Output file'),
+    'parallel': N_('Workers'),
+    'use_gpu': N_('Use GPU'),
+    'trail_reject': N_('Trail rejection'),
+    'drizzle_scale': N_('Drizzle scale'),
+    'plate_solve': N_('Plate solve'),
+    'color_calibrate': N_('Colour calibrate'),
+    'remove_stars': N_('Starless sidecar'),
+    'deconvolve_mode': N_('Deconvolution'),
+    'session_cfa_eq': N_('Session colour equalisation'),
+    'ca_correction': N_('Chromatic aberration fix'),
+    'cfa_drizzle': N_('Bayer drizzle'),
+    'dark_temp_model': N_('Dark temperature model'),
+    'super_res_iters': N_('Super-resolution passes'),
+    'bg_method': N_('Background method'),
+    'scnr': N_('SCNR (green removal)'),
 }
 
 
@@ -306,8 +319,13 @@ _NO_CHANGE_MARK = {'directory', 'output'}
 
 
 def _field_label(field: Dict[str, Any]) -> str:
+    """The English label, which is also its translation key."""
     dest = field['dest']
     return _FIELD_LABELS.get(dest, dest.replace('_', ' ').capitalize())
+
+
+def _field_label_ui(field: Dict[str, Any]) -> str:
+    return _(_field_label(field))
 
 
 # ── Setup: "what did you image?" cards and the run mode ─────────────
@@ -320,26 +338,41 @@ _EXAMPLES_DIR = Path(__file__).resolve().parent / 'data' / 'examples'
 # reaches the run through read_form() like any other change. Descriptions
 # say only what auto_settings._TARGET_SETTINGS does for that type.
 _TARGET_CARDS = (
-    ('auto', 'Auto-detect',
-     'Recognised from the session, header or folder name, then the frames.',
+    ('auto', N_('Auto-detect'),
+     N_('Recognised from the session, header or folder name, then the frames.'),
      '', False, None, None),
-    ('galaxy', 'Galaxy',
-     'Keeps the faint halo out of background removal; trims star size.',
-     'galaxy', False, 'galaxy.jpg', 'Example galaxy: Whirlpool Galaxy (M51), Celestron Origin'),
-    ('nebula', 'Nebula',
-     'Diffuse emission: a gentler stretch, stars kept full size.',
-     'emission_nebula', False, 'nebula.jpg', 'Example nebula: Omega Nebula (M17), Celestron Origin'),
-    ('cluster', 'Star cluster',
-     'Dense clusters: a dark sky background, stars kept full size.',
+    ('galaxy', N_('Galaxy'),
+     N_('Keeps the faint halo out of background removal; trims star size.'),
+     'galaxy', False, 'galaxy.jpg', N_('Example galaxy: Whirlpool Galaxy (M51), Celestron Origin')),
+    ('nebula', N_('Nebula'),
+     N_('Diffuse emission: a gentler stretch, stars kept full size.'),
+     'emission_nebula', False, 'nebula.jpg', N_('Example nebula: Omega Nebula (M17), Celestron Origin')),
+    ('cluster', N_('Star cluster'),
+     N_('Dense clusters: a dark sky background, stars kept full size.'),
      'globular_cluster', False, None, None),
-    ('starfield', 'Star field',
-     'Rich star fields and Milky Way regions; light local contrast.',
+    ('starfield', N_('Star field'),
+     N_('Rich star fields and Milky Way regions; light local contrast.'),
      'star_field', False, 'starfield.jpg',
-     'Example star field: Sagittarius Star Cloud (M24), Celestron Origin'),
-    ('comet', 'Comet',
-     'Also stacks on the moving nucleus (saved as a second _comet image).',
+     N_('Example star field: Sagittarius Star Cloud (M24), Celestron Origin')),
+    ('comet', N_('Comet'),
+     N_('Also stacks on the moving nucleus (saved as a second _comet image).'),
      '', True, None, None),
 )
+# target_inference's source codes, as the phrase shown after a target name.
+_SOURCE_PHRASES = {'session': N_('from the session file'), 'header': N_('from the FITS header'),
+                   'folder': N_('from the folder name'), 'filename': N_('from the file name'),
+                   'simbad': N_('from SIMBAD')}
+
+
+def _from_source(src: Optional[str]) -> str:
+    return _(_SOURCE_PHRASES[src]) if src in _SOURCE_PHRASES else ''
+
+
+def _target_label(target_type: str) -> str:
+    from src.auto_settings import TARGET_LABELS
+    return _(TARGET_LABELS.get(target_type, target_type))
+
+
 # Inferred target types -> the card that shows them.
 _TYPE_TO_CARD = {'galaxy': 'galaxy', 'emission_nebula': 'nebula', 'reflection_nebula': 'nebula',
                  'planetary_nebula': 'nebula', 'globular_cluster': 'cluster',
@@ -350,8 +383,8 @@ _TYPE_TO_CARD = {'galaxy': 'galaxy', 'emission_nebula': 'nebula', 'reflection_ne
 # min for <0.3% change) and deconvolution (no help at typical Origin SNR), so
 # offering it as "best quality" would sell a slower run, not a better one.
 _RUN_MODES = (
-    ('full', 'Full quality', 'Recommended. Every step that measured as an improvement.', ''),
-    ('quick', 'Quick look', 'Faster check: no outlier rejection, lighter processing.', 'quick'),
+    ('full', N_('Full quality'), N_('Recommended. Every step that measured as an improvement.'), ''),
+    ('quick', N_('Quick look'), N_('Faster check: no outlier rejection, lighter processing.'), 'quick'),
 )
 # Fields the cards and run mode set; not counted as "changed" settings.
 _PICKER_DESTS = {'target_type', 'comet_mode', 'preset'}
@@ -381,11 +414,11 @@ def _card_thumbnail(card: tuple):
     im = Image.new('RGB', _THUMB, (6, 7, 10))
     d = ImageDraw.Draw(im)
     rnd = random.Random(7)
-    for _ in range(50):
+    for _i in range(50):
         v = rnd.randrange(60, 190)
         d.point((rnd.randrange(w), rnd.randrange(h)), fill=(v, v, v))
     if key == 'cluster':
-        for _ in range(260):
+        for _i in range(260):
             x, y = rnd.gauss(w / 2, w / 9), rnd.gauss(h / 2, h / 7)
             v = rnd.randrange(150, 255)
             d.point((x, y), fill=(v, v, int(v * 0.9)))
@@ -456,26 +489,26 @@ class GoalPicker(ttk.Frame):
         self._on_pick = on_pick
         self.suggested: Optional[str] = None
 
-        ttk.Label(self, text='WHAT DID YOU IMAGE?', style='TLabelframe.Label').pack(
+        ttk.Label(self, text=_('WHAT DID YOU IMAGE?'), style='TLabelframe.Label').pack(
             anchor='w', pady=(10, 4))
         grid = ttk.Frame(self)
         grid.pack(fill='x')
         self.cards: Dict[str, _Choice] = {}
         for i, card in enumerate(_TARGET_CARDS):
-            c = _Choice(grid, card[1], card[2], lambda c=card: self.pick_target(c[0]),
+            c = _Choice(grid, _(card[1]), _(card[2]), lambda c=card: self.pick_target(c[0]),
                         photo=_card_thumbnail(card))
             c.grid(row=i // 3, column=i % 3, padx=3, pady=3, sticky='nsew')
             self.cards[card[0]] = c
         for col in range(3):
             grid.grid_columnconfigure(col, weight=1, uniform='card')
 
-        ttk.Label(self, text='HOW SHOULD IT RUN?', style='TLabelframe.Label').pack(
+        ttk.Label(self, text=_('HOW SHOULD IT RUN?'), style='TLabelframe.Label').pack(
             anchor='w', pady=(12, 4))
         modes = ttk.Frame(self)
         modes.pack(fill='x')
         self.modes: Dict[str, _Choice] = {}
         for i, (key, title, text, _preset) in enumerate(_RUN_MODES):
-            m = _Choice(modes, title, text, lambda k=key: self.pick_mode(k))
+            m = _Choice(modes, _(title), _(text), lambda k=key: self.pick_mode(k))
             m.text.configure(wraplength=220)
             m.grid(row=0, column=i, padx=3, sticky='nsew')
             modes.grid_columnconfigure(i, weight=1, uniform='mode')
@@ -518,11 +551,11 @@ class GoalPicker(ttk.Frame):
         """Badge the card matching what the session/header says, and tell the
         Auto-detect card what it will use."""
         self.suggested = _TYPE_TO_CARD.get(target_type or '')
-        auto_text = _TARGET_CARDS[0][2]
+        auto_text = _(_TARGET_CARDS[0][2])
         if self.suggested and target_type:
-            from src.auto_settings import TARGET_LABELS
-            label = TARGET_LABELS.get(target_type, target_type)
-            auto_text = f'Will start from: {label}' + (f' ({name})' if name else '') + '.'
+            label = _target_label(target_type)
+            auto_text = (_('Will start from: {label} ({name}).', label=label, name=name) if name
+                         else _('Will start from: {label}.', label=label))
         self.cards['auto'].text.configure(text=auto_text)
         self.refresh()
 
@@ -530,7 +563,7 @@ class GoalPicker(ttk.Frame):
         target, mode = self.selected_target(), self.selected_mode()
         for key, card in self.cards.items():
             card.set_state(key == target)
-            card.set_badge('SUGGESTED' if key == self.suggested and key != target else '')
+            card.set_badge(_('SUGGESTED') if key == self.suggested and key != target else '')
         for key, m in self.modes.items():
             m.set_state(key == mode)
 
@@ -542,7 +575,7 @@ class GoalPicker(ttk.Frame):
             key = self.suggested
         card = next((c for c in _TARGET_CARDS if c[0] == key), None)
         if card and card[5] and (_EXAMPLES_DIR / card[5]).exists():
-            return _EXAMPLES_DIR / card[5], card[6]
+            return _EXAMPLES_DIR / card[5], _(card[6])
         return None, ''
 
 
@@ -618,7 +651,7 @@ class SetupForm(ttk.Frame):
         self._toggle_btn.pack(side='left', fill='x', expand=True)
         self.search_var = tk.StringVar(value='')
         ttk.Entry(bar, textvariable=self.search_var, width=22).pack(side='right', padx=(8, 0))
-        ttk.Label(bar, text='Search settings', style='Dim.TLabel').pack(side='right')
+        ttk.Label(bar, text=_('Search settings'), style='Dim.TLabel').pack(side='right')
         self.search_var.trace_add('write', lambda *_: self._on_search())
 
         # A sidebar of group names, not a Notebook of horizontal tabs: this
@@ -632,7 +665,7 @@ class SetupForm(ttk.Frame):
         nav.pack_propagate(False)
         content = ttk.Frame(self._advanced_body)
         content.pack(side='left', fill='both', expand=True, padx=(10, 0))
-        self._no_match = ttk.Label(content, text='No settings match.', style='Dim.TLabel')
+        self._no_match = ttk.Label(content, text=_('No settings match.'), style='Dim.TLabel')
 
         # Plain frames: the whole form scrolls in the App's ScrollableFrame
         # (a scroll area per page nested inside that one fought it for the
@@ -642,7 +675,7 @@ class SetupForm(ttk.Frame):
         self._current_group: Optional[str] = None
         for group_title in self.schema:
             self._pages[group_title] = ttk.Frame(content)
-            lbl = tk.Label(nav, text=group_title, background=_PANEL, foreground=_TEXT_DIM,
+            lbl = tk.Label(nav, text=_(group_title), background=_PANEL, foreground=_TEXT_DIM,
                           font=_FONT, anchor='w', justify='left', wraplength=148,
                           padx=12, pady=9)
             lbl.bind('<Button-1>', lambda _e, g=group_title: self._show_group(g))
@@ -650,7 +683,7 @@ class SetupForm(ttk.Frame):
         self._nav = nav
 
         self.expert_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(nav, text='Expert options', variable=self.expert_var,
+        ttk.Checkbutton(nav, text=_('Expert options'), variable=self.expert_var,
                         command=self._refresh_expert).pack(side='bottom', anchor='w',
                                                            padx=8, pady=8)
 
@@ -708,7 +741,7 @@ class SetupForm(ttk.Frame):
             visible_groups = [g for g in self.schema if expert or not _is_expert_group(g)]
         for g, lbl in self._nav_labels.items():
             if g in visible_groups:
-                lbl.configure(text=f'{g}  ({matches[g]})' if terms else g)
+                lbl.configure(text=f'{_(g)}  ({matches[g]})' if terms else _(g))
                 lbl.pack(fill='x')
 
         if not visible_groups:
@@ -742,8 +775,8 @@ class SetupForm(ttk.Frame):
         n = sum(1 for d, info in self._fields.items()
                 if info['group'] is not None and d not in _PICKER_DESTS and self._is_changed(d))
         arrow = '▾' if self._advanced_shown else '▸'
-        suffix = f'  ·  {n} changed' if n else ''
-        self._toggle_btn.configure(text=f'{arrow} Additional options{suffix}')
+        suffix = '  ·  ' + _('{n} changed', n=n) if n else ''
+        self._toggle_btn.configure(text=f"{arrow} {_('Additional options')}{suffix}")
 
     def _show_group(self, group_title: str) -> None:
         self._current_group = group_title
@@ -772,18 +805,19 @@ class SetupForm(ttk.Frame):
         # Human label from the dest, never the raw "--flag" (and never the
         # *negating* flag for bool_false fields like dest 'auto' / flag
         # '--no-auto', which would read backwards next to a checked box).
-        label = ttk.Label(parent, text=_field_label(field))
+        label = ttk.Label(parent, text=_field_label_ui(field))
         label.grid(row=row, column=1, sticky='w', padx=(0, 8), pady=(5, 0))
         widgets.append(label)
         # Tooltip keeps the CLI flag name and the full help discoverable.
-        _tip = field.get('help') or ''
+        _tip = _(field['help']) if field.get('help') else ''
         _flag = field.get('flag')
         if _flag:
             _tip = f"{_flag}\n{_tip}".strip()
         if _tip:
             _Tooltip(label, _tip)
 
-        summary = field.get('summary') or ''
+        summary_en = field.get('summary') or ''
+        summary = _(summary_en) if summary_en else ''
         inline_hint = None
         if kind in ('bool_true', 'bool_false'):
             var = tk.BooleanVar(value=bool(field['default']))
@@ -814,7 +848,7 @@ class SetupForm(ttk.Frame):
             w.grid(row=row, column=2, sticky='we', pady=(5, 0))
             widget_hint = field.get('widget')
             if widget_hint:
-                b = ttk.Button(parent, text='Browse…', width=9,
+                b = ttk.Button(parent, text=_('Browse…'),
                                command=lambda d=dest, v=var, h=widget_hint:
                                    self._browse(d, v, h))
                 b.grid(row=row, column=3, padx=(4, 0), pady=(5, 0))
@@ -850,7 +884,7 @@ class SetupForm(ttk.Frame):
 
         self.vars[dest] = var
         self._initial[dest] = var.get()
-        self._labels[dest] = _field_label(field)
+        self._labels[dest] = _field_label_ui(field)
         var.trace_add('write', lambda *_: self._notify_change())
         self._fields[dest] = {
             'widgets': widgets, 'group': group, 'dot': dot, 'reset': reset,
@@ -858,8 +892,10 @@ class SetupForm(ttk.Frame):
             # Not the full help: it mentions related features ("drizzle"
             # appears in the help of half the registration options), so a
             # search would list everything near a topic, not the setting.
-            'haystack': ' '.join([_field_label(field), field.get('flag') or '', dest,
-                                  summary, ' '.join(str(c) for c in field.get('choices') or [])
+            # English and the translation both, so either finds a setting.
+            'haystack': ' '.join([_field_label(field), _field_label_ui(field),
+                                  field.get('flag') or '', dest, summary_en, summary,
+                                  ' '.join(str(c) for c in field.get('choices') or [])
                                   ]).replace('_', ' ').lower(),
         }
         if dest not in _NO_CHANGE_MARK:
@@ -879,7 +915,7 @@ class SetupForm(ttk.Frame):
         info = self._fields[dest]
         changed = self._is_changed(dest)
         info['dot'].configure(text='●' if changed else '')
-        info['reset'].configure(text='reset' if changed else '')
+        info['reset'].configure(text=_('reset') if changed else '')
         if info['group'] is not None:
             self._refresh_toggle_text()
 
@@ -904,49 +940,56 @@ class SetupForm(ttk.Frame):
     def describe_run(self) -> List[Tuple[str, str]]:
         """(heading, text) rows describing what Start will do with the
         current form -- the App's "This run" panel."""
-        from src.auto_settings import TARGET_LABELS
         v = {d: var.get() for d, var in self.vars.items()}
         directory = str(v.get('directory') or '').strip()
-        rows = [('Frames', self._data_summary or
-                 ('No light frames found in that folder.' if directory
-                  else 'Choose the folder with your light frames.'))]
+        rows = [(_('Frames'), self._data_summary or
+                 (_('No light frames found in that folder.') if directory
+                  else _('Choose the folder with your light frames.')))]
 
         name, inf_type, src = self.inferred
         auto = bool(v.get('auto', True))
         if v.get('comet_mode'):
-            target = 'Comet: a second stack aligned on the nucleus'
+            target = _('Comet: a second stack aligned on the nucleus')
         elif not auto:
-            target = 'Auto advisor off: no tuning for the target'
+            target = _('Auto advisor off: no tuning for the target')
         elif v.get('target_type'):
-            target = f"{TARGET_LABELS.get(v['target_type'], v['target_type'])} (your choice)"
+            target = _('{label} (your choice)', label=_target_label(v['target_type']))
         elif inf_type and inf_type != 'unknown':
-            target = (f"Auto-detect: starts from {TARGET_LABELS.get(inf_type, inf_type)}"
-                      + (f" ({name}, from the {src})" if name else '')
-                      + ', then checks the frames')
+            label = _target_label(inf_type)
+            if name and _from_source(src):
+                target = _('Auto-detect: starts from {label} ({name}, {source}), then checks the frames',
+                           label=label, name=name, source=_from_source(src))
+            elif name:
+                target = _('Auto-detect: starts from {label} ({name}), then checks the frames',
+                           label=label, name=name)
+            else:
+                target = _('Auto-detect: starts from {label}, then checks the frames', label=label)
         else:
-            target = 'Auto-detect from the frames after the first pass'
-        rows.append(('Target', target))
+            target = _('Auto-detect from the frames after the first pass')
+        rows.append((_('Target'), target))
 
         mode = self.goal.selected_mode()
-        rows.append(('Mode', next((f'{m[1]}. {m[2]}' for m in _RUN_MODES if m[0] == mode),
-                                  f"Preset: {v.get('preset')}")))
+        rows.append((_('Mode'), next((_('{mode}. {description}', mode=_(m[1]), description=_(m[2]))
+                                      for m in _RUN_MODES if m[0] == mode),
+                                     _('Preset: {preset}', preset=v.get('preset')))))
 
         changed = self.changed_settings()
         if changed:
-            shown = ', '.join(changed[:4]) + (f' and {len(changed) - 4} more'
-                                             if len(changed) > 4 else '')
-            rows.append(('Changed', shown))
+            shown = (_('{settings} and {n} more', settings=', '.join(changed[:4]), n=len(changed) - 4)
+                     if len(changed) > 4 else ', '.join(changed))
+            rows.append((_('Changed'), shown))
         else:
-            rows.append(('Changed', 'Nothing; defaults' + (', tuned by --auto' if auto else '')))
+            rows.append((_('Changed'), _('Nothing; defaults, tuned by --auto') if auto
+                         else _('Nothing; defaults')))
 
         output = str(v.get('output') or '').strip()
         if output:
-            rows.append(('Output', output))
+            rows.append((_('Output'), output))
         elif directory:
             folder = os.path.abspath(directory.rstrip('/\\'))
-            rows.append(('Output', os.path.join(os.path.dirname(folder),
-                                                os.path.basename(folder) + '_stacked.fits')
-                         + '  (next to the folder; never overwrites)'))
+            rows.append((_('Output'), os.path.join(os.path.dirname(folder),
+                                                   os.path.basename(folder) + '_stacked.fits')
+                         + '  ' + _('(next to the folder; never overwrites)')))
         return rows
 
     def _browse(self, dest: str, var: tk.Variable, widget_hint: str) -> None:
@@ -954,7 +997,7 @@ class SetupForm(ttk.Frame):
             path = filedialog.askdirectory()
         elif widget_hint == 'file-save':
             path = filedialog.asksaveasfilename(
-                filetypes=[('FITS files', '*.fits'), ('All files', '*.*')])
+                filetypes=[(_('FITS files'), '*.fits'), (_('All files'), '*.*')])
         else:
             path = filedialog.askopenfilename()
         if path:
@@ -980,10 +1023,9 @@ class SetupForm(ttk.Frame):
                     sub_counts = discover_frames(d)
                     for k, v in sub_counts.items():
                         counts[k] = counts.get(k, 0) + len(v)
-            parts = ', '.join(f"{v} {k}{'s' if v != 1 and not k.endswith('s') else ''}"
-                              for k, v in counts.items() if v)
+            parts = ', '.join(_frame_count(k, v) for k, v in counts.items() if v)
             self._data_summary = parts
-            text = parts or 'no frames found'
+            text = parts or _('no frames found')
             if lights:
                 # The same local lookups the run starts with (info.json name,
                 # FITS OBJECT, folder name), but never SIMBAD from here.
@@ -997,7 +1039,7 @@ class SetupForm(ttk.Frame):
                     ttype = None
                 self.inferred = (name, ttype, src)
                 if name:
-                    text += f'  ·  {name}' + (f', from the {src}' if src else '')
+                    text += f'  ·  {name}' + (f', {_from_source(src)}' if _from_source(src) else '')
             self.dir_count_var.set(text)
         except Exception:
             self.dir_count_var.set('')
@@ -1013,6 +1055,19 @@ class SetupForm(ttk.Frame):
         target-aware tuning on every GUI-launched run."""
         return {dest: var.get() for dest, var in self.vars.items()
                if var.get() != self._initial.get(dest)}
+
+
+# discover_frames() kinds, singular and plural.
+_FRAME_KINDS = {'light': (N_('{n} light'), N_('{n} lights')),
+                'dark': (N_('{n} dark'), N_('{n} darks')),
+                'flat': (N_('{n} flat'), N_('{n} flats')),
+                'bias': (N_('{n} bias'), N_('{n} bias frames')),
+                'darkflat': (N_('{n} dark flat'), N_('{n} dark flats'))}
+
+
+def _frame_count(kind: str, n: int) -> str:
+    one, many = _FRAME_KINDS.get(kind, ('{n} ' + kind, '{n} ' + kind))
+    return _(one if n == 1 else many, n=n)
 
 
 class _Tooltip:
@@ -1069,11 +1124,11 @@ class PreviewCanvas(ttk.Frame):
         self._drag_start = None
         self._drag_orig = None
         self.zoom_var = tk.StringVar(value='—')
-        self.caption_var = tk.StringVar(value='Waiting for the first stack…')
+        self.caption_var = tk.StringVar(value=_('Waiting for the first stack…'))
 
         toolbar = ttk.Frame(self)
         toolbar.pack(fill='x', pady=(0, 4))
-        ttk.Button(toolbar, text='Fit', width=5, command=self.fit).pack(side='left')
+        ttk.Button(toolbar, text=_('Fit'), command=self.fit).pack(side='left')
         ttk.Button(toolbar, text='1:1', width=5, command=self.one_to_one).pack(side='left', padx=4)
         ttk.Label(toolbar, textvariable=self.zoom_var, width=6, style='Dim.TLabel').pack(side='left')
 
@@ -1118,7 +1173,7 @@ class PreviewCanvas(ttk.Frame):
         self.compare_on = False
         self.scale = self.fit_scale = 1.0
         self.tx = self.ty = 0.0
-        self.caption_var.set('Waiting for the first stack…')
+        self.caption_var.set(_('Waiting for the first stack…'))
         self.redraw()
 
     # ── view transform ─────────────────────────────────────────────────
@@ -1186,7 +1241,8 @@ class PreviewCanvas(ttk.Frame):
         c.delete('all')
         cw, ch = max(c.winfo_width(), 1), max(c.winfo_height(), 1)
         if self._img_a is None:
-            c.create_text(cw / 2, ch / 2, text='◆ ORIGINSTACK\nWaiting for the first stack preview…',
+            c.create_text(cw / 2, ch / 2,
+                          text='◆ ORIGINSTACK\n' + _('Waiting for the first stack preview…'),
                           fill=_TEXT_FAINT, justify='center', font=(_SANS, 11))
             self.zoom_var.set('—')
             return
@@ -1362,10 +1418,33 @@ class App:
         self.update_label.bind('<Button-1>', lambda _e: self._open_update_url())
         self._update_url = ''
         self._start_update_check()
-        self.header_status_var = tk.StringVar(value='Idle')
+        self.header_status_var = tk.StringVar(value=_('Idle'))
         tk.Label(inner, textvariable=self.header_status_var, background=_PANEL,
                 foreground=_TEXT_DIM, font=_FONT_MONO).pack(side='right', pady=8)
+        self._build_language_menu(inner)
         tk.Frame(root, background=_LINE, height=1).pack(fill='x', side='top')
+
+    def _build_language_menu(self, parent: tk.Frame) -> None:
+        """Header drop-down: Automatic (the system language) or a fixed
+        language. The choice is saved and applies from the next start --
+        rebuilding every widget mid-session would also drop a run's state."""
+        from src.i18n import LANGUAGES, save_choice, saved_choice, system_language
+        auto_label = _('Automatic ({language})', language=LANGUAGES[system_language()])
+        options = [('auto', auto_label)] + list(LANGUAGES.items())
+        current = saved_choice()
+        var = tk.StringVar(value=next(label for code, label in options if code == current))
+        combo = ttk.Combobox(parent, textvariable=var, values=[label for _c, label in options],
+                             state='readonly', width=22)
+        combo.pack(side='right', padx=(0, 12), pady=8)
+        note = tk.Label(parent, text='', background=_PANEL, foreground=_ACCENT3, font=_FONT)
+        note.pack(side='right', padx=(0, 8), pady=8)
+
+        def _picked(_event=None):
+            code = next(code for code, label in options if label == var.get())
+            save_choice(code)
+            note.configure(text=_('Restart OriginStack to change the language.')
+                           if code != current else '')
+        combo.bind('<<ComboboxSelected>>', _picked)
 
     def _start_update_check(self) -> None:
         """Background self-update check, once per launch. Never blocks the window
@@ -1385,7 +1464,7 @@ class App:
 
     def _show_update(self, info: Dict[str, str]) -> None:
         self._update_url = info['url']
-        self.update_label.configure(text=f"Update available: v{info['version']}")
+        self.update_label.configure(text=_('Update available: v{version}', version=info['version']))
 
     def _open_update_url(self) -> None:
         if self._update_url:
@@ -1412,25 +1491,27 @@ class App:
 
         run_row = ttk.Frame(parent)
         run_row.pack(fill='x', pady=10)
-        self.start_btn = ttk.Button(run_row, text='Start', style='Accent.TButton',
+        self.start_btn = ttk.Button(run_row, text=_('Start'), style='Accent.TButton',
                                     command=self._on_start)
         self.start_btn.pack(side='left')
-        self.cancel_btn = ttk.Button(run_row, text='Cancel', command=self._on_cancel)
+        self.cancel_btn = ttk.Button(run_row, text=_('Cancel'), command=self._on_cancel)
         self.cancel_btn.pack(side='left', padx=(6, 0))
         self.cancel_btn.state(['disabled'])
-        self.status_var = tk.StringVar(value='Idle')
+        self.status_var = tk.StringVar(value=_('Idle'))
         ttk.Label(run_row, textvariable=self.status_var, style='Dim.TLabel').pack(
             side='left', padx=10)
         self.open_folder_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(run_row, text='Open folder when done',
+        ttk.Checkbutton(run_row, text=_('Open folder when done'),
                         variable=self.open_folder_var).pack(side='left', padx=(10, 0))
-        ttk.Button(run_row, text='Open Folder', command=self._open_output_folder).pack(
+        ttk.Button(run_row, text=_('Open Folder'), command=self._open_output_folder).pack(
             side='left', padx=(6, 0))
 
-        phase_frame = ttk.LabelFrame(parent, text='PIPELINE')
+        phase_frame = ttk.LabelFrame(parent, text=_('PIPELINE'))
         phase_frame.pack(fill='x', pady=6)
         self.phase_labels = []
-        titles = ['1 · Quality', '2 · Registration', '3 · Stacking', '4 · Post-process']
+        titles = [f'{i} · {name}' for i, name in
+                  enumerate((_('Quality'), _('Registration'), _('Stacking'), _('Post-process')),
+                            start=1)]
         for i, t in enumerate(titles):
             lbl = ttk.Label(phase_frame, text=t, style='Phase.TLabel', anchor='center')
             lbl.grid(row=0, column=i, sticky='we', padx=(4 if i == 0 else 2,
@@ -1445,7 +1526,7 @@ class App:
 
         # RECENT FRAMES moved to the right column; the whole left column
         # below the pipeline bar is the log now.
-        log_frame = ttk.LabelFrame(parent, text='LOG')
+        log_frame = ttk.LabelFrame(parent, text=_('LOG'))
         log_frame.pack(fill='both', expand=True, pady=6)
         self.log_text = scrolledtext.ScrolledText(
             log_frame, height=20, bg=_LOG_BG, fg=_LOG_FG, insertbackground=_LOG_FG,
@@ -1455,7 +1536,7 @@ class App:
     # ── right column: preview, frame strip, recent frames, summary ────
 
     def _build_right(self, parent: ttk.Frame) -> None:
-        preview_frame = ttk.LabelFrame(parent, text='PREVIEW')
+        preview_frame = ttk.LabelFrame(parent, text=_('PREVIEW'))
         preview_frame.pack(fill='both', expand=True, pady=(0, 6))
 
         vtools = ttk.Frame(preview_frame)
@@ -1466,7 +1547,7 @@ class App:
         self.view_combo.pack(side='left')
         self.view_combo.bind('<<ComboboxSelected>>', self._on_view_selected)
         self.compare_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(vtools, text='Compare', variable=self.compare_var,
+        ttk.Checkbutton(vtools, text=_('Compare'), variable=self.compare_var,
                         command=self._on_compare_toggled).pack(side='left', padx=8)
         self.compare_combo_var = tk.StringVar()
         self.compare_combo = ttk.Combobox(vtools, textvariable=self.compare_combo_var,
@@ -1483,17 +1564,19 @@ class App:
 
         self._known_slugs: List[str] = []
 
-        strip_frame = ttk.LabelFrame(parent, text='FRAMES')
+        strip_frame = ttk.LabelFrame(parent, text=_('FRAMES'))
         strip_frame.pack(fill='x', pady=6)
         self.frame_strip = FrameStrip(strip_frame, on_click=self._on_thumb_click)
         self.frame_strip.pack(fill='x')
 
-        frames_frame = ttk.LabelFrame(parent, text='RECENT FRAMES')
+        frames_frame = ttk.LabelFrame(parent, text=_('RECENT FRAMES'))
         frames_frame.pack(fill='x', pady=6)
         cols = ('frame', 'score', 'snr', 'stars', 'fwhm')
-        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=8)
+        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=5)
+        headings = {'frame': _('Frame'), 'score': _('Score'), 'snr': 'SNR',
+                    'stars': _('Stars'), 'fwhm': 'FWHM'}
         for c, w in zip(cols, (170, 60, 60, 50, 60)):
-            self.frames_tree.heading(c, text=c.capitalize())
+            self.frames_tree.heading(c, text=headings[c])
             self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
         self.frames_tree.tag_configure('bad', foreground=_BAD)
         self.frames_tree.pack(fill='x')
@@ -1501,7 +1584,7 @@ class App:
         # Before a run (and after any change once one has finished) this is
         # "This run": what Start will do with the form. After a run it is the
         # run's summary.
-        self.summary_frame = ttk.LabelFrame(parent, text='THIS RUN')
+        self.summary_frame = ttk.LabelFrame(parent, text=_('THIS RUN'))
         # Packed ahead of the preview so it gets its rows first; packed last it
         # was squeezed to two lines below the (empty, before a run) frame lists.
         self.summary_frame.pack(fill='x', pady=6, side='bottom', before=preview_frame)
@@ -1511,7 +1594,23 @@ class App:
         self.plan_frame = ttk.Frame(self.summary_frame)
         self.plan_frame.pack(fill='x', padx=4, pady=4)
         self.plan_frame.grid_columnconfigure(1, weight=1)
+        # Wrap the plan to the panel's width: at a fixed 520 px a longer
+        # (translated) line wrapped needlessly, and every extra line was
+        # taken from the RECENT FRAMES table above it.
+        self.plan_frame.bind('<Configure>', self._rewrap_plan, add='+')
+        # Bottom-up: this summary, the frames table, the thumbnail strip; the
+        # preview (packed last) takes what is left. Packed top-down, the frames
+        # table was packed last and lost its rows whenever the summary grew.
+        frames_frame.pack_configure(side='bottom', after=self.summary_frame)
+        strip_frame.pack_configure(side='bottom', after=frames_frame)
         self._show_plan = True
+
+    def _plan_wrap(self) -> int:
+        return max(300, self.plan_frame.winfo_width() - 120)
+
+    def _rewrap_plan(self, _event=None) -> None:
+        for child in self.plan_frame.grid_slaves(column=1):
+            child.configure(wraplength=self._plan_wrap())
 
     # ── run control ─────────────────────────────────────────────────────
 
@@ -1519,16 +1618,16 @@ class App:
         form = self.form.read_form()
         result = self.rm.start(form)
         if not result.get('ok'):
-            self.status_var.set(f"Error: {result.get('error')}")
+            self.status_var.set(_('Error: {error}', error=result.get('error')))
             return
         self.start_btn.state(['disabled'])
         self.cancel_btn.state(['!disabled'])
-        self.status_var.set('Running…')
+        self.status_var.set(_('Running…'))
         self._shown_log_lines = 0
         self.frames_tree.delete(*self.frames_tree.get_children())
         self.summary_var.set('')
         self._show_plan = False
-        self.summary_frame.configure(text='COMPLETE')
+        self.summary_frame.configure(text=_('COMPLETE'))
         self.plan_frame.pack_forget()
         self.summary_label.pack(anchor='w', padx=4, pady=4)
 
@@ -1538,7 +1637,7 @@ class App:
         if self.rm.is_running():
             return
         self._show_plan = True
-        self.summary_frame.configure(text='THIS RUN')
+        self.summary_frame.configure(text=_('THIS RUN'))
         self.summary_label.pack_forget()
         self.plan_frame.pack(fill='x', padx=4, pady=4)
         for child in self.plan_frame.winfo_children():
@@ -1546,7 +1645,7 @@ class App:
         for i, (head, text) in enumerate(self.form.describe_run()):
             ttk.Label(self.plan_frame, text=head, style='Dim.TLabel').grid(
                 row=i, column=0, sticky='nw', padx=(0, 12), pady=1)
-            ttk.Label(self.plan_frame, text=text, wraplength=520, justify='left').grid(
+            ttk.Label(self.plan_frame, text=text, wraplength=self._plan_wrap(), justify='left').grid(
                 row=i, column=1, sticky='w', pady=1)
         if self.preview.current_slug in ('', 'example'):
             path, caption = self.form.goal.example()
@@ -1565,13 +1664,13 @@ class App:
         # wouldn't make the pipeline notice any sooner.
         self.rm.cancel()
         self.cancel_btn.state(['disabled'])
-        self.status_var.set('Cancelling…')
+        self.status_var.set(_('Cancelling…'))
 
     def _on_closing(self) -> None:
         if self.rm.is_running():
             from src.native_dialog import ask_yes_no
             if not ask_yes_no('OriginStack',
-                              'A stacking run is still in progress. Quit anyway?',
+                              _('A stacking run is still in progress. Quit anyway?'),
                               default=True):
                 return
         self.root.destroy()
@@ -1603,7 +1702,7 @@ class App:
     def _on_thumb_click(self, fid: int) -> None:
         data = self.ui.frame_jpeg(fid)
         if data:
-            self.preview.load_slot(data, f'frame-{fid}', f'Frame #{fid}')
+            self.preview.load_slot(data, f'frame-{fid}', _('Frame #{n}', n=fid))
 
     @staticmethod
     def _slug_from_label(label: str) -> str:
@@ -1719,24 +1818,25 @@ class App:
         running = self.rm.is_running()
         if running:
             self.start_btn.state(['disabled'])
-            self.header_status_var.set('Cancelling…' if self.rm.is_cancelling() else 'Running…')
+            self.header_status_var.set(_('Cancelling…') if self.rm.is_cancelling() else _('Running…'))
         else:
             self.start_btn.state(['!disabled'])
             self.cancel_btn.state(['disabled'])
             if snap is not None and snap['run_status'] in ('ok', 'error', 'cancelled'):
                 done_ok = snap['run_status'] == 'ok'
                 if snap['run_status'] == 'cancelled':
-                    self.status_var.set('Cancelled')
-                    self.header_status_var.set('Cancelled')
+                    self.status_var.set(_('Cancelled'))
+                    self.header_status_var.set(_('Cancelled'))
                 else:
-                    self.status_var.set('Done' if done_ok else f"Failed: {snap['run_error']}")
-                    self.header_status_var.set('Complete' if done_ok else 'Failed')
+                    self.status_var.set(_('Done') if done_ok
+                                        else _('Failed: {error}', error=snap['run_error']))
+                    self.header_status_var.set(_('Complete') if done_ok else _('Failed'))
                 # Edge-triggered (not every poll tick) so it only pops once
                 # per completed run, not repeatedly while the status holds.
                 if done_ok and self._last_run_status != 'ok' and self.open_folder_var.get():
                     self._open_output_folder()
             elif snap is None or snap['run_status'] == 'idle':
-                self.header_status_var.set('Idle')
+                self.header_status_var.set(_('Idle'))
         if snap is not None:
             self._last_run_status = snap['run_status']
 
@@ -1767,15 +1867,17 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == '--verify-headless':
         return _run_headless(sys.argv[2:])
 
+    from src.i18n import resolve_language, set_language
+    _set_fonts(set_language(resolve_language()))
     root = tk.Tk()
     try:
         App(root)
     except Exception as e:
-        return _fatal("OriginStack", f"Failed to open the app window: {e}")
+        return _fatal("OriginStack", _('Failed to open the app window: {error}', error=e))
     try:
         root.mainloop()
     except Exception as e:
-        return _fatal("OriginStack", f"Unexpected error: {e}")
+        return _fatal("OriginStack", _('Unexpected error: {error}', error=e))
     return 0
 
 

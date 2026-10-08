@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comment empiler les images du Celestron Origin sur votre ordinateur</title>
+<meta name="description" content="Pas à pas : prenez un dossier de session du Celestron Origin, empilez ses images FITS brutes sur votre propre ordinateur avec calibration par offsets, darks et flats, et obtenez une image plus nette que le FinalStackedMaster.tiff du télescope. Gratuit.">
+<meta name="author" content="Tom Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/fr/stack-celestron-origin.html">
+<meta property="og:locale" content="fr_FR">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/fr/stack-celestron-origin.html">
+<meta property="og:title" content="Comment empiler les images du Celestron Origin sur votre ordinateur">
+<meta property="og:description" content="Réempilez gratuitement sur votre propre ordinateur les images brutes d&#x27;une session du Celestron Origin, et obtenez des étoiles plus fines que l&#x27;empilement du télescope.">
+<meta property="og:image" content="https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg">
+<meta property="og:image:alt" content="La nébuleuse du Crabe à partir des mêmes images : l&#x27;empilement du Celestron Origin lui-même, celui de Siril et celui d&#x27;OriginStack">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "inLanguage": "fr",
+  "headline": "Comment empiler les images du Celestron Origin sur votre ordinateur",
+  "description": "Réempilez sur votre propre ordinateur les images FITS brutes d'une session du Celestron Origin avec OriginStack, un logiciel d'empilement gratuit et open source pour l'astrophotographie.",
+  "url": "https://originstack.site/stack-celestron-origin.html",
+  "image": "https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg",
+  "author": {
+    "@type": "Person",
+    "name": "Tom Davenport"
+  },
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "OriginStack",
+    "url": "https://originstack.site/"
+  },
+  "datePublished": "2026-10-07",
+  "dateModified": "2026-10-07"
+}
+</script>
+<link rel="icon" href="../img/favicon.png">
+<link rel="preload" href="../fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Accueil</a> <a href="../advanced.html">Avancé</a> <a href="./#get">Installation</a>
+      </nav>
+    </div>
+    <h1>Comment empiler les images du Celestron Origin sur votre ordinateur</h1>
+    <p class="lede">L'Origin empile au fur et à mesure, mais il conserve aussi chaque image brute qu'il a prise. Réempiler ces images sur un ordinateur, avec une calibration et un alignement soignés, donne une image plus nette et plus propre que celle que le télescope enregistre. Ce guide le fait avec OriginStack, gratuit et exécuté sur votre propre machine.</p>
+    <p class="toc">
+      <a href="#folder">Contenu d'un dossier de session</a> <a href="#steps">L'empiler, pas à pas</a> <a href="#nights">Plusieurs nuits</a> <a href="#why">Pourquoi réempiler</a> <a href="#problems">En cas de problème</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="folder">
+  <div class="wrap">
+    <h2>Contenu d'un dossier de session du Celestron Origin</h2>
+    <p class="intro measure">Chaque session d'imagerie a son propre dossier, nommé d'après la cible et l'heure de début, par exemple <code>Black_Eye_Galaxy_2026-03-14_21-20-36</code>. Copiez tout le dossier sur votre ordinateur et laissez son contenu tel quel. OriginStack reconnaît lui-même chaque fichier.</p>
+    <dl class="feat">
+      <div><dt>Les images brutes<code>Light0001.fits ...</code></dt>
+        <dd><p>Un fichier FITS par pose. Ce sont les données brutes du capteur, encore dans la mosaïque couleur de la caméra, et ce sont elles qui sont empilées.</p></dd></div>
+      <div><dt>Images de calibration<code>bias, dark, flat</code></dt>
+        <dd><p>Les offsets, darks et flats, si la session en contient. Ils enregistrent le décalage du capteur, son signal thermique et ses pixels chauds, ainsi que le vignetage de l'optique. OriginStack en construit des images maîtres et corrige chaque image brute avec elles. Une session sans ces images s'empile quand même ; cette correction est simplement sautée.</p></dd></div>
+      <div><dt>Informations de session<code>info.json</code></dt>
+        <dd><p>Écrit par l'Origin : le nom de la cible, la matrice de couleur du capteur, votre position GPS, et l'endroit du ciel où pointait le télescope. OriginStack s'en sert pour nommer la cible, choisir les réglages adaptés et placer l'empilement sur le ciel.</p></dd></div>
+      <div><dt>L'empilement du télescope lui-même<code>FinalStackedMaster.tiff</code></dt>
+        <dd><p>L'image construite par l'Origin pendant la session. OriginStack l'ignore, elle n'est donc jamais empilée comme une image de plus.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>L'empiler, pas à pas</h2>
+    <dl class="feat">
+      <div><dt>1. Installer OriginStack<code>Windows, macOS, Linux</code></dt>
+        <dd><p>Sous Windows, téléchargez le programme d'installation depuis la <a data-goatcounter-click="release-page-stack-celestron-origin" href="https://github.com/hd152/originstack/releases/latest">dernière version</a> et lancez-le. Le programme d'installation n'est pas encore signé, donc SmartScreen peut afficher un avertissement : choisissez Informations complémentaires, puis Exécuter quand même. Sur Mac, téléchargez le zip Apple silicon ou Intel depuis la même page et faites glisser OriginStack dans Applications ; le premier lancement nécessite une autorisation supplémentaire, décrite avec les étapes pour Linux sur la <a href="./#get">page d'accueil</a>. Ni compte ni Python ne sont nécessaires.</p></dd></div>
+      <div><dt>2. Choisir le dossier de session</dt>
+        <dd><p>Ouvrez l'application et choisissez le dossier que vous avez copié. Elle compte les images et lit le nom de la cible dans <code>info.json</code>.</p></dd></div>
+      <div><dt>3. Indiquer ce que vous avez photographié</dt>
+        <dd><p>Choisissez Galaxie, Nébuleuse, Amas d'étoiles, Champ stellaire ou Comète, ou laissez Détection auto. L'application en suggère un d'après la session. Choisissez Qualité maximale, ou Aperçu rapide pour une vérification plus rapide.</p></dd></div>
+      <div><dt>4. Appuyer sur Démarrer</dt>
+        <dd><p>Les images sont calibrées, notées, alignées (y compris la lente rotation de champ que produit une monture alt-azimutale comme celle de l'Origin), empilées avec rejet des valeurs aberrantes, puis finalisées : gradients, couleur et bruit sont traités et le résultat est étiré pour l'affichage. Une session d'une centaine d'images prend une minute ou deux sur un ordinateur de bureau récent à 8 cœurs. L'aperçu suit chaque étape au fur et à mesure.</p></dd></div>
+      <div><dt>5. Utiliser le résultat</dt>
+        <dd><p>Laissez la sortie vide et l'empilement est enregistré à côté du dossier de session, sans jamais écraser un empilement antérieur. Vous obtenez un JPEG à regarder et à partager, et un fichier FITS qui reste linéaire, pour un traitement ultérieur dans d'autres logiciels ou une fusion avec une autre nuit plus tard.</p></dd></div>
+    </dl>
+    <p class="plain measure">Vous préférez la ligne de commande ? La même exécution s'écrit <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="nights">
+  <div class="wrap">
+    <h2>Plusieurs nuits sur une même cible</h2>
+    <p class="intro measure">Placez le dossier de session de chaque nuit dans un même dossier parent et choisissez ce dossier parent. Comme le champ de l'Origin tourne pendant le suivi d'une cible, les nuits coïncident rarement exactement. OriginStack lit d'abord les métadonnées de chaque session, puis soit regroupe toutes les images, soit empile chaque nuit séparément et les assemble par une correspondance d'étoiles insensible à la rotation, selon ce qui conserve la plus grande partie de l'image. Pour ajouter les images de ce soir à un empilement déjà réalisé, utilisez <code>--merge</code>. Les détails sont sur la <a href="../advanced.html#rotation">page avancée</a>.</p>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <h2>Pourquoi réempiler au lieu d'utiliser FinalStackedMaster.tiff</h2>
+    <p class="intro measure">Sur quatre sessions de l'Origin, avec les mêmes images, l'empilement du télescope avait des étoiles 3 à 38% plus larges que celles d'OriginStack, pour un bruit à quelques pour cent près. Le fichier de l'Origin a toutefois un avantage : ses gradients de ciel sont déjà supprimés. OriginStack les supprime lors de ses étapes de finition.</p>
+    <div class="figs">
+      <figure class="wide">
+        <picture><source type="image/webp" srcset="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Trois recadrages de la nébuleuse du Crabe en pleine résolution à partir des mêmes images : l&#x27;empilement du Celestron Origin lui-même, celui de Siril et celui d&#x27;OriginStack, tous avec le même étirement. Les étoiles et les filaments de la nébuleuse de l&#x27;Origin sont visiblement plus doux."></picture>
+        <figcaption>La nébuleuse du Crabe à partir des mêmes 133 images, toutes avec le même étirement : l'empilement de l'Origin lui-même (à gauche), Siril et OriginStack.</figcaption>
+      </figure>
+    </div>
+    <p class="caveat measure">Les mesures complètes, la méthode et une comparaison avec Siril et DeepSkyStacker se trouvent sur la <a href="./#vs-origin">page d'accueil</a>. Quatre sessions d'un seul télescope forment un petit échantillon ; <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> refait la comparaison sur vos propres images.</p>
+  </div>
+</section>
+
+<section id="problems">
+  <div class="wrap">
+    <h2>En cas de problème</h2>
+    <dl class="feat">
+      <div><dt>Aucune image trouvée</dt>
+        <dd><p>Choisissez le dossier qui contient directement les fichiers <code>Light*.fits</code>, ou un dossier de dossiers de session, pas un dossier situé au-dessus.</p></dd></div>
+      <div><dt>Il a choisi le mauvais type de cible</dt>
+        <dd><p>Choisissez vous-même la carte au lieu de Détection auto. En ligne de commande, passez <code>--target-type</code>.</p></dd></div>
+      <div><dt>Vous n'avez pas de connexion Internet</dt>
+        <dd><p>L'empilement fonctionne hors ligne. Cochez Hors ligne dans l'application, ou passez <code>--offline</code>, et OriginStack n'effectue aucune requête réseau.</p></dd></div>
+      <div><dt>Autre chose</dt>
+        <dd><p>Ouvrez un <a href="https://github.com/hd152/originstack/issues">ticket sur GitHub</a> avec le journal affiché dans le panneau inférieur gauche de l'application.</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack est un logiciel libre sous licence MIT.</span>
+    <span><a href="./">Accueil</a> &nbsp; <a href="../advanced.html">Fonctions avancées</a> &nbsp; <a data-goatcounter-click="source-github-stack-celestron-origin" href="https://github.com/hd152/originstack">Code source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Signaler un problème</a> &nbsp; <a href="privacy.html">Confidentialité</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../stack-celestron-origin.html" hreflang="en" lang="en">English</a> <a href="../de/stack-celestron-origin.html" hreflang="de" lang="de">Deutsch</a> <a href="../es/stack-celestron-origin.html" hreflang="es" lang="es">Español</a> <a href="../fr/stack-celestron-origin.html" hreflang="fr" lang="fr" aria-current="true">Français</a> <a href="../it/stack-celestron-origin.html" hreflang="it" lang="it">Italiano</a> <a href="../pt-br/stack-celestron-origin.html" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/stack-celestron-origin.html" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/stack-celestron-origin.html" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+</body>
+</html>

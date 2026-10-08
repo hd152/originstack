@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Celestron Origin の画像をコンピューターでスタックする方法</title>
+<meta name="description" content="ステップ・バイ・ステップ：Celestron Origin のセッションフォルダの生 FITS フレームを、バイアス・ダーク・フラットでキャリブレーションしてお使いのコンピューターでスタックし、望遠鏡自身の FinalStackedMaster.tiff よりシャープな画像を得る方法。無料です。">
+<meta name="author" content="Tom Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/ja/stack-celestron-origin.html">
+<meta property="og:locale" content="ja_JP">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/ja/stack-celestron-origin.html">
+<meta property="og:title" content="Celestron Origin の画像をコンピューターでスタックする方法">
+<meta property="og:description" content="Celestron Origin のセッションの生フレームを、お使いのコンピューターで無料で再スタックし、望遠鏡自身のスタックよりシャープな星像を得られます。">
+<meta property="og:image" content="https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg">
+<meta property="og:image:alt" content="同じフレームから作ったかに星雲：Celestron Origin 自身のスタック、Siril、OriginStack">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "inLanguage": "ja",
+  "headline": "Celestron Origin の画像をコンピューターでスタックする方法",
+  "description": "無料でオープンソースの天体写真スタックソフト OriginStack で、Celestron Origin のセッションの生 FITS フレームをお使いのコンピューターで再スタックします。",
+  "url": "https://originstack.site/stack-celestron-origin.html",
+  "image": "https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg",
+  "author": {
+    "@type": "Person",
+    "name": "Tom Davenport"
+  },
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "OriginStack",
+    "url": "https://originstack.site/"
+  },
+  "datePublished": "2026-10-07",
+  "dateModified": "2026-10-07"
+}
+</script>
+<link rel="icon" href="../img/favicon.png">
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="ページ">
+        <a href="./">ホーム</a> <a href="../advanced.html">上級者向け</a> <a href="./#get">インストール</a>
+      </nav>
+    </div>
+    <h1>Celestron Origin の画像をコンピューターでスタックする方法</h1>
+    <p class="lede">Origin は撮影しながらスタックしますが、撮影したすべての生フレームも保存しています。それらのフレームを、適切なキャリブレーションと位置合わせでコンピューター上でスタックし直すと、望遠鏡が保存する画像よりシャープでクリーンな画像が得られます。このガイドでは、無料でお使いのマシン上で動く OriginStack を使ってその手順を説明します。</p>
+    <p class="toc">
+      <a href="#folder">セッションフォルダの中身</a> <a href="#steps">ステップ・バイ・ステップのスタック手順</a> <a href="#nights">複数の夜</a> <a href="#why">再スタックする理由</a> <a href="#problems">うまくいかないときは</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="folder">
+  <div class="wrap">
+    <h2>Celestron Origin のセッションフォルダの中身</h2>
+    <p class="intro measure">撮影セッションごとに、対象名と開始時刻を名前にしたフォルダが作られます（例: <code>Black_Eye_Galaxy_2026-03-14_21-20-36</code>）。フォルダごとコンピューターにコピーし、中身はそのままにしておいてください。OriginStack が各ファイルを自動的に判別します。</p>
+    <dl class="feat">
+      <div><dt>ライトフレーム<code>Light0001.fits ...</code></dt>
+        <dd><p>露出ごとに1つの FITS ファイル。カメラのカラーモザイクのままの生のセンサーデータで、これがスタックされます。</p></dd></div>
+      <div><dt>キャリブレーションフレーム<code>bias, dark, flat</code></dt>
+        <dd><p>セッションにある場合は、バイアス、ダーク、フラットのフレーム。センサーのオフセット、熱による信号とホットピクセル、光学系の周辺減光を記録したものです。OriginStack はこれらからマスターフレームを作り、すべてのライトフレームを補正します。これらがないセッションもスタックできますが、その補正は省略されます。</p></dd></div>
+      <div><dt>セッション情報<code>info.json</code></dt>
+        <dd><p>Origin が書き込むファイル：対象名、センサーのカラー配列、GPS による位置、望遠鏡が向いていた空の位置。OriginStack はこれを使って対象を特定し、それに合った設定を選び、スタックを天球上に位置付けます。</p></dd></div>
+      <div><dt>望遠鏡自身のスタック<code>FinalStackedMaster.tiff</code></dt>
+        <dd><p>セッション中に Origin が作成した画像。OriginStack はこれを無視するため、フレームの1つとしてスタックされることはありません。</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>ステップ・バイ・ステップのスタック手順</h2>
+    <dl class="feat">
+      <div><dt>1. OriginStack をインストール<code>Windows, macOS, Linux</code></dt>
+        <dd><p>Windows では、<a data-goatcounter-click="release-page-stack-celestron-origin" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>からセットアップファイルをダウンロードして実行します。インストーラーはまだコード署名されていないため、SmartScreen の警告が出ることがあります。「詳細情報」を選び、「実行」を選んでください。Mac では、同じページから Apple シリコン版または Intel 版の zip をダウンロードし、OriginStack を「アプリケーション」フォルダにドラッグします。初回起動時には追加の許可が1回必要で、その方法は<a href="./#get">ホームページ</a>の Linux の手順と並べて説明しています。アカウントも Python も不要です。</p></dd></div>
+      <div><dt>2. セッションフォルダを選ぶ</dt>
+        <dd><p>アプリを開き、コピーしたフォルダを選びます。アプリがフレーム数を数え、<code>info.json</code> から対象名を読み取ります。</p></dd></div>
+      <div><dt>3. 撮影したものを選ぶ</dt>
+        <dd><p>銀河、星雲、星団、星野、彗星のいずれかを選ぶか、自動検出のままにします。アプリがセッションから1つを提案します。最高品質か、より速く確認できるクイックルックを選んでください。</p></dd></div>
+      <div><dt>4. 「開始」を押す</dt>
+        <dd><p>フレームのキャリブレーション、評価、位置合わせ（Origin のような経緯台で生じるゆっくりとした視野回転を含む）、外れ値除外ありのスタック、仕上げが行われます。仕上げではかぶり、色、ノイズを処理し、見やすいように強調します。約 100 フレームのセッションなら、最近の 8 コアのデスクトップ PC で1〜2分です。プレビューは各ステップの進行に合わせて更新されます。</p></dd></div>
+      <div><dt>5. 結果を使う</dt>
+        <dd><p>出力を空欄にしておくと、スタックはセッションフォルダの隣に保存され、以前のものを上書きすることはありません。閲覧や共有用の JPEG と、他のソフトでのさらなる処理や後で別の夜と統合するためのリニアのままの FITS ファイルが得られます。</p></dd></div>
+    </dl>
+    <p class="plain measure">コマンドラインがよい場合は、同じ処理を <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code> で実行できます。</p>
+  </div>
+</section>
+
+<section id="nights">
+  <div class="wrap">
+    <h2>同じ対象を複数の夜に撮影した場合</h2>
+    <p class="intro measure">各夜のセッションフォルダを1つの親フォルダに入れ、その親フォルダを選びます。Origin では対象を追尾するにつれて視野が回転するため、夜ごとの画像がぴったり揃うことはまれです。OriginStack はまず各セッションのメタデータを読み、画像がより多く残る方法を選んで、すべてのフレームをまとめてスタックするか、夜ごとにスタックしてから回転に強い星マッチングで結合します。すでに作ったスタックに今夜のフレームを追加するには <code>--merge</code> を使います。詳しくは<a href="../advanced.html#rotation">上級者向けページ</a>をご覧ください。</p>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <h2>FinalStackedMaster.tiff を使わずに再スタックする理由</h2>
+    <p class="intro measure">Origin の4つのセッションで同じフレームを使って比べたところ、望遠鏡自身のスタックの星像は OriginStack より 3〜38% 太く、ノイズは数パーセント以内の差でした。Origin のファイルにも利点が1つあり、空のかぶりがすでに除去されています。OriginStack は仕上げの処理でかぶりを除去します。</p>
+    <div class="figs">
+      <figure class="wide">
+        <picture><source type="image/webp" srcset="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="同じフレームから作ったかに星雲の等倍の切り抜き3枚：Celestron Origin 自身のスタック、Siril、OriginStack で、すべて同じ強調をかけています。Origin の星像と星雲のフィラメントは明らかに甘くなっています。"></picture>
+        <figcaption>同じ 133 フレームから作ったかに星雲。すべて同じ強調をかけています：Origin 自身のスタック（左）、Siril、OriginStack。</figcaption>
+      </figure>
+    </div>
+    <p class="caveat measure">詳しい測定結果、方法、Siril や DeepSkyStacker との比較は<a href="./#vs-origin">ホームページ</a>にあります。1台の望遠鏡による4セッションは小さなサンプルです。<a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> で、ご自身のフレームで比較を再現できます。</p>
+  </div>
+</section>
+
+<section id="problems">
+  <div class="wrap">
+    <h2>うまくいかないときは</h2>
+    <dl class="feat">
+      <div><dt>フレームが見つからない</dt>
+        <dd><p><code>Light*.fits</code> ファイルそのものが入っているフォルダ、またはセッションフォルダをまとめたフォルダを選んでください。それより上の階層のフォルダではありません。</p></dd></div>
+      <div><dt>対象の種類が間違って選ばれた</dt>
+        <dd><p>自動検出ではなく、カードを自分で選んでください。コマンドラインでは <code>--target-type</code> を指定します。</p></dd></div>
+      <div><dt>インターネットに接続できない</dt>
+        <dd><p>スタックはオフラインで動作します。アプリで「オフライン」にチェックを入れるか <code>--offline</code> を指定すると、OriginStack はネットワーク接続を一切行いません。</p></dd></div>
+      <div><dt>その他の問題</dt>
+        <dd><p>アプリの左下のパネルにあるログを添えて、<a href="https://github.com/hd152/originstack/issues">GitHub で issue</a> を作成してください。</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack は MIT ライセンスのフリーソフトウェアです。</span>
+    <span><a href="./">ホーム</a> &nbsp; <a href="../advanced.html">高度な機能</a> &nbsp; <a data-goatcounter-click="source-github-stack-celestron-origin" href="https://github.com/hd152/originstack">ソース</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">問題を報告</a> &nbsp; <a href="privacy.html">プライバシー</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../stack-celestron-origin.html" hreflang="en" lang="en">English</a> <a href="../de/stack-celestron-origin.html" hreflang="de" lang="de">Deutsch</a> <a href="../es/stack-celestron-origin.html" hreflang="es" lang="es">Español</a> <a href="../fr/stack-celestron-origin.html" hreflang="fr" lang="fr">Français</a> <a href="../it/stack-celestron-origin.html" hreflang="it" lang="it">Italiano</a> <a href="../pt-br/stack-celestron-origin.html" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/stack-celestron-origin.html" hreflang="ja" lang="ja" aria-current="true">日本語</a> <a href="../zh-cn/stack-celestron-origin.html" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+</body>
+</html>
