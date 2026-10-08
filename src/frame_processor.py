@@ -996,8 +996,11 @@ def _measure_session_ca(frames: List[FrameInfo], args) -> Optional[dict]:
             rgb = debayer(np.asarray(data), pattern=bayer, method='bilinear')
         else:
             rgb = data
+        # With --use-gpu the main process's debayer returns a cupy array, and
+        # np.ascontiguousarray on it raised inside this probe: every sample was
+        # lost, so each Phase 1 worker measured CA itself (3.3 s/frame).
         return measure_chromatic_aberration(
-            np.ascontiguousarray(rgb, dtype=np.float32))
+            np.ascontiguousarray(get_gpu().to_host(rgb), dtype=np.float32))
 
     samples = []
     try:

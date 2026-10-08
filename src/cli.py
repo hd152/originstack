@@ -1937,11 +1937,10 @@ def build_parser() -> argparse.ArgumentParser:
                         'dipole / hot pixel) -- the same role ZTF\'s BTSbot / Rubin\'s DIA '
                         'triage play downstream of classical image differencing. Advisory '
                         'only: never drops a candidate, just adds a column to '
-                        '<output>_transients.csv. Native-only (astro_native.transient_triage_score, '
-                        'no onnxruntime fallback yet) -- self-disables with a warning if '
-                        'unavailable. The bundled model is trained entirely on synthetic data '
-                        '(tools/gen_transient_triage_data.py + tools/train_transient_triage.py, '
-                        'no labelled real transients exist yet), so treat it as a first cut. '
+                        '<output>_transients.csv. Runs in numpy (or the native kernel in a '
+                        '"triage"-feature build); no extra dependency. The bundled model is '
+                        'trained on synthetic pairs plus real two-night pairs with injected '
+                        'sources (no labelled real transients exist yet). '
                         'Requires --transient-detect.')
     g_post.add_argument('--transient-triage-model', default=None, metavar='PATH',
                    help='Override the bundled transient-triage model '

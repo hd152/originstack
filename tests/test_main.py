@@ -763,7 +763,8 @@ class TestApplyTransformGpuOomFallback(unittest.TestCase):
         _gpu_mod._gpu = self._real_gpu
 
     def test_oom_falls_back_to_cpu_and_disables_gpu(self):
-        img = np.zeros((8, 8, 3), dtype=np.float32)
+        # float64: a float32 frame goes to the native warp before the GPU is tried
+        img = np.zeros((8, 8, 3), dtype=np.float64)
         result = astro.apply_transform(img, shift=(1.0, 2.0))
         self.assertEqual(result.shape, img.shape)
         self.assertFalse(self.fake.active, "GPU must be permanently disabled after a real OOM")
