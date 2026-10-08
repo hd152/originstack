@@ -134,6 +134,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `cli.py` | `process_directory`, `parse_args`, `main`, `_build_masters`; removed flags are hidden `_RemovedFlag` actions |
 | `health_check.py` | `run_health_check` |
 | `ui_events.py` / `desktop_control.py` / `desktop_app.py` / `native_dialog.py` / `notify.py` | Desktop app: event sink polled by tkinter, form-from-argparse + `RunManager` (cooperative cancel), the tkinter window, error dialogs, balloon notifications |
+| `i18n.py` | Desktop-app translations: `_()`/`N_()`, catalogs in `src/locales/<code>.json` keyed by the English text, language from `$ORIGINSTACK_LANG` / the saved menu choice / the OS |
 
 ### Four-phase pipeline
 1. **Phase 1 — Process & quality** (`frame_processor.py`): load, calibrate, hot pixels, debayer, white balance, quality metrics, patch scores, in parallel; hard limits, outlier and percentile gates.
@@ -182,6 +183,12 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 - All HTTP goes through `net_query`'s `_http_*` helpers (the `--offline` guard). The default run does query SIMBAD; keep the README "Network use" table accurate.
 - Every desktop-app failure path goes through `_fatal()` (windowed exe has no console). Logging uses `logging.getLogger("originstack")` (OS001); optional imports in `src/` are `try/except`-guarded (OS002); library code uses `safe_print` (OS003).
 - `save_effective_config` writes strings through `_toml_str` (Windows paths).
+
+**Translations (desktop app and website)**
+- Every user-visible string in `desktop_app.py` goes through `_()` (or `N_()` in a module-level table, translated where shown). Keys stay English: never translate a value that is submitted, compared or used as a dict key (group titles, dests, choices). The log, progress text and the CLI stay English on purpose.
+- The Setup form translates at display time: group titles, field labels, summaries and full help are looked up by their English text, so changing an option's help in `cli.py` makes its translations stale. `python tools/i18n_strings.py` shows coverage per language, `--missing <code>` lists what needs translating; `python tools/check_translations.py` must pass (placeholders and HTML tags kept). Missing text falls back to English.
+- The English pages in `docs/` are the website source. After editing `index.html`, `stack-celestron-origin.html` or `privacy.html`, run `python tools/build_site_i18n.py` to regenerate `docs/<lang>/`, the switcher, `hreflang` alternates and the sitemap (a test fails when they are stale). New or changed paragraphs need `i18n/site/<code>.json` entries (`--missing <code>`), or they stay English on the translated pages. Never edit `docs/<lang>/` by hand.
+- Translations were machine-drafted (2026-10) and not reviewed by native speakers.
 
 **Domain conventions worth knowing**
 - Origin FITS have RA increasing with +x (not textbook east-left); `info.json`'s solve describes the session's *first* sub. `pipeline._settle_stack_wcs` maps it through that sub's transform + crop, then refines with `local_solve` (`--no-wcs-refine`); the result is `args._stack_wcs`. A WCS on the `(3, H, W)` cube must be built with `naxis=2`.

@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>如何在电脑上叠加 Celestron Origin 图像</title>
+<meta name="description" content="分步教程：取一个 Celestron Origin 会话文件夹，在你自己的电脑上用偏置场、暗场和平场校准并叠加其原始 FITS 帧，得到比望远镜自带的 FinalStackedMaster.tiff 更锐利的图像。免费。">
+<meta name="author" content="Tom Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/zh-cn/stack-celestron-origin.html">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/zh-cn/stack-celestron-origin.html">
+<meta property="og:title" content="如何在电脑上叠加 Celestron Origin 图像">
+<meta property="og:description" content="在你自己的电脑上免费重新叠加 Celestron Origin 会话的原始帧，获得比望远镜自带叠加更锐利的星点。">
+<meta property="og:image" content="https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg">
+<meta property="og:image:alt" content="由相同帧得到的蟹状星云：Celestron Origin 自带的叠加、Siril 的叠加和 OriginStack 的叠加">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "inLanguage": "zh-CN",
+  "headline": "如何在电脑上叠加 Celestron Origin 图像",
+  "description": "用免费、开源的天文摄影叠加软件 OriginStack，在你自己的电脑上重新叠加 Celestron Origin 会话的原始 FITS 帧。",
+  "url": "https://originstack.site/stack-celestron-origin.html",
+  "image": "https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg",
+  "author": {
+    "@type": "Person",
+    "name": "Tom Davenport"
+  },
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "OriginStack",
+    "url": "https://originstack.site/"
+  },
+  "datePublished": "2026-10-07",
+  "dateModified": "2026-10-07"
+}
+</script>
+<link rel="icon" href="../img/favicon.png">
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/stack-celestron-origin.html">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/stack-celestron-origin.html">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/stack-celestron-origin.html">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/stack-celestron-origin.html">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/stack-celestron-origin.html">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/stack-celestron-origin.html">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/stack-celestron-origin.html">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/stack-celestron-origin.html">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/stack-celestron-origin.html">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="页面">
+        <a href="./">首页</a> <a href="../advanced.html">高级</a> <a href="./#get">安装</a>
+      </nav>
+    </div>
+    <h1>如何在电脑上叠加 Celestron Origin 图像</h1>
+    <p class="lede">Origin 一边拍摄一边叠加，但它也保留了拍摄的每一张原始帧。在电脑上以正确的校准和对齐重新叠加这些帧，能得到比望远镜保存的图像更锐利、更干净的结果。本指南使用 OriginStack 完成这一过程，它免费，并在你自己的电脑上运行。</p>
+    <p class="toc">
+      <a href="#folder">会话文件夹里有什么</a> <a href="#steps">分步叠加</a> <a href="#nights">多个夜晚</a> <a href="#why">为什么要重新叠加</a> <a href="#problems">出现问题时</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="folder">
+  <div class="wrap">
+    <h2>Celestron Origin 会话文件夹里有什么</h2>
+    <p class="intro measure">每次拍摄会话都有自己的文件夹，以目标和开始时间命名，例如 <code>Black_Eye_Galaxy_2026-03-14_21-20-36</code>。将整个文件夹复制到电脑上，内容保持原样即可。OriginStack 会自行识别每个文件。</p>
+    <dl class="feat">
+      <div><dt>亮场<code>Light0001.fits ...</code></dt>
+        <dd><p>每次曝光一个 FITS 文件。这些是原始传感器数据，仍处于相机的彩色马赛克格式，也就是要叠加的数据。</p></dd></div>
+      <div><dt>校准帧<code>bias, dark, flat</code></dt>
+        <dd><p>偏置场、暗场和平场（如果会话中有的话）。它们记录了传感器的偏置、热信号和热像素，以及光学系统的暗角。OriginStack 用它们生成主校准帧，并用其校正每一张亮场。没有校准帧的会话也能叠加，只是跳过这一校正。</p></dd></div>
+      <div><dt>会话信息<code>info.json</code></dt>
+        <dd><p>由 Origin 写入：目标名称、传感器的颜色排列、你的 GPS 位置，以及望远镜所指向的天区。OriginStack 用它来命名目标、为其选择设置，并将叠加结果定位到天空中。</p></dd></div>
+      <div><dt>望远镜自带的叠加<code>FinalStackedMaster.tiff</code></dt>
+        <dd><p>Origin 在会话期间生成的图像。OriginStack 会忽略它，因此它永远不会被当作另一帧叠加进去。</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>分步叠加</h2>
+    <dl class="feat">
+      <div><dt>1. 安装 OriginStack<code>Windows, macOS, Linux</code></dt>
+        <dd><p>在 Windows 上，从<a data-goatcounter-click="release-page-stack-celestron-origin" href="https://github.com/hd152/originstack/releases/latest">最新版本</a>下载安装文件并运行。安装程序尚未进行代码签名，因此 SmartScreen 可能会发出警告：请选择“更多信息”，然后选择“仍要运行”。在 Mac 上，从同一页面下载 Apple 芯片或 Intel 版 zip，并将 OriginStack 拖入“应用程序”；首次启动需要额外批准一次，具体说明与 Linux 步骤一起列在<a href="./#get">首页</a>。无需账号，也无需 Python。</p></dd></div>
+      <div><dt>2. 选择会话文件夹</dt>
+        <dd><p>打开应用并选择你复制的文件夹。它会统计帧数，并从 <code>info.json</code> 中读取目标名称。</p></dd></div>
+      <div><dt>3. 说明你拍了什么</dt>
+        <dd><p>选择星系、星云、星团、星场或彗星，或保持“自动检测”。应用会根据会话建议一个。选择“完整质量”，或选择“快速预览”进行较快的检查。</p></dd></div>
+      <div><dt>4. 按“开始”</dt>
+        <dd><p>各帧会经过校准、评分、对齐（包括 Origin 这类地平式支架产生的视场缓慢旋转）、带离群值剔除的叠加，以及成品处理：处理梯度、颜色和噪声，并将结果拉伸以便观看。在一台较新的 8 核台式机上，约一百帧的会话需要一两分钟。预览会随着每一步实时更新。</p></dd></div>
+      <div><dt>5. 使用结果</dt>
+        <dd><p>输出留空时，叠加结果会保存在会话文件夹旁边，绝不覆盖之前的结果。你会得到一张用于查看和分享的 JPEG，以及一个保持线性的 FITS 文件，可在其他软件中做进一步处理，或日后与另一晚的数据合并。</p></dd></div>
+    </dl>
+    <p class="plain measure">更喜欢命令行？同样的运行是 <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>。</p>
+  </div>
+</section>
+
+<section id="nights">
+  <div class="wrap">
+    <h2>同一目标的多个夜晚</h2>
+    <p class="intro measure">把每晚的会话文件夹放进同一个上级文件夹，然后选择这个上级文件夹。由于 Origin 跟踪目标时视场会旋转，各晚的画面很少能完全对齐。OriginStack 会先读取每个会话的元数据，然后选择能保留更多画面的方式：要么合并所有帧，要么每晚单独叠加，再用不受旋转影响的星点匹配拼合。要把今晚的帧加入已有的叠加结果，请使用 <code>--merge</code>。详情见<a href="../advanced.html#rotation">高级页面</a>。</p>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <h2>为什么要重新叠加，而不是直接使用 FinalStackedMaster.tiff</h2>
+    <p class="intro measure">在四个 Origin 会话上，使用相同的帧，望远镜自带叠加的星点比 OriginStack 宽 3% 到 38%，而噪声相差在几个百分点以内。Origin 的文件确实有一个优势：天空梯度已经被去除。OriginStack 则在成品处理步骤中去除梯度。</p>
+    <div class="figs">
+      <figure class="wide">
+        <picture><source type="image/webp" srcset="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="同一批帧得到的蟹状星云全分辨率三幅裁切：Celestron Origin 自带的叠加、Siril 的叠加和 OriginStack 的叠加，均施加相同的拉伸。Origin 的星点和星云丝状结构明显更柔和。"></picture>
+        <figcaption>由相同的 133 帧得到的蟹状星云，均施加相同的拉伸：Origin 自带的叠加（左）、Siril 和 OriginStack。</figcaption>
+      </figure>
+    </div>
+    <p class="caveat measure">完整的测量数据、方法以及与 Siril 和 DeepSkyStacker 的对比见<a href="./#vs-origin">首页</a>。来自同一台望远镜的四个会话样本量很小；<a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> 可以在你自己的帧上重复这一对比。</p>
+  </div>
+</section>
+
+<section id="problems">
+  <div class="wrap">
+    <h2>出现问题时</h2>
+    <dl class="feat">
+      <div><dt>找不到任何帧</dt>
+        <dd><p>请选择直接存放 <code>Light*.fits</code> 文件的文件夹，或存放多个会话文件夹的文件夹，而不是更上一级的文件夹。</p></dd></div>
+      <div><dt>识别的目标类型不对</dt>
+        <dd><p>请自己选择卡片，不要使用“自动检测”。在命令行中，传入 <code>--target-type</code>。</p></dd></div>
+      <div><dt>没有网络连接</dt>
+        <dd><p>叠加可以离线进行。在应用中勾选“离线”，或传入 <code>--offline</code>，OriginStack 就不会发出任何网络请求。</p></dd></div>
+      <div><dt>其他问题</dt>
+        <dd><p>请在 GitHub 上提交<a href="https://github.com/hd152/originstack/issues">issue</a>，并附上应用左下方面板中的日志。</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack 是采用 MIT 许可证的自由软件。</span>
+    <span><a href="./">首页</a> &nbsp; <a href="../advanced.html">高级功能</a> &nbsp; <a data-goatcounter-click="source-github-stack-celestron-origin" href="https://github.com/hd152/originstack">源代码</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">报告问题</a> &nbsp; <a href="privacy.html">隐私</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../stack-celestron-origin.html" hreflang="en" lang="en">English</a> <a href="../de/stack-celestron-origin.html" hreflang="de" lang="de">Deutsch</a> <a href="../es/stack-celestron-origin.html" hreflang="es" lang="es">Español</a> <a href="../fr/stack-celestron-origin.html" hreflang="fr" lang="fr">Français</a> <a href="../it/stack-celestron-origin.html" hreflang="it" lang="it">Italiano</a> <a href="../pt-br/stack-celestron-origin.html" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/stack-celestron-origin.html" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/stack-celestron-origin.html" hreflang="zh-CN" lang="zh-CN" aria-current="true">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+</body>
+</html>

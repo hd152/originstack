@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OriginStack: kostenloser Astrofoto-Stacker für das Celestron Origin</title>
+<meta name="description" content="Kostenloser Open-Source-Stacker für die Astrofotografie mit dem Celestron Origin und anderen Farbkameras. Kalibriert, stackt und bearbeitet FITS-, RAW- und TIFF-Frames.">
+<meta name="keywords" content="astrophotography, image stacking, deep sky stacking, Celestron Origin, Origin smart telescope, FITS stacker, astrophotography software, calibration frames, bias dark flat, sigma clipping, drizzle, plate solving, DeepSkyStacker alternative, Siril alternative, free, open source, Windows">
+<meta name="author" content="Tom Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<meta name="google-site-verification" content="y0T7c32pCBMpH_AOL0quViwPiUemWRP4GJJkPyHGJgU" />
+<meta name="google-adsense-account" content="ca-pub-6072198698992372">
+<link rel="canonical" href="https://originstack.site/de/">
+<meta property="og:locale" content="de_DE">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/de/">
+<meta property="og:title" content="OriginStack: kostenloser Astrofoto-Stacker für das Celestron Origin">
+<meta property="og:description" content="Schwächere Details, schärfere Sterne, saubererer Himmel. Kostenloses Open-Source-Stacking und -Bearbeitung für das Celestron Origin und andere Farbkameras.">
+<meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<meta property="og:image:alt" content="Der Omeganebel, mit OriginStack aus 114 Frames zu je 30 Sekunden gestackt">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="OriginStack: kostenloser Astrofoto-Stacker für das Celestron Origin">
+<meta name="twitter:description" content="114 Frames zu je 30 Sekunden, ein Bild. Kostenloses Open-Source-Stacking und -Bearbeitung für die Astrofotografie.">
+<meta name="twitter:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "OriginStack",
+  "url": "https://originstack.site/",
+  "description": "Kostenlose Open-Source-Software zum Stacken und Bearbeiten von Astrofotos. Kalibriert, registriert, stackt und bearbeitet Frames eines Celestron Origin oder jeder One-Shot-Color-Kamera.",
+  "applicationCategory": "MultimediaApplication",
+  "applicationSubCategory": "Astrophotography image stacking",
+  "operatingSystem": "Windows 10, Windows 11, Linux, macOS",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "downloadUrl": "https://github.com/hd152/originstack/releases/latest",
+  "codeRepository": "https://github.com/hd152/originstack",
+  "image": "https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg",
+  "author": {
+    "@type": "Person",
+    "name": "Tom Davenport"
+  },
+  "keywords": "astrophotography, image stacking, Celestron Origin, FITS, calibration, drizzle, plate solving"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  "name": "OriginStack",
+  "url": "https://originstack.site/",
+  "logo": "https://originstack.site/img/originstack-logo-512.png"
+}
+</script>
+<link rel="icon" href="../img/favicon.png">
+<link rel="preload" href="../fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" as="image" type="image/webp" imagesrcset="../img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, ../img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, ../img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" imagesizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))" fetchpriority="high">
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="bar">
+      <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
+      <nav aria-label="Abschnitte">
+        <a href="#time">Tempo</a> <a href="#app">Die App</a> <a href="#compare">Im Vergleich</a> <a href="stack-celestron-origin.html">Anleitung</a> <a href="../advanced.html">Für Fortgeschrittene</a> <a href="#get">Installation</a>
+      </nav>
+    </div>
+
+    <h1><span class="kicker">Kostenlose Stacking-Software für die Astrofotografie mit dem Celestron Origin</span> Schwächere Details, schärfere Sterne, saubererer Himmel.</h1>
+    <p class="lede">OriginStack stackt und bearbeitet die rohen FITS-Dateien eines Celestron Origin oder die Frames jeder Farbkamera zu einem fertigen Bild. Es läuft auf Ihrem eigenen Computer, braucht kein Konto und geht nur online, um einen unbekannten Objektnamen nachzuschlagen oder für optionale Schritte wie Plate Solving.</p>
+
+    <div class="actions">
+      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Für Windows herunterladen</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">Quellcode auf GitHub ansehen</a>
+    </div>
+    <p class="platforms">Alle Downloads: <a data-goatcounter-click="download-list-win" href="https://github.com/hd152/originstack/releases/latest" data-asset="-setup\.exe$">Windows</a> &middot; <a data-goatcounter-click="download-list-mac-arm64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-arm64\.zip$">Mac (Apple Silicon)</a> &middot; <a data-goatcounter-click="download-list-mac-x86_64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-x86_64\.zip$">Mac (Intel)</a> &middot; <a data-goatcounter-click="download-list-linux" href="https://github.com/hd152/originstack/releases/latest" data-asset="-linux-x64\.tar\.gz$">Linux</a>
+    </p>
+    <p class="fine" id="fine-win">Windows 10 oder 11, 64 Bit, kostenlos und unter MIT-Lizenz. Das Installationsprogramm ist noch nicht code-signiert, daher kann SmartScreen warnen: Wählen Sie „Weitere Informationen“ und dann „Trotzdem ausführen“.</p>
+    <p class="fine" id="fine-mac" hidden>macOS, kostenlos und unter MIT-Lizenz. Die Version für Apple Silicon benötigt macOS 14 oder neuer. Die App ist noch nicht von Apple signiert, daher blockiert macOS den ersten Start: Klicken Sie mit gedrückter Ctrl-Taste in „Programme“ auf OriginStack und wählen Sie „Öffnen“, oder erlauben Sie den Start unter Systemeinstellungen, Datenschutz &amp; Sicherheit, „Dennoch öffnen“. <a href="#mac">Details</a></p>
+    <p class="fine" id="fine-linux" hidden>Linux x86-64 mit glibc 2.35 oder neuer (Ubuntu 22.04, Debian 12, Fedora 36 und neuer), kostenlos und unter MIT-Lizenz. Entpacken und <code>./install.sh</code> ausführen. <a href="#get">Details</a></p>
+
+    <div class="wipe" id="wipe" role="group" aria-label="Vergleich eines einzelnen Frames mit dem fertigen Stack">
+      <picture><source type="image/webp" srcset="../img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, ../img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, ../img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img class="after" fetchpriority="high" src="../img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="Der Omeganebel nach dem Stacken von 114 Frames und der Bearbeitung: hellrotes Gas mit dunklen Bändern vor einem dichten Sternfeld."></picture>
+      <img class="before" src="../img/omega-nebula-m17-single-frame-celestron-origin.jpg" srcset="../img/omega-nebula-m17-single-frame-celestron-origin-800.jpg 800w, ../img/omega-nebula-m17-single-frame-celestron-origin-1200.jpg 1200w, ../img/omega-nebula-m17-single-frame-celestron-origin.jpg 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))" width="1600" height="1103" alt="Ein einzelner 30-Sekunden-Frame desselben Feldes, gestreckt, damit etwas zu sehen ist: körnig, der Nebel schwach vor einem verrauschten violetten Himmel.">
+      <span class="line"></span>
+      <span class="grip" aria-hidden="true">&lt;&gt;</span>
+      <span class="cap l">Ein 30-Sekunden-Frame, gestreckt</span>
+      <span class="cap r">114 Frames, gestackt und bearbeitet</span>
+      <input type="range" min="0" max="100" value="50" aria-label="Ziehen, um einen einzelnen Frame mit dem fertigen Stack zu vergleichen">
+    </div>
+  </div>
+</header>
+
+<main>
+<section id="time">
+  <div class="wrap">
+    <h2>Eine Nacht voller Frames in etwa anderthalb Minuten</h2>
+    <p class="intro measure">Der Omeganebel, 114 Frames, auf einem Desktop-PC mit 8 Kernen: <strong>89 Sekunden</strong> von den Rohdateien bis zum fertigen Bild, statt 132 in der vorigen Version. Der rote Block ist der Teil, der das Bild gut aussehen lässt; der Rest dient dazu, 114 Frames zur Deckung zu bringen.</p>
+
+    <div class="run" role="img" aria-label="Balken, der 89 Sekunden aufteilt in Laden und Bewerten 32.7, Registrierung 9.4, Ausrichten und Stacken 24.6, Fertigstellen 15.6 sowie Datenträger und Einrichtung 6.8 Sekunden">
+      <span style="width:36.7%; background:#1d7f86"></span>
+      <span style="width:10.5%; background:#4fa3a8"></span>
+      <span style="width:27.6%; background:#8cc5c8"></span>
+      <span style="width:17.5%; background:#b3312a"></span>
+      <span style="width:7.7%; background:#b9c3cf"></span>
+    </div>
+    <ul class="legend">
+      <li><i style="background:#1d7f86"></i>Laden, kalibrieren, bewerten<b>32.7 s</b></li>
+      <li><i style="background:#4fa3a8"></i>Registrieren<b>9.4 s</b></li>
+      <li><i style="background:#8cc5c8"></i>Ausrichten und stacken<b>24.6 s</b></li>
+      <li><i style="background:#b3312a"></i>Bild fertigstellen<b>15.6 s</b></li>
+      <li><i style="background:#b9c3cf"></i>Datenträger und Einrichtung<b>6.8 s</b></li>
+    </ul>
+
+    <div class="phases">
+      <div>
+        <h3>Laden, kalibrieren, bewerten</h3>
+        <p>Jeder Frame wird mit Ihren Bias-, Dark- und Flat-Frames korrigiert, aus dem Farbmosaik des Sensors in ein Bild umgewandelt und nach Schärfe und Rauschen bewertet. Eindeutig schlechte Frames werden aussortiert.</p>
+      </div>
+      <div>
+        <h3>Registrieren</h3>
+        <p>Die Frames werden auf Bruchteile eines Pixels zur Deckung gebracht, einschließlich der langsamen Bildfeldrotation, die eine azimutale Montierung wie die des Origin erzeugt.</p>
+      </div>
+      <div>
+        <h3>Ausrichten und stacken</h3>
+        <p>Die ausgerichteten Frames werden mit Ausreißerverwerfung kombiniert, sodass Satellitenspuren, Hotpixel und kosmische Strahlung herausfallen, statt mit eingemittelt zu werden.</p>
+      </div>
+      <div>
+        <h3>Bild fertigstellen</h3>
+        <p>Hintergrundgradienten, Farbe und Rauschen werden behandelt, dann wird das Ergebnis für die Betrachtung gestreckt. Die gespeicherte FITS-Datei bleibt linear und ist bereit für jede weitere Bearbeitung.</p>
+      </div>
+    </div>
+    <p class="plain measure">Die Frames werden einzeln nacheinander verarbeitet, daher brauchen 500 Frames etwa so viel Arbeitsspeicher wie 50. Temporäre Dateien belegen während des Laufs etwa 100 MB Speicherplatz pro Frame; ist genug Platz, werden die ausgerichteten Frames stattdessen im Arbeitsspeicher gehalten, wobei immer 30% davon frei bleiben.</p>
+  </div>
+</section>
+
+<section id="app">
+  <div class="wrap">
+    <h2>Bei der Arbeit zusehen oder die Einstellungen überspringen</h2>
+    <p class="intro measure">Wählen Sie in der App einen Ordner mit Frames, geben Sie an, was Sie fotografiert haben (oder lassen Sie es die App herausfinden), und klicken Sie auf Start. Jede Einstellung hat eine Erklärung in einer Zeile, und die Standardwerte wählen den Rest passend zu Ihrem Objekt. Dies sind echte Bildschirme vom Stacken der Frames der Sonnenblumengalaxie, die in den Vergleichen weiter unten verwendet werden. Neu in der Bearbeitung von Celestron-Origin-Bildern? Die <a href="stack-celestron-origin.html">Schritt-für-Schritt-Anleitung</a> beginnt bei dem Session-Ordner, den das Teleskop speichert.</p>
+
+    <div class="shots">
+      <figure class="shot big">
+        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1029" loading="lazy" alt="Das OriginStack-Fenster während eines Laufs: links Ordner und Ausgabe mit Bildkarten für Objekttyp und Laufmodus, drei von vier Pipeline-Phasen als erledigt markiert und darunter das Log; rechts eine Vorschau der Sonnenblumengalaxie mitten in der Nachbearbeitung, eine Leiste mit Frame-Miniaturen und eine Tabelle mit den Bewertungen pro Frame."></picture>
+        <figcaption>Mitten im Sonnenblumen-Lauf. Die Phasen 1 bis 3 sind erledigt, und die Vorschau zeigt jeden Fertigstellungsschritt, während er läuft.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1029" loading="lazy" alt="Das OriginStack-Fenster vor einem Lauf: ein gewählter Ordner mit seinen Frame-Anzahlen und darunter der Objektname aus der Session-Datei, Bildkarten für Automatisch erkennen, Galaxie (als Empfohlen markiert), Nebel, Sternhaufen, Sternfeld und Komet, eine Wahl zwischen Volle Qualität und Schnellansicht, ein Beispiel-Galaxienbild in der Vorschau und eine Zusammenfassung Dieser Lauf mit Frames, Objekt, Modus, geänderten Einstellungen und Ausgabedatei."></picture>
+        <figcaption>Vor einem Lauf. Wählen Sie einen Ordner, und die App zählt Ihre Frames, liest das Objekt aus der Session und schlägt eine Karte vor; die Vorschau zeigt ein Beispielergebnis, und Dieser Lauf sagt genau, was Start tun wird.</figcaption>
+      </figure>
+      <figure class="shot s5">
+        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="983" loading="lazy" alt="Vorschau- und Frame-Bereich nach Abschluss des Laufs mit dem fertigen Bild der Sonnenblumengalaxie und einer Zusammenfassung: 158 von 158 Frames in 3 Minuten 35 Sekunden gestackt."></picture>
+        <figcaption>Wenn es fertig ist, können Sie das Ergebnis zoomen und verschieben oder zwischen dem linearen Stack und dem fertigen Bild hin- und herwischen.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="Der Bereich Weitere Optionen mit einem Suchfeld und einer Liste von Gruppen, mit Optionen für Registrierung und Stacking wie Proper Image Coaddition, Banding-Entfernung und dem Verzeichnungsmodell, jeweils mit einer Beschreibung in einer Zeile."></picture>
+        <figcaption>Rund hundert weitere Optionen finden sich unter Weitere Optionen, jede mit einer Beschreibung in einer Zeile und einem Suchfeld, um sie zu finden; die selteneren bleiben verborgen, bis Sie Expertenoptionen ankreuzen.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <h2>Wie es im Vergleich mit Siril und DeepSkyStacker abschneidet</h2>
+    <p class="intro measure">Dieselben Frames, dieselben Bias-, Dark- und Flat-Frames, ein Rechner, jedes Programm mit standardnahen Einstellungen. Drei Sessions mit dem Celestron Origin: der Omeganebel (114 × 30 s), die Sonnenblumengalaxie (158 × 20 s) und die Sculptor-Galaxie (532 × 10 s).</p>
+
+    <table class="wide">
+      <caption>OriginStack zuerst, Siril an zweiter Stelle. Nur Stack bedeutet ohne die Fertigstellungsschritte von OriginStack, die Siril nicht hat.</caption>
+      <thead><tr><th>Session</th><th class="n">Nur Stack</th><th class="n">OriginStack, fertiges Bild</th><th class="n">Spitzenspeicher</th><th class="n">Sternbreite</th></tr></thead>
+      <tbody>
+        <tr><th>Omega, 114 Frames</th><td class="n">68 s / 86 s</td><td class="n">90 s</td><td class="n">10.6 / 6.5 GB</td><td class="n">4.40 / 4.56 px</td></tr>
+        <tr><th>Sonnenblume, 158 Frames</th><td class="n">84 s / 106 s</td><td class="n">107 s</td><td class="n">12.8 / 7.8 GB</td><td class="n">3.52 / 3.60 px</td></tr>
+        <tr><th>Sculptor, 532 Frames</th><td class="n">169 s / 195 s</td><td class="n">184 s</td><td class="n">9.2 / 11.2 GB</td><td class="n">2.69 / 3.01 px</td></tr>
+      </tbody>
+    </table>
+
+    <div class="split">
+      <div class="chart">
+        <h3>Sternbreite an denselben Sternen (kleiner ist schärfer)</h3>
+        <h3 class="sub">Omega</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:67.7%"></i><b>4.40 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:70.2%"></i><b>4.56 px</b></div></div>
+        <div class="row"><span>DeepSkyStacker</span><div class="track"><i style="width:74.3%"></i><b>4.83 px</b></div></div>
+        <h3 class="sub">Sonnenblume</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.2%"></i><b>3.52 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:55.4%"></i><b>3.60 px</b></div></div>
+        <h3 class="sub">Sculptor</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:41.4%"></i><b>2.69 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:46.3%"></i><b>3.01 px</b></div></div>
+        <small>Eine Gauß-Anpassung an jeden von bis zu 400 hellen, ungesättigten, isolierten Sternen, an denselben Positionen in beiden Stacks, jeder Stack auf seinem eigenen Pixelraster.</small>
+      </div>
+
+      <div class="verdict">
+        <h3>Was die Zahlen sagen</h3>
+        <p><strong>Schärfe: schärfer als Siril bei allen drei.</strong> An denselben Sternen ist OriginStack beim Omeganebel 4% schmaler (4.40 gegenüber 4.56 px), bei der Sonnenblumengalaxie 1.5% und bei der Sculptor-Galaxie 10% schmaler. Zwei Änderungen haben dazu geführt: <em>Proper Image Coaddition</em>, standardmäßig an, gewichtet jede Detailskala danach, wie scharf, transparent und verrauscht jeder Frame war (Zackay &amp; Ofek, 2017); und eine Korrektur an einem Hotpixel-Schritt, der in jedem Frame die Spitze der meisten hellen Sterne abgeflacht hatte &mdash; bei unterabgetasteten Sternen sieht das Zentrum eines Sterns für einen Test, der ein Pixel nur mit seinen Nachbarn vergleicht, genau wie ein Hotpixel aus. Außerdem nutzte es mehr Frames: 114, 158 und 532, wo Siril 111, 157 und 525 verwendete.</p>
+        <p><strong>Rauschen: ruhiger als Siril bei gleicher Schärfe.</strong> Ein schärferer Stack rauscht pro Pixel stärker, daher wird für einen fairen Vergleich jeder Kanal von OriginStack so weit weichgezeichnet, bis seine Sterne genau so breit sind wie bei Siril. Dann beträgt sein Rauschen in Rot/Grün/Blau das 0.81-, 0.88- und 0.89-Fache von Siril beim Omeganebel, 1.00, 0.75 und 0.93 bei der Sonnenblumengalaxie (ihre roten Sterne waren bereits so breit wie bei Siril) und 0.97, 0.92 und 0.89 bei der Sculptor-Galaxie. Ohne Angleichung, pro Pixel, sind es 0.92, 1.05, 1.06; 1.00, 0.84, 0.97; und 1.16, 1.08, 1.28 &mdash; je schärfer die Sterne, desto höher dieser Wert.</p>
+        <p><strong>Tempo: schneller als Siril bei allen drei.</strong> Bis zum Stack, direkt nacheinander auf demselben Rechner ausgeführt: 68 s gegenüber 86 s bei Siril für den Omeganebel, 84 gegenüber 106 s für die Sonnenblumengalaxie und 169 gegenüber 195 s für die Sculptor-Galaxie. OriginStack erledigt weiterhin Arbeit pro Frame, die Siril nicht macht &mdash; Qualitätsbewertung, Weißabgleich und Sternerkennung bei jedem Frame &mdash; und holt das bei Registrierung und Stacking wieder auf. Die Zeiten beider Programme schwankten über den Tag zwischen identischen Läufen um bis zu ein Drittel (Siril allein brauchte beim Omeganebel 55 bis 86 s), vergleichen Sie also innerhalb einer Zeile. Das fertige Bild kostet weitere 14 bis 23 s.</p>
+        <p><strong>Arbeitsspeicher und Datenträger.</strong> OriginStack betreibt einen Worker pro physischem Kern und hält die ausgerichteten Frames im Arbeitsspeicher, wenn Platz ist: 9.2 GB bei der Sculptor-Galaxie gegenüber 11.2 bei Siril, und 10.6 bzw. 12.8 GB bei den beiden kürzeren Sessions, bei denen alles in den Arbeitsspeicher passte (Siril 6.5 und 7.8). Der temporäre Speicherplatz ist bei den beiden kürzeren Sessions geringer (11 und 15 GB gegenüber 17 und 23 GB) und bei der Sculptor-Galaxie höher (63 gegenüber 57 GB).</p>
+        <p><strong>DeepSkyStacker</strong> brauchte für den Omeganebel 14 min 8 s, lieferte weichere Sterne als die beiden anderen und hinterließ mit seinen Standardeinstellungen Hotpixel-Streifen und einige falsch registrierte Frames.</p>
+      </div>
+    </div>
+
+    <p class="caveat measure">Die Stärke von OriginStack liegt in dem, was nach dem Stack kommt: Es stellt das Bild im selben Lauf ohne Einrichtung fertig, erklärt die Nacht mit <a href="../advanced.html#diagnostics">Diagnosen</a>, bestimmt die Himmelsposition auf Ihrem eigenen Computer, läuft auf Wunsch <a href="../advanced.html#workflow">vollständig offline</a> und erledigt den <a href="../advanced.html">Rest</a>, den die anderen Programme Ihnen überlassen. Beim reinen Stack ist es jetzt bei allen drei Sessions schärfer als Siril, bei gleicher Schärfe rauschärmer und bei allen drei schneller. Alle drei Sessions wurden am 2026-10-02 mit dieser Version neu gemessen; der Wert für DeepSkyStacker stammt aus einem früheren Lauf und wurde nicht wiederholt. Diese Zahlen wurden schon einmal korrigiert: Eine frühere Version dieser Seite hat die Schärfe überbewertet, weil die Sterne für die Messung ungünstig ausgewählt wurden, und eine andere schrieb eine Rauschverbesserung der Erkennung kosmischer Strahlung zu, die in Wahrheit eine Glättung war. Drei Sessions mit einer Kamera sind eine kleine Stichprobe, und beide Programme liefen mit standardnahen Einstellungen. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> wiederholt all dies mit Ihren eigenen Frames.</p>
+
+    <h2 id="vs-origin" class="again">Und im Vergleich mit dem Stack des Teleskops selbst</h2>
+    <p class="intro measure">Jeder Session-Ordner des Celestron Origin enthält auch das eigene Ergebnis des Teleskops, <code>FinalStackedMaster.tiff</code>. Vier Sessions, dieselben Lights für alle drei: die Black-Eye-Galaxie (81 &times; 20 s), die Sonnenblumengalaxie (158 &times; 20 s), der Krebsnebel (133 Frames) und der Herkuleshaufen (56 Frames). OriginStack mit Standardeinstellungen, Siril mit den oben genannten Einstellungen.</p>
+
+    <table class="wide">
+      <caption>Sternbreite an denselben Sternen, OriginStack jeweils gegenüber dem anderen. Das Rauschen ist auf der Skala eines Sterns gemessen, Rot/Grün/Blau, OriginStack geteilt durch das andere Programm.</caption>
+      <thead><tr><th>Session</th><th class="n">vs. Origin: Sternbreite</th><th class="n">vs. Origin: Rauschen</th><th class="n">vs. Siril: Sternbreite</th><th class="n">vs. Siril: Rauschen</th></tr></thead>
+      <tbody>
+        <tr><th>Black Eye, 81 Frames</th><td class="n">8.15 / 8.38 px</td><td class="n">1.00 / 1.04 / 1.06</td><td class="n">8.21 / 8.26 px</td><td class="n">0.94 / 1.09 / 0.97</td></tr>
+        <tr><th>Sonnenblume, 158 Frames</th><td class="n">3.54 / 4.25 px</td><td class="n">0.96 / 0.93 / 0.95</td><td class="n">3.50 / 3.58 px</td><td class="n">1.02 / 1.03 / 1.02</td></tr>
+        <tr><th>Krebsnebel, 133 Frames</th><td class="n">2.54 / 3.50 px</td><td class="n">1.00 / 0.92 / 0.95</td><td class="n">2.54 / 2.77 px</td><td class="n">1.04 / 0.99 / 1.01</td></tr>
+        <tr><th>Herkules, 56 Frames</th><td class="n">5.67 / 5.98 px</td><td class="n">0.99 / 0.96 / 1.01</td><td class="n">5.68 / 5.74 px</td><td class="n">1.00 / 1.04 / 1.01</td></tr>
+      </tbody>
+    </table>
+
+    <div class="split">
+      <div class="chart">
+        <h3>Sternbreite relativ zu OriginStack, an denselben Sternen (kleiner ist schärfer)</h3>
+        <h3 class="sub">Black-Eye-Galaxie</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:69.5%"></i><b>1.01</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:71.5%"></i><b>1.04</b></div></div>
+        <h3 class="sub">Sonnenblumengalaxie</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:70.0%"></i><b>1.02</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:83.1%"></i><b>1.20</b></div></div>
+        <h3 class="sub">Krebsnebel</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:74.7%"></i><b>1.08</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:94.0%"></i><b>1.36</b></div></div>
+        <h3 class="sub">Herkuleshaufen</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:69.8%"></i><b>1.01</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:72.7%"></i><b>1.05</b></div></div>
+        <small>1.00 ist OriginStack. Jedes Programm wird an den Sternen, die beide gut anpassen, gegen OriginStack gemessen, jedes Bild auf seinem eigenen Pixelraster.</small>
+      </div>
+
+      <div class="verdict">
+        <h3>Was die Zahlen sagen</h3>
+        <p><strong>Schärfe: bei jeder Session dieselbe Reihenfolge.</strong> OriginStack, dann Siril, dann das Origin. Der eigene Stack des Teleskops ist der weichste der drei: Seine Sterne sind bei der Black-Eye-Galaxie 4% breiter als bei OriginStack, bei der Sonnenblumengalaxie 17%, beim Krebsnebel 27% und beim Herkuleshaufen 5%, und das meiste davon im Blauen. Siril liegt nah an OriginStack, 1 bis 8% breiter.</p>
+        <p><strong>Rauschen: ein Unentschieden.</strong> Gemessen auf der Skala eines Sterns &mdash; das Rauschen, das bestimmt, wie schwache Sterne Sie noch sehen können &mdash; liegen alle drei in jedem Kanal innerhalb weniger Prozent beieinander. Die zusätzliche Schärfe von OriginStack kostet kein Rauschen.</p>
+        <p><strong>Was das Origin ab Werk besser macht:</strong> Sein gespeichertes Bild ist bereits von Himmelsgradienten befreit. OriginStack entfernt sie in seinen Fertigstellungsschritten; der Stack von Siril hat hier keine solche Entfernung.</p>
+        <p><strong>Der Vergleich hat zwei Fehler in OriginStack aufgedeckt.</strong> Die fertigen Bilder nebeneinander zeigten einen gesprenkelten Himmel bei kleinen, schwachen Objekten und blaue Scheiben bei gesättigten Sternen. Beides ist behoben, und die Zahlen oben wurden danach erneut gemessen.</p>
+      </div>
+    </div>
+
+    <div class="figs">
+      <figure class="wide">
+        <picture><source type="image/webp" srcset="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="Drei Ausschnitte des Krebsnebels in voller Auflösung aus denselben Frames: der eigene Stack des Celestron Origin, der von Siril und der von OriginStack, alle gleich gestreckt. Die Sterne und die Filamente des Nebels sind beim Origin sichtbar weicher."></picture>
+        <figcaption>Der Krebsnebel in voller Auflösung aus denselben 133 Frames, alle drei gleich gestreckt. Der eigene Stack des Origin (links) ist sichtbar weicher; Siril und OriginStack liegen nah beieinander, wobei die Sterne von OriginStack 8% schmaler sind.</figcaption>
+      </figure>
+    </div>
+
+    <p class="caveat measure">So wurde gemessen: Das TIFF des Origin ist linear, liegt aber auf einem großen Sockel, sodass die Kerne seiner hellsten Sterne abgeschnitten sind; jeder Stack wurde mit einem Gain pro Farbkanal, gemessen dort, wo das Bild linear ist, auf die Helligkeitsskala von OriginStack gebracht, und abgeschnittene Sterne wurden ausgelassen. Die Rauschverhältnisse hängen an diesem Gain, lesen Sie sie also mit plus/minus 5 bis 10%. Vier Sessions mit einem Teleskop sind eine kleine Stichprobe. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> wiederholt das mit Ihren eigenen Frames.</p>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>Damit entstanden</h2>
+    <p class="intro measure">Alle aus rohen Frames des Celestron Origin, gestackt und bearbeitet mit OriginStack, unter gemessenem <strong>Bortle 7-9</strong>-Himmel (starke Lichtverschmutzung, Garten/Dach, kein dunkler Standort) -- Messungen und Methode zu jedem Bild finden Sie in der <a href="https://github.com/hd152/originstack#readme">README</a>.</p>
+    <div class="gallery">
+      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 59vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="803" loading="lazy" alt="Die Whirlpool-Galaxie, eine Spiralgalaxie in Draufsicht mit einer kleineren Begleitgalaxie."></picture><figcaption>Whirlpool-Galaxie (M51)</figcaption></figure>
+      <div class="stack">
+        <figure><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1200" height="811" loading="lazy" alt="Der Orionnebel mit seiner hellen zentralen Wolke und dem umgebenden Gas."></picture><figcaption>Orionnebel (M42), sieben Sessions kombiniert</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="Ein dichtes Sternfeld im Schützen mit dunklen Staubbändern."></picture><figcaption>Sagittarius-Sternwolke (M24), 138 × 10 s</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="../img/andromeda-galaxy-m31-celestron-origin-800.webp 800w, ../img/andromeda-galaxy-m31-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/andromeda-galaxy-m31-celestron-origin.jpg" width="1200" height="774" loading="lazy" alt="Die Andromedagalaxie, ein heller Spiralkern mit einem Staubband und zwei Begleitgalaxien."></picture><figcaption>Andromedagalaxie (M31), 183 × 10 s</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="../img/horsehead-flame-nebula-celestron-origin-800.webp 800w, ../img/horsehead-flame-nebula-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/horsehead-flame-nebula-celestron-origin.jpg" width="1200" height="961" loading="lazy" alt="Das leuchtende Gas und das dunkle Staubband des Flammennebels nahe Alnitak, mit der dunklen Einkerbung des Pferdekopfnebels im Staubband."></picture><figcaption>Region Pferdekopf- / Flammennebel, 213 × 10 s</figcaption></figure>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <h2>Installation</h2>
+    <div class="get">
+      <div>
+        <h3>Windows-Installationsprogramm</h3>
+        <p>Kostenlose Stacking-Software für Windows 10 und 11. Laden Sie die Setup-Datei aus dem <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">neuesten Release</a> herunter und führen Sie sie aus. Sie installiert nur für Ihren Benutzer, legt einen Eintrag im Startmenü und ein Deinstallationsprogramm an und benötigt kein Python.</p>
+        <p>Lieber die ZIP-Datei? Verwenden Sie zuerst „Alle extrahieren“ und starten Sie dann OriginStack.exe aus dem entpackten Ordner. Ein Start direkt aus der ZIP-Datei schlägt fehl.</p>
+      </div>
+      <div id="mac">
+        <h3>macOS-App</h3>
+        <p>Laden Sie die ZIP-Datei für Ihren Mac aus dem <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">neuesten Release</a> herunter: <code>macos-arm64</code> für Apple Silicon (M1 und neuer, benötigt macOS 14 oder neuer) oder <code>macos-x86_64</code> für einen Intel-Mac. Öffnen Sie die ZIP-Datei und ziehen Sie OriginStack in „Programme“. Kein Python erforderlich.</p>
+        <p>Die App ist noch nicht von Apple signiert, daher blockiert macOS den ersten Start. Klicken Sie mit gedrückter Ctrl-Taste auf OriginStack, wählen Sie „Öffnen“ und dann erneut „Öffnen“; unter macOS 15 und neuer versuchen Sie einmal, sie zu öffnen, und wählen dann unter Systemeinstellungen, Datenschutz &amp; Sicherheit „Dennoch öffnen“. Oder entfernen Sie die Download-Markierung im Terminal:</p>
+<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
+        <p>Die Mac-Versionen wurden in der Praxis weniger genutzt als die Windows-Version.</p>
+      </div>
+      <div>
+        <h3>Linux-Paket</h3>
+        <p>Laden Sie <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> aus dem <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">neuesten Release</a> herunter, entpacken Sie es und führen Sie das Installationsprogramm aus. Es installiert nur für Ihren Benutzer, legt einen Eintrag im Anwendungsmenü an und benötigt weder Python noch Root-Rechte.</p>
+<pre>tar xzf OriginStack-*-linux-x64.tar.gz
+cd OriginStack-*-linux-x64
+./install.sh</pre>
+        <p>Es benötigt glibc 2.35 oder neuer (Ubuntu 22.04, Debian 12, Fedora 36 und neuer) und wurde in der Praxis weniger genutzt als die Windows-Version. Mit <code>./install.sh --uninstall</code> entfernen Sie es wieder.</p>
+      </div>
+      <div>
+        <h3>Aus dem Quellcode</h3>
+        <p>Unter Windows, Linux (getestet) oder macOS (nicht getestet):</p>
+<pre>git clone https://github.com/hd152/originstack
+cd originstack
+pip install -r requirements.txt
+python desktop_app.py</pre>
+        <p>Die Kommandozeile erledigt dieselbe Arbeit: <code>python originstack.py -d lights/ -o stacked.fits</code>. Eine optionale Rust-Erweiterung beschleunigt die aufwendigen Schritte; ohne sie wird auf reines NumPy zurückgegriffen.</p>
+      </div>
+      <div>
+        <h3>Was es sonst noch kann</h3>
+        <p>Kalibrierung mit Bias-, Dark- und Flat-Frames, Entfernung von Hotpixeln und Satellitenspuren, Sigma-Clipping und weitere Stacking-Methoden mit Ausreißerverwerfung, optionales Drizzle, Entfernung von Hintergrund und Gradienten, Rauschunterdrückung und Dekonvolution, Plate Solving, Farbkalibrierung, Photometrie und ein Kometenmodus. Wenn Sie eine kostenlose Alternative zu DeepSkyStacker oder Siril für Astrofotos vom Celestron Origin und anderen One-Shot-Color-Kameras suchen: Genau dafür ist es gemacht.</p>
+      </div>
+      <div>
+        <h3>Was es einliest</h3>
+        <p>Rohdateien des Celestron Origin (die FITS-Frames in jedem Session-Ordner mit ihrer <code>info.json</code>) sowie Frames von Farbkameras als FITS, Kamera-RAW (Canon, Nikon, Sony und andere, benötigt rawpy), TIFF und XISF. SER-Videos werden für die Planetenfotografie unterstützt. Formate lassen sich in einem Ordner beliebig mischen.</p>
+        <p>Soll es vollständig offline laufen? Übergeben Sie <code>--offline</code> oder kreuzen Sie die Option in der App an, und OriginStack stellt keinerlei Netzwerkanfragen.</p>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack ist freie Software unter der MIT-Lizenz.</span>
+    <span><a href="stack-celestron-origin.html">Origin-Bilder stacken</a> &nbsp; <a href="../advanced.html">Funktionen für Fortgeschrittene</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">Quellcode</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Problem melden</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">Änderungen</a> &nbsp; <a href="privacy.html">Datenschutz</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../" hreflang="en" lang="en">English</a> <a href="../de/" hreflang="de" lang="de" aria-current="true">Deutsch</a> <a href="../es/" hreflang="es" lang="es">Español</a> <a href="../fr/" hreflang="fr" lang="fr">Français</a> <a href="../it/" hreflang="it" lang="it">Italiano</a> <a href="../pt-br/" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+
+<script type="application/json" id="i18n">{"download": "Für {os} herunterladen", "downloadVersion": "OriginStack {version} für {os} herunterladen", "win": "Windows", "mac-arm64": "Mac (Apple Silicon)", "mac-x86_64": "Mac (Intel)", "linux": "Linux"}</script>
+<script>
+(function () {
+  // Button labels; the translated pages carry their own copy of this block.
+  var T = JSON.parse(document.getElementById('i18n').textContent);
+  // Wipe: the range input drives one CSS variable. On load the divider sweeps in once.
+  var wipe = document.getElementById('wipe'), range = wipe.querySelector('input');
+  function set(v) { wipe.style.setProperty('--p', v + '%'); }
+  range.addEventListener('input', function () { set(range.value); });
+  var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    var from = 96, to = 50, t0 = null, dur = 1500, moved = false;
+    range.addEventListener('pointerdown', function () { moved = true; }, { once: true });
+    set(from);
+    requestAnimationFrame(function step(t) {
+      if (moved) return;
+      if (t0 === null) t0 = t;
+      var k = Math.min((t - t0) / dur, 1), e = 1 - Math.pow(1 - k, 3);
+      set(from + (to - from) * e); range.value = from + (to - from) * e;
+      if (k < 1) requestAnimationFrame(step);
+    });
+  }
+
+  // Pick the visitor's platform for the main button; the static links (latest release page)
+  // still work without this. Phones and tablets keep the Windows default.
+  var plat = 'win';
+  try {
+    var p = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') + ' ' + navigator.userAgent;
+    var touch = navigator.maxTouchPoints > 1;
+    if (/Mac/.test(p) && !touch) {
+      plat = 'mac-arm64';
+      // Chrome and Firefox name the GPU; Safari says "Apple GPU" on every Mac, so Intel
+      // Macs on Safari get the Apple silicon button and the Intel link next to it.
+      try {
+        var gl = document.createElement('canvas').getContext('webgl');
+        var ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        var gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
+        if (/Intel|AMD|Radeon/i.test(gpu)) plat = 'mac-x86_64';
+      } catch (e) {}
+    } else if (/Linux/.test(p) && !/Android/.test(p)) {
+      plat = 'linux';
+    }
+  } catch (e) {}
+  var label = T[plat];
+  var want = { 'win': /-setup\.exe$/, 'mac-arm64': /-macos-arm64\.zip$/, 'mac-x86_64': /-macos-x86_64\.zip$/, 'linux': /-linux-x64\.tar\.gz$/ }[plat];
+  var dl = document.getElementById('download');
+  dl.textContent = T.download.replace('{os}', label);
+  dl.setAttribute('data-goatcounter-click', 'download-hero-' + plat);
+  if (plat !== 'win') {
+    document.getElementById('fine-win').hidden = true;
+    document.getElementById(plat === 'linux' ? 'fine-linux' : 'fine-mac').hidden = false;
+  }
+  try {
+    fetch('https://api.github.com/repos/hd152/originstack/releases/latest')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (!rel) return;
+        var assets = rel.assets || [];
+        function find(re) { return assets.filter(function (x) { return re.test(x.name); })[0]; }
+        var mine = find(want);
+        if (mine) dl.href = mine.browser_download_url;
+        dl.textContent = T.downloadVersion.replace('{version}', String(rel.tag_name).replace(/^v/, '')).replace('{os}', label);
+        Array.prototype.forEach.call(document.querySelectorAll('.platforms a[data-asset]'), function (a) {
+          var x = find(new RegExp(a.getAttribute('data-asset')));
+          if (x) a.href = x.browser_download_url;
+        });
+      }).catch(function () {});
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

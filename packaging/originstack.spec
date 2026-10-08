@@ -36,6 +36,8 @@ datas += [(str(ROOT / 'VERSION'), '.')]
 # add: datas += [(str(ROOT / 'src' / 'data' / 'transient_triage.onnx'), 'src/data')]
 # Example results on the desktop app's target cards (src/desktop_app.py, by path).
 datas += [(str(ROOT / 'src' / 'data' / 'examples'), 'src/data/examples')]
+# Desktop-app translations (src/i18n.py reads src/locales/<code>.json by path).
+datas += [(str(ROOT / 'src' / 'locales'), 'src/locales')]
 
 # The window icon. The EXE resource below sets the taskbar/Explorer icon, but
 # desktop_app.py also calls root.iconbitmap() with a path relative to its own

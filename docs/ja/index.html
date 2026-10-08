@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OriginStack：Celestron Origin 用の無料天体写真スタックソフト</title>
+<meta name="description" content="Celestron Origin などのカラーカメラ向けの、無料でオープンソースの天体写真スタックソフト。FITS、RAW、TIFF のフレームをキャリブレーション、スタック、画像処理します。">
+<meta name="keywords" content="astrophotography, image stacking, deep sky stacking, Celestron Origin, Origin smart telescope, FITS stacker, astrophotography software, calibration frames, bias dark flat, sigma clipping, drizzle, plate solving, DeepSkyStacker alternative, Siril alternative, free, open source, Windows">
+<meta name="author" content="Tom Davenport">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<meta name="google-site-verification" content="y0T7c32pCBMpH_AOL0quViwPiUemWRP4GJJkPyHGJgU" />
+<meta name="google-adsense-account" content="ca-pub-6072198698992372">
+<link rel="canonical" href="https://originstack.site/ja/">
+<meta property="og:locale" content="ja_JP">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/ja/">
+<meta property="og:title" content="OriginStack：Celestron Origin 用の無料天体写真スタックソフト">
+<meta property="og:description" content="より淡い細部、よりシャープな星、よりクリーンな空。Celestron Origin などのカラーカメラ向けの、無料でオープンソースのスタック・画像処理ソフトです。">
+<meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<meta property="og:image:alt" content="OriginStack で 30 秒露出 114 フレームをスタックしたオメガ星雲">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="OriginStack：Celestron Origin 用の無料天体写真スタックソフト">
+<meta name="twitter:description" content="30 秒露出 114 フレームを、1枚の画像に。無料でオープンソースの天体写真スタック・画像処理ソフトです。">
+<meta name="twitter:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "OriginStack",
+  "url": "https://originstack.site/",
+  "description": "無料でオープンソースの天体写真用画像スタック・画像処理ソフト。Celestron Origin や任意のワンショットカラーカメラのフレームをキャリブレーション、位置合わせ、スタック、画像処理します。",
+  "applicationCategory": "MultimediaApplication",
+  "applicationSubCategory": "Astrophotography image stacking",
+  "operatingSystem": "Windows 10, Windows 11, Linux, macOS",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "downloadUrl": "https://github.com/hd152/originstack/releases/latest",
+  "codeRepository": "https://github.com/hd152/originstack",
+  "image": "https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg",
+  "author": {
+    "@type": "Person",
+    "name": "Tom Davenport"
+  },
+  "keywords": "astrophotography, image stacking, Celestron Origin, FITS, calibration, drizzle, plate solving"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  "name": "OriginStack",
+  "url": "https://originstack.site/",
+  "logo": "https://originstack.site/img/originstack-logo-512.png"
+}
+</script>
+<link rel="icon" href="../img/favicon.png">
+<link rel="preload" as="image" type="image/webp" imagesrcset="../img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, ../img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, ../img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" imagesizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))" fetchpriority="high">
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="bar">
+      <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
+      <nav aria-label="セクション">
+        <a href="#time">速度</a> <a href="#app">アプリ</a> <a href="#compare">比較</a> <a href="stack-celestron-origin.html">ガイド</a> <a href="../advanced.html">上級者向け</a> <a href="#get">インストール</a>
+      </nav>
+    </div>
+
+    <h1><span class="kicker">Celestron Origin 用の無料天体写真スタックソフト</span> より淡い細部、よりシャープな星、よりクリーンな空。</h1>
+    <p class="lede">OriginStack は、Celestron Origin の生の FITS ファイルや任意のカラーカメラのフレームをスタック・画像処理し、1枚の完成画像に仕上げます。お使いのコンピューター上で動作し、アカウントは不要です。インターネットに接続するのは、認識できない対象名を調べるときと、プレートソルブなどのオプションの処理を使うときだけです。</p>
+
+    <div class="actions">
+      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Windows 版をダウンロード</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">GitHub でソースを見る</a>
+    </div>
+    <p class="platforms">すべてのダウンロード：<a data-goatcounter-click="download-list-win" href="https://github.com/hd152/originstack/releases/latest" data-asset="-setup\.exe$">Windows</a> &middot; <a data-goatcounter-click="download-list-mac-arm64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-arm64\.zip$">Mac（Apple シリコン）</a> &middot; <a data-goatcounter-click="download-list-mac-x86_64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-x86_64\.zip$">Mac（Intel）</a> &middot; <a data-goatcounter-click="download-list-linux" href="https://github.com/hd152/originstack/releases/latest" data-asset="-linux-x64\.tar\.gz$">Linux</a>
+    </p>
+    <p class="fine" id="fine-win">Windows 10 または 11（64 ビット）、無料、MIT ライセンス。インストーラーはまだコード署名されていないため、SmartScreen の警告が出ることがあります。「詳細情報」を選び、「実行」を選んでください。</p>
+    <p class="fine" id="fine-mac" hidden>macOS、無料、MIT ライセンス。Apple シリコン版には macOS 14 以降が必要です。アプリはまだ Apple の署名を受けていないため、初回起動時に macOS がブロックします。「アプリケーション」フォルダで OriginStack を Control キーを押しながらクリックして「開く」を選ぶか、「システム設定」の「プライバシーとセキュリティ」で「このまま開く」を選んで許可してください。<a href="#mac">詳細</a></p>
+    <p class="fine" id="fine-linux" hidden>glibc 2.35 以降の Linux x86-64（Ubuntu 22.04、Debian 12、Fedora 36 以降）、無料、MIT ライセンス。展開して <code>./install.sh</code> を実行してください。<a href="#get">詳細</a></p>
+
+    <div class="wipe" id="wipe" role="group" aria-label="1フレームと完成したスタックの比較">
+      <picture><source type="image/webp" srcset="../img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, ../img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, ../img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img class="after" fetchpriority="high" src="../img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="114 フレームをスタックして画像処理したオメガ星雲：密集した星野を背景に、暗い筋の入った明るい赤いガス。"></picture>
+      <img class="before" src="../img/omega-nebula-m17-single-frame-celestron-origin.jpg" srcset="../img/omega-nebula-m17-single-frame-celestron-origin-800.jpg 800w, ../img/omega-nebula-m17-single-frame-celestron-origin-1200.jpg 1200w, ../img/omega-nebula-m17-single-frame-celestron-origin.jpg 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))" width="1600" height="1103" alt="同じ視野の 30 秒露出1フレームを見えるように強調したもの：ざらつきが多く、ノイズの多い紫色の空に星雲が淡く写っています。">
+      <span class="line"></span>
+      <span class="grip" aria-hidden="true">&lt;&gt;</span>
+      <span class="cap l">30 秒露出1フレーム（強調済み）</span>
+      <span class="cap r">114 フレームをスタック・画像処理</span>
+      <input type="range" min="0" max="100" value="50" aria-label="ドラッグして1フレームと完成したスタックを比較">
+    </div>
+  </div>
+</header>
+
+<main>
+<section id="time">
+  <div class="wrap">
+    <h2>一晩分のフレームを約1分半で</h2>
+    <p class="intro measure">オメガ星雲 114 フレーム、8 コアのデスクトップ PC で、生ファイルから完成画像まで <strong>89 秒</strong>（前バージョンでは 132 秒）。赤いブロックが画像の見栄えを良くする部分で、残りは 114 フレームの位置を揃える処理です。</p>
+
+    <div class="run" role="img" aria-label="89 秒の内訳を示すバー：読み込みと評価 32.7 秒、位置合わせ 9.4 秒、整列とスタック 24.6 秒、仕上げ 15.6 秒、ディスクと準備 6.8 秒">
+      <span style="width:36.7%; background:#1d7f86"></span>
+      <span style="width:10.5%; background:#4fa3a8"></span>
+      <span style="width:27.6%; background:#8cc5c8"></span>
+      <span style="width:17.5%; background:#b3312a"></span>
+      <span style="width:7.7%; background:#b9c3cf"></span>
+    </div>
+    <ul class="legend">
+      <li><i style="background:#1d7f86"></i>読み込み・キャリブレーション・評価<b>32.7 s</b></li>
+      <li><i style="background:#4fa3a8"></i>位置合わせ<b>9.4 s</b></li>
+      <li><i style="background:#8cc5c8"></i>整列とスタック<b>24.6 s</b></li>
+      <li><i style="background:#b3312a"></i>画像の仕上げ<b>15.6 s</b></li>
+      <li><i style="background:#b9c3cf"></i>ディスクと準備<b>6.8 s</b></li>
+    </ul>
+
+    <div class="phases">
+      <div>
+        <h3>読み込み・キャリブレーション・評価</h3>
+        <p>各フレームをバイアス、ダーク、フラットで補正し、センサーのカラーモザイクから画像に変換して、シャープさとノイズを評価します。明らかに不良なフレームは除外されます。</p>
+      </div>
+      <div>
+        <h3>位置合わせ</h3>
+        <p>フレームを1ピクセル未満の精度で揃えます。Origin のような経緯台で生じるゆっくりとした視野回転も補正します。</p>
+      </div>
+      <div>
+        <h3>整列とスタック</h3>
+        <p>揃えたフレームを外れ値除外しながら合成するため、人工衛星の軌跡、ホットピクセル、宇宙線は平均に混ざらずに除去されます。</p>
+      </div>
+      <div>
+        <h3>画像の仕上げ</h3>
+        <p>背景のかぶり、色、ノイズを処理し、その後見やすいように強調します。保存される FITS ファイルはリニアのままなので、さらなる処理にそのまま使えます。</p>
+      </div>
+    </div>
+    <p class="plain measure">フレームは1枚ずつ処理されるため、500 フレームでも 50 フレームとほぼ同じメモリで済みます。実行中の一時ファイルはフレームあたり約 100 MB のディスクを使います。メモリに余裕がある場合は、位置合わせ済みフレームを代わりにメモリ上に保持し、常に 30% の空きを残します。</p>
+  </div>
+</section>
+
+<section id="app">
+  <div class="wrap">
+    <h2>処理を見守るか、設定を省略するか</h2>
+    <p class="intro measure">フレームのフォルダを指定し、何を撮影したかを選んで（またはアプリに判断させて）、「開始」を押すだけです。すべての設定に1行の説明があり、残りは既定値が対象に合わせて選びます。以下は、後述の比較で使ったひまわり銀河のフレームをスタックしたときの実際の画面です。Celestron Origin の画像処理は初めてですか？<a href="stack-celestron-origin.html">ステップ・バイ・ステップのガイド</a>では、望遠鏡が保存するセッションフォルダから説明しています。</p>
+
+    <div class="shots">
+      <figure class="shot big">
+        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1029" loading="lazy" alt="実行中の OriginStack のウィンドウ：左側にフォルダと出力、対象の種類と実行モードの画像カード、4つのパイプラインフェーズのうち3つが完了済みの表示、その下にログ。右側には後処理途中のひまわり銀河のプレビュー、フレームのサムネイル列、フレームごとのスコアの表。"></picture>
+        <figcaption>ひまわり銀河の処理途中。フェーズ 1〜3 が完了し、プレビューは仕上げの各ステップの進行に合わせて更新されます。</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1029" loading="lazy" alt="実行前の OriginStack のウィンドウ：選択したフォルダとそのフレーム数、その下にセッションファイルから読み取った対象名。自動検出、銀河（おすすめ表示付き）、星雲、星団、星野、彗星の画像カード、最高品質とクイックルックの選択、プレビューに表示された銀河の作例、そしてフレーム、対象、モード、変更した設定、出力ファイルをまとめた「今回の実行」の概要。"></picture>
+        <figcaption>実行前。フォルダを選ぶと、アプリがフレーム数を数え、セッションから対象を読み取ってカードを提案します。プレビューには作例が表示され、「今回の実行」に「開始」で何が行われるかが正確に示されます。</figcaption>
+      </figure>
+      <figure class="shot s5">
+        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="983" loading="lazy" alt="実行完了後のプレビューとフレームのパネル。ひまわり銀河の最終画像と、158 フレーム中 158 フレームを 3 分 35 秒でスタックしたという概要が表示されています。"></picture>
+        <figcaption>完了したら、結果を拡大・移動したり、リニアスタックと完成画像を切り替えて比較したりできます。</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="検索ボックスとグループ一覧のある「追加オプション」パネル。厳密な画像コアディション、縞ノイズ除去、歪みモデルなど、位置合わせとスタックのオプションがそれぞれ1行の説明付きで表示されています。"></picture>
+        <figcaption>「追加オプション」にはさらに約 100 個のオプションがあり、それぞれ1行の説明と検索ボックスで探せます。使用頻度の低いものは「上級オプション」にチェックを入れるまで非表示です。</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <h2>Siril や DeepSkyStacker との比較</h2>
+    <p class="intro measure">同じフレーム、同じバイアス・ダーク・フラット、同じマシンで、各ツールを標準的な設定で実行しました。Celestron Origin の3セッション：オメガ星雲（30 秒 × 114）、ひまわり銀河（20 秒 × 158）、ちょうこくしつ座銀河（10 秒 × 532）。</p>
+
+    <table class="wide">
+      <caption>OriginStack が先、Siril が後。「スタックのみ」は、Siril にはない OriginStack の仕上げ処理を含まない時間です。</caption>
+      <thead><tr><th>セッション</th><th class="n">スタックのみ</th><th class="n">OriginStack、完成画像</th><th class="n">最大メモリ</th><th class="n">星像の幅</th></tr></thead>
+      <tbody>
+        <tr><th>オメガ、114 フレーム</th><td class="n">68 s / 86 s</td><td class="n">90 s</td><td class="n">10.6 / 6.5 GB</td><td class="n">4.40 / 4.56 px</td></tr>
+        <tr><th>ひまわり、158 フレーム</th><td class="n">84 s / 106 s</td><td class="n">107 s</td><td class="n">12.8 / 7.8 GB</td><td class="n">3.52 / 3.60 px</td></tr>
+        <tr><th>ちょうこくしつ座、532 フレーム</th><td class="n">169 s / 195 s</td><td class="n">184 s</td><td class="n">9.2 / 11.2 GB</td><td class="n">2.69 / 3.01 px</td></tr>
+      </tbody>
+    </table>
+
+    <div class="split">
+      <div class="chart">
+        <h3>同じ恒星での星像の幅（小さいほどシャープ）</h3>
+        <h3 class="sub">オメガ</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:67.7%"></i><b>4.40 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:70.2%"></i><b>4.56 px</b></div></div>
+        <div class="row"><span>DeepSkyStacker</span><div class="track"><i style="width:74.3%"></i><b>4.83 px</b></div></div>
+        <h3 class="sub">ひまわり</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.2%"></i><b>3.52 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:55.4%"></i><b>3.60 px</b></div></div>
+        <h3 class="sub">ちょうこくしつ座</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:41.4%"></i><b>2.69 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:46.3%"></i><b>3.01 px</b></div></div>
+        <small>明るく飽和しておらず孤立した最大 400 個の恒星それぞれにガウス関数をフィットしたもの。両スタックで同じ位置の恒星を、それぞれのピクセルグリッド上で測定しています。</small>
+      </div>
+
+      <div class="verdict">
+        <h3>数値が示すこと</h3>
+        <p><strong>シャープさ：3つすべてで Siril よりシャープ。</strong>同じ恒星で比べると、OriginStack はオメガで 4% 細く（4.40 px 対 4.56 px）、ひまわりで 1.5%、ちょうこくしつ座で 10% 細くなりました。これを実現したのは2つの変更です。既定で有効な<em>厳密な画像コアディション</em>は、細部の各スケールを、各フレームのシャープさ・透明度・ノイズに応じて重み付けします（Zackay &amp; Ofek, 2017）。もう1つは、すべてのフレームでほとんどの明るい恒星のピークを平坦にしていたホットピクセル処理の修正です &mdash; アンダーサンプリングの星像では、ピクセルを隣接ピクセルと比べるだけの判定にとって、恒星の中心はホットピクセルとまったく同じに見えます。また、使用したフレーム数も多く、Siril の 111、157、525 に対して 114、158、532 でした。</p>
+        <p><strong>ノイズ：シャープさを揃えれば Siril より低ノイズ。</strong>シャープなスタックほどピクセル単位のノイズは多くなるため、公平な比較として、OriginStack の各チャンネルを恒星の幅が Siril とちょうど同じになるまでぼかしました。すると赤/緑/青のノイズは、Siril に対してオメガで 0.81、0.88、0.89 倍、ひまわりで 1.00、0.75、0.93 倍（赤の星像はもともと Siril と同じ幅でした）、ちょうこくしつ座で 0.97、0.92、0.89 倍です。揃えずにピクセル単位で比べると 0.92、1.05、1.06、1.00、0.84、0.97、1.16、1.08、1.28 倍です &mdash; 恒星がシャープなほど、この数値は大きくなります。</p>
+        <p><strong>速度：3つすべてで Siril より高速。</strong>同じマシンで続けて実行した、スタック完了までの時間：オメガで 68 秒（Siril 86 秒）、ひまわりで 84 秒（同 106 秒）、ちょうこくしつ座で 169 秒（同 195 秒）。OriginStack は、Siril が行わないフレームごとの処理 &mdash; 全フレームでの品質評価、ホワイトバランス、星検出 &mdash; も行っていますが、その分を位置合わせとスタックで取り戻しています。どちらのツールも、同じ条件の実行でも1日のうちに最大 3 分の 1 ほど時間が変動したため（Siril だけでもオメガで 55〜86 秒）、同じ行の中で比較してください。完成画像の作成にはさらに 14〜23 秒かかります。</p>
+        <p><strong>メモリとディスク。</strong>OriginStack は物理コアごとに1つのワーカーを動かし、余裕があれば位置合わせ済みのフレームをメモリ上に保持します。ちょうこくしつ座では 9.2 GB（Siril は 11.2 GB）、すべてがメモリに収まった短い2つのセッションでは 10.6 GB と 12.8 GB（Siril は 6.5 GB と 7.8 GB）でした。一時ディスク使用量は、短い2つのセッションでは少なく（17 GB と 23 GB に対して 11 GB と 15 GB）、ちょうこくしつ座では多くなりました（57 GB に対して 63 GB）。</p>
+        <p><strong>DeepSkyStacker</strong> はオメガで 14 分 8 秒かかり、星像は他の2つより甘く、既定の設定ではホットピクセルの筋と位置合わせに失敗した数フレームが残りました。</p>
+      </div>
+    </div>
+
+    <p class="caveat measure">OriginStack の強みはスタックの後にあります。設定なしで同じ実行の中で画像を仕上げ、<a href="../advanced.html#diagnostics">診断</a>でその夜の状況を説明し、空の位置をお使いのコンピューター上で求め、必要なら<a href="../advanced.html#workflow">完全オフライン</a>で動作し、他のツールがユーザー任せにしている<a href="../advanced.html">その他の処理</a>もこなします。単純なスタックでも、今では3セッションすべてで Siril よりシャープで、シャープさを揃えれば低ノイズ、そして3つすべてで高速です。3セッションはすべて 2026-10-02 にこのバージョンで測定し直しました。DeepSkyStacker の数値は以前の実行によるもので、再測定はしていません。これらの数値は過去にも訂正しています。このページの以前の版では、測定する恒星の選び方のせいでシャープさを過大評価していました。また別の版では、実際には平滑化だったノイズ改善を宇宙線検出の効果としていました。1台のカメラによる3セッションは小さなサンプルで、どちらのツールも標準的な設定のままです。<a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> で、ご自身のフレームでこのすべてを再現できます。</p>
+
+    <h2 id="vs-origin" class="again">望遠鏡自身のスタックとの比較</h2>
+    <p class="intro measure">Celestron Origin のセッションフォルダには、望遠鏡自身による結果 <code>FinalStackedMaster.tiff</code> も含まれています。4つのセッションで、3つすべてに同じライトフレームを使用：くろめ銀河（20 秒 &times; 81）、ひまわり銀河（20 秒 &times; 158）、かに星雲（133 フレーム）、ヘルクレス座球状星団（56 フレーム）。OriginStack は既定の設定、Siril は上記の設定です。</p>
+
+    <table class="wide">
+      <caption>同じ恒星での星像の幅を、OriginStack とそれぞれで比較。ノイズは恒星の大きさのスケールで、赤/緑/青について OriginStack を相手の値で割ったものです。</caption>
+      <thead><tr><th>セッション</th><th class="n">対 Origin：星像の幅</th><th class="n">対 Origin：ノイズ</th><th class="n">対 Siril：星像の幅</th><th class="n">対 Siril：ノイズ</th></tr></thead>
+      <tbody>
+        <tr><th>くろめ銀河、81 フレーム</th><td class="n">8.15 / 8.38 px</td><td class="n">1.00 / 1.04 / 1.06</td><td class="n">8.21 / 8.26 px</td><td class="n">0.94 / 1.09 / 0.97</td></tr>
+        <tr><th>ひまわり、158 フレーム</th><td class="n">3.54 / 4.25 px</td><td class="n">0.96 / 0.93 / 0.95</td><td class="n">3.50 / 3.58 px</td><td class="n">1.02 / 1.03 / 1.02</td></tr>
+        <tr><th>かに星雲、133 フレーム</th><td class="n">2.54 / 3.50 px</td><td class="n">1.00 / 0.92 / 0.95</td><td class="n">2.54 / 2.77 px</td><td class="n">1.04 / 0.99 / 1.01</td></tr>
+        <tr><th>ヘルクレス座、56 フレーム</th><td class="n">5.67 / 5.98 px</td><td class="n">0.99 / 0.96 / 1.01</td><td class="n">5.68 / 5.74 px</td><td class="n">1.00 / 1.04 / 1.01</td></tr>
+      </tbody>
+    </table>
+
+    <div class="split">
+      <div class="chart">
+        <h3>同じ恒星での、OriginStack に対する星像の幅の比（小さいほどシャープ）</h3>
+        <h3 class="sub">くろめ銀河</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:69.5%"></i><b>1.01</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:71.5%"></i><b>1.04</b></div></div>
+        <h3 class="sub">ひまわり銀河</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:70.0%"></i><b>1.02</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:83.1%"></i><b>1.20</b></div></div>
+        <h3 class="sub">かに星雲</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:74.7%"></i><b>1.08</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:94.0%"></i><b>1.36</b></div></div>
+        <h3 class="sub">ヘルクレス座球状星団</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:69.0%"></i><b>1.00</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:69.8%"></i><b>1.01</b></div></div>
+        <div class="row"><span>Celestron Origin</span><div class="track"><i style="width:72.7%"></i><b>1.05</b></div></div>
+        <small>1.00 が OriginStack です。各ツールは、両方で良好にフィットした恒星について OriginStack と比較し、各画像はそれぞれのピクセルグリッド上で測定しています。</small>
+      </div>
+
+      <div class="verdict">
+        <h3>数値が示すこと</h3>
+        <p><strong>シャープさ：どのセッションでも同じ順位。</strong>OriginStack、Siril、Origin の順です。望遠鏡自身のスタックが3つの中で最も甘く、星像は OriginStack に比べてくろめ銀河で 4%、ひまわりで 17%、かにで 27%、ヘルクレス座球状星団で 5% 太く、その大部分は青チャンネルです。Siril は OriginStack に近く、1〜8% 太い程度です。</p>
+        <p><strong>ノイズ：互角。</strong>恒星の大きさのスケール &mdash; どれだけ暗い星まで見えるかを決めるノイズ &mdash; で測ると、3つはどのチャンネルでも互いに数パーセント以内です。OriginStack のシャープさはノイズの面で何の代償もありません。</p>
+        <p><strong>Origin がそのままで優れている点：</strong>保存される画像の時点で、空のかぶりがすでに除去されています。OriginStack は仕上げの処理でかぶりを除去します。ここでの Siril のスタックには除去処理は入っていません。</p>
+        <p><strong>この比較で OriginStack の不具合が2つ見つかりました。</strong>完成画像を並べると、小さく淡い対象で空がまだらになり、飽和した恒星に青い円盤が出ていました。どちらも修正済みで、上の数値は修正後に測定し直したものです。</p>
+      </div>
+    </div>
+
+    <div class="figs">
+      <figure class="wide">
+        <picture><source type="image/webp" srcset="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-800.webp 800w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1200.webp 1200w, ../img/crab-nebula-celestron-origin-vs-siril-vs-originstack-1460.webp 1460w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg" width="1460" height="514" loading="lazy" alt="同じフレームから作ったかに星雲の等倍の切り抜き3枚：Celestron Origin 自身のスタック、Siril、OriginStack で、すべて同じ強調をかけています。Origin の星像と星雲のフィラメントは明らかに甘くなっています。"></picture>
+        <figcaption>同じ 133 フレームから作った等倍のかに星雲。3枚すべてに同じ強調をかけています。Origin 自身のスタック（左）は明らかに甘く、Siril と OriginStack は近いものの、OriginStack の星像が 8% 細くなっています。</figcaption>
+      </figure>
+    </div>
+
+    <p class="caveat measure">測定方法：Origin の TIFF はリニアですが大きなペデスタル（底上げ）が乗っているため、最も明るい恒星の中心はクリップしています。各スタックは、画像がリニアな部分で測定したカラーチャンネルごとのゲイン1つで OriginStack の明るさのスケールに合わせ、クリップした恒星は除外しました。ノイズの比はそのゲインに依存するため、±5〜10% の幅があるものとして読んでください。1台の望遠鏡による4セッションは小さなサンプルです。<a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> で、ご自身のフレームで再現できます。</p>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>作例</h2>
+    <p class="intro measure">すべて Celestron Origin の生フレームを OriginStack でスタック・画像処理したもので、測定値 <strong>Bortle 7-9</strong> の空（強い光害、自宅の庭や屋上で、暗い空の観測地ではありません）で撮影しています。画像ごとの測定値と方法は <a href="https://github.com/hd152/originstack#readme">README</a> をご覧ください。</p>
+    <div class="gallery">
+      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 59vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="803" loading="lazy" alt="正面向きの渦巻銀河である子持ち銀河と、小さな伴銀河。"></picture><figcaption>子持ち銀河（M51）</figcaption></figure>
+      <div class="stack">
+        <figure><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1200" height="811" loading="lazy" alt="明るい中心部の雲と周囲のガスが広がるオリオン大星雲。"></picture><figcaption>オリオン大星雲（M42）、7セッションを統合</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="暗い塵の帯が走る、いて座の恒星が密集した領域。"></picture><figcaption>いて座スタークラウド（M24）、10 秒 × 138</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="../img/andromeda-galaxy-m31-celestron-origin-800.webp 800w, ../img/andromeda-galaxy-m31-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/andromeda-galaxy-m31-celestron-origin.jpg" width="1200" height="774" loading="lazy" alt="アンドロメダ銀河。明るい渦巻の中心部、暗黒帯、2つの伴銀河。"></picture><figcaption>アンドロメダ銀河（M31）、10 秒 × 183</figcaption></figure>
+        <figure><picture><source type="image/webp" srcset="../img/horsehead-flame-nebula-celestron-origin-800.webp 800w, ../img/horsehead-flame-nebula-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 38vw"><img src="../img/horsehead-flame-nebula-celestron-origin.jpg" width="1200" height="961" loading="lazy" alt="アルニタク付近で輝く燃える木星雲のガスと暗い塵の帯。塵の帯の中に馬頭星雲の暗いくぼみが見えます。"></picture><figcaption>馬頭星雲／燃える木星雲の領域、10 秒 × 213</figcaption></figure>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <h2>インストール</h2>
+    <div class="get">
+      <div>
+        <h3>Windows インストーラー</h3>
+        <p>Windows 10 と 11 向けの無料スタックソフトです。<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>からセットアップファイルをダウンロードして実行してください。現在のユーザーだけにインストールされ、スタートメニューの項目とアンインストーラーが追加されます。Python は不要です。</p>
+        <p>zip 版がよい場合は、まず「すべて展開」を行い、展開したフォルダから OriginStack.exe を実行してください。zip の中から直接実行すると失敗します。</p>
+      </div>
+      <div id="mac">
+        <h3>macOS アプリ</h3>
+        <p><a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>からお使いの Mac 用の zip をダウンロードしてください：Apple シリコン（M1 以降、macOS 14 以降が必要）なら <code>macos-arm64</code>、Intel Mac なら <code>macos-x86_64</code> です。zip を開き、OriginStack を「アプリケーション」フォルダにドラッグします。Python は不要です。</p>
+        <p>アプリはまだ Apple の署名を受けていないため、初回起動時に macOS がブロックします。OriginStack を Control キーを押しながらクリックして「開く」を選び、もう一度「開く」を選んでください。macOS 15 以降では、一度開こうとした後、「システム設定」の「プライバシーとセキュリティ」で「このまま開く」を選んでください。または、ターミナルでダウンロードのフラグを解除します：</p>
+<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
+        <p>Mac 版は Windows 版に比べて実際の使用実績がまだ少なめです。</p>
+      </div>
+      <div>
+        <h3>Linux バンドル</h3>
+        <p><a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>から <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> をダウンロードし、展開してインストーラーを実行してください。現在のユーザーだけにインストールされ、アプリケーションメニューに項目が追加されます。Python も root 権限も不要です。</p>
+<pre>tar xzf OriginStack-*-linux-x64.tar.gz
+cd OriginStack-*-linux-x64
+./install.sh</pre>
+        <p>glibc 2.35 以降（Ubuntu 22.04、Debian 12、Fedora 36 以降）が必要で、Windows 版に比べて実際の使用実績はまだ少なめです。削除するには <code>./install.sh --uninstall</code> を実行してください。</p>
+      </div>
+      <div>
+        <h3>ソースから</h3>
+        <p>Windows、Linux（テスト済み）、macOS（未テスト）で：</p>
+<pre>git clone https://github.com/hd152/originstack
+cd originstack
+pip install -r requirements.txt
+python desktop_app.py</pre>
+        <p>コマンドラインでも同じことができます：<code>python originstack.py -d lights/ -o stacked.fits</code>。オプションの Rust 拡張で重い処理が高速化されます。なくても通常の NumPy で動作します。</p>
+      </div>
+      <div>
+        <h3>その他の機能</h3>
+        <p>バイアス・ダーク・フラットによるキャリブレーション、ホットピクセルと人工衛星の軌跡の除去、シグマクリップなどの外れ値を除外するスタック方式、オプションのドリズル、背景とかぶりの除去、ノイズ除去とデコンボリューション、プレートソルブ、色較正、測光、彗星モード。Celestron Origin やその他のワンショットカラーの天体写真データ向けに、DeepSkyStacker や Siril に代わる無料のソフトをお探しなら、まさにそのために作られています。</p>
+      </div>
+      <div>
+        <h3>対応形式</h3>
+        <p>Celestron Origin の生ファイル（各セッションフォルダ内の FITS フレームと、その <code>info.json</code>）、およびカラーカメラの FITS、カメラ RAW（Canon、Nikon、Sony など。rawpy が必要）、TIFF、XISF のフレーム。惑星撮影用に SER 動画にも対応しています。1つのフォルダに複数の形式を自由に混在できます。</p>
+        <p>完全にオフラインで使いたい場合は、<code>--offline</code> を指定するか、アプリでチェックを入れてください。OriginStack はネットワーク接続を一切行いません。</p>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack は MIT ライセンスのフリーソフトウェアです。</span>
+    <span><a href="stack-celestron-origin.html">Origin の画像をスタックする方法</a> &nbsp; <a href="../advanced.html">高度な機能</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">ソース</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">問題を報告</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">変更履歴</a> &nbsp; <a href="privacy.html">プライバシー</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../" hreflang="en" lang="en">English</a> <a href="../de/" hreflang="de" lang="de">Deutsch</a> <a href="../es/" hreflang="es" lang="es">Español</a> <a href="../fr/" hreflang="fr" lang="fr">Français</a> <a href="../it/" hreflang="it" lang="it">Italiano</a> <a href="../pt-br/" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/" hreflang="ja" lang="ja" aria-current="true">日本語</a> <a href="../zh-cn/" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+
+<script type="application/json" id="i18n">{"download": "{os} 版をダウンロード", "downloadVersion": "OriginStack {version}（{os} 版）をダウンロード", "win": "Windows", "mac-arm64": "Mac（Apple シリコン）", "mac-x86_64": "Mac（Intel）", "linux": "Linux"}</script>
+<script>
+(function () {
+  // Button labels; the translated pages carry their own copy of this block.
+  var T = JSON.parse(document.getElementById('i18n').textContent);
+  // Wipe: the range input drives one CSS variable. On load the divider sweeps in once.
+  var wipe = document.getElementById('wipe'), range = wipe.querySelector('input');
+  function set(v) { wipe.style.setProperty('--p', v + '%'); }
+  range.addEventListener('input', function () { set(range.value); });
+  var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) {
+    var from = 96, to = 50, t0 = null, dur = 1500, moved = false;
+    range.addEventListener('pointerdown', function () { moved = true; }, { once: true });
+    set(from);
+    requestAnimationFrame(function step(t) {
+      if (moved) return;
+      if (t0 === null) t0 = t;
+      var k = Math.min((t - t0) / dur, 1), e = 1 - Math.pow(1 - k, 3);
+      set(from + (to - from) * e); range.value = from + (to - from) * e;
+      if (k < 1) requestAnimationFrame(step);
+    });
+  }
+
+  // Pick the visitor's platform for the main button; the static links (latest release page)
+  // still work without this. Phones and tablets keep the Windows default.
+  var plat = 'win';
+  try {
+    var p = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') + ' ' + navigator.userAgent;
+    var touch = navigator.maxTouchPoints > 1;
+    if (/Mac/.test(p) && !touch) {
+      plat = 'mac-arm64';
+      // Chrome and Firefox name the GPU; Safari says "Apple GPU" on every Mac, so Intel
+      // Macs on Safari get the Apple silicon button and the Intel link next to it.
+      try {
+        var gl = document.createElement('canvas').getContext('webgl');
+        var ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        var gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
+        if (/Intel|AMD|Radeon/i.test(gpu)) plat = 'mac-x86_64';
+      } catch (e) {}
+    } else if (/Linux/.test(p) && !/Android/.test(p)) {
+      plat = 'linux';
+    }
+  } catch (e) {}
+  var label = T[plat];
+  var want = { 'win': /-setup\.exe$/, 'mac-arm64': /-macos-arm64\.zip$/, 'mac-x86_64': /-macos-x86_64\.zip$/, 'linux': /-linux-x64\.tar\.gz$/ }[plat];
+  var dl = document.getElementById('download');
+  dl.textContent = T.download.replace('{os}', label);
+  dl.setAttribute('data-goatcounter-click', 'download-hero-' + plat);
+  if (plat !== 'win') {
+    document.getElementById('fine-win').hidden = true;
+    document.getElementById(plat === 'linux' ? 'fine-linux' : 'fine-mac').hidden = false;
+  }
+  try {
+    fetch('https://api.github.com/repos/hd152/originstack/releases/latest')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (!rel) return;
+        var assets = rel.assets || [];
+        function find(re) { return assets.filter(function (x) { return re.test(x.name); })[0]; }
+        var mine = find(want);
+        if (mine) dl.href = mine.browser_download_url;
+        dl.textContent = T.downloadVersion.replace('{version}', String(rel.tag_name).replace(/^v/, '')).replace('{os}', label);
+        Array.prototype.forEach.call(document.querySelectorAll('.platforms a[data-asset]'), function (a) {
+          var x = find(new RegExp(a.getAttribute('data-asset')));
+          if (x) a.href = x.browser_download_url;
+        });
+      }).catch(function () {});
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

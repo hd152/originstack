@@ -6,6 +6,15 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **The desktop app and website in seven more languages:** Deutsch, Español, Français, Italiano,
+  Português (Brasil), 日本語 and 简体中文. The app follows the system language, with a language menu in
+  the header and `ORIGINSTACK_LANG` to override; every label, card, setting description and tooltip
+  is translated, while the log and the command line stay English. The website's home page, guide
+  and privacy policy have translated versions at `originstack.site/<language>/` with a language
+  switcher. The translations are machine-drafted; corrections are welcome.
+
 ## [2.8.0] - 2026-10-07
 
 A leaner release: a native module a tenth the size, a pile of dead code gone, and a website at
