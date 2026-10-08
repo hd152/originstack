@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Gaia queries are cached locally.** Colour calibration, `--photometry` and
+  `--photometry-timeseries` ask Gaia for the field's stars, 6-12 s each over the network. Results
+  are now kept next to the star index and reused whenever they are exactly what Gaia would
+  return: a `--from-stack` rerun or the next night of the same target answers in milliseconds,
+  and also works offline. `ORIGINSTACK_NO_GAIA_CACHE=1` turns it off.
+
 ### Changed
 
 - **`--transient-triage` works in every build, with a retrained model.** It used to need a native

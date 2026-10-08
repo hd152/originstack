@@ -196,7 +196,45 @@ def gaia_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
     n rows of a cone that holds more, a different subset on each call -- the same stack
     matched 72 to 78 Gaia stars on four runs of identical code. Brightest-first is also
     what every caller wants (the detected stars are the bright ones). ``None`` keeps
-    the server's order. ``min_mag``: only stars fainter than this G magnitude."""
+    the server's order. ``min_mag``: only stars fainter than this G magnitude.
+
+    Brightest-first results are cached locally and reused when provably identical
+    (``src/gaia_cache.py``)."""
+    if order_by and not order_by.replace("_", "").isalnum():
+        raise ValueError(f"bad order_by column: {order_by!r}")
+    from src import gaia_cache
+    if order_by != gaia_cache.ORDER_COLUMN or not gaia_cache.enabled():
+        return tap_query(_GAIA_TAP, _gaia_adql(ra_deg, dec_deg, radius_deg, columns, max_rows,
+                                               require_not_null, order_by, min_mag))
+    hit = gaia_cache.lookup(ra_deg, dec_deg, radius_deg, columns, max_rows,
+                            require_not_null, min_mag)
+    if hit is not None:
+        return hit
+    fetch_cols = list(columns) + [c for c in gaia_cache.KEY_COLUMNS if c not in columns]
+    # Fetch a slightly larger cone and more rows than asked, so that the next
+    # night of the same target (pointed a few arcmin off) is still inside this
+    # entry; the answer is then read from it exactly like any later hit.
+    pr, pn = gaia_cache.padded(radius_deg, max_rows)
+    table = tap_query(_GAIA_TAP, _gaia_adql(ra_deg, dec_deg, pr, fetch_cols, pn,
+                                           require_not_null, order_by, min_mag))
+    if table is not None:
+        gaia_cache.store(table, ra_deg, dec_deg, pr, pn, require_not_null, min_mag)
+        hit = gaia_cache.lookup(ra_deg, dec_deg, radius_deg, columns, max_rows,
+                                require_not_null, min_mag, entry_table=table, entry_rows=pn,
+                                entry_radius=pr, entry_centre=(ra_deg, dec_deg))
+        if hit is not None:
+            return hit
+    # the padded fetch did not settle it (or failed): ask for exactly the request
+    table = tap_query(_GAIA_TAP, _gaia_adql(ra_deg, dec_deg, radius_deg, fetch_cols, max_rows,
+                                           require_not_null, order_by, min_mag))
+    if table is None:
+        return None
+    gaia_cache.store(table, ra_deg, dec_deg, radius_deg, max_rows, require_not_null, min_mag)
+    return table[list(columns)]
+
+
+def _gaia_adql(ra_deg, dec_deg, radius_deg, columns, max_rows, require_not_null,
+               order_by, min_mag) -> str:
     cols = ", ".join(columns)
     where_extra = ""
     if require_not_null:
@@ -215,10 +253,8 @@ def gaia_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
         f"CIRCLE('ICRS',{float(ra_deg)},{float(dec_deg)},{float(radius_deg)})){where_extra}"
     )
     if order_by:
-        if not order_by.replace("_", "").isalnum():
-            raise ValueError(f"bad order_by column: {order_by!r}")
         adql += f" ORDER BY {order_by} ASC"
-    return tap_query(_GAIA_TAP, adql)
+    return adql
 
 
 def vizier_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,

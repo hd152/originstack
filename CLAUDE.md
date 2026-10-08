@@ -129,6 +129,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `plate_solve.py` / `local_solve.py` | `--plate-solve` backend dispatch; built-in Gaia-tile solver |
 | `annotation.py` | `--annotate` (SIMBAD) |
 | `net_query.py` | All HTTP (Gaia/VizieR/SIMBAD/astrometry.net/Horizons/update check); `--offline` guard |
+| `gaia_cache.py` | Local cache of brightest-first Gaia cone queries (`star_index_dir()/gaia_cones`); answers only when the cached rows are the server's own answer (cone contained, entry untruncated or still >= n rows, float32 G for the `min_mag` cut); misses fetch a 5%-wider cone with 25% more rows so the next night hits |
 | `target_inference.py` / `auto_settings.py` | Target from headers/folder/SIMBAD; `--auto` advisor (blended presets) |
 | `checkpoint.py` / `cleanup.py` | Checkpoint/resume + `stack_fingerprint`; temp-file registry |
 | `pipeline.py` | `stack_target` (wires the phases), `postprocess_from_stack` (`--from-stack`) |
