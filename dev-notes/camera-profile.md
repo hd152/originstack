@@ -87,7 +87,33 @@ flat or sky colour.
   normal free fit (70 / 23 stars, rescued by the guard fallback; R 0.709, B 1.06,
   in line with the other nights); the 21-frame RA 12h27 field calibrates through the
   prior (10 stars) where it had none; M37 still declines (below).
-* **Not fixed here:** rich clusters (M37, NGC 2244 2026-03-12, Duck) decline because
-  `match_gaia_field` keeps the brightest few hundred Gaia stars (G 10.8-12.9), all
-  saturated in 20 s subs. A fainter magnitude window for colour calibration would fix
-  it.
+* Rich clusters (M37) declined because `match_gaia_field` keeps the brightest few
+  hundred Gaia stars (G 10.8-12.9), all saturated in 20 s subs -- fixed in section 6.
+
+## 5. Photometry noise model — rebuilt on the raw gain (2026-10-08)
+
+`noise_model.measure_noise_model` was the variance-vs-signal *slope* on the processed
+frames. Against raw gain x processing scale (processed own-channel sample / raw above
+the pedestal, same pixels; 12 frames per session) it read R/G/B 0.72/0.88/0.89
+(Sunflower), 0.68/0.86/0.68 (Whirlpool 05-10), 1.33/1.07/0.93 (Pinwheel 01-18),
+0.46/0.40/0.60 (Needle) and **negative** on Crab (-0.53/-0.51/-0.88) and M101 04-27.
+A clipped variance instead of the MAD did not fix it (0.3-1.35x): the cause is the
+flat, not quantisation -- after flat division a uniform sky has one signal level and
+more noise in the vignetted corners, so within a frame variance no longer follows
+signal. It is now `k_c = s_c / g` (raw gain from the profile or the session's own
+two-point estimate, master-bias pedestal).
+
+**Effect: none measurable on Origin data.** `--photometry-timeseries` on Sunflower
+2026-03-12, 338 Gaia stars, old vs new: median reduced chi^2 1.41 / 1.41 overall,
+G 13-14 1.15 / 1.15, G 14-15 1.19 / 1.19, G 9-12 6.36 / 6.35 -- with ~11,000 ADU of sky
+per pixel the sky term dominates every aperture, and the bright-star excess is
+not Poisson. The fix is for correctness (a negative k failed the `k > 0` check and
+photometry fell back to a header gain 4.5x off).
+
+## 6. Colour calibration on rich fields (2026-10-08)
+
+`fit_channel_scales_solar` re-queries Gaia from just fainter than the faintest
+saturated matched star (`match_gaia_field(min_g=)`, `gaia_cone_search(min_mag=)`)
+when too few unsaturated stars remain and at least half of the candidates were
+saturated. M37: 105 of the matched stars saturated, re-queried from G > 13.0, 75 good
+stars, scales R 0.715 B 1.042 (other nights R 0.71-0.76, B 1.05-1.13), B-R slope 0.72.

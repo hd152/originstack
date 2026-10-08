@@ -188,19 +188,22 @@ _SIMBAD_TAP = "https://simbad.cds.unistra.fr/simbad/sim-tap/sync"
 def gaia_cone_search(ra_deg: float, dec_deg: float, radius_deg: float,
                      columns: List[str], max_rows: int = 500,
                      require_not_null: Optional[List[str]] = None,
-                     order_by: Optional[str] = "phot_g_mean_mag"):
+                     order_by: Optional[str] = "phot_g_mean_mag",
+                     min_mag: Optional[float] = None):
     """Gaia DR3 cone search, brightest first. Returns an astropy Table or None.
 
     ``order_by`` matters: ``TOP n`` without an ``ORDER BY`` lets the server return any
     n rows of a cone that holds more, a different subset on each call -- the same stack
     matched 72 to 78 Gaia stars on four runs of identical code. Brightest-first is also
     what every caller wants (the detected stars are the bright ones). ``None`` keeps
-    the server's order."""
+    the server's order. ``min_mag``: only stars fainter than this G magnitude."""
     cols = ", ".join(columns)
     where_extra = ""
     if require_not_null:
         conds = " AND ".join(f"{c} IS NOT NULL" for c in require_not_null)
         where_extra = f" AND {conds}"
+    if min_mag is not None:
+        where_extra += f" AND phot_g_mean_mag > {float(min_mag)}"
     # ADQL sent to Gaia's TAP HTTP service, not a local SQL database (bandit's
     # generic SELECT/FROM heuristic doesn't distinguish the two). The only
     # interpolated values here are float()-cast coordinates/radius (can

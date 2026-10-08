@@ -458,23 +458,43 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
     gm = match_gaia_field(img, header, verbose=verbose)
     if gm is None:
         return None
-    bp_rp = gm.bp - gm.rp
     lum = np.asarray(img, dtype=np.float64).mean(axis=2)
     sat = 0.6 * float(np.percentile(lum, 99.99))
-    xs, ys = gm.x, gm.y
-    d2 = (xs[:, None] - xs[None, :]) ** 2 + (ys[:, None] - ys[None, :]) ** 2
-    np.fill_diagonal(d2, np.inf)
-    isolated = d2.min(axis=1) > (2.0 * gm.r_out) ** 2 if len(xs) > 1 else np.ones(len(xs), bool)
-    base = np.isfinite(bp_rp) & (bp_rp > -0.3) & (bp_rp < 2.5) & isolated
-    ok = base & (gm.det_peak < sat)
+    sky = float(np.median(lum[::4, ::4]))
+    ceil = sky + 0.7 * (float(np.nanmax(lum)) - sky)
     need = min_stars if slope_prior is None else min(min_stars, min_prior_stars)
-    if ok.sum() < need:
-        # On a sparse field the 99.99th percentile is the sky itself, so 0.6x it sits
-        # below every star's peak (which includes the sky) and nothing passes. Then
-        # judge saturation against the data ceiling, above the sky.
-        sky = float(np.median(lum[::4, ::4]))
-        ceil = sky + 0.7 * (float(np.nanmax(lum)) - sky)
-        ok = base & (gm.det_peak < ceil)
+
+    def select(gm):
+        bp_rp = gm.bp - gm.rp
+        xs, ys = gm.x, gm.y
+        d2 = (xs[:, None] - xs[None, :]) ** 2 + (ys[:, None] - ys[None, :]) ** 2
+        np.fill_diagonal(d2, np.inf)
+        isolated = d2.min(axis=1) > (2.0 * gm.r_out) ** 2 if len(xs) > 1 else np.ones(len(xs), bool)
+        base = np.isfinite(bp_rp) & (bp_rp > -0.3) & (bp_rp < 2.5) & isolated
+        ok = base & (gm.det_peak < sat)
+        if ok.sum() < need:
+            # On a sparse field the 99.99th percentile is the sky itself, so 0.6x it
+            # sits below every star's peak (which includes the sky) and nothing
+            # passes. Then judge saturation against the data ceiling, above the sky.
+            ok = base & (gm.det_peak < ceil)
+        return bp_rp, base, ok
+
+    bp_rp, base, ok = select(gm)
+    saturated = base & ~ok
+    if ok.sum() < need and saturated.sum() >= max(need, base.sum() // 2):
+        # A rich field: the catalogue's brightest rows (it is queried brightest-first)
+        # are all saturated in the subs -- M37 matched 620 stars at G 10.8-12.9, all
+        # clipped. Query again from just fainter than the faintest saturated one.
+        g_min = float(np.nanmax(gm.g[saturated]))
+        deeper = match_gaia_field(img, header, verbose=verbose, min_g=g_min)
+        if deeper is not None:
+            if verbose:
+                from src.utils import safe_print
+                safe_print(f"  [colour cal] {int(saturated.sum())} matched stars saturated; "
+                      f"re-queried Gaia from G > {g_min:.1f}")
+            gm = deeper
+            bp_rp, base, ok = select(gm)
+    xs, ys = gm.x, gm.y
     if ok.sum() < need:
         if verbose:
             print(f"  [colour cal] {int(ok.sum())} usable Gaia stars (< {need})")

@@ -6,6 +6,16 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Colour calibration on rich star fields.** In a dense cluster like M37 the brightest Gaia stars
+  are all saturated in 20 s subs, so the calibration found nothing usable and was skipped. It now
+  queries Gaia again from just fainter than the saturated stars (M37: 75 good stars).
+- **Photometry's noise model.** Its shot-noise coefficient came from a variance-vs-signal slope
+  that flat-fielding breaks (it even came out negative on some sessions). It is now the camera's
+  raw gain times how much Phase 1 scaled each channel. On the sessions tested this did not change
+  the error bars measurably, because sky noise dominates.
+
 ## [2.9.0] - 2026-10-08
 
 The app in seven more languages, a measured profile of the Origin's camera, and comet

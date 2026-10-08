@@ -177,10 +177,13 @@ class GaiaMatch:
 
 
 def match_gaia_field(img_rgb, header, *, max_rows: int = 1200,
-                     verbose: bool = False) -> Optional[GaiaMatch]:
+                     verbose: bool = False, min_g: Optional[float] = None) -> Optional[GaiaMatch]:
     """Detect stars, cone-search Gaia DR3, project it via the header WCS,
     and cross-match by pixel position. Returns a :class:`GaiaMatch` or
-    ``None`` (with a logged reason) if any step fails."""
+    ``None`` (with a logged reason) if any step fails. ``min_g``: only Gaia stars
+    fainter than this G magnitude (the query is brightest-first and capped at
+    ``max_rows``, so a rich field otherwise returns only stars bright enough to
+    saturate)."""
     a = np.ascontiguousarray(np.asarray(img_rgb, dtype=np.float64))
     if a.ndim != 3 or a.shape[2] != 3:
         _log.warning("Photometry: needs an (H, W, 3) RGB image -- skipping")
@@ -222,7 +225,8 @@ def match_gaia_field(img_rgb, header, *, max_rows: int = 1200,
          "phot_bp_mean_mag", "phot_rp_mean_mag"],
         max_rows=max_rows,
         require_not_null=["phot_g_mean_mag", "phot_bp_mean_mag",
-                          "phot_rp_mean_mag"])
+                          "phot_rp_mean_mag"],
+        min_mag=min_g)
     if catalog is None or len(catalog) < 8:
         _log.warning("Photometry: Gaia query returned %s stars -- skipping",
                      "no" if catalog is None else len(catalog))
