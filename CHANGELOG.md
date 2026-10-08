@@ -6,6 +6,11 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-10-08
+
+`--use-gpu` and `--transient-triage` that work in the shipped app, Gaia queries answered from a
+local cache, and steadier colour calibration on dense star fields.
+
 ### Added
 
 - **Gaia queries are cached locally.** Colour calibration, `--photometry` and
