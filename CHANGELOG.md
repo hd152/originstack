@@ -6,6 +6,11 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-10-08
+
+The app in seven more languages, a measured profile of the Origin's camera, and comet
+sessions that blend, resume and reject washed-out subs.
+
 ### Added
 
 - **The desktop app and website in seven more languages:** Deutsch, Español, Français, Italiano,
@@ -14,6 +19,28 @@ match the `VERSION` file and `v*` git tags.
   is translated, while the log and the command line stay English. The website's home page, guide
   and privacy policy have translated versions at `originstack.site/<language>/` with a language
   switcher. The translations are machine-drafted; corrections are welcome.
+- **A camera profile for the Origin's built-in camera.** OriginStack recognises the Origin camera
+  from its FITS headers and uses its measured gain: 0.0165 e-/ADU at ISO 200 and 0.0064 at ISO 500,
+  where the header's `EGAIN` is about 4.5x too high. Photometry error bars use it whenever the
+  session's own frames can't provide one, after checking it against two of the session's lights.
+  `tools/measure_camera_profile.py` re-measures it from your own sessions.
+- **Colour calibration on sparse fields.** A field with only 6-14 good Gaia stars, which used to get
+  no colour calibration, is now calibrated using the camera's measured colour response.
+- **Overexposed subs are rejected.** A sub with more than 10% of its pixels at the sensor's maximum
+  (bright twilight or a moonlit sky) is dropped and reported as "Overexposed". Clipped star cores in
+  such subs came out magenta or green.
+
+### Fixed
+
+- **Comet mode's star/comet blend no longer fails on mismatched stack sizes.** The star- and
+  comet-aligned stacks each have their own crop; both are now cut to the area they share.
+- **Resuming a comet session from a checkpoint no longer crashes.**
+- **Colour calibration on fields with few stars no longer rejects every star as saturated.** Fields
+  like the Duck Nebula and NGC 2244 that skipped colour calibration now get it.
+
+### Changed
+
+- The desktop app's Comet card shows a real example image (C/2025 R2 SWAN).
 
 ## [2.8.0] - 2026-10-07
 
