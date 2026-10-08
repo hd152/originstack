@@ -182,6 +182,45 @@ def _build_flat_norm(
     masters['_flat_norm'] = flat_norm
 
 
+def raw_saturated_fraction(data, be16_bzero=None, step: int = 3):
+    """Fraction of raw pixels at the sensor's full scale (1-in-``step``^2 sample; an odd
+    step, so a Bayer mosaic is sampled at all four colour sites -- a step of 4 saw only
+    red, which had not clipped, and read 0.6% on a 52%-saturated frame), or
+    None when the full scale is unknown.
+
+    The quality gate in ``validate_image_data`` runs after calibration and white
+    balance, which spread each channel's clip level apart, so it only rejected a
+    frame above 95% "at max". A real comet session shot in bright twilight had a raw
+    median of 65535 and 52% of its pixels clipped; it passed, and the clipped star
+    cores came out magenta or green depending on which channel clipped. Here the
+    count is on the raw values: the BITPIX=16 block from ``read_fits_be16`` (still
+    big-endian), an integer array, or a float array whose maximum is 16-bit full scale.
+    """
+    if be16_bzero is not None:
+        s = np.ascontiguousarray(data[::step, ::step]).byteswap()
+        if float(be16_bzero) == 32768.0:
+            v = s.view(np.int16).astype(np.int32) + 32768
+            full = 65535
+        else:
+            v = s.view(np.int16).astype(np.int32)
+            full = 32767
+    else:
+        a = np.asarray(data)
+        if a.ndim != 2:
+            return None
+        v = a[::step, ::step]
+        if np.issubdtype(v.dtype, np.integer):
+            full = int(np.iinfo(v.dtype).max)
+        else:
+            vmax = float(np.nanmax(v)) if v.size else 0.0
+            if not (65535 * 0.999 <= vmax <= 65535.5):
+                return None
+            full = 65535
+    if v.size == 0:
+        return None
+    return float(np.count_nonzero(v >= 0.99 * full)) / v.size
+
+
 def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[np.ndarray]],
                           debayer_method: str, white_balance: str,
                           ca_correction: bool = False,
@@ -230,6 +269,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     if data is None or data.size == 0:
         return {'error': 'empty data array'}
     timings['load'], _t = time.perf_counter() - _t, time.perf_counter()
+    _sat = raw_saturated_fraction(data, _be16)
+    if _sat is not None and _sat > Config.OVEREXPOSED_FRACTION:
+        return {'error': f'overexposed ({_sat * 100:.0f}% of pixels at the sensor maximum)'}
     # True once hot pixels have been fixed on the mosaic itself (map + statistical
     # pass with the star-support rule); the luminance-based RGB pass after the
     # debayer is then skipped -- see the hot-pixel step below
@@ -1949,6 +1991,8 @@ def quality_gate(
                 cat = 'Poor quality'
             elif 'star' in reason:
                 cat = 'No stars detected'
+            elif 'overexposed' in reason:
+                cat = 'Overexposed (sensor saturated)'
             elif 'load' in reason or 'empty' in reason:
                 cat = 'Load/data errors'
             else:
@@ -1956,5 +2000,9 @@ def quality_gate(
             reason_counts[cat] = reason_counts.get(cat, 0) + 1
         safe_print(f"  ✗ Rejected: {stats.rejected_frames} "
                    f"({', '.join(f'{c}: {v}' for c, v in reason_counts.items())})")
+        if reason_counts.get('Overexposed (sensor saturated)'):
+            safe_print("    Overexposed subs have most of the frame at the sensor's maximum "
+                       "(bright twilight or moonlit sky); clipped pixels have no usable "
+                       "colour. Shorter exposures or lower gain avoid it.")
 
     return final

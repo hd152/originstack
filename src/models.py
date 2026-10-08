@@ -24,6 +24,7 @@ class Config:
     SPIKE_REJECT_SIGMA = 5.0         # --spike-reject: excess over the 8 same-plane neighbours' median, in plane sigma
     SPIKE_REJECT_CONTRAST = 5.0      # --spike-reject: excess must also be this many times the neighbours' own lift (sharpness)
     SPIKE_REJECT_SUPPORT_FRAC = 0.15 # --spike-reject: a 1-px mosaic neighbour above this fraction of the peak 'supports' it; 3+ of 4 = star
+    OVEREXPOSED_FRACTION = 0.10      # Reject a sub with more raw pixels than this at full scale (measured: every normal session on the dev machine <= 2.1%, NGC 2244; overexposed SWAN subs 52% and 99.8%)
     CA_MIN_SHIFT_PX = 0.25           # Session CA below this: skip the correction warp entirely
     SESSION_CFA_MIN_FRAMES = 12      # Fewer lights than this: per-frame CFA equalisation, not one session estimate
     SESSION_CFA_PROBE_FRAMES = 8     # Frames spread through the session that the estimate is taken from
