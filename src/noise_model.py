@@ -39,10 +39,12 @@ def _channel_sites(pattern: str, c: int):
 
 def pair_samples(frame: np.ndarray, pattern: str, c: int):
     """(difference, mean) of horizontally adjacent same-colour samples (2 px apart) of
-    channel ``c`` in a debayered frame that keeps its raw samples."""
+    channel ``c`` in a debayered frame that keeps its raw samples, or in a 2-D raw
+    mosaic (the camera profile's raw gain, src/camera_profile.py)."""
     ds, ss = [], []
     for dy, dx in _channel_sites(pattern, c):
-        plane = np.asarray(frame[dy::2, dx::2, c], np.float64)
+        sub = frame[dy::2, dx::2] if np.ndim(frame) == 2 else frame[dy::2, dx::2, c]
+        plane = np.asarray(sub, np.float64)
         a, b = plane[:, :-1], plane[:, 1:]
         ds.append((a - b).ravel())
         ss.append((0.5 * (a + b)).ravel())
@@ -55,7 +57,8 @@ def _robust_pair_var(d: np.ndarray) -> float:
 
 
 def frame_bins(frame: np.ndarray, pattern: str, border: int = 8):
-    """Per channel: [(median signal, pair variance), ...] over the sky-end signal bins."""
+    """Per channel: [(median signal, pair variance), ...] over the sky-end signal bins.
+    ``frame`` is a debayered (H, W, 3) frame that keeps its raw samples or a raw mosaic."""
     f = np.asarray(frame)[border:-border, border:-border]
     out = []
     for c in range(3):

@@ -284,8 +284,11 @@ def _resolve_extinction(args, airmass):
 
 
 def _read_gain(header, args=None):
-    """Sensor gain (e-/ADU): --photometry-gain override, else a PTC estimate
-    stashed by the calibration builder, else the FITS header."""
+    """Sensor gain (e-/ADU): --photometry-gain override, else the camera profile's
+    gain when this session's own lights agreed with it (src/camera_profile.py), else
+    a PTC estimate stashed by the calibration builder, else the FITS header. The
+    profile goes before the PTC: the Origin takes its flats at another ISO (23 on the
+    sessions measured), so a bias+flat PTC describes a different gain."""
     override = getattr(args, "photometry_gain", None) if args is not None else None
     if override is not None:
         try:
@@ -293,6 +296,9 @@ def _read_gain(header, args=None):
                 return float(override)
         except (TypeError, ValueError):
             pass
+    cam = getattr(args, "_camera", None) if args is not None else None
+    if cam and cam.get("gain"):
+        return float(cam["gain"])
     ptc = getattr(args, "_ptc_gain_e_per_adu", None) if args is not None else None
     if ptc:
         try:
@@ -333,7 +339,10 @@ def poisson_coefficients(header, args=None, stacked: bool = True):
         g = _read_gain(header, args)
         if g:
             c = np.full(3, 1.0 / g)
-            src = "PTC (bias+flat pairs)" if getattr(args, "_ptc_gain_e_per_adu", None) else "FITS gain"
+            cam = getattr(args, "_camera", None)
+            src = (f"camera profile ({cam['label']}, ISO {cam['iso']})" if cam and cam.get("gain")
+                   else "PTC (bias+flat pairs)" if getattr(args, "_ptc_gain_e_per_adu", None)
+                   else "FITS gain")
     if c is None:
         return None, None
     if stacked:

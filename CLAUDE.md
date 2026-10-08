@@ -123,6 +123,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `channel_combine.py` | `combine` subcommand: LRGB/SHO/HOO, SCNR, `--continuum` subtraction |
 | `difference_imaging.py` / `transient_triage.py` | ZOGY subtraction + detection (`--transient-detect REF.fits`); CNN triage (`--transient-triage`, needs a `triage`-feature native build) |
 | `photometry_core.py` | `aperture_photometry_batch`, WCS helpers (`_celestial_wcs`, `_pixel_coords`, `_field_centre_and_radius`) shared by photometry, colour calibration, annotation, mosaic |
+| `camera_profile.py` | Camera identified from the FITS `CAMERA` keyword (`Origin178-<unit>`); shipped per-model constants in `src/data/camera_profiles/<model>.json`: raw gain per ISO (Origin178: 0.0165 / 0.0064 e-/ADU at ISO 200 / 500; header `EGAIN` is ~4.5x high), checked on two of the session's own lights before photometry uses it (`resolve_camera` -> `args._camera`, `verify_gain`); colour slopes vs Gaia BP-RP, used by the solar colour fit only with 6-14 stars. Measurements and the not-shipped CFA prior / per-unit library in [camera-profile](dev-notes/camera-profile.md); `tools/measure_camera_profile.py` re-measures |
 | `photometry.py` / `photometry_timeseries.py` / `lightcurve_analysis.py` / `gain_ptc.py` | `--photometry`; `--photometry-timeseries`; `--lightcurve-analysis`; PTC gain from bias/flat pairs |
 | `observing_geometry.py` | Alt/az, airmass, parallactic angle (closed-form fallbacks, no IERS needed) |
 | `plate_solve.py` / `local_solve.py` | `--plate-solve` backend dispatch; built-in Gaia-tile solver |
@@ -216,6 +217,9 @@ Details in the linked notes.
 - Removed denoisers NLM, BM3D, MMT, non-adaptive wavelet + Noise2Self calibration ([module-notes](dev-notes/module-notes.md)).
 - Physical sky model on ~1 deg fields (declines by design).
 - Starless-layer deconvolution and separate-layer stretch.
+- Camera-wide CFA equalisation prior: 2x2 green offsets vary 5-15 ADU between sessions, 0.4 ADU within one ([camera-profile](dev-notes/camera-profile.md)).
+- Per-unit bad-pixel / vignetting library: the session dark already holds the recurring bad pixels; a leave-one-out vignetting map gains 0-5% after a quadratic ([camera-profile](dev-notes/camera-profile.md)).
+- Variance-vs-signal slope for raw Origin gain: the stepped raw values make it quantisation-dominated; use the two-point ratio (`camera_profile.raw_pair_gain`).
 
 ### Native (Rust) build
 ```bash
