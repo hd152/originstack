@@ -929,7 +929,7 @@ OriginStack works entirely on your machine. It goes online in these cases only, 
 | SIMBAD lookup of the target | On a normal run, when the object name (from the session file, the FITS `OBJECT` header, or the folder name) is not in the built-in table | The name string only |
 | Gaia star index tiles | `--plate-solve` (built-in solver), and on a normal run with a session `info.json` solve (to correct that WCS on the stack; `--no-wcs-refine` turns it off), for sky areas not yet in the local index | Sky coordinates of a 5°×5° tile; tiles are cached, so each area is fetched once |
 | astrometry.net | `--plate-solve --plate-solver astrometry` (or `auto` when the built-in solver fails) | The image, to solve its position (needs your API key) |
-| Gaia / VizieR / SIMBAD catalogues | Colour calibration on a normal run with a sky position (`--no-color-calibrate` turns it off); `--photometry`, `--photometry-timeseries`, `--annotate` | Sky coordinates of the field |
+| Gaia / VizieR / SIMBAD catalogues | Colour calibration on a normal run with a sky position (`--no-color-calibrate` turns it off); `--photometry`, `--photometry-timeseries`, `--annotate` | Sky coordinates of the field. Gaia results are cached next to the star index (`gaia_cones/`), so the same field on another night or a `--from-stack` rerun is answered locally, also under `--offline`; `ORIGINSTACK_NO_GAIA_CACHE=1` turns that off |
 | JPL Horizons | Comet ephemerides | The comet designation and time |
 | Self-update check | Once per CLI run or desktop-app launch | Nothing — an anonymous GET of GitHub's public releases API, no request parameters, no identifying data |
 
