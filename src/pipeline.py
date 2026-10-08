@@ -469,6 +469,32 @@ def _colcal_header(header, scales) -> None:
         header[f'COLCAL_{ch}'] = (round(float(s), 4), f'{ch} scale factor')
 
 
+def _reference_from_registration(final, final_indices, shifts, transforms, mem_lum):
+    """(best_idx, ref_lum) recovered from a restored registration: the reference
+    is the frame registered onto itself (zero shift, no transform). Falls back to
+    the highest-scoring frame if none is exactly the identity."""
+    j = next((k for k, (s, t) in enumerate(zip(shifts, transforms))
+              if t is None and abs(float(s[0])) < 1e-9 and abs(float(s[1])) < 1e-9), None)
+    if j is None:
+        j = max(range(len(final)), key=lambda k: final[k].metrics.get('score', 0))
+    best_idx = final_indices[j]
+    return best_idx, np.array(mem_lum[best_idx])
+
+
+def _shared_crop(a: np.ndarray, crop_a, b: np.ndarray, crop_b):
+    """Cut two stacks on the same reference grid to the rectangle both crops
+    cover. ``crop_*`` = (top, bottom, left, right) of each array in that grid.
+    Raises ValueError when the crops do not overlap."""
+    ta, ba, la, ra = (int(v) for v in crop_a)
+    tb, bb, lb, rb = (int(v) for v in crop_b)
+    if a.shape[0] != ba - ta or a.shape[1] != ra - la or b.shape[0] != bb - tb or b.shape[1] != rb - lb:
+        raise ValueError(f"crop/array mismatch: {a.shape} vs {crop_a}, {b.shape} vs {crop_b}")
+    t, bt, lft, rt = max(ta, tb), min(ba, bb), max(la, lb), min(ra, rb)
+    if t >= bt or lft >= rt:
+        raise ValueError(f"crops {crop_a} and {crop_b} do not overlap")
+    return (a[t - ta:bt - ta, lft - la:rt - la], b[t - tb:bt - tb, lft - lb:rt - lb])
+
+
 def _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts, transforms,
                       displacement_fields, H, W, C, crop, output_path, stats):
     """``--full-field``: extend the stack past the common crop (src/full_field.py).
@@ -899,6 +925,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                            + " from checkpoint")
                 stats.registration_time = 0.0
                 del cached_lums
+                # Comet mode registers a second pass against the reference frame, so
+                # it needs best_idx / ref_lum even when registration was restored --
+                # without them a resumed comet session died with an UnboundLocalError.
+                best_idx, ref_lum = _reference_from_registration(
+                    final, final_indices, shifts, transforms, mem_lum)
             else:
                 print_phase(2, "Registration")
                 phase_start = time.time()
@@ -1145,12 +1176,17 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                  ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
                 safe_print(f"  Comet stack: {os.path.basename(comet_out)}")
 
-                # Blend star-aligned and comet-aligned stacks into a composite
+                # Blend star-aligned and comet-aligned stacks into a composite. Each
+                # pass has its own common crop, so the two stacks differ in shape
+                # (2013x3031 vs 2022x3032 on a real SWAN session); both sit on the
+                # reference frame's grid, so cut both to the shared rectangle.
                 from src.stacking import blend_comet_star_stacks
-                comet_lum = np.mean(comet_stacked, axis=2)
+                _star_c, _comet_c = _shared_crop(stacked, (top, bottom, left, right),
+                                                 comet_stacked, (ct, cb, cl, cr))
+                comet_lum = np.mean(_comet_c, axis=2)
                 tail_pa = comet_dither_info.get('tail_pa_deg', None)
                 blended = blend_comet_star_stacks(
-                    stacked, comet_stacked, comet_lum,
+                    _star_c, _comet_c, comet_lum,
                     blend_sigma=float(getattr(args, 'comet_blend_sigma', 30.0)),
                     tail_pa_deg=tail_pa,
                 )

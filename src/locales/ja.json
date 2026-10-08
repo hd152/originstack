@@ -182,6 +182,7 @@
  "Example galaxy: Whirlpool Galaxy (M51), Celestron Origin": "銀河の例：子持ち銀河（M51）、Celestron Origin",
  "Example nebula: Omega Nebula (M17), Celestron Origin": "星雲の例：オメガ星雲（M17）、Celestron Origin",
  "Example star field: Sagittarius Star Cloud (M24), Celestron Origin": "星野の例：いて座スタークラウド（M24）、Celestron Origin",
+ "Example comet: C/2025 R2 (SWAN), Celestron Origin": "彗星の例：C/2025 R2（SWAN）、Celestron Origin",
  "Exclude a generous ellipse around the detected galaxy/extended source from background extraction sampling, so its broad, low-contrast halo is not fit and subtracted as a background gradient (a smooth-surface model cannot otherwise tell a tapering galaxy halo apart from real gradient at its edge). The ellipse is fit to the object's own second-moment shape, so it tracks real elongation instead of assuming a circle. Auto-enabled by --auto for galaxy-leaning targets; pass this explicitly under --no-auto.": "検出した銀河や広がった天体の周囲の大きめの楕円を背景抽出のサンプリングから除外し、その広く低コントラストなハローが背景の勾配としてフィッティング・減算されないようにします（滑らかな曲面モデルでは、端に向かって薄れる銀河のハローと実際の勾配を区別できないため）。楕円は天体自身の2次モーメントの形にフィットするので、円を仮定せず実際の伸びに追従します。--auto では銀河寄りの対象で自動的に有効になります。--no-auto の場合は明示的に指定してください。",
  "Exclude a generous ellipse around the detected galaxy/extended source from background extraction sampling, so its…": "検出した銀河や広がった天体の周囲の大きめの楕円を背景抽出のサンプリングから除外し、その…",
  "Expert options": "上級オプション",

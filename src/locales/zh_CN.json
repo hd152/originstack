@@ -182,6 +182,7 @@
  "Example galaxy: Whirlpool Galaxy (M51), Celestron Origin": "星系示例：涡状星系（M51），Celestron Origin",
  "Example nebula: Omega Nebula (M17), Celestron Origin": "星云示例：欧米茄星云（M17），Celestron Origin",
  "Example star field: Sagittarius Star Cloud (M24), Celestron Origin": "星场示例：人马座恒星云（M24），Celestron Origin",
+ "Example comet: C/2025 R2 (SWAN), Celestron Origin": "彗星示例：C/2025 R2（SWAN），Celestron Origin",
  "Exclude a generous ellipse around the detected galaxy/extended source from background extraction sampling, so its broad, low-contrast halo is not fit and subtracted as a background gradient (a smooth-surface model cannot otherwise tell a tapering galaxy halo apart from real gradient at its edge). The ellipse is fit to the object's own second-moment shape, so it tracks real elongation instead of assuming a circle. Auto-enabled by --auto for galaxy-leaning targets; pass this explicitly under --no-auto.": "在背景提取采样时排除检测到的星系/延展天体周围一个宽松的椭圆，使其宽阔、低对比度的晕不会被当作背景梯度拟合并减去（否则平滑曲面模型无法区分星系边缘逐渐变暗的晕与真实梯度）。椭圆按天体自身的二阶矩形状拟合，因此能跟随真实的伸长，而不是假设为圆形。--auto 会对偏星系类的目标自动启用；在 --no-auto 下请显式传入。",
  "Exclude a generous ellipse around the detected galaxy/extended source from background extraction sampling, so its…": "在背景提取采样时排除检测到的星系/延展天体周围一个宽松的椭圆，使其…",
  "Expert options": "专家选项",

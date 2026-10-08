@@ -356,7 +356,7 @@ _TARGET_CARDS = (
      N_('Example star field: Sagittarius Star Cloud (M24), Celestron Origin')),
     ('comet', N_('Comet'),
      N_('Also stacks on the moving nucleus (saved as a second _comet image).'),
-     '', True, None, None),
+     '', True, 'comet.jpg', N_('Example comet: C/2025 R2 (SWAN), Celestron Origin')),
 )
 # target_inference's source codes, as the phrase shown after a target name.
 _SOURCE_PHRASES = {'session': N_('from the session file'), 'header': N_('from the FITS header'),
@@ -425,13 +425,6 @@ def _card_thumbnail(card: tuple):
         glow = Image.new('L', _THUMB, 0)
         ImageDraw.Draw(glow).ellipse((w / 2 - 14, h / 2 - 14, w / 2 + 14, h / 2 + 14), fill=90)
         im.paste((255, 240, 210), mask=glow.filter(ImageFilter.GaussianBlur(8)))
-    elif key == 'comet':
-        tail = Image.new('L', _THUMB, 0)
-        ImageDraw.Draw(tail).polygon([(92, 36), (8, 6), (6, 26)], fill=110)
-        im.paste((120, 220, 200), mask=tail.filter(ImageFilter.GaussianBlur(6)))
-        head = Image.new('L', _THUMB, 0)
-        ImageDraw.Draw(head).ellipse((82, 26, 102, 46), fill=255)
-        im.paste((190, 255, 230), mask=head.filter(ImageFilter.GaussianBlur(4)))
     else:  # auto
         d.text((w / 2 - 14, h / 2 - 6), 'AUTO', fill=(232, 230, 223))
     return ImageTk.PhotoImage(im)
