@@ -489,7 +489,8 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
         deeper = match_gaia_field(img, header, verbose=verbose, min_g=g_min)
         if deeper is not None:
             if verbose:
-                print(f"  [colour cal] {int(saturated.sum())} matched stars saturated; "
+                from src.utils import safe_print
+                safe_print(f"  [colour cal] {int(saturated.sum())} matched stars saturated; "
                       f"re-queried Gaia from G > {g_min:.1f}")
             gm = deeper
             bp_rp, base, ok = select(gm)
