@@ -6,6 +6,10 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.10.2] - 2026-10-09
+
+OriginStack is now free software under the GNU GPL v3.
+
 ### Changed
 
 - **OriginStack is now licensed under the GNU General Public License v3.0 or later** (was MIT).
