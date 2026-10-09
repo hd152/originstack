@@ -6,20 +6,39 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-10-09
+
+A choice of temp folder, temporary files cleaned up after every run, and an Output that can
+be a folder.
+
+### Added
+
+- **Choose the temp folder** (Temp folder in the app, `--temp-dir` on the command line). A long
+  session needs a lot of room for temporary files -- about 170 MB per light frame, ~145 GB for 850
+  lights -- and they used to go to the system drive only. The app remembers the folder.
+
+### Fixed
+
+- **Temporary files are removed after every run**, including one that failed or was cancelled. The
+  app keeps running between stacks, and the files of a failed run (tens of GB) stayed until it was
+  closed -- or for good if it was closed by force. Files a crashed run left behind are removed when
+  the next run starts.
+- **Output can be a folder.** The Output picker chooses a folder; the stack is named after the
+  session and never overwrites an earlier one. A full `.fits` path can still be typed in.
+- **Open Folder works with a blank Output.** It opens the folder the run wrote to, with the stack
+  selected. A blank Output saves beside the light-frames folder (in the folder that contains it);
+  the field's help now says so.
+
 ## [2.11.0] - 2026-10-09
 
-The app and website in Dutch, a choice of temp folder, and large sessions (hundreds of
-lights) that show their progress, clean up after themselves and say clearly when the disk is too
-small.
+The app and website in Dutch, and large sessions (hundreds of lights) that show their
+progress instead of appearing to hang.
 
 ### Added
 
 - **Dutch (Nederlands).** The desktop app and the website (`originstack.site/nl/`) are now also in
   Dutch; the app picks it up from a Dutch system language, or choose it from the language menu. Like
   the other translations it is machine-drafted, and corrections are welcome.
-- **Choose the temp folder** (Temp folder in the app, `--temp-dir` on the command line). A long
-  session needs a lot of room for temporary files -- about 170 MB per light frame, ~145 GB for 850
-  lights -- and they used to go to the system drive only. The app remembers the folder.
 
 ### Fixed
 
@@ -30,15 +49,6 @@ small.
   by band from disk: 5.5 -> 2.3 min on an 849-frame session (64 GB RAM), identical result.
 - **A run that cannot fit on the temp disk stops at once with a clear message** (how much space is
   needed and free, and what to do), instead of failing when the disk fills mid-run.
-- **Temporary files are removed after every run**, including one that failed or was cancelled. The
-  app keeps running between stacks, and the files of a failed run (tens of GB) stayed until it was
-  closed -- or for good if it was closed by force. Files a crashed run left behind are removed when
-  the next run starts.
-- **Output can be a folder.** The Output picker chooses a folder; the stack is named after the
-  session and never overwrites an earlier one. A full `.fits` path can still be typed in.
-- **Open Folder works with a blank Output.** It opens the folder the run wrote to, with the stack
-  selected. A blank Output saves beside the light-frames folder (in the folder that contains it);
-  the field's help now says so.
 
 ## [2.10.2] - 2026-10-09
 
