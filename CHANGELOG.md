@@ -6,6 +6,24 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Choose the temp folder** (Temp folder in the app, `--temp-dir` on the command line). A long
+  session needs a lot of room for temporary files -- about 170 MB per light frame, ~145 GB for 850
+  lights -- and they used to go to the system drive only. The app remembers the folder.
+
+### Fixed
+
+- **Temporary files are removed after every run**, including one that failed or was cancelled. The
+  app keeps running between stacks, and the files of a failed run (tens of GB) stayed until it was
+  closed -- or for good if it was closed by force. Files a crashed run left behind are removed when
+  the next run starts.
+- **Output can be a folder.** The Output picker chooses a folder; the stack is named after the
+  session and never overwrites an earlier one. A full `.fits` path can still be typed in.
+- **Open Folder works with a blank Output.** It opens the folder the run wrote to, with the stack
+  selected. A blank Output saves beside the light-frames folder (in the folder that contains it);
+  the field's help now says so.
+
 ## [2.11.0] - 2026-10-09
 
 The app and website in Dutch, and large sessions (hundreds of lights) that show their
