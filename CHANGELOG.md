@@ -6,6 +6,10 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-10-08
+
+Multi-session combines without seams, rims or blue saturated stars.
+
 ### Fixed
 
 - **Multi-session combines no longer show the sessions' edges.** Each session's sky was matched to
