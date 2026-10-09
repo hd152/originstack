@@ -6,6 +6,17 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-10-09
+
+The app and website in Dutch, and large sessions (hundreds of lights) that show their
+progress instead of appearing to hang.
+
+### Added
+
+- **Dutch (Nederlands).** The desktop app and the website (`originstack.site/nl/`) are now also in
+  Dutch; the app picks it up from a Dutch system language, or choose it from the language menu. Like
+  the other translations it is machine-drafted, and corrections are welcome.
+
 ### Fixed
 
 - **Large sessions no longer look hung while stacking.** With ~850 lights the aligned frames (60 GB)
@@ -15,12 +26,6 @@ match the `VERSION` file and `v*` git tags.
   by band from disk: 5.5 -> 2.3 min on an 849-frame session (64 GB RAM), identical result.
 - **A run that cannot fit on the temp disk stops at once with a clear message** (how much space is
   needed and free, and what to do), instead of failing when the disk fills mid-run.
-
-### Added
-
-- **Dutch (Nederlands).** The desktop app and the website (`originstack.site/nl/`) are now also in
-  Dutch; the app picks it up from a Dutch system language, or choose it from the language menu. Like
-  the other translations it is machine-drafted, and corrections are welcome.
 
 ## [2.10.2] - 2026-10-09
 
