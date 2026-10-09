@@ -20,6 +20,17 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _no_sweep_of_the_real_temp_folder(monkeypatch):
+    """cli.apply_temp_dir removes OriginStack leftovers from the temp folder once
+    per process. Tests must never do that to the real one: a test run on a
+    machine with an app run going deleted that run's per-session stacks."""
+    import tempfile
+
+    from src import cli
+    monkeypatch.setattr(cli, '_SWEPT', set(cli._SWEPT) | {tempfile.gettempdir()})
+
+
+@pytest.fixture(autouse=True)
 def _no_star_index_downloads(tmp_path_factory, monkeypatch):
     """The built-in plate solver (and the default WCS refine after Phase 3) fetch
     Gaia index tiles over the network and cache them in the user's profile.

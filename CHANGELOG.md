@@ -12,6 +12,8 @@ match the `VERSION` file and `v*` git tags.
   around a stacking thread that was still inside native code, which could crash the app on exit
   (a "stopped working" message, or a process that did not go away). Closing now cancels the run,
   stops its worker processes, removes the run's temporary files when they are free, and exits.
+- **A failed multi-session combine really keeps the per-session stacks** it says it keeps (and
+  lists where they are), instead of the end-of-run cleanup deleting them.
 
 ## [2.11.1] - 2026-10-09
 

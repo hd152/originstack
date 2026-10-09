@@ -1294,8 +1294,19 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                     verbose=getattr(args, 'verbose', False))
             except Exception as exc:
                 safe_print(f"  ERROR: rotation-aware combine failed: {exc}")
-                safe_print("  The per-target stacks are kept; combine them with "
-                           "--merge manually.")
+                # Keep them for real: they are registered as temp files, and the
+                # end-of-run cleanup would otherwise delete them.
+                kept = []
+                for _p in produced:
+                    for _side in (_p, _p[:-5] + '.jpg', _p[:-5] + '_config.toml'):
+                        _cleanup_deregister(_side)
+                    if os.path.exists(_p):
+                        kept.append(_p)
+                if kept:
+                    safe_print("  The per-target stacks are kept; combine them with "
+                               "--merge manually:")
+                    for _p in kept:
+                        safe_print(f"    {_p}")
                 raise
 
             Hf, Wf = combined.shape[:2]
