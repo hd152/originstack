@@ -70,4 +70,4 @@ especially in `src/background.py`, `src/registration.py`, or the native kernels
 
 ## License
 
-By contributing, you agree your contribution is licensed under this project's [MIT license](LICENSE).
+By contributing, you agree your contribution is licensed under this project's license, the [GNU General Public License v3.0 or later](LICENSE).

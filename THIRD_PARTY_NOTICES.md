@@ -1,6 +1,7 @@
 # Third-Party Notices
 
-OriginStack itself is licensed under the MIT License (see [LICENSE](LICENSE)). This
+OriginStack itself is licensed under the GNU General Public License v3.0 or later (see
+[LICENSE](LICENSE)); every dependency below is under a license compatible with it. This
 file lists the third-party software it depends on, so users and redistributors know
 what else they're pulling in and under what terms. It's generated from the packages
 declared in [requirements.txt](requirements.txt), [requirements-gpu.txt](requirements-gpu.txt),

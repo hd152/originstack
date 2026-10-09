@@ -3,6 +3,7 @@ name = "astro_native"
 version = "0.53.0"
 edition = "2021"
 description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "astro_native"

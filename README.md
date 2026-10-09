@@ -9,7 +9,7 @@
 
 [![CI](https://github.com/hd152/originstack/actions/workflows/ci.yml/badge.svg)](https://github.com/hd152/originstack/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/hd152/originstack)](https://github.com/hd152/originstack/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 [**Website**](https://originstack.site/) · [Download](https://github.com/hd152/originstack/releases/latest) · [Changelog](CHANGELOG.md) · [Code signing policy](CODE_SIGNING_POLICY.md)
 
@@ -991,5 +991,15 @@ Notes:
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party dependency licenses are listed in
+Copyright (C) 2026 Tom Davenport
+
+OriginStack is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version. It is distributed in the
+hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full
+text.
+
+Releases up to and including 2.10.1 were published under the MIT License, and those
+releases stay available under it. Third-party dependency licenses are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

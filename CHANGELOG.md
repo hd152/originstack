@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **OriginStack is now licensed under the GNU General Public License v3.0 or later** (was MIT).
+  You can still use, study, share and modify it freely; anyone who distributes a modified version
+  must publish its source under the same license. Releases up to and including 2.10.1 remain
+  available under the MIT License.
+
 ## [2.10.1] - 2026-10-08
 
 Multi-session combines without seams, rims or blue saturated stars.
