@@ -134,6 +134,7 @@ class FrameStore:
             except (MemoryError, OSError) as e:
                 _log.debug("frame store: RAM allocation of %.1f GB failed (%s); using disk",
                            nbytes / 1e9, e)
+        _require_disk(nbytes, prefix)
         fd, path = tempfile.mkstemp(suffix='.dat', prefix=prefix)
         os.close(fd)
         try:
@@ -174,6 +175,31 @@ class FrameStore:
         for shm in self._shms:
             _close_shm(shm)
         self._shms.clear()
+
+
+class FrameStoreSpaceError(OSError):
+    """Neither RAM nor the temp disk can hold a frame array."""
+
+
+def _require_disk(nbytes: int, prefix: str) -> None:
+    """Refuse up front when the temp disk cannot hold the array at all.
+
+    The file is created sparse, so running out of space only shows when the
+    pages are written -- deep into Phase 1 or alignment, as a crash or a stall,
+    after many minutes. An 849-frame session needed ~85 GB for Phase 1's arrays
+    and 60 GB more for the aligned stack."""
+    try:
+        import shutil
+        free = shutil.disk_usage(tempfile.gettempdir()).free
+    except Exception:
+        return
+    if nbytes > free - 1e9:
+        what = prefix.rstrip('_').replace('_', ' ')
+        raise FrameStoreSpaceError(
+            f"Not enough space for the {what} frames: {nbytes / 1e9:.1f} GB needed, "
+            f"{free / 1e9:.1f} GB free in the temp folder ({tempfile.gettempdir()}). "
+            f"Free some disk space, point TEMP/TMPDIR at a larger drive, or stack fewer "
+            f"frames at a time (stack each night separately and combine them with --merge).")
 
 
 def _close_shm(shm: shared_memory.SharedMemory) -> None:
