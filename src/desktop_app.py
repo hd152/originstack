@@ -270,7 +270,7 @@ class ScrollableFrame(ttk.Frame):
 # the ones almost every run touches (where the lights are, what to call the
 # output, and the handful of settings that most change the result) while
 # the other ~110 flags are fine-tuning most runs never need.
-_COMMON_DESTS = ['directory', 'output', 'auto', 'stack_method',
+_COMMON_DESTS = ['directory', 'output', 'temp_dir', 'auto', 'stack_method',
                  'denoiser', 'deconvolve_mode', 'drizzle_scale', 'trail_reject',
                  'use_gpu', 'parallel']
 
@@ -279,7 +279,8 @@ _COMMON_DESTS = ['directory', 'output', 'auto', 'stack_method',
 # "Stack method"). Only the cases where that reads badly are overridden.
 _FIELD_LABELS = {
     'directory': N_('Light frames'),
-    'output': N_('Output file'),
+    'output': N_('Output'),
+    'temp_dir': N_('Temp folder'),
     'parallel': N_('Workers'),
     'use_gpu': N_('Use GPU'),
     'trail_reject': N_('Trail rejection'),
@@ -315,7 +316,7 @@ def _is_expert_field(field: Dict[str, Any]) -> bool:
 
 
 # Required paths: being set is not a change worth marking.
-_NO_CHANGE_MARK = {'directory', 'output'}
+_NO_CHANGE_MARK = {'directory', 'output', 'temp_dir'}
 
 
 def _field_label(field: Dict[str, Any]) -> str:
@@ -633,7 +634,7 @@ class SetupForm(ttk.Frame):
             field = all_fields.get(dest)
             if field is not None:
                 row += self._build_field(common_frame, row, field, group=None)
-            if dest == 'output':
+            if dest == 'temp_dir':
                 goal_row, row = row, row + 1  # the target cards and run mode go here
 
         bar = ttk.Frame(self)
@@ -1477,6 +1478,10 @@ class App:
         self.form = SetupForm(setup.inner, on_expand=setup.scroll_to,
                               on_change=self._on_form_change)
         self.form.pack(fill='both', expand=True, padx=(0, 6))
+        from src.desktop_control import load_app_setting
+        _tv = self.form.vars.get('temp_dir')
+        if _tv is not None and not _tv.get():
+            _tv.set(load_app_setting('temp_dir', '') or '')
         parent = ttk.Frame(vpaned)
         vpaned.add(setup, weight=1)
         vpaned.add(parent, weight=1)
@@ -1609,6 +1614,9 @@ class App:
 
     def _on_start(self) -> None:
         form = self.form.read_form()
+        # remembered for the next launch: a big session's temp files need a roomy drive
+        from src.desktop_control import save_app_setting
+        save_app_setting('temp_dir', str(form.get('temp_dir') or '').strip())
         result = self.rm.start(form)
         if not result.get('ok'):
             self.status_var.set(_('Error: {error}', error=result.get('error')))
@@ -1795,15 +1803,34 @@ class App:
         self._refresh_run_button(snap)
 
     def _open_output_folder(self) -> None:
-        var = self.form.vars.get('output')
-        out_path = var.get().strip() if var is not None else ''
-        if not out_path:
+        """Show the stack the last run wrote (selected in Explorer), else the folder the
+        Output field names. A blank Output used to open nothing: the stack is named
+        by the run, beside the light-frames folder."""
+        path = self.rm.last_output
+        if not path:
+            var = self.form.vars.get('output')
+            typed = var.get().strip() if var is not None else ''
+            path = typed if typed else None
+        if not path:
             return
-        folder = os.path.dirname(out_path) or '.'
+        path = os.path.abspath(path)
+        target_file = path if os.path.isfile(path) else None
+        folder = path if os.path.isdir(path) else (os.path.dirname(path) or '.')
         if not os.path.isdir(folder):
             return
         try:
-            os.startfile(folder)
+            if sys.platform == 'win32':
+                if target_file:
+                    import subprocess
+                    subprocess.Popen(['explorer', '/select,', target_file])
+                else:
+                    os.startfile(folder)
+            elif sys.platform == 'darwin':
+                import subprocess
+                subprocess.Popen(['open', '-R', target_file] if target_file else ['open', folder])
+            else:
+                import subprocess
+                subprocess.Popen(['xdg-open', folder])
         except Exception:
             pass
 

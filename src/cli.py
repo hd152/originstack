@@ -964,7 +964,9 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             outp = os.path.join(tempfile.gettempdir(), f'{name}_stack.fits')
             targets.append((d, outp))
             tmp_stacks.append(outp)
-            _cleanup_register(outp)
+            # the per-session stack's preview and saved settings land beside it
+            for _side in (outp, outp[:-5] + '.jpg', outp[:-5] + '_config.toml'):
+                _cleanup_register(_side)
         safe_print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
         defer_phase4 = len(targets) > 1
         # final combined output will be combined from tmp_stacks
@@ -1865,6 +1867,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'Phase 1 arrays in temp files unless the temp disk would be left '
                         'short. ram: everything in RAM, no temp files. disk: everything '
                         'in temp files.')
+    g_core.add_argument('--temp-dir', default=None, metavar='DIR',
+                   help='Folder for temporary files (default: the system temp folder). A '
+                        'long session needs a lot of room there -- about 100 MB per light '
+                        'frame plus 70 MB per frame for alignment, so ~145 GB for 850 '
+                        'lights -- so point this at a drive with space. Leftover files from '
+                        'a run that crashed are removed at the next start.')
     g_core.add_argument('--gpu-phase1', choices=['auto', 'on', 'off'], default='auto',
                    help='With --use-gpu: where Phase 1 frame processing runs. '
                         '"auto" (default) keeps it on the CPU process pool unless the '
@@ -2607,6 +2615,46 @@ def _name_output_in_folder(folder: str, directory: str) -> str:
         n += 1
 
 
+_SYSTEM_TEMP = None
+_SWEPT: set = set()
+
+
+def apply_temp_dir(temp_dir) -> str:
+    """Point this process's temporary files at ``temp_dir`` (``--temp-dir``), or back
+    at the system temp folder when it is empty -- the desktop app runs many jobs in
+    one process, so each run sets it again. The environment variables are set too,
+    so Phase 1's worker processes agree. Removes OriginStack files left there by a
+    crashed run (once per folder per process). Returns the folder in use."""
+    global _SYSTEM_TEMP
+    if _SYSTEM_TEMP is None:
+        _SYSTEM_TEMP = {k: os.environ.get(k) for k in ('TMP', 'TEMP', 'TMPDIR')}
+    if temp_dir:
+        folder = os.path.abspath(os.path.expanduser(str(temp_dir)))
+        os.makedirs(folder, exist_ok=True)
+        tempfile.tempdir = folder
+        for k in ('TMP', 'TEMP', 'TMPDIR'):
+            os.environ[k] = folder
+    else:
+        for k, v in _SYSTEM_TEMP.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        tempfile.tempdir = None
+    folder = tempfile.gettempdir()
+    if folder not in _SWEPT:
+        _SWEPT.add(folder)
+        try:
+            from src.cleanup import sweep_orphans
+            n, freed = sweep_orphans([folder])
+            if n:
+                safe_print(f"  Removed {n} leftover temp file(s) of an earlier run "
+                           f"({freed / 1e9:.1f} GB) from {folder}")
+        except Exception:
+            pass
+    return folder
+
+
 def apply_post_parse_setup(args: argparse.Namespace) -> None:
     """Everything ``main()`` does between ``parse_args()`` and calling
     ``process_directory()``: default the output path, load ``--config``,
@@ -2618,6 +2666,7 @@ def apply_post_parse_setup(args: argparse.Namespace) -> None:
     function specifically so the two callers can't drift apart the way they
     already had (the desktop app was silently missing the "no output path
     specified" notice before this was extracted)."""
+    apply_temp_dir(getattr(args, 'temp_dir', None))
     _from_stack = getattr(args, 'from_stack', None)
     if _from_stack:
         _stem = os.path.splitext(_from_stack)[0]

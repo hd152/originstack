@@ -18,13 +18,48 @@ import re
 import threading
 from typing import Any, Dict, List, Optional
 
+
+def load_app_setting(key: str, default=None):
+    """A value saved in the app's settings file (the one that holds the language)."""
+    import json
+
+    from src.i18n import _settings_path
+    try:
+        data = json.loads(_settings_path().read_text(encoding='utf-8'))
+        return data.get(key, default) if isinstance(data, dict) else default
+    except (OSError, ValueError):
+        return default
+
+
+def save_app_setting(key: str, value) -> None:
+    import json
+
+    from src.i18n import _settings_path
+    path = _settings_path()
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[key] = value
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+    except OSError:
+        pass
+
+
 # A handful of path-typed fields the auto-rendered form can't infer a picker
 # kind for from argparse metadata alone.
 _WIDGET_HINTS: Dict[str, str] = {
     'directory': 'dir',
     'cal_dir': 'dir',
     'export_frames_dir': 'dir',
-    'output': 'file-save',
+    # A folder is what most people want (the stack is named for them and never
+    # overwrites); a full .fits path can still be typed in.
+    'output': 'dir',
+    'temp_dir': 'dir',
     'vignette_map': 'file-open',
     'config': 'file-open',
     'log_file': 'file-save',
@@ -48,7 +83,10 @@ _UNSUPPORTED_DESTS = {'live', 'stream', 'quality_sweep', 'sweep_undo'}
 # (tests/test_desktop_setup_form.py checks).
 _FIELD_SUMMARIES: Dict[str, str] = {
     'directory': 'The folder with your light frames (calibration frames can sit alongside).',
-    'output': 'Where to save the stack. Leave blank to save next to the light frames.',
+    'output': 'Folder to save the stack in (or type a full .fits path). Leave blank to save it '
+              'beside the light-frames folder, in the folder that contains it.',
+    'temp_dir': 'Where temporary files go while stacking (about 170 MB per light frame). '
+                'Pick a drive with plenty of free space for long sessions.',
     'preset': 'A starting point for the settings: quick, quality, or tuned for a target type.',
     'auto': 'Recognises the target after the first pass and picks settings for it. '
             'Anything you change here still wins.',
@@ -271,6 +309,10 @@ class RunManager:
         self.status = 'idle'
         self.thread: Optional[threading.Thread] = None
         self._cancel_event = threading.Event()
+        # The output file of the last run as the pipeline resolved it (a blank
+        # Output, or a folder, becomes <session>_stacked.fits somewhere), for the
+        # app's Open Folder button.
+        self.last_output: Optional[str] = None
 
     def is_running(self) -> bool:
         return self.status == 'running'
@@ -311,6 +353,7 @@ class RunManager:
 
         wv = get_ui_events()
         status, error = 'ok', None
+        args = None
         try:
             args = parse_args(argv)
             args._cancel_event = self._cancel_event
@@ -346,6 +389,16 @@ class RunManager:
             safe_print(f"  ERROR: run failed: {error}")
             get_logger().exception(f"desktop app run failed: {error}")
         finally:
+            # Temp files of this run, whatever happened: the app's process lives on,
+            # so the at-exit cleanup alone left a failed run's files (tens of GB)
+            # behind until the app was closed.
+            try:
+                from src.cleanup import cleanup_now
+                cleanup_now()
+            except Exception:
+                pass
+            if args is not None and getattr(args, 'output', None):
+                self.last_output = os.path.abspath(str(args.output))
             wv.run_finished(status, error)
             with self._lock:
                 self.status = status

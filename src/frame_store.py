@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import weakref
 from multiprocessing import shared_memory
 from typing import Dict, List, Optional, Tuple
 
@@ -74,6 +75,21 @@ def _available_mb() -> Tuple[Optional[float], Optional[float]]:
         return None, None
 
 
+_LIVE_STORES: 'weakref.WeakSet[FrameStore]' = weakref.WeakSet()
+
+
+def cleanup_all_stores() -> None:
+    """Close and delete every frame store still open (end of a run, any outcome).
+    A store whose owner raised before its own ``cleanup()`` -- the aligned stack on
+    a disk-full or failed combine -- otherwise kept its temp file for the life of
+    the process."""
+    for store in list(_LIVE_STORES):
+        try:
+            store.cleanup()
+        except Exception:
+            pass
+
+
 class FrameStore:
     """Creates and cleans up session frame arrays; see the module docstring."""
 
@@ -83,6 +99,7 @@ class FrameStore:
         self._memmaps: List[np.memmap] = []
         self._shms: List[shared_memory.SharedMemory] = []
         self.placement: Dict[str, str] = {}
+        _LIVE_STORES.add(self)
 
     @staticmethod
     def _fits_ram(nbytes: int, reserve_mb: float) -> bool:
@@ -198,7 +215,8 @@ def _require_disk(nbytes: int, prefix: str) -> None:
         raise FrameStoreSpaceError(
             f"Not enough space for the {what} frames: {nbytes / 1e9:.1f} GB needed, "
             f"{free / 1e9:.1f} GB free in the temp folder ({tempfile.gettempdir()}). "
-            f"Free some disk space, point TEMP/TMPDIR at a larger drive, or stack fewer "
+            f"Choose a temp folder on a drive with more room (Temp folder in the app, "
+            f"--temp-dir on the command line), free some disk space, or stack fewer "
             f"frames at a time (stack each night separately and combine them with --merge).")
 
 
