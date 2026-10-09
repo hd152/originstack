@@ -6,6 +6,10 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.2] - 2026-10-09
+
+The app closes cleanly, and a failed multi-session combine keeps its per-session stacks.
+
 ### Fixed
 
 - **Closing the app always ends it.** Closing the window during a run let Python shut down
