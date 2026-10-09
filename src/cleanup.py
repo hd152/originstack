@@ -88,22 +88,29 @@ _ORPHAN_PATTERNS = ('stack_aligned_*.dat', 'stack_rgb_*.dat', 'stack_lum_*.dat',
                     'master_*.dat', '*_stack.fits', '*_stack.jpg', '*_stack_config.toml')
 
 
-def sweep_orphans(folders=None, min_age_hours: float = 6.0):
+def sweep_orphans(folders=None, min_age_hours=None):
     """Remove OriginStack temp files left by a run that crashed or was killed.
 
-    Only names OriginStack itself creates, and only files untouched for
-    ``min_age_hours`` -- an older file cannot belong to a run that is still going
-    (they are written throughout a run), so another instance is safe. Returns
-    (files removed, bytes freed)."""
+    Only names OriginStack itself creates. Frame arrays (``.dat``) on Windows at
+    any age: they stay memory-mapped while a run uses them, and Windows refuses
+    to delete an open file, so a concurrent instance is safe. Everything else --
+    and anything on other systems, where deleting an open file succeeds -- only
+    once untouched for 6 hours: a hierarchical run's per-session stacks are
+    closed while they wait for the combine. Returns (files removed, bytes freed)."""
     import glob
     import tempfile
     import time
     if folders is None:
         folders = [tempfile.gettempdir()]
-    cutoff = time.time() - min_age_hours * 3600.0
+    now = time.time()
     n = freed = 0
     for folder in {os.path.abspath(f) for f in folders if f}:
         for pat in _ORPHAN_PATTERNS:
+            if min_age_hours is not None:
+                age_h = min_age_hours
+            else:
+                age_h = 0.0 if (os.name == 'nt' and pat.endswith('.dat')) else 6.0
+            cutoff = now - age_h * 3600.0
             for p in glob.glob(os.path.join(folder, pat)):
                 try:
                     st = os.stat(p)
