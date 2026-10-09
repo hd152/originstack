@@ -155,7 +155,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 
 **Linear data**
 - The main output FITS is the linear pre-Phase-4 stack (`RAWSTACK=True`, `NFRAMES`/`INTGTIME`/`TOTEXP`). `--merge`, `--transient-detect` and `--from-stack` refuse inputs without `RAWSTACK`. Photometry, colour calibration and difference imaging run on the linear stack, never the post-processed one.
-- `--merge`: flux-match previous stacks to the current one, inverse-noise-variance weighted mean per footprint, `embed_to_shape` before registration, headers summed; no `--drizzle-scale > 1`. Hierarchical combine uses the same `merge_previous_stacks` (rotation-aware), reference = most `INTGTIME`; Phase 4 runs once on the combined stack (`args._defer_phase4` for the per-session runs).
+- `--merge`: flux-match previous stacks to the current one (gain from pixels bright in both; sky offset as a robust quadratic surface fitted to block medians of `ref - gain*img`, `_sky_offset_surface` -- a constant offset left seams and a red rim on a five-session Lagoon combine; clipped cores neutralised after the mean, `_clipped_weight(grow_px=_CLIP_GROW_PX)`), inverse-noise-variance weighted mean per footprint, `embed_to_shape` before registration, headers summed; no `--drizzle-scale > 1`. Hierarchical combine uses the same `merge_previous_stacks` (rotation-aware), reference = most `INTGTIME`; Phase 4 runs once on the combined stack (`args._defer_phase4` for the per-session runs).
 - Multi-session pooling vs split is decided from predicted avoidable field rotation (`_predict_rotation_spread`, 3 deg); lights come from `discover_frames`, not a glob.
 
 **Uncertainty / Phase 4**

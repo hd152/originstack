@@ -6,6 +6,18 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Multi-session combines no longer show the sessions' edges.** Each session's sky was matched to
+  the reference with one constant per channel, measured over an overlap that on a nebula is mostly
+  nebula; its own sky gradient stayed. On a five-session Lagoon combine that left diagonal seams
+  where a rotated session's footprint ended and a red rim along the frame edges (the red sky was
+  ~1200 ADU off). The sky difference is now fitted as a smooth surface per channel.
+- **Saturated stars in multi-session combines are white again.** Clipped star cores are neutral in
+  each session, but the per-channel scaling that matches sessions to each other turned them blue
+  or cyan, with a blue ring where the core was clipped in some sessions only. They are now made
+  neutral after the combine.
+
 ## [2.10.0] - 2026-10-08
 
 `--use-gpu` and `--transient-triage` that work in the shipped app, Gaia queries answered from a

@@ -308,3 +308,92 @@ class TestFootprintRimIsTrimmed(unittest.TestCase):
         leak_on = float(np.median(self._merge_with_bright_rim(3)[6:8, 40:280, 1])) - 1000.0
         self.assertGreater(leak_off, 100.0)      # the artifact is real without the trim
         self.assertLess(abs(leak_on), 10.0)      # and gone with it
+
+
+def _scene(shift=(0.0, 0.0), H=256, W=320, seed=0, clip=None):
+    """Star field plus a large nebula (so the overlap's median is not sky);
+    sky-free. ``clip``: saturate star cores at this level (neutral)."""
+    f = _star_field(shift=shift, seed=seed, H=H, W=W, noise=1.0)[:, :, 0].astype(np.float64) - 1000.0
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    neb = 1500.0 * np.exp(-((yy - H / 2 - shift[0]) ** 2 + (xx - W / 2 - shift[1]) ** 2) / (2 * 70.0 ** 2))
+    img = np.stack([f + 1.6 * neb, f + neb, f + 0.6 * neb], axis=2)   # red nebula
+    if clip is not None:
+        img = np.minimum(img, clip)
+    return img
+
+
+class TestSkyOffsetSurface(unittest.TestCase):
+    """Sessions with different sky gradients and colours must not step at the
+    previous stack's footprint edge (real five-session Lagoon combine: diagonal
+    seams and a red rim)."""
+
+    def _merge(self, use_surface):
+        import src.merge as m
+        real = m._sky_offset_surface
+        if not use_surface:
+            m._sky_offset_surface = lambda *a, **k: None
+        try:
+            H, W = 512, 640          # >= 30 whole 48-px blocks in the overlap
+            new = (_scene(H=H, W=W) + np.array([1000.0, 900.0, 800.0])).astype(np.float32)
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+            grad = (xx / W)[..., None] * np.array([400.0, 60.0, 30.0])  # red LP gradient
+            prev = (_scene(shift=(40.0, 0.0), H=H, W=W) * np.array([0.8, 1.0, 1.25])
+                    + np.array([300.0, 500.0, 700.0]) + grad).astype(np.float32)
+            with tempfile.TemporaryDirectory() as td:
+                p = os.path.join(td, 'prev.fits')
+                _write_stack(p, prev, nframes=40)
+                merged, _ = m.merge_previous_stacks(new, 10, [p])
+            return merged.astype(np.float64), new.astype(np.float64)
+        finally:
+            m._sky_offset_surface = real
+
+    def _step(self, merged, new):
+        # the previous stack covers rows < ~470 of the new grid; sky far from the
+        # nebula, on both sides of its footprint edge and at both ends of the gradient
+        d = merged - new
+        inside_l = np.median(d[440:460, 10:80], axis=(0, 1))
+        inside_r = np.median(d[440:460, 560:630], axis=(0, 1))
+        outside = np.median(d[480:505, 10:80], axis=(0, 1))     # new stack alone: 0
+        return np.abs(inside_l - outside), np.abs(inside_r - outside)
+
+    def test_no_step_at_the_footprint_edge(self):
+        step, step_right = self._step(*self._merge(True))
+        self.assertLess(step.max(), 15.0)
+        self.assertLess(step_right.max(), 15.0)
+
+    def test_a_constant_offset_left_one(self):
+        step, step_right = self._step(*self._merge(False))
+        self.assertGreater(max(step.max(), step_right.max()), 50.0)
+
+
+class TestClippedCoresStayNeutral(unittest.TestCase):
+    """Neutral saturated cores must stay neutral through per-channel merge gains."""
+
+    def _merge(self, neutralise):
+        import src.color_calibrate as cc
+        import src.merge as m
+        real = cc._clipped_weight
+        if not neutralise:
+            cc._clipped_weight = lambda *a, **k: None
+        try:
+            new = (_scene(clip=6000.0) + 1000.0).astype(np.float32)
+            prev = ((_scene(shift=(5.0, 3.0), clip=6000.0) + 1000.0)
+                    * np.array([1.0, 0.8, 0.5])).astype(np.float32)   # B needs x2
+            with tempfile.TemporaryDirectory() as td:
+                p = os.path.join(td, 'prev.fits')
+                _write_stack(p, prev, nframes=40)
+                merged, _ = m.merge_previous_stacks(new, 10, [p])
+            return merged
+        finally:
+            cc._clipped_weight = real
+
+    def _core_ratio(self, merged):
+        lum = merged.sum(axis=2)
+        cores = lum >= np.percentile(lum, 99.95)
+        return float(np.median(merged[cores][:, 2] / merged[cores][:, 0]))
+
+    def test_cores_neutral(self):
+        self.assertLess(abs(self._core_ratio(self._merge(True)) - 1.0), 0.05)
+
+    def test_cores_coloured_without_it(self):
+        self.assertGreater(abs(self._core_ratio(self._merge(False)) - 1.0), 0.15)

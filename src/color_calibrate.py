@@ -611,14 +611,18 @@ def calibrate_linear_stack(img: np.ndarray, header, method: str = 'solar',
     return scales, info
 
 
-def _clipped_weight(img: np.ndarray):
+def _clipped_weight(img: np.ndarray, grow_px: float = 0.0):
     """Per pixel, 0..1: how close it is to a clipped plateau, or None if the
     stack has none. A channel has a plateau when ``Config.CLIP_PLATEAU_MIN_STARS``
     separate regions sit within 2% of its maximum: saturated star cores stack to
     nearly one level, while a smooth unclipped galaxy core is a single region
     (counting pixels instead would neutralise it). Ramps from 0 at 80% of the
     plateau to 1 at it, like the white balance step's
-    ``debayer._desaturate_near_clipped_highlights``."""
+    ``debayer._desaturate_near_clipped_highlights``.
+
+    ``grow_px``: also weight pixels within this distance of a plateau (1 at its
+    edge, tapering to 0), for wings that were clipped in some of the frames or
+    stacks that went into ``img`` but not in all of them."""
     from scipy import ndimage as ndi
 
     from src.models import Config
@@ -635,7 +639,13 @@ def _clipped_weight(img: np.ndarray):
         frac = f if frac is None else np.maximum(frac, f)
     if frac is None:
         return None
-    return np.clip((frac - 0.8) / 0.2, 0.0, 1.0)
+    w = np.clip((frac - 0.8) / 0.2, 0.0, 1.0)
+    if grow_px > 0:
+        plateau = w >= 0.75         # within 5% of the top: stacked clipped cores spread 2-3%
+        if plateau.any():
+            d = ndi.distance_transform_edt(~plateau)
+            w = np.maximum(w, np.clip(1.0 - d / float(grow_px), 0.0, 1.0))
+    return w
 
 
 def apply_scales_inplace(img: np.ndarray, scales) -> np.ndarray:

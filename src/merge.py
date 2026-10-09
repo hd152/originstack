@@ -228,6 +228,67 @@ def _match_flux_scale(ref: np.ndarray, img: np.ndarray, valid: np.ndarray
     return gains, offsets, int(n_min or 0)
 
 
+# Clipped-core neutralisation reaches this far past each stack's plateau: a
+# wing clipped in some sessions and not others, scaled by their per-channel
+# gains, left a blue ring (B/R 1.4-1.7 at 5-9 px) around neutral Lagoon cores.
+_CLIP_GROW_PX = 8.0
+_OFFSET_BLOCK_PX = 48         # block-median cell for the sky offset surface
+_OFFSET_MIN_BLOCKS = 30
+
+
+def _sky_offset_surface(ref: np.ndarray, img: np.ndarray, valid: np.ndarray,
+                        gains: np.ndarray):
+    """Per-channel offset surface (H, W, 3) mapping ``gains * img`` onto ``ref``.
+
+    ``_match_flux_scale``'s single offset (median of ``ref`` - gain x median of
+    ``img`` over the overlap) assumes the two stacks' skies differ by a
+    constant. Each session's linear stack carries its own gradient (light
+    pollution, moon, the altitude it was taken at), and on a nebula-filled field
+    the overlap's median is nebula, not sky: on a five-session Lagoon combine the
+    red sky of the merged sessions came out ~1200 ADU off the reference's, and
+    the inverse-variance mean then stepped at every footprint edge -- diagonal
+    seams and a red rim where fewer sessions covered. With the gain applied, the
+    sources cancel in ``ref - gain * img``; what is left is the sky difference.
+    Its block medians over the overlap are fitted with a robust (Tukey) quadratic
+    in x, y. None when too few blocks are fully inside the overlap.
+    """
+    H, W = ref.shape[:2]
+    b = _OFFSET_BLOCK_PX
+    nby, nbx = H // b, W // b
+    if nby < 3 or nbx < 3:
+        return None
+    vb = valid[:nby * b, :nbx * b].reshape(nby, b, nbx, b).mean(axis=(1, 3)) > 0.95
+    if int(vb.sum()) < _OFFSET_MIN_BLOCKS:
+        return None
+    yy, xx = np.nonzero(vb)
+    cy = ((yy + 0.5) * b - H / 2) / (W / 2)
+    cx = ((xx + 0.5) * b - W / 2) / (W / 2)
+    A = np.stack([np.ones_like(cx), cx, cy, cx * cx, cx * cy, cy * cy], axis=1)
+    gy, gx = np.mgrid[0:H, 0:W].astype(np.float64)
+    gy = (gy - H / 2) / (W / 2)
+    gx = (gx - W / 2) / (W / 2)
+    out = np.empty((H, W, 3), dtype=np.float64)
+    for c in range(3):
+        d = (ref[:nby * b, :nbx * b, c].astype(np.float64)
+             - gains[c] * img[:nby * b, :nbx * b, c].astype(np.float64))
+        med = np.median(d.reshape(nby, b, nbx, b).transpose(0, 2, 1, 3).reshape(nby, nbx, -1),
+                        axis=2)[vb]
+        w = np.ones_like(med)
+        coef = None
+        for _ in range(10):
+            sw = np.sqrt(w)
+            coef = np.linalg.lstsq(A * sw[:, None], med * sw, rcond=None)[0]
+            r = med - A @ coef
+            s = 1.4826 * float(np.median(np.abs(r))) + 1e-9
+            u = r / (4.685 * s)
+            w = np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+            if w.sum() < A.shape[1] * 3:
+                return None
+        out[:, :, c] = (coef[0] + coef[1] * gx + coef[2] * gy + coef[3] * gx * gx
+                        + coef[4] * gx * gy + coef[5] * gy * gy)
+    return out
+
+
 def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                           merge_paths: List[str],
                           verbose: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -252,6 +313,14 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     wsum_n = np.broadcast_to(w_new, (H, W, 3)).astype(np.float64).copy()
     acc = stacked.astype(np.float64) * new_w
     wsum = np.full((H, W), new_w, dtype=np.float64)
+    # Saturated cores: each stack's own clipped plateau, on the common grid.
+    # A clipped core is neutral in its own stack, but the per-channel gains and
+    # inverse-variance weights below scale it per channel -- on a five-session
+    # Lagoon combine (gains up to B x2.24) every bright star came out a blue or
+    # cyan disc. They are made neutral again after the merge, as
+    # color_calibrate.apply_scales_inplace does for one stack.
+    from src.color_calibrate import _clipped_weight
+    clip_w = _clipped_weight(stacked, grow_px=_CLIP_GROW_PX)
 
     new_lum = _lum(stacked)
     new_stars = _detect_stars(new_lum)
@@ -345,8 +414,13 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                     f"(< {Config.MERGE_MIN_CORRELATION}) — wrong target or "
                     f"failed registration; refusing to merge")
 
+        cw = _clipped_weight(aligned, grow_px=_CLIP_GROW_PX)
+        if cw is not None:
+            cw = np.where(valid, cw, 0.0)
+            clip_w = cw if clip_w is None else np.maximum(clip_w, cw)
         gains, offsets, n_fit = _match_flux_scale(stacked, aligned, valid)
-        scaled = aligned.astype(np.float64) * gains + offsets
+        surface = _sky_offset_surface(stacked, aligned, valid, gains)
+        scaled = aligned.astype(np.float64) * gains + (surface if surface is not None else offsets)
         if np.any(gains != 1.0):
             safe_print(f"    flux scale vs current stack: R x{gains[0]:.3f}  "
                        f"G x{gains[1]:.3f}  B x{gains[2]:.3f} ({n_fit} px in fit)")
@@ -394,6 +468,12 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     else:
         merged = (acc / np.maximum(wsum[:, :, np.newaxis], 1e-12)).astype(np.float32)
         info['weighting'] = 'frame-count'
+    if clip_w is not None:
+        sel = clip_w > 0
+        w = clip_w[sel][:, None].astype(np.float32)
+        px = merged[sel]
+        merged[sel] = px * (1 - w) + px.max(axis=1, keepdims=True) * w
+        info['neutral_clipped_px'] = int((clip_w >= 1).sum())
     safe_print(f"  Merge weighting: {info['weighting']}")
     return merged, info
 
