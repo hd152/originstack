@@ -358,7 +358,7 @@ Leave **Output file** blank and the stack is saved next to the light-frames fold
 
 Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
 
-**Languages.** The app follows your system language: English, Deutsch, Español, Français, Italiano, Português (Brasil), 日本語 or 简体中文. Pick another from the menu in the header (it applies from the next start), or set `ORIGINSTACK_LANG` (e.g. `ORIGINSTACK_LANG=fr`). The log and the command line stay in English, so a log attached to a problem report reads the same for everyone. The translations are machine-drafted; corrections are welcome as issues or pull requests (`src/locales/<code>.json`, keyed by the English text).
+**Languages.** The app follows your system language: English, Deutsch, Español, Français, Italiano, Nederlands, Português (Brasil), 日本語 or 简体中文. Pick another from the menu in the header (it applies from the next start), or set `ORIGINSTACK_LANG` (e.g. `ORIGINSTACK_LANG=fr`). The log and the command line stay in English, so a log attached to a problem report reads the same for everyone. The translations are machine-drafted; corrections are welcome as issues or pull requests (`src/locales/<code>.json`, keyed by the English text).
 
 ---
 

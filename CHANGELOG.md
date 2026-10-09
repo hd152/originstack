@@ -6,6 +6,12 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Dutch (Nederlands).** The desktop app and the website (`originstack.site/nl/`) are now also in
+  Dutch; the app picks it up from a Dutch system language, or choose it from the language menu. Like
+  the other translations it is machine-drafted, and corrections are welcome.
+
 ## [2.10.2] - 2026-10-09
 
 OriginStack is now free software under the GNU GPL v3.
