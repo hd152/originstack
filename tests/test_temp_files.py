@@ -5,6 +5,8 @@ import os
 import tempfile
 import time
 
+import pytest
+
 import src.cleanup as cleanup
 import src.frame_store as fs
 from src.cli import apply_temp_dir
@@ -25,9 +27,22 @@ def test_sweep_removes_only_old_originstack_files(tmp_path):
     other.write_bytes(b'x')
     os.utime(other, (old, old))                         # not ours
     keep += [fresh, other]
-    n, freed = cleanup.sweep_orphans([str(tmp_path)])
+    n, freed = cleanup.sweep_orphans([str(tmp_path)], min_age_hours=6)
     assert n == len(gone) and freed == 10 * len(gone)
     assert not any(p.exists() for p in gone) and all(p.exists() for p in keep)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows refuses to delete an open file')
+def test_windows_sweep_takes_any_age_but_never_an_open_file(tmp_path):
+    closed = tmp_path / 'stack_rgb_done.dat'
+    closed.write_bytes(b'x')
+    busy = tmp_path / 'stack_aligned_busy.dat'
+    with open(busy, 'wb') as fh:          # another instance still running
+        fh.write(b'x')
+        fresh_stack = tmp_path / 'M42_stack.fits'   # closed, waiting for the combine
+        fresh_stack.write_bytes(b'x')
+        n, _ = cleanup.sweep_orphans([str(tmp_path)])
+        assert n == 1 and not closed.exists() and busy.exists() and fresh_stack.exists()
 
 
 def test_cleanup_now_closes_and_deletes_an_open_frame_store(tmp_path, monkeypatch):

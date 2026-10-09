@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Closing the app always ends it.** Closing the window during a run let Python shut down
+  around a stacking thread that was still inside native code, which could crash the app on exit
+  (a "stopped working" message, or a process that did not go away). Closing now cancels the run,
+  stops its worker processes, removes the run's temporary files when they are free, and exits.
+
 ## [2.11.1] - 2026-10-09
 
 A choice of temp folder, temporary files cleaned up after every run, and an Output that can

@@ -1898,7 +1898,69 @@ def main() -> int:
         root.mainloop()
     except Exception as e:
         return _fatal("OriginStack", _('Unexpected error: {error}', error=e))
+    _shutdown_and_exit(0)
     return 0
+
+
+def _shutdown_and_exit(code: int = 0, wait_s: float = 5.0) -> None:
+    """Leave the process for certain once the window has closed.
+
+    A normal interpreter exit with a run still going tore Python down while the
+    run thread was inside native code -- a crash on exit in one of two tests
+    (in the packaged app, a "stopped working" dialog or a process that does not
+    go away) -- and it waits for any non-daemon thread and for the stacking
+    code's thread pools. Instead: cancel the run and give it ``wait_s`` to stop
+    at a checkpoint, stop Phase 1's worker processes, delete this run's temp
+    files when nothing is using them any more, then exit at once."""
+    import multiprocessing
+    try:
+        from src.desktop_control import get_run_manager
+        rm = get_run_manager()
+        if rm.is_running():
+            rm.cancel()
+            if rm.thread is not None:
+                rm.thread.join(timeout=wait_s)
+        run_stopped = not rm.is_running()
+    except Exception:
+        run_stopped = False
+    try:
+        for p in multiprocessing.active_children():
+            p.terminate()
+    except Exception:
+        pass
+    try:
+        import psutil
+        for child in psutil.Process().children(recursive=True):
+            try:
+                child.kill()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if not run_stopped:
+        # with its workers gone, a run waiting on them fails at once
+        try:
+            if rm.thread is not None:
+                rm.thread.join(timeout=wait_s)
+            run_stopped = not rm.is_running()
+        except Exception:
+            pass
+    if run_stopped:
+        # with the run still inside a phase its memory-mapped files are in use; a
+        # later run's start-up sweep removes them instead
+        try:
+            from src.cleanup import cleanup_now
+            cleanup_now()
+        except Exception:
+            pass
+    try:
+        import logging
+        logging.shutdown()
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
 
 
 if __name__ == '__main__':
