@@ -6,6 +6,16 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Large sessions no longer look hung while stacking.** With ~850 lights the aligned frames (60 GB)
+  no longer fit in memory, and the combine and proper-coadd steps then ran for minutes with no
+  output while the computer paged; on a smaller machine that could take far longer and looked like
+  a hang. Both steps now report progress and honour Cancel, and the combine reads the frames band
+  by band from disk: 5.5 -> 2.3 min on an 849-frame session (64 GB RAM), identical result.
+- **A run that cannot fit on the temp disk stops at once with a clear message** (how much space is
+  needed and free, and what to do), instead of failing when the disk fills mid-run.
+
 ### Added
 
 - **Dutch (Nederlands).** The desktop app and the website (`originstack.site/nl/`) are now also in

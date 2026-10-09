@@ -285,7 +285,7 @@ def _tiled_ok(aligned) -> bool:
                                                    'proper_coadd_accum32_tile')))
 
 
-def _combine_tiled(aligned, frames, meas, ref_sig, PH: int, PW: int):
+def _combine_tiled(aligned, frames, meas, ref_sig, PH: int, PW: int, tick=None):
     """One combine thread's share of the proper coadd: ``frames`` (in order) accumulated
     into its own float32 sums. Returns (num complex64 (C, PH, NF), den float32, s_w,
     s_w2f, s_sky, n_bad, n_rep) -- bit-identical to the per-frame path in
@@ -355,6 +355,8 @@ def _combine_tiled(aligned, frames, meas, ref_sig, PH: int, PW: int):
 
     batch = []
     for j in frames:
+        if tick is not None:
+            tick()
         p, F = meas[j]
         fr = aligned[j]
         if copy_in or not fr.flags.c_contiguous:
@@ -427,19 +429,49 @@ class FrameMeasurer:
         return p, flux
 
 
+def _progress_ticker(label: str, total: int, cancel_event=None, verbose: bool = True):
+    """A thread-safe per-frame callback: app progress, a log line about every 10%
+    on long runs, and ``RunCancelled`` once ``cancel_event`` is set. An 849-frame
+    session spent 2.4 min here with no output, which on a slower machine looks
+    like a hang."""
+    import threading
+    lock = threading.Lock()
+    state = {'n': 0, 't0': time.time(), 'next': max(1, total // 10)}
+    from src.ui_events import get_ui_events
+    ui = get_ui_events()
+
+    def tick():
+        if cancel_event is not None and cancel_event.is_set():
+            from src.models import RunCancelled
+            raise RunCancelled("cancelled during proper coadd")
+        with lock:
+            state['n'] += 1
+            n = state['n']
+            ui.progress(label, n, total)
+            if verbose and total >= 100 and n >= state['next']:
+                state['next'] += max(1, total // 10)
+                el = time.time() - state['t0']
+                safe_print(f"    {label}: {n}/{total} frames ({el:.0f}s, "
+                           f"~{el / n * (total - n):.0f}s left)")
+    return tick
+
+
 def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
                  workers: Optional[int] = None, verbose: bool = True,
-                 stats: Optional[dict] = None, premeasured=None) -> Optional[np.ndarray]:
+                 stats: Optional[dict] = None, premeasured=None,
+                 cancel_event=None) -> Optional[np.ndarray]:
     """Proper coadd of ``aligned`` (N, H, W, C) float32 onto ``reference``'s grid.
 
     ``reference`` is the normal stack of the same frames (rejection reference and PSF
     star positions). ``premeasured`` = (FrameMeasurer, [measure() result per frame])
     skips the measuring pass (done during alignment). Returns float32 (H, W, C), or
-    None when the PSF could not be measured (the caller keeps the normal stack)."""
+    None when the PSF could not be measured (the caller keeps the normal stack).
+    ``cancel_event``: a set ``threading.Event`` stops it with ``RunCancelled``."""
     if not HAS_SCIPY:
         return None
     t0 = time.time()
     N, H, W, C = aligned.shape
+    tick_measure = _progress_ticker('Proper coadd: measuring', N, cancel_event, verbose=False)
     ref = np.asarray(reference, np.float32)
     ref_lum = (0.299 * ref[..., 0] + 0.587 * ref[..., 1] + 0.114 * ref[..., 2]) if C == 3 else ref[..., 0]
     if premeasured is not None:
@@ -458,6 +490,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
 
     # --- per-frame measurements ------------------------------------------------
     def measure(j):
+        tick_measure()
         return FrameMeasurer(stars, p_ref).measure(aligned[j])   # stamps and samples only
 
     # 2 threads: the fit is ~6 ms of small-array numpy/scipy calls per frame and holds
@@ -521,6 +554,8 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     n_rep_box = [0]
     acc32 = native
 
+    tick = _progress_ticker('Proper coadd', len(use), cancel_event, verbose=verbose)
+
     def worker(k):
         planes = np.zeros((C + 1, PH, PW), np.float32)
         a_num = np.zeros((C,) + fshape, np.complex64 if acc32 else np.complex128)
@@ -528,6 +563,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
         s_w = np.zeros(C); s_w2f = np.zeros(C); s_sky = np.zeros(C)
         nbad = nrep = 0
         for j in use[k::n_thr]:
+            tick()
             p, F = meas[j]
             # one sequential read into RAM: the strided sky/noise samples below touched
             # nearly every page of a disk-backed aligned frame once per channel (34 s of
@@ -564,7 +600,7 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
         return a_num, a_den, s_w, s_w2f, s_sky, nbad
 
     def worker_tiled(k):
-        *part, nrep = _combine_tiled(aligned, use[k::n_thr], meas, ref_sig, PH, PW)
+        *part, nrep = _combine_tiled(aligned, use[k::n_thr], meas, ref_sig, PH, PW, tick=tick)
         with lock:
             n_rep_box[0] += nrep
         return tuple(part)

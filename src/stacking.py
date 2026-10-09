@@ -16,7 +16,7 @@ from scipy import ndimage
 from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.gpu_context import get_gpu
-from src.models import Config, FrameInfo, ProcessingStats
+from src.models import Config, FrameInfo, ProcessingStats, RunCancelled
 from src.utils import diff_mad_sigma, format_time, get_logger, safe_print
 
 try:
@@ -41,6 +41,48 @@ def _native_usable(data: np.ndarray) -> bool:
     A non-matching array (wrong dtype / non-contiguous) falls back to numpy."""
     return (HAS_NATIVE and data.ndim == 4 and data.dtype == np.float32
             and data.flags['C_CONTIGUOUS'])
+
+
+# Row bands for combining a disk-backed aligned stack: each band of every frame
+# is read into RAM with one sequential read per frame, then combined in memory.
+_BAND_BYTES = 1.5e9
+
+
+def _combine_in_bands(stack: np.ndarray, combine, args, label: str) -> np.ndarray:
+    """``combine(block, r0)`` over row bands of ``stack`` (N, H, W, C), or in one
+    call when the stack is in RAM.
+
+    A disk-backed aligned stack larger than RAM was combined in one native call
+    over the memmap: on an 849-frame session (60 GB aligned stack, 64 GB of RAM)
+    that call ran 5.5 min with no output while the machine paged at ~400k
+    pages/s -- on a smaller machine it looked hung. Band by band, each frame's
+    rows are one contiguous read, progress is reported and Cancel is honoured.
+    ``combine`` must be per-pixel (the band's first row is passed as ``r0`` for
+    position-dependent weights), so the result is identical to one call.
+    """
+    if not isinstance(stack, np.memmap):
+        return combine(stack, 0)
+    N, H, W, C = stack.shape
+    rows = int(max(1, min(H, _BAND_BYTES // max(N * W * C * stack.itemsize, 1))))
+    out = np.empty((H, W, C), dtype=np.float32)
+    from src.ui_events import get_ui_events
+    ui = get_ui_events()
+    n_bands = (H + rows - 1) // rows
+    t0 = time.time()
+    for b, r0 in enumerate(range(0, H, rows)):
+        ev = getattr(args, '_cancel_event', None)
+        if ev is not None and ev.is_set():
+            raise RunCancelled("cancelled during stacking")
+        r1 = min(H, r0 + rows)
+        block = np.ascontiguousarray(stack[:, r0:r1])
+        out[r0:r1] = combine(block, r0)
+        del block
+        ui.progress(label, b + 1, n_bands)
+        if b == 0 or (b + 1) % max(1, n_bands // 10) == 0 or b + 1 == n_bands:
+            el = time.time() - t0
+            safe_print(f"    {label}: {r1}/{H} rows ({format_time(el)}, "
+                       f"~{format_time(el / (b + 1) * (n_bands - b - 1))} left)")
+    return out
 
 
 def lacosmic_noise_model(img: np.ndarray):
@@ -2101,12 +2143,18 @@ def run_stacking_phase(
                     _w32 = (weights.astype(np.float32, copy=False)
                             if weights is not None else None)
                     _use_mad = (getattr(args, 'rejection_estimator', 'mad') == 'mad')
-                    stacked = _native.patch_weighted_sigma_combine_fast(
-                        mem_aligned, qgrids, _w32, float(args.rejection_sigma),
-                        int(args.rejection_iters), _use_mad, qgrid_geom)
+
+                    def _fused(block, r0):
+                        return _native.patch_weighted_sigma_combine_fast(
+                            block, qgrids, _w32, float(args.rejection_sigma),
+                            int(args.rejection_iters), _use_mad,
+                            (qgrid_geom[0], qgrid_geom[1], qgrid_geom[2] + r0, qgrid_geom[3]))
+                    stacked = _combine_in_bands(mem_aligned, _fused, args, 'Combining')
                     safe_print(f"    [rust] fused patch-weighted + sigma-clip combine "
                                f"({format_time(time.time() - _t_fused)})")
                     _fused_done = True
+                except RunCancelled:
+                    raise
                 except Exception as _fexc:
                     _log.debug("native fused patch combine failed (%s); using numpy", _fexc)
 
@@ -2217,7 +2265,8 @@ def run_stacking_phase(
                 _pc_stats = {}
                 _pc = proper_coadd(mem_aligned, stacked,
                                    fwhm=float(np.median(_fw)) if _fw else 5.0,
-                                   verbose=True, stats=_pc_stats)
+                                   verbose=True, stats=_pc_stats,
+                                   cancel_event=getattr(args, '_cancel_event', None))
                 if _pc is not None:
                     stacked = _pc
                     if _pc_stats.get('poisson_factor'):
@@ -2225,6 +2274,8 @@ def run_stacking_phase(
                     safe_print(f"  Proper coadd ({format_time(time.time() - _t_pc)})")
                 else:
                     safe_print("  Proper coadd: PSF could not be measured -- keeping the normal stack")
+            except RunCancelled:
+                raise
             except Exception as _pce:
                 safe_print(f"  WARNING: proper coadd failed ({_pce}); keeping the normal stack")
 
