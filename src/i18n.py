@@ -35,6 +35,7 @@ LANGUAGES: Dict[str, str] = {
     'es': 'Español',
     'fr': 'Français',
     'it': 'Italiano',
+    'nl': 'Nederlands',
     'pt_BR': 'Português (Brasil)',
     'ja': '日本語',
     'zh_CN': '简体中文',

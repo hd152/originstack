@@ -43,6 +43,7 @@ LANGS = [
     ('es', 'es', 'es', 'es_ES', 'Español'),
     ('fr', 'fr', 'fr', 'fr_FR', 'Français'),
     ('it', 'it', 'it', 'it_IT', 'Italiano'),
+    ('nl', 'nl', 'nl', 'nl_NL', 'Nederlands'),
     ('pt_BR', 'pt-br', 'pt-BR', 'pt_BR', 'Português'),
     ('ja', 'ja', 'ja', 'ja_JP', '日本語'),
     ('zh_CN', 'zh-cn', 'zh-CN', 'zh_CN', '简体中文'),

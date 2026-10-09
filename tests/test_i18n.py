@@ -44,7 +44,7 @@ def test_unknown_language_is_english(english):
 @pytest.mark.parametrize('tag, code', [
     ('de_DE.UTF-8', 'de'), ('fr-CA', 'fr'), ('pt-BR', 'pt_BR'), ('pt_PT', 'pt_BR'),
     ('zh-Hans-CN', 'zh_CN'), ('zh_CN', 'zh_CN'), ('zh-TW', None), ('zh-Hant', None),
-    ('ja-JP', 'ja'), ('en_GB', 'en'), ('nl_NL', None), ('', None), (None, None)])
+    ('ja-JP', 'ja'), ('en_GB', 'en'), ('nl_NL', 'nl'), ('nl-BE', 'nl'), ('sv_SE', None), ('', None), (None, None)])
 def test_normalize(tag, code):
     assert i18n.normalize(tag) == code
 
