@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The preview JPG of a large bright nebula shows its faint outer parts.** The JPG stretch
+  lifts faint signal only about three times, which suits a galaxy but left everything outside
+  the bright centre of the Orion Nebula black, though the FITS holds it. When a bright nebula
+  fills the frame, the stretch is now made strong enough to show its outer nebulosity.
+  Galaxies and star fields are stretched as before.
+
 ## [2.11.3] - 2026-10-10
 
 Bright nebula cores keep their structure in the preview JPG, and re-running a multi-session folder stacks its sessions again.
