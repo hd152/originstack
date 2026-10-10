@@ -719,10 +719,20 @@ def multiscale_local_contrast(
             detail = detail * core
         enhanced_lum += strength * w * detail * mask
 
-    # Reconstruct RGB by the luminance ratio (hue/saturation preserved)
-    safe_lum = np.where(lum > 1e-10, lum, 1e-10)
-    ratio = enhanced_lum / safe_lum
-    result = img.astype(np.float64) * ratio[:, :, np.newaxis]
+    # Reconstruct RGB by the luminance ratio (hue/saturation preserved) where the
+    # pixel's own luminance is clearly above zero; toward zero, add the luminance
+    # change to every channel instead. The sky is centred on zero here, so a pixel
+    # can have a luminance near 0 with one channel well above it and another below
+    # (a dark lane beside bright nebulosity, where the smoothed mask is on): the
+    # ratio then divided a normal enhancement by ~1e-10 and on a real Orion stack
+    # 51k pixels reached 1e18.
+    delta = enhanced_lum - lum
+    ref = max(s_m, 1e-6)
+    alpha = np.clip(lum / (3.0 * ref), 0.0, 1.0)
+    ratio = np.where(lum > 0, enhanced_lum / np.maximum(lum, 1e-10), 1.0)
+    img64 = img.astype(np.float64)
+    result = (alpha[:, :, None] * (img64 * ratio[:, :, None])
+              + (1.0 - alpha[:, :, None]) * (img64 + delta[:, :, None]))
     return np.clip(result, 0.0, None).astype(np.float32)
 
 

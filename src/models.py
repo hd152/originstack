@@ -48,6 +48,19 @@ class Config:
     # frames where the percentile is already higher (Crab +70 sigma) are
     # unchanged, Hercules (+37) nearly so. 100 sigma started to dim the galaxies.
     PREVIEW_WHITE_MIN_SIGMA = 50.0
+    # Highlight roll-off above the preview white point, for an *extended* bright
+    # region (a nebula core) rather than star cores: on a real Orion stack the
+    # 99.5th-percentile white point sat at 68k ADU against a core reaching 166k,
+    # so the whole Trapezium region (25.6k connected pixels, 0.44% of the frame)
+    # clipped flat white while the FITS showed its structure. Applied when the
+    # largest connected region above white covers at least
+    # PREVIEW_ROLLOFF_MIN_AREA of the frame (Orion 0.44%; star cores only on
+    # Black Eye / Whirlpool / a dense Flaming Star field: 0.003-0.012%). Below
+    # white the usual curve is scaled into [0, KNEE]; above it a log curve of
+    # STRENGTH maps white..p99.99 into [KNEE, 1].
+    PREVIEW_ROLLOFF_MIN_AREA = 0.001
+    PREVIEW_ROLLOFF_KNEE = 0.85
+    PREVIEW_ROLLOFF_STRENGTH = 8.0
     # Colour calibration of a stack with clipped star cores: a channel has a
     # clipped plateau when at least this many separate regions (stars) sit within
     # 2% of its maximum. Saturated cores stack to nearly one level (six on a real

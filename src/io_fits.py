@@ -246,6 +246,50 @@ def _preview_white(lum: np.ndarray, sky: float, sigma: float, percentile: float,
     return white, sp_scale
 
 
+def _extended_highlight_top(lum: np.ndarray, white: float) -> Optional[float]:
+    """Top of the highlight roll-off, or None when there is nothing to roll off.
+
+    A white point at the 99.5th percentile clips star cores, which is fine, but
+    also any bright *extended* region above it -- a nebula core such as the
+    Trapezium region of M42 then renders as a flat white blob. That case is told
+    apart from star cores by the largest connected region above white (see
+    ``Config.PREVIEW_ROLLOFF_MIN_AREA``); the top is the 99.99th percentile."""
+    from scipy import ndimage
+
+    from src.models import Config
+    above = lum > white
+    if not above.any():
+        return None
+    labels, n = ndimage.label(above)
+    if n == 0 or np.bincount(labels.ravel())[1:].max() < Config.PREVIEW_ROLLOFF_MIN_AREA * lum.size:
+        return None
+    top = float(np.percentile(lum, 99.99))
+    return top if top > 1.2 * float(white) else None
+
+
+def _rolloff_curve(curve, lum: np.ndarray, white: float, top: float) -> np.ndarray:
+    """``curve`` (a luminance -> [0, 1] stretch with white point ``white``) scaled
+    into [0, knee], with a log roll-off mapping white..top into [knee, 1]."""
+    from src.models import Config
+    knee = Config.PREVIEW_ROLLOFF_KNEE
+    a = Config.PREVIEW_ROLLOFF_STRENGTH
+    below = np.asarray(curve(np.minimum(lum, white).astype(np.float32)), dtype=np.float64)
+    over = np.clip((lum.astype(np.float64) - white) / (top - white), 0.0, 1.0)
+    return np.where(lum <= white, knee * below,
+                    knee + (1.0 - knee) * np.log1p(a * over) / np.log1p(a)).astype(np.float32)
+
+
+def _preserving_preview(rgb: np.ndarray, lum: np.ndarray, curve, black: float,
+                        white: float, sky_sigma: float) -> np.ndarray:
+    """Colour-preserving preview of ``rgb`` with the luminance curve ``curve``,
+    rolling off an extended highlight above ``white`` instead of clipping it."""
+    top = _extended_highlight_top(lum, white)
+    if top is None:
+        return colour_preserving_stretch(rgb, curve(lum), black, white, sky_sigma)
+    return colour_preserving_stretch(rgb, _rolloff_curve(curve, lum, white, top),
+                                     black, top, sky_sigma)
+
+
 def colour_preserving_stretch(rgb: np.ndarray, lum_stretched: np.ndarray,
                               black: float, white: float,
                               sky_sigma: float) -> np.ndarray:
@@ -353,9 +397,9 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
         ghs_sp = ghs_sp * _sp_scale
         if color == 'preserve':
-            out = colour_preserving_stretch(
-                rgb, generalized_hyperbolic_stretch(
-                    lum, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+            out = _preserving_preview(
+                rgb, lum, lambda x: generalized_hyperbolic_stretch(
+                    x, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
                     black_point=unified_black, white_point=unified_white),
                 unified_black, unified_white, _bg_sigma)
         else:
@@ -374,9 +418,9 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # above any extended structure, burying diffuse signal near-black.
         unified_white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
         if color == 'preserve':
-            out = colour_preserving_stretch(
-                rgb, arcsinh_stretch(lum, black_point=unified_black,
-                                     white_point=unified_white),
+            out = _preserving_preview(
+                rgb, lum, lambda x: arcsinh_stretch(x, black_point=unified_black,
+                                                    white_point=unified_white),
                 unified_black, unified_white, _bg_sigma)
         else:
             for c in range(3):
