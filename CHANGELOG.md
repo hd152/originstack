@@ -16,6 +16,13 @@ match the `VERSION` file and `v*` git tags.
 - **Local contrast could produce absurd pixel values** (up to 1e18 on a real Orion stack) in dark
   lanes beside bright nebulosity, where the luminance is near zero after background removal.
   The step now adds the change to each channel there instead of dividing by the luminance.
+- **Re-running a multi-session folder stacked the previous result instead of the sessions.**
+  The combined stack is written into the folder that holds the session subfolders, and it was
+  not marked as OriginStack output, so the next run on that folder saw a FITS file at the top
+  level, stacked that one file as a light and ignored every session. Earlier stacks are now
+  recognised and skipped, and new combined stacks are marked as OriginStack output.
+- **Background extraction no longer fails on an image less than one mesh cell high or wide**
+  ("ky=0 failed for 6th keyword ky").
 
 ## [2.11.2] - 2026-10-09
 

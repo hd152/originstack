@@ -922,6 +922,29 @@ def apply_network_policy(args: argparse.Namespace, announce: bool = False) -> bo
     return offline
 
 
+def _root_has_input_fits(directory: str) -> bool:
+    """True when the folder itself holds FITS frames to stack.
+
+    This pipeline's own outputs do not count: a multi-session run writes its
+    combined stack into the folder that holds the sessions, and the next run on
+    that folder then saw "FITS in the root", stacked that one file as a light
+    and ignored every session subfolder."""
+    from src.frame_discovery import classify_frame
+    from src.io_fits import _read_fits_header
+    for f in sorted(os.listdir(directory)):
+        if not f.lower().endswith(('.fit', '.fits')):
+            continue
+        path = os.path.join(directory, f)
+        if not os.path.isfile(path):
+            continue
+        try:
+            if classify_frame(path, _read_fits_header(path)) != 'skip':
+                return True
+        except Exception:
+            return True       # unreadable: let discovery report it, as before
+    return False
+
+
 def process_directory(directory: str, output: str, args: argparse.Namespace):
     apply_network_policy(args, announce=True)
     # Print banner
@@ -947,7 +970,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     defer_phase4 = False
 
     safe_print("\nDiscovering frames...")
-    if any(os.listdir(directory)) and any(f.lower().endswith(('.fit', '.fits')) for f in os.listdir(directory)):
+    if _root_has_input_fits(directory):
         # single folder
         targets = [(directory, output)]
         safe_print("  Mode: Single folder")

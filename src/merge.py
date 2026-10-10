@@ -494,6 +494,10 @@ def seed_reference_header(header, meta: Dict[str, Any]) -> None:
     of linear stacks, before any Phase 4 step.
     """
     header['RAWSTACK'] = (True, 'Linear pre-post-processing stack')
+    # Marks the file as this pipeline's output, so pointing a later run at the
+    # folder holding it does not pick it up as a light (classify_frame).
+    header['CREATOR'] = ('originstack.py', 'Software that created this file')
+    header['COMBINED'] = (True, 'Image is a stacked combination')
     if meta.get('intgtime', 0.0) > 0:
         header['INTGTIME'] = (meta['intgtime'],
                               'Total integration time (s)')

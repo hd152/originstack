@@ -112,7 +112,10 @@ def classify_frame(path: str, header: dict) -> str:
     # the current CREATOR prefix and the pre-rename one (astro_stack.py ->
     # originstack.py) so outputs from older runs are still recognized.
     _creator = header.get('CREATOR', '')
-    if header.get('COMBINED') or _creator.startswith(('astro_stack', 'originstack')):
+    # RAWSTACK is written only on this pipeline's stacks: a multi-session combine
+    # before 2.11.3 carried it without CREATOR/COMBINED and was taken as a light.
+    if (header.get('COMBINED') or header.get('RAWSTACK') is not None
+            or str(_creator).startswith(('astro_stack', 'originstack'))):
         return 'skip'
     # Skip the Celestron Origin app's own onboard live-stacked master preview
     # (already stacked + stretched) that it writes into the session folder
