@@ -208,6 +208,20 @@ def _sigma_sky(arr: np.ndarray, sigma: float = 3.0, maxiters: int = 5) -> Tuple[
     return float(np.median(arr)), float(np.std(arr))
 
 
+def _two_point_axes(grid_y, grid_x, bg_grid, H, W):
+    """A spline needs at least two nodes per axis; a mesh one cell high or wide
+    (an image shorter or narrower than a cell) has one. Repeat that row/column
+    at the image's edges so the surface is constant along that axis."""
+    bg_grid = np.asarray(bg_grid, dtype=np.float64)
+    if len(grid_y) < 2:
+        grid_y = np.array([0.0, max(float(H - 1), 1.0)])
+        bg_grid = np.repeat(bg_grid[:1, :], 2, axis=0)
+    if len(grid_x) < 2:
+        grid_x = np.array([0.0, max(float(W - 1), 1.0)])
+        bg_grid = np.repeat(bg_grid[:, :1], 2, axis=1)
+    return grid_y, grid_x, bg_grid
+
+
 def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int = 3,
                        clip_sigma: float = 3.0, clip_iters: int = 5,
                        star_mask: Optional[np.ndarray] = None) -> np.ndarray:
@@ -411,10 +425,10 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
         kx = min(3, nx + 1)
         spline = RectBivariateSpline(ext_y, ext_x, ext_grid, kx=kx, ky=ky)
     else:
-        ky = min(3, max(0, ny - 1))
-        kx = min(3, max(0, nx - 1))
-        if ny == 1 and nx == 1: ky, kx = 1, 1
-        spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=kx, ky=ky)
+        grid_y, grid_x, bg_grid = _two_point_axes(grid_y, grid_x, bg_grid, H, W)
+        # scipy's first axis (its 'x', degree kx) is the image's y here
+        spline = RectBivariateSpline(grid_y, grid_x, bg_grid,
+                                     kx=min(3, len(grid_y) - 1), ky=min(3, len(grid_x) - 1))
 
     # Evaluate spline
     background = spline(np.arange(H), np.arange(W)).astype(np.float32)
@@ -723,7 +737,8 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             ext_x = np.concatenate([[0.0], grid_x, [float(W - 1)]])
             spline = RectBivariateSpline(ext_y, ext_x, ext_grid, kx=min(3, nx+1), ky=min(3, ny+1))
         else:
-            spline = RectBivariateSpline(grid_y, grid_x, bg_grid, kx=min(3, max(0,nx-1)), ky=min(3, max(0,ny-1)))
+            gy, gx, gg = _two_point_axes(grid_y, grid_x, bg_grid, H, W)
+            spline = RectBivariateSpline(gy, gx, gg, kx=min(3, len(gy) - 1), ky=min(3, len(gx) - 1))
 
         background = spline(np.arange(H), np.arange(W)).astype(np.float64)
         blur_sigma = (H/ny) * 0.5
