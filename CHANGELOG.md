@@ -6,6 +6,17 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bright nebula cores keep their structure in the preview JPG.** The preview's white point
+  clips star cores, but it also clipped any large bright region above it: the core of the Orion
+  Nebula came out as a flat white blob while the FITS showed its structure. When a large
+  connected region sits above the white point, the brightest part of the range is now rolled
+  off gradually instead of clipped. Star fields and galaxies are unaffected.
+- **Local contrast could produce absurd pixel values** (up to 1e18 on a real Orion stack) in dark
+  lanes beside bright nebulosity, where the luminance is near zero after background removal.
+  The step now adds the change to each channel there instead of dividing by the luminance.
+
 ## [2.11.2] - 2026-10-09
 
 The app closes cleanly, and a failed multi-session combine keeps its per-session stacks.
