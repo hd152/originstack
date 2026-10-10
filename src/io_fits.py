@@ -261,7 +261,8 @@ def _extended_highlight_top(lum: np.ndarray, white: float) -> Optional[float]:
     if not above.any():
         return None
     labels, n = ndimage.label(above)
-    if n == 0 or np.bincount(labels.ravel())[1:].max() < Config.PREVIEW_ROLLOFF_MIN_AREA * lum.size:
+    min_area = max(Config.PREVIEW_ROLLOFF_MIN_AREA * lum.size, Config.PREVIEW_ROLLOFF_MIN_PIXELS)
+    if n == 0 or np.bincount(labels.ravel())[1:].max() < min_area:
         return None
     top = float(np.percentile(lum, 99.99))
     return top if top > 1.2 * float(white) else None
@@ -279,11 +280,56 @@ def _rolloff_curve(curve, lum: np.ndarray, white: float, top: float) -> np.ndarr
                     knee + (1.0 - knee) * np.log1p(a * over) / np.log1p(a)).astype(np.float32)
 
 
+def _extended_nebula_ghs(lum: np.ndarray, sky: float, sky_sigma: float, black: float,
+                         white: float, b: float, sp: float, hp: float) -> Tuple[float, float]:
+    """GHS stretch factor and symmetry point for a frame-filling bright nebula.
+
+    The curve is ``asinh(b (x - SP))``, which lifts the faintest signal only
+    ~b / asinh(b) times: about 3x at the presets' b = 6-9. That suits a galaxy,
+    whose white point sits a few times above its disk, but on a real Orion
+    stack the white point is ~70k against outer wings a few hundred ADU above
+    sky -- the median above-sky pixel displayed at 0.09 and the whole outer
+    nebula, plain in any auto-stretched view of the FITS, rendered black.
+
+    For such an image (the highlight roll-off case) SP goes to 0 and b rises
+    until the lower quartile of the clearly-above-sky pixels displays at
+    ``Config.PREVIEW_NEBULA_FAINT_LEVEL``. Never weaker than the given curve."""
+    from src.models import Config
+    sub = lum[::2, ::2]
+    vals = sub[sub > sky + 3.0 * sky_sigma]
+    span = float(white) - float(black)
+    if vals.size < 100 or span <= 0:
+        return b, sp
+    q = (float(np.percentile(vals, 25)) - float(black)) / span
+    if not 0.0 < q < hp:
+        return b, sp
+
+    def level(bb: float, s: float) -> float:
+        lo = np.arcsinh(-bb * s)
+        return float((np.arcsinh(bb * (q - s)) - lo) / (np.arcsinh(bb * (hp - s)) - lo))
+
+    target = Config.PREVIEW_NEBULA_FAINT_LEVEL / Config.PREVIEW_ROLLOFF_KNEE
+    if level(b, sp) >= target:
+        return b, sp
+    lo_b, hi_b = float(b), Config.PREVIEW_NEBULA_MAX_B
+    if level(hi_b, 0.0) < target:
+        return hi_b, 0.0
+    for _ in range(50):
+        mid = 0.5 * (lo_b + hi_b)
+        if level(mid, 0.0) < target:
+            lo_b = mid
+        else:
+            hi_b = mid
+    return hi_b, 0.0
+
+
 def _preserving_preview(rgb: np.ndarray, lum: np.ndarray, curve, black: float,
-                        white: float, sky_sigma: float) -> np.ndarray:
+                        white: float, sky_sigma: float, top=False) -> np.ndarray:
     """Colour-preserving preview of ``rgb`` with the luminance curve ``curve``,
-    rolling off an extended highlight above ``white`` instead of clipping it."""
-    top = _extended_highlight_top(lum, white)
+    rolling off an extended highlight above ``white`` instead of clipping it.
+    ``top``: a precomputed ``_extended_highlight_top`` (False: compute it here)."""
+    if top is False:
+        top = _extended_highlight_top(lum, white)
     if top is None:
         return colour_preserving_stretch(rgb, curve(lum), black, white, sky_sigma)
     return colour_preserving_stretch(rgb, _rolloff_curve(curve, lum, white, top),
@@ -397,11 +443,15 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
         ghs_sp = ghs_sp * _sp_scale
         if color == 'preserve':
+            _top = _extended_highlight_top(lum, unified_white)
+            if _top is not None:
+                ghs_b, ghs_sp = _extended_nebula_ghs(lum, _med, _bg_sigma, unified_black,
+                                                     unified_white, ghs_b, ghs_sp, ghs_hp)
             out = _preserving_preview(
                 rgb, lum, lambda x: generalized_hyperbolic_stretch(
                     x, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
                     black_point=unified_black, white_point=unified_white),
-                unified_black, unified_white, _bg_sigma)
+                unified_black, unified_white, _bg_sigma, top=_top)
         else:
             for c in range(3):
                 out[:, :, c] = generalized_hyperbolic_stretch(

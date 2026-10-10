@@ -59,3 +59,25 @@ def test_local_contrast_finite_near_zero_luminance():
     out = multiscale_local_contrast(img)
     assert np.all(np.isfinite(out))
     assert out.max() < 10 * img.max()
+
+
+def test_frame_filling_nebula_wings_are_lifted():
+    # A bright core well above the white point plus faint wings filling the frame
+    # (Orion): the wings must not render near-black.
+    img = _sky()
+    yy, xx = np.mgrid[:400, :600]
+    r = np.hypot(yy - 200, xx - 300)
+    img += (40000.0 * np.exp(-(r / 30.0) ** 2) + 600.0 * np.exp(-(r / 120.0) ** 2))[..., None].astype(np.float32)
+    out = iof.render_preview_float(img, 'ghs', ghs_b=5.64, ghs_sp=0.115)
+    lum = out @ np.array([0.299, 0.587, 0.114])
+    wings = (r > 70) & (r < 100)
+    assert np.median(lum[wings]) > 0.15
+
+
+def test_no_extended_highlight_keeps_the_curve():
+    img = _sky()
+    _add_star(img, 100, 100, 3e4)
+    lum = img.astype(np.float64) @ np.array([0.299, 0.587, 0.114])
+    med, sig = iof._sky_stats(lum.astype(np.float32))
+    white, _ = iof._preview_white(lum, med, sig, 99.5, med)
+    assert iof._extended_highlight_top(lum, white) is None

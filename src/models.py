@@ -59,8 +59,17 @@ class Config:
     # white the usual curve is scaled into [0, KNEE]; above it a log curve of
     # STRENGTH maps white..p99.99 into [KNEE, 1].
     PREVIEW_ROLLOFF_MIN_AREA = 0.001
+    # ...and at least this many pixels: on a small frame 0.1% is one bright star
+    # (largest star region on the real stacks above: 701 px; Orion's core 25.6k).
+    PREVIEW_ROLLOFF_MIN_PIXELS = 1000
     PREVIEW_ROLLOFF_KNEE = 0.85
     PREVIEW_ROLLOFF_STRENGTH = 8.0
+    # In that same case (a frame-filling bright nebula) the GHS curve is made
+    # strong enough that the lower quartile of the clearly-above-sky pixels
+    # displays at this level (galaxy and star-field presets land at 0.13-0.17
+    # with their own settings; Orion's outer wings needed ~0.25), with b capped.
+    PREVIEW_NEBULA_FAINT_LEVEL = 0.25
+    PREVIEW_NEBULA_MAX_B = 500.0
     # Colour calibration of a stack with clipped star cores: a channel has a
     # clipped plateau when at least this many separate regions (stars) sit within
     # 2% of its maximum. Saturated cores stack to nearly one level (six on a real
