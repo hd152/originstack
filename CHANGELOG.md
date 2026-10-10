@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.4] - 2026-10-10
+
 ### Fixed
 
 - **The preview JPG of a large bright nebula shows its faint outer parts.** The JPG stretch
