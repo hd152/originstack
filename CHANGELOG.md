@@ -6,6 +6,10 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.3] - 2026-10-10
+
+Bright nebula cores keep their structure in the preview JPG, and re-running a multi-session folder stacks its sessions again.
+
 ### Fixed
 
 - **Bright nebula cores keep their structure in the preview JPG.** The preview's white point
