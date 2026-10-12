@@ -5,13 +5,103 @@
 //! the numpy reference in `src/stacking.py` (`_sigma_clip_tile`) but runs the
 //! per-pixel loop in native code, parallelised across image rows with rayon, so
 //! there is no per-tile float32 copy and no repeated whole-stack NaN passes.
+//! It also provides the pure-Rust byte-shuffle + LZ4 codec used by the opt-in
+//! Phase 1 compressed frame store.
 
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
     PyReadonlyArray3, PyReadonlyArray4, PyReadwriteArray3,
 };
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use rayon::prelude::*;
+
+/// Shuffle bytes by element position, improving LZ4's compression of numeric arrays.
+fn byte_shuffle(input: &[u8], itemsize: usize) -> Vec<u8> {
+    let count = input.len() / itemsize;
+    let mut output = vec![0; input.len()];
+    for byte in 0..itemsize {
+        for item in 0..count {
+            output[byte * count + item] = input[item * itemsize + byte];
+        }
+    }
+    output
+}
+
+/// Inverse of `byte_shuffle`.
+fn byte_unshuffle(input: &[u8], itemsize: usize) -> Vec<u8> {
+    let count = input.len() / itemsize;
+    let mut output = vec![0; input.len()];
+    for byte in 0..itemsize {
+        for item in 0..count {
+            output[item * itemsize + byte] = input[byte * count + item];
+        }
+    }
+    output
+}
+
+/// Losslessly compress a C-contiguous numeric array using byte shuffle + pure-Rust LZ4.
+#[pyfunction]
+fn compress_frame(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, u8>,
+    itemsize: usize,
+) -> PyResult<Py<PyBytes>> {
+    if itemsize == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "itemsize must be positive",
+        ));
+    }
+    let input = data
+        .as_slice()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("frame bytes must be C-contiguous"))?;
+    if input.len() % itemsize != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "frame byte count must be divisible by itemsize",
+        ));
+    }
+    if input.len() > u32::MAX as usize {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "LZ4 frame input exceeds the 4 GiB block limit",
+        ));
+    }
+    let input = input.to_vec();
+    let compressed = py.detach(move || {
+        let shuffled = byte_shuffle(&input, itemsize);
+        lz4_flex::block::compress_prepend_size(&shuffled)
+    });
+    Ok(PyBytes::new(py, &compressed).unbind())
+}
+
+/// Decompress a byte-shuffled LZ4 frame and verify its expected output length.
+#[pyfunction]
+fn decompress_frame(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    expected_len: usize,
+    itemsize: usize,
+) -> PyResult<Py<PyBytes>> {
+    if itemsize == 0 || expected_len % itemsize != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "expected length must be divisible by positive itemsize",
+        ));
+    }
+    let compressed = data.as_bytes().to_vec();
+    let output = py
+        .detach(move || {
+            let shuffled = lz4_flex::block::decompress_size_prepended(&compressed)
+                .map_err(|e| e.to_string())?;
+            if shuffled.len() != expected_len {
+                return Err(format!(
+                    "decompressed frame has {} bytes; expected {expected_len}",
+                    shuffled.len()
+                ));
+            }
+            Ok(byte_unshuffle(&shuffled, itemsize))
+        })
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &output).unbind())
+}
 
 /// f32/f64 for `median_inplace`.
 trait MedianFloat: Copy + PartialOrd + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> {
@@ -30,16 +120,33 @@ impl MedianFloat for f64 {
     const HALF: f64 = 0.5;
 }
 
-/// Median of a slice via quickselect (O(n), vs O(n log n) full sort), in the
-/// slice's own precision (f32 or f64). Exact order statistics, so values match
-/// the numpy/sort-based reference bit-for-bit: odd N -> k-th element; even N ->
-/// mean of the two middle order statistics (the second is the max of the left
-/// partition after select_nth). Empty -> NaN.
+/// Median in the slice's own precision (f32 or f64). Tiny finite slices use
+/// insertion-sized sorting; larger slices use quickselect (O(n), vs O(n log
+/// n) full sort). Exact order statistics, so values match the numpy/sort-based
+/// reference: odd N -> k-th element; even N -> mean of the middle pair. Empty
+/// -> NaN.
 #[inline]
 fn median_inplace<T: MedianFloat>(v: &mut [T]) -> T {
     let n = v.len();
     if n == 0 {
         return T::NAN;
+    }
+    // Selection has appreciable setup overhead for tiny samples. Keep the
+    // general quickselect path for larger stacks and NaN-containing slices.
+    if n <= 8 && v.iter().all(|x| x.partial_cmp(x).is_some()) {
+        for i in 1..n {
+            let value = v[i];
+            let mut j = i;
+            while j > 0 && v[j - 1] > value {
+                v[j] = v[j - 1];
+                j -= 1;
+            }
+            v[j] = value;
+        }
+        if n % 2 == 1 {
+            return v[n / 2];
+        }
+        return T::HALF * (v[n / 2 - 1] + v[n / 2]);
     }
     let mid = n / 2;
     let (_, &mut m, _) =
@@ -188,48 +295,53 @@ where
     let rows: Vec<[&mut [f32]; K]> = (0..h)
         .map(|_| std::array::from_fn(|j| chunks[j].next().unwrap()))
         .collect();
-    rows.into_par_iter().enumerate().for_each(|(row, out_rows)| {
-        let mut state = init();
-        let mut block = vec![0f32; tile * n];
-        match data {
-            Some(flat) => {
-                let row_base = row * row_len;
-                let mut start = 0usize;
-                while start < row_len {
-                    let t = tile.min(row_len - start);
-                    // Gather-transpose: sequential read per frame, L2 write.
-                    for k in 0..n {
-                        let src = &flat[k * frame_len + row_base + start..][..t];
-                        for (p, &v) in src.iter().enumerate() {
-                            block[p * n + k] = v;
+    let min_rows = (h / (rayon::current_num_threads().max(1) * 4)).max(1);
+    rows.into_par_iter()
+        .enumerate()
+        .with_min_len(min_rows)
+        .for_each_init(
+            || (init(), vec![0f32; tile * n]),
+            |(state, block), (row, out_rows)| {
+                match data {
+                    Some(flat) => {
+                        let row_base = row * row_len;
+                        let mut start = 0usize;
+                        while start < row_len {
+                            let t = tile.min(row_len - start);
+                            // Gather-transpose: sequential read per frame, L2 write.
+                            for k in 0..n {
+                                let src = &flat[k * frame_len + row_base + start..][..t];
+                                for (p, &v) in src.iter().enumerate() {
+                                    block[p * n + k] = v;
+                                }
+                            }
+                            for p in 0..t {
+                                let r = work(state, &block[p * n..(p + 1) * n]);
+                                for j in 0..K {
+                                    out_rows[j][start + p] = r[j];
+                                }
+                            }
+                            start += t;
                         }
                     }
-                    for p in 0..t {
-                        let r = work(&mut state, &block[p * n..(p + 1) * n]);
-                        for j in 0..K {
-                            out_rows[j][start + p] = r[j];
+                    None => {
+                        // Non-contiguous fallback: original indexed gather.
+                        let vals = &mut block[..n];
+                        for col in 0..row_len {
+                            let wj = col / c;
+                            let cj = col % c;
+                            for k in 0..n {
+                                vals[k] = arr[[k, row, wj, cj]];
+                            }
+                            let r = work(state, &vals[..n]);
+                            for j in 0..K {
+                                out_rows[j][col] = r[j];
+                            }
                         }
                     }
-                    start += t;
                 }
-            }
-            None => {
-                // Non-contiguous fallback: original indexed gather.
-                let vals = &mut block[..n];
-                for col in 0..row_len {
-                    let wj = col / c;
-                    let cj = col % c;
-                    for k in 0..n {
-                        vals[k] = arr[[k, row, wj, cj]];
-                    }
-                    let r = work(&mut state, &vals[..n]);
-                    for j in 0..K {
-                        out_rows[j][col] = r[j];
-                    }
-                }
-            }
-        }
-    });
+            },
+        );
     outs
 }
 
@@ -262,6 +374,7 @@ fn sigma_clip_mask(
     active: &mut [bool],
     gather: &mut Vec<f32>,
     scratch: &mut Vec<f32>,
+    rejected: &mut Vec<usize>,
 ) {
     let n = vals.len();
     for i in 0..n {
@@ -279,23 +392,25 @@ fn sigma_clip_mask(
         }
         let (center, spread) = center_spread(gather, scratch, use_mad);
         let thresh = sigma * spread;
+        rejected.clear();
         let mut survivors = 0usize;
         for i in 0..n {
-            if active[i] && (vals[i] - center).abs() <= thresh {
-                survivors += 1;
+            if active[i] {
+                let deviation = (vals[i] - center).abs();
+                if deviation <= thresh {
+                    survivors += 1;
+                } else if deviation > thresh {
+                    rejected.push(i);
+                }
             }
         }
         if survivors == 0 {
             break;
         }
-        let mut changed = false;
-        for i in 0..n {
-            if active[i] && (vals[i] - center).abs() > thresh {
-                active[i] = false;
-                changed = true;
-            }
+        for &i in rejected.iter() {
+            active[i] = false;
         }
-        if !changed {
+        if rejected.is_empty() {
             break;
         }
     }
@@ -317,6 +432,7 @@ fn sigma_clip_mask_fast(
     active: &mut [bool],
     gather: &mut Vec<f32>,
     scratch: &mut Vec<f32>,
+    rejected: &mut Vec<usize>,
 ) {
     let n = vals.len();
     let mut inf = false;
@@ -326,7 +442,9 @@ fn sigma_clip_mask_fast(
         inf |= v.is_infinite();
     }
     if inf {
-        sigma_clip_mask(vals, sigma, max_iters, true, active, gather, scratch);
+        sigma_clip_mask(
+            vals, sigma, max_iters, true, active, gather, scratch, rejected,
+        );
         return;
     }
     for _ in 0..max_iters {
@@ -353,22 +471,23 @@ fn sigma_clip_mask_fast(
             spread = std_pop(gather); // fallback
         }
         let thresh = sigma * spread;
+        rejected.clear();
         let mut survivors = 0usize;
-        let mut any_out = false;
         for i in 0..n {
             if active[i] {
-                let ok = (vals[i] - center).abs() <= thresh;
-                survivors += ok as usize;
-                any_out |= !ok;
+                let deviation = (vals[i] - center).abs();
+                if deviation <= thresh {
+                    survivors += 1;
+                } else if deviation > thresh {
+                    rejected.push(i);
+                }
             }
         }
-        if survivors == 0 || !any_out {
+        if survivors == 0 || rejected.is_empty() {
             break;
         }
-        for i in 0..n {
-            if active[i] && (vals[i] - center).abs() > thresh {
-                active[i] = false;
-            }
+        for &i in rejected.iter() {
+            active[i] = false;
         }
     }
 }
@@ -386,6 +505,7 @@ fn combine_pixel(
     active: &mut [bool],
     gather: &mut Vec<f32>,
     scratch: &mut Vec<f32>,
+    rejected: &mut Vec<usize>,
 ) -> f32 {
     let n = vals.len();
     for i in 0..n {
@@ -405,29 +525,28 @@ fn combine_pixel(
         let (center, spread) = center_spread(gather, scratch, use_mad);
         let thresh = sigma * spread;
 
-        // Proposed new mask.
-        let mut changed = false;
+        // Collect rejects while counting survivors, so the no-survivor case
+        // can still retain the current mask without scanning the values twice.
+        rejected.clear();
         let mut survivors = 0usize;
-        // First pass: count survivors under the threshold.
         for i in 0..n {
-            if active[i] && (vals[i] - center).abs() <= thresh {
-                survivors += 1;
+            if active[i] {
+                let deviation = (vals[i] - center).abs();
+                if deviation <= thresh {
+                    survivors += 1;
+                } else if deviation > thresh {
+                    rejected.push(i);
+                }
             }
         }
         if survivors == 0 {
             // All would be rejected -> keep the current mask, no change, stop.
             break;
         }
-        for i in 0..n {
-            if active[i] {
-                let keep = (vals[i] - center).abs() <= thresh;
-                if !keep {
-                    active[i] = false;
-                    changed = true;
-                }
-            }
+        for &i in rejected.iter() {
+            active[i] = false;
         }
-        if !changed {
+        if rejected.is_empty() {
             break;
         }
     }
@@ -521,11 +640,13 @@ fn sigma_clip_combine<'py>(
                     vec![true; n],
                     Vec::<f32>::with_capacity(n),
                     Vec::<f32>::with_capacity(n),
+                    Vec::<usize>::with_capacity(n),
                 )
             },
-            |(active, gather, scratch), vals| {
+            |(active, gather, scratch, rejected), vals| {
                 combine_pixel(
                     vals, wref, sigma, max_iters, winsorize, use_mad, active, gather, scratch,
+                    rejected,
                 )
             },
         )
@@ -1403,26 +1524,30 @@ fn dwt2_native<'py>(
             o1.par_chunks_mut(out_w)
                 .zip(o2.par_chunks_mut(out_w))
                 .enumerate()
-                .for_each(|(r, (a_row, d_row))| {
-                    let line = &src_rows[r * w..(r + 1) * w];
-                    // ext[t] = line[reflect_idx(t - (flen - 1))]
-                    let ext: Vec<f64> = (0..ext_len)
-                        .map(|t| line[reflect_idx(t as isize - (flen as isize - 1), w)])
-                        .collect();
-                    for j in 0..out_w {
-                        // index base-k  ->  ext[base - k + flen - 1]
-                        let top = offset + 2 * j + flen - 1;
-                        let mut a = 0.0f64;
-                        let mut d = 0.0f64;
-                        for k in 0..flen {
-                            let v = ext[top - k];
-                            a += lo[k] * v;
-                            d += hi[k] * v;
+                .for_each_init(
+                    || Vec::<f64>::with_capacity(ext_len),
+                    |ext, (r, (a_row, d_row))| {
+                        let line = &src_rows[r * w..(r + 1) * w];
+                        // ext[t] = line[reflect_idx(t - (flen - 1))]
+                        ext.resize(ext_len, 0.0);
+                        for (t, value) in ext.iter_mut().enumerate() {
+                            *value = line[reflect_idx(t as isize - (flen as isize - 1), w)];
                         }
-                        a_row[j] = a;
-                        d_row[j] = d;
-                    }
-                });
+                        for j in 0..out_w {
+                            // index base-k  ->  ext[base - k + flen - 1]
+                            let top = offset + 2 * j + flen - 1;
+                            let mut a = 0.0f64;
+                            let mut d = 0.0f64;
+                            for k in 0..flen {
+                                let v = ext[top - k];
+                                a += lo[k] * v;
+                                d += hi[k] * v;
+                            }
+                            a_row[j] = a;
+                            d_row[j] = d;
+                        }
+                    },
+                );
         };
         let mut c_a = vec![0.0f64; out_h * out_w];
         let mut c_v = vec![0.0f64; out_h * out_w];
@@ -1463,10 +1588,22 @@ fn idwt2_native<'py>(
     let rlo: Vec<f64> = rec_lo.as_array().to_vec();
     let rhi: Vec<f64> = rec_hi.as_array().to_vec();
 
-    let ca64: Vec<f64> = ca_arr.iter().copied().collect();
-    let ch64: Vec<f64> = ch_arr.iter().copied().collect();
-    let cv64: Vec<f64> = cv_arr.iter().copied().collect();
-    let cd64: Vec<f64> = cd_arr.iter().copied().collect();
+    let ca64 = match ca_arr.as_slice() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(ca_arr.iter().copied().collect()),
+    };
+    let ch64 = match ch_arr.as_slice() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(ch_arr.iter().copied().collect()),
+    };
+    let cv64 = match cv_arr.as_slice() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(cv_arr.iter().copied().collect()),
+    };
+    let cd64 = match cd_arr.as_slice() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(cd_arr.iter().copied().collect()),
+    };
 
     let out = py.detach(|| {
         // Pass 1: axis=1 (per-row) reconstruction -- La = idwt(cA,cV), Lh = idwt(cH,cD).
@@ -1485,23 +1622,28 @@ fn idwt2_native<'py>(
                 idwt_1d_line(ch_row, cd_row, &rlo, &rhi, idwt_offset, out_w, lh_row);
             });
 
-        // Pass 2: axis=0 (per-column) reconstruction on (La, Lh) -> final (out_h, out_w).
-        let cols: Vec<Vec<f64>> = (0..out_w)
-            .into_par_iter()
-            .map(|c| {
-                let la_col: Vec<f64> = (0..in_h).map(|r| la[r * out_w + c]).collect();
-                let lh_col: Vec<f64> = (0..in_h).map(|r| lh[r * out_w + c]).collect();
-                let mut out_col = vec![0.0f64; out_h];
-                idwt_1d_line(&la_col, &lh_col, &rlo, &rhi, idwt_offset, out_h, &mut out_col);
-                out_col
-            })
-            .collect();
         let mut result = vec![0.0f64; out_h * out_w];
-        for (c, col) in cols.into_iter().enumerate() {
-            for r in 0..out_h {
-                result[r * out_w + c] = col[r];
-            }
-        }
+        // Axis=0 reconstruction, calculated row-major to avoid a pair of
+        // temporary column vectors and the final column-to-row transpose.
+        result
+            .par_chunks_mut(out_w)
+            .enumerate()
+            .for_each(|(oi, row)| {
+                let n_pos = idwt_offset as isize + oi as isize;
+                for (c, value) in row.iter_mut().enumerate() {
+                    let mut acc = 0.0f64;
+                    for k in 0..rlo.len() {
+                        let m = n_pos - k as isize;
+                        if m >= 0 && m % 2 == 0 {
+                            let j = (m / 2) as usize;
+                            if j < in_h {
+                                acc += rlo[k] * la[j * out_w + c] + rhi[k] * lh[j * out_w + c];
+                            }
+                        }
+                    }
+                    *value = acc;
+                }
+            });
         result
     });
 
@@ -2620,6 +2762,7 @@ fn patch_weighted_sigma_combine_impl<'py>(
             let mut active = vec![true; n];
             let mut gather: Vec<f32> = Vec::with_capacity(n);
             let mut scratch: Vec<f32> = Vec::with_capacity(n);
+            let mut rejected: Vec<usize> = Vec::with_capacity(n);
             let mut reject_count = vec![0u32; n]; // per-frame rejected-channel count
             // patch grid: corners[(gx0 * n + f)] = this row's four grid
             // values around grid column gx0 for frame f
@@ -2643,7 +2786,7 @@ fn patch_weighted_sigma_combine_impl<'py>(
 
             // Per-pixel combine given contiguous per-channel sample slices in
             // `block` (layout [(p*c + ch)*n + f]) — see gather-transpose below.
-            let combine_col = |block: &[f32], p: usize, col: usize,
+            let mut combine_col = |block: &[f32], p: usize, col: usize,
                                    active: &mut [bool], gather: &mut Vec<f32>,
                                    scratch: &mut Vec<f32>, reject_count: &mut [u32],
                                    out_row: &mut [f32]| {
@@ -2653,9 +2796,11 @@ fn patch_weighted_sigma_combine_impl<'py>(
                 for ch in 0..c {
                     let chan = &block[(p * c + ch) * n..][..n];
                     if use_mad {
-                        sigma_clip_mask_fast(chan, sigma, max_iters, active, gather, scratch);
+                        sigma_clip_mask_fast(chan, sigma, max_iters, active, gather, scratch,
+                                             &mut rejected);
                     } else {
-                        sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch);
+                        sigma_clip_mask(chan, sigma, max_iters, use_mad, active, gather, scratch,
+                                        &mut rejected);
                     }
                     for f in 0..n {
                         if !active[f] {
@@ -9762,6 +9907,8 @@ fn xcorr_window<'py>(
 
 #[pymodule]
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(compress_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(decompress_frame, m)?)?;
     #[cfg(feature = "triage")]
     m.add_function(wrap_pyfunction!(transient_triage::transient_triage_score, m)?)?;
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;

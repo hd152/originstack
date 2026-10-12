@@ -40,7 +40,13 @@ from src.io_fits import load_frame
 from src.models import Config, FrameInfo, ProcessingStats, RunCancelled
 from src.quality import compute_quality_metrics, estimate_bortle, validate_image_data
 from src.stacking import lacosmic_reject
-from src.utils import format_time, mp_context, print_quality_table, safe_print
+from src.utils import (
+    format_time,
+    mp_context,
+    print_quality_table,
+    progress_disabled,
+    safe_print,
+)
 
 try:
     from tqdm import tqdm
@@ -1145,11 +1151,14 @@ def _parallel_frame_worker(
         # measured, so its initializer could not carry them)
         set_session_cfa(args_tuple[15])
     global _worker_masters
-    from src.frame_store import open_frame_array
+    from src.frame_store import COMPRESSED_PREFIX, open_frame_array
+    compressed_store = mm_rgb_path.startswith(COMPRESSED_PREFIX)
     mem_rgb = open_frame_array(mm_rgb_path, 'float32', rgb_shape)
-    slot = mem_rgb[frame_idx]
+    slot = (np.empty(rgb_shape[1:], dtype=np.float32) if compressed_store
+            else mem_rgb[frame_idx])
     mem_lum = open_frame_array(mm_lum_path, 'float32', lum_shape)
-    lum_slot = mem_lum[frame_idx]
+    lum_slot = (np.empty(lum_shape[1:], dtype=np.float32) if compressed_store
+                else mem_lum[frame_idx])
     result = _process_single_frame(path, {}, _worker_masters, debayer_method, white_balance,
                                    out_rgb=slot,
                                    out_lum=lum_slot,
@@ -1175,14 +1184,22 @@ def _parallel_frame_worker(
             return (isinstance(a, np.ndarray) and a.shape == b.shape
                     and a.__array_interface__['data'][0] == b.__array_interface__['data'][0])
         rgb = result['rgb']
-        if not _is(rgb, slot):          # a step replaced the debayered array: copy it in
+        if compressed_store:
+            # The worker's slot is a decompressed temporary array, not a shared
+            # writable view; commit the finished frame as one compressed chunk.
             mem_rgb[frame_idx] = rgb
-        if not _is(result['lum'], lum_slot):    # the white-balance pass may have written it
+            mem_lum[frame_idx] = result['lum']
+        elif not _is(rgb, slot):        # a step replaced the debayered array: copy it in
+            mem_rgb[frame_idx] = rgb
+        if not compressed_store and not _is(result['lum'], lum_slot):
+            # The white-balance pass may have written luminance directly.
             mem_lum[frame_idx] = result['lum']
         # Flush deferred to main process after all workers complete — flushing
         # the entire memmap on every frame causes excessive concurrent I/O.
         del mem_rgb, mem_lum, slot, lum_slot
     except Exception as e:
+        if compressed_store:
+            raise RuntimeError(f"compressed frame-store write failed for frame {frame_idx}: {e}") from e
         return (frame_idx, None, f'memmap write error: {e}', None)
     timings['memmap_write'] = time.perf_counter() - _t
 
@@ -1328,7 +1345,7 @@ def execute_frame_processing(
                 try:
                     for future in tqdm(as_completed(futures), total=n,
                                        desc="  Processing", unit="frame",
-                                       disable=args.verbose):
+                                       disable=progress_disabled(args.verbose)):
                         _check_cancel(args)
                         frame_idx, metrics, error, timings = future.result()
                         _accum(timings)
@@ -1464,7 +1481,7 @@ def execute_frame_processing(
             try:
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Processing", unit="frame",
-                                   disable=False):
+                                   disable=progress_disabled()):
                     _check_cancel(args)
                     i, metrics, error, lum_arr, timings = future.result()
                     _accum(timings)
@@ -1558,7 +1575,7 @@ def execute_frame_processing(
                        f"(measured once, applied per frame)")
         for i, f in tqdm(enumerate(lights), total=n,
                          desc="  Processing", unit="frame",
-                         disable=args.verbose):
+                         disable=progress_disabled(args.verbose)):
             _check_cancel(args)
             result = _process_single_frame(
                 f.path, f.header, masters, args.debayer_method, args.white_balance,
@@ -1751,7 +1768,7 @@ def reload_accepted_frames(
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",
-                                   disable=args.verbose):
+                                   disable=progress_disabled(args.verbose)):
                     orig_idx, _, error, _ = future.result()
                     if error:
                         j = _orig_to_j.get(orig_idx, -1)
@@ -1822,7 +1839,7 @@ def reload_accepted_frames(
                        for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
             for future in tqdm(as_completed(futures), total=n,
                                desc="  Reloading", unit="frame",
-                               disable=args.verbose):
+                               disable=progress_disabled(args.verbose)):
                 j, orig_idx, rgb, lum, error = future.result()
                 if error:
                     safe_print(f"  WARNING: Could not reload "

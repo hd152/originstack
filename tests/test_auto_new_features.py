@@ -105,6 +105,19 @@ class TestGalaxySkipsSkyResidual:
         a._apply_dynamic_settings(sig, weights, args)
         assert args.skip_step == ['background']
 
+    @pytest.mark.parametrize('ttype', ['galaxy', 'emission_nebula', 'reflection_nebula'])
+    def test_extended_target_uses_more_sensitive_dbe_emission_mask(self, ttype):
+        sig = dict(a._TYPE_ANCHORS[ttype])
+        args = _args(dbe_diffuse_threshold_sigma=1.0)
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
+        assert args.dbe_diffuse_threshold_sigma == 0.25
+
+    def test_non_extended_target_keeps_default_dbe_emission_mask(self):
+        sig = {**a._TYPE_ANCHORS['star_field'], 'fwhm': 2.0}
+        args = _args(dbe_diffuse_threshold_sigma=1.0)
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
+        assert args.dbe_diffuse_threshold_sigma == 1.0
+
 
 class TestVarianceStabilizeRule:
 

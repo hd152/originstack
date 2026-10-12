@@ -1901,6 +1901,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'Phase 1 arrays in temp files unless the temp disk would be left '
                         'short. ram: everything in RAM, no temp files. disk: everything '
                         'in temp files.')
+    g_core.add_argument('--no-compress-phase1', dest='compress_phase1', action='store_false',
+                   help='Disable automatic/forced lossless compression of Phase 1 frames.')
+    g_core.add_argument('--compress-phase1', dest='compress_phase1', action='store_true',
+                   help='Force lossless Rust LZ4 compression of Phase 1 RGB/luminance frames, '
+                        'even when the memory estimate says it is not needed.')
+    g_core.set_defaults(compress_phase1=None)
     g_core.add_argument('--temp-dir', default=None, metavar='DIR',
                    help='Folder for temporary files (default: the system temp folder). A '
                         'long session needs a lot of room there -- about 100 MB per light '
@@ -2021,9 +2027,9 @@ def build_parser() -> argparse.ArgumentParser:
                         'its RGB ratios, so stars and bright cores keep their colour. '
                         'channel: the curve is applied to each channel separately (the '
                         'behaviour before 2.5), which renders bright objects whiter.')
-    g_out.add_argument('--preview-black-sigma', type=float, default=0.0,
+    g_out.add_argument('--preview-black-sigma', type=float, default=-0.0868,
                    help='Preview black point, in sky-sigma above the sky median '
-                        '(default: 0.0). Higher (e.g. 2.0) clips background noise '
+                        '(default: -0.0868). Higher (e.g. 2.0) clips background noise '
                         'to black for a small target on empty sky; negative keeps '
                         'faint frame-filling nebulosity visible. Set per target by --auto.')
     g_post.add_argument('--repair-stars', action='store_true',
@@ -2403,6 +2409,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(
         # Features that are on by default (disabled via --no-* flags)
         background_extraction=True,
+        # DBE's diffuse-emission mask normally protects signal above 1 sky
+        # sigma. --auto lowers this for extended-source targets; this setting
+        # is saved in the effective config so --from-stack reuses it.
+        dbe_diffuse_threshold_sigma=1.0,
         # Primary luma denoiser when --denoiser is left at 'auto' and no
         # preset/--auto overrides it: directional (curvelet-inspired)
         # adaptive wavelet. At protect_strength=0.6 it's a strict superset
@@ -2441,7 +2451,7 @@ def build_parser() -> argparse.ArgumentParser:
         bg_mesh_size=64,
         bg_filter_size=3,
         bg_clip_sigma=3.0,
-        dbe_patch_size=64,
+        dbe_patch_size=47,
         entropy_bg=False,
         # Registration internals
         # skimage phase cross-correlation before the FFT branch is permanently
@@ -2507,9 +2517,9 @@ def build_parser() -> argparse.ArgumentParser:
         diagnostic_dir=None,
         debug_registration=False,
         export_masks=False,
-        ghs_b=8.0,
-        ghs_sp=0.15,
-        ghs_hp=0.95,
+        ghs_b=5.5613,
+        ghs_sp=0.1125,
+        ghs_hp=0.92,
         rejection_estimator='mad',
         advanced_metrics=False,
         # Improvements 1-9

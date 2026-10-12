@@ -30,7 +30,8 @@ Pillow>=12.3.0
 #     tomli
 #
 #   Native (Rust) acceleration — not a pip package; build ext/astro_native/ with maturin
-#   (see README "Native (Rust) acceleration"). Everything has a NumPy fallback.
+#   (see README "Native (Rust) acceleration"). The opt-in --compress-phase1 frame store
+#   requires this extension; its Rust LZ4 codec has no Python codec dependency.
 #
 #   XISF input (PixInsight's native format) and SER (FireCapture/SharpCap planetary
 #   video) support need no extra packages — both are read with a built-in parser.

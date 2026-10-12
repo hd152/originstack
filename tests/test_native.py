@@ -47,6 +47,21 @@ def _stack(n=30, h=24, w=28, c=3, seed=0, outliers=True):
     return d
 
 
+@pytest.mark.parametrize('itemsize', [1, 2, 4, 8])
+def test_lossless_frame_compression_round_trip(itemsize):
+    raw = np.random.default_rng(41 + itemsize).bytes(100_003 - (100_003 % itemsize))
+    byte_array = np.frombuffer(raw, dtype=np.uint8)
+    encoded = native.compress_frame(byte_array, itemsize)
+    decoded = native.decompress_frame(encoded, len(raw), itemsize)
+    assert decoded == raw
+
+
+def test_lossless_frame_decompression_rejects_wrong_length():
+    encoded = native.compress_frame(np.arange(64, dtype=np.uint8), 4)
+    with pytest.raises(ValueError, match='expected 60'):
+        native.decompress_frame(encoded, 60, 4)
+
+
 @pytest.mark.parametrize("use_mad", [True, False])
 @pytest.mark.parametrize("winsorize", [False, True])
 @pytest.mark.parametrize("weighted", [False, True])
@@ -76,6 +91,14 @@ def test_median_matches_numpy():
     ref = astro.median_combine(d.astype(np.float64))
     got = native.median_combine(d)
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1e-3
+
+
+@pytest.mark.parametrize("n", range(1, 9))
+def test_median_small_stack_matches_numpy(n):
+    """The tiny-sample median path preserves NumPy's exact order statistics."""
+    rng = np.random.default_rng(n)
+    d = rng.normal(size=(n, 5, 7, 3)).astype(np.float32)
+    np.testing.assert_array_equal(native.median_combine(d), np.median(d, axis=0))
 
 
 @pytest.mark.parametrize("weighted", [False, True])
@@ -1112,6 +1135,25 @@ def test_dwt2_native_bit_exact_closed_form():
             for g, r in zip(got, (ca, ch, cv, cd)):
                 assert g.shape == r.shape
                 assert np.array_equal(g, r), (name, h, w)
+
+
+@pytest.mark.parametrize("h,w", [(32, 32), (33, 45), (64, 65)])
+def test_idwt2_native_direct_roundtrip(h, w):
+    """Exercise the native inverse kernel directly on even and odd shapes."""
+    rng = np.random.default_rng(h + w)
+    img = rng.normal(size=(h, w))
+    bank = _wavelet_mod._FILTER_BANKS["bior1.3"]
+    coeffs = native.dwt2_native(
+        np.ascontiguousarray(img), bank.lo_kernel, bank.hi_kernel, bank.offset)
+    got = native.idwt2_native(
+        *coeffs,
+        _wavelet_mod._REC_LO,
+        _wavelet_mod._REC_HI,
+        _wavelet_mod._IDWT_OFFSET,
+        h,
+        w,
+    )
+    np.testing.assert_allclose(got, img, atol=1e-9)
 
 
 def _wavelet_sym(i, n):

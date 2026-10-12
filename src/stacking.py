@@ -17,7 +17,13 @@ from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats, RunCancelled
-from src.utils import diff_mad_sigma, format_time, get_logger, safe_print
+from src.utils import (
+    diff_mad_sigma,
+    format_time,
+    get_logger,
+    progress_disabled,
+    safe_print,
+)
 
 try:
     from tqdm import tqdm
@@ -1946,6 +1952,7 @@ def run_stacking_phase(
     psf_kernel_table: Optional[Tuple[np.ndarray, int, int]] = None,
     psf: Optional[np.ndarray] = None,
     sigma_out: Optional[dict] = None,
+    phase_timings: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, int, int, int]:
     """Align and combine frames into a stacked image.
 
@@ -1969,6 +1976,7 @@ def run_stacking_phase(
     """
     from src.registration import apply_transform, calc_common_crop, sample_displacement_field
 
+    _phase_timings = phase_timings if phase_timings is not None else {}
     n_final = len(final)
     print(f"  Method: {args.stack_method}")
     print(f"  Combining {n_final} frames...")
@@ -2083,17 +2091,20 @@ def run_stacking_phase(
         if _reg_native:
             safe_print("    [rust] Lanczos-3 warp (per-frame alignment)")
         _t_align = time.time()
+        _t_align_perf = time.perf_counter()
         from src.ui_events import get_ui_events as _get_wv
         _wv = _get_wv()
         _wv_done = 0
         with ThreadPoolExecutor(max_workers=n_align) as executor:
             futures = {executor.submit(_align_one, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
-                               desc="  Aligning", unit="frame", disable=not args.verbose):
+                               desc="  Aligning", unit="frame",
+                               disable=progress_disabled(not args.verbose)):
                 future.result()
                 _wv_done += 1
                 _wv.progress('Aligning frames', _wv_done, n_final)
         mem_aligned.flush()
+        _phase_timings['alignment'] = time.perf_counter() - _t_align_perf
         safe_print(f"    Alignment: {n_final} frames in {format_time(time.time() - _t_align)} "
                    f"({n_align} workers, {n_final / max(time.time() - _t_align, 1e-9):.1f} frame/s)")
 
@@ -2101,6 +2112,7 @@ def run_stacking_phase(
         # per-frame median before the rejection combine, so per-frame gradients
         # (moonlight, LP drift, thin cloud) don't tilt the stack or skew
         # sigma-clip. Operates in place on the aligned stack.
+        _t_local_normalize = time.perf_counter()
         if getattr(args, 'local_normalize', False):
             _t_ln = time.time()
             try:
@@ -2112,6 +2124,7 @@ def run_stacking_phase(
                                f"({format_time(time.time() - _t_ln)})")
             except Exception as _lnexc:
                 safe_print(f"    WARNING: local normalization failed: {_lnexc}")
+        _phase_timings['local_normalize'] = time.perf_counter() - _t_local_normalize
 
         # Patch-weighted lucky-imaging combine (if quality maps were computed in
         # Phase 2). quality_maps holds small per-frame patch-score GRIDS in
@@ -2123,6 +2136,7 @@ def run_stacking_phase(
         # fall in here too and silently became an unrejected weighted mean --
         # --auto turns patch weighting on at 15+ frames, so a requested
         # median kept every cosmic ray and trail while the log said "median".
+        _t_combine = time.perf_counter()
         _patch_ok = args.stack_method in _PATCH_WEIGHTED_METHODS
         if quality_maps is not None and len(quality_maps) == n_final and not _patch_ok:
             safe_print(f"  NOTE: patch weighting is not available for --stack-method "
@@ -2252,11 +2266,13 @@ def run_stacking_phase(
         # Proper coadd below replaces it with its own exact value.
         _w = np.asarray(weights, np.float64) if weights is not None else np.ones(n_final)
         args._stack_poisson_factor = [float((_w ** 2).sum() / max(_w.sum(), 1e-300) ** 2)] * C
+        _phase_timings['combine'] = time.perf_counter() - _t_combine
 
         # --proper-coadd: replace the stack with the Zackay-Ofek proper coadd of the
         # same aligned frames (src/proper_coadd.py); the stack above is its outlier
         # reference and the fallback.
         if getattr(args, 'proper_coadd', False) and n_final >= 3:
+            _t_pc_perf = time.perf_counter()
             try:
                 from src.proper_coadd import proper_coadd
                 _fw = [float(f.metrics.get('fwhm', 0) or 0) for f in final if f.metrics]
@@ -2278,10 +2294,13 @@ def run_stacking_phase(
                 raise
             except Exception as _pce:
                 safe_print(f"  WARNING: proper coadd failed ({_pce}); keeping the normal stack")
+            finally:
+                _phase_timings['proper_coadd'] = time.perf_counter() - _t_pc_perf
 
         # --noise-validate: odd/even half-stacks while the aligned frames are
         # still on disk (see src/noise_validation.py).
         if getattr(args, 'noise_validate', False) and n_final >= 6:
+            _t_noise_validation = time.perf_counter()
             try:
                 from astropy.io import fits as _nfits
 
@@ -2309,11 +2328,14 @@ def run_stacking_phase(
                         k: _nv[k] for k in ('median_sigma', 'n') if k in _nv}
             except Exception as _nve:
                 safe_print(f"  WARNING: noise validation failed: {_nve}")
+            finally:
+                _phase_timings['noise_validation'] = time.perf_counter() - _t_noise_validation
 
         # --moving-objects: link per-frame residuals into tracks while the aligned
         # frames are still on disk (see src/moving_objects.py).
         if (getattr(args, 'moving_objects', False)
                 or getattr(args, 'moving_objects_stack', False)) and n_final >= 8:
+            _t_moving_objects = time.perf_counter()
             try:
                 from src import moving_objects as _mo
                 _t_mo = time.time()
@@ -2334,12 +2356,15 @@ def run_stacking_phase(
                 safe_print(f"  Moving-object search ({time.time() - _t_mo:.1f}s)")
             except Exception as _moe:
                 safe_print(f"  WARNING: moving-object search failed: {_moe}")
+            finally:
+                _phase_timings['moving_objects'] = time.perf_counter() - _t_moving_objects
 
         del mem_aligned
         _aligned_store.cleanup()
 
     else:
         if drizzle_scale > 1.0:
+            _t_drizzle = time.perf_counter()
             crop_h, crop_w = bottom - top, right - left
             out_h = int(round(crop_h * drizzle_scale))
             out_w = int(round(crop_w * drizzle_scale))
@@ -2529,7 +2554,7 @@ def run_stacking_phase(
                 with ThreadPoolExecutor(max_workers=2) as loader:
                     pending = loader.submit(_load_frame, 0)
                     for j in tqdm(range(n_final), desc="  Drizzling", unit="frame",
-                                  disable=not args.verbose):
+                                  disable=progress_disabled(not args.verbose)):
                         rgb_j = pending.result()
                         if j + 1 < n_final:
                             pending = loader.submit(_load_frame, j + 1)
@@ -2573,7 +2598,7 @@ def run_stacking_phase(
                     futures = {executor.submit(_drizzle_one, j): j for j in range(n_final)}
                     for future in tqdm(as_completed(futures), total=n_final,
                                        desc="  Drizzling", unit="frame",
-                                       disable=not args.verbose):
+                                       disable=progress_disabled(not args.verbose)):
                         future.result()
 
             if want_splat:
@@ -2604,8 +2629,10 @@ def run_stacking_phase(
                         stacked, mem_rgb, final_indices, shifts, transforms, weights,
                         top, left, drizzle_scale, psf, H, W, C,
                         iters=ibp_iters, relax=ibp_relax, verbose=args.verbose)
+            _phase_timings['drizzle_resample_combine'] = time.perf_counter() - _t_drizzle
 
         else:
+            _t_align_combine = time.perf_counter()
             acc = np.zeros((bottom - top, right - left, C), dtype=np.float64)
             total_weight = 0.0
             gpu = get_gpu()
@@ -2627,16 +2654,19 @@ def run_stacking_phase(
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
                 futures = {executor.submit(_align_crop, j): j for j in range(n_final)}
                 for future in tqdm(as_completed(futures), total=n_final,
-                                   desc="  Stacking", unit="frame", disable=not args.verbose):
+                                   desc="  Stacking", unit="frame",
+                                   disable=progress_disabled(not args.verbose)):
                     j, cropped = future.result()
                     w = float(weights[j])
                     acc += cropped.astype(np.float64) * w
                     total_weight += w
             stacked = (acc / max(total_weight, 1e-12)).astype(np.float32)
+            _phase_timings['align_combine'] = time.perf_counter() - _t_align_combine
 
     # --cfa-drizzle: recombine the measured Bayer samples onto the stack's grid
     # (see src/cfa_drizzle.py); the stack built above is its rejection
     # reference and the fallback where the mosaic lattice is still too sparse.
+    _t_finalize = time.perf_counter()
     if getattr(args, 'cfa_drizzle', False):
         from src.cfa_drizzle import apply_cfa_drizzle
         stacked = apply_cfa_drizzle(stacked, mem_rgb, final_indices, shifts, transforms,
@@ -2650,6 +2680,7 @@ def run_stacking_phase(
                               args=args, min_interval=0.0)
     except Exception:
         pass
+    _phase_timings['finalize'] = time.perf_counter() - _t_finalize
     return stacked, fits_stacked, top, bottom, left, right
 
 

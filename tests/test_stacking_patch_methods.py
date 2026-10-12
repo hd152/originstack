@@ -11,7 +11,7 @@ from src.cli import parse_args
 from src.models import FrameInfo, ProcessingStats
 
 
-def _stack(method, capsys):
+def _stack(method, capsys, phase_timings=None):
     n, h, w, c = 12, 48, 48, 3
     args = parse_args(['-d', 'x', '-o', 'y.fits', '--stack-method', method, '--no-auto'])
     rng = np.random.default_rng(0)
@@ -22,7 +22,7 @@ def _stack(method, capsys):
     qmaps = [np.ones((4, 4), np.float32) for _ in range(n)]
     _, fits_stacked, top, _, left, _ = st.run_stacking_phase(
         final, list(range(n)), mem, [(0.0, 0.0)] * n, [None] * n, h, w, c, args,
-        ProcessingStats(), quality_maps=qmaps)
+        ProcessingStats(), quality_maps=qmaps, phase_timings=phase_timings)
     return fits_stacked[24 - top, 24 - left], capsys.readouterr().out
 
 
@@ -38,3 +38,14 @@ def test_rejection_methods_still_use_the_patch_path(method, capsys):
     px, out = _stack(method, capsys)
     assert np.all(np.abs(px - 100.0) < 5.0), px
     assert 'Patch-weighted mean combine' in out
+
+
+def test_stacking_phase_reports_alignment_and_combine_timings(capsys):
+    timings = {}
+    _stack('median', capsys, phase_timings=timings)
+    assert timings['alignment'] >= 0.0
+    assert timings['local_normalize'] >= 0.0
+    assert timings['combine'] >= 0.0
+    if 'proper_coadd' in timings:
+        assert timings['proper_coadd'] >= 0.0
+    assert timings['finalize'] >= 0.0

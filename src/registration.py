@@ -15,7 +15,7 @@ from scipy import ndimage
 from src.background import _gaussian_blur
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import get_logger, safe_print
+from src.utils import get_logger, progress_disabled, safe_print
 
 try:
     from tqdm import tqdm
@@ -1075,7 +1075,8 @@ def select_reference_frame(
         futs = {executor.submit(_pyramid_one, j, orig_idx): j
                 for j, orig_idx in enumerate(final_indices)}
         for fut in tqdm(as_completed(futs), total=len(final),
-                        desc="  Ref-select", unit="frame"):
+                        desc="  Ref-select", unit="frame",
+                        disable=progress_disabled()):
             j, sy, sx = fut.result()
             pyramid_shifts[j] = (sy, sx)
             _wv_done += 1
@@ -1332,7 +1333,8 @@ def score_registration_residuals(
             futs = {executor.submit(_check_one, j, final[j], final_indices[j]): j
                     for j in indices}
             for fut in tqdm(as_completed(futs), total=len(indices),
-                            desc=label, unit="frame"):
+                            desc=label, unit="frame",
+                            disable=progress_disabled()):
                 j, rms, ok, match = fut.result()
                 residuals[j] = rms
                 passed[j] = ok
@@ -1859,7 +1861,8 @@ def run_registration_phase(
         futures = {executor.submit(_register_one, j, f, orig_idx): j
                    for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
         for future in tqdm(as_completed(futures), total=len(final),
-                           desc="  Registering", unit="frame", disable=args.verbose):
+                           desc="  Registering", unit="frame",
+                           disable=progress_disabled(args.verbose)):
             j, shift_val, transform_val = future.result()
             shifts[j] = shift_val
             transforms[j] = transform_val
@@ -2689,7 +2692,7 @@ def run_comet_registration_phase(
     # Process sequentially to allow linear seed extrapolation
     for j, orig_idx in enumerate(tqdm(
             final_indices, total=len(final), desc="  Comet tracking",
-            unit="frame", disable=getattr(args, 'verbose', False))):
+            unit="frame", disable=progress_disabled(getattr(args, 'verbose', False)))):
         j_result, shift_val, centroid_val = _register_comet(j, orig_idx)
         shifts[j] = shift_val
         centroids[j] = centroid_val
