@@ -10,6 +10,9 @@ match the `VERSION` file and `v*` git tags.
 
 ### Fixed
 
+- **The desktop app reliably shows a release update in its header.** The background
+  release check now hands its result to Tkinter's main-thread poll instead of
+  scheduling a Tk callback from the worker thread.
 - **Already-debayered RGB FITS frames no longer fail in Phase 1.** FITS stores color
   planes in channel-first order, while the processing pipeline expects channel-last
   RGB; Phase 1 now converts the layout before writing the frame store.

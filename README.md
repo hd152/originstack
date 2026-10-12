@@ -130,7 +130,7 @@ SUMMARY
 - **Parallel processing**: multi-core via `ProcessPoolExecutor`; GPU acceleration via CuPy (`--use-gpu`)
 
 ### Input Formats
-- **FITS** — always supported, no extra dependencies
+- **FITS** — always supported, no extra dependencies. RGB FITS cubes in the standard channel-first `(3, H, W)` layout are converted to the pipeline's channel-last `(H, W, 3)` layout during Phase 1.
 - **Camera RAW** (CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, PEF, 3FR, MRW, X3F, IIQ) — needs `pip install rawpy`; reads the undemosaiced sensor mosaic, so RAW lights go through the same debayer step as OSC FITS
 - **TIFF** (16/32-bit) — needs `pip install tifffile`; common intermediate/export format from N.I.N.A., SharpCap, PixInsight, DeepSkyStacker
 - **XISF** (PixInsight's native format) — no extra dependency; OriginStack can also write XISF (`--export xisf`)
@@ -947,7 +947,7 @@ OriginStack works entirely on your machine. It goes online in these cases only, 
 
 Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no network requests at all: the target lookup is skipped, and the features in the table that need the network are turned off with a note in the log. Everything else is computed locally; colour falls back to the field's own star colours (white balance and, where a preset enables it, the gray-locus calibration). This is enforced where the requests are made rather than caller by caller, and a test counts real connection attempts.
 
-**The self-update check** is the one thing that isn't gated by `--offline` itself (it runs before a run's settings are even read), but it never blocks anything and fails silently: a background thread checks GitHub once, and if a newer release exists, the CLI prints one line at the end of the run and the desktop app shows a small clickable "Update available" note in the header. Set `ORIGINSTACK_NO_UPDATE_CHECK` (to anything) to disable it outright; it's also skipped automatically whenever `--offline` was used in the same process.
+**The self-update check** is the one thing that isn't gated by `--offline` itself (it runs before a run's settings are even read), but it never blocks anything and fails silently: a background thread checks GitHub once, and if a newer release exists, the CLI prints one line at the end of the run and the desktop app shows a small clickable "Update available" note in the header (not a system notification). The desktop app passes the result to its Tkinter main-thread poll, so the check can finish without touching UI widgets from the worker thread. Set `ORIGINSTACK_NO_UPDATE_CHECK` (to anything) to disable it outright; it's also skipped automatically whenever `--offline` was used in the same process.
 
 ---
 
