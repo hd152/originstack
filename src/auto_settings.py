@@ -592,6 +592,9 @@ def _apply_dynamic_settings(
     _extended_w = (weights.get('galaxy', 0.0)
                    + weights.get('emission_nebula', 0.0)
                    + weights.get('reflection_nebula', 0.0))
+    if _extended_w > 0.3:
+        # Avoid fitting faint outer nebulosity as sky on extended targets.
+        _set('dbe_diffuse_threshold_sigma', 0.25)
     if (_extended_w > 0.3
             and 'skip_step' not in _explicit
             and 'sky_residual' not in current_skip):

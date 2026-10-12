@@ -16,7 +16,9 @@ from src.cli import apply_temp_dir
 def test_sweep_removes_only_old_originstack_files(tmp_path):
     old = time.time() - 24 * 3600
     keep, gone = [], []
-    for name in ('stack_rgb_abc.dat', 'stack_aligned_x.dat', 'M42_stack.fits', 'M42_stack.jpg',
+    for name in ('stack_rgb_abc.dat', 'stack_aligned_x.dat',
+                 'stack_rgb_compressed_abc_00000000.lz4',
+                 'stack_lum_compressed_abc_00000000.lz4', 'M42_stack.fits', 'M42_stack.jpg',
                  'M42_stack_config.toml'):
         p = tmp_path / name
         p.write_bytes(b'x' * 10)

@@ -50,7 +50,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import format_time, get_memory_usage_mb, safe_print
+from src.utils import format_time, get_memory_usage_mb, progress_disabled, safe_print
 
 try:
     from tqdm import tqdm
@@ -106,7 +106,7 @@ def survey(args, directory: str, masters: Dict, mem_mgr
 
     t_start = time.time()
     for i, fi in enumerate(tqdm(lights, desc='  STREAM survey', unit='frame',
-                                disable=verbose or not lights)):
+                                disable=progress_disabled(verbose or not lights))):
         t0 = time.time()
         try:
             res = _process_single_frame(

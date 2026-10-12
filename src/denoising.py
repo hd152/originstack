@@ -600,6 +600,10 @@ _DETAIL_CLIP_PERCENTILE = 99.0
 # Noise coring of each detail layer: |detail| below LO x its own sky sigma gets
 # no boost, above HI gets the full boost, linear in between.
 _LC_CORE_LO, _LC_CORE_HI = 1.0, 3.0
+_LC_NOISE_TILE = 128
+_LC_NOISE_MIN_SAMPLES = 32
+_LC_NOISE_MIN_RATIO, _LC_NOISE_MAX_RATIO = 0.5, 2.0
+_LC_REFERENCE_FWHM = 4.0
 
 
 def _robust_sigma(x: np.ndarray) -> float:
@@ -609,19 +613,73 @@ def _robust_sigma(x: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(x - np.median(x))))
 
 
+def _local_detail_sigma(detail: np.ndarray, sky: np.ndarray,
+                        global_sigma: float) -> np.ndarray:
+    """Estimate smoothly varying detail noise from coarse sky-only tiles.
+
+    The global robust estimate remains the fallback and bounds local values,
+    preventing object contamination or an empty tile from producing extreme
+    coring thresholds. The coarse estimate and its interpolant are small/full
+    single-plane arrays, rather than a per-pixel sliding-window stack.
+    """
+    h, w = detail.shape
+    tile = _LC_NOISE_TILE
+    gh = (h + tile - 1) // tile
+    gw = (w + tile - 1) // tile
+    grid = np.full((gh, gw), global_sigma, dtype=np.float64)
+    for gy, y0 in enumerate(range(0, h, tile)):
+        y1 = min(y0 + tile, h)
+        for gx, x0 in enumerate(range(0, w, tile)):
+            x1 = min(x0 + tile, w)
+            values = detail[y0:y1:4, x0:x1:4]
+            valid = sky[y0:y1:4, x0:x1:4]
+            samples = values[valid]
+            if samples.size >= _LC_NOISE_MIN_SAMPLES:
+                estimate = _robust_sigma(samples)
+                if estimate > 0:
+                    grid[gy, gx] = estimate
+
+    grid = ndimage.gaussian_filter(grid, sigma=1.0, mode="nearest")
+    grid = np.clip(
+        grid,
+        global_sigma * _LC_NOISE_MIN_RATIO,
+        global_sigma * _LC_NOISE_MAX_RATIO,
+    )
+    local = ndimage.zoom(
+        grid,
+        (h / gh, w / gw),
+        order=1,
+        mode="nearest",
+        prefilter=False,
+    )
+    return local[:h, :w]
+
+
+def _scale_local_contrast_scales(
+        scales: Tuple[int, ...], scale_fwhm: Optional[float]) -> Tuple[float, ...]:
+    """Scale the default pixel radii within conservative FWHM-based bounds."""
+    if scale_fwhm is None or not np.isfinite(scale_fwhm) or scale_fwhm <= 0:
+        return tuple(float(scale) for scale in scales)
+    factor = float(np.clip(scale_fwhm / _LC_REFERENCE_FWHM, 0.5, 2.0))
+    return tuple(max(1.0, float(scale) * factor) for scale in scales)
+
+
 def multiscale_local_contrast(
         img: np.ndarray,
         strength: float = 0.7,
         scales: Tuple[int, ...] = (2, 12, 40),
         scale_weights: Tuple[float, ...] = (0.3, 0.6, 0.1),
         star_mask: Optional[np.ndarray] = None,
-        detail_clip_percentile: Optional[float] = _DETAIL_CLIP_PERCENTILE
+        detail_clip_percentile: Optional[float] = _DETAIL_CLIP_PERCENTILE,
+        scale_fwhm: Optional[float] = None,
         ) -> np.ndarray:
     """Multiscale local contrast enhancement (MLCE) for galaxy/nebula structure.
 
     Luminance-domain unsharp masking at fine, medium and coarse scales, applied
     through a mid-tone mask (0 on sky, 1 on the object, back to 0 on the
-    brightest cores) and RGB rebuilt by the luminance ratio (hue kept).
+    brightest cores) and RGB rebuilt by the luminance ratio (hue kept). If
+    ``scale_fwhm`` is provided, all radii adapt to the measured stack FWHM,
+    bounded to half/twice the default 4 px reference.
 
     Three things keep it from amplifying noise (measured with
     ``tools/bench_phase4.py`` on Sunflower, Whirlpool and Crab stacks, 2026-10;
@@ -639,8 +697,11 @@ def multiscale_local_contrast(
         pixels clearly *above sky*, not of the whole frame: on a galaxy filling
         2.5% of the frame the whole-frame 97th percentile sat below the galaxy,
         so the mask was zero on the galaxy itself.
-      * Each detail layer is cored against its own sky sigma (|detail| under
-        1 sigma gets no boost, full boost from 3).
+      * Each detail layer is cored against a smoothed, sky-only local noise
+        estimate, bounded to 0.5-2x its global robust sigma (|detail| under
+        1 sigma gets no boost, full boost from 3). Bright stellar cores tighten
+        the detail-only percentile cap to prevent overlapping saturated wings
+        from carving a collar.
 
     Result: display sky noise 1.02-1.06x of no enhancement on the galaxies,
     structure (2-12 px band on the object) +29-30%; on Crab structure per
@@ -657,14 +718,23 @@ def multiscale_local_contrast(
                        detail source is clipped (the bright-star collar guard).
                        ``None`` disables it -- correct for an image with no
                        stars in it (the ``--starless-process`` layer).
+        scale_fwhm:    Measured stack FWHM in pixels; ``None`` preserves the
+                       literal ``scales`` values.
 
     Returns:
         Enhanced float32 image (H, W, 3), non-negative.
     """
-    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
-           + 0.114 * img[:, :, 2]).astype(np.float64)
+    lum = np.einsum(
+        "...c,c->...",
+        img,
+        np.array([0.299, 0.587, 0.114], dtype=np.float64),
+        dtype=np.float64,
+        casting="unsafe",
+        optimize=True,
+    )
     if strength <= 0:
         return np.clip(img, 0.0, None).astype(np.float32)
+    active_scales = _scale_local_contrast_scales(scales, scale_fwhm)
 
     # Mid-tone mask from a smoothed luminance, in its own noise units
     lum_m = _gaussian_blur(lum, 2.0)
@@ -689,6 +759,7 @@ def multiscale_local_contrast(
 
     if star_mask is not None:
         mask *= (1.0 - star_mask.astype(np.float64))
+    del low
 
     # Detail is measured against a peak-clipped luminance: otherwise a bright
     # star's flux leaks into its own background estimate -- the blur smears the
@@ -697,27 +768,52 @@ def multiscale_local_contrast(
     # mean / 14.2% worst on a real Lagoon stack before this guard existed). It
     # deliberately does not key off ``star_mask``: that is a narrow core mask,
     # far smaller than the wings that pollute a sigma-12 blur.
-    if detail_clip_percentile is None:
+    detail_cap_percentile = detail_clip_percentile
+    if detail_cap_percentile is not None and star_mask is not None and above.size > 100:
+        # A percentile cap can remain dominated by a small cluster of bright
+        # stellar wings even after saturated cores are excluded by the soft
+        # star mask. Tighten only the detail-source cap when masked cores tower
+        # over the ordinary above-sky distribution; keep the mid-tone mask's
+        # independently calibrated highlight transition unchanged.
+        star_core = star_mask > 0.5
+        if star_core.any():
+            star_peak = float(np.max(lum, where=star_core, initial=0.0))
+            typical_bright = float(np.percentile(above, 99.0))
+            if typical_bright > 0 and star_peak > 2.0 * typical_bright:
+                detail_cap_percentile = min(detail_cap_percentile, 95.0)
+
+    if detail_cap_percentile is None:
         detail_src = lum
     elif above.size > 100:
-        detail_src = np.minimum(lum, float(np.percentile(above, detail_clip_percentile)))
+        detail_src = np.minimum(lum, float(np.percentile(above, detail_cap_percentile)))
     else:
-        detail_src = np.minimum(lum, float(np.percentile(lum, detail_clip_percentile)))
+        detail_src = np.minimum(lum, float(np.percentile(lum, detail_cap_percentile)))
 
     sky = mask == 0
+    del above, lum_m
     enhanced_lum = lum.copy()
-    for sigma, w in zip(scales, scale_weights):
+    for sigma, w in zip(active_scales, scale_weights):
         if w <= 0:
             continue
         # gaussian_filter_ds: full resolution below its 24 px threshold, a
         # downsampled blur above (the 40 px base scale)
         detail = detail_src - gaussian_filter_ds(detail_src, float(sigma))
-        sd = _robust_sigma(detail[sky][::5]) if sky.any() else _robust_sigma(detail[::5, ::5])
+        sampled = detail[::5, ::5]
+        sampled_sky = sky[::5, ::5]
+        sd = _robust_sigma(sampled[sampled_sky]) if sampled_sky.any() else _robust_sigma(sampled)
         if sd > 0:
-            core = np.clip((np.abs(detail) / sd - _LC_CORE_LO) / (_LC_CORE_HI - _LC_CORE_LO),
-                           0.0, 1.0)
-            detail = detail * core
-        enhanced_lum += strength * w * detail * mask
+            local_sd = _local_detail_sigma(detail, sky, sd)
+            np.divide(detail, local_sd, out=local_sd)
+            np.absolute(local_sd, out=local_sd)
+            local_sd -= _LC_CORE_LO
+            local_sd /= _LC_CORE_HI - _LC_CORE_LO
+            np.clip(local_sd, 0.0, 1.0, out=local_sd)
+            detail *= local_sd
+            del local_sd
+        detail *= mask
+        detail *= strength * w
+        enhanced_lum += detail
+        del detail
 
     # Reconstruct RGB by the luminance ratio (hue/saturation preserved) where the
     # pixel's own luminance is clearly above zero; toward zero, add the luminance
@@ -726,14 +822,27 @@ def multiscale_local_contrast(
     # (a dark lane beside bright nebulosity, where the smoothed mask is on): the
     # ratio then divided a normal enhancement by ~1e-10 and on a real Orion stack
     # 51k pixels reached 1e18.
-    delta = enhanced_lum - lum
+    ratio = np.maximum(lum, 1e-10)
+    np.divide(enhanced_lum, ratio, out=ratio)
+    ratio -= 1.0
+    delta = enhanced_lum
+    delta -= lum
     ref = max(s_m, 1e-6)
-    alpha = np.clip(lum / (3.0 * ref), 0.0, 1.0)
-    ratio = np.where(lum > 0, enhanced_lum / np.maximum(lum, 1e-10), 1.0)
-    img64 = img.astype(np.float64)
-    result = (alpha[:, :, None] * (img64 * ratio[:, :, None])
-              + (1.0 - alpha[:, :, None]) * (img64 + delta[:, :, None]))
-    return np.clip(result, 0.0, None).astype(np.float32)
+    alpha = lum / (3.0 * ref)
+    np.clip(alpha, 0.0, 1.0, out=alpha)
+    ratio *= alpha
+    alpha *= -1.0
+    alpha += 1.0
+    delta *= alpha
+    result = np.empty(img.shape, dtype=np.float32)
+    for channel in range(img.shape[2]):
+        output_channel = img[:, :, channel].astype(np.float64)
+        output_channel *= ratio
+        output_channel += img[:, :, channel]
+        output_channel += delta
+        np.maximum(output_channel, 0.0, out=output_channel)
+        result[:, :, channel] = output_channel
+    return result
 
 
 def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,

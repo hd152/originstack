@@ -105,6 +105,32 @@ class TestNoDarkHaloAroundStars(unittest.TestCase):
         out = multiscale_local_contrast(self.img, strength=0.0, star_mask=self.mask)
         np.testing.assert_allclose(out, self.img, rtol=1e-5)
 
+    def test_crowded_saturated_stars_do_not_carve_dark_collars(self):
+        size = 301
+        yy, xx = np.mgrid[0:size, 0:size]
+        base = 300.0 + 120.0 * np.exp(
+            -((yy - size / 2) ** 2 + (xx - size / 2) ** 2) / (2 * 90.0 ** 2)
+        )
+        star_centres = ((146, 146), (150, 155), (157, 148), (139, 156))
+        image = np.stack([base] * 3, axis=-1)
+        mask = np.zeros((size, size), dtype=np.float64)
+        annulus = np.zeros((size, size), dtype=bool)
+        for cy, cx in star_centres:
+            r2 = (yy - cy) ** 2 + (xx - cx) ** 2
+            image += (30000.0 * np.exp(-r2 / (2 * 2.2 ** 2)))[..., None]
+            mask = np.maximum(mask, np.exp(-r2 / (2 * (3.0 / 2.3548) ** 2)))
+            annulus |= (r2 >= 10 ** 2) & (r2 <= 30 ** 2)
+        image = np.minimum(image, 8000.0).astype(np.float32)
+
+        out = multiscale_local_contrast(
+            image, strength=_STRENGTH, star_mask=mask.astype(np.float32)
+        )[:, :, 1].astype(np.float64)
+        before = image[:, :, 1].astype(np.float64)
+        worst = float((out[annulus] - before[annulus]).min()) / float(before[annulus].mean())
+
+        self.assertGreater(worst, -0.06,
+                           f"crowded saturated-star dark collar: {100 * worst:.1f}%")
+
 
 if __name__ == '__main__':
     unittest.main()

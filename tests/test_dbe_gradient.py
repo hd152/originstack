@@ -61,6 +61,28 @@ def test_a_bright_object_is_not_admitted_as_gradient():
     assert float(out[210, 330].mean()) - float(np.median(out[100:140, 250:400].mean(axis=2))) > 300.0
 
 
+def test_lower_diffuse_threshold_preserves_faint_extended_emission():
+    H, W = 420, 640
+    rng = np.random.default_rng(8)
+    yy, xx = np.mgrid[:H, :W]
+    r = np.hypot(yy - H / 2, xx - W / 2)
+    sky = 1000.0 + rng.normal(0.0, 20.0, (H, W))
+    nebula = 45.0 * np.exp(-0.5 * (r / 115.0) ** 2)
+    image = np.stack([sky + nebula] * 3, axis=-1).astype(np.float32)
+
+    default = bg.dynamic_background_extraction(image, patch_size=32)
+    protected = bg.dynamic_background_extraction(
+        image, patch_size=32, diffuse_threshold_sigma=0.25)
+    outer_nebula = (r >= 100.0) & (r < 180.0)
+    sky_region = r >= 260.0
+
+    default_excess = float(np.median(default[:, :, 0][outer_nebula])
+                           - np.median(default[:, :, 0][sky_region]))
+    protected_excess = float(np.median(protected[:, :, 0][outer_nebula])
+                              - np.median(protected[:, :, 0][sky_region]))
+    assert protected_excess > default_excess + 5.0
+
+
 def test_emission_mask_disk_dilation_matches_scipy_binary_dilation():
     """`_build_emission_mask`'s compact-source dilation switched from
     `scipy.ndimage.binary_dilation` with a disk structuring element to a

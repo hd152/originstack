@@ -1,6 +1,10 @@
 """Where the big per-session frame arrays live: RAM when it comfortably fits,
 a temp file (np.memmap) otherwise. ``--frame-store auto|ram|disk``.
 
+Phase 1 RGB and luminance frames can additionally use independent, losslessly
+compressed Rust LZ4 files when ``--compress-phase1`` is selected or when the
+projected Phase 1 array and worker memory exceed the safe available-memory budget.
+
 The aligned-frame and per-frame RGB/luminance arrays are tens of GB on a long
 session. As temp-file memmaps they cost real time even when the machine has
 the RAM to spare: every page is a file-backed fault on first touch, dirty pages
@@ -28,10 +32,12 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tempfile
+import uuid
 import weakref
 from multiprocessing import shared_memory
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -45,6 +51,8 @@ _log = logging.getLogger('originstack')
 # phase 85.8 -> 63.0 s with it in RAM, while 0.20 still leaves ~13 GB for everything else.
 RESERVE_FRAC = 0.20
 SHM_PREFIX = 'shm:'
+COMPRESSED_PREFIX = 'lz4:'
+_NATIVE_COMPRESSOR = None
 
 
 class _RamArray(np.ndarray):
@@ -66,11 +74,185 @@ class _ScratchMemmap(np.memmap):
         pass
 
 
+class _CompressedFrameArray:
+    """Frame-indexed, lossless disk store with the subset of ndarray operations
+    used by the pipeline. Frame compression and decompression run in Rust."""
+
+    def __init__(self, prefix: str, dtype, shape: tuple):
+        self.prefix = prefix
+        self.dtype = np.dtype(dtype)
+        self.shape = tuple(shape)
+        self.ndim = len(self.shape)
+        self._frame_shape = self.shape[1:]
+
+    def _path(self, index: int) -> str:
+        return f'{self.prefix}{index:08d}.lz4'
+
+    def _normalise_index(self, index: int) -> int:
+        index = int(index)
+        if index < 0:
+            index += self.shape[0]
+        if not 0 <= index < self.shape[0]:
+            raise IndexError("frame index out of range")
+        return index
+
+    def _read_frame(self, index: int) -> np.ndarray:
+        native = _require_native_compressor()
+        index = self._normalise_index(index)
+        with open(self._path(index), 'rb') as stream:
+            compressed = stream.read()
+        raw = native.decompress_frame(
+            compressed,
+            int(np.prod(self._frame_shape)) * self.dtype.itemsize,
+            self.dtype.itemsize)
+        return np.frombuffer(raw, dtype=self.dtype).reshape(self._frame_shape).copy()
+
+    def _write_frame(self, index: int, frame: np.ndarray) -> None:
+        native = _require_native_compressor()
+        index = self._normalise_index(index)
+        try:
+            contiguous = np.ascontiguousarray(
+                np.broadcast_to(np.asarray(frame, dtype=self.dtype), self._frame_shape))
+        except ValueError as exc:
+            raise ValueError(
+                f"Expected a value broadcastable to frame shape {self._frame_shape}"
+            ) from exc
+        compressed = native.compress_frame(
+            contiguous.view(np.uint8).reshape(-1), self.dtype.itemsize)
+        path = self._path(index)
+        temporary = f'{path}.{os.getpid()}.tmp'
+        try:
+            with open(temporary, 'wb') as stream:
+                stream.write(compressed)
+            os.replace(temporary, path)
+        finally:
+            try:
+                os.remove(temporary)
+            except FileNotFoundError:
+                pass
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            frame_key, *rest = key
+            subkey = tuple(rest)
+        else:
+            frame_key, subkey = key, ()
+        if isinstance(frame_key, (int, np.integer)):
+            frame = self._read_frame(frame_key)
+            return frame[subkey] if subkey else frame
+        indices = np.arange(self.shape[0])[frame_key]
+        if np.ndim(indices) == 0:
+            frame = self._read_frame(int(indices))
+            return frame[subkey] if subkey else frame
+        frames = np.stack([self._read_frame(int(i)) for i in np.asarray(indices).flat])
+        frames = frames.reshape((*np.shape(indices), *self._frame_shape))
+        return frames[(slice(None), *subkey)] if subkey else frames
+
+    def __setitem__(self, key, value) -> None:
+        if isinstance(key, tuple):
+            frame_key, *rest = key
+            subkey = tuple(rest)
+        else:
+            frame_key, subkey = key, ()
+        if isinstance(frame_key, (int, np.integer)):
+            index = self._normalise_index(frame_key)
+            frame = self._read_frame(index) if subkey else None
+            if subkey:
+                frame[subkey] = value
+            else:
+                frame = value
+            self._write_frame(index, frame)
+            return
+        indices = np.arange(self.shape[0])[frame_key]
+        values = np.asarray(value)
+        if np.ndim(indices) == 0:
+            index = int(indices)
+            frame = self._read_frame(index) if subkey else None
+            if subkey:
+                frame[subkey] = value
+            else:
+                frame = value
+            self._write_frame(index, frame)
+            return
+        for offset, index in enumerate(np.asarray(indices).flat):
+            frame = self._read_frame(int(index)) if subkey else None
+            if subkey:
+                frame[subkey] = values[offset]
+            else:
+                frame = values[offset]
+            self._write_frame(int(index), frame)
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        result = np.stack([self._read_frame(i) for i in range(self.shape[0])])
+        if dtype is not None:
+            result = result.astype(dtype, copy=False)
+        if copy:
+            result = result.copy()
+        return result
+
+    def flush(self) -> None:
+        pass
+
+
+def _require_native_compressor():
+    global _NATIVE_COMPRESSOR
+    if _NATIVE_COMPRESSOR is not None:
+        return _NATIVE_COMPRESSOR
+    try:
+        import astro_native
+    except ImportError as exc:
+        raise RuntimeError(
+            "Lossless Phase 1 compression requires the Rust astro_native extension. "
+            "Build it with 'maturin develop --release' from ext/astro_native, or use "
+            "the default uncompressed frame store."
+        ) from exc
+    if not (hasattr(astro_native, 'compress_frame')
+            and hasattr(astro_native, 'decompress_frame')):
+        raise RuntimeError(
+            "The installed astro_native extension lacks Rust frame compression. "
+            "Rebuild it with 'maturin develop --release' from ext/astro_native."
+        )
+    _NATIVE_COMPRESSOR = astro_native
+    return _NATIVE_COMPRESSOR
+
+
 def _available_mb() -> Tuple[Optional[float], Optional[float]]:
     try:
         import psutil
         v = psutil.virtual_memory()
         return v.available / 1e6, v.total / 1e6
+    except Exception:
+        if sys.platform == 'win32':
+            return _windows_memory_mb()
+        return None, None
+
+
+def _windows_memory_mb() -> Tuple[Optional[float], Optional[float]]:
+    """Return physical memory figures when psutil is unavailable on Windows."""
+    try:
+        import ctypes
+
+        class _MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ('dwLength', ctypes.c_ulong),
+                ('dwMemoryLoad', ctypes.c_ulong),
+                ('ullTotalPhys', ctypes.c_ulonglong),
+                ('ullAvailPhys', ctypes.c_ulonglong),
+                ('ullTotalPageFile', ctypes.c_ulonglong),
+                ('ullAvailPageFile', ctypes.c_ulonglong),
+                ('ullTotalVirtual', ctypes.c_ulonglong),
+                ('ullAvailVirtual', ctypes.c_ulonglong),
+                ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        get_memory_status = ctypes.WinDLL('kernel32', use_last_error=True).GlobalMemoryStatusEx
+        get_memory_status.argtypes = [ctypes.POINTER(_MemoryStatusEx)]
+        get_memory_status.restype = ctypes.c_bool
+        if not get_memory_status(ctypes.byref(status)):
+            return None, None
+        return status.ullAvailPhys / 1e6, status.ullTotalPhys / 1e6
     except Exception:
         return None, None
 
@@ -109,6 +291,19 @@ class FrameStore:
         return nbytes / 1e6 <= avail - RESERVE_FRAC * total - reserve_mb
 
     @staticmethod
+    def phase1_compression_needed(nbytes: int, reserve_mb: float) -> Optional[bool]:
+        """Whether Phase 1's uncompressed arrays exceed the safe RAM budget.
+
+        ``None`` means memory telemetry is unavailable, so automatic mode
+        cannot make a reliable prediction and leaves compression disabled.
+        """
+        avail, total = _available_mb()
+        if avail is None or total is None:
+            return None
+        budget_mb = avail - RESERVE_FRAC * total - reserve_mb
+        return nbytes / 1e6 > max(0.0, budget_mb)
+
+    @staticmethod
     def _disk_ok(nbytes: int) -> bool:
         """The temp disk keeps max(10%, 5 GB) free after this file."""
         try:
@@ -128,7 +323,8 @@ class FrameStore:
         return self._fits_ram(nbytes, reserve_mb)
 
     def create(self, prefix: str, dtype, shape: tuple, shared: bool = False,
-               reserve_mb: float = 0.0, prefer: str = 'ram') -> Tuple[np.ndarray, str]:
+               reserve_mb: float = 0.0, prefer: str = 'ram',
+               compressed: bool = False) -> Tuple[Any, str]:
         """(array, spec). ``shared``: other processes will attach by spec.
         ``reserve_mb``: memory the caller still needs on top (e.g. its workers).
         ``prefer`` (auto mode): 'ram' -- RAM whenever it fits; 'disk' -- a temp file
@@ -136,6 +332,22 @@ class FrameStore:
         RAM if it fits. Disk is the last resort either way."""
         dt = np.dtype(dtype)
         nbytes = int(np.prod(shape)) * dt.itemsize
+        if compressed:
+            _require_native_compressor()
+            token = uuid.uuid4().hex
+            compressed_prefix = os.path.join(
+                tempfile.gettempdir(), f'{prefix}compressed_{token}_')
+            arr = _CompressedFrameArray(compressed_prefix, dt, shape)
+            paths = [arr._path(i) for i in range(shape[0])]
+            self._files.extend(paths)
+            try:
+                from src.cleanup import register as _cleanup_register
+                for path in paths:
+                    _cleanup_register(path)
+            except Exception:
+                pass
+            self.placement[prefix] = f'compressed ({nbytes / 1e9:.1f} GB uncompressed)'
+            return arr, COMPRESSED_PREFIX + compressed_prefix
         if nbytes > 0 and self._want_ram(nbytes, reserve_mb, prefer):
             try:
                 if shared:
@@ -241,6 +453,9 @@ _ATTACHED: Dict[str, shared_memory.SharedMemory] = {}
 
 def open_frame_array(spec: str, dtype, shape: tuple) -> np.ndarray:
     """A worker's writable view of an array created by ``FrameStore.create``."""
+    if spec.startswith(COMPRESSED_PREFIX):
+        prefix = spec[len(COMPRESSED_PREFIX):]
+        return _CompressedFrameArray(prefix, dtype, shape)
     if spec.startswith(SHM_PREFIX):
         name = spec[len(SHM_PREFIX):]
         shm = _ATTACHED.get(name)

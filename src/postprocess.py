@@ -498,11 +498,13 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
             safe_print(f"\n  Applying Dynamic Background Extraction "
                        f"(patch={dbe_patch}px, robust local regression, sigma={args.bg_clip_sigma})...")
             _entropy_bg = getattr(args, 'entropy_bg', False)
+            _diffuse_threshold = getattr(args, 'dbe_diffuse_threshold_sigma', 1.0)
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
                 verbose=args.verbose, star_mask=pp_star_mask,
                 use_entropy_weights=_entropy_bg,
-                exclusion_mask=_bg_excl_mask)
+                exclusion_mask=_bg_excl_mask,
+                diffuse_threshold_sigma=_diffuse_threshold)
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
         elif bg_method == 'wavelet':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
@@ -510,11 +512,13 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
             print(f"\n  Applying starlet wavelet-band background extraction "
                   f"(patch={dbe_patch}px, scales={wavelet_scales}, sigma={args.bg_clip_sigma})...")
             _entropy_bg = getattr(args, 'entropy_bg', False)
+            _diffuse_threshold = getattr(args, 'dbe_diffuse_threshold_sigma', 1.0)
             stacked = wavelet_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
                 n_scales=wavelet_scales, verbose=args.verbose, star_mask=pp_star_mask,
                 use_entropy_weights=_entropy_bg,
-                exclusion_mask=_bg_excl_mask)
+                exclusion_mask=_bg_excl_mask,
+                diffuse_threshold_sigma=_diffuse_threshold)
             safe_print(f"  ✓ Wavelet-band background extraction ({format_time(time.time() - bg_start)})")
         else:
             print(f"\n  Applying background extraction "
@@ -948,8 +952,10 @@ def postprocess_stack(
     if getattr(args, 'local_contrast', False) and 'local_contrast' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_local_contrast')
         lc_strength = float(getattr(args, 'local_contrast_strength', 0.7))
+        lc_fwhm = _stack_fwhm(stacked, _pp_sources, final)
         print(f"\n  Applying multiscale local contrast enhancement "
-              f"(strength={lc_strength:.2f}, scales=2/12/40 px)...")
+              f"(strength={lc_strength:.2f}, FWHM={lc_fwhm:.1f} px, "
+              f"base scales=2/12/40 px)...")
         lc_start = time.time()
         _lc_starless, _lc_stars = _split_starless(stacked, _pp_sources, final, args)
         if _lc_starless is not None:
@@ -957,11 +963,13 @@ def postprocess_stack(
             # flux to clip out of the detail source, so the collar guard is off.
             stacked = multiscale_local_contrast(_lc_starless, strength=lc_strength,
                                                 star_mask=None,
-                                                detail_clip_percentile=None)
+                                                detail_clip_percentile=None,
+                                                scale_fwhm=lc_fwhm)
             stacked = stacked + _lc_stars
         else:
             stacked = multiscale_local_contrast(stacked, strength=lc_strength,
-                                                star_mask=pp_star_mask)
+                                                star_mask=pp_star_mask,
+                                                scale_fwhm=lc_fwhm)
         safe_print(f"  ✓ Local contrast enhancement ({format_time(time.time() - lc_start)})")
 
     # 11. Comet: radial renormalization (reveals jets by flattening coma gradient)

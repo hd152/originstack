@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import FrameInfo, ProcessingStats
-from src.utils import format_time, mp_context, safe_print
+from src.utils import format_time, mp_context, progress_disabled, safe_print
 
 try:
     from tqdm import tqdm
@@ -232,7 +232,7 @@ def run_quality_sweep(root: str, args) -> int:
             n_err = 0
             for fut in tqdm(as_completed(futs), total=len(futs),
                             desc=f"  {rel}", unit="frame",
-                            disable=getattr(args, 'verbose', False)):
+                            disable=progress_disabled(getattr(args, 'verbose', False))):
                 path, metrics, err = fut.result()
                 f = futs[fut]
                 if err:

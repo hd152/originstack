@@ -39,6 +39,36 @@ from src.utils import format_time, get_memory_usage_mb, obs_time_utc_iso, print_
 
 _log = logging.getLogger("originstack")
 
+
+def _print_stacking_breakdown(phase_timings: Dict[str, float],
+                              total_seconds: float) -> None:
+    labels = (
+        ('psf_setup', 'PSF/kernel setup'),
+        ('alignment', 'Frame alignment'),
+        ('local_normalize', 'Local normalization'),
+        ('combine', 'Stack combine'),
+        ('proper_coadd', 'Proper coadd'),
+        ('noise_validation', 'Noise validation'),
+        ('moving_objects', 'Moving-object search'),
+        ('drizzle_resample_combine', 'Drizzle resample + combine'),
+        ('align_combine', 'Align + weighted combine'),
+        ('full_field', 'Full-field extension'),
+        ('finalize', 'Finalization'),
+    )
+    items = [(label, phase_timings[key]) for key, label in labels
+             if key in phase_timings and phase_timings[key] > 0]
+    if not items:
+        return
+    measured = sum(seconds for _, seconds in items)
+    remainder = max(total_seconds - measured, 0.0)
+    safe_print("\n  Stacking breakdown:")
+    for label, seconds in items:
+        safe_print(f"    {label+':':<30} {format_time(seconds):>8}  "
+                   f"({seconds / max(total_seconds, 1e-9) * 100:4.1f}%)")
+    safe_print(f"    {'Other (setup/cleanup):':<30} {format_time(remainder):>8}  "
+               f"({remainder / max(total_seconds, 1e-9) * 100:4.1f}%)")
+
+
 try:
     HAS_PSUTIL = True
 except Exception:
@@ -789,13 +819,38 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         # RAM (shared memory: Phase 1's worker processes write into these) when it
         # fits beside what the workers themselves will use, temp file otherwise
         _p1_reserve_mb = (os.cpu_count() or 4) * (H_rgb * W_rgb * 4 * 9 / 1e6 + 200)
+        _compress_phase1 = getattr(args, 'compress_phase1', None)
+        if _compress_phase1 is None:
+            _compress_phase1 = mm_mgr.store.phase1_compression_needed(
+                bytes_needed, _p1_reserve_mb)
+            if _compress_phase1 is None:
+                safe_print("  Phase 1 compression: auto disabled (memory availability "
+                           "could not be measured)")
+            elif _compress_phase1:
+                try:
+                    from src.frame_store import _require_native_compressor
+                    _require_native_compressor()
+                except RuntimeError as exc:
+                    safe_print(f"  NOTE: Phase 1 compression would reduce memory pressure, "
+                               f"but is unavailable ({exc}); using uncompressed disk frames")
+                    _compress_phase1 = False
+                else:
+                    safe_print("  Phase 1 compression: auto enabled (estimated frame arrays "
+                               "exceed the safe available-memory budget)")
+            else:
+                safe_print("  Phase 1 compression: auto disabled (estimated frame arrays "
+                           "fit within the safe available-memory budget)")
+        else:
+            _compress_phase1 = bool(_compress_phase1)
         # (auto: these prefer the temp file -- see src/frame_store.py for why)
         mem_rgb, mm_rgb_path = mm_mgr.store.create('stack_rgb_', 'float32', rgb_shape,
                                                    shared=True, reserve_mb=_p1_reserve_mb,
-                                                   prefer='disk')
+                                                   prefer='disk',
+                                                   compressed=_compress_phase1)
         mem_lum, mm_lum_path = mm_mgr.store.create('stack_lum_', 'float32', lum_shape,
                                                    shared=True, reserve_mb=_p1_reserve_mb,
-                                                   prefer='disk')
+                                                   prefer='disk',
+                                                   compressed=_compress_phase1)
         from src.frame_store import announce as _announce_store
         _announce_store(mm_mgr.store)
         cached_lums: list = [None] * n
@@ -1028,6 +1083,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # ======================================================================
             print_phase(3, "Stacking")
             phase_start = time.time()
+            phase3_timings: Dict[str, float] = {}
+            _t_psf_setup = time.perf_counter()
 
             quality_maps = dither_info.pop('quality_maps', None)
             displacement_fields = dither_info.pop('displacement_fields', None)
@@ -1080,6 +1137,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 safe_print(f"  drizzle kernel: Magic Kernel (base, not Sharp), "
                           f"{2 * magic_halo + 1}x{2 * magic_halo + 1} taps")
 
+            phase3_timings['psf_setup'] = time.perf_counter() - _t_psf_setup
             stacked, fits_stacked, top, bottom, left, right = run_stacking_phase(
                 final, final_indices, mem_rgb,
                 shifts, transforms, H, W, C, args, stats,
@@ -1087,17 +1145,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 displacement_fields=displacement_fields,
                 psf_kernel_table=psf_kernel_table,
                 psf=psf_estimate,
-                sigma_out=_sigma_out)
+                sigma_out=_sigma_out,
+                phase_timings=phase3_timings)
 
             if getattr(args, 'full_field', None):
+                _t_full_field = time.perf_counter()
                 _ff = _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts,
                                         transforms, displacement_fields, H, W, C,
                                         (top, bottom, left, right), output_path, stats)
+                phase3_timings['full_field'] = time.perf_counter() - _t_full_field
                 if _ff is not None:
                     stacked, (top, bottom, left, right) = _ff
                     fits_stacked = stacked.copy()
 
             stats.stacking_time = time.time() - phase_start
+            _print_stacking_breakdown(phase3_timings, stats.stacking_time)
 
             if getattr(args, 'dither_report', False):
                 from src.dither_report import run_dither_report

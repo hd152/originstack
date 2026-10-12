@@ -58,6 +58,19 @@ def get_logger() -> logging.Logger:
     return logging.getLogger('originstack')
 
 
+def progress_disabled(verbose: bool = False) -> bool:
+    """Whether a tqdm progress bar should suppress terminal output.
+
+    The desktop app runs under ``pythonw`` with ``sys.stderr is None`` and
+    publishes progress through UI events instead. tqdm otherwise raises during
+    construction when it tries to write to that missing stream.
+    """
+    stream = sys.stderr
+    return bool(verbose or stream is None
+                or not callable(getattr(stream, 'write', None))
+                or getattr(stream, 'closed', False))
+
+
 def safe_print(text: str):
     """Print text with fallback for unicode characters on Windows."""
     # Tee into the desktop app's log pane (no-op unless attached).

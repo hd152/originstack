@@ -13,6 +13,23 @@ from src.cli import build_parser
 def test_parser_renders_full_help():
     text = build_parser().format_help()
     assert '--offline' in text and '--no-auto' in text
+    assert '--no-compress-phase1' in text
+
+
+def test_phase1_compression_defaults_to_auto_and_supports_explicit_overrides():
+    parser = build_parser()
+    assert parser.parse_args([]).compress_phase1 is None
+    assert parser.parse_args(['--no-compress-phase1']).compress_phase1 is False
+    assert parser.parse_args(['--compress-phase1']).compress_phase1 is True
+
+
+def test_older_omega_dbe_and_stretch_values_are_global_defaults():
+    args = build_parser().parse_args(['-d', 'lights'])
+    assert args.dbe_patch_size == 47
+    assert args.ghs_b == 5.5613
+    assert args.ghs_hp == 0.92
+    assert args.ghs_sp == 0.1125
+    assert args.preview_black_sigma == -0.0868
 
 
 def test_every_help_string_formats_with_argparse_params():

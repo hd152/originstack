@@ -324,6 +324,17 @@ python originstack.py -d lights/ -o stacked.fits --target-type globular_cluster
 
 Explicit flags always win over what `--auto` picks.
 
+For extended targets (galaxies and emission/reflection nebulae), `--auto`
+also makes DBE's diffuse-emission mask more sensitive so faint outer structure
+is less likely to be fitted as sky and subtracted. Other target types retain
+the standard DBE threshold. The effective threshold is saved in the run config
+and reused by `--from-stack`.
+
+Without `--auto`, the baseline DBE patch size is 47 px and the preview GHS
+settings are `b=5.5613`, `SP=0.1125`, `HP=0.92`, with a black point of
+`-0.0868` sky sigma. `--auto` can tune these settings for the detected target;
+explicit command-line or config values remain available for deliberate overrides.
+
 ### Several sessions of the same target
 
 ```bash
@@ -691,6 +702,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--from-stack STACK.fits` | Re-run post-processing only, on an earlier run's linear stack |
 | `--spike-reject` | Remove cosmic-ray / hot-pixel spikes on the raw mosaic before debayering (cheap; `--auto` turns it on for < 20 frames, mean stacking or drizzle) |
 | `--frame-store {auto,ram,disk}` | Keep per-session frame arrays in RAM when there is room (auto), always (ram), or in temp files (disk) |
+| `--compress-phase1` / `--no-compress-phase1` | Automatically compress Phase 1 frames when their estimated memory plus worker reserve exceeds the safe available-RAM budget; either flag forces compression on or off |
 | `--no-wcs-refine` | Keep the session `info.json` WCS as mapped onto the stack, without the Gaia refinement |
 | `--gpu-phase1 {auto,on,off}` | With `--use-gpu`: run Phase 1 on the GPU or the CPU pool (auto picks) |
 | `--comet-mode` | Also stack on the comet nucleus (`<output>_comet.fits`) |
