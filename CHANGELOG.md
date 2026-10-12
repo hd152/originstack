@@ -6,6 +6,21 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.5] - 2026-10-12
+
+Large sessions can automatically use lossless compressed Phase 1 storage when RAM
+is constrained, while nebula detail is better protected during background
+extraction and denoising.
+
+### Added
+
+- **Adaptive Phase 1 frame compression.** Lossless compression is selected automatically when the estimated frame arrays and worker reserve exceed the safe RAM budget; explicit settings remain available to force compression on or off.
+
+### Improved
+
+- **Nebula detail is better preserved.** Background extraction, denoising, and local contrast better retain faint extended structure while reducing artifacts.
+- **Expanded architecture and behavior documentation**, with updated translations and regression coverage.
+
 ## [2.11.4] - 2026-10-10
 
 ### Fixed
@@ -1472,4 +1487,3 @@ A leaner release: a native module a tenth the size, a pile of dead code gone, an
 Versions prior to 1.0.0 (`v0.1.0` – `v0.9.0`) predate this changelog; see
 the [GitHub Releases](https://github.com/hd152/originstack/releases) page
 and `git log` for that history.
-
