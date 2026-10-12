@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import io
 import os
+import queue
 import sys
 import threading
 import tkinter as tk
@@ -1324,6 +1325,7 @@ class App:
         self._shown_log_lines = 0
         self._last_run_status = 'idle'
         self._named_cache: List[Dict[str, Any]] = []
+        self._update_results: queue.Queue[Dict[str, str]] = queue.Queue()
 
         root.title('OriginStack')
         root.geometry('1400x900')
@@ -1453,7 +1455,7 @@ class App:
             from src.net_query import check_for_update
             info = check_for_update(read_version())
             if info:
-                self.root.after(0, lambda: self._show_update(info))
+                self._update_results.put(info)
         threading.Thread(target=_bg, daemon=True).start()
 
     def _show_update(self, info: Dict[str, str]) -> None:
@@ -1713,6 +1715,12 @@ class App:
 
     def _poll(self) -> None:
         try:
+            try:
+                info = self._update_results.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                self._show_update(info)
             self._refresh()
         finally:
             self.root.after(self.POLL_MS, self._poll)
