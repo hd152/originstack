@@ -36,3 +36,15 @@ def test_rgb_pass_still_runs_for_pre_debayered_input(monkeypatch):
     res = FP._process_single_frame('x.fits', {}, {}, 'rcd', 'none',
                                    preloaded_data=(rgb, {}), skip_quality=True)
     assert res['error'] is None and calls
+
+
+def test_channel_first_pre_debayered_fits_is_normalized_to_hwc():
+    rgb = np.stack([_mosaic(seed=i) for i in range(3)])
+    chw = FP._process_single_frame('x.fits', {}, {}, 'rcd', 'none',
+                                   preloaded_data=(rgb, {}), skip_quality=True)
+    hwc = FP._process_single_frame('x.fits', {}, {}, 'rcd', 'none',
+                                   preloaded_data=(np.moveaxis(rgb, 0, -1), {}),
+                                   skip_quality=True)
+    assert chw['error'] is None and hwc['error'] is None
+    assert chw['rgb'].shape == (rgb.shape[1], rgb.shape[2], 3)
+    np.testing.assert_array_equal(chw['rgb'], hwc['rgb'])

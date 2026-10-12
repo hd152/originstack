@@ -274,6 +274,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         return {'error': f'load error: {e}'}
     if data is None or data.size == 0:
         return {'error': 'empty data array'}
+    if data.ndim == 3 and data.shape[0] == 3 and data.shape[-1] != 3:
+        data = np.ascontiguousarray(data.transpose(1, 2, 0))
     timings['load'], _t = time.perf_counter() - _t, time.perf_counter()
     _sat = raw_saturated_fraction(data, _be16)
     if _sat is not None and _sat > Config.OVEREXPOSED_FRACTION:

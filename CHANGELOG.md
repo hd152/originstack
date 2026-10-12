@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.6] - 2026-10-12
+
+### Fixed
+
+- **Already-debayered RGB FITS frames no longer fail in Phase 1.** FITS stores color
+  planes in channel-first order, while the processing pipeline expects channel-last
+  RGB; Phase 1 now converts the layout before writing the frame store.
+
 ## [2.11.5] - 2026-10-12
 
 Large sessions can automatically use lossless compressed Phase 1 storage when RAM
