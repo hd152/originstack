@@ -2019,8 +2019,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'quantity). No effect with other --denoiser choices.')
     g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
-    g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
-                   help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
+    g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs', 'masked', 'multiscale', 'seti'],
+                   default='ghs',
+                   help='Preview JPEG stretch method (default: ghs). masked blends a stronger '
+                        'faint-signal stretch through a smooth luminance mask; multiscale uses '
+                        'separate diffuse and filament masks; seti applies SETI Astro statistical '
+                        'stretch (target median 0.20).')
     g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='preserve',
                    help='How the ghs/arcsinh stretch treats colour (default: preserve). '
                         'preserve: the curve is applied to luminance and each pixel keeps '
