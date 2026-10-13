@@ -6,6 +6,26 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.7] - 2026-10-13
+
+Preview stretches now offer more control over faint nebula detail, and automatic
+local contrast is gentler for emission nebulae.
+
+### Added
+
+- **Masked preview stretch** (`--stretch masked`) softly boosts faint, above-sky
+  detail while tapering the boost toward sky noise and bright highlights.
+- **Multi-scale preview stretch** (`--stretch multiscale`) separately enhances
+  diffuse emission and fine filament ridges.
+- **SETI Astro preview stretch** (`--stretch seti`) maps the normalized image
+  median to a target display median of 0.20. These stretch options affect the
+  preview JPEG only; the FITS data is unchanged.
+
+### Improved
+
+- **Emission-nebula local contrast is more conservative by default** under
+  `--auto`, reducing the risk of an overly aggressive Phase 4 rendering.
+
 ## [2.11.6] - 2026-10-12
 
 ### Fixed

@@ -199,7 +199,7 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('deconvolve_blind_psf',    True),
         ('star_reduce',             False),
         ('galaxy_mode',             False),
-        ('local_contrast_strength', 0.75),
+        ('local_contrast_strength', 0.35),
         # Toned down from (7.0, 0.18): a real Trifid Nebula render at the old
         # values looked oversaturated/punchy (deep magenta emission region,
         # not hard-clipped -- only ~0.4% of nebula pixels hit 255 -- just a
