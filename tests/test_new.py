@@ -462,12 +462,6 @@ class TestComputeQualityMetricsAdvanced(unittest.TestCase):
         self.assertEqual(m['strehl'], 0.0)
         self.assertEqual(m['dispersion_px'], 0.0)
 
-    def test_advanced_metrics_true_is_default(self):
-        """Default call (no advanced_metrics kwarg) should return the same keys."""
-        m = self.cqm(self._star_lum())
-        self.assertIn('strehl', m)
-        self.assertIn('dispersion_px', m)
-
     def test_mad_background_close_to_median(self):
         """MAD estimator: background should equal the pixel median."""
         bg = 300.0

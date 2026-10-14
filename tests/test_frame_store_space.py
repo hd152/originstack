@@ -16,6 +16,17 @@ def test_refuses_with_a_clear_message_when_temp_disk_is_too_small(monkeypatch):
     store.cleanup()
 
 
+def test_compressed_store_refuses_when_temp_disk_is_too_small(monkeypatch):
+    pytest.importorskip('astro_native')
+    Usage = collections.namedtuple('Usage', 'total used free')
+    monkeypatch.setattr('shutil.disk_usage', lambda p: Usage(100e9, 98e9, 2e9))
+    store = fs.FrameStore('disk')
+    with pytest.raises(fs.FrameStoreSpaceError, match=r'stack rgb.*GB needed.*GB free'):
+        store.create('stack_rgb_', 'float32', (200, 1000, 1000, 3), compressed=True)  # ~1.9 GB est.
+    assert not store._files
+    store.cleanup()
+
+
 def test_small_arrays_still_go_to_disk(monkeypatch, tmp_path):
     monkeypatch.setattr(fs.tempfile, 'gettempdir', lambda: str(tmp_path))
     monkeypatch.setattr(fs.tempfile, 'tempdir', str(tmp_path))

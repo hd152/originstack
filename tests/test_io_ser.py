@@ -34,12 +34,14 @@ def _write_ser(path: str, color_id: int, width: int, height: int,
             fh.write(fr.tobytes())
 
 
-class TestHeaderParse(unittest.TestCase):
+class _SerTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmpdir.cleanup)
         io_ser._parse_ser_header.cache_clear()
 
+
+class TestHeaderParse(_SerTest):
     def test_mono_uint8_header(self):
         path = os.path.join(self.tmpdir.name, 'mono.ser')
         frames = [np.full((4, 4), i * 10, dtype=np.uint8) for i in range(3)]
@@ -55,12 +57,7 @@ class TestHeaderParse(unittest.TestCase):
         self.assertEqual(info['FrameSize'], 16)
 
 
-class TestExpandSerFiles(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.addCleanup(self.tmpdir.cleanup)
-        io_ser._parse_ser_header.cache_clear()
-
+class TestExpandSerFiles(_SerTest):
     def test_expansion_order_and_count(self):
         path = os.path.join(self.tmpdir.name, 'clip.ser')
         frames = [np.full((2, 2), i, dtype=np.uint8) for i in range(3)]
@@ -78,15 +75,10 @@ class TestExpandSerFiles(unittest.TestCase):
         self.assertEqual(io_ser.expand_ser_files(self.tmpdir.name), [])
 
 
-class TestFrameReadCorrectness(unittest.TestCase):
+class TestFrameReadCorrectness(_SerTest):
     """The critical test: memmap offset arithmetic must select the RIGHT
     frame, not just A frame -- verify 3 distinct hand-written frames read
     back as 3 distinct, correct pixel arrays."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.addCleanup(self.tmpdir.cleanup)
-        io_ser._parse_ser_header.cache_clear()
 
     def test_mono_frames_distinct_and_correct(self):
         path = os.path.join(self.tmpdir.name, 'mono.ser')

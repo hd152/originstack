@@ -18,6 +18,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
+
 try:
     import astro_native as _native
     _HAS_NATIVE = True
@@ -48,8 +50,7 @@ def _load_channel(path: str) -> np.ndarray:
         if data.shape[0] == 3:          # (3, H, W) — FITS convention
             return (0.299 * data[0] + 0.587 * data[1] + 0.114 * data[2])
         if data.shape[2] == 3:          # (H, W, 3)
-            return (0.299 * data[:, :, 0] + 0.587 * data[:, :, 1]
-                    + 0.114 * data[:, :, 2])
+            return luminance(data)
     raise ValueError(f"Unsupported FITS shape {data.shape} in {path}")
 
 
@@ -407,8 +408,7 @@ def _star_mask_for(rgb: np.ndarray, fwhm: float = 3.5) -> Optional[np.ndarray]:
         from src.quality import detect_stars_auto, generate_star_mask
     except Exception:
         return None
-    lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
-           + 0.114 * rgb[:, :, 2]).astype(np.float32)
+    lum = luminance(rgb).astype(np.float32)
     med = float(np.median(lum))
     noise = 1.4826 * float(np.median(np.abs(lum - med))) or 1e-3
     try:
@@ -437,14 +437,12 @@ def fix_narrowband_stars(rgb: np.ndarray, mode: str = "desaturate",
         return rgb
     m = np.clip(mask, 0.0, 1.0)[:, :, np.newaxis] * float(np.clip(strength, 0.0, 1.0))
     out = rgb.astype(np.float32, copy=True)
-    lum = (0.299 * out[:, :, 0] + 0.587 * out[:, :, 1]
-           + 0.114 * out[:, :, 2])[:, :, np.newaxis]
+    lum = luminance(out)[:, :, np.newaxis]
 
     if mode == "rgb" and rgb_stars is not None:
         ref = _resize_to(_normalise(rgb_stars), rgb.shape[0], rgb.shape[1]) \
             if rgb_stars.shape[:2] != rgb.shape[:2] else _normalise(rgb_stars)
-        ref_lum = (0.299 * ref[:, :, 0] + 0.587 * ref[:, :, 1]
-                   + 0.114 * ref[:, :, 2])[:, :, np.newaxis]
+        ref_lum = luminance(ref)[:, :, np.newaxis]
         # NB luminance * broadband colour ratio -> natural star colour.
         recolored = np.clip(lum * (ref / np.maximum(ref_lum, 1e-4)), 0.0, 1.0)
         out = out * (1.0 - m) + recolored * m

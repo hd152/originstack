@@ -114,7 +114,7 @@ def run_phase4(stacked: np.ndarray, extra: list, stack_path: Optional[str],
                                  ghs_sp=float(getattr(args, "ghs_sp", 0.15)),
                                  ghs_hp=float(getattr(args, "ghs_hp", 0.95)),
                                  black_sigma=float(getattr(args, "preview_black_sigma", 0.0)),
-                                 color=getattr(args, "stretch_color", "preserve"))
+                                 color=getattr(args, "stretch_color", "channel"))
     return P, np.asarray(D, dtype=np.float64), args, buf.getvalue()
 
 

@@ -53,7 +53,15 @@ def test_lossless_frame_compression_round_trip(itemsize):
     byte_array = np.frombuffer(raw, dtype=np.uint8)
     encoded = native.compress_frame(byte_array, itemsize)
     decoded = native.decompress_frame(encoded, len(raw), itemsize)
-    assert decoded == raw
+    assert decoded.dtype == np.uint8 and decoded.flags.writeable and decoded.flags.aligned
+    assert decoded.tobytes() == raw
+
+
+def test_lossless_frame_compression_reads_a_float32_view_in_place():
+    frame = np.random.default_rng(7).normal(0.05, 0.002, (31, 17, 3)).astype(np.float32)
+    encoded = native.compress_frame(frame.view(np.uint8).reshape(-1), 4)
+    decoded = native.decompress_frame(encoded, frame.nbytes, 4).view(np.float32)
+    np.testing.assert_array_equal(decoded.reshape(frame.shape), frame)
 
 
 def test_lossless_frame_decompression_rejects_wrong_length():
@@ -379,8 +387,7 @@ def test_fix_hot_bayer_matches_reference():
     np.testing.assert_allclose(got, ref, atol=1e-3)
 
 
-@pytest.mark.parametrize("with_mono", [False, True])
-def test_hot_pixel_box_replace_matches_scipy(with_mono):
+def test_hot_pixel_box_replace_matches_scipy():
     from scipy import ndimage as _nd
     rng = np.random.default_rng(7)
     h, w, c = 48, 56, 3

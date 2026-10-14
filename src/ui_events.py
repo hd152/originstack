@@ -15,6 +15,7 @@ Mirrors the ``get_gpu()`` module-level singleton pattern.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -49,6 +50,9 @@ class UIEvents:
         self._frame_thumbs: "OrderedDict[int, dict]" = OrderedDict()
         self._frame_thumb_seq = 0
         self._frame_thumbs_version = 0
+        # The image the run's preview JPEG was stretched from, kept so the
+        # user can pick another stretch once the run is done (restretch()).
+        self._final_src: Optional[dict] = None
         self._state: Dict[str, Any] = {
             'run': {},                 # target/output/frame counts
             'phase': 0,
@@ -148,15 +152,25 @@ class UIEvents:
     @staticmethod
     def _stretch_kw(args) -> dict:
         """Extract stretch parameters from an args namespace (or defaults)."""
-        if args is None:
-            return dict(stretch='ghs', ghs_b=8.0, ghs_sp=0.15, ghs_hp=0.95,
-                        black_sigma=0.0)
-        return dict(
-            stretch=getattr(args, 'stretch', 'ghs'),
-            ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-            ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-            ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-            black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0))
+        from src.io_fits import preview_stretch_kw
+        return preview_stretch_kw(args)
+
+    def _set_named_slot(self, slug: str, caption: str, data: bytes) -> None:
+        """Register / update a named viewer slot (caller holds the lock)."""
+        self._named_version += 1
+        self._named[slug] = {'caption': caption, 'ver': self._named_version,
+                             'jpeg': data}
+        self._named.move_to_end(slug)
+        self._latest_slug = slug
+        # evict oldest slots beyond the cap (keep 'final' + newest)
+        while len(self._named) > _MAX_NAMED:
+            for k in list(self._named.keys()):
+                if k != 'final' and k != self._latest_slug:
+                    del self._named[k]
+                    break
+            else:
+                break
+        self._bump()
 
     def preview(self, rgb, caption: str, args=None, slot: Optional[str] = None,
                 min_interval: float = 2.0) -> None:
@@ -182,21 +196,7 @@ class UIEvents:
             self._preview_caption = caption
             self._preview_version += 1
             self._last_preview_time = now
-            # register / update the named slot
-            self._named_version += 1
-            self._named[slug] = {'caption': caption, 'ver': self._named_version,
-                                 'jpeg': data}
-            self._named.move_to_end(slug)
-            self._latest_slug = slug
-            # evict oldest slots beyond the cap (keep 'final' + newest)
-            while len(self._named) > _MAX_NAMED:
-                for k in list(self._named.keys()):
-                    if k != 'final' and k != self._latest_slug:
-                        del self._named[k]
-                        break
-                else:
-                    break
-            self._bump()
+            self._set_named_slot(slug, caption, data)
 
     def frame_preview(self, name: str, rgb, args=None,
                       max_dim: int = 512) -> None:
@@ -226,6 +226,56 @@ class UIEvents:
                 self._frame_thumbs.popitem(last=False)
             self._frame_thumbs_version += 1
             self._bump()
+
+    def remember_final_preview(self, rgb, path: str, args=None, starless=None) -> None:
+        """Keep the image ``path`` (the run's preview JPEG) was just stretched
+        from, with the settings used, so ``restretch`` can redo it with another
+        stretch. Holds a full-resolution float image until the next run starts,
+        so it is only kept while the desktop app is attached. The last call
+        wins: in a multi-target run that is the last JPEG written."""
+        if not self.active:
+            return
+        kw = self._stretch_kw(args)
+        with self._lock:
+            self._final_src = {'rgb': rgb, 'starless': starless,
+                               'path': os.path.abspath(path), 'kw': kw}
+            self._bump()
+
+    def restretch(self, stretch: str, color: str) -> bytes:
+        """Re-render the remembered final preview with ``stretch``/``color``,
+        overwrite its JPEG and update the 'final' viewer slot. Returns the
+        viewer-sized JPEG bytes. Runs the full-resolution stretch, so call it
+        off the GUI thread. Raises ``RuntimeError`` when there is nothing to
+        re-stretch or the stretch backend is unavailable; ``OSError`` when the
+        file cannot be written."""
+        from src.io_fits import preview_jpeg_from_uint8, render_preview_rgb_uint8, write_preview_jpeg
+        with self._lock:
+            src = self._final_src
+        if src is None:
+            raise RuntimeError('no finished preview to re-stretch')
+        kw = dict(src['kw'], stretch=stretch, color=color)
+        out = render_preview_rgb_uint8(src['rgb'], starless=src['starless'], **kw)
+        if out is None:
+            raise RuntimeError(f'the {stretch} stretch is unavailable')
+        path = src['path']
+        tmp = path + '.tmp'
+        try:
+            write_preview_jpeg(out, tmp)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        data = preview_jpeg_from_uint8(out)
+        with self._lock:
+            # A new run may have started while this rendered: its state wins.
+            if self._final_src is src:
+                src['kw'] = kw
+                caption = self._named.get('final', {}).get('caption', 'Final (post-processed)')
+                self._set_named_slot('final', caption, data)
+        return data
 
     def summary(self, **fields: Any) -> None:
         if not self.active:
@@ -269,6 +319,7 @@ class UIEvents:
             self._frame_thumbs.clear()
             self._frame_thumb_seq = 0
             self._frame_thumbs_version += 1
+            self._final_src = None
             self._bump()
 
     def run_finished(self, status: str, error: Optional[str] = None) -> None:
@@ -317,6 +368,10 @@ class UIEvents:
             snap['frames_img_version'] = self._frame_thumbs_version
             snap['frames_img'] = [{'id': v['id'], 'name': v['name']}
                                   for v in self._frame_thumbs.values()]
+            fs = self._final_src
+            snap['restretch'] = (None if fs is None else
+                                 {'stretch': fs['kw']['stretch'], 'color': fs['kw']['color'],
+                                  'path': fs['path']})
             return snap
 
     def named_jpeg(self, slug: str) -> Optional[bytes]:

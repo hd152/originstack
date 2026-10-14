@@ -12,6 +12,7 @@ from src.background import (
     _gaussian_blur,
     gaussian_filter_ds,
 )
+from src.debayer import luminance
 from src.models import Config
 from src.utils import get_logger, safe_print
 
@@ -435,8 +436,7 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
     while the surrounding sky is clean). A real star mask only protects
     actual point sources, so extended structure still gets smoothed.
     """
-    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
-           + 0.114 * img[:, :, 2]).astype(np.float64)
+    lum = luminance(img).astype(np.float64)
 
     if star_mask is not None:
         protect = np.clip(np.asarray(star_mask, dtype=np.float64), 0.0, 1.0)
@@ -1118,7 +1118,7 @@ def remove_star_halos(img: np.ndarray, star_sources, fwhm: float,
     sigma = fwhm / 2.355
     protect_radius_px = protection_radius * fwhm
 
-    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+    lum = luminance(img)
 
     for star in bright_stars:
         try:

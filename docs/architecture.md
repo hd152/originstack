@@ -52,7 +52,7 @@ flowchart TB
     subgraph Analysis[Scientific analysis and outputs]
         PHOTO[photometry.py + photometric_calibration.py + photometry_core.py]
         SOLVE[plate_solve.py + local_solve.py]
-        NET[net_query.py + gaia_cache.py]
+        NET[net_query.py + gaia_cache.py + release check]
         REPORT[session_report.py + quality_sweep.py + annotation.py]
         OUT[Output FITS / previews / CSV / reports]
     end
@@ -61,6 +61,7 @@ flowchart TB
     U --> APP
     CLI --> AUTO
     APP --> CLI
+    APP --> NET
     AUTO --> CFG
 
     CLI --> FR
@@ -115,6 +116,7 @@ The project is built around a four-phase pipeline:
 
 1. Input discovery and calibration
    - File format readers load FITS, RAW, TIFF, XISF, SER, and other camera frames.
+   - Phase 1 normalizes channel-first RGB FITS cubes `(3, H, W)` to its internal channel-last `(H, W, 3)` layout.
    - `frame_discovery.py` classifies lights, darks, flats, and calibrations.
    - `frame_processor.py` runs the per-frame processing queue and quality scoring.
 
@@ -138,4 +140,5 @@ The project is built around a four-phase pipeline:
 - Modular pipeline: each phase is implemented in a dedicated module family with a clear responsibility boundary.
 - Native acceleration: the hot paths can use `ext/astro_native` Rust kernels while falling back to NumPy/SciPy implementations.
 - Desktop + CLI integration: the same pipeline is exposed via the terminal and the native desktop GUI.
+- Desktop release checks run in the background and deliver any update notice through the Tkinter main-thread poll.
 - Scientific extension: the stack is not just an image combine; it also supports plate solving, photometry, noise validation, and reporting.

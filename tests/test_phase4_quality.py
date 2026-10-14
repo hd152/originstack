@@ -97,7 +97,8 @@ def test_channel_mode_is_the_old_per_channel_curve():
 
 def test_stretch_color_flag_parses():
     from src import cli
-    assert cli.parse_args(['-d', '.']).stretch_color == 'preserve'
+    assert cli.parse_args(['-d', '.']).stretch_color == 'channel'
+    assert cli.parse_args(['-d', '.', '--stretch-color', 'preserve']).stretch_color == 'preserve'
     assert cli.parse_args(['-d', '.', '--stretch-color', 'channel']).stretch_color == 'channel'
 
 
@@ -402,3 +403,22 @@ def test_solar_fit_declines_when_star_colours_scatter(monkeypatch):
     scrambled = dataclasses.replace(gm, bp=gm.bp[perm], rp=gm.rp[perm])
     monkeypatch.setattr(ph, 'match_gaia_field', lambda *a, **k: scrambled)
     assert cc.fit_channel_scales_solar(img, header=None) is None
+
+
+def test_early_cache_key_ignores_the_output_name_and_side_file_runs_skip_the_cache(tmp_path):
+    """A --from-stack to a new -o must reuse the early steps (27 s -> 9 s on a
+    real stack); runs that write side files from those steps must not."""
+    from src import cli
+    from src.postprocess import _early_cache_key, _early_cache_usable
+    f = tmp_path / 's.fits'
+    f.write_bytes(b'x')
+    img = np.ones((32, 32, 3), np.float32)
+    a = cli.parse_args(['--from-stack', str(f), '-o', str(tmp_path / 'a.fits')])
+    b = cli.parse_args(['--from-stack', str(f), '-o', str(tmp_path / 'b.fits')])
+    assert _early_cache_key(img, a, set()) == _early_cache_key(img, b, set())
+    a._pp_early_cache = str(tmp_path / 's_phase4cache.pkl')
+    assert _early_cache_usable(a, None)
+    for flag in ('export_masks', 'keep_intermediates'):
+        setattr(a, flag, True)
+        assert not _early_cache_usable(a, None)
+        setattr(a, flag, False)

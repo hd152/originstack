@@ -52,6 +52,9 @@ _log = logging.getLogger('originstack')
 RESERVE_FRAC = 0.20
 SHM_PREFIX = 'shm:'
 COMPRESSED_PREFIX = 'lz4:'
+# Compressed / raw size assumed by the up-front disk check. Byte-shuffled LZ4 gave
+# 1.33x on a noisy float32 frame (only the exponent byte compresses), so 0.8 errs safe.
+COMPRESSED_SIZE_ESTIMATE = 0.8
 _NATIVE_COMPRESSOR = None
 
 
@@ -105,7 +108,9 @@ class _CompressedFrameArray:
             compressed,
             int(np.prod(self._frame_shape)) * self.dtype.itemsize,
             self.dtype.itemsize)
-        return np.frombuffer(raw, dtype=self.dtype).reshape(self._frame_shape).copy()
+        frame = np.frombuffer(raw, dtype=self.dtype).reshape(self._frame_shape)
+        # astro_native >= 0.56 returns a fresh writable array; older wheels return bytes
+        return frame if frame.flags.writeable else frame.copy()
 
     def _write_frame(self, index: int, frame: np.ndarray) -> None:
         native = _require_native_compressor()
@@ -334,6 +339,7 @@ class FrameStore:
         nbytes = int(np.prod(shape)) * dt.itemsize
         if compressed:
             _require_native_compressor()
+            _require_disk(int(nbytes * COMPRESSED_SIZE_ESTIMATE), prefix)
             token = uuid.uuid4().hex
             compressed_prefix = os.path.join(
                 tempfile.gettempdir(), f'{prefix}compressed_{token}_')

@@ -23,6 +23,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
+
 try:
     from scipy import ndimage
 
@@ -94,7 +96,7 @@ def consistency_map(a: np.ndarray, b: np.ndarray, smooth: float = 2.0, window: i
     then correlated over a ``window`` box after removing each half's local mean.
     Negative correlation carries no information and is clipped to 0."""
     def lum(x):
-        return 0.299 * x[:, :, 0] + 0.587 * x[:, :, 1] + 0.114 * x[:, :, 2]
+        return luminance(x)
 
     la = _gaussian_blur(lum(a).astype(np.float64), smooth)
     lb = _gaussian_blur(lum(b).astype(np.float64), smooth)

@@ -13,6 +13,12 @@ try:
 except Exception:
     HAS_PSUTIL = False
 
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(iterable, **kwargs):
+        return iterable
+
 
 def setup_logging(level: str = 'WARNING', log_file: Optional[str] = None) -> logging.Logger:
     """Configure the 'originstack' logger hierarchy.

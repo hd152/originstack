@@ -23,11 +23,7 @@ from typing import Optional
 
 import numpy as np
 
-try:
-    from src.utils import safe_print
-except ImportError:
-    def safe_print(*args, **kwargs):
-        print(*args, **kwargs)
+from src.utils import safe_print
 
 
 def load_vignette_map(path: str) -> Optional[np.ndarray]:

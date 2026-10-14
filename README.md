@@ -130,7 +130,7 @@ SUMMARY
 - **Parallel processing**: multi-core via `ProcessPoolExecutor`; GPU acceleration via CuPy (`--use-gpu`)
 
 ### Input Formats
-- **FITS** — always supported, no extra dependencies
+- **FITS** — always supported, no extra dependencies. RGB FITS cubes in the standard channel-first `(3, H, W)` layout are converted to the pipeline's channel-last `(H, W, 3)` layout during Phase 1.
 - **Camera RAW** (CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, PEF, 3FR, MRW, X3F, IIQ) — needs `pip install rawpy`; reads the undemosaiced sensor mosaic, so RAW lights go through the same debayer step as OSC FITS
 - **TIFF** (16/32-bit) — needs `pip install tifffile`; common intermediate/export format from N.I.N.A., SharpCap, PixInsight, DeepSkyStacker
 - **XISF** (PixInsight's native format) — no extra dependency; OriginStack can also write XISF (`--export xisf`)
@@ -195,7 +195,7 @@ Applied in order after stacking. Steps marked ✅ are on by default; ❌ must be
 16. ✅ Multiscale local contrast enhancement (MLCE) — `--no-local-contrast` to disable
 17. ✅ Edge-band correction (`--skip-step edge_bands`) — removes the sky excess that rises toward the frame edges, then the final sky flattening + neutralisation (masked large-scale per-channel background → neutral grey)
 
-Opt-in variants of the chain: `--starless-process` runs the denoisers and local contrast (and deconvolution, if enabled) on a starless copy and adds the stars back untouched; `--layered-stretch` takes the preview's black/white points from a starless copy so a faint galaxy or nebula owns the tonal range instead of being squeezed under the stars' white point.
+Opt-in variants of the chain: `--starless-process` runs the denoisers and local contrast (and deconvolution, if enabled) on a starless copy and adds the stars back untouched; `--layered-stretch` takes the preview's black/white points from a starless copy so a faint galaxy or nebula owns the tonal range instead of being squeezed under the stars' white point. `--stretch masked` blends a stronger shadow stretch into faint, above-sky structure using a smoothed luminance mask, while tapering the boost out toward bright highlights. `--stretch multiscale` uses separate broad and fine-scale luminance masks to enhance diffuse emission and filament ridges with different strengths. Both are preview-only; neither changes the FITS.
 
 > The auto-advisor enforces a **single primary luma denoiser** (the curvelet
 > wavelet, with ACDNR only as the fallback sky smoother) — layering several
@@ -224,7 +224,13 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 - **Plate solving** built in, against a local Gaia DR3 index (no API key, works offline once the index covers the field), or via ASTAP / nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
 - **Re-run post-processing only** (`--from-stack STACK.fits`) — Phase 4 on an earlier run's linear stack, with that run's saved settings; no light frames needed
 - **Colour calibration against Gaia DR3** — on by default when the stack has a sky position (the session solve, refined against Gaia) and the run is online: each star's measured colour is fitted against its Gaia BP-RP on the linear stack, and the channels scaled so a Sun-like (G2V) star is white. `--no-color-calibrate` turns it off; the gray-locus method (`--photometric-calibration`) is the fallback
-- **Colour-preserving stretch** (`--stretch-color preserve`, default) — the preview curve is applied to brightness only, so stars and galaxy cores keep their colour instead of washing out to white; `--stretch-color channel` restores the old per-channel curve
+- **Colour-preserving stretch** (`--stretch-color preserve`) — the preview curve is applied to brightness only, so stars and galaxy cores keep their colour instead of washing out to white; the default, `--stretch-color channel`, applies the curve to each channel separately
+- **Masked preview stretch** (`--stretch masked`) — softly boosts faint above-sky detail while tapering back toward sky noise and bright highlights; preview JPEG only
+- **Multi-scale masked stretch** (`--stretch multiscale`) — separately weights broad diffuse emission and fine positive filament ridges; preview JPEG only
+- **SETI Astro statistical stretch** (`--stretch seti`) — maps the normalized image median to a target display median of 0.20, with a sigma-based black point; `--stretch-color channel` (the default) applies it independently per channel, while `preserve` keeps pixel colour ratios
+- **Noise-limited stretch** (`--stretch noisefloor`) — solves the GHS strength so the sky noise shows at a fixed size (about 4 of 255 display levels), so a short and a long integration get a curve suited to each instead of the preset's fixed one; preview JPEG only
+- **Perceptual stretch** (`--stretch oklab`) — the GHS curve applied to OKLab lightness: mid-tones keep the usual preview colour, while saturated star cores render bright and still coloured instead of being dimmed to fit; preview JPEG only
+- **Local-contrast stretch** (`--stretch clahe`) — the GHS preview plus contrast-limited adaptive histogram equalisation, blended in only on extended signal (not sky, not stars) to bring out dust lanes and arms; preview JPEG only
 - **Aperture photometry** (`--photometry`) — calibrates the stack against Gaia DR3: per-channel zero points (optional colour terms), airmass from the `info.json` GPS + time, a Poisson error term from raw bias/flat pairs, and a `<output>_photometry.csv` star catalogue with magnitudes + uncertainties
 - **Differential light curves** (`--photometry-timeseries`) — aperture-photometers a fixed Gaia star list on every registered sub and ensemble-calibrates, writing per-frame + per-star CSVs with a variability flag; `--photometry-target "RA,DEC"` reports one star
 - **Banding removal** (`--banding-removal`) — per-row/column offsets removed from each calibrated Bayer frame before debayering, per colour plane, only where significant; a clean frame is left essentially untouched
@@ -364,6 +370,7 @@ The window has two columns:
 - **Right — Preview + frames**
   - Before a run: an example result for the chosen target, and a **This run** summary of what Start will do (frames, target, mode, changed settings, output file).
   - During and after a run: the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a per-frame thumbnail strip and a running table of per-frame quality (score, SNR, star count, FWHM).
+  - After a run: a **Stretch** / **Colour** bar above the preview offers every `--stretch` and `--stretch-color` choice; **Apply to JPEG** re-renders the preview and overwrites the run's `.jpg` without re-processing (the FITS outputs are unchanged).
 
 Leave **Output file** blank and the stack is saved next to the light-frames folder, never overwriting an earlier one.
 
@@ -652,7 +659,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Chroma noise reduction | ✅ on | `--no-chroma-nr` |
 | Star reduction | ✅ on | `--no-star-reduce` |
 | Colour calibration against Gaia (online, needs a sky position) | ✅ on | `--no-color-calibrate` |
-| Colour-preserving stretch | ✅ on | `--stretch-color channel` |
+| Colour-preserving stretch | ❌ off | `--stretch-color preserve` |
 | Star removal (writes a `_starless.fits` sidecar; main output keeps stars) | ❌ off | `--remove-stars` |
 | Local contrast enhancement | ✅ on | `--no-local-contrast` |
 | Chromatic aberration correction | ✅ on | `--no-ca-correction` |
@@ -947,7 +954,7 @@ OriginStack works entirely on your machine. It goes online in these cases only, 
 
 Pass **`--offline`** (a checkbox in the desktop app's Core options) to make no network requests at all: the target lookup is skipped, and the features in the table that need the network are turned off with a note in the log. Everything else is computed locally; colour falls back to the field's own star colours (white balance and, where a preset enables it, the gray-locus calibration). This is enforced where the requests are made rather than caller by caller, and a test counts real connection attempts.
 
-**The self-update check** is the one thing that isn't gated by `--offline` itself (it runs before a run's settings are even read), but it never blocks anything and fails silently: a background thread checks GitHub once, and if a newer release exists, the CLI prints one line at the end of the run and the desktop app shows a small clickable "Update available" note in the header. Set `ORIGINSTACK_NO_UPDATE_CHECK` (to anything) to disable it outright; it's also skipped automatically whenever `--offline` was used in the same process.
+**The self-update check** is the one thing that isn't gated by `--offline` itself (it runs before a run's settings are even read), but it never blocks anything and fails silently: a background thread checks GitHub once, and if a newer release exists, the CLI prints one line at the end of the run and the desktop app shows a small clickable "Update available" note in the header (not a system notification). The desktop app passes the result to its Tkinter main-thread poll, so the check can finish without touching UI widgets from the worker thread. Set `ORIGINSTACK_NO_UPDATE_CHECK` (to anything) to disable it outright; it's also skipped automatically whenever `--offline` was used in the same process.
 
 ---
 

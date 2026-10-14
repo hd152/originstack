@@ -29,7 +29,7 @@ from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import autodetect_bayer_orientation, debayer
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
-from src.io_fits import load_fits, load_frame, populate_fits_header, save_preview_rgb
+from src.io_fits import load_fits, load_frame, populate_fits_header, preview_stretch_kw, save_preview_rgb
 from src.models import FrameInfo, ProcessingStats
 from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
@@ -192,20 +192,25 @@ def _export_frame_jpegs(final: List[FrameInfo], final_indices: List[int],
                          args: argparse.Namespace) -> None:
     """Write a stretched JPEG preview for each accepted frame."""
     os.makedirs(export_dir, exist_ok=True)
-    stretch = getattr(args, 'stretch', 'ghs')
-    ghs_b  = float(getattr(args, 'ghs_b', 8.0))
-    ghs_sp = float(getattr(args, 'ghs_sp', 0.15))
-    ghs_hp = float(getattr(args, 'ghs_hp', 0.95))
+    kw = preview_stretch_kw(args)
     for j, f in zip(final_indices, final):
         rgb = np.array(mem_rgb[j])
         stem = os.path.splitext(os.path.basename(f.path))[0]
         out_path = os.path.join(export_dir, stem + '.jpg')
         try:
-            save_preview_rgb(rgb, out_path, stretch=stretch,
-                             ghs_b=ghs_b, ghs_sp=ghs_sp, ghs_hp=ghs_hp)
+            save_preview_rgb(rgb, out_path, **kw)
         except Exception as e:
             safe_print(f"  WARNING: frame JPEG export failed for {stem}: {e}")
     safe_print(f"  Exported {len(final)} frame JPEGs → {export_dir}")
+
+
+def save_final_preview(rgb: np.ndarray, preview_path: str, args,
+                       starless: Optional[np.ndarray] = None) -> None:
+    """Write the run's preview JPEG with ``args``' stretch settings and keep
+    its source so the desktop app can re-stretch it after the run."""
+    from src.ui_events import get_ui_events
+    save_preview_rgb(rgb, preview_path, starless=starless, **preview_stretch_kw(args))
+    get_ui_events().remember_final_preview(rgb, preview_path, args, starless=starless)
 
 
 def _prefetch_session_lookups(lights: List[FrameInfo], args, directory: str,
@@ -1272,10 +1277,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 comet_hdu.writeto(comet_out, overwrite=True)
                 comet_prev = os.path.splitext(comet_out)[0] + '.jpg'
                 save_preview_rgb(comet_stacked, comet_prev,
-                                 stretch=getattr(args, 'stretch', 'ghs'),
-                                 ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-                                 ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                                 ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+                                 **preview_stretch_kw(args))
                 safe_print(f"  Comet stack: {os.path.basename(comet_out)}")
 
                 # Blend star-aligned and comet-aligned stacks into a composite. Each
@@ -1303,10 +1305,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 blended_hdu.writeto(blended_out, overwrite=True)
                 blended_prev = os.path.splitext(blended_out)[0] + '.jpg'
                 save_preview_rgb(blended, blended_prev,
-                                 stretch=getattr(args, 'stretch', 'ghs'),
-                                 ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-                                 ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                                 ghs_hp=float(getattr(args, 'ghs_hp', 0.95)))
+                                 **preview_stretch_kw(args))
                 safe_print(f"  Comet blended stack: {os.path.basename(blended_out)}")
 
             # Save raw stack so post-processing can be re-run without phases 1-3
@@ -1728,13 +1727,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             safe_print("  Layered stretch: no usable star detections -- using the single stretch")
         else:
             safe_print("  Preview: layered stretch (starless layer + stars)")
-    save_preview_rgb(_preview_src, preview_path, stretch=stretch_method,
-                     ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-                     ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
-                     starless=_preview_starless,
-                     color=getattr(args, 'stretch_color', 'preserve'))
+    save_final_preview(_preview_src, preview_path, args, starless=_preview_starless)
 
     if getattr(args, 'annotate', False):
         if _wcs_available:
@@ -1899,13 +1892,7 @@ def postprocess_from_stack(stack_path: str, output_path: str,
     if getattr(args, 'layered_stretch', False) and stretch_method == 'ghs':
         from src.star_removal import starless_from_image
         starless = starless_from_image(result)
-    save_preview_rgb(result, preview_path, stretch=stretch_method,
-                     ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-                     ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
-                     starless=starless,
-                     color=getattr(args, 'stretch_color', 'preserve'))
+    save_final_preview(result, preview_path, args, starless=starless)
     safe_print(f"  ✓ Preview: {os.path.basename(preview_path)} "
                f"(Phase 4 {format_time(stats.post_processing_time)})")
     return result

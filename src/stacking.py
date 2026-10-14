@@ -23,13 +23,8 @@ from src.utils import (
     get_logger,
     progress_disabled,
     safe_print,
+    tqdm,
 )
-
-try:
-    from tqdm import tqdm
-except Exception:
-    def tqdm(iterable, **kwargs):
-        return iterable
 
 # Optional native (Rust) kernels — graceful degradation to numpy if absent.
 try:
@@ -253,6 +248,42 @@ def _cap_tile_workers(n_workers: int, N: int, tile_size: int, C: int) -> int:
         # 1 GB budget for tile workers either way.
         safe = max(1, (1024 * 1024 * 1024) // max(per_worker_bytes, 1))
     return min(n_workers, safe)
+
+
+def _tile_grid(H: int, W: int, tile_size: int) -> List[Tuple[int, int, int, int]]:
+    """``(y0, y1, x0, x1)`` of every tile of a ``tile_size`` grid over H x W."""
+    return [(ty, min(ty + tile_size, H), tx, min(tx + tile_size, W))
+            for ty in range(0, H, tile_size) for tx in range(0, W, tile_size)]
+
+
+def _combine_tiles(data: np.ndarray, tile_size: int, tile_fn, *outs) -> int:
+    """Run ``tile_fn`` on every spatial tile of ``data`` (N, H, W, C) in a
+    thread pool and write its result(s) into ``outs``.
+
+    ``tile_fn(tile)`` gets a float32 copy of the (N, th, tw, C) tile and
+    returns one array per entry of ``outs`` (a bare array for one). A 4-D
+    out is a per-frame map (N, H, W, C); 2-D/3-D outs are (H, W[, C]). A
+    ``None`` out skips that result. Returns the number of tiles."""
+    N, H, W, C = data.shape
+    tiles = _tile_grid(H, W, tile_size)
+
+    def _run(coords):
+        ty, ty_end, tx, tx_end = coords
+        return tile_fn(np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32))
+
+    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tiles)), N, tile_size, C)
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for (ty, ty_end, tx, tx_end), res in zip(tiles, executor.map(_run, tiles)):
+            if not isinstance(res, tuple):
+                res = (res,)
+            for dest, val in zip(outs, res):
+                if dest is None:
+                    continue
+                if dest.ndim == 4:
+                    dest[:, ty:ty_end, tx:tx_end] = val
+                else:
+                    dest[ty:ty_end, tx:tx_end] = val
+    return len(tiles)
 
 
 def _free_rej_mask(mask: np.ndarray) -> None:
@@ -824,36 +855,17 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
     result = np.zeros((H, W, C), dtype=np.float32)
     rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
 
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-
-    tile_coords = [
-        (ty_idx * tile_size, min((ty_idx + 1) * tile_size, H),
-         tx_idx * tile_size, min((tx_idx + 1) * tile_size, W))
-        for ty_idx in range(n_tiles_y)
-        for tx_idx in range(n_tiles_x)
-    ]
-
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+    def _tile(tile):
         if return_mask:
-            tile_result, tile_mask = _sigma_clip_tile_with_mask(tile, sigma, max_iters, weights, winsorize, use_mad)
-            return coords, tile_result, tile_mask
-        return coords, _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize, use_mad), None
+            return _sigma_clip_tile_with_mask(tile, sigma, max_iters, weights, winsorize, use_mad)
+        return _sigma_clip_tile(tile, sigma, max_iters, weights, winsorize, use_mad)
 
-    n_tile_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-    with ThreadPoolExecutor(max_workers=n_tile_workers) as executor:
-        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
-            if return_mask and tile_mask is not None:
-                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
+    n_tiles = _combine_tiles(data, tile_size, _tile, result, rej_mask_full)
 
     if verbose:
         estimator = 'MAD' if use_mad else 'std'
         mode = 'winsorized' if winsorize else 'reject'
-        safe_print(f"    Tiled sigma-clip: {n_tiles_y * n_tiles_x} tiles of "
+        safe_print(f"    Tiled sigma-clip: {n_tiles} tiles of "
                    f"{tile_size}x{tile_size}, estimator={estimator}, mode={mode}")
     if return_mask:
         return result, rej_mask_full
@@ -1016,28 +1028,13 @@ def median_combine(data: np.ndarray, verbose: bool = False) -> np.ndarray:
     tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
 
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    tile_coords = [
-        (ty * tile_size, min((ty + 1) * tile_size, H),
-         tx * tile_size, min((tx + 1) * tile_size, W))
-        for ty in range(n_tiles_y)
-        for tx in range(n_tiles_x)
-    ]
+    def _tile(tile):
+        return np.median(tile, axis=0).astype(np.float32)
 
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.asarray(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        return coords, np.median(tile, axis=0).astype(np.float32)
-
-    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for coords, tile_result in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
+    n_tiles = _combine_tiles(data, tile_size, _tile, result)
 
     if verbose:
-        safe_print(f"    Tiled median: {n_tiles_y * n_tiles_x} tiles of "
+        safe_print(f"    Tiled median: {n_tiles} tiles of "
                    f"{tile_size}x{tile_size}")
     return result
 
@@ -1104,37 +1101,19 @@ def percentile_clip_combine(data: np.ndarray, low: float = 20.0, high: float = 8
     result = np.zeros((H, W, C), dtype=np.float32)
     rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
 
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    tile_coords = [
-        (ty * tile_size, min((ty + 1) * tile_size, H),
-         tx * tile_size, min((tx + 1) * tile_size, W))
-        for ty in range(n_tiles_y)
-        for tx in range(n_tiles_x)
-    ]
-
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+    def _tile(tile):
         tile_result = _percentile_clip_tile(tile, low, high, weights)
         if return_mask:
             lo = np.percentile(tile, low, axis=0)
             hi = np.percentile(tile, high, axis=0)
-            tile_mask = ~((tile >= lo[np.newaxis]) & (tile <= hi[np.newaxis]))
-            return coords, tile_result, tile_mask
-        return coords, tile_result, None
+            return tile_result, ~((tile >= lo[np.newaxis]) & (tile <= hi[np.newaxis]))
+        return tile_result
 
-    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
-            if return_mask and tile_mask is not None:
-                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
+    n_tiles = _combine_tiles(data, tile_size, _tile, result, rej_mask_full)
 
     if verbose:
         safe_print(f"    Percentile clip: low={low}%, high={high}%, "
-                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+                   f"{n_tiles} tiles of {tile_size}x{tile_size}")
     if return_mask:
         return result, rej_mask_full
     return result
@@ -1282,18 +1261,7 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
     result = np.zeros((H, W, C), dtype=np.float32)
     rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
 
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    tile_coords = [
-        (ty * tile_size, min((ty + 1) * tile_size, H),
-         tx * tile_size, min((tx + 1) * tile_size, W))
-        for ty in range(n_tiles_y)
-        for tx in range(n_tiles_x)
-    ]
-
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+    def _tile(tile):
         tile_result = _esd_clip_tile(tile, max_outliers, significance, weights)
         if return_mask:
             # Re-compute mask for return: use nanmean+nanstd approach (approx)
@@ -1304,20 +1272,14 @@ def esd_combine(data: np.ndarray, max_outliers: int = 0, significance: float = 0
                 std_r = np.std(tile, axis=0)
                 std_r = np.maximum(std_r, 1e-12)
                 tile_mask = np.abs(tile - mean_r[np.newaxis]) > 3.0 * std_r[np.newaxis]
-            return coords, tile_result, tile_mask
-        return coords, tile_result, None
+            return tile_result, tile_mask
+        return tile_result
 
-    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
-            if return_mask and tile_mask is not None:
-                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
+    n_tiles = _combine_tiles(data, tile_size, _tile, result, rej_mask_full)
 
     if verbose:
         safe_print(f"    ESD: max_outliers={max_outliers}, significance={significance}, "
-                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+                   f"{n_tiles} tiles of {tile_size}x{tile_size}")
     if return_mask:
         return result, rej_mask_full
     return result
@@ -1437,18 +1399,7 @@ def linear_fit_clip_combine(data: np.ndarray, sigma_low: float = 4.0, sigma_high
     result = np.zeros((H, W, C), dtype=np.float32)
     rej_mask_full = _make_rej_mask(N, H, W, C) if return_mask else None
 
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    tile_coords = [
-        (ty * tile_size, min((ty + 1) * tile_size, H),
-         tx * tile_size, min((tx + 1) * tile_size, W))
-        for ty in range(n_tiles_y)
-        for tx in range(n_tiles_x)
-    ]
-
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+    def _tile(tile):
         tile_result = _linear_fit_clip_tile(tile, sigma_low, sigma_high, max_iters, weights)
         if return_mask:
             order = np.argsort(tile, axis=0)
@@ -1469,20 +1420,14 @@ def linear_fit_clip_combine(data: np.ndarray, sigma_low: float = 4.0, sigma_high
             sorted_mask = (resid < -sigma_low * sigma[np.newaxis]) | (resid > sigma_high * sigma[np.newaxis])
             tile_mask = np.zeros_like(sorted_mask)
             np.put_along_axis(tile_mask, order, sorted_mask, axis=0)
-            return coords, tile_result, tile_mask
-        return coords, tile_result, None
+            return tile_result, tile_mask
+        return tile_result
 
-    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for coords, tile_result, tile_mask in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
-            if return_mask and tile_mask is not None:
-                rej_mask_full[:, ty:ty_end, tx:tx_end, :] = tile_mask
+    n_tiles = _combine_tiles(data, tile_size, _tile, result, rej_mask_full)
 
     if verbose:
         safe_print(f"    Linear fit clip: sigma=[{sigma_low}, {sigma_high}], "
-                   f"iters={max_iters}, {n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+                   f"iters={max_iters}, {n_tiles} tiles of {tile_size}x{tile_size}")
     if return_mask:
         return result, rej_mask_full
     return result
@@ -1590,31 +1535,16 @@ def ivw_combine(data: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray] =
         tile_size = _adaptive_tile_size(N, C)
         result = np.zeros((H, W, C), dtype=np.float32)
         sigma = np.zeros((H, W), dtype=np.float32)
-        n_tiles_y = (H + tile_size - 1) // tile_size
-        n_tiles_x = (W + tile_size - 1) // tile_size
-        tile_coords = [
-            (ty * tile_size, min((ty + 1) * tile_size, H),
-             tx * tile_size, min((tx + 1) * tile_size, W))
-            for ty in range(n_tiles_y) for tx in range(n_tiles_x)
-        ]
 
-        def _process_tile_sigma(coords):
-            ty, ty_end, tx, tx_end = coords
-            tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
+        def _tile_sigma(tile):
             combined, wsum = _ivw_tile(tile, noise32, sky32, gain, weights, return_wsum=True)
             wsum_px = wsum.mean(axis=-1)  # one confidence map, not per-channel
-            sig = (1.0 / np.sqrt(np.maximum(wsum_px, 1e-12))).astype(np.float32)
-            return coords, combined, sig
+            return combined, (1.0 / np.sqrt(np.maximum(wsum_px, 1e-12))).astype(np.float32)
 
-        n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            for coords, combined, sig in executor.map(_process_tile_sigma, tile_coords):
-                ty, ty_end, tx, tx_end = coords
-                result[ty:ty_end, tx:tx_end, :] = combined
-                sigma[ty:ty_end, tx:tx_end] = sig
+        n_tiles = _combine_tiles(data, tile_size, _tile_sigma, result, sigma)
         if verbose:
             safe_print(f"    Inverse-variance-weighted: uncertainty map computed "
-                       f"({n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size})")
+                       f"({n_tiles} tiles of {tile_size}x{tile_size})")
         return result, sigma
 
     if _native_usable(data):
@@ -1630,30 +1560,15 @@ def ivw_combine(data: np.ndarray, noise: np.ndarray, sky: Optional[np.ndarray] =
     tile_size = _adaptive_tile_size(N, C)
     result = np.zeros((H, W, C), dtype=np.float32)
 
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    tile_coords = [
-        (ty * tile_size, min((ty + 1) * tile_size, H),
-         tx * tile_size, min((tx + 1) * tile_size, W))
-        for ty in range(n_tiles_y)
-        for tx in range(n_tiles_x)
-    ]
+    def _tile(tile):
+        return _ivw_tile(tile, noise32, sky32, gain, weights)
 
-    def _process_tile(coords):
-        ty, ty_end, tx, tx_end = coords
-        tile = np.array(data[:, ty:ty_end, tx:tx_end, :], dtype=np.float32)
-        return coords, _ivw_tile(tile, noise32, sky32, gain, weights)
-
-    n_workers = _cap_tile_workers(min(os.cpu_count() or 4, len(tile_coords)), N, tile_size, C)
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for coords, tile_result in executor.map(_process_tile, tile_coords):
-            ty, ty_end, tx, tx_end = coords
-            result[ty:ty_end, tx:tx_end, :] = tile_result
+    n_tiles = _combine_tiles(data, tile_size, _tile, result)
 
     if verbose:
         safe_print(f"    Inverse-variance-weighted: "
                    f"{'per-pixel shot noise' if gain is not None else 'per-frame constant'}, "
-                   f"{n_tiles_y * n_tiles_x} tiles of {tile_size}x{tile_size}")
+                   f"{n_tiles} tiles of {tile_size}x{tile_size}")
     return result
 
 
@@ -1720,13 +1635,7 @@ def patch_weighted_mean_combine(
 
     result = np.zeros((H, W, C), dtype=np.float32)
 
-    n_tiles_y = (H + tile_size - 1) // tile_size
-    n_tiles_x = (W + tile_size - 1) // tile_size
-    tile_coords = [
-        (ty * tile_size, min((ty + 1) * tile_size, H),
-         tx * tile_size, min((tx + 1) * tile_size, W))
-        for ty in range(n_tiles_y) for tx in range(n_tiles_x)
-    ]
+    tile_coords = _tile_grid(H, W, tile_size)
 
     def _process_tile(coords):
         ty, ty_end, tx, tx_end = coords

@@ -20,6 +20,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.utils import safe_print
 
 try:
@@ -163,8 +164,7 @@ def starless_from_image(rgb: np.ndarray, fwhm: float = 4.0) -> Optional[np.ndarr
         return None
     try:
         from src.quality import detect_stars_auto
-        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
-               + 0.114 * rgb[:, :, 2]).astype(np.float32)
+        lum = luminance(rgb).astype(np.float32)
         med = float(np.median(lum))
         sd = 1.4826 * float(np.median(np.abs(lum - med)))
         sources = detect_stars_auto(lum, max(sd, 1e-3), background=med)

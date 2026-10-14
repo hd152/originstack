@@ -28,7 +28,7 @@ from typing import List, Tuple
 import numpy as np
 from astropy.io import fits
 
-from src.io_fits import save_preview_rgb
+from src.io_fits import preview_stretch_kw, save_preview_rgb
 from src.utils import safe_print
 
 # ---------------------------------------------------------------------------
@@ -302,10 +302,7 @@ def stitch_mosaic_panels(
     mosaic_hwc = np.transpose(mosaic_chw, (1, 2, 0))
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
     save_preview_rgb(mosaic_hwc, preview_path,
-                     stretch=getattr(args, 'stretch', 'ghs'),
-                     ghs_b=getattr(args, 'ghs_b', 8.0),
-                     ghs_sp=getattr(args, 'ghs_sp', 0.15),
-                     ghs_hp=getattr(args, 'ghs_hp', 0.95))
+                     **preview_stretch_kw(args))
 
     safe_print(
         f"  ✓ Mosaic: {os.path.basename(output_path)}  "

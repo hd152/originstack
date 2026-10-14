@@ -7,6 +7,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.models import Config
 
 _log = logging.getLogger("originstack")
@@ -310,7 +311,7 @@ def estimate_strehl_ratio(img: np.ndarray, star_positions,
 
     H, W = img.shape[:2]
     lum = (img if img.ndim == 2
-           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+           else luminance(img))
 
     cutout_r = Config.STREHL_CUTOUT_RADIUS
     try:
@@ -458,7 +459,7 @@ def compute_brenner_sharpness(img: np.ndarray) -> float:
     or trailed one of equal SNR.
     """
     lum = (img if img.ndim == 2
-           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+           else luminance(img))
     lum = lum.astype(np.float64)
     diff = lum[:, 2:] - lum[:, :-2]
     np.multiply(diff, diff, out=diff)  # == diff * diff, without a temporary
@@ -534,7 +535,7 @@ def compute_multiscale_entropy(img: np.ndarray, levels: int = None) -> float:
         levels = Config.WAVELET_ENTROPY_LEVELS
 
     lum = (img if img.ndim == 2
-           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+           else luminance(img))
     lum = lum.astype(np.float32)
 
     # Clamp to what the image actually supports -- pywt.wavedec2 does this
@@ -674,7 +675,7 @@ def decompose_psf_zernike(img: np.ndarray, star_positions,
 
     H, W = img.shape[:2]
     lum = (img if img.ndim == 2
-           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+           else luminance(img))
 
     try:
         sorted_idx = list(np.argsort(star_positions['flux'])[::-1])

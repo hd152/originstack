@@ -57,3 +57,20 @@ def _no_colour_calibration_queries(monkeypatch):
         return None
     _none.__wrapped__ = real
     monkeypatch.setattr(color_calibrate, 'calibrate_linear_stack', _none)
+
+
+@pytest.fixture(scope='module')
+def tk_root():
+    """A themed, withdrawn Tk root shared by a test module's desktop-app tests."""
+    # One root for the module: creating and destroying a Tk root per test
+    # intermittently crashed Tk inside tk.Tk() (Windows, Python 3.14).
+    tk = pytest.importorskip('tkinter')
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip('no display available for a real Tk root')
+    root.withdraw()
+    from src import desktop_app
+    desktop_app._apply_theme(root)
+    yield root
+    root.destroy()

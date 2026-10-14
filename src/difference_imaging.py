@@ -59,6 +59,7 @@ from typing import List, NamedTuple, Optional, Sequence, Tuple
 import numpy as np
 from scipy import fft as sp_fft
 
+from src.debayer import luminance
 from src.utils import safe_print
 
 _log = logging.getLogger("originstack")
@@ -87,7 +88,7 @@ def _to_luminance(img: np.ndarray) -> np.ndarray:
     if arr.ndim == 2:
         return arr
     if arr.shape[2] >= 3:
-        return 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+        return luminance(arr)
     return arr.mean(axis=2)
 
 

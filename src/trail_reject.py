@@ -30,6 +30,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.utils import safe_print
 
 try:
@@ -238,7 +239,7 @@ def reject_trails(rgb: np.ndarray, lum: Optional[np.ndarray] = None,
     if rgb.ndim != 3 or rgb.shape[2] != 3:
         return rgb, 0
     if lum is None:
-        lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        lum = luminance(rgb)
     mask, n = detect_trail_mask(lum, min_len_frac=min_len_frac, width=width)
     if mask is None or n == 0:
         return rgb, 0

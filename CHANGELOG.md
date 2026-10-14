@@ -6,6 +6,108 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.9] - 2026-10-14
+
+Background extraction works on every colour channel again, faster `--from-stack`
+re-runs, and faster compressed Phase 1 storage on large sessions.
+
+### Changed
+
+- **Faster compressed Phase 1 frame storage.** When a large session's frames
+  are stored compressed (`--compress-phase1`, or automatically when they do not
+  fit in RAM), reading a frame back is about 2.5x faster and writing one about
+  1.7x faster, with half the temporary memory per frame. The compressed store
+  now also checks temp-folder space before Phase 1 starts instead of failing
+  part-way through.
+
+### Fixed
+
+- **Background extraction (DBE) models every colour channel again.** Each
+  channel's sky patches were compared against the luminance sky level, so on a
+  colour-calibrated stack whose green and blue skies sit well above it (Sunflower:
+  every G and B patch) those channels fell back to the coarser mesh extraction.
+  Now each channel is sampled against its own sky: the background comes out
+  flatter (sky spread 8.9/8.0/9.8 -> 7.7/6.5/8.8 ADU on Sunflower) and DBE takes
+  4 s instead of 8.
+- **`--from-stack` reuses the background steps when you write to a new file.**
+  The Phase 4 cache was keyed on the output name, so every re-run with a new
+  `-o` redid them (Sunflower: 27 s -> 10 s per re-run).
+- **Saved configs keep `--skip-step`.** List settings were left out of
+  `<output>_config.toml`, so `--from-stack` and `--config` re-runs ran the steps
+  the original run had skipped (for galaxies, `--auto` skips the sky residual
+  step) and gave a different result.
+- **Every preview JPEG follows `--stretch-color` and `--preview-black-sigma`.** The
+  previews written by `--live`, `--stream`, `--mosaic`, comet mode (comet and
+  blended stacks), `--export-frames-dir` and `--annotate` always rendered
+  `preserve` colour, and the mosaic, comet and per-frame previews also ignored
+  `--preview-black-sigma`. The `--combine-sessions` preview written when
+  post-processing the combined stack fails now uses the run's GHS settings too.
+
+## [2.11.8] - 2026-10-13
+
+Pick a different preview stretch after a run, three new stretches, and the
+preview stretch is per-channel by default again.
+
+### Added
+
+- **Re-stretch the preview after a run (desktop app).** Once a run finishes, a
+  bar above the preview offers every `--stretch` and `--stretch-color` choice;
+  *Apply to JPEG* re-renders the preview and overwrites the run's `.jpg`. No
+  re-processing: the FITS outputs are unchanged.
+- **Noise-limited preview stretch** (`--stretch noisefloor`) sets the curve
+  strength from the sky noise, so a short and a long integration each get a
+  suitable curve instead of the preset's fixed one.
+- **Perceptual preview stretch** (`--stretch oklab`) applies the curve to OKLab
+  lightness: mid-tones look as with `ghs`, while saturated star cores render
+  brighter and still coloured.
+- **Local-contrast preview stretch** (`--stretch clahe`) adds contrast-limited
+  adaptive histogram equalisation on extended signal (not sky, not stars) to bring
+  out dust lanes and spiral arms. All three affect the preview JPEG only.
+
+### Changed
+
+- **`--stretch-color` defaults to `channel`**: the preview curve is applied to each
+  colour channel separately. `--stretch-color preserve` keeps each pixel's colour
+  ratios (stars keep their colour instead of whitening). Saved configs that name a
+  value keep it.
+
+### Fixed
+
+- **`--stretch seti --stretch-color channel`** no longer fails.
+- **The desktop app's live previews follow `--stretch-color`**; they always used
+  `preserve` before.
+
+## [2.11.7] - 2026-10-13
+
+Preview stretches now offer more control over faint nebula detail, and automatic
+local contrast is gentler for emission nebulae.
+
+### Added
+
+- **Masked preview stretch** (`--stretch masked`) softly boosts faint, above-sky
+  detail while tapering the boost toward sky noise and bright highlights.
+- **Multi-scale preview stretch** (`--stretch multiscale`) separately enhances
+  diffuse emission and fine filament ridges.
+- **SETI Astro preview stretch** (`--stretch seti`) maps the normalized image
+  median to a target display median of 0.20. These stretch options affect the
+  preview JPEG only; the FITS data is unchanged.
+
+### Improved
+
+- **Emission-nebula local contrast is more conservative by default** under
+  `--auto`, reducing the risk of an overly aggressive Phase 4 rendering.
+
+## [2.11.6] - 2026-10-12
+
+### Fixed
+
+- **The desktop app reliably shows a release update in its header.** The background
+  release check now hands its result to Tkinter's main-thread poll instead of
+  scheduling a Tk callback from the worker thread.
+- **Already-debayered RGB FITS frames no longer fail in Phase 1.** FITS stores color
+  planes in channel-first order, while the processing pipeline expects channel-last
+  RGB; Phase 1 now converts the layout before writing the frame store.
+
 ## [2.11.5] - 2026-10-12
 
 Large sessions can automatically use lossless compressed Phase 1 storage when RAM

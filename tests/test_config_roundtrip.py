@@ -29,3 +29,19 @@ def test_saved_config_with_windows_log_path_parses(tmp_path):
     cfg = tomllib.loads(text)              # used to raise "Invalid hex value"
     assert cfg['log_file'] == log
     assert cfg['stack_method'] == 'sigma_clip' and cfg['auto'] is True
+
+
+def test_list_settings_round_trip_and_merge_inputs_are_not_saved(tmp_path):
+    """--auto's skip_step additions used to be dropped (lists were not written),
+    so a --from-stack or --config re-run ran the steps the original run skipped."""
+    from src import cli
+    args = argparse.Namespace(skip_step=['sky_residual', 'edge_bands'], merge=['a.fits'],
+                              stack_method='sigma_clip')
+    save_effective_config(args, str(tmp_path / 'out.fits'))
+    path = tmp_path / 'out_config.toml'
+    cfg = tomllib.loads(path.read_text(encoding='utf-8'))
+    assert cfg['skip_step'] == ['sky_residual', 'edge_bands']
+    assert 'merge' not in cfg
+    fresh = cli.parse_args(['-d', '.'])
+    cli.load_config_file(str(path), fresh)
+    assert fresh.skip_step == ['sky_residual', 'edge_bands']

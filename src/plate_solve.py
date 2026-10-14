@@ -23,6 +23,7 @@ import numpy as np
 from astropy.io import fits
 
 from src import net_query
+from src.debayer import luminance
 from src.utils import safe_print
 
 # ---------------------------------------------------------------------------
@@ -202,7 +203,7 @@ def solve_plate(image_data: np.ndarray, header: fits.Header, output_path: str,
         if image_data.shape[0] == 3:
             lum = 0.299 * image_data[0] + 0.587 * image_data[1] + 0.114 * image_data[2]
         else:
-            lum = 0.299 * image_data[:, :, 0] + 0.587 * image_data[:, :, 1] + 0.114 * image_data[:, :, 2]
+            lum = luminance(image_data)
     else:
         lum = image_data
 

@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.models import Config
 from src.utils import diff_mad_sigma, get_logger, safe_print
 from src.utils import embed_to_shape as _embed_to_shape
@@ -43,8 +44,7 @@ _log = get_logger()
 
 
 def _lum(rgb: np.ndarray) -> np.ndarray:
-    return (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
-            + 0.114 * rgb[:, :, 2]).astype(np.float32)
+    return luminance(rgb).astype(np.float32)
 
 
 def _detect_stars(lum: np.ndarray) -> Optional[Any]:

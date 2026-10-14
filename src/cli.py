@@ -22,9 +22,9 @@ from src.debayer import build_hot_pixel_map
 from src.frame_discovery import discover_frames, group_lights_by_filter, select_matching_darks, select_matching_flats
 from src.gpu_context import get_gpu, reset_gpu
 from src.health_check import run_health_check
-from src.io_fits import make_master, save_preview_rgb
+from src.io_fits import make_master
 from src.models import Config, ProcessingStats
-from src.pipeline import stack_target
+from src.pipeline import save_final_preview, stack_target
 from src.utils import (
     TZ_OFFSET_RE,
     disable_astropy_network,
@@ -277,21 +277,33 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
     lines = ['# OriginStack effective configuration\n',
              '# Generated automatically -- can be reused with --config\n\n']
 
+    # merge: the previous stacks are an input, like directory, not a setting
     skip_keys = {'directory', 'output', 'config', 'health_check', 'dry_run',
                  'verbose', 'debug_registration', 'keep_intermediates',
-                 'preset', 'diagnostic', 'diagnostic_dir'}
+                 'preset', 'diagnostic', 'diagnostic_dir', 'merge'}
+
+    def _toml_value(value):
+        if isinstance(value, bool):
+            return 'true' if value else 'false'
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            return _toml_str(value)
+        return None
 
     for key, value in sorted(vars(args).items()):
         if key.startswith('_') or key in skip_keys:
             continue
-        if isinstance(value, bool):
-            lines.append(f'{key} = {"true" if value else "false"}\n')
-        elif isinstance(value, (int, float)):
-            lines.append(f'{key} = {value}\n')
-        elif isinstance(value, str):
-            lines.append(f'{key} = {_toml_str(value)}\n')
-        elif value is None:
+        if isinstance(value, (list, tuple)):
+            # e.g. --auto's skip_step additions: dropped, a --from-stack or
+            # --config re-run ran the steps the original run had skipped
+            items = [_toml_value(v) for v in value]
+            if all(i is not None for i in items):
+                lines.append(f'{key} = [{", ".join(items)}]\n')
             continue
+        item = _toml_value(value)
+        if item is not None:
+            lines.append(f'{key} = {item}\n')
 
     try:
         with open(config_path, 'w', encoding='utf-8') as f:
@@ -1357,23 +1369,13 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                                f"({exc}); the linear combined stack is saved and its "
                                f"preview is unprocessed")
             if _processed is not None:
-                _pa = _eff
-                _pstretch = getattr(_pa, 'stretch', 'linear')
                 _pstarless = None
-                if getattr(_pa, 'layered_stretch', False) and _pstretch == 'ghs':
+                if getattr(_eff, 'layered_stretch', False) and getattr(_eff, 'stretch', '') == 'ghs':
                     from src.star_removal import starless_from_image
                     _pstarless = starless_from_image(_processed)
-                save_preview_rgb(_processed, preview_path, stretch=_pstretch,
-                                 ghs_b=float(getattr(_pa, 'ghs_b', 8.0)),
-                                 ghs_sp=float(getattr(_pa, 'ghs_sp', 0.15)),
-                                 ghs_hp=float(getattr(_pa, 'ghs_hp', 0.95)),
-                                 black_sigma=float(getattr(_pa, 'preview_black_sigma', 0.0)),
-                                 starless=_pstarless,
-                                 color=getattr(_pa, 'stretch_color', 'preserve'))
+                save_final_preview(_processed, preview_path, _eff, starless=_pstarless)
             else:
-                save_preview_rgb(combined, preview_path,
-                                 stretch=getattr(args, 'stretch', 'linear'),
-                                 color=getattr(args, 'stretch_color', 'preserve'))
+                save_final_preview(combined, preview_path, args)
 
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
@@ -2019,10 +2021,19 @@ def build_parser() -> argparse.ArgumentParser:
                         'quantity). No effect with other --denoiser choices.')
     g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
-    g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs'], default='ghs',
-                   help='Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)')
-    g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='preserve',
-                   help='How the ghs/arcsinh stretch treats colour (default: preserve). '
+    g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs', 'masked', 'multiscale', 'seti',
+                                             'noisefloor', 'oklab', 'clahe'],
+                   default='ghs',
+                   help='Preview JPEG stretch method (default: ghs). masked blends a stronger '
+                        'faint-signal stretch through a smooth luminance mask; multiscale uses '
+                        'separate diffuse and filament masks; seti applies SETI Astro statistical '
+                        'stretch (target median 0.20); noisefloor picks the curve strength from '
+                        'the sky noise (ignores the preset GHS strength and --preview-black-sigma); '
+                        'oklab applies the GHS curve to perceptual lightness and keeps hue and '
+                        'saturation; clahe adds contrast-limited local equalisation to the GHS '
+                        'preview where there is extended signal.')
+    g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='channel',
+                   help='How the ghs/arcsinh stretch treats colour (default: channel). '
                         'preserve: the curve is applied to luminance and each pixel keeps '
                         'its RGB ratios, so stars and bright cores keep their colour. '
                         'channel: the curve is applied to each channel separately (the '

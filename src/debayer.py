@@ -1268,7 +1268,7 @@ def _fix_hot_rgb_impl(rgb, threshold, xp, _nd, inplace=False):
             fixed, lum_out = fused
             return (rgb if fixed is None else fixed), lum_out
 
-    lum     = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    lum     = luminance(rgb)
     med_lum = _median_filter3(lum, xp, _nd)
     diff    = lum - med_lum
     mad     = float(xp.median(xp.abs(diff)))
@@ -1284,7 +1284,7 @@ def _fix_hot_rgb_impl(rgb, threshold, xp, _nd, inplace=False):
             result = _native.hot_pixel_box_replace_native(
                 np.ascontiguousarray(rgb, dtype=np.float32),
                 np.ascontiguousarray(mask, dtype=np.uint8))
-            lum_fixed = 0.299 * result[:, :, 0] + 0.587 * result[:, :, 1] + 0.114 * result[:, :, 2]
+            lum_fixed = luminance(result)
             return result, lum_fixed
         except Exception:
             pass
@@ -1293,7 +1293,7 @@ def _fix_hot_rgb_impl(rgb, threshold, xp, _nd, inplace=False):
     for c in range(rgb.shape[2]):
         ch = rgb[:, :, c]
         result[:, :, c] = xp.where(mask, _nd.uniform_filter(ch, size=3), ch)
-    lum_fixed = 0.299 * result[:, :, 0] + 0.587 * result[:, :, 1] + 0.114 * result[:, :, 2]
+    lum_fixed = luminance(result)
     return result, lum_fixed
 
 

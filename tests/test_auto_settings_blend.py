@@ -76,6 +76,13 @@ class TestCalibrationAtAnchors:
                 assert abs(got - expected) < tol, (
                     f"{ttype}.{attr}: got {got}, want ~{expected} (tol {tol})")
 
+    def test_emission_nebula_local_contrast_is_conservative(self):
+        sig = dict(a._TYPE_ANCHORS['emission_nebula'])
+        sig['fwhm'] = 3.0
+        args = _args()
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
+        assert 0.25 < args.local_contrast_strength < 0.45
+
 
 class TestInterpolation:
     def test_midpoint_between_two_anchors_is_strictly_between(self):

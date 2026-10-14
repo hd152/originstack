@@ -148,17 +148,22 @@ class TestDesktopAppWiring:
             from src import desktop_app
             monkeypatch.setattr('src.utils.should_check_for_update', lambda: True)
 
-            class ImmediateThread:
-                def __init__(self, target=None, daemon=None):
-                    self._target = target
+            real_thread = threading.Thread
+            started = []
 
-                def start(self):
-                    self._target()
-            monkeypatch.setattr(threading, 'Thread', ImmediateThread)
+            def track_thread(*args, **kwargs):
+                thread = real_thread(*args, **kwargs)
+                started.append(thread)
+                return thread
+
+            monkeypatch.setattr(threading, 'Thread', track_thread)
             monkeypatch.setattr('src.net_query.check_for_update',
                                lambda *a, **k: {'version': '9.9.9', 'url': 'https://example.invalid/new'})
             app = desktop_app.App(root)
-            root.update()
+            started[0].join(timeout=2)
+            assert not started[0].is_alive()
+            assert app.update_label.cget('text') == ''
+            app._poll()
             assert '9.9.9' in app.update_label.cget('text')
             assert app._update_url == 'https://example.invalid/new'
         finally:

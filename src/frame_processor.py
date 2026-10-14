@@ -46,13 +46,8 @@ from src.utils import (
     print_quality_table,
     progress_disabled,
     safe_print,
+    tqdm,
 )
-
-try:
-    from tqdm import tqdm
-except Exception:
-    def tqdm(iterable, **kwargs):
-        return iterable
 
 
 def _get_ui_events():
@@ -117,7 +112,7 @@ def _pre_gradient_removal(rgb: np.ndarray, lum: np.ndarray) -> np.ndarray:
     if native:
         vals = (0.299 * rgb[Ys, Xs, 0] + 0.587 * rgb[Ys, Xs, 1] + 0.114 * rgb[Ys, Xs, 2])
     else:
-        lum_pg = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        lum_pg = luminance(rgb)
         vals = lum_pg[Ys, Xs]
     b_vec = vals.ravel().astype(np.float64)
     coeffs, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
@@ -274,6 +269,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         return {'error': f'load error: {e}'}
     if data is None or data.size == 0:
         return {'error': 'empty data array'}
+    if data.ndim == 3 and data.shape[0] == 3 and data.shape[-1] != 3:
+        data = np.ascontiguousarray(data.transpose(1, 2, 0))
     timings['load'], _t = time.perf_counter() - _t, time.perf_counter()
     _sat = raw_saturated_fraction(data, _be16)
     if _sat is not None and _sat > Config.OVEREXPOSED_FRACTION:

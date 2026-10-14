@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import io
 import os
+import queue
 import sys
 import threading
 import tkinter as tk
@@ -1324,6 +1325,7 @@ class App:
         self._shown_log_lines = 0
         self._last_run_status = 'idle'
         self._named_cache: List[Dict[str, Any]] = []
+        self._update_results: queue.Queue[Dict[str, str]] = queue.Queue()
 
         root.title('OriginStack')
         root.geometry('1400x900')
@@ -1453,7 +1455,7 @@ class App:
             from src.net_query import check_for_update
             info = check_for_update(read_version())
             if info:
-                self.root.after(0, lambda: self._show_update(info))
+                self._update_results.put(info)
         threading.Thread(target=_bg, daemon=True).start()
 
     def _show_update(self, info: Dict[str, str]) -> None:
@@ -1552,6 +1554,30 @@ class App:
                                           state='readonly', width=20)
         self.compare_combo.pack(side='left', fill='x', expand=True)
         self.compare_combo.bind('<<ComboboxSelected>>', self._on_compare_selected)
+
+        # Once a run is done: re-stretch its preview JPEG with another stretch
+        # (UIEvents.restretch). Hidden until the run has left an image to redo.
+        self.restretch_bar = ttk.Frame(preview_frame)
+        ttk.Label(self.restretch_bar, text=_('Stretch')).pack(side='left')
+        self.restretch_var = tk.StringVar()
+        self.restretch_combo = ttk.Combobox(self.restretch_bar, textvariable=self.restretch_var,
+                                            state='readonly', width=11,
+                                            values=self._field_choices('stretch'))
+        self.restretch_combo.pack(side='left', padx=(4, 8))
+        ttk.Label(self.restretch_bar, text=_('Colour')).pack(side='left')
+        self.restretch_color_var = tk.StringVar()
+        self.restretch_color_combo = ttk.Combobox(
+            self.restretch_bar, textvariable=self.restretch_color_var, state='readonly',
+            width=9, values=self._field_choices('stretch_color'))
+        self.restretch_color_combo.pack(side='left', padx=(4, 8))
+        self.restretch_btn = ttk.Button(self.restretch_bar, text=_('Apply to JPEG'),
+                                        command=self._on_restretch)
+        self.restretch_btn.pack(side='left')
+        self.restretch_status_var = tk.StringVar()
+        ttk.Label(self.restretch_bar, textvariable=self.restretch_status_var,
+                  style='Dim.TLabel').pack(side='left', padx=8)
+        self._restretch_shown: Optional[str] = None   # path the bar was set up for
+        self._restretch_results: queue.Queue = queue.Queue()
 
         self.preview = PreviewCanvas(preview_frame)
         self.preview.pack(fill='both', expand=True, padx=4)
@@ -1697,6 +1723,64 @@ class App:
         data = self.ui.named_jpeg(slug) if slug else None
         self.preview.set_compare_slot(data, slug)
 
+    def _field_choices(self, dest: str) -> List[str]:
+        """The CLI's choices for ``dest`` (from the Setup form's schema)."""
+        for fields in self.form.schema.values():
+            for f in fields:
+                if f['dest'] == dest:
+                    return list(f['choices'] or [])
+        return []
+
+    def _sync_restretch_bar(self, snap: Dict[str, Any]) -> None:
+        """Show the re-stretch bar once a finished run has left a preview to
+        redo, preset to the stretch that JPEG has now; hide it otherwise."""
+        info = snap.get('restretch')
+        if info is None or snap['run_status'] != 'ok':
+            if self._restretch_shown is not None:
+                self.restretch_bar.pack_forget()
+                self._restretch_shown = None
+            return
+        if self._restretch_shown != info['path']:
+            self._restretch_shown = info['path']
+            self.restretch_var.set(info['stretch'])
+            self.restretch_color_var.set(info['color'])
+            self.restretch_status_var.set('')
+            self.restretch_btn.state(['!disabled'])
+            self.restretch_bar.pack(fill='x', padx=4, pady=(0, 4), before=self.preview)
+
+    def _on_restretch(self) -> None:
+        stretch = self.restretch_var.get()
+        color = self.restretch_color_var.get()
+        if not stretch or not color or self.rm.is_running():
+            return
+        self.restretch_btn.state(['disabled'])
+        self.restretch_status_var.set(_('Re-stretching…'))
+
+        def _bg() -> None:
+            try:
+                self._restretch_results.put(('ok', self.ui.restretch(stretch, color)))
+            except Exception as e:
+                self._restretch_results.put(('error', str(e)))
+        threading.Thread(target=_bg, daemon=True).start()
+        self.root.after(self.POLL_MS, self._poll_restretch)
+
+    def _poll_restretch(self) -> None:
+        try:
+            status, value = self._restretch_results.get_nowait()
+        except queue.Empty:
+            self.root.after(self.POLL_MS, self._poll_restretch)
+            return
+        self.restretch_btn.state(['!disabled'])
+        if status == 'ok':
+            name = os.path.basename(self._restretch_shown or '')
+            self.restretch_status_var.set(_('Saved {name}', name=name))
+            self.compare_var.set(False)
+            self._on_compare_toggled()
+            self.preview.load_slot(value, 'final', _('Final ({stretch})',
+                                                      stretch=self.restretch_var.get()))
+        else:
+            self.restretch_status_var.set(_('Re-stretch failed: {error}', error=value))
+
     def _on_wipe_moved(self, value: str) -> None:
         self.preview.set_wipe(float(value))
 
@@ -1713,6 +1797,12 @@ class App:
 
     def _poll(self) -> None:
         try:
+            try:
+                info = self._update_results.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                self._show_update(info)
             self._refresh()
         finally:
             self.root.after(self.POLL_MS, self._poll)
@@ -1800,6 +1890,7 @@ class App:
             lines = [f"{k}: {v}" for k, v in snap['summary'].items()]
             self.summary_var.set('\n'.join(lines))
 
+        self._sync_restretch_bar(snap)
         self._refresh_run_button(snap)
 
     def _open_output_folder(self) -> None:
