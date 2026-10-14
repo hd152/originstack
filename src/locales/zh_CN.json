@@ -242,7 +242,7 @@
  "How frames are combined and outliers (satellites, cosmic rays) rejected. auto picks for the session.": "如何合成各帧并剔除离群值（卫星、宇宙线）。auto 会根据会话选择。",
  "How strongly noise reduction protects filaments and spiral arms (0-1).": "降噪对丝状结构和旋臂的保护强度（0-1）。",
  "How the colour balance of each frame is set before stacking.": "叠加前如何设置每帧的色彩平衡。",
- "How the ghs/arcsinh stretch treats colour (default: preserve). preserve: the curve is applied to luminance and each pixel keeps its RGB ratios, so stars and bright cores keep their colour. channel: the curve is applied to each channel separately (the behaviour before 2.5), which renders bright objects whiter.": "ghs/arcsinh 拉伸如何处理颜色（默认：preserve）。preserve：曲线作用于亮度，每个像素保持其 RGB 比例，因此恒星和明亮核心保留颜色。channel：曲线分别作用于每个通道（2.5 之前的行为），亮的天体会显得更白。",
+ "How the ghs/arcsinh stretch treats colour (default: channel). preserve: the curve is applied to luminance and each pixel keeps its RGB ratios, so stars and bright cores keep their colour. channel: the curve is applied to each channel separately (the behaviour before 2.5), which renders bright objects whiter.": "ghs/arcsinh 拉伸如何处理颜色（默认：channel）。preserve：曲线作用于亮度，每个像素保持其 RGB 比例，因此恒星和明亮核心保留颜色。channel：曲线分别作用于每个通道（2.5 之前的行为），亮的天体会显得更白。",
  "How the ghs/arcsinh stretch treats colour.": "ghs/arcsinh 拉伸如何处理颜色。",
  "How the preview JPEG is brightened from the linear stack.": "如何从线性叠加结果提亮预览 JPEG。",
  "Idle": "空闲",

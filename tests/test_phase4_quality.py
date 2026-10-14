@@ -97,7 +97,8 @@ def test_channel_mode_is_the_old_per_channel_curve():
 
 def test_stretch_color_flag_parses():
     from src import cli
-    assert cli.parse_args(['-d', '.']).stretch_color == 'preserve'
+    assert cli.parse_args(['-d', '.']).stretch_color == 'channel'
+    assert cli.parse_args(['-d', '.', '--stretch-color', 'preserve']).stretch_color == 'preserve'
     assert cli.parse_args(['-d', '.', '--stretch-color', 'channel']).stretch_color == 'channel'
 
 

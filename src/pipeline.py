@@ -1734,7 +1734,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
                      starless=_preview_starless,
-                     color=getattr(args, 'stretch_color', 'preserve'))
+                     color=getattr(args, 'stretch_color', 'channel'))
     from src.ui_events import get_ui_events
     get_ui_events().remember_final_preview(_preview_src, preview_path, args,
                                            starless=_preview_starless)
@@ -1908,7 +1908,7 @@ def postprocess_from_stack(stack_path: str, output_path: str,
                      ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
                      starless=starless,
-                     color=getattr(args, 'stretch_color', 'preserve'))
+                     color=getattr(args, 'stretch_color', 'channel'))
     from src.ui_events import get_ui_events
     get_ui_events().remember_final_preview(result, preview_path, args, starless=starless)
     safe_print(f"  ✓ Preview: {os.path.basename(preview_path)} "

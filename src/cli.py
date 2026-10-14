@@ -1369,11 +1369,11 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                                  ghs_hp=float(getattr(_pa, 'ghs_hp', 0.95)),
                                  black_sigma=float(getattr(_pa, 'preview_black_sigma', 0.0)),
                                  starless=_pstarless,
-                                 color=getattr(_pa, 'stretch_color', 'preserve'))
+                                 color=getattr(_pa, 'stretch_color', 'channel'))
             else:
                 save_preview_rgb(combined, preview_path,
                                  stretch=getattr(args, 'stretch', 'linear'),
-                                 color=getattr(args, 'stretch_color', 'preserve'))
+                                 color=getattr(args, 'stretch_color', 'channel'))
             from src.ui_events import get_ui_events
             if _processed is not None:
                 get_ui_events().remember_final_preview(_processed, preview_path, _pa,
@@ -2036,8 +2036,8 @@ def build_parser() -> argparse.ArgumentParser:
                         'oklab applies the GHS curve to perceptual lightness and keeps hue and '
                         'saturation; clahe adds contrast-limited local equalisation to the GHS '
                         'preview where there is extended signal.')
-    g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='preserve',
-                   help='How the ghs/arcsinh stretch treats colour (default: preserve). '
+    g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='channel',
+                   help='How the ghs/arcsinh stretch treats colour (default: channel). '
                         'preserve: the curve is applied to luminance and each pixel keeps '
                         'its RGB ratios, so stars and bright cores keep their colour. '
                         'channel: the curve is applied to each channel separately (the '

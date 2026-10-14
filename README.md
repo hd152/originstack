@@ -224,10 +224,10 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 - **Plate solving** built in, against a local Gaia DR3 index (no API key, works offline once the index covers the field), or via ASTAP / nova.astrometry.net — writes WCS to FITS header, identifies objects via SIMBAD
 - **Re-run post-processing only** (`--from-stack STACK.fits`) — Phase 4 on an earlier run's linear stack, with that run's saved settings; no light frames needed
 - **Colour calibration against Gaia DR3** — on by default when the stack has a sky position (the session solve, refined against Gaia) and the run is online: each star's measured colour is fitted against its Gaia BP-RP on the linear stack, and the channels scaled so a Sun-like (G2V) star is white. `--no-color-calibrate` turns it off; the gray-locus method (`--photometric-calibration`) is the fallback
-- **Colour-preserving stretch** (`--stretch-color preserve`, default) — the preview curve is applied to brightness only, so stars and galaxy cores keep their colour instead of washing out to white; `--stretch-color channel` restores the old per-channel curve
+- **Colour-preserving stretch** (`--stretch-color preserve`) — the preview curve is applied to brightness only, so stars and galaxy cores keep their colour instead of washing out to white; the default, `--stretch-color channel`, applies the curve to each channel separately
 - **Masked preview stretch** (`--stretch masked`) — softly boosts faint above-sky detail while tapering back toward sky noise and bright highlights; preview JPEG only
 - **Multi-scale masked stretch** (`--stretch multiscale`) — separately weights broad diffuse emission and fine positive filament ridges; preview JPEG only
-- **SETI Astro statistical stretch** (`--stretch seti`) — maps the normalized image median to a target display median of 0.20, with a sigma-based black point; `--stretch-color channel` applies it independently per channel, while the default preserves pixel colour ratios
+- **SETI Astro statistical stretch** (`--stretch seti`) — maps the normalized image median to a target display median of 0.20, with a sigma-based black point; `--stretch-color channel` (the default) applies it independently per channel, while `preserve` keeps pixel colour ratios
 - **Noise-limited stretch** (`--stretch noisefloor`) — solves the GHS strength so the sky noise shows at a fixed size (about 4 of 255 display levels), so a short and a long integration get a curve suited to each instead of the preset's fixed one; preview JPEG only
 - **Perceptual stretch** (`--stretch oklab`) — the GHS curve applied to OKLab lightness: mid-tones keep the usual preview colour, while saturated star cores render bright and still coloured instead of being dimmed to fit; preview JPEG only
 - **Local-contrast stretch** (`--stretch clahe`) — the GHS preview plus contrast-limited adaptive histogram equalisation, blended in only on extended signal (not sky, not stars) to bring out dust lanes and arms; preview JPEG only
@@ -658,7 +658,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Chroma noise reduction | ✅ on | `--no-chroma-nr` |
 | Star reduction | ✅ on | `--no-star-reduce` |
 | Colour calibration against Gaia (online, needs a sky position) | ✅ on | `--no-color-calibrate` |
-| Colour-preserving stretch | ✅ on | `--stretch-color channel` |
+| Colour-preserving stretch | ❌ off | `--stretch-color preserve` |
 | Star removal (writes a `_starless.fits` sidecar; main output keeps stars) | ❌ off | `--remove-stars` |
 | Local contrast enhancement | ✅ on | `--no-local-contrast` |
 | Chromatic aberration correction | ✅ on | `--no-ca-correction` |

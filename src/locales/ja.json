@@ -242,7 +242,7 @@
  "How frames are combined and outliers (satellites, cosmic rays) rejected. auto picks for the session.": "フレームの合成方法と、外れ値（人工衛星、宇宙線）の除外方法。auto はセッションに合わせて選びます。",
  "How strongly noise reduction protects filaments and spiral arms (0-1).": "ノイズ除去でフィラメントや渦巻腕をどれだけ強く保護するか（0〜1）。",
  "How the colour balance of each frame is set before stacking.": "スタック前に各フレームのカラーバランスをどう設定するか。",
- "How the ghs/arcsinh stretch treats colour (default: preserve). preserve: the curve is applied to luminance and each pixel keeps its RGB ratios, so stars and bright cores keep their colour. channel: the curve is applied to each channel separately (the behaviour before 2.5), which renders bright objects whiter.": "ghs/arcsinh 強調での色の扱い（既定値: preserve）。preserve: 輝度にカーブを適用し、各ピクセルの RGB 比を保つため、恒星や明るい中心部の色が残ります。channel: 各チャンネルに別々にカーブを適用します（2.5 より前の動作）。明るい天体がより白く表現されます。",
+ "How the ghs/arcsinh stretch treats colour (default: channel). preserve: the curve is applied to luminance and each pixel keeps its RGB ratios, so stars and bright cores keep their colour. channel: the curve is applied to each channel separately (the behaviour before 2.5), which renders bright objects whiter.": "ghs/arcsinh 強調での色の扱い（既定値: channel）。preserve: 輝度にカーブを適用し、各ピクセルの RGB 比を保つため、恒星や明るい中心部の色が残ります。channel: 各チャンネルに別々にカーブを適用します（2.5 より前の動作）。明るい天体がより白く表現されます。",
  "How the ghs/arcsinh stretch treats colour.": "ghs/arcsinh 強調での色の扱い。",
  "How the preview JPEG is brightened from the linear stack.": "リニアスタックからプレビュー JPEG を明るくする方法。",
  "Idle": "待機中",

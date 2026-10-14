@@ -154,13 +154,14 @@ class UIEvents:
         """Extract stretch parameters from an args namespace (or defaults)."""
         if args is None:
             return dict(stretch='ghs', ghs_b=8.0, ghs_sp=0.15, ghs_hp=0.95,
-                        black_sigma=0.0)
+                        black_sigma=0.0, color='channel')
         return dict(
             stretch=getattr(args, 'stretch', 'ghs'),
             ghs_b=float(getattr(args, 'ghs_b', 8.0)),
             ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
             ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-            black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0))
+            black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0),
+            color=getattr(args, 'stretch_color', 'channel'))
 
     def preview(self, rgb, caption: str, args=None, slot: Optional[str] = None,
                 min_interval: float = 2.0) -> None:
@@ -240,8 +241,6 @@ class UIEvents:
         if not self.active:
             return
         kw = self._stretch_kw(args)
-        kw['color'] = (getattr(args, 'stretch_color', 'preserve') if args is not None
-                       else 'preserve')
         with self._lock:
             self._final_src = {'rgb': rgb, 'starless': starless,
                                'path': os.path.abspath(path), 'kw': kw}
