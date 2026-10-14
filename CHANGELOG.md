@@ -6,6 +6,40 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.8] - 2026-10-13
+
+Pick a different preview stretch after a run, three new stretches, and the
+preview stretch is per-channel by default again.
+
+### Added
+
+- **Re-stretch the preview after a run (desktop app).** Once a run finishes, a
+  bar above the preview offers every `--stretch` and `--stretch-color` choice;
+  *Apply to JPEG* re-renders the preview and overwrites the run's `.jpg`. No
+  re-processing: the FITS outputs are unchanged.
+- **Noise-limited preview stretch** (`--stretch noisefloor`) sets the curve
+  strength from the sky noise, so a short and a long integration each get a
+  suitable curve instead of the preset's fixed one.
+- **Perceptual preview stretch** (`--stretch oklab`) applies the curve to OKLab
+  lightness: mid-tones look as with `ghs`, while saturated star cores render
+  brighter and still coloured.
+- **Local-contrast preview stretch** (`--stretch clahe`) adds contrast-limited
+  adaptive histogram equalisation on extended signal (not sky, not stars) to bring
+  out dust lanes and spiral arms. All three affect the preview JPEG only.
+
+### Changed
+
+- **`--stretch-color` defaults to `channel`**: the preview curve is applied to each
+  colour channel separately. `--stretch-color preserve` keeps each pixel's colour
+  ratios (stars keep their colour instead of whitening). Saved configs that name a
+  value keep it.
+
+### Fixed
+
+- **`--stretch seti --stretch-color channel`** no longer fails.
+- **The desktop app's live previews follow `--stretch-color`**; they always used
+  `preserve` before.
+
 ## [2.11.7] - 2026-10-13
 
 Preview stretches now offer more control over faint nebula detail, and automatic

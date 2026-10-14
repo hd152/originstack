@@ -356,7 +356,6 @@
  "Post-processing (Phase 4)": "後処理（フェーズ 4）",
  "Preset": "プリセット",
  "Preset: {preset}": "プリセット：{preset}",
- "Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)": "プレビュー JPEG の強調方式（既定値: ghs = Generalized Hyperbolic Stretch）",
  "Preview JPEG: take the stretch black/white points from a starless copy of the image, so faint galaxy/nebula structure owns the tonal range instead of being squeezed under the stars' white point. Only affects the preview JPEG, not the FITS/TIFF. Needs --stretch ghs. Off by default.": "プレビュー JPEG：強調の黒点と白点を画像のスターレスのコピーから求めるため、淡い銀河や星雲の構造が恒星の白点の下に押し込められず、階調域を広く使えます。影響するのはプレビュー JPEG のみで、FITS/TIFF には影響しません。--stretch ghs が必要です。既定ではオフです。",
  "Preview JPEG: take the stretch black/white points from a starless copy of the image, so faint galaxy/nebula structure…": "プレビュー JPEG：強調の黒点と白点を画像のスターレスのコピーから求めるため、淡い銀河や星雲の構造が…",
  "Preview black point, in sky-sigma above the sky median (default: -0.0868). Higher (e.g. 2.0) clips background noise to black for a small target on empty sky; negative keeps faint frame-filling nebulosity visible. Set per target by --auto.": "プレビューの黒点。空の中央値からの空のシグマ単位（既定値: -0.0868）。大きくすると（例: 2.0）、何もない空にある小さな対象で背景ノイズが黒につぶれます。負の値にすると、フレーム全体に広がる淡い星雲が見えたままになります。--auto で対象ごとに設定されます。",

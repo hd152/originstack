@@ -356,7 +356,6 @@
  "Post-processing (Phase 4)": "后期处理（第 4 阶段）",
  "Preset": "预设",
  "Preset: {preset}": "预设：{preset}",
- "Preview JPEG stretch method (default: ghs = Generalized Hyperbolic Stretch)": "预览 JPEG 的拉伸方法（默认：ghs = 广义双曲拉伸）",
  "Preview JPEG: take the stretch black/white points from a starless copy of the image, so faint galaxy/nebula structure owns the tonal range instead of being squeezed under the stars' white point. Only affects the preview JPEG, not the FITS/TIFF. Needs --stretch ghs. Off by default.": "预览 JPEG：从图像的去星副本中取拉伸的黑点/白点，使暗弱的星系/星云结构占据色调范围，而不是被压缩在恒星的白点之下。只影响预览 JPEG，不影响 FITS/TIFF。需要 --stretch ghs。默认关闭。",
  "Preview JPEG: take the stretch black/white points from a starless copy of the image, so faint galaxy/nebula structure…": "预览 JPEG：从图像的去星副本中取拉伸的黑点/白点，使暗弱的星系/星云结构…",
  "Preview black point, in sky-sigma above the sky median (default: -0.0868). Higher (e.g. 2.0) clips background noise to black for a small target on empty sky; negative keeps faint frame-filling nebulosity visible. Set per target by --auto.": "预览黑点，以天空中位数之上的天空 σ 为单位（默认：-0.0868）。较高的值（例如 2.0）会把空旷天空上小目标的背景噪声裁成黑色；负值可保留铺满画面的暗弱星云。由 --auto 按目标设置。",
