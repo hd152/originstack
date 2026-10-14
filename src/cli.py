@@ -1374,6 +1374,12 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 save_preview_rgb(combined, preview_path,
                                  stretch=getattr(args, 'stretch', 'linear'),
                                  color=getattr(args, 'stretch_color', 'preserve'))
+            from src.ui_events import get_ui_events
+            if _processed is not None:
+                get_ui_events().remember_final_preview(_processed, preview_path, _pa,
+                                                       starless=_pstarless)
+            else:
+                get_ui_events().remember_final_preview(combined, preview_path, args)
 
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")

@@ -687,18 +687,35 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
     """Write the preview JPEG. ``starless`` (same shape as ``rgb``), with
     ``stretch='ghs'``, switches to the layered stretch -- see
     ``render_preview_layered_uint8``."""
-    from src.models import Config
     if Image is None:
         return
-    if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
-        out = render_preview_layered_uint8(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                           ghs_hp=ghs_hp, black_sigma=black_sigma,
-                                           color=color)
-    else:
-        out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                   ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
+    out = render_preview_rgb_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                   ghs_hp=ghs_hp, black_sigma=black_sigma,
+                                   starless=starless, color=color)
     if out is None:
         return
+    write_preview_jpeg(out, path)
+
+
+def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
+                             ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                             ghs_hp: float = 0.95, black_sigma: float = 0.0,
+                             starless: Optional[np.ndarray] = None,
+                             color: str = 'preserve') -> Optional[np.ndarray]:
+    """The full-resolution uint8 image ``save_preview_rgb`` writes: the layered
+    stretch when ``starless`` is given with ``stretch='ghs'``, else
+    ``render_preview_uint8``."""
+    if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
+        return render_preview_layered_uint8(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                            ghs_hp=ghs_hp, black_sigma=black_sigma,
+                                            color=color)
+    return render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
+
+
+def write_preview_jpeg(out: np.ndarray, path: str) -> None:
+    """Write a stretched uint8 HWC image as the size-capped preview JPEG."""
+    from src.models import Config
     img = _preview_pil_image(out, Config.PREVIEW_MAX_DIMENSION)
     img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY)
 

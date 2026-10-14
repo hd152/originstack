@@ -1735,6 +1735,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
                      starless=_preview_starless,
                      color=getattr(args, 'stretch_color', 'preserve'))
+    from src.ui_events import get_ui_events
+    get_ui_events().remember_final_preview(_preview_src, preview_path, args,
+                                           starless=_preview_starless)
 
     if getattr(args, 'annotate', False):
         if _wcs_available:
@@ -1906,6 +1909,8 @@ def postprocess_from_stack(stack_path: str, output_path: str,
                      black_sigma=float(getattr(args, 'preview_black_sigma', 0.0)),
                      starless=starless,
                      color=getattr(args, 'stretch_color', 'preserve'))
+    from src.ui_events import get_ui_events
+    get_ui_events().remember_final_preview(result, preview_path, args, starless=starless)
     safe_print(f"  ✓ Preview: {os.path.basename(preview_path)} "
                f"(Phase 4 {format_time(stats.post_processing_time)})")
     return result
