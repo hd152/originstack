@@ -856,8 +856,15 @@ def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
     several percent wider than the linear stack. This narrows the profile
     instead. Per star (brightest ``max_stars``, detected well above the noise):
 
-      * local background ``B`` = per-channel median of an annulus just outside
-        the star, so a galaxy or nebula under the star stays background;
+      * local background ``B`` = per-channel median of a thin ring just outside
+        the star (the inner 1.5 px of the annulus), so a galaxy or nebula under
+        the star stays background. Not the whole annulus: a bright star's halo
+        still falls across it, its median sits below the halo at the inner edge,
+        and flattening the light inside to that level left a dark moat just
+        inside the edge -- 11-47 sky sigma deep around the brightest stars of a
+        ``--denoiser nn`` Sunflower stack (1-5 sigma at the undenoised noise,
+        so it went unseen). For a star without a halo at 2.5 FWHM the two agree;
+        the removal stops at R (the light above ``B`` is ~0 there);
       * ``e`` = the star's light above ``B``, lightly smoothed (sigma 0.7 px) so
         the operation acts on the star's profile, not on its noise;
       * keep the fraction ``(e / A) ** amount`` of it (``A`` = the star's
@@ -867,7 +874,7 @@ def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
 
     Only the smooth star light is removed -- the pixel noise is left as it was,
     so the sky around a star keeps its texture (no smooth discs) -- and the
-    removal is tapered to zero at 2.5 FWHM. Star colour is kept (each channel
+    removal stops at 2.5 FWHM. Star colour is kept (each channel
     loses the same fraction).
 
     Args:
@@ -886,8 +893,11 @@ def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
     Rb = int(np.ceil(R + max(3.0, fwhm)))
     yy, xx = np.mgrid[-Rb:Rb + 1, -Rb:Rb + 1]
     rr = np.hypot(yy, xx)
-    ann = (rr > R + 0.5) & (rr <= Rb)
-    taper = np.clip((R - rr) / max(0.5 * fwhm, 1.0), 0.0, 1.0)
+    ann = (rr > R + 0.5) & (rr <= R + 2.0)
+    # B is the light level at R, so the light above it is ~0 there and the reduction
+    # (monotone in it) needs no taper of its own; fade over the 1 px ring only. A
+    # 0.5 FWHM taper restored the full halo next to pixels keeping ~15% of it: a bump.
+    taper = np.clip(R + 1.0 - rr, 0.0, 1.0)
     lw = np.array([0.299, 0.587, 0.114], dtype=np.float32)
     sky_sigma = max(float(_estimate_sky_sigma(img)), 1e-6)
 
