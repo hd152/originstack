@@ -6,9 +6,12 @@ with Siril's command-line build, then reports per-stage wall time, star sharpnes
 
     python tools/bench_vs_siril.py "D:/astro/Omega/session1" --workdir bench_out
     python tools/bench_vs_siril.py lights/ --siril "C:/Program Files/Siril/bin/siril-cli.exe"
+    python tools/bench_vs_siril.py lights/ --reference-stack wbpp_master.xisf --reference-name WBPP
 
-Needs a Siril 1.2+ install (``siril-cli``). Colour (Bayer) FITS lights only. Everything is
-written under ``--workdir``; the input folder is never modified.
+Needs a Siril 1.2+ install (``siril-cli``), unless ``--reference-stack`` names a linear master
+made by another tool (PixInsight WBPP, APP, DSS, ...): Siril is then not run and that master is
+compared instead, with ``--reference-time`` as its wall time if given. Colour (Bayer) FITS lights
+only. Everything is written under ``--workdir``; the input folder is never modified.
 
 How the numbers are made comparable (and where they are not):
   * Both tools get the same lights and the same bias/dark/flat, with default-style settings.
@@ -20,6 +23,9 @@ How the numbers are made comparable (and where they are not):
     OriginStack's onto Siril's grid and matching the flux scale per channel. It depends on
     resolution (a blurrier stack is smoother per pixel), so read it together with the star
     widths; the blurred rows are for reference only.
+  * A ``--reference-stack`` master must be linear (no stretch, no background extraction) and
+    uncompressed if XISF. It may be mirrored (tools disagree on the FITS row order): it is
+    flipped back when only the flipped copy matches OriginStack's star pattern.
   * Star width is fitted on ONE shared set of stars, at the same positions in both stacks and
     on each stack's own pixel grid (see common_star_fwhm.py). Comparing each stack's FWHM over
     its own detected star list is not valid: which stars get picked changes the number by more
@@ -163,6 +169,61 @@ def load_linear(path, siril=False):
     return data * 65535.0 if siril else data
 
 
+def load_reference(path):
+    """A linear master from another tool as a (3, H, W) float64 cube on a 0-65535 scale.
+    Accepts FITS or XISF, (3, H, W) or (H, W, 3); mono is replicated to three channels.
+    Data normalised to [0, 1] (Siril, PixInsight) is scaled up like Siril's own output."""
+    if path.lower().endswith(".xisf"):
+        from src.io_xisf import read_xisf
+        data = read_xisf(path)[0]
+    else:
+        from astropy.io import fits
+        data = fits.getdata(path)
+    data = np.asarray(data, dtype=np.float64)
+    if data.ndim == 2:
+        data = np.repeat(data[None], 3, 0)
+    elif data.ndim == 3 and data.shape[0] != 3 and data.shape[-1] == 3:
+        data = np.moveaxis(data, -1, 0)
+    if data.ndim != 3 or data.shape[0] != 3:
+        sys.exit(f"{path}: expected an RGB or mono image, got shape {data.shape}")
+    if np.nanpercentile(data, 99.99) <= 1.5:
+        data = data * 65535.0
+    return np.nan_to_num(data)
+
+
+def orient_like(os_cube, ref_cube):
+    """*ref_cube*, flipped top-to-bottom when only the flipped copy's star pattern matches
+    OriginStack's (the comparisons below fit a rigid transform, which cannot mirror)."""
+    from src.blind_match import match_rigid_unknown_rotation
+    from src.star_detect import detect_stars_matched_filter as detect
+
+    def stars(c):
+        s = detect(c.mean(0) - np.median(c.mean(0)))
+        return s[np.argsort(-s["flux"])]
+
+    def inliers(src, dst):
+        # the matcher can accept a chance consensus on a mirrored field, so count how many of
+        # the brightest stars the transform actually lands within 2 px of a star
+        m = match_rigid_unknown_rotation(src, dst, max_stars=60, pixel_tol=2.0)
+        if m is None:
+            return 0
+        s = np.c_[src["xcentroid"][:60], src["ycentroid"][:60], np.ones(min(len(src), 60))]
+        moved = (m.params @ s.T).T[:, :2]
+        d = np.c_[dst["xcentroid"], dst["ycentroid"]]
+        dist = np.sqrt(((moved[:, None, :] - d[None, :, :]) ** 2).sum(-1)).min(1)
+        return int((dist < 2.0).sum())
+
+    os_stars = stars(os_cube)
+    flipped = np.ascontiguousarray(ref_cube[:, ::-1])
+    n_as_is, n_flipped = inliers(stars(ref_cube), os_stars), inliers(stars(flipped), os_stars)
+    if max(n_as_is, n_flipped) < 6:
+        print("Warning: no star-pattern match with the reference stack, flipped or not.")
+    if n_flipped > n_as_is:
+        print("Reference stack is mirrored relative to OriginStack's; flipped it top-to-bottom.")
+        return flipped
+    return ref_cube
+
+
 def fwhm_and_stars(cube):
     from src.quality import detect_stars_auto, measure_fwhm
     lum = cube.mean(0).astype(np.float32)
@@ -268,11 +329,23 @@ def main():
     ap.add_argument("--reuse-siril", action="store_true",
                     help="reuse the Siril stack (and its timings) already in --workdir instead of "
                          "re-running Siril -- for comparing several OriginStack settings to one Siril run")
+    ap.add_argument("--reference-stack",
+                    help="compare against this linear master (FITS or XISF) from another tool "
+                         "instead of running Siril, e.g. PixInsight WBPP's master light")
+    ap.add_argument("--reference-name", default="Reference",
+                    help="label for --reference-stack in the report (default: Reference)")
+    ap.add_argument("--reference-time", type=float,
+                    help="the reference tool's wall time in seconds, for the timing table")
     args = ap.parse_args()
+    if args.reference_stack and (args.reuse_siril or args.siril):
+        ap.error("--reference-stack replaces Siril; drop --siril/--reuse-siril")
+    if args.reference_stack and not os.path.exists(args.reference_stack):
+        ap.error(f"--reference-stack {args.reference_stack} not found")
 
     lights, cal = split_inputs(args.folder)
     os.makedirs(args.workdir, exist_ok=True)
-    siril = None if args.reuse_siril else find_siril(args.siril)
+    siril = None if args.reuse_siril or args.reference_stack else find_siril(args.siril)
+    ref_name = args.reference_name if args.reference_stack else "Siril"
     print(f"{len(lights)} lights; calibration: " + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in cal.items()))
 
     import shlex
@@ -281,7 +354,10 @@ def main():
     os_path, os_wall, os_phases, os_res = run_originstack(args.folder, args.workdir, extra)
     si_meta = os.path.join(args.workdir, "siril_run.json")
     si_saved = os.path.join(args.workdir, "siril", "siril_stack.fit")
-    if args.reuse_siril and os.path.exists(si_saved) and os.path.exists(si_meta):
+    if args.reference_stack:
+        si_path, si_wall, si_stages = args.reference_stack, args.reference_time, {}
+        si_res = {"peak_private_mb": None, "peak_disk_gb": None, "frames_stacked": None}
+    elif args.reuse_siril and os.path.exists(si_saved) and os.path.exists(si_meta):
         print("Reusing the Siril stack in --workdir ...")
         with open(si_meta) as fh:
             m = json.load(fh)
@@ -293,7 +369,11 @@ def main():
         with open(si_meta, "w") as fh:
             json.dump({"wall": si_wall, "stages": si_stages, "res": si_res}, fh)
 
-    os_cube, si_cube = load_linear(os_path), load_linear(si_path, siril=True)
+    os_cube = load_linear(os_path)
+    if args.reference_stack:
+        si_cube = orient_like(os_cube, load_reference(si_path))
+    else:
+        si_cube = load_linear(si_path, siril=True)
     os_fwhm, os_stars = fwhm_and_stars(os_cube)
     si_fwhm, si_stars = fwhm_and_stars(si_cube)
     rows = noise_ratios(os_cube, si_cube)
@@ -303,9 +383,13 @@ def main():
     print(f"OriginStack end to end (incl. Phase 4 post-processing): {os_wall:.1f}")
     if no_p4:
         print(f"OriginStack without post-processing (like-for-like):    {no_p4:.1f}  {os_phases}")
-    print(f"Siril script total:                                     {si_wall:.1f}  {si_stages}")
+    if si_wall is not None:
+        label = f"{ref_name} (as given):" if args.reference_stack else "Siril script total:"
+        print(f"{label:<56}{si_wall:.1f}  {si_stages or ''}")
     print("\n=== Resources (private memory summed over all processes; disk = fall in free space) ===")
-    for name, r in (("OriginStack", os_res), ("Siril", si_res)):
+    for name, r in (("OriginStack", os_res), (ref_name, si_res)):
+        if r["peak_private_mb"] is None:
+            continue
         print(f"{name:<12} peak memory {r['peak_private_mb'] / 1024:6.1f} GB   peak disk {r['peak_disk_gb']:6.1f} GB   "
               f"frames stacked {r['frames_stacked']} of {len(lights)}")
     from common_star_fwhm import common_star_fwhm
@@ -313,26 +397,27 @@ def main():
     print("\n=== Star width on the same stars in both linear stacks (smaller is sharper) ===")
     if shared:
         print(f"OriginStack {shared['a']:.2f} px (IQR {shared['a_iqr'][0]:.2f}-{shared['a_iqr'][1]:.2f})   "
-              f"Siril {shared['b']:.2f} px (IQR {shared['b_iqr'][0]:.2f}-{shared['b_iqr'][1]:.2f})   "
+              f"{ref_name} {shared['b']:.2f} px (IQR {shared['b_iqr'][0]:.2f}-{shared['b_iqr'][1]:.2f})   "
               f"median per-star ratio {shared['ratio_a_over_b']:.3f}   n={shared['n']}")
     else:
         print("too few matched, unsaturated, isolated stars to compare")
-    print(f"(stars detected: OriginStack {os_stars}, Siril {si_stars}; not comparable as a sharpness figure)")
+    print(f"(stars detected: OriginStack {os_stars}, {ref_name} {si_stars}; not comparable as a sharpness figure)")
     if rows:
-        print("\nOriginStack noise / Siril noise (R, G, B); rows after 0 blur OriginStack's stack, for reference only:")
+        print(f"\nOriginStack noise / {ref_name} noise (R, G, B); rows after 0 blur OriginStack's stack, "
+              "for reference only:")
         for sigma, (fw, r) in rows.items():
             print(f"  blur sigma {sigma:<4} FWHM {fw:5.2f}   {r[0]:.2f} {r[1]:.2f} {r[2]:.2f}")
     mn = matched_noise(os_cube, si_cube)
     if mn:
         print()
-        print("Per channel (R, G, B): OriginStack's star width / Siril's, and its noise / Siril's after "
-              "blurring each channel to Siril's star width (the like-for-like noise figure):")
+        print(f"Per channel (R, G, B): OriginStack's star width / {ref_name}'s, and its noise / {ref_name}'s "
+              f"after blurring each channel to {ref_name}'s star width (the like-for-like noise figure):")
         for name, (w, nz) in zip("RGB", mn):
             print(f"  {name}: width ratio {w:.3f}   noise at matched width {nz:.2f}")
     with open(os.path.join(args.workdir, "results.json"), "w") as fh:
         json.dump({"lights": len(lights), "originstack": {"wall": os_wall, "phases": os_phases, "fwhm": os_fwhm,
                                                           "stars": os_stars, **os_res},
-                   "siril": {"wall": si_wall, "stages": si_stages, "fwhm": si_fwhm, "stars": si_stars, **si_res},
+                   ref_name.lower(): {"wall": si_wall, "stages": si_stages, "fwhm": si_fwhm, "stars": si_stars, **si_res},
                    "noise": {str(k): v[1] for k, v in (rows or {}).items()},
                    "matched_noise": mn}, fh, indent=2)
 
