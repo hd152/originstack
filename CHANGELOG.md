@@ -8,6 +8,21 @@ match the `VERSION` file and `v*` git tags.
 
 ### Fixed
 
+- **Background extraction (DBE) models every colour channel again.** Each
+  channel's sky patches were compared against the luminance sky level, so on a
+  colour-calibrated stack whose green and blue skies sit well above it (Sunflower:
+  every G and B patch) those channels fell back to the coarser mesh extraction.
+  Now each channel is sampled against its own sky: the background comes out
+  flatter (sky spread 8.9/8.0/9.8 -> 7.7/6.5/8.8 ADU on Sunflower) and DBE takes
+  4 s instead of 8.
+- **`--from-stack` reuses the background steps when you write to a new file.**
+  The Phase 4 cache was keyed on the output name, so every re-run with a new
+  `-o` redid them (Sunflower: 27 s -> 10 s per re-run).
+- **Saved configs keep `--skip-step`.** List settings were left out of
+  `<output>_config.toml`, so `--from-stack` and `--config` re-runs ran the steps
+  the original run had skipped (for galaxies, `--auto` skips the sky residual
+  step) and gave a different result.
+
 - **Every preview JPEG follows `--stretch-color` and `--preview-black-sigma`.** The
   previews written by `--live`, `--stream`, `--mosaic`, comet mode (comet and
   blended stacks), `--export-frames-dir` and `--annotate` always rendered

@@ -828,6 +828,22 @@ def _flatten_edge_glow(lum_smooth: np.ndarray, sky_med: float, sky_std: float) -
     return out
 
 
+def _channel_sky(channel: np.ndarray) -> float:
+    """Sky level of one channel, measured as ``_dbe_prepare_emission_mask``
+    measures the luminance sky (sigma-clipped border of a broad blur).
+
+    The patch sampler's brightness cut must use the channel's own sky: on a
+    colour-calibrated stack the channels' skies differ by far more than the
+    cut's 2 sky sigma (Sunflower: R 12106, G 16885, B 18485 ADU against a
+    luminance sky near 15600), so against the luminance sky every G and B
+    patch was rejected and DBE fell back to the mesh for both -- 3.4 s slower,
+    and only R was modelled by DBE."""
+    H, W = channel.shape
+    smooth = gaussian_filter_ds(np.asarray(channel, dtype=np.float64),
+                                sigma=max(20.0, min(H, W) / 50.0))
+    return _sigma_sky(_border_pixels(smooth))[0]
+
+
 def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
                                exclusion_mask: Optional[np.ndarray],
                                verbose: bool, label: str,
@@ -1527,7 +1543,7 @@ def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
     if H == 0 or W == 0:
         return rgb.copy()
 
-    emission_mask, sky_med, sky_std, _dense_field = _dbe_prepare_emission_mask(
+    emission_mask, _lum_sky, sky_std, _dense_field = _dbe_prepare_emission_mask(
         rgb, star_mask, exclusion_mask, verbose, label,
         diffuse_threshold_sigma=diffuse_threshold_sigma)
 
@@ -1541,7 +1557,7 @@ def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
         channel = rgb[:, :, c].astype(np.float64)
         coords, values = _sample_background_patches(
             channel, emission_mask, patch_size, masked_frac_thresh,
-            sky_ref=sky_med, sky_std=sky_std,
+            sky_ref=_channel_sky(channel), sky_std=sky_std,
             use_entropy_weights=use_entropy_weights)
 
         n0 = len(coords)

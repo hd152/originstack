@@ -43,13 +43,19 @@ def test_edge_glow_in_the_strongest_channel_is_removed():
     assert after[0] < 15 and after[1] < 15
 
 
-def test_without_gradient_admission_the_strong_channel_is_left_uncorrected(monkeypatch):
-    """Guards the test above: with the admission pass disabled the same image
-    keeps most of its R edge excess, so the assertion is a real one."""
+def test_without_gradient_admission_or_channel_sky_the_strong_channel_is_left_uncorrected(
+        monkeypatch):
+    """Guards the test above: R's tint puts most of its patches above the
+    luminance sky's cut, and either the admission pass or sampling each channel
+    against its own sky (``_channel_sky``) recovers them. With both disabled the
+    same image keeps most of its R edge excess, so the assertion is a real one."""
+    img = _edge_glow_image()
+    _mask, lum_sky, _std, _dense = bg._dbe_prepare_emission_mask(img, None, None, False, 'DBE')
+    monkeypatch.setattr(bg, '_channel_sky', lambda channel: lum_sky)
     monkeypatch.setattr(bg, '_admit_gradient_patches',
                         lambda channel, em, ps, mf, sd, coords, values, ent, **k: (coords, values))
-    img, out = _run()
-    assert _edge_offsets(out)[0] > 20      # vs < 15 with the pass (about half)
+    out = bg.dynamic_background_extraction(img, patch_size=32)
+    assert _edge_offsets(out)[0] > 20      # vs < 15 with either (about half)
 
 
 def test_a_bright_object_is_not_admitted_as_gradient():
@@ -170,3 +176,28 @@ def test_fit_background_surface_bilinear_upsample_matches_cubic():
     diff = np.abs(up1 - up3)
     assert float(diff.mean()) < 0.1
     assert float(diff.max()) < 1.0
+
+
+def test_each_channel_is_sampled_against_its_own_sky(monkeypatch):
+    """On a colour-calibrated stack the channels' skies differ by far more than
+    the sampler's 2-sky-sigma cut (Sunflower: R 12106, G 16885, B 18485 ADU).
+    Against the luminance sky every G and B patch was rejected and both fell
+    back to the mesh extraction; every channel must get the DBE surface fit."""
+    rng = np.random.default_rng(3)
+    H, W = 420, 640
+    yy, xx = np.mgrid[:H, :W]
+    grad = 0.15 * xx + 0.1 * yy
+    img = np.empty((H, W, 3))
+    for c, sky in enumerate((12000.0, 16900.0, 18500.0)):
+        img[:, :, c] = sky + grad + rng.normal(0, 20, (H, W))
+    img = img.astype(np.float32)
+    fallbacks = []
+    real = bg.extract_background
+    monkeypatch.setattr(bg, 'extract_background',
+                        lambda *a, **k: fallbacks.append(1) or real(*a, **k))
+    out = bg.dynamic_background_extraction(img, patch_size=32)
+    assert fallbacks == []
+    centre = out[H // 4:3 * H // 4, W // 4:3 * W // 4]
+    assert np.all(np.abs(np.median(centre, axis=(0, 1))) < 5.0)
+    assert np.all(np.abs(np.median(out[:, :40], axis=(0, 1))
+                         - np.median(out[:, -40:], axis=(0, 1))) < 5.0)   # gradient gone

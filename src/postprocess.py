@@ -1113,6 +1113,12 @@ def _early_args_read() -> tuple:
 
 _EARLY_ARGS: Optional[tuple] = None
 
+# Read by _postprocess_early only to name side files (star-mask sidecar,
+# background map, aberration PNG), never for the pixels; the runs that write
+# those files do not use the cache (_early_cache_usable). Keyed, every
+# --from-stack to a new -o missed the cache (27 s instead of 9 s, Sunflower).
+_EARLY_KEY_IGNORE = frozenset({'output'})
+
 
 def _early_cache_key(stacked: np.ndarray, args, skip_steps: set) -> Optional[str]:
     import hashlib
@@ -1132,6 +1138,8 @@ def _early_cache_key(stacked: np.ndarray, args, skip_steps: set) -> Optional[str
     # key on the file alone returned the uncalibrated early steps.
     h.update(np.ascontiguousarray(stacked[::7, ::7]).tobytes())
     for name in _EARLY_ARGS:
+        if name in _EARLY_KEY_IGNORE:
+            continue
         h.update(f"|{name}={getattr(args, name, None)!r}".encode())
     try:
         from src.utils import read_version
@@ -1142,10 +1150,12 @@ def _early_cache_key(stacked: np.ndarray, args, skip_steps: set) -> Optional[str
 
 
 def _early_cache_usable(args, _diag_dir) -> bool:
-    # diagnostics/aberration reports write files from inside the early steps
+    # these write files from inside the early steps, which a cache hit would skip
     return (bool(getattr(args, '_pp_early_cache', None)) and _diag_dir is None
             and not getattr(args, 'aberration_report', False)
-            and not getattr(args, 'diagnostic', False))
+            and not getattr(args, 'diagnostic', False)
+            and not getattr(args, 'export_masks', False)
+            and not getattr(args, 'keep_intermediates', False))
 
 
 def _early_cache_load(key, args, _diag_dir):

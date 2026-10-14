@@ -277,21 +277,33 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
     lines = ['# OriginStack effective configuration\n',
              '# Generated automatically -- can be reused with --config\n\n']
 
+    # merge: the previous stacks are an input, like directory, not a setting
     skip_keys = {'directory', 'output', 'config', 'health_check', 'dry_run',
                  'verbose', 'debug_registration', 'keep_intermediates',
-                 'preset', 'diagnostic', 'diagnostic_dir'}
+                 'preset', 'diagnostic', 'diagnostic_dir', 'merge'}
+
+    def _toml_value(value):
+        if isinstance(value, bool):
+            return 'true' if value else 'false'
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            return _toml_str(value)
+        return None
 
     for key, value in sorted(vars(args).items()):
         if key.startswith('_') or key in skip_keys:
             continue
-        if isinstance(value, bool):
-            lines.append(f'{key} = {"true" if value else "false"}\n')
-        elif isinstance(value, (int, float)):
-            lines.append(f'{key} = {value}\n')
-        elif isinstance(value, str):
-            lines.append(f'{key} = {_toml_str(value)}\n')
-        elif value is None:
+        if isinstance(value, (list, tuple)):
+            # e.g. --auto's skip_step additions: dropped, a --from-stack or
+            # --config re-run ran the steps the original run had skipped
+            items = [_toml_value(v) for v in value]
+            if all(i is not None for i in items):
+                lines.append(f'{key} = [{", ".join(items)}]\n')
             continue
+        item = _toml_value(value)
+        if item is not None:
+            lines.append(f'{key} = {item}\n')
 
     try:
         with open(config_path, 'w', encoding='utf-8') as f:

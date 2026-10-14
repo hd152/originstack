@@ -148,7 +148,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 
 **Settings, checkpoints, `--from-stack`**
 - `stack_fingerprint` hashes lights + Phase 1 (`p1`) and Phase 2-3 (`p23`) settings, taken before `--auto` mutates `args`. **A new Phase 1-3 attribute not in those CLI groups must be added to `_P1_EXTRA`/`_P23_EXTRA`** (Phase-4-only members of those groups go in `_P23_IGNORE`), or changing it silently reuses a stale checkpoint.
-- `--from-stack` runs Phase 4 on a previous run's linear FITS with its `<stem>_config.toml`; never writes the input. The early-step cache key is collected from `_postprocess_early`'s own source (`_early_args_read`); a new local crossing the `_postprocess_early` boundary must join its return value.
+- `--from-stack` runs Phase 4 on a previous run's linear FITS with its `<stem>_config.toml`; never writes the input. The early-step cache key is collected from `_postprocess_early`'s own source (`_early_args_read`); a new local crossing the `_postprocess_early` boundary must join its return value. Names read only for side-file paths go in `_EARLY_KEY_IGNORE` (`output` was keyed: every new `-o` missed); a step that writes a side file there must make `_early_cache_usable` false. `save_effective_config` writes lists too (`skip_step`; dropping them re-ran skipped steps on `--from-stack`).
 - Saved configs bake in `--auto`'s derived choices (e.g. `pre_gradient_removal`) as if user-set; re-running from a config is not the same as re-running `--auto`.
 - `--auto` mutates the one shared `args`; `cli._snapshot_args`/`_restore_args` reset it per target, copy mutable containers (`_copy_arg_value`) and delete attributes a target created. Accumulating settings (e.g. `skip_step`) leak otherwise. Tested by `tests/test_auto_state_isolation.py` against the real helpers.
 - `_want_combine_sessions` honours a `combine_sessions=True` *value* (saved configs), not only argv.
@@ -161,6 +161,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 **Uncertainty / Phase 4**
 - Any Phase 4 step that writes a file or calls the network belongs in `uncertainty._QUIET_OFF`, or each Monte Carlo realization writes it silently.
 - `reduce_chroma_noise` (and anything right after DBE) must not clip negatives: the sky is centred on zero there.
+- DBE samples each channel against its own sky (`background._channel_sky`), not the luminance sky: on a colour-calibrated stack G/B sat far above it and fell back to the mesh.
 - Stretch one image; never recombine separately stretched layers.
 - Never rebuild RGB as `img * new_lum / lum` on sky-centred data: lum ~ 0 with channels of opposite sign gave 1e18 in `multiscale_local_contrast` (Orion); fade to an additive change near zero.
 - The preview white point (p99.5) clips star cores by design; an *extended* region above it (largest connected region >= `Config.PREVIEW_ROLLOFF_MIN_AREA`) is rolled off instead (`io_fits._preserving_preview`). Gate on connected area, not blurred area fraction (a dense star field passes the latter).
