@@ -182,6 +182,18 @@ def test_seti_stretch_maps_median_to_target_and_preserves_input():
     np.testing.assert_array_equal(image, original)
 
 
+def test_seti_channel_stretch_returns_valid_preview():
+    ramp = np.linspace(100.0, 1000.0, 400, dtype=np.float32)
+    image = np.broadcast_to(ramp[None, :, None], (200, 400, 3)).copy()
+    original = image.copy()
+
+    preview = iof.render_preview_float(image, stretch='seti', color='channel')
+
+    assert np.all(np.isfinite(preview))
+    assert preview.min() >= 0.0 and preview.max() <= 1.0
+    np.testing.assert_array_equal(image, original)
+
+
 def test_seti_stretch_flag_parses():
     from src import cli
     assert cli.parse_args(['-d', '.', '--stretch', 'seti']).stretch == 'seti'

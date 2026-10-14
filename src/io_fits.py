@@ -576,6 +576,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
                 rgb, lum, lambda x: seti_curve(x, linked_median),
                 black, white, _bg_sigma, top=top)
         else:
+            out = np.zeros_like(rgb)
             for c in range(3):
                 normalized = np.clip(
                     (rgb[:, :, c].astype(np.float64) - black) / span, 0.0, 1.0)
