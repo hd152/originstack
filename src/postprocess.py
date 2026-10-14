@@ -540,8 +540,10 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 safe_print(f"    WARNING: could not save background map: {e}")
             del _pre_bg
 
-    # 2. Chroma noise reduction
-    if getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps:
+    # 2. Chroma noise reduction. Not before --denoiser nn: the network was trained on
+    # stacks without it and removes colour noise itself.
+    if (getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps
+            and not getattr(args, 'denoise_nn', False)):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_chroma_nr')
         cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
         cnr_large = float(getattr(args, 'chroma_nr_large_sigma', 0.0))
@@ -731,6 +733,28 @@ def postprocess_stack(
             protect_strength=curv_protect,
             variance_stabilize=getattr(args, 'variance_stabilize', False))
         safe_print(f"  ✓ Directional wavelet denoise ({format_time(time.time() - curv_start)})")
+
+    # 6.7c. Learned Noise2Noise denoiser (src/nn_denoise.py)
+    if getattr(args, 'denoise_nn', False) and 'nn' not in skip_steps:
+        from src.nn_denoise import model_available, nn_denoise
+        if not model_available():
+            safe_print("\n  WARNING: --denoiser nn: model file src/data/nn_denoise.npz is missing; "
+                       "skipping denoising")
+        else:
+            _diag_save(stacked, _diag_dir, _diag_counter, 'before_nn_denoise')
+            nn_strength = float(getattr(args, 'nn_denoise_strength', 1.0))
+            print(f"\n  Applying neural-network denoising (strength={nn_strength:.2f})...")
+            nn_start = time.time()
+            from src.io_fits import _sky_stats
+            _sig_before = _sky_stats(luminance(stacked))[1]
+            stacked = nn_denoise(stacked, strength=nn_strength)
+            # The preview stretch is solved from the sky noise; keep it at the noise the
+            # image had before this step, or it would stretch ~10x harder.
+            _sig_after = _sky_stats(luminance(stacked))[1]
+            args._preview_noise_scale = (_sig_before / _sig_after
+                                         if _sig_after > 0 and _sig_before > _sig_after else 1.0)
+            safe_print(f"  ✓ NN denoise ({format_time(time.time() - nn_start)})")
+            stacked = _sanitize(stacked, "nn denoising")
 
     # 6.8. Anisotropic diffusion (Perona-Malik)
     if getattr(args, 'denoise_aniso', False) and 'aniso' not in skip_steps:

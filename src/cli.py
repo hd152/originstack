@@ -1233,6 +1233,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 safe_print(f"  Denoising: curvelet={getattr(args, 'denoise_curvelet', False)}, "
                            f"bilateral={getattr(args, 'denoise_bilateral', False)}, "
                            f"aniso={getattr(args, 'denoise_aniso', False)}, "
+                           f"nn={getattr(args, 'denoise_nn', False)}, "
                            f"ACDNR={getattr(args, 'denoise_acdnr', False)}")
                 safe_print(f"  Deconvolution: {getattr(args, 'deconvolve', False)}")
                 safe_print(f"  Star reduction: {getattr(args, 'star_reduce', False)}")
@@ -1543,7 +1544,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'parameters, and estimate resource usage — without processing anything')
     g_post.add_argument('--denoiser',
                    choices=['auto', 'wavelet', 'curvelet', 'acdnr', 'bilateral', 'aniso',
-                            'none'],
+                            'nn', 'none'],
                    default='auto',
                    help='Primary luma denoiser (default: auto — wavelet unless a '
                         'preset/--auto selects otherwise). '
@@ -1556,6 +1557,9 @@ def build_parser() -> argparse.ArgumentParser:
                         'curvelet: an alias for wavelet, kept for old command lines. '
                         'acdnr: contrast-gated sky smoothing. '
                         'bilateral / aniso: edge-preserving filters. '
+                        'nn: a small neural network trained on real Origin sessions '
+                        '(Noise2Noise on odd/even sub-stacks); denoises colour too, so '
+                        'chroma noise reduction is skipped. '
                         'none: disable luma denoising. Chroma noise reduction is '
                         'separate (--no-chroma-nr). Fine tuning via --config.')
     g_post.add_argument('--wavelet-protect', dest='directional_protect_strength',
@@ -1590,7 +1594,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
                         'sky_residual, sky_pedestal, bilateral, '
-                        'acdnr, wavelet (alias: curvelet), deconvolve, star_reduce, local_contrast, '
+                        'acdnr, wavelet (alias: curvelet), nn, deconvolve, star_reduce, local_contrast, '
                         'sky_neutralize, edge_bands, remove_stars, starless_process')
     g_stack.add_argument('--no-proper-coadd', dest='proper_coadd', action='store_false',
                    help='Turn off proper image coaddition (Zackay & Ofek 2017), on by default: '
@@ -2516,6 +2520,8 @@ def build_parser() -> argparse.ArgumentParser:
         denoise_bilateral=False,
         denoise_acdnr=False,
         denoise_aniso=False,
+        denoise_nn=False,
+        nn_denoise_strength=1.0,
         deconvolve=False,
         deconvolve_tv=False,
         deconvolve_svpsf=False,
@@ -2600,6 +2606,7 @@ def parse_args(argv=None):
         args.denoise_acdnr = (d == 'acdnr')
         args.denoise_bilateral = (d == 'bilateral')
         args.denoise_aniso = (d == 'aniso')
+        args.denoise_nn = (d == 'nn')
     args.deconvolve = args.deconvolve_mode in ('rl', 'tv', 'rl-sv', 'sparse')
     args.deconvolve_tv = (args.deconvolve_mode == 'tv')
     args.deconvolve_svpsf = (args.deconvolve_mode == 'rl-sv')
@@ -2612,7 +2619,8 @@ def parse_args(argv=None):
     # --denoiser / --deconvolve wins over preset & auto just like a direct flag.
     if 'denoiser' in _explicit_dests:
         _explicit_dests.update({
-            'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet'})
+            'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet',
+            'denoise_nn'})
     if 'deconvolve_mode' in _explicit_dests:
         _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse'})
 

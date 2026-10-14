@@ -28,14 +28,17 @@ def _rescale_intensity(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return np.clip((x.astype(np.float64) - lo) / (hi - lo), 0.0, 1.0)
 
 
-def _sky_stats(lum: np.ndarray) -> Tuple[float, float]:
+def _sky_stats(lum: np.ndarray, noise_scale: float = 1.0) -> Tuple[float, float]:
     """Robust (median, sigma) of the sky background via 2.5-sigma /
     3-iteration clipping -- shared by the ghs and arcsinh preview stretch
-    branches below."""
+    branches below. ``noise_scale`` multiplies the sigma: the stretch is chosen
+    from the sky noise, and after ``--denoiser nn`` (which removes ~90% of it)
+    the measured sigma would make it far stronger than the same data without
+    denoising -- the pipeline passes the noise the image had before the step."""
     _, med, sigma = sigma_clipped_stats(lum, sigma=2.5, maxiters=3)
     med = float(med)
     sigma = float(sigma) if np.isfinite(sigma) and sigma > 0 else 1.0
-    return med, sigma
+    return med, sigma * float(noise_scale)
 
 
 def _read_fits_header(path: str) -> dict:
@@ -660,12 +663,14 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_b: float = 8.0, ghs_sp: float = 0.15,
                          ghs_hp: float = 0.95,
                          black_sigma: float = 0.0,
-                         color: str = 'preserve') -> Optional[np.ndarray]:
+                         color: str = 'preserve',
+                         noise_scale: float = 1.0) -> Optional[np.ndarray]:
     """Stretch an HWC float32 image to display uint8 (the shared core of the
     preview JPEG file writer and the live web view). Returns None when the
     required stretch backend is unavailable."""
     out = render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
+                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
+                               noise_scale=noise_scale)
     if out is None:
         return None
     return np.clip(out * 255, 0, 255).astype(np.uint8)
@@ -675,7 +680,8 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_b: float = 8.0, ghs_sp: float = 0.15,
                          ghs_hp: float = 0.95,
                          black_sigma: float = 0.0,
-                         color: str = 'preserve') -> Optional[np.ndarray]:
+                         color: str = 'preserve',
+                         noise_scale: float = 1.0) -> Optional[np.ndarray]:
     """The display stretch of ``render_preview_uint8`` before quantisation:
     HWC float in [0, 1]. ``tools/bench_phase4.py`` scores this.
 
@@ -698,7 +704,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # per-channel sky statistics.
         out = np.zeros_like(rgb)
         lum = luminance(rgb)
-        _med, _bg_sigma = _sky_stats(lum)
+        _med, _bg_sigma = _sky_stats(lum, noise_scale)
         # Black point relative to the sky median in units of sky sigma.
         # black_sigma < 0 keeps sky noise visible (good for frame-filling faint
         # nebulae); black_sigma > 0 clips the noise floor to black (good for a
@@ -770,7 +776,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # instead of the preset's b / SP / black point.
         out = np.zeros_like(rgb)
         lum = luminance(rgb)
-        _med, _bg_sigma = _sky_stats(lum)
+        _med, _bg_sigma = _sky_stats(lum, noise_scale)
         black = _med - Config.PREVIEW_NOISE_BLACK_SIGMA * _bg_sigma
         white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, black)
         nb = _noise_limited_b(_med, _bg_sigma, black, white, ghs_hp)
@@ -785,7 +791,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
                 out[:, :, c] = noise_curve(rgb[:, :, c])
     elif stretch == 'seti':
         lum = luminance(rgb)
-        _med, _bg_sigma = _sky_stats(lum)
+        _med, _bg_sigma = _sky_stats(lum, noise_scale)
         black = max(float(np.min(lum)), _med - 2.7 * _bg_sigma)
         white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, black)
         span = max(white - black, 1e-12)
@@ -812,7 +818,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # Arcsinh stretch — unified luminance-based normalization to preserve color
         out = np.zeros_like(rgb)
         lum = luminance(rgb)
-        _med, _bg_sigma = _sky_stats(lum)
+        _med, _bg_sigma = _sky_stats(lum, noise_scale)
         unified_black = _med + black_sigma * _bg_sigma
         # See the 'ghs' branch above for why 99.5 rather than a higher
         # percentile: saturated-star pixels otherwise set a white point far
@@ -841,7 +847,8 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
 def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
                                  ghs_b: float = 8.0, ghs_sp: float = 0.15,
                                  ghs_hp: float = 0.95, black_sigma: float = 0.0,
-                                 color: str = 'preserve') -> np.ndarray:
+                                 color: str = 'preserve',
+                                 noise_scale: float = 1.0) -> np.ndarray:
     """GHS preview whose black and white points come from the starless layer.
 
     One stretch has to pick a single white point, and on a starry frame the
@@ -863,7 +870,7 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
     """
     from src.denoising import generalized_hyperbolic_stretch
     lum_s = luminance(starless)
-    med, sigma = _sky_stats(lum_s)
+    med, sigma = _sky_stats(lum_s, noise_scale)
     black = med + black_sigma * sigma
     # 99.9, not the 99.5 the plain stretch uses: with the stars gone the top of
     # the histogram is the galaxy's own bright body, and 99.5 lands inside the
@@ -908,7 +915,8 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_b: float = 8.0, ghs_sp: float = 0.15,
                      ghs_hp: float = 0.95, black_sigma: float = 0.0,
                      starless: Optional[np.ndarray] = None,
-                     color: str = 'preserve') -> None:
+                     color: str = 'preserve',
+                     noise_scale: float = 1.0) -> None:
     """Write the preview JPEG. ``starless`` (same shape as ``rgb``), with
     ``stretch='ghs'``, switches to the layered stretch -- see
     ``render_preview_layered_uint8``."""
@@ -916,7 +924,7 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
         return
     out = render_preview_rgb_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                    ghs_hp=ghs_hp, black_sigma=black_sigma,
-                                   starless=starless, color=color)
+                                   starless=starless, color=color, noise_scale=noise_scale)
     if out is None:
         return
     write_preview_jpeg(out, path)
@@ -926,16 +934,18 @@ def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
                              ghs_b: float = 8.0, ghs_sp: float = 0.15,
                              ghs_hp: float = 0.95, black_sigma: float = 0.0,
                              starless: Optional[np.ndarray] = None,
-                             color: str = 'preserve') -> Optional[np.ndarray]:
+                             color: str = 'preserve',
+                             noise_scale: float = 1.0) -> Optional[np.ndarray]:
     """The full-resolution uint8 image ``save_preview_rgb`` writes: the layered
     stretch when ``starless`` is given with ``stretch='ghs'``, else
     ``render_preview_uint8``."""
     if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
         return render_preview_layered_uint8(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                             ghs_hp=ghs_hp, black_sigma=black_sigma,
-                                            color=color)
+                                            color=color, noise_scale=noise_scale)
     return render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
+                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
+                                noise_scale=noise_scale)
 
 
 def preview_jpeg_from_uint8(out: np.ndarray, max_dim: int = 1024) -> bytes:
@@ -949,13 +959,15 @@ def preview_jpeg_from_uint8(out: np.ndarray, max_dim: int = 1024) -> bytes:
 def preview_stretch_kw(args) -> dict:
     """The preview stretch settings in ``args`` (defaults where unset, or for
     ``args=None``), as keyword arguments of ``save_preview_rgb``."""
+    ns = getattr(args, '_preview_noise_scale', 1.0)    # set by Phase 4's --denoiser nn step
     return dict(
         stretch=getattr(args, 'stretch', 'ghs'),
         ghs_b=float(getattr(args, 'ghs_b', 8.0)),
         ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
         ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
         black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0),
-        color=getattr(args, 'stretch_color', 'channel'))
+        color=getattr(args, 'stretch_color', 'channel'),
+        noise_scale=float(ns) if isinstance(ns, (int, float)) and ns > 0 else 1.0)
 
 
 def write_preview_jpeg(out: np.ndarray, path: str) -> None:
@@ -990,7 +1002,8 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
                        ghs_b: float = 8.0, ghs_sp: float = 0.15,
                        ghs_hp: float = 0.95, black_sigma: float = 0.0,
                        max_dim: int = 1024, desaturate: float = 0.0,
-                       color: str = 'preserve') -> Optional[bytes]:
+                       color: str = 'preserve',
+                       noise_scale: float = 1.0) -> Optional[bytes]:
     """Stretched preview JPEG as bytes (for the live web view).
 
     ``desaturate`` (0-1) blends the stretched result toward luminance -- see
@@ -999,7 +1012,8 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
     if Image is None:
         return None
     out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
+                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
+                               noise_scale=noise_scale)
     if out is None:
         return None
     return preview_jpeg_from_uint8(_desaturate_preview_uint8(out, desaturate), max_dim)
