@@ -77,15 +77,15 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 |--------|----------|
 | `gpu_context.py` | `GpuContext` (`xp` = numpy or cupy), `get_gpu()` singleton; `--use-gpu` |
 | `models.py` | `Config` (all magic-number constants), `FrameInfo`, `ProcessingStats`, `RunCancelled` |
-| `utils.py` | `safe_print`/print helpers, `header_get_first`, `parse_timestamp` (the one home for Origin's `-0700` offset), `disable_astropy_network`, `embed_to_shape`, `native_status`, `read_version`, `should_check_for_update` |
-| `io_fits.py` | FITS load/save, `load_frame` (the single format dispatcher), `make_master`, `populate_fits_header`, preview rendering (`render_preview_float`, white-point floor) |
+| `utils.py` | `safe_print`/print helpers, `header_get_first`, `parse_timestamp` (the one home for Origin's `-0700` offset), `disable_astropy_network`, `embed_to_shape`, `native_status`, `read_version`, `should_check_for_update`, `tqdm` (the one guarded import; plain iterator without it) |
+| `io_fits.py` | FITS load/save, `load_frame` (the single format dispatcher), `make_master`, `populate_fits_header`, preview rendering (`render_preview_float`, white-point floor; stretches linear/arcsinh/ghs/masked/multiscale/seti/noisefloor/oklab/clahe), `preview_stretch_kw(args)` (the one place preview settings are read from `args`) |
 | `io_raw.py` / `io_tiff.py` / `io_xisf.py` / `io_ser.py` | Camera RAW (rawpy), TIFF (tifffile), XISF 1.0 (no dep), SER video (no dep; one file -> virtual frames `path::index`) |
 | `xisf_writer.py` | Minimal XISF 1.0 writer |
 | `frame_discovery.py` | `discover_frames`, `classify_frame`, `select_matching_darks` |
 | `robust_pca.py` | Robust-PCA masters (`--master-method robust_pca`), `--flat-from-lights` (downsampled per CFA plane) |
 | `dark_temp_model.py` | Per-pixel dark-vs-temperature polynomial (`--dark-temp-model`) |
 | `vignette_calib.py` | Per-instrument vignetting map, apply side (`--vignette-map`; built by `tools/build_vignette_map.py`) |
-| `debayer.py` | Calibration, hot pixels (Bayer statistical fix with star-support rule), RCD (default) / Malvar / Menon debayer, white balance, session-constant CFA equalisation (`--no-session-cfa-eq`), `--spike-reject` |
+| `debayer.py` | Calibration, hot pixels (Bayer statistical fix with star-support rule), RCD (default) / Malvar / Menon debayer, white balance, session-constant CFA equalisation (`--no-session-cfa-eq`), `--spike-reject`, `luminance()` (0.299/0.587/0.114, native for f32; use it rather than writing the expression out) |
 | `banding.py` | Row/column banding removal (`--banding-removal`) |
 | `trail_reject.py` | Satellite/aircraft trail rejection (`--trail-reject`), Phase 1 |
 | `local_normalize.py` | Per-frame additive background matching before rejection (`--local-normalize`). Still exists; only the old Phase 4 local-normalisation *step* was removed |
@@ -98,7 +98,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `affine_fit.py` / `phase_correlate.py` / `blind_match.py` | Rigid RANSAC; subpixel phase correlation; blind unknown-rotation star match |
 | `transparency.py` | Per-frame transparency (`--transparency-min`); `to_aligned_yx` is the inverse of `apply_transform` |
 | `distortion.py` | Radial distortion model (`--distortion-model`); null result on Origin data |
-| `stacking.py` | Combines (sigma-clip, percentile, ESD, linear fit, IVW, wavelet, median), drizzle (resample / `--drizzle-method splat`, kernels lanczos/psf/magic, `--super-res-iters`), lacosmic, online sigma-clip, `run_stacking_phase` |
+| `stacking.py` | Combines (sigma-clip, percentile, ESD, linear fit, IVW, wavelet, median), drizzle (resample / `--drizzle-method splat`, kernels lanczos/psf/magic, `--super-res-iters`), lacosmic, online sigma-clip, `run_stacking_phase`; the numpy combines share one tile driver (`_tile_grid`, `_combine_tiles`) |
 | `proper_coadd.py` | Zackay-Ofek proper coaddition, on by default (`--no-proper-coadd`) |
 | `cfa_drizzle.py` | Bayer drizzle (`--cfa-drizzle`, opt-in, not recommended for Origin data) |
 | `full_field.py` | Extend the stack beyond the common crop (`--full-field`) |
@@ -110,7 +110,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `session_report.py` / `session_info.py` | Tracking/trend report (`--session-report`); parse capture-app `info.json`, stack WCS |
 | `dither_report.py` / `aberration.py` | Dither coverage (`--dither-report`); field aberration/tilt (`--aberration-report`) |
 | `postprocess.py` | Phase 4 chain `postprocess_stack`, `_postprocess_early` (cacheable early steps) |
-| `background.py` | Mesh/DBE background, sky residual, edge bands, `gaussian_filter_ds`, `gaussian_blur_spatial` |
+| `background.py` | Mesh/DBE background (DBE and `--bg-method wavelet` share `_patch_background_extraction`; only the surface fit differs), sky residual, edge bands, `gaussian_filter_ds`, `gaussian_blur_spatial` |
 | `denoising.py` | Directional wavelet (`--denoiser wavelet`, `--wavelet-protect`; `curvelet` alias), ACDNR, bilateral, aniso, `shrink_stars` (the star-reduction step), multiscale local contrast, chroma NR |
 | `wavelet.py` | Native-backed `wavedec2`/`waverec2` |
 | `psf_deconvolution.py` | PSF estimation; RL / RL-SV / TV / sparse FISTA (`--deconvolve`) |
@@ -132,10 +132,10 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `gaia_cache.py` | Local cache of brightest-first Gaia cone queries (`star_index_dir()/gaia_cones`); answers only when the cached rows are the server's own answer (cone contained, entry untruncated or still >= n rows, float32 G for the `min_mag` cut); misses fetch a 5%-wider cone with 25% more rows so the next night hits |
 | `target_inference.py` / `auto_settings.py` | Target from headers/folder/SIMBAD; `--auto` advisor (blended presets) |
 | `checkpoint.py` / `cleanup.py` | Checkpoint/resume + `stack_fingerprint`; temp-file registry |
-| `pipeline.py` | `stack_target` (wires the phases), `postprocess_from_stack` (`--from-stack`) |
+| `pipeline.py` | `stack_target` (wires the phases), `postprocess_from_stack` (`--from-stack`), `save_final_preview` (writes a run's preview JPEG and keeps its source for the desktop re-stretch) |
 | `cli.py` | `process_directory`, `parse_args`, `main`, `_build_masters`; removed flags are hidden `_RemovedFlag` actions |
 | `health_check.py` | `run_health_check` |
-| `ui_events.py` / `desktop_control.py` / `desktop_app.py` / `native_dialog.py` / `notify.py` | Desktop app: event sink polled by tkinter, form-from-argparse + `RunManager` (cooperative cancel), the tkinter window, error dialogs, balloon notifications |
+| `ui_events.py` / `desktop_control.py` / `desktop_app.py` / `native_dialog.py` / `notify.py` | Desktop app: event sink polled by tkinter (`remember_final_preview`/`restretch`: pick another stretch for the finished run's JPEG), form-from-argparse + `RunManager` (cooperative cancel), the tkinter window, error dialogs, balloon notifications |
 | `i18n.py` | Desktop-app translations: `_()`/`N_()`, catalogs in `src/locales/<code>.json` keyed by the English text, language from `$ORIGINSTACK_LANG` / the saved menu choice / the OS |
 
 ### Four-phase pipeline
@@ -164,6 +164,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 - Stretch one image; never recombine separately stretched layers.
 - Never rebuild RGB as `img * new_lum / lum` on sky-centred data: lum ~ 0 with channels of opposite sign gave 1e18 in `multiscale_local_contrast` (Orion); fade to an additive change near zero.
 - The preview white point (p99.5) clips star cores by design; an *extended* region above it (largest connected region >= `Config.PREVIEW_ROLLOFF_MIN_AREA`) is rolled off instead (`io_fits._preserving_preview`). Gate on connected area, not blurred area fraction (a dense star field passes the latter).
+- Preview JPEGs take their settings from `io_fits.preview_stretch_kw(args)` (the run's main preview via `pipeline.save_final_preview`); hand-built kwargs drifted: the live/stream/mosaic/comet/annotated previews left out `color` and rendered `preserve` after the default became `channel`.
 
 **Streaming memory**
 - Never hold all frames in memory unless `frame_store` decided they fit (available RAM minus 20% of total minus worker reserve). Output must be bit-identical across RAM/disk placement (`tests/test_frame_store.py`). Shared-memory arrays are opened in workers with `track=False`. A combine over a disk-backed aligned stack goes through `stacking._combine_in_bands` (one contiguous read per frame per row band, progress, Cancel; the kernel must be per-pixel so the result is bit-identical): one native call over a 60 GB memmap ran 5.5 min silent and paged the machine (849 frames). Long per-frame loops report through `ui_events.progress` and check `args._cancel_event`; an `except Exception` fallback around them must re-raise `RunCancelled`. `frame_store` refuses an array the temp disk cannot hold (`FrameStoreSpaceError`) -- the sparse file would otherwise fail only when written.

@@ -14,8 +14,8 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 |--------|----------|
 | `src/gpu_context.py` | `GpuContext`, CUDA stream contexts, `get_gpu()` singleton |
 | `src/models.py` | `Config`, `FrameInfo`, `ProcessingStats` |
-| `src/utils.py` | Print helpers, `format_time`, `get_memory_usage_mb`, `native_status()` |
-| `src/io_fits.py` | FITS load/save, `load_frame` (format dispatcher), `make_master`, `populate_fits_header` |
+| `src/utils.py` | Print helpers, `format_time`, `get_memory_usage_mb`, `native_status()`, `header_get_first`, `parse_timestamp`, the guarded `tqdm` import |
+| `src/io_fits.py` | FITS load/save, `load_frame` (format dispatcher), `make_master`, `populate_fits_header`, preview stretches and JPEG writing, `preview_stretch_kw(args)` |
 | `src/robust_pca.py` | Robust PCA (Principal Component Pursuit) master calibration frames (`--master-method robust_pca`); same decomposition backs `--flat-from-lights` — see feature 35 |
 | `src/dark_temp_model.py` | Temperature-interpolated dark current model (`--dark-temp-model`) — see feature 34 |
 | `src/io_raw.py` | Camera RAW load (rawpy) — CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ |
@@ -48,7 +48,7 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/local_normalize.py` | Per-frame Local Normalization (`--local-normalize`), pre-combine — see feature 42 |
 | `src/live_stack.py` | Real-time stacking (`--live`) — see feature 44 |
 | `src/stream_stack.py` | Two-pass streaming stack of an already-complete directory (`--stream`) — see feature 43 |
-| `src/ui_events.py` | In-process UI event/state sink for the desktop app — log/phase/progress state, named milestone previews, per-frame thumbnail ring |
+| `src/ui_events.py` | In-process UI event/state sink for the desktop app — log/phase/progress state, named milestone previews, per-frame thumbnail ring, re-stretch of the finished run's preview |
 | `src/desktop_control.py` | Desktop-app control layer — form schema introspection, form-to-argv translation, `RunManager` |
 | `src/desktop_app.py` | Native tkinter desktop app (`python desktop_app.py`) — Setup form, live progress/log, interactive preview (zoom/pan/wipe compare/thumbnail ring) |
 | `src/native_dialog.py` | Native Windows message boxes via ctypes — fatal-error / close-confirm dialogs for the packaged desktop app |
@@ -403,6 +403,7 @@ mean-variance relationship.
 - Native tkinter window (stdlib, no external UI toolkit or runtime dependency) — replaced a `pywebview`-wrapped local HTTP dashboard (2026-08)
 - Setup form auto-built from the CLI's own argument parser (one tab per argparse group), so it can't drift out of sync with the flags it exposes
 - Live phase stepper with timings, active-loop progress bar, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, before/after wipe-slider compare, per-frame thumbnail ring), and a completion summary card
+- After a run, a Stretch / Colour bar re-renders the preview JPEG with another `--stretch` / `--stretch-color` choice (no re-processing; the FITS outputs are unchanged)
 - Zero overhead on a plain CLI run: the underlying event-sink singleton's publish methods are no-ops until the desktop app attaches it; preview JPEG encoding is throttled
 - Closing the window mid-run asks for confirmation; a native OS notification fires on completion
 
@@ -426,7 +427,7 @@ mean-variance relationship.
 | Format | Flag | Description |
 |--------|------|-------------|
 | FITS float32 | (always) | Primary output; (3, H, W) layout for maximum compatibility |
-| Preview JPEG | (always) | GHS, arcsinh, or linear stretch; 95% quality |
+| Preview JPEG | (always) | Stretched with `--stretch` / `--stretch-color` (feature 29); 95% quality |
 | TIFF 32-bit | `--export tiff` | 32-bit float RGB for external tools |
 | XISF 1.0 | `--export xisf` | PixInsight native format |
 | Per-frame JPEGs | `--export-frames-dir` | Stretched preview for every accepted frame |
@@ -451,6 +452,14 @@ mean-variance relationship.
 | GHS *(default)* | `--stretch ghs` | Generalised Hyperbolic Stretch; tunable via config keys `ghs_b`, `ghs_sp`, `ghs_hp` (auto-set per target) |
 | Arcsinh | `--stretch arcsinh` | Arcsinh stretch; good for galaxies |
 | Linear | `--stretch linear` | No stretch; useful for already-processed data |
+| Masked | `--stretch masked` | Stronger faint-signal stretch blended in through a smooth luminance mask |
+| Multi-scale | `--stretch multiscale` | Separate diffuse-emission and filament masks |
+| SETI Astro | `--stretch seti` | Statistical stretch to a display median of 0.20 |
+| Noise floor | `--stretch noisefloor` | GHS strength solved from the sky noise (about 4 of 255 levels per sky sigma) |
+| OKLab | `--stretch oklab` | GHS curve on OKLab lightness; saturated star cores stay bright and coloured |
+| CLAHE | `--stretch clahe` | GHS plus contrast-limited local equalisation on extended signal |
+
+`--stretch-color channel` (default) applies the curve to each channel; `preserve` applies it to luminance and keeps each pixel's RGB ratios. Every preview JPEG (main, live, stream, mosaic, comet, per-frame, annotated) uses the same settings. After a run the desktop app can re-stretch the preview JPEG with another choice.
 
 ### 30. GPU Acceleration
 
@@ -695,7 +704,8 @@ with `--config` (keys listed per feature above and in `parse_args`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--stretch` | ghs | Preview stretch: linear, arcsinh, ghs |
+| `--stretch` | ghs | Preview stretch: linear, arcsinh, ghs, masked, multiscale, seti, noisefloor, oklab, clahe |
+| `--stretch-color` | channel | `channel`: curve per channel; `preserve`: curve on luminance, RGB ratios kept |
 | `--preview-black-sigma N` | auto | Preview black point in sky-sigma (auto-set per target and stack depth) |
 | `--export FMT[,FMT]` | — | Extra formats: tiff, xisf |
 | `--matched-filter` | off | Write a per-stack matched-filter SNR map (feature 28) |

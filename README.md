@@ -370,6 +370,7 @@ The window has two columns:
 - **Right — Preview + frames**
   - Before a run: an example result for the chosen target, and a **This run** summary of what Start will do (frames, target, mode, changed settings, output file).
   - During and after a run: the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a per-frame thumbnail strip and a running table of per-frame quality (score, SNR, star count, FWHM).
+  - After a run: a **Stretch** / **Colour** bar above the preview offers every `--stretch` and `--stretch-color` choice; **Apply to JPEG** re-renders the preview and overwrites the run's `.jpg` without re-processing (the FITS outputs are unchanged).
 
 Leave **Output file** blank and the stack is saved next to the light-frames folder, never overwriting an earlier one.
 

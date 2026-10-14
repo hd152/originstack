@@ -6,6 +6,15 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every preview JPEG follows `--stretch-color` and `--preview-black-sigma`.** The
+  previews written by `--live`, `--stream`, `--mosaic`, comet mode (comet and
+  blended stacks), `--export-frames-dir` and `--annotate` always rendered
+  `preserve` colour, and the mosaic, comet and per-frame previews also ignored
+  `--preview-black-sigma`. The `--combine-sessions` preview written when
+  post-processing the combined stack fails now uses the run's GHS settings too.
+
 ## [2.11.8] - 2026-10-13
 
 Pick a different preview stretch after a run, three new stretches, and the
