@@ -17,30 +17,61 @@ use pyo3::types::PyBytes;
 use rayon::prelude::*;
 
 /// Shuffle bytes by element position, improving LZ4's compression of numeric arrays.
-fn byte_shuffle(input: &[u8], itemsize: usize) -> Vec<u8> {
+/// One sequential pass over `input`, `itemsize` sequential write streams.
+fn byte_shuffle_into(input: &[u8], itemsize: usize, output: &mut [u8]) {
     let count = input.len() / itemsize;
-    let mut output = vec![0; input.len()];
-    for byte in 0..itemsize {
-        for item in 0..count {
-            output[byte * count + item] = input[item * itemsize + byte];
+    if itemsize == 4 {
+        let (p0, rest) = output.split_at_mut(count);
+        let (p1, rest) = rest.split_at_mut(count);
+        let (p2, p3) = rest.split_at_mut(count);
+        for ((((item, b0), b1), b2), b3) in input
+            .chunks_exact(4)
+            .zip(p0.iter_mut())
+            .zip(p1.iter_mut())
+            .zip(p2.iter_mut())
+            .zip(p3.iter_mut())
+        {
+            *b0 = item[0];
+            *b1 = item[1];
+            *b2 = item[2];
+            *b3 = item[3];
+        }
+        return;
+    }
+    for (index, item) in input.chunks_exact(itemsize).enumerate() {
+        for (byte, &value) in item.iter().enumerate() {
+            output[byte * count + index] = value;
         }
     }
-    output
 }
 
-/// Inverse of `byte_shuffle`.
-fn byte_unshuffle(input: &[u8], itemsize: usize) -> Vec<u8> {
+/// Inverse of `byte_shuffle_into`.
+fn byte_unshuffle_into(input: &[u8], itemsize: usize, output: &mut [u8]) {
     let count = input.len() / itemsize;
-    let mut output = vec![0; input.len()];
-    for byte in 0..itemsize {
-        for item in 0..count {
-            output[item * itemsize + byte] = input[byte * count + item];
+    if itemsize == 4 {
+        let (p0, rest) = input.split_at(count);
+        let (p1, rest) = rest.split_at(count);
+        let (p2, p3) = rest.split_at(count);
+        for ((((item, &b0), &b1), &b2), &b3) in output
+            .chunks_exact_mut(4)
+            .zip(p0.iter())
+            .zip(p1.iter())
+            .zip(p2.iter())
+            .zip(p3.iter())
+        {
+            item.copy_from_slice(&[b0, b1, b2, b3]);
+        }
+        return;
+    }
+    for (index, item) in output.chunks_exact_mut(itemsize).enumerate() {
+        for (byte, value) in item.iter_mut().enumerate() {
+            *value = input[byte * count + index];
         }
     }
-    output
 }
 
 /// Losslessly compress a C-contiguous numeric array using byte shuffle + pure-Rust LZ4.
+/// Works on the caller's buffer in place (no input copy); one shuffle scratch buffer.
 #[pyfunction]
 fn compress_frame(
     py: Python<'_>,
@@ -65,42 +96,58 @@ fn compress_frame(
             "LZ4 frame input exceeds the 4 GiB block limit",
         ));
     }
-    let input = input.to_vec();
-    let compressed = py.detach(move || {
-        let shuffled = byte_shuffle(&input, itemsize);
+    let compressed = py.detach(|| {
+        let mut shuffled = vec![0u8; input.len()];
+        byte_shuffle_into(input, itemsize, &mut shuffled);
         lz4_flex::block::compress_prepend_size(&shuffled)
     });
     Ok(PyBytes::new(py, &compressed).unbind())
 }
 
 /// Decompress a byte-shuffled LZ4 frame and verify its expected output length.
+/// Returns a new, writable, numpy-aligned uint8 array (callers `.view()` it as
+/// the frame dtype); the compressed bytes are read in place.
 #[pyfunction]
-fn decompress_frame(
-    py: Python<'_>,
-    data: &Bound<'_, PyBytes>,
+fn decompress_frame<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyBytes>,
     expected_len: usize,
     itemsize: usize,
-) -> PyResult<Py<PyBytes>> {
+) -> PyResult<Bound<'py, PyArray1<u8>>> {
     if itemsize == 0 || expected_len % itemsize != 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "expected length must be divisible by positive itemsize",
         ));
     }
-    let compressed = data.as_bytes().to_vec();
-    let output = py
-        .detach(move || {
-            let shuffled = lz4_flex::block::decompress_size_prepended(&compressed)
+    let compressed = data.as_bytes();
+    let (stored_len, block) = lz4_flex::block::uncompressed_size(compressed)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    if stored_len != expected_len {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "decompressed frame has {stored_len} bytes; expected {expected_len}"
+        )));
+    }
+    let out = PyArray1::<u8>::zeros(py, expected_len, false);
+    {
+        let mut out_rw = numpy::PyArrayMethods::readwrite(&out);
+        let out_slice = out_rw.as_slice_mut().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err("output array must be contiguous")
+        })?;
+        py.detach(|| {
+            let mut shuffled = vec![0u8; expected_len];
+            let written = lz4_flex::block::decompress_into(block, &mut shuffled)
                 .map_err(|e| e.to_string())?;
-            if shuffled.len() != expected_len {
+            if written != expected_len {
                 return Err(format!(
-                    "decompressed frame has {} bytes; expected {expected_len}",
-                    shuffled.len()
+                    "decompressed frame has {written} bytes; expected {expected_len}"
                 ));
             }
-            Ok(byte_unshuffle(&shuffled, itemsize))
+            byte_unshuffle_into(&shuffled, itemsize, out_slice);
+            Ok(())
         })
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    Ok(PyBytes::new(py, &output).unbind())
+    }
+    Ok(out)
 }
 
 /// f32/f64 for `median_inplace`.
