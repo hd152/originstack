@@ -498,6 +498,21 @@ def _blend_weights(sig: dict, prior_type: Optional[str] = None,
     return {t: w / total for t, w in raw.items()}
 
 
+def _auto_setter(args, changes: List[str]):
+    """``_set(attr, val)``: apply an --auto choice to ``args`` and log it in
+    ``changes``, unless the user set ``attr`` explicitly on the CLI."""
+    explicit = getattr(args, '_explicit_cli_dests', set())
+
+    def _set(attr: str, val: object) -> None:
+        if attr in explicit:
+            return  # user set this flag explicitly on the CLI — it wins over auto
+        old = getattr(args, attr, None)
+        if old != val:
+            setattr(args, attr, val)
+            changes.append(f"{attr}  {old!r} -> {val!r}")
+    return _set
+
+
 def _apply_dynamic_settings(
     sig: dict, weights: Dict[str, float], args
 ) -> List[str]:
@@ -512,14 +527,7 @@ def _apply_dynamic_settings(
     """
     changes: List[str] = []
     _explicit = getattr(args, '_explicit_cli_dests', set())
-
-    def _set(attr: str, val: object) -> None:
-        if attr in _explicit:
-            return  # user set this flag explicitly on the CLI — it wins over auto
-        old = getattr(args, attr, None)
-        if old != val:
-            setattr(args, attr, val)
-            changes.append(f"{attr}  {old!r} -> {val!r}")
+    _set = _auto_setter(args, changes)
 
     # Union of every attr any preset defines, first-seen order for a stable,
     # readable change-list.
@@ -615,15 +623,7 @@ def _apply_quality_settings(
 ) -> List[str]:
     """Apply frame-count, SNR, FWHM, Strehl, and dispersion adjustments."""
     changes: List[str] = []
-    _explicit = getattr(args, '_explicit_cli_dests', set())
-
-    def _set(attr: str, val: object) -> None:
-        if attr in _explicit:
-            return  # user set this flag explicitly on the CLI — it wins over auto
-        old = getattr(args, attr, None)
-        if old != val:
-            setattr(args, attr, val)
-            changes.append(f"{attr}  {old!r} -> {val!r}")
+    _set = _auto_setter(args, changes)
 
     def _disable_deconvolve() -> None:
         if getattr(args, 'deconvolve', False):

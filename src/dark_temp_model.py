@@ -24,20 +24,14 @@ from typing import List, Optional
 import numpy as np
 
 from src.models import FrameInfo
-from src.utils import get_logger, safe_print
+from src.utils import get_logger, header_get_first, safe_print
 
 _log = get_logger()
 
 
 def _frame_temp(f: FrameInfo) -> Optional[float]:
-    for key in ('CCDTEMP', 'CCD-TEMP', 'TEMPERAT', 'CCD_TEMP', 'SET-TEMP'):
-        val = f.header.get(key)
-        if val is not None:
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                pass
-    return None
+    return header_get_first(f.header, ('CCDTEMP', 'CCD-TEMP', 'TEMPERAT', 'CCD_TEMP', 'SET-TEMP'),
+                            cast=float)
 
 
 def build_dark_temperature_model(frames: List[FrameInfo], degree: int = 2) -> Optional[dict]:

@@ -25,6 +25,10 @@ def _scene(noise=20.0, h=400, w=600, seed=0):
     return img, r, sky
 
 
+def _assert_display(out):
+    assert np.all(np.isfinite(out)) and out.min() >= 0.0 and out.max() <= 1.0
+
+
 def _sat(p):
     return (p.max(axis=-1) - p.min(axis=-1)) / np.maximum(p.max(axis=-1), 1e-9)
 
@@ -78,12 +82,6 @@ def test_noise_limited_b_is_linear_when_noise_already_visible():
     assert iof._noise_limited_b(500.0, 10.0, 475.0, 700.0, 0.95) == 0.0
 
 
-def test_noisefloor_channel_mode_valid():
-    img, _r, _sky = _scene()
-    out = iof.render_preview_float(img, 'noisefloor', color='channel')
-    assert np.all(np.isfinite(out)) and out.min() >= 0.0 and out.max() <= 1.0
-
-
 # ── oklab ──────────────────────────────────────────────────────────────────
 
 def test_oklab_grey_matches_ghs():
@@ -97,7 +95,7 @@ def test_oklab_star_cores_brighter_and_still_coloured():
     img, r, _sky = _scene()
     g = iof.render_preview_float(img, 'ghs')
     o = iof.render_preview_float(img, 'oklab')
-    assert np.all(np.isfinite(o)) and o.min() >= 0.0 and o.max() <= 1.0
+    _assert_display(o)
     for y, x in ((60, 80), (330, 500)):
         # ghs keeps the ratios by dimming the core to fit the gamut
         assert o[y, x] @ W > g[y, x] @ W + 0.1
@@ -120,7 +118,7 @@ def test_clahe_lifts_nebula_contrast_but_not_sky_or_stars():
     img, r, sky = _scene()
     g = iof.render_preview_float(img, 'ghs')
     c = iof.render_preview_float(img, 'clahe')
-    assert np.all(np.isfinite(c)) and c.min() >= 0.0 and c.max() <= 1.0
+    _assert_display(c)
     gl, cl = g @ W, c @ W
     assert abs(cl[sky].mean() - gl[sky].mean()) * 255 < 0.5
     neb = (r > 20) & (r < 80)
@@ -154,8 +152,16 @@ def test_clahe_finite_on_sky_centred_data():
     img += (3000.0 * np.exp(-((xx - 150) / 50.0) ** 2))[..., None].astype(np.float32)
     img[:, 140:148, 0] = 400.0
     img[:, 140:148, 2] = -400.0 * 0.299 / 0.114
-    out = iof.render_preview_float(img, 'clahe')
-    assert np.all(np.isfinite(out)) and out.min() >= 0.0 and out.max() <= 1.0
+    _assert_display(iof.render_preview_float(img, 'clahe'))
+
+
+@pytest.mark.parametrize('color', ['preserve', 'channel'])
+@pytest.mark.parametrize('name', ['noisefloor', 'oklab', 'clahe'])
+def test_new_stretches_valid_in_both_colour_modes(name, color):
+    img, _r, _sky = _scene()
+    original = img.copy()
+    _assert_display(iof.render_preview_float(img, name, color=color))
+    np.testing.assert_array_equal(img, original)
 
 
 @pytest.mark.parametrize('name', ['noisefloor', 'oklab', 'clahe'])

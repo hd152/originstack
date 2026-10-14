@@ -116,22 +116,6 @@ def test_translated_page_links_resolve():
                 assert target.exists(), f'{folder}/{page}: {url}'
 
 
-@pytest.fixture(scope='module')
-def tk_root():
-    # One root for the module, as in test_desktop_setup_form.py: a root per
-    # test intermittently crashed Tk on Windows.
-    tk = pytest.importorskip('tkinter')
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip('no display available for a real Tk root')
-    root.withdraw()
-    from src import desktop_app
-    desktop_app._apply_theme(root)
-    yield root
-    root.destroy()
-
-
 @pytest.mark.parametrize('code', [c for c in i18n.LANGUAGES if c != 'en'])
 def test_setup_form_builds_in_every_language(code, tk_root, english):
     from src import desktop_app

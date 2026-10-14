@@ -379,8 +379,7 @@ def test_fix_hot_bayer_matches_reference():
     np.testing.assert_allclose(got, ref, atol=1e-3)
 
 
-@pytest.mark.parametrize("with_mono", [False, True])
-def test_hot_pixel_box_replace_matches_scipy(with_mono):
+def test_hot_pixel_box_replace_matches_scipy():
     from scipy import ndimage as _nd
     rng = np.random.default_rng(7)
     h, w, c = 48, 56, 3

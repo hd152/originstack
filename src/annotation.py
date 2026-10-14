@@ -189,13 +189,9 @@ def run_annotation(stacked: np.ndarray, header, output_path: str, args) -> bool:
         safe_print("  Annotate: no catalogued objects found in field")
         return False
 
-    from src.io_fits import render_preview_uint8
+    from src.io_fits import preview_stretch_kw, render_preview_uint8
     preview = render_preview_uint8(
-        stacked, stretch=getattr(args, 'stretch', 'ghs'),
-        ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-        ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-        ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-        black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0))
+        stacked, **preview_stretch_kw(args))
     if preview is None:
         safe_print("  Annotate: preview stretch unavailable -- skipping")
         return False

@@ -152,16 +152,25 @@ class UIEvents:
     @staticmethod
     def _stretch_kw(args) -> dict:
         """Extract stretch parameters from an args namespace (or defaults)."""
-        if args is None:
-            return dict(stretch='ghs', ghs_b=8.0, ghs_sp=0.15, ghs_hp=0.95,
-                        black_sigma=0.0, color='channel')
-        return dict(
-            stretch=getattr(args, 'stretch', 'ghs'),
-            ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-            ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-            ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-            black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0),
-            color=getattr(args, 'stretch_color', 'channel'))
+        from src.io_fits import preview_stretch_kw
+        return preview_stretch_kw(args)
+
+    def _set_named_slot(self, slug: str, caption: str, data: bytes) -> None:
+        """Register / update a named viewer slot (caller holds the lock)."""
+        self._named_version += 1
+        self._named[slug] = {'caption': caption, 'ver': self._named_version,
+                             'jpeg': data}
+        self._named.move_to_end(slug)
+        self._latest_slug = slug
+        # evict oldest slots beyond the cap (keep 'final' + newest)
+        while len(self._named) > _MAX_NAMED:
+            for k in list(self._named.keys()):
+                if k != 'final' and k != self._latest_slug:
+                    del self._named[k]
+                    break
+            else:
+                break
+        self._bump()
 
     def preview(self, rgb, caption: str, args=None, slot: Optional[str] = None,
                 min_interval: float = 2.0) -> None:
@@ -187,21 +196,7 @@ class UIEvents:
             self._preview_caption = caption
             self._preview_version += 1
             self._last_preview_time = now
-            # register / update the named slot
-            self._named_version += 1
-            self._named[slug] = {'caption': caption, 'ver': self._named_version,
-                                 'jpeg': data}
-            self._named.move_to_end(slug)
-            self._latest_slug = slug
-            # evict oldest slots beyond the cap (keep 'final' + newest)
-            while len(self._named) > _MAX_NAMED:
-                for k in list(self._named.keys()):
-                    if k != 'final' and k != self._latest_slug:
-                        del self._named[k]
-                        break
-                else:
-                    break
-            self._bump()
+            self._set_named_slot(slug, caption, data)
 
     def frame_preview(self, name: str, rgb, args=None,
                       max_dim: int = 512) -> None:
@@ -253,9 +248,7 @@ class UIEvents:
         off the GUI thread. Raises ``RuntimeError`` when there is nothing to
         re-stretch or the stretch backend is unavailable; ``OSError`` when the
         file cannot be written."""
-        import io as _io
-
-        from src.io_fits import _preview_pil_image, render_preview_rgb_uint8, write_preview_jpeg
+        from src.io_fits import preview_jpeg_from_uint8, render_preview_rgb_uint8, write_preview_jpeg
         with self._lock:
             src = self._final_src
         if src is None:
@@ -275,21 +268,13 @@ class UIEvents:
                     os.remove(tmp)
                 except OSError:
                     pass
-        buf = _io.BytesIO()
-        _preview_pil_image(out, 1024).save(buf, format='JPEG', quality=85)
-        data = buf.getvalue()
+        data = preview_jpeg_from_uint8(out)
         with self._lock:
             # A new run may have started while this rendered: its state wins.
             if self._final_src is src:
                 src['kw'] = kw
-                self._named_version += 1
-                caption = (self._named['final']['caption'] if 'final' in self._named
-                           else 'Final (post-processed)')
-                self._named['final'] = {'caption': caption, 'ver': self._named_version,
-                                        'jpeg': data}
-                self._named.move_to_end('final')
-                self._latest_slug = 'final'
-                self._bump()
+                caption = self._named.get('final', {}).get('caption', 'Final (post-processed)')
+                self._set_named_slot('final', caption, data)
         return data
 
     def summary(self, **fields: Any) -> None:

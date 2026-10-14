@@ -62,22 +62,6 @@ def test_name_lists_refer_to_real_dests():
         assert not missing, f'{name} names unknown dests: {sorted(missing)}'
 
 
-@pytest.fixture(scope='module')
-def tk_root():
-    # One root for the module: creating and destroying a Tk root per test
-    # intermittently crashed Tk inside tk.Tk() (Windows, Python 3.14).
-    tk = pytest.importorskip('tkinter')
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip('no display available for a real Tk root')
-    root.withdraw()
-    from src import desktop_app
-    desktop_app._apply_theme(root)
-    yield root
-    root.destroy()
-
-
 @pytest.fixture
 def form(tk_root):
     from src import desktop_app

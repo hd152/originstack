@@ -22,6 +22,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.utils import safe_print
 
 try:
@@ -120,7 +121,7 @@ def repair_saturated_stars(
 
     H, W, _ = rgb.shape
     out = rgb.astype(np.float32, copy=True)
-    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    lum = luminance(rgb)
 
     lum_max = float(lum.max())
     if lum_max <= 0:

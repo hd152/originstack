@@ -22,14 +22,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.models import FrameInfo, ProcessingStats
-from src.utils import format_time, mp_context, progress_disabled, safe_print
-
-try:
-    from tqdm import tqdm
-except Exception:
-    def tqdm(iterable, **kwargs):
-        return iterable
+from src.utils import format_time, mp_context, progress_disabled, safe_print, tqdm
 
 REJECT_SUFFIX = '.rejected'
 
@@ -92,8 +87,7 @@ def _score_one(path: str) -> Tuple[str, Optional[dict], Optional[str]]:
                           + arr[1:h:2, 0:w:2] + arr[1:h:2, 1:w:2])
             fwhm_scale = 2.0
         else:
-            lum = (0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1]
-                   + 0.114 * arr[:, :, 2]).astype(np.float32)
+            lum = luminance(arr).astype(np.float32)
             fwhm_scale = 1.0
         metrics = compute_quality_metrics(lum, level='gate', advanced_metrics=False)
         if fwhm_scale != 1.0:

@@ -22,9 +22,9 @@ from src.debayer import build_hot_pixel_map
 from src.frame_discovery import discover_frames, group_lights_by_filter, select_matching_darks, select_matching_flats
 from src.gpu_context import get_gpu, reset_gpu
 from src.health_check import run_health_check
-from src.io_fits import make_master, save_preview_rgb
+from src.io_fits import make_master
 from src.models import Config, ProcessingStats
-from src.pipeline import stack_target
+from src.pipeline import save_final_preview, stack_target
 from src.utils import (
     TZ_OFFSET_RE,
     disable_astropy_network,
@@ -1357,29 +1357,13 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                                f"({exc}); the linear combined stack is saved and its "
                                f"preview is unprocessed")
             if _processed is not None:
-                _pa = _eff
-                _pstretch = getattr(_pa, 'stretch', 'linear')
                 _pstarless = None
-                if getattr(_pa, 'layered_stretch', False) and _pstretch == 'ghs':
+                if getattr(_eff, 'layered_stretch', False) and getattr(_eff, 'stretch', '') == 'ghs':
                     from src.star_removal import starless_from_image
                     _pstarless = starless_from_image(_processed)
-                save_preview_rgb(_processed, preview_path, stretch=_pstretch,
-                                 ghs_b=float(getattr(_pa, 'ghs_b', 8.0)),
-                                 ghs_sp=float(getattr(_pa, 'ghs_sp', 0.15)),
-                                 ghs_hp=float(getattr(_pa, 'ghs_hp', 0.95)),
-                                 black_sigma=float(getattr(_pa, 'preview_black_sigma', 0.0)),
-                                 starless=_pstarless,
-                                 color=getattr(_pa, 'stretch_color', 'channel'))
+                save_final_preview(_processed, preview_path, _eff, starless=_pstarless)
             else:
-                save_preview_rgb(combined, preview_path,
-                                 stretch=getattr(args, 'stretch', 'linear'),
-                                 color=getattr(args, 'stretch_color', 'channel'))
-            from src.ui_events import get_ui_events
-            if _processed is not None:
-                get_ui_events().remember_final_preview(_processed, preview_path, _pa,
-                                                       starless=_pstarless)
-            else:
-                get_ui_events().remember_final_preview(combined, preview_path, args)
+                save_final_preview(combined, preview_path, args)
 
             safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
             safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")

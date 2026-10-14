@@ -2,11 +2,20 @@
 (replaces the old HTTP/SSE ``WebView``; these tests port ``test_webview.py``'s
 state-logic coverage, minus everything that was testing the deleted HTTP
 transport)."""
+import argparse
+import os
+import tempfile
 import unittest
 
 import numpy as np
 
-from src.io_fits import preview_jpeg_bytes, render_preview_uint8
+from src.io_fits import (
+    preview_jpeg_bytes,
+    render_preview_rgb_uint8,
+    render_preview_uint8,
+    save_preview_rgb,
+    write_preview_jpeg,
+)
 from src.ui_events import UIEvents
 
 
@@ -177,28 +186,21 @@ class TestFrameThumbRing(unittest.TestCase):
         self.assertEqual(len(ui._frame_thumbs), _MAX_FRAME_THUMBS)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestRestretch(unittest.TestCase):
     """remember_final_preview()/restretch(): picking another stretch for the
     run's preview JPEG once the run is done."""
 
-    def _remembered(self, tmpdir, stretch='ghs'):
-        import argparse
-        import os
-
-        from src.io_fits import save_preview_rgb
-        ui = UIEvents()
-        ui.attach()
-        rgb = _synth_rgb()
-        rgb[40:60, 50:70] += 400.0  # some structure for the stretches to differ on
-        path = os.path.join(tmpdir, 'stack.jpg')
-        args = argparse.Namespace(stretch=stretch, stretch_color='preserve')
-        save_preview_rgb(rgb, path, stretch=stretch)
-        ui.remember_final_preview(rgb, path, args)
-        return ui, rgb, path
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.ui = UIEvents()
+        self.ui.attach()
+        self.rgb = _synth_rgb()
+        self.rgb[40:60, 50:70] += 400.0  # some structure for the stretches to differ on
+        self.path = os.path.join(self._tmp.name, 'stack.jpg')
+        save_preview_rgb(self.rgb, self.path, stretch='ghs')
+        args = argparse.Namespace(stretch='ghs', stretch_color='preserve')
+        self.ui.remember_final_preview(self.rgb, self.path, args)
 
     def test_inactive_keeps_nothing(self):
         ui = UIEvents()
@@ -208,46 +210,36 @@ class TestRestretch(unittest.TestCase):
             ui.restretch('arcsinh', 'preserve')
 
     def test_snapshot_reports_current_stretch(self):
-        import os
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            ui, _rgb, path = self._remembered(d)
-            info = ui.snapshot()['restretch']
-            self.assertEqual(info, {'stretch': 'ghs', 'color': 'preserve',
-                                    'path': os.path.abspath(path)})
+        self.assertEqual(self.ui.snapshot()['restretch'],
+                         {'stretch': 'ghs', 'color': 'preserve',
+                          'path': os.path.abspath(self.path)})
 
     def test_restretch_overwrites_jpeg_and_final_slot(self):
-        import os
-        import tempfile
-
         from PIL import Image
-
-        from src.io_fits import render_preview_rgb_uint8, write_preview_jpeg
-        with tempfile.TemporaryDirectory() as d:
-            ui, rgb, path = self._remembered(d)
-            before = open(path, 'rb').read()
-            data = ui.restretch('linear', 'channel')
-            self.assertTrue(data.startswith(b'\xff\xd8'))
-            after = open(path, 'rb').read()
-            self.assertNotEqual(before, after)
-            # Same bytes the normal writer produces for that stretch.
-            ref = os.path.join(d, 'ref.jpg')
-            write_preview_jpeg(render_preview_rgb_uint8(rgb, stretch='linear',
-                                                        color='channel'), ref)
-            self.assertEqual(after, open(ref, 'rb').read())
-            self.assertEqual(Image.open(path).size, (160, 128))
-            self.assertFalse(os.path.exists(path + '.tmp'))
-            self.assertEqual(ui.named_jpeg('final'), data)
-            snap = ui.snapshot()
-            self.assertEqual(snap['restretch']['stretch'], 'linear')
-            self.assertEqual(snap['restretch']['color'], 'channel')
-            self.assertEqual(snap['latest_slug'], 'final')
+        before = open(self.path, 'rb').read()
+        data = self.ui.restretch('linear', 'channel')
+        self.assertTrue(data.startswith(b'\xff\xd8'))
+        after = open(self.path, 'rb').read()
+        self.assertNotEqual(before, after)
+        # Same bytes the normal writer produces for that stretch.
+        ref = os.path.join(self._tmp.name, 'ref.jpg')
+        write_preview_jpeg(render_preview_rgb_uint8(self.rgb, stretch='linear',
+                                                    color='channel'), ref)
+        self.assertEqual(after, open(ref, 'rb').read())
+        self.assertEqual(Image.open(self.path).size, (160, 128))
+        self.assertFalse(os.path.exists(self.path + '.tmp'))
+        self.assertEqual(self.ui.named_jpeg('final'), data)
+        snap = self.ui.snapshot()
+        self.assertEqual(snap['restretch']['stretch'], 'linear')
+        self.assertEqual(snap['restretch']['color'], 'channel')
+        self.assertEqual(snap['latest_slug'], 'final')
 
     def test_new_run_drops_the_remembered_image(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            ui, _rgb, _path = self._remembered(d)
-            ui.run_started()
-            self.assertIsNone(ui.snapshot()['restretch'])
-            with self.assertRaises(RuntimeError):
-                ui.restretch('arcsinh', 'preserve')
+        self.ui.run_started()
+        self.assertIsNone(self.ui.snapshot()['restretch'])
+        with self.assertRaises(RuntimeError):
+            self.ui.restretch('arcsinh', 'preserve')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -49,14 +49,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import format_time, get_memory_usage_mb, progress_disabled, safe_print
-
-try:
-    from tqdm import tqdm
-except Exception:
-    def tqdm(iterable, **kwargs):
-        return iterable
+from src.utils import format_time, get_memory_usage_mb, progress_disabled, safe_print, tqdm
 
 try:
     from scipy import ndimage as _ndi
@@ -306,7 +301,7 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
         caching existed."""
         if rec.cache_index is not None and rgb_cache is not None:
             rgb = np.array(rgb_cache[rec.cache_index], dtype=np.float32)
-            lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+            lum = luminance(rgb)
             return {'rgb': rgb, 'lum': lum, 'error': None}
         return _load(rec)
 
@@ -462,7 +457,7 @@ def run_stream_stack(args) -> int:
 
     from astropy.io import fits
 
-    from src.io_fits import populate_fits_header, save_preview_rgb
+    from src.io_fits import populate_fits_header, preview_stretch_kw, save_preview_rgb
     from src.pipeline import _save_tiff
     from src.postprocess import postprocess_stack
 
@@ -488,11 +483,7 @@ def run_stream_stack(args) -> int:
         _save_tiff(processed, output_path)
 
     preview_path = os.path.splitext(output_path)[0] + '.jpg'
-    save_preview_rgb(processed, preview_path, stretch=getattr(args, 'stretch', 'ghs'),
-                     ghs_b=float(getattr(args, 'ghs_b', 8.0)),
-                     ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
-                     ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
-                     black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0))
+    save_preview_rgb(processed, preview_path, **preview_stretch_kw(args))
 
     safe_print(f"\n  STREAM complete: {len(frame_infos)}/{n_total} frames, "
               f"{n_rej} pixel-samples rejected, total {format_time(time.time() - t0)}")

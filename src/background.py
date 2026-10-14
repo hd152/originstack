@@ -9,6 +9,10 @@ from scipy import ndimage
 from scipy.interpolate import RectBivariateSpline
 from scipy.ndimage import gaussian_filter, zoom
 
+from src.debayer import luminance
+from src.models import Config
+from src.utils import safe_print
+
 try:
     import astro_native as _native
     HAS_NATIVE = hasattr(_native, 'dbe_fit_surface')
@@ -16,39 +20,10 @@ except Exception:
     _native = None
     HAS_NATIVE = False
 
-# Local dependencies - Added fallbacks for standalone execution or missing Config
-try:
-    from src.models import Config
-except ImportError:
-    # Fallback configuration for standalone usage or testing
-    class _MockConfig:
-        BORDER_FRAC = 0.1
-        DBE_PATCH_SIZE = 64
-        DBE_MASKED_FRAC_THRESH = 0.5
-        DBE_OUTLIER_SIGMA = 3.0
-        DBE_OUTLIER_ITERS = 5
-        DBE_MIN_SAMPLES = 10
-        DBE_MAX_SAMPLES = 1000
-        DBE_FIT_SIGMA_PATCHES = 1.25
-    Config = _MockConfig
-
-try:
-    from src.utils import safe_print
-except ImportError:
-    # Fallback logging for standalone usage
-    def safe_print(*args, **kwargs):
-        print(*args, **kwargs)
-
 try:
     from astropy.stats import sigma_clipped_stats
 except ImportError:
     sigma_clipped_stats = None
-
-# Global import check for scipy functions to keep them at module level
-try:
-    from scipy.ndimage import gaussian_filter as _gf
-except ImportError:
-    _gf = None
 
 
 _HAS_NATIVE_GAUSSIAN = HAS_NATIVE and hasattr(_native, 'gaussian_filter_native')
@@ -451,7 +426,7 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
     if H == 0 or W == 0:
         return rgb.copy()
 
-    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    lum = luminance(rgb)
 
     # --- Auto-detect extended source ---
     combined_mask = star_mask.astype(np.float32) if star_mask is not None else np.zeros((H, W), dtype=np.float32)
@@ -561,7 +536,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
     if H == 0 or W == 0:
         return img.astype(np.float32)
 
-    lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+    lum = luminance(img)
 
     # --- Detect extended sources ---
     cell_excluded = np.zeros((max(1, H // mesh_size), max(1, W // mesh_size)), dtype=bool)
@@ -770,7 +745,7 @@ def sky_floor_normalize(rgb: np.ndarray, star_mask: Optional[np.ndarray] = None,
         return rgb.copy()
 
     result = rgb.copy()
-    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    lum = luminance(rgb)
 
     # --- Build source mask ---
     src_mask = np.zeros((H, W), dtype=np.float32)
@@ -862,7 +837,7 @@ def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
     (dynamic_background_extraction, wavelet_background_extraction).
     Returns (emission_mask, sky_med, sky_std, dense_field)."""
     H, W = rgb.shape[:2]
-    lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]).astype(np.float64)
+    lum = luminance(rgb).astype(np.float64)
     smooth_sigma = max(20.0, min(H, W) / 50.0)
     lum_smooth = gaussian_filter_ds(lum, sigma=smooth_sigma)
     sky_med, sky_std = _sigma_sky(_border_pixels(lum_smooth))
@@ -1533,20 +1508,19 @@ def _fill_exclusion_radial(background: np.ndarray, coords: np.ndarray,
     return out
 
 
-def dynamic_background_extraction(
-        rgb: np.ndarray,
-        patch_size: int = Config.DBE_PATCH_SIZE,
-        masked_frac_thresh: float = Config.DBE_MASKED_FRAC_THRESH,
-        clip_sigma: float = 3.0,
-        outlier_sigma: float = Config.DBE_OUTLIER_SIGMA,
-        outlier_iters: int = Config.DBE_OUTLIER_ITERS,
-        star_mask: Optional[np.ndarray] = None,
-        verbose: bool = False,
-        use_entropy_weights: bool = False,
-        exclusion_mask: Optional[np.ndarray] = None,
-        diffuse_threshold_sigma: float = 1.0) -> np.ndarray:
-    """Dynamic Background Extraction (DBE): adaptive patch sampling + robust
-    local-regression surface fit (see ``_fit_background_surface``)."""
+def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
+                                 patch_size: int, masked_frac_thresh: float,
+                                 clip_sigma: float, star_mask: Optional[np.ndarray],
+                                 verbose: bool, use_entropy_weights: bool,
+                                 exclusion_mask: Optional[np.ndarray],
+                                 diffuse_threshold_sigma: float,
+                                 admit_gradient: bool = False,
+                                 note: Optional[str] = None) -> np.ndarray:
+    """Shared driver of DBE and the wavelet background: sample sky patches per
+    channel, turn them into a surface with ``fit(coords, values)``, subtract.
+    Too few samples fall back to the mesh extraction. ``admit_gradient`` adds
+    DBE's gradient-following patches; ``note`` is printed (verbose) after the
+    emission mask is built."""
     from concurrent.futures import ThreadPoolExecutor
 
     H, W = rgb.shape[:2]
@@ -1554,11 +1528,11 @@ def dynamic_background_extraction(
         return rgb.copy()
 
     emission_mask, sky_med, sky_std, _dense_field = _dbe_prepare_emission_mask(
-        rgb, star_mask, exclusion_mask, verbose, "DBE",
+        rgb, star_mask, exclusion_mask, verbose, label,
         diffuse_threshold_sigma=diffuse_threshold_sigma)
 
-    if verbose and HAS_NATIVE:
-        safe_print("    [rust] DBE robust local-regression surface fit")
+    if verbose and note:
+        safe_print(note)
 
     result = np.empty_like(rgb)
     channel_names = ['Red', 'Green', 'Blue']
@@ -1571,13 +1545,14 @@ def dynamic_background_extraction(
             use_entropy_weights=use_entropy_weights)
 
         n0 = len(coords)
-        coords, values = _admit_gradient_patches(
-            channel, emission_mask, patch_size, masked_frac_thresh, sky_std,
-            coords, values, use_entropy_weights)
+        if admit_gradient:
+            coords, values = _admit_gradient_patches(
+                channel, emission_mask, patch_size, masked_frac_thresh, sky_std,
+                coords, values, use_entropy_weights)
         n = len(coords)
         if verbose:
             extra = f" (+{n - n0} admitted along the gradient)" if n > n0 else ""
-            safe_print(f"    DBE {channel_names[c]}: {n} background patches accepted{extra}")
+            safe_print(f"    {label} {channel_names[c]}: {n} background patches accepted{extra}")
 
         if n < Config.DBE_MIN_SAMPLES:
             if verbose:
@@ -1586,7 +1561,7 @@ def dynamic_background_extraction(
                         ', exclusion mask kept' if exclusion_mask is not None else '') + ')'
                 else:
                     fallback_desc = 'mesh extraction'
-                safe_print(f"    DBE {channel_names[c]}: insufficient samples ({n}), "
+                safe_print(f"    {label} {channel_names[c]}: insufficient samples ({n}), "
                            f"falling back to {fallback_desc}")
             if _dense_field:
                 # Ultra-dense field: the full emission mask (many small
@@ -1613,22 +1588,15 @@ def dynamic_background_extraction(
                                                 clip_sigma=clip_sigma,
                                                 star_mask=emission_mask).astype(np.float64)
         else:
-            # Subsample if too many for RBF performance
+            # Subsample if too many for the surface fit
             if n > Config.DBE_MAX_SAMPLES:
                 step = max(1, n // Config.DBE_MAX_SAMPLES)
                 coords = coords[::step]
                 values = values[::step]
                 if verbose:
-                    safe_print(f"    DBE {channel_names[c]}: subsampled to "
+                    safe_print(f"    {label} {channel_names[c]}: subsampled to "
                                f"{len(coords)} patches")
-
-            background = _fit_background_surface(
-                coords, values, H, W,
-                outlier_sigma=outlier_sigma, max_iter=outlier_iters,
-                patch_size=patch_size, verbose=verbose)
-            if exclusion_mask is not None:
-                background = _fill_exclusion_radial(
-                    background, coords, values, exclusion_mask, patch_size)
+            background = fit(coords, values)
 
         subtracted = channel - background
         if verbose:
@@ -1642,6 +1610,40 @@ def dynamic_background_extraction(
             result[:, :, c] = ch_result
 
     return result
+
+
+def dynamic_background_extraction(
+        rgb: np.ndarray,
+        patch_size: int = Config.DBE_PATCH_SIZE,
+        masked_frac_thresh: float = Config.DBE_MASKED_FRAC_THRESH,
+        clip_sigma: float = 3.0,
+        outlier_sigma: float = Config.DBE_OUTLIER_SIGMA,
+        outlier_iters: int = Config.DBE_OUTLIER_ITERS,
+        star_mask: Optional[np.ndarray] = None,
+        verbose: bool = False,
+        use_entropy_weights: bool = False,
+        exclusion_mask: Optional[np.ndarray] = None,
+        diffuse_threshold_sigma: float = 1.0) -> np.ndarray:
+    """Dynamic Background Extraction (DBE): adaptive patch sampling + robust
+    local-regression surface fit (see ``_fit_background_surface``)."""
+    H, W = rgb.shape[:2]
+
+    def fit(coords: np.ndarray, values: np.ndarray) -> np.ndarray:
+        background = _fit_background_surface(
+            coords, values, H, W,
+            outlier_sigma=outlier_sigma, max_iter=outlier_iters,
+            patch_size=patch_size, verbose=verbose)
+        if exclusion_mask is not None:
+            background = _fill_exclusion_radial(
+                background, coords, values, exclusion_mask, patch_size)
+        return background
+
+    return _patch_background_extraction(
+        rgb, "DBE", fit, patch_size=patch_size, masked_frac_thresh=masked_frac_thresh,
+        clip_sigma=clip_sigma, star_mask=star_mask, verbose=verbose,
+        use_entropy_weights=use_entropy_weights, exclusion_mask=exclusion_mask,
+        diffuse_threshold_sigma=diffuse_threshold_sigma, admit_gradient=True,
+        note="    [rust] DBE robust local-regression surface fit" if HAS_NATIVE else None)
 
 
 # ============ Wavelet-band (starlet) Background Extraction =========
@@ -1764,77 +1766,17 @@ def wavelet_background_extraction(
     that turns those samples into a smooth 2-D surface differs from
     ``dynamic_background_extraction``. See ``_wavelet_background_surface``.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     H, W = rgb.shape[:2]
-    if H == 0 or W == 0:
-        return rgb.copy()
 
-    emission_mask, sky_med, sky_std, _dense_field = _dbe_prepare_emission_mask(
-        rgb, star_mask, exclusion_mask, verbose, "Wavelet BG",
+    def fit(coords: np.ndarray, values: np.ndarray) -> np.ndarray:
+        return _wavelet_background_surface(coords, values, H, W, patch_size=patch_size,
+                                           n_scales=n_scales, verbose=verbose)
+
+    return _patch_background_extraction(
+        rgb, "Wavelet BG", fit, patch_size=patch_size, masked_frac_thresh=masked_frac_thresh,
+        clip_sigma=clip_sigma, star_mask=star_mask, verbose=verbose,
+        use_entropy_weights=use_entropy_weights, exclusion_mask=exclusion_mask,
         diffuse_threshold_sigma=diffuse_threshold_sigma)
-
-    result = np.empty_like(rgb)
-    channel_names = ['Red', 'Green', 'Blue']
-
-    def _process_channel(c):
-        channel = rgb[:, :, c].astype(np.float64)
-        coords, values = _sample_background_patches(
-            channel, emission_mask, patch_size, masked_frac_thresh,
-            sky_ref=sky_med, sky_std=sky_std,
-            use_entropy_weights=use_entropy_weights)
-
-        n = len(coords)
-        if verbose:
-            safe_print(f"    Wavelet BG {channel_names[c]}: {n} background patches accepted")
-
-        if n < Config.DBE_MIN_SAMPLES:
-            if verbose:
-                if _dense_field:
-                    fallback_desc = 'sigma-clip mesh (no emission mask' + (
-                        ', exclusion mask kept' if exclusion_mask is not None else '') + ')'
-                else:
-                    fallback_desc = 'mesh extraction'
-                safe_print(f"    Wavelet BG {channel_names[c]}: insufficient samples ({n}), "
-                           f"falling back to {fallback_desc}")
-            if _dense_field:
-                # See dynamic_background_extraction's identical branch for
-                # why a caller-supplied exclusion_mask (galaxy/comet) is
-                # still honored here even though the general emission mask
-                # is dropped for density reasons.
-                background = extract_background(
-                    channel, mesh_size=patch_size * 2,
-                    clip_sigma=clip_sigma,
-                    star_mask=exclusion_mask).astype(np.float64)
-            else:
-                background = extract_background(channel, mesh_size=patch_size,
-                                                clip_sigma=clip_sigma,
-                                                star_mask=emission_mask).astype(np.float64)
-        else:
-            if n > Config.DBE_MAX_SAMPLES:
-                step = max(1, n // Config.DBE_MAX_SAMPLES)
-                coords = coords[::step]
-                values = values[::step]
-                if verbose:
-                    safe_print(f"    Wavelet BG {channel_names[c]}: subsampled to "
-                               f"{len(coords)} patches")
-
-            background = _wavelet_background_surface(
-                coords, values, H, W, patch_size=patch_size,
-                n_scales=n_scales, verbose=verbose)
-
-        subtracted = channel - background
-        if verbose:
-            safe_print(f"    {channel_names[c]}: bg_median="
-                       f"{float(np.median(background)):.1f}, "
-                       f"subtracted_median={float(np.median(subtracted)):.1f}")
-        return c, subtracted.astype(np.float32)
-
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        for c, ch_result in executor.map(_process_channel, range(3)):
-            result[:, :, c] = ch_result
-
-    return result
 
 
 def remove_edge_bands(img: np.ndarray, sky_mask: np.ndarray,

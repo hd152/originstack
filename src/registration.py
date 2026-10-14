@@ -15,13 +15,7 @@ from scipy import ndimage
 from src.background import _gaussian_blur
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
-from src.utils import get_logger, progress_disabled, safe_print
-
-try:
-    from tqdm import tqdm
-except Exception:
-    def tqdm(iterable, **kwargs):
-        return iterable
+from src.utils import get_logger, progress_disabled, safe_print, tqdm
 
 _log = get_logger()
 

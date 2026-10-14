@@ -10,6 +10,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 
+from src.debayer import luminance
 from src.models import FrameInfo, ProcessingStats
 
 try:
@@ -324,16 +325,23 @@ def _extended_nebula_ghs(lum: np.ndarray, sky: float, sky_sigma: float, black: f
 
 
 def _preserving_preview(rgb: np.ndarray, lum: np.ndarray, curve, black: float,
-                        white: float, sky_sigma: float, top=False) -> np.ndarray:
+                        white: float, sky_sigma: float, top=False,
+                        apply=None) -> np.ndarray:
     """Colour-preserving preview of ``rgb`` with the luminance curve ``curve``,
     rolling off an extended highlight above ``white`` instead of clipping it.
-    ``top``: a precomputed ``_extended_highlight_top`` (False: compute it here)."""
+    ``top``: a precomputed ``_extended_highlight_top`` (False: compute it here).
+    ``apply``: the colour step (default ``colour_preserving_stretch``)."""
+    apply = apply or colour_preserving_stretch
     if top is False:
         top = _extended_highlight_top(lum, white)
     if top is None:
-        return colour_preserving_stretch(rgb, curve(lum), black, white, sky_sigma)
-    return colour_preserving_stretch(rgb, _rolloff_curve(curve, lum, white, top),
-                                     black, top, sky_sigma)
+        return apply(rgb, curve(lum), black, white, sky_sigma)
+    return apply(rgb, _rolloff_curve(curve, lum, white, top), black, top, sky_sigma)
+
+
+def _smoothstep(values: np.ndarray) -> np.ndarray:
+    values = np.clip(values, 0.0, 1.0)
+    return values * values * (3.0 - 2.0 * values)
 
 
 def _masked_stretch_weight(lum: np.ndarray, sky: float, sky_sigma: float,
@@ -347,12 +355,8 @@ def _masked_stretch_weight(lum: np.ndarray, sky: float, sky_sigma: float,
     bright_start = max(sky + 12.0 * sky_sigma, sky + 0.35 * (white - sky))
     bright_end = max(float(white), bright_start + sky_sigma)
 
-    def smoothstep(values: np.ndarray) -> np.ndarray:
-        values = np.clip(values, 0.0, 1.0)
-        return values * values * (3.0 - 2.0 * values)
-
-    faint = smoothstep((smoothed - faint_start) / max(faint_full - faint_start, 1e-12))
-    highlights = 1.0 - smoothstep(
+    faint = _smoothstep((smoothed - faint_start) / max(faint_full - faint_start, 1e-12))
+    highlights = 1.0 - _smoothstep(
         (smoothed - bright_start) / max(bright_end - bright_start, 1e-12))
     return ndimage.gaussian_filter(faint * highlights, sigma=2.0).astype(np.float32)
 
@@ -367,18 +371,14 @@ def _multiscale_stretch_weights(lum: np.ndarray, sky: float, sky_sigma: float,
     medium = ndimage.gaussian_filter(source, sigma=5.0)
     fine = ndimage.gaussian_filter(source, sigma=1.5)
 
-    def smoothstep(values: np.ndarray) -> np.ndarray:
-        values = np.clip(values, 0.0, 1.0)
-        return values * values * (3.0 - 2.0 * values)
-
     faint_start = sky + 2.0 * sky_sigma
     faint_full = sky + 4.0 * sky_sigma
     bright_start = max(sky + 12.0 * sky_sigma, sky + 0.35 * (white - sky))
     bright_end = max(float(white), bright_start + sky_sigma)
 
     def emission_weight(signal: np.ndarray) -> np.ndarray:
-        faint = smoothstep((signal - faint_start) / max(faint_full - faint_start, 1e-12))
-        highlights = 1.0 - smoothstep(
+        faint = _smoothstep((signal - faint_start) / max(faint_full - faint_start, 1e-12))
+        highlights = 1.0 - _smoothstep(
             (signal - bright_start) / max(bright_end - bright_start, 1e-12))
         return faint * highlights
 
@@ -386,7 +386,7 @@ def _multiscale_stretch_weights(lum: np.ndarray, sky: float, sky_sigma: float,
     # Positive fine-minus-medium residuals select compact bright ridges while
     # the diffuse mask prevents noise or unrelated stars from becoming targets.
     detail = np.maximum(fine - medium, 0.0)
-    detail_weight = smoothstep(
+    detail_weight = _smoothstep(
         (detail - 1.0 * sky_sigma) / max(3.0 * sky_sigma, 1e-12))
     filament_weight = diffuse_weight * detail_weight
     diffuse_weight = ndimage.gaussian_filter(diffuse_weight, sigma=3.0)
@@ -475,13 +475,8 @@ def _oklab_to_linear(lab: np.ndarray) -> np.ndarray:
 
 
 def _srgb_decode(v: np.ndarray) -> np.ndarray:
-    v = np.clip(v, 0.0, 1.0)
-    return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
-
-
-def _srgb_decode_signed(v: np.ndarray) -> np.ndarray:
-    """``_srgb_decode`` extended beyond [0, 1] (odd, unbounded), for colour
-    directions read off an over-range display pixel."""
+    """sRGB display value -> linear, extended beyond [0, 1] (odd, unbounded)
+    for colour directions read off an over-range display pixel."""
     a = np.abs(v)
     return np.sign(v) * np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
 
@@ -520,15 +515,15 @@ def oklab_stretch(rgb: np.ndarray, lum_stretched: np.ndarray, black: float,
     T = np.clip(np.asarray(lum_stretched, dtype=np.float64), 0.0, 1.0)
     pos = n > 1e-9
     shown = cn * np.where(pos, T / np.where(pos, n, 1.0), 0.0)[..., None]
-    lab = _linear_to_oklab(_srgb_decode_signed(shown))
+    lab = _linear_to_oklab(_srgb_decode(shown))
     L0 = lab[..., 0]
     sat = np.hypot(lab[..., 1], lab[..., 2]) / np.maximum(L0, 1e-6)
     sat = np.where(L0 > 1e-6, np.minimum(sat, Config.PREVIEW_OKLAB_MAX_SATURATION), 0.0)
     hue = np.arctan2(lab[..., 2], lab[..., 1])
     L = np.cbrt(_srgb_decode(T))
     knee = Config.PREVIEW_OKLAB_KNEE
-    t = np.clip((T - knee) / max(1.0 - knee, 1e-12), 0.0, 1.0)
-    desat = 1.0 - Config.PREVIEW_OKLAB_MAX_DESAT * t * t * (3.0 - 2.0 * t)
+    desat = 1.0 - Config.PREVIEW_OKLAB_MAX_DESAT * _smoothstep(
+        (T - knee) / max(1.0 - knee, 1e-12))
     gate = np.clip(n / max(3.0 * float(sky_sigma) / span, 1e-9), 0.0, 1.0)
     C = sat * L * desat * gate
     out = _oklab_to_linear(np.stack([L, C * np.cos(hue), C * np.sin(hue)], axis=-1))
@@ -588,8 +583,7 @@ def _clahe_weight(lum: np.ndarray, sky: float, sky_sigma: float) -> np.ndarray:
     from scipy import ndimage
     src = lum.astype(np.float64)
     smooth = ndimage.gaussian_filter(src, sigma=3.0)
-    t = np.clip((smooth - (sky + 2.0 * sky_sigma)) / max(3.0 * sky_sigma, 1e-12), 0.0, 1.0)
-    signal = t * t * (3.0 - 2.0 * t)
+    signal = _smoothstep((smooth - (sky + 2.0 * sky_sigma)) / max(3.0 * sky_sigma, 1e-12))
     compact = (ndimage.gaussian_filter(src, sigma=1.0)
                - ndimage.gaussian_filter(src, sigma=6.0)) > 8.0 * sky_sigma
     stars = ndimage.binary_dilation(compact, iterations=4)
@@ -604,8 +598,7 @@ def _apply_display_luminance(out: np.ndarray, lum_new: np.ndarray) -> np.ndarray
     lum = out @ np.array([0.299, 0.587, 0.114], dtype=out.dtype)
     delta = (lum_new - lum)[..., None]
     ratio = (lum_new / np.maximum(lum, 1e-6))[..., None]
-    t = np.clip((lum - 0.02) / 0.06, 0.0, 1.0)[..., None]
-    f = t * t * (3.0 - 2.0 * t)
+    f = _smoothstep((lum - 0.02) / 0.06)[..., None]
     res = f * (out * ratio) + (1.0 - f) * (out + delta)
     res = np.maximum(res, 0.0)
     res = res / np.maximum(res.max(axis=2, keepdims=True), 1.0)
@@ -704,7 +697,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # cross-channel color ratios that would otherwise be destroyed by independent
         # per-channel sky statistics.
         out = np.zeros_like(rgb)
-        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum)
         # Black point relative to the sky median in units of sky sigma.
         # black_sigma < 0 keeps sky noise visible (good for frame-filling faint
@@ -730,12 +723,15 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
             if _top is not None:
                 ghs_b, ghs_sp = _extended_nebula_ghs(lum, _med, _bg_sigma, unified_black,
                                                      unified_white, ghs_b, ghs_sp, ghs_hp)
+
+        def curve(x: np.ndarray) -> np.ndarray:
+            return generalized_hyperbolic_stretch(
+                x, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
+                black_point=unified_black, white_point=unified_white)
+
         if stretch in ('masked', 'multiscale'):
-            base = _preserving_preview(
-                rgb, lum, lambda x: generalized_hyperbolic_stretch(
-                    x, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
-                    black_point=unified_black, white_point=unified_white),
-                unified_black, unified_white, _bg_sigma, top=_top)
+            base = _preserving_preview(rgb, lum, curve, unified_black, unified_white,
+                                       _bg_sigma, top=_top)
             span = max(unified_white - unified_black, 1e-12)
 
             def faint_curve(x: np.ndarray) -> np.ndarray:
@@ -752,27 +748,13 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
                     lum, _med, _bg_sigma, unified_white)
                 out = base + (boosted - base) * (
                     0.45 * diffuse_weight[..., None] + 0.5 * filament_weight[..., None])
-        elif stretch == 'oklab':
-            def curve(x: np.ndarray) -> np.ndarray:
-                return generalized_hyperbolic_stretch(
-                    x, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
-                    black_point=unified_black, white_point=unified_white)
-            if _top is None:
-                out = oklab_stretch(rgb, curve(lum), unified_black, unified_white, _bg_sigma)
-            else:
-                out = oklab_stretch(rgb, _rolloff_curve(curve, lum, unified_white, _top),
-                                    unified_black, _top, _bg_sigma)
-        elif color == 'preserve':
-            out = _preserving_preview(
-                rgb, lum, lambda x: generalized_hyperbolic_stretch(
-                    x, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
-                    black_point=unified_black, white_point=unified_white),
-                unified_black, unified_white, _bg_sigma, top=_top)
+        elif stretch == 'oklab' or color == 'preserve':
+            out = _preserving_preview(rgb, lum, curve, unified_black, unified_white,
+                                      _bg_sigma, top=_top,
+                                      apply=oklab_stretch if stretch == 'oklab' else None)
         else:
             for c in range(3):
-                out[:, :, c] = generalized_hyperbolic_stretch(
-                    rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
-                    black_point=unified_black, white_point=unified_white)
+                out[:, :, c] = curve(rgb[:, :, c])
         if stretch == 'clahe':
             # Local contrast on top of the plain GHS preview: equalise its
             # display luminance per tile and blend that in where there is
@@ -787,7 +769,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # GHS whose strength is solved from the sky noise (_noise_limited_b)
         # instead of the preset's b / SP / black point.
         out = np.zeros_like(rgb)
-        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum)
         black = _med - Config.PREVIEW_NOISE_BLACK_SIGMA * _bg_sigma
         white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, black)
@@ -802,7 +784,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
             for c in range(3):
                 out[:, :, c] = noise_curve(rgb[:, :, c])
     elif stretch == 'seti':
-        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum)
         black = max(float(np.min(lum)), _med - 2.7 * _bg_sigma)
         white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, black)
@@ -829,7 +811,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
     elif stretch == 'arcsinh':
         # Arcsinh stretch — unified luminance-based normalization to preserve color
         out = np.zeros_like(rgb)
-        lum = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum)
         unified_black = _med + black_sigma * _bg_sigma
         # See the 'ghs' branch above for why 99.5 rather than a higher
@@ -880,8 +862,7 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
     avoids ever recombining two curves.
     """
     from src.denoising import generalized_hyperbolic_stretch
-    lum_s = (0.299 * starless[:, :, 0] + 0.587 * starless[:, :, 1]
-             + 0.114 * starless[:, :, 2])
+    lum_s = luminance(starless)
     med, sigma = _sky_stats(lum_s)
     black = med + black_sigma * sigma
     # 99.9, not the 99.5 the plain stretch uses: with the stars gone the top of
@@ -892,7 +873,7 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
     white, _sp_scale = _preview_white(lum_s, med, sigma, 99.9, black)
     ghs_sp = ghs_sp * _sp_scale
     if color == 'preserve':
-        lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        lum = luminance(rgb)
         out = colour_preserving_stretch(
             rgb, generalized_hyperbolic_stretch(
                 lum, b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
@@ -957,6 +938,26 @@ def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
                                 ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
 
 
+def preview_jpeg_from_uint8(out: np.ndarray, max_dim: int = 1024) -> bytes:
+    """A stretched uint8 HWC image as size-capped viewer JPEG bytes."""
+    import io as _io
+    buf = _io.BytesIO()
+    _preview_pil_image(out, max_dim).save(buf, format='JPEG', quality=85)
+    return buf.getvalue()
+
+
+def preview_stretch_kw(args) -> dict:
+    """The preview stretch settings in ``args`` (defaults where unset, or for
+    ``args=None``), as keyword arguments of ``save_preview_rgb``."""
+    return dict(
+        stretch=getattr(args, 'stretch', 'ghs'),
+        ghs_b=float(getattr(args, 'ghs_b', 8.0)),
+        ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
+        ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
+        black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0),
+        color=getattr(args, 'stretch_color', 'channel'))
+
+
 def write_preview_jpeg(out: np.ndarray, path: str) -> None:
     """Write a stretched uint8 HWC image as the size-capped preview JPEG."""
     from src.models import Config
@@ -980,8 +981,7 @@ def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:
     amount = float(np.clip(amount, 0.0, 1.0))
     if amount <= 0.0 or out.ndim != 3 or out.shape[2] != 3:
         return out
-    lum = (0.299 * out[:, :, 0] + 0.587 * out[:, :, 1]
-           + 0.114 * out[:, :, 2]).astype(np.float32)
+    lum = luminance(out).astype(np.float32)
     blended = out.astype(np.float32) * (1.0 - amount) + lum[:, :, None] * amount
     return np.clip(blended, 0, 255).astype(np.uint8)
 
@@ -996,18 +996,13 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
     ``desaturate`` (0-1) blends the stretched result toward luminance -- see
     ``_desaturate_preview_uint8``. 0 (default) preserves full colour, as
     every non-thumbnail caller wants."""
-    import io as _io
     if Image is None:
         return None
     out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color)
     if out is None:
         return None
-    out = _desaturate_preview_uint8(out, desaturate)
-    img = _preview_pil_image(out, max_dim)
-    buf = _io.BytesIO()
-    img.save(buf, format='JPEG', quality=85)
-    return buf.getvalue()
+    return preview_jpeg_from_uint8(_desaturate_preview_uint8(out, desaturate), max_dim)
 
 
 def populate_fits_header(header: fits.Header, frames: List[FrameInfo],

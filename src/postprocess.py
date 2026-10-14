@@ -23,6 +23,7 @@ from src.background import (
     sky_floor_normalize,
     wavelet_background_extraction,
 )
+from src.debayer import luminance
 from src.denoising import (
     acdnr_denoise,
     anisotropic_diffusion,
@@ -225,8 +226,7 @@ def _stack_fwhm(stacked: np.ndarray, sources, final) -> float:
     if sources is not None and len(sources) > 0:
         try:
             from src.quality import measure_fwhm
-            lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                   + 0.114 * stacked[:, :, 2])
+            lum = luminance(stacked)
             f = float(measure_fwhm(lum, sources))
             if 1.0 <= f <= 20.0:
                 return f
@@ -316,8 +316,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
     _pp_sources = None
     if sigma_clipped_stats is not None:
         try:
-            _pp_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                       + 0.114 * stacked[:, :, 2])
+            _pp_lum = luminance(stacked)
             _, _bg_med, _bg_std = sigma_clipped_stats(_pp_lum, sigma=3.0, maxiters=5)
             _pp_sources = detect_stars_auto(_pp_lum, float(_bg_std), background=float(_bg_med))
             if _pp_sources is not None and len(_pp_sources) > 0:
@@ -390,8 +389,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
         if getattr(args, 'comet_mode', False):
             try:
                 from src.registration import find_comet_centroid
-                _pp_lum_comet = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                                 + 0.114 * stacked[:, :, 2])
+                _pp_lum_comet = luminance(stacked)
                 _coma_cy, _coma_cx = find_comet_centroid(_pp_lum_comet)
                 _coma_radius = float(getattr(args, 'coma_mask_radius', 150))
                 _H_c, _W_c = stacked.shape[:2]
@@ -426,8 +424,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                         _gal_center_override, getattr(args, 'galaxy_mask_radius', None))
                 else:
                     from src.registration import find_extended_source_ellipse
-                    _pp_lum_gal = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                                   + 0.114 * stacked[:, :, 2])
+                    _pp_lum_gal = luminance(stacked)
                     _gal_fit = find_extended_source_ellipse(_pp_lum_gal)
                 if _gal_fit is not None:
                     _gal_cy, _gal_cx, _gal_a, _gal_b, _gal_axes = _gal_fit
@@ -564,8 +561,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_sky_floor')
         try:
             H_s, W_s = stacked.shape[:2]
-            lum_s = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                     + 0.114 * stacked[:, :, 2])
+            lum_s = luminance(stacked)
             sky_mask = np.ones((H_s, W_s), dtype=bool)
             try:
                 smooth_sigma = max(20.0, min(H_s, W_s) / 50.0)
@@ -648,8 +644,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
     # preserves the noise distribution; colour neutralisation happens at the end
     # (after photometric calibration, which re-scales the channels).
     if args.background_extraction and 'sky_pedestal' not in skip_steps:
-        _ped_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                    + 0.114 * stacked[:, :, 2])
+        _ped_lum = luminance(stacked)
         _ped_med = float(np.median(_ped_lum))
         _ped_sigma = float(np.median(np.abs(_ped_lum - _ped_med)) * 1.4826)
         pedestal = max(8.0 * _ped_sigma - _ped_med, 0.0)
@@ -846,8 +841,7 @@ def postprocess_stack(
                                           dtype=np.float64)).astype(int)
                 _ok = ((_ys >= 0) & (_ys < _H_dm) & (_xs >= 0) & (_xs < _W_dm))
                 _pts[_ys[_ok], _xs[_ok]] = True
-            _dl = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                   + 0.114 * stacked[:, :, 2])
+            _dl = luminance(stacked)
             _hi = float(np.percentile(_dl, 99.7))
             if _hi > 0:
                 _pts |= (_dl >= _hi)
@@ -980,8 +974,7 @@ def postprocess_stack(
         _rr_start = time.time()
         try:
             from src.registration import find_comet_centroid
-            _rr_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                       + 0.114 * stacked[:, :, 2])
+            _rr_lum = luminance(stacked)
             _rr_cy, _rr_cx = find_comet_centroid(_rr_lum)
             renormed = radial_renormalize(stacked, _rr_cy, _rr_cx)
             # Save as sidecar FITS
@@ -1001,8 +994,7 @@ def postprocess_stack(
         _ls_start = time.time()
         try:
             from src.registration import find_comet_centroid
-            _ls_lum = (0.299 * stacked[:, :, 0] + 0.587 * stacked[:, :, 1]
-                       + 0.114 * stacked[:, :, 2])
+            _ls_lum = luminance(stacked)
             _ls_cy, _ls_cx = find_comet_centroid(_ls_lum)
             ls_img = larson_sekanina(stacked, _ls_cy, _ls_cx, rotation_deg=ls_rot)
             # Save as sidecar FITS

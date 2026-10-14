@@ -1725,13 +1725,7 @@ class App:
 
     def _field_choices(self, dest: str) -> List[str]:
         """The CLI's choices for ``dest`` (from the Setup form's schema)."""
-        form = getattr(self, 'form', None)
-        if form is not None:
-            schema = form.schema
-        else:
-            from src.desktop_control import get_form_schema
-            schema = get_form_schema()
-        for fields in schema.values():
+        for fields in self.form.schema.values():
             for f in fields:
                 if f['dest'] == dest:
                     return list(f['choices'] or [])

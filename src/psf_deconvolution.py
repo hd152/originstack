@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 import numpy as np
 from scipy import signal as _scipy_signal
 
+from src.debayer import luminance
 from src.models import Config
 
 _log = logging.getLogger("originstack")
@@ -129,7 +130,7 @@ def estimate_psf(img: np.ndarray, star_positions,
         psf_size = Config.RL_PSF_SIZE
 
     H, W = img.shape[:2]
-    lum = img if img.ndim == 2 else (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+    lum = img if img.ndim == 2 else luminance(img)
 
     # Sort by flux (brightest first), skip saturated
     try:
@@ -261,7 +262,7 @@ def estimate_psf_blind(img: np.ndarray, star_positions,
 
     H, W = img.shape[:2]
     lum = (img if img.ndim == 2
-           else 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2])
+           else luminance(img))
 
     half = psf_size // 2
     cutout_r = half + 4   # slightly larger than psf_size for clean border

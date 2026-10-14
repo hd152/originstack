@@ -36,6 +36,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from src.debayer import luminance
 from src.utils import format_time, safe_print
 
 try:
@@ -220,7 +221,7 @@ class LiveStacker:
         stack = self.current_stack()
         if stack is None:
             return
-        lum = 0.299 * stack[:, :, 0] + 0.587 * stack[:, :, 1] + 0.114 * stack[:, :, 2]
+        lum = luminance(stack)
         snr = _stack_snr(lum)
         self.snr_history.append((self.n, snr))
         exp_str = (f", {format_time(self.total_exposure)} integration"
@@ -305,13 +306,9 @@ class LiveStacker:
         hdu.writeto(output_path, overwrite=True)
         safe_print(f"  Live stack saved: {output_path} ({self.n} frames)")
         try:
-            from src.io_fits import save_preview_rgb
+            from src.io_fits import preview_stretch_kw, save_preview_rgb
             prev = os.path.splitext(output_path)[0] + '.jpg'
-            save_preview_rgb(stack, prev, stretch=getattr(self.args, 'stretch', 'ghs'),
-                             ghs_b=float(getattr(self.args, 'ghs_b', 8.0)),
-                             ghs_sp=float(getattr(self.args, 'ghs_sp', 0.15)),
-                             ghs_hp=float(getattr(self.args, 'ghs_hp', 0.95)),
-                             black_sigma=float(getattr(self.args, 'preview_black_sigma', 0.0) or 0.0))
+            save_preview_rgb(stack, prev, **preview_stretch_kw(self.args))
             safe_print(f"  Preview: {prev}")
         except Exception:
             pass
