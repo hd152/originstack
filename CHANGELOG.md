@@ -6,6 +6,20 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.11.9] - 2026-10-14
+
+Background extraction works on every colour channel again, faster `--from-stack`
+re-runs, and faster compressed Phase 1 storage on large sessions.
+
+### Changed
+
+- **Faster compressed Phase 1 frame storage.** When a large session's frames
+  are stored compressed (`--compress-phase1`, or automatically when they do not
+  fit in RAM), reading a frame back is about 2.5x faster and writing one about
+  1.7x faster, with half the temporary memory per frame. The compressed store
+  now also checks temp-folder space before Phase 1 starts instead of failing
+  part-way through.
+
 ### Fixed
 
 - **Background extraction (DBE) models every colour channel again.** Each
@@ -22,7 +36,6 @@ match the `VERSION` file and `v*` git tags.
   `<output>_config.toml`, so `--from-stack` and `--config` re-runs ran the steps
   the original run had skipped (for galaxies, `--auto` skips the sky residual
   step) and gave a different result.
-
 - **Every preview JPEG follows `--stretch-color` and `--preview-black-sigma`.** The
   previews written by `--live`, `--stream`, `--mosaic`, comet mode (comet and
   blended stacks), `--export-frames-dir` and `--annotate` always rendered
