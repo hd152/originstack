@@ -70,6 +70,25 @@ class Config:
     # with their own settings; Orion's outer wings needed ~0.25), with b capped.
     PREVIEW_NEBULA_FAINT_LEVEL = 0.25
     PREVIEW_NEBULA_MAX_B = 500.0
+    # --stretch noisefloor: the GHS strength is solved so one sky sigma spans
+    # this many display levels (of 255) at the sky, the black point sitting
+    # BLACK_SIGMA sky sigmas below the sky median. Starting values (2026-10,
+    # synthetic data only, not yet tuned on real stacks): ~4 levels keeps the
+    # grain visible but quiet, and 2.5 sigma clips almost no sky to black.
+    PREVIEW_NOISE_LEVELS = 4.0
+    PREVIEW_NOISE_BLACK_SIGMA = 2.5
+    # --stretch oklab: chroma is compressed toward white over display lightness
+    # KNEE..1 by up to MAX_DESAT (the rest of an out-of-gamut colour is fitted
+    # by dimming, which keeps star colour), and capped at MAX_SATURATION x L.
+    PREVIEW_OKLAB_KNEE = 0.75
+    PREVIEW_OKLAB_MAX_DESAT = 0.5
+    PREVIEW_OKLAB_MAX_SATURATION = 1.0
+    # --stretch clahe: contrast-limited adaptive histogram equalisation of the
+    # GHS preview's luminance, TILES x TILES tiles, CLIP x the uniform bin
+    # count, blended in at STRENGTH where there is signal and no star.
+    PREVIEW_CLAHE_TILES = 8
+    PREVIEW_CLAHE_CLIP = 2.0
+    PREVIEW_CLAHE_STRENGTH = 0.5
     # Colour calibration of a stack with clipped star cores: a channel has a
     # clipped plateau when at least this many separate regions (stars) sit within
     # 2% of its maximum. Saturated cores stack to nearly one level (six on a real
