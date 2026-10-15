@@ -2522,6 +2522,8 @@ def build_parser() -> argparse.ArgumentParser:
         denoise_aniso=False,
         denoise_nn=False,
         nn_denoise_strength=1.0,
+        nn_chroma_nr=False,
+        nn_restore_sigma=4.0,
         deconvolve=False,
         deconvolve_tv=False,
         deconvolve_svpsf=False,

@@ -705,13 +705,16 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         out = np.zeros_like(rgb)
         lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum, noise_scale)
-        # Black point relative to the sky median in units of sky sigma.
+        # Black point relative to the sky median in units of sky sigma -- the noise
+        # actually left in the image: after --denoiser nn, black_sigma times the
+        # pre-denoising sigma clipped the whole (now clean) sky to black.
+        _black_sigma_px = _bg_sigma / noise_scale
         # black_sigma < 0 keeps sky noise visible (good for frame-filling faint
         # nebulae); black_sigma > 0 clips the noise floor to black (good for a
         # small target on empty sky, e.g. a galaxy or cluster, where a low black
         # point turns the whole background into a colour-noise storm). The
         # target-type advisor sets an appropriate value per preset.
-        unified_black = _med + black_sigma * _bg_sigma
+        unified_black = _med + black_sigma * _black_sigma_px
         # 99.5th, not 99.9th: on a starry frame the top 0.1% of pixels is
         # saturated-star cores, which pushes the white point far above any
         # extended structure (nebulosity, galaxy arms). Since GHS's shadow
@@ -819,7 +822,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         out = np.zeros_like(rgb)
         lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum, noise_scale)
-        unified_black = _med + black_sigma * _bg_sigma
+        unified_black = _med + black_sigma * _bg_sigma / noise_scale   # as in 'ghs'
         # See the 'ghs' branch above for why 99.5 rather than a higher
         # percentile: saturated-star pixels otherwise set a white point far
         # above any extended structure, burying diffuse signal near-black.
@@ -871,7 +874,7 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
     from src.denoising import generalized_hyperbolic_stretch
     lum_s = luminance(starless)
     med, sigma = _sky_stats(lum_s, noise_scale)
-    black = med + black_sigma * sigma
+    black = med + black_sigma * sigma / noise_scale       # the noise left (see 'ghs')
     # 99.9, not the 99.5 the plain stretch uses: with the stars gone the top of
     # the histogram is the galaxy's own bright body, and 99.5 lands inside the
     # disk (measured on a real stack: white 338 vs 679 at 99.9 vs 1177 for the

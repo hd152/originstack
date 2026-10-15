@@ -540,10 +540,11 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 safe_print(f"    WARNING: could not save background map: {e}")
             del _pre_bg
 
-    # 2. Chroma noise reduction. Not before --denoiser nn: the network was trained on
-    # stacks without it and removes colour noise itself.
+    # 2. Chroma noise reduction. Not before --denoiser nn unless --config
+    # nn_chroma_nr=true: the network was trained on stacks without it.
     if (getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps
-            and not getattr(args, 'denoise_nn', False)):
+            and (not getattr(args, 'denoise_nn', False)
+                 or getattr(args, 'nn_chroma_nr', False))):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_chroma_nr')
         cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
         cnr_large = float(getattr(args, 'chroma_nr_large_sigma', 0.0))
@@ -743,11 +744,12 @@ def postprocess_stack(
         else:
             _diag_save(stacked, _diag_dir, _diag_counter, 'before_nn_denoise')
             nn_strength = float(getattr(args, 'nn_denoise_strength', 1.0))
-            print(f"\n  Applying neural-network denoising (strength={nn_strength:.2f})...")
+            safe_print(f"\n  Applying neural-network denoising (strength={nn_strength:.2f})...")
             nn_start = time.time()
             from src.io_fits import _sky_stats
             _sig_before = _sky_stats(luminance(stacked))[1]
-            stacked = nn_denoise(stacked, strength=nn_strength)
+            stacked = nn_denoise(stacked, strength=nn_strength,
+                                 restore_sigma=float(getattr(args, 'nn_restore_sigma', 4.0)))
             # The preview stretch is solved from the sky noise; keep it at the noise the
             # image had before this step, or it would stretch ~10x harder.
             _sig_after = _sky_stats(luminance(stacked))[1]

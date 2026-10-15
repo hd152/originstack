@@ -136,7 +136,39 @@ def check_parity(net, path: str) -> float:
     return float(np.abs(ref - got).max() / (np.abs(ref).max() + 1e-12))
 
 
-def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0, resume: bool = False) -> None:
+def faint_sources(n: int, size: int, gen, dev):
+    """(n, 3, size, size) random faint sources in noise units, the same ones to be added
+    to input and target: elliptical Gaussians and exponential discs, 0.8-8 px scale,
+    peak 0.3-10 sigma (log-uniform), colour varying +-30% per channel, ~3 per patch.
+
+    Without them the network learns that faint isolated blobs are rare in real
+    patches, and shrinking them is the minimum-MSE answer: injected blobs of 0.5-1.25
+    sky sigma kept only 48-84% of their flux (v1). Added to both images, they leave the
+    Noise2Noise target unbiased and only change the prior."""
+    import torch
+    out = torch.zeros((n, 3, size, size), device=dev)
+    yy, xx = torch.meshgrid(torch.arange(size, device=dev, dtype=torch.float32),
+                            torch.arange(size, device=dev, dtype=torch.float32), indexing="ij")
+    counts = gen.poisson(3.0, n)
+    for i in range(n):
+        for _ in range(int(counts[i])):
+            cy, cx = gen.uniform(0, size, 2)
+            sa = gen.uniform(0.8, 8.0)
+            sb = sa * gen.uniform(0.4, 1.0)
+            th = gen.uniform(0, np.pi)
+            dy, dx = yy - float(cy), xx - float(cx)
+            u = (dx * np.cos(th) + dy * np.sin(th)) / sa
+            v = (-dx * np.sin(th) + dy * np.cos(th)) / sb
+            r2 = u * u + v * v
+            prof = torch.exp(-0.5 * r2) if gen.random() < 0.5 else torch.exp(-torch.sqrt(r2) * 1.6783)
+            peak = float(np.exp(gen.uniform(np.log(0.3), np.log(10.0))))
+            col = np.clip(1.0 + 0.3 * gen.standard_normal(3), 0.3, 2.0)
+            out[i] += torch.tensor(peak * col, device=dev, dtype=torch.float32)[:, None, None] * prof
+    return out
+
+
+def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0, resume: bool = False,
+          inject: bool = False) -> None:
     import torch
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -161,6 +193,9 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
             a, b, ww = (torch.rot90(t, k, (2, 3)) for t in (a, b, ww))
             if rng.random() < 0.5:
                 a, b, ww = (torch.flip(t, (3,)) for t in (a, b, ww))
+            if inject:
+                src = faint_sources(a.shape[0], a.shape[2], rng, dev)
+                a, b = a + src, b + src
         return a, b, ww
 
     def loss_of(a, b, ww):
@@ -218,7 +253,8 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     if err > 1e-4:
         raise SystemExit("numpy forward pass does not match torch")
     with open(os.path.splitext(out)[0] + "_train.json", "w") as fh:
-        json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val}, fh)
+        json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val,
+                   "inject": inject}, fh)
 
 
 def main() -> None:
@@ -235,11 +271,13 @@ def main() -> None:
     t.add_argument("--lr", type=float, default=1e-3)
     t.add_argument("--out", default=os.path.join(ROOT, "src", "data", "nn_denoise.npz"))
     t.add_argument("--resume", action="store_true", help="continue from <out>_ckpt.pt")
+    t.add_argument("--inject", action="store_true",
+                   help="add random faint sources to training patches (faint_sources)")
     args = ap.parse_args()
     if args.cmd == "bank":
         build_bank(args.pairs, args.bank, args.per_pair)
     else:
-        train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume)
+        train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject)
 
 
 if __name__ == "__main__":

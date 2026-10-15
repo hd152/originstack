@@ -113,6 +113,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `background.py` | Mesh/DBE background (DBE and `--bg-method wavelet` share `_patch_background_extraction`; only the surface fit differs), sky residual, edge bands, `gaussian_filter_ds`, `gaussian_blur_spatial` |
 | `denoising.py` | Directional wavelet (`--denoiser wavelet`, `--wavelet-protect`; `curvelet` alias), ACDNR, bilateral, aniso, `shrink_stars` (the star-reduction step), multiscale local contrast, chroma NR |
 | `wavelet.py` | Native-backed `wavedec2`/`waverec2` |
+| `nn_denoise.py` | `--denoiser nn`: Noise2Noise U-Net trained on real sessions' quarter-stacks (`tools/gen_n2n_pairs.py`, `tools/train_nn_denoise.py --inject`; weights `src/data/nn_denoise.npz`), numpy forward pass on native `nn_conv3x3`; input normalised to noise units; low-frequency restore (`nn_restore_sigma`, 4 px) returns faint extended light a min-MSE denoiser flattens; skips chroma NR (`nn_chroma_nr`); sets `args._preview_noise_scale` so the preview's thresholds use the pre-denoise noise and its black point the noise left. Score with `tools/eval_nn_denoise.py` (error vs an independent half-stack, no ground truth) |
 | `psf_deconvolution.py` | PSF estimation; RL / RL-SV / TV / sparse FISTA (`--deconvolve`) |
 | `sky_model.py` | EXPERIMENTAL physical sky model (`--bg-method physical`); `remove_physical_sky_with_reason` declines on narrow fields -> DBE |
 | `star_removal.py` / `star_repair.py` | `--remove-stars` (opt-in), `--starless-process`, `--layered-stretch`; saturated-core repair (`--repair-stars`) |
