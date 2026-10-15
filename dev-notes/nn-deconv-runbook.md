@@ -57,8 +57,16 @@ Everything the run needs, off the USB drive:
 | `C:\nn_work\heldout_stacks` | linear stacks + `_config.toml` of the 5 held-out targets, for `bench_phase4.py` |
 | `C:\nn_work\denoiser` | `--denoiser nn` v1/v2 weights, checkpoints, training logs, evaluations, its 5 GB bank |
 
-On that machine step 2 is
-`python tools/gen_n2n_pairs.py --mode seeing --out C:/nn_work/nn_deconv/pairs --list C:/nn_work/sessions.txt`.
+| `C:\nn_work\venv` | training Python: base Python's torch (CUDA) + astro_native 0.57.0, nothing on G: |
+
+Nothing below needs the USB drive. On that machine (repo at `C:\source\originstack`):
+
+```powershell
+python tools/gen_n2n_pairs.py --mode seeing --out C:/nn_work/nn_deconv/pairs --list C:/nn_work/sessions.txt
+C:/nn_work/venv/Scripts/python tools/train_nn_denoise.py bank --mode deconv --pairs C:/nn_work/nn_deconv/pairs --bank C:/nn_work/bank_deconv.npz --per-pair 240
+C:/nn_work/venv/Scripts/python tools/train_nn_denoise.py train --bank C:/nn_work/bank_deconv.npz --steps 30000 --out C:/nn_work/model_deconv_v1.npz --resume > C:/nn_work/train_deconv.log 2>&1
+python tools/eval_nn_deconv.py --pairs C:/nn_work/nn_deconv/pairs --model C:/nn_work/model_deconv_v1.npz --restore 0 4 8 --json C:/nn_work/eval_deconv_v1.json
+```
 To use another machine, copy `C:\nn_work` across and regenerate `sessions.txt` with the
 snippet below (`ROOT` = the copied `sessions` folder).
 
