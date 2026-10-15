@@ -11,6 +11,14 @@ background and sigma. The loss is L2 weighted by 1 / local noise variance (a hea
 smoothed (A - B)^2), so bright stars, whose Poisson noise is large in sky-sigma units, do
 not dominate it.
 
+``bank --mode deconv`` builds the learned deconvolver's bank instead, from
+``gen_n2n_pairs.py --mode seeing`` (input = stack of all but the sharpest frames, target =
+stack of the sharpest): the same sky with a sharper PSF and independent noise. There the
+(A - B)^2 weight would be large exactly on the stars, whose profiles differ by design, so
+the weight is 1 / the target's own noise variance: sky sigma^2 plus a Poisson term linear
+in the smoothed signal, fitted per session (``target_variance``). Half the patches are
+centred near stars, which carry most of the PSF information.
+
 Usage:
     pip install torch            (into a separate venv: it is not a project dependency)
     python tools/train_nn_denoise.py bank  --pairs G:/output/nn_denoise/pairs --bank bank.npz
@@ -60,7 +68,44 @@ def normalised_pair(a: np.ndarray, b: np.ndarray):
     return za, zb, (2.0 / np.maximum(var, 1e-3)).astype(np.float32)
 
 
-def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0) -> None:
+def target_variance(z: np.ndarray) -> np.ndarray:
+    """Per-pixel noise variance of a stack in noise units: a + c * max(signal, 0), fitted
+    per channel to the variance of lag-4 row differences in bins of the smoothed signal
+    (lag 4 skips the debayer/warp correlation; differences cancel all but sharp structure,
+    and MADs keep the star cores that survive out of the fit)."""
+    out = np.empty_like(z)
+    for ch in range(z.shape[2]):
+        x = z[..., ch]
+        sm = ndi.gaussian_filter(x, 2.0)
+        d = ((x[:, 4:] - x[:, :-4]) / np.sqrt(2.0)).ravel()
+        sv = sm[:, 2:-2].ravel()
+        edges = np.unique(np.quantile(sv[sv > 0], np.linspace(0, 0.995, 25)))
+        ms, vs = [], []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            sel = d[(sv >= lo) & (sv < hi)]
+            if sel.size > 500:
+                ms.append(0.5 * (lo + hi))
+                vs.append((1.4826 * np.median(np.abs(sel - np.median(sel)))) ** 2)
+        if len(ms) >= 3:
+            c, a = np.polyfit(ms, vs, 1)
+            a, c = max(a, 1e-3), max(c, 0.0)
+        else:
+            a, c = 1.0, 0.0
+        out[..., ch] = a + c * np.maximum(sm, 0.0)
+    return out
+
+
+def deconv_pair(a: np.ndarray, b: np.ndarray):
+    """(zA, zB, weight) for a seeing pair, B through A's normalisation, weight 1 / B's
+    noise variance."""
+    grid, sigma = nd.normalise(a)
+    bg = nd.background_at(grid, 0, 0, *a.shape[:2])
+    za = (a - bg) / sigma.astype(np.float32)
+    zb = (b - bg) / sigma.astype(np.float32)
+    return za, zb, (1.0 / target_variance(zb)).astype(np.float32)
+
+
+def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str = "denoise") -> None:
     rng = np.random.default_rng(seed)
     za_l, zb_l, w_l, sess = [], [], [], []
     dirs = sorted(d for d in glob.glob(os.path.join(pairs_dir, "*")) if os.path.exists(os.path.join(d, "meta.json")))
@@ -69,13 +114,28 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0) -> None:
         if is_holdout(name):
             continue
         t = time.time()
-        for a, b in session_pairs(d):
-            za, zb, w = normalised_pair(a, b)
+        if mode == "deconv":
+            pairs = [(np.load(os.path.join(d, "input.npy")), np.load(os.path.join(d, "target.npy")))]
+        else:
+            pairs = session_pairs(d)
+        for a, b in pairs:
+            za, zb, w = deconv_pair(a, b) if mode == "deconv" else normalised_pair(a, b)
             h, wd, _ = za.shape
             m = 16                      # skip the stack's ragged edge
-            for _ in range(per_pair):
-                y = rng.integers(m, h - PATCH - m)
-                x = rng.integers(m, wd - PATCH - m)
+            stars = None
+            if mode == "deconv":
+                from src.star_detect import detect_stars_matched_filter as detect
+                lum = za.mean(-1)
+                st = detect(lum - np.median(lum))
+                stars = np.c_[np.asarray(st["ycentroid"]), np.asarray(st["xcentroid"])]
+            for k in range(per_pair):
+                if stars is not None and len(stars) and k % 2 == 0:
+                    cy, cx = stars[rng.integers(len(stars))]
+                    y = int(np.clip(cy - rng.integers(16, PATCH - 16), m, h - PATCH - m))
+                    x = int(np.clip(cx - rng.integers(16, PATCH - 16), m, wd - PATCH - m))
+                else:
+                    y = rng.integers(m, h - PATCH - m)
+                    x = rng.integers(m, wd - PATCH - m)
                 za_l.append(za[y:y + PATCH, x:x + PATCH].astype(np.float16))
                 zb_l.append(zb[y:y + PATCH, x:x + PATCH].astype(np.float16))
                 w_l.append(w[y:y + PATCH, x:x + PATCH].astype(np.float16))
@@ -264,6 +324,7 @@ def main() -> None:
     b.add_argument("--pairs", required=True)
     b.add_argument("--bank", required=True)
     b.add_argument("--per-pair", type=int, default=40)
+    b.add_argument("--mode", choices=["denoise", "deconv"], default="denoise")
     t = sub.add_parser("train")
     t.add_argument("--bank", required=True)
     t.add_argument("--steps", type=int, default=30000)
@@ -275,7 +336,7 @@ def main() -> None:
                    help="add random faint sources to training patches (faint_sources)")
     args = ap.parse_args()
     if args.cmd == "bank":
-        build_bank(args.pairs, args.bank, args.per_pair)
+        build_bank(args.pairs, args.bank, args.per_pair, mode=args.mode)
     else:
         train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject)
 
