@@ -115,6 +115,12 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
             continue
         t = time.time()
         if mode == "deconv":
+            with open(os.path.join(d, "meta.json")) as fh:
+                meta = json.load(fh)
+            if min(meta.get("n_target", 0), meta.get("n_input", 0)) < 3:
+                print(f"[{i + 1}/{len(dirs)}] {name}: skipped, no seeing split "
+                      f"({meta.get('n_target')} / {meta.get('n_input')} frames)", flush=True)
+                continue
             pairs = [(np.load(os.path.join(d, "input.npy")), np.load(os.path.join(d, "target.npy")))]
         else:
             pairs = session_pairs(d)

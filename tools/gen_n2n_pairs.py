@@ -65,19 +65,34 @@ def frame_fwhms(frames: np.ndarray, n_stars: int = 60) -> np.ndarray:
     ref = clipped_mean(frames, np.arange(0, n, max(1, n // 16))) @ _LUMA
     st = detect(ref - np.median(ref))
     st = st[np.argsort(-st["flux"])]
-    sat = np.percentile(ref, 99.99) * 0.6
+    # clipped cores sit at the image maximum; 0.6 x the 99.99th percentile (as in
+    # common_star_fwhm) called every star "saturated" on a faint field (Whirlpool)
+    sat = 0.8 * float(ref.max())
     xs, ys = np.asarray(st["xcentroid"]), np.asarray(st["ycentroid"])
-    keep = []
+    fl = np.asarray(st["flux"], np.float64)
     m = _HALF + 4
-    for i in range(len(st)):
-        x, y = int(round(xs[i])), int(round(ys[i]))
-        if not (m < x < w - m and m < y < h - m) or ref[y, x] >= sat:
-            continue
-        if any((xs[j] - xs[i]) ** 2 + (ys[j] - ys[i]) ** 2 < 20 ** 2 for j in range(len(st)) if j != i):
-            continue
-        keep.append((x, y))
-        if len(keep) == n_stars:
-            break
+    cand = [i for i in range(len(st))
+            if m < xs[i] < w - m and m < ys[i] < h - m and ref[int(round(ys[i])), int(round(xs[i]))] < sat]
+
+    def isolated(r_px):
+        # only neighbours at least 5% as bright count: faint detections (noise, knots in a
+        # galaxy) around every star left no star at all on the two Whirlpool sessions
+        out = []
+        for i in cand:
+            d2 = (xs - xs[i]) ** 2 + (ys - ys[i]) ** 2
+            near = (d2 < r_px ** 2) & (fl >= 0.05 * fl[i])
+            near[i] = False
+            if not near.any():
+                out.append((int(round(xs[i])), int(round(ys[i]))))
+                if len(out) == n_stars:
+                    break
+        return out
+
+    keep = isolated(20.0)
+    if len(keep) < 10:
+        keep = isolated(12.0)
+    print(f"[n2n] FWHM stars: {len(st)} detected, {len(cand)} unsaturated in bounds, "
+          f"{len(keep)} isolated", flush=True)
     out = np.full(n, np.nan)
     for f in range(n):
         vals = []
@@ -104,6 +119,10 @@ def _worker(session: str, out_dir: str, mode: str = "quarters", sharp_frac: floa
         if mode == "seeing":
             fw = frame_fwhms(frames)
             ok = np.flatnonzero(np.isfinite(fw))
+            if len(ok) < 6:
+                # SystemExit, not an Exception: the stacker's fail-soft except would
+                # swallow that, finish the run, and leave no sign of the failure
+                raise SystemExit(f"[n2n] FWHM measured on only {len(ok)} of {n} frames")
             order = ok[np.argsort(fw[ok])]
             k = max(3, int(round(sharp_frac * len(order))))
             sharp, rest = np.sort(order[:k]), np.sort(order[k:])
