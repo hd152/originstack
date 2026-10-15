@@ -32,7 +32,11 @@ from src import nn_denoise as nd  # noqa: E402
 
 
 def score(a, b, out):
-    from train_nn_denoise import sky_level_z, target_variance
+    from scipy import ndimage as ndi
+    from train_nn_denoise import SKY_MATCH_SIGMA, sky_level_z, target_variance
+    # the target's large-scale sky differs from the input's (time-biased frame subset):
+    # match it as training does, so a method that shifts the background is penalised
+    b = b - np.stack([ndi.gaussian_filter(b[..., c] - a[..., c], SKY_MATCH_SIGMA) for c in range(3)], -1)
     grid, sigma = nd.normalise(a)
     bg = nd.background_at(grid, 0, 0, *a.shape[:2])
     s = sigma.astype(np.float32)

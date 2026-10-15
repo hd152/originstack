@@ -98,9 +98,19 @@ def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     return np.median(bg.reshape(-1, bg.shape[-1]), axis=0) / sigma
 
 
+SKY_MATCH_SIGMA = 32.0     # px; far above a star's scale, so its sharpening survives
+
+
 def deconv_pair(a: np.ndarray, b: np.ndarray):
     """(zA, zB, weight) for a seeing pair, B through A's normalisation, weight 1 / B's
-    noise variance."""
+    noise variance.
+
+    B's large-scale difference from A (Gaussian, ``SKY_MATCH_SIGMA``) is removed first:
+    the sharpest frames are a time-biased subset (seeing follows altitude), so their sky
+    level differs, and v2 learned that shift -- held-out sky error 3-6x that of no
+    processing until the low-frequency restore put the input's background back. A
+    sharper star keeps its flux, so its difference smooths to ~0 at that scale."""
+    b = b - np.stack([ndi.gaussian_filter(b[..., c] - a[..., c], SKY_MATCH_SIGMA) for c in range(3)], -1)
     grid, sigma = nd.normalise(a)
     bg = nd.background_at(grid, 0, 0, *a.shape[:2])
     za = (a - bg) / sigma.astype(np.float32)
@@ -298,6 +308,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
 
     t0 = time.time()
     run = 0.0
+    best = [float("inf"), None]
     for step in range(start, steps + 1):
         lo, _ = loss_of(*batch_of(rng.choice(tr_idx, batch), True))
         opt.zero_grad()
@@ -308,6 +319,10 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         run += lo.item()
         if step % 1000 == 0 or step == steps:
             v, vb = validate()
+            if v < best[0]:
+                # keep the best-validation weights: deconvolution v2 was best at step
+                # 10000 and overfit after (val 1.996 -> 2.215 while train kept falling)
+                best[0], best[1] = v, {k: t.detach().clone() for k, t in net.state_dict().items()}
             print(f"step {step:6d}  train {run / 1000:.4f}  val {v:.4f}  (identity {vb:.4f})  "
                   f"{time.time() - t0:.0f} s", flush=True)
             run = 0.0
@@ -315,6 +330,9 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
                         "rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(), "step": step},
                        ckpt + ".tmp")
             os.replace(ckpt + ".tmp", ckpt)
+    if best[1] is not None:
+        net.load_state_dict(best[1])
+        print(f"best validation {best[0]:.4f} kept", flush=True)
     final_val = validate()[0]
     export(net, out)
     err = check_parity(net, out)
