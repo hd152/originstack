@@ -45,6 +45,23 @@ off mid-run twice (one training run lost at step 14000, the data run below abort
 - Keep the data on an **internal** drive if you can, and always write logs and the bank
   to an internal drive (a failed log write killed a run: exit code 120, no traceback).
 
+## Local copy on the first machine (`C:\nn_work`, made 2026-10-14)
+
+Everything the run needs, off the USB drive:
+
+| Path | Contents |
+|---|---|
+| `C:\nn_work\sessions\<target>\<session>` | the 83 session folders (lights, calibration, `info.json`), 137 GB |
+| `C:\nn_work\sessions.txt` | the session list with these local paths -- use it in step 2 (skip step 1) |
+| `C:\nn_work\nn_deconv\pairs` | the seeing pairs finished so far (skipped on rerun) |
+| `C:\nn_work\heldout_stacks` | linear stacks + `_config.toml` of the 5 held-out targets, for `bench_phase4.py` |
+| `C:\nn_work\denoiser` | `--denoiser nn` v1/v2 weights, checkpoints, training logs, evaluations, its 5 GB bank |
+
+On that machine step 2 is
+`python tools/gen_n2n_pairs.py --mode seeing --out C:/nn_work/nn_deconv/pairs --list C:/nn_work/sessions.txt`.
+To use another machine, copy `C:\nn_work` across and regenerate `sessions.txt` with the
+snippet below (`ROOT` = the copied `sessions` folder).
+
 ## 1. Choose the sessions
 
 Origin session folders (each has an `info.json`). The first machine used 83 sessions of
