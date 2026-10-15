@@ -32,6 +32,7 @@ import json
 import os
 import sys
 import time
+from typing import Optional
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -68,31 +69,33 @@ def normalised_pair(a: np.ndarray, b: np.ndarray):
     return za, zb, (2.0 / np.maximum(var, 1e-3)).astype(np.float32)
 
 
-def target_variance(z: np.ndarray) -> np.ndarray:
-    """Per-pixel noise variance of a stack in noise units: a + c * max(signal, 0), fitted
-    per channel to the variance of lag-4 row differences in bins of the smoothed signal
-    (lag 4 skips the debayer/warp correlation; differences cancel all but sharp structure,
-    and MADs keep the star cores that survive out of the fit)."""
+def target_variance(z: np.ndarray, sky_level: Optional[np.ndarray] = None) -> np.ndarray:
+    """Per-pixel noise variance of a stack in noise units, ``a * (1 + max(signal, 0) / B)``:
+    sky-limited Poisson noise grows with the light, at the rate the sky level B sets.
+
+    ``a`` is measured directly (MAD of lag-4 row differences on the faintest 30% of the
+    smoothed image -- lag 4 skips the debayer/warp correlation). ``sky_level`` is B per
+    channel in the same noise units. Two fits were tried and dropped: the intercept of a
+    variance-vs-signal line fell to its 1e-3 floor on several sessions (1000x sky weight,
+    loss in the thousands), and its slope, from lag-4 differences on stars and nebulae,
+    measured their structure rather than their noise (normalised noise 0.14-12 on the
+    brightest pixels). Without ``sky_level`` (or B <= 0) the variance is ``a`` alone."""
     out = np.empty_like(z)
     for ch in range(z.shape[2]):
         x = z[..., ch]
         sm = ndi.gaussian_filter(x, 2.0)
         d = ((x[:, 4:] - x[:, :-4]) / np.sqrt(2.0)).ravel()
         sv = sm[:, 2:-2].ravel()
-        edges = np.unique(np.quantile(sv[sv > 0], np.linspace(0, 0.995, 25)))
-        ms, vs = [], []
-        for lo, hi in zip(edges[:-1], edges[1:]):
-            sel = d[(sv >= lo) & (sv < hi)]
-            if sel.size > 500:
-                ms.append(0.5 * (lo + hi))
-                vs.append((1.4826 * np.median(np.abs(sel - np.median(sel)))) ** 2)
-        if len(ms) >= 3:
-            c, a = np.polyfit(ms, vs, 1)
-            a, c = max(a, 1e-3), max(c, 0.0)
-        else:
-            a, c = 1.0, 0.0
-        out[..., ch] = a + c * np.maximum(sm, 0.0)
+        sky = d[sv < np.quantile(sv, 0.3)]
+        a = max((1.4826 * np.median(np.abs(sky - np.median(sky)))) ** 2, 1e-6)
+        bl = float(sky_level[ch]) if sky_level is not None else 0.0
+        out[..., ch] = a * (1.0 + np.maximum(sm, 0.0) / bl) if bl > 0 else a
     return out
+
+
+def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+    """The sky level B per channel in noise units (median background / sigma)."""
+    return np.median(bg.reshape(-1, bg.shape[-1]), axis=0) / sigma
 
 
 def deconv_pair(a: np.ndarray, b: np.ndarray):
@@ -102,7 +105,7 @@ def deconv_pair(a: np.ndarray, b: np.ndarray):
     bg = nd.background_at(grid, 0, 0, *a.shape[:2])
     za = (a - bg) / sigma.astype(np.float32)
     zb = (b - bg) / sigma.astype(np.float32)
-    return za, zb, (1.0 / target_variance(zb)).astype(np.float32)
+    return za, zb, (1.0 / target_variance(zb, sky_level_z(bg, sigma))).astype(np.float32)
 
 
 def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str = "denoise") -> None:

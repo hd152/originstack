@@ -32,12 +32,12 @@ from src import nn_denoise as nd  # noqa: E402
 
 
 def score(a, b, out):
-    from train_nn_denoise import target_variance
+    from train_nn_denoise import sky_level_z, target_variance
     grid, sigma = nd.normalise(a)
     bg = nd.background_at(grid, 0, 0, *a.shape[:2])
     s = sigma.astype(np.float32)
     zb, zo = (b - bg) / s, (out - bg) / s
-    w = 1.0 / target_variance(zb)
+    w = 1.0 / target_variance(zb, sky_level_z(bg, s))
     m = 32
     e = (w * (zo - zb) ** 2)[m:-m, m:-m]
     lum = ndi_smooth(zb.mean(-1))[m:-m, m:-m]
