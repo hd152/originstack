@@ -10,6 +10,12 @@ Output per session, under ``--out``:
     <name>/q0.npy .. q3.npy   (H, W, 3) float32 linear, aligned to each other
     <name>/meta.json          frame count, source folder
 
+``--mode seeing`` (training data for the learned deconvolver) instead measures every
+aligned frame's FWHM on the same bright isolated stars and writes the stack of the
+sharpest ``--sharp-frac`` of frames (target) and of the rest (input): the same sky, a
+sharper PSF, disjoint frames so independent noise.
+    <name>/input.npy, <name>/target.npy, <name>/fwhm.npy (per frame), meta.json
+
 Usage:
     python tools/gen_n2n_pairs.py --out G:/output/nn_denoise/pairs SESSION_DIR [SESSION_DIR ...]
     python tools/gen_n2n_pairs.py --out ... --list sessions.txt
@@ -44,7 +50,48 @@ def clipped_mean(frames: np.ndarray, idx: np.ndarray, sigma: float = 3.0, iters:
     return out
 
 
-def _worker(session: str, out_dir: str) -> None:
+_LUMA = np.array([0.299, 0.587, 0.114], np.float32)
+
+
+def frame_fwhms(frames: np.ndarray, n_stars: int = 60) -> np.ndarray:
+    """Median Gaussian FWHM of each aligned frame, fitted on the same bright, unsaturated,
+    isolated stars (picked on a quick reference stack) -- one star list for every frame,
+    so the numbers compare across frames."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from common_star_fwhm import _HALF, _gauss_fit
+
+    from src.star_detect import detect_stars_matched_filter as detect
+    n, h, w, _ = frames.shape
+    ref = clipped_mean(frames, np.arange(0, n, max(1, n // 16))) @ _LUMA
+    st = detect(ref - np.median(ref))
+    st = st[np.argsort(-st["flux"])]
+    sat = np.percentile(ref, 99.99) * 0.6
+    xs, ys = np.asarray(st["xcentroid"]), np.asarray(st["ycentroid"])
+    keep = []
+    m = _HALF + 4
+    for i in range(len(st)):
+        x, y = int(round(xs[i])), int(round(ys[i]))
+        if not (m < x < w - m and m < y < h - m) or ref[y, x] >= sat:
+            continue
+        if any((xs[j] - xs[i]) ** 2 + (ys[j] - ys[i]) ** 2 < 20 ** 2 for j in range(len(st)) if j != i):
+            continue
+        keep.append((x, y))
+        if len(keep) == n_stars:
+            break
+    out = np.full(n, np.nan)
+    for f in range(n):
+        vals = []
+        for x, y in keep:
+            cut = np.asarray(frames[f, y - m:y + m + 1, x - m:x + m + 1], np.float32) @ _LUMA
+            r = _gauss_fit(cut, m, m)
+            if r is not None:
+                vals.append(r[0])
+        if len(vals) >= 5:
+            out[f] = np.median(vals)
+    return out
+
+
+def _worker(session: str, out_dir: str, mode: str = "quarters", sharp_frac: float = 0.3) -> None:
     """Run the stacker in this process with the capture hook installed."""
     sys.path.insert(0, ROOT)
     import src.noise_validation as nv
@@ -53,11 +100,24 @@ def _worker(session: str, out_dir: str) -> None:
         n = frames.shape[0]
         os.makedirs(out_dir, exist_ok=True)
         t = time.time()
-        for q in range(4):
-            np.save(os.path.join(out_dir, f"q{q}.npy"), clipped_mean(frames, np.arange(q, n, 4)))
+        meta = {"session": session, "frames": int(n), "shape": list(frames.shape[1:]), "mode": mode}
+        if mode == "seeing":
+            fw = frame_fwhms(frames)
+            ok = np.flatnonzero(np.isfinite(fw))
+            order = ok[np.argsort(fw[ok])]
+            k = max(3, int(round(sharp_frac * len(order))))
+            sharp, rest = np.sort(order[:k]), np.sort(order[k:])
+            np.save(os.path.join(out_dir, "fwhm.npy"), fw)
+            np.save(os.path.join(out_dir, "target.npy"), clipped_mean(frames, sharp))
+            np.save(os.path.join(out_dir, "input.npy"), clipped_mean(frames, rest))
+            meta.update(sharp_frac=sharp_frac, n_target=int(len(sharp)), n_input=int(len(rest)),
+                        fwhm_target=float(np.median(fw[sharp])), fwhm_input=float(np.median(fw[rest])))
+        else:
+            for q in range(4):
+                np.save(os.path.join(out_dir, f"q{q}.npy"), clipped_mean(frames, np.arange(q, n, 4)))
         with open(os.path.join(out_dir, "meta.json"), "w") as fh:
-            json.dump({"session": session, "frames": int(n), "shape": list(frames.shape[1:])}, fh)
-        print(f"[n2n] wrote 4 quarter-stacks of {n} frames in {time.time() - t:.0f} s", flush=True)
+            json.dump(meta, fh)
+        print(f"[n2n] {mode}: {n} frames in {time.time() - t:.0f} s", flush=True)
         raise SystemExit(0)          # BaseException: not swallowed by the stacker's fail-soft except
 
     nv.validate_noise = capture
@@ -76,10 +136,13 @@ def main() -> None:
     ap.add_argument("sessions", nargs="*")
     ap.add_argument("--list", help="text file, one session folder per line")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--mode", choices=["quarters", "seeing"], default="quarters")
+    ap.add_argument("--sharp-frac", type=float, default=0.3,
+                    help="--mode seeing: fraction of frames, sharpest first, in the target stack")
     ap.add_argument("--worker", nargs=2, metavar=("SESSION", "OUT"), help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.worker:
-        _worker(*args.worker)
+        _worker(*args.worker, mode=args.mode, sharp_frac=args.sharp_frac)
         return
     sessions = list(args.sessions)
     if args.list:
@@ -91,7 +154,8 @@ def main() -> None:
             print(f"[{i}/{len(sessions)}] {_name(s)}: done already")
             continue
         t = time.time()
-        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--out", args.out, "--worker", s, dst],
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--out", args.out, "--mode", args.mode,
+                            "--sharp-frac", str(args.sharp_frac), "--worker", s, dst],
                            capture_output=True, text=True, errors="replace")
         ok = os.path.exists(os.path.join(dst, "meta.json"))
         print(f"[{i}/{len(sessions)}] {_name(s)}: {'ok' if ok else 'FAILED'} ({time.time() - t:.0f} s)", flush=True)
