@@ -1318,13 +1318,14 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                 fingerprint=_ckpt_fp)
 
         finally:
-            # Unmapping and deleting the frame store (~65 GB on a 532-frame session) took
-            # ~9 s on the critical path; nothing reads it after this point, so it runs in
-            # a background thread (non-daemon: the interpreter waits for it at exit, and
-            # src.cleanup's at-exit sweep still covers any file it could not remove).
-            import threading as _threading
-            _threading.Thread(target=mm_mgr.cleanup, name='frame-store-cleanup',
-                              daemon=False).start()
+            # Release the frame store before Phase 4 starts. Running this in a background
+            # thread made the next phase compete with gc.collect() and large temp-file
+            # deletion, which looked like a hang because there was no completion message.
+            _cleanup_start = time.perf_counter()
+            safe_print("  Releasing frame store...")
+            mm_mgr.cleanup()
+            safe_print(f"  Frame store released "
+                       f"({format_time(time.perf_counter() - _cleanup_start)})")
         # end: if resume_phase < 3
 
     # ======================================================================
