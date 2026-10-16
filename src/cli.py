@@ -98,6 +98,19 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
                 setattr(args, key, value)
                 changes.append(f"{key}={value}")
 
+        # Configs saved before 2.11.9 have no skip_step key (list settings were dropped),
+        # so they lose the sky_residual skip --auto adds for extended targets, and a
+        # --from-stack re-run fits a galaxy away as sky (a real Fireworks stack: the
+        # galaxy's contrast 118 -> -3 in that one step). The same --auto rule left
+        # galaxy_mode / dbe_diffuse_threshold_sigma 0.25 behind: restore the skip.
+        if ('skip_step' not in flat and 'skip_step' not in _explicit
+                and (flat.get('galaxy_mode') is True
+                     or float(flat.get('dbe_diffuse_threshold_sigma', 1.0)) <= 0.25)):
+            skip = list(getattr(args, 'skip_step', None) or [])
+            if 'sky_residual' not in skip:
+                args.skip_step = skip + ['sky_residual']
+                changes.append("skip_step+=sky_residual (extended target, config from before 2.11.9)")
+
     except FileNotFoundError:
         safe_print(f"  WARNING: Config file not found: {config_path}")
     except Exception as e:

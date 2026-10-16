@@ -1366,19 +1366,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     print_phase(4, "Post-processing")
     phase_start = time.time()
 
-    # Resolve diagnostic snapshot directory
-    if getattr(args, 'diagnostic', False):
-        _diag_dir = getattr(args, 'diagnostic_dir', None) or \
-                    os.path.splitext(output_path)[0] + '_diagnostic'
-        os.makedirs(_diag_dir, exist_ok=True)
-        _h, _w, _c = stacked.shape
-        _est_mb = (_h * _w * _c * 4 * 14) / (1024 ** 2)
-        safe_print(f"\n  [diagnostic] Output folder: {_diag_dir}")
-        safe_print(f"  [diagnostic] Estimated disk usage: ~{_est_mb:.0f} MB "
-                   f"(up to 14 snapshots x {_h * _w * _c * 4 / (1024**2):.0f} MB each)")
-        args._diagnostic_dir = _diag_dir
-    else:
-        args._diagnostic_dir = None
+    _set_diagnostic_dir(args, output_path, stacked.shape)
 
     # --uncertainty-propagate re-runs Phase 4 on noise realizations of this
     # exact array, so keep the linear pre-post-processing stack (Phase 4
@@ -1840,6 +1828,21 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     return output_path
 
 
+def _set_diagnostic_dir(args, output_path: str, shape) -> None:
+    """``args._diagnostic_dir`` for ``--debug diagnostic`` (a FITS snapshot before each
+    Phase 4 step), or None. Both the full run and ``--from-stack`` call this."""
+    if not getattr(args, 'diagnostic', False):
+        args._diagnostic_dir = None
+        return
+    diag_dir = getattr(args, 'diagnostic_dir', None) or os.path.splitext(output_path)[0] + '_diagnostic'
+    os.makedirs(diag_dir, exist_ok=True)
+    h, w, c = shape
+    safe_print(f"\n  [diagnostic] Output folder: {diag_dir}")
+    safe_print(f"  [diagnostic] Estimated disk usage: ~{h * w * c * 4 * 14 / 1024 ** 2:.0f} MB "
+               f"(up to 14 snapshots x {h * w * c * 4 / 1024 ** 2:.0f} MB each)")
+    args._diagnostic_dir = diag_dir
+
+
 def postprocess_from_stack(stack_path: str, output_path: str,
                            args: argparse.Namespace) -> np.ndarray:
     """``--from-stack``: Phase 4 alone, on the linear main FITS of an earlier run.
@@ -1862,6 +1865,7 @@ def postprocess_from_stack(stack_path: str, output_path: str,
     if os.path.abspath(output_path) == os.path.abspath(stack_path):
         raise ValueError("--from-stack: -o must differ from the input stack "
                          "(the linear FITS is never overwritten)")
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)   # as a full run does
     safe_print(f"  Linear stack: {os.path.basename(stack_path)} "
                f"({stacked.shape[0]}x{stacked.shape[1]}, "
                f"{int(header.get('NFRAMES', 0) or 0)} frames)")
@@ -1877,6 +1881,7 @@ def postprocess_from_stack(stack_path: str, output_path: str,
     # Background/sky steps are reused from this file while the stack and their
     # settings are unchanged (postprocess._early_cache_*)
     args._pp_early_cache = os.path.splitext(stack_path)[0] + '_phase4cache.pkl'
+    _set_diagnostic_dir(args, output_path, stacked.shape)   # --debug diagnostic
     print_phase(4, "Post-processing (from an existing linear stack)")
     t0 = time.time()
     result = postprocess_stack(stacked, args, [], stats)
