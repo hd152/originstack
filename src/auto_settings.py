@@ -875,9 +875,40 @@ def apply_auto_settings(
     changes: List[str] = []
     changes.extend(_apply_dynamic_settings(sig, weights, args))
     changes.extend(_apply_quality_settings(sig, args, target_type=target_type, weights=weights))
+    changes.extend(_apply_nn_deconvolution(args, weights))
     changes.extend(_apply_free_diagnostics(args))
 
     return target_type, label, sig, changes, weights
+
+
+# The learned deconvolver (--deconvolve nn) for galaxies on Origin data: the narrowest stars of
+# default / RL / --denoiser nn / --deconvolve nn on all five held-out targets, most on the two
+# galaxies (Phase 4 FWHM vs linear 0.75 / 0.74 against the default chain's 0.88 / 0.88), at the
+# nn denoiser's sky noise (dev-notes/nn-deconv-runbook.md, step 6). Origin only: it learned that
+# instrument's seeing blur and narrows ideal Gaussian stars by just 2-5%. Not yet for nebulae and
+# star fields (a brighter halo round some bright stars, ~5 deg hue error on bright areas).
+NN_DECONV_MIN_GALAXY_WEIGHT = 0.5
+
+
+def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
+    changes: List[str] = []
+    explicit = getattr(args, '_explicit_cli_dests', set())
+    if {'denoiser', 'deconvolve_mode'} & explicit or getattr(args, 'deconvolve_nn', False):
+        return changes                       # the user chose denoising/deconvolution
+    if (weights or {}).get('galaxy', 0.0) < NN_DECONV_MIN_GALAXY_WEIGHT:
+        return changes
+    if not str((getattr(args, '_camera', None) or {}).get('model', '')).startswith('Origin'):
+        return changes
+    from src.nn_denoise import DECONV_MODEL_PATH, model_available
+    if not model_available(DECONV_MODEL_PATH):
+        return changes
+    _set = _auto_setter(args, changes)
+    _set('deconvolve_mode', 'nn')
+    _set('deconvolve_nn', True)
+    _set('deconvolve', False)                # not Richardson-Lucy as well
+    for attr in ('denoise_curvelet', 'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn'):
+        _set(attr, False)                    # the network denoises as it sharpens
+    return changes
 
 
 def _apply_free_diagnostics(args) -> List[str]:

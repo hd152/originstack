@@ -6,6 +6,28 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Learned noise reduction (`--denoiser nn`).** A small neural network trained on real
+  Origin sessions (pairs of stacks of the same sky with independent noise), run without any
+  extra software. On five targets it was never trained on, it left a tenth of the wavelet
+  denoiser's error with star widths unchanged.
+- **Learned deconvolution (`--deconvolve nn`).** The same network trained to turn a stack of a
+  session's softer frames into the stack of its sharpest 30%: stars come out 8-18% narrower
+  and the noise is removed too, so it replaces the denoiser and chroma noise reduction. On the
+  held-out targets it gave the narrowest stars of every option, with no dark rings round stars
+  and no invented faint sources (checked against independent stacks). It learned the Origin's
+  own seeing, so on other instruments it sharpens much less.
+
+### Changed
+
+- **Galaxies from an Origin get learned deconvolution automatically.** When the target is
+  mostly galaxy, the camera is an Origin and you have not chosen `--denoiser` or
+  `--deconvolve` yourself, `--auto` now uses `--deconvolve nn` instead of the wavelet
+  denoiser: on the two held-out galaxies, stars 14-16% narrower than before and a far cleaner
+  sky, for about 12 s more. `--deconvolve off` keeps the previous result. Nebulae and star
+  fields are unchanged for now. **Expect different output for galaxies.**
+
 ## [2.11.9] - 2026-10-14
 
 Background extraction works on every colour channel again, faster `--from-stack`
