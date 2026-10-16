@@ -19,6 +19,20 @@ match the `VERSION` file and `v*` git tags.
   and no invented faint sources (checked against independent stacks). It learned the Origin's
   own seeing, so on other instruments it sharpens much less.
 
+### Fixed
+
+- **Nights shot through different filters are no longer averaged together.** A folder of
+  sessions taken partly with the Origin's Clear setting and partly with its Nebula filter was
+  combined into one stack; the two respond to different light (a Nebula-filtered sky is about
+  ten times darker, with almost no red continuum), so the result showed each session's outline
+  and lost the nebula. Each filter is now combined separately (`<output>_clear.fits`,
+  `<output>_nebula.fits`), as a single folder mixing filters already was.
+- **Re-finishing an older galaxy stack keeps the galaxy.** Configs saved before 2.11.9 did not
+  record the sky-residual skip that `--auto` uses for galaxies and nebulae, so `--from-stack`
+  ran that step and could fit a faint galaxy away as sky. Such configs now get the skip back.
+- `--debug diagnostic` now works with `--from-stack`, and `--from-stack` creates the output
+  folder if it does not exist.
+
 ### Changed
 
 - **Galaxies from an Origin get learned deconvolution automatically.** When the target is
