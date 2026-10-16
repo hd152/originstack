@@ -209,10 +209,14 @@
     <dl class="feat">
       <div><dt>Background and gradients<code>on by default</code></dt>
         <dd><p>Dynamic background extraction fits a smooth surface to sky samples with a robust local regression, admits patches that follow a gradient, and flattens glow that is cut off by the frame edge. In a galaxy or comet mode it protects the object.</p></dd></div>
-      <div><dt>Noise reduction<code>--denoiser wavelet</code></dt>
-        <dd><p>A wavelet denoiser that protects elongated structure such as filaments and spiral arms, with an optional variance-stabilising transform. Chosen after benchmarking the alternatives on ground-truth scenes.</p></dd></div>
-      <div><dt>Deconvolution<code>--deconvolve rl|rl-sv|tv|sparse</code></dt>
-        <dd><p>Richardson-Lucy (global or varying across the field), total variation, and a sparse wavelet method. The point-spread function is estimated from your own stars, and stars are protected from ringing.</p></dd></div>
+      <div><dt>Noise reduction<code>--denoiser wavelet</code> <code>--denoiser nn</code></dt>
+        <dd><p>A wavelet denoiser that protects elongated structure such as filaments and spiral arms, with an optional variance-stabilising transform. Chosen after benchmarking the alternatives on ground-truth scenes.</p>
+        <p>Or a small neural network trained on real Origin sessions with independent noise (Noise2Noise), run on your computer.</p>
+        <p class="fact">On five targets it was never trained on, it left a tenth of the wavelet denoiser's error, with star widths unchanged.</p></dd></div>
+      <div><dt>Deconvolution<code>--deconvolve rl|rl-sv|tv|sparse|nn</code></dt>
+        <dd><p>Richardson-Lucy (global or varying across the field), total variation, and a sparse wavelet method. The point-spread function is estimated from your own stars, and stars are protected from ringing.</p>
+        <p><code>nn</code> is a learned deconvolver trained to turn a session's softer frames into its sharpest ones; it also removes noise. The automatic settings use it for Origin galaxy sessions.</p>
+        <p class="fact">On the held-out galaxies, finished stars came out 14-16% narrower than with the default chain, with no dark rings, and 94-100% of the faint sources it shows are confirmed in an independent stack. See <a href="how-it-works.html#learned">learned methods</a>.</p></dd></div>
       <div><dt>Starless processing<code>--remove-stars</code> <code>--starless-process</code></dt>
         <dd><p>Removes stars by inpainting, saves a starless copy, and can run the denoising on the starless layer alone with the stars added back exactly.</p></dd></div>
       <div><dt>Stretch<code>--stretch ghs</code> <code>--layered-stretch</code></dt>

@@ -49,6 +49,7 @@
       <a href="how-it-works-stacking.html">Combining frames</a>
       <a href="how-it-works-finishing.html">Colour and finishing</a>
       <a href="how-it-works-stretches.html">Stretch gallery</a>
+      <a href="#learned">Learned methods</a>
       <a href="#engine">Speed and memory</a>
       <a href="#trust">How we check it</a>
     </p>
@@ -161,6 +162,26 @@
     </dl>
   </div>
 </section>
+<section id="learned">
+  <div class="wrap">
+    <h2>Learned methods, and what is not AI</h2>
+    <p class="intro measure">OriginStack uses no generative AI and no cloud AI service: nothing generates, paints in or imagines image content, and no image leaves your computer for processing. Almost every step is classical signal processing, described on these pages and implemented in the project itself. Three optional steps use small neural networks, and they are held to the same test as everything else: they must not add anything that is not in the data.</p>
+    <dl class="feat">
+      <div><dt>Learned noise reduction<code>--denoiser nn</code> <code>opt-in</code></dt>
+        <dd><p>A small U-Net, a common image-processing network, with 265,587 numbers in it. It was trained with the Noise2Noise method: each real Origin session was split into stacks of the same sky with independent noise, and the network learned to predict one from another. No clean "ground truth" picture, and no image from anywhere else, was involved.</p></dd></div>
+      <div><dt>Learned deconvolution<code>--deconvolve nn</code> <code>auto for Origin galaxies</code></dt>
+        <dd><p>The same network trained to turn the stack of a session's softer frames into the stack of its sharpest 30%, so it learned to undo the Origin's real seeing blur and to remove noise at the same time. The automatic settings use it for galaxy sessions from an Origin; <code>--deconvolve off</code> turns it off.</p>
+        <p class="fact">Checked on five targets it was never trained on: stars 8-18% narrower, no ringing around bright stars, faint test sources keep 81-99% of their light, and 94-100% of the faint sources it shows are confirmed in an independent stack of other frames, against 3-21% for random positions. On other telescopes it sharpens much less, because it learned the Origin's blur.</p></dd></div>
+      <div><dt>Transient triage<code>--transient-triage</code> <code>opt-in</code></dt>
+        <dd><p>A small classifier that sorts candidate changes found by difference imaging into likely real and likely artefact. It only ranks candidates; it never changes an image.</p></dd></div>
+      <div><dt>How they run</dt>
+        <dd><p>The weights ship with the program (about 1 MB per network) and run in plain NumPy and the project's own native code on your computer: no machine-learning framework at run time, no download, no network. They are deterministic, so the same stack always gives the same result. The training code is in the repository, so the networks can be retrained from your own sessions.</p></dd></div>
+      <div><dt>What it depends on</dt>
+        <dd><p>No other astronomy software, external programs, accounts or cloud services. It uses standard open-source scientific Python libraries (NumPy, SciPy, Astropy, Pillow, and optionally rawpy and tifffile for camera RAW and TIFF files). By default it looks up the target name on SIMBAD and Gaia star positions for plate solving and colour calibration; <code>--offline</code> turns all network access off.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
 <section id="trust">
   <div class="wrap">
     <h2>How we check it</h2>
