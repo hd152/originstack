@@ -278,3 +278,26 @@ footer .langs a[aria-current] { opacity: 1; font-weight: 600; text-decoration: u
 .eq { font-family: var(--text); font-size: 1.05rem; color: var(--ink); background: var(--plate); border-left: 3px solid var(--oiii); padding: 10px 14px; overflow-x: auto; white-space: nowrap; }
 .refs { padding-left: 1.2em; margin-top: 24px; }
 .refs li { margin-bottom: 10px; color: #2b3b55; }
+.flow a rect { transition: opacity .15s; }
+.flow a:hover rect, .flow a:focus-visible rect { opacity: .82; }
+.phases h3 a { text-decoration: none; }
+.phases h3 a:hover { text-decoration: underline; }
+.pager { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+.pager a { display: flex; flex-direction: column; gap: 2px; font-family: var(--display); font-weight: 600; font-size: 1.15rem; text-decoration: none; border: 1px solid var(--line); padding: 12px 18px; min-width: 200px; }
+.pager a:hover { border-color: var(--ink); }
+.pager a.next { margin-left: auto; text-align: right; }
+.pager small { font-weight: 500; font-size: .85rem; color: var(--slate); }
+svg.diagram { display: block; width: 100%; height: auto; }
+.figs > div { min-width: 0; }
+.feat.one { margin-top: 0; }
+.feat.one > div { grid-template-columns: 1fr; }
+.pickers { display: flex; flex-wrap: wrap; gap: 12px 28px; margin-top: 28px; font-family: var(--display); font-weight: 500; }
+.pickers select { margin-left: 8px; font: inherit; padding: 4px 8px; border: 1px solid var(--line); background: #fff; color: var(--ink); }
+.wipe.stretch-wipe { aspect-ratio: 3 / 2; max-width: 960px; margin-top: 18px; }
+.stretches { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: clamp(28px, 4vw, 48px); margin-top: 36px; }
+.stretches figure { margin: 0; }
+.stretches img { width: 100%; height: auto; display: block; background: #000; }
+.stretches figcaption { margin-top: 12px; color: #2b3b55; }
+.stretches figcaption h3 { font-size: 1.2rem; margin-bottom: 6px; }
+.stretches figcaption h3 code { font-weight: 500; font-size: .8rem; color: var(--slate); margin-left: 6px; }
+.stretches figcaption p { margin: 0 0 .5em; }
