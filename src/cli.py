@@ -1290,110 +1290,21 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 safe_print("  Falling back to translation-based combine...")
 
         if not mosaic_done:
-            # --- Rotation-aware combine, via the same path --merge uses ---
-            #
-            # This used to register the per-subfolder stacks with
-            # calculate_shift, which returns a pure (dy, dx) translation and
-            # cannot represent rotation at all. On an alt-az mount the field
-            # rotates while it tracks, so separate sessions differ by an
-            # arbitrary angle -- measured at 26.8 degrees across five real
-            # Lagoon sessions, about 860 px of corner displacement. Correcting
-            # that with a shift leaves stars smeared toward the corners, which
-            # is worse than not combining at all.
-            #
-            # merge_previous_stacks does the right thing: blind
-            # rotation-agnostic star-pattern matching (src/blind_match.py),
-            # then a per-pixel NFRAMES-weighted mean inside each warped
-            # footprint, so a deep session is not diluted by a shallow one.
-            from src.merge import (
-                apply_merge_header,
-                load_merge_stack,
-                merge_previous_stacks,
-                read_merge_meta,
-                seed_reference_header,
-            )
-
-            # Reference grid = the deepest stack: most signal for the star
-            # match, and the least resampling of the data that matters most.
-            # "Deepest" is integration time when every stack records it, not
-            # frame count: sessions of 10 s and 30 s subs make 100 frames worth
-            # very different amounts of light.
-            frames_n, seconds = [], []
-            for path in produced:
-                try:
-                    # Header only: this used to load and float32-copy every
-                    # stack's pixels just to read NFRAMES.
-                    meta = read_merge_meta(path)
-                    frames_n.append(int(meta.get('nframes') or 0))
-                    seconds.append(float(meta.get('intgtime') or 0.0))
-                except Exception:
-                    frames_n.append(0)
-                    seconds.append(0.0)
-            use_seconds = all(t > 0 for t in seconds)
-            depths = seconds if use_seconds else frames_n
-            ref_idx = int(np.argmax(depths)) if any(depths) else 0
-            ref_path = produced[ref_idx]
-            others = [p for i, p in enumerate(produced) if i != ref_idx]
-
-            safe_print(f"  Reference grid: {os.path.basename(ref_path)} "
-                       f"({frames_n[ref_idx]} frames, {seconds[ref_idx]:.0f} s)")
-            try:
-                ref_stack, ref_meta = load_merge_stack(ref_path)
-                combined, merge_info = merge_previous_stacks(
-                    ref_stack, int(ref_meta.get('nframes') or 1), others,
-                    verbose=getattr(args, 'verbose', False))
-            except Exception as exc:
-                safe_print(f"  ERROR: rotation-aware combine failed: {exc}")
-                # Keep them for real: they are registered as temp files, and the
-                # end-of-run cleanup would otherwise delete them.
-                kept = []
-                for _p in produced:
-                    for _side in (_p, _p[:-5] + '.jpg', _p[:-5] + '_config.toml'):
-                        _cleanup_deregister(_side)
-                    if os.path.exists(_p):
-                        kept.append(_p)
-                if kept:
-                    safe_print("  The per-target stacks are kept; combine them with "
-                               "--merge manually:")
-                    for _p in kept:
-                        safe_print(f"    {_p}")
-                raise
-
-            Hf, Wf = combined.shape[:2]
-            out_hdu = fits.PrimaryHDU()
-            out_hdu.data = np.transpose(combined, (2, 0, 1))
-            out_hdu.header['NTARGETS'] = len(produced)
-            try:
-                seed_reference_header(out_hdu.header, ref_meta)
-                apply_merge_header(out_hdu.header, merge_info)
-            except Exception as exc:
-                # The pixels are already merged and correct, so do not fail the
-                # run over metadata -- but do say so. Silently dropping these
-                # left a combined stack that looked fine and could not chain.
-                safe_print(f"  WARNING: could not record merge totals in the header "
-                           f"({exc}); the combined stack will not chain into --merge")
-            out_hdu.writeto(output, overwrite=True)
-            preview_path = os.path.splitext(output)[0] + '.jpg'
-            _eff = _effective_args.get(ref_path)
-            _processed = None
-            if _eff is not None:
-                try:
-                    _processed = _postprocess_combined(combined, _eff, output)
-                except Exception as exc:
-                    safe_print(f"  WARNING: post-processing the combined stack failed "
-                               f"({exc}); the linear combined stack is saved and its "
-                               f"preview is unprocessed")
-            if _processed is not None:
-                _pstarless = None
-                if getattr(_eff, 'layered_stretch', False) and getattr(_eff, 'stretch', '') == 'ghs':
-                    from src.star_removal import starless_from_image
-                    _pstarless = starless_from_image(_processed)
-                save_final_preview(_processed, preview_path, _eff, starless=_pstarless)
+            # Stacks shot through different filters (e.g. the Origin's Clear and Nebula)
+            # have different spectral responses -- a Nebula-filtered sky is ~10x darker
+            # with almost no red continuum -- so per-channel flux matching cannot
+            # reconcile them and their average shows each footprint. Combine each
+            # filter separately, as a mixed-filter session folder is split.
+            groups = _group_stacks_by_filter(produced)
+            if len(groups) > 1:
+                safe_print(f"  Sessions were shot through {len(groups)} filters "
+                           f"({', '.join(sorted(groups))}) -- combining each separately")
+                _base, _ext = os.path.splitext(output)
+                for _tag, _paths in sorted(groups.items()):
+                    safe_print(f"  FILTER {_tag}: {len(_paths)} stack(s)")
+                    _combine_stacks(_paths, f"{_base}_{_tag}{_ext}", args, _effective_args)
             else:
-                save_final_preview(combined, preview_path, args)
-
-            safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
-            safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
+                _combine_stacks(produced, output, args, _effective_args)
 
         # Remove per-target temp stacks now that the combined output is written
         for p in tmp_stacks:
@@ -1411,6 +1322,134 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
     safe_print(f"  Total time: {format_time(total_time)}")
     safe_print("\n  ✓ All processing complete!")
     safe_print(f"{'=' * 70}\n")
+
+
+def _group_stacks_by_filter(paths: list) -> dict:
+    """``{filter_tag: [stack paths]}`` from each stack's FILTER header (the tag
+    ``group_lights_by_filter`` uses); stacks without one share 'unfiltered'."""
+    from src.frame_discovery import _sanitize_filter_tag
+    groups: dict = {}
+    for path in paths:
+        try:
+            raw = str(fits.getheader(path).get('FILTER') or '').strip()
+        except Exception:
+            raw = ''
+        groups.setdefault(_sanitize_filter_tag(raw) if raw else 'unfiltered', []).append(path)
+    return groups
+
+
+def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> None:
+    """Register and combine per-session linear stacks into ``output`` (rotation-aware,
+    the same path --merge uses), then post-process the combined stack once with the
+    reference session's settings. A single stack is finished on its own."""
+    # --- Rotation-aware combine, via the same path --merge uses ---
+    #
+    # This used to register the per-subfolder stacks with
+    # calculate_shift, which returns a pure (dy, dx) translation and
+    # cannot represent rotation at all. On an alt-az mount the field
+    # rotates while it tracks, so separate sessions differ by an
+    # arbitrary angle -- measured at 26.8 degrees across five real
+    # Lagoon sessions, about 860 px of corner displacement. Correcting
+    # that with a shift leaves stars smeared toward the corners, which
+    # is worse than not combining at all.
+    #
+    # merge_previous_stacks does the right thing: blind
+    # rotation-agnostic star-pattern matching (src/blind_match.py),
+    # then a per-pixel NFRAMES-weighted mean inside each warped
+    # footprint, so a deep session is not diluted by a shallow one.
+    from src.merge import (
+        apply_merge_header,
+        load_merge_stack,
+        merge_previous_stacks,
+        read_merge_meta,
+        seed_reference_header,
+    )
+
+    # Reference grid = the deepest stack: most signal for the star
+    # match, and the least resampling of the data that matters most.
+    # "Deepest" is integration time when every stack records it, not
+    # frame count: sessions of 10 s and 30 s subs make 100 frames worth
+    # very different amounts of light.
+    frames_n, seconds = [], []
+    for path in paths:
+        try:
+            # Header only: this used to load and float32-copy every
+            # stack's pixels just to read NFRAMES.
+            meta = read_merge_meta(path)
+            frames_n.append(int(meta.get('nframes') or 0))
+            seconds.append(float(meta.get('intgtime') or 0.0))
+        except Exception:
+            frames_n.append(0)
+            seconds.append(0.0)
+    use_seconds = all(t > 0 for t in seconds)
+    depths = seconds if use_seconds else frames_n
+    ref_idx = int(np.argmax(depths)) if any(depths) else 0
+    ref_path = paths[ref_idx]
+    others = [p for i, p in enumerate(paths) if i != ref_idx]
+
+    safe_print(f"  Reference grid: {os.path.basename(ref_path)} "
+               f"({frames_n[ref_idx]} frames, {seconds[ref_idx]:.0f} s)")
+    try:
+        ref_stack, ref_meta = load_merge_stack(ref_path)
+        if others:
+            combined, merge_info = merge_previous_stacks(
+                ref_stack, int(ref_meta.get('nframes') or 1), others,
+                verbose=getattr(args, 'verbose', False))
+        else:   # a filter group of one session: finish it on its own
+            combined, merge_info = ref_stack, None
+    except Exception as exc:
+        safe_print(f"  ERROR: rotation-aware combine failed: {exc}")
+        # Keep them for real: they are registered as temp files, and the
+        # end-of-run cleanup would otherwise delete them.
+        kept = []
+        for _p in paths:
+            for _side in (_p, _p[:-5] + '.jpg', _p[:-5] + '_config.toml'):
+                _cleanup_deregister(_side)
+            if os.path.exists(_p):
+                kept.append(_p)
+        if kept:
+            safe_print("  The per-target stacks are kept; combine them with "
+                       "--merge manually:")
+            for _p in kept:
+                safe_print(f"    {_p}")
+        raise
+
+    Hf, Wf = combined.shape[:2]
+    out_hdu = fits.PrimaryHDU()
+    out_hdu.data = np.transpose(combined, (2, 0, 1))
+    out_hdu.header['NTARGETS'] = len(paths)
+    try:
+        seed_reference_header(out_hdu.header, ref_meta)
+        if merge_info is not None:
+            apply_merge_header(out_hdu.header, merge_info)
+    except Exception as exc:
+        # The pixels are already merged and correct, so do not fail the
+        # run over metadata -- but do say so. Silently dropping these
+        # left a combined stack that looked fine and could not chain.
+        safe_print(f"  WARNING: could not record merge totals in the header "
+                   f"({exc}); the combined stack will not chain into --merge")
+    out_hdu.writeto(output, overwrite=True)
+    preview_path = os.path.splitext(output)[0] + '.jpg'
+    _eff = effective_args.get(ref_path)
+    _processed = None
+    if _eff is not None:
+        try:
+            _processed = _postprocess_combined(combined, _eff, output)
+        except Exception as exc:
+            safe_print(f"  WARNING: post-processing the combined stack failed "
+                       f"({exc}); the linear combined stack is saved and its "
+                       f"preview is unprocessed")
+    if _processed is not None:
+        _pstarless = None
+        if getattr(_eff, 'layered_stretch', False) and getattr(_eff, 'stretch', '') == 'ghs':
+            from src.star_removal import starless_from_image
+            _pstarless = starless_from_image(_processed)
+        save_final_preview(_processed, preview_path, _eff, starless=_pstarless)
+    else:
+        save_final_preview(combined, preview_path, args)
+
+    safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
+    safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
 
 
 def _positive_float(text: str) -> float:
