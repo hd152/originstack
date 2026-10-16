@@ -1,6 +1,7 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
-Status (2026-10-14): **training data half-built, no model yet.** Everything below runs on
+Status (2026-10-16): **v3 trained and passes every step-5 check; integration (step 6) not
+started.** Use it with `restore_sigma=4` (see "v3 results" below). Everything below runs on
 any Windows machine with the repo, Python, a Rust toolchain and ideally an NVIDIA GPU.
 Branch: `feat/nn-denoiser`.
 
@@ -158,7 +159,52 @@ the full stack) with `error` below `nn_denoise`'s, and the crops (next step) sho
 ringing or invented detail. Also run the faint-source injection test idea from the
 denoiser work (inject faint blobs, check their flux survives) before shipping.
 
+Then the checks the error score does not cover -- faint sources, ringing, invented sources --
+and crops to look at:
+
+```powershell
+python tools/eval_nn_faint.py --pairs C:/nn_work/nn_deconv/pairs --model C:/nn_work/model_deconv_v3.npz --json C:/nn_work/faint_v3.json --crops C:/nn_work/crops_v3
+```
+
+## v3 results (2026-10-16, second machine: RTX 3050 Laptop 4 GB, `C:\nn_work`)
+
+Trained after `57fbe10` (target sky matched to the input, best-validation weights): 83
+sessions / 56 targets, pairs ~5 h, bank 17,760 patches in 7 min, 30,000 steps in 3.2 h.
+Validation 1.443 at step 1000, best **1.2248 at step 23,000** (identity 1.8223), 1.22-1.26
+from step 15,000 on -- no overfitting (v2: 1.996 -> 2.215). Exported numpy vs torch max rel
+diff 5.3e-7. Weights: `C:\nn_work\model_deconv_v3.npz` (not shipped).
+
+`eval_nn_deconv.py`, 9 held-out pairs (Omega x2, Orion x2, Pleiades x2, Sculptor, Sunflower x2):
+
+| | width / input | width / target | error vs `nn_denoise` | sky error |
+|---|---|---|---|---|
+| r0 | 0.82-0.92 | 0.96-1.09 | lower on 8/9 (Pleiades 2025-10: 0.554 vs 0.481) | within 0.01 of nn_denoise's on 8/9 |
+| r4 | 0.81-0.92 | 0.96-1.08 | lower on 9/9 | within 0.01 of nn_denoise's on 8/9 |
+
+The exception for sky error is Orion 2025-12-11 (0.07-0.08 vs 0.06); every method is far
+below no processing (0.32-0.49). v2's sky-level learning is gone (its held-out sky error was
+3-6x no processing). `eval_nn_faint.py` on the same 9 pairs (1024x1536 centre crops):
+
+- **Faint sources: use r4.** Neutral exponential discs (1.5 / 3 px) at 0.5-1 sky sigma keep
+  35-83% of their flux at r0 (worse than `nn_denoise`'s 79-102%), **81-99% at r4**, matching
+  the denoiser on every session; PSF-shaped point sources 79-107% at r4 (weakest: Pleiades
+  2025-10 at 1-2 sigma). The restore costs no sharpness (width/input r4 = r0 within 0.007).
+  Both Omega pairs have only 2 free sky positions (the nebula fills the frame): little weight.
+- **Ringing: none.** Deepest dip of the bright, isolated, unsaturated stars' radial profile
+  below the local sky, 1.5-6 FWHM: 0.00 to -0.02 sky sigma for every method (the input
+  itself: 0 to -0.17).
+- **No invented sources.** The crops show faint point sources on the sky that are hard to see
+  in the input. Faint peaks of each output checked against the independent sharp stack (its
+  PSF-matched filter > 2.5 sigma within 2 px): 94-100% confirmed for the deconvolver, against
+  3-21% for random sky positions. It shows 20-60% more real faint peaks above 2 sigma than
+  `nn_denoise` (Sunflower 2026-03: 97 vs 72 per Mpx; a matched filter on the input: 51).
+- Crops (`C:\nn_work\crops_v3`): stars visibly tighter, no rings or blobs; nebula interiors
+  (Omega) unchanged in structure; a faint irregular skirt around the Pleiades' brightest
+  stars, not a dip.
+
 ## 6. Then (not done yet): integrate as `--deconvolve nn`
+
+- Use `restore_sigma=4` (above): r0 loses up to two thirds of 0.5-1 sigma faint sources.
 
 - `src/cli.py`: add `nn` to `--deconvolve` choices; map to `args.deconvolve_nn`, and do
   not set `args.deconvolve` (that triggers the RL step). The network also denoises (its
