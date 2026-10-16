@@ -8,6 +8,11 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
+    ignore:
+      # numpy 2.5+ requires Python 3.12; CI and users still run 3.11 (#102).
+      # Drop this once 3.11 support ends.
+      - dependency-name: "numpy"
+        versions: [">=2.5"]
 
   # ext/astro_native's Cargo.toml
   - package-ecosystem: "cargo"
