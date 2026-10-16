@@ -42,6 +42,22 @@
 </header>
 
 <main>
+<section id="v2-12">
+  <div class="wrap">
+    <h2>2.12 <small class="when">16 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-12-0"><h3>2.12.0 <span>16 Oct</span></h3>
+        <ul>
+          <li><strong>Learned noise reduction and deconvolution</strong> (<code>--denoiser nn</code>, <code>--deconvolve nn</code>): small neural networks trained only on real Origin sessions, run on your own computer. The deconvolver makes stars 8-18% narrower and removes the noise, and was checked not to invent stars or detail. See <a href="how-it-works.html#learned">learned methods</a>.</li>
+          <li><strong>Sharper galaxies by default.</strong> For Origin galaxy sessions the automatic settings now use the learned deconvolver; <code>--deconvolve off</code> keeps the previous result.</li>
+          <li><strong>Separate stacks per filter.</strong> Nights shot with the Clear setting and with the Nebula filter are combined separately instead of averaged into one muddled stack.</li>
+          <li><strong>Old galaxy stacks re-finish correctly</strong> with <code>--from-stack</code>, and bright stars no longer get a dark ring from star reduction.</li>
+          <li>A much larger website: how it works, a background page, a stretch gallery, an app guide, other cameras, a gallery and a command-line reference.</li>
+        </ul></article>
+    </div>
+  </div>
+</section>
+
 <section id="v2-11">
   <div class="wrap">
     <h2>2.11 <small class="when">9&ndash;14 October 2026</small></h2>
