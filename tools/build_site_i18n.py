@@ -35,7 +35,7 @@ SITE = 'https://originstack.site/'
 
 PAGES = ['index.html', 'stack-celestron-origin.html', 'privacy.html']
 # Pages in the sitemap that are not translated.
-ENGLISH_ONLY = ['advanced.html']
+ENGLISH_ONLY = ['advanced.html', 'how-it-works.html']
 
 # catalog code, folder, hreflang / html lang, og:locale, own name
 LANGS = [
