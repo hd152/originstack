@@ -226,9 +226,9 @@ multiply by `sky_noise` to compare (positive = bright halo, negative = dark moat
 | Sculptor | 0.880 / 0.799 / 0.860 / **0.752** | 0.67 / 0.04 | 0.79 / 0.06 / 0.80 |
 | Sunflower 2026-03 | 0.882 / 0.822 / 0.878 / **0.739** | 0.74 / 0.05 | 0.30 / 0.08 / 0.48 |
 
-The narrowest stars on all five, 6-17% narrower than the default chain, at the nn denoiser's
-sky noise (5-15x below the default's); RL's dark moats (Orion) and sky speckle (Sunflower)
-do not appear. `faint_cnr` is 10-20% below `--denoiser nn`'s and far above the default's.
+The narrowest stars on all five, 7-16% narrower than the default chain, at about the nn
+denoiser's sky noise (3.5-19x below the default's); RL's dark moats (Orion) and sky speckle (Sunflower)
+do not appear. `faint_cnr` is 1-20% below `--denoiser nn`'s and far above the default's.
 Like `--denoiser nn`, hue error on bright pixels is ~5 deg (default 2-3 deg) and Pleiades'
 display star-colour agreement with Gaia is a little lower (rho 0.61 vs 0.70).
 
