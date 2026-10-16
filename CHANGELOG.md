@@ -6,18 +6,46 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-10-16
+
+Learned noise reduction and deconvolution trained on real Origin sessions, sharper galaxies
+by default, separate stacks per filter, and a much larger website.
+
 ### Added
 
 - **Learned noise reduction (`--denoiser nn`).** A small neural network trained on real
-  Origin sessions (pairs of stacks of the same sky with independent noise), run without any
-  extra software. On five targets it was never trained on, it left a tenth of the wavelet
-  denoiser's error with star widths unchanged.
+  Origin sessions (pairs of stacks of the same sky with independent noise), run on your own
+  computer with no extra software. On five targets it was never trained on, it left a tenth of
+  the wavelet denoiser's error with star widths unchanged, and faint sources keep 86-99% of
+  their light.
 - **Learned deconvolution (`--deconvolve nn`).** The same network trained to turn a stack of a
   session's softer frames into the stack of its sharpest 30%: stars come out 8-18% narrower
   and the noise is removed too, so it replaces the denoiser and chroma noise reduction. On the
   held-out targets it gave the narrowest stars of every option, with no dark rings round stars
   and no invented faint sources (checked against independent stacks). It learned the Origin's
-  own seeing, so on other instruments it sharpens much less.
+  own seeing, so on other instruments it sharpens much less. Both networks ship with the
+  program (about 1 MB each) and run in plain NumPy with a new native kernel; neither sends
+  anything anywhere.
+- **Website** ([originstack.site](https://originstack.site/)): "How it works" pages on every
+  stage of the pipeline, a background page for newcomers (noise, the Bayer pattern, the PSF,
+  deconvolution, stretching), a stretch gallery comparing all ten stretches on one stack, a
+  desktop app guide, a page for other cameras, an image gallery, a "What's new" page, a
+  command-line reference generated from the program itself, a documentation hub, and a clear
+  statement of what OriginStack does and does not use: no generative AI, no cloud service.
+- For developers: the training and evaluation tools behind the networks
+  (`tools/gen_n2n_pairs.py`, `tools/train_nn_denoise.py`, `tools/eval_nn_denoise.py`,
+  `tools/eval_nn_deconv.py`, `tools/eval_nn_faint.py`) and `tools/build_cli_reference.py`.
+  `astro_native` 0.57.0 adds the `nn_conv3x3` kernel.
+
+### Changed
+
+- **Galaxies from an Origin get learned deconvolution automatically.** When the target is
+  mostly galaxy, the camera is an Origin and you have not chosen `--denoiser` or
+  `--deconvolve` yourself, `--auto` now uses `--deconvolve nn` instead of the wavelet
+  denoiser: on the two held-out galaxies, stars 14-16% narrower than before and a far cleaner
+  sky, for about 12 s more. `--deconvolve off` keeps the previous result. Nebulae and star
+  fields are unchanged for now. **Expect different output for galaxies.**
+- The release packages are about 2 MB larger (the two network files).
 
 ### Fixed
 
@@ -30,17 +58,13 @@ match the `VERSION` file and `v*` git tags.
 - **Re-finishing an older galaxy stack keeps the galaxy.** Configs saved before 2.11.9 did not
   record the sky-residual skip that `--auto` uses for galaxies and nebulae, so `--from-stack`
   ran that step and could fit a faint galaxy away as sky. Such configs now get the skip back.
+- **No dark moat around bright stars after star reduction.** Star reduction measured the local
+  background where a bright star's halo still fell, so it cut the light just inside down too
+  far and left a dark ring: 1-5 sky sigma on a normal stack, far more on a denoised one. It now
+  takes the background at the edge of the reduced area: on the same stars, at most about
+  4 sky sigma instead of up to 47.
 - `--debug diagnostic` now works with `--from-stack`, and `--from-stack` creates the output
   folder if it does not exist.
-
-### Changed
-
-- **Galaxies from an Origin get learned deconvolution automatically.** When the target is
-  mostly galaxy, the camera is an Origin and you have not chosen `--denoiser` or
-  `--deconvolve` yourself, `--auto` now uses `--deconvolve nn` instead of the wavelet
-  denoiser: on the two held-out galaxies, stars 14-16% narrower than before and a far cleaner
-  sky, for about 12 s more. `--deconvolve off` keeps the previous result. Nebulae and star
-  fields are unchanged for now. **Expect different output for galaxies.**
 
 ## [2.11.9] - 2026-10-14
 
