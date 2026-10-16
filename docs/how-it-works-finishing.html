@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How OriginStack works: colour calibration, plate solving and finishing</title>
+<meta name="description" content="What OriginStack does with the linear stack: plate solving, Gaia colour calibration, photometry, background extraction, wavelet noise reduction and the stretch.">
+<meta name="keywords" content="how image stacking works, astrophotography algorithms, sigma clipping, MAD, demosaicing RCD, Bayer, image registration, RANSAC, phase correlation, field rotation alt-az, proper image coaddition Zackay Ofek, dynamic background extraction, wavelet denoising BayesShrink, generalized hyperbolic stretch, Gaia colour calibration, plate solving, Celestron Origin">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/how-it-works-finishing.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/how-it-works-finishing.html">
+<meta property="og:title" content="How OriginStack works: colour and finishing">
+<meta property="og:description" content="What OriginStack does with the linear stack: plate solving, Gaia colour calibration, photometry, background extraction, wavelet noise reduction and the stretch.">
+<meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Colour and finishing</h1>
+    <p class="lede">After the <a href="how-it-works.html">pipeline</a> has made the linear stack: where it is on the sky, its true colour, and Phase 4, which turns it into a picture.</p>
+    <p class="toc">
+      <a href="how-it-works.html">Overview</a>
+      <a href="how-it-works-background.html">Background</a>
+      <a href="how-it-works-stretches.html">Stretch gallery</a>
+      <a href="#sky">Sky position and colour</a>
+      <a href="#finish">Finishing</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="sky">
+  <div class="wrap">
+    <h2>Where it is on the sky, and its true colour</h2>
+    <dl class="feat">
+      <div><dt>Plate solving<code>WCS</code> <code>built in</code></dt>
+        <dd><p>A <em>world coordinate system</em> (WCS) maps every pixel to a right ascension and declination. To find it, OriginStack projects catalogue stars from Gaia onto a flat plane around a guess at the field centre (from the Origin's own session file or the FITS header), at the expected pixel scale, and matches the pattern to the brightest stars in the image with the same rotation-free distance matching used for registration. A match is refined to a full affine fit. Catalogue tiles are cached on your computer, so a field solved once solves offline afterwards.</p>
+        <p class="fact">The Origin's own solve describes the session's first frame, not the stack. Carrying it through the registration and refining it took the median error on a real stack from 63 pixels to 0.24.</p></dd></div>
+      <div><dt>Colour calibration against Gaia<code>on by default</code></dt>
+        <dd><p>The Gaia space telescope measured the colour of over a billion stars, as a difference between its blue and red magnitudes (BP&minus;RP). OriginStack measures the instrumental colour of the isolated, unsaturated stars in the linear stack, fits it against their Gaia colours with a robust (Theil-Sen) line, and scales the channels so a star with the Sun's colour (BP&minus;RP&nbsp;=&nbsp;0.82) comes out white. Scaling channels keeps the stack linear. In a dense or reddened field where the stars span too narrow a range, it queries fainter stars, and if the fit is too scattered it declines rather than guess.</p></dd></div>
+      <div><dt>Photometry<code>--photometry</code></dt>
+        <dd><p>Star brightness is measured in a circular aperture with partial pixels counted by area, the sky level from a surrounding ring with outliers rejected, and converted to magnitudes with a zero point fitted against Gaia, corrected for the thickness of atmosphere at that altitude. The noise model uses the camera's gain measured from your own frames; the gain the Origin writes in its headers is about five times too high.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="finish">
+  <div class="wrap">
+    <h2>Finishing the image</h2>
+    <p class="intro measure">The linear stack is accurate but looks almost black. Phase 4 makes it look like the object. The order matters: each step assumes the earlier ones have run.</p>
+    <dl class="feat">
+      <div><dt>Background extraction<code>DBE</code> <code>default</code></dt>
+        <dd><p>Light pollution, moonlight and vignetting leave a smooth glow across the frame that is not part of the sky. Dynamic background extraction lays a grid of 64-pixel patches over the image, discards patches that contain stars or the object, takes a robust level from the rest, and fits a smooth surface through them with a local regression that rejects outlying patches. That surface is subtracted. When a large galaxy covers the middle of the frame, the surface under it is filled from a radial model instead of stretched across from the edges.</p></dd></div>
+      <div><dt>Colour noise<code>chroma NR</code></dt>
+        <dd><p>The eye is far more forgiving of blurred colour than blurred brightness. Colour noise in the sky is smoothed with a masked blur: stars and the object are left out of the blur, so their colour cannot bleed into the sky, and they keep their original colour exactly. The sky is centred on zero at this point, so negative values are kept, not clipped.</p></dd></div>
+      <div><dt>Wavelet noise reduction<code>--denoiser wavelet</code> <code>default</code></dt>
+        <dd><p>A <a href="how-it-works-background.html#wavelets">wavelet transform</a> splits the image into detail at different scales and orientations. Noise spreads thinly over all the small-scale coefficients; real detail concentrates in a few large ones. <em>BayesShrink</em> sets a threshold per band from that band's noise and signal, shrinking small coefficients toward zero. OriginStack adds a structure map: where the image has a coherent direction, such as a filament or a spiral arm, the threshold is lowered so that structure survives.</p></dd></div>
+      <div><dt>Deconvolution<code>--deconvolve</code> <code>opt-in</code></dt>
+        <dd><p>If the blur is known, it can be partly undone (<a href="how-it-works-background.html#deconvolution">background</a>). Richardson-Lucy iterates toward the sharp image that, blurred by the measured PSF, best reproduces the data. It also amplifies noise and rings around bright stars, so stars are masked and it is off by default.</p></dd></div>
+      <div><dt>Star reduction and local contrast<code>shrink_stars</code> <code>multiscale contrast</code></dt>
+        <dd><p>Star reduction narrows each star's profile while keeping its peak brightness and colour, so stars do not crowd out the object. Local contrast enhancement boosts mid-scale detail on the object, measured against the sky noise at each scale, so it sharpens structure without amplifying noise.</p></dd></div>
+      <div><dt>The stretch<code>--stretch ghs</code> <code>default</code></dt>
+        <dd><p>Finally, the linear values are mapped to display brightness (<a href="how-it-works-background.html#stretch">how stretching works</a>). The <a href="how-it-works-stretches.html">stretch gallery</a> compares all ten options on one stack. The generalised hyperbolic stretch brightens faint levels steeply while compressing highlights gently, with the black point set from the measured sky noise. With <code>--stretch-color preserve</code> the curve is applied to brightness only and colour ratios are kept (Lupton et al., 2004), so bright stars keep their colour instead of turning white.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="reading">
+  <div class="wrap">
+    <h2>Further reading</h2>
+    <ul class="refs measure">
+      <li>Chang, S. G., Yu, B. &amp; Vetterli, M. (2000). Adaptive wavelet thresholding for image denoising and compression. <em>IEEE Trans. Image Processing</em> 9, 1532&ndash;1546.</li>
+      <li>Lupton, R. et al. (2004). Preparing red-green-blue images from CCD data. <em>PASP</em> 116, 133&ndash;137.</li>
+      <li>Zackay, B., Ofek, E. O. &amp; Gal-Yam, A. (2016). Proper image subtraction (ZOGY). <em>The Astrophysical Journal</em> 830, 27.</li>
+      <li>Gaia Collaboration (2023). Gaia Data Release 3. <em>Astronomy &amp; Astrophysics</em> 674, A1.</li>
+    </ul>
+  </div>
+</section>
+<section class="pager-sec">
+  <div class="wrap">
+    <nav class="pager" aria-label="How it works pages">
+      <a class="prev" href="how-it-works-stacking.html"><small>Previous</small>Combining frames</a>
+      <a class="next" href="how-it-works-stretches.html"><small>Next</small>Stretch gallery</a>
+    </nav>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="advanced.html">Advanced features</a> &nbsp; <a data-goatcounter-click="source-github-how" href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

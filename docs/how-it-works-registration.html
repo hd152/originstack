@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How OriginStack works: rotation-aware registration</title>
+<meta name="description" content="How OriginStack lines frames up on an alt-az mount: phase correlation, star matching with RANSAC, blind rotation-free pattern matching, residual checks and Lanczos resampling.">
+<meta name="keywords" content="how image stacking works, astrophotography algorithms, sigma clipping, MAD, demosaicing RCD, Bayer, image registration, RANSAC, phase correlation, field rotation alt-az, proper image coaddition Zackay Ofek, dynamic background extraction, wavelet denoising BayesShrink, generalized hyperbolic stretch, Gaia colour calibration, plate solving, Celestron Origin">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/how-it-works-registration.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/how-it-works-registration.html">
+<meta property="og:title" content="How OriginStack works: registration">
+<meta property="og:description" content="How OriginStack lines frames up on an alt-az mount: phase correlation, star matching with RANSAC, blind rotation-free pattern matching, residual checks and Lanczos resampling.">
+<meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Registration</h1>
+    <p class="lede">Phase 2 of the <a href="how-it-works.html">pipeline</a>: measuring each frame's shift and rotation to a fraction of a pixel, then resampling it onto a common grid.</p>
+    <p class="toc">
+      <a href="how-it-works.html">Overview</a>
+      <a href="how-it-works-background.html">Background</a>
+      <a href="how-it-works-stretches.html">Stretch gallery</a>
+      <a href="#register">Registration</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="register">
+  <div class="wrap">
+    <h2>Registration: lining frames up</h2>
+    <p class="intro measure">Between frames the telescope drifts, and on an <a href="how-it-works-background.html#rotation">alt-az mount</a> like the Origin the field also slowly rotates around the target as it crosses the sky. Before frames can be combined, each one's offset and rotation must be known to a small fraction of a pixel.</p>
+    <dl class="feat">
+      <div><dt>A coarse shift first<code>pyramid + phase correlation</code></dt>
+        <dd><p>The offset between two images shows up as a peak in their cross-correlation. Computing that with Fourier transforms (phase correlation) finds the shift for the whole image at once. OriginStack does it coarse to fine: on a half-resolution copy to find the rough offset, then at full resolution only in a small window around it, then to sub-pixel precision by fitting a curve through the peak.</p></dd></div>
+      <div><dt>Then rotation, from star patterns<code>star matching + RANSAC</code></dt>
+        <dd><p>A shift alone cannot describe a rotated field. The stars of each frame are matched to those of the reference, and a rotation plus translation is fitted to the matched pairs. Some matches are always wrong, so the fit uses <em>RANSAC</em>: fit to a few random pairs, count how many other pairs agree, repeat, and keep the fit that most pairs agree with. The final fit uses all the agreeing pairs with the closed-form least-squares solution of Umeyama. The random sampling uses a fixed seed, so the same frames always give the same result.</p></dd></div>
+      <div><dt>When the rotation is unknown<code>blind pattern match</code></dt>
+        <dd><p>For frames where the simple shift came out as nonsense, and for stacks from different nights, nothing is known about the rotation. The trick: the distance between two stars does not change when the field rotates or shifts. Pairs of stars with matching distances in both images are candidate matches; candidates that agree on one rotation angle are the real ones. Because both images come from the same camera, the scale is exactly 1, which removes one unknown.</p>
+        <p class="fact">On a real Fireworks Galaxy session, 34 of 148 frames needed this rescue. Before, they were stacked in the wrong place.</p></dd></div>
+      <div><dt>Checking the answer<code>residual gate</code></dt>
+        <dd><p>After alignment, star positions are measured again on a sample of frames. A frame whose stars still land too far from the reference is dropped. The limit adapts to the session, so one wrongly set threshold cannot throw away a whole night. The reference frame itself is chosen from the middle of the session in time, which keeps the area common to all frames as large as possible.</p></dd></div>
+      <div><dt>Resampling<code>Lanczos-3</code></dt>
+        <dd><p>Moving an image by a fraction of a pixel means computing new pixel values between the old ones. OriginStack uses a Lanczos-3 kernel, a windowed sinc that keeps fine detail far better than bilinear interpolation. Each frame is warped once, with the shift and rotation combined into a single resampling step, so it is never blurred twice.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="reading">
+  <div class="wrap">
+    <h2>Further reading</h2>
+    <ul class="refs measure">
+      <li>Guizar-Sicairos, M., Thurman, S. T. &amp; Fienup, J. R. (2008). Efficient subpixel image registration algorithms. <em>Optics Letters</em> 33, 156&ndash;158.</li>
+      <li>Fischler, M. A. &amp; Bolles, R. C. (1981). Random sample consensus. <em>Communications of the ACM</em> 24, 381&ndash;395.</li>
+      <li>Umeyama, S. (1991). Least-squares estimation of transformation parameters between two point patterns. <em>IEEE Trans. PAMI</em> 13, 376&ndash;380.</li>
+    </ul>
+  </div>
+</section>
+<section class="pager-sec">
+  <div class="wrap">
+    <nav class="pager" aria-label="How it works pages">
+      <a class="prev" href="how-it-works-frames.html"><small>Previous</small>Calibration, colour and stars</a>
+      <a class="next" href="how-it-works-stacking.html"><small>Next</small>Combining frames</a>
+    </nav>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="advanced.html">Advanced features</a> &nbsp; <a data-goatcounter-click="source-github-how" href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>
