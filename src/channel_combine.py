@@ -482,8 +482,8 @@ def _save_combined(img: np.ndarray, output_path: str,
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def run_combine_cli(argv=None) -> None:
-    """Parse argv and run channel combination.  Called from main()."""
+def build_combine_parser() -> argparse.ArgumentParser:
+    """The ``combine`` subcommand's parser (also read by tools/build_cli_reference.py)."""
     p = argparse.ArgumentParser(
         prog="originstack.py combine",
         description="Combine separately stacked channel FITS files into a colour image.",
@@ -547,7 +547,12 @@ def run_combine_cli(argv=None) -> None:
                    help="Preview JPEG stretch (default: ghs)")
     p.add_argument("-o", "--output", required=True,
                    help="Output FITS path")
+    return p
 
+
+def run_combine_cli(argv=None) -> None:
+    """Parse argv and run channel combination.  Called from main()."""
+    p = build_combine_parser()
     args = p.parse_args(argv)
 
     print(f"\n{'='*60}")
