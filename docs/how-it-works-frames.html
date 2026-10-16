@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How OriginStack works: calibration, demosaicing and star detection</title>
+<meta name="description" content="How OriginStack prepares each frame: bias, dark and flat calibration, hot pixels that spare stars, RCD demosaicing of the Bayer mosaic, and matched-filter star detection.">
+<meta name="keywords" content="how image stacking works, astrophotography algorithms, sigma clipping, MAD, demosaicing RCD, Bayer, image registration, RANSAC, phase correlation, field rotation alt-az, proper image coaddition Zackay Ofek, dynamic background extraction, wavelet denoising BayesShrink, generalized hyperbolic stretch, Gaia colour calibration, plate solving, Celestron Origin">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/how-it-works-frames.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/how-it-works-frames.html">
+<meta property="og:title" content="How OriginStack works: calibration, colour and stars">
+<meta property="og:description" content="How OriginStack prepares each frame: bias, dark and flat calibration, hot pixels that spare stars, RCD demosaicing of the Bayer mosaic, and matched-filter star detection.">
+<meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Calibration, colour and stars</h1>
+    <p class="lede">Phase 1 of the <a href="how-it-works.html">pipeline</a>: every frame is calibrated, turned from the sensor's colour mosaic into a colour image, and measured, before anything is aligned.</p>
+    <p class="toc">
+      <a href="how-it-works.html">Overview</a>
+      <a href="how-it-works-background.html">Background</a>
+      <a href="how-it-works-stretches.html">Stretch gallery</a>
+      <a href="#calibrate">Calibration</a>
+      <a href="#colour">Colour mosaic</a>
+      <a href="#stars">Finding stars</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="calibrate">
+  <div class="wrap">
+    <h2>Calibration: removing what every frame shares</h2>
+    <p class="intro measure">Stacking cannot remove a defect that sits in the same place in every frame. Calibration subtracts and divides those defects out first, using frames taken for the purpose.</p>
+    <dl class="feat">
+      <div><dt>Bias, darks and flats<code>master frames</code></dt>
+        <dd><p>A <strong>bias</strong> frame is a zero-length exposure: the sensor's electronic offset. A <strong>dark</strong> is an exposure with the light blocked, recording the heat signal that builds up over the exposure. A <strong>flat</strong> is an exposure of an even light source, recording how the optics and dust dim parts of the field (vignetting and dust shadows). Each light is corrected as (light &minus; bias &minus; dark) &divide; normalised flat.</p>
+        <p>Many calibration frames are combined into one <em>master</em> per type with a median, so the masters themselves carry little noise. Darks are chosen to match the lights' sensor temperature, since dark current roughly doubles every 6&nbsp;&deg;C, and scaled when their exposure time differs.</p></dd></div>
+      <div><dt>Hot pixels, without eating stars<code>on by default</code></dt>
+        <dd><p>A hot pixel is one far brighter than its neighbours. So is the centre of a small, sharp star, which is the trap: on the Origin a star can be only about two pixels wide in each colour plane. OriginStack works on the raw sensor mosaic and flags a pixel that stands far above the median of its own colour plane, then keeps it if the <em>adjacent</em> pixels of the other colours are also raised. A hot pixel leaves its neighbours alone; starlight spills into them.</p>
+        <p class="fact">Before this rule, the hot-pixel step was clipping the peak of almost every star in every frame. Fixing it made stacked stars about 14% narrower on one session.</p></dd></div>
+      <div><dt>Robust statistics<code>median, MAD</code></dt>
+        <dd><p>Astronomical images are full of outliers: stars, satellites, cosmic rays. A mean and standard deviation are dragged around by them; a median and the <em>median absolute deviation</em> (MAD) are not. Almost every threshold in the pipeline is set in units of a robust noise estimate like this, so it adapts to each frame instead of using a fixed number.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="colour">
+  <div class="wrap">
+    <h2>From colour mosaic to colour image</h2>
+    <p class="intro measure">A colour camera sensor sees only brightness. To get colour, each pixel sits under a red, green or blue filter in a repeating 2&times;2 pattern (the <a href="how-it-works-background.html#bayer">Bayer pattern</a>, usually RGGB): half the pixels are green, a quarter red and a quarter blue. Every pixel is missing two of its three colours, and demosaicing fills them in.</p>
+    <dl class="feat">
+      <div><dt>Ratio Corrected Demosaicing<code>--debayer-method rcd</code> <code>default</code></dt>
+        <dd><p>The simplest fill averages the nearest pixels of the missing colour, which blurs edges and star profiles. RCD, by Luis Sanz Rodr&iacute;guez and used by Siril, RawTherapee and darktable, first decides at each pixel whether detail runs more horizontally or vertically, and interpolates along it. It then fills colour from ratios between channels rather than raw differences, since the ratio of red to green changes much more slowly across a star than the brightness does.</p>
+        <p class="fact">Against known ground truth it has lower error than the Malvar method used before on every synthetic scene tested, and on real Origin stacks it left 7 to 15% less noise per colour.</p></dd></div>
+      <div><dt>The two greens<code>session-constant equalisation</code></dt>
+        <dd><p>The two green pixels in each 2&times;2 block are slightly different in sensitivity, which leaves a faint checkerboard. The difference is a property of the sensor, so it is measured once per session from a handful of frames and removed from every frame in the same pass that writes the demosaiced image.</p></dd></div>
+      <div><dt>White balance<code>--white-balance</code></dt>
+        <dd><p>Each frame's channels are scaled so the sky background comes out neutral. This is only a starting point: true star colour is fitted later against a catalogue (see <a href="how-it-works-finishing.html#sky">colour calibration</a>).</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="stars">
+  <div class="wrap">
+    <h2>Finding and measuring stars</h2>
+    <p class="intro measure">Stars are the reference points for nearly everything: frame quality, alignment, the sharpness model, colour calibration and the sky position. So the pipeline needs to find them reliably in noisy frames.</p>
+    <dl class="feat">
+      <div><dt>The matched filter<code>star detection</code></dt>
+        <dd><p>The best linear way to find a signal of known shape in random noise is to correlate the image with that shape. A star is a small round blur, so the frame (minus its local background) is convolved with a small Gaussian the size of a star, and peaks well above the local noise are stars. The background and noise are estimated on a coarse grid of cells, so a nebula or gradient does not throw off the threshold.</p>
+        <p class="fact">Validated against the established SEP and DAOStarFinder detectors on real frames, with sub-pixel centroids after a refinement pass, and about twice as fast as SEP.</p></dd></div>
+      <div><dt>Star width<code>FWHM</code></dt>
+        <dd><p>The <a href="how-it-works-background.html#psf">full width at half maximum</a> of a star's profile is the usual measure of sharpness: the seeing that night, focus and tracking all show up in it. Each frame's FWHM, star count, signal-to-noise and a sharpness score feed into which frames are kept and how much each counts.</p></dd></div>
+      <div><dt>Comparing sharpness fairly<code>shared stars</code></dt>
+        <dd><p>A stack's average FWHM depends on which stars it was measured on. When OriginStack compares two stacks, its own or another program's, it measures the <em>same</em> stars in both. An earlier comparison that did not was wrong by more than the difference it claimed.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="reading">
+  <div class="wrap">
+    <h2>Further reading</h2>
+    <ul class="refs measure">
+      <li>Sanz Rodr&iacute;guez, L. Ratio Corrected Demosaicing (RCD), as implemented in RawTherapee and Siril.</li>
+      <li>Malvar, H. S., He, L. &amp; Cutler, R. (2004). High-quality linear interpolation for demosaicing of Bayer-patterned color images. <em>Proc. IEEE ICASSP</em>.</li>
+    </ul>
+  </div>
+</section>
+<section class="pager-sec">
+  <div class="wrap">
+    <nav class="pager" aria-label="How it works pages">
+      <a class="prev" href="how-it-works-background.html"><small>Previous</small>Background</a>
+      <a class="next" href="how-it-works-registration.html"><small>Next</small>Registration</a>
+    </nav>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="advanced.html">Advanced features</a> &nbsp; <a data-goatcounter-click="source-github-how" href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

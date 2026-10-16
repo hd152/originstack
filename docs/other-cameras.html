@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Using OriginStack with other cameras</title>
+<meta name="description" content="OriginStack is built around the Celestron Origin but reads FITS, camera RAW (Canon, Nikon, Sony and more), TIFF, XISF and SER from other one-shot-colour cameras. What works, how to lay out the folder, and the current limits.">
+<meta name="keywords" content="stack DSLR astrophotography free, stack FITS one shot colour, OSC stacking software, camera RAW astrophotography stacking, SER stacking, XISF, free alternative DeepSkyStacker">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/other-cameras.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/other-cameras.html">
+<meta property="og:title" content="Using OriginStack with other cameras">
+<meta property="og:description" content="FITS, camera RAW, TIFF, XISF and SER from one-shot-colour cameras: what works and how to set it up.">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="docs.html">Documentation</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Other cameras</h1>
+    <p class="lede">OriginStack was built for the Celestron Origin and is tested mostly on its data, but nothing in the stacking itself is specific to it. Frames from other one-shot-colour cameras, dedicated astro cameras and DSLRs alike, go through the same pipeline. This page says what works, how to set up the folder, and where the limits are today.</p>
+    <p class="toc">
+      <a href="#formats">File formats</a>
+      <a href="#folder">The folder</a>
+      <a href="#colour">Colour sensors</a>
+      <a href="#headers">What it reads from headers</a>
+      <a href="#origin-only">What needs an Origin</a>
+      <a href="#limits">Limits</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="formats">
+  <div class="wrap">
+    <h2>File formats</h2>
+    <p class="intro measure">Every format below loads through the same path, so they can be mixed in one folder. The installers include everything needed; from source, RAW and TIFF need <code>pip install rawpy tifffile</code>.</p>
+    <table class="wide">
+      <thead><tr><th>Format</th><th>Extensions</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>FITS</td><td><code>.fit</code> <code>.fits</code></td><td>The usual astro-camera format (N.I.N.A., SharpCap, ASIAIR, the Origin). Raw colour mosaics, or already debayered RGB.</td></tr>
+        <tr><td>Camera RAW</td><td><code>.cr2</code> <code>.cr3</code> <code>.nef</code> <code>.arw</code> <code>.dng</code> <code>.orf</code> <code>.rw2</code> <code>.raf</code> <code>.pef</code> and more</td><td>Canon, Nikon, Sony, Olympus/OM System, Panasonic, Fujifilm, Pentax and others. The undemosaiced sensor data is read, so RAW frames are calibrated and debayered like FITS; exposure time and ISO come from the file.</td></tr>
+        <tr><td>TIFF</td><td><code>.tif</code> <code>.tiff</code></td><td>16- or 32-bit linear TIFF from capture or other stacking software. A colour TIFF is taken as debayered RGB; a single-channel TIFF as a colour mosaic (see <a href="#colour">below</a>).</td></tr>
+        <tr><td>XISF</td><td><code>.xisf</code></td><td>PixInsight's format: uncompressed, mono or RGB. Compressed files are refused with a clear message.</td></tr>
+        <tr><td>SER</td><td><code>.ser</code></td><td>Video from FireCapture, SharpCap and similar. Each frame in the file becomes one light frame.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="folder">
+  <div class="wrap">
+    <h2>Setting up the folder</h2>
+    <p class="intro measure">Put the light frames and any calibration frames in one folder and choose that folder, or keep a calibration library elsewhere and point <code>--cal-dir</code> at it: the best-matching frames of each type are picked from it by ISO, sensor temperature, exposure, filter and frame size. Subfolders of a single night are not searched; a folder whose subfolders each hold a night is stacked as several sessions.</p>
+    <dl class="feat">
+      <div><dt>How frames are sorted</dt>
+        <dd><p>A file whose name contains <code>dark</code>, <code>flat</code> or <code>bias</code> is that kind of calibration frame; so is a file whose <code>IMAGETYP</code> header is exactly <code>DARK</code>, <code>FLAT</code> or <code>BIAS</code>, and a zero-length exposure is a bias. Everything else is a light.</p>
+        <p class="fact">Some capture programs write <code>IMAGETYP</code> as <code>Dark Frame</code> or <code>Flat Field</code>, which is not recognised yet. Keep the frame type in the file names (most programs do by default) and it works either way.</p></dd></div>
+      <div><dt>Darks</dt>
+        <dd><p>Darks are matched to the lights by sensor temperature and exposure time, and scaled when the exposure differs. A library of darks at several temperatures can be modelled instead (<code>--dark-temp-model</code>).</p></dd></div>
+      <div><dt>Flats</dt>
+        <dd><p>Flats are normalised and divided out. With no flats, <code>--flat-from-lights</code> estimates one from the lights themselves; it is approximate.</p></dd></div>
+      <div><dt>Leave out</dt>
+        <dd><p>Dark flats: there is no separate dark-flat step, and a file named <code>darkflat</code> would be taken as a dark. Use bias frames for the flats instead. Earlier OriginStack outputs in the folder are recognised and skipped.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="colour">
+  <div class="wrap">
+    <h2>Colour sensors and the Bayer pattern</h2>
+    <p class="intro measure">A one-shot-colour sensor records a <a href="how-it-works-background.html#bayer">Bayer mosaic</a>, and the debayering step needs to know which corner of each 2&times;2 block is red.</p>
+    <dl class="feat">
+      <div><dt>Where the pattern comes from</dt>
+        <dd><p>The <code>BAYERPAT</code> (or <code>COLORTYP</code>) header for FITS, the file itself for RAW, the colour ID for SER. With none of these it assumes RGGB.</p></dd></div>
+      <div><dt>A wrong pattern is caught</dt>
+        <dd><p>Some software writes a pattern that is flipped top to bottom against the pixel data; the Origin does. Each session's declared pattern is checked against the mosaic itself, and the flipped version is used when the two green sites disagree by more than a real sensor could.</p></dd></div>
+      <div><dt>Override it<code>.json</code> sidecar</dt>
+        <dd><p>A single-channel TIFF, or any frame with a missing or wrong header, takes its pattern from a JSON file with the same name next to it, for example <code>light_001.json</code> containing <code>{"bayerPattern": "GRBG"}</code>.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="headers">
+  <div class="wrap">
+    <h2>What it reads from the headers</h2>
+    <table class="wide">
+      <thead><tr><th>For</th><th>Keywords</th><th>Without them</th></tr></thead>
+      <tbody>
+        <tr><td>Matching darks</td><td><code>EXPTIME</code>, <code>CCD-TEMP</code> / <code>CCDTEMP</code> / <code>SET-TEMP</code> / <code>TEMPERAT</code>, <code>GAIN</code> or <code>ISO</code></td><td>Darks are matched on whatever is present; with no exposure time they cannot be scaled.</td></tr>
+        <tr><td>Target name and type</td><td><code>OBJECT</code></td><td>The folder or file name is tried, then the frames themselves.</td></tr>
+        <tr><td>Plate solving, colour calibration</td><td>An existing WCS, or <code>RA</code>/<code>DEC</code> or <code>OBJCTRA</code>/<code>OBJCTDEC</code>, plus <code>FOCALLEN</code> and <code>XPIXSZ</code> for the scale</td><td>No sky position, so no Gaia colour calibration; the background-based white balance is used instead.</td></tr>
+        <tr><td>Session timing, field rotation</td><td><code>DATE-OBS</code></td><td>Sessions in a multi-night folder are pooled.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="origin-only">
+  <div class="wrap">
+    <h2>What needs an Origin</h2>
+    <dl class="feat">
+      <div><dt>The session file<code>info.json</code></dt>
+        <dd><p>The Origin writes the target, the site location and a first sky solution into each session folder. Other cameras get these from the headers above instead, so a capture program that writes a good header gives the same results.</p></dd></div>
+      <div><dt>The camera profile</dt>
+        <dd><p>The Origin's camera gain is measured and built in. For other cameras, photometry measures the gain from pairs of bias and flat frames when the folder has them, and otherwise falls back to the header's <code>GAIN</code>/<code>EGAIN</code>.</p></dd></div>
+      <div><dt>Tuned defaults</dt>
+        <dd><p>The automatic settings were tuned on Origin data: 10 to 30 second subs at about 1.5 arcseconds per pixel. They adapt to the frames, but very different data, such as long DSLR exposures at a wide field, may be better served by choosing the target type yourself.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <h2>Limits today</h2>
+    <div class="nope">
+      <div><h3>Monochrome cameras</h3>
+        <p>Single-channel FITS, TIFF and RAW frames are always treated as a colour mosaic, so frames from a mono camera come out wrong. Mono SER and XISF files are the exception: they are read as greyscale. Narrowband or LRGB channels stacked elsewhere can still be combined with the <a href="command-line.html#combine">combine</a> subcommand.</p></div>
+      <div><h3>Planetary imaging</h3>
+        <p>SER files are stacked with the deep-sky pipeline and the <code>planetary</code> preset: whole-frame alignment and quality selection, no multi-point alignment. For the Moon and planets at high magnification, a dedicated lucky-imaging stacker will do better.</p></div>
+      <div><h3>Less testing</h3>
+        <p>Nearly all of the measurements on this site are on Origin data. Other cameras are expected to work, but have had far less use. If something goes wrong, <a href="https://github.com/hd152/originstack/issues">open an issue</a> with the log and, if you can, a few sample frames.</p></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

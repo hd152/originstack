@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How OriginStack works: stretch gallery</title>
+<meta name="description" content="The same Crab Nebula stack shown with every OriginStack stretch: linear, arcsinh, generalised hyperbolic (GHS), colour-preserving GHS, masked, multiscale, noise-floor, SETI statistical, OKLab and CLAHE, with what each is good for.">
+<meta name="keywords" content="astrophotography stretch comparison, generalized hyperbolic stretch, GHS, arcsinh stretch, statistical stretch, midtones transfer function, OKLab, CLAHE, colour preserving stretch, Celestron Origin">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/how-it-works-stretches.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/how-it-works-stretches.html">
+<meta property="og:title" content="How OriginStack works: stretch gallery">
+<meta property="og:description" content="One Crab Nebula stack, ten stretches, and what each is good for.">
+<meta property="og:image" content="https://originstack.site/img/stretch-masked.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Stretch gallery</h1>
+    <p class="lede">One stack, ten ways to display it. Every image on this page is the same Crab Nebula stack after the same finishing steps; only the final stretch differs. Choose with <code>--stretch</code> (and <code>--stretch-color</code> for colour handling). For what a stretch is, see the <a href="how-it-works-background.html#stretch">background page</a>.</p>
+    <p class="toc">
+      <a href="how-it-works.html">Overview</a>
+      <a href="how-it-works-background.html">Background</a>
+      <a href="#compare">Compare two</a>
+      <a href="#gallery">All ten</a>
+      <a href="#numbers">The numbers</a>
+      <a href="#choose">Which to use</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="compare">
+  <div class="wrap">
+    <h2>Compare any two</h2>
+    <p class="intro measure">Pick a stretch for each side and drag across the image. The crop is 960&times;640 pixels around the Crab Nebula (M1) from a 133-frame, 44-minute Origin session, shown at three-quarters size.</p>
+    <div class="pickers">
+      <label>Left <select id="pick-l"></select></label>
+      <label>Right <select id="pick-r"></select></label>
+    </div>
+    <div class="wipe stretch-wipe" id="wipe" role="group" aria-label="Comparison of two stretches of the same image">
+      <img class="after" id="img-r" src="img/stretch-ghs.jpg" width="720" height="480" alt="The Crab Nebula with the right-hand stretch.">
+      <img class="before" id="img-l" src="img/stretch-linear.jpg" width="720" height="480" alt="The Crab Nebula with the left-hand stretch.">
+      <span class="line"></span>
+      <span class="grip" aria-hidden="true">&lt;&gt;</span>
+      <span class="cap l" id="cap-l">linear</span>
+      <span class="cap r" id="cap-r">ghs</span>
+      <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the two stretches">
+    </div>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>All ten</h2>
+    <div class="stretches">
+      <figure id="s-linear"><img src="img/stretch-linear.jpg" width="720" height="480" loading="lazy" alt="Linear stretch: the nebula's core is a white blob, the faint outer parts and faint stars are lost.">
+        <figcaption><h3>Linear <code>--stretch linear</code></h3>
+          <p>No curve at all: each channel is scaled between a low and a high percentile, so display brightness rises in direct proportion to the light in the data.</p>
+          <p><strong>Good for</strong> seeing how bright things really are relative to each other, and spotting a saturated core. <strong>Watch</strong> the core clip to white (1.6% of this crop) while the faint outer nebula stays invisible.</p></figcaption></figure>
+
+      <figure id="s-arcsinh"><img src="img/stretch-arcsinh.jpg" width="720" height="480" loading="lazy" alt="Arcsinh stretch: the nebula's structure shows, on a black sky.">
+        <figcaption><h3>Arcsinh <code>--stretch arcsinh</code></h3>
+          <p>Linear for faint values, logarithmic for bright ones, with the black point at the sky and the white point at the brightest extended light.</p>
+          <p><strong>Good for</strong> a simple, predictable look with a black sky; the classic astronomical display curve. <strong>Watch</strong> its fixed shape: it cannot trade faint against bright the way GHS can.</p></figcaption></figure>
+
+      <figure id="s-ghs"><img src="img/stretch-ghs.jpg" width="720" height="480" loading="lazy" alt="Generalised hyperbolic stretch, per channel: similar to arcsinh with a slightly brighter nebula and whiter core.">
+        <figcaption><h3>GHS <code>--stretch ghs</code> <code>default</code></h3>
+          <p>The generalised hyperbolic stretch with its strength, symmetry point and highlight protection chosen for the target (<code>ghs_b</code>, <code>ghs_sp</code>, <code>ghs_hp</code> in the saved config). Applied to each colour channel separately.</p>
+          <p><strong>Good for</strong> most targets: it lifts the faint parts and protects the bright ones, and the advisor tunes it per target type. <strong>Watch</strong> bright cores and stars turning whiter than their true colour.</p></figcaption></figure>
+
+      <figure id="s-ghs-preserve"><img src="img/stretch-ghs-preserve.jpg" width="720" height="480" loading="lazy" alt="Colour-preserving GHS: the same brightness, with redder filaments and more coloured stars.">
+        <figcaption><h3>GHS, colour preserved <code>--stretch-color preserve</code></h3>
+          <p>The same curve applied to brightness only; every pixel keeps its ratio of red, green and blue (Lupton et al., 2004).</p>
+          <p><strong>Good for</strong> true colour: the Crab's red filaments and the stars' colours survive into the bright parts. <strong>Watch</strong> very saturated bright colours, which are dimmed to fit the display range.</p></figcaption></figure>
+
+      <figure id="s-masked"><img src="img/stretch-masked.jpg" width="720" height="480" loading="lazy" alt="Masked stretch: the nebula's faint outer edge is brighter and larger, and many more faint stars show.">
+        <figcaption><h3>Masked <code>--stretch masked</code></h3>
+          <p>The GHS image, blended with a much stronger faint-signal curve through a smooth brightness mask, so the boost goes to faint structure and not to the sky or the bright core.</p>
+          <p><strong>Good for</strong> faint outer nebulosity and galaxy haloes. <strong>Watch</strong> faint stars: they get the boost too, so the field looks busier.</p></figcaption></figure>
+
+      <figure id="s-multiscale"><img src="img/stretch-multiscale.jpg" width="720" height="480" loading="lazy" alt="Multiscale stretch: like masked, with slightly more emphasis on fine filaments.">
+        <figcaption><h3>Multiscale <code>--stretch multiscale</code></h3>
+          <p>Like masked, but with two masks: one for broad diffuse glow and one for fine filaments, each boosted by its own amount.</p>
+          <p><strong>Good for</strong> nebulae with both a faint glow and fine filaments. <strong>Watch</strong> the same busier star field as masked.</p></figcaption></figure>
+
+      <figure id="s-noisefloor"><img src="img/stretch-noisefloor.jpg" width="720" height="480" loading="lazy" alt="Noise-floor stretch: a dark grey sky with the noise just visible.">
+        <figcaption><h3>Noise floor <code>--stretch noisefloor</code></h3>
+          <p>GHS whose strength is solved from the sky noise: the weakest curve that makes one standard deviation of sky noise span a fixed number of display levels. It ignores the target presets and sets its own black point.</p>
+          <p><strong>Good for</strong> a consistent, honest look across very different targets, and judging how deep the data really goes. <strong>Watch</strong> the dark-grey sky with visible grain; that is intended.</p></figcaption></figure>
+
+      <figure id="s-seti"><img src="img/stretch-seti.jpg" width="720" height="480" loading="lazy" alt="SETI statistical stretch: a mid-grey sky showing noise and faint dust, with a large bright nebula.">
+        <figcaption><h3>Statistical <code>--stretch seti</code></h3>
+          <p>A midtones transfer function solved so the image's median lands at 0.20 of the display range, after Seti Astro's statistical stretch. It knows nothing about objects; it simply makes the typical pixel mid-dark.</p>
+          <p><strong>Good for</strong> a diagnostic look at everything in the data: faint dust, gradients, noise. <strong>Watch</strong> the grey, grainy sky (median 0.21 here, against 0.005 for GHS); it is rarely the final look.</p></figcaption></figure>
+
+      <figure id="s-oklab"><img src="img/stretch-oklab.jpg" width="720" height="480" loading="lazy" alt="OKLab stretch: very close to colour-preserving GHS.">
+        <figcaption><h3>OKLab <code>--stretch oklab</code></h3>
+          <p>The GHS curve applied to lightness in the OKLab colour space, which is built to match how bright colours look to the eye. Hue and saturation are kept.</p>
+          <p><strong>Good for</strong> colourful bright regions: unlike plain colour preservation, a saturated red core is not dimmed to half the brightness of a white one. <strong>Watch</strong> nothing in particular; on a mostly neutral field it looks like colour-preserved GHS.</p></figcaption></figure>
+
+      <figure id="s-clahe"><img src="img/stretch-clahe.jpg" width="720" height="480" loading="lazy" alt="CLAHE stretch: the GHS image with slightly more contrast inside the nebula.">
+        <figcaption><h3>CLAHE <code>--stretch clahe</code></h3>
+          <p>The GHS image plus contrast-limited adaptive histogram equalisation: brightness is equalised tile by tile, with a cap on how far contrast can be pushed, and blended in only where there is extended signal.</p>
+          <p><strong>Good for</strong> structure inside a bright nebula or galaxy core. <strong>Watch</strong> a processed look if the target fills the frame; sky and stars are left alone.</p></figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="numbers">
+  <div class="wrap">
+    <h2>The numbers</h2>
+    <p class="intro measure">Measured on the crops above, display values from 0 (black) to 1 (white). The sky level is the median of the whole crop, which is almost all sky; "clipped" is the share of pixels driven to pure white.</p>
+    <table class="measure">
+      <thead><tr><th>Stretch</th><th class="n">Sky level</th><th class="n">Mean</th><th class="n">Clipped</th></tr></thead>
+      <tbody>
+        <tr><td>linear</td><td class="n">0.045</td><td class="n">0.081</td><td class="n">1.64%</td></tr>
+        <tr><td>arcsinh</td><td class="n">0.006</td><td class="n">0.042</td><td class="n">0.51%</td></tr>
+        <tr><td>ghs</td><td class="n">0.005</td><td class="n">0.040</td><td class="n">0.55%</td></tr>
+        <tr><td>ghs, colour preserved</td><td class="n">0.004</td><td class="n">0.039</td><td class="n">0.68%</td></tr>
+        <tr><td>masked</td><td class="n">0.005</td><td class="n">0.054</td><td class="n">0.65%</td></tr>
+        <tr><td>multiscale</td><td class="n">0.006</td><td class="n">0.056</td><td class="n">0.65%</td></tr>
+        <tr><td>noisefloor</td><td class="n">0.043</td><td class="n">0.072</td><td class="n">0.55%</td></tr>
+        <tr><td>seti</td><td class="n">0.207</td><td class="n">0.244</td><td class="n">0.51%</td></tr>
+        <tr><td>oklab</td><td class="n">0.004</td><td class="n">0.039</td><td class="n">0.62%</td></tr>
+        <tr><td>clahe</td><td class="n">0.005</td><td class="n">0.043</td><td class="n">0.55%</td></tr>
+      </tbody>
+    </table>
+    <p class="plain measure">Masked and multiscale raise the mean by about a third over GHS while leaving the sky where it was: the extra brightness all goes to faint structure and faint stars. Noise floor and SETI raise the sky itself.</p>
+  </div>
+</section>
+
+<section id="choose">
+  <div class="wrap">
+    <h2>Which to use</h2>
+    <dl class="feat">
+      <div><dt>Start with the default</dt>
+        <dd><p>GHS, tuned per target by the advisor. Add <code>--stretch-color preserve</code> if star colours or coloured nebulae matter to you, or use <code>oklab</code> for the same with brighter saturated colours.</p></dd></div>
+      <div><dt>Faint stuff is missing</dt>
+        <dd><p>Try <code>masked</code> or <code>multiscale</code>. If you are not sure the faint stuff is really there, look at <code>seti</code> or <code>noisefloor</code> first: they show the noise along with it.</p></dd></div>
+      <div><dt>It is cheap to try them all</dt>
+        <dd><p>The stretch is the last step. <code>--from-stack STACK.fits --stretch NAME</code> re-runs only the finishing steps on a stack you already made, with the early steps cached, so each try takes seconds. The FITS file is not affected by any of this: it stays linear.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="pager-sec">
+  <div class="wrap">
+    <nav class="pager" aria-label="How it works pages">
+      <a class="prev" href="how-it-works-finishing.html"><small>Previous</small>Colour and finishing</a>
+      <a class="next" href="advanced.html"><small>Next</small>Advanced features</a>
+    </nav>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="advanced.html">Advanced features</a> &nbsp; <a data-goatcounter-click="source-github-how" href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var S = [['linear', 'linear'], ['arcsinh', 'arcsinh'], ['ghs', 'ghs (default)'], ['ghs-preserve', 'ghs, colour preserved'],
+           ['masked', 'masked'], ['multiscale', 'multiscale'], ['noisefloor', 'noisefloor'], ['seti', 'seti'],
+           ['oklab', 'oklab'], ['clahe', 'clahe']];
+  var wipe = document.getElementById('wipe'), range = wipe.querySelector('input');
+  function set(v) { wipe.style.setProperty('--p', v + '%'); }
+  range.addEventListener('input', function () { set(range.value); });
+  function wire(side, initial) {
+    var sel = document.getElementById('pick-' + side), img = document.getElementById('img-' + side),
+        cap = document.getElementById('cap-' + side);
+    S.forEach(function (s) { var o = document.createElement('option'); o.value = s[0]; o.textContent = s[1]; sel.appendChild(o); });
+    function show() {
+      var label = sel.options[sel.selectedIndex].textContent;
+      img.src = 'img/stretch-' + sel.value + '.jpg';
+      img.alt = 'The Crab Nebula with the ' + label + ' stretch.';
+      cap.textContent = label;
+    }
+    sel.value = initial; show();
+    sel.addEventListener('change', show);
+  }
+  wire('l', 'linear'); wire('r', 'ghs');
+})();
+</script>
+</body>
+</html>

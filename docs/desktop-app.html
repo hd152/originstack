@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OriginStack desktop app guide</title>
+<meta name="description" content="How to use the OriginStack desktop app: choose a folder, say what you imaged, start, watch each step, compare previews, re-stretch the result and find the files it writes. For Windows, macOS and Linux.">
+<meta name="keywords" content="OriginStack app, astrophotography stacking app, stack Celestron Origin images, free stacking software Windows, desktop stacker guide">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/desktop-app.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/desktop-app.html">
+<meta property="og:title" content="OriginStack desktop app guide">
+<meta property="og:description" content="Choose a folder, say what you imaged, press Start: a walk through the app, screen by screen.">
+<meta property="og:image" content="https://originstack.site/img/app-setup-v211.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="docs.html">Documentation</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>The desktop app</h1>
+    <p class="lede">Everything the command line does, in one window: choose a folder, say what you imaged, press Start. This page walks through the app screen by screen. It applies to version 2.11 on Windows, macOS and Linux.</p>
+    <p class="toc">
+      <a href="#install">Install</a>
+      <a href="#setup">Set up a run</a>
+      <a href="#settings">Settings</a>
+      <a href="#running">While it runs</a>
+      <a href="#done">When it is done</a>
+      <a href="#files">The files</a>
+      <a href="#tips">Tips</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="install">
+  <div class="wrap">
+    <h2>Install and open it</h2>
+    <p class="intro measure">Download the installer for your system from the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a>; none of them needs Python or an account. The <a href="./#get">install section</a> on the home page has the details for each system, including the extra approval macOS asks for on first launch.</p>
+    <dl class="feat">
+      <div><dt>Language<code>top right</code></dt>
+        <dd><p>The app follows your system language, in English, Dutch, French, German, Italian, Japanese, Brazilian Portuguese, Spanish or Simplified Chinese. The menu in the top-right corner changes it; restart the app for the change to take effect. The log stays in English so it can be shared when asking for help.</p></dd></div>
+      <div><dt>Updates</dt>
+        <dd><p>When a newer release is out, the header says so. Nothing is downloaded or installed automatically.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="setup">
+  <div class="wrap">
+    <h2>Set up a run</h2>
+    <figure class="shot-wide">
+      <picture><source type="image/webp" srcset="img/app-setup-v211-800.webp 800w, img/app-setup-v211-1200.webp 1200w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/app-setup-v211.png" width="1750" height="1125" loading="lazy" alt="The OriginStack window before a run: Light frames, Output and Temp folder fields at the top left, six picture cards for the target type, Start and Cancel buttons, and on the right an empty preview, frame strip and a This run summary listing 158 lights, 1 dark, 1 flat and 1 bias."></picture>
+      <figcaption>A Sunflower Galaxy session chosen and nothing else changed. The app has counted the frames, read the target from the session file, and marked Galaxy as suggested; <em>This run</em> says what Start will do.</figcaption>
+    </figure>
+    <dl class="feat">
+      <div><dt>1. Light frames</dt>
+        <dd><p>Choose the folder with your light frames. For a Celestron Origin, that is the session folder you copied from the telescope. The line underneath counts what it found (lights, darks, flats, bias frames) and names the target if it can tell, from the session file, the FITS header or the folder name. Calibration frames are found in the same folder; a separate calibration library can be set under <em>Additional options</em> (<code>--cal-dir</code>).</p>
+        <p>A folder of several session folders works too: the app stacks the nights together or separately, whichever keeps more of the picture, and finishes them as one image.</p></dd></div>
+      <div><dt>2. Output<code>optional</code></dt>
+        <dd><p>A folder to save into, or a full <code>.fits</code> path. Leave it blank and the stack is saved beside the light-frames folder, named after the session. An earlier stack is never overwritten: a new name is chosen instead.</p></dd></div>
+      <div><dt>3. Temp folder<code>optional</code></dt>
+        <dd><p>Where temporary files go while stacking, about 170 MB per light frame. Leave it blank for the system's temp folder, or pick a drive with more free space for long sessions. The app remembers your choice, checks the space before it starts, and removes the files after every run, including one that failed or was cancelled.</p></dd></div>
+      <div><dt>4. What did you image?</dt>
+        <dd><p>Six cards: <strong>Auto-detect</strong>, <strong>Galaxy</strong>, <strong>Nebula</strong>, <strong>Star cluster</strong>, <strong>Star field</strong> and <strong>Comet</strong>. Each changes how the image is finished: a galaxy keeps its faint halo out of background removal and gets smaller stars, a nebula a gentler stretch, a comet a second stack aligned on the moving nucleus. Auto-detect starts from the suggested card and then checks the frames themselves. Before a run, the preview shows an example result for the card you picked.</p></dd></div>
+      <div><dt>5. How should it run?</dt>
+        <dd><p><strong>Full quality</strong> runs every step that measured as an improvement. <strong>Quick look</strong> is a faster check: no outlier rejection and lighter processing, for seeing whether a session is worth a full run.</p></dd></div>
+      <div><dt>6. This run</dt>
+        <dd><p>The panel at the bottom right sums it up before you commit: the frames, the target and where the guess came from, the mode, every setting you changed, and the output file.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="settings">
+  <div class="wrap">
+    <h2>Settings, if you want them</h2>
+    <p class="intro measure">You do not need to change anything: settings are tuned to the target and the frames automatically, and anything you set yourself wins over the tuning. Below the cards are the handful of settings that most change a result; <em>Additional options</em> opens the rest.</p>
+    <figure class="shot-wide">
+      <picture><source type="image/webp" srcset="img/app-search-v211-800.webp 800w, img/app-search-v211-1200.webp 1200w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/app-search-v211.png" width="1750" height="1125" loading="lazy" alt="The settings area: denoiser, deconvolution, drizzle scale, trail rejection, GPU and workers, then Additional options with the search box containing drizzle and five matching settings listed."></picture>
+      <figcaption>The main settings, and <em>Additional options</em> searched for "drizzle": five settings match, each with a one-line description.</figcaption>
+    </figure>
+    <dl class="feat">
+      <div><dt>The main settings</dt>
+        <dd><p>Stacking method, denoiser, deconvolution, drizzle scale, trail rejection, GPU and the number of workers. Every setting has a one-line description under it; hover for the full help.</p></dd></div>
+      <div><dt>Additional options<code>search</code></dt>
+        <dd><p>All the other options, grouped like the pipeline: frames and calibration, registration and stacking, post-processing, output and plate solving, multiple sessions, comet mode, diagnostics. Type in <em>Search settings</em> to find one by name or description. They are the same options as the <a href="command-line.html">command line</a>.</p></dd></div>
+      <div><dt>Expert options</dt>
+        <dd><p>A checkbox at the bottom of the groups shows the fine-tuning the automatic settings normally manage, the diagnostics, and features that are experimental or did not help on typical data in testing.</p></dd></div>
+      <div><dt>What you changed</dt>
+        <dd><p>A changed setting is marked and gets a <em>reset</em> link back to its default, and the app counts changed settings that sit in a collapsed section, so nothing you altered stays out of sight. <em>This run</em> lists them all.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="running">
+  <div class="wrap">
+    <h2>While it runs</h2>
+    <figure class="shot-wide">
+      <picture><source type="image/webp" srcset="img/app-running-800.webp 800w, img/app-running-1200.webp 1200w, img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/app-running.png" width="1600" height="1029" loading="lazy" alt="The app during a run: the first three pipeline steps done and Post-process active, the log showing background extraction and denoising, the preview showing the galaxy, a strip of frame thumbnails and a table of recent frames with their score, SNR, star count and FWHM."></picture>
+      <figcaption>Part-way through the finishing steps. Screenshot from version 2.5; the layout is the same in 2.11.</figcaption>
+    </figure>
+    <dl class="feat">
+      <div><dt>Pipeline and log</dt>
+        <dd><p>The four boxes light up as the run moves through <a href="how-it-works.html#pipeline">quality, registration, stacking and post-processing</a>, with a progress bar underneath. The log reports each step and how long it took; a warning or a rejected frame says why.</p></dd></div>
+      <div><dt>Preview</dt>
+        <dd><p>Shows the stack as it develops. The drop-down lists every stage saved so far, such as the stack before and after each finishing step; tick <em>Compare</em> and pick a second stage to see the two side by side. <em>Fit</em> and <em>1:1</em> switch between the whole image and actual pixels.</p></dd></div>
+      <div><dt>Frames</dt>
+        <dd><p>A strip of thumbnails, and a table of the most recent frames with their quality score, signal-to-noise, star count and star width (FWHM), so a run of bad frames from cloud or wind is easy to spot.</p></dd></div>
+      <div><dt>Cancel</dt>
+        <dd><p>Stops the run at the next safe point and removes its temporary files. Closing the window during a run does the same.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="done">
+  <div class="wrap">
+    <h2>When it is done</h2>
+    <figure class="shot-wide narrow">
+      <picture><source type="image/webp" srcset="img/app-done-800.webp 800w" sizes="(min-width: 860px) 800px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/app-done.png" width="800" height="983" loading="lazy" alt="The right-hand panels after a run: the final post-processed galaxy in the preview, the frame strip, recent frames, and a Complete panel showing 158 of 158 frames stacked, average FWHM 5.38 pixels, the output name and a total time of 3 minutes 35 seconds."></picture>
+      <figcaption>The finished run: 158 of 158 frames stacked in 3 minutes 35 seconds. Screenshot from version 2.5; 2.11 adds the re-stretch bar described below.</figcaption>
+    </figure>
+    <dl class="feat">
+      <div><dt>Complete</dt>
+        <dd><p>A summary of the run: frames stacked out of those found, average star width, the output file and the total time. <em>Open Folder</em> opens the output folder with the stack selected; tick <em>Open folder when done</em> to have it open automatically.</p></dd></div>
+      <div><dt>Re-stretch the preview<code>Stretch</code> <code>Colour</code> <code>Apply to JPEG</code></dt>
+        <dd><p>A bar above the preview offers every display stretch and colour mode. Try them on the finished image and press <em>Apply to JPEG</em> to save the one you like over the run's JPEG. Nothing is re-processed and the FITS files do not change. The <a href="how-it-works-stretches.html">stretch gallery</a> shows what each one does.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="files">
+  <div class="wrap">
+    <h2>The files it writes</h2>
+    <table class="measure">
+      <thead><tr><th>File</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td><code>NAME.fits</code></td><td>The stack itself, linear and in 32-bit floating point, with the frame count and integration time in its header. Use it in other software, measure it, or merge it with another night later.</td></tr>
+        <tr><td><code>NAME.jpg</code></td><td>The finished, stretched picture, ready to look at and share.</td></tr>
+        <tr><td><code>NAME_config.toml</code></td><td>Every setting the run used, including those tuned automatically. Load it again with <code>--config</code>, or let <code>--from-stack</code> pick it up.</td></tr>
+      </tbody>
+    </table>
+    <p class="plain measure">Some options write more, such as a starless copy, a comet stack, an annotated JPEG or diagnostic reports; each is named after the stack and described with its option in the <a href="command-line.html">command-line reference</a>.</p>
+  </div>
+</section>
+
+<section id="tips">
+  <div class="wrap">
+    <h2>Tips</h2>
+    <dl class="feat">
+      <div><dt>Disk space</dt>
+        <dd><p>Long sessions need room: about 170 MB of temporary space per light frame, so 300 frames need around 50 GB. The app checks before it starts and says how much it needs.</p></dd></div>
+      <div><dt>Workers</dt>
+        <dd><p>Leave it at 0 (automatic): one process per physical core. Set 1 to process one frame at a time on a machine that is short of memory.</p></dd></div>
+      <div><dt>GPU</dt>
+        <dd><p>Off by default. On the cards tested it was no faster than the processor; it may help on a card with plenty of memory.</p></dd></div>
+      <div><dt>When something goes wrong</dt>
+        <dd><p>The log says what happened. The <a href="stack-celestron-origin.html">Origin guide</a> covers the common problems; for anything else, <a href="https://github.com/hd152/originstack/issues">open an issue</a> and paste the log.</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

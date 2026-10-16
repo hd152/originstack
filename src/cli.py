@@ -1580,7 +1580,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'basis rather than TV\'s spatial-gradient basis -- a different '
                         'sparsity prior, tune via --config deconvolve_sparse_lambda, '
                         'default 0.01). '
-                        'nn: a network trained on Origin sessions that narrows stars by 8-18% '
+                        'nn: a network trained on Origin sessions that narrows stars by 8-18%% '
                         'and removes noise; it replaces the denoiser and chroma noise reduction. '
                         'PSF options (blind PSF, iterations, model) via --config.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',

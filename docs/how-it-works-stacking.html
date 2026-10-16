@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How OriginStack works: rejection and proper image coaddition</title>
+<meta name="description" content="How OriginStack combines aligned frames: mean versus median, MAD sigma clipping, quality weighting, and Zackay-Ofek proper image coaddition.">
+<meta name="keywords" content="how image stacking works, astrophotography algorithms, sigma clipping, MAD, demosaicing RCD, Bayer, image registration, RANSAC, phase correlation, field rotation alt-az, proper image coaddition Zackay Ofek, dynamic background extraction, wavelet denoising BayesShrink, generalized hyperbolic stretch, Gaia colour calibration, plate solving, Celestron Origin">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/how-it-works-stacking.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/how-it-works-stacking.html">
+<meta property="og:title" content="How OriginStack works: combining frames">
+<meta property="og:description" content="How OriginStack combines aligned frames: mean versus median, MAD sigma clipping, quality weighting, and Zackay-Ofek proper image coaddition.">
+<meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Combining frames</h1>
+    <p class="lede">Phase 3 of the <a href="how-it-works.html">pipeline</a>: turning many aligned frames into one linear stack, keeping the good values and the fine detail.</p>
+    <p class="toc">
+      <a href="how-it-works.html">Overview</a>
+      <a href="how-it-works-background.html">Background</a>
+      <a href="how-it-works-stretches.html">Stretch gallery</a>
+      <a href="#combine">Combining</a>
+      <a href="#coadd">Proper coaddition</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="combine">
+  <div class="wrap">
+    <h2>Combining: one value from many</h2>
+    <p class="intro measure">Once aligned, every pixel position has one value from each frame. Most of those values are good. A few are not: a satellite crossed, a cosmic ray hit, a plane's light passed through. Combining is deciding which values to trust and how to average them.</p>
+    <dl class="feat">
+      <div><dt>Mean versus median<code>the trade</code></dt>
+        <dd><p>The mean of good data has the lowest noise, but one satellite trail drags it up. The median ignores the trail but is about 25% noisier on clean data. Rejection gets the best of both: find the outliers, drop them, average the rest.</p></dd></div>
+      <div><dt>Sigma clipping<code>--stack-method sigma_clip</code> <code>15+ frames</code></dt>
+        <dd><p>For each pixel, take the median of the frames' values and their spread (from the MAD), reject any value more than 3 spreads away, and repeat up to three times. Then average what remains, weighted by each frame's quality. With fewer than 15 frames a sigma estimate is unreliable, so the default switches to a percentile clip, which simply drops the highest and lowest values.</p>
+        <p class="fact">Also available: winsorized clipping, a generalised extreme-studentized-deviate test (ESD), linear-fit clipping, inverse-variance weighting and a wavelet-domain combine. See the <a href="advanced.html#stacking">advanced page</a>.</p></dd></div>
+      <div><dt>Weights from quality, region by region<code>patch weighting</code></dt>
+        <dd><p>A frame that is sharp in one corner and soft in another, because of a gust of wind or a tilt, is scored in patches, and counts for more where it is sharp.</p></dd></div>
+      <div><dt>Common crop<code>no black borders</code></dt>
+        <dd><p>A rotated and shifted frame no longer fills the whole grid. The stack is cropped to the area every frame covers, so the edge is not a ragged mix of fewer frames. With <code>--full-field</code> the stack is extended to everything any frame covered instead.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="coadd">
+  <div class="wrap">
+    <h2>Proper coaddition: weighting by detail</h2>
+    <p class="intro measure">A weighted average gives each frame one weight for everything in it. But a soft frame and a sharp frame are equally good at recording the smooth glow of a nebula, and very different at recording a small star. Proper image coaddition (Zackay and Ofek, 2017) gives each frame a separate weight for every scale of detail.</p>
+    <dl class="feat">
+      <div><dt>The idea<code>on by default</code> <code>--no-proper-coadd</code></dt>
+        <dd><p>Any image can be split into spatial frequencies, from the broad background to the finest detail, with a <a href="how-it-works-background.html#fourier">Fourier transform</a>. Blur weakens the high frequencies; how much is described by the frame's point-spread function (PSF), the shape a point of light takes in that frame (<a href="how-it-works-background.html#psf">more on the PSF</a>). Proper coaddition weights each frame at each frequency by how much of that frequency its PSF passed, divided by its noise. Sharp frames dominate the fine detail; every frame still contributes to the smooth parts.</p>
+        <p class="eq">R&#770; = &Sigma;<sub>j</sub> (F<sub>j</sub> / &sigma;<sub>j</sub><sup>2</sup>) P&#770;<sub>j</sub>* M&#770;<sub>j</sub> &nbsp;/&nbsp; &radic;( &Sigma;<sub>j</sub> (F<sub>j</sub><sup>2</sup> / &sigma;<sub>j</sub><sup>2</sup>) |P&#770;<sub>j</sub>|<sup>2</sup> )</p>
+        <p class="fact">M is each frame, P its PSF, F its transparency, &sigma; its background noise; the hat means the Fourier transform. The result is mathematically guaranteed to be at least as sharp as a weighted mean of the same frames, and keeps total flux unchanged.</p></dd></div>
+      <div><dt>Measured, not assumed<code>per-frame PSF</code></dt>
+        <dd><p>Each frame's PSF is measured by fitting an elliptical Moffat profile (a star shape with realistic wide wings) jointly to about 30 bright, isolated, unsaturated stars. Its transparency comes from those stars' brightness in a fixed aperture, and its noise from the sky. Outliers such as satellite trails are removed first against the normal stack.</p>
+        <p class="fact">On three real sessions: stars 1.3 to 2.7% narrower than the plain stack, with equal or lower noise.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="reading">
+  <div class="wrap">
+    <h2>Further reading</h2>
+    <ul class="refs measure">
+      <li>Zackay, B. &amp; Ofek, E. O. (2017). How to COAAD images. II. A coaddition image that is optimal for any purpose in the background-dominated noise limit. <em>The Astrophysical Journal</em> 836, 188.</li>
+    </ul>
+  </div>
+</section>
+<section class="pager-sec">
+  <div class="wrap">
+    <nav class="pager" aria-label="How it works pages">
+      <a class="prev" href="how-it-works-registration.html"><small>Previous</small>Registration</a>
+      <a class="next" href="how-it-works-finishing.html"><small>Next</small>Colour and finishing</a>
+    </nav>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="advanced.html">Advanced features</a> &nbsp; <a data-goatcounter-click="source-github-how" href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What's new in OriginStack</title>
+<meta name="description" content="The highlights of each OriginStack release in plain language: new stretches, translations, a macOS app, Gaia colour calibration, proper image coaddition, a built-in plate solver and more.">
+<meta name="keywords" content="OriginStack release notes, OriginStack changelog, OriginStack new version, astrophotography stacking software update">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/whats-new.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/whats-new.html">
+<meta property="og:title" content="What's new in OriginStack">
+<meta property="og:description" content="The highlights of each release in plain language.">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="docs.html">Documentation</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>What's new</h1>
+    <p class="lede">The highlights of each release, in plain language. The <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">full changelog</a> has every change and the measurements behind them. To update, download the <a href="https://github.com/hd152/originstack/releases/latest">latest release</a>; the app says in its header when a new one is out.</p>
+  </div>
+</header>
+
+<main>
+<section id="v2-11">
+  <div class="wrap">
+    <h2>2.11 <small class="when">9&ndash;14 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-11-9"><h3>2.11.9 <span>14 Oct</span></h3>
+        <ul>
+          <li><strong>Flatter backgrounds.</strong> Background extraction models every colour channel again; on a colour-calibrated stack it had quietly fallen back to a coarser method for green and blue. It is also twice as fast.</li>
+          <li><strong>Faster re-finishing.</strong> <code>--from-stack</code> reuses its cached early steps even when you write to a new file name: 27 s down to 10 s per try on one stack.</li>
+          <li>Saved settings now keep skipped steps, and every preview follows the chosen stretch colour mode.</li>
+        </ul></article>
+      <article id="v2-11-8"><h3>2.11.8 <span>13 Oct</span></h3>
+        <ul>
+          <li><strong>Re-stretch after a run.</strong> The app offers every stretch on the finished image; <em>Apply to JPEG</em> saves the one you like without re-processing.</li>
+          <li><strong>Three new stretches:</strong> noise floor, OKLab and CLAHE. See the <a href="how-it-works-stretches.html">stretch gallery</a>.</li>
+          <li>The preview stretch is per-channel by default again; <code>--stretch-color preserve</code> keeps colour ratios.</li>
+        </ul></article>
+      <article id="v2-11-7"><h3>2.11.7 <span>13 Oct</span></h3>
+        <ul>
+          <li><strong>More stretches for faint nebulae:</strong> masked, multiscale and the SETI statistical stretch.</li>
+          <li>Gentler automatic local contrast on emission nebulae.</li>
+        </ul></article>
+      <article id="v2-11-5"><h3>2.11.4&ndash;2.11.6 <span>10&ndash;12 Oct</span></h3>
+        <ul>
+          <li><strong>Big sessions on smaller machines.</strong> Frames are stored losslessly compressed when they would not fit in memory.</li>
+          <li>Large bright nebulae such as Orion show their faint outer parts and their core structure in the JPEG.</li>
+          <li>Already-debayered RGB FITS frames load again; the update notice shows reliably in the app.</li>
+        </ul></article>
+      <article id="v2-11-1"><h3>2.11.0&ndash;2.11.3 <span>9&ndash;10 Oct</span></h3>
+        <ul>
+          <li><strong>Dutch</strong> for the app and the website.</li>
+          <li><strong>A temp folder of your choice</strong>, checked for space before the run, and temporary files cleaned up after every run, even a cancelled or failed one.</li>
+          <li>Output can be a folder; the stack is named after the session and never overwrites an earlier one.</li>
+          <li>Very large sessions (850 frames) show progress instead of looking hung, and can be cancelled; closing the app always ends it cleanly.</li>
+          <li>Re-running a multi-night folder stacks the nights again instead of the previous result.</li>
+        </ul></article>
+    </div>
+  </div>
+</section>
+
+<section id="v2-10">
+  <div class="wrap">
+    <h2>2.10 <small class="when">8&ndash;9 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-10-2"><h3>2.10.2 <span>9 Oct</span></h3>
+        <ul>
+          <li><strong>Now under the GNU GPL v3.</strong> Still free to use, study, share and change; modified versions that are distributed must share their source too. Earlier releases remain under MIT.</li>
+        </ul></article>
+      <article id="v2-10-0"><h3>2.10.0&ndash;2.10.1 <span>8 Oct</span></h3>
+        <ul>
+          <li><strong>Gaia answers from a local cache</strong>: re-runs and the next night of the same target colour-calibrate in milliseconds, and offline.</li>
+          <li><strong>Colour calibration on hard fields</strong>: dense reddened nebulae and rich clusters whose bright stars are saturated now get a usable fit, and a fit that is too scattered is skipped rather than applied.</li>
+          <li><strong>Seamless multi-night combines</strong>: no session edges, no red rims, white saturated stars.</li>
+          <li><code>--use-gpu</code> was four times slower than the processor; now it matches it.</li>
+        </ul></article>
+    </div>
+  </div>
+</section>
+
+<section id="v2-5">
+  <div class="wrap">
+    <h2>2.5&ndash;2.9 <small class="when">5&ndash;8 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-9-0"><h3>2.9.0 <span>8 Oct</span></h3>
+        <ul>
+          <li><strong>Seven more languages</strong> for the app and the website: German, Spanish, French, Italian, Brazilian Portuguese, Japanese and Simplified Chinese.</li>
+          <li><strong>A measured profile of the Origin's camera</strong>, for honest photometry error bars and colour calibration on sparse fields.</li>
+          <li>Overexposed subs (twilight, moonlight) are rejected; comet sessions blend and resume reliably.</li>
+        </ul></article>
+      <article id="v2-8-0"><h3>2.8.0 <span>7 Oct</span></h3>
+        <ul>
+          <li><strong>A much smaller download</strong>: the native module went from 26.6 MB to 2.7 MB with identical results.</li>
+          <li>This website.</li>
+        </ul></article>
+      <article id="v2-7-0"><h3>2.7.0 <span>7 Oct</span></h3>
+        <ul>
+          <li><strong>A macOS app</strong> for Apple silicon and Intel.</li>
+          <li><strong>Cleaner skies and crisper galaxy arms</strong>: local contrast no longer adds grain to the sky.</li>
+          <li>Multi-night folders pool into one deeper stack when the rotation allows; live stacking follows field rotation.</li>
+          <li><code>--full-field</code> keeps the edges the normal stack crops away.</li>
+        </ul></article>
+      <article id="v2-6-0"><h3>2.6.0 <span>6 Oct</span></h3>
+        <ul>
+          <li><strong>"What did you image?"</strong> picture cards and Full quality / Quick look in the app, with a summary of what Start will do, a description under every setting and a settings search.</li>
+          <li>Small faint targets render on a clean, dark sky; bright stars are no longer blue discs.</li>
+        </ul></article>
+      <article id="v2-5-0"><h3>2.5.0 <span>5 Oct</span></h3>
+        <ul>
+          <li><strong>True star colours</strong>: Gaia colour calibration on by default.</li>
+          <li><strong>Star reduction that narrows stars</strong> instead of blurring them.</li>
+          <li>Large galaxies no longer come out as a red slab when they cover much of the frame.</li>
+        </ul></article>
+    </div>
+  </div>
+</section>
+
+<section id="v2-4">
+  <div class="wrap">
+    <h2>2.4 <small class="when">2 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-4-0"><h3>2.4.0 <span>2 Oct</span></h3>
+        <ul>
+          <li><strong><a href="how-it-works-stacking.html#coadd">Proper image coaddition</a></strong>, on by default: sharper stars at no cost in noise.</li>
+          <li><strong>A built-in plate solver</strong>: about a second per solve, no account, offline once the area is cached.</li>
+          <li><strong><code>--from-stack</code></strong>: re-run only the finishing steps on an earlier stack.</li>
+          <li>Photometry error bars from a measured noise model.</li>
+        </ul></article>
+    </div>
+    <p class="plain measure">Older releases are in the <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">changelog</a> and on the <a href="https://github.com/hd152/originstack/releases">releases page</a>.</p>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">Full changelog</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

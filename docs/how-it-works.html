@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How OriginStack works: the algorithms behind the stack</title>
+<meta name="description" content="The concepts and algorithms behind OriginStack, explained in plain terms: why stacking works, the four-phase pipeline, and how each result is checked.">
+<meta name="keywords" content="how image stacking works, astrophotography algorithms, sigma clipping, MAD, demosaicing RCD, Bayer, image registration, RANSAC, phase correlation, field rotation alt-az, proper image coaddition Zackay Ofek, dynamic background extraction, wavelet denoising BayesShrink, generalized hyperbolic stretch, Gaia colour calibration, plate solving, Celestron Origin">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/how-it-works.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/how-it-works.html">
+<meta property="og:title" content="How OriginStack works">
+<meta property="og:description" content="The concepts and algorithms behind OriginStack, explained in plain terms: why stacking works, the four-phase pipeline, and how each result is checked.">
+<meta property="og:image" content="https://originstack.site/img/omega-nebula-m17-stacked-celestron-origin.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>How it works</h1>
+    <p class="lede">What happens between a folder of raw frames and a finished picture, and why. This page is the overview; each stage of the pipeline has its own page that explains the method it uses and where it comes from. New to the subject? The <a href="how-it-works-background.html">background page</a> explains the techniques underneath: the Bayer pattern, the PSF, deconvolution, stretching and more. The <a href="advanced.html">advanced page</a> lists the features and their flags.</p>
+    <p class="toc">
+      <a href="#why">Why stack</a>
+      <a href="#pipeline">The pipeline</a>
+      <a href="how-it-works-background.html">Background</a>
+      <a href="how-it-works-frames.html">Calibration, colour and stars</a>
+      <a href="how-it-works-registration.html">Registration</a>
+      <a href="how-it-works-stacking.html">Combining frames</a>
+      <a href="how-it-works-finishing.html">Colour and finishing</a>
+      <a href="how-it-works-stretches.html">Stretch gallery</a>
+      <a href="#engine">Speed and memory</a>
+      <a href="#trust">How we check it</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="why">
+  <div class="wrap">
+    <h2>Why stacking works</h2>
+    <p class="intro measure">A single 10-second frame of a faint galaxy is mostly noise. Every frame records the same galaxy, but the noise in each frame is different and random. Add frames together and the galaxy adds up in proportion to the number of frames, while random noise adds up only as its square root. Stack <em>N</em> frames and the signal-to-noise ratio improves by about &radic;<em>N</em>: 100 frames are ten times cleaner than one.</p>
+    <dl class="feat">
+      <div><dt>Signal and noise<code>SNR &prop; &radic;N</code></dt>
+        <dd><p>The noise comes from three places: the random arrival of photons (shot noise, which grows with the brightness itself), the sensor's read-out electronics, and heat in the sensor (dark current). Stacking beats down all three, but only the random parts. Anything that is the same in every frame, such as a hot pixel, a dust shadow or a gradient from a streetlight, stacks up just like the galaxy does. That is what calibration and background extraction are for.</p></dd></div>
+      <div><dt>Linear data<code>RAWSTACK=True</code></dt>
+        <dd><p>A pixel's value in a raw frame is proportional to the light that fell on it. That property, linearity, is what makes measurement possible: double the starlight, double the number. OriginStack keeps the stack linear in the FITS file it saves, and does every measurement, from colour calibration to photometry, on that linear stack. Only the preview image is stretched for viewing, because the eye needs faint things brightened far more than bright ones.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="pipeline">
+  <div class="wrap">
+    <h2>The pipeline, end to end</h2>
+    <p class="intro measure">A run has four phases, and each has its own page: pick a box or a heading below. The first three produce the linear stack; the fourth turns it into a picture. Each phase can be checkpointed, so a change to a later setting does not repeat the earlier work.</p>
+
+    <figure class="flow">
+      <svg viewBox="0 0 1000 230" role="img" aria-labelledby="flow-title flow-desc">
+        <title id="flow-title">The four phases of an OriginStack run</title>
+        <desc id="flow-desc">Raw frames go through Phase 1 (calibrate, demosaic, score), Phase 2 (register), and Phase 3 (warp and combine) to make the linear stack, which is saved as FITS and used for colour calibration, plate solving and photometry. Phase 4 finishes it into the preview image.</desc>
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#56667c"/></marker>
+        </defs>
+        <g font-family="Bricolage Grotesque, Segoe UI, system-ui, sans-serif">
+          <rect x="4" y="54" width="112" height="72" rx="6" fill="#ecf0f3" stroke="#56667c"/>
+          <text x="60" y="86" text-anchor="middle" font-size="16" font-weight="600" fill="#14213a">Raw frames</text>
+          <text x="60" y="106" text-anchor="middle" font-size="13" fill="#56667c">lights, darks, flats</text>
+
+          <a href="how-it-works-frames.html">
+            <rect x="146" y="40" width="168" height="100" rx="6" fill="#1d7f86"/>
+            <text x="230" y="66" text-anchor="middle" font-size="13" fill="#d8eef0">PHASE 1</text>
+            <text x="230" y="90" text-anchor="middle" font-size="17" font-weight="600" fill="#fff">Calibrate,</text>
+            <text x="230" y="110" text-anchor="middle" font-size="17" font-weight="600" fill="#fff">demosaic, score</text>
+          </a>
+
+          <a href="how-it-works-registration.html">
+            <rect x="344" y="40" width="150" height="100" rx="6" fill="#4fa3a8"/>
+            <text x="419" y="66" text-anchor="middle" font-size="13" fill="#eaf6f7">PHASE 2</text>
+            <text x="419" y="100" text-anchor="middle" font-size="17" font-weight="600" fill="#fff">Register</text>
+          </a>
+
+          <a href="how-it-works-stacking.html">
+            <rect x="524" y="40" width="160" height="100" rx="6" fill="#8cc5c8"/>
+            <text x="604" y="66" text-anchor="middle" font-size="13" fill="#14213a">PHASE 3</text>
+            <text x="604" y="90" text-anchor="middle" font-size="17" font-weight="600" fill="#14213a">Warp and</text>
+            <text x="604" y="110" text-anchor="middle" font-size="17" font-weight="600" fill="#14213a">combine</text>
+          </a>
+
+          <a href="how-it-works-finishing.html">
+            <rect x="714" y="40" width="130" height="100" rx="6" fill="#b3312a"/>
+            <text x="779" y="66" text-anchor="middle" font-size="13" fill="#f6dcda">PHASE 4</text>
+            <text x="779" y="100" text-anchor="middle" font-size="17" font-weight="600" fill="#fff">Finish</text>
+          </a>
+
+          <rect x="874" y="54" width="122" height="72" rx="6" fill="#ecf0f3" stroke="#56667c"/>
+          <text x="935" y="86" text-anchor="middle" font-size="16" font-weight="600" fill="#14213a">Preview</text>
+          <text x="935" y="106" text-anchor="middle" font-size="13" fill="#56667c">JPEG, TIFF</text>
+
+          <path d="M116 90 H142" stroke="#56667c" stroke-width="2" marker-end="url(#arr)"/>
+          <path d="M314 90 H340" stroke="#56667c" stroke-width="2" marker-end="url(#arr)"/>
+          <path d="M494 90 H520" stroke="#56667c" stroke-width="2" marker-end="url(#arr)"/>
+          <path d="M684 90 H710" stroke="#56667c" stroke-width="2" marker-end="url(#arr)"/>
+          <path d="M844 90 H870" stroke="#56667c" stroke-width="2" marker-end="url(#arr)"/>
+
+          <path d="M604 140 V176" stroke="#56667c" stroke-width="2" marker-end="url(#arr)"/>
+          <rect x="430" y="180" width="348" height="44" rx="6" fill="#fff" stroke="#14213a" stroke-width="1.5"/>
+          <text x="604" y="208" text-anchor="middle" font-size="15" fill="#14213a"><tspan font-weight="600">Linear stack (FITS)</tspan> &#183; colour, WCS, photometry</text>
+        </g>
+      </svg>
+    </figure>
+
+    <div class="phases">
+      <div>
+        <h3><a href="how-it-works-frames.html">Phase 1: process and score</a></h3>
+        <p>Every frame is loaded, calibrated, cleaned of hot pixels, demosaiced into colour, white-balanced and measured: star count, star width, sharpness and noise. Frames run in parallel, one process per CPU core. Clearly bad frames are dropped here.</p>
+      </div>
+      <div>
+        <h3><a href="how-it-works-registration.html">Phase 2: register</a></h3>
+        <p>Each frame's offset, rotation and scale relative to a reference frame is measured to a fraction of a pixel, then checked by re-measuring star positions after alignment.</p>
+      </div>
+      <div>
+        <h3><a href="how-it-works-stacking.html">Phase 3: warp and combine</a></h3>
+        <p>Frames are resampled onto the reference grid, cropped to the area every frame covers, and combined pixel by pixel with outlier rejection, then recombined by spatial frequency (proper coaddition).</p>
+      </div>
+      <div>
+        <h3><a href="how-it-works-finishing.html">Phase 4: finish</a></h3>
+        <p>Gradients are removed, colour noise and luminance noise reduced, stars tightened, contrast enhanced, and the image stretched for display. This phase reads the linear stack and never changes it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="engine">
+  <div class="wrap">
+    <h2>Speed and memory</h2>
+    <dl class="feat">
+      <div><dt>Never more frames than fit<code>frame store</code></dt>
+        <dd><p>A 500-frame Origin session is tens of gigabytes once demosaiced and aligned. Before creating each large array, OriginStack checks the memory actually available, keeps a fifth of the machine's RAM free, and puts the array in memory only if it fits; otherwise it goes to a temporary file mapped into memory. Where it lives never changes the result: both placements are tested to give bit-identical stacks.</p></dd></div>
+      <div><dt>Rust kernels with a safety net<code>astro_native</code></dt>
+        <dd><p>The hot loops (calibration, demosaicing, star detection, warping, the combines, coaddition, denoising) are written in Rust and run multi-threaded. Every one has a plain NumPy version of the same algorithm, and a test checks the two agree, in most cases bit for bit. A kernel is only written after measuring that NumPy is actually wasting time there.</p></dd></div>
+      <div><dt>Reproducible<code>same input, same output</code></dt>
+        <dd><p>Every random choice is seeded, so stacking the same frames twice gives the same image. Each run saves its effective settings; checkpoints are tied to the files and settings they came from, so a stale one is never reused.</p></dd></div>
+    </dl>
+  </div>
+</section>
+<section id="trust">
+  <div class="wrap">
+    <h2>How we check it</h2>
+    <p class="intro measure">An image that looks better is not necessarily more correct. Every step on this page was measured before it became a default, and several ideas that looked good did not survive measurement; they are listed on the <a href="advanced.html#nope">advanced page</a>.</p>
+    <dl class="feat">
+      <div><dt>Ground truth</dt>
+        <dd><p>Synthetic scenes with known stars and nebulae let each step's error be measured exactly: demosaicing, drizzle, denoising and the colour pipeline were all chosen this way.</p></dd></div>
+      <div><dt>Real sessions, same stars</dt>
+        <dd><p>On real Origin data there is no truth to compare against, so changes are measured as star width on the same stars and noise matched at equal sharpness, against the previous version and against Siril. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats the comparison on your own frames.</p></dd></div>
+      <div><dt>The data checks itself<code>--noise-validate</code></dt>
+        <dd><p>Stacking the odd and even frames separately and comparing them gives the true noise in the stack and shows which structure is real: it appears in both halves.</p></dd></div>
+    </dl>
+    <p class="plain measure">The source code is the full reference: every method described in these pages is in <a href="https://github.com/hd152/originstack/tree/main/src">src/</a>, with design notes and measurements in <a href="https://github.com/hd152/originstack/tree/main/dev-notes">dev-notes/</a>. Papers are listed on each topic page.</p>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="advanced.html">Advanced features</a> &nbsp; <a data-goatcounter-click="source-github-how" href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>
