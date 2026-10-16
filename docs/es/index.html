@@ -343,6 +343,11 @@ python desktop_app.py</pre>
         <p>Archivos en bruto del Celestron Origin (las tomas FITS de cada carpeta de sesión, con su <code>info.json</code>), y tomas de cámaras a color en FITS, RAW de cámara (Canon, Nikon, Sony y otras, requiere rawpy), TIFF y XISF. Se admite vídeo SER para trabajo planetario. Puedes mezclar formatos libremente en una carpeta.</p>
         <p>¿Lo quieres totalmente sin conexión? Usa <code>--offline</code>, o márcalo en la aplicación, y OriginStack no hará ninguna petición de red.</p>
       </div>
+      <div id="no-gen-ai">
+        <h3>Sin IA generativa, nada en la nube</h3>
+        <p>OriginStack nunca envía sus imágenes a un servicio de IA y nunca genera ni inventa contenido de imagen. Su procesamiento es tratamiento de señal clásico y documentado, escrito para este proyecto, desde la calibración y la alineación hasta la eliminación del fondo y la reducción de ruido, y puede leerlo todo en el código fuente. No necesita otro software de astronomía, ni cuenta, ni servicio en la nube, solo bibliotecas científicas de código abierto habituales.</p>
+        <p>Dos pasos opcionales, <code>--denoiser nn</code> y <code>--deconvolve nn</code>, usan pequeñas redes neuronales entrenadas solo con sesiones reales del Celestron Origin. Se ejecutan en su propio ordenador y se comprobaron con apilados independientes para confirmar que no añaden estrellas ni detalles que no estén en los datos. Los ajustes automáticos usan el segundo para sesiones de galaxias del Origin; <code>--deconvolve off</code> lo desactiva. <a href="../how-it-works.html#learned">Cómo funcionan</a>.</p>
+      </div>
     </div>
   </div>
 </section>

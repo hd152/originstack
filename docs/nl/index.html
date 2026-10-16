@@ -343,6 +343,11 @@ python desktop_app.py</pre>
         <p>Ruwe bestanden van de Celestron Origin (de FITS-frames in elke sessiemap, met hun <code>info.json</code>), en frames van kleurencamera's als FITS, camera-RAW (Canon, Nikon, Sony en andere, vereist rawpy), TIFF en XISF. SER-video wordt ondersteund voor planeten. Formaten mogen in één map door elkaar staan.</p>
         <p>Helemaal offline werken? Geef <code>--offline</code> mee, of vink het aan in de app, en OriginStack doet helemaal geen netwerkverzoeken.</p>
       </div>
+      <div id="no-gen-ai">
+        <h3>Geen generatieve AI, niets in de cloud</h3>
+        <p>OriginStack stuurt je beelden nooit naar een AI-dienst en genereert of verzint nooit beeldinhoud. De verwerking is klassieke, gedocumenteerde signaalverwerking die voor dit project is geschreven, van kalibratie en uitlijning tot achtergrondverwijdering en ruisonderdrukking, en je kunt alles in de broncode lezen. Er is geen andere astronomiesoftware, geen account en geen clouddienst nodig, alleen gangbare opensource wetenschappelijke bibliotheken.</p>
+        <p>Twee optionele stappen, <code>--denoiser nn</code> en <code>--deconvolve nn</code>, gebruiken kleine neurale netwerken die alleen op echte Celestron Origin-sessies zijn getraind. Ze draaien op je eigen computer en zijn tegen onafhankelijke stacks gecontroleerd om te bevestigen dat ze geen sterren of details toevoegen die niet in de data zitten. De automatische instellingen gebruiken de tweede voor sterrenstelselsessies van de Origin; <code>--deconvolve off</code> zet hem uit. <a href="../how-it-works.html#learned">Hoe ze werken</a>.</p>
+      </div>
     </div>
   </div>
 </section>

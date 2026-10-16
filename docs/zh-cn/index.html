@@ -341,6 +341,11 @@ python desktop_app.py</pre>
         <p>Celestron Origin 原始文件（每个会话文件夹中的 FITS 帧及其 <code>info.json</code>），以及彩色相机的 FITS、相机 RAW（Canon、Nikon、Sony 等，需要 rawpy）、TIFF 和 XISF 帧。行星摄影支持 SER 视频。同一文件夹中可以随意混用各种格式。</p>
         <p>想要完全离线？传入 <code>--offline</code>，或在应用中勾选，OriginStack 就不会发出任何网络请求。</p>
       </div>
+      <div id="no-gen-ai">
+        <h3>不使用生成式 AI，不上云</h3>
+        <p>OriginStack 从不把你的图像发送给任何 AI 服务，也从不生成或臆造图像内容。它的处理流程是为本项目编写、有文档说明的经典信号处理，从校准、对齐到背景去除和降噪，全部可以在源代码中查看。它不需要其他天文软件，不需要账户，也不需要云服务，只用常见的开源科学计算库。</p>
+        <p>两个可选步骤 <code>--denoiser nn</code> 和 <code>--deconvolve nn</code> 使用小型神经网络，只用真实的 Celestron Origin 会话训练。它们在你自己的电脑上运行，并已用独立叠加图核对，确认不会添加数据中没有的星点或细节。自动设置会对 Origin 的星系会话使用后者；<code>--deconvolve off</code> 可将其关闭。<a href="../how-it-works.html#learned">工作原理</a>。</p>
+      </div>
     </div>
   </div>
 </section>

@@ -343,6 +343,11 @@ python desktop_app.py</pre>
         <p>Les fichiers bruts du Celestron Origin (les images FITS de chaque dossier de session, avec leur <code>info.json</code>), et les images de caméras couleur en FITS, RAW d'appareil photo (Canon, Nikon, Sony et autres, nécessite rawpy), TIFF et XISF. La vidéo SER est prise en charge pour l'imagerie planétaire. Mélangez librement les formats dans un même dossier.</p>
         <p>Vous le voulez entièrement hors ligne ? Passez <code>--offline</code>, ou cochez l'option dans l'application, et OriginStack n'effectue aucune requête réseau.</p>
       </div>
+      <div id="no-gen-ai">
+        <h3>Aucune IA générative, rien dans le cloud</h3>
+        <p>OriginStack n'envoie jamais vos images à un service d'IA et ne génère ni n'invente jamais de contenu d'image. Son traitement est un traitement du signal classique et documenté, écrit pour ce projet, de la calibration et de l'alignement à la suppression du fond et à la réduction du bruit, et vous pouvez tout lire dans le code source. Il ne nécessite aucun autre logiciel d'astronomie, aucun compte ni service cloud, seulement des bibliothèques scientifiques libres courantes.</p>
+        <p>Deux étapes facultatives, <code>--denoiser nn</code> et <code>--deconvolve nn</code>, utilisent de petits réseaux de neurones entraînés uniquement sur de vraies sessions du Celestron Origin. Elles s'exécutent sur votre propre ordinateur et ont été vérifiées sur des empilements indépendants pour confirmer qu'elles n'ajoutent aucune étoile ni aucun détail absent des données. Les réglages automatiques utilisent la seconde pour les sessions de galaxies de l'Origin ; <code>--deconvolve off</code> la désactive. <a href="../how-it-works.html#learned">Comment elles fonctionnent</a>.</p>
+      </div>
     </div>
   </div>
 </section>
