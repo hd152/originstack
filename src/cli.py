@@ -1235,7 +1235,8 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                            f"aniso={getattr(args, 'denoise_aniso', False)}, "
                            f"nn={getattr(args, 'denoise_nn', False)}, "
                            f"ACDNR={getattr(args, 'denoise_acdnr', False)}")
-                safe_print(f"  Deconvolution: {getattr(args, 'deconvolve', False)}")
+                safe_print(f"  Deconvolution: "
+                           f"{'nn' if getattr(args, 'deconvolve_nn', False) else getattr(args, 'deconvolve', False)}")
                 safe_print(f"  Star reduction: {getattr(args, 'star_reduce', False)}")
                 safe_print(f"  Local contrast: {getattr(args, 'local_contrast', False)}")
                 safe_print(f"  Stretch: {getattr(args, 'stretch', 'linear')}")
@@ -1569,7 +1570,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'arms) is detected. 0 = plain BayesShrink with no protection; '
                         'default 0.6 (or the --auto preset\'s value). Only applies with '
                         '--denoiser wavelet/curvelet.')
-    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse'],
+    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse', 'nn'],
                    default='off', dest='deconvolve_mode',
                    help='Deconvolution: off (default), rl (Richardson-Lucy), '
                         'tv (Total-Variation regularised; sharper edges, slower), '
@@ -1579,6 +1580,8 @@ def build_parser() -> argparse.ArgumentParser:
                         'basis rather than TV\'s spatial-gradient basis -- a different '
                         'sparsity prior, tune via --config deconvolve_sparse_lambda, '
                         'default 0.01). '
+                        'nn: a network trained on Origin sessions that narrows stars by 8-18% '
+                        'and removes noise; it replaces the denoiser and chroma noise reduction. '
                         'PSF options (blind PSF, iterations, model) via --config.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
@@ -2524,6 +2527,8 @@ def build_parser() -> argparse.ArgumentParser:
         nn_denoise_strength=1.0,
         nn_chroma_nr=False,
         nn_restore_sigma=4.0,
+        deconvolve_nn=False,     # --deconvolve nn (src/data/nn_deconv.npz at the nn step)
+        nn_deconv_restore_sigma=4.0,
         deconvolve=False,
         deconvolve_tv=False,
         deconvolve_svpsf=False,
@@ -2613,6 +2618,12 @@ def parse_args(argv=None):
     args.deconvolve_tv = (args.deconvolve_mode == 'tv')
     args.deconvolve_svpsf = (args.deconvolve_mode == 'rl-sv')
     args.deconvolve_sparse = (args.deconvolve_mode == 'sparse')
+    # --deconvolve nn: the network denoises as it sharpens (its target is the clean sharp
+    # sky), so no other denoiser runs before or after it.
+    args.deconvolve_nn = (args.deconvolve_mode == 'nn')
+    if args.deconvolve_nn:
+        args.denoise_curvelet = args.denoise_acdnr = args.denoise_bilateral = False
+        args.denoise_aniso = args.denoise_nn = False
 
     # The consolidated flags above (--denoiser, --deconvolve) are user-facing
     # aliases whose dests (denoiser, deconvolve_mode) differ from the internal
@@ -2624,7 +2635,10 @@ def parse_args(argv=None):
             'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet',
             'denoise_nn'})
     if 'deconvolve_mode' in _explicit_dests:
-        _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse'})
+        _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse', 'deconvolve_nn'})
+        if args.deconvolve_nn:   # keep presets and --auto from turning a denoiser back on
+            _explicit_dests.update({'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso',
+                                    'denoise_curvelet', 'denoise_nn'})
 
     _exp = [e.strip() for e in (args.export or '').split(',') if e.strip()]
     for e in _exp:

@@ -40,9 +40,10 @@ datas += [(str(ROOT / 'src' / 'data' / 'examples'), 'src/data/examples')]
 datas += [(str(ROOT / 'src' / 'locales'), 'src/locales')]
 # Camera profiles (src/camera_profile.py reads them by path).
 datas += [(str(ROOT / 'src' / 'data' / 'camera_profiles'), 'src/data/camera_profiles')]
-# --denoiser nn weights (src/nn_denoise.py reads them by path; 1 MB, numpy forward
+# --denoiser nn / --deconvolve nn weights (src/nn_denoise.py reads them by path; 1 MB each, numpy forward
 # pass with the always-built nn_conv3x3 kernel, so unlike triage it works in releases).
 datas += [(str(ROOT / 'src' / 'data' / 'nn_denoise.npz'), 'src/data')]
+datas += [(str(ROOT / 'src' / 'data' / 'nn_deconv.npz'), 'src/data')]
 
 # The window icon. The EXE resource below sets the taskbar/Explorer icon, but
 # desktop_app.py also calls root.iconbitmap() with a path relative to its own

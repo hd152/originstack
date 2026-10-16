@@ -1,7 +1,7 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
-Status (2026-10-16): **v3 trained and passes every step-5 check; integration (step 6) not
-started.** Use it with `restore_sigma=4` (see "v3 results" below). Everything below runs on
+Status (2026-10-16): **v3 trained, passes every step-5 check, and is integrated as
+`--deconvolve nn` (step 6) with `restore_sigma=4`.** See "v3 results" and step 6 below. Everything below runs on
 any Windows machine with the repo, Python, a Rust toolchain and ideally an NVIDIA GPU.
 Branch: `feat/nn-denoiser`.
 
@@ -202,7 +202,41 @@ below no processing (0.32-0.49). v2's sky-level learning is gone (its held-out s
   (Omega) unchanged in structure; a faint irregular skirt around the Pleiades' brightest
   stars, not a dip.
 
-## 6. Then (not done yet): integrate as `--deconvolve nn`
+## 6. Integrated as `--deconvolve nn` (2026-10-16)
+
+Done as planned below: `deconvolve_nn` (with `nn_deconv_restore_sigma` 4), the nn step
+(6.7c) runs `src/data/nn_deconv.npz`, chroma NR and every denoiser are off (marked explicit
+so presets/`--auto` cannot re-enable them; `--denoiser nn` is replaced), the weights are in
+the packaging spec, the help is re-keyed in all locales, `tests/test_nn_denoise.py` covers
+CLI, config round trip, the Phase 4 call and the real model. On ideal Gaussian stars the
+network narrows them only 2-5% (1.6 px sigma: 2%; 1.2 px: 5%), flux within 1%: it learned
+the real seeing blur of Origin sessions, so do not assume the 8-18% on other optics.
+
+Full pipeline, `bench_phase4.py` on one fresh stack of each held-out target (stacked with
+this branch; `C:\nn_work\heldout_stacks`, results `C:\nn_work\bench_v3.json`, crops and
+side-by-sides `C:\nn_work\bench_v3\cmp_*.jpg`). `fwhm_ratio` = Phase 4 output / linear,
+same stars; `sky_noise` display 8-bit; `ring` in each variant's own sky-noise units, so
+multiply by `sky_noise` to compare (positive = bright halo, negative = dark moat):
+
+| target | fwhm base / rl / nn_denoise / **nn_deconv** | sky_noise base / nn_deconv | ring x sky_noise base / rl / nn_deconv |
+|---|---|---|---|
+| Omega 2026-08 | 1.064 / 1.038 / 1.065 / **0.924** | 0.41 / 0.12 | 0.29 / 0.40 / 0.15 |
+| Orion 2025-12-27 | 1.061 / 1.074 / 1.072 / **0.955** | 0.07 / 0.02 | 0.08 / **-1.42** / 0.06 |
+| Pleiades 2025-11 | 1.068 / 1.034 / 1.088 / **0.988** | 0.48 / 0.09 | 0.11 / 0.05 / 0.02 |
+| Sculptor | 0.880 / 0.799 / 0.860 / **0.752** | 0.67 / 0.04 | 0.79 / 0.06 / 0.80 |
+| Sunflower 2026-03 | 0.882 / 0.822 / 0.878 / **0.739** | 0.74 / 0.05 | 0.30 / 0.08 / 0.48 |
+
+The narrowest stars on all five, 6-17% narrower than the default chain, at the nn denoiser's
+sky noise (5-15x below the default's); RL's dark moats (Orion) and sky speckle (Sunflower)
+do not appear. `faint_cnr` is 10-20% below `--denoiser nn`'s and far above the default's.
+Like `--denoiser nn`, hue error on bright pixels is ~5 deg (default 2-3 deg) and Pleiades'
+display star-colour agreement with Gaia is a little lower (rho 0.61 vs 0.70).
+
+Open: the bright halo ring around Sunflower's brightest star (already listed for
+`--denoiser nn`, also faintly in the default chain) is a little more distinct; the clean
+sky shows it more. Not a dark moat.
+
+The original plan:
 
 - Use `restore_sigma=4` (above): r0 loses up to two thirds of 0.5-1 sigma faint sources.
 

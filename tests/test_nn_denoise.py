@@ -134,3 +134,82 @@ def test_preview_stretch_uses_the_noise_before_denoising():
     soft = render_preview_float(img, stretch='noisefloor', noise_scale=10.0)
     hard = render_preview_float(img, stretch='noisefloor')
     assert soft[:50, :50].std() < 0.5 * hard[:50, :50].std()  # sky noise far less amplified
+
+
+# ── --deconvolve nn: the same network trained on seeing pairs (src/data/nn_deconv.npz) ──
+
+def test_cli_deconvolve_nn_selects_only_the_learned_deconvolver():
+    a = parse_args(['-d', 'x', '-o', 'y.fits', '--deconvolve', 'nn'])
+    assert a.deconvolve_nn is True
+    assert a.deconvolve is False                       # not the Richardson-Lucy step
+    assert not (a.denoise_curvelet or a.denoise_acdnr or a.denoise_bilateral
+                or a.denoise_aniso or a.denoise_nn)    # it denoises itself
+    # presets and --auto must not turn a denoiser back on
+    assert {'deconvolve_nn', 'denoise_curvelet', 'denoise_nn'} <= a._explicit_cli_dests
+    # --denoiser nn as well: the deconvolver replaces it
+    b = parse_args(['-d', 'x', '-o', 'y.fits', '--denoiser', 'nn', '--deconvolve', 'nn'])
+    assert b.deconvolve_nn is True and b.denoise_nn is False
+    assert parse_args(['-d', 'x', '-o', 'y.fits']).deconvolve_nn is False
+
+
+def test_deconvolve_nn_survives_a_saved_config(tmp_path):
+    from src.cli import load_config_file, save_effective_config
+    a = parse_args(['-d', 'x', '-o', str(tmp_path / 's.fits'), '--deconvolve', 'nn'])
+    save_effective_config(a, str(tmp_path / 's.fits'))
+    b = parse_args(['-d', 'x', '-o', str(tmp_path / 't.fits')])
+    load_config_file(str(tmp_path / 's_config.toml'), b)
+    assert b.deconvolve_nn is True and b.deconvolve_mode == 'nn'
+    assert not (b.denoise_curvelet or b.denoise_nn)
+
+
+@pytest.mark.skipif(not nd.model_available(nd.DECONV_MODEL_PATH), reason="deconvolution model not present")
+def test_bundled_deconvolver_narrows_stars_and_keeps_their_flux():
+    """On ideal Gaussian stars it narrows them only a little (4-5% at sigma 1.2 px; 8-18% on
+    real Origin stacks, whose seeing blur it was trained to undo) but keeps flux and denoises."""
+    from scipy.optimize import curve_fit
+
+    from tests._helpers import star_field
+    rng = np.random.default_rng(11)
+    stars = [(rng.uniform(24, 232), rng.uniform(24, 296), rng.uniform(3000, 20000)) for _ in range(20)]
+    clean = star_field((256, 320), stars, 1.2, bg=800.0, noise=0.0, rng=rng, dtype=np.float64)
+    noisy = clean + np.random.default_rng(2).normal(0, 25, clean.shape)
+    img = np.stack([noisy] * 3, -1).astype(np.float32)
+    out = nd.nn_denoise(img, model_path=nd.DECONV_MODEL_PATH)
+
+    def width(a):   # median fitted Gaussian sigma
+        g = lambda c, amp, s, b: amp * np.exp(-0.5 * (c[0] ** 2 + c[1] ** 2) / s ** 2) + b  # noqa: E731
+        ws = []
+        for y, x, _ in stars:
+            yi, xi = int(round(y)), int(round(x))
+            box = a[yi - 7:yi + 8, xi - 7:xi + 8]
+            yy, xx = np.mgrid[-7:8, -7:8] + np.array([yi - y, xi - x])[:, None, None]
+            p, _ = curve_fit(g, (yy.ravel(), xx.ravel()), box.ravel(), p0=(box.max() - 800, 1.5, 800))
+            ws.append(abs(p[1]))
+        return float(np.median(ws))
+
+    flux = lambda a: sum(a[int(y) - 8:int(y) + 9, int(x) - 8:int(x) + 9].sum() - 289 * 800  # noqa: E731
+                         for y, x, _ in stars)
+    assert width(out[..., 1]) < 0.97 * width(img[..., 1])            # sharper
+    assert flux(out[..., 1]) == pytest.approx(flux(clean), rel=0.02)  # same light
+    sky = (slice(0, 16), slice(0, 16))
+    assert out[sky][..., 1].std() < 0.5 * img[sky][..., 1].std()     # and denoised
+
+
+def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
+    import src.nn_denoise as ndm
+    import src.postprocess as pp
+    from src.models import ProcessingStats
+    calls = []
+
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0):
+        calls.append((model_path, restore_sigma))
+        return img
+    monkeypatch.setattr(ndm, 'nn_denoise', fake)
+    monkeypatch.setattr(ndm, 'model_available', lambda path=None: True)
+    monkeypatch.setattr(pp, 'reduce_chroma_noise', lambda *a, **k: pytest.fail('chroma NR ran'))
+    rng = np.random.default_rng(3)
+    img = (500 + rng.normal(0, 5, (96, 128, 3))).astype(np.float32)
+    args = parse_args(['-d', '.', '--deconvolve', 'nn', '--skip-step', 'background'])
+    args._diagnostic_dir = None
+    pp.postprocess_stack(img, args, [], ProcessingStats())
+    assert calls == [(ndm.DECONV_MODEL_PATH, 4.0)]

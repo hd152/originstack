@@ -30,6 +30,9 @@ except Exception:
     _HAS_NATIVE = False
 
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'nn_denoise.npz')
+# The same network trained on seeing pairs (--deconvolve nn, dev-notes/nn-deconv-runbook.md):
+# sharpest-30% stack as target, so it sharpens as well as denoises. Run with nn_denoise().
+DECONV_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'nn_deconv.npz')
 
 BG_BLOCK = 64          # background mesh cell (px); the surface is smooth on this scale
 ASINH_SOFT = 4.0       # network input = asinh(z / ASINH_SOFT): linear near the sky, compressed on stars
