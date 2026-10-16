@@ -6,6 +6,7 @@ import copy
 import logging
 import math
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -39,6 +40,16 @@ from src.utils import (
 _log = logging.getLogger("originstack")
 
 
+_LEGACY_BASIC_STRING = re.compile(r'^(\s*[A-Za-z0-9_.-]+\s*=\s*)"([^"\']*\\[^"\']*)"(\s*(?:#.*)?)$')
+
+
+def _repair_legacy_toml(text: str) -> str:
+    """Turn ``key = "C:\\path"`` lines (a backslash in a basic string, written unescaped
+    by old versions) into TOML literal strings ``key = 'C:\\path'``, where backslashes
+    need no escaping. Other lines are unchanged."""
+    return '\n'.join(_LEGACY_BASIC_STRING.sub(r"\1'\2'\3", line) for line in text.split('\n'))
+
+
 def load_config_file(config_path: str, args: argparse.Namespace) -> list:
     """Load configuration from a TOML file, applying values that aren't set on CLI."""
     changes = []
@@ -53,7 +64,17 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
                 return changes
 
         with open(config_path, 'rb') as f:
-            config = tomllib.load(f)
+            raw = f.read().decode('utf-8')
+        try:
+            config = tomllib.loads(raw)
+        except tomllib.TOMLDecodeError:
+            # Configs saved before 2026-09-19 wrote Windows paths unescaped
+            # (astrollm_dir = "C:\source\astrollm"), which is invalid TOML: the
+            # whole file was ignored and the run fell back to defaults (35 of 89
+            # real configs). Read them with those strings as literal strings.
+            config = tomllib.loads(_repair_legacy_toml(raw))
+            safe_print(f"  Config {os.path.basename(config_path)}: read with Windows paths "
+                       f"repaired (saved by a version before 2.1)")
 
         # Flatten nested sections: [stacking] sigma=3.0 -> rejection_sigma=3.0
         flat = {}
@@ -114,7 +135,8 @@ def load_config_file(config_path: str, args: argparse.Namespace) -> list:
     except FileNotFoundError:
         safe_print(f"  WARNING: Config file not found: {config_path}")
     except Exception as e:
-        safe_print(f"  WARNING: Error loading config: {e}")
+        safe_print(f"  WARNING: could not read config {config_path} ({e}) -- NONE of its "
+                   f"settings are applied; the run uses defaults")
 
     return changes
 

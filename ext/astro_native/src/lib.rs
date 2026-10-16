@@ -247,6 +247,35 @@ fn std_sample(v: &[f32]) -> f32 {
     var.sqrt() as f32
 }
 
+/// Bit-packed per-sample activity mask used by the clipping kernels.
+#[derive(Clone)]
+struct ActiveMask {
+    words: Vec<u64>,
+}
+
+impl ActiveMask {
+    #[inline]
+    fn new(len: usize) -> Self { Self { words: vec![0; (len + 63) / 64] } }
+    #[inline]
+    fn clear(&mut self) { self.words.fill(0); }
+    #[inline]
+    fn set_all_non_nan(&mut self, vals: &[f32]) {
+        self.clear();
+        for (i, &v) in vals.iter().enumerate() {
+            if !v.is_nan() { self.set(i, true); }
+        }
+    }
+    #[inline(always)]
+    fn get(&self, i: usize) -> bool {
+        (self.words[i >> 6] & (1u64 << (i & 63))) != 0
+    }
+    #[inline(always)]
+    fn set(&mut self, i: usize, value: bool) {
+        let bit = 1u64 << (i & 63);
+        if value { self.words[i >> 6] |= bit; } else { self.words[i >> 6] &= !bit; }
+    }
+}
+
 /// Center + spread for the active values, with the same zero-spread fallback as
 /// the numpy reference (MAD -> std, std -> MAD).
 #[inline]
@@ -261,6 +290,7 @@ fn center_spread(active: &[f32], scratch: &mut Vec<f32>, use_mad: bool) -> (f32,
         if spread < 1e-12 {
             spread = std_pop(active); // fallback
         }
+
         (med, spread)
     } else {
         let ctr = mean(active);
@@ -273,7 +303,49 @@ fn center_spread(active: &[f32], scratch: &mut Vec<f32>, use_mad: bool) -> (f32,
             scratch.extend(active.iter().map(|&x| (x - med).abs()));
             spread = median_inplace(scratch) * 1.4826; // fallback
         }
+
         (ctr, spread)
+    }
+}
+
+fn sigma_clip_mask_std_fast(
+    vals: &[f32], sigma: f32, max_iters: usize, active: &mut ActiveMask,
+    gather: &mut Vec<f32>, scratch: &mut Vec<f32>, rejected: &mut Vec<usize>,
+) {
+    active.set_all_non_nan(vals);
+    if vals.iter().any(|v| !v.is_finite()) {
+        sigma_clip_mask(vals, sigma, max_iters, false, active, gather, scratch, rejected);
+        return;
+    }
+    for iter in 0..max_iters {
+        if iter != 0 {
+            gather.clear();
+            for i in 0..vals.len() { if active.get(i) { gather.push(vals[i]); } }
+            if gather.is_empty() { break; }
+        }
+        let source = if iter == 0 { vals } else { gather.as_slice() };
+        let center = mean(source);
+        let mut spread = std_pop(source);
+        if spread < 1e-12 {
+            scratch.clear();
+            scratch.extend_from_slice(source);
+            let med = median_inplace(scratch);
+            scratch.clear();
+            scratch.extend(source.iter().map(|&x| (x - med).abs()));
+            spread = median_inplace(scratch) * 1.4826;
+        }
+        let thresh = sigma * spread;
+        rejected.clear();
+        let mut survivors = 0usize;
+        for i in 0..vals.len() {
+            if active.get(i) {
+                let deviation = (vals[i] - center).abs();
+                if deviation <= thresh { survivors += 1; }
+                else if deviation > thresh { rejected.push(i); }
+            }
+        }
+        if survivors == 0 || rejected.is_empty() { break; }
+        for &i in rejected.iter() { active.set(i, false); }
     }
 }
 
@@ -418,19 +490,19 @@ fn sigma_clip_mask(
     sigma: f32,
     max_iters: usize,
     use_mad: bool,
-    active: &mut [bool],
+    active: &mut ActiveMask,
     gather: &mut Vec<f32>,
     scratch: &mut Vec<f32>,
     rejected: &mut Vec<usize>,
 ) {
     let n = vals.len();
     for i in 0..n {
-        active[i] = !vals[i].is_nan();
+        active.set(i, !vals[i].is_nan());
     }
     for _ in 0..max_iters {
         gather.clear();
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 gather.push(vals[i]);
             }
         }
@@ -442,7 +514,7 @@ fn sigma_clip_mask(
         rejected.clear();
         let mut survivors = 0usize;
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 let deviation = (vals[i] - center).abs();
                 if deviation <= thresh {
                     survivors += 1;
@@ -455,7 +527,7 @@ fn sigma_clip_mask(
             break;
         }
         for &i in rejected.iter() {
-            active[i] = false;
+            active.set(i, false);
         }
         if rejected.is_empty() {
             break;
@@ -476,7 +548,7 @@ fn sigma_clip_mask_fast(
     vals: &[f32],
     sigma: f32,
     max_iters: usize,
-    active: &mut [bool],
+    active: &mut ActiveMask,
     gather: &mut Vec<f32>,
     scratch: &mut Vec<f32>,
     rejected: &mut Vec<usize>,
@@ -485,7 +557,7 @@ fn sigma_clip_mask_fast(
     let mut inf = false;
     for i in 0..n {
         let v = vals[i];
-        active[i] = !v.is_nan();
+        active.set(i, !v.is_nan());
         inf |= v.is_infinite();
     }
     if inf {
@@ -497,7 +569,7 @@ fn sigma_clip_mask_fast(
     for _ in 0..max_iters {
         gather.clear();
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 gather.push(vals[i]);
             }
         }
@@ -511,7 +583,7 @@ fn sigma_clip_mask_fast(
         if spread < 1e-12 {
             gather.clear();
             for i in 0..n {
-                if active[i] {
+                if active.get(i) {
                     gather.push(vals[i]);
                 }
             }
@@ -521,7 +593,7 @@ fn sigma_clip_mask_fast(
         rejected.clear();
         let mut survivors = 0usize;
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 let deviation = (vals[i] - center).abs();
                 if deviation <= thresh {
                     survivors += 1;
@@ -534,7 +606,7 @@ fn sigma_clip_mask_fast(
             break;
         }
         for &i in rejected.iter() {
-            active[i] = false;
+            active.set(i, false);
         }
     }
 }
@@ -549,20 +621,57 @@ fn combine_pixel(
     max_iters: usize,
     winsorize: bool,
     use_mad: bool,
-    active: &mut [bool],
+    active: &mut ActiveMask,
     gather: &mut Vec<f32>,
     scratch: &mut Vec<f32>,
     rejected: &mut Vec<usize>,
 ) -> f32 {
     let n = vals.len();
+    // The unweighted, non-winsorized clipping modes are common stacking paths.
+    // Use the fused mask path for those cases: it avoids rebuilding the
+    // active sample list in center_spread and preserves the same fallback for
+    // infinities and zero-spread pixels.
+    if !use_mad && !winsorize && weights.is_none() {
+        sigma_clip_mask_std_fast(
+            vals, sigma, max_iters, active, gather, scratch, rejected,
+        );
+        let mut acc = 0.0f64;
+        let mut count = 0usize;
+        for i in 0..n {
+            if active.get(i) {
+                acc += vals[i] as f64;
+                count += 1;
+            }
+        }
+        return if count == 0 { 0.0 } else { (acc / count as f64) as f32 };
+    }
+    if use_mad && !winsorize && weights.is_none() {
+        sigma_clip_mask_fast(
+            vals, sigma, max_iters, active, gather, scratch, rejected,
+        );
+        let mut acc = 0.0f64;
+        let mut count = 0usize;
+        for i in 0..n {
+            if active.get(i) {
+                acc += vals[i] as f64;
+                count += 1;
+            }
+        }
+        return if count == 0 {
+            0.0
+        } else {
+            (acc / count as f64) as f32
+        };
+    }
+
     for i in 0..n {
-        active[i] = !vals[i].is_nan();
+        active.set(i, !vals[i].is_nan());
     }
 
     for _ in 0..max_iters {
         gather.clear();
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 gather.push(vals[i]);
             }
         }
@@ -577,7 +686,7 @@ fn combine_pixel(
         rejected.clear();
         let mut survivors = 0usize;
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 let deviation = (vals[i] - center).abs();
                 if deviation <= thresh {
                     survivors += 1;
@@ -591,7 +700,7 @@ fn combine_pixel(
             break;
         }
         for &i in rejected.iter() {
-            active[i] = false;
+            active.set(i, false);
         }
         if rejected.is_empty() {
             break;
@@ -603,7 +712,7 @@ fn combine_pixel(
         // boundary, then (weighted) mean over all clipped samples.
         gather.clear();
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 gather.push(vals[i]);
             }
         }
@@ -638,7 +747,7 @@ fn combine_pixel(
         let mut acc = 0f64;
         let mut wsum = 0f64;
         for i in 0..n {
-            if active[i] {
+            if active.get(i) {
                 let w = weights.map(|w| w[i]).unwrap_or(1.0) as f64;
                 acc += vals[i] as f64 * w;
                 wsum += w;
@@ -684,7 +793,7 @@ fn sigma_clip_combine<'py>(
             n,
             || {
                 (
-                    vec![true; n],
+                    ActiveMask::new(n),
                     Vec::<f32>::with_capacity(n),
                     Vec::<f32>::with_capacity(n),
                     Vec::<usize>::with_capacity(n),
@@ -1094,15 +1203,15 @@ fn esd_combine<'py>(
             w,
             c,
             n,
-            || (vec![true; n], Vec::<f32>::with_capacity(n)),
+            || (ActiveMask::new(n), Vec::<f32>::with_capacity(n)),
             |(active, gather), vals| {
                 for k in 0..n {
-                    active[k] = !vals[k].is_nan();
+                    active.set(k, !vals[k].is_nan());
                 }
                 for i in 0..mo {
                     gather.clear();
                     for k in 0..n {
-                        if active[k] {
+                        if active.get(k) {
                             gather.push(vals[k]);
                         }
                     }
@@ -1118,7 +1227,7 @@ fn esd_combine<'py>(
                     let mut max_dev = -1f32;
                     let mut idx = usize::MAX;
                     for k in 0..n {
-                        if active[k] {
+                        if active.get(k) {
                             let dv = (vals[k] - mn).abs() / sd;
                             if dv > max_dev {
                                 max_dev = dv;
@@ -1128,7 +1237,7 @@ fn esd_combine<'py>(
                     }
                     let lam = lut_flat[m * mo + i];
                     if (max_dev as f64) > lam && idx != usize::MAX {
-                        active[idx] = false; // m >= 3 -> m-1 >= 2 survive
+                        active.set(idx, false); // m >= 3 -> m-1 >= 2 survive
                     }
                     // NOTE: intentionally no early-break on a non-rejecting
                     // iteration. The numpy reference (`_esd_clip_tile`) breaks
@@ -1143,7 +1252,7 @@ fn esd_combine<'py>(
                 let mut acc = 0f64;
                 let mut wsum = 0f64;
                 for k in 0..n {
-                    if active[k] {
+                    if active.get(k) {
                         let wt = wref.map(|w| w[k]).unwrap_or(1.0) as f64;
                         acc += vals[k] as f64 * wt;
                         wsum += wt;
@@ -1199,7 +1308,7 @@ fn linear_fit_clip_combine<'py>(
                 (
                     (0..n).collect::<Vec<usize>>(),      // order (reused scratch)
                     vec![0.0f64; n],                      // y_sorted
-                    vec![true; n],                        // accepted
+                    ActiveMask::new(n),                   // accepted
                     Vec::<usize>::with_capacity(n),       // newly-rejected scratch
                 )
             },
@@ -1212,7 +1321,7 @@ fn linear_fit_clip_combine<'py>(
                 });
                 for r in 0..n {
                     y_sorted[r] = vals[order[r]] as f64;
-                    accepted[r] = !y_sorted[r].is_nan();
+                    accepted.set(r, !y_sorted[r].is_nan());
                 }
 
                 for _ in 0..iters {
@@ -1220,7 +1329,7 @@ fn linear_fit_clip_combine<'py>(
                     let mut sum_x = 0f64;
                     let mut sum_y = 0f64;
                     for r in 0..n {
-                        if accepted[r] {
+                        if accepted.get(r) {
                             sum_x += r as f64;
                             sum_y += y_sorted[r];
                             n_acc += 1;
@@ -1234,7 +1343,7 @@ fn linear_fit_clip_combine<'py>(
                     let mut sxx = 0f64;
                     let mut sxy = 0f64;
                     for r in 0..n {
-                        if accepted[r] {
+                        if accepted.get(r) {
                             let dx = r as f64 - x_mean;
                             sxx += dx * dx;
                             sxy += dx * (y_sorted[r] - y_mean);
@@ -1248,7 +1357,7 @@ fn linear_fit_clip_combine<'py>(
 
                     let mut ss = 0f64;
                     for r in 0..n {
-                        if accepted[r] {
+                        if accepted.get(r) {
                             let e = y_sorted[r] - (intercept + slope * r as f64);
                             ss += e * e;
                         }
@@ -1257,7 +1366,7 @@ fn linear_fit_clip_combine<'py>(
 
                     newly_rejected.clear();
                     for r in 0..n {
-                        if accepted[r] {
+                        if accepted.get(r) {
                             let e = y_sorted[r] - (intercept + slope * r as f64);
                             if e < -sigma_low * sigma || e > sigma_high * sigma {
                                 newly_rejected.push(r);
@@ -1275,14 +1384,14 @@ fn linear_fit_clip_combine<'py>(
                         break;
                     }
                     for &r in newly_rejected.iter() {
-                        accepted[r] = false;
+                        accepted.set(r, false);
                     }
                 }
 
                 let mut acc = 0f64;
                 let mut wsum = 0f64;
                 for r in 0..n {
-                    if accepted[r] {
+                    if accepted.get(r) {
                         let orig_idx = order[r];
                         let wt = wref.map(|wv| wv[orig_idx] as f64).unwrap_or(1.0);
                         acc += y_sorted[r] * wt;
@@ -1460,7 +1569,28 @@ fn dwt_row_accumulate_body(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, h
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn dwt_row_accumulate_avx2(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
-    dwt_row_accumulate_body(a, d, src, lk, hk)
+    use std::arch::x86_64::{
+        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd,
+    };
+    let n = src.len();
+    let vl = _mm256_set1_pd(lk);
+    let vh = _mm256_set1_pd(hk);
+    let mut i = 0;
+    while i + 4 <= n {
+        // Deliberately separate multiply and add: using _mm256_fmadd_pd
+        // changes rounding and breaks the scalar parity contract.
+        let x = _mm256_loadu_pd(src.as_ptr().add(i));
+        let av = _mm256_loadu_pd(a.as_ptr().add(i));
+        let dv = _mm256_loadu_pd(d.as_ptr().add(i));
+        _mm256_storeu_pd(a.as_mut_ptr().add(i), _mm256_add_pd(av, _mm256_mul_pd(vl, x)));
+        _mm256_storeu_pd(d.as_mut_ptr().add(i), _mm256_add_pd(dv, _mm256_mul_pd(vh, x)));
+        i += 4;
+    }
+    while i < n {
+        *a.get_unchecked_mut(i) += lk * *src.get_unchecked(i);
+        *d.get_unchecked_mut(i) += hk * *src.get_unchecked(i);
+        i += 1;
+    }
 }
 
 fn dwt_row_accumulate(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {
@@ -2806,7 +2936,7 @@ fn patch_weighted_sigma_combine_impl<'py>(
                 let g0 = (g.floor() as usize).min(qh.saturating_sub(2).max(0));
                 (g0, (g - g0 as f64) as f32)
             });
-            let mut active = vec![true; n];
+            let mut active = ActiveMask::new(n);
             let mut gather: Vec<f32> = Vec::with_capacity(n);
             let mut scratch: Vec<f32> = Vec::with_capacity(n);
             let mut rejected: Vec<usize> = Vec::with_capacity(n);
@@ -2834,7 +2964,7 @@ fn patch_weighted_sigma_combine_impl<'py>(
             // Per-pixel combine given contiguous per-channel sample slices in
             // `block` (layout [(p*c + ch)*n + f]) — see gather-transpose below.
             let mut combine_col = |block: &[f32], p: usize, col: usize,
-                                   active: &mut [bool], gather: &mut Vec<f32>,
+                                   active: &mut ActiveMask, gather: &mut Vec<f32>,
                                    scratch: &mut Vec<f32>, reject_count: &mut [u32],
                                    out_row: &mut [f32]| {
                 for rc in reject_count.iter_mut() {
@@ -2850,7 +2980,7 @@ fn patch_weighted_sigma_combine_impl<'py>(
                                         &mut rejected);
                     }
                     for f in 0..n {
-                        if !active[f] {
+                        if !active.get(f) {
                             reject_count[f] += 1;
                         }
                     }
@@ -5215,12 +5345,47 @@ fn bilateral_filter<'py>(
             let mut neighbor = [0f64; 8];
             for x in 0..w {
                 let base = y * w * c + x * c;
+                let interior = interior_y && x >= radius && x + radius < w;
+                let mut acc = [0f64; 8];
+                let mut wsum = 0f64;
+
+                // RGB is the production path. Keeping its three channels in
+                // locals avoids the generic temporary channel array and loop
+                // in the innermost neighbour operation.
+                if c == 3 {
+                    let cr = flat[base] as f64;
+                    let cg = flat[base + 1] as f64;
+                    let cb = flat[base + 2] as f64;
+                    for dy in -r..=r {
+                        let yy = if interior { (y as isize + dy) as usize } else { mirror_idx(y as isize + dy, h) };
+                        let spatial_row = ((dy + r) as usize) * (2 * radius + 1);
+                        for dx in -r..=r {
+                            let xx = if interior { (x as isize + dx) as usize } else { mirror_idx(x as isize + dx, w) };
+                            let nbase = yy * w * 3 + xx * 3;
+                            let nr = flat[nbase] as f64;
+                            let ng = flat[nbase + 1] as f64;
+                            let nb = flat[nbase + 2] as f64;
+                            let dr = nr - cr;
+                            let dg = ng - cg;
+                            let db = nb - cb;
+                            let sw = spatial_w[spatial_row + (dx + r) as usize];
+                            let wt = sw * (-(dr * dr + dg * dg + db * db) * inv_2c2).exp();
+                            acc[0] += nr * wt;
+                            acc[1] += ng * wt;
+                            acc[2] += nb * wt;
+                            wsum += wt;
+                        }
+                    }
+                    let denom = wsum.max(1e-12);
+                    row_out[x * 3] = (acc[0] / denom) as f32;
+                    row_out[x * 3 + 1] = (acc[1] / denom) as f32;
+                    row_out[x * 3 + 2] = (acc[2] / denom) as f32;
+                    continue;
+                }
+
                 for ch in 0..c {
                     center[ch] = flat[base + ch] as f64;
                 }
-                let mut acc = [0f64; 8];
-                let mut wsum = 0f64;
-                let interior = interior_y && x >= radius && x + radius < w;
                 for dy in -r..=r {
                     let yy = if interior { (y as isize + dy) as usize } else { mirror_idx(y as isize + dy, h) };
                     for dx in -r..=r {

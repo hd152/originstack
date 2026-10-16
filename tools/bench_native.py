@@ -19,7 +19,7 @@ def make_stack(n, h, w, c=3, outliers=True):
     return np.ascontiguousarray(d)
 
 
-def bench(name, fn, warm=1, reps=3):
+def bench(name, fn, warm=1, reps=3, work_items=None, work_bytes=None):
     for _ in range(warm):
         fn()
     ts = []
@@ -28,7 +28,15 @@ def bench(name, fn, warm=1, reps=3):
         fn()
         ts.append(time.perf_counter() - t0)
     best = min(ts)
-    print(f"{name:34s} {best*1000:9.1f} ms")
+    median = float(np.median(ts))
+    spread = (max(ts) - min(ts)) / median if median else 0.0
+    suffix = ""
+    if work_items is not None:
+        suffix += f"  {work_items / best / 1e6:8.2f} Mpix/s"
+    if work_bytes is not None:
+        suffix += f"  {work_bytes / best / 1e9:8.2f} GB/s"
+    print(f"{name:34s} best {best*1000:8.1f} ms  "
+          f"median {median*1000:8.1f} ms  spread {spread:5.1%}{suffix}")
     return best
 
 
@@ -38,9 +46,11 @@ results = {}
 d200 = make_stack(200, 384, 512)
 w200 = rng.uniform(0.5, 1.5, 200).astype(np.float32)
 results["sigma_clip_mad"] = bench(
-    "sigma_clip (MAD, default)", lambda: nat.sigma_clip_combine(d200, 3.0, 3, None, False, True))
+    "sigma_clip (MAD, default)", lambda: nat.sigma_clip_combine(d200, 3.0, 3, None, False, True),
+    work_items=d200.shape[1] * d200.shape[2] * d200.shape[3])
 results["sigma_clip_std"] = bench(
-    "sigma_clip (std)", lambda: nat.sigma_clip_combine(d200, 3.0, 3, None, False, False))
+    "sigma_clip (std)", lambda: nat.sigma_clip_combine(d200, 3.0, 3, None, False, False),
+    work_items=d200.shape[1] * d200.shape[2] * d200.shape[3])
 results["sigma_clip_wt_winsor"] = bench(
     "sigma_clip (wt+winsor)", lambda: nat.sigma_clip_combine(d200, 3.0, 3, w200, True, True))
 results["median"] = bench("median", lambda: nat.median_combine(d200))
@@ -60,6 +70,15 @@ for ne in range(3, 61):
         den = np.sqrt((ncur - 2 + t * t) * ncur)
         lut[ne, i] = (ncur - 1) * t / den
 results["esd"] = bench("esd (60fr, mo=15)", lambda: nat.esd_combine(d60, 15, lut, None))
+if hasattr(nat, "linear_fit_clip_combine"):
+    results["linear_fit"] = bench(
+        "linear fit clip (60fr)", lambda: nat.linear_fit_clip_combine(
+            d60, 4.0, 2.0, 5, None))
+if hasattr(nat, "ivw_combine"):
+    noise60 = rng.uniform(10.0, 40.0, d60.shape[0]).astype(np.float32)
+    results["ivw"] = bench(
+        "inverse variance (60fr)", lambda: nat.ivw_combine(
+            d60, noise60, None, None, None))
 
 # --- fused patch-weighted ---
 d100 = make_stack(100, 256, 256)
@@ -92,7 +111,30 @@ results["debayer_malvar"] = bench(
 rgb_full = np.ascontiguousarray(rng.uniform(0, 1000, (2000, 3000, 3)).astype(np.float32))
 results["bilateral_filter"] = bench(
     "bilateral_filter (sigma_space=3)",
-    lambda: nat.bilateral_filter(rgb_full, 50.0, 3.0, 9))
+    lambda: nat.bilateral_filter(rgb_full, 50.0, 3.0, 9),
+    work_items=rgb_full.shape[0] * rgb_full.shape[1])
+
+# --- wavelet transforms: representative post-processing image ---
+if hasattr(nat, "dwt2_native") and hasattr(nat, "idwt2_native"):
+    wave = np.ascontiguousarray(rng.normal(0, 1, (1024, 1536)).astype(np.float64))
+    lo = np.array([-0.08838834764831845, 0.08838834764831845,
+                   0.7071067811865476, 0.7071067811865476,
+                   0.08838834764831845, -0.08838834764831845])
+    hi = np.array([-0.0, 0.0, -0.7071067811865476, 0.7071067811865476,
+                   -0.0, 0.0])
+    rec_lo = np.array([0.0, 0.0, 0.7071067811865476, 0.7071067811865476, 0.0, 0.0])
+    rec_hi = np.array([-0.08838834764831845, -0.08838834764831845,
+                       0.7071067811865476, -0.7071067811865476,
+                       0.08838834764831845, 0.08838834764831845])
+    coeffs = bench(
+        "dwt2 (1024x1536)", lambda: nat.dwt2_native(wave, lo, hi, 1),
+        reps=2, work_items=wave.size)
+    results["dwt2"] = coeffs
+    ca, ch, cv, cd = nat.dwt2_native(wave, lo, hi, 1)
+    results["idwt2"] = bench(
+        "idwt2 (1024x1536)", lambda: nat.idwt2_native(
+            ca, ch, cv, cd, rec_lo, rec_hi, 4, wave.shape[0], wave.shape[1]),
+        reps=2, work_items=wave.size)
 
 # --- batch aperture photometry: time-series shape (300 stars, one frame) ---
 if hasattr(nat, "aperture_photometry_batch"):
@@ -136,6 +178,20 @@ if hasattr(nat, "median_filter_native"):
     results["median_filter_5x5"] = bench(
         "median_filter_native (5x5, full-res plane)",
         lambda: nat.median_filter_native(mf_plane, 5))
+
+# --- frame-level kernels: realistic full-resolution RGB/mosaic shapes ---
+if hasattr(nat, "lacosmic_reject_native"):
+    lac_img = np.ascontiguousarray(
+        rng.normal(500, 20, (1024, 1536, 3)).astype(np.float32))
+    results["lacosmic"] = bench(
+        "lacosmic (1024x1536 RGB)",
+        lambda: nat.lacosmic_reject_native(lac_img),
+        reps=2, work_items=1024 * 1536)
+if hasattr(nat, "debayer_rcd_native"):
+    rcd_raw = np.ascontiguousarray(rng.uniform(0, 65535, (1024, 1536)).astype(np.float32))
+    results["debayer_rcd"] = bench(
+        "debayer_rcd (1024x1536)", lambda: nat.debayer_rcd_native(
+            rcd_raw, 1.0, (0, 0), (1, 1)), reps=2, work_items=rcd_raw.size)
 
 out = sys.argv[1] if len(sys.argv) > 1 else "bench_results.json"
 with open(out, "w") as f:
