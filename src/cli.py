@@ -1233,8 +1233,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                 safe_print(f"  Denoising: curvelet={getattr(args, 'denoise_curvelet', False)}, "
                            f"bilateral={getattr(args, 'denoise_bilateral', False)}, "
                            f"aniso={getattr(args, 'denoise_aniso', False)}, "
+                           f"nn={getattr(args, 'denoise_nn', False)}, "
                            f"ACDNR={getattr(args, 'denoise_acdnr', False)}")
-                safe_print(f"  Deconvolution: {getattr(args, 'deconvolve', False)}")
+                safe_print(f"  Deconvolution: "
+                           f"{'nn' if getattr(args, 'deconvolve_nn', False) else getattr(args, 'deconvolve', False)}")
                 safe_print(f"  Star reduction: {getattr(args, 'star_reduce', False)}")
                 safe_print(f"  Local contrast: {getattr(args, 'local_contrast', False)}")
                 safe_print(f"  Stretch: {getattr(args, 'stretch', 'linear')}")
@@ -1543,7 +1545,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'parameters, and estimate resource usage — without processing anything')
     g_post.add_argument('--denoiser',
                    choices=['auto', 'wavelet', 'curvelet', 'acdnr', 'bilateral', 'aniso',
-                            'none'],
+                            'nn', 'none'],
                    default='auto',
                    help='Primary luma denoiser (default: auto — wavelet unless a '
                         'preset/--auto selects otherwise). '
@@ -1556,6 +1558,9 @@ def build_parser() -> argparse.ArgumentParser:
                         'curvelet: an alias for wavelet, kept for old command lines. '
                         'acdnr: contrast-gated sky smoothing. '
                         'bilateral / aniso: edge-preserving filters. '
+                        'nn: a small neural network trained on real Origin sessions '
+                        '(Noise2Noise on odd/even sub-stacks); denoises colour too, so '
+                        'chroma noise reduction is skipped. '
                         'none: disable luma denoising. Chroma noise reduction is '
                         'separate (--no-chroma-nr). Fine tuning via --config.')
     g_post.add_argument('--wavelet-protect', dest='directional_protect_strength',
@@ -1565,7 +1570,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'arms) is detected. 0 = plain BayesShrink with no protection; '
                         'default 0.6 (or the --auto preset\'s value). Only applies with '
                         '--denoiser wavelet/curvelet.')
-    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse'],
+    g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse', 'nn'],
                    default='off', dest='deconvolve_mode',
                    help='Deconvolution: off (default), rl (Richardson-Lucy), '
                         'tv (Total-Variation regularised; sharper edges, slower), '
@@ -1575,6 +1580,8 @@ def build_parser() -> argparse.ArgumentParser:
                         'basis rather than TV\'s spatial-gradient basis -- a different '
                         'sparsity prior, tune via --config deconvolve_sparse_lambda, '
                         'default 0.01). '
+                        'nn: a network trained on Origin sessions that narrows stars by 8-18%% '
+                        'and removes noise; it replaces the denoiser and chroma noise reduction. '
                         'PSF options (blind PSF, iterations, model) via --config.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
@@ -1590,7 +1597,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Skip a named post-processing step. Can be specified multiple times. '
                         'Steps: hot_pixel, background, chroma_nr, sky_floor, '
                         'sky_residual, sky_pedestal, bilateral, '
-                        'acdnr, wavelet (alias: curvelet), deconvolve, star_reduce, local_contrast, '
+                        'acdnr, wavelet (alias: curvelet), nn, deconvolve, star_reduce, local_contrast, '
                         'sky_neutralize, edge_bands, remove_stars, starless_process')
     g_stack.add_argument('--no-proper-coadd', dest='proper_coadd', action='store_false',
                    help='Turn off proper image coaddition (Zackay & Ofek 2017), on by default: '
@@ -2516,6 +2523,12 @@ def build_parser() -> argparse.ArgumentParser:
         denoise_bilateral=False,
         denoise_acdnr=False,
         denoise_aniso=False,
+        denoise_nn=False,
+        nn_denoise_strength=1.0,
+        nn_chroma_nr=False,
+        nn_restore_sigma=4.0,
+        deconvolve_nn=False,     # --deconvolve nn (src/data/nn_deconv.npz at the nn step)
+        nn_deconv_restore_sigma=4.0,
         deconvolve=False,
         deconvolve_tv=False,
         deconvolve_svpsf=False,
@@ -2600,10 +2613,17 @@ def parse_args(argv=None):
         args.denoise_acdnr = (d == 'acdnr')
         args.denoise_bilateral = (d == 'bilateral')
         args.denoise_aniso = (d == 'aniso')
+        args.denoise_nn = (d == 'nn')
     args.deconvolve = args.deconvolve_mode in ('rl', 'tv', 'rl-sv', 'sparse')
     args.deconvolve_tv = (args.deconvolve_mode == 'tv')
     args.deconvolve_svpsf = (args.deconvolve_mode == 'rl-sv')
     args.deconvolve_sparse = (args.deconvolve_mode == 'sparse')
+    # --deconvolve nn: the network denoises as it sharpens (its target is the clean sharp
+    # sky), so no other denoiser runs before or after it.
+    args.deconvolve_nn = (args.deconvolve_mode == 'nn')
+    if args.deconvolve_nn:
+        args.denoise_curvelet = args.denoise_acdnr = args.denoise_bilateral = False
+        args.denoise_aniso = args.denoise_nn = False
 
     # The consolidated flags above (--denoiser, --deconvolve) are user-facing
     # aliases whose dests (denoiser, deconvolve_mode) differ from the internal
@@ -2612,9 +2632,13 @@ def parse_args(argv=None):
     # --denoiser / --deconvolve wins over preset & auto just like a direct flag.
     if 'denoiser' in _explicit_dests:
         _explicit_dests.update({
-            'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet'})
+            'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_curvelet',
+            'denoise_nn'})
     if 'deconvolve_mode' in _explicit_dests:
-        _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse'})
+        _explicit_dests.update({'deconvolve', 'deconvolve_tv', 'deconvolve_sparse', 'deconvolve_nn'})
+        if args.deconvolve_nn:   # keep presets and --auto from turning a denoiser back on
+            _explicit_dests.update({'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso',
+                                    'denoise_curvelet', 'denoise_nn'})
 
     _exp = [e.strip() for e in (args.export or '').split(',') if e.strip()]
     for e in _exp:

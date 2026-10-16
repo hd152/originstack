@@ -540,8 +540,11 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 safe_print(f"    WARNING: could not save background map: {e}")
             del _pre_bg
 
-    # 2. Chroma noise reduction
-    if getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps:
+    # 2. Chroma noise reduction. Not before --denoiser nn / --deconvolve nn unless
+    # --config nn_chroma_nr=true: the networks were trained on stacks without it.
+    if (getattr(args, 'chroma_nr', True) and 'chroma_nr' not in skip_steps
+            and (not (getattr(args, 'denoise_nn', False) or getattr(args, 'deconvolve_nn', False))
+                 or getattr(args, 'nn_chroma_nr', False))):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_chroma_nr')
         cnr_sigma = getattr(args, 'chroma_nr_sigma', 2.0)
         cnr_large = float(getattr(args, 'chroma_nr_large_sigma', 0.0))
@@ -731,6 +734,38 @@ def postprocess_stack(
             protect_strength=curv_protect,
             variance_stabilize=getattr(args, 'variance_stabilize', False))
         safe_print(f"  ✓ Directional wavelet denoise ({format_time(time.time() - curv_start)})")
+
+    # 6.7c. Learned Noise2Noise denoiser, or the learned deconvolver (--deconvolve nn: the
+    # same network trained on seeing pairs, so it also denoises; src/nn_denoise.py)
+    _nn_deconv = getattr(args, 'deconvolve_nn', False) and 'deconvolve' not in skip_steps
+    if (_nn_deconv or getattr(args, 'denoise_nn', False)) and 'nn' not in skip_steps:
+        from src.nn_denoise import DECONV_MODEL_PATH, model_available, nn_denoise
+        _nn_path = DECONV_MODEL_PATH if _nn_deconv else None
+        _nn_flag = '--deconvolve nn' if _nn_deconv else '--denoiser nn'
+        if not model_available(_nn_path):
+            safe_print(f"\n  WARNING: {_nn_flag}: model file "
+                       f"src/data/{'nn_deconv' if _nn_deconv else 'nn_denoise'}.npz is missing; skipping")
+        else:
+            _diag_save(stacked, _diag_dir, _diag_counter,
+                       'before_nn_deconvolve' if _nn_deconv else 'before_nn_denoise')
+            nn_strength = float(getattr(args, 'nn_denoise_strength', 1.0))
+            nn_restore = float(getattr(args, 'nn_deconv_restore_sigma' if _nn_deconv
+                                       else 'nn_restore_sigma', 4.0))
+            safe_print(f"\n  Applying neural-network {'deconvolution' if _nn_deconv else 'denoising'} "
+                       f"(strength={nn_strength:.2f})...")
+            nn_start = time.time()
+            from src.io_fits import _sky_stats
+            _sig_before = _sky_stats(luminance(stacked))[1]
+            stacked = nn_denoise(stacked, strength=nn_strength, model_path=_nn_path,
+                                 restore_sigma=nn_restore)
+            # The preview stretch is solved from the sky noise; keep it at the noise the
+            # image had before this step, or it would stretch ~10x harder.
+            _sig_after = _sky_stats(luminance(stacked))[1]
+            args._preview_noise_scale = (_sig_before / _sig_after
+                                         if _sig_after > 0 and _sig_before > _sig_after else 1.0)
+            safe_print(f"  ✓ NN {'deconvolution' if _nn_deconv else 'denoise'} "
+                       f"({format_time(time.time() - nn_start)})")
+            stacked = _sanitize(stacked, "nn deconvolution" if _nn_deconv else "nn denoising")
 
     # 6.8. Anisotropic diffusion (Perona-Malik)
     if getattr(args, 'denoise_aniso', False) and 'aniso' not in skip_steps:

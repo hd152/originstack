@@ -35,3 +35,11 @@ def test_cli_reference_leaves_out_removed_flags():
     removed = [o for a in build_parser()._actions if isinstance(a, _RemovedFlag) for o in a.option_strings]
     assert removed
     assert not any(f'<code>{o}</code>' in text for o in removed)
+
+
+def test_help_texts_have_no_unescaped_percent():
+    """argparse %-formats every help string: a bare '%' followed by a conversion letter
+    (e.g. '8-18% and' -> '% a') silently dumps the parser's internals into --help."""
+    import build_cli_reference
+    text = build_cli_reference.render()
+    assert 'object at 0x' not in text and '_ArgumentGroup' not in text

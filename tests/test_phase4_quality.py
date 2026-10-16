@@ -318,6 +318,29 @@ def test_shrink_stars_narrows_without_blurring_or_touching_noise():
         assert r1 == pytest.approx(r0, rel=0.05)
 
 
+def test_shrink_stars_leaves_no_moat_around_a_haloed_star():
+    """A bright star whose Moffat halo still falls across the background annulus: the
+    reduced profile must fall monotonically outward. With B the median of the whole
+    annulus and a 0.5 FWHM taper it dipped below the halo just inside 2.5 FWHM and rose
+    again (11-47 sky sigma on a denoised stack)."""
+    from astropy.table import Table
+
+    from src.denoising import shrink_stars
+    fwhm, beta = 5.3, 2.0
+    alpha = fwhm / (2 * np.sqrt(2 ** (1 / beta) - 1))
+    yy, xx = np.mgrid[:161, :161]
+    r = np.hypot(yy - 80, xx - 80)
+    star = 60000.0 * (1 + (r / alpha) ** 2) ** -beta
+    rng = np.random.default_rng(0)
+    img = (500.0 + star[..., None] + rng.normal(0, 1.0, (161, 161, 3))).astype(np.float32)
+    src = Table({'xcentroid': [80.0], 'ycentroid': [80.0], 'flux': [1.0]})
+    out = shrink_stars(img, src, fwhm, amount=0.5) @ LUMA
+    prof = np.array([out[(r >= k) & (r < k + 1)].mean() for k in range(30)])
+    assert prof[2] < (img @ LUMA)[80, 82] * 0.99              # it did shrink
+    rise = np.maximum(np.diff(prof), 0).max()                 # largest outward increase
+    assert rise < 10.0          # old code: 93 ADU (a 157 ADU moat); now ~6 (the 1 px fade)
+
+
 def test_shrink_stars_noop_cases():
     from src.denoising import shrink_stars
     img, src, _ = _star_grid()

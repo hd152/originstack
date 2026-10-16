@@ -83,7 +83,7 @@ def run_phase4(stacked: np.ndarray, extra: list, stack_path: Optional[str],
     """Phase 4 + display stretch on ``stacked`` with the CLI's own argument
     handling. Returns (P, D, args)."""
     from src import cli
-    from src.io_fits import render_preview_float
+    from src.io_fits import preview_stretch_kw, render_preview_float
     from src.models import ProcessingStats
     from src.postprocess import postprocess_stack
 
@@ -109,12 +109,9 @@ def run_phase4(stacked: np.ndarray, extra: list, stack_path: Optional[str],
             from src.pipeline import prepare_linear_for_phase4
             prepare_linear_for_phase4(args, stacked, header)
         P = postprocess_stack(stacked, args, [], ProcessingStats())
-        D = render_preview_float(P, stretch=getattr(args, "stretch", "ghs"),
-                                 ghs_b=float(getattr(args, "ghs_b", 8.0)),
-                                 ghs_sp=float(getattr(args, "ghs_sp", 0.15)),
-                                 ghs_hp=float(getattr(args, "ghs_hp", 0.95)),
-                                 black_sigma=float(getattr(args, "preview_black_sigma", 0.0)),
-                                 color=getattr(args, "stretch_color", "channel"))
+        # the run's own preview settings, incl. what Phase 4 set (noise_scale after
+        # --denoiser nn); hand-built kwargs here rendered nn stacks ~10x over-stretched
+        D = render_preview_float(P, **preview_stretch_kw(args))
     return P, np.asarray(D, dtype=np.float64), args, buf.getvalue()
 
 

@@ -3107,3 +3107,48 @@ def test_residual_warp_matches_scipy_calls(monkeypatch):
     for g, w in zip(got, want):
         assert g.dtype == w.dtype
         np.testing.assert_array_equal(g.view(np.uint8), w.view(np.uint8))
+
+
+# ── nn_conv3x3 (src/nn_denoise.py, --denoiser nn) ────────────────────────────
+
+@pytest.mark.parametrize('c,o,h,w', [(3, 24, 37, 53), (72, 24, 16, 40), (96, 96, 9, 8), (5, 3, 1, 1)])
+@pytest.mark.parametrize('act', [True, False])
+def test_nn_conv3x3_matches_numpy(c, o, h, w, act):
+    """Not bit-identical (numpy's BLAS product sums the taps in its own order): tolerance."""
+    import src.nn_denoise as nd
+    rng = np.random.default_rng(c * 1000 + o)
+    x = rng.normal(size=(c, h, w)).astype(np.float32)
+    wt = rng.normal(0, 0.2, (o, c, 3, 3)).astype(np.float32)
+    b = rng.normal(size=o).astype(np.float32)
+    got = native.nn_conv3x3(x, wt, b, nd.LEAK, act)
+    ref = nd._conv3x3_numpy(x, wt, b, act)
+    np.testing.assert_allclose(got, ref, rtol=1e-4, atol=1e-4 * np.abs(ref).max())
+
+
+def test_nn_conv3x3_avx2_twin_is_identical_to_portable():
+    rng = np.random.default_rng(7)
+    x = rng.normal(size=(24, 21, 35)).astype(np.float32)
+    wt = rng.normal(0, 0.2, (20, 24, 3, 3)).astype(np.float32)
+    b = rng.normal(size=20).astype(np.float32)
+    np.testing.assert_array_equal(native.nn_conv3x3(x, wt, b, 0.1, True),
+                                  native.nn_conv3x3_portable(x, wt, b, 0.1, True))
+
+
+def test_nn_denoise_forward_uses_native_and_matches_numpy(monkeypatch):
+    import src.nn_denoise as nd
+    rng = np.random.default_rng(8)
+    f = 4
+    shapes = {'e0a': (f, 3), 'e0b': (f, f), 'e1a': (2 * f, f), 'e1b': (2 * f, 2 * f), 'ma': (4 * f, 2 * f),
+              'mb': (4 * f, 4 * f), 'd1a': (2 * f, 6 * f), 'd1b': (2 * f, 2 * f), 'd0a': (f, 3 * f), 'd0b': (f, f)}
+    w = {}
+    for k, (oo, i) in shapes.items():
+        w[k + '.weight'] = rng.normal(0, 0.2, (oo, i, 3, 3)).astype(np.float32)
+        w[k + '.bias'] = rng.normal(0, 0.05, oo).astype(np.float32)
+    w['out.weight'] = rng.normal(0, 0.2, (3, f, 1, 1)).astype(np.float32)
+    w['out.bias'] = np.zeros(3, np.float32)
+    x = rng.normal(size=(3, 64, 96)).astype(np.float32)
+    assert nd._HAS_NATIVE
+    got = nd.forward(x, w)
+    monkeypatch.setattr(nd, '_HAS_NATIVE', False)
+    ref = nd.forward(x, w)
+    np.testing.assert_allclose(got, ref, rtol=1e-4, atol=1e-4 * np.abs(ref).max())
