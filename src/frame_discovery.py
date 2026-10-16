@@ -63,12 +63,19 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
 
     with ThreadPoolExecutor() as ex:
         headers = list(ex.map(_read_header, files))
+    n_dark_flats = 0
     for p, hdr in zip(files, headers):
         _merge_json_sidecar(p, hdr)
         ftype = classify_frame(p, hdr)
         if ftype == 'skip':
             continue
+        if ftype == 'darkflat':
+            n_dark_flats += 1
+            continue
         frames[ftype].append(FrameInfo(path=p, type=ftype, header=hdr))
+    if n_dark_flats:
+        safe_print(f"  Note: {n_dark_flats} dark flat(s) not used -- the flats are bias-corrected "
+                   f"instead (keep bias frames in the folder)")
     return frames
 
 
@@ -122,13 +129,42 @@ def classify_frame(path: str, header: dict) -> str:
     # alongside the raw subs -- must not be treated as another light frame.
     if name in ('finalstackedmaster.tif', 'finalstackedmaster.tiff'):
         return 'skip'
-    if 'dark' in name or header.get('IMAGETYP', '').lower() == 'dark':
+    imagetyp = _imagetyp_kind(header.get('IMAGETYP'))
+    # Dark flats (darks matched to the flats) have no step of their own: the flats are
+    # bias-corrected instead. Left in, 'dark' in the name made them darks for the lights.
+    if _DARK_FLAT_NAME.search(name) or imagetyp == 'darkflat':
+        return 'darkflat'
+    # The file name comes first: some Origin flats carry IMAGETYP='LIGHT'.
+    if 'dark' in name or imagetyp == 'dark':
         return 'dark'
-    if 'flat' in name or header.get('IMAGETYP', '').lower() == 'flat':
+    if 'flat' in name or imagetyp == 'flat':
         return 'flat'
-    if 'bias' in name or header.get('IMAGETYP', '').lower() == 'bias' or header.get('EXPTIME', 1) == 0:
+    if 'bias' in name or imagetyp == 'bias' or header.get('EXPTIME', 1) == 0:
         return 'bias'
     return 'light'
+
+
+_DARK_FLAT_NAME = re.compile(r'dark[\s_.-]*flat|flat[\s_.-]*dark')
+
+
+def _imagetyp_kind(value) -> Optional[str]:
+    """The frame type an IMAGETYP header names, in any of the usual spellings: 'DARK',
+    'Dark Frame', 'Flat Field', 'Bias Frame', 'Offset', 'ZERO', 'Dark Flat', 'Light
+    Frame'... -> 'dark' / 'flat' / 'bias' / 'darkflat' / 'light', or None."""
+    v = re.sub(r'[^a-z]', '', str(value or '').lower())
+    if not v:
+        return None
+    if v.startswith(('darkflat', 'flatdark')):
+        return 'darkflat'
+    if v.startswith('dark'):
+        return 'dark'
+    if v.startswith('flat'):
+        return 'flat'
+    if v.startswith(('bias', 'offset', 'zero')):
+        return 'bias'
+    if v.startswith(('light', 'object', 'science')):
+        return 'light'
+    return None
 
 
 def _frame_iso(f: FrameInfo):

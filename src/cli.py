@@ -963,7 +963,7 @@ def _root_has_input_fits(directory: str) -> bool:
         if not os.path.isfile(path):
             continue
         try:
-            if classify_frame(path, _read_fits_header(path)) != 'skip':
+            if classify_frame(path, _read_fits_header(path)) not in ('skip', 'darkflat'):
                 return True
         except Exception:
             return True       # unreadable: let discovery report it, as before

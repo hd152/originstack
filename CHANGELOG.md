@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Calibration frames are recognised from more capture programs.** An `IMAGETYP` header of
+  `Dark Frame`, `Flat Field`, `Bias Frame`, `Offset` or `Zero` was not understood, so such
+  frames were stacked as lights unless their file name said what they were. Dark flats were
+  taken as darks for the lights; they are now left out with a note (the flats are
+  bias-corrected instead).
+
 ## [2.12.0] - 2026-10-16
 
 Learned noise reduction and deconvolution trained on real Origin sessions, sharper galaxies
