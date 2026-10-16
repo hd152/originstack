@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Configs saved by versions before 2.1 load again.** They wrote Windows paths without
+  escaping their backslashes, which is not valid TOML, so `--config` and `--from-stack`
+  ignored the whole file after a one-line warning and ran with defaults (35 of 89 real saved
+  configs). Such paths are now read as they were meant, and a config that still cannot be
+  read says plainly that none of its settings were applied.
+
 ## [2.12.0] - 2026-10-16
 
 Learned noise reduction and deconvolution trained on real Origin sessions, sharper galaxies
