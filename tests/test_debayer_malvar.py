@@ -87,3 +87,22 @@ class TestMalvarNativeNumpyParity:
         native_out = db._native.debayer_malvar(np.ascontiguousarray(raw), 'RGGB')
         numpy_out = db._debayer_malvar_numpy(raw, 'RGGB')
         np.testing.assert_allclose(native_out, numpy_out, atol=1e-3)
+
+    def test_native_into_matches_allocating_kernel(self):
+        if not db._HAS_NATIVE or not hasattr(db._native, 'debayer_malvar_into'):
+            pytest.skip("astro_native debayer_malvar_into kernel not built")
+        raw = _synthetic_raw(seed=8)
+        out = np.empty((*raw.shape, 3), dtype=np.float32)
+        db._native.debayer_malvar_into(np.ascontiguousarray(raw), out, 'RGGB')
+        expected = db._native.debayer_malvar(np.ascontiguousarray(raw), 'RGGB')
+        np.testing.assert_array_equal(out, expected)
+
+    def test_python_dispatch_writes_supplied_output(self):
+        if not db._HAS_NATIVE or not hasattr(db._native, 'debayer_malvar_into'):
+            pytest.skip("astro_native debayer_malvar_into kernel not built")
+        raw = _synthetic_raw(seed=9)
+        expected = db.debayer_malvar(raw, 'RGGB')
+        out = np.empty((*raw.shape, 3), dtype=np.float32)
+        got = db.debayer(raw, 'RGGB', method='malvar', out=out)
+        assert got is out
+        np.testing.assert_array_equal(out, expected)

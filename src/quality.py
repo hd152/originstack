@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -96,6 +97,32 @@ try:
 except ImportError:
     laplace = maximum_filter = gaussian_filter = _gaussian_blur = None
     _SCIPY_AVAILABLE = False
+
+
+
+@dataclass
+class FrameStatistics:
+    """Statistics and shared samples collected once for a luminance frame."""
+
+    native: Optional[tuple]
+    validation_sample: np.ndarray
+    quality_sample: np.ndarray
+
+
+def collect_frame_statistics(img: np.ndarray) -> FrameStatistics:
+    """Prepare the samples shared by validation and quality analysis."""
+    native = _validate_native(img)
+    validation_sample = (
+        np.ascontiguousarray(img[::3, ::3])
+        if min(img.shape[:2]) >= 64 else img
+    )
+    min_dim = min(img.shape)
+    downsample = 4 if min_dim >= 2048 else (2 if min_dim >= 1024 else 1)
+    quality_sample = (
+        img[::downsample, ::downsample]
+        if downsample > 1 else img
+    ).astype(np.float32, copy=False)
+    return FrameStatistics(native, validation_sample, quality_sample)
 
 
 def generate_star_mask(shape: Tuple[int, int], star_positions: Optional[object], fwhm: float = 3.0) -> np.ndarray:
@@ -226,7 +253,8 @@ def _validate_native(img):
 
 
 def validate_image_data(img: np.ndarray, name: str = "", native_stats=None,
-                        sample=None) -> Tuple[bool, Optional[str]]:
+                        sample=None, frame_stats: Optional[FrameStatistics] = None
+                        ) -> Tuple[bool, Optional[str]]:
     """Validate image data for common issues. Returns (is_valid, error_message).
 
     Performance improvements vs original:
@@ -239,6 +267,11 @@ def validate_image_data(img: np.ndarray, name: str = "", native_stats=None,
     # native_stats / sample: validate_frame_stats(img) and img[::3, ::3], when the caller
     # already has them (debayer.white_balance_grayworld_lum_into computes both while
     # writing the luminance)
+    if frame_stats is not None:
+        if native_stats is None:
+            native_stats = frame_stats.native
+        if sample is None:
+            sample = frame_stats.validation_sample
     native = native_stats if native_stats is not None else _validate_native(img)
     # One isfinite pass — NaN/Inf counts only paid for on the failure path.
     if (not native[0]) if native is not None else (not np.isfinite(img).all()):
@@ -746,7 +779,9 @@ def decompose_psf_zernike(img: np.ndarray, star_positions,
 
 
 def compute_quality_metrics(img: np.ndarray, level: str = 'full',
-                            advanced_metrics: bool = True) -> Dict:
+                            advanced_metrics: bool = True,
+                            frame_stats: Optional[FrameStatistics] = None,
+                            existing_metrics: Optional[Dict] = None) -> Dict:
     """Comprehensive quality analysis with multiple metrics.
 
     ``level`` picks how much work to do -- one axis, three named points, no
@@ -785,7 +820,8 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
     _min_dim = min(img.shape)
     _ds = 4 if _min_dim >= 2048 else (2 if _min_dim >= 1024 else 1)
     # Cast to float32 once — shared by stats, percentile, and laplace below.
-    img_s = (img[::_ds, ::_ds] if _ds > 1 else img).astype(np.float32)
+    img_s = (frame_stats.quality_sample if frame_stats is not None else
+             (img[::_ds, ::_ds] if _ds > 1 else img).astype(np.float32))
 
     # Star detection on a 2x-downsampled image -- the matched-filter/SEP
     # convolution runs over the whole frame; half-res cuts that cost by 4x.
@@ -793,36 +829,51 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
     _star_ds = 2 if _min_dim >= 1500 else 1
     img_s_stars = img[::_star_ds, ::_star_ds] if _star_ds > 1 else img
 
-    # All percentiles in one pass — p50 replaces a separate np.median call.
-    # Percentiles and the median depend only on the multiset of values, not
-    # their order (signed zeros aside, handled below), so the median runs in
-    # place on the scratch copy the percentile call already partitioned (cheap:
-    # its order statistics are already in position) instead of partitioning a
-    # fresh copy; the MAD's deviations are built and partitioned in the same
-    # buffer, in the same element order as before. Same values exactly.
-    _scratch = img_s.copy()
-    p01, p50, p75, p95, p99 = np.percentile(_scratch, [1, 50, 75, 95, 99],
-                                            overwrite_input=True)
-    brightness = float(p50)  # median == p50, no extra traversal
+    if existing_metrics is None:
+        # All percentiles in one pass — p50 replaces a separate np.median call.
+        # Percentiles and the median depend only on the multiset of values, not
+        # their order (signed zeros aside, handled below), so the median runs in
+        # place on the scratch copy the percentile call already partitioned
+        # instead of partitioning a fresh copy; the MAD's deviations are built
+        # and partitioned in the same buffer, in the same element order as
+        # before. Same values exactly.
+        _scratch = img_s.copy()
+        p01, p50, p75, p95, p99 = np.percentile(
+            _scratch, [1, 50, 75, 95, 99], overwrite_input=True)
+        brightness = float(p50)  # median == p50, no extra traversal
 
-    mean = float(np.mean(img_s))
-    contrast = float(np.std(img_s))
+        mean = float(np.mean(img_s))
+        contrast = float(np.std(img_s))
 
-    # MAD-based background/noise — single pass, no iterative sigma clipping.
-    # 1.4826 * MAD is an unbiased estimator of Gaussian sigma.
-    _bg_median = float(np.median(_scratch, overwrite_input=True))
-    if _bg_median == 0.0:
-        # The one order-dependent case: +0.0 and -0.0 compare equal, so which
-        # one a partition lands on depends on the input order. Recompute on the
-        # unpermuted data, as before, to keep the sign bit identical too.
-        _bg_median = float(np.median(img_s))
-    np.subtract(img_s, _bg_median, out=_scratch)
-    np.abs(_scratch, out=_scratch)
-    _bg_mad = float(np.median(_scratch, overwrite_input=True))
-    del _scratch
-    background = _bg_median
-    noise = max(1.4826 * _bg_mad, 1e-6)
-    snr = (p95 - background) / noise
+        # MAD-based background/noise — single pass, no iterative sigma clipping.
+        # 1.4826 * MAD is an unbiased estimator of Gaussian sigma.
+        _bg_median = float(np.median(_scratch, overwrite_input=True))
+        if _bg_median == 0.0:
+            # The one order-dependent case: +0.0 and -0.0 compare equal, so which
+            # one a partition lands on depends on the input order. Recompute on
+            # the unpermuted data, as before, to keep the sign bit identical too.
+            _bg_median = float(np.median(img_s))
+        np.subtract(img_s, _bg_median, out=_scratch)
+        np.abs(_scratch, out=_scratch)
+        _bg_mad = float(np.median(_scratch, overwrite_input=True))
+        del _scratch
+        background = _bg_median
+        noise = max(1.4826 * _bg_mad, 1e-6)
+        snr = (p95 - background) / noise
+    else:
+        # Deferred completion runs on the same image as the gate pass. Reusing
+        # these values avoids a second percentile/MAD/mean/std pass.
+        brightness = float(existing_metrics['brightness'])
+        mean = float(existing_metrics['mean'])
+        contrast = float(existing_metrics['contrast'])
+        snr = float(existing_metrics['snr'])
+        background = float(existing_metrics['background'])
+        noise = float(existing_metrics['noise'])
+        p01 = float(existing_metrics['p01'])
+        p50 = float(existing_metrics['p50'])
+        p75 = float(existing_metrics['p75'])
+        p95 = float(existing_metrics['p95'])
+        p99 = float(existing_metrics['p99'])
 
     # Star detection
     star_count = 0
@@ -830,7 +881,15 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
     sources_s = None
     fwhm = 0.0
 
-    if level != 'quick':
+    if existing_metrics is not None and existing_metrics.get('_star_sources') is not None:
+        sources_s = existing_metrics['_star_sources'].copy()
+        if _star_ds > 1:
+            sources_s['xcentroid'] /= _star_ds
+            sources_s['ycentroid'] /= _star_ds
+        star_count = int(existing_metrics.get('star_count', len(sources_s)))
+        star_snr = float(existing_metrics.get('star_snr', 0.0))
+        fwhm = float(existing_metrics.get('fwhm', 0.0)) / _star_ds
+    elif level != 'quick':
         # matched-filter (the only detector) -- see detect_stars_auto's
         # docstring for why this must be the single dispatch point rather
         # than each call site picking its own backend.
@@ -945,7 +1004,9 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
     # Composite quality score (0–100 range).
     # Normalisation targets realistic single-frame values:
     #   SNR ~2 = good sky-limited frame; FWHM ~4px = good seeing (gentle penalty above that).
-    if level == 'quick':
+    if existing_metrics is not None:
+        score = float(existing_metrics['score'])
+    elif level == 'quick':
         # SNR-only score for the initial quality gate (no star detection overhead)
         score = min(max(snr / 2.0, 0.01), 1.0) * 100.0
     else:
@@ -1003,3 +1064,19 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
         'zernike_spherical': float(zernike_result.get('zernike_spherical', 0.0)),
         '_star_sources': sources_s,
     }
+
+
+def complete_quality_metrics(img: np.ndarray, metrics: Dict,
+                             advanced_metrics: bool = True) -> Dict:
+    """Add diagnostics omitted by the Phase 1 gate pass.
+
+    The gate pass deliberately avoids expensive sharpness, PSF and wavelet
+    diagnostics for frames that may be rejected.  Reusing this helper after
+    ``quality_gate`` keeps the public full-metrics API unchanged while making
+    the normal pipeline pay for diagnostics only on accepted frames.
+    """
+    diagnostics = compute_quality_metrics(
+        img, level='full', advanced_metrics=advanced_metrics,
+        existing_metrics=metrics)
+    metrics.update(diagnostics)
+    return metrics

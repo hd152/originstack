@@ -38,7 +38,12 @@ from src.frame_discovery import is_nebula_filter
 from src.gpu_context import get_gpu
 from src.io_fits import load_frame
 from src.models import Config, FrameInfo, ProcessingStats, RunCancelled
-from src.quality import compute_quality_metrics, estimate_bortle, validate_image_data
+from src.quality import (
+    collect_frame_statistics,
+    compute_quality_metrics,
+    estimate_bortle,
+    validate_image_data,
+)
 from src.stacking import lacosmic_reject
 from src.utils import (
     format_time,
@@ -241,7 +246,8 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                           allow_gpu: bool = True,
                           spike_reject: bool = False,
                           out_rgb: Optional[np.ndarray] = None,
-                          out_lum: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                          out_lum: Optional[np.ndarray] = None,
+                          quality_level: str = 'full') -> Dict[str, Any]:
     """Process one frame: load, calibrate, debayer, hot-pixel, quality.
 
     ``out_lum``: this frame's luminance frame-store slot (pool workers); when the
@@ -606,19 +612,22 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             pass
     timings['pre_gradient_removal'], _t = time.perf_counter() - _t, time.perf_counter()
 
+    frame_stats = collect_frame_statistics(lum)
     if wb_validate is not None and lum is wb_lum:      # nothing has replaced it since
         is_valid, validation_error = validate_image_data(lum, os.path.basename(path),
                                                          native_stats=wb_validate[0],
-                                                         sample=wb_validate[1])
+                                                         sample=wb_validate[1],
+                                                         frame_stats=frame_stats)
     else:
-        is_valid, validation_error = validate_image_data(lum, os.path.basename(path))
+        is_valid, validation_error = validate_image_data(
+            lum, os.path.basename(path), frame_stats=frame_stats)
     if not is_valid:
         return {'error': f'validation failed: {validation_error}'}
     timings['validate'], _t = time.perf_counter() - _t, time.perf_counter()
 
     metrics = {} if skip_quality else compute_quality_metrics(
-        lum, level='quick' if quick_quality else 'full',
-        advanced_metrics=advanced_metrics)
+        lum, level='quick' if quick_quality else quality_level,
+        advanced_metrics=advanced_metrics, frame_stats=frame_stats)
     if metrics:
         try:
             _exptime = float(header.get('EXPTIME', 0) or 0)
@@ -628,18 +637,6 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             metrics['bortle_estimate'] = None
     timings['quality'], _t = time.perf_counter() - _t, time.perf_counter()
 
-    # Patch quality scores for --patch-registration, computed here while the
-    # luminance is already in worker memory. Phase 2 shifts this tiny coarse
-    # grid into aligned space instead of re-reading and re-warping the full
-    # frame per map. Computed unconditionally: whether patch registration is
-    # enabled is decided by the auto-advisor AFTER Phase 1, and one Brenner
-    # pass over an in-cache frame is trivial next to the steps above.
-    try:
-        from src.registration import compute_patch_scores
-        metrics['_patch_scores'] = compute_patch_scores(np.asarray(lum))
-    except Exception:
-        pass
-    timings['patch_scores'] = time.perf_counter() - _t
     return {'rgb': rgb, 'lum': lum, 'metrics': metrics, 'error': None, 'timings': timings}
 
 
@@ -1173,7 +1170,8 @@ def _parallel_frame_worker(
                                    ca_shifts=ca_shifts,
                                    trail_reject=_worker_trail_reject,
                                    banding=_worker_banding,
-                                   spike_reject=_worker_spike_reject)
+                                   spike_reject=_worker_spike_reject,
+                                   quality_level='gate')
     if result.get('error'):
         return (frame_idx, None, result['error'], None)
 
@@ -1463,7 +1461,8 @@ def execute_frame_processing(
                     ca_shifts=_ca_shifts,
                     trail_reject=getattr(args, 'trail_reject', False),
                     banding=_banding_cfg(args),
-                    spike_reject=getattr(args, 'spike_reject', False))
+                    spike_reject=getattr(args, 'spike_reject', False),
+                    quality_level='gate')
             if result.get('error'):
                 return i, None, result['error'], None, None
             mem_rgb[i] = result['rgb']
@@ -1504,7 +1503,8 @@ def execute_frame_processing(
                             # so it is not folded into the per-step totals below —
                             # the GPU path's timing breakdown is best-effort.
                             _qfuts[i] = _qpool.submit(
-                                compute_quality_metrics, lum_arr, advanced_metrics=_adv)
+                                compute_quality_metrics, lum_arr, level='gate',
+                                advanced_metrics=_adv)
                         else:
                             f.metrics = metrics
                             if args.verbose:
@@ -1588,8 +1588,9 @@ def execute_frame_processing(
                 pre_gradient_removal=_pgr,
                 ca_shifts=_ca_shifts,
                 trail_reject=getattr(args, 'trail_reject', False),
-                    banding=_banding_cfg(args),
-                    spike_reject=getattr(args, 'spike_reject', False))
+                banding=_banding_cfg(args),
+                spike_reject=getattr(args, 'spike_reject', False),
+                quality_level='gate')
             _wv = _get_ui_events()
             _wv.progress('Processing frames', i + 1, n)
             if result.get('error'):
@@ -1831,7 +1832,8 @@ def reload_accepted_frames(
                     ca_shifts=_ca_shifts,
                     trail_reject=_tr,
                     banding=_banding_cfg(args),
-                    spike_reject=getattr(args, 'spike_reject', False))
+                    spike_reject=getattr(args, 'spike_reject', False),
+                    quality_level='gate')
             if result.get('error'):
                 return j, orig_idx, None, None, result['error']
             return j, orig_idx, result['rgb'], result['lum'], None

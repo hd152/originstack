@@ -283,11 +283,11 @@ def debayer_bilinear(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bili
 
     # FIX #7: Average the two green upsamples in one expression — same cost,
     # but expressed clearly; a future GPU kernel could fuse these.
-    out = xp.zeros((H, W, 3), dtype=xp.float32)
-    out[:, :, 0] = upsample(r,  r_r,  r_c)
-    out[:, :, 1] = 0.5 * (upsample(g1, g1_r, g1_c) + upsample(g2, g2_r, g2_c))
-    out[:, :, 2] = upsample(b,  b_r,  b_c)
-    return out
+    result = xp.zeros((H, W, 3), dtype=xp.float32)
+    result[:, :, 0] = upsample(r,  r_r,  r_c)
+    result[:, :, 1] = 0.5 * (upsample(g1, g1_r, g1_c) + upsample(g2, g2_r, g2_c))
+    result[:, :, 2] = upsample(b,  b_r,  b_c)
+    return result
 
 
 # Malvar-He-Cutler (2004) kernels -- "High-Quality Linear Interpolation for
@@ -369,27 +369,44 @@ def _debayer_malvar_numpy(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
     return np.stack([R, G, B], axis=-1).astype(np.float32)
 
 
-def _malvar_raw(raw: np.ndarray, pattern: str) -> np.ndarray:
+def _malvar_raw(raw: np.ndarray, pattern: str,
+                out: Optional[np.ndarray] = None) -> np.ndarray:
     """Malvar demosaic with no grid equalisation (native, numpy fallback)."""
+    if (out is not None and _HAS_NATIVE and hasattr(_native, 'debayer_malvar_into')
+            and isinstance(raw, np.ndarray) and isinstance(out, np.ndarray)
+            and raw.dtype == np.float32 and out.dtype == np.float32
+            and raw.ndim == 2 and out.shape == (*raw.shape, 3)
+            and raw.flags['C_CONTIGUOUS'] and out.flags['C_CONTIGUOUS']
+            and out.flags['WRITEABLE']):
+        try:
+            _native.debayer_malvar_into(np.ascontiguousarray(raw), out, pattern.upper())
+            return out
+        except Exception:
+            pass
     if _HAS_NATIVE and hasattr(_native, 'debayer_malvar'):
         try:
             return _native.debayer_malvar(np.ascontiguousarray(raw, dtype=np.float32),
                                           pattern.upper())
         except Exception:
             pass
-    return _debayer_malvar_numpy(raw, pattern)
+    result = _debayer_malvar_numpy(raw, pattern)
+    if out is not None:
+        out[...] = result
+        return out
+    return result
 
 
-def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+def debayer_malvar(raw: np.ndarray, pattern: str = 'RGGB',
+                   out: Optional[np.ndarray] = None) -> np.ndarray:
     """Malvar-He-Cutler demosaicing (native Rust kernel with a numpy
     fallback -- see ``_debayer_malvar_numpy`` for the algorithm/validation
     notes). No longer depends on cv2."""
-    out = _malvar_raw(raw, pattern)      # `out` is ours: equalise it where it lies
+    result = _malvar_raw(raw, pattern, out=out)
     cfg = _session_cfa
     if cfg is not None and cfg['pattern'] == pattern.upper():
-        _apply_fixed_grid(out, cfg)
-        return out
-    return _equalize_bayer_grid(out, inplace=True)
+        _apply_fixed_grid(result, cfg)
+        return result
+    return _equalize_bayer_grid(result, inplace=True)
 
 
 # ── Session-constant CFA equalisation ────────────────────────────────────────
@@ -899,9 +916,9 @@ def _debayer_rcd_numpy(a: np.ndarray, offsets, scale: float, raw: np.ndarray,
 def debayer(raw: np.ndarray, pattern: str = 'RGGB', method: str = 'bilinear',
             out: Optional[np.ndarray] = None) -> np.ndarray:
     """Dispatch to the appropriate debayering method. ``out``: an (H, W, 3) float32 buffer
-    the native RCD path writes into (others ignore it and return a new array)."""
+    the native RCD and Malvar paths can write into (others return a new array)."""
     if method == 'malvar':
-        return debayer_malvar(raw, pattern)
+        return debayer_malvar(raw, pattern, out=out)
     elif method == 'menon2007':
         return debayer_menon2007(raw, pattern)
     elif method == 'rcd':

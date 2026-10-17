@@ -500,6 +500,30 @@ class TestComputeQualityMetricsAdvanced(unittest.TestCase):
         self.assertEqual(m['star_count'], 0)
         self.assertEqual(m['fwhm'], 0.0)
 
+    def test_gate_metrics_match_full_metrics(self):
+        """The gate pass preserves metrics consumed by quality gating."""
+        img = self._star_lum((128, 128))
+        gate = self.cqm(img, level='gate')
+        full = self.cqm(img, level='full')
+        for key in ('brightness', 'mean', 'contrast', 'snr', 'star_count',
+                    'star_snr', 'fwhm', 'background', 'noise', 'score',
+                    'p01', 'p50', 'p75', 'p95', 'p99', 'dynamic_range'):
+            self.assertEqual(gate[key], full[key], key)
+
+    def test_deferred_completion_reuses_gate_star_measurements(self):
+        """Completing accepted-frame diagnostics must not redetect stars."""
+        from unittest.mock import patch
+
+        from src.quality import complete_quality_metrics
+
+        img = self._star_lum((128, 128))
+        gate = self.cqm(img, level='gate')
+        with patch('src.quality.detect_stars_auto',
+                   side_effect=AssertionError("stars redetected")):
+            complete_quality_metrics(img, gate)
+        self.assertNotEqual(gate['sharpness'], 0.0)
+        self.assertIn('_star_sources', gate)
+
 
 class TestEstimateBortle(unittest.TestCase):
     """Tests for the heuristic Bortle-bucket estimate from sky background."""
