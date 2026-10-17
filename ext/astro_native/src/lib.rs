@@ -17,19 +17,29 @@ use pyo3::types::PyBytes;
 use rayon::prelude::*;
 
 /// Shuffle bytes by element position, improving LZ4's compression of numeric arrays.
-/// One sequential pass over `input`, `itemsize` sequential write streams.
+/// One sequential pass over `input`, `itemsize` sequential write streams. 4-byte items (every
+/// frame the pipeline stores) go 16 at a time through SSSE3 when the CPU has it: the scalar
+/// byte loop was ~35 ms of the 70 ms it took to code a 75 MB RGB frame, single thread.
 fn byte_shuffle_into(input: &[u8], itemsize: usize, output: &mut [u8]) {
     let count = input.len() / itemsize;
     if itemsize == 4 {
         let (p0, rest) = output.split_at_mut(count);
         let (p1, rest) = rest.split_at_mut(count);
         let (p2, p3) = rest.split_at_mut(count);
-        for ((((item, b0), b1), b2), b3) in input
+        #[allow(unused_mut)]
+        let mut done = 0;
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("ssse3") {
+            done = count / 16 * 16;
+            // SAFETY: SSSE3 checked above; every slice holds at least `done` items.
+            unsafe { shuffle4_ssse3(&input[..4 * done], p0, p1, p2, p3) };
+        }
+        for ((((item, b0), b1), b2), b3) in input[4 * done..]
             .chunks_exact(4)
-            .zip(p0.iter_mut())
-            .zip(p1.iter_mut())
-            .zip(p2.iter_mut())
-            .zip(p3.iter_mut())
+            .zip(p0[done..].iter_mut())
+            .zip(p1[done..].iter_mut())
+            .zip(p2[done..].iter_mut())
+            .zip(p3[done..].iter_mut())
         {
             *b0 = item[0];
             *b1 = item[1];
@@ -45,19 +55,54 @@ fn byte_shuffle_into(input: &[u8], itemsize: usize, output: &mut [u8]) {
     }
 }
 
-/// Inverse of `byte_shuffle_into`.
+/// 16 items per step: `pshufb` groups each register's bytes by plane, a 4x4 transpose of
+/// 32-bit lanes makes one register per plane. `input.len()` is a multiple of 64.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn shuffle4_ssse3(input: &[u8], p0: &mut [u8], p1: &mut [u8], p2: &mut [u8], p3: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let m = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    for (g, block) in input.chunks_exact(64).enumerate() {
+        let src = block.as_ptr() as *const __m128i;
+        let s0 = _mm_shuffle_epi8(_mm_loadu_si128(src), m);
+        let s1 = _mm_shuffle_epi8(_mm_loadu_si128(src.add(1)), m);
+        let s2 = _mm_shuffle_epi8(_mm_loadu_si128(src.add(2)), m);
+        let s3 = _mm_shuffle_epi8(_mm_loadu_si128(src.add(3)), m);
+        let t0 = _mm_unpacklo_epi32(s0, s1);
+        let t1 = _mm_unpacklo_epi32(s2, s3);
+        let t2 = _mm_unpackhi_epi32(s0, s1);
+        let t3 = _mm_unpackhi_epi32(s2, s3);
+        let at = 16 * g;
+        _mm_storeu_si128(p0[at..at + 16].as_mut_ptr() as *mut __m128i, _mm_unpacklo_epi64(t0, t1));
+        _mm_storeu_si128(p1[at..at + 16].as_mut_ptr() as *mut __m128i, _mm_unpackhi_epi64(t0, t1));
+        _mm_storeu_si128(p2[at..at + 16].as_mut_ptr() as *mut __m128i, _mm_unpacklo_epi64(t2, t3));
+        _mm_storeu_si128(p3[at..at + 16].as_mut_ptr() as *mut __m128i, _mm_unpackhi_epi64(t2, t3));
+    }
+}
+
+/// Inverse of `byte_shuffle_into`. 4-byte items go 16 at a time through SSE2 byte and
+/// 16-bit interleaves (baseline x86-64, so no run-time check).
 fn byte_unshuffle_into(input: &[u8], itemsize: usize, output: &mut [u8]) {
     let count = input.len() / itemsize;
     if itemsize == 4 {
         let (p0, rest) = input.split_at(count);
         let (p1, rest) = rest.split_at(count);
         let (p2, p3) = rest.split_at(count);
-        for ((((item, &b0), &b1), &b2), &b3) in output
+        #[cfg(target_arch = "x86_64")]
+        let done = {
+            let done = count / 16 * 16;
+            // SAFETY: SSE2 is part of the x86-64 baseline; every slice holds `done` items.
+            unsafe { unshuffle4_sse2(p0, p1, p2, p3, &mut output[..4 * done]) };
+            done
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let done = 0;
+        for ((((item, &b0), &b1), &b2), &b3) in output[4 * done..]
             .chunks_exact_mut(4)
-            .zip(p0.iter())
-            .zip(p1.iter())
-            .zip(p2.iter())
-            .zip(p3.iter())
+            .zip(p0[done..].iter())
+            .zip(p1[done..].iter())
+            .zip(p2[done..].iter())
+            .zip(p3[done..].iter())
         {
             item.copy_from_slice(&[b0, b1, b2, b3]);
         }
@@ -67,6 +112,29 @@ fn byte_unshuffle_into(input: &[u8], itemsize: usize, output: &mut [u8]) {
         for (byte, value) in item.iter_mut().enumerate() {
             *value = input[byte * count + index];
         }
+    }
+}
+
+/// `output.len()` is a multiple of 64; 16 items per step.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn unshuffle4_sse2(p0: &[u8], p1: &[u8], p2: &[u8], p3: &[u8], output: &mut [u8]) {
+    use std::arch::x86_64::*;
+    for (g, block) in output.chunks_exact_mut(64).enumerate() {
+        let at = 16 * g;
+        let a = _mm_loadu_si128(p0[at..at + 16].as_ptr() as *const __m128i);
+        let b = _mm_loadu_si128(p1[at..at + 16].as_ptr() as *const __m128i);
+        let c = _mm_loadu_si128(p2[at..at + 16].as_ptr() as *const __m128i);
+        let d = _mm_loadu_si128(p3[at..at + 16].as_ptr() as *const __m128i);
+        let ab_lo = _mm_unpacklo_epi8(a, b);
+        let ab_hi = _mm_unpackhi_epi8(a, b);
+        let cd_lo = _mm_unpacklo_epi8(c, d);
+        let cd_hi = _mm_unpackhi_epi8(c, d);
+        let dst = block.as_mut_ptr() as *mut __m128i;
+        _mm_storeu_si128(dst, _mm_unpacklo_epi16(ab_lo, cd_lo));
+        _mm_storeu_si128(dst.add(1), _mm_unpackhi_epi16(ab_lo, cd_lo));
+        _mm_storeu_si128(dst.add(2), _mm_unpacklo_epi16(ab_hi, cd_hi));
+        _mm_storeu_si128(dst.add(3), _mm_unpackhi_epi16(ab_hi, cd_hi));
     }
 }
 
@@ -383,26 +451,11 @@ fn frame_v2_u32(src: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(src[at..at + 4].try_into().unwrap())
 }
 
-/// Decompress a frame written by `compress_frame_chunked` *or* `compress_frame` straight
-/// into ``out`` (a C-contiguous uint8 view of the destination frame; its length is the
-/// expected uncompressed size). The caller allocates ``out`` (``np.empty``: no zero fill),
-/// and chunked frames are unshuffled chunk by chunk into it, in parallel, with no
-/// frame-sized scratch buffer.
-#[pyfunction]
-fn decompress_frame_into(
-    py: Python<'_>,
-    data: &Bound<'_, PyBytes>,
-    mut out: numpy::PyReadwriteArray1<'_, u8>,
-    itemsize: usize,
-) -> PyResult<()> {
-    let err = |m: String| pyo3::exceptions::PyValueError::new_err(m);
-    let src = data.as_bytes();
-    let dst = out
-        .as_slice_mut()
-        .map_err(|_| err("output array must be contiguous".into()))?;
+/// Decode a stored frame (chunked or whole-frame LZ4) into ``dst``.
+fn frame_decode_into(src: &[u8], dst: &mut [u8], itemsize: usize) -> Result<(), String> {
     let expected = dst.len();
     if itemsize == 0 || expected % itemsize != 0 {
-        return Err(err("expected length must be divisible by positive itemsize".into()));
+        return Err("expected length must be divisible by positive itemsize".into());
     }
     if src.len() >= FRAME_V2_HEADER && &src[..4] == FRAME_V2_MAGIC {
         let stored_item = frame_v2_u32(src, 4) as usize;
@@ -410,17 +463,17 @@ fn decompress_frame_into(
         let chunk = frame_v2_u32(src, 16) as usize;
         let n = frame_v2_u32(src, 20) as usize;
         if stored_item != itemsize {
-            return Err(err(format!("frame itemsize {stored_item}; expected {itemsize}")));
+            return Err(format!("frame itemsize {stored_item}; expected {itemsize}"));
         }
         if total != expected {
-            return Err(err(format!("decompressed frame has {total} bytes; expected {expected}")));
+            return Err(format!("decompressed frame has {total} bytes; expected {expected}"));
         }
         if chunk == 0 || chunk % itemsize != 0 || n != total.div_ceil(chunk) {
-            return Err(err("corrupt chunked frame header".into()));
+            return Err("corrupt chunked frame header".into());
         }
         let table_end = FRAME_V2_HEADER + 4 * n * itemsize;
         if src.len() < table_end {
-            return Err(err("truncated chunked frame".into()));
+            return Err("truncated chunked frame".into());
         }
         // payload offset of every chunk, from the per-plane stored lengths
         let mut offsets = Vec::with_capacity(n + 1);
@@ -433,55 +486,110 @@ fn decompress_frame_into(
             offsets.push(at);
         }
         if at != src.len() {
-            return Err(err("truncated chunked frame".into()));
+            return Err("truncated chunked frame".into());
         }
-        return py
-            .detach(|| {
-                dst.par_chunks_mut(chunk).enumerate().try_for_each_init(
-                    || vec![0u8; chunk],
-                    |scratch, (i, d)| {
-                        let s = &mut scratch[..d.len()];
-                        let plane = d.len() / itemsize;
-                        let mut pos = offsets[i];
-                        for (p, sp) in s.chunks_exact_mut(plane).enumerate() {
-                            let e = frame_v2_u32(src, FRAME_V2_HEADER + 4 * (i * itemsize + p));
-                            let len = (e & !FRAME_V2_RAW) as usize;
-                            let stored = &src[pos..pos + len];
-                            pos += len;
-                            if e & FRAME_V2_RAW != 0 {
-                                if len != plane {
-                                    return Err(format!("chunk {i} plane {p}: {len} raw bytes; expected {plane}"));
-                                }
-                                sp.copy_from_slice(stored);
-                            } else {
-                                let written =
-                                    lz4_flex::block::decompress_into(stored, sp).map_err(|e| e.to_string())?;
-                                if written != plane {
-                                    return Err(format!("chunk {i} plane {p} has {written} bytes; expected {plane}"));
-                                }
-                            }
+        return dst.par_chunks_mut(chunk).enumerate().try_for_each_init(
+            || vec![0u8; chunk],
+            |scratch, (i, d)| {
+                let s = &mut scratch[..d.len()];
+                let plane = d.len() / itemsize;
+                let mut pos = offsets[i];
+                for (p, sp) in s.chunks_exact_mut(plane).enumerate() {
+                    let e = frame_v2_u32(src, FRAME_V2_HEADER + 4 * (i * itemsize + p));
+                    let len = (e & !FRAME_V2_RAW) as usize;
+                    let stored = &src[pos..pos + len];
+                    pos += len;
+                    if e & FRAME_V2_RAW != 0 {
+                        if len != plane {
+                            return Err(format!("chunk {i} plane {p}: {len} raw bytes; expected {plane}"));
                         }
-                        byte_unshuffle_into(s, itemsize, d);
-                        Ok(())
-                    },
-                )
-            })
-            .map_err(err);
+                        sp.copy_from_slice(stored);
+                    } else {
+                        let written =
+                            lz4_flex::block::decompress_into(stored, sp).map_err(|e| e.to_string())?;
+                        if written != plane {
+                            return Err(format!("chunk {i} plane {p} has {written} bytes; expected {plane}"));
+                        }
+                    }
+                }
+                byte_unshuffle_into(s, itemsize, d);
+                Ok(())
+            },
+        );
     }
-    let (stored_len, block) = lz4_flex::block::uncompressed_size(src).map_err(|e| err(e.to_string()))?;
+    let (stored_len, block) = lz4_flex::block::uncompressed_size(src).map_err(|e| e.to_string())?;
     if stored_len != expected {
-        return Err(err(format!("decompressed frame has {stored_len} bytes; expected {expected}")));
+        return Err(format!("decompressed frame has {stored_len} bytes; expected {expected}"));
     }
-    py.detach(|| {
-        let mut shuffled = vec![0u8; expected];
-        let written = lz4_flex::block::decompress_into(block, &mut shuffled).map_err(|e| e.to_string())?;
-        if written != expected {
-            return Err(format!("decompressed frame has {written} bytes; expected {expected}"));
+    let mut shuffled = vec![0u8; expected];
+    let written = lz4_flex::block::decompress_into(block, &mut shuffled).map_err(|e| e.to_string())?;
+    if written != expected {
+        return Err(format!("decompressed frame has {written} bytes; expected {expected}"));
+    }
+    byte_unshuffle_into(&shuffled, itemsize, dst);
+    Ok(())
+}
+
+/// Decompress a frame written by `compress_frame_chunked` (or `..._to_file`) *or*
+/// `compress_frame` straight into ``out`` (a C-contiguous uint8 view of the destination
+/// frame; its length is the expected uncompressed size). The caller allocates ``out``
+/// (``np.empty``: no zero fill), and chunked frames are unshuffled chunk by chunk into it,
+/// in parallel, with no frame-sized scratch buffer.
+#[pyfunction]
+fn decompress_frame_into(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    mut out: numpy::PyReadwriteArray1<'_, u8>,
+    itemsize: usize,
+) -> PyResult<()> {
+    let src = data.as_bytes();
+    let dst = out
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("output array must be contiguous"))?;
+    py.detach(|| frame_decode_into(src, dst, itemsize))
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// File read buffers reused across `decompress_frame_file_into` calls.
+static FRAME_READ_POOL: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> = std::sync::OnceLock::new();
+
+/// `decompress_frame_into` reading the stored frame from ``path`` into a pooled buffer
+/// (a Python ``read()`` allocated and filled a fresh frame-sized bytes object per read).
+/// A missing file raises ``FileNotFoundError``.
+#[pyfunction]
+fn decompress_frame_file_into(
+    py: Python<'_>,
+    path: std::path::PathBuf,
+    mut out: numpy::PyReadwriteArray1<'_, u8>,
+    itemsize: usize,
+) -> PyResult<()> {
+    use std::io::Read;
+    let dst = out
+        .as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("output array must be contiguous"))?;
+    let pool = FRAME_READ_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut buf = pool.lock().ok().and_then(|mut p| p.pop()).unwrap_or_default();
+    let result = py.detach(|| -> PyResult<()> {
+        buf.clear();
+        let mut file = std::fs::File::open(&path).map_err(|e| {
+            let msg = format!("{}: {e}", path.display());
+            if e.kind() == std::io::ErrorKind::NotFound {
+                pyo3::exceptions::PyFileNotFoundError::new_err(msg)
+            } else {
+                pyo3::exceptions::PyOSError::new_err(msg)
+            }
+        })?;
+        if let Ok(meta) = file.metadata() {
+            buf.reserve(meta.len() as usize);
         }
-        byte_unshuffle_into(&shuffled, itemsize, dst);
-        Ok(())
-    })
-    .map_err(err)
+        file.read_to_end(&mut buf)
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{}: {e}", path.display())))?;
+        frame_decode_into(&buf, dst, itemsize).map_err(pyo3::exceptions::PyValueError::new_err)
+    });
+    if let Ok(mut p) = pool.lock() {
+        p.push(buf);
+    }
+    result
 }
 
 /// f32/f64 for `median_inplace`.
@@ -10708,6 +10816,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decompress_frame, m)?)?;
     m.add_function(wrap_pyfunction!(compress_frame_chunked, m)?)?;
     m.add_function(wrap_pyfunction!(compress_frame_chunked_to_file, m)?)?;
+    m.add_function(wrap_pyfunction!(decompress_frame_file_into, m)?)?;
     m.add_function(wrap_pyfunction!(decompress_frame_into, m)?)?;
     #[cfg(feature = "triage")]
     m.add_function(wrap_pyfunction!(transient_triage::transient_triage_score, m)?)?;

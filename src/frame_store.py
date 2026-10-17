@@ -102,6 +102,12 @@ class _CompressedFrameArray:
     def _read_frame(self, index: int) -> np.ndarray:
         native = _require_native_compressor()
         index = self._normalise_index(index)
+        if hasattr(native, 'decompress_frame_file_into'):
+            # >= 0.60: read into a pooled buffer, not a fresh frame-sized bytes object
+            frame = np.empty(self._frame_shape, self.dtype)
+            native.decompress_frame_file_into(self._path(index), frame.view(np.uint8).reshape(-1),
+                                              self.dtype.itemsize)
+            return frame
         with open(self._path(index), 'rb') as stream:
             compressed = stream.read()
         if hasattr(native, 'decompress_frame_into'):
