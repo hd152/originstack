@@ -86,7 +86,11 @@ def test_lower_diffuse_threshold_preserves_faint_extended_emission():
                            - np.median(default[:, :, 0][sky_region]))
     protected_excess = float(np.median(protected[:, :, 0][outer_nebula])
                               - np.median(protected[:, :, 0][sky_region]))
-    assert protected_excess > default_excess + 5.0
+    # judged against the truth, not a margin over the default: the sample-gap fill
+    # raised the default from 11.9 to 17.7 of 20.2 ADU (threshold 0.25: 17.5 -> 19.1)
+    true_excess = float(np.median(nebula[outer_nebula]))
+    assert protected_excess >= default_excess
+    assert protected_excess > 0.9 * true_excess
 
 
 def test_emission_mask_disk_dilation_matches_scipy_binary_dilation():
