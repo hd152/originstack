@@ -102,6 +102,12 @@ class _CompressedFrameArray:
     def _read_frame(self, index: int) -> np.ndarray:
         native = _require_native_compressor()
         index = self._normalise_index(index)
+        if hasattr(native, 'decompress_frame_file_into'):
+            # >= 0.60: read into a pooled buffer, not a fresh frame-sized bytes object
+            frame = np.empty(self._frame_shape, self.dtype)
+            native.decompress_frame_file_into(self._path(index), frame.view(np.uint8).reshape(-1),
+                                              self.dtype.itemsize)
+            return frame
         with open(self._path(index), 'rb') as stream:
             compressed = stream.read()
         if hasattr(native, 'decompress_frame_into'):
@@ -129,14 +135,20 @@ class _CompressedFrameArray:
             raise ValueError(
                 f"Expected a value broadcastable to frame shape {self._frame_shape}"
             ) from exc
-        # chunked (>= 0.58): shuffled in cache, chunks compressed in parallel
-        encode = getattr(native, 'compress_frame_chunked', native.compress_frame)
-        compressed = encode(contiguous.view(np.uint8).reshape(-1), self.dtype.itemsize)
         path = self._path(index)
         temporary = f'{path}.{os.getpid()}.tmp'
+        flat = contiguous.view(np.uint8).reshape(-1)
         try:
-            with open(temporary, 'wb') as stream:
-                stream.write(compressed)
+            if hasattr(native, 'compress_frame_chunked_to_file'):
+                # >= 0.59: the same bytes, coded into pooled buffers and written from
+                # there (no concatenated copy, no Python bytes, no write-call copy)
+                native.compress_frame_chunked_to_file(flat, self.dtype.itemsize, temporary)
+            else:
+                # chunked (>= 0.58): shuffled in cache, chunks compressed in parallel
+                encode = getattr(native, 'compress_frame_chunked', native.compress_frame)
+                compressed = encode(flat, self.dtype.itemsize)
+                with open(temporary, 'wb') as stream:
+                    stream.write(compressed)
             os.replace(temporary, path)
         finally:
             try:

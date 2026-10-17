@@ -92,6 +92,69 @@ def test_chunked_frame_matches_whole_frame_codec_on_float32():
     np.testing.assert_array_equal(whole, flat)
 
 
+def test_chunked_frame_to_file_writes_the_same_bytes(tmp_path):
+    # pooled buffers are reused across calls of different sizes, so alternate them
+    rng = np.random.default_rng(11)
+    cases = [(rng.normal(0.05, 0.002, (700, 513, 3)).astype(np.float32), 4),
+             (np.zeros((300, 211), np.float32), 4),
+             (np.frombuffer(rng.bytes((3 << 20) + 12_344), np.uint8), 1),
+             (rng.normal(1e4, 600, (1024, 1100)).astype(np.float32), 4),
+             (rng.integers(0, 4096, 200_001).astype(np.uint16), 2)]
+    for i, (arr, itemsize) in enumerate(cases * 2):
+        flat = np.ascontiguousarray(arr).view(np.uint8).reshape(-1)
+        path = tmp_path / f'f{i}.lz4'
+        n = native.compress_frame_chunked_to_file(flat, itemsize, str(path))
+        expected = native.compress_frame_chunked(flat, itemsize)
+        assert n == len(expected) and path.read_bytes() == expected
+
+
+@pytest.mark.parametrize('n_items', [5, 16, 1000, 262_144, 262_144 + 37, 600_001])
+def test_chunked_frame_shuffle_matches_numpy_byte_planes(n_items):
+    # random bytes do not compress, so every plane is stored raw and the payload is the
+    # byte-shuffled chunks themselves: checks the SIMD 4-byte shuffle (16 items a step,
+    # scalar tail) against numpy's transpose, chunk by chunk
+    raw = np.frombuffer(np.random.default_rng(n_items).bytes(4 * n_items), np.uint8)
+    enc = native.compress_frame_chunked(raw, 4)
+    chunk = int.from_bytes(enc[16:20], 'little')
+    n_chunks = int.from_bytes(enc[20:24], 'little')
+    payload = np.frombuffer(enc[24 + 16 * n_chunks:], np.uint8)
+    expected = np.concatenate([raw[i:i + chunk].reshape(-1, 4).T.ravel()
+                               for i in range(0, raw.size, chunk)])
+    np.testing.assert_array_equal(payload, expected)
+    out = np.empty_like(raw)
+    native.decompress_frame_into(enc, out, 4)
+    np.testing.assert_array_equal(out, raw)
+
+
+def test_decompress_frame_file_into_reads_every_format(tmp_path):
+    rng = np.random.default_rng(13)
+    frame = rng.normal(1e4, 600, (513, 700, 3)).astype(np.float32)
+    flat = frame.view(np.uint8).reshape(-1)
+    small = rng.normal(0, 1, (40, 33)).astype(np.float32)
+    cases = {'to_file': None, 'chunked': native.compress_frame_chunked(flat, 4),
+             'whole': native.compress_frame(flat, 4)}
+    native.compress_frame_chunked_to_file(flat, 4, str(tmp_path / 'to_file.lz4'))
+    for name, blob in cases.items():
+        path = tmp_path / f'{name}.lz4'
+        if blob is not None:
+            path.write_bytes(blob)
+        for _ in range(2):          # the second read reuses the pooled buffer
+            out = np.empty_like(frame)
+            native.decompress_frame_file_into(str(path), out.view(np.uint8).reshape(-1), 4)
+            np.testing.assert_array_equal(out.view(np.uint32), frame.view(np.uint32))
+        # a smaller frame after a larger one through the same pooled buffer
+        p_small = tmp_path / f'{name}_small.lz4'
+        native.compress_frame_chunked_to_file(small.view(np.uint8).reshape(-1), 4, str(p_small))
+        out = np.empty_like(small)
+        native.decompress_frame_file_into(str(p_small), out.view(np.uint8).reshape(-1), 4)
+        np.testing.assert_array_equal(out, small)
+    with pytest.raises(FileNotFoundError):
+        native.decompress_frame_file_into(str(tmp_path / 'missing.lz4'), np.empty(4, np.uint8), 4)
+    (tmp_path / 'bad.lz4').write_bytes(cases['chunked'][:-3])
+    with pytest.raises(ValueError, match='truncated'):
+        native.decompress_frame_file_into(str(tmp_path / 'bad.lz4'), np.empty(flat.size, np.uint8), 4)
+
+
 def test_decompress_frame_into_reads_the_whole_frame_format():
     frame = np.random.default_rng(3).normal(0.0, 1.0, (64, 37, 3)).astype(np.float32)
     encoded = native.compress_frame(frame.view(np.uint8).reshape(-1), 4)

@@ -60,7 +60,9 @@ def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
 
     counter is a one-element list [int] of accepted frames seen so far, mutated
     in place. `every` comes from --ui-frame-every (0 disables); the first
-    frame is always shown so the viewer lights up immediately.
+    frame is always shown so the viewer lights up immediately. `rgb` may be a
+    zero-argument callable: a compressed frame store decodes a whole 75 MB frame
+    on every read, so callers pass `lambda: mem_rgb[i]` and only shown frames are read.
     """
     every = int(getattr(args, 'ui_frame_every', 5) or 0)
     if every <= 0 or not wv.active or rgb is None:
@@ -69,7 +71,7 @@ def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
     c = counter[0]
     if c == 1 or c % every == 0:
         try:
-            wv.frame_preview(name, np.asarray(rgb), args=args)
+            wv.frame_preview(name, np.asarray(rgb() if callable(rgb) else rgb), args=args)
         except Exception:
             pass
 
@@ -791,22 +793,25 @@ _RAYON_WORKER_CAP = 1
 def phase1_layout(args, n: int) -> Tuple[int, int]:
     """(worker processes, native threads per worker) for Phase 1's process pool.
 
-    Default: one process per *physical* core, with each worker's Rust kernels using the
-    remaining logical cores (8 x 2 on an 8-core / 16-thread CPU). 16 single-threaded
-    processes held 16 whole frames at once -- 16.5 GB peak on a 178-frame Sculptor
-    subset against Siril's 6.5-11 GB -- while sharing 8 cores' memory bandwidth; 8 x 2
-    measured 8.9 GB at a Phase 1 time within run-to-run noise (34.6 vs 32.5 s; 4 x 4:
-    5.8 GB but 50 s). An explicit -j N keeps N single-threaded workers, as before."""
-    logical = os.cpu_count() or 4
+    Default: single-threaded workers on three quarters of the *physical* cores (6 x 1 on
+    an 8-core / 16-thread CPU). Phase 1 is bound by memory traffic, not cores: on a
+    Ryzen 7 5800H with dual-channel DDR4 a frame took 172 ms alone and 850 ms under
+    8 x 2 workers, while an in-cache loop slowed only 2.4x at 16 threads. Phase 1 alone,
+    alternating runs: Sunflower (158 frames) 8 x 2 30.6 / 30.7 s, 6 x 1 28.3 / 27.6 s,
+    4 x 2 27.7 / 27.4 s, 8 x 1 29.3 / 27.9 s; Messier 101 (214) 8 x 2 42.8 / 43.4 s,
+    6 x 1 38.3 / 40.5 s, 4 x 2 41.0 / 44.9 s. Fewer workers also hold fewer frames:
+    16 single-threaded processes held 16.5 GB on a 178-frame Sculptor subset (8 x 2:
+    8.9 GB). An explicit -j N keeps N single-threaded workers, as before."""
     if getattr(args, 'parallel', 0) and args.parallel > 0:
         return max(1, min(args.parallel, n)), _RAYON_WORKER_CAP
+    logical = os.cpu_count() or 4
     try:
         import psutil
         physical = psutil.cpu_count(logical=False) or max(1, logical // 2)
     except Exception:
         physical = max(1, logical // 2)
-    workers = max(1, min(physical, n))
-    return workers, max(1, logical // workers)
+    workers = max(1, min(3 * physical // 4, n))
+    return workers, 1
 
 
 def _pin_worker_to_single_thread(rayon_threads: int = _RAYON_WORKER_CAP) -> None:
@@ -1362,7 +1367,7 @@ def execute_frame_processing(
                             f.metrics = metrics
                             _publish_frame_thumb(_wv, args,
                                                  os.path.basename(f.path),
-                                                 mem_rgb[frame_idx], _wv_thumb_count)
+                                                 lambda: mem_rgb[frame_idx], _wv_thumb_count)
                             if args.verbose:
                                 m = f.metrics
                                 safe_print(f'    {os.path.basename(f.path)}: '
@@ -1520,7 +1525,7 @@ def execute_frame_processing(
                         _wv.frame_metrics(os.path.basename(f.path), f.metrics)
                     if error is None:
                         _publish_frame_thumb(_wv, args, os.path.basename(f.path),
-                                             mem_rgb[i], _wv_thumb_count)
+                                             lambda: mem_rgb[i], _wv_thumb_count)
                     # Periodically free CuPy's cached memory pool to prevent VRAM exhaustion
                     # from accumulating unused cached blocks across many completed frames.
                     if gpu.active and (_completed % _free_interval == 0):
