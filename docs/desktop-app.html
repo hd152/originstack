@@ -170,7 +170,7 @@
       <div><dt>Disk space</dt>
         <dd><p>Long sessions need room: about 170 MB of temporary space per light frame, so 300 frames need around 50 GB. The app checks before it starts and says how much it needs.</p></dd></div>
       <div><dt>Workers</dt>
-        <dd><p>Leave it at 0 (automatic): one process per physical core. Set 1 to process one frame at a time on a machine that is short of memory.</p></dd></div>
+        <dd><p>Leave it at 0 (automatic): one single-threaded process on three of every four physical cores (frame processing is limited by memory speed, so more workers only compete for it). Set 1 to process one frame at a time on a machine that is short of memory.</p></dd></div>
       <div><dt>GPU</dt>
         <dd><p>Off by default. On the cards tested it was no faster than the processor; it may help on a card with plenty of memory.</p></dd></div>
       <div><dt>When something goes wrong</dt>

@@ -245,7 +245,7 @@ The startup banner reports native status (`native_status()`); accelerated steps 
 `tqdm`, `Pillow`, `psutil`, `cupy`, `rawpy`, `tifffile`, `astro_native` — each guarded, features degrade gracefully.
 
 ### Parallelism
-`-j N` / `--parallel N`: `0` auto (one process per physical core, Rust kernels on the remaining logical cores), `1` sequential, `N` = N single-threaded processes. `ProcessPoolExecutor` for CPU, `ThreadPoolExecutor` for GPU/thread paths.
+`-j N` / `--parallel N`: `0` auto (single-threaded processes on 3/4 of the physical cores: Phase 1 is memory-bound, 6 x 1 beat 8 x 2 by 7-10% on an 8-core laptop; `frame_processor.phase1_layout`), `1` sequential, `N` = N single-threaded processes. `ProcessPoolExecutor` for CPU, `ThreadPoolExecutor` for GPU/thread paths.
 
 ### Packaging the desktop app (Windows)
 ```powershell

@@ -120,3 +120,14 @@ def test_session_ca_probe_survives_a_device_array_debayer(monkeypatch):
     out = fp._measure_session_ca(frames, args)
     assert seen and all(t is np.ndarray for t in seen)
     assert out is not None
+
+
+@pytest.mark.parametrize('physical, frames, expected', [
+    (8, 158, (6, 1)), (4, 50, (3, 1)), (16, 300, (12, 1)), (1, 10, (1, 1)), (8, 4, (4, 1))])
+def test_phase1_layout_uses_three_quarters_of_physical_cores(monkeypatch, physical, frames,
+                                                             expected):
+    # memory-bound: single-threaded workers on 3/4 of the physical cores beat 8 x 2
+    psutil = pytest.importorskip('psutil')
+    monkeypatch.setattr(psutil, 'cpu_count', lambda logical=True: physical if not logical else 2 * physical)
+    assert fp.phase1_layout(_args(), frames) == expected
+    assert fp.phase1_layout(_args(parallel=3), frames) == (min(3, frames), fp._RAYON_WORKER_CAP)

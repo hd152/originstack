@@ -793,22 +793,25 @@ _RAYON_WORKER_CAP = 1
 def phase1_layout(args, n: int) -> Tuple[int, int]:
     """(worker processes, native threads per worker) for Phase 1's process pool.
 
-    Default: one process per *physical* core, with each worker's Rust kernels using the
-    remaining logical cores (8 x 2 on an 8-core / 16-thread CPU). 16 single-threaded
-    processes held 16 whole frames at once -- 16.5 GB peak on a 178-frame Sculptor
-    subset against Siril's 6.5-11 GB -- while sharing 8 cores' memory bandwidth; 8 x 2
-    measured 8.9 GB at a Phase 1 time within run-to-run noise (34.6 vs 32.5 s; 4 x 4:
-    5.8 GB but 50 s). An explicit -j N keeps N single-threaded workers, as before."""
-    logical = os.cpu_count() or 4
+    Default: single-threaded workers on three quarters of the *physical* cores (6 x 1 on
+    an 8-core / 16-thread CPU). Phase 1 is bound by memory traffic, not cores: on a
+    Ryzen 7 5800H with dual-channel DDR4 a frame took 172 ms alone and 850 ms under
+    8 x 2 workers, while an in-cache loop slowed only 2.4x at 16 threads. Phase 1 alone,
+    alternating runs: Sunflower (158 frames) 8 x 2 30.6 / 30.7 s, 6 x 1 28.3 / 27.6 s,
+    4 x 2 27.7 / 27.4 s, 8 x 1 29.3 / 27.9 s; Messier 101 (214) 8 x 2 42.8 / 43.4 s,
+    6 x 1 38.3 / 40.5 s, 4 x 2 41.0 / 44.9 s. Fewer workers also hold fewer frames:
+    16 single-threaded processes held 16.5 GB on a 178-frame Sculptor subset (8 x 2:
+    8.9 GB). An explicit -j N keeps N single-threaded workers, as before."""
     if getattr(args, 'parallel', 0) and args.parallel > 0:
         return max(1, min(args.parallel, n)), _RAYON_WORKER_CAP
+    logical = os.cpu_count() or 4
     try:
         import psutil
         physical = psutil.cpu_count(logical=False) or max(1, logical // 2)
     except Exception:
         physical = max(1, logical // 2)
-    workers = max(1, min(physical, n))
-    return workers, max(1, logical // workers)
+    workers = max(1, min(3 * physical // 4, n))
+    return workers, 1
 
 
 def _pin_worker_to_single_thread(rayon_threads: int = _RAYON_WORKER_CAP) -> None:
