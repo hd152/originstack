@@ -56,6 +56,10 @@ ROBUST_TAU = 10.0      # noise units: the loss is quadratic below, linear above
 CUTOUTS_PER_SESSION = 250
 CUTOUT_MIN_PEAK = 15.0  # noise units: fainter templates bring too much of their own sky
 MAX_SCALE = 0.6        # preferred largest template scale (its sky noise scales with it)
+# Loss weight of a pixel: 1 / (1 + shot variance) ** STAR_WEIGHT_POWER. v4 used power 1: a
+# star core then counted for almost nothing, so leaving a star cost little against removing
+# structure, and the trained model removed 8-26% of real stars' light (structure 63-99%).
+STAR_WEIGHT_POWER = 0.5
 # sessions never used for training (scored by ``eval``): a nebula, a dense star cloud,
 # a galaxy, and the 300-frame dithered night
 HOLDOUT = ("Crab_Nebula", "Sagittarius_Star_Cloud", "Messier_101_2026-04-27",
@@ -549,7 +553,7 @@ def inject(base, sess, bank: CutoutBank, rng, dev, empty_frac: float = 0.1):
 
 
 def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
-          resume: bool = False) -> None:
+          resume: bool = False, star_weight_power: float = STAR_WEIGHT_POWER) -> None:
     import torch
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -562,7 +566,8 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
     n = len(Z)
     rng = np.random.default_rng(seed)
     sessions = np.unique(sess)
-    val_sess = rng.choice(sessions, max(1, len(sessions) // 10), replace=False)
+    # a fifth of the sessions (v4's two let one odd session steer the checkpoint choice)
+    val_sess = rng.choice(sessions, max(3, len(sessions) // 5), replace=False)
     val = np.isin(sess, val_sess)
     tr_idx, va_idx = np.flatnonzero(~val), np.flatnonzero(val)
     print(f"{n} patches from {len(sessions)} sessions, train {len(tr_idx)}, val {len(va_idx)} "
@@ -592,7 +597,7 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
         -- a compact galaxy nucleus or a bright star the mask test called extended, which
         the target says to keep and the network removes: batch losses of 1e6 against ~2."""
         pred = net(torch.asinh(x / nd.ASINH_SOFT)) * torch.sqrt(1.0 + torch.clamp(x, min=0.0))
-        w = keep / (1.0 + var)
+        w = keep / (1.0 + var) ** star_weight_power
 
         def rob(e):
             t = ROBUST_TAU
@@ -614,6 +619,31 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
         net.train()
         return tot / len(va_idx), base_l / len(va_idx)
 
+    def heldout_score():
+        """(real stars' light removed, structure kept) on the validation sessions' own
+        patches, nothing injected -- what the checkpoint is chosen by. The validation loss
+        picked v4's step-3000 model, which removed 90-95% of real stars and 73-86% of the
+        nebulae with them. Real stars: the masked pixels (keep = 0) brighter than 3 sigma;
+        structure: unmasked pixels brighter than 3 sigma."""
+        net.eval()
+        rem_num = rem_den = kept_num = kept_den = 0.0
+        with torch.no_grad():
+            for s0 in range(0, len(va_idx), 32):
+                ids = va_idx[s0:s0 + 32]
+                base = torch.from_numpy(Z[ids].astype(np.float32)).permute(0, 3, 1, 2).to(dev)
+                keep = torch.from_numpy(K[ids].astype(np.float32))[:, None].to(dev)
+                out_b = base + net(torch.asinh(base / nd.ASINH_SOFT)) * torch.sqrt(
+                    1.0 + torch.clamp(base, min=0.0))
+                bright = (base.mean(dim=1, keepdim=True) > 3.0).float()
+                star_px = bright * (1.0 - keep)
+                struct_px = bright * keep
+                rem_num += float(((base - out_b) * star_px).sum())
+                rem_den += float((base * star_px).sum())
+                kept_num += float((out_b * struct_px).sum())
+                kept_den += float((base * struct_px).sum())
+        net.train()
+        return rem_num / max(rem_den, 1e-9), kept_num / max(kept_den, 1e-9)
+
     ckpt = os.path.splitext(out)[0] + "_ckpt.pt"
     start = 1
     if resume and os.path.exists(ckpt):
@@ -628,7 +658,7 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
 
     t0 = time.time()
     run = 0.0
-    best = [float("inf"), None]
+    best = [-float("inf"), None, 0]
     for step in range(start, steps + 1):
         lo, _ = loss_of(*batch_of(rng.choice(tr_idx, batch), rng, True))
         opt.zero_grad()
@@ -639,18 +669,23 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
         run += lo.item()
         if step % 1000 == 0 or step == steps:
             v, vb = validate()
-            if v < best[0]:
-                best[0], best[1] = v, {k: t.detach().clone() for k, t in net.state_dict().items()}
+            removed, kept = heldout_score()
+            score = min(removed, kept)
+            if score > best[0]:
+                best[0], best[1], best[2] = score, {k: t.detach().clone() for k, t in net.state_dict().items()}, step
             print(f"step {step:6d}  train {run / 1000:.4f}  val {v:.4f}  (identity {vb:.4f})  "
-                  f"{time.time() - t0:.0f} s", flush=True)
+                  f"real removed {removed:.3f}  structure kept {kept:.3f}  {time.time() - t0:.0f} s",
+                  flush=True)
             run = 0.0
             torch.save({"net": net.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                         "rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(), "step": step},
                        ckpt + ".tmp")
             os.replace(ckpt + ".tmp", ckpt)
+    export(net, os.path.splitext(out)[0] + "_final.npz")
     if best[1] is not None:
         net.load_state_dict(best[1])
-        print(f"best validation {best[0]:.4f} kept", flush=True)
+        print(f"best held-out score {best[0]:.3f} (min of real removed, structure kept) "
+              f"at step {best[2]} kept", flush=True)
     final_val = validate()[0]
     export(net, out)
     err = check_parity(net, out)
@@ -659,6 +694,7 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
         raise SystemExit("numpy forward pass does not match torch")
     with open(os.path.splitext(out)[0] + "_train.json", "w") as fh:
         json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val,
+                   "best_step": best[2], "best_score": best[0], "star_weight_power": star_weight_power,
                    "sessions": [str(s) for s in f["names"]], "holdout": list(HOLDOUT)}, fh)
 
 
@@ -757,6 +793,7 @@ def main() -> None:
     t.add_argument("--lr", type=float, default=1e-3)
     t.add_argument("--out", default=os.path.join(ROOT, "src", "data", "nn_starless.npz"))
     t.add_argument("--resume", action="store_true")
+    t.add_argument("--star-weight-power", type=float, default=STAR_WEIGHT_POWER)
     e = sub.add_parser("eval")
     e.add_argument("--stacks", required=True)
     e.add_argument("--model", default=os.path.join(ROOT, "src", "data", "nn_starless.npz"))
@@ -766,7 +803,8 @@ def main() -> None:
     if a.cmd == "bank":
         build_bank(a.stacks, a.bank, a.per_session)
     elif a.cmd == "train":
-        train(a.bank, a.steps, a.out, a.batch, a.lr, resume=a.resume)
+        train(a.bank, a.steps, a.out, a.batch, a.lr, resume=a.resume,
+              star_weight_power=a.star_weight_power)
     else:
         evaluate(a.stacks, a.model, a.out_dir, a.holdout_only)
 
