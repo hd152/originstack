@@ -6,7 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-10-16
+
 ### Fixed
+
+- **Large sessions no longer appear hung after proper coadd completes.** Frame-store cleanup
+  now finishes before post-processing begins and reports its progress, instead of competing
+  with Phase 4 on a background thread without visible output.
 
 - **Configs saved by versions before 2.1 load again.** They wrote Windows paths without
   escaping their backslashes, which is not valid TOML, so `--config` and `--from-stack`
