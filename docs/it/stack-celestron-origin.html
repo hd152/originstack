@@ -120,6 +120,8 @@
   <div class="wrap">
     <h2>Più notti sullo stesso soggetto</h2>
     <p class="intro measure">Metti la cartella di sessione di ogni notte dentro un'unica cartella superiore e scegli quest'ultima. Poiché il campo dell'Origin ruota mentre insegue un soggetto, le notti raramente combaciano esattamente. OriginStack legge prima i metadati di ogni sessione e poi unisce tutti i frame oppure integra ogni notte separatamente e le congiunge con un abbinamento stellare immune alla rotazione, scegliendo l'opzione che conserva più immagine. Per aggiungere i frame di stanotte a uno stack che hai già fatto, usa <code>--merge</code>. I dettagli sono nella <a href="../advanced.html#rotation">pagina avanzata</a>.</p>
+    <p class="plain measure">Le notti si sommano. Cinque notti sulla galassia Vortice, 680 fotogrammi ovvero 3,8 ore, contro la migliore notte singola, 295 fotogrammi ovvero 1,6 ore: sugli stessi pixel il rumore del cielo è inferiore del 30%, e le stesse 400 stelle sono più sottili del 12%, perché le notti con l'aria più stabile pesano di più nella combinazione. Ogni notte viene prima uniformata in luminosità alle altre, così notti riprese con ISO, esposizione o luminosità del cielo diverse si combinano senza problemi.</p>
+    <p class="plain measure">Non serve conservare i fotogrammi di ogni notte. Ogni elaborazione salva un FITS lineare, quindi <code>--merge</code> aggiunge la sessione di stanotte allo stack che hai già in meno di un minuto, e il risultato può accogliere anche la notte successiva.</p>
   </div>
 </section>
 

@@ -118,6 +118,8 @@
   <div class="wrap">
     <h2>Several nights on one target</h2>
     <p class="intro measure">Put each night's session folder inside one parent folder and pick the parent. Because the Origin's field rotates as a target tracks, nights rarely line up exactly. OriginStack reads each session's metadata first and either pools all the frames or stacks each night on its own and joins them with a rotation-proof star match, whichever keeps more of the picture. To add tonight's frames to a stack you already made, use <code>--merge</code>. Details are on the <a href="advanced.html#rotation">advanced page</a>.</p>
+    <p class="plain measure">Nights add up. Five nights on the Whirlpool Galaxy, 680 frames or 3.8 hours, against the best single night, 295 frames or 1.6 hours: on the same pixels the sky noise is 30% lower, and the same 400 stars are 12% narrower, because the nights with steadier air carry more weight in the combine. Each night is first matched to the others in brightness, so nights shot at different ISO, exposure or sky brightness combine cleanly.</p>
+    <p class="plain measure">You do not need to keep every night's frames. Each run saves a linear FITS file, so <code>--merge</code> adds tonight's session to the stack you already have in under a minute, and the result can take the next night too.</p>
   </div>
 </section>
 

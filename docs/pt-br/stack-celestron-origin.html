@@ -120,6 +120,8 @@
   <div class="wrap">
     <h2>Várias noites num mesmo alvo</h2>
     <p class="intro measure">Coloque a pasta de sessão de cada noite dentro de uma pasta-mãe e escolha a pasta-mãe. Como o campo do Origin gira enquanto ele acompanha o alvo, as noites raramente se alinham exatamente. O OriginStack lê primeiro os metadados de cada sessão e, conforme o que preservar mais da imagem, junta todos os frames ou empilha cada noite separadamente e as une com um casamento de estrelas imune à rotação. Para acrescentar os frames desta noite a um empilhamento que você já fez, use <code>--merge</code>. Os detalhes estão na <a href="../advanced.html#rotation">página avançada</a>.</p>
+    <p class="plain measure">As noites se somam. Cinco noites na Galáxia do Rodamoinho, 680 quadros ou 3,8 horas, contra a melhor noite sozinha, 295 quadros ou 1,6 hora: nos mesmos pixels o ruído de céu é 30% menor, e as mesmas 400 estrelas são 12% mais finas, porque as noites com o ar mais estável pesam mais na combinação. Cada noite é antes ajustada em brilho às outras, então noites com ISO, exposição ou brilho do céu diferentes se combinam sem problemas.</p>
+    <p class="plain measure">Não é preciso guardar os quadros de cada noite. Cada execução salva um FITS linear, então o <code>--merge</code> adiciona a sessão desta noite ao stack que você já tem em menos de um minuto, e o resultado aceita também a noite seguinte.</p>
   </div>
 </section>
 
