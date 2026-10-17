@@ -141,7 +141,25 @@ def classify_frame(path: str, header: dict) -> str:
         return 'flat'
     if 'bias' in name or imagetyp == 'bias' or header.get('EXPTIME', 1) == 0:
         return 'bias'
+    # Another program's stack saved in the session folder (PixInsight/Siril/other
+    # stackers record how many frames they combined). Taken as a light, an RGB cube
+    # among the raw Bayer subs set the shape of the whole frame store when its name
+    # sorted first, and every real sub then failed to fit. Only lights are checked:
+    # master calibration frames carry NCOMBINE legitimately.
+    if _combined_count(header) > 1:
+        return 'skip'
     return 'light'
+
+
+def _combined_count(header) -> int:
+    for key in ('NCOMBINE', 'STACKCNT'):
+        try:
+            v = int(header.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v
+    return 0
 
 
 _DARK_FLAT_NAME = re.compile(r'dark[\s_.-]*flat|flat[\s_.-]*dark')

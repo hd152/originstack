@@ -52,3 +52,19 @@ def test_discovery_leaves_dark_flats_out(tmp_path):
         fits.PrimaryHDU(np.zeros((4, 4), np.uint16), header=h).writeto(tmp_path / name)
     f = discover_frames(str(tmp_path))
     assert {k: len(v) for k, v in f.items()} == {'light': 1, 'dark': 1, 'flat': 1, 'bias': 0}
+
+
+def test_another_programs_stack_in_the_session_folder_is_skipped():
+    # a real session folder held 'Flaming_Star_Nebula_wizardstack_35f.fits', an RGB
+    # cube with NCOMBINE=35: taken as a light it set the frame-store shape and every
+    # raw sub failed to fit
+    hdr = {'NAXIS': 3, 'NAXIS3': 3, 'NCOMBINE': 35, 'EXPTIME': 20}
+    assert classify_frame('x/Flaming_Star_Nebula_wizardstack_35f.fits', hdr) == 'skip'
+    assert classify_frame('x/stack.fits', {'STACKCNT': 120, 'EXPTIME': 20}) == 'skip'
+    assert classify_frame('x/Light0001.fits', {'NCOMBINE': 1, 'EXPTIME': 20}) == 'light'
+
+
+def test_master_calibration_frames_keep_their_type():
+    assert classify_frame('x/master_dark.fits', {'IMAGETYP': 'DARK', 'NCOMBINE': 30}) == 'dark'
+    assert classify_frame('x/master_flat.fits', {'NCOMBINE': 25, 'EXPTIME': 1}) == 'flat'
+    assert classify_frame('x/master_bias.fits', {'NCOMBINE': 50, 'EXPTIME': 0}) == 'bias'
