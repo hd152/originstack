@@ -213,6 +213,7 @@ Details in the linked notes.
 - Sort-based MAD sigma-clip / sort-once u32 keys for patch-weighted combine: 13-45% slower than quickselect.
 - Windowed selection predicted from the neighbour pixel; radix-histogram median: no faster.
 - Native rustfft `rfft2_batch` for proper coadd; Moffat closed-form spectrum; batched/AVX2 coadd accumulate; `FILE_ATTRIBUTE_TEMPORARY`; Phase 1 arrays in RAM; file writes instead of memmap slot assignment.
+- Phase 1 write-behind (a writer thread per worker) and reused per-worker output slots: no gain, Phase 1 is CPU/memory-throughput bound on 8 cores; more workers than physical cores is slower ([native-kernels](dev-notes/native-kernels.md)).
 - Pre-touching frame-store pages from a parent thread: a worker still faults every page in its own view (60-99 vs 68-72 ms per 75 MB slot; floor 10 ms) ([pipeline-notes](dev-notes/pipeline-notes.md)).
 - Measuring proper-coadd PSFs inside the alignment loop (GIL contention).
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).

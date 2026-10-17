@@ -247,6 +247,138 @@ fn compress_frame_chunked(
     Ok(PyBytes::new(py, &encoded).unbind())
 }
 
+/// Chunk buffers reused across `compress_frame_chunked_to_file` calls. A Phase 1 worker
+/// writes two frames per light; fresh ~1 MB allocations are zero pages the OS faults in on
+/// every frame, which is memory traffic the other workers are short of.
+static FRAME_V2_POOL: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> =
+    std::sync::OnceLock::new();
+
+fn frame_v2_take(n: usize) -> Vec<u8> {
+    let pool = FRAME_V2_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut p) = pool.lock() {
+        if let Some(i) = p.iter().position(|v| v.len() >= n) {
+            return p.swap_remove(i);
+        }
+    }
+    vec![0u8; n]
+}
+
+fn frame_v2_give(v: Vec<u8>) {
+    if let Some(pool) = FRAME_V2_POOL.get() {
+        if let Ok(mut p) = pool.lock() {
+            p.push(v);
+        }
+    }
+}
+
+/// `frame_v2_encode_chunk` writing into `out` (sized for the worst case) instead of fresh
+/// vectors; the same planes, entries and bytes. Returns (entries, bytes used).
+fn frame_v2_encode_chunk_into(shuffled: &[u8], itemsize: usize, out: &mut [u8]) -> (Vec<u32>, usize) {
+    let plane = shuffled.len() / itemsize;
+    let mut entries = Vec::with_capacity(itemsize);
+    let mut probe_out = [0u8; lz4_flex::block::get_maximum_output_size(FRAME_V2_PROBE)];
+    let mut used = 0usize;
+    for p in shuffled.chunks_exact(plane) {
+        let probe = &p[..p.len().min(FRAME_V2_PROBE)];
+        let worth = p.len() < 2 * FRAME_V2_PROBE
+            || lz4_flex::block::compress_into(probe, &mut probe_out).map_or(false, |n| {
+                n * 100 < probe.len() * 97
+            });
+        let room = lz4_flex::block::get_maximum_output_size(p.len());
+        let packed = if worth {
+            lz4_flex::block::compress_into(p, &mut out[used..used + room]).ok()
+        } else {
+            None
+        };
+        match packed {
+            Some(n) if n < p.len() => {
+                entries.push(n as u32);
+                used += n;
+            }
+            _ => {
+                entries.push(p.len() as u32 | FRAME_V2_RAW);
+                out[used..used + p.len()].copy_from_slice(p);
+                used += p.len();
+            }
+        }
+    }
+    (entries, used)
+}
+
+/// `compress_frame_chunked` written straight to ``path`` (created or truncated); returns the
+/// byte count. The same bytes as writing that function's result, without its copies: each
+/// chunk is coded into a pooled buffer and written from there (the bytes path concatenated
+/// the chunks, copied them into a Python bytes object, and the file write copied them again
+/// -- three passes over ~55 MB per RGB frame while every Phase 1 worker competes for memory).
+#[pyfunction]
+fn compress_frame_chunked_to_file(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, u8>,
+    itemsize: usize,
+    path: std::path::PathBuf,
+) -> PyResult<usize> {
+    use std::io::Write;
+    if itemsize == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "itemsize must be positive",
+        ));
+    }
+    let input = data
+        .as_slice()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("frame bytes must be C-contiguous"))?;
+    if input.len() % itemsize != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "frame byte count must be divisible by itemsize",
+        ));
+    }
+    let chunk = (FRAME_V2_CHUNK_BYTES / itemsize).max(1) * itemsize;
+    if input.len().div_ceil(chunk) * itemsize > u32::MAX as usize {
+        return Err(pyo3::exceptions::PyValueError::new_err("frame too large"));
+    }
+    let room = itemsize * lz4_flex::block::get_maximum_output_size(chunk / itemsize);
+    py.detach(|| -> std::io::Result<usize> {
+        let parts: Vec<(Vec<u32>, Vec<u8>, usize)> = input
+            .par_chunks(chunk)
+            .map_init(
+                || vec![0u8; chunk],
+                |scratch, src| {
+                    let s = &mut scratch[..src.len()];
+                    byte_shuffle_into(src, itemsize, s);
+                    let mut buf = frame_v2_take(room);
+                    let (entries, used) = frame_v2_encode_chunk_into(s, itemsize, &mut buf);
+                    (entries, buf, used)
+                },
+            )
+            .collect();
+        let mut head = Vec::with_capacity(FRAME_V2_HEADER + 4 * itemsize * parts.len());
+        head.extend_from_slice(FRAME_V2_MAGIC);
+        head.extend_from_slice(&(itemsize as u32).to_le_bytes());
+        head.extend_from_slice(&(input.len() as u64).to_le_bytes());
+        head.extend_from_slice(&(chunk as u32).to_le_bytes());
+        head.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+        for (entries, _, _) in &parts {
+            for e in entries {
+                head.extend_from_slice(&e.to_le_bytes());
+            }
+        }
+        let mut written = head.len();
+        let result = (|| {
+            let mut file = std::fs::File::create(&path)?;
+            file.write_all(&head)?;
+            for (_, buf, used) in &parts {
+                file.write_all(&buf[..*used])?;
+                written += used;
+            }
+            Ok(written)
+        })();
+        for (_, buf, _) in parts {
+            frame_v2_give(buf);
+        }
+        result
+    })
+    .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
 fn frame_v2_u32(src: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(src[at..at + 4].try_into().unwrap())
 }
@@ -10575,6 +10707,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compress_frame, m)?)?;
     m.add_function(wrap_pyfunction!(decompress_frame, m)?)?;
     m.add_function(wrap_pyfunction!(compress_frame_chunked, m)?)?;
+    m.add_function(wrap_pyfunction!(compress_frame_chunked_to_file, m)?)?;
     m.add_function(wrap_pyfunction!(decompress_frame_into, m)?)?;
     #[cfg(feature = "triage")]
     m.add_function(wrap_pyfunction!(transient_triage::transient_triage_score, m)?)?;

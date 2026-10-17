@@ -92,6 +92,22 @@ def test_chunked_frame_matches_whole_frame_codec_on_float32():
     np.testing.assert_array_equal(whole, flat)
 
 
+def test_chunked_frame_to_file_writes_the_same_bytes(tmp_path):
+    # pooled buffers are reused across calls of different sizes, so alternate them
+    rng = np.random.default_rng(11)
+    cases = [(rng.normal(0.05, 0.002, (700, 513, 3)).astype(np.float32), 4),
+             (np.zeros((300, 211), np.float32), 4),
+             (np.frombuffer(rng.bytes((3 << 20) + 12_344), np.uint8), 1),
+             (rng.normal(1e4, 600, (1024, 1100)).astype(np.float32), 4),
+             (rng.integers(0, 4096, 200_001).astype(np.uint16), 2)]
+    for i, (arr, itemsize) in enumerate(cases * 2):
+        flat = np.ascontiguousarray(arr).view(np.uint8).reshape(-1)
+        path = tmp_path / f'f{i}.lz4'
+        n = native.compress_frame_chunked_to_file(flat, itemsize, str(path))
+        expected = native.compress_frame_chunked(flat, itemsize)
+        assert n == len(expected) and path.read_bytes() == expected
+
+
 def test_decompress_frame_into_reads_the_whole_frame_format():
     frame = np.random.default_rng(3).normal(0.0, 1.0, (64, 37, 3)).astype(np.float32)
     encoded = native.compress_frame(frame.view(np.uint8).reshape(-1), 4)

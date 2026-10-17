@@ -60,7 +60,9 @@ def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
 
     counter is a one-element list [int] of accepted frames seen so far, mutated
     in place. `every` comes from --ui-frame-every (0 disables); the first
-    frame is always shown so the viewer lights up immediately.
+    frame is always shown so the viewer lights up immediately. `rgb` may be a
+    zero-argument callable: a compressed frame store decodes a whole 75 MB frame
+    on every read, so callers pass `lambda: mem_rgb[i]` and only shown frames are read.
     """
     every = int(getattr(args, 'ui_frame_every', 5) or 0)
     if every <= 0 or not wv.active or rgb is None:
@@ -69,7 +71,7 @@ def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
     c = counter[0]
     if c == 1 or c % every == 0:
         try:
-            wv.frame_preview(name, np.asarray(rgb), args=args)
+            wv.frame_preview(name, np.asarray(rgb() if callable(rgb) else rgb), args=args)
         except Exception:
             pass
 
@@ -1362,7 +1364,7 @@ def execute_frame_processing(
                             f.metrics = metrics
                             _publish_frame_thumb(_wv, args,
                                                  os.path.basename(f.path),
-                                                 mem_rgb[frame_idx], _wv_thumb_count)
+                                                 lambda: mem_rgb[frame_idx], _wv_thumb_count)
                             if args.verbose:
                                 m = f.metrics
                                 safe_print(f'    {os.path.basename(f.path)}: '
@@ -1520,7 +1522,7 @@ def execute_frame_processing(
                         _wv.frame_metrics(os.path.basename(f.path), f.metrics)
                     if error is None:
                         _publish_frame_thumb(_wv, args, os.path.basename(f.path),
-                                             mem_rgb[i], _wv_thumb_count)
+                                             lambda: mem_rgb[i], _wv_thumb_count)
                     # Periodically free CuPy's cached memory pool to prevent VRAM exhaustion
                     # from accumulating unused cached blocks across many completed frames.
                     if gpu.active and (_completed % _free_interval == 0):
