@@ -104,6 +104,13 @@ class _CompressedFrameArray:
         index = self._normalise_index(index)
         with open(self._path(index), 'rb') as stream:
             compressed = stream.read()
+        if hasattr(native, 'decompress_frame_into'):
+            # astro_native >= 0.58: chunks decoded in parallel straight into an
+            # uninitialised frame (no zero fill, no frame-sized scratch); reads both formats
+            frame = np.empty(self._frame_shape, self.dtype)
+            native.decompress_frame_into(compressed, frame.view(np.uint8).reshape(-1),
+                                         self.dtype.itemsize)
+            return frame
         raw = native.decompress_frame(
             compressed,
             int(np.prod(self._frame_shape)) * self.dtype.itemsize,
@@ -122,8 +129,9 @@ class _CompressedFrameArray:
             raise ValueError(
                 f"Expected a value broadcastable to frame shape {self._frame_shape}"
             ) from exc
-        compressed = native.compress_frame(
-            contiguous.view(np.uint8).reshape(-1), self.dtype.itemsize)
+        # chunked (>= 0.58): shuffled in cache, chunks compressed in parallel
+        encode = getattr(native, 'compress_frame_chunked', native.compress_frame)
+        compressed = encode(contiguous.view(np.uint8).reshape(-1), self.dtype.itemsize)
         path = self._path(index)
         temporary = f'{path}.{os.getpid()}.tmp'
         try:

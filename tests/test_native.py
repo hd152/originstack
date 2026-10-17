@@ -70,6 +70,46 @@ def test_lossless_frame_decompression_rejects_wrong_length():
         native.decompress_frame(encoded, 60, 4)
 
 
+# 1 MB chunks: one partial chunk, an exact multiple, and several chunks plus a tail
+@pytest.mark.parametrize('n_bytes', [100_000, 2 << 20, (3 << 20) + 12_344])
+@pytest.mark.parametrize('itemsize', [1, 2, 4, 8])
+def test_chunked_frame_compression_round_trip(n_bytes, itemsize):
+    raw = np.random.default_rng(n_bytes + itemsize).bytes(n_bytes - n_bytes % itemsize)
+    encoded = native.compress_frame_chunked(np.frombuffer(raw, dtype=np.uint8), itemsize)
+    out = np.empty(len(raw), np.uint8)
+    native.decompress_frame_into(encoded, out, itemsize)
+    assert out.tobytes() == raw
+
+
+def test_chunked_frame_matches_whole_frame_codec_on_float32():
+    frame = np.random.default_rng(9).normal(0.05, 0.002, (700, 513, 3)).astype(np.float32)
+    flat = frame.view(np.uint8).reshape(-1)
+    whole = native.decompress_frame(native.compress_frame(flat, 4), frame.nbytes, 4)
+    out = np.empty_like(frame)
+    native.decompress_frame_into(native.compress_frame_chunked(flat, 4),
+                                 out.view(np.uint8).reshape(-1), 4)
+    np.testing.assert_array_equal(out.view(np.uint32), frame.view(np.uint32))
+    np.testing.assert_array_equal(whole, flat)
+
+
+def test_decompress_frame_into_reads_the_whole_frame_format():
+    frame = np.random.default_rng(3).normal(0.0, 1.0, (64, 37, 3)).astype(np.float32)
+    encoded = native.compress_frame(frame.view(np.uint8).reshape(-1), 4)
+    out = np.empty_like(frame)
+    native.decompress_frame_into(encoded, out.view(np.uint8).reshape(-1), 4)
+    np.testing.assert_array_equal(out, frame)
+
+
+def test_decompress_frame_into_rejects_bad_input():
+    encoded = native.compress_frame_chunked(np.arange(64, dtype=np.uint8), 4)
+    with pytest.raises(ValueError, match='expected 60'):
+        native.decompress_frame_into(encoded, np.empty(60, np.uint8), 4)
+    with pytest.raises(ValueError, match='itemsize'):
+        native.decompress_frame_into(encoded, np.empty(64, np.uint8), 2)
+    with pytest.raises(ValueError, match='truncated'):
+        native.decompress_frame_into(encoded[:-3], np.empty(64, np.uint8), 4)
+
+
 @pytest.mark.parametrize("use_mad", [True, False])
 @pytest.mark.parametrize("winsorize", [False, True])
 @pytest.mark.parametrize("weighted", [False, True])

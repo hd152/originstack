@@ -1380,6 +1380,60 @@ def _dbe_regression_coarse_grid(coords: np.ndarray, values: np.ndarray,
     return coarse, surf_lo, surf_hi
 
 
+_GAP_WIDEN = (3.0, 9.0)        # wider bandwidths (x sigma_px) used across sample gaps
+_GAP_MIN_WEIGHT = (1.0, 3.0)   # kernel weight (in samples) below which a node starts / is
+#                                fully taken over by the next wider fit
+
+
+def _fill_sample_gaps(coarse: np.ndarray, coords: np.ndarray, values: np.ndarray,
+                      H: int, W: int, outlier_sigma: float, max_iter: int,
+                      sigma_px: float, Hc: int, Wc: int) -> np.ndarray:
+    """Blend the local fit into wider-bandwidth fits where it has no samples nearby.
+
+    The Gaussian-weighted local-linear fit is evaluated per node from the samples within
+    its kernel; in a gap of several kernel widths -- a frame-filling nebula whose faint
+    glow DBE rejects as signal, e.g. the Eagle field -- each node is decided by its one or
+    two nearest patches (the weights fall off as exp(-d^2)) or by the far-field fallback,
+    and the surface becomes flat polygons with straight, sharp edges that the subtraction
+    prints into the sky. Per node, the kernel's summed sample weight measures its support;
+    below ~3 samples the result moves smoothly to a fit 3x (then 9x) wider. Nodes with
+    normal support (several samples within the kernel) keep the original fit exactly.
+    """
+    ys = coords[:, 0] * H
+    xs = coords[:, 1] * W
+    gy = np.linspace(0.0, 1.0, Hc) * H if Hc > 1 else np.zeros(1)
+    gx = np.linspace(0.0, 1.0, Wc) * W if Wc > 1 else np.zeros(1)
+    def support(sig: float) -> np.ndarray:
+        # exp(-(dy^2 + dx^2) k) = exp(-dy^2 k) exp(-dx^2 k) and the grid is a tensor
+        # product, so the per-node sum over samples is one (Hc, S) @ (S, Wc) product
+        # (a dense node x sample exp table was ~1 s per call at Hc x Wc ~ 46k nodes)
+        inv = 1.0 / (2.0 * sig * sig)
+        ey = np.exp(-(gy[:, None] - ys[None, :]) ** 2 * inv)
+        ex = np.exp(-(gx[:, None] - xs[None, :]) ** 2 * inv)
+        return ey @ ex.T
+
+    lo, hi = _GAP_MIN_WEIGHT
+
+    def share(s: np.ndarray) -> np.ndarray:      # 1 = keep this level, 0 = hand over
+        t = np.clip((s - lo) / (hi - lo), 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    keep = share(support(sigma_px))
+    if keep.min() >= 1.0:
+        return coarse                            # well sampled everywhere: unchanged
+    result = coarse * keep
+    remaining = 1.0 - keep
+    for k, factor in enumerate(_GAP_WIDEN):
+        sig = sigma_px * factor
+        wide, _lo, _hi = _dbe_regression_coarse_grid(
+            coords, values, H, W, outlier_sigma, max_iter, sig, Hc, Wc, False)
+        last = k == len(_GAP_WIDEN) - 1
+        take = np.ones_like(keep) if last else share(support(sig))
+        result += remaining * take * wide
+        remaining = remaining * (1.0 - take)
+    return result
+
+
 def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
                             H: int, W: int,
                             outlier_sigma: float, max_iter: int,
@@ -1402,6 +1456,8 @@ def _fit_background_surface(coords: np.ndarray, values: np.ndarray,
 
     coarse, surf_lo, surf_hi = _dbe_regression_coarse_grid(
         coords, values, H, W, outlier_sigma, max_iter, sigma_px, Hc, Wc, verbose)
+    coarse = _fill_sample_gaps(coarse, coords, values, H, W, outlier_sigma, max_iter,
+                               sigma_px, Hc, Wc)
 
     # order=1 (bilinear), not order=3 (cubic): the very next line blurs this
     # surface again (sigma=patch_size*0.5, typically >=32px), which absorbs

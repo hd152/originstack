@@ -150,6 +150,208 @@ fn decompress_frame<'py>(
     Ok(out)
 }
 
+/// Chunked frame format written by `compress_frame_chunked`: "OSZ2", itemsize (u32),
+/// uncompressed length (u64), chunk length (u32), chunk count (u32), then one u32 entry per
+/// byte plane of every chunk (chunk-major; `FRAME_V2_RAW` set = stored uncompressed, the
+/// rest is the stored length), then the planes' bytes in the same order. Every chunk is
+/// byte-shuffled on its own, so the shuffle runs in cache (the whole-frame shuffle of
+/// `compress_frame` was a 75 MB scratch pass), and chunks are coded in parallel. On a
+/// calibrated float32 frame the two middle mantissa bytes do not compress at all (1.00x)
+/// while LZ4 still spent ~30 ms compressing and ~18 ms decompressing each; a plane whose
+/// first `FRAME_V2_PROBE` bytes do not shrink by 3% is copied instead.
+const FRAME_V2_MAGIC: &[u8; 4] = b"OSZ2";
+const FRAME_V2_HEADER: usize = 24;
+/// LZ4's window is 64 KB, so 1 MB chunks lose nothing measurable to the chunk boundaries.
+const FRAME_V2_CHUNK_BYTES: usize = 1 << 20;
+const FRAME_V2_PROBE: usize = 16 << 10;
+const FRAME_V2_RAW: u32 = 1 << 31;
+
+/// One chunk's planes: (entries, payload). `shuffled` holds the chunk byte-shuffled.
+fn frame_v2_encode_chunk(shuffled: &[u8], itemsize: usize) -> (Vec<u32>, Vec<u8>) {
+    let plane = shuffled.len() / itemsize;
+    let mut entries = Vec::with_capacity(itemsize);
+    let mut payload = Vec::with_capacity(shuffled.len());
+    for p in shuffled.chunks_exact(plane) {
+        let probe = &p[..p.len().min(FRAME_V2_PROBE)];
+        let worth = p.len() < 2 * FRAME_V2_PROBE
+            || lz4_flex::block::compress(probe).len() * 100 < probe.len() * 97;
+        let packed = if worth { Some(lz4_flex::block::compress(p)) } else { None };
+        match packed {
+            Some(c) if c.len() < p.len() => {
+                entries.push(c.len() as u32);
+                payload.extend_from_slice(&c);
+            }
+            _ => {
+                entries.push(p.len() as u32 | FRAME_V2_RAW);
+                payload.extend_from_slice(p);
+            }
+        }
+    }
+    (entries, payload)
+}
+
+/// Losslessly compress a C-contiguous numeric array in the chunked format (see
+/// `FRAME_V2_MAGIC`); `decompress_frame_into` reads it back.
+#[pyfunction]
+fn compress_frame_chunked(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, u8>,
+    itemsize: usize,
+) -> PyResult<Py<PyBytes>> {
+    if itemsize == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "itemsize must be positive",
+        ));
+    }
+    let input = data
+        .as_slice()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("frame bytes must be C-contiguous"))?;
+    if input.len() % itemsize != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "frame byte count must be divisible by itemsize",
+        ));
+    }
+    let chunk = (FRAME_V2_CHUNK_BYTES / itemsize).max(1) * itemsize;
+    if input.len().div_ceil(chunk) * itemsize > u32::MAX as usize {
+        return Err(pyo3::exceptions::PyValueError::new_err("frame too large"));
+    }
+    let encoded = py.detach(|| {
+        let parts: Vec<(Vec<u32>, Vec<u8>)> = input
+            .par_chunks(chunk)
+            .map_init(
+                || vec![0u8; chunk],
+                |scratch, src| {
+                    let s = &mut scratch[..src.len()];
+                    byte_shuffle_into(src, itemsize, s);
+                    frame_v2_encode_chunk(s, itemsize)
+                },
+            )
+            .collect();
+        let body: usize = parts.iter().map(|(_, b)| b.len()).sum();
+        let mut out = Vec::with_capacity(FRAME_V2_HEADER + 4 * itemsize * parts.len() + body);
+        out.extend_from_slice(FRAME_V2_MAGIC);
+        out.extend_from_slice(&(itemsize as u32).to_le_bytes());
+        out.extend_from_slice(&(input.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(chunk as u32).to_le_bytes());
+        out.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+        for (entries, _) in &parts {
+            for e in entries {
+                out.extend_from_slice(&e.to_le_bytes());
+            }
+        }
+        for (_, b) in &parts {
+            out.extend_from_slice(b);
+        }
+        out
+    });
+    Ok(PyBytes::new(py, &encoded).unbind())
+}
+
+fn frame_v2_u32(src: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(src[at..at + 4].try_into().unwrap())
+}
+
+/// Decompress a frame written by `compress_frame_chunked` *or* `compress_frame` straight
+/// into ``out`` (a C-contiguous uint8 view of the destination frame; its length is the
+/// expected uncompressed size). The caller allocates ``out`` (``np.empty``: no zero fill),
+/// and chunked frames are unshuffled chunk by chunk into it, in parallel, with no
+/// frame-sized scratch buffer.
+#[pyfunction]
+fn decompress_frame_into(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    mut out: numpy::PyReadwriteArray1<'_, u8>,
+    itemsize: usize,
+) -> PyResult<()> {
+    let err = |m: String| pyo3::exceptions::PyValueError::new_err(m);
+    let src = data.as_bytes();
+    let dst = out
+        .as_slice_mut()
+        .map_err(|_| err("output array must be contiguous".into()))?;
+    let expected = dst.len();
+    if itemsize == 0 || expected % itemsize != 0 {
+        return Err(err("expected length must be divisible by positive itemsize".into()));
+    }
+    if src.len() >= FRAME_V2_HEADER && &src[..4] == FRAME_V2_MAGIC {
+        let stored_item = frame_v2_u32(src, 4) as usize;
+        let total = u64::from_le_bytes(src[8..16].try_into().unwrap()) as usize;
+        let chunk = frame_v2_u32(src, 16) as usize;
+        let n = frame_v2_u32(src, 20) as usize;
+        if stored_item != itemsize {
+            return Err(err(format!("frame itemsize {stored_item}; expected {itemsize}")));
+        }
+        if total != expected {
+            return Err(err(format!("decompressed frame has {total} bytes; expected {expected}")));
+        }
+        if chunk == 0 || chunk % itemsize != 0 || n != total.div_ceil(chunk) {
+            return Err(err("corrupt chunked frame header".into()));
+        }
+        let table_end = FRAME_V2_HEADER + 4 * n * itemsize;
+        if src.len() < table_end {
+            return Err(err("truncated chunked frame".into()));
+        }
+        // payload offset of every chunk, from the per-plane stored lengths
+        let mut offsets = Vec::with_capacity(n + 1);
+        let mut at = table_end;
+        offsets.push(at);
+        for i in 0..n {
+            for p in 0..itemsize {
+                at += (frame_v2_u32(src, FRAME_V2_HEADER + 4 * (i * itemsize + p)) & !FRAME_V2_RAW) as usize;
+            }
+            offsets.push(at);
+        }
+        if at != src.len() {
+            return Err(err("truncated chunked frame".into()));
+        }
+        return py
+            .detach(|| {
+                dst.par_chunks_mut(chunk).enumerate().try_for_each_init(
+                    || vec![0u8; chunk],
+                    |scratch, (i, d)| {
+                        let s = &mut scratch[..d.len()];
+                        let plane = d.len() / itemsize;
+                        let mut pos = offsets[i];
+                        for (p, sp) in s.chunks_exact_mut(plane).enumerate() {
+                            let e = frame_v2_u32(src, FRAME_V2_HEADER + 4 * (i * itemsize + p));
+                            let len = (e & !FRAME_V2_RAW) as usize;
+                            let stored = &src[pos..pos + len];
+                            pos += len;
+                            if e & FRAME_V2_RAW != 0 {
+                                if len != plane {
+                                    return Err(format!("chunk {i} plane {p}: {len} raw bytes; expected {plane}"));
+                                }
+                                sp.copy_from_slice(stored);
+                            } else {
+                                let written =
+                                    lz4_flex::block::decompress_into(stored, sp).map_err(|e| e.to_string())?;
+                                if written != plane {
+                                    return Err(format!("chunk {i} plane {p} has {written} bytes; expected {plane}"));
+                                }
+                            }
+                        }
+                        byte_unshuffle_into(s, itemsize, d);
+                        Ok(())
+                    },
+                )
+            })
+            .map_err(err);
+    }
+    let (stored_len, block) = lz4_flex::block::uncompressed_size(src).map_err(|e| err(e.to_string()))?;
+    if stored_len != expected {
+        return Err(err(format!("decompressed frame has {stored_len} bytes; expected {expected}")));
+    }
+    py.detach(|| {
+        let mut shuffled = vec![0u8; expected];
+        let written = lz4_flex::block::decompress_into(block, &mut shuffled).map_err(|e| e.to_string())?;
+        if written != expected {
+            return Err(format!("decompressed frame has {written} bytes; expected {expected}"));
+        }
+        byte_unshuffle_into(&shuffled, itemsize, dst);
+        Ok(())
+    })
+    .map_err(err)
+}
+
 /// f32/f64 for `median_inplace`.
 trait MedianFloat: Copy + PartialOrd + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> {
     const NAN: Self;
@@ -10372,6 +10574,8 @@ fn nn_conv3x3_portable<'py>(
 fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compress_frame, m)?)?;
     m.add_function(wrap_pyfunction!(decompress_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(compress_frame_chunked, m)?)?;
+    m.add_function(wrap_pyfunction!(decompress_frame_into, m)?)?;
     #[cfg(feature = "triage")]
     m.add_function(wrap_pyfunction!(transient_triage::transient_triage_score, m)?)?;
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
