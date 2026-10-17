@@ -74,7 +74,7 @@
     <h1>Beelden van de Celestron Origin op je computer stapelen</h1>
     <p class="lede">De Origin stapelt tijdens het opnemen, maar bewaart ook elk ruw frame dat hij maakte. Die frames opnieuw op een computer stapelen, met goede kalibratie en uitlijning, geeft een scherper en schoner beeld dan het beeld dat de telescoop opslaat. Deze handleiding doet dat met OriginStack, dat gratis is en op je eigen machine draait.</p>
     <p class="toc">
-      <a href="#folder">Wat er in een sessiemap staat</a> <a href="#steps">Stap voor stap stapelen</a> <a href="#nights">Meerdere nachten</a> <a href="#why">Waarom opnieuw stapelen</a> <a href="#problems">Als er iets misgaat</a>
+      <a href="#folder">Wat er in een sessiemap staat</a> <a href="#steps">Stap voor stap stapelen</a> <a href="#mosaic">Mozaïeken</a> <a href="#nights">Meerdere nachten</a> <a href="#why">Waarom opnieuw stapelen</a> <a href="#problems">Als er iets misgaat</a>
     </p>
   </div>
 </header>
@@ -113,6 +113,14 @@
         <dd><p>Laat de uitvoer leeg en de stack wordt naast de sessiemap opgeslagen, zonder ooit een eerdere te overschrijven. Je krijgt een JPEG om te bekijken en te delen, en een FITS-bestand dat lineair blijft, voor verdere bewerking in andere software of om later met een andere nacht samen te voegen.</p></dd></div>
     </dl>
     <p class="plain measure">Liever de opdrachtregel? Dezelfde run is <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>Mozaïeken</h2>
+    <p class="intro measure">De mozaïekmodus van de Origin legt een groot object vast als een aantal overlappende tegels en slaat elke tegel op als een eigen sessiemap. Zet de tegelmappen in één bovenliggende map en kies die. OriginStack ziet aan de richting van elke sessie dat het tegels zijn en geen nachten van hetzelfde veld, stackt elke tegel, stemt de tegels in hun overlap op elkaar af in helderheid en gradiënt, voegt ze samen tot één beeld en werkt dat één keer af. Meerdere nachten van dezelfde tegel kunnen in dezelfde map. Op de opdrachtregel heet de optie <code>--mosaic</code>, maar hij gaat vanzelf aan.</p>
+    <p class="caveat measure">Dit is getest met tegels die uit echte Origin-stacks zijn geknipt, nog niet met een opname uit de mozaïekmodus zelf. Als een mozaïek van uw Origin niet goed aansluit, <a href="https://github.com/hd152/originstack/issues">open dan een issue</a>.</p>
   </div>
 </section>
 

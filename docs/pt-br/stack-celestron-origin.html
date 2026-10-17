@@ -74,7 +74,7 @@
     <h1>Como empilhar imagens do Celestron Origin no seu computador</h1>
     <p class="lede">O Origin empilha durante a sessão, mas também guarda cada frame bruto que capturou. Empilhar esses frames de novo num computador, com calibração e alinhamento adequados, gera uma imagem mais nítida e mais limpa que a que o telescópio salva. Este guia faz isso com o OriginStack, que é gratuito e roda na sua própria máquina.</p>
     <p class="toc">
-      <a href="#folder">O que há numa pasta de sessão</a> <a href="#steps">Empilhando, passo a passo</a> <a href="#nights">Várias noites</a> <a href="#why">Por que reempilhar</a> <a href="#problems">Se algo der errado</a>
+      <a href="#folder">O que há numa pasta de sessão</a> <a href="#steps">Empilhando, passo a passo</a> <a href="#mosaic">Mosaicos</a> <a href="#nights">Várias noites</a> <a href="#why">Por que reempilhar</a> <a href="#problems">Se algo der errado</a>
     </p>
   </div>
 </header>
@@ -113,6 +113,14 @@
         <dd><p>Deixe a saída em branco e o empilhamento é salvo ao lado da pasta da sessão, sem nunca sobrescrever um anterior. Você recebe um JPEG para ver e compartilhar, e um arquivo FITS que continua linear, para trabalho posterior em outros programas ou para mesclar com outra noite mais tarde.</p></dd></div>
     </dl>
     <p class="plain measure">Prefere a linha de comando? A mesma execução é <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>Mosaicos</h2>
+    <p class="intro measure">O modo Mosaico do Origin captura um objeto grande como vários ladrilhos sobrepostos e salva cada ladrilho na própria pasta de sessão. Coloque as pastas dos ladrilhos dentro de uma pasta comum e escolha essa pasta. O OriginStack percebe pelo apontamento de cada sessão que são ladrilhos, e não noites do mesmo campo, empilha cada ladrilho, ajusta os ladrilhos entre si onde se sobrepõem, em brilho e gradiente, junta-os em uma só imagem e a finaliza uma vez. Várias noites do mesmo ladrilho podem ficar na mesma pasta. Na linha de comando a opção é <code>--mosaic</code>, mas ela se ativa sozinha.</p>
+    <p class="caveat measure">Foi testado com ladrilhos recortados de stacks reais do Origin, ainda não com uma captura do próprio modo Mosaico. Se um mosaico do seu Origin não se juntar direito, <a href="https://github.com/hd152/originstack/issues">abra um issue</a>, por favor.</p>
   </div>
 </section>
 

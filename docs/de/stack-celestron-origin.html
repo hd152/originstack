@@ -74,7 +74,7 @@
     <h1>Celestron-Origin-Bilder auf dem eigenen Computer stacken</h1>
     <p class="lede">Das Origin stackt laufend während der Aufnahme, bewahrt aber auch jeden aufgenommenen Roh-Frame auf. Wer diese Frames am Computer mit sorgfältiger Kalibrierung und Ausrichtung erneut stackt, erhält ein schärferes und saubereres Bild als das, welches das Teleskop speichert. Diese Anleitung zeigt das mit OriginStack, das kostenlos ist und auf Ihrem eigenen Rechner läuft.</p>
     <p class="toc">
-      <a href="#folder">Was in einem Session-Ordner liegt</a> <a href="#steps">Stacken, Schritt für Schritt</a> <a href="#nights">Mehrere Nächte</a> <a href="#why">Warum überhaupt neu stacken</a> <a href="#problems">Wenn etwas schiefgeht</a>
+      <a href="#folder">Was in einem Session-Ordner liegt</a> <a href="#steps">Stacken, Schritt für Schritt</a> <a href="#mosaic">Mosaike</a> <a href="#nights">Mehrere Nächte</a> <a href="#why">Warum überhaupt neu stacken</a> <a href="#problems">Wenn etwas schiefgeht</a>
     </p>
   </div>
 </header>
@@ -113,6 +113,14 @@
         <dd><p>Lassen Sie die Ausgabe leer, wird der Stack neben dem Session-Ordner gespeichert, ohne je einen früheren zu überschreiben. Sie erhalten ein JPEG zum Ansehen und Teilen und eine FITS-Datei, die linear bleibt, für die Weiterbearbeitung in anderer Software oder um sie später mit einer weiteren Nacht zusammenzuführen.</p></dd></div>
     </dl>
     <p class="plain measure">Lieber die Kommandozeile? Derselbe Lauf lautet <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>Mosaike</h2>
+    <p class="intro measure">Der Mosaikmodus des Origin nimmt ein großes Objekt als mehrere überlappende Kacheln auf und speichert jede Kachel als eigenen Session-Ordner. Legen Sie die Kachel-Ordner in einen gemeinsamen Ordner und wählen Sie diesen. OriginStack erkennt an der Ausrichtung jeder Session, dass es Kacheln sind und keine Nächte desselben Feldes, stackt jede Kachel, gleicht die Kacheln in ihren Überlappungen in Helligkeit und Gradient aneinander an, fügt sie zu einem Bild zusammen und bearbeitet es einmal fertig. Mehrere Nächte derselben Kachel dürfen im selben Ordner liegen. Auf der Kommandozeile heißt die Option <code>--mosaic</code>, sie schaltet sich aber selbst ein.</p>
+    <p class="caveat measure">Getestet ist das mit Kacheln, die aus echten Origin-Stacks geschnitten wurden, noch nicht mit einer Aufnahme aus dem Mosaikmodus selbst. Wenn sich ein Mosaik Ihres Origin nicht zusammensetzen lässt, <a href="https://github.com/hd152/originstack/issues">eröffnen Sie bitte ein Issue</a>.</p>
   </div>
 </section>
 

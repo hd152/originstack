@@ -72,7 +72,7 @@
     <h1>如何在电脑上叠加 Celestron Origin 图像</h1>
     <p class="lede">Origin 一边拍摄一边叠加，但它也保留了拍摄的每一张原始帧。在电脑上以正确的校准和对齐重新叠加这些帧，能得到比望远镜保存的图像更锐利、更干净的结果。本指南使用 OriginStack 完成这一过程，它免费，并在你自己的电脑上运行。</p>
     <p class="toc">
-      <a href="#folder">会话文件夹里有什么</a> <a href="#steps">分步叠加</a> <a href="#nights">多个夜晚</a> <a href="#why">为什么要重新叠加</a> <a href="#problems">出现问题时</a>
+      <a href="#folder">会话文件夹里有什么</a> <a href="#steps">分步叠加</a> <a href="#mosaic">马赛克</a> <a href="#nights">多个夜晚</a> <a href="#why">为什么要重新叠加</a> <a href="#problems">出现问题时</a>
     </p>
   </div>
 </header>
@@ -111,6 +111,14 @@
         <dd><p>输出留空时，叠加结果会保存在会话文件夹旁边，绝不覆盖之前的结果。你会得到一张用于查看和分享的 JPEG，以及一个保持线性的 FITS 文件，可在其他软件中做进一步处理，或日后与另一晚的数据合并。</p></dd></div>
     </dl>
     <p class="plain measure">更喜欢命令行？同样的运行是 <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>。</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>马赛克</h2>
+    <p class="intro measure">Origin 的马赛克模式把一个大目标拍成若干相互重叠的拼块，每个拼块保存为单独的会话文件夹。把各拼块的文件夹放进同一个上级文件夹，然后选择这个上级文件夹。OriginStack 会根据每个会话的指向判断它们是拼块而不是同一视场的不同夜晚，分别叠加每个拼块，在重叠区域把拼块之间的亮度和梯度对齐，融合成一幅图像并只做一次后期处理。同一拼块的多个夜晚也可以放在同一个上级文件夹中。命令行选项是 <code>--mosaic</code>，但它会自动开启。</p>
+    <p class="caveat measure">这已经用从真实 Origin 叠加结果中切出的拼块测试过，但还没有用马赛克模式本身拍摄的数据测试。如果你的 Origin 马赛克无法正确拼接，请<a href="https://github.com/hd152/originstack/issues">提交 issue</a>。</p>
   </div>
 </section>
 
