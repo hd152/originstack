@@ -117,3 +117,12 @@ saturated matched star (`match_gaia_field(min_g=)`, `gaia_cone_search(min_mag=)`
 when too few unsaturated stars remain and at least half of the candidates were
 saturated. M37: 105 of the matched stars saturated, re-queried from G > 13.0, 75 good
 stars, scales R 0.715 B 1.042 (other nights R 0.71-0.76, B 1.05-1.13), B-R slope 0.72.
+
+### Firmware facts and ISO-mismatched darks (2026-10)
+
+**What the firmware says (Origin 1.4.6084, read as data, not run).** The core software drives `Origin178`, `Origin678C` (own camera firmware file `Origin678C.img`; IMX678, most likely the Mark II's), `QHY183C`, `ASI183MC` and `ASI294MC` (`camera_profile.ORIGIN_PLATFORM_CAMERAS`); only the Origin178 has a profile here. It converts the app's ISO to camera gain with a quadratic (coefficients A/B/C in `Camera-Settings.json` on the data partition, not recoverable from the image we have), scales darks by exposure, gain and temperature, and keeps darks per gain/exposure/bit depth plus factory darks/flats/biases. A profile for the other cameras needs one session from each (`tools/measure_camera_profile.py`).
+
+**ISO 500 lights with an ISO 200 dark.** 3 of 33 local sessions (Eyes Galaxies 2026-03-19, Messier 37 2026-03-19, Pinwheel 2026-01-18) pair ISO 500 lights with the Origin's ISO 200 dark; OriginStack scales the dark's (dark - bias) part by exposure only. The Origin's dark and bias files are not a clean pair: their smoothed difference is -70 to -170 ADU on most sessions and +1600 ADU on Pinwheel, with 150-280 ADU of spatial structure. Stacked three ways each (default settings; quadratic-removed residual of star-masked 32 px block medians, edge-minus-centre, outliers):
+- *x2.58 (the ISO gain ratio, 0.0165/0.0064 e-/ADU) on top of the exposure ratio:* edge glow fell in R and G on Messier 37 and Eyes (R +17.8 -> +0.5, +14.6 -> +2.5 ADU) but overshot in B (-7.9, -6.5); whole-frame residual 0-10% worse; on Pinwheel R residual 276 -> 440 ADU and pixel noise +57% (G/B 13-16% better). The ratio multiplies the dark/bias offset error too.
+- *No dark:* worse than either on Messier 37 and Eyes (outliers 2-4x on Messier 37); on Pinwheel R better than the scaled dark, G/B worse.
+Not changed: the dark is used as before, scaled by exposure, and the run now says when its ISO differs from the lights' (`cli._warn_dark_iso_mismatch`).

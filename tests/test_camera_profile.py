@@ -90,8 +90,23 @@ def test_resolve_camera(monkeypatch):
     monkeypatch.setattr(cp, 'verify_gain', lambda *a, **k: (0.0165, 0.031, False))
     info = cp.resolve_camera([_F(_hdr())], args, verify=True)
     assert info['gain'] is None and info['gain_measured'] == pytest.approx(0.031)
-    assert cp.resolve_camera([_F({'CAMERA': 'Other-12345678'})], args) is None
+    # a camera without a profile is recorded, without a gain, so profile-specific steps
+    # know to stay off (it used to leave no record at all)
+    other = cp.resolve_camera([_F({'CAMERA': 'Other-12345678', 'ISOSPEED': 200})], args)
+    assert other['model'] == 'Other' and other['gain'] is None and not other['profiled']
+    assert args._camera is other
+    # no CAMERA keyword: nothing to record
+    assert cp.resolve_camera([_F({'ISOSPEED': 200})], args) is None
     assert args._camera is None
+
+
+def test_other_origin_platform_cameras_are_named(capsys):
+    args = argparse.Namespace()
+    info = cp.resolve_camera([_F({'CAMERA': 'Origin678C-0123456789abcdef', 'ISOSPEED': 200,
+                                  'NAXIS1': 3840, 'NAXIS2': 2160})], args)
+    out = capsys.readouterr().out
+    assert info['model'] == 'Origin678C' and info['gain'] is None
+    assert 'Origin platform supports' in out and 'no measured profile yet' in out
 
 
 def test_read_gain_order():
@@ -113,3 +128,19 @@ def test_poisson_label_names_the_profile():
                               _stack_poisson_factor=None)
     c, src = poisson_coefficients({'NFRAMES': 1}, args, stacked=False)
     assert np.allclose(c, 1 / 0.0165) and 'camera profile' in src
+
+
+def test_dark_at_another_iso_is_reported(capsys):
+    from src.cli import _warn_dark_iso_mismatch
+    lights = [_F({'ISOSPEED': 500}) for _ in range(3)]
+    _warn_dark_iso_mismatch({'light': lights, 'dark': [_F({'ISOSPEED': 200})]})
+    assert 'ISO 200 but the lights at ISO 500' in capsys.readouterr().out
+    _warn_dark_iso_mismatch({'light': lights, 'dark': [_F({'ISOSPEED': 500})]})
+    assert capsys.readouterr().out == ''
+
+
+def test_dark_iso_note_ignores_frames_without_headers(capsys):
+    # _build_masters is tested with placeholder frames; a note must never break it
+    from src.cli import _warn_dark_iso_mismatch
+    _warn_dark_iso_mismatch({'light': [object()], 'dark': [object()]})
+    assert capsys.readouterr().out == ''
