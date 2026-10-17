@@ -84,11 +84,13 @@ def _sky(H, W, seed=0):
     return img
 
 
-def _wcs(ra, dec, scale_deg, crpix):
+def _wcs(ra, dec, scale_deg, crpix, rot_deg=0.0):
+    """TAN WCS with RA increasing with +x (as real Origin frames), rotated by rot_deg."""
     w = WCS(naxis=2)
     w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     w.wcs.crval = [ra, dec]
-    w.wcs.cd = np.array([[scale_deg, 0.0], [0.0, scale_deg]])
+    c, s = math.cos(math.radians(rot_deg)), math.sin(math.radians(rot_deg))
+    w.wcs.cd = scale_deg * np.array([[c, -s], [s, c]])
     w.wcs.crpix = list(crpix)
     return w
 
@@ -102,8 +104,9 @@ def _write_panels(tmp_path, truth, w_truth, boxes, gains, planes, sigma, rng):
         v, u = np.mgrid[:h, :w].astype(np.float32)
         grad = a + b * (u / w - 0.5) + c * (v / h - 0.5)
         data = (sub / g) + grad[..., None] + rng.normal(0, sigma, sub.shape).astype(np.float32)
-        hdr = _wcs(*w_truth.wcs.crval, w_truth.wcs.cd[0, 0],
-                   (w_truth.wcs.crpix[0] - x0, w_truth.wcs.crpix[1] - y0)).to_header()
+        w = w_truth.deepcopy()
+        w.wcs.crpix = [w_truth.wcs.crpix[0] - x0, w_truth.wcs.crpix[1] - y0]
+        hdr = w.to_header()
         hdr["RAWSTACK"] = True
         hdr["NFRAMES"] = 100 + k
         hdr["INTGTIME"] = float(2000 + 100 * k)
@@ -113,11 +116,13 @@ def _write_panels(tmp_path, truth, w_truth, boxes, gains, planes, sigma, rng):
     return paths
 
 
-def test_stitch_recovers_the_sky_without_seams(tmp_path):
+# 7 deg: field rotation as on real Origin stacks (their CD is rotated ~6.9 deg)
+@pytest.mark.parametrize("rot", [0.0, 7.0])
+def test_stitch_recovers_the_sky_without_seams(tmp_path, rot):
     rng = np.random.default_rng(3)
     H, W = 700, 1000
     truth = _sky(H, W)
-    w_truth = _wcs(10.0, 41.0, 1.476 / 3600, (W / 2, H / 2))
+    w_truth = _wcs(10.0, 41.0, 1.476 / 3600, (W / 2, H / 2), rot)
     boxes = [(0, 420, 0, 600), (0, 420, 400, 1000), (280, 700, 0, 600), (280, 700, 400, 1000)]
     gains = [1.0, 1.08, 0.93, 1.03]
     planes = [(0, 0, 0), (12.0, 8.0, -5.0), (-7.0, -6.0, 10.0), (4.0, 10.0, 6.0)]
@@ -130,14 +135,19 @@ def test_stitch_recovers_the_sky_without_seams(tmp_path):
         m = np.moveaxis(hd[0].data, 0, -1)
         hdr = hd[0].header
     assert hdr["RAWSTACK"] and hdr["MOSAIC"] and hdr["NPANELS"] == 4
+    # the four panels tile the whole field: nothing may fall off the grid
+    assert hdr["COVERAGE"] > 0.95, hdr["COVERAGE"]
+    assert abs(m.shape[0] - H) <= 2 and abs(m.shape[1] - W) <= 2
     w_m = WCS(hdr, naxis=2)
     # sample the truth at the mosaic's pixels (exact: same scale, axis-aligned, integer shift)
     ra, dec = w_m.pixel_to_world_values(0, 0)
     tx, ty = w_truth.world_to_pixel_values(ra, dec)
     ox, oy = int(round(float(tx))), int(round(float(ty)))
-    hh, ww = min(m.shape[0], H - oy), min(m.shape[1], W - ox)
-    got = m[:hh, :ww]
-    ref = truth[oy:oy + hh, ox:ox + ww] / gains[3]          # deepest panel (k=3) is the scale
+    my, mx = max(0, -oy), max(0, -ox)                       # mosaic rows/cols before the truth's
+    ty0, tx0 = oy + my, ox + mx
+    hh, ww = min(m.shape[0] - my, H - ty0), min(m.shape[1] - mx, W - tx0)
+    got = m[my:my + hh, mx:mx + ww]
+    ref = truth[ty0:ty0 + hh, tx0:tx0 + ww] / gains[3]      # deepest panel (k=3) is the scale
     inner = np.zeros((hh, ww), bool)
     inner[10:-10, 10:-10] = True
     # residual vs truth: an offset/plane from the reference panel is allowed; remove it

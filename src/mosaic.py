@@ -204,8 +204,10 @@ def _output_wcs(wcss: List["WCS"], shapes: List[Tuple[int, int]], ref: int) -> T
         xs.append(px)
         ys.append(py)
     xs, ys = np.concatenate(xs), np.concatenate(ys)
-    x0, y0 = math.floor(float(xs.min())), math.floor(float(ys.min()))
-    out.wcs.crpix = [1.0 - x0, 1.0 - y0]
+    # (1e-6: a panel edge at -1e-10 from rounding must not add an empty border row)
+    x0, y0 = math.floor(float(xs.min()) + 1e-6), math.floor(float(ys.min()) + 1e-6)
+    # shift by whole pixels so the minimum lands on pixel 0 (CRPIX is 1-based)
+    out.wcs.crpix = [float(r.wcs.crpix[0]) - x0, float(r.wcs.crpix[1]) - y0]
     W = int(math.ceil(float(xs.max())) - x0 + 1)
     H = int(math.ceil(float(ys.max())) - y0 + 1)
     return out, (H, W)
@@ -313,6 +315,22 @@ def _robust_plane(u, v, d, iters: int = 6):
     return coef
 
 
+def _robust_gain(bi, bj, u, v, iters: int = 6) -> float:
+    """r of bj ~ r bi + a + b u + c v (Tukey-biweight IRLS): the gain between two panels
+    with their relative sky gradient fitted at the same time."""
+    A = np.column_stack([bi, np.ones_like(u), u, v])
+    w = np.ones_like(bj)
+    coef = np.zeros(4)
+    for _ in range(iters):
+        sw = np.sqrt(w)
+        coef, *_ = np.linalg.lstsq(A * sw[:, None], bj * sw, rcond=None)
+        r = bj - A @ coef
+        s = 1.4826 * np.median(np.abs(r - np.median(r))) + 1e-12
+        t = r / (4.685 * s)
+        w = np.where(np.abs(t) < 1, (1 - t * t) ** 2, 0.0)
+    return float(coef[0])
+
+
 def _match(panels: List[_Placed], shape_out, ref: int, verbose: bool) -> None:
     """Set each panel's gain and plane by one global least-squares solve over all
     pairwise overlaps (the reference panel fixed at gain 1, plane 0)."""
@@ -331,25 +349,28 @@ def _match(panels: List[_Placed], shape_out, ref: int, verbose: bool) -> None:
             pairs.append((i, j, sa, sb, y0, x0, m))
     if not pairs:
         return
-    # 1) gains, from block medians of pixels well above the sky in both (log ratios)
+    # 1) gains: per overlap, P_j ~ r P_i + plane, fitted jointly on block medians (a
+    #    gain fitted before removing the pair's relative gradient was biased by it,
+    #    ~1% on a synthetic 2x2 mosaic: visible seams on a bright galaxy), then the
+    #    log ratios solved for all panels at once
     for c in range(3):
         rows, rhs, wts = [], [], []
-        for i, j, sa, sb, _y0, _x0, m in pairs:
+        for i, j, sa, sb, y0, x0, m in pairs:
             ai, mi = _block_median(panels[i].data[sa][..., c], m)
             aj, _ = _block_median(panels[j].data[sb][..., c], m)
             ok = mi & np.isfinite(ai) & np.isfinite(aj)
             if ok.sum() < _MIN_OVERLAP_BLOCKS:
                 continue
             si, sj = ai[ok], aj[ok]
-            # brighter than the overlap's sky by 10 block-noise units in both
-            thr_i = np.median(si) + 10.0 * panels[i].sigma[c] / _BLOCK
-            thr_j = np.median(sj) + 10.0 * panels[j].sigma[c] / _BLOCK
-            bright = (si > thr_i) & (sj > thr_j)
+            # the gain needs signal: blocks well above the overlap's sky in both
+            bright = ((si > np.median(si) + 10.0 * panels[i].sigma[c] / _BLOCK)
+                      & (sj > np.median(sj) + 10.0 * panels[j].sigma[c] / _BLOCK))
             if bright.sum() < 20:
                 continue
-            # gain from the slope of i against j over the bright blocks (sky offsets cancel)
-            ci, cj = si[bright] - np.median(si), sj[bright] - np.median(sj)
-            ratio = float(np.median(cj / np.maximum(ci, 1e-9)))
+            by, bx = np.nonzero(ok)
+            u = (x0 + (bx + 0.5) * _BLOCK) / Wo - 0.5
+            v = (y0 + (by + 0.5) * _BLOCK) / Ho - 0.5
+            ratio = _robust_gain(si, sj, u, v)
             if not (0.3 < ratio < 3.0):
                 continue
             row = np.zeros(n)
