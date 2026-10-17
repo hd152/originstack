@@ -25,9 +25,11 @@ in the packaged app, so ``--mosaic`` fell back to an ordinary combine there).
 ``predict_mosaic`` decides from metadata alone whether a folder of sessions is a mosaic:
 sessions pointed more than ``_SAME_POINTING_FRAC`` of a field apart whose fields
 overlap. The Celestron Origin's own Mosaic Mode (firmware 1.4.6084 and later) captures
-and stacks every tile as a session; any tile keys it writes into ``info.json``
-(``MosaicUuid``, ``TileRow``/``TileCol``, ...) are read too, but their exact layout has
-not been seen on real data yet, so pointing is what decides.
+and stacks every tile as a session; when the sessions carry its mosaic description
+(``mosaic_manifest``: a shared ``MosaicUuid`` in ``info.json``, or a JSON tile list whose
+UUIDs are the sessions' ``StackedInfo.uuid``), that decides exactly and missing tiles are
+reported. The schema comes from the firmware; where it is stored on disk has not been
+seen on real data yet, so pointing remains the fallback.
 """
 from __future__ import annotations
 
@@ -112,12 +114,192 @@ def _separation(a: dict, b: dict) -> float:
     return math.acos(max(-1.0, min(1.0, s)))
 
 
+def session_uuid(d: str) -> Optional[str]:
+    """The session's stacked-master UUID (``info.json`` ``StackedInfo.uuid``): what the
+    Origin's mosaic tile list refers to each tile by."""
+    try:
+        with open(os.path.join(d, 'info.json'), encoding='utf-8') as fh:
+            info = json.load(fh)
+        u = (info.get('StackedInfo') or info).get('uuid')
+        return str(u).lower() if u else None
+    except Exception:
+        return None
+
+
+def _tile_entries(obj, out: list) -> None:
+    """Every dict under ``obj`` that has TileRow and TileCol (an Origin mosaic tile)."""
+    if isinstance(obj, dict):
+        keys = {k.lower(): k for k in obj if isinstance(k, str)}
+        if 'tilerow' in keys and 'tilecol' in keys:
+            out.append(obj)
+        for v in obj.values():
+            _tile_entries(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _tile_entries(v, out)
+
+
+def _uuids_in(obj) -> List[str]:
+    """String values of any ``*uuid*`` key directly in ``obj`` (the tile list's own field
+    name for the stacked master is not known from the firmware, only that it is a UUID)."""
+    return [str(v).lower() for k, v in obj.items()
+            if isinstance(k, str) and 'uuid' in k.lower() and isinstance(v, str) and v]
+
+
+def _read_json(path: str):
+    try:
+        if os.path.getsize(path) > 4 << 20:
+            return None
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def mosaic_manifest(subdirs: List[str]) -> Optional[dict]:
+    """The Origin's own mosaic description, when the sessions carry one: ``{'mosaic':
+    uuid or None, 'tiles': {dir: (row, col)}, 'grid': (w, h) or None, 'total': int or
+    None, 'missing': [(row, col)], 'others': [dir]}``, else None.
+
+    Two sources, both in the schema the firmware validates (``MosaicParameters``:
+    CenterRa/CenterDec/Orientation/MosaicWidth/MosaicHeight/TileStride/FeatherRadius;
+    ``MosaicMetadata``: GridWidth/GridHeight/TilesTotal/TilesCompleted; tiles: TileRow,
+    TileCol and a stacked-master UUID): tile keys inside the sessions' own ``info.json``
+    (sessions sharing a MosaicUuid are one mosaic), or any JSON file in the parent folder
+    or a session folder listing tiles whose UUIDs are the sessions' ``StackedInfo.uuid``.
+    Where the firmware stores it on disk has not been seen yet; this reads both places."""
+    if len(subdirs) < 2:
+        return None
+    uuid_of = {d: session_uuid(d) for d in subdirs}
+    dir_of = {u: d for d, u in uuid_of.items() if u}
+    tiles: Dict[str, Tuple[int, int]] = {}
+    info_tiles: Dict[str, Tuple[int, int]] = {}
+    meta: Dict[str, object] = {}
+    # (1) the sessions' own info.json
+    by_mosaic: Dict[str, List[str]] = {}
+    for d in subdirs:
+        p = session_pointing(d) or {}
+        t = p.get('tile') or {}
+        if 'mosaicuuid' in t:
+            by_mosaic.setdefault(str(t['mosaicuuid']).lower(), []).append(d)
+            if 'tilerow' in t and 'tilecol' in t:
+                try:
+                    info_tiles[d] = (int(t['tilerow']), int(t['tilecol']))
+                except (TypeError, ValueError):
+                    pass
+            for k in ('gridwidth', 'gridheight'):
+                if k in t:
+                    meta[k] = t[k]
+    mosaic_id = None
+    if by_mosaic:
+        mosaic_id, members = max(by_mosaic.items(), key=lambda kv: len(kv[1]))
+        if len(members) < 2:
+            mosaic_id = None           # every session its own "mosaic": nothing in common
+        else:
+            tiles.update({d: info_tiles[d] for d in members if d in info_tiles})
+    # (2) tile lists in JSON files of the parent and session folders
+    parent = os.path.dirname(os.path.normpath(subdirs[0]))
+    files = [os.path.join(parent, f) for f in sorted(os.listdir(parent)) if f.lower().endswith('.json')] \
+        if os.path.isdir(parent) else []
+    for d in subdirs:
+        files += [os.path.join(d, f) for f in sorted(os.listdir(d))
+                  if f.lower().endswith('.json') and f.lower() != 'info.json']
+    for f in files:
+        obj = _read_json(f)
+        if obj is None:
+            continue
+        entries: list = []
+        _tile_entries(obj, entries)
+        matched = 0
+        for e in entries:
+            keys = {k.lower(): k for k in e if isinstance(k, str)}
+            try:
+                rc = (int(e[keys['tilerow']]), int(e[keys['tilecol']]))
+            except (TypeError, ValueError):
+                continue
+            for u in _uuids_in(e):
+                if u in dir_of:
+                    tiles.setdefault(dir_of[u], rc)
+                    matched += 1
+                    break
+        if matched >= 2:
+            found: Dict[str, object] = {}
+            _walk_keys(obj, found)
+            for k in ('gridwidth', 'gridheight'):
+                if k in found:
+                    meta[k] = found[k]
+            _total = _find_key(obj, 'tilestotal')
+            if _total is not None:
+                meta['total'] = _total
+            if mosaic_id is None:
+                mid = _find_key(obj, 'mosaicuuid')
+                mosaic_id = str(mid).lower() if mid else None
+    if len(tiles) < 2 and mosaic_id is None:
+        return None
+    members = set(tiles)
+    if mosaic_id is not None:
+        members |= set(by_mosaic.get(mosaic_id, []))
+    if len(members) < 2:
+        return None
+    grid = None
+    try:
+        if 'gridwidth' in meta and 'gridheight' in meta:
+            grid = (int(meta['gridwidth']), int(meta['gridheight']))
+    except (TypeError, ValueError):
+        grid = None
+    total = None
+    try:
+        total = int(meta['total']) if 'total' in meta else (grid[0] * grid[1] if grid else None)
+    except (TypeError, ValueError):
+        total = None
+    missing = []
+    if grid:
+        have = set(tiles.values())
+        missing = [(r, c) for r in range(grid[1]) for c in range(grid[0]) if (r, c) not in have]
+    return {'mosaic': mosaic_id, 'tiles': {d: tiles.get(d) for d in sorted(members)},
+            'grid': grid, 'total': total, 'missing': missing,
+            'others': [d for d in subdirs if d not in members]}
+
+
+def _find_key(obj, key: str):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str) and k.lower() == key:
+                return v
+            r = _find_key(v, key)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_key(v, key)
+            if r is not None:
+                return r
+    return None
+
+
 def predict_mosaic(subdirs: List[str]) -> Optional[dict]:
     """``{'clusters': [[dir, ...], ...], 'reason': str}`` when ``subdirs`` look like the
-    panels of one mosaic, else None. Panels = groups of sessions at one pointing (several
-    nights of the same tile stay one group); it is a mosaic when there are at least two
-    groups and every group overlaps another, so the panels form one connected sky area.
-    Unreadable metadata, or groups that do not overlap (different targets), give None."""
+    panels of one mosaic, else None. The Origin's own mosaic description wins when the
+    sessions carry one (``mosaic_manifest``: exact, with missing tiles reported);
+    otherwise panels = groups of sessions at one pointing (several nights of the same
+    tile stay one group), and it is a mosaic when there are at least two groups and every
+    group overlaps another, so the panels form one connected sky area. Unreadable
+    metadata, or groups that do not overlap (different targets), give None."""
+    man = mosaic_manifest(subdirs)
+    if man is not None:
+        groups: Dict[object, List[str]] = {}
+        for d, rc in man['tiles'].items():
+            groups.setdefault(rc if rc is not None else d, []).append(d)
+        reason = (f"Origin mosaic{' ' + man['mosaic'][:8] if man['mosaic'] else ''}: "
+                  f"{len(groups)} tile(s) from {len(man['tiles'])} session(s)")
+        if man['grid']:
+            reason += f", grid {man['grid'][0]}x{man['grid'][1]}"
+        if man['missing']:
+            reason += f"; missing tile(s) {', '.join(f'[{r},{c}]' for r, c in man['missing'])}"
+        if man['others']:
+            reason += f"; {len(man['others'])} other session(s) not part of it"
+        return {'clusters': list(groups.values()), 'reason': reason, 'exact': True,
+                'manifest': man}
     pts = [(d, session_pointing(d)) for d in subdirs]
     if len(pts) < 2 or any(p is None for _, p in pts):
         return None
