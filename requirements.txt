@@ -19,9 +19,6 @@ Pillow>=12.3.0
 #   TIFF input support (16/32-bit linear TIFF lights, e.g. from N.I.N.A./SharpCap/PixInsight):
 #     tifffile>=2023.1   — read TIFF images; also used to write --export tiff output
 #
-#   Mosaic stitching (--mosaic):
-#     reproject          — WCS reprojection of the per-panel stacks
-#
 #   HTTPS certificate store:
 #     certifi            — used for Gaia/SIMBAD/astrometry.net lookups when installed; some
 #                          Python installs (seen on Windows) have no usable default CA store

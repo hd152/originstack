@@ -882,6 +882,16 @@ def _want_combine_sessions(args: argparse.Namespace,
         return False
 
     if subdirs and len(subdirs) > 1:
+        # Panels of a mosaic (the Origin's Mosaic Mode stacks each tile as a session)
+        # cannot be pooled: their frames point at different sky.
+        from src.mosaic import predict_mosaic
+        _mz = predict_mosaic(subdirs)
+        if _mz is not None:
+            safe_print(f"  Sessions look like mosaic panels ({_mz['reason']}): stacking "
+                       f"each and stitching. Pass --combine-sessions or --hierarchical "
+                       f"to combine them as one field instead.")
+            args.mosaic = True
+            return False
         spread = _predict_rotation_spread(subdirs)
         if spread is None:
             # Without this line a session missing its info.json GPS/WCS gets
@@ -1308,8 +1318,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         if getattr(args, 'mosaic', False):
             from src.mosaic import stitch_mosaic_panels
             mosaic_done = stitch_mosaic_panels(produced, output, args)
-            if not mosaic_done:
-                safe_print("  Falling back to translation-based combine...")
+            if mosaic_done:
+                _finish_mosaic(output, produced, args, _effective_args)
+            else:
+                safe_print("  Falling back to the ordinary combine...")
 
         if not mosaic_done:
             # Stacks shot through different filters (e.g. the Origin's Clear and Nebula)
@@ -1358,6 +1370,33 @@ def _group_stacks_by_filter(paths: list) -> dict:
             raw = ''
         groups.setdefault(_sanitize_filter_tag(raw) if raw else 'unfiltered', []).append(path)
     return groups
+
+
+def _finish_mosaic(output: str, panels: list, args, effective_args: dict) -> None:
+    """Phase 4 once on the stitched linear mosaic, with the deepest panel's settings
+    (as a hierarchical combine uses its reference session's), then the preview."""
+    from src.merge import load_merge_stack, read_merge_meta
+    depth = []
+    for p in panels:
+        try:
+            meta = read_merge_meta(p)
+            depth.append(float(meta.get('intgtime') or meta.get('nframes') or 0.0))
+        except Exception:
+            depth.append(0.0)
+    ref = panels[int(np.argmax(depth))] if depth else panels[0]
+    mosaic, _meta = load_merge_stack(output)
+    preview_path = os.path.splitext(output)[0] + '.jpg'
+    _eff = effective_args.get(ref)
+    _processed = None
+    if _eff is not None:
+        try:
+            _processed = _postprocess_combined(mosaic, _eff, output)
+        except Exception as exc:
+            safe_print(f"  WARNING: post-processing the mosaic failed ({exc}); the linear "
+                       f"mosaic is saved and its preview is unprocessed")
+    save_final_preview(_processed if _processed is not None else mosaic, preview_path,
+                       _eff if _processed is not None else args)
+    safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
 
 
 def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> None:
@@ -2398,9 +2437,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'choice is made from the predicted field rotation between sessions. '
                         'Has no effect unless the input directory contains subfolders.')
     g_sessions.add_argument('--mosaic', action='store_true',
-                   help='Stitch per-subfolder stacks into a mosaic via WCS reprojection. '
-                        'Requires: pip install reproject and a working plate solver. '
-                        'Automatically enables --plate-solve.')
+                   help='Stitch per-subfolder stacks into one mosaic: each panel is stacked, '
+                        'the panels are matched to each other in their overlaps (gain and '
+                        'gradient) and blended, then the mosaic is finished once. Needs a WCS '
+                        'per panel (the Origin session solve, or a plate solve: enables '
+                        '--plate-solve). Turned on automatically when the subfolders point '
+                        'at overlapping but different parts of the sky.')
     g_core.add_argument('--offline', action='store_true',
                    help='Make no network requests at all. By default a run may look up a target '
                         'name it does not recognise on SIMBAD (only the name is sent), and '

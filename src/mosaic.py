@@ -1,46 +1,45 @@
-"""Mosaic stitching for multi-panel astrophotography.
+"""Mosaic stitching for multi-panel sessions (``--mosaic``, or detected automatically).
 
 Workflow
 --------
-Each panel subfolder is stacked independently (phases 1–4 unchanged).
-``stitch_mosaic_panels`` then:
+Each panel subfolder is stacked on its own through Phases 1-3 (Phase 4 deferred, as for
+a multi-night combine). ``stitch_mosaic_panels`` then:
 
-  1. Verifies every panel has a usable WCS (PLTSOLVD=True or CTYPE1 from info.json).
-  2. Computes the optimal output WCS grid covering all panels.
-  3. Reprojects each panel onto that grid, per-channel.
-  4. Blends overlaps with distance-transform feathering weights.
-  5. Matches per-panel sky backgrounds to minimise seams.
-  6. Writes the final mosaic FITS + preview.
+  1. reads every panel's linear stack and its WCS (the session solve refined against
+     Gaia, or a plate solve);
+  2. builds one TAN grid covering all panels (median pixel scale, the deepest panel's
+     orientation);
+  3. reprojects each panel onto it (an exact WCS-to-WCS map on a coarse grid,
+     interpolated -- the TAN-to-TAN map is smooth -- then cubic resampling), keeping
+     only the panel's own footprint;
+  4. matches the panels to each other in their overlaps with one least-squares solve
+     for all of them at once: a gain per panel and channel (transparency, exposure),
+     then a plane per panel and channel (residual gradient), the deepest panel fixed;
+  5. blends with feathered, inverse-noise-variance weights;
+  6. writes a linear mosaic FITS (``RAWSTACK``, ``MOSAIC``); the caller runs Phase 4
+     once on it, so background extraction and the stretch see one image, not N.
 
-If ``reproject`` is not installed or any panel lacks a WCS, falls back to
-the translation-based combine already in cli.py (returns False).
+No dependency beyond numpy/scipy/astropy (``reproject`` used to be required and was not
+in the packaged app, so ``--mosaic`` fell back to an ordinary combine there).
 
-Dependencies
-------------
-Required (new):  pip install reproject
-Already present: astropy, scipy, numpy
+``predict_mosaic`` decides from metadata alone whether a folder of sessions is a mosaic:
+sessions pointed more than ``_SAME_POINTING_FRAC`` of a field apart whose fields
+overlap. The Celestron Origin's own Mosaic Mode (firmware 1.4.6084 and later) captures
+and stacks every tile as a session; any tile keys it writes into ``info.json``
+(``MosaicUuid``, ``TileRow``/``TileCol``, ...) are read too, but their exact layout has
+not been seen on real data yet, so pointing is what decides.
 """
 from __future__ import annotations
 
+import json
+import math
 import os
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from astropy.io import fits
 
-from src.io_fits import preview_stretch_kw, save_preview_rgb
 from src.utils import safe_print
-
-# ---------------------------------------------------------------------------
-# Optional dependencies
-# ---------------------------------------------------------------------------
-
-try:
-    from reproject import reproject_interp
-    from reproject.mosaicking import find_optimal_celestial_wcs, reproject_and_coadd
-    HAS_REPROJECT = True
-except Exception:
-    HAS_REPROJECT = False
 
 try:
     from astropy.wcs import WCS
@@ -49,273 +48,469 @@ except Exception:
     HAS_WCS = False
 
 try:
-    from scipy.ndimage import distance_transform_edt
-    HAS_EDT = True
+    from scipy import ndimage as ndi
+    HAS_SCIPY = True
 except Exception:
-    HAS_EDT = False
+    HAS_SCIPY = False
+
+# Sessions closer than this fraction of the (smaller) field are the same pointing:
+# nights of one target differ by 7-70 px of 2048 (< 0.04), a mosaic tile steps ~0.6-0.9.
+_SAME_POINTING_FRAC = 0.25
+# Two pointings can overlap if they are closer than this fraction of the larger field.
+_OVERLAP_FRAC = 0.95
+_MAP_STEP = 32            # px between exact WCS evaluations of the reprojection map
+_TRIM_PX = 4              # dropped from each panel's footprint edge (warp ringing, crop rim)
+_FEATHER_FRAC = 0.12      # feather ramp, as a fraction of the panel's smaller side
+_BLOCK = 16               # px; overlap differences are fitted on block medians
+_MIN_OVERLAP_BLOCKS = 30
+_TILE_KEYS = ('mosaicuuid', 'tilerow', 'tilecol', 'gridwidth', 'gridheight', 'tilesize',
+              'tilestride', 'mosaicorientation', 'compositionuuid')
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+# ── detection ───────────────────────────────────────────────────────────────
 
-def _check_dependencies() -> str | None:
-    """Return a human-readable error string if a required package is absent."""
-    if not HAS_REPROJECT:
-        return ("mosaic mode requires the 'reproject' package — "
-                "install with: pip install reproject")
-    if not HAS_WCS:
-        return "mosaic mode requires astropy.wcs (install: pip install astropy)"
-    return None
-
-
-def _feather_weight(ch_data: np.ndarray) -> np.ndarray:
-    """Distance-from-edge weight map for smooth seam blending.
-
-    Each pixel in the output is proportional to its distance to the nearest
-    zero / non-finite pixel in *ch_data*.  Panels therefore contribute most
-    strongly at their centres and fade toward their edges, eliminating hard
-    seams in overlap zones.
-    """
-    valid = (np.isfinite(ch_data) & (ch_data != 0)).astype(np.float32)
-    if not HAS_EDT or valid.sum() == 0:
-        return valid
-    w = distance_transform_edt(valid).astype(np.float32)
-    max_w = float(w.max())
-    return (w / max_w) if max_w > 0 else valid
+def _walk_keys(obj, out: Dict[str, object]) -> None:
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str) and k.lower() in _TILE_KEYS:
+                out[k.lower()] = v
+            _walk_keys(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _walk_keys(v, out)
 
 
-def _sky_floor(ch_data: np.ndarray, border_frac: float = 0.05) -> float:
-    """Sigma-clipped median of border pixels — the per-channel sky pedestal."""
-    H, W = ch_data.shape
-    by = max(5, int(H * border_frac))
-    bx = max(5, int(W * border_frac))
-    border = np.concatenate([
-        ch_data[:by, :].ravel(),
-        ch_data[-by:, :].ravel(),
-        ch_data[by:-by, :bx].ravel(),
-        ch_data[by:-by, -bx:].ravel(),
-    ])
-    border = border[np.isfinite(border) & (border > 0)]
-    if border.size == 0:
-        return 0.0
-    med = float(np.median(border))
-    sigma = float(np.std(border))
-    clipped = border[np.abs(border - med) < 3.0 * sigma]
-    return float(np.median(clipped)) if clipped.size > 0 else med
+def session_pointing(d: str) -> Optional[dict]:
+    """``{'ra', 'dec', 'fov_x', 'fov_y'}`` (radians) of a session folder from its
+    ``info.json``, plus any Origin mosaic tile keys found in it, or None."""
+    path = os.path.join(d, 'info.json')
+    try:
+        with open(path, encoding='utf-8') as fh:
+            info = json.load(fh)
+    except Exception:
+        return None
+    si = info.get('StackedInfo', info) if isinstance(info, dict) else {}
+    try:
+        cel = si['celestial']
+        out = {'ra': float(cel['first']), 'dec': float(cel['second']),
+               'fov_x': float(si['fovX']), 'fov_y': float(si['fovY'])}
+    except Exception:
+        return None
+    if not (out['fov_x'] > 0 and out['fov_y'] > 0):
+        return None
+    tiles: Dict[str, object] = {}
+    _walk_keys(info, tiles)
+    if tiles:
+        out['tile'] = tiles
+    return out
 
 
-def _normalise_backgrounds(
-    panels: List[Tuple[np.ndarray, fits.Header]],
-) -> List[Tuple[np.ndarray, fits.Header]]:
-    """Subtract a per-panel, per-channel sky pedestal so all panels share a
-    common zero-sky baseline before reprojection.
+def _separation(a: dict, b: dict) -> float:
+    """Angular separation (radians)."""
+    s = (math.sin(a['dec']) * math.sin(b['dec'])
+         + math.cos(a['dec']) * math.cos(b['dec']) * math.cos(a['ra'] - b['ra']))
+    return math.acos(max(-1.0, min(1.0, s)))
 
-    This is a first-pass correction; ``reproject_and_coadd`` with
-    ``match_background=True`` adds a second finer pass in overlap zones.
-    """
-    result = []
-    for data_chw, hdr in panels:
-        corrected = data_chw.copy()
-        for c in range(3):
-            sky = _sky_floor(data_chw[c])
-            if sky != 0.0:
-                corrected[c] -= sky
-        result.append((corrected, hdr))
-    return result
 
+def predict_mosaic(subdirs: List[str]) -> Optional[dict]:
+    """``{'clusters': [[dir, ...], ...], 'reason': str}`` when ``subdirs`` look like the
+    panels of one mosaic, else None. Panels = groups of sessions at one pointing (several
+    nights of the same tile stay one group); it is a mosaic when there are at least two
+    groups and every group overlaps another, so the panels form one connected sky area.
+    Unreadable metadata, or groups that do not overlap (different targets), give None."""
+    pts = [(d, session_pointing(d)) for d in subdirs]
+    if len(pts) < 2 or any(p is None for _, p in pts):
+        return None
+    fov_small = min(min(p['fov_x'], p['fov_y']) for _, p in pts)
+    fov_large = max(max(p['fov_x'], p['fov_y']) for _, p in pts)
+    clusters: List[List[Tuple[str, dict]]] = []
+    for d, p in pts:
+        for c in clusters:
+            if _separation(c[0][1], p) < _SAME_POINTING_FRAC * fov_small:
+                c.append((d, p))
+                break
+        else:
+            clusters.append([(d, p)])
+    tiled = any('tile' in p for _, p in pts)
+    if len(clusters) < 2:
+        return None
+    # connectivity of the overlap graph between pointings
+    n = len(clusters)
+    seen, todo = {0}, [0]
+    while todo:
+        i = todo.pop()
+        for j in range(n):
+            if j not in seen and _separation(clusters[i][0][1], clusters[j][0][1]) < _OVERLAP_FRAC * fov_large:
+                seen.add(j)
+                todo.append(j)
+    if len(seen) != n:
+        return None
+    steps = [_separation(clusters[i][0][1], clusters[j][0][1]) / fov_small
+             for i in range(n) for j in range(i + 1, n)]
+    reason = (f"{n} pointings {min(steps):.2f}-{max(steps):.2f} fields apart with "
+              f"overlapping fields" + (" (Origin mosaic tile keys present)" if tiled else ""))
+    return {'clusters': [[d for d, _ in c] for c in clusters], 'reason': reason}
+
+
+# ── reprojection ────────────────────────────────────────────────────────────
 
 def _load_panel(path: str) -> Tuple[np.ndarray, fits.Header]:
-    """Load a panel FITS into a (3, H, W) float32 array + header."""
+    """A panel FITS as (H, W, 3) float32 + header."""
     with fits.open(path, memmap=False) as hd:
         hdr = hd[0].header.copy()
         data = np.array(hd[0].data, dtype=np.float32)
     if data.ndim == 2:
-        # Grayscale — promote to 3-channel
-        data = np.stack([data, data, data], axis=0)
-    elif data.ndim == 3 and data.shape[0] != 3:
-        # (H, W, 3) → (3, H, W)
-        data = np.transpose(data, (2, 0, 1))
+        data = np.stack([data] * 3, axis=-1)
+    elif data.ndim == 3 and data.shape[0] == 3:
+        data = np.ascontiguousarray(np.moveaxis(data, 0, -1))
     return data, hdr
 
 
 def _panel_wcs(hdr: fits.Header) -> "WCS":
-    """Extract a 2-axis celestial WCS from a panel header."""
+    """A 2-axis celestial WCS from a panel header (built with naxis=2: the data is a
+    (3, H, W) cube)."""
     import warnings
-    # Silence astropy's FITSFixedWarning: its handler iterates sys.modules and
-    # can raise under a concurrent import (see photometry_core._celestial_wcs).
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        wcs = WCS(hdr)
-    # Prefer the celestial sub-WCS; fall back to full WCS if .celestial is empty
-    cel = wcs.celestial
-    if cel.naxis == 2:
-        return cel
-    return wcs
+        return WCS(hdr, naxis=2)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+def _has_wcs(hdr: fits.Header) -> bool:
+    return bool(hdr.get('PLTSOLVD', False)) or all(k in hdr for k in ('CTYPE1', 'CRVAL1', 'CRPIX1'))
 
-def stitch_mosaic_panels(
-    panel_paths: List[str],
-    output_path: str,
-    args,
-) -> bool:
-    """Reproject and coadd WCS-solved panel stacks into a single mosaic FITS.
 
-    Parameters
-    ----------
-    panel_paths:
-        Ordered list of per-panel stacked FITS paths (output of each
-        subfolder's ``stack_target`` call).
-    output_path:
-        Destination path for the final mosaic FITS.
-    args:
-        Parsed CLI namespace — used for ``verbose``, ``stretch``, and GHS
-        preview parameters.
+def _pixel_scale_deg(w: "WCS") -> float:
+    m = w.pixel_scale_matrix
+    return float(math.sqrt(abs(np.linalg.det(m))))
 
-    Returns
-    -------
-    True
-        Mosaic written successfully.
-    False
-        Fell back to caller's translation-based combine (e.g. missing
-        dependency or unsolved panel).
-    """
+
+def _output_wcs(wcss: List["WCS"], shapes: List[Tuple[int, int]], ref: int) -> Tuple["WCS", Tuple[int, int]]:
+    """A TAN grid covering every panel: the reference (deepest) panel's own projection --
+    tangent point, scale, orientation, parity -- extended by whole pixels, so that panel
+    lands on the grid without being resampled and only the others are interpolated."""
+    r = wcss[ref]
+    out = WCS(naxis=2)
+    out.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    out.wcs.crval = list(r.wcs.crval)
+    out.wcs.cd = r.pixel_scale_matrix
+    out.wcs.crpix = list(r.wcs.crpix)
+    xs, ys = [], []
+    for w, (h, wd) in zip(wcss, shapes):
+        t = np.linspace(0, 1, 9)
+        ex = np.concatenate([t * (wd - 1), np.full(9, wd - 1.0), t[::-1] * (wd - 1), np.zeros(9)])
+        ey = np.concatenate([np.zeros(9), t * (h - 1), np.full(9, h - 1.0), t[::-1] * (h - 1)])
+        ra, dec = w.pixel_to_world_values(ex, ey)
+        px, py = out.world_to_pixel_values(ra, dec)
+        xs.append(px)
+        ys.append(py)
+    xs, ys = np.concatenate(xs), np.concatenate(ys)
+    x0, y0 = math.floor(float(xs.min())), math.floor(float(ys.min()))
+    out.wcs.crpix = [1.0 - x0, 1.0 - y0]
+    W = int(math.ceil(float(xs.max())) - x0 + 1)
+    H = int(math.ceil(float(ys.max())) - y0 + 1)
+    return out, (H, W)
+
+
+class _Placed:
+    """One panel resampled onto the output grid, over its own bounding box only."""
+
+    def __init__(self, data, valid, y0, x0, sigma, depth, name):
+        self.data, self.valid, self.y0, self.x0 = data, valid, y0, x0
+        self.sigma, self.depth, self.name = sigma, depth, name
+        self.gain = np.ones(3)
+        self.plane = np.zeros((3, 3))           # per channel: a + b u + c v
+
+    @property
+    def box(self):
+        return self.y0, self.y0 + self.data.shape[0], self.x0, self.x0 + self.data.shape[1]
+
+
+def _reproject(img: np.ndarray, w_in: "WCS", w_out: "WCS", shape_out) -> Optional[Tuple[np.ndarray, np.ndarray, int, int]]:
+    """(data, valid, y0, x0): ``img`` resampled onto ``w_out`` over its footprint's box."""
+    h, wd, _ = img.shape
+    t = np.linspace(0, 1, 9)
+    ex = np.concatenate([t * (wd - 1), np.full(9, wd - 1.0), t[::-1] * (wd - 1), np.zeros(9)])
+    ey = np.concatenate([np.zeros(9), t * (h - 1), np.full(9, h - 1.0), t[::-1] * (h - 1)])
+    ra, dec = w_in.pixel_to_world_values(ex, ey)
+    px, py = w_out.world_to_pixel_values(ra, dec)
+    Ho, Wo = shape_out
+    y0, y1 = max(0, int(math.floor(py.min())) - 1), min(Ho, int(math.ceil(py.max())) + 2)
+    x0, x1 = max(0, int(math.floor(px.min())) - 1), min(Wo, int(math.ceil(px.max())) + 2)
+    if y1 <= y0 or x1 <= x0:
+        return None
+    gy = np.unique(np.concatenate([np.arange(y0, y1, _MAP_STEP), [y1 - 1]])).astype(np.float64)
+    gx = np.unique(np.concatenate([np.arange(x0, x1, _MAP_STEP), [x1 - 1]])).astype(np.float64)
+    GX, GY = np.meshgrid(gx, gy)
+    ra, dec = w_out.pixel_to_world_values(GX, GY)
+    sx, sy = w_in.world_to_pixel_values(ra, dec)
+    # the exact map on the coarse grid, interpolated to every output pixel
+    fy = np.interp(np.arange(y0, y1), gy, np.arange(len(gy)))
+    fx = np.interp(np.arange(x0, x1), gx, np.arange(len(gx)))
+    FY, FX = np.meshgrid(fy, fx, indexing='ij')
+    mx = ndi.map_coordinates(sx, [FY, FX], order=1, mode='nearest')
+    my = ndi.map_coordinates(sy, [FY, FX], order=1, mode='nearest')
+    finite = np.all(np.isfinite(img), axis=2)
+    inside = (mx >= _TRIM_PX) & (mx <= wd - 1 - _TRIM_PX) & (my >= _TRIM_PX) & (my <= h - 1 - _TRIM_PX)
+    ok = ndi.map_coordinates(finite.astype(np.float32), [my, mx], order=0, mode='constant', cval=0.0) > 0.5
+    valid = inside & ok
+    out = np.zeros((y1 - y0, x1 - x0, 3), np.float32)
+    for c in range(3):
+        ch = np.where(finite, img[..., c], 0.0).astype(np.float64)
+        out[..., c] = ndi.map_coordinates(ch, [my, mx], order=3, mode='nearest', prefilter=True)
+    out[~valid] = 0.0
+    return out, valid, y0, x0
+
+
+def _noise_sigma(img: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Per-channel noise of a placed panel: MAD of lag-4 row differences (as nn_denoise)."""
+    out = np.ones(3)
+    v = valid[::2, 4:] & valid[::2, :-4]
+    for c in range(3):
+        x = img[::2, :, c]
+        d = (x[:, 4:] - x[:, :-4])[v]
+        if d.size > 100:
+            out[c] = 1.4826 * np.median(np.abs(d - np.median(d))) / math.sqrt(2.0)
+    return np.maximum(out, 1e-9)
+
+
+def _block_median(a: np.ndarray, m: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """(values (gh, gw), ok mask) of ``a``'s block medians over valid pixels ``m``."""
+    h, w = a.shape
+    gh, gw = h // _BLOCK, w // _BLOCK
+    if gh == 0 or gw == 0:
+        return np.zeros((0, 0)), np.zeros((0, 0), bool)
+    a = a[:gh * _BLOCK, :gw * _BLOCK].reshape(gh, _BLOCK, gw, _BLOCK).transpose(0, 2, 1, 3).reshape(gh, gw, -1)
+    m = m[:gh * _BLOCK, :gw * _BLOCK].reshape(gh, _BLOCK, gw, _BLOCK).transpose(0, 2, 1, 3).reshape(gh, gw, -1)
+    full = m.all(axis=-1)
+    vals = np.where(full, np.median(np.where(m, a, 0.0), axis=-1), np.nan)
+    return vals, full
+
+
+def _overlap(a: _Placed, b: _Placed):
+    """(slices into a, slices into b, origin y, x) of the two boxes' intersection."""
+    ay0, ay1, ax0, ax1 = a.box
+    by0, by1, bx0, bx1 = b.box
+    y0, y1, x0, x1 = max(ay0, by0), min(ay1, by1), max(ax0, bx0), min(ax1, bx1)
+    if y1 - y0 < 2 * _BLOCK or x1 - x0 < 2 * _BLOCK:
+        return None
+    sa = (slice(y0 - ay0, y1 - ay0), slice(x0 - ax0, x1 - ax0))
+    sb = (slice(y0 - by0, y1 - by0), slice(x0 - bx0, x1 - bx0))
+    return sa, sb, y0, x0
+
+
+def _robust_plane(u, v, d, iters: int = 6):
+    """(a, b, c) of d ~ a + b u + c v, Tukey-biweight IRLS."""
+    A = np.column_stack([np.ones_like(u), u, v])
+    w = np.ones_like(d)
+    coef = np.zeros(3)
+    for _ in range(iters):
+        sw = np.sqrt(w)
+        coef, *_ = np.linalg.lstsq(A * sw[:, None], d * sw, rcond=None)
+        r = d - A @ coef
+        s = 1.4826 * np.median(np.abs(r - np.median(r))) + 1e-12
+        t = r / (4.685 * s)
+        w = np.where(np.abs(t) < 1, (1 - t * t) ** 2, 0.0)
+    return coef
+
+
+def _match(panels: List[_Placed], shape_out, ref: int, verbose: bool) -> None:
+    """Set each panel's gain and plane by one global least-squares solve over all
+    pairwise overlaps (the reference panel fixed at gain 1, plane 0)."""
+    Ho, Wo = shape_out
+    n = len(panels)
+    pairs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            ov = _overlap(panels[i], panels[j])
+            if ov is None:
+                continue
+            sa, sb, y0, x0 = ov
+            m = panels[i].valid[sa] & panels[j].valid[sb]
+            if m.sum() < _MIN_OVERLAP_BLOCKS * _BLOCK * _BLOCK:
+                continue
+            pairs.append((i, j, sa, sb, y0, x0, m))
+    if not pairs:
+        return
+    # 1) gains, from block medians of pixels well above the sky in both (log ratios)
+    for c in range(3):
+        rows, rhs, wts = [], [], []
+        for i, j, sa, sb, _y0, _x0, m in pairs:
+            ai, mi = _block_median(panels[i].data[sa][..., c], m)
+            aj, _ = _block_median(panels[j].data[sb][..., c], m)
+            ok = mi & np.isfinite(ai) & np.isfinite(aj)
+            if ok.sum() < _MIN_OVERLAP_BLOCKS:
+                continue
+            si, sj = ai[ok], aj[ok]
+            # brighter than the overlap's sky by 10 block-noise units in both
+            thr_i = np.median(si) + 10.0 * panels[i].sigma[c] / _BLOCK
+            thr_j = np.median(sj) + 10.0 * panels[j].sigma[c] / _BLOCK
+            bright = (si > thr_i) & (sj > thr_j)
+            if bright.sum() < 20:
+                continue
+            # gain from the slope of i against j over the bright blocks (sky offsets cancel)
+            ci, cj = si[bright] - np.median(si), sj[bright] - np.median(sj)
+            ratio = float(np.median(cj / np.maximum(ci, 1e-9)))
+            if not (0.3 < ratio < 3.0):
+                continue
+            row = np.zeros(n)
+            row[i], row[j] = 1.0, -1.0           # log g_i - log g_j = log(ratio)
+            rows.append(row)
+            rhs.append(math.log(ratio))
+            wts.append(math.sqrt(bright.sum()))
+        lg = np.zeros(n)
+        if rows:
+            A = np.array(rows) * np.array(wts)[:, None]
+            b = np.array(rhs) * np.array(wts)
+            keep = [k for k in range(n) if k != ref]
+            sol, *_ = np.linalg.lstsq(A[:, keep], b, rcond=None)
+            lg[keep] = sol
+        for k in range(n):
+            panels[k].gain[c] = math.exp(lg[k])
+    # 2) planes on the gain-corrected data: (g_i P_i - g_j P_j) ~ plane_i - plane_j
+    for c in range(3):
+        rows, rhs = [], []
+        for i, j, sa, sb, y0, x0, m in pairs:
+            di = panels[i].gain[c] * panels[i].data[sa][..., c] - panels[j].gain[c] * panels[j].data[sb][..., c]
+            vals, ok = _block_median(di, m)
+            ok &= np.isfinite(vals)
+            if ok.sum() < _MIN_OVERLAP_BLOCKS:
+                continue
+            by, bx = np.nonzero(ok)
+            u = (x0 + (bx + 0.5) * _BLOCK) / Wo - 0.5
+            v = (y0 + (by + 0.5) * _BLOCK) / Ho - 0.5
+            coef = _robust_plane(u, v, vals[ok])
+            wt = math.sqrt(ok.sum())
+            for k in range(3):
+                row = np.zeros(3 * n)
+                row[3 * i + k], row[3 * j + k] = wt, -wt
+                rows.append(row)
+                rhs.append(wt * coef[k])
+        if not rows:
+            continue
+        keep = [q for q in range(3 * n) if q // 3 != ref]
+        sol, *_ = np.linalg.lstsq(np.array(rows)[:, keep], np.array(rhs), rcond=None)
+        full = np.zeros(3 * n)
+        full[keep] = sol
+        for k in range(n):
+            panels[k].plane[c] = full[3 * k:3 * k + 3]
+    if verbose:
+        for p in panels:
+            safe_print(f"    {p.name}: gain {np.round(p.gain, 3)}, plane offset "
+                       f"{np.round(p.plane[:, 0], 1)}")
+
+
+def _feather(valid: np.ndarray) -> np.ndarray:
+    d = ndi.distance_transform_edt(valid)
+    ramp = max(8.0, _FEATHER_FRAC * min(valid.shape))
+    t = np.clip(d / ramp, 0.0, 1.0)
+    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+
+
+def _blend(panels: List[_Placed], shape_out) -> Tuple[np.ndarray, np.ndarray]:
+    """(mosaic (H, W, 3), coverage count): feathered inverse-noise-variance mean of the
+    matched panels."""
+    Ho, Wo = shape_out
+    num = np.zeros((Ho, Wo, 3), np.float64)
+    den = np.zeros((Ho, Wo, 3), np.float64)
+    cov = np.zeros((Ho, Wo), np.int16)
+    yy_cache = {}
+    for p in panels:
+        y0, y1, x0, x1 = p.box
+        key = (y0, y1, x0, x1)
+        if key not in yy_cache:
+            v, u = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+            yy_cache = {key: ((u + 0.5) / Wo - 0.5, (v + 0.5) / Ho - 0.5)}
+        u, v = yy_cache[key]
+        fw = _feather(p.valid)
+        for c in range(3):
+            a, b, cc = p.plane[c]
+            corr = p.gain[c] * p.data[..., c] - (a + b * u + cc * v)
+            w = fw / (p.gain[c] * p.sigma[c]) ** 2
+            num[y0:y1, x0:x1, c] += w * corr
+            den[y0:y1, x0:x1, c] += w
+        cov[y0:y1, x0:x1] += p.valid
+    out = np.where(den > 0, num / np.maximum(den, 1e-300), 0.0).astype(np.float32)
+    return out, cov
+
+
+# ── public API ──────────────────────────────────────────────────────────────
+
+def stitch_mosaic_panels(panel_paths: List[str], output_path: str, args) -> bool:
+    """Stitch per-panel linear stacks into ``output_path`` (a linear mosaic FITS; the
+    caller post-processes it). Returns False -- caller falls back to an ordinary
+    combine -- when a panel has no WCS or the panels do not overlap."""
     verbose = getattr(args, 'verbose', False)
-
-    # --- Dependency check ------------------------------------------------
-    err = _check_dependencies()
-    if err:
-        safe_print(f"  WARNING: {err}")
+    if not (HAS_WCS and HAS_SCIPY):
+        safe_print("  WARNING: mosaic stitching needs astropy.wcs and scipy")
         return False
-
-    # --- Load panels, verify WCS -----------------------------------------
-    panels: List[Tuple[np.ndarray, fits.Header]] = []
+    imgs, hdrs = [], []
     for path in panel_paths:
         data, hdr = _load_panel(path)
-        _has_wcs = hdr.get('PLTSOLVD', False) or (
-            'CTYPE1' in hdr and 'CRVAL1' in hdr and 'CRPIX1' in hdr)
-        if not _has_wcs:
-            safe_print(
-                f"  WARNING: {os.path.basename(path)} has no usable WCS.\n"
-                f"  Mosaic requires every panel to have either a plate solution "
-                f"(--plate-solve) or WCS from info.json (Celestron Origin / similar)."
-            )
+        if not _has_wcs(hdr):
+            safe_print(f"  WARNING: {os.path.basename(path)} has no usable WCS; a mosaic needs "
+                       f"every panel solved (the session solve from info.json, or --plate-solve)")
             return False
-        panels.append((data, hdr))
+        imgs.append(data)
+        hdrs.append(hdr)
+    depth = [float(h.get('INTGTIME') or h.get('NFRAMES') or 1.0) for h in hdrs]
+    ref = int(np.argmax(depth))
+    wcss = [_panel_wcs(h) for h in hdrs]
+    w_out, shape_out = _output_wcs(wcss, [im.shape[:2] for im in imgs], ref)
+    Ho, Wo = shape_out
+    if Ho * Wo > 400e6:
+        safe_print(f"  WARNING: mosaic grid {Ho}x{Wo} is implausibly large (panels too far "
+                   f"apart?); not stitching")
+        return False
+    safe_print(f"  Mosaic grid: {Ho}x{Wo} px ({Ho * Wo / 1e6:.1f} Mpx), {len(imgs)} panels, "
+               f"reference {os.path.basename(panel_paths[ref])}")
+    placed: List[_Placed] = []
+    for k, (im, w, path) in enumerate(zip(imgs, wcss, panel_paths)):
+        got = _reproject(im, w, w_out, shape_out)
+        if got is None:
+            safe_print(f"  WARNING: {os.path.basename(path)} falls outside the mosaic grid")
+            return False
+        data, valid, y0, x0 = got
+        placed.append(_Placed(data, valid, y0, x0, _noise_sigma(data, valid), depth[k],
+                              os.path.basename(path)))
+    imgs = None
+    # every panel must overlap the rest (one connected sky area)
+    n = len(placed)
+    seen, todo = {ref}, [ref]
+    while todo:
+        i = todo.pop()
+        for j in range(n):
+            if j not in seen and _overlap(placed[i], placed[j]) is not None:
+                seen.add(j)
+                todo.append(j)
+    if len(seen) != n:
+        safe_print("  WARNING: the panels do not all overlap; not a mosaic")
+        return False
+    safe_print("  Matching panels in their overlaps (gain + gradient, one global solve)...")
+    _match(placed, shape_out, ref, verbose)
+    mosaic, cov = _blend(placed, shape_out)
 
-    wcs_sources = set(hdr.get('WCSORIG', 'plate_solve') for _, hdr in panels)
-    safe_print(
-        f"  All {len(panels)} panels have WCS "
-        f"(sources: {', '.join(sorted(wcs_sources))}) — "
-        f"stitching via WCS reprojection"
-    )
-
-    # --- Per-panel sky normalisation -------------------------------------
-    safe_print("  Normalising panel sky backgrounds...")
-    panels = _normalise_backgrounds(panels)
-
-    # --- Compute output WCS grid -----------------------------------------
-    safe_print("  Computing optimal output WCS grid...")
-    wcs_shapes = []
-    for data_chw, hdr in panels:
-        _, H, W = data_chw.shape
-        wcs_shapes.append((_panel_wcs(hdr), (H, W)))
-
-    wcs_out, shape_out = find_optimal_celestial_wcs(wcs_shapes, auto_rotate=False)
-    Hm, Wm = shape_out
-    safe_print(f"  Output mosaic: {Hm}×{Wm} px  ({Hm * Wm / 1e6:.1f} Mpx)")
-
-    # --- Reproject per channel ------------------------------------------
-    mosaic_chw = np.zeros((3, Hm, Wm), dtype=np.float32)
-    footprint: np.ndarray | None = None
-    channel_names = ['R', 'G', 'B']
-
-    for c, ch in enumerate(channel_names):
-        if verbose:
-            safe_print(f"  Reprojecting channel {ch}...")
-
-        inputs = []
-        weights = []
-        for data_chw, hdr in panels:
-            ch_data = data_chw[c]                     # (H, W)
-            inputs.append((ch_data, _panel_wcs(hdr)))
-            weights.append(_feather_weight(ch_data))
-
-        # match_background: additive per-panel offset fitting in overlap zones
-        # (scipy already required; gracefully degrade for older reproject)
-        try:
-            ch_mosaic, ch_fp = reproject_and_coadd(
-                inputs,
-                wcs_out,
-                shape_out=shape_out,
-                input_weights=weights,
-                reproject_function=reproject_interp,
-                combine_function='mean',
-                match_background=True,
-            )
-        except TypeError:
-            # reproject < 0.9 — no match_background parameter
-            ch_mosaic, ch_fp = reproject_and_coadd(
-                inputs,
-                wcs_out,
-                shape_out=shape_out,
-                input_weights=weights,
-                reproject_function=reproject_interp,
-                combine_function='mean',
-            )
-
-        mosaic_chw[c] = np.nan_to_num(ch_mosaic, nan=0.0).astype(np.float32)
-        if footprint is None:
-            footprint = ch_fp
-
-    # --- Build output header --------------------------------------------
-    out_hdr = wcs_out.to_header()
-    # Carry over instrument/observer keywords from first panel
-    base_hdr = panels[0][1]
-    for key in ('TELESCOP', 'INSTRUME', 'FOCALLEN', 'XPIXSZ', 'YPIXSZ',
-                'OBSERVER', 'OBJECT'):
-        if key in base_hdr:
+    hdr = w_out.to_header()
+    base = hdrs[ref]
+    for key in ('TELESCOP', 'INSTRUME', 'FOCALLEN', 'XPIXSZ', 'YPIXSZ', 'OBSERVER', 'OBJECT',
+                'DATE-OBS', 'BAYERPAT', 'CAMERA'):
+        if key in base:
             try:
-                out_hdr[key] = base_hdr[key]
+                hdr[key] = base[key]
             except Exception:
                 pass
-    out_hdr['NPANELS'] = (len(panels), 'Number of mosaic panels')
-    out_hdr['CREATOR'] = 'originstack.py'
-    out_hdr['COMBINED'] = True
-
-    # Panel source paths (truncated to 68 chars each — FITS header limit)
+    hdr['RAWSTACK'] = (True, 'Linear stack (before post-processing)')
+    hdr['MOSAIC'] = (True, 'Stitched from several panels')
+    hdr['NPANELS'] = (len(placed), 'Number of mosaic panels')
+    hdr['NFRAMES'] = (int(sum(int(h.get('NFRAMES') or 0) for h in hdrs)), 'Frames in all panels')
+    hdr['INTGTIME'] = (float(max(depth)), '[s] deepest panel (panels cover different sky)')
+    hdr['COVERAGE'] = (float(np.mean(cov > 0)), 'Fraction of the grid covered')
+    hdr['CREATOR'] = 'originstack.py'
     for i, path in enumerate(panel_paths):
-        key = f'PANEL{i:03d}'
         try:
-            out_hdr[key] = os.path.basename(path)[:68]
+            hdr[f'PANEL{i:03d}'] = os.path.basename(path)[:68]
         except Exception:
             pass
-
-    # --- Write FITS + preview -------------------------------------------
-    primary = fits.PrimaryHDU(data=mosaic_chw, header=out_hdr)
-    primary.writeto(output_path, overwrite=True)
-
-    mosaic_hwc = np.transpose(mosaic_chw, (1, 2, 0))
-    preview_path = os.path.splitext(output_path)[0] + '.jpg'
-    save_preview_rgb(mosaic_hwc, preview_path,
-                     **preview_stretch_kw(args))
-
-    safe_print(
-        f"  ✓ Mosaic: {os.path.basename(output_path)}  "
-        f"({Hm}×{Wm}, {Hm * Wm / 1e6:.1f} Mpx, {len(panels)} panels)"
-    )
-    safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
-
-    if footprint is not None:
-        coverage = float(np.mean(footprint > 0)) * 100.0
-        overlap_px = int(np.sum(footprint > 1.0))
-        safe_print(
-            f"  Coverage: {coverage:.1f}% of output grid populated  "
-            f"| Overlap zone: {overlap_px:,} px"
-        )
-
+    fits.PrimaryHDU(data=np.transpose(mosaic, (2, 0, 1)), header=hdr).writeto(output_path, overwrite=True)
+    safe_print(f"  ✓ Mosaic: {os.path.basename(output_path)} ({Ho}x{Wo}, {len(placed)} panels, "
+               f"{np.mean(cov > 0) * 100:.1f}% of the grid covered, {np.mean(cov > 1) * 100:.1f}% overlap)")
     return True
