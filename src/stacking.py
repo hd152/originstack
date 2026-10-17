@@ -1982,14 +1982,24 @@ def run_stacking_phase(
         n_align = (min(gpu.max_gpu_workers(Config.GPU_ALIGN_WORKER_MB,
                                            Config.GPU_VRAM_RESERVE_MB), n_final)
                    if _gpu_warps else min(os.cpu_count() or 4, n_final))
-        # Cap alignment workers so concurrent frame reads/writes don't thrash the
-        # disk when available RAM is below the total working-set size.
-        # Each worker needs: one source frame + one transformed frame in memory.
+        # Cap alignment workers by the private memory each one allocates while
+        # available RAM is short. A frame-store view (memmap / RAM array) is read in
+        # place and the native warp writes straight into the slot, so a worker then
+        # holds almost nothing; counting a source + warped frame regardless cut a
+        # disk-backed run to 4 workers once Phase 1's memmap pages filled the cache.
+        # The compressed store returns a fresh decompressed frame; the GPU, elastic
+        # and non-native paths build the warped crop before copying it in.
         try:
             import psutil as _ps
+
+            from src.registration import _native as _reg_native_mod
             _avail_mb = _ps.virtual_memory().available / 1e6
-            _src_mb  = H * W * C * 4 / 1e6
-            _crop_mb = crop_h * crop_w * C * 4 / 1e6
+            _src_view = isinstance(mem_rgb, np.ndarray)
+            _warp_into = (not _gpu_warps and displacement_fields is None
+                          and hasattr(_reg_native_mod, 'warp_affine_lanczos3_into')
+                          and isinstance(mem_aligned, np.ndarray))
+            _src_mb  = 0.0 if _src_view else H * W * C * 4 / 1e6
+            _crop_mb = 0.0 if _warp_into else crop_h * crop_w * C * 4 / 1e6
             _per_align_mb = _src_mb + _crop_mb + 64          # +64 MB headroom
             _safe = max(1, int(_avail_mb * 0.6 / _per_align_mb))
             if _safe < n_align:
