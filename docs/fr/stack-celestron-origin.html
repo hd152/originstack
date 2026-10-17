@@ -120,6 +120,8 @@
   <div class="wrap">
     <h2>Plusieurs nuits sur une même cible</h2>
     <p class="intro measure">Placez le dossier de session de chaque nuit dans un même dossier parent et choisissez ce dossier parent. Comme le champ de l'Origin tourne pendant le suivi d'une cible, les nuits coïncident rarement exactement. OriginStack lit d'abord les métadonnées de chaque session, puis soit regroupe toutes les images, soit empile chaque nuit séparément et les assemble par une correspondance d'étoiles insensible à la rotation, selon ce qui conserve la plus grande partie de l'image. Pour ajouter les images de ce soir à un empilement déjà réalisé, utilisez <code>--merge</code>. Les détails sont sur la <a href="../advanced.html#rotation">page avancée</a>.</p>
+    <p class="plain measure">Les nuits s'additionnent. Cinq nuits sur la galaxie du Tourbillon, 680 images soit 3,8 heures, face à la meilleure nuit seule, 295 images soit 1,6 heure : sur les mêmes pixels, le bruit de ciel est 30 % plus faible, et les mêmes 400 étoiles sont 12 % plus fines, car les nuits à l'air plus stable pèsent davantage dans la combinaison. Chaque nuit est d'abord ajustée en luminosité sur les autres, si bien que des nuits prises à des ISO, des poses ou des fonds de ciel différents se combinent proprement.</p>
+    <p class="plain measure">Inutile de garder les images de chaque nuit. Chaque traitement enregistre un FITS linéaire, donc <code>--merge</code> ajoute la session de ce soir à votre pile existante en moins d'une minute, et le résultat peut accueillir la nuit suivante.</p>
   </div>
 </section>
 

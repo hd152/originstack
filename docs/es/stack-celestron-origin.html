@@ -120,6 +120,8 @@
   <div class="wrap">
     <h2>Varias noches sobre un mismo objeto</h2>
     <p class="intro measure">Pon la carpeta de sesión de cada noche dentro de una carpeta común y elige esa carpeta. Como el campo del Origin rota mientras sigue al objeto, las noches casi nunca encajan exactamente. OriginStack lee primero los metadatos de cada sesión y, o bien reúne todas las tomas, o bien apila cada noche por separado y las une con una correspondencia de estrellas inmune a la rotación, lo que conserve más imagen. Para añadir las tomas de esta noche a un apilado que ya hiciste, usa <code>--merge</code>. Los detalles están en la <a href="../advanced.html#rotation">página de funciones avanzadas</a>.</p>
+    <p class="plain measure">Las noches se suman. Cinco noches de la galaxia del Remolino, 680 fotogramas o 3,8 horas, frente a la mejor noche sola, 295 fotogramas o 1,6 horas: en los mismos píxeles el ruido de cielo es un 30 % menor, y las mismas 400 estrellas son un 12 % más finas, porque las noches con el aire más estable pesan más en la combinación. Primero cada noche se iguala en brillo con las demás, así que noches con distinto ISO, exposición o brillo del cielo se combinan sin problemas.</p>
+    <p class="plain measure">No hace falta guardar los fotogramas de cada noche. Cada ejecución guarda un FITS lineal, así que <code>--merge</code> añade la sesión de esta noche al stack que ya tienes en menos de un minuto, y el resultado admite también la noche siguiente.</p>
   </div>
 </section>
 

@@ -120,6 +120,8 @@
   <div class="wrap">
     <h2>Mehrere Nächte auf ein Objekt</h2>
     <p class="intro measure">Legen Sie die Session-Ordner aller Nächte in einen gemeinsamen übergeordneten Ordner und wählen Sie diesen. Da das Bildfeld des Origin rotiert, während es einem Objekt folgt, passen Nächte selten genau aufeinander. OriginStack liest zuerst die Metadaten jeder Session und fasst dann entweder alle Frames zusammen oder stackt jede Nacht einzeln und verbindet sie mit einem rotationsunabhängigen Sternabgleich, je nachdem, was mehr vom Bild erhält. Um die Frames von heute Nacht zu einem bereits erstellten Stack hinzuzufügen, verwenden Sie <code>--merge</code>. Details finden Sie auf der <a href="../advanced.html#rotation">Seite für Fortgeschrittene</a>.</p>
+    <p class="plain measure">Nächte summieren sich. Fünf Nächte auf der Whirlpool-Galaxie, 680 Frames oder 3,8 Stunden, gegen die beste einzelne Nacht, 295 Frames oder 1,6 Stunden: Auf denselben Pixeln ist das Himmelsrauschen 30 % geringer, und dieselben 400 Sterne sind 12 % schmaler, weil die Nächte mit ruhigerer Luft im Ergebnis mehr Gewicht haben. Jede Nacht wird zuerst in der Helligkeit an die anderen angeglichen, sodass Nächte mit anderem ISO, anderer Belichtung oder anderer Himmelshelligkeit sauber zusammenpassen.</p>
+    <p class="plain measure">Die Frames jeder Nacht müssen Sie nicht aufbewahren. Jeder Lauf speichert eine lineare FITS-Datei, also fügt <code>--merge</code> die Session von heute Nacht in weniger als einer Minute zu Ihrem vorhandenen Stack hinzu, und das Ergebnis nimmt auch die nächste Nacht auf.</p>
   </div>
 </section>
 
