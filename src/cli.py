@@ -355,13 +355,24 @@ def _warn_dark_iso_mismatch(frames: dict) -> None:
     (Pinwheel 2026-01-18, whose dark sits 1600 ADU above its bias) R residual structure
     rose 60%: the ratio multiplies the dark/bias offset error too. Leaving the dark out
     was worse still on two of three. So the dark is used as before, with this note."""
+    from collections import Counter
+
     from src.frame_discovery import _frame_iso
+
+    def isos(fs):
+        out = Counter()
+        for f in fs:
+            try:                     # only a note: a frame without a readable header is skipped
+                v = _frame_iso(f)
+            except Exception:
+                continue
+            if v is not None:
+                out[str(v)] += 1
+        return out
     lights, darks = frames.get('light') or [], frames.get('dark') or []
     if not lights or not darks:
         return
-    from collections import Counter
-    l_iso = Counter(str(_frame_iso(f)) for f in lights if _frame_iso(f) is not None)
-    d_iso = Counter(str(_frame_iso(f)) for f in darks if _frame_iso(f) is not None)
+    l_iso, d_iso = isos(lights), isos(darks)
     if not l_iso or not d_iso:
         return
     li, di = l_iso.most_common(1)[0][0], d_iso.most_common(1)[0][0]

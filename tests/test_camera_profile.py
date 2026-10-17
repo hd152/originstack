@@ -137,3 +137,10 @@ def test_dark_at_another_iso_is_reported(capsys):
     assert 'ISO 200 but the lights at ISO 500' in capsys.readouterr().out
     _warn_dark_iso_mismatch({'light': lights, 'dark': [_F({'ISOSPEED': 500})]})
     assert capsys.readouterr().out == ''
+
+
+def test_dark_iso_note_ignores_frames_without_headers(capsys):
+    # _build_masters is tested with placeholder frames; a note must never break it
+    from src.cli import _warn_dark_iso_mismatch
+    _warn_dark_iso_mismatch({'light': [object()], 'dark': [object()]})
+    assert capsys.readouterr().out == ''
