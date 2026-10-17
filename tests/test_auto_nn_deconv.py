@@ -39,7 +39,11 @@ def test_not_for_other_targets(model, weights):
     assert args.deconvolve_nn is False and args.denoise_curvelet is True
 
 
-@pytest.mark.parametrize('camera', [None, {'model': 'IMX571', 'unit': None}])
+# the Mark II's Origin678C and the other cameras the Origin platform drives were not in
+# the training data: 'starts with Origin' is not enough
+@pytest.mark.parametrize('camera', [None, {'model': 'IMX571', 'unit': None},
+                                    {'model': 'Origin678C', 'unit': 'ab12', 'profiled': False},
+                                    {'model': 'ASI294MC', 'unit': None}])
 def test_not_for_other_cameras(model, camera):
     args = _args(camera=camera)
     assert a._apply_nn_deconvolution(args, GALAXY) == []

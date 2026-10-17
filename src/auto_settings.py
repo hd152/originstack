@@ -888,6 +888,10 @@ def apply_auto_settings(
 # instrument's seeing blur and narrows ideal Gaussian stars by just 2-5%. Not yet for nebulae and
 # star fields (a brighter halo round some bright stars, ~5 deg hue error on bright areas).
 NN_DECONV_MIN_GALAXY_WEIGHT = 0.5
+# Cameras whose data the learned deconvolution was trained on. It learned that sensor's
+# sampling and the Origin's seeing blur; the Mark II's Origin678C (smaller pixels) and the
+# other cameras the Origin platform drives are not covered, so --auto leaves it off there.
+NN_TRAINED_CAMERAS = ('Origin178',)
 
 
 def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
@@ -897,7 +901,7 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
         return changes                       # the user chose denoising/deconvolution
     if (weights or {}).get('galaxy', 0.0) < NN_DECONV_MIN_GALAXY_WEIGHT:
         return changes
-    if not str((getattr(args, '_camera', None) or {}).get('model', '')).startswith('Origin'):
+    if str((getattr(args, '_camera', None) or {}).get('model', '')) not in NN_TRAINED_CAMERAS:
         return changes
     from src.nn_denoise import DECONV_MODEL_PATH, model_available
     if not model_available(DECONV_MODEL_PATH):

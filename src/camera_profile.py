@@ -47,6 +47,12 @@ class CameraId:
         return f"{self.model}" + (f" #{self.unit[:6]}" if self.unit else "")
 
 
+# Cameras the Origin's core software (firmware 1.4.6084) knows how to drive, besides
+# the built-in Origin178: its strings name these models. Only the Origin178 has a
+# measured profile; the others are recognised so a run says what it is missing.
+ORIGIN_PLATFORM_CAMERAS = ('Origin178', 'Origin678C', 'QHY183C', 'ASI183MC', 'ASI294MC')
+
+
 def identify(header) -> Optional[CameraId]:
     """The camera behind a light frame's header, or None for an unknown one."""
     if header is None:
@@ -284,9 +290,22 @@ def resolve_camera(lights, args, verify: bool = False) -> Optional[dict]:
         shape = None
     prof = profile_for(cam, shape)
     if prof is None:
-        return None
+        if cam is None:
+            return None
+        # recorded anyway, without a gain: downstream steps that are specific to a
+        # profiled camera (the learned deconvolution, the colour-slope prior, the
+        # profile gain) then know this is another camera and stay off
+        info = {'model': cam.model, 'unit': cam.unit, 'iso': cam.iso, 'gain': None,
+                'gain_measured': None, 'label': cam.label, 'profiled': False}
+        why = ("no measured profile yet" if load_profile(cam.model) is None
+               else f"frame size {shape} differs from its profile")
+        known = " (a camera the Origin platform supports)" if cam.model in ORIGIN_PLATFORM_CAMERAS else ""
+        safe_print(f"  Camera: {cam.label}{known}, ISO {cam.iso} -- {why}; gain from this "
+                   f"session's own noise, Origin178-trained steps not applied automatically")
+        args._camera = info
+        return info
     info = {'model': cam.model, 'unit': cam.unit, 'iso': cam.iso, 'gain': None,
-            'gain_measured': None, 'label': cam.label}
+            'gain_measured': None, 'label': cam.label, 'profiled': True}
     g_tab = table_gain(prof, cam.iso)
     msg = f"  Camera: {cam.label}, ISO {cam.iso}"
     if g_tab is None:
