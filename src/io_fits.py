@@ -1227,6 +1227,9 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
         header['DITHMAG'] = (round(dither_info['mean_magnitude'], 2), 'Mean dither magnitude in pixels')
         header['DITHPOS'] = (dither_info['unique_positions'], 'Number of unique dither positions')
         header['DITHPAT'] = (dither_info['pattern'], 'Detected shift pattern type')
+        if 'step_px' in dither_info:
+            header['DITHSTEP'] = (round(float(dither_info['step_px']), 2),
+                                  'Median frame-to-frame step (px), drift removed')
 
     # Sigma-clip details
     if args.stack_method == 'sigma_clip':

@@ -885,62 +885,60 @@ def calc_common_crop(shifts: List[Tuple[float, float]], shape: Tuple[int, int],
     return top, bottom, left, right
 
 
+# Frame-to-frame jitter (median step around the session's average step vector) at
+# which shifts count as dithering. Measured on frame headers: the Origin's dithering
+# (firmware 1.4.6084+) steps a median 22-26 px between frames; undithered sessions
+# 0.5-3 px of tracking drift and seeing.
+DITHER_STEP_MIN_PX = 5.0
+
+
 def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> Dict[str, Any]:
-    """Analyse registration shifts to detect dithering patterns."""
+    """Analyse registration shifts (in frame order) to detect dithering.
+
+    Decided by the frame-to-frame jitter: the median length of each step between
+    consecutive frames after removing the session's median step vector (the drift).
+    Dithering jumps between positions; drift moves steadily; one large repoint in a
+    drifting session is one step, not a median. The old test (random step direction
+    and low lag-1 autocorrelation of the steps) mislabelled real sessions both ways:
+    steps between independent dither positions have a lag-1 autocorrelation of -0.5,
+    right at its threshold."""
     if len(shifts) < 3:
         return {'is_dithered': False, 'pattern': 'aligned',
                 'mean_magnitude': 0.0, 'unique_positions': len(shifts),
-                'direction_spread_deg': 0.0, 'autocorrelation': 0.0}
+                'direction_spread_deg': 0.0, 'autocorrelation': 0.0,
+                'step_px': 0.0, 'drift_px_per_frame': 0.0}
 
-    sy = np.array([s[0] for s in shifts])
-    sx = np.array([s[1] for s in shifts])
+    sy = np.array([s[0] for s in shifts], np.float64)
+    sx = np.array([s[1] for s in shifts], np.float64)
     mags = np.sqrt(sy ** 2 + sx ** 2)
-
     mean_mag = float(np.mean(mags))
-    int_positions = set((int(round(y)), int(round(x))) for y, x in shifts)
-    unique_positions = len(int_positions)
+    unique_positions = len(set((int(round(y)), int(round(x))) for y, x in shifts))
+
+    steps = np.column_stack([np.diff(sy), np.diff(sx)])
+    drift = np.median(steps, axis=0)
+    jitter = float(np.median(np.hypot(*(steps - drift).T)))
+    drift_rate = float(np.hypot(*drift))
 
     non_zero = mags > 0.5
     if non_zero.sum() >= 3:
-        angles = np.degrees(np.arctan2(sy[non_zero], sx[non_zero]))
-        sin_mean = np.mean(np.sin(np.radians(angles)))
-        cos_mean = np.mean(np.cos(np.radians(angles)))
-        R = np.sqrt(sin_mean ** 2 + cos_mean ** 2)
+        ang = np.arctan2(sy[non_zero], sx[non_zero])
+        R = np.hypot(np.mean(np.sin(ang)), np.mean(np.cos(ang)))
         direction_spread = float(np.degrees(np.sqrt(-2.0 * np.log(max(R, 1e-12)))))
     else:
         direction_spread = 0.0
+    autocorrelation = 0.0
+    if len(steps) >= 3:
+        acs = [np.corrcoef(steps[:-1, k], steps[1:, k])[0, 1]
+               for k in range(2) if np.std(steps[:, k]) > 1e-6]
+        acs = [a for a in acs if np.isfinite(a)]
+        autocorrelation = float(np.mean(acs)) if acs else 0.0
 
-    if len(shifts) >= 4:
-        dx = np.diff(sx)
-        dy = np.diff(sy)
-        if len(dx) >= 2:
-            autocorr_x = float(np.corrcoef(dx[:-1], dx[1:])[0, 1]) if np.std(dx) > 1e-6 else 0.0
-            autocorr_y = float(np.corrcoef(dy[:-1], dy[1:])[0, 1]) if np.std(dy) > 1e-6 else 0.0
-            autocorrelation = (autocorr_x + autocorr_y) / 2.0
-            if not np.isfinite(autocorrelation):
-                autocorrelation = 0.0
-        else:
-            autocorrelation = 0.0
+    if jitter >= DITHER_STEP_MIN_PX:
+        pattern, is_dithered = 'dithered', True
+    elif mean_mag < 1.0 and jitter < 1.0:
+        pattern, is_dithered = 'aligned', False
     else:
-        autocorrelation = 0.0
-
-    all_near_zero = mean_mag < 1.0
-    is_random_direction = direction_spread > 40.0
-    is_low_autocorr = abs(autocorrelation) < 0.5
-    has_many_positions = unique_positions >= len(shifts) * 0.5
-
-    if all_near_zero:
-        pattern = 'aligned'
-        is_dithered = False
-    elif is_random_direction and is_low_autocorr and has_many_positions:
-        pattern = 'dithered'
-        is_dithered = True
-    elif not is_random_direction or not is_low_autocorr:
-        pattern = 'tracking_drift'
-        is_dithered = False
-    else:
-        pattern = 'dithered'
-        is_dithered = True
+        pattern, is_dithered = 'tracking_drift', False
 
     result = {
         'is_dithered': is_dithered,
@@ -949,6 +947,8 @@ def detect_dither(shifts: List[Tuple[float, float]], verbose: bool = False) -> D
         'unique_positions': unique_positions,
         'direction_spread_deg': direction_spread,
         'autocorrelation': autocorrelation,
+        'step_px': jitter,
+        'drift_px_per_frame': drift_rate,
     }
 
     if verbose:
@@ -2152,15 +2152,22 @@ def run_registration_phase(
         print("\n  Dither analysis:")
         print(f"    Pattern: {labels.get(dither_info['pattern'], dither_info['pattern'])}")
         print(f"    Mean shift: {dither_info['mean_magnitude']:.1f} px")
+        print(f"    Frame-to-frame step: {dither_info['step_px']:.1f} px "
+              f"(drift {dither_info['drift_px_per_frame']:.1f} px/frame)")
         print(f"    Unique positions: {dither_info['unique_positions']}/{len(shifts)} frames")
         if dither_info.get('direction_spread_deg', 0) > 0:
             print(f"    Direction spread: {dither_info['direction_spread_deg']:.1f} deg")
         if dither_info['is_dithered'] and args.stack_method == 'mean':
             safe_print("    Warning: mean stacking does not reject cosmic rays; "
                        "consider --stack-method sigma_clip")
-        if dither_info['is_dithered'] and getattr(args, 'drizzle_scale', 1.0) <= 1.0:
-            safe_print("    Tip: dithered data detected — add --drizzle-scale 2.0 "
-                       "to enable sub-pixel super-resolution stacking")
+        # Drizzle only adds resolution when the stars are undersampled; the Origin's
+        # (FWHM ~3.4 px median) are not, and every dithered Origin session got the tip.
+        _fw = [float(f.metrics.get('fwhm', 0) or 0) for f in final if getattr(f, 'metrics', None)]
+        _fw = [x for x in _fw if x > 0]
+        if (dither_info['is_dithered'] and getattr(args, 'drizzle_scale', 1.0) <= 1.0
+                and _fw and float(np.median(_fw)) < 2.5):
+            safe_print(f"    Tip: dithered and undersampled (median FWHM {np.median(_fw):.1f} px) "
+                       f"-- --drizzle-scale 2.0 can recover resolution")
 
     return shifts, transforms, dither_info, final, final_indices
 
