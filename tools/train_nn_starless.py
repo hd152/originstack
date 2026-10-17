@@ -5,15 +5,17 @@ No real image is starless, so the targets are real linear stacks and the inputs 
 same stacks with stars added (``bank`` measures, per session, what those stars must look
 like; ``train`` adds them on the fly):
 
-* PSF: the median of the session's bright, isolated, unsaturated stars, per channel, out
-  to ``PSF_R`` px -- the session's own seeing, its blue halo and its wings.
-* colour: channel flux ratios of the session's detected stars, drawn at random.
+* stars: the session's own isolated stars, cut out, sky-subtracted and tapered
+  (``star_cutouts``), injected unresampled (90-degree rotations and flips) and scaled down
+  to the drawn brightness -- the real profile, colour and correlated noise texture. v1-v3
+  injected the median PSF with white shot noise and the network learned to remove only
+  those: 16-24% of real stars' light.
 * brightness: peaks from ~1.5 sky sigma to past the session's saturation level, mostly
   faint (a power law, as real star counts are), with a share spread evenly in log so bright
   and saturated stars are well represented; a saturated star is clipped at the session's
   own measured core level, as the stack clips it.
-* shot noise: the stars' Poisson noise in sky-sigma units, ``var = z * sigma / sky`` per
-  channel (sky-limited exposures), from the session's own sky level and noise.
+* shot noise: a template scaled by k keeps k^2 of its own; the missing share of
+  ``var = z * sigma / sky`` per channel is added with the stacks' neighbour correlation.
 
 The stacks' own stars stay in both input and target; a mask around each (out to where its
 PSF falls below half a sky sigma) gives them zero loss weight, so the network is never
@@ -51,6 +53,9 @@ DEPTH = 4              # pooling levels
 WIDTHS = (24, 48, 96, 96)
 MID = 128
 ROBUST_TAU = 10.0      # noise units: the loss is quadratic below, linear above
+CUTOUTS_PER_SESSION = 250
+CUTOUT_MIN_PEAK = 15.0  # noise units: fainter templates bring too much of their own sky
+MAX_SCALE = 0.6        # preferred largest template scale (its sky noise scales with it)
 # sessions never used for training (scored by ``eval``): a nebula, a dense star cloud,
 # a galaxy, and the 300-frame dithered night
 HOLDOUT = ("Crab_Nebula", "Sagittarius_Star_Cloud", "Messier_101_2026-04-27",
@@ -207,6 +212,60 @@ def real_star_mask(shape, stars, psf: np.ndarray, z: np.ndarray, sat_z: np.ndarr
     return m
 
 
+def star_cutouts(z: np.ndarray, stars, psf: np.ndarray, sat_z: np.ndarray,
+                 max_n: int = CUTOUTS_PER_SESSION):
+    """The session's own isolated stars as injection templates (v4): (stamps (n, 3, S, S)
+    float16, core peak (n,), saturated (n,)). v3 injected the median PSF with white shot
+    noise and removed 16-24% of real stars' light: the stacks' noise is correlated by the
+    debayer and the registration resampling (neighbour correlation ~0.48, lag 2 ~0.07) and
+    each real star differs from the median PSF, so the injected stars were recognisably
+    not real. A cutout carries the real profile and noise texture; it is never resampled
+    (90-degree rotations and flips only). Kept: star-like detections (``star_like``) with
+    a core above ``CUTOUT_MIN_PEAK``, no detection brighter than 2% of the star within its
+    radius + 4 px, and a flat, sky-level annulus (no nebula under it). Each is
+    sky-subtracted on that annulus and tapered to zero by a 3-px cosine edge at the radius
+    where the session PSF scaled to its peak falls below half a sky sigma."""
+    stars = star_like(stars, z, psf, sat_z)
+    if len(stars) == 0:
+        return None
+    h, w, _ = z.shape
+    R = PSF_R
+    prof = psf.max(axis=0)
+    radial = prof[R, R:] / max(float(prof[R, R]), 1e-12)
+    yy, xx = np.mgrid[-R:R + 1, -R:R + 1]
+    rr = np.hypot(yy, xx)
+    from scipy.spatial import cKDTree
+    ys, xs, pk = stars['ycentroid'], stars['xcentroid'], stars['peak']
+    tree = cKDTree(np.column_stack([ys, xs]))
+    out, peaks, sats = [], [], []
+    for i in np.argsort(-pk):
+        p = float(pk[i])
+        if p < CUTOUT_MIN_PEAK:
+            break
+        y, x = int(round(ys[i])), int(round(xs[i]))
+        if not (R <= y < h - R and R <= x < w - R):
+            continue
+        above = np.flatnonzero(radial * p > 0.5)
+        rs = min(R - 6, int(above[-1] if above.size else 1) + 3)
+        if any(j != i and pk[j] > 0.02 * p for j in tree.query_ball_point([ys[i], xs[i]], rs + 4)):
+            continue
+        st = z[y - R:y + R + 1, x - R:x + R + 1].astype(np.float32)
+        ann = st[(rr > rs) & (rr <= rs + 5)]
+        med = np.median(ann, axis=0)
+        if np.any(np.abs(med) > 3.0) or np.any(ann.std(axis=0) > 1.6):
+            continue
+        win = np.clip((rs - rr) / 3.0, 0.0, 1.0)
+        st = (st - med) * (0.5 - 0.5 * np.cos(np.pi * win))[..., None]
+        out.append(st.transpose(2, 0, 1).astype(np.float16))
+        peaks.append(float(st[R - 1:R + 2, R - 1:R + 2].max()))
+        sats.append(bool(np.any(z[y - 1:y + 2, x - 1:x + 2].max(axis=(0, 1)) > 0.8 * sat_z)))
+        if len(out) >= max_n:
+            break
+    if len(out) < 8:
+        return None
+    return np.stack(out), np.array(peaks, np.float32), np.array(sats, bool)
+
+
 def session_bank(path: str, per_session: int, rng):
     img = load_stack(path)
     z, _bg, _sig, shot = normalised(img)
@@ -216,6 +275,9 @@ def session_bank(path: str, per_session: int, rng):
     if got is None:
         return None
     psf, n_psf = got
+    cut = star_cutouts(z, stars, psf, sat_z)
+    if cut is None:
+        return None
     mask = real_star_mask(z.shape[:2], stars, psf, z, sat_z)
     h, w, _ = z.shape
     # a third of the patches centred on the stack's extended emission (smoothed light
@@ -236,7 +298,8 @@ def session_bank(path: str, per_session: int, rng):
         za.append(z[y:y + PATCH, x:x + PATCH].astype(np.float16))
         wa.append(~mask[y:y + PATCH, x:x + PATCH])
     return dict(z=np.stack(za), keep=np.stack(wa), psf=psf, col=star_colours(z, stars),
-                sat=sat_z, shot=shot, n_stars=len(stars), n_psf=n_psf, masked=float(mask.mean()))
+                sat=sat_z, shot=shot, n_stars=len(stars), n_psf=n_psf, masked=float(mask.mean()),
+                stamps=cut[0], stamp_peak=cut[1], stamp_sat=cut[2])
 
 
 def build_bank(stacks: str, out: str, per_session: int, seed: int = 0) -> None:
@@ -244,6 +307,7 @@ def build_bank(stacks: str, out: str, per_session: int, seed: int = 0) -> None:
     paths = sorted(p for p in glob.glob(os.path.join(stacks, '*.fits'))
                    if not is_holdout(os.path.basename(p)))
     Z, K, S, psfs, cols, sats, shots, names = [], [], [], [], [], [], [], []
+    ST, SP, SS, SN = [], [], [], []
     for p in paths:
         t = time.time()
         try:
@@ -257,15 +321,19 @@ def build_bank(stacks: str, out: str, per_session: int, seed: int = 0) -> None:
         i = len(psfs)
         Z.append(b['z']); K.append(b['keep']); S.append(np.full(len(b['z']), i))
         psfs.append(b['psf']); cols.append(b['col']); sats.append(b['sat']); shots.append(b['shot'])
+        ST.append(b['stamps']); SP.append(b['stamp_peak']); SS.append(b['stamp_sat'])
+        SN.append(np.full(len(b['stamps']), i))
         names.append(os.path.basename(p))
         print(f"[{i}] {os.path.basename(p)}: {b['n_stars']} stars, PSF from {b['n_psf']}, "
-              f"masked {b['masked']:.0%}, sat z {b['sat'].round(0)}, shot {b['shot'].round(4)} "
+              f"masked {b['masked']:.0%}, {len(b['stamps'])} templates "
+              f"({int(b['stamp_sat'].sum())} saturated), sat z {b['sat'].round(0)}, shot {b['shot'].round(4)} "
               f"({time.time() - t:.0f} s)", flush=True)
     ncol = max(len(c) for c in cols)
     colarr = np.stack([np.resize(c, (ncol, 3)) for c in cols])
     np.savez(out, z=np.concatenate(Z), keep=np.concatenate(K), sess=np.concatenate(S),
              psf=np.stack(psfs), col=colarr, sat=np.stack(sats), shot=np.stack(shots),
-             names=np.array(names))
+             names=np.array(names), stamps=np.concatenate(ST), stamp_peak=np.concatenate(SP),
+             stamp_sat=np.concatenate(SS), stamp_sess=np.concatenate(SN))
     print(f"bank: {sum(len(z) for z in Z)} patches from {len(psfs)} sessions -> {out}")
 
 
@@ -378,15 +446,66 @@ def psf_fwhm_px(psf: np.ndarray) -> float:
     return 2.3548 * float(np.sqrt(max(s2, 0.25)))
 
 
-def inject(base, sess, bank, rng, dev, empty_frac: float = 0.1):
-    """(input, star light, shot variance) for a batch of base patches (B, 3, P, P), with
-    stars drawn from each patch's own session."""
+class CutoutBank:
+    """Per-session star templates for ``inject`` (stamps on the training device)."""
+
+    def __init__(self, stamps, peaks, sat, sess, sat_all, shot_all, dev):
+        import torch
+        self.stamps = torch.as_tensor(stamps, device=dev)           # float16 (N, 3, S, S)
+        self.peaks, self.sat_all, self.shot_all = peaks, sat_all, shot_all
+        self.unsat, self.satd = {}, {}
+        for s in np.unique(sess):
+            idx = np.flatnonzero((sess == s) & ~sat)
+            self.unsat[int(s)] = idx[np.argsort(peaks[idx])]          # ascending core peak
+            self.satd[int(s)] = np.flatnonzero((sess == s) & sat)
+
+    def pick(self, s: int, target: np.ndarray, rng):
+        """(template index, scale) per target peak: a saturated template at scale 1 for a
+        target at or past the session's saturation, else an unsaturated one at least
+        1/``MAX_SCALE`` as bright, scaled down to the target (the template's own sky noise
+        scales by the same factor), else the brightest that is at least as bright."""
+        unsat, satd = self.unsat[s], self.satd[s]
+        pk = self.peaks[unsat]
+        idx = np.empty(len(target), int)
+        scale = np.ones(len(target), np.float32)
+        satlvl = 0.8 * float(self.sat_all[s].max())
+        for m, t in enumerate(target):
+            if t >= satlvl and len(satd):
+                idx[m] = satd[rng.integers(len(satd))]
+                continue
+            lo = np.searchsorted(pk, t / MAX_SCALE)
+            if lo >= len(pk):
+                lo = min(np.searchsorted(pk, t), len(pk) - 1)
+            j = unsat[rng.integers(lo, len(pk))]
+            idx[m] = j
+            scale[m] = min(1.0, t / max(float(self.peaks[j]), 1e-6))
+        return idx, scale
+
+
+def _correlated(shape, dev):
+    """Unit-variance noise with the stacks' neighbour correlation (separable [a, b, a]
+    kernel: lag-1 correlation 0.50, lag-2 0.07; measured 0.45-0.52 and 0.03-0.13)."""
     import torch
     import torch.nn.functional as F
+    k = torch.tensor([0.27, 0.92, 0.27], device=dev)
+    k = k / torch.sqrt((k * k).sum())
+    k2 = (k[:, None] * k[None, :])[None, None]
+    B, C, H, W = shape
+    n = torch.randn((B * C, 1, H + 2, W + 2), device=dev)
+    return F.conv2d(n, k2).reshape(B, C, H, W)
+
+
+def inject(base, sess, bank: CutoutBank, rng, dev, empty_frac: float = 0.1):
+    """(input, star light, shot variance) for a batch of base patches (B, 3, P, P), with real
+    star cutouts from each patch's own session (``star_cutouts``). A template scaled by k
+    carries k^2 of its shot variance; the missing (k - k^2) share is added as correlated
+    noise, so faint injected stars are as noisy as real ones."""
+    import torch
     B, C, P, _ = base.shape
     R = PSF_R
+    S2 = 2 * R + 1
     canvas = torch.zeros((B, C, P + 2 * R, P + 2 * R), device=dev)
-    psf_all, col_all, sat_all, shot_all = bank
+    deficit = torch.zeros_like(canvas)
     for i in range(B):
         if rng.random() < empty_frac:
             continue
@@ -394,46 +513,36 @@ def inject(base, sess, bank, rng, dev, empty_frac: float = 0.1):
         n = int(rng.poisson(np.exp(rng.uniform(np.log(2.0), np.log(40.0)))))
         if n == 0:
             continue
-        # peak z: a power law (dN/dF ~ F^-1.6) from 1.5 sigma, plus a log-uniform share
+        smax = float(bank.sat_all[s].max())
+        # peak z: a power law (dN/dF ~ F^-1.6) from 1.5 sigma, plus 40% spread evenly in log
+        # so bright and saturated stars are well represented
         u = rng.random(n)
         pl = 1.5 * (1.0 - u) ** (-1.0 / 0.6)
-        lu = np.exp(rng.uniform(np.log(1.5), np.log(4.0 * float(sat_all[s].max())), n))
-        # 40% spread evenly in log: bright and saturated stars were left as coloured
-        # cores by v1 (30%), the hardest case and rare under the power law
-        peak = np.where(rng.random(n) < 0.6, pl, lu).clip(1.5, 4.0 * float(sat_all[s].max()))
-        cols = col_all[s][rng.integers(0, len(col_all[s]), n)]
-        # PSF: the session's, rotated/flipped, scaled +-15% in width, shifted sub-pixel
-        psf = psf_all[s]
-        k = int(rng.integers(4))
-        stamp = torch.rot90(psf, k, (1, 2))
+        lu = np.exp(rng.uniform(np.log(1.5), np.log(4.0 * smax), n))
+        peak = np.where(rng.random(n) < 0.6, pl, lu).clip(1.5, 4.0 * smax)
+        idx, k = bank.pick(s, peak, rng)
+        st = bank.stamps[torch.as_tensor(idx, device=dev)].float()
+        st = torch.rot90(st, int(rng.integers(4)), (2, 3))
         if rng.random() < 0.5:
-            stamp = torch.flip(stamp, (2,))
-        scale = rng.uniform(0.85, 1.15, n)
-        dy, dx = rng.uniform(-0.5, 0.5, (2, n))
-        theta = torch.zeros((n, 2, 3), device=dev)
-        theta[:, 0, 0] = torch.as_tensor(1.0 / scale, device=dev, dtype=torch.float32)
-        theta[:, 1, 1] = theta[:, 0, 0]
-        theta[:, 0, 2] = torch.as_tensor(-2.0 * dx / (2 * R + 1), device=dev, dtype=torch.float32)
-        theta[:, 1, 2] = torch.as_tensor(-2.0 * dy / (2 * R + 1), device=dev, dtype=torch.float32)
-        grid = F.affine_grid(theta, (n, C, 2 * R + 1, 2 * R + 1), align_corners=False)
-        st = F.grid_sample(stamp[None].expand(n, -1, -1, -1), grid, mode='bicubic',
-                           padding_mode='zeros', align_corners=False).clamp_min(0.0)
-        st = st / st.amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-12)
-        amp = torch.as_tensor(peak[:, None] * cols, device=dev, dtype=torch.float32)
-        st = st * amp[:, :, None, None]
-        S2 = 2 * R + 1
+            st = torch.flip(st, (3,))
+        kt = torch.as_tensor(k, device=dev)[:, None, None, None]
+        shot = torch.as_tensor(bank.shot_all[s], device=dev, dtype=torch.float32)[None, :, None, None]
+        light = st * kt
+        dvar = (kt - kt * kt) * st.clamp_min(0.0) * shot
         ys = torch.as_tensor(rng.integers(0, P, n), device=dev)
         xs = torch.as_tensor(rng.integers(0, P, n), device=dev)
         ar = torch.arange(S2, device=dev)
         flat = ((ys[:, None, None] + ar[None, :, None]) * (P + 2 * R)
                 + xs[:, None, None] + ar[None, None, :]).reshape(-1)      # one scatter per channel
         for c in range(C):
-            canvas[i, c].view(-1).index_add_(0, flat, st[:, c].reshape(-1))
+            canvas[i, c].view(-1).index_add_(0, flat, light[:, c].reshape(-1))
+            deficit[i, c].view(-1).index_add_(0, flat, dvar[:, c].reshape(-1))
     stars = canvas[:, :, R:R + P, R:R + P]
-    shot = torch.as_tensor(shot_all[sess], device=dev, dtype=torch.float32)[:, :, None, None]
-    var = stars * shot
-    noisy = base + stars + torch.randn_like(stars) * torch.sqrt(var)
-    sat = torch.as_tensor(sat_all[sess], device=dev, dtype=torch.float32)[:, :, None, None]
+    dv = deficit[:, :, R:R + P, R:R + P]
+    noisy = base + stars + _correlated(stars.shape, dev) * torch.sqrt(dv)
+    shot = torch.as_tensor(bank.shot_all[sess], device=dev, dtype=torch.float32)[:, :, None, None]
+    var = stars.clamp_min(0.0) * shot
+    sat = torch.as_tensor(bank.sat_all[sess], device=dev, dtype=torch.float32)[:, :, None, None]
     # a star clips where the stack clips; never clip the base's own pixels
     clipped = torch.where(stars > 0, torch.minimum(noisy, torch.maximum(sat, base)), noisy)
     return clipped, stars, var
@@ -446,7 +555,8 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     f = np.load(bank_path)
     Z, K, sess = f["z"], f["keep"], f["sess"]
-    bank = (torch.as_tensor(f["psf"], device=dev), f["col"], f["sat"], f["shot"])
+    bank = CutoutBank(f["stamps"], f["stamp_peak"], f["stamp_sat"], f["stamp_sess"],
+                      f["sat"], f["shot"], dev)
     fwhm = np.array([psf_fwhm_px(p) for p in f["psf"]])
     print("session PSF FWHM px:", np.round(fwhm, 2), flush=True)
     n = len(Z)
@@ -581,8 +691,13 @@ def evaluate(stacks: str, model: str, out_dir: str, holdout_only: bool, seed: in
             continue
         psf, _ = got
         real = real_star_mask(z.shape[:2], stars, psf, z, sat_z)
+        cut = star_cutouts(z, stars, psf, sat_z)
+        if cut is None:
+            print(f"{name}: no star templates", flush=True)
+            continue
         # (1) injected stars on a grid of whole-image tiles
-        bank = (torch.as_tensor(psf[None]), star_colours(z, stars)[None], sat_z[None], shot[None])
+        bank = CutoutBank(cut[0], cut[1], cut[2], np.zeros(len(cut[0]), int), sat_z[None],
+                          shot[None], 'cpu')
         h, w, _ = z.shape
         H16, W16 = h - h % PATCH, w - w % PATCH
         zt = torch.from_numpy(np.ascontiguousarray(z[:H16, :W16].transpose(2, 0, 1)))[None]
@@ -609,6 +724,10 @@ def evaluate(stacks: str, model: str, out_dir: str, holdout_only: bool, seed: in
         kept = float(np.sum(zs[struct]) / max(np.sum(zb[struct]), 1e-9)) if struct.any() else float('nan')
         # (3) the real stack, starless
         sl_real, st_real = ns.remove_stars_nn(img, model)
+        # (4) the real stars: share of their light removed (the number v3 failed on)
+        zr = (sl_real[:H16, :W16] - bg[:H16, :W16]) / sig
+        on = real[:H16, :W16] & (zb.mean(axis=2) > 3.0)
+        real_removed = float(np.sum((zb - zr)[on]) / max(np.sum(zb[on]), 1e-9)) if on.any() else float('nan')
         from src.io_fits import render_preview_float
         for tag, arr in (('input', img), ('starless', sl_real)):
             disp = render_preview_float(arr, stretch='ghs')
@@ -616,7 +735,8 @@ def evaluate(stacks: str, model: str, out_dir: str, holdout_only: bool, seed: in
                 os.path.join(out_dir, f"{name}_{tag}.jpg"), quality=90)
         row = dict(name=name, injected_flux_removed=removed, rms_under_injected=resid,
                    rms_under_injected_identity=resid_id, rms_change_clear_sky=changed,
-                   structure_kept=kept, n_under=int(under.sum()), n_clear=int(clear.sum()))
+                   structure_kept=kept, real_star_flux_removed=real_removed,
+                   n_under=int(under.sum()), n_clear=int(clear.sum()))
         rows.append(row)
         print(json.dumps(row), flush=True)
     with open(os.path.join(out_dir, "eval.json"), "w") as fh:
