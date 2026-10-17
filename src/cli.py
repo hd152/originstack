@@ -1504,7 +1504,7 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
         _pstarless = None
         if getattr(_eff, 'layered_stretch', False) and getattr(_eff, 'stretch', '') == 'ghs':
             from src.star_removal import starless_from_image
-            _pstarless = starless_from_image(_processed)
+            _pstarless = starless_from_image(_processed, method=getattr(_eff, 'star_removal', 'inpaint'))
         save_final_preview(_processed, preview_path, _eff, starless=_pstarless)
     else:
         save_final_preview(combined, preview_path, args)
@@ -2535,6 +2535,14 @@ def build_parser() -> argparse.ArgumentParser:
                         'owns the tonal range instead of being squeezed under the '
                         'stars\' white point. Only affects the preview JPEG, not the '
                         'FITS/TIFF. Needs --stretch ghs. Off by default.')
+    g_post.add_argument('--star-removal', dest='star_removal', choices=['inpaint', 'nn'],
+                   default='inpaint',
+                   help='How --remove-stars, --starless-process and --layered-stretch take '
+                        'the stars out. inpaint (default): fill each detected star from the '
+                        'surrounding background. nn: a small neural network trained on '
+                        'real Origin stacks with added stars; it also removes faint and '
+                        'blended stars and halos, and only ever removes light. What it '
+                        'puts under a star is an estimate of the background there.')
     g_post.add_argument('--no-remove-stars', dest='remove_stars', action='store_false',
                    help=argparse.SUPPRESS)  # back-compat no-op (star removal is opt-in now)
 

@@ -110,8 +110,11 @@ def build_star_mask(shape: Tuple[int, int], sources, fwhm: float,
 
 def remove_stars(rgb: np.ndarray, sources, fwhm: float,
                  radius_scale: float = 1.8,
-                 verbose: bool = False) -> Tuple[np.ndarray, int]:
-    """Inpaint detected stars with normalised-convolution local background.
+                 verbose: bool = False, method: str = 'inpaint') -> Tuple[np.ndarray, int]:
+    """Remove the stars from ``rgb``: ``method='nn'`` with the learned remover
+    (src/nn_starless.py; it needs no detections and falls back to the inpaint when its
+    weights are missing), otherwise inpaint detected stars with normalised-convolution
+    local background.
 
     Args:
         rgb: (H, W, 3) float32 image.
@@ -123,6 +126,16 @@ def remove_stars(rgb: np.ndarray, sources, fwhm: float,
     (n=0) when scipy is unavailable, no stars were found, or the mask tripped
     the safety cap.
     """
+    if method == 'nn' and rgb.ndim == 3 and rgb.shape[2] == 3:
+        from src import nn_starless
+        if nn_starless.model_available():
+            starless, stars = nn_starless.remove_stars_nn(rgb)
+            n = int(len(sources)) if sources is not None and len(sources) > 0 else 1
+            if verbose:
+                safe_print(f"    Star removal (nn): {float(np.mean(stars.max(axis=2) > 0)) * 100:.1f}% "
+                           f"of pixels changed")
+            return starless, n
+        safe_print("    Star removal: nn weights not found -- using the inpaint")
     if not _HAS_SCIPY or rgb.ndim != 3 or rgb.shape[2] != 3:
         return rgb.copy(), 0
     mask, max_r = build_star_mask(rgb.shape[:2], sources, fwhm, radius_scale=radius_scale)
@@ -152,7 +165,8 @@ def remove_stars(rgb: np.ndarray, sources, fwhm: float,
     return out, n_stars
 
 
-def starless_from_image(rgb: np.ndarray, fwhm: float = 4.0) -> Optional[np.ndarray]:
+def starless_from_image(rgb: np.ndarray, fwhm: float = 4.0,
+                        method: str = 'inpaint') -> Optional[np.ndarray]:
     """Starless copy of ``rgb``, detecting the stars itself.
 
     For callers that only have the finished image (the layered preview stretch)
@@ -162,6 +176,10 @@ def starless_from_image(rgb: np.ndarray, fwhm: float = 4.0) -> Optional[np.ndarr
     """
     if rgb.ndim != 3 or rgb.shape[2] != 3:
         return None
+    if method == 'nn':
+        out, n = remove_stars(rgb, None, fwhm, method='nn')
+        if n > 0:
+            return out
     try:
         from src.quality import detect_stars_auto
         lum = luminance(rgb).astype(np.float32)

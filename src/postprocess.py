@@ -254,13 +254,15 @@ def _split_starless(stacked: np.ndarray, sources, final, args):
     flux; anything the inpaint wrongly took (a galaxy's bright core mistaken
     for a star) simply rides along untouched in ``stars``.
     """
+    _nn = getattr(args, 'star_removal', 'inpaint') == 'nn'
     if (not getattr(args, 'starless_process', False)
             or 'starless_process' in set(getattr(args, 'skip_step', []) or [])
-            or sources is None or len(sources) == 0):
+            or (not _nn and (sources is None or len(sources) == 0))):
         return None, None
     try:
         from src.star_removal import remove_stars
-        starless, n = remove_stars(stacked, sources, _median_fwhm(final))
+        starless, n = remove_stars(stacked, sources, _median_fwhm(final),
+                                   method=getattr(args, 'star_removal', 'inpaint'))
         if n <= 0:
             return None, None
         return starless, stacked - starless
@@ -1097,13 +1099,14 @@ def postprocess_stack(
     # sidecar write error) can never cost the caller the main stack.
     if getattr(args, 'remove_stars', False) and 'remove_stars' not in skip_steps:
         try:
-            if _pp_sources is not None and len(_pp_sources) > 0:
+            _rs_method = getattr(args, 'star_removal', 'inpaint')
+            if _rs_method == 'nn' or (_pp_sources is not None and len(_pp_sources) > 0):
                 _rs_fwhm = _median_fwhm(final)
                 safe_print(f"\n  Removing stars (fwhm={_rs_fwhm:.1f}px)...")
                 _rs_start = time.time()
                 from src.star_removal import remove_stars
                 starless, n_removed = remove_stars(stacked, _pp_sources, _rs_fwhm,
-                                                   verbose=args.verbose)
+                                                   verbose=args.verbose, method=_rs_method)
                 if n_removed > 0:
                     _output_path_rs = getattr(args, 'output', None)
                     if _output_path_rs:

@@ -1711,7 +1711,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
     _preview_starless = None
     if getattr(args, 'layered_stretch', False) and stretch_method == 'ghs':
         from src.star_removal import starless_from_image
-        _preview_starless = starless_from_image(_preview_src)
+        _preview_starless = starless_from_image(_preview_src, method=getattr(args, 'star_removal', 'inpaint'))
         if _preview_starless is None:
             safe_print("  Layered stretch: no usable star detections -- using the single stretch")
         else:
@@ -1897,7 +1897,7 @@ def postprocess_from_stack(stack_path: str, output_path: str,
     starless = None
     if getattr(args, 'layered_stretch', False) and stretch_method == 'ghs':
         from src.star_removal import starless_from_image
-        starless = starless_from_image(result)
+        starless = starless_from_image(result, method=getattr(args, 'star_removal', 'inpaint'))
     save_final_preview(result, preview_path, args, starless=starless)
     safe_print(f"  ✓ Preview: {os.path.basename(preview_path)} "
                f"(Phase 4 {format_time(stats.post_processing_time)})")
