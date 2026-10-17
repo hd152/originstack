@@ -73,14 +73,13 @@
     <p class="intro measure">Put the light frames and any calibration frames in one folder and choose that folder, or keep a calibration library elsewhere and point <code>--cal-dir</code> at it: the best-matching frames of each type are picked from it by ISO, sensor temperature, exposure, filter and frame size. Subfolders of a single night are not searched; a folder whose subfolders each hold a night is stacked as several sessions.</p>
     <dl class="feat">
       <div><dt>How frames are sorted</dt>
-        <dd><p>A file whose name contains <code>dark</code>, <code>flat</code> or <code>bias</code> is that kind of calibration frame; so is a file whose <code>IMAGETYP</code> header is exactly <code>DARK</code>, <code>FLAT</code> or <code>BIAS</code>, and a zero-length exposure is a bias. Everything else is a light.</p>
-        <p class="fact">Some capture programs write <code>IMAGETYP</code> as <code>Dark Frame</code> or <code>Flat Field</code>, which is not recognised yet. Keep the frame type in the file names (most programs do by default) and it works either way.</p></dd></div>
+        <dd><p>A file whose name contains <code>dark</code>, <code>flat</code> or <code>bias</code> is that kind of calibration frame; otherwise the <code>IMAGETYP</code> header decides, in any of the usual spellings (<code>DARK</code>, <code>Dark Frame</code>, <code>Flat Field</code>, <code>Bias Frame</code>, <code>Offset</code>...), and a zero-length exposure is a bias. Everything else is a light.</p></dd></div>
       <div><dt>Darks</dt>
         <dd><p>Darks are matched to the lights by sensor temperature and exposure time, and scaled when the exposure differs. A library of darks at several temperatures can be modelled instead (<code>--dark-temp-model</code>).</p></dd></div>
       <div><dt>Flats</dt>
         <dd><p>Flats are normalised and divided out. With no flats, <code>--flat-from-lights</code> estimates one from the lights themselves; it is approximate.</p></dd></div>
       <div><dt>Leave out</dt>
-        <dd><p>Dark flats: there is no separate dark-flat step, and a file named <code>darkflat</code> would be taken as a dark. Use bias frames for the flats instead. Earlier OriginStack outputs in the folder are recognised and skipped.</p></dd></div>
+        <dd><p>Dark flats are recognised (by name or <code>IMAGETYP</code>) and left out, with a note in the log: there is no separate dark-flat step, and the flats are bias-corrected instead, so keep bias frames in the folder. Earlier OriginStack outputs in the folder are recognised and skipped.</p></dd></div>
     </dl>
   </div>
 </section>
