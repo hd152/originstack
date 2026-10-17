@@ -64,7 +64,9 @@ def test_origin_tile_keys_are_reported(tmp_path):
     dirs = [_session(tmp_path, f"t{i}", 10.0, 41.0 + i * step,
                      {"MosaicUuid": "abc", "TileRow": i, "TileCol": 0}) for i in range(2)]
     got = mosaic.predict_mosaic(dirs)
-    assert got is not None and "tile keys" in got["reason"]
+    # a shared MosaicUuid groups them exactly, by tile position
+    assert got is not None and got["exact"] and "Origin mosaic" in got["reason"]
+    assert sorted(got["manifest"]["tiles"].values()) == [(0, 0), (1, 0)]
     assert mosaic.session_pointing(dirs[1])["tile"]["tilerow"] == 1
 
 
@@ -204,3 +206,50 @@ def test_detected_mosaic_switches_to_panels(tmp_path):
     args = types.SimpleNamespace(mosaic=False, combine_sessions=False, hierarchical=False)
     assert _want_combine_sessions(args, dirs) is False
     assert args.mosaic is True
+
+
+# ── the Origin's own mosaic description (schema from the firmware) ──────────────
+
+def _uuid_session(tmp_path, name, ra, dec, uuid, extra=None):
+    d = _session(tmp_path, name, ra, dec, extra)
+    info = json.loads((tmp_path / name / "info.json").read_text())
+    info["StackedInfo"]["uuid"] = uuid
+    (tmp_path / name / "info.json").write_text(json.dumps(info))
+    return d
+
+
+def test_shared_mosaic_uuid_groups_tiles_exactly(tmp_path):
+    # identical pointings: the pointing test alone would say "not a mosaic"
+    dirs = [_uuid_session(tmp_path, f"t{i}", 10.0, 41.0, f"u{i}",
+                          {"MosaicUuid": "M-1", "TileRow": i // 2, "TileCol": i % 2,
+                           "GridWidth": 2, "GridHeight": 2}) for i in range(3)]
+    got = mosaic.predict_mosaic(dirs)
+    assert got is not None and got["exact"]
+    man = got["manifest"]
+    assert man["grid"] == (2, 2) and man["missing"] == [(1, 1)]
+    assert sorted(man["tiles"].values()) == [(0, 0), (0, 1), (1, 0)]
+    assert "missing tile(s) [1,1]" in got["reason"]
+
+
+def test_a_tile_list_file_maps_tiles_to_sessions_by_uuid(tmp_path):
+    step = math.degrees(FOV_Y) * 0.8
+    dirs = [_uuid_session(tmp_path, f"s{i}", 10.0, 41.0 + i * step, f"abc-{i}") for i in range(2)]
+    other = _uuid_session(tmp_path, "unrelated", 210.0, 54.0, "zzz")
+    (tmp_path / "mosaic.json").write_text(json.dumps({
+        "MosaicUuid": "MOS-9", "GridWidth": 1, "GridHeight": 3, "TilesTotal": 3,
+        "MosaicTiles": [{"TileRow": 0, "TileCol": 0, "StackedMasterUuid": "ABC-0"},
+                        {"TileRow": 1, "TileCol": 0, "StackedMasterUuid": "abc-1"},
+                        {"TileRow": 2, "TileCol": 0, "StackedMasterUuid": "not-captured"}]}))
+    got = mosaic.predict_mosaic(dirs + [other])
+    assert got is not None and got["exact"]
+    man = got["manifest"]
+    assert man["mosaic"] == "mos-9" and man["total"] == 3
+    assert man["tiles"] == {dirs[0]: (0, 0), dirs[1]: (1, 0)}
+    assert man["missing"] == [(2, 0)] and man["others"] == [other]
+
+
+def test_one_mosaic_uuid_per_session_falls_back_to_pointing(tmp_path):
+    dirs = [_uuid_session(tmp_path, f"n{i}", 202.47 + 0.004 * i, 47.19, f"u{i}",
+                          {"MosaicUuid": f"M-{i}", "TileRow": 0, "TileCol": 0}) for i in range(2)]
+    assert mosaic.mosaic_manifest(dirs) is None
+    assert mosaic.predict_mosaic(dirs) is None        # same pointing, not a mosaic
