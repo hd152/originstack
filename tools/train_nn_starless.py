@@ -141,9 +141,48 @@ def star_colours(z: np.ndarray, stars, n: int = 400) -> np.ndarray:
     return np.array(out, np.float32) if out else np.ones((1, 3), np.float32)
 
 
-def real_star_mask(shape, stars, psf: np.ndarray) -> np.ndarray:
+def star_like(stars, z: np.ndarray, psf: np.ndarray, sat_z: np.ndarray):
+    """The detections whose light is concentrated like the session's PSF. The detector
+    also returns galaxy cores and nebula knots (its shape fields do not separate them:
+    ~3 px for nearly everything); masked out of the loss (v1), they taught the network
+    that removing compact bright structure costs nothing -- the Crab lost 70% of its light
+    away from any star. Here a detection is a star when the mean light 5-9 px from its
+    centre, relative to its 3x3 core, is within 3x the PSF's ratio (+ the noise), or when
+    its core reaches 0.8 of the saturation level (a flattened core raises that ratio, and an
+    unmasked saturated star would teach the network to keep it); the rest keep their loss
+    weight, so keeping them is trained like any other background."""
+    if len(stars) == 0:
+        return stars
+    lum = z.mean(axis=2)
+    p = psf.mean(axis=0)
+    yy, xx = np.mgrid[-9:10, -9:10]
+    rr = np.hypot(yy, xx)
+    ring, core = (rr >= 5) & (rr <= 9), rr <= 1.5
+    c = PSF_R
+    pr = p[c - 9:c + 10, c - 9:c + 10]
+    psf_ratio = pr[ring].mean() / pr[core].mean()
+    h, w = lum.shape
+    keep = np.zeros(len(stars), bool)
+    for k, s in enumerate(stars):
+        y, x = int(round(s['ycentroid'])), int(round(s['xcentroid']))
+        if not (9 <= y < h - 9 and 9 <= x < w - 9):
+            keep[k] = True
+            continue
+        st = lum[y - 9:y + 10, x - 9:x + 10]
+        if np.any(z[y - 1:y + 2, x - 1:x + 2].max(axis=(0, 1)) > 0.8 * sat_z):
+            keep[k] = True
+            continue
+        cm = st[core].mean()
+        if cm <= 0:
+            continue
+        keep[k] = st[ring].mean() / cm <= 3.0 * psf_ratio + 3.0 / max(cm, 1e-6)
+    return stars[keep]
+
+
+def real_star_mask(shape, stars, psf: np.ndarray, z: np.ndarray, sat_z: np.ndarray) -> np.ndarray:
     """Pixels where a real star's light exceeds half a sky sigma (from the session PSF's
-    radial profile scaled to its peak), plus 2 px."""
+    radial profile scaled to its peak), plus 2 px; star-like detections only."""
+    stars = star_like(stars, z, psf, sat_z)
     h, w = shape
     prof = psf.max(axis=0)
     cy = PSF_R
@@ -176,7 +215,7 @@ def session_bank(path: str, per_session: int, rng):
     if got is None:
         return None
     psf, n_psf = got
-    mask = real_star_mask(z.shape[:2], stars, psf)
+    mask = real_star_mask(z.shape[:2], stars, psf, z, sat_z)
     h, w, _ = z.shape
     za, wa = [], []
     for _ in range(per_session):
@@ -305,7 +344,9 @@ def inject(base, sess, bank, rng, dev, empty_frac: float = 0.1):
         u = rng.random(n)
         pl = 1.5 * (1.0 - u) ** (-1.0 / 0.6)
         lu = np.exp(rng.uniform(np.log(1.5), np.log(4.0 * float(sat_all[s].max())), n))
-        peak = np.where(rng.random(n) < 0.7, pl, lu).clip(1.5, 4.0 * float(sat_all[s].max()))
+        # 40% spread evenly in log: bright and saturated stars were left as coloured
+        # cores by v1 (30%), the hardest case and rare under the power law
+        peak = np.where(rng.random(n) < 0.6, pl, lu).clip(1.5, 4.0 * float(sat_all[s].max()))
         cols = col_all[s][rng.integers(0, len(col_all[s]), n)]
         # PSF: the session's, rotated/flipped, scaled +-15% in width, shifted sub-pixel
         psf = psf_all[s]
@@ -326,10 +367,14 @@ def inject(base, sess, bank, rng, dev, empty_frac: float = 0.1):
         st = st / st.amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-12)
         amp = torch.as_tensor(peak[:, None] * cols, device=dev, dtype=torch.float32)
         st = st * amp[:, :, None, None]
-        ys = rng.integers(0, P, n)
-        xs = rng.integers(0, P, n)
-        for j in range(n):
-            canvas[i, :, ys[j]:ys[j] + 2 * R + 1, xs[j]:xs[j] + 2 * R + 1] += st[j]
+        S2 = 2 * R + 1
+        ys = torch.as_tensor(rng.integers(0, P, n), device=dev)
+        xs = torch.as_tensor(rng.integers(0, P, n), device=dev)
+        ar = torch.arange(S2, device=dev)
+        flat = ((ys[:, None, None] + ar[None, :, None]) * (P + 2 * R)
+                + xs[:, None, None] + ar[None, None, :]).reshape(-1)      # one scatter per channel
+        for c in range(C):
+            canvas[i, c].view(-1).index_add_(0, flat, st[:, c].reshape(-1))
     stars = canvas[:, :, R:R + P, R:R + P]
     shot = torch.as_tensor(shot_all[sess], device=dev, dtype=torch.float32)[:, :, None, None]
     var = stars * shot
@@ -468,7 +513,7 @@ def evaluate(stacks: str, model: str, out_dir: str, holdout_only: bool, seed: in
             print(f"{name}: no PSF", flush=True)
             continue
         psf, _ = got
-        real = real_star_mask(z.shape[:2], stars, psf)
+        real = real_star_mask(z.shape[:2], stars, psf, z, sat_z)
         # (1) injected stars on a grid of whole-image tiles
         bank = (torch.as_tensor(psf[None]), star_colours(z, stars)[None], sat_z[None], shot[None])
         h, w, _ = z.shape
