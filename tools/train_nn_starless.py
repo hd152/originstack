@@ -50,6 +50,7 @@ PSF_R = 40             # empirical PSF radius (px): stamps are (2 * PSF_R + 1)^2
 DEPTH = 4              # pooling levels
 WIDTHS = (24, 48, 96, 96)
 MID = 128
+ROBUST_TAU = 10.0      # noise units: the loss is quadratic below, linear above
 # sessions never used for training (scored by ``eval``): a nebula, a dense star cloud,
 # a galaxy, and the 300-frame dithered night
 HOLDOUT = ("Crab_Nebula", "Sagittarius_Star_Cloud", "Messier_101_2026-04-27",
@@ -217,10 +218,21 @@ def session_bank(path: str, per_session: int, rng):
     psf, n_psf = got
     mask = real_star_mask(z.shape[:2], stars, psf, z, sat_z)
     h, w, _ = z.shape
+    # a third of the patches centred on the stack's extended emission (smoothed light
+    # with the stars masked): random patches are nearly all star field and sky, and v2
+    # removed 85% of the Crab's light -- keeping structure was hardly ever trained
+    lum = np.where(mask, np.nan, z.mean(axis=2))
+    sm = ndi.uniform_filter(np.nan_to_num(lum[::8, ::8], nan=0.0), 5)
+    cand = np.argwhere(sm > max(2.0, np.percentile(sm, 99)))
     za, wa = [], []
-    for _ in range(per_session):
-        y = int(rng.integers(0, h - PATCH))
-        x = int(rng.integers(0, w - PATCH))
+    for k in range(per_session):
+        if k % 3 == 0 and len(cand):
+            cy, cx = cand[rng.integers(len(cand))] * 8
+            y = int(np.clip(cy - PATCH // 2 + rng.integers(-PATCH // 4, PATCH // 4 + 1), 0, h - PATCH))
+            x = int(np.clip(cx - PATCH // 2 + rng.integers(-PATCH // 4, PATCH // 4 + 1), 0, w - PATCH))
+        else:
+            y = int(rng.integers(0, h - PATCH))
+            x = int(rng.integers(0, w - PATCH))
         za.append(z[y:y + PATCH, x:x + PATCH].astype(np.float16))
         wa.append(~mask[y:y + PATCH, x:x + PATCH])
     return dict(z=np.stack(za), keep=np.stack(wa), psf=psf, col=star_colours(z, stars),
@@ -324,6 +336,48 @@ def check_parity(net, path: str) -> float:
 
 # ── star injection ──────────────────────────────────────────────────────────────
 
+def extended_structure(n: int, size: int, psf_fwhm: np.ndarray, gen, dev):
+    """(n, 3, size, size) synthetic extended light in noise units, added to input and
+    target alike, so keeping it is what the network learns: elliptical Gaussians,
+    exponential discs and thin filaments, from 1.5x the session's star width to 200 px,
+    peaks 0.5-300 sigma (log-uniform), colour +-40% per channel, ~1.5 per patch. Without
+    it (v1, v2) the real backgrounds held too little nebula and galaxy light for the
+    network to learn the difference between a star and a small bright blob."""
+    import torch
+    out = torch.zeros((n, 3, size, size), device=dev)
+    yy, xx = torch.meshgrid(torch.arange(size, device=dev, dtype=torch.float32),
+                            torch.arange(size, device=dev, dtype=torch.float32), indexing="ij")
+    counts = gen.poisson(1.5, n)
+    for i in range(n):
+        smin = 1.5 * float(psf_fwhm[i]) / 2.3548
+        for _ in range(int(counts[i])):
+            cy, cx = gen.uniform(-0.25 * size, 1.25 * size, 2)
+            sa = float(np.exp(gen.uniform(np.log(smin), np.log(200.0))))
+            kind = gen.random()
+            sb = sa * (gen.uniform(0.04, 0.15) if kind < 0.2 else gen.uniform(0.3, 1.0))
+            sb = max(sb, smin)
+            th = gen.uniform(0, np.pi)
+            dy, dx = yy - float(cy), xx - float(cx)
+            u = (dx * np.cos(th) + dy * np.sin(th)) / sa
+            v = (-dx * np.sin(th) + dy * np.cos(th)) / sb
+            r2 = u * u + v * v
+            prof = torch.exp(-0.5 * r2) if gen.random() < 0.5 else torch.exp(-torch.sqrt(r2) * 1.6783)
+            peak = float(np.exp(gen.uniform(np.log(0.5), np.log(300.0))))
+            col = np.clip(1.0 + 0.4 * gen.standard_normal(3), 0.2, 2.5)
+            out[i] += torch.tensor(peak * col, device=dev, dtype=torch.float32)[:, None, None] * prof
+    return out
+
+
+def psf_fwhm_px(psf: np.ndarray) -> float:
+    """FWHM (px) of a unit-sum PSF stamp from its second moment (luminance)."""
+    p = psf.mean(axis=0)
+    yy, xx = np.mgrid[:p.shape[0], :p.shape[1]] - PSF_R
+    core = np.hypot(yy, xx) <= 8
+    w = np.where(core, p, 0.0)
+    s2 = float((w * (yy ** 2 + xx ** 2)).sum() / max(w.sum(), 1e-12)) / 2.0
+    return 2.3548 * float(np.sqrt(max(s2, 0.25)))
+
+
 def inject(base, sess, bank, rng, dev, empty_frac: float = 0.1):
     """(input, star light, shot variance) for a batch of base patches (B, 3, P, P), with
     stars drawn from each patch's own session."""
@@ -393,6 +447,8 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
     f = np.load(bank_path)
     Z, K, sess = f["z"], f["keep"], f["sess"]
     bank = (torch.as_tensor(f["psf"], device=dev), f["col"], f["sat"], f["shot"])
+    fwhm = np.array([psf_fwhm_px(p) for p in f["psf"]])
+    print("session PSF FWHM px:", np.round(fwhm, 2), flush=True)
     n = len(Z)
     rng = np.random.default_rng(seed)
     sessions = np.unique(sess)
@@ -414,13 +470,24 @@ def train(bank_path: str, steps: int, out: str, batch: int, lr: float, seed: int
             base, keep = torch.rot90(base, k, (2, 3)), torch.rot90(keep, k, (2, 3))
             if gen.random() < 0.5:
                 base, keep = torch.flip(base, (3,)), torch.flip(keep, (3,))
+        if aug:
+            # extended light in both: the target keeps it
+            base = base + extended_structure(base.shape[0], base.shape[2], fwhm[sess[idx]], gen, dev)
         x, stars, var = inject(base, sess[idx], bank, gen, dev)
         return x, base, keep, var
 
     def loss_of(x, base, keep, var):
+        """Charbonnier (quadratic below ``ROBUST_TAU`` weighted noise units, linear above)
+        of the error in noise units. Plain L2 (v2) let a few pixels dominate whole batches
+        -- a compact galaxy nucleus or a bright star the mask test called extended, which
+        the target says to keep and the network removes: batch losses of 1e6 against ~2."""
         pred = net(torch.asinh(x / nd.ASINH_SOFT)) * torch.sqrt(1.0 + torch.clamp(x, min=0.0))
         w = keep / (1.0 + var)
-        return (w * (x + pred - base) ** 2).mean(), (w * (x - base) ** 2).mean()
+
+        def rob(e):
+            t = ROBUST_TAU
+            return (w * t * t * (torch.sqrt(1.0 + (e / t) ** 2) - 1.0)).mean()
+        return rob(x + pred - base), rob(x - base)
 
     vgen_seed = 12345
 
