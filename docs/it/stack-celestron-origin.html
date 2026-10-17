@@ -74,7 +74,7 @@
     <h1>Come integrare le immagini del Celestron Origin sul tuo computer</h1>
     <p class="lede">L'Origin integra man mano, ma conserva anche ogni frame grezzo che ha scattato. Integrare di nuovo quei frame su un computer, con una calibrazione e un allineamento accurati, dà un'immagine più nitida e pulita di quella salvata dal telescopio. Questa guida lo fa con OriginStack, che è gratuito e funziona sul tuo computer.</p>
     <p class="toc">
-      <a href="#folder">Cosa c'è in una cartella di sessione</a> <a href="#steps">Lo stacking, passo per passo</a> <a href="#nights">Più notti</a> <a href="#why">Perché reintegrare</a> <a href="#problems">Se qualcosa va storto</a>
+      <a href="#folder">Cosa c'è in una cartella di sessione</a> <a href="#steps">Lo stacking, passo per passo</a> <a href="#mosaic">Mosaici</a> <a href="#nights">Più notti</a> <a href="#why">Perché reintegrare</a> <a href="#problems">Se qualcosa va storto</a>
     </p>
   </div>
 </header>
@@ -113,6 +113,14 @@
         <dd><p>Lascia vuoto il campo di output e lo stack viene salvato accanto alla cartella di sessione, senza mai sovrascriverne uno precedente. Ottieni un JPEG da guardare e condividere, e un file FITS che resta lineare, per ulteriori lavorazioni in altri software o da unire in seguito a un'altra notte.</p></dd></div>
     </dl>
     <p class="plain measure">Preferisci la riga di comando? La stessa esecuzione è <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>Mosaici</h2>
+    <p class="intro measure">La modalità Mosaico dell'Origin riprende un soggetto grande come più tessere sovrapposte e salva ogni tessera nella propria cartella di sessione. Metti le cartelle delle tessere in un'unica cartella e scegli quella. OriginStack capisce dal puntamento di ogni sessione che sono tessere e non notti dello stesso campo, impila ogni tessera, uniforma le tessere tra loro dove si sovrappongono, in luminosità e gradiente, le fonde in un'unica immagine e la rifinisce una volta. Più notti della stessa tessera possono stare nella stessa cartella. Da riga di comando l'opzione è <code>--mosaic</code>, ma si attiva da sola.</p>
+    <p class="caveat measure">È stato provato su tessere ritagliate da stack reali dell'Origin, non ancora su una ripresa della modalità Mosaico vera e propria. Se un mosaico del tuo Origin non si unisce, <a href="https://github.com/hd152/originstack/issues">apri una segnalazione</a>, per favore.</p>
   </div>
 </section>
 

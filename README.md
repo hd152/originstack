@@ -241,7 +241,7 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 - **Bayer-aware drizzle** (`--cfa-drizzle`, opt-in) — recombines each frame's *measured* colour samples instead of debayer-interpolated ones (native kernel, 15.7× the numpy path). On well-sampled data it trades 13% lower luma noise for 2× colour noise and no sharpness gain, so it is meant for undersampled data
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
-- **Mosaic stitching** — WCS-based reprojection via `reproject` (`--mosaic`)
+- **Mosaic stitching** (`--mosaic`, or detected from the sessions' pointing) — panels matched to each other in their overlaps (gain + gradient, one global solve), blended, and finished once as one image; no extra dependency
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges. Stacks from different exposure/ISO are mapped onto one flux scale first and weighted by measured noise, not frame count
 - **Multi-session (hierarchical) runs post-process the combined stack** — the combined output goes through Phase 4 with the reference session's settings, and the reference grid is the session with the most integration time
 - **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`): pick the target from picture cards and a run mode, see what the run will do before you start, then follow phase progress, the log, per-frame quality and an interactive preview (zoom/pan, before/after wipe compare) — see [Desktop App](#desktop-app) below
@@ -292,7 +292,6 @@ Plate solving needs nothing extra: the built-in solver uses a local Gaia star in
 | `psutil` | Memory-adaptive worker/memmap sizing (guarded with a fixed fallback everywhere) |
 | `rawpy` | Camera RAW input (CR2/CR3/NEF/ARW/DNG/…) |
 | `tifffile` | TIFF input and `--export tiff` output |
-| `reproject` | Mosaic stitching (`--mosaic`) |
 | `certifi` | Up-to-date CA certificates for the HTTPS lookups (Gaia, SIMBAD, astrometry.net), on systems whose own store is missing or stale |
 | `tomli` | Reading `--config` TOML files on Python 3.10 (3.11+ has `tomllib` built in) |
 | `cupy-cuda*` | GPU acceleration (`--use-gpu`; see [GPU Acceleration](#gpu-acceleration)) |
@@ -610,7 +609,7 @@ If the metadata can't be read, the sessions are pooled and the log says so.
 
 ### Mode 3 — Mosaic (`--mosaic`)
 
-Use this when your subfolders are **adjacent sky panels** of the same large target, and you want them stitched into a single wide-field image using WCS reprojection.
+Use this when your subfolders are **adjacent sky panels** of the same large target (for example the tiles of the Celestron Origin's Mosaic Mode), and you want them stitched into a single wide-field image. You usually do not need the flag: when the sessions' `info.json` pointings are more than a quarter of a field apart and their fields overlap, the run switches to mosaic mode by itself (`--combine-sessions` or `--hierarchical` override it).
 
 ```
 panels/
@@ -629,12 +628,11 @@ panels/
 python originstack.py -d panels/ -o mosaic.fits --mosaic -v
 ```
 
-Each subfolder is first stacked independently (phases 1–4), then all panel stacks are reprojected onto a common optimal WCS grid and blended with distance-weighted feathering to eliminate seams. Overlap zones are background-matched automatically.
+Each subfolder is stacked on its own (Phases 1–3), then the panels are resampled onto one grid (the deepest panel's own projection, so it is not resampled), matched to each other in their overlaps with one least-squares solve for all of them (a gain per panel and channel for transparency, then a plane per panel and channel for residual gradient), and blended with feathered, inverse-noise-variance weights. Post-processing runs once, on the whole mosaic, so background extraction and the stretch see one image.
 
 **Requirements:**
-- `pip install reproject` — WCS-based reprojection library
-- Every panel must have a valid WCS: either from `info.json` (Celestron Origin) or from plate solving (`--mosaic` turns `--plate-solve` on)
-- If any panel is missing a WCS, the mosaic step is skipped with a warning
+- Every panel must have a valid WCS: either from `info.json` (Celestron Origin, refined against Gaia) or from plate solving (`--mosaic` turns `--plate-solve` on)
+- The panels must overlap; if any panel is missing a WCS or the panels do not form one connected area, the mosaic step is skipped with a warning and the stacks are combined as usual
 
 ---
 
@@ -644,6 +642,7 @@ Each subfolder is first stacked independently (phases 1–4), then all panel sta
 |---|---|
 | FITS files directly in the directory | **Single folder** |
 | Subdirectories containing FITS files | **Several sessions**: pooled, or stacked separately and merged when field rotation would crop the corners |
+| Subdirectories pointed at overlapping but different sky (mosaic tiles) | **Mosaic**: each panel stacked, then stitched |
 | Subdirectories + `--combine-sessions` / `--hierarchical` | **Several sessions**, forced pooled / forced separate-then-merge |
 | Subdirectories + `--mosaic` | **Mosaic** |
 
@@ -718,7 +717,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--offline` | Make no network requests at all |
 | `--no-proper-coadd` | Plain combine only, without proper image coaddition |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |
-| `--mosaic` | Stitch per-subfolder stacks via WCS reprojection |
+| `--mosaic` | Stitch per-subfolder panel stacks into one mosaic (also detected automatically) |
 | `--merge STACK.fits [...]` | Incremental stacking: fold previous linear stacks into this run |
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run by default) |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |

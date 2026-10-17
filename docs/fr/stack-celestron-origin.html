@@ -74,7 +74,7 @@
     <h1>Comment empiler les images du Celestron Origin sur votre ordinateur</h1>
     <p class="lede">L'Origin empile au fur et à mesure, mais il conserve aussi chaque image brute qu'il a prise. Réempiler ces images sur un ordinateur, avec une calibration et un alignement soignés, donne une image plus nette et plus propre que celle que le télescope enregistre. Ce guide le fait avec OriginStack, gratuit et exécuté sur votre propre machine.</p>
     <p class="toc">
-      <a href="#folder">Contenu d'un dossier de session</a> <a href="#steps">L'empiler, pas à pas</a> <a href="#nights">Plusieurs nuits</a> <a href="#why">Pourquoi réempiler</a> <a href="#problems">En cas de problème</a>
+      <a href="#folder">Contenu d'un dossier de session</a> <a href="#steps">L'empiler, pas à pas</a> <a href="#mosaic">Mosaïques</a> <a href="#nights">Plusieurs nuits</a> <a href="#why">Pourquoi réempiler</a> <a href="#problems">En cas de problème</a>
     </p>
   </div>
 </header>
@@ -113,6 +113,14 @@
         <dd><p>Laissez la sortie vide et l'empilement est enregistré à côté du dossier de session, sans jamais écraser un empilement antérieur. Vous obtenez un JPEG à regarder et à partager, et un fichier FITS qui reste linéaire, pour un traitement ultérieur dans d'autres logiciels ou une fusion avec une autre nuit plus tard.</p></dd></div>
     </dl>
     <p class="plain measure">Vous préférez la ligne de commande ? La même exécution s'écrit <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>Mosaïques</h2>
+    <p class="intro measure">Le mode Mosaïque de l'Origin photographie une grande cible en plusieurs tuiles qui se recouvrent et enregistre chaque tuile dans son propre dossier de session. Placez les dossiers des tuiles dans un même dossier parent et choisissez celui-ci. OriginStack voit au pointage de chaque session qu'il s'agit de tuiles et non de nuits d'un même champ, empile chaque tuile, ajuste les tuiles les unes aux autres dans leurs recouvrements, en luminosité et en gradient, les fond en une seule image et la finalise une fois. Plusieurs nuits d'une même tuile peuvent aller dans le même dossier parent. En ligne de commande, l'option est <code>--mosaic</code>, mais elle s'active toute seule.</p>
+    <p class="caveat measure">C'est testé sur des tuiles découpées dans de vraies piles Origin, pas encore sur une acquisition du mode Mosaïque lui-même. Si une mosaïque de votre Origin ne s'assemble pas, <a href="https://github.com/hd152/originstack/issues">ouvrez un ticket</a>, s'il vous plaît.</p>
   </div>
 </section>
 

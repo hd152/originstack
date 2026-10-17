@@ -406,7 +406,7 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
       <div id="opt-hierarchical"><dt><code>--hierarchical</code></dt>
         <dd><p>Always stack each subfolder separately, then combine the per-subfolder stacks with rotation-aware registration (or --mosaic, if given). Without this flag (or --combine-sessions) the choice is made from the predicted field rotation between sessions. Has no effect unless the input directory contains subfolders.</p></dd></div>
       <div id="opt-mosaic"><dt><code>--mosaic</code></dt>
-        <dd><p>Stitch per-subfolder stacks into a mosaic via WCS reprojection. Requires: pip install reproject and a working plate solver. Automatically enables --plate-solve.</p></dd></div>
+        <dd><p>Stitch per-subfolder stacks into one mosaic: each panel is stacked, the panels are matched to each other in their overlaps (gain and gradient) and blended, then the mosaic is finished once. Needs a WCS per panel (the Origin session solve, or a plate solve: enables --plate-solve). Turned on automatically when the subfolders point at overlapping but different parts of the sky.</p></dd></div>
     </dl>
   </div>
 </section>

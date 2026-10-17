@@ -70,6 +70,7 @@
     <p class="toc">
       <a href="#folder">What is in a session folder</a>
       <a href="#steps">Stacking it, step by step</a>
+      <a href="#mosaic">Mosaics</a>
       <a href="#nights">Several nights</a>
       <a href="#why">Why restack at all</a>
       <a href="#problems">If something goes wrong</a>
@@ -111,6 +112,14 @@
         <dd><p>Leave the output blank and the stack is saved next to the session folder, never overwriting an earlier one. You get a JPEG to look at and share, and a FITS file that stays linear, for further work in other software or for merging with another night later.</p></dd></div>
     </dl>
     <p class="plain measure">Prefer the command line? The same run is <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>Mosaics</h2>
+    <p class="intro measure">The Origin's Mosaic Mode captures a large target as several overlapping tiles and saves each tile as its own session folder. Put the tile folders inside one parent folder and pick the parent. OriginStack sees from each session's pointing that these are tiles, not nights of one field, stacks every tile, matches the tiles to each other where they overlap, in brightness and in gradient, blends them into one image and finishes it once. Several nights of the same tile can go in the same parent folder. On the command line the option is <code>--mosaic</code>, but it turns itself on.</p>
+    <p class="caveat measure">This is tested on tiles cut from real Origin stacks, not yet on a capture from Mosaic Mode itself. If a mosaic from your Origin does not stitch, please <a href="https://github.com/hd152/originstack/issues">open an issue</a>.</p>
   </div>
 </section>
 

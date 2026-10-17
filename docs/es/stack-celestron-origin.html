@@ -74,7 +74,7 @@
     <h1>Cómo apilar imágenes del Celestron Origin en tu ordenador</h1>
     <p class="lede">El Origin apila sobre la marcha, pero también conserva todas las tomas en bruto que ha hecho. Volver a apilar esas tomas en un ordenador, con una calibración y una alineación adecuadas, da una imagen más nítida y limpia que la que guarda el telescopio. Esta guía lo hace con OriginStack, que es gratuito y se ejecuta en tu propio equipo.</p>
     <p class="toc">
-      <a href="#folder">Qué hay en una carpeta de sesión</a> <a href="#steps">Apilarla paso a paso</a> <a href="#nights">Varias noches</a> <a href="#why">Por qué volver a apilar</a> <a href="#problems">Si algo sale mal</a>
+      <a href="#folder">Qué hay en una carpeta de sesión</a> <a href="#steps">Apilarla paso a paso</a> <a href="#mosaic">Mosaicos</a> <a href="#nights">Varias noches</a> <a href="#why">Por qué volver a apilar</a> <a href="#problems">Si algo sale mal</a>
     </p>
   </div>
 </header>
@@ -113,6 +113,14 @@
         <dd><p>Deja la salida en blanco y el apilado se guarda junto a la carpeta de sesión, sin sobrescribir nunca uno anterior. Obtienes un JPEG para ver y compartir, y un archivo FITS que sigue siendo lineal, para seguir trabajando en otros programas o para fusionarlo más adelante con otra noche.</p></dd></div>
     </dl>
     <p class="plain measure">¿Prefieres la línea de comandos? La misma ejecución es <code>python originstack.py -d Black_Eye_Galaxy_2026-03-14_21-20-36 -o black_eye.fits</code>.</p>
+  </div>
+</section>
+
+<section id="mosaic">
+  <div class="wrap">
+    <h2>Mosaicos</h2>
+    <p class="intro measure">El modo Mosaico del Origin captura un objeto grande como varias teselas solapadas y guarda cada tesela como su propia carpeta de sesión. Pon las carpetas de las teselas dentro de una carpeta común y elige esa. OriginStack ve por el apuntado de cada sesión que son teselas y no noches del mismo campo, apila cada tesela, iguala las teselas entre sí donde se solapan, en brillo y en gradiente, las une en una sola imagen y la procesa una vez. Varias noches de la misma tesela pueden ir en la misma carpeta. En la línea de comandos la opción es <code>--mosaic</code>, pero se activa sola.</p>
+    <p class="caveat measure">Está probado con teselas recortadas de stacks reales del Origin, todavía no con una captura del propio modo Mosaico. Si un mosaico de tu Origin no se une bien, <a href="https://github.com/hd152/originstack/issues">abre una incidencia</a>, por favor.</p>
   </div>
 </section>
 
