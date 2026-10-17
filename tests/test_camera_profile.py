@@ -128,3 +128,12 @@ def test_poisson_label_names_the_profile():
                               _stack_poisson_factor=None)
     c, src = poisson_coefficients({'NFRAMES': 1}, args, stacked=False)
     assert np.allclose(c, 1 / 0.0165) and 'camera profile' in src
+
+
+def test_dark_at_another_iso_is_reported(capsys):
+    from src.cli import _warn_dark_iso_mismatch
+    lights = [_F({'ISOSPEED': 500}) for _ in range(3)]
+    _warn_dark_iso_mismatch({'light': lights, 'dark': [_F({'ISOSPEED': 200})]})
+    assert 'ISO 200 but the lights at ISO 500' in capsys.readouterr().out
+    _warn_dark_iso_mismatch({'light': lights, 'dark': [_F({'ISOSPEED': 500})]})
+    assert capsys.readouterr().out == ''

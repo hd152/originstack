@@ -347,6 +347,30 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
         safe_print(f"  WARNING: Could not save config file ({e})")
 
 
+def _warn_dark_iso_mismatch(frames: dict) -> None:
+    """Say when the dark was taken at another ISO than the lights. The Origin pairs ISO
+    500 sessions with an ISO 200 dark (3 of 33 local sessions); the dark is scaled by
+    exposure only. Scaling it by the ISO gain ratio as well (x2.58) was measured on all
+    three and is not a reliable gain: edge glow fell in R/G but overshot in B, and on one
+    (Pinwheel 2026-01-18, whose dark sits 1600 ADU above its bias) R residual structure
+    rose 60%: the ratio multiplies the dark/bias offset error too. Leaving the dark out
+    was worse still on two of three. So the dark is used as before, with this note."""
+    from src.frame_discovery import _frame_iso
+    lights, darks = frames.get('light') or [], frames.get('dark') or []
+    if not lights or not darks:
+        return
+    from collections import Counter
+    l_iso = Counter(str(_frame_iso(f)) for f in lights if _frame_iso(f) is not None)
+    d_iso = Counter(str(_frame_iso(f)) for f in darks if _frame_iso(f) is not None)
+    if not l_iso or not d_iso:
+        return
+    li, di = l_iso.most_common(1)[0][0], d_iso.most_common(1)[0][0]
+    if li != di:
+        safe_print(f"  NOTE: the dark was taken at ISO {di} but the lights at ISO {li}; it is "
+                   f"scaled by exposure only, so its thermal pattern is only partly removed "
+                   f"(a dark at ISO {li} matches better)")
+
+
 def _postprocess_combined(combined, eff_args, output_path):
     """Run Phase 4 on a hierarchically combined linear stack.
 
@@ -579,6 +603,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
                 frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
         except Exception as e:
             safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+        _warn_dark_iso_mismatch(frames)
 
     # Photon-transfer gain / read-noise from raw bias+flat pairs, for the
     # Poisson term in --photometry. Only when photometry is requested and no
