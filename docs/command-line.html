@@ -321,6 +321,9 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
         <dd><p>Run the denoisers and local contrast on a starless copy of the image, then add the stars back untouched. With no stars in the layer there is nothing to protect (no star mask, no halo leaking into background estimates, no collar around bright stars), so faint galaxy/nebula structure gets cleaner treatment. The layers sum back to the input exactly, so no star flux is lost. Off by default.</p></dd></div>
       <div id="opt-layered-stretch"><dt><code>--layered-stretch</code></dt>
         <dd><p>Preview JPEG: take the stretch black/white points from a starless copy of the image, so faint galaxy/nebula structure owns the tonal range instead of being squeezed under the stars&#x27; white point. Only affects the preview JPEG, not the FITS/TIFF. Needs --stretch ghs. Off by default.</p></dd></div>
+      <div id="opt-star-removal"><dt><code>--star-removal</code></dt>
+        <dd><p>How --remove-stars, --starless-process and --layered-stretch take the stars out. inpaint (default): fill each detected star from the surrounding background. nn: a small neural network trained on real Origin stacks with added stars; it also removes faint and blended stars and halos, and only ever removes light. What it puts under a star is an estimate of the background there.</p>
+          <p class="meta">Choices: <code>inpaint</code>, <code>nn</code> &middot; Default: <code>inpaint</code></p></dd></div>
     </dl>
   </div>
 </section>
