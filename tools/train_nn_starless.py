@@ -56,6 +56,7 @@ ROBUST_TAU = 10.0      # noise units: the loss is quadratic below, linear above
 CUTOUTS_PER_SESSION = 250
 CUTOUT_MIN_PEAK = 15.0  # noise units: fainter templates bring too much of their own sky
 MAX_SCALE = 0.6        # preferred largest template scale (its sky noise scales with it)
+CLEAN_LO, CLEAN_HI = 3.0, 10.0  # sigma: radial profile below, raw template above (``clean_stamps``)
 # Loss weight of a pixel: 1 / (1 + shot variance) ** STAR_WEIGHT_POWER. v4 used power 1: a
 # star core then counted for almost nothing, so leaving a star cost little against removing
 # structure, and the trained model removed 8-26% of real stars' light (structure 63-99%).
@@ -450,12 +451,43 @@ def psf_fwhm_px(psf: np.ndarray) -> float:
     return 2.3548 * float(np.sqrt(max(s2, 0.25)))
 
 
+def clean_stamps(stamps: np.ndarray):
+    """(stamps, raw weight) with each template's own sky noise taken out of its faint parts
+    (v6). A cutout carries a full copy of its sky noise; a bright star is injected at a scale
+    near 1, so the sky around it got ~24% more noise than around a real star and a small
+    classifier told injected from real stars at AUC 0.89-0.95 above 100 sigma (v5, against
+    0.53-0.57 below 30). Where the template's own radial profile (mean per 1-px ring and
+    channel: its real width and colour, with the ring's noise averaged down) is below
+    ``CLEAN_LO`` sigma in luminance the template is replaced by that profile; above
+    ``CLEAN_HI`` it is kept raw; linear in between. A Gaussian-smoothed template instead
+    widened the wings (light 4-10 px up 50-100%) and was told apart at AUC 0.89, faint stars
+    included. ``inject`` then adds the shot noise the profile no longer carries.
+    Raw weight (N, 1, S, S)."""
+    st = stamps.astype(np.float32)
+    n, c, s, _ = st.shape
+    r = PSF_R
+    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+    ring = np.rint(np.hypot(yy, xx)).astype(np.int64).ravel()
+    nr = int(ring.max()) + 1
+    cnt = np.bincount(ring, minlength=nr).astype(np.float32)
+    prof = np.empty_like(st)
+    for i0 in range(0, n, 256):
+        blk = st[i0:i0 + 256].reshape(-1, s * s)                      # (b*c, S*S)
+        idx = (np.arange(len(blk))[:, None] * nr + ring[None, :]).ravel()
+        sums = np.bincount(idx, weights=blk.ravel(), minlength=len(blk) * nr).reshape(len(blk), nr)
+        prof[i0:i0 + 256] = (sums / cnt)[:, ring].reshape(-1, c, s, s)
+    w = np.clip((prof.mean(axis=1, keepdims=True) - CLEAN_LO) / (CLEAN_HI - CLEAN_LO), 0.0, 1.0)
+    return (w * st + (1.0 - w) * prof).astype(np.float16), w.astype(np.float16)
+
+
 class CutoutBank:
     """Per-session star templates for ``inject`` (stamps on the training device)."""
 
     def __init__(self, stamps, peaks, sat, sess, sat_all, shot_all, dev):
         import torch
+        stamps, raw_w = clean_stamps(stamps)
         self.stamps = torch.as_tensor(stamps, device=dev)           # float16 (N, 3, S, S)
+        self.raw_w = torch.as_tensor(raw_w, device=dev)             # float16 (N, 1, S, S)
         self.peaks, self.sat_all, self.shot_all = peaks, sat_all, shot_all
         self.unsat, self.satd = {}, {}
         for s in np.unique(sess):
@@ -501,9 +533,10 @@ def _correlated(shape, dev):
 
 def inject(base, sess, bank: CutoutBank, rng, dev, empty_frac: float = 0.1):
     """(input, star light, shot variance) for a batch of base patches (B, 3, P, P), with real
-    star cutouts from each patch's own session (``star_cutouts``). A template scaled by k
-    carries k^2 of its shot variance; the missing (k - k^2) share is added as correlated
-    noise, so faint injected stars are as noisy as real ones."""
+    star cutouts from each patch's own session (``star_cutouts``, ``clean_stamps``). A raw
+    template pixel scaled by k carries k^2 of its shot variance, a radial-profile one none; the
+    missing (k - k^2 w^2) share (w = raw weight) is added as correlated noise, so injected
+    stars are as noisy as real ones."""
     import torch
     B, C, P, _ = base.shape
     R = PSF_R
@@ -525,14 +558,16 @@ def inject(base, sess, bank: CutoutBank, rng, dev, empty_frac: float = 0.1):
         lu = np.exp(rng.uniform(np.log(1.5), np.log(4.0 * smax), n))
         peak = np.where(rng.random(n) < 0.6, pl, lu).clip(1.5, 4.0 * smax)
         idx, k = bank.pick(s, peak, rng)
-        st = bank.stamps[torch.as_tensor(idx, device=dev)].float()
-        st = torch.rot90(st, int(rng.integers(4)), (2, 3))
+        ti = torch.as_tensor(idx, device=dev)
+        st, rw = bank.stamps[ti].float(), bank.raw_w[ti].float()
+        rot = int(rng.integers(4))
+        st, rw = torch.rot90(st, rot, (2, 3)), torch.rot90(rw, rot, (2, 3))
         if rng.random() < 0.5:
-            st = torch.flip(st, (3,))
+            st, rw = torch.flip(st, (3,)), torch.flip(rw, (3,))
         kt = torch.as_tensor(k, device=dev)[:, None, None, None]
         shot = torch.as_tensor(bank.shot_all[s], device=dev, dtype=torch.float32)[None, :, None, None]
         light = st * kt
-        dvar = (kt - kt * kt) * st.clamp_min(0.0) * shot
+        dvar = (kt - kt * kt * rw * rw) * st.clamp_min(0.0) * shot
         ys = torch.as_tensor(rng.integers(0, P, n), device=dev)
         xs = torch.as_tensor(rng.integers(0, P, n), device=dev)
         ar = torch.arange(S2, device=dev)
