@@ -415,3 +415,60 @@ _run_manager: RunManager = RunManager()
 
 def get_run_manager() -> RunManager:
     return _run_manager
+
+
+# ── "Report a problem": a pre-filled GitHub issue ──────────────────────
+#
+# Nothing is sent from the app: the URL opens the issue form in the browser,
+# where the user reads (and can edit) the text before choosing to submit it.
+
+ISSUES_URL = 'https://github.com/hd152/originstack/issues/new'
+# GitHub refuses issue URLs much past 8 KB; keep the whole URL under this.
+_REPORT_URL_MAX = 7000
+
+
+def _redact_home(text: str) -> str:
+    """The home folder as ``~`` (it usually holds the account name)."""
+    import os
+    home = os.path.expanduser('~')
+    if not home or home == '~':
+        return text
+    for form in {home, home.replace('\\', '/'), home.replace('/', '\\')}:
+        text = re.sub(re.escape(form), '~', text, flags=re.IGNORECASE)
+    return text
+
+
+def problem_report_url(log_text: str = '', error: Optional[str] = None) -> str:
+    """The issue-form URL: version, OS, Python and native status, the last
+    run's error, and as much of the end of the log as fits."""
+    import platform
+    import sys
+    from urllib.parse import urlencode
+
+    from src.utils import native_status, read_version
+    version = read_version()
+    head = ['**What happened?**', '', '<!-- What you did, what you expected, what you saw. -->', '', '',
+            '**System**', '',
+            f'- OriginStack {version}' + (' (packaged app)' if getattr(sys, 'frozen', False) else ''),
+            f'- {platform.platform()}, Python {platform.python_version()}',
+            f'- {native_status()}']
+    if error:
+        head += ['', '**Error**', '', '```', _redact_home(error.strip())[:1500], '```']
+    title = f'[{version}] ' + (_redact_home(error.strip().splitlines()[0])[:80] if error else '')
+
+    def url(lines: List[str]) -> str:
+        body = head[:]
+        if lines:
+            body += ['', f'**Log** (last {len(lines)} lines)', '', '```', *lines, '```']
+        body += ['', '<sub>Please check the text above before submitting: this issue is public. '
+                     'Remove anything you do not want to share.</sub>']
+        return ISSUES_URL + '?' + urlencode({'title': title, 'body': '\n'.join(body)})
+
+    lines = [ln.rstrip() for ln in _redact_home(log_text or '').splitlines() if ln.strip()]
+    # a progress run ("Combining: 969/1964 rows", ...): only its last line
+    stem = [re.sub(r'\d.*', '', ln) for ln in lines]
+    lines = [ln for i, ln in enumerate(lines)
+             if i + 1 == len(lines) or stem[i + 1] != stem[i] or not re.search(r'\d+/\d+', ln)][-80:]
+    while lines and len(url(lines)) > _REPORT_URL_MAX:
+        lines = lines[max(1, len(lines) // 10):]          # drop the oldest tenth
+    return url(lines)

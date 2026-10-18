@@ -541,5 +541,7 @@
  "{n} flats": "{n} flats",
  "{n} light": "{n} brute",
  "{n} lights": "{n} brutes",
- "{settings} and {n} more": "{settings} et {n} de plus"
+ "{settings} and {n} more": "{settings} et {n} de plus",
+ "Report a problem": "Signaler un problème",
+ "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "Ouvre un nouveau ticket GitHub dans votre navigateur, prérempli avec la version, le système et la fin du journal. Rien n’est envoyé tant que vous ne le soumettez pas."
 }

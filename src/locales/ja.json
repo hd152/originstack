@@ -541,5 +541,7 @@
  "{n} flats": "フラット {n} 枚",
  "{n} light": "ライト {n} 枚",
  "{n} lights": "ライト {n} 枚",
- "{settings} and {n} more": "{settings} ほか {n} 件"
+ "{settings} and {n} more": "{settings} ほか {n} 件",
+ "Report a problem": "問題を報告",
+ "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "バージョン、システム、ログの末尾を記入済みの新しい GitHub Issue をブラウザーで開きます。そこで送信するまで何も送られません。"
 }
