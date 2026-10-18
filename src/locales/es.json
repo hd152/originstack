@@ -541,5 +541,7 @@
  "{n} flats": "{n} flats",
  "{n} light": "{n} toma de luz",
  "{n} lights": "{n} tomas de luz",
- "{settings} and {n} more": "{settings} y {n} más"
+ "{settings} and {n} more": "{settings} y {n} más",
+ "Report a problem": "Informar de un problema",
+ "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "Abre una nueva incidencia de GitHub en el navegador con la versión, el sistema y el final del registro ya rellenados. No se envía nada hasta que la envíe allí."
 }

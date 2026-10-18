@@ -1418,6 +1418,13 @@ class App:
         tk.Label(inner, textvariable=self.header_status_var, background=_PANEL,
                 foreground=_TEXT_DIM, font=_FONT_MONO).pack(side='right', pady=8)
         self._build_language_menu(inner)
+        report = tk.Label(inner, text=_('Report a problem'), background=_PANEL,
+                          foreground=_TEXT_DIM, font=_FONT, cursor='hand2')
+        report.pack(side='right', padx=(0, 16), pady=8)
+        report.bind('<Button-1>', lambda _e: self._report_problem())
+        _Tooltip(report, _('Opens a new GitHub issue in your browser with the version, system '
+                           'and the end of the log filled in. Nothing is sent until you submit it '
+                           'there.'))
         tk.Frame(root, background=_LINE, height=1).pack(fill='x', side='top')
 
     def _build_language_menu(self, parent: tk.Frame) -> None:
@@ -1465,6 +1472,12 @@ class App:
     def _open_update_url(self) -> None:
         if self._update_url:
             webbrowser.open(self._update_url)
+
+    def _report_problem(self) -> None:
+        from src.desktop_control import problem_report_url
+        snap = self.ui.snapshot()
+        error = snap.get('run_error') if snap.get('run_status') == 'error' else None
+        webbrowser.open(problem_report_url(self.log_text.get('1.0', 'end'), error))
 
     # ── left column: setup, run controls, progress, log ───────────────
 

@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Report a problem** (desktop app header): opens a new GitHub issue in the browser with the
+  version, system, native-module status, the last run's error and the end of the log filled in
+  (home folder shown as `~`, repeated progress lines collapsed). Nothing is sent by the app; the
+  user reviews and submits the issue on GitHub.
+
 ## [2.13.0] - 2026-10-17
 
 Mosaics from the Origin's Mosaic Mode, a faster first phase, dither detection, and awareness
