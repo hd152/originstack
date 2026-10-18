@@ -6,6 +6,57 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-10-17
+
+Mosaics from the Origin's Mosaic Mode, a faster first phase, dither detection, and awareness
+of the other cameras the Origin platform drives.
+
+### Added
+
+- **Mosaics (`--mosaic`, detected automatically).** A folder of tile sessions from the Origin's
+  Mosaic Mode is recognised and stitched into one image: from the Origin's own mosaic
+  description (tile row and column, matched to each session by its stack UUID) when present,
+  otherwise from the sessions' pointings. Panels are reprojected without the `reproject`
+  package (the packaged app now stitches instead of silently combining), brightness and
+  gradient are matched across all overlaps at once, and post-processing runs once on the
+  result. Missing tiles and sessions that are not part of the mosaic are reported. Not yet
+  tested on a real Mosaic Mode capture.
+- **Dither detection.** The registration log reports whether a session was dithered and by
+  how much, and the stack's header records it (`DITHSTEP`). The `--drizzle-scale 2.0` tip now
+  appears only when stars are undersampled.
+- **Other Origin-platform cameras are recognised** (Origin678C, QHY183C, ASI183MC, ASI294MC
+  besides the Origin178) and named in the log; a camera without a measured profile is
+  recorded as such instead of being ignored.
+- A note when the dark was taken at another ISO than the lights (it is scaled by exposure
+  time only; scaling by the ISO gain ratio was measured and is not a reliable improvement).
+- Documentation: what stacking several nights gains, with measurements.
+
+### Changed
+
+- **Faster processing of the frames (Phase 1): about 35-40%.** On a 158-frame session on an
+  8-core laptop, Phase 1 went from ~45 s to ~28 s and the whole run from 2m26 to 2m06, with
+  an identical stack. The compressed frame store no longer decodes every frame for a preview
+  thumbnail that is not shown, writes frames to disk without extra copies, and Phase 1 now
+  runs single-threaded workers on three quarters of the physical cores (it is limited by
+  memory speed, not cores; it also holds fewer frames in memory). `-j N` is unchanged.
+- **Smoother background extraction in frame-filling nebulae.** Where large areas have no sky
+  samples, the background model now blends into wider fits instead of forming flat polygons
+  with edges printed into the sky. Background extraction is also faster (10.8 s to 4.2 s on
+  one stack). Expect slightly different backgrounds where samples are sparse.
+- Learned deconvolution is chosen automatically only for the camera it was trained on
+  (Origin178); other cameras keep the wavelet denoiser under `--auto`.
+- Installing from source now needs NumPy 2.4.6 or later. `astro_native` 0.60.0.
+
+### Fixed
+
+- **Other programs' stacks found among a session's lights are skipped.** A stacked file with
+  `NCOMBINE` or `STACKCNT` above 1 was taken as a light and stopped the run.
+- **Calibration frames are recognised from more capture programs.** An `IMAGETYP` header of
+  `Dark Frame`, `Flat Field`, `Bias Frame`, `Offset` or `Zero` was not understood, so such
+  frames were stacked as lights unless their file name said what they were. Dark flats were
+  taken as darks for the lights; they are now left out with a note (the flats are
+  bias-corrected instead). (This entry was missing from 2.12.1's notes; the fix shipped now.)
+
 ## [2.12.1] - 2026-10-16
 
 ### Fixed

@@ -33,6 +33,7 @@ from src.io_fits import load_fits, load_frame, populate_fits_header, preview_str
 from src.models import FrameInfo, ProcessingStats
 from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
+from src.quality import complete_quality_metrics
 from src.registration import run_registration_phase, select_reference_frame
 from src.stacking import run_stacking_phase
 from src.utils import format_time, get_memory_usage_mb, obs_time_utc_iso, print_phase, safe_print
@@ -314,6 +315,33 @@ def _run_auto_advisor(final: List[FrameInfo], args,
                 safe_print(f"    - {s}")
     except Exception as _exc:
         _log.debug("auto suggestions failed (%s)", _exc)
+
+
+def _complete_accepted_quality_metrics(final: List[FrameInfo],
+                                       final_indices: List[int],
+                                       mem_lum,
+                                       args) -> None:
+    """Compute expensive diagnostics after the gate has accepted frames."""
+    for frame, index in zip(final, final_indices):
+        if frame.metrics:
+            complete_quality_metrics(
+                np.asarray(mem_lum[index]),
+                frame.metrics,
+                advanced_metrics=getattr(args, 'advanced_metrics', True))
+
+
+def _compute_patch_scores_if_needed(final: List[FrameInfo],
+                                   final_indices: List[int],
+                                   mem_lum,
+                                   args) -> None:
+    """Populate patch scores only when patch-quality registration is enabled."""
+    if not getattr(args, 'patch_registration', False):
+        return
+    from src.registration import compute_patch_scores
+    for frame, index in zip(final, final_indices):
+        if frame.metrics is not None and '_patch_scores' not in frame.metrics:
+            frame.metrics['_patch_scores'] = compute_patch_scores(
+                np.asarray(mem_lum[index]))
 
 
 def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
@@ -945,6 +973,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 _lights_index = {id(f): i for i, f in enumerate(lights)}
                 final_indices = [_lights_index[id(f)] for f in final]
 
+                _complete_accepted_quality_metrics(final, final_indices, mem_lum, args)
+
                 # Free rejected frames' luminance — they are never needed again.
                 accepted_set = set(final_indices)
                 for _i in range(len(cached_lums)):
@@ -996,6 +1026,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             # ======================================================================
             # PHASE 2: Registration
             # ======================================================================
+            _compute_patch_scores_if_needed(final, final_indices, mem_lum, args)
             H, W = H_rgb, W_rgb
 
             if resume_phase >= 2:

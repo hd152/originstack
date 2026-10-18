@@ -5407,6 +5407,79 @@ fn debayer_malvar<'py>(
     Ok(arr3.into_pyarray(py))
 }
 
+/// Malvar-He-Cutler demosaicing directly into a caller-owned frame-store slot.
+/// This mirrors `debayer_malvar` exactly but avoids a full RGB allocation and
+/// copy when Phase 1 already has an output buffer.
+#[pyfunction]
+fn debayer_malvar_into<'py>(
+    py: Python<'py>,
+    raw: numpy::PyReadonlyArray2<'py, f32>,
+    mut out: numpy::PyReadwriteArray3<'py, f32>,
+    pattern: &str,
+) -> PyResult<()> {
+    let (r_r, r_c, b_r, b_c) = malvar_pattern_offsets(pattern)?;
+    let arr = raw.as_array();
+    let s = arr.shape();
+    let (h, w) = (s[0], s[1]);
+    if out.as_array().shape() != [h, w, 3] {
+        return Err(pyo3::exceptions::PyValueError::new_err("out must be (h, w, 3)"));
+    }
+    let owned: Vec<f32>;
+    let flat: &[f32] = match arr.as_slice() {
+        Some(sl) => sl,
+        None => {
+            owned = arr.iter().copied().collect();
+            &owned
+        }
+    };
+    let dst = out.as_slice_mut()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be contiguous"))?;
+    py.detach(|| {
+        dst.par_chunks_mut(w * 3).enumerate().for_each(|(y, row_out)| {
+            let is_r_row = y % 2 == r_r;
+            let is_b_row = y % 2 == b_r;
+            let interior_y = y >= 2 && y + 2 < h;
+            for x in 0..w {
+                let is_r_col = x % 2 == r_c;
+                let is_b_col = x % 2 == b_c;
+                let raw_value = flat[y * w + x];
+                let (r, g, b) = if interior_y && x >= 2 && x + 2 < w {
+                    let base = y * w + x;
+                    if is_r_row && is_r_col {
+                        (raw_value, malvar_tap_interior(flat, w, base, &MALVAR_G_AT_RB),
+                         malvar_tap_interior(flat, w, base, &MALVAR_R_AT_B))
+                    } else if is_b_row && is_b_col {
+                        (malvar_tap_interior(flat, w, base, &MALVAR_R_AT_B),
+                         malvar_tap_interior(flat, w, base, &MALVAR_G_AT_RB), raw_value)
+                    } else if is_r_row && is_b_col {
+                        (malvar_tap_interior(flat, w, base, &MALVAR_RG_RB_BG_BR), raw_value,
+                         malvar_tap_interior(flat, w, base, &MALVAR_RG_BR_BG_RB))
+                    } else {
+                        (malvar_tap_interior(flat, w, base, &MALVAR_RG_BR_BG_RB), raw_value,
+                         malvar_tap_interior(flat, w, base, &MALVAR_RG_RB_BG_BR))
+                    }
+                } else if is_r_row && is_r_col {
+                    (raw_value, malvar_tap(flat, h, w, y, x, &MALVAR_G_AT_RB),
+                     malvar_tap(flat, h, w, y, x, &MALVAR_R_AT_B))
+                } else if is_b_row && is_b_col {
+                    (malvar_tap(flat, h, w, y, x, &MALVAR_R_AT_B),
+                     malvar_tap(flat, h, w, y, x, &MALVAR_G_AT_RB), raw_value)
+                } else if is_r_row && is_b_col {
+                    (malvar_tap(flat, h, w, y, x, &MALVAR_RG_RB_BG_BR), raw_value,
+                     malvar_tap(flat, h, w, y, x, &MALVAR_RG_BR_BG_RB))
+                } else {
+                    (malvar_tap(flat, h, w, y, x, &MALVAR_RG_BR_BG_RB), raw_value,
+                     malvar_tap(flat, h, w, y, x, &MALVAR_RG_RB_BG_BR))
+                };
+                row_out[x * 3] = r;
+                row_out[x * 3 + 1] = g;
+                row_out[x * 3 + 2] = b;
+            }
+        });
+    });
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Menon (2007) DDFAPD Bayer demosaicing
 // ---------------------------------------------------------------------------
@@ -10849,6 +10922,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_stars_matched_filter, m)?)?;
     m.add_function(wrap_pyfunction!(fit_rigid_ransac, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_malvar, m)?)?;
+    m.add_function(wrap_pyfunction!(debayer_malvar_into, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_menon2007, m)?)?;
     m.add_function(wrap_pyfunction!(bilateral_filter, m)?)?;
     m.add_function(wrap_pyfunction!(warp_affine_kernel_table, m)?)?;

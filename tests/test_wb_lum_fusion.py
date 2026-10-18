@@ -138,4 +138,5 @@ def test_out_lum_slot_written_and_identical(monkeypatch):
     ma = {k: v for k, v in a['metrics'].items() if k != '_patch_scores'}
     mb = {k: v for k, v in b['metrics'].items() if k != '_patch_scores'}
     assert repr(ma) == repr(mb)
-    np.testing.assert_array_equal(a['metrics']['_patch_scores'], b['metrics']['_patch_scores'])
+    assert '_patch_scores' not in a['metrics']
+    assert '_patch_scores' not in b['metrics']
