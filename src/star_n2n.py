@@ -14,15 +14,20 @@ No starless ground truth is needed: every session trains on itself. At run time 
 sees y rather than z (a 1/(1 + alpha) lower star density than in training); smaller alpha
 narrows that gap at the cost of amplifying the network's error by (1 + alpha) / alpha.
 
-``StarField`` builds the injection model from the image itself: clean per-channel PSFs
-(``_psf_from``: median of the bright isolated unsaturated stars, centroid-aligned; the core
-from the nearest stars of each field zone, the wings azimuthally averaged over all of them;
-placed at a random sub-pixel phase), donor fluxes and colours (the
-detected stars' own luminosity function), and a smoothed detection density. Injected stars
-get photon noise (variance s / B in noise units). v1 pasted the raw star cutouts instead:
-each carried its own sky noise, and the network learned to recognise and fully remove those
-stars (bright injected stars kept 4% vs real 60-90%, dev-notes/star-n2n-runbook.md). What it
-cannot match is listed there (saturated stars, stars below detection, correlated noise).
+``StarField`` builds the injection model from the image itself: injected stars are copies of
+the image's own unsaturated stars (donors, picked uniformly, so the luminosity function,
+colours, shapes and sub-pixel phases match by construction), pasted 64-192 px from their donor
+(same background and PSF zone), out to the radius where the star's wing drops below
+``COPY_WING_LEVEL``. A copy carries its donor's photon noise and also a disc of its donor's
+sky noise; ``real_discs`` gives every real donor such a disc too (a tapered cutout of
+star-free sky), added to the training input only (zero-mean, so the target is unaffected),
+and ``starless_z`` adds them at run time, so real and injected stars look alike.
+
+Four rounds of *modelled* injected stars failed (dev-notes/star-n2n-runbook.md): raw stamp
+cutouts scaled to new fluxes (their sky noise gave them away), then clean PSFs, per zone,
+per flux bin -- the network always told them from real stars by shape (validation loss far
+below the ~half-of-identity floor of indistinguishable stars; pasted real cutouts were kept
+like real stars). Saturated stars and stars below detection are never injected, so they stay.
 
 Training: tools/gen_starless_bank.py, then tools/train_nn_denoise.py train (unchanged).
 Evaluation: tools/eval_star_n2n.py.
@@ -40,21 +45,25 @@ from src import nn_denoise as nd
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'nn_starless.npz')
 
 STAMP_R = 12            # stamp half-size (px); also the aperture radius for star fluxes
-SAT_FRAC = 0.8          # a star whose stamp peaks above this x the image maximum is saturated
+SAT_FRAC = 0.7          # a star peaking above this x its channel's maximum, in any channel, is saturated
 ISOLATION_FRAC = 0.05   # a neighbour within 2 R at >= this x the flux spoils a stamp
 DENSITY_BLOCK = 16      # px, cell of the injection density grid
 DENSITY_SIGMA = 4.0     # cells (64 px), smoothing of the detection density
 DENSITY_FLOOR = 0.05    # x mean density, so star-free regions still get the odd star
 N_STAMPS = 60
-PSF_R = 24              # injected PSF half-size (px): bright stars' wings reach past STAMP_R
-PSF_CORE_R = 6.0        # px; outside, the PSF is its azimuthal mean (averages the wing noise away)
-N_PHASE = 4             # sub-pixel phases per axis the PSF is pre-shifted to
-PSF_ZONES = 4           # PSF cores on a PSF_ZONES x PSF_ZONES grid of field zones...
-PSF_LOCAL_K = 15        # ...each the median of the nearest this many stars (at least)
-PSF_FLUX_BINS = 4       # and per donor-flux quartile: the shape depends on the flux
-PSF_BIN_MAX = 300       # cutouts per flux bin at most
-PSF_FIT_R = 4.0         # px; faint cutouts are scaled by a template fit inside this radius
-
+PSF_R = 40              # px; the wing profile's reach (bright stars' halos go past STAMP_R)
+COPY_R_MIN, COPY_R_MAX = 6, 40   # px; radius of a copied star: where its wing drops below...
+COPY_WING_LEVEL = 0.05  # ...this (noise units), plus the taper; brighter stars carry wider copies.
+                        # 0.2 lost a third of a faint star's flux in the wings it left out
+SKY_CLEAR_R = 10        # px; disc sources: sky positions with no detection this close
+INJECT_OFFSET = (64.0, 192.0)   # px; a copy lands this far from its donor
+GUARD_SIGMA = 1.0       # starless floor inside a star: ring's 10th percentile minus this (noise units)
+OUTSIDE_CLIP = (-1.0, 5.0)   # star layer outside every footprint, in local-noise sigma: undetected stars
+COLOUR_SNR = (3.0, 8.0)      # star-layer luminance S/N over which a footprint's colour is forced
+SAT_R_MIN, SAT_R_MAX = 6, 40  # px; a saturated star's core fill radius: where its halo is above...
+SAT_CORE_LEVEL = 20.0         # ...this many sky sigma (the clipped, non-linear part)
+HALO_R = 150                  # px; a saturated star's radial halo is subtracted out to here...
+HALO_FLOOR = 0.3              # ...or to where it first drops below this (sky sigma)
 
 def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     """Sky level B per channel in noise units (median background / sigma); the photon-noise
@@ -71,79 +80,51 @@ def normalise_image(img: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray
     return ((img - bg) / sig).astype(np.float32), bg, sig, sky_level_z(bg, sigma)
 
 
-def _shift(a: np.ndarray, dy: float, dx: float) -> np.ndarray:
-    """Cubic-spline sub-pixel shift of an (h, w, C) array, per channel."""
-    return np.stack([ndi.shift(a[..., c], (dy, dx), order=3, mode='constant')
-                     for c in range(a.shape[2])], -1).astype(np.float32)
+def _plane_subtract(cut: np.ndarray) -> np.ndarray:
+    """``cut`` (h, w, C) minus a per-channel plane fitted to its border pixels, so a copied
+    star does not carry its donor's local background (a nebula gradient) along. Border pixels
+    more than 2.5 sigma above the fit (a neighbour's wing) are dropped and the fit repeated:
+    with them a crowded field's planes sat too high, and copies lost a third of their flux."""
+    h, w, c = cut.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    edge = np.zeros((h, w), bool)
+    edge[0], edge[-1], edge[:, 0], edge[:, -1] = True, True, True, True
+    a = np.c_[np.ones(edge.sum()), yy[edge], xx[edge]]
+    out = np.empty(cut.shape, np.float32)
+    for ch in range(c):
+        v = cut[..., ch][edge].astype(np.float64)
+        keep = np.ones(len(v), bool)
+        for _ in range(3):
+            coef, *_ = np.linalg.lstsq(a[keep], v[keep], rcond=None)
+            res = v - a @ coef
+            sd = 1.4826 * np.median(np.abs(res[keep] - np.median(res[keep])))
+            new = res < 2.5 * max(sd, 1e-6)
+            if new.sum() < 3 or (new == keep).all():
+                break
+            keep = new
+        out[..., ch] = cut[..., ch] - (coef[0] + yy * coef[1] + xx * coef[2])
+    return out
 
 
-def _centroid(sp: np.ndarray, r: int) -> Tuple[float, float]:
-    """First moment of the luminance within 3 px of a cutout's centre pixel ``(r, r)``."""
-    cut = np.clip(sp.mean(-1)[r - 3:r + 4, r - 3:r + 4], 0.0, None)
-    t = float(cut.sum())
-    if t <= 0:
-        return 0.0, 0.0
-    yy, xx = np.mgrid[-3:4, -3:4]
-    return float((yy * cut).sum() / t), float((xx * cut).sum() / t)
-
-
-def _aligned_cutouts(z: np.ndarray, ys: np.ndarray, xs: np.ndarray, r: int = PSF_R,
-                     template: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """``(cuts, keep)``: (n, 2r+1, 2r+1, C) cutouts of the stars at integer positions
-    ``ys, xs`` with the border-median background removed, centroid-aligned and scaled to
-    unit flux in the ``aperture_flux`` box (so an injected flux f measures as f); ``keep``
-    indexes the stars used (inside the image, positive flux in every channel).
-
-    With ``template`` (a unit-flux PSF) the scale is the least-squares amplitude of the
-    template inside ``PSF_FIT_R`` instead of the box sum: a faint star's 25 x 25 box sum is
-    dominated by sky noise (sigma 25 in noise units against fluxes of a few tens)."""
-    h, w, c = z.shape
+def _wing_profile(z: np.ndarray, ys: np.ndarray, xs: np.ndarray, r: int = PSF_R) -> Optional[np.ndarray]:
+    """Azimuthal luminance profile (index = radius in px, 0..r) of the stars at ``ys, xs``,
+    per unit ``aperture_flux``: median of their background-subtracted cutouts."""
+    h, w, _ = z.shape
     a = r - STAMP_R
-    if template is not None:
-        yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
-        fit = np.hypot(yy, xx) <= PSF_FIT_R
-        tpl = template[fit]                                   # (n_fit, C)
-        tpl_ss = (tpl * tpl).sum(0)
-    cuts, keep = [], []
-    for i, (y, x) in enumerate(zip(np.asarray(ys, int), np.asarray(xs, int))):
+    cuts = []
+    for y, x in zip(np.asarray(ys, int), np.asarray(xs, int)):
         if not (r <= y < h - r and r <= x < w - r):
             continue
-        cut = z[y - r:y + r + 1, x - r:x + r + 1]
-        border = np.concatenate([cut[0], cut[-1], cut[1:-1, 0], cut[1:-1, -1]])
-        sp = cut - np.median(border, axis=0)
-        dy, dx = _centroid(sp, r)
-        sp = _shift(sp, -dy, -dx)
-        if template is not None:
-            core = (sp[fit] * tpl).sum(0) / tpl_ss
-        else:
-            core = sp[a:a + 2 * STAMP_R + 1, a:a + 2 * STAMP_R + 1].sum((0, 1))
-        if np.all(core > 0):
-            cuts.append(sp / core)
-            keep.append(i)
-    return np.array(cuts, np.float32).reshape(-1, 2 * r + 1, 2 * r + 1, c), np.array(keep, int)
-
-
-def _psf_from(core_cuts: np.ndarray, wing_cuts: np.ndarray, r: int = PSF_R) -> np.ndarray:
-    """A clean PSF: per-pixel median of ``core_cuts`` inside ``PSF_CORE_R`` (keeps the local
-    shape: elongation, orientation), the azimuthal mean of the median of ``wing_cuts``
-    outside (the wings carry most of the pixels, so most of the cutouts' own sky noise:
-    v1 pasted raw cutouts and the network learned to spot that noise). Medians reject a
-    neighbour in any one cutout. Clipped at 0, tapered to 0 at r, unit box flux."""
-    c = core_cuts.shape[-1]
-    a = r - STAMP_R
-    core = np.median(core_cuts, axis=0)
-    wingm = np.median(wing_cuts, axis=0)
+        sp = _plane_subtract(z[y - r:y + r + 1, x - r:x + r + 1]).mean(-1)
+        tot = sp[a:a + 2 * STAMP_R + 1, a:a + 2 * STAMP_R + 1].sum()
+        if tot > 0:
+            cuts.append(sp / tot)
+    if not cuts:
+        return None
+    m = np.median(np.array(cuts), axis=0)
     yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
-    rad = np.hypot(yy, xx)
-    ri = np.rint(rad).astype(int)
-    wing = np.clip(rad - PSF_CORE_R, 0.0, 1.0)
-    m = np.empty_like(core)
-    for ch in range(c):
-        prof = ndi.mean(wingm[..., ch], ri, index=np.arange(ri.max() + 1))
-        m[..., ch] = (1.0 - wing) * core[..., ch] + wing * prof[ri]
-    m = np.clip(m, 0.0, None) * _window(r)[:, :, None]
-    tot = m[a:a + 2 * STAMP_R + 1, a:a + 2 * STAMP_R + 1].sum((0, 1))
-    return (m / tot).astype(np.float32)
+    ri = np.rint(np.hypot(yy, xx)).astype(int)
+    return ndi.mean(m, ri, index=np.arange(r + 1))
 
 
 def _window(r: int = STAMP_R) -> np.ndarray:
@@ -189,9 +170,14 @@ class StarField:
         self.det_y, self.det_x = ys, xs
         flux = aperture_flux(z, ys, xs)
         flum = flux.mean(1)
-        sat_level = SAT_FRAC * float(np.nanmax(lum))
-        peak = np.array([lum[y - 2:y + 3, x - 2:x + 3].max() for y, x in zip(ys, xs)]) if len(ys) else np.zeros(0)
-        self.saturated = peak >= sat_level
+        # per channel: on the Pleiades the 9 brightest "unsaturated" stars (by luminance)
+        # all had red peaks at 0.79-0.85 of the red maximum, a soft-saturation plateau (some
+        # subframes clipped), with green and blue at 0.6-0.7. Not additive: copied, they
+        # left coloured blobs and inverted or kept cores
+        sat_level = SAT_FRAC * np.nanmax(z.reshape(-1, z.shape[2]), axis=0)
+        peak = (np.array([z[y - 2:y + 3, x - 2:x + 3].reshape(-1, z.shape[2]).max(0) for y, x in zip(ys, xs)])
+                if len(ys) else np.zeros((0, z.shape[2])))
+        self.saturated = (peak >= sat_level).any(1)
         donor = ~self.saturated & np.isfinite(flum) & (flum > 0)
 
         # stamps: the brightest isolated unsaturated stars with positive flux in every channel
@@ -220,13 +206,46 @@ class StarField:
         self.stamps = np.array(stamps, np.float32).reshape(-1, 2 * r + 1, 2 * r + 1, z.shape[2])
         self.stamp_y, self.stamp_x = np.array(sy, float), np.array(sx, float)
 
-        # donors: the luminosity function and colours to inject, capped at the brightest stamp
-        # so no stamp is scaled up (that would amplify its noise)
-        cap = max(sflux) if sflux else 0.0
-        donor &= np.nan_to_num(flum, nan=np.inf) <= cap
+        # donors: every unsaturated star with positive flux; its copy radius from the bright
+        # stars' wing profile (copied out to where the wing falls below COPY_WING_LEVEL)
+        prof = _wing_profile(z, np.array(sy, int), np.array(sx, int))
+        rad = np.full(len(ys), COPY_R_MIN)
+        if prof is not None:
+            for i in np.flatnonzero(donor):
+                below = np.flatnonzero(flum[i] * prof < COPY_WING_LEVEL)
+                rad[i] = (below[0] if len(below) else PSF_R) + 3
+        rad = np.clip(rad, COPY_R_MIN, COPY_R_MAX)
+        donor &= (ys >= rad) & (ys < h - rad) & (xs >= rad) & (xs < w - rad)
         self.donor_flux = np.clip(flux[donor], 0.0, None)
-        self.donor_y, self.donor_x = ys[donor], xs[donor]
-        self._build_psfs(z, ys, xs, flum, donor, np.array(sy, int), np.array(sx, int))
+        self.donor_y, self.donor_x, self.donor_r = ys[donor], xs[donor], rad[donor]
+        self._copies = [_plane_subtract(z[y - q:y + q + 1, x - q:x + q + 1]) * _window(q)[:, :, None]
+                        for y, x, q in zip(self.donor_y, self.donor_x, self.donor_r)]
+        # a copy's own flux: donor_flux (a 25 x 25 box) also counts neighbours in a crowded field
+        self.copy_flux = np.array([cp.sum((0, 1)) for cp in self._copies], np.float64).reshape(-1, z.shape[2])
+
+        # disc sources: star-free points 2-3 copy radii from each donor, most clear first. A
+        # copy brings its donor's surroundings (sky noise, nebula texture, a halo) along, so
+        # the real stars' discs come from the same kind of place; star-free points anywhere
+        # (first try) were mostly bright nebula on the Pleiades (disc sigma 15.7 vs 0.9).
+        free = np.ones((h, w), bool)
+        free[ys, xs] = False
+        dist = ndi.distance_transform_edt(free)
+        m = COPY_R_MAX
+        ang = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+        py, px = [], []
+        for k in (2, 3):
+            ry = np.rint(self.donor_y[:, None] + k * self.donor_r[:, None] * np.sin(ang)).astype(int).ravel()
+            rx = np.rint(self.donor_x[:, None] + k * self.donor_r[:, None] * np.cos(ang)).astype(int).ravel()
+            py.append(ry)
+            px.append(rx)
+        py, px = np.concatenate(py), np.concatenate(px)
+        inb = (py >= m) & (py < h - m) & (px >= m) & (px < w - m)
+        py, px = py[inb], px[inb]
+        cl = dist[py, px]
+        ok = cl >= SKY_CLEAR_R
+        order = np.argsort(-cl[ok])
+        self._sky_y, self._sky_x, self._sky_dist = py[ok][order], px[ok][order], cl[ok][order]
+        self._z = z
 
         # injection intensity proportional to the local density of real (donor) stars
         gh, gw = max(1, h // DENSITY_BLOCK), max(1, w // DENSITY_BLOCK)
@@ -236,98 +255,74 @@ class StarField:
         dens = ndi.gaussian_filter(cnt, DENSITY_SIGMA, mode='nearest')
         dens = np.maximum(dens, DENSITY_FLOOR * max(dens.mean(), 1e-12))
         self.density = dens / dens.sum()
-        self.ok = len(self.donor_flux) >= 10 and self.psf_phases is not None
-
-    def _build_psfs(self, z, ys, xs, flum, donor, sy, sx) -> None:
-        """``psf_phases`` (flux bins, zones, N_PHASE, N_PHASE, 2R+1, 2R+1, C) and the bins'
-        flux edges ``psf_flux_edges``.
-
-        A PSF per donor-flux quartile and field zone: the core (``PSF_CORE_R``) is the median
-        of that bin's isolated stars nearest the zone (elongation varies over the field: one
-        PSF for the whole field (v2) made injected stars rounder than real ones at the edges,
-        ellipticity 0.11 vs 0.17), the wings are the bright stamps' azimuthal mean. Per flux
-        bin because the sigma-clipped stack makes bright stars narrower than faint ones; with
-        the bright stamps' shape for every flux (v3) the network told injected from real stars
-        by shape alone (pasted real cutouts kept 0.83-0.94 like real stars, clean injected
-        ones 0.06-0.6)."""
-        h, w, _ = z.shape
-        self.psf_phases, self.psf_flux_edges = None, np.zeros(0)
-        cuts_b, keep_b = _aligned_cutouts(z, sy, sx)
-        if not len(cuts_b) or not donor.any():
-            return
-        template = _psf_from(cuts_b, cuts_b)
-
-        # isolated donors: no neighbour within 2 STAMP_R at >= ISOLATION_FRAC of the flux
-        fl0 = np.nan_to_num(flum, nan=0.0)
-        iso = np.zeros(len(ys), bool)
-        for i in np.flatnonzero(donor):
-            d2 = (ys - ys[i]) ** 2 + (xs - xs[i]) ** 2
-            near = (d2 < (2 * STAMP_R) ** 2) & (fl0 >= ISOLATION_FRAC * fl0[i])
-            near[i] = False
-            iso[i] = not near.any()
-
-        dl = flum[donor]
-        edges = np.quantile(dl, np.arange(1, PSF_FLUX_BINS) / PSF_FLUX_BINS)
-        b_of = np.searchsorted(edges, flum)
-        off = (np.arange(N_PHASE) + 0.5) / N_PHASE - 0.5
-        zh, zw = h / PSF_ZONES, w / PSF_ZONES
-        out = []
-        for b in range(PSF_FLUX_BINS):
-            idx = np.flatnonzero(donor & iso & (b_of == b))
-            if len(idx) > PSF_BIN_MAX:                    # evenly over the bin's flux range
-                idx = idx[np.argsort(flum[idx])][np.linspace(0, len(idx) - 1, PSF_BIN_MAX).astype(int)]
-            cuts, keep = _aligned_cutouts(z, ys[idx], xs[idx], template=template)
-            if len(cuts) < PSF_LOCAL_K:
-                cuts, cy, cx = cuts_b, sy[keep_b].astype(float), sx[keep_b].astype(float)
-            else:
-                cy, cx = ys[idx][keep].astype(float), xs[idx][keep].astype(float)
-            k = min(len(cuts), max(PSF_LOCAL_K, len(cuts) // 4))
-            zones = []
-            for gy in range(PSF_ZONES):
-                for gx in range(PSF_ZONES):
-                    d2 = (cy - (gy + 0.5) * zh) ** 2 + (cx - (gx + 0.5) * zw) ** 2
-                    psf = _psf_from(cuts[np.argsort(d2)[:k]], cuts_b)
-                    zones.append([[_shift(psf, dy, dx) for dx in off] for dy in off])
-            out.append(zones)
-        self.psf_phases = np.array(out, np.float32)
-        self.psf_flux_edges = edges
+        self.ok = len(self.donor_flux) >= 10 and len(self._sky_y) > 0
 
     @property
     def n_donors(self) -> int:
         return len(self.donor_flux)
 
+    @staticmethod
+    def _paste(s: np.ndarray, y: int, x: int, st: np.ndarray) -> None:
+        h, w, _ = s.shape
+        q = st.shape[0] // 2
+        y0, y1 = max(0, y - q), min(h, y + q + 1)
+        x0, x1 = max(0, x - q), min(w, x + q + 1)
+        s[y0:y1, x0:x1] += st[y0 - (y - q):y1 - (y - q), x0 - (x - q):x1 - (x - q)]
+
     def inject(self, rng: np.random.Generator, alpha: float = 1.0
                ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """A new star layer, ``alpha`` x the real donor count on average (Poisson):
-        ``(s, ys, xs, flux)`` with s (H, W, C) in noise units (photon noise included) and the
-        injected positions and per-channel fluxes."""
+        """A new star layer, ``alpha`` x the donor count on average (Poisson), of copies of
+        uniformly drawn donors: ``(s, ys, xs, flux)`` with s (H, W, C) in noise units (the
+        copies carry their donors' photon and sky noise), the injected positions and the
+        copies' per-channel fluxes."""
         h, w, c = self.shape
-        r = PSF_R
         s = np.zeros(self.shape, np.float32)
         n = int(rng.poisson(alpha * self.n_donors)) if self.ok else 0
         if n == 0:
             return s, np.zeros(0, int), np.zeros(0, int), np.zeros((0, c))
-        gh, gw = self.density.shape
-        cell = rng.choice(gh * gw, size=n, p=self.density.ravel())
-        ys = np.minimum((cell // gw) * DENSITY_BLOCK + rng.integers(0, DENSITY_BLOCK, n), h - 1)
-        xs = np.minimum((cell % gw) * DENSITY_BLOCK + rng.integers(0, DENSITY_BLOCK, n), w - 1)
-        flux = self.donor_flux[rng.integers(0, self.n_donors, n)]
-        # the clean PSF of the star's field zone at a random sub-pixel phase: v1 pasted the
-        # raw cutouts, whose own sky noise the network learned to spot
-        ph = rng.integers(0, N_PHASE, (n, 2))
-        zone = (np.minimum(ys * PSF_ZONES // h, PSF_ZONES - 1) * PSF_ZONES
-                + np.minimum(xs * PSF_ZONES // w, PSF_ZONES - 1))
-        fbin = np.searchsorted(self.psf_flux_edges, flux.mean(1))
-        for y, x, f, (py, px), zi, fb in zip(ys, xs, flux, ph, zone, fbin):
-            y0, y1 = max(0, y - r), min(h, y + r + 1)
-            x0, x1 = max(0, x - r), min(w, x + r + 1)
-            st = self.psf_phases[fb, zi, py, px, y0 - (y - r):y1 - (y - r), x0 - (x - r):x1 - (x - r)]
-            s[y0:y1, x0:x1] += st * f.astype(np.float32)
-        for ch in range(c):
-            if self.B[ch] > 0:
-                s[..., ch] += (rng.standard_normal((h, w)).astype(np.float32)
-                               * np.sqrt(np.maximum(s[..., ch], 0.0) / np.float32(self.B[ch])))
-        return s, ys, xs, flux
+        # each copy lands INJECT_OFFSET px from its own donor (random angle): on the same
+        # kind of background (nebula or dark sky) and in the same PSF zone, but beyond the
+        # network's ~24 px view of its twin. Placed by the overall star density instead (v6),
+        # bright copies landed mostly on dark sky while Orion's bright stars all sit in
+        # nebula, and the network kept every bright star there (left +1.0)
+        pick = rng.integers(0, self.n_donors, n)
+        ys = np.zeros(n, int)
+        xs = np.zeros(n, int)
+        todo = np.arange(n)
+        for _ in range(8):
+            if not len(todo):
+                break
+            ang = rng.uniform(0, 2 * np.pi, len(todo))
+            rad = rng.uniform(*INJECT_OFFSET, len(todo))
+            ty = np.rint(self.donor_y[pick[todo]] + rad * np.sin(ang)).astype(int)
+            tx = np.rint(self.donor_x[pick[todo]] + rad * np.cos(ang)).astype(int)
+            inb = (ty >= 0) & (ty < h) & (tx >= 0) & (tx < w)
+            ys[todo[inb]], xs[todo[inb]] = ty[inb], tx[inb]
+            todo = todo[~inb]
+        if len(todo):                       # a small image: fall back to the star density
+            gh, gw = self.density.shape
+            cell = rng.choice(gh * gw, size=len(todo), p=self.density.ravel())
+            ys[todo] = np.minimum((cell // gw) * DENSITY_BLOCK + rng.integers(0, DENSITY_BLOCK, len(todo)), h - 1)
+            xs[todo] = np.minimum((cell % gw) * DENSITY_BLOCK + rng.integers(0, DENSITY_BLOCK, len(todo)), w - 1)
+        for y, x, j in zip(ys, xs, pick):
+            self._paste(s, y, x, self._copies[j])
+        return s, ys, xs, self.copy_flux[pick]
+
+    def real_discs(self, rng: np.random.Generator) -> np.ndarray:
+        """Zero-mean noise layer: at every donor, a tapered cutout of star-free sky of the
+        donor's copy radius -- the disc of extra sky noise a copy brings, given to the real
+        stars too so it cannot tell injected from real ones."""
+        d = np.zeros(self.shape, np.float32)
+        if not self.ok:
+            return d
+        # positions with no detection within q (all of them if none is that clear)
+        n_ok = np.maximum(np.searchsorted(-self._sky_dist, -self.donor_r, side='left'), 1)
+        k = (rng.random(self.n_donors) * n_ok).astype(int)
+        for y, x, q, j in zip(self.donor_y, self.donor_x, self.donor_r, k):
+            sy, sx = self._sky_y[j], self._sky_x[j]
+            sky = _plane_subtract(self._z[sy - q:sy + q + 1, sx - q:sx + q + 1]) * _window(q)[:, :, None]
+            self._paste(d, y, x, sky)
+        return d
 
 
 def nd_detect(lum: np.ndarray):
@@ -336,18 +331,161 @@ def nd_detect(lum: np.ndarray):
     return detect_stars_matched_filter(np.ascontiguousarray(lum, np.float32))
 
 
-def starless_z(z: np.ndarray, w, alpha: float = 1.0) -> np.ndarray:
+def guard_holes(x: np.ndarray, field: 'StarField', floor_sigma: float = GUARD_SIGMA) -> np.ndarray:
+    """Floor the starless estimate ``x`` (noise units) inside each donor's footprint at the
+    10th percentile of a ring just outside it, minus ``floor_sigma``, per channel. The
+    (1 + alpha) / alpha extrapolation turns any over-removal into a dip below the sky; v7
+    still cut the cores of the Pleiades' brightest stars to -529 sigma. A real starless sky
+    does not sit that far under its own surroundings, and a nebula gradient across a
+    footprint mostly stays above the ring's low percentile."""
+    out = x.copy()
+    h, w, _ = x.shape
+    for y, xc, q in zip(field.donor_y, field.donor_x, field.donor_r):
+        R = q + 4
+        y0, y1, x0, x1 = max(0, y - R), min(h, y + R + 1), max(0, xc - R), min(w, xc + R + 1)
+        yy, xx = np.mgrid[y0 - y:y1 - y, x0 - xc:x1 - xc]
+        rr = np.hypot(yy, xx)
+        inside, ring = rr <= q, (rr > q) & (rr <= R)
+        if ring.sum() < 8:
+            continue
+        cut = out[y0:y1, x0:x1]
+        floor = np.percentile(cut[ring], 10, axis=0) - np.float32(floor_sigma)
+        cut[inside] = np.maximum(cut[inside], floor)
+    return out
+
+
+def constrain_star_layer(z: np.ndarray, x: np.ndarray, field: 'StarField') -> np.ndarray:
+    """Hold the star layer ``z - x`` (noise units) to what stars can be.
+
+    Outside every detection's footprint it is clipped to ``OUTSIDE_CLIP`` x the local noise
+    (sqrt(1 + light / B), Poisson above the sky): room for undetected faint stars and no more.
+    v7 changed bright nebula between stars by up to 113 sigma, with a colour deviation of
+    6.5 sigma at the median there (Omega's core: magenta / blue / green blotches), which the
+    (1 + alpha) / alpha extrapolation doubles. Inside a donor's footprint, where the layer's
+    luminance S/N rises through ``COLOUR_SNR``, its colour is faded to the donor's own (one
+    colour per star); the faint rim keeps the network's per-channel output and its noise
+    texture."""
+    h, w, c = z.shape
+    s = z - x
+    foot = np.zeros((h, w), bool)
+    yy, xx = np.ogrid[:h, :w]
+    rads = np.full(len(field.det_y), COPY_R_MIN)
+    rads[field.saturated] = COPY_R_MAX
+    for y, xc, q in zip(np.r_[field.donor_y, field.det_y], np.r_[field.donor_x, field.det_x],
+                        np.r_[field.donor_r, rads]):
+        y0, y1, x0, x1 = max(0, y - q), min(h, y + q + 1), max(0, xc - q), min(w, xc + q + 1)
+        foot[y0:y1, x0:x1] |= (yy[y0:y1] - y) ** 2 + (xx[:, x0:x1] - xc) ** 2 <= q * q
+    light = np.stack([ndi.gaussian_filter(np.maximum(z[..., k], 0.0), 2.0) for k in range(c)], -1)
+    loc = np.sqrt(1.0 + light / np.maximum(field.B, 1e-6).astype(np.float32))
+    out = ~foot
+    s[out] = np.clip(s[out], OUTSIDE_CLIP[0] * loc[out], OUTSIDE_CLIP[1] * loc[out])
+
+    lo, hi = COLOUR_SNR
+    for y, xc, q, cf in zip(field.donor_y, field.donor_x, field.donor_r, field.copy_flux):
+        if np.any(cf <= 0):
+            continue
+        col = (cf / cf.sum()).astype(np.float32)
+        y0, y1, x0, x1 = max(0, y - q), min(h, y + q + 1), max(0, xc - q), min(w, xc + q + 1)
+        disk = (yy[y0:y1] - y) ** 2 + (xx[:, x0:x1] - xc) ** 2 <= q * q
+        cut = s[y0:y1, x0:x1]
+        tot = cut.sum(-1)
+        wgt = np.clip((tot / np.sqrt(c) - lo) / (hi - lo), 0.0, 1.0) * disk
+        cut += wgt[..., None] * (tot[..., None] * col - cut)
+    return (z - s).astype(np.float32)
+
+
+def _subtract_halo(out: np.ndarray, y: int, x: int) -> np.ndarray:
+    """Subtract a saturated star's radial halo from ``out`` (in place) out to ``HALO_R``:
+    per channel, the median of each 2 px ring minus the median of the outermost 10 px,
+    clipped at 0, zero from the first ring where it drops below ``HALO_FLOOR`` sky sigma.
+    Ring medians follow the star's own symmetric light and cancel a linear nebula gradient.
+    Returns the luminance halo profile (per 2 px ring), used to size the core."""
+    h, w, c = out.shape
+    R = HALO_R
+    y0, y1, x0, x1 = max(0, y - R), min(h, y + R + 1), max(0, x - R), min(w, x + R + 1)
+    yy, xx = np.mgrid[y0 - y:y1 - y, x0 - x:x1 - x]
+    rr = np.hypot(yy, xx)
+    ri = (rr // 2).astype(int)
+    nb = R // 2 + 1
+    inside = rr <= R
+    cut = out[y0:y1, x0:x1]
+    lum = np.zeros(nb)
+    for k in range(c):
+        v = cut[..., k]
+        prof = np.array([np.median(v[inside & (ri == i)]) if np.any(inside & (ri == i)) else np.nan
+                         for i in range(nb)])
+        bg = np.nanmedian(prof[-5:])
+        halo = np.nan_to_num(np.clip(prof - bg, 0.0, None))
+        low = np.flatnonzero(halo < HALO_FLOOR)
+        if len(low):
+            halo[low[0]:] = 0.0
+        v -= np.where(inside, halo[np.minimum(ri, nb - 1)], 0.0).astype(np.float32)
+        lum += halo / c
+    return lum
+
+
+def fill_saturated(x: np.ndarray, z: np.ndarray, field: 'StarField', seed: int = 0) -> np.ndarray:
+    """Remove each saturated star (never injected, so the network leaves it) from the
+    starless estimate ``x``, whose other stars are already gone: subtract its radial halo
+    (``_subtract_halo``), then fill the core -- where the halo was above ``SAT_CORE_LEVEL``
+    sky sigma, the clipped, non-linear part -- by normalised convolution from the pixels
+    around it, plus sky noise of the local level. Filling out to where the halo stops falling
+    (60 px at most) left a flat disc inside a still-bright halo ring on the Pleiades and
+    Orion; so did the ``--remove-stars`` inpaint, whose fills also had 7-39% of the noise."""
+    out = x.copy()
+    h, w, c = x.shape
+    rng = np.random.default_rng(seed)
+    for y, xc in zip(field.det_y[field.saturated], field.det_x[field.saturated]):
+        lum = _subtract_halo(out, y, xc)
+        hi = np.flatnonzero(lum >= SAT_CORE_LEVEL)
+        r = int(np.clip(2 * (hi[-1] + 1) + 2 if len(hi) else SAT_R_MIN, SAT_R_MIN, SAT_R_MAX))
+        sig = max(4.0, 0.5 * r)
+        R = int(r + 3 * sig)
+        y0, y1, x0, x1 = max(0, y - R), min(h, y + R + 1), max(0, xc - R), min(w, xc + R + 1)
+        yy, xx = np.mgrid[y0 - y:y1 - y, x0 - xc:x1 - xc]
+        disk = np.hypot(yy, xx) <= r
+        keep = (~disk).astype(np.float32)
+        den = np.maximum(ndi.gaussian_filter(keep, sig, mode='nearest'), 1e-6)
+        cut = out[y0:y1, x0:x1]
+        for k in range(c):
+            fill = ndi.gaussian_filter(cut[..., k] * keep, sig, mode='nearest') / den
+            noise = rng.standard_normal(fill.shape).astype(np.float32) * np.sqrt(
+                1.0 + np.maximum(fill, 0.0) / np.float32(max(field.B[k], 1e-6)))
+            cut[..., k][disk] = (fill + noise)[disk]
+    return out
+
+
+def starless_z(z: np.ndarray, w, alpha: float = 1.0, field: Optional['StarField'] = None,
+               tta: int = 2, seed: int = 0, guard: bool = True, saturated: bool = True) -> np.ndarray:
     """Noisier2Noise estimate of the starless sky from noise-unit data z (H, W, C):
-    ``z - (1 + alpha) / alpha * (z - f(z))`` with f the trained network."""
-    f = nd.denoise_z(z, w)
-    return (z - np.float32((1.0 + alpha) / alpha) * (z - f)).astype(np.float32)
+    ``z - (1 + alpha) / alpha * (z - f)`` with f the trained network's output. The network
+    was trained with a sky-noise disc on every star (``StarField.real_discs``); with a
+    ``field`` (built on z), f is its mean over ``tta`` inputs ``z + discs`` with independent
+    discs, and the known discs stay out of the formula's z. ``guard`` then holds the star
+    layer to what stars can be (``constrain_star_layer``) and floors the star footprints
+    (``guard_holes``); ``saturated`` fills the saturated stars (``fill_saturated``)."""
+    if field is None or tta <= 0 or not field.ok:
+        f = nd.denoise_z(z, w)
+    else:
+        rng = np.random.default_rng(seed)
+        f = np.zeros_like(z)
+        for _ in range(tta):
+            f += nd.denoise_z(z + field.real_discs(rng), w)
+        f /= np.float32(tta)
+    x = (z - np.float32((1.0 + alpha) / alpha) * (z - f)).astype(np.float32)
+    if guard and field is not None and field.ok:
+        x = guard_holes(constrain_star_layer(z, x, field), field)
+    if saturated and field is not None and field.ok and field.saturated.any():
+        x = fill_saturated(x, z, field, seed)
+    return x
 
 
 def model_available(path: Optional[str] = None) -> bool:
     return os.path.exists(path or MODEL_PATH)
 
 
-def remove_stars_nn(img: np.ndarray, model_path: Optional[str] = None, alpha: float = 1.0
+def remove_stars_nn(img: np.ndarray, model_path: Optional[str] = None, alpha: float = 1.0, tta: int = 2,
+                    guard: bool = True, saturated: bool = True
                     ) -> Tuple[np.ndarray, np.ndarray]:
     """``(starless, stars)`` for a linear (H, W, 3) image; ``alpha`` must be the one the
     model's bank was built with. ``stars = img - starless`` (for screen recombination)."""
@@ -355,7 +493,7 @@ def remove_stars_nn(img: np.ndarray, model_path: Optional[str] = None, alpha: fl
     img = np.asarray(img, dtype=np.float32)
     finite = np.isfinite(img)
     src = np.where(finite, img, 0.0).astype(np.float32)
-    z, bg, sig, _ = normalise_image(src)
-    out = starless_z(z, w, alpha) * sig + bg
+    z, bg, sig, B = normalise_image(src)
+    out = starless_z(z, w, alpha, StarField(z, B), tta, guard=guard, saturated=saturated) * sig + bg
     out = np.where(finite, out, img).astype(np.float32)
     return out, np.where(finite, src - out, 0.0).astype(np.float32)

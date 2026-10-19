@@ -57,18 +57,24 @@ def session_patches(img: np.ndarray, rng: np.random.Generator, per_session: int,
     m = 16                      # skip the stack's ragged edge
     za_l, zb_l, w_l = [], [], []
     for r in range(realisations):
-        s, ys, xs, _ = field.inject(rng, alpha)
-        za = z + s
+        s, ys, xs, fl = field.inject(rng, alpha)
+        # every copy brings a disc of its donor's sky noise; give the real stars one too
+        za = z + s + field.real_discs(rng)
         w = (1.0 / target_variance(za, B)).astype(np.float32)
         n = per_session // realisations + (1 if r < per_session % realisations else 0)
-        # centre half the patches on a star drawn from real donors and injected stars alike:
-        # centring on injected stars only (v1) raised the share of injected stars the network
-        # sees above alpha / (1 + alpha), which the correction formula assumes
+        # centre half the patches on a star drawn from real donors and injected stars alike,
+        # with probability ~ sqrt(flux) (the same copy flux for both): centring on injected
+        # stars only (v1) raised the share of injected stars the network sees above
+        # alpha / (1 + alpha), which the correction formula assumes; uniform centring (v5)
+        # left the brightest 1% so rare that the network inverted or kept them
         cy = np.concatenate([field.donor_y, ys])
         cx = np.concatenate([field.donor_x, xs])
+        cf = np.concatenate([field.copy_flux.mean(1), fl.mean(1)]) if len(ys) else field.copy_flux.mean(1)
+        pw = np.sqrt(np.clip(cf, 1.0, None))
+        pw /= pw.sum()
         for k in range(n):
             if len(cy) and k % 2 == 0:
-                j = rng.integers(len(cy))
+                j = rng.choice(len(cy), p=pw)
                 y = int(np.clip(cy[j] - rng.integers(16, PATCH - 16), m, h - PATCH - m))
                 x = int(np.clip(cx[j] - rng.integers(16, PATCH - 16), m, wd - PATCH - m))
             else:
