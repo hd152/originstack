@@ -30,8 +30,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
-from src import star_n2n as sn  # noqa: E402
 from train_nn_denoise import PATCH, is_holdout, target_variance  # noqa: E402
+
+from src import star_n2n as sn  # noqa: E402
 
 
 def full_stack(pair_dir: str) -> np.ndarray:
