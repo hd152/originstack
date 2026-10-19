@@ -87,6 +87,8 @@
         <dd><p><strong>Full quality</strong> runs every step that measured as an improvement. <strong>Quick look</strong> is a faster check: no outlier rejection and lighter processing, for seeing whether a session is worth a full run.</p></dd></div>
       <div><dt>6. This run</dt>
         <dd><p>The panel at the bottom right sums it up before you commit: the frames, the target and where the guess came from, the mode, every setting you changed, and the output file.</p></dd></div>
+      <div><dt>Preflight</dt>
+        <dd><p>Before starting, the checklist confirms that light frames, calibration frames, a target and enough temporary disk space are available. A warning does not prevent a run, but it makes the trade-off visible first.</p></dd></div>
     </dl>
   </div>
 </section>
@@ -128,6 +130,8 @@
         <dd><p>A strip of thumbnails, and a table of the most recent frames with their quality score, signal-to-noise, star count and star width (FWHM), so a run of bad frames from cloud or wind is easy to spot.</p></dd></div>
       <div><dt>Cancel</dt>
         <dd><p>Stops the run at the next safe point and removes its temporary files. Closing the window during a run does the same.</p></dd></div>
+      <div><dt>Keyboard shortcuts</dt>
+        <dd><p><kbd>Ctrl</kbd>+<kbd>Enter</kbd> starts a run, <kbd>Esc</kbd> cancels, <kbd>F</kbd> fits the preview, <kbd>1</kbd> shows actual pixels and <kbd>C</kbd> toggles compare mode.</p></dd></div>
     </dl>
   </div>
 </section>
@@ -141,7 +145,9 @@
     </figure>
     <dl class="feat">
       <div><dt>Complete</dt>
-        <dd><p>A summary of the run: frames stacked out of those found, average star width, the output file and the total time. <em>Open Folder</em> opens the output folder with the stack selected; tick <em>Open folder when done</em> to have it open automatically.</p></dd></div>
+        <dd><p>A summary of the run: frames stacked out of those found, average star width, the output file and the total time. <em>Open Folder</em> opens the output folder with the stack selected; tick <em>Open folder when done</em> to have it open automatically. <em>Copy CLI command</em> places an equivalent reproducible command on the clipboard.</p></dd></div>
+      <div><dt>Diagnostics</dt>
+        <dd><p>Open the diagnostics panel after a run to see warnings, rejected-frame counts and errors without searching through the full log.</p></dd></div>
       <div><dt>Re-stretch the preview<code>Stretch</code> <code>Colour</code> <code>Apply to JPEG</code></dt>
         <dd><p>A bar above the preview offers every display stretch and colour mode. Try them on the finished image and press <em>Apply to JPEG</em> to save the one you like over the run's JPEG. Nothing is re-processed and the FITS files do not change. The <a href="how-it-works-stretches.html">stretch gallery</a> shows what each one does.</p></dd></div>
     </dl>

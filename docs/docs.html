@@ -41,6 +41,17 @@
 </header>
 
 <main>
+<section id="search">
+  <div class="wrap">
+    <h2>Find documentation</h2>
+    <div class="site-search">
+      <label for="doc-search">Search guides and references</label>
+      <input id="doc-search" type="search" placeholder="Try “drizzle”, “desktop app” or “RAW”"
+             autocomplete="off">
+      <ul id="doc-search-results" class="site-search-results" hidden></ul>
+    </div>
+  </div>
+</section>
 <section id="start">
   <div class="wrap">
     <h2>Get started</h2>
@@ -84,5 +95,39 @@
     <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
   </div>
 </footer>
+<script>
+(() => {
+  const input = document.querySelector('#doc-search');
+  const results = document.querySelector('#doc-search-results');
+  if (!input || !results) return;
+  const pages = [
+    ['Install', './#get', 'Windows, macOS and Linux installation'],
+    ['Desktop app', 'desktop-app.html', 'setup, settings, preview and output files'],
+    ['Celestron Origin guide', 'stack-celestron-origin.html', 'session folders and stacking'],
+    ['Other cameras', 'other-cameras.html', 'RAW, FITS, TIFF, XISF and SER'],
+    ['How it works', 'how-it-works.html', 'pipeline stages and processing'],
+    ['Stretch gallery', 'how-it-works-stretches.html', 'linear, arcsinh and other stretches'],
+    ['Command-line reference', 'command-line.html', 'all CLI options'],
+    ['Advanced features', 'advanced.html', 'drizzle, merging, photometry and diagnostics']
+  ];
+  input.addEventListener('input', () => {
+    const query = input.value.trim().toLowerCase();
+    results.replaceChildren();
+    if (!query) { results.hidden = true; return; }
+    const matches = pages.filter(([, , text]) => text.toLowerCase().includes(query));
+    for (const [title, href, text] of matches) {
+      const li = document.createElement('li');
+      li.innerHTML = `<a href="${href}">${title}</a> — ${text}`;
+      results.append(li);
+    }
+    if (!matches.length) {
+      const li = document.createElement('li');
+      li.textContent = 'No matching page. Try a broader term.';
+      results.append(li);
+    }
+    results.hidden = false;
+  });
+})();
+</script>
 </body>
 </html>

@@ -303,6 +303,23 @@
 <section id="get">
   <div class="wrap">
     <h2>安装</h2>
+    <p class="intro measure">Not sure which download is right? Choose your system and experience below.</p>
+    <div class="chooser" aria-label="Download chooser">
+      <label>Operating system
+        <select id="chooser-os">
+          <option value="windows">Windows 10/11</option>
+          <option value="mac">macOS</option>
+          <option value="linux">Linux</option>
+        </select>
+      </label>
+      <label>Experience
+        <select id="chooser-user">
+          <option value="beginner">I am new to stacking</option>
+          <option value="cli">I prefer the command line</option>
+        </select>
+      </label>
+    </div>
+    <p class="chooser-output" id="chooser-output">The Windows installer is the easiest way to begin.</p>
     <div class="get">
       <div>
         <h3>Windows 安装程序</h3>
@@ -429,6 +446,33 @@ python desktop_app.py</pre>
         });
       }).catch(function () {});
   } catch (e) {}
+})();
+</script>
+<script>
+(() => {
+  const os = document.querySelector('#chooser-os');
+  const user = document.querySelector('#chooser-user');
+  const output = document.querySelector('#chooser-output');
+  if (!os || !user || !output) return;
+  const update = () => {
+    const messages = {
+      windows: {
+        beginner: 'The Windows installer is the easiest way to begin.',
+        cli: 'Download the Windows zip or install from source, then use originstack.py from a terminal.'
+      },
+      mac: {
+        beginner: 'Download the macOS zip for your processor, then open the app from Applications.',
+        cli: 'Download the macOS zip or install from source, then run originstack.py from a terminal.'
+      },
+      linux: {
+        beginner: 'Download the Linux bundle, extract it, and run install.sh.',
+        cli: 'Download the Linux bundle or install from source with pip, then run originstack.py.'
+      }
+    };
+    output.textContent = messages[os.value][user.value];
+  };
+  os.addEventListener('change', update);
+  user.addEventListener('change', update);
 })();
 </script>
 </body>

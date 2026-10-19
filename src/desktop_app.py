@@ -20,6 +20,8 @@ import datetime
 import io
 import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -605,6 +607,7 @@ class SetupForm(ttk.Frame):
         self._change_pending = False
         self._labels: Dict[str, str] = {}
         self._data_summary = ''
+        self._frame_counts: Dict[str, int] = {}
         # (name, type, source) the session/header/folder suggest for the
         # chosen folder -- local lookups only, no SIMBAD from the form.
         self.inferred: Tuple[Optional[str], Optional[str], Optional[str]] = (None, None, None)
@@ -1008,6 +1011,7 @@ class SetupForm(ttk.Frame):
     def _rescan_directory(self) -> None:
         directory = self.vars['directory'].get().strip()
         self._data_summary = ''
+        self._frame_counts = {}
         self.inferred = (None, None, None)
         if not directory or not os.path.isdir(directory):
             self.dir_count_var.set('')
@@ -1027,6 +1031,7 @@ class SetupForm(ttk.Frame):
                         counts[k] = counts.get(k, 0) + len(v)
             parts = ', '.join(_frame_count(k, v) for k, v in counts.items() if v)
             self._data_summary = parts
+            self._frame_counts = counts
             text = parts or _('no frames found')
             if lights:
                 # The same local lookups the run starts with (info.json name,
@@ -1341,6 +1346,7 @@ class App:
         self._last_run_status = 'idle'
         self._named_cache: List[Dict[str, Any]] = []
         self._update_results: queue.Queue[Dict[str, str]] = queue.Queue()
+        self._diagnostics_open = False
 
         root.title('OriginStack')
         root.geometry('1400x900')
@@ -1407,6 +1413,12 @@ class App:
         root.after(80, _pin_vsplit)
 
         root.protocol('WM_DELETE_WINDOW', self._on_closing)
+        root.bind('<Control-Return>', lambda _event: self._on_start())
+        root.bind('<Escape>', lambda _event: self._on_cancel() if self.rm.is_running() else None)
+        root.bind('f', lambda _event: self.preview.fit())
+        root.bind('1', lambda _event: self.preview.one_to_one())
+        root.bind('c', lambda _event: self.compare_var.set(not self.compare_var.get())
+                  or self._on_compare_toggled())
         root.after(self.POLL_MS, self._poll)
         self._on_form_change()
 
@@ -1536,6 +1548,23 @@ class App:
         self.readiness_var = tk.StringVar(value=_('Choose a light-frame folder to begin.'))
         ttk.Label(parent, textvariable=self.readiness_var, style='Dim.TLabel',
                   wraplength=560).pack(fill='x', pady=(0, 4))
+        self.preflight_frame = ttk.LabelFrame(parent, text=_('PREFLIGHT'))
+        self.preflight_frame.pack(fill='x', pady=(0, 6))
+        self.preflight_vars = {
+            key: tk.StringVar(value=f'○ {label}')
+            for key, label in (
+                ('frames', _('Light frames')),
+                ('calibration', _('Calibration frames')),
+                ('target', _('Target detected')),
+                ('space', _('Temporary disk space')),
+                ('output', _('Output location')),
+            )
+        }
+        for row, var in enumerate(self.preflight_vars.values()):
+            ttk.Label(self.preflight_frame, textvariable=var, style='Dim.TLabel').grid(
+                row=row // 2, column=row % 2, sticky='w', padx=8, pady=2)
+        self.preflight_frame.grid_columnconfigure(0, weight=1)
+        self.preflight_frame.grid_columnconfigure(1, weight=1)
 
         phase_frame = ttk.LabelFrame(parent, text=_('PIPELINE'))
         phase_frame.pack(fill='x', pady=6)
@@ -1562,10 +1591,18 @@ class App:
         # below the pipeline bar is the log now.
         log_frame = ttk.LabelFrame(parent, text=_('LOG'))
         log_frame.pack(fill='both', expand=True, pady=6)
+        self._log_frame = log_frame
         self.log_text = scrolledtext.ScrolledText(
             log_frame, height=20, bg=_LOG_BG, fg=_LOG_FG, insertbackground=_LOG_FG,
             font=(_MONO, 9), state='disabled', wrap='word')
         self.log_text.pack(fill='both', expand=True)
+        self.diagnostics_frame = ttk.LabelFrame(parent, text=_('DIAGNOSTICS'))
+        self.diagnostics_var = tk.StringVar(value=_(
+            'Warnings and rejected frames will appear here after a run.'))
+        ttk.Label(self.diagnostics_frame, textvariable=self.diagnostics_var,
+                  justify='left', wraplength=560).pack(fill='x', padx=8, pady=6)
+        ttk.Button(parent, text=_('Show diagnostics'), command=self._toggle_diagnostics).pack(
+            anchor='w', pady=(0, 6))
 
     # ── right column: preview, frame strip, recent frames, summary ────
 
@@ -1652,6 +1689,13 @@ class App:
         self.summary_var = tk.StringVar(value='')
         self.summary_label = ttk.Label(self.summary_frame, textvariable=self.summary_var,
                                        justify='left')
+        self.result_actions = ttk.Frame(self.summary_frame)
+        ttk.Button(self.result_actions, text=_('Copy CLI command'),
+                   command=self._copy_cli_command).pack(side='left', padx=(0, 6))
+        ttk.Button(self.result_actions, text=_('Open output folder'),
+                   command=self._open_output_folder).pack(side='left', padx=(0, 6))
+        ttk.Button(self.result_actions, text=_('Start another run'),
+                   command=self._reset_run_view).pack(side='left')
         self.plan_frame = ttk.Frame(self.summary_frame)
         self.plan_frame.pack(fill='x', padx=4, pady=4)
         self.plan_frame.grid_columnconfigure(1, weight=1)
@@ -1694,6 +1738,78 @@ class App:
         self.summary_frame.configure(text=_('COMPLETE'))
         self.plan_frame.pack_forget()
         self.summary_label.pack(anchor='w', padx=4, pady=4)
+        self.result_actions.pack_forget()
+
+    @staticmethod
+    def _check_icon(ok: Optional[bool], label: str, warning: str = '') -> str:
+        if ok is True:
+            return f'✓ {label}'
+        if ok is False:
+            return f'⚠ {warning or label}'
+        return f'○ {label}'
+
+    def _update_preflight(self) -> None:
+        directory = self.form.vars['directory'].get().strip()
+        if not directory or not os.path.isdir(directory):
+            for key, var in self.preflight_vars.items():
+                label = var.get().split(' ', 1)[-1]
+                var.set(self._check_icon(None, label))
+            return
+        counts = self.form._frame_counts
+        lights = counts.get('light', 0)
+        has_cal = any(counts.get(kind, 0) for kind in ('dark', 'flat', 'bias', 'darkflat'))
+        free = shutil.disk_usage(directory).free
+        estimated = max(1, lights) * 170 * 1024 * 1024
+        self.preflight_vars['frames'].set(self._check_icon(lights > 0,
+                                                            _('Light frames'),
+                                                            _('No light frames found')))
+        self.preflight_vars['calibration'].set(self._check_icon(
+            has_cal, _('Calibration frames'), _('No calibration frames found')))
+        self.preflight_vars['target'].set(self._check_icon(
+            bool(self.form.inferred[1]), _('Target detected'), _('Target will be selected manually')))
+        self.preflight_vars['space'].set(self._check_icon(
+            free >= estimated, _('Temporary disk space'),
+            _('Low disk space — about {gb:.1f} GB needed').format(
+                gb=estimated / 1024 ** 3)))
+        self.preflight_vars['output'].set(self._check_icon(
+            bool(directory), _('Output location')))
+
+    def _reset_run_view(self) -> None:
+        if self.rm.is_running():
+            return
+        self.preview.clear()
+        self.frame_strip.clear()
+        self.frames_tree.delete(*self.frames_tree.get_children())
+        self.summary_var.set('')
+        self.summary_frame.configure(text=_('THIS RUN'))
+        self.summary_label.pack_forget()
+        self.result_actions.pack_forget()
+        self._on_form_change()
+
+    def _copy_cli_command(self) -> None:
+        """Copy the current form as a reproducible command-line invocation."""
+        from src.desktop_control import build_argv_from_form
+
+        form = self.form.read_form()
+        try:
+            argv = build_argv_from_form(form)
+        except Exception as exc:
+            _fatal(_('Command export failed'), str(exc))
+            return
+        command = subprocess.list2cmdline([sys.executable, 'originstack.py', *argv])
+        self.root.clipboard_clear()
+        self.root.clipboard_append(command)
+        self.diagnostics_var.set(_('Copied command to the clipboard:\n{command}',
+                                  command=command))
+        if not self._diagnostics_open:
+            self._toggle_diagnostics()
+
+    def _toggle_diagnostics(self) -> None:
+        self._diagnostics_open = not self._diagnostics_open
+        if self._diagnostics_open:
+            self.diagnostics_frame.pack(fill='x', pady=(0, 6), before=self._log_frame)
+        else:
+            self.diagnostics_frame.pack_forget()
 
     def _on_form_change(self) -> None:
         """The form changed: show what Start would now do, and the example
@@ -1710,6 +1826,7 @@ class App:
             self.readiness_var.set(_('No frames found — choose a folder containing light frames.'))
         else:
             self.readiness_var.set(_('Ready to start · {summary}', summary=self.form._data_summary))
+        self._update_preflight()
         self._show_plan = True
         self.summary_frame.configure(text=_('THIS RUN'))
         self.summary_label.pack_forget()
@@ -1960,6 +2077,16 @@ class App:
         if snap['summary'] and not self._show_plan:
             lines = [f"{k}: {v}" for k, v in snap['summary'].items()]
             self.summary_var.set('\n'.join(lines))
+            self.result_actions.pack(anchor='w', padx=4, pady=(0, 6))
+        if snap['run_status'] in ('ok', 'error', 'cancelled'):
+            rejected = sum(1 for row in snap['frames'] if not row.get('ok', True))
+            message = _('No warnings recorded.')
+            if rejected:
+                message = _('{count} frame(s) were rejected during quality analysis.').format(
+                    count=rejected)
+            if snap['run_error']:
+                message = _('Run failed: {error}').format(error=snap['run_error'])
+            self.diagnostics_var.set(message)
 
         self._sync_restretch_bar(snap)
         self._refresh_run_button(snap)
