@@ -50,7 +50,10 @@ PSF_R = 24              # injected PSF half-size (px): bright stars' wings reach
 PSF_CORE_R = 6.0        # px; outside, the PSF is its azimuthal mean (averages the wing noise away)
 N_PHASE = 4             # sub-pixel phases per axis the PSF is pre-shifted to
 PSF_ZONES = 4           # PSF cores on a PSF_ZONES x PSF_ZONES grid of field zones...
-PSF_LOCAL_K = 15        # ...each the median of the nearest this many stars
+PSF_LOCAL_K = 15        # ...each the median of the nearest this many stars (at least)
+PSF_FLUX_BINS = 4       # and per donor-flux quartile: the shape depends on the flux
+PSF_BIN_MAX = 300       # cutouts per flux bin at most
+PSF_FIT_R = 4.0         # px; faint cutouts are scaled by a template fit inside this radius
 
 
 def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
@@ -84,14 +87,23 @@ def _centroid(sp: np.ndarray, r: int) -> Tuple[float, float]:
     return float((yy * cut).sum() / t), float((xx * cut).sum() / t)
 
 
-def _aligned_cutouts(z: np.ndarray, ys: np.ndarray, xs: np.ndarray, r: int = PSF_R
-                     ) -> Tuple[np.ndarray, np.ndarray]:
+def _aligned_cutouts(z: np.ndarray, ys: np.ndarray, xs: np.ndarray, r: int = PSF_R,
+                     template: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
     """``(cuts, keep)``: (n, 2r+1, 2r+1, C) cutouts of the stars at integer positions
     ``ys, xs`` with the border-median background removed, centroid-aligned and scaled to
     unit flux in the ``aperture_flux`` box (so an injected flux f measures as f); ``keep``
-    indexes the stars used (inside the image, positive flux in every channel)."""
+    indexes the stars used (inside the image, positive flux in every channel).
+
+    With ``template`` (a unit-flux PSF) the scale is the least-squares amplitude of the
+    template inside ``PSF_FIT_R`` instead of the box sum: a faint star's 25 x 25 box sum is
+    dominated by sky noise (sigma 25 in noise units against fluxes of a few tens)."""
     h, w, c = z.shape
     a = r - STAMP_R
+    if template is not None:
+        yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+        fit = np.hypot(yy, xx) <= PSF_FIT_R
+        tpl = template[fit]                                   # (n_fit, C)
+        tpl_ss = (tpl * tpl).sum(0)
     cuts, keep = [], []
     for i, (y, x) in enumerate(zip(np.asarray(ys, int), np.asarray(xs, int))):
         if not (r <= y < h - r and r <= x < w - r):
@@ -101,7 +113,10 @@ def _aligned_cutouts(z: np.ndarray, ys: np.ndarray, xs: np.ndarray, r: int = PSF
         sp = cut - np.median(border, axis=0)
         dy, dx = _centroid(sp, r)
         sp = _shift(sp, -dy, -dx)
-        core = sp[a:a + 2 * STAMP_R + 1, a:a + 2 * STAMP_R + 1].sum((0, 1))
+        if template is not None:
+            core = (sp[fit] * tpl).sum(0) / tpl_ss
+        else:
+            core = sp[a:a + 2 * STAMP_R + 1, a:a + 2 * STAMP_R + 1].sum((0, 1))
         if np.all(core > 0):
             cuts.append(sp / core)
             keep.append(i)
@@ -205,30 +220,13 @@ class StarField:
         self.stamps = np.array(stamps, np.float32).reshape(-1, 2 * r + 1, 2 * r + 1, z.shape[2])
         self.stamp_y, self.stamp_x = np.array(sy, float), np.array(sx, float)
 
-        # the injected PSFs: one per field zone (local core, global wings), each pre-shifted
-        # to N_PHASE x N_PHASE sub-pixel phases. One PSF for the whole field (v2) made
-        # injected stars rounder than real ones, most at the edges (ellipticity 0.11 vs 0.17)
-        cuts, keep = _aligned_cutouts(z, np.array(sy, int), np.array(sx, int))
-        self.psf_phases = None
-        if len(cuts):
-            cy, cx = np.array(sy, float)[keep], np.array(sx, float)[keep]
-            off = (np.arange(N_PHASE) + 0.5) / N_PHASE - 0.5
-            zh, zw = h / PSF_ZONES, w / PSF_ZONES
-            k = min(PSF_LOCAL_K, len(cuts))
-            phases = []
-            for gy in range(PSF_ZONES):
-                for gx in range(PSF_ZONES):
-                    d2 = (cy - (gy + 0.5) * zh) ** 2 + (cx - (gx + 0.5) * zw) ** 2
-                    psf = _psf_from(cuts[np.argsort(d2)[:k]], cuts)
-                    phases.append([[_shift(psf, dy, dx) for dx in off] for dy in off])
-            self.psf_phases = np.array(phases, np.float32)     # (zones, N_PHASE, N_PHASE, ...)
-
         # donors: the luminosity function and colours to inject, capped at the brightest stamp
         # so no stamp is scaled up (that would amplify its noise)
         cap = max(sflux) if sflux else 0.0
         donor &= np.nan_to_num(flum, nan=np.inf) <= cap
         self.donor_flux = np.clip(flux[donor], 0.0, None)
         self.donor_y, self.donor_x = ys[donor], xs[donor]
+        self._build_psfs(z, ys, xs, flum, donor, np.array(sy, int), np.array(sx, int))
 
         # injection intensity proportional to the local density of real (donor) stars
         gh, gw = max(1, h // DENSITY_BLOCK), max(1, w // DENSITY_BLOCK)
@@ -239,6 +237,60 @@ class StarField:
         dens = np.maximum(dens, DENSITY_FLOOR * max(dens.mean(), 1e-12))
         self.density = dens / dens.sum()
         self.ok = len(self.donor_flux) >= 10 and self.psf_phases is not None
+
+    def _build_psfs(self, z, ys, xs, flum, donor, sy, sx) -> None:
+        """``psf_phases`` (flux bins, zones, N_PHASE, N_PHASE, 2R+1, 2R+1, C) and the bins'
+        flux edges ``psf_flux_edges``.
+
+        A PSF per donor-flux quartile and field zone: the core (``PSF_CORE_R``) is the median
+        of that bin's isolated stars nearest the zone (elongation varies over the field: one
+        PSF for the whole field (v2) made injected stars rounder than real ones at the edges,
+        ellipticity 0.11 vs 0.17), the wings are the bright stamps' azimuthal mean. Per flux
+        bin because the sigma-clipped stack makes bright stars narrower than faint ones; with
+        the bright stamps' shape for every flux (v3) the network told injected from real stars
+        by shape alone (pasted real cutouts kept 0.83-0.94 like real stars, clean injected
+        ones 0.06-0.6)."""
+        h, w, _ = z.shape
+        self.psf_phases, self.psf_flux_edges = None, np.zeros(0)
+        cuts_b, keep_b = _aligned_cutouts(z, sy, sx)
+        if not len(cuts_b) or not donor.any():
+            return
+        template = _psf_from(cuts_b, cuts_b)
+
+        # isolated donors: no neighbour within 2 STAMP_R at >= ISOLATION_FRAC of the flux
+        fl0 = np.nan_to_num(flum, nan=0.0)
+        iso = np.zeros(len(ys), bool)
+        for i in np.flatnonzero(donor):
+            d2 = (ys - ys[i]) ** 2 + (xs - xs[i]) ** 2
+            near = (d2 < (2 * STAMP_R) ** 2) & (fl0 >= ISOLATION_FRAC * fl0[i])
+            near[i] = False
+            iso[i] = not near.any()
+
+        dl = flum[donor]
+        edges = np.quantile(dl, np.arange(1, PSF_FLUX_BINS) / PSF_FLUX_BINS)
+        b_of = np.searchsorted(edges, flum)
+        off = (np.arange(N_PHASE) + 0.5) / N_PHASE - 0.5
+        zh, zw = h / PSF_ZONES, w / PSF_ZONES
+        out = []
+        for b in range(PSF_FLUX_BINS):
+            idx = np.flatnonzero(donor & iso & (b_of == b))
+            if len(idx) > PSF_BIN_MAX:                    # evenly over the bin's flux range
+                idx = idx[np.argsort(flum[idx])][np.linspace(0, len(idx) - 1, PSF_BIN_MAX).astype(int)]
+            cuts, keep = _aligned_cutouts(z, ys[idx], xs[idx], template=template)
+            if len(cuts) < PSF_LOCAL_K:
+                cuts, cy, cx = cuts_b, sy[keep_b].astype(float), sx[keep_b].astype(float)
+            else:
+                cy, cx = ys[idx][keep].astype(float), xs[idx][keep].astype(float)
+            k = min(len(cuts), max(PSF_LOCAL_K, len(cuts) // 4))
+            zones = []
+            for gy in range(PSF_ZONES):
+                for gx in range(PSF_ZONES):
+                    d2 = (cy - (gy + 0.5) * zh) ** 2 + (cx - (gx + 0.5) * zw) ** 2
+                    psf = _psf_from(cuts[np.argsort(d2)[:k]], cuts_b)
+                    zones.append([[_shift(psf, dy, dx) for dx in off] for dy in off])
+            out.append(zones)
+        self.psf_phases = np.array(out, np.float32)
+        self.psf_flux_edges = edges
 
     @property
     def n_donors(self) -> int:
@@ -265,10 +317,11 @@ class StarField:
         ph = rng.integers(0, N_PHASE, (n, 2))
         zone = (np.minimum(ys * PSF_ZONES // h, PSF_ZONES - 1) * PSF_ZONES
                 + np.minimum(xs * PSF_ZONES // w, PSF_ZONES - 1))
-        for y, x, f, (py, px), zi in zip(ys, xs, flux, ph, zone):
+        fbin = np.searchsorted(self.psf_flux_edges, flux.mean(1))
+        for y, x, f, (py, px), zi, fb in zip(ys, xs, flux, ph, zone, fbin):
             y0, y1 = max(0, y - r), min(h, y + r + 1)
             x0, x1 = max(0, x - r), min(w, x + r + 1)
-            st = self.psf_phases[zi, py, px, y0 - (y - r):y1 - (y - r), x0 - (x - r):x1 - (x - r)]
+            st = self.psf_phases[fb, zi, py, px, y0 - (y - r):y1 - (y - r), x0 - (x - r):x1 - (x - r)]
             s[y0:y1, x0:x1] += st * f.astype(np.float32)
         for ch in range(c):
             if self.B[ch] > 0:
