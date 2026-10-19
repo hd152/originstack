@@ -258,3 +258,77 @@ The original plan:
 - `--denoiser nn` widens stars 1-2.5% on the nebula/cluster fields in `bench_phase4`
   (Omega, Orion, Pleiades); not with `--config nn_chroma_nr=true`. Cause not found.
 - A faint ring is still visible around Sunflower's brightest star with `--denoiser nn`.
+
+## Next: synthetic-blur training (planned 2026-10-18, not started)
+
+Why: the seeing-pair target caps sharpening at the session's sharpest-30% stack -- blur every
+frame shares (optics, focus, debayer) is never removed, and ideal Gaussian stars narrow only
+2-5%. BlurXTerminator-style correction needs targets sharper than any real data.
+
+Why not just re-blur the existing targets: an input made from the target shares its noise
+(breaks the independent-noise property the seeing pairs rely on), and the truth would still be
+the best-frame stack, so nothing teaches the network to go past it.
+
+Plan:
+- **Truth**: stars drawn at Gaia positions/fluxes (`gaia_cache`) with a narrow PSF, on a
+  clean extended background (a denoised, star-removed real stack; the inpaint
+  `star_removal` is good enough for training targets).
+- **Input**: truth blurred by a PSF family -- Moffat over FWHM/beta, ellipticity, coma,
+  slightly different width per channel -- plus noise matched to real stacks *including its
+  spatial correlation* (debayer + warp; `noise_model`). Uncorrelated noise will not transfer.
+- **Mix** synthetic pairs with the real seeing pairs so the network stays honest on real data;
+  `train_nn_denoise.py bank --mode synthetic`, loss weighting adjusted for noiseless targets.
+- **Evaluation** (the hard part): `width/target` and `eval_nn_faint`'s invented-source check
+  both reference the sharp stack, so they cannot judge detail beyond it. Add (a) held-out
+  synthetic fields with exact truth, (b) a Gaia close-pair check on real stacks: pairs below
+  the input's resolution split at the right separation and flux ratio, and no split where Gaia
+  has a single star.
+
+Order: a 2-3 day feasibility run first (small generator, short training, held-out check);
+go only if held-out stars narrow clearly past the sharp-stack target without failing the
+Gaia check. Full version estimated at 2-3 weeks plus ~3-4 h per training run (RTX 3050),
+3-6 runs expected.
+
+Risks: invented detail (the real-pair network cannot invent sources; synthetic targets lose
+that guarantee -- the Gaia check is the guard); the 24-filter U-Net may need more depth or
+width for larger varying blur, which costs CPU inference time (never timed at full
+resolution); a large synthetic-to-real gap could limit the gain over today's 7-16%.
+
+## BXT-inspired open-source direction
+
+This is a possible future feature, not a claim of compatibility with or parity with
+BlurXTerminator. The practical target is a locally adaptive, artifact-aware astronomical
+deconvolver that is trained and validated in this project. A true BXT-like result requires
+neural-network training; end users would receive versioned weights and would not need to
+train a model themselves.
+
+### Two implementation paths
+
+- **Classical path (no training):** extend `psf_deconvolution.py` to fit a spatial PSF field
+  from stars, then apply locally varying RL/TV/sparse deconvolution with star masks, flux
+  constraints, and halo/ringing protection. This is interpretable and useful, but is more
+  sensitive to PSF-fitting errors and is not expected to match a learned system.
+- **Learned path (recommended):** extend the existing `--deconvolve nn` model with local PSF
+  conditioning and separate star/non-stellar behavior. Training would use a larger mixture of
+  real seeing pairs and validated synthetic-blur pairs, with losses for star width,
+  ellipticity, flux conservation, faint-structure preservation, and halo/ringing penalties.
+
+The learned path should expose conservative controls for star sharpening, extended-object
+sharpening, correction strength, and automatic mode. Existing star detection, masks, PSF
+fitting, and held-out evaluation tools are reusable.
+
+### Proposed order and effort
+
+1. Improve the current seeing-pair model and expand the held-out validation set: 2-4 weeks.
+2. Add spatial PSF features (local FWHM, ellipticity, orientation, field position, and
+   confidence): 4-8 weeks.
+3. Add star/non-stellar controls and artifact safeguards: 2-5 weeks.
+4. Harden validation and CPU/GPU inference: 4-8 weeks.
+
+A useful BXT-inspired v1 is therefore an approximately 8-12 week effort; a production-grade
+feature is more likely 4-6 months. These estimates assume access to a GPU and a diverse
+training corpus. The main risk is not the neural-network code: it is obtaining trustworthy
+targets sharper than the input without teaching the model to invent detail.
+
+Do not market this as "open-source BlurXTerminator" or promise feature parity. The appropriate
+description is "locally adaptive, artifact-aware neural astronomical deconvolution."
