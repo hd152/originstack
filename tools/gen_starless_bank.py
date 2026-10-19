@@ -4,7 +4,7 @@ Per session (a ``gen_n2n_pairs.py --mode seeing`` pair directory -- input.npy + 
 together are the full-depth stack), in noise units: input = image + an injected star layer
 (``StarField.inject``, ``--alpha`` x the real star count), target = the image as it is. Several
 independent injections per session (``--realisations``); half of the patches are centred on
-injected stars. Weight = 1 / the input's noise variance (``target_variance``: sky plus the
+a star, real or injected. Weight = 1 / the input's noise variance (``target_variance``: sky plus the
 photon noise of the stars), so bright stars do not dominate the loss.
 
 The output has the keys ``tools/train_nn_denoise.py train`` reads (za, zb, w, sess); train with
@@ -61,11 +61,16 @@ def session_patches(img: np.ndarray, rng: np.random.Generator, per_session: int,
         za = z + s
         w = (1.0 / target_variance(za, B)).astype(np.float32)
         n = per_session // realisations + (1 if r < per_session % realisations else 0)
+        # centre half the patches on a star drawn from real donors and injected stars alike:
+        # centring on injected stars only (v1) raised the share of injected stars the network
+        # sees above alpha / (1 + alpha), which the correction formula assumes
+        cy = np.concatenate([field.donor_y, ys])
+        cx = np.concatenate([field.donor_x, xs])
         for k in range(n):
-            if len(ys) and k % 2 == 0:
-                j = rng.integers(len(ys))
-                y = int(np.clip(ys[j] - rng.integers(16, PATCH - 16), m, h - PATCH - m))
-                x = int(np.clip(xs[j] - rng.integers(16, PATCH - 16), m, wd - PATCH - m))
+            if len(cy) and k % 2 == 0:
+                j = rng.integers(len(cy))
+                y = int(np.clip(cy[j] - rng.integers(16, PATCH - 16), m, h - PATCH - m))
+                x = int(np.clip(cx[j] - rng.integers(16, PATCH - 16), m, wd - PATCH - m))
             else:
                 y = int(rng.integers(m, h - PATCH - m))
                 x = int(rng.integers(m, wd - PATCH - m))
