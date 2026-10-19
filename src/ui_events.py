@@ -58,7 +58,8 @@ class UIEvents:
             'phase': 0,
             'phase_title': '',
             'phases': {},              # {n: {'title', 'started', 'elapsed'}}
-            'progress': {'label': '', 'done': 0, 'total': 0},
+            'progress': {'label': '', 'done': 0, 'total': 0,
+                         'started': None, 'eta': None},
             'log': [],
             'frames': [],              # recent per-frame metric rows
             'summary': None,
@@ -120,15 +121,25 @@ class UIEvents:
             self._state['phase_title'] = title
             self._state['phases'][num] = {'title': title, 'started': now,
                                           'elapsed': None}
-            self._state['progress'] = {'label': '', 'done': 0, 'total': 0}
+            self._state['progress'] = {'label': '', 'done': 0, 'total': 0,
+                                       'started': now, 'eta': None}
             self._bump()
 
     def progress(self, label: str, done: int, total: int) -> None:
         if not self.active:
             return
         with self._lock:
-            self._state['progress'] = {'label': label, 'done': int(done),
-                                       'total': int(total)}
+            done = int(done)
+            total = int(total)
+            previous = self._state['progress']
+            started = previous.get('started') or time.time()
+            elapsed = max(0.0, time.time() - started)
+            eta = None
+            if done > 0 and total > done:
+                eta = elapsed * (total - done) / done
+            self._state['progress'] = {'label': label, 'done': done,
+                                       'total': total, 'started': started,
+                                       'eta': eta}
             self._bump()
 
     def frame_metrics(self, name: str, metrics: Optional[dict],

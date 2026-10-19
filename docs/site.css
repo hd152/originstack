@@ -87,6 +87,12 @@ img { max-width: 100%; display: block; }
 a { color: var(--ha-dark); text-underline-offset: .18em; }
 a:hover { color: var(--ha); }
 :focus-visible { outline: 3px solid var(--oiii); outline-offset: 3px; }
+.skip-link {
+  position: absolute; left: 12px; top: -48px; z-index: 10;
+  padding: 8px 12px; background: #fff; color: var(--ink);
+  font-family: var(--display); font-weight: 600;
+}
+.skip-link:focus { top: 12px; }
 h1, h2, h3 { font-family: var(--display); font-weight: 700; line-height: 1.08; margin: 0; letter-spacing: -.015em; }
 p { margin: 0 0 1em; }
 .wrap { padding-inline: var(--gutter); max-width: 1320px; margin-inline: auto; }
@@ -98,6 +104,8 @@ p { margin: 0 0 1em; }
 .bar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-block: 22px; }
 .bar img { height: 52px; width: auto; }
 .bar nav { display: flex; gap: clamp(16px, 3vw, 34px); font-family: var(--display); font-size: 1rem; font-weight: 500; }
+.bar nav { scrollbar-width: none; }
+.bar nav::-webkit-scrollbar { display: none; }
 .bar nav a { text-decoration: none; opacity: .82; }
 .bar nav a:hover { opacity: 1; text-decoration: underline; }
 .hero h1 {
@@ -118,6 +126,9 @@ p { margin: 0 0 1em; }
 .btn.primary:hover { background: var(--ha-dark); color: #fff; }
 .btn.quiet { border-color: rgba(232, 237, 245, .5); color: #e8edf5; }
 .btn.quiet:hover { border-color: #e8edf5; background: rgba(232, 237, 245, .08); }
+.btn:focus-visible, .hub a:focus-visible, .bar nav a:focus-visible {
+  outline: 3px solid var(--oiii); outline-offset: 4px;
+}
 .platforms { margin: 16px 0 0; font-family: var(--display); font-size: 1rem; color: #9fb0c6; }
 .platforms a { color: #e8edf5; text-underline-offset: .2em; white-space: nowrap; }
 .fine { font-size: .98rem; color: #9fb0c6; margin: 14px 0 0; max-width: 62ch; }
@@ -146,7 +157,12 @@ p { margin: 0 0 1em; }
 .wipe input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
 .wipe:focus-within { outline: 3px solid var(--oiii); outline-offset: 3px; }
 @media (max-width: 600px) {
-  .bar nav { display: none; }
+  .bar { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .bar img { height: 42px; }
+  .bar nav {
+    width: 100%; overflow-x: auto; gap: 18px; padding-bottom: 4px;
+    white-space: nowrap; -webkit-overflow-scrolling: touch;
+  }
   .wipe .cap { font-size: .8rem; padding: 4px 9px; }
   .wipe .cap.l { bottom: 46px; }
 }
@@ -306,6 +322,11 @@ svg.diagram { display: block; width: 100%; height: auto; }
 .hub { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; margin-top: 28px; }
 .hub a { display: block; text-decoration: none; border: 1px solid var(--line); border-top: 3px solid var(--oiii); padding: 16px 18px 18px; background: #fff; color: var(--ink); }
 .hub a:hover { border-color: var(--ink); border-top-color: var(--ha); }
+.hub a { transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+.hub a:hover, .hub a:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(20, 33, 58, .10);
+}
 .hub h3 { font-size: 1.15rem; margin-bottom: 6px; }
 .hub p { margin: 0; color: #33435c; font-size: 1rem; }
 .shot-wide { margin: 36px 0 0; }
@@ -334,6 +355,13 @@ h2 .when { font-family: var(--text); font-weight: 400; font-size: 1rem; color: v
 .filter { margin-top: 22px; font-family: var(--display); }
 .filter input { font: inherit; font-family: var(--text); padding: 6px 10px; border: 1px solid var(--line); min-width: min(320px, 100%); margin-left: 8px; }
 .filter span { color: var(--slate); margin-left: 10px; }
+.toc {
+  position: sticky; top: 0; z-index: 2; padding-block: 10px;
+  background: rgba(11, 18, 32, .96); backdrop-filter: blur(8px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .hub a { transition: none; }
+}
 .gallery-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: clamp(26px, 4vw, 44px); margin-top: 34px; }
 .gallery-grid figure { margin: 0; }
 .gallery-grid img { width: 100%; height: auto; display: block; background: #000; }
