@@ -669,6 +669,11 @@ def postprocess_stack(
     skip_steps = set(getattr(args, 'skip_step', []) or [])
     _diag_dir = getattr(args, '_diagnostic_dir', None)
     _diag_counter = [1]
+    # --remove-stars-method nn works on the linear stack (what its network was trained on),
+    # so keep Phase 4's input; the later steps may change the array in place
+    _rs_linear = (stacked.copy() if getattr(args, 'remove_stars', False)
+                  and getattr(args, 'remove_stars_method', 'inpaint') == 'nn'
+                  and 'remove_stars' not in skip_steps else None)
 
     _cache_key = (_early_cache_key(stacked, args, skip_steps)
                   if _early_cache_usable(args, _diag_dir) else None)
@@ -1095,7 +1100,25 @@ def postprocess_stack(
     # deliverable keeps stars, the starless image is for downstream
     # nebula/background work. Wrapped so a failure here (inpaint blow-up,
     # sidecar write error) can never cost the caller the main stack.
-    if getattr(args, 'remove_stars', False) and 'remove_stars' not in skip_steps:
+    if _rs_linear is not None:
+        try:
+            from src import star_n2n
+            if star_n2n.model_available():
+                safe_print("\n  Removing stars (nn, linear stack)...")
+                _rs_start = time.time()
+                starless, _ = star_n2n.remove_stars_nn(_rs_linear)
+                _output_path_rs = getattr(args, 'output', None)
+                if _output_path_rs:
+                    _save_sidecar_fits(starless, _output_path_rs, '_starless')
+                safe_print(f"  ✓ Star removal, nn ({format_time(time.time() - _rs_start)})")
+            else:
+                safe_print("  ⚠ Star removal: nn model not found — falling back to inpaint")
+                _rs_linear = None
+        except Exception as _rs_exc:
+            safe_print(f"  ⚠ Star removal (nn) failed ({_rs_exc}) — falling back to inpaint")
+            _rs_linear = None
+    if (_rs_linear is None and getattr(args, 'remove_stars', False)
+            and 'remove_stars' not in skip_steps):
         try:
             if _pp_sources is not None and len(_pp_sources) > 0:
                 _rs_fwhm = _median_fwhm(final)

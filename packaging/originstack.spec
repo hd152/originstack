@@ -44,6 +44,8 @@ datas += [(str(ROOT / 'src' / 'data' / 'camera_profiles'), 'src/data/camera_prof
 # pass with the always-built nn_conv3x3 kernel, so unlike triage it works in releases).
 datas += [(str(ROOT / 'src' / 'data' / 'nn_denoise.npz'), 'src/data')]
 datas += [(str(ROOT / 'src' / 'data' / 'nn_deconv.npz'), 'src/data')]
+# --remove-stars-method nn weights (src/star_n2n.py, same U-Net and forward pass).
+datas += [(str(ROOT / 'src' / 'data' / 'nn_starless.npz'), 'src/data')]
 
 # The window icon. The EXE resource below sets the taskbar/Explorer icon, but
 # desktop_app.py also calls root.iconbitmap() with a path relative to its own

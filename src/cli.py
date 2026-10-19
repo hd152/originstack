@@ -2557,6 +2557,16 @@ def build_parser() -> argparse.ArgumentParser:
                         '(aggressive stretch, external star recombination). '
                         'Computed last, on the fully post-processed image. Not '
                         'turned on by --auto.')
+    g_post.add_argument('--remove-stars-method', dest='remove_stars_method',
+                   choices=['inpaint', 'nn'], default='inpaint',
+                   help='How --remove-stars removes the stars. inpaint (default): fill '
+                        'each star with smooth local background, on the post-processed '
+                        'image. nn (EXPERIMENTAL): a network trained by Noisier2Noise on '
+                        'Origin sessions removes the stars and keeps the sky noise and the '
+                        'nebula structure under them; saturated stars have their halo '
+                        'subtracted and their core filled. With nn the sidecar is the '
+                        'starless version of the linear stack (like the main FITS), for '
+                        'your own processing.')
     g_post.add_argument('--starless-process', dest='starless_process', action='store_true',
                    help='Run the denoisers and local contrast on a starless copy '
                         'of the image, then add the stars back untouched. With no '
