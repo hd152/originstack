@@ -437,7 +437,9 @@ class _Choice(tk.Frame):
     description. ``set_state`` switches the border between selected and not."""
 
     def __init__(self, parent, title: str, text: str, on_click, photo=None):
-        super().__init__(parent, background=_LINE, padx=1, pady=1, cursor='hand2')
+        super().__init__(parent, background=_LINE, padx=1, pady=1, cursor='hand2',
+                         takefocus=1)
+        self._on_click = on_click
         self.body = tk.Frame(self, background=_PANEL)
         self.body.pack(fill='both', expand=True)
         self.photo = photo  # keep-alive ref
@@ -456,6 +458,11 @@ class _Choice(tk.Frame):
         self.text.pack(fill='x', padx=8, pady=(0, 7))
         for w in self._descendants(self):
             w.bind('<Button-1>', lambda _e: on_click())
+        self.bind('<Return>', lambda _e: self._on_click())
+        self.bind('<space>', lambda _e: self._on_click())
+        self.bind('<FocusIn>', lambda _e: self.configure(highlightthickness=2,
+                                                         highlightbackground=_ACCENT2))
+        self.bind('<FocusOut>', lambda _e: self.configure(highlightthickness=0))
 
     @staticmethod
     def _descendants(w):
@@ -1074,6 +1081,8 @@ class _Tooltip:
         self.widget, self.text, self.tip = widget, text, None
         widget.bind('<Enter>', self._show)
         widget.bind('<Leave>', self._hide)
+        widget.bind('<FocusIn>', self._show)
+        widget.bind('<FocusOut>', self._hide)
 
     def _show(self, _event) -> None:
         if self.tip or not self.text:
@@ -1111,6 +1120,7 @@ class PreviewCanvas(ttk.Frame):
         self._nat_h = 0
         self._img_a: Optional[Any] = None   # PIL.Image
         self._img_b: Optional[Any] = None
+        self._source_bytes: Optional[bytes] = None
         self._photo = None                  # keep-alive ref
         self.current_slug = ''
         self.compare_on = False
@@ -1142,6 +1152,7 @@ class PreviewCanvas(ttk.Frame):
 
     def load_slot(self, jpeg_bytes: bytes, slug: str, caption: str) -> None:
         from PIL import Image
+        self._source_bytes = jpeg_bytes
         img = Image.open(io.BytesIO(jpeg_bytes)).convert('RGB')
         first = self._img_a is None
         self._img_a = img
@@ -1153,6 +1164,9 @@ class PreviewCanvas(ttk.Frame):
         else:
             self.redraw()
 
+    def _photo_bytes(self) -> bytes:
+        return self._source_bytes or b''
+
     def set_compare_slot(self, jpeg_bytes: Optional[bytes], slug: str) -> None:
         from PIL import Image
         self.compare_slug = slug
@@ -1163,6 +1177,7 @@ class PreviewCanvas(ttk.Frame):
         """Drop the displayed image(s) -- called when a new run starts so the
         viewer doesn't keep showing the previous run's stack."""
         self._img_a = self._img_b = self._photo = None
+        self._source_bytes = None
         self._nat_w = self._nat_h = 0
         self.current_slug = self.compare_slug = ''
         self.compare_on = False
@@ -1518,6 +1533,9 @@ class App:
                         variable=self.open_folder_var).pack(side='left', padx=(10, 0))
         ttk.Button(run_row, text=_('Open Folder'), command=self._open_output_folder).pack(
             side='left', padx=(6, 0))
+        self.readiness_var = tk.StringVar(value=_('Choose a light-frame folder to begin.'))
+        ttk.Label(parent, textvariable=self.readiness_var, style='Dim.TLabel',
+                  wraplength=560).pack(fill='x', pady=(0, 4))
 
         phase_frame = ttk.LabelFrame(parent, text=_('PIPELINE'))
         phase_frame.pack(fill='x', pady=6)
@@ -1536,6 +1554,9 @@ class App:
         self.progress_var = tk.StringVar(value='')
         ttk.Label(phase_frame, textvariable=self.progress_var).grid(
             row=2, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
+        self.eta_var = tk.StringVar(value='')
+        ttk.Label(phase_frame, textvariable=self.eta_var, style='Dim.TLabel').grid(
+            row=3, column=0, columnspan=4, sticky='e', padx=4, pady=(0, 4))
 
         # RECENT FRAMES moved to the right column; the whole left column
         # below the pipeline bar is the log now.
@@ -1554,6 +1575,7 @@ class App:
 
         vtools = ttk.Frame(preview_frame)
         vtools.pack(fill='x', pady=4)
+        ttk.Label(vtools, text=_('Milestone')).pack(side='left', padx=(0, 4))
         self.view_var = tk.StringVar()
         self.view_combo = ttk.Combobox(vtools, textvariable=self.view_var,
                                        state='readonly', width=20)
@@ -1567,6 +1589,8 @@ class App:
                                           state='readonly', width=20)
         self.compare_combo.pack(side='left', fill='x', expand=True)
         self.compare_combo.bind('<<ComboboxSelected>>', self._on_compare_selected)
+        ttk.Button(vtools, text=_('Full screen'), command=self._preview_fullscreen).pack(
+            side='right')
 
         # Once a run is done: re-stretch its preview JPEG with another stretch
         # (UIEvents.restretch). Hidden until the run has left an image to redo.
@@ -1676,6 +1700,16 @@ class App:
         result for the chosen target until a run's own previews arrive."""
         if self.rm.is_running():
             return
+        directory = self.form.vars.get('directory')
+        folder = directory.get().strip() if directory is not None else ''
+        if not folder:
+            self.readiness_var.set(_('Choose a light-frame folder to begin.'))
+        elif not os.path.isdir(folder):
+            self.readiness_var.set(_('Folder not found — choose an existing light-frame folder.'))
+        elif not self.form._data_summary:
+            self.readiness_var.set(_('No frames found — choose a folder containing light frames.'))
+        else:
+            self.readiness_var.set(_('Ready to start · {summary}', summary=self.form._data_summary))
         self._show_plan = True
         self.summary_frame.configure(text=_('THIS RUN'))
         self.summary_label.pack_forget()
@@ -1797,6 +1831,21 @@ class App:
     def _on_wipe_moved(self, value: str) -> None:
         self.preview.set_wipe(float(value))
 
+    def _preview_fullscreen(self) -> None:
+        """Open the current preview in a borderless, keyboard-dismissible window."""
+        if self.preview._img_a is None:
+            return
+        window = tk.Toplevel(self.root)
+        window.title(_('Preview'))
+        window.configure(background=_WELL)
+        window.geometry('1200x800')
+        view = PreviewCanvas(window)
+        view.pack(fill='both', expand=True, padx=12, pady=12)
+        view.load_slot(self.preview._photo_bytes(), self.preview.current_slug,
+                       self.preview.caption_var.get())
+        window.bind('<Escape>', lambda _event: window.destroy())
+        window.focus_set()
+
     def _on_thumb_click(self, fid: int) -> None:
         data = self.ui.frame_jpeg(fid)
         if data:
@@ -1857,6 +1906,15 @@ class App:
         self.progress_bar['value'] = prog['done']
         self.progress_var.set(f"{prog['label']} ({prog['done']}/{prog['total']})"
                               if prog['total'] else prog['label'])
+        eta = prog.get('eta')
+        if eta is not None and eta > 0:
+            seconds = int(eta)
+            self.eta_var.set(
+                _('About {minutes} min remaining', minutes=max(1, round(seconds / 60)))
+                if seconds >= 60 else
+                _('About {seconds} sec remaining', seconds=seconds))
+        else:
+            self.eta_var.set('')
 
         # log (append-only)
         log_lines = snap['log']
