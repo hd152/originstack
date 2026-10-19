@@ -771,24 +771,23 @@ Notes on reading these numbers:
 
 ### Compared with Siril and DeepSkyStacker
 
-Same lights, same bias/dark/flat, one machine (Windows 11, 8-core / 16-thread CPU, 64 GB RAM), each tool at default-style settings. Three Celestron Origin sessions: Omega Nebula (114 × 30 s), Sunflower Galaxy (158 × 20 s) and Sculptor Galaxy (532 × 10 s). Reproduce on your own data with [`tools/bench_vs_siril.py`](tools/bench_vs_siril.py).
+Same lights, same bias/dark/flat, one machine (Windows 11, 8-core / 16-thread CPU, 64 GB RAM), each tool at default-style settings. Two Celestron Origin sessions: Omega Nebula (114 × 30 s) and Sunflower Galaxy (158 × 20 s); the Sculptor Galaxy (532 × 10 s) is being re-measured with this version. Reproduce on your own data with [`tools/bench_vs_siril.py`](tools/bench_vs_siril.py).
 
 OriginStack first, Siril second. "Stack only" leaves out OriginStack's finishing steps (background extraction, denoising, stretch), which Siril's script does not have:
 
 | Session | Stack only | OriginStack, finished image | Peak memory | Star width |
 |---------|-----------|-----------------------------|-------------|------------|
-| Omega, 114 frames | 68 s / 86 s | 90 s | 10.6 / 6.5 GB | 4.40 / 4.56 px |
-| Sunflower, 158 frames | 84 s / 106 s | 107 s | 12.8 / 7.8 GB | 3.52 / 3.60 px |
-| Sculptor, 532 frames | 169 s / 195 s | 184 s | 9.2 / 11.2 GB | 2.69 / 3.01 px |
+| Omega, 114 frames | 46 s / 56 s | 65 s | 12.1 / 6.5 GB | 4.42 / 4.56 px |
+| Sunflower, 158 frames | 59 s / 72 s | 86 s | 14.3 / 8.0 GB | 3.51 / 3.60 px |
 
-- **Sharpness: sharper than Siril on all three.** On the same stars OriginStack is 4% narrower on Omega, 1.5% on Sunflower and 10% on Sculptor -- from proper image coaddition (on by default; Zackay & Ofek 2017) and a fix to a hot-pixel step that had been flattening the peaks of undersampled stars. It used 114/114, 158/158 and 532/532 frames; Siril used 111, 157 and 525.
-- **Noise: quieter once sharpness is matched.** Blurring each OriginStack channel until its stars are exactly as wide as Siril's, its noise (R/G/B) is 0.81/0.88/0.89x Siril's on Omega, 1.00/0.75/0.93x on Sunflower and 0.97/0.92/0.89x on Sculptor. Unmatched, per pixel, a sharper stack reads noisier (up to 1.28x on Sculptor's blue).
-- **Speed: faster than Siril on all three**, run back to back on the same machine, even though OriginStack also scores quality, white-balances and detects stars on every frame. Both tools' times moved by up to a third between identical runs over the day (Siril alone took 55-86 s on Omega), so compare within a row.
-- **Memory and disk.** One worker per physical core in these runs (Phase 1 now uses three quarters of them, single-threaded, which is faster and holds fewer frames); the aligned frames stay in memory when there is room. Siril uses less memory on the two shorter sessions, OriginStack less on Sculptor. Peak temporary disk: 11 / 15 / 63 GB against Siril's 17 / 23 / 57 GB.
+- **Sharpness: sharper than Siril on both.** On the same stars OriginStack is 3% narrower on Omega and 2% on Sunflower -- from proper image coaddition (on by default; Zackay & Ofek 2017) and a fix to a hot-pixel step that had been flattening the peaks of undersampled stars. It used 114/114 and 158/158 frames; Siril used 111 and 157.
+- **Noise: quieter once sharpness is matched.** Blurring each OriginStack channel until its stars are exactly as wide as Siril's, its noise (R/G/B) is 0.80/0.86/0.88x Siril's on Omega and 0.84/0.66/0.93x on Sunflower. Unmatched, per pixel, a sharper stack reads noisier (up to 1.05x on Omega's blue).
+- **Speed: faster than Siril on both**, run back to back on the same machine, even though OriginStack also scores quality, white-balances and detects stars on every frame. Both tools' times moved by up to a third between identical runs over the day (Siril alone took 55-86 s on Omega), so compare within a row.
+- **Memory and disk.** Phase 1 runs single-threaded workers on three quarters of the physical cores; the aligned frames stay in memory when there is room, as on both sessions here, so Siril uses less memory (6.5 / 8.0 GB against 12.1 / 14.3). Peak temporary disk: 11 / 15 GB against Siril's 18 / 24 GB.
 - **DeepSkyStacker** took 14 min 8 s on Omega (defaults: plain average, no rejection), gave stars softer than both others (4.83 px against 4.56 for Siril on the same stars), and its stack showed horizontal hot-pixel streaks and a few misregistered frames. A tuned run would look better; it was not repeated.
 - **Where OriginStack fits.** It finishes the image in the same run with no setup, explains the night ([diagnostics](docs/advanced.html)), runs fully offline on request (`--offline`) and does much that the other tools leave to you.
 
-All three sessions were re-measured on 2026-10-02 with this version. Three sessions from one camera are a small sample.
+Omega and Sunflower were re-measured on 2026-10-20 with this version, on an idle 8-core laptop (i9-10885H). Two sessions from one camera are a small sample.
 
 How star width is measured matters more than it looks. It is a Gaussian fit to each of up to 400 bright, unsaturated, isolated stars, **at the same positions in both stacks and on each stack's own pixel grid** (no resampling), and the median is reported. An earlier version of this section compared each stack's FWHM over its own detected star list and concluded OriginStack's stars were tighter; that came from which stars were picked and was withdrawn. Measured properly, OriginStack's stars were then genuinely 13% wider than Siril's on Omega, until a hot-pixel filter that was clipping the cores of bright stars was found, by switching Phase 1 steps off one at a time, and fixed (see the changelog). Registration accuracy (about 0.1 px between frames), the warp kernel, rejection, weighting and normalisation were all checked and are not the cause of anything above.
 

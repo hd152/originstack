@@ -121,22 +121,22 @@
 <main id="main-content">
 <section id="time">
   <div class="wrap">
-    <h2>Una noche de tomas en un minuto y medio</h2>
-    <p class="intro measure">La nebulosa Omega, 114 tomas, en un ordenador de sobremesa de 8 núcleos: <strong>89 segundos</strong> desde los archivos en bruto hasta la imagen terminada, frente a 132 en la versión anterior. El bloque rojo es la parte que hace que la imagen se vea bien; el resto es conseguir que 114 tomas encajen.</p>
+    <h2>Una noche de tomas en aproximadamente un minuto</h2>
+    <p class="intro measure">La nebulosa Omega, 114 tomas, en un portátil de 8 núcleos: <strong>65 segundos</strong> desde los archivos en bruto hasta la imagen terminada, frente a 89 a principios de octubre. El bloque rojo es la parte que hace que la imagen se vea bien; el resto es conseguir que 114 tomas encajen.</p>
 
-    <div class="run" role="img" aria-label="Barra que muestra 89 segundos divididos en carga y puntuación 32.7, registro 9.4, alineación y apilado 24.6, acabado 15.6, y disco y preparación 6.8 segundos">
-      <span style="width:36.7%; background:#1d7f86"></span>
-      <span style="width:10.5%; background:#4fa3a8"></span>
-      <span style="width:27.6%; background:#8cc5c8"></span>
-      <span style="width:17.5%; background:#b3312a"></span>
-      <span style="width:7.7%; background:#b9c3cf"></span>
+    <div class="run" role="img" aria-label="Barra que muestra 65 segundos divididos en carga y puntuación 13.2, registro 2.6, alineación y apilado 22.7, acabado 18.3, y disco y preparación 7.9 segundos">
+      <span style="width:20.4%; background:#1d7f86"></span>
+      <span style="width:4.0%; background:#4fa3a8"></span>
+      <span style="width:35.1%; background:#8cc5c8"></span>
+      <span style="width:28.3%; background:#b3312a"></span>
+      <span style="width:12.2%; background:#b9c3cf"></span>
     </div>
     <ul class="legend">
-      <li><i style="background:#1d7f86"></i>Cargar, calibrar, puntuar<b>32.7 s</b></li>
-      <li><i style="background:#4fa3a8"></i>Registrar<b>9.4 s</b></li>
-      <li><i style="background:#8cc5c8"></i>Alinear y apilar<b>24.6 s</b></li>
-      <li><i style="background:#b3312a"></i>Acabar la imagen<b>15.6 s</b></li>
-      <li><i style="background:#b9c3cf"></i>Disco y preparación<b>6.8 s</b></li>
+      <li><i style="background:#1d7f86"></i>Cargar, calibrar, puntuar<b>13.2 s</b></li>
+      <li><i style="background:#4fa3a8"></i>Registrar<b>2.6 s</b></li>
+      <li><i style="background:#8cc5c8"></i>Alinear y apilar<b>22.7 s</b></li>
+      <li><i style="background:#b3312a"></i>Acabar la imagen<b>18.3 s</b></li>
+      <li><i style="background:#b9c3cf"></i>Disco y preparación<b>7.9 s</b></li>
     </ul>
 
     <div class="phases">
@@ -190,15 +190,14 @@
 <section id="compare">
   <div class="wrap">
     <h2>Comparativa con Siril y DeepSkyStacker</h2>
-    <p class="intro measure">Las mismas tomas, los mismos bias, darks y flats, un mismo equipo, cada herramienta con ajustes de tipo predeterminado. Tres sesiones del Celestron Origin: la nebulosa Omega (114 × 30 s), la galaxia del Girasol (158 × 20 s) y la galaxia del Escultor (532 × 10 s).</p>
+    <p class="intro measure">Las mismas tomas, los mismos bias, darks y flats, un mismo equipo, cada herramienta con ajustes de tipo predeterminado. Dos sesiones del Celestron Origin: la nebulosa Omega (114 × 30 s) y la galaxia del Girasol (158 × 20 s). La galaxia del Escultor (532 × 10 s) se está volviendo a medir con esta versión.</p>
 
     <table class="wide">
       <caption>Primero OriginStack, después Siril. Solo apilado significa sin los pasos de acabado de OriginStack, que Siril no tiene.</caption>
       <thead><tr><th>Sesión</th><th class="n">Solo apilado</th><th class="n">OriginStack, imagen terminada</th><th class="n">Memoria máxima</th><th class="n">Anchura de las estrellas</th></tr></thead>
       <tbody>
-        <tr><th>Omega, 114 tomas</th><td class="n">68 s / 86 s</td><td class="n">90 s</td><td class="n">10.6 / 6.5 GB</td><td class="n">4.40 / 4.56 px</td></tr>
-        <tr><th>Girasol, 158 tomas</th><td class="n">84 s / 106 s</td><td class="n">107 s</td><td class="n">12.8 / 7.8 GB</td><td class="n">3.52 / 3.60 px</td></tr>
-        <tr><th>Escultor, 532 tomas</th><td class="n">169 s / 195 s</td><td class="n">184 s</td><td class="n">9.2 / 11.2 GB</td><td class="n">2.69 / 3.01 px</td></tr>
+        <tr><th>Omega, 114 tomas</th><td class="n">46 s / 56 s</td><td class="n">65 s</td><td class="n">12.1 / 6.5 GB</td><td class="n">4.42 / 4.56 px</td></tr>
+        <tr><th>Girasol, 158 tomas</th><td class="n">59 s / 72 s</td><td class="n">86 s</td><td class="n">14.3 / 8.0 GB</td><td class="n">3.51 / 3.60 px</td></tr>
       </tbody>
     </table>
 
@@ -206,24 +205,21 @@
       <div class="chart">
         <h3>Anchura de las estrellas sobre las mismas estrellas (menor es más nítido)</h3>
         <h3 class="sub">Omega</h3>
-        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:67.7%"></i><b>4.40 px</b></div></div>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:68.0%"></i><b>4.42 px</b></div></div>
         <div class="row"><span>Siril</span><div class="track"><i style="width:70.2%"></i><b>4.56 px</b></div></div>
         <div class="row"><span>DeepSkyStacker</span><div class="track"><i style="width:74.3%"></i><b>4.83 px</b></div></div>
         <h3 class="sub">Girasol</h3>
-        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.2%"></i><b>3.52 px</b></div></div>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.0%"></i><b>3.51 px</b></div></div>
         <div class="row"><span>Siril</span><div class="track"><i style="width:55.4%"></i><b>3.60 px</b></div></div>
-        <h3 class="sub">Escultor</h3>
-        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:41.4%"></i><b>2.69 px</b></div></div>
-        <div class="row"><span>Siril</span><div class="track"><i style="width:46.3%"></i><b>3.01 px</b></div></div>
         <small>Un ajuste gaussiano a cada una de hasta 400 estrellas brillantes, no saturadas y aisladas, en las mismas posiciones en ambos apilados, cada uno en su propia rejilla de píxeles.</small>
       </div>
 
       <div class="verdict">
         <h3>Qué dicen los números</h3>
-        <p><strong>Nitidez: más nítido que Siril en las tres.</strong> Sobre las mismas estrellas, OriginStack es un 4% más estrecho en Omega (4.40 frente a 4.56 px), un 1.5% en el Girasol y un 10% en el Escultor. Dos cambios lo hicieron posible: la <em>coadición óptima de imágenes</em>, activada por defecto, que pondera cada escala de detalle según la nitidez, la transparencia y el ruido de cada toma (Zackay &amp; Ofek, 2017); y la corrección de un paso de píxeles calientes que aplanaba el pico de la mayoría de las estrellas brillantes en cada toma &mdash; en estrellas submuestreadas, el centro de una estrella se parece exactamente a un píxel caliente para una prueba que solo compara un píxel con sus vecinos. Además usó más tomas: 114, 158 y 532, frente a las 111, 157 y 525 de Siril.</p>
-        <p><strong>Ruido: menos ruido que Siril una vez igualada la nitidez.</strong> Un apilado más nítido tiene más ruido por píxel, así que la comparación justa desenfoca cada canal de OriginStack hasta que sus estrellas son exactamente tan anchas como las de Siril. Entonces su ruido, rojo/verde/azul, es 0.81, 0.88, 0.89 veces el de Siril en Omega, 1.00, 0.75, 0.93 en el Girasol (sus estrellas en rojo ya eran tan anchas como las de Siril) y 0.97, 0.92, 0.89 en el Escultor. Sin igualar, por píxel, es 0.92, 1.05, 1.06; 1.00, 0.84, 0.97; y 1.16, 1.08, 1.28 &mdash; cuanto más nítidas las estrellas, más alto ese número.</p>
-        <p><strong>Velocidad: más rápido que Siril en las tres.</strong> Hasta el apilado, ejecutados uno tras otro en el mismo equipo: 68 s frente a los 86 s de Siril en Omega, 84 frente a 106 s en el Girasol y 169 frente a 195 s en el Escultor. OriginStack sigue haciendo trabajo por toma que Siril no hace &mdash; puntuación de calidad, balance de blancos y detección de estrellas en cada toma &mdash; y lo recupera en el registro y el apilado. Los tiempos de ambas herramientas variaron hasta un tercio entre ejecuciones idénticas a lo largo del día (Siril solo tardó entre 55 y 86 s en Omega), así que compara dentro de cada fila. La imagen terminada cuesta otros 14 a 23 s.</p>
-        <p><strong>Memoria y disco.</strong> OriginStack ejecuta un proceso por núcleo físico y mantiene las tomas alineadas en memoria cuando hay espacio: 9.2 GB en el Escultor frente a 11.2 de Siril, y 10.6 y 12.8 GB en las dos sesiones más cortas, donde todo cupo en memoria (Siril 6.5 y 7.8). El disco temporal es menor en las dos sesiones más cortas (11 y 15 GB frente a 17 y 23 GB) y mayor en el Escultor (63 frente a 57 GB).</p>
+        <p><strong>Nitidez: más nítido que Siril en ambas.</strong> Sobre las mismas estrellas, OriginStack es un 3% más estrecho en Omega (4.42 frente a 4.56 px) y un 2% en el Girasol. Dos cambios lo hicieron posible: la <em>coadición óptima de imágenes</em>, activada por defecto, que pondera cada escala de detalle según la nitidez, la transparencia y el ruido de cada toma (Zackay &amp; Ofek, 2017); y la corrección de un paso de píxeles calientes que aplanaba el pico de la mayoría de las estrellas brillantes en cada toma &mdash; en estrellas submuestreadas, el centro de una estrella se parece exactamente a un píxel caliente para una prueba que solo compara un píxel con sus vecinos. Además usó más tomas: 114 y 158, frente a las 111 y 157 de Siril.</p>
+        <p><strong>Ruido: menos ruido que Siril una vez igualada la nitidez.</strong> Un apilado más nítido tiene más ruido por píxel, así que la comparación justa desenfoca cada canal de OriginStack hasta que sus estrellas son exactamente tan anchas como las de Siril. Entonces su ruido, rojo/verde/azul, es 0.80, 0.86, 0.88 veces el de Siril en Omega y 0.84, 0.66, 0.93 en el Girasol (sus estrellas en rojo ya eran tan anchas como las de Siril). Sin igualar, por píxel, es 0.92, 1.02, 1.05 y 0.84, 0.73, 0.97 &mdash; cuanto más nítidas las estrellas, más alto ese número.</p>
+        <p><strong>Velocidad: más rápido que Siril en ambas.</strong> Hasta el apilado, ejecutados uno tras otro en el mismo equipo: 46 s frente a los 56 s de Siril en Omega y 59 frente a 72 s en el Girasol. OriginStack sigue haciendo trabajo por toma que Siril no hace &mdash; puntuación de calidad, balance de blancos y detección de estrellas en cada toma &mdash; y lo recupera en el registro y el apilado. Los tiempos de ambas herramientas variaron hasta un tercio entre ejecuciones idénticas a lo largo del día (Siril solo tardó entre 55 y 86 s en Omega), así que compara dentro de cada fila. La imagen terminada cuesta otros 18 a 27 s.</p>
+        <p><strong>Memoria y disco.</strong> OriginStack mantiene las tomas alineadas en memoria cuando hay espacio, como en las dos sesiones de aquí: 12.1 y 14.3 GB, frente a 6.5 y 8.0 de Siril. El disco temporal es menor: 11 y 15 GB frente a 18 y 24 GB de Siril.</p>
         <p><strong>DeepSkyStacker</strong> tardó 14 min 8 s en Omega, produjo estrellas más suaves que los otros dos y, con sus ajustes predeterminados, dejó rastros de píxeles calientes y algunas tomas mal registradas.</p>
       </div>
     </div>
