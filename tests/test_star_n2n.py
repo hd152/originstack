@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 import pytest
+from scipy import ndimage as ndi
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
 import eval_star_n2n as ev  # noqa: E402
@@ -81,11 +82,23 @@ def test_inject_count_flux_and_noise(field_and_z):
     s, ys, xs, flux = field.inject(rng, alpha=1.0)
     n = field.n_donors
     assert abs(len(ys) - n) < 5 * np.sqrt(n)          # Poisson(alpha * donors)
-    # total injected flux (edge clipping only loses a little)
-    assert 0.8 < s.sum() / flux.sum() <= 1.05
-    # photon noise is there: far from any injected star the layer is exactly 0
+    # total injected flux: copies of the donors, out to where their wings vanish
+    assert 0.9 < s.sum() / flux.sum() <= 1.1
+    # copies only: far from any injected star the layer is exactly 0
     assert (s == 0).mean() > 0.3
     assert len(field.inject(rng, alpha=0.0)[1]) == 0
+
+
+def test_real_discs_are_zero_mean_noise_at_the_donors(field_and_z):
+    field, _, _ = field_and_z
+    d = field.real_discs(np.random.default_rng(4))
+    lum = d.mean(-1)
+    assert abs(float(d.sum())) < 0.05 * float(np.abs(d).sum())     # noise, not flux
+    on = np.zeros(lum.shape, bool)
+    on[field.donor_y, field.donor_x] = True
+    assert (lum[on] != 0).all()                                     # one disc on every donor
+    far = ~ndi.binary_dilation(on, iterations=sn.COPY_R_MAX + 1)
+    assert (lum[far] == 0).all()
 
 
 def test_correction_formula_with_oracle(monkeypatch):
@@ -103,7 +116,10 @@ def test_correction_formula_with_oracle(monkeypatch):
 def test_identity_network_returns_input(tmp_path):
     img = _synthetic(seed=2)
     path = _zero_out_weights(tmp_path / 'zero.npz')
-    starless, stars = sn.remove_stars_nn(img, model_path=path, alpha=0.5)
+    # tta=0: an identity network passes the run-time noise discs straight through; the
+    # hole guard would raise noise pixels inside star footprints
+    starless, stars = sn.remove_stars_nn(img, model_path=path, alpha=0.5, tta=0, guard=False,
+                                         saturated=False)
     np.testing.assert_allclose(starless, img, atol=1e-3 * float(np.abs(img).max()))
     assert np.abs(stars).max() < 1e-3 * float(np.abs(img).max())
     nd._weights_cache.pop(path, None)
@@ -143,8 +159,108 @@ def test_eval_metrics_on_identity_model(tmp_path):
     p = tmp_path / 'stack.npy'
     np.save(p, _synthetic(seed=6))
     w = nd.load_weights(_zero_out_weights(tmp_path / 'zero.npz'))
-    r = ev.evaluate(str(p), w, alpha=1.0, test_alpha=0.3, seed=0)
+    r = ev.evaluate(str(p), w, alpha=1.0, test_alpha=0.3, seed=0, tta=0, post=False)
     assert r['inject_left']['all'] == pytest.approx(1.0, abs=0.05)
     assert r['real_left']['all'] == pytest.approx(1.0, abs=0.05)
     assert r['faint_kept'] == pytest.approx(1.0, abs=0.05)
     assert abs(r['sky_shift']) < 1e-3 and r['sky_mad'] < 1e-3
+
+
+def test_guard_fills_holes_and_leaves_the_sky(field_and_z):
+    field, z, _ = field_and_z
+    x = np.zeros_like(z)
+    y0, x0, q = field.donor_y[0], field.donor_x[0], field.donor_r[0]
+    x[y0 - 1:y0 + 2, x0 - 1:x0 + 2] = -500.0                 # an inverted core
+    x[5, 5] = -3.0                                           # sky noise far from any star
+    star = np.zeros(z.shape[:2], bool)
+    star[field.donor_y, field.donor_x] = True
+    far = ~ndi.binary_dilation(star, iterations=sn.COPY_R_MAX + 5)
+    g = sn.guard_holes(x, field)
+    assert g[y0, x0].min() >= -sn.GUARD_SIGMA - 1e-6        # floored at ring p10 (0) - 1
+    np.testing.assert_array_equal(g[far], x[far])           # nothing changes off the stars
+    assert (g >= x).all()                                    # it only ever raises
+
+
+def test_fill_saturated_removes_the_clipped_stars_only(field_and_z):
+    field, z, _ = field_and_z
+    assert field.saturated.any()
+    out = sn.fill_saturated(z, z, field)
+    sy, sx = field.det_y[field.saturated], field.det_x[field.saturated]
+    for y, x in zip(sy, sx):                                # the core now looks like its surroundings
+        yy, xx = np.mgrid[-24:25, -24:25]
+        ring = out[y - 24:y + 25, x - 24:x + 25][np.hypot(yy, xx) > 16]
+        assert z[y, x].mean() > 50                          # it was a bright star...
+        assert abs(out[y - 1:y + 2, x - 1:x + 2].mean() - np.median(ring)) < 5   # ...now sky
+    free = np.ones(z.shape[:2], bool)
+    free[sy, sx] = False
+    far = ndi.distance_transform_edt(free) > sn.HALO_R + 1
+    np.testing.assert_array_equal(out[far], z[far])         # nothing else is touched
+
+
+# ── --remove-stars-method nn ─────────────────────────────────────────────────
+
+def test_cli_remove_stars_method():
+    from src.cli import parse_args
+    assert parse_args(['-d', 'x', '-o', 'y.fits']).remove_stars_method == 'inpaint'
+    a = parse_args(['-d', 'x', '-o', 'y.fits', '--remove-stars', '--remove-stars-method', 'nn'])
+    assert a.remove_stars and a.remove_stars_method == 'nn'
+
+
+def test_remove_stars_method_survives_a_saved_config(tmp_path):
+    from src.cli import load_config_file, parse_args, save_effective_config
+    a = parse_args(['-d', 'x', '-o', str(tmp_path / 's.fits'), '--remove-stars', '--remove-stars-method', 'nn'])
+    save_effective_config(a, str(tmp_path / 's.fits'))
+    b = parse_args(['-d', 'x', '-o', str(tmp_path / 't.fits')])
+    load_config_file(str(tmp_path / 's_config.toml'), b)
+    assert b.remove_stars and b.remove_stars_method == 'nn'
+
+
+def _phase4(tmp_path, monkeypatch, method, available=True):
+    import src.postprocess as pp
+    from src.cli import parse_args
+    from src.models import ProcessingStats
+    calls = {'nn': [], 'inpaint': 0, 'sidecar': []}
+
+    def fake_nn(img, *a, **k):
+        calls['nn'].append(img.copy())
+        return img * 0.5, img * 0.5
+
+    def fake_inpaint(img, sources, fwhm, **k):
+        calls['inpaint'] += 1
+        return img, 1
+    monkeypatch.setattr(sn, 'remove_stars_nn', fake_nn)
+    monkeypatch.setattr(sn, 'model_available', lambda path=None: available)
+    monkeypatch.setattr('src.star_removal.remove_stars', fake_inpaint)
+    monkeypatch.setattr(pp, '_save_sidecar_fits', lambda img, out, suffix: calls['sidecar'].append(suffix))
+    img = _synthetic(seed=8)
+    args = parse_args(['-d', '.', '-o', str(tmp_path / 's.fits'), '--remove-stars',
+                       '--remove-stars-method', method, '--skip-step', 'background'])
+    args._diagnostic_dir = None
+    pp.postprocess_stack(img.copy(), args, [], ProcessingStats())
+    return img, calls
+
+
+def test_phase4_nn_removes_stars_from_the_linear_stack(tmp_path, monkeypatch):
+    img, calls = _phase4(tmp_path, monkeypatch, 'nn')
+    assert len(calls['nn']) == 1
+    np.testing.assert_array_equal(calls['nn'][0], img)       # Phase 4's input, not its output
+    assert calls['inpaint'] == 0 and calls['sidecar'].count('_starless') == 1
+
+
+def test_phase4_nn_falls_back_to_inpaint_without_the_model(tmp_path, monkeypatch):
+    _, calls = _phase4(tmp_path, monkeypatch, 'nn', available=False)
+    assert calls['nn'] == [] and calls['inpaint'] == 1
+
+
+@pytest.mark.skipif(not sn.model_available(), reason="star removal model not present")
+def test_bundled_model_removes_unsaturated_stars():
+    img = _synthetic(seed=9)
+    starless, stars = sn.remove_stars_nn(img)
+    assert np.isfinite(starless).all()
+    np.testing.assert_allclose(starless + stars, img, rtol=1e-5, atol=1e-3)
+    z, _, _, B = sn.normalise_image(img)
+    f = sn.StarField(z, B)
+    fin = sn.aperture_flux(img, f.donor_y, f.donor_x).mean(1)
+    fout = sn.aperture_flux(starless, f.donor_y, f.donor_x).mean(1)
+    bright = fin > np.quantile(fin, 0.5)
+    assert np.median(fout[bright] / fin[bright]) < 0.3       # most of each star is gone

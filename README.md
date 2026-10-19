@@ -662,6 +662,7 @@ Most post-processing is **on by default**. Here are the disable flags:
 | Colour calibration against Gaia (online, needs a sky position) | ✅ on | `--no-color-calibrate` |
 | Colour-preserving stretch | ❌ off | `--stretch-color preserve` |
 | Star removal (writes a `_starless.fits` sidecar; main output keeps stars) | ❌ off | `--remove-stars` |
+| ↳ learned star removal instead of the inpaint (EXPERIMENTAL; sidecar = starless linear stack) | ❌ off | `--remove-stars-method nn` |
 | Local contrast enhancement | ✅ on | `--no-local-contrast` |
 | Chromatic aberration correction | ✅ on | `--no-ca-correction` |
 | Cosmic ray rejection | auto | `--cosmic-ray-rejection` / `--no-cosmic-ray-rejection` (auto-skipped on deep rejection stacks) |

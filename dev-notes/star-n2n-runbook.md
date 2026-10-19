@@ -1,7 +1,10 @@
 # Learned star removal by Noisier2Noise: runbook (EXPERIMENTAL, started 2026-10-19)
 
-Status (2026-10-19): tests pass; **v1 trained and evaluated: no-go** (see "v1 results").
-No CLI flag; `src/star_n2n.py` is not wired into Phase 4.
+Status (2026-10-20): **shipped as `--remove-stars-method nn` (experimental, v7 weights + inference
+fixes); passes every check on the five held-out stacks except Orion faint injected 0.26.**
+History: v1-v4 (modelled injected stars) failed; v5 (copies of the image's own stars)
+passed star removal; v6/v7 fixed the brightest stars; inference fixes and the CLI option
+are in the last section.
 
 ## Idea
 
@@ -127,3 +130,123 @@ fix below, injected and real agree to +-0.1 px either way.
 
 **v4**: a PSF per donor-flux quartile and zone (cores from that bin's isolated stars, scaled
 by a template fit inside 4 px, wings from the bright stamps).
+
+v4 result (30k steps): val 3.04 (identity 25.2) -- still recognised. Real left 0.03-0.91,
+injected -0.70 to 0.04; pasted real cutouts again kept like real stars (0.64-0.76 vs
+0.65-0.78). Modelling the PSF was abandoned.
+
+## v5 (2026-10-20): copies of the image's own stars -- removal works
+
+Injected stars are copies of uniformly drawn unsaturated donors, plane-subtracted (robust:
+a neighbour on the border raised the plane and cost copies a third of their flux), out to
+where the wing drops below 0.05 sigma (+3 px taper, 6-24 px). A copy brings a disc of its
+donor's surroundings; every real donor gets one in the training input too (cutout from a
+star-free point 2-3 copy radii from a random donor -- star-free points anywhere were mostly
+bright nebula on the Pleiades, disc sigma 15.7 vs 0.9), and `starless_z` adds them at run
+time (mean of `tta` = 2 realisations; the known discs stay out of the formula's z).
+
+Training: **val flat at 10.8-12.5 from step 2000 to 30,000** (identity 25.0) -- at the
+~half-of-identity floor, no slide. Eval (`--tta 2`):
+
+| stack | real_left faint / mid / bright | inject_left | faint_kept | sky_shift | hole |
+|---|---|---|---|---|---|
+| Omega | 0.02 / 0.04 / -0.01 | -0.09 / -0.10 / -0.11 | 0.95 | +0.028 | -3.6 |
+| Orion | -0.02 / 0.15 / 0.08 | 0.07 / 0.09 / 0.03 | 0.97 | +0.055 | -33.6 |
+| Pleiades | -0.06 / 0.03 / 0.01 | -0.08 / -0.05 / 0.00 | 0.92 | +0.007 | -585 |
+| Sculptor | -0.22 / 0.02 / 0.06 | -0.08 / -0.06 / -0.01 | 0.90 | -0.014 | -0.20 |
+| Sunflower | -0.23 / -0.01 / 0.03 | -0.21 / -0.09 / 0.03 | 0.91 | -0.010 | -0.11 |
+
+Crops: Pleiades and Sunflower starless panels clean, a few faint blotches. Fails:
+- **The brightest ~1%** (peak 0.8-1.0 of the saturation level): left -0.6 (inverted, cores
+  down to -1765 sigma on the Pleiades) or +1.0 (kept, Orion's Trapezium); 99% of stars left
+  -0.01 to +0.10. Their halos reach past the 24 px copy radius (a truncated-halo tell for
+  exactly those) and uniform patch centring left them rare. **v6**: copies out to 40 px,
+  patch centres ~ sqrt(copy flux) from real and injected alike (exchangeability holds:
+  selection depends on flux only).
+- Orion: colour "beach-ball" artefacts around a bright star; nebula edges in the stars layer.
+
+## v6 / v7 (2026-10-20)
+
+**v6** (copies out to 40 px; patch centres ~ sqrt(copy flux), real and injected alike):
+Pleiades brightest left -0.6 -> -0.22..+0.02, Omega hole -3.6 -> +0.15. But Orion kept
+every bright star (left +1.0): they all sit in nebula, while copies landed by the overall
+star density mostly on dark sky. Crops: coloured blobs at a few bright stars -- the 9
+brightest Pleiades donors had **red pinned at 0.79-0.85 of the red maximum** (soft
+saturation; G/B 0.6-0.7), not additive.
+
+**v7**: a copy lands 64-192 px from its own donor (same background and PSF zone, outside
+the network's view of its twin); saturation tested per channel at 0.7 of each channel's
+maximum (Pleiades 34 -> 46 saturated, Orion 21 -> 46). Val 8.63 (identity 19.5, the same
+~0.44 ratio as v5/v6).
+
+| stack | real_left faint / mid / bright | inject_left | faint_kept | sky_shift | hole |
+|---|---|---|---|---|---|
+| Omega | 0.03 / 0.06 / 0.05 | -0.03 / -0.04 / -0.04 | 0.96 | +0.014 | -0.27 |
+| Orion | 0.04 / 0.11 / 0.22 | 0.16 / 0.08 / 0.13 | 0.95 | +0.012 | +0.24 |
+| Pleiades | -0.02 / 0.08 / 0.03 | -0.12 / -0.02 / -0.00 | 0.94 | +0.001 | -34.5 |
+| Sculptor | -0.09 / 0.10 / 0.12 | -0.07 / 0.02 / 0.13 | 0.94 | -0.003 | -0.22 |
+| Sunflower | -0.14 / 0.02 / 0.02 | -0.15 / 0.01 / -0.00 | 0.93 | -0.001 | -5.07 |
+
+Every stack passes real/injected (within +-0.22), faint sources and sky shift (Orion's
+0.052 -> 0.012). Open:
+- Saturated stars (now ~5% of detections on the nebula/cluster fields) stay, by design.
+- Orion's brightest unsaturated stars are still partly kept (top 5: left 0.48; 9.4k-37k
+  flux: 0.37), Pleiades' brightest still dip in the core (down to -529 sigma), Sunflower
+  hole -5. Whole-image views (`show_v7_*.jpg`): faint and mid stars gone, galaxy arms,
+  small background galaxies and nebula kept; bright stars remain.
+
+## Hole guard and the comparison with `--remove-stars` (2026-10-20)
+
+`guard_holes` (on by default): inside each donor's footprint the starless estimate is floored
+at the ring's 10th percentile - 1 sigma. v7 holes: Pleiades -34.5 -> -0.50, Sunflower
+-5.07 -> -1.67, the others within +-0.22.
+
+`eval_star_n2n.py --method inpaint` scores the existing remover
+(`star_removal.starless_from_image`, normalised-convolution inpaint of brightness-scaled
+disks; FWHM 5.2-6.1 px from the stamps' second moments, 4.4 px for the crops):
+
+| | inpaint | v7 + guard |
+|---|---|---|
+| real / injected left | 0.00-0.05 / 0.00-0.13 | -0.12..0.23 / -0.15..0.16 |
+| faint_kept, sky_shift | 1.00, 0.000 | 0.93-0.96, <= 0.014 |
+| saturated stars left | 0.00 | 0.98-1.00 |
+| fill_noise (ideal 1) | 0.07-0.39 | 0.94-1.09 |
+
+The flux metrics favour the inpaint by construction (it replaces each disk, so the aperture
+flux there is ~0). The crops (`C:\nn_work\starless\compare_*.jpg`, input | inpaint | v7) show
+what they miss: the inpaint leaves smooth, noise-free disks up to 38 px (2% of the image)
+everywhere, erasing the nebula structure under them; v7 keeps the sky texture and the
+nebula structure and leaves no disks, but leaves saturated stars and puts magenta / blue /
+green blotches on the brightest nebula (Omega's core).
+
+## Inference fixes and `--remove-stars-method nn` (2026-10-20)
+
+On v7, without retraining:
+- `constrain_star_layer`: outside every detection's footprint the star layer is clipped to
+  -1..+5 local-noise sigma; inside a donor's footprint its colour fades to the donor's own as
+  the layer's S/N rises through 3..8. Omega's bright nebula between stars: colour deviation
+  median 6.5 -> 2.8 sigma, share > 5 sigma 56% -> 9%.
+- `fill_saturated` (hybrid): per saturated star, subtract the per-channel radial halo (ring
+  medians to 150 px, cut where < 0.3 sigma), fill the core above 20 sigma by normalised
+  convolution + sky noise. Filling to where the halo stops falling (<= 60 px) left flat discs
+  inside bright halo rings. Spikes and reflection rings (not symmetric) remain.
+- Eval: the remover now builds the star field of its own input (as `remove_stars_nn` does);
+  with the clean image's field, injected test stars had no footprint and the constraint kept
+  them (inject_left 0.45-0.75, an eval artefact).
+
+Final, shipped weights (`src/data/nn_starless.npz` = v7), `--tta 2`, all post steps:
+
+| stack | real_left | inject_left | faint_kept | sky_shift | hole | fill_noise | sat_left |
+|---|---|---|---|---|---|---|---|
+| Omega | 0.07 / 0.09 / 0.06 | 0.09 / -0.01 / -0.03 | 0.96 | +0.013 | -0.23 | 1.05 | 0.01 |
+| Orion | 0.07 / 0.13 / 0.22 | 0.26 / 0.03 / 0.05 | 0.94 | +0.010 | +0.10 | 1.10 | 0.00 |
+| Pleiades | -0.01 / 0.09 / 0.05 | -0.00 / -0.08 / -0.02 | 0.94 | -0.001 | -0.35 | 0.98 | 0.00 |
+| Sculptor | -0.06 / 0.11 / 0.13 | 0.02 / -0.04 / 0.04 | 0.94 | -0.003 | -0.19 | 0.95 | 0.00 |
+| Sunflower | -0.11 / 0.04 / 0.03 | -0.19 / -0.02 / -0.01 | 0.93 | -0.001 | -0.60 | 0.94 | 0.00 |
+
+Every check passes on every stack except Orion's faint injected tertile (0.26 vs 0.2) and
+real bright (0.22). Integrated as `--remove-stars --remove-stars-method nn` (default
+`inpaint`): the sidecar is the starless linear stack (Phase 4's input), 25.5 s on Sunflower.
+
+Open: diffraction spikes / reflection rings of saturated stars; Orion's brightest unsaturated
+stars partly kept; residual colour patches on the brightest nebula.

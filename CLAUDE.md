@@ -117,6 +117,7 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 | `psf_deconvolution.py` | PSF estimation; RL / RL-SV / TV / sparse FISTA (`--deconvolve`) |
 | `sky_model.py` | EXPERIMENTAL physical sky model (`--bg-method physical`); `remove_physical_sky_with_reason` declines on narrow fields -> DBE |
 | `star_removal.py` / `star_repair.py` | `--remove-stars` (opt-in), `--starless-process`, `--layered-stretch`; saturated-core repair (`--repair-stars`) |
+| `star_n2n.py` | `--remove-stars-method nn` (EXPERIMENTAL): Noisier2Noise star removal on the linear stack (the `nn_denoise` U-Net, weights `src/data/nn_starless.npz`); injected training stars are copies of the image's own stars with noise discs on real ones; inference adds the discs (tta), holds the star layer to stars (`constrain_star_layer`), floors holes (`guard_holes`), subtracts saturated stars' halos (`fill_saturated`). Train with `tools/gen_starless_bank.py` + `tools/train_nn_denoise.py`, score with `tools/eval_star_n2n.py` (`--method inpaint` for the old remover); [star-n2n runbook](dev-notes/star-n2n-runbook.md) |
 | `source_separation.py` / `exposure_fusion.py` | NMF star/nebula split (`--nmf-separate`); Mertens fusion (`--hdr-blend-mode fusion`) |
 | `atmospheric_dispersion.py` | EXPERIMENTAL dispersion correction (`--fix-atmospheric-dispersion`) |
 | `uncertainty.py` | Monte Carlo Phase 4 uncertainty (`--uncertainty-propagate`), confidence map, `--error-aware-stretch` |
