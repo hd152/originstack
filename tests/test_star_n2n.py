@@ -264,3 +264,31 @@ def test_bundled_model_removes_unsaturated_stars():
     fout = sn.aperture_flux(starless, f.donor_y, f.donor_x).mean(1)
     bright = fin > np.quantile(fin, 0.5)
     assert np.median(fout[bright] / fin[bright]) < 0.3       # most of each star is gone
+
+
+def test_starless_process_nn_splits_with_the_linear_sky_level(tmp_path, monkeypatch):
+    """--starless-process with --remove-stars-method nn: the split before the denoisers uses
+    the network, with B measured on Phase 4's (linear) input; the later splits keep the
+    inpaint. The layers still sum back to the input."""
+    import src.postprocess as pp
+    from src.cli import parse_args
+    from src.models import ProcessingStats
+    seen = []
+
+    def fake_nn(img, *a, sky_level=None, **k):
+        seen.append(sky_level)
+        return img * 0.25, img * 0.75
+    monkeypatch.setattr(sn, 'remove_stars_nn', fake_nn)
+    monkeypatch.setattr(sn, 'model_available', lambda path=None: True)
+    img = _synthetic(seed=10)
+    expect = sn.linear_sky_level(img)
+    args = parse_args(['-d', '.', '-o', str(tmp_path / 's.fits'), '--starless-process',
+                       '--remove-stars-method', 'nn', '--skip-step', 'background'])
+    args._diagnostic_dir = None
+    pp.postprocess_stack(img.copy(), args, [], ProcessingStats())
+    assert len(seen) == 1                                    # only the pre-denoise split
+    np.testing.assert_allclose(seen[0], expect)
+    assert (np.asarray(seen[0]) > 1).all()                   # a real sky, not the subtracted ~0
+
+    starless, stars = pp._split_starless(img, np.zeros(1), [], args, nn_sky=expect)
+    np.testing.assert_allclose(starless + stars, img, rtol=1e-6)

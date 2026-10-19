@@ -1012,6 +1012,8 @@ def test_dbe_sample_patches_matches_numpy():
             -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.0 ** 2))
     emission = (rng.random((H, W)) < 0.02).astype(np.float32)
 
+    # the first call must take the native path, or both calls run the numpy loop
+    assert bg.HAS_NATIVE and hasattr(native, 'dbe_sample_patches')
     c1, v1 = bg._sample_background_patches(channel, emission, 48, 0.30,
                                            5100.0, 60.0)
     had = bg.HAS_NATIVE
