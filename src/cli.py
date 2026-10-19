@@ -2566,7 +2566,8 @@ def build_parser() -> argparse.ArgumentParser:
                         'nebula structure under them; saturated stars have their halo '
                         'subtracted and their core filled. With nn the sidecar is the '
                         'starless version of the linear stack (like the main FITS), for '
-                        'your own processing.')
+                        'your own processing. It also sets how --starless-process takes '
+                        'the stars out before the denoisers.')
     g_post.add_argument('--starless-process', dest='starless_process', action='store_true',
                    help='Run the denoisers and local contrast on a starless copy '
                         'of the image, then add the stars back untouched. With no '

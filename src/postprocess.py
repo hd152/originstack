@@ -244,7 +244,7 @@ def _median_fwhm(final, default: float = 4.0) -> float:
     return float(np.median(vals)) if vals else float(default)
 
 
-def _split_starless(stacked: np.ndarray, sources, final, args):
+def _split_starless(stacked: np.ndarray, sources, final, args, nn_sky=None):
     """Split ``stacked`` into (starless, stars) with ``starless + stars == stacked``.
 
     Returns (None, None) when the split is off, unavailable, or unsafe (no
@@ -259,6 +259,14 @@ def _split_starless(stacked: np.ndarray, sources, final, args):
             or sources is None or len(sources) == 0):
         return None, None
     try:
+        if nn_sky is not None:
+            # --remove-stars-method nn: the network keeps the sky noise and the nebula
+            # under each star, where the inpaint leaves smooth discs for the denoisers.
+            # Only the split before the denoisers passes nn_sky: deconvolution and local
+            # contrast split the denoised image, outside what the network was trained on
+            from src import star_n2n
+            starless, _ = star_n2n.remove_stars_nn(stacked, sky_level=nn_sky)
+            return starless, stacked - starless
         from src.star_removal import remove_stars
         starless, n = remove_stars(stacked, sources, _median_fwhm(final))
         if n <= 0:
@@ -674,6 +682,14 @@ def postprocess_stack(
     _rs_linear = (stacked.copy() if getattr(args, 'remove_stars', False)
                   and getattr(args, 'remove_stars_method', 'inpaint') == 'nn'
                   and 'remove_stars' not in skip_steps else None)
+    # and --starless-process with nn needs the linear sky level: background extraction
+    # removes it before the split
+    _split_sky = None
+    if (getattr(args, 'starless_process', False) and 'starless_process' not in skip_steps
+            and getattr(args, 'remove_stars_method', 'inpaint') == 'nn'):
+        from src import star_n2n
+        if star_n2n.model_available():
+            _split_sky = star_n2n.linear_sky_level(stacked)
 
     _cache_key = (_early_cache_key(stacked, args, skip_steps)
                   if _early_cache_usable(args, _diag_dir) else None)
@@ -690,7 +706,7 @@ def postprocess_stack(
     # with no stars in it they need no star mask (nothing to protect, no halo
     # to leak into a background estimate), and the stars layer is added back
     # untouched after the last denoiser.
-    _dn_starless, _dn_stars = _split_starless(stacked, _pp_sources, final, args)
+    _dn_starless, _dn_stars = _split_starless(stacked, _pp_sources, final, args, _split_sky)
     if _dn_starless is not None:
         safe_print("\n  Starless processing: denoising the starless layer only")
         stacked = _dn_starless

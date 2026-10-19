@@ -397,7 +397,7 @@ def constrain_star_layer(z: np.ndarray, x: np.ndarray, field: 'StarField') -> np
 def _subtract_halo(out: np.ndarray, y: int, x: int) -> np.ndarray:
     """Subtract a saturated star's radial halo from ``out`` (in place) out to ``HALO_R``:
     per channel, the median of each 2 px ring minus the median of the outermost 10 px,
-    clipped at 0, zero from the first ring where it drops below ``HALO_FLOOR`` sky sigma.
+    clipped at 0, made non-increasing, zero from the first ring below ``HALO_FLOOR`` sky sigma.
     Ring medians follow the star's own symmetric light and cancel a linear nebula gradient.
     Returns the luminance halo profile (per 2 px ring), used to size the core."""
     h, w, c = out.shape
@@ -415,7 +415,10 @@ def _subtract_halo(out: np.ndarray, y: int, x: int) -> np.ndarray:
         prof = np.array([np.median(v[inside & (ri == i)]) if np.any(inside & (ri == i)) else np.nan
                          for i in range(nb)])
         bg = np.nanmedian(prof[-5:])
-        halo = np.nan_to_num(np.clip(prof - bg, 0.0, None))
+        # a halo only falls with radius: the running minimum keeps a nebula's bright
+        # rim or dark pocket further out from being subtracted as "halo" (concentric
+        # rings next to a dark pocket in Omega's nebula with --starless-process)
+        halo = np.minimum.accumulate(np.nan_to_num(np.clip(prof - bg, 0.0, None)))
         low = np.flatnonzero(halo < HALO_FLOOR)
         if len(low):
             halo[low[0]:] = 0.0
@@ -484,16 +487,29 @@ def model_available(path: Optional[str] = None) -> bool:
     return os.path.exists(path or MODEL_PATH)
 
 
+def linear_sky_level(img: np.ndarray) -> np.ndarray:
+    """The sky level B per channel in noise units of a linear (H, W, 3) image, for
+    ``remove_stars_nn(sky_level=)`` on a copy whose sky has since been subtracted."""
+    src = np.where(np.isfinite(img), img, 0.0).astype(np.float32)
+    return normalise_image(src)[3]
+
+
 def remove_stars_nn(img: np.ndarray, model_path: Optional[str] = None, alpha: float = 1.0, tta: int = 2,
-                    guard: bool = True, saturated: bool = True
+                    guard: bool = True, saturated: bool = True, sky_level: Optional[np.ndarray] = None
                     ) -> Tuple[np.ndarray, np.ndarray]:
     """``(starless, stars)`` for a linear (H, W, 3) image; ``alpha`` must be the one the
-    model's bank was built with. ``stars = img - starless`` (for screen recombination)."""
+    model's bank was built with. ``stars = img - starless`` (for screen recombination).
+
+    ``sky_level`` is B per channel (``linear_sky_level`` of the image before its sky was
+    removed): after background extraction the image's own sky reads ~0, and B sets the
+    photon noise the star-layer constraint and the saturated fill use."""
     w = nd.load_weights(model_path or MODEL_PATH)
     img = np.asarray(img, dtype=np.float32)
     finite = np.isfinite(img)
     src = np.where(finite, img, 0.0).astype(np.float32)
     z, bg, sig, B = normalise_image(src)
+    if sky_level is not None:
+        B = np.asarray(sky_level, np.float64)
     out = starless_z(z, w, alpha, StarField(z, B), tta, guard=guard, saturated=saturated) * sig + bg
     out = np.where(finite, out, img).astype(np.float32)
     return out, np.where(finite, src - out, 0.0).astype(np.float32)
