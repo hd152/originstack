@@ -95,3 +95,35 @@ Likely tells, in the order to test them:
   stack of several stars or a fitted PSF model, noise added once.
 - **White photon noise vs correlated real noise** (debayer, warp) -- see "Known gaps" above.
 Diagnostic before retraining: score f on injected stars with each tell removed in turn.
+
+## v2 / v3 (2026-10-19): clean PSFs; the network still told injected stars apart by shape
+
+**Diagnostic** (scratch scripts, on v1): the raw network keep fraction of injected stars with
+one tell removed at a time. Clean PSF (median of centroid-aligned stamps) lifted bright
+injected keep 0.04 -> 0.74 (Sunflower), -0.01 -> 0.37 (Sculptor); photon noise off,
+correlated photon noise and sub-pixel phase: no change. PSF radius 24 instead of 12: Orion
+bright 0.21 -> 0.86 (wings). So the stamps' own sky noise was the main tell.
+
+**v2** (one clean r=24 PSF per session, 4x4 sub-pixel phases, bank patches centred on real
+and injected stars alike), 10k steps: gap narrowed (Sculptor bright real 0.31 / injected
+0.06, was 0.05 / -1.08) but real stars mostly stayed (0.2-0.64 left). Injected stars were
+rounder than real ones at the edges (ellipticity 0.11 vs 0.17) -> per-zone cores.
+
+**v3** (core from the 15 nearest stars of each of 4x4 zones), 30k steps (46 min, val 2.75
+vs identity 23.2): *worse* -- real 0.63-0.92 left, injected -0.8 on Omega/Orion/Pleiades.
+
+**The validation loss measures discriminability.** If injected and real stars cannot be
+told apart, f(z) = z - s/2 on every star and the loss cannot go below ~half of identity
+(alpha 1, equal counts): ~11.6 here. v1 (2.53) and v3 (2.75) were far below: the network
+was recognising the injected stars. Watch this number in training.
+
+Which tell (on v3): photon noise white / none / correlated -- no change (faint injected
+kept 0.45 vs real 0.87). **Pasted real cutouts** (copied as they are into empty sky) were
+kept like real stars (0.78-0.94 vs real in place 0.81-0.96): the tell is the PSF shape.
+The sigma-clipped stack makes bright stars narrower than faint ones, and every injected
+star had the bright stamps' shape. Second-moment widths measured on white noise suggested
+a 0.1-0.18 px gap at mid flux; measured on the real stack's (correlated) noise, after the
+fix below, injected and real agree to +-0.1 px either way.
+
+**v4**: a PSF per donor-flux quartile and zone (cores from that bin's isolated stars, scaled
+by a template fit inside 4 px, wings from the bright stamps).
