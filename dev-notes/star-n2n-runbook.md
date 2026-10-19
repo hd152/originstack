@@ -93,5 +93,5 @@ Likely tells, in the order to test them:
   a tapered 25 px disc of extra noise around each injected star, plus the stamp's own
   photon noise, on top of the white photon noise added afterwards. Fix: stamps from a
   stack of several stars or a fitted PSF model, noise added once.
-- **White photon noise vs correlated real noise** (debayer, warp) -- already listed below.
+- **White photon noise vs correlated real noise** (debayer, warp) -- see "Known gaps" above.
 Diagnostic before retraining: score f on injected stars with each tell removed in turn.
