@@ -1,7 +1,7 @@
 # Learned star removal by Noisier2Noise: runbook (EXPERIMENTAL, started 2026-10-19)
 
-Status: code written, **tests not yet run**, no bank built, no model trained. No CLI flag;
-`src/star_n2n.py` is not wired into Phase 4.
+Status (2026-10-19): tests pass; **v1 trained and evaluated: no-go** (see "v1 results").
+No CLI flag; `src/star_n2n.py` is not wired into Phase 4.
 
 ## Idea
 
@@ -61,3 +61,37 @@ blotches. The identity model scores ~1 / ~1 / 1 / 0 / 0 (see the test).
 - The U-Net's receptive field (~24 px radius) limits removal of large halos.
 - Star positions are not independent of the sky (dark nebulae); the density map only
   approximates that.
+
+## v1 results (2026-10-19): no-go -- the network tells injected stars from real ones
+
+Bank: 74 sessions (holdouts excluded), 17,760 patches, alpha 1, ~6 s/session. 10k steps
+in 15.5 min (RTX 3050, ~93 s / 1000 steps); val 9.04 at step 1000, best **2.53 at step
+9000** (identity 26.80), still falling. numpy vs torch 6e-7. Files in `C:\nn_work\starless`
+(`bank_starless.npz`, `model_starless_v1.npz`, `train_v1.log`, `eval_v1.json`, `crops_v1`).
+
+| stack | real_left faint / mid / bright | inject_left faint / mid / bright | faint_kept | sky_shift | hole |
+|---|---|---|---|---|---|
+| Omega | 0.47 / 0.25 / -0.28 | -0.06 / -0.53 / -0.94 | 0.87 | -0.009 | 0.05 |
+| Orion | 0.35 / 0.27 / 0.87 | 0.00 / -0.91 / -0.92 | 0.87 | -0.010 | 6.05 |
+| Pleiades | 0.61 / 0.49 / 0.63 | -0.21 / -0.61 / -0.92 | 0.86 | -0.019 | 1.32 |
+| Sculptor | 0.07 / 0.02 / 0.05 | -0.14 / -0.52 / -1.08 | 0.85 | -0.025 | -0.21 |
+| Sunflower | 0.52 / 0.61 / 0.77 | -0.41 / -0.34 / -0.92 | 0.84 | -0.021 | 0.19 |
+
+`faint_kept` and `sky_shift` pass; star removal fails. The raw network output f(z) keeps
+(1 + left) / 2 of a star: ~0.04 of a bright *injected* star but 0.6-0.9 of a real one on
+four of five stacks. Noisier2Noise needs f to be unable to tell them apart (then it keeps
+1 / (1 + alpha) = 0.5 of both); this one recognises the injected stars, removes them fully,
+and the 2x extrapolation turns that into an over-subtraction of the injected (-0.9) and an
+under-removal of the real stars. Sculptor (sparse, clean) is the exception: real 0.02-0.07,
+crops mostly cleared, a few dark pits. Orion's `hole` +6 is unremoved bright stars, not holes.
+
+Likely tells, in the order to test them:
+- **Integer-pixel placement of 60 fixed stamps per session**: every injected star is an
+  exact copy of one of the 3 nearest stamps, same sub-pixel phase; real stars vary.
+  Fix: sub-pixel shift (Lanczos) each stamp to a random phase.
+- **Stamps carry their own sky noise** (cutouts of real stars, scaled by flux / stamp flux):
+  a tapered 25 px disc of extra noise around each injected star, plus the stamp's own
+  photon noise, on top of the white photon noise added afterwards. Fix: stamps from a
+  stack of several stars or a fitted PSF model, noise added once.
+- **White photon noise vs correlated real noise** (debayer, warp) -- already listed below.
+Diagnostic before retraining: score f on injected stars with each tell removed in turn.
