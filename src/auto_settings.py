@@ -389,8 +389,14 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('local_contrast_strength', 0.6),
         ('ghs_b',                   5.0),
         ('ghs_sp',                  0.20),
-        # Wide field usually has scattered nebulosity — mild clip only.
-        ('preview_black_sigma',     0.5),
+        # Below the frame median, not above it: a Milky Way field has no empty sky,
+        # its median *is* the unresolved star cloud. At +0.5 sigma the black point
+        # sat on that glow and erased it (M24, 8 nights: between-star preview level
+        # 0-0.2 of 255) along with the dark nebulae it shows up -- Barnard 92 was
+        # gone. -2 renders the glow (~5/255) with B92 a clear dark cloud, -3 greys;
+        # -3 here because the blend dilutes it (M24 is ~75% wide field: -2 landed
+        # at -1.24, still clipping most of the glow).
+        ('preview_black_sigma',     -3.0),
         ('scnr',                    True),
         ('photometric_calibration', True),
         ('denoise_acdnr',           True),
