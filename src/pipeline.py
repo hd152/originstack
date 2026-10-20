@@ -1318,7 +1318,8 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 from src.registration import run_comet_registration_phase
                 comet_shifts, comet_transforms, comet_dither_info = run_comet_registration_phase(
                     final, final_indices, best_idx,
-                    ref_lum, mem_lum, H, W, args, stats)
+                    ref_lum, mem_lum, H, W, args, stats,
+                    star_shifts=shifts, star_transforms=transforms)
                 comet_stacked, _, ct, cb, cl, cr = run_stacking_phase(
                     final, final_indices, mem_rgb,
                     comet_shifts, comet_transforms, H, W, C, args, stats)
@@ -1344,11 +1345,12 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                                  comet_stacked, (ct, cb, cl, cr))
                 comet_lum = np.mean(_comet_c, axis=2)
                 tail_pa = comet_dither_info.get('tail_pa_deg', None)
-                blended = blend_comet_star_stacks(
-                    _star_c, _comet_c, comet_lum,
-                    blend_sigma=float(getattr(args, 'comet_blend_sigma', 30.0)),
-                    tail_pa_deg=tail_pa,
-                )
+                _nuc = comet_dither_info.get('nucleus_aligned')
+                if _nuc is not None:
+                    _nuc = (_nuc[0] - max(top, ct), _nuc[1] - max(left, cl))
+                blended = blend_comet_star_stacks(_star_c, _comet_c, comet_lum,
+                                                  track=comet_dither_info.get('track'),
+                                                  nucleus=_nuc)
                 blended_out = os.path.splitext(output_path)[0] + '_comet_blended.fits'
                 blended_hdu = _cfits.PrimaryHDU(
                     data=np.transpose(blended.astype(np.float32), (2, 0, 1))

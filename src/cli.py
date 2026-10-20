@@ -2272,6 +2272,10 @@ def build_parser() -> argparse.ArgumentParser:
                   '--originvision-checkpoint'):
         p.add_argument(_flag, action=_RemovedFlag, nargs=1, default=None,
                        help=argparse.SUPPRESS)
+    # The comet + stars composite is built from layers since 2.13 (stacking.
+    # blend_comet_star_stacks); there is no blend radius any more.
+    p.add_argument('--comet-blend-sigma', action=_RemovedFlag, nargs=1, default=None,
+                   help=argparse.SUPPRESS)
     g_out.add_argument('--plate-solver', choices=['auto', 'local', 'astap', 'astrometry'],
                    default='auto',
                    help='Plate solver backend. auto (default): the built-in solver against a '
@@ -2290,9 +2294,6 @@ def build_parser() -> argparse.ArgumentParser:
     g_comet.add_argument('--comet-mode', action='store_true',
                    help='Enable comet nucleus tracking. Produces a second stack aligned '
                         'on the comet nucleus saved as <stem>_comet.fits.')
-    g_comet.add_argument('--comet-blend-sigma', type=float, default=30.0, metavar='PX',
-                   help='Gaussian blend radius (pixels) for comet+star blended composite '
-                        '(default: 30). Larger = more comet-stack area in the blend.')
     g_comet.add_argument('--comet-xy', default=None, metavar='X,Y',
                    help='Approximate comet nucleus position in the reference frame '
                         '(pixels, comma-separated, e.g. "1024,768"). X=column, Y=row.')
@@ -2670,7 +2671,6 @@ def build_parser() -> argparse.ArgumentParser:
         local_contrast_strength=0.7,
         scnr_amount=1.0,
         scnr_target='green',
-        comet_blend_sigma=30.0,
         comet_xy=None,
         comet_search_radius=50.0,
         comet_affine=False,
@@ -2824,8 +2824,11 @@ def parse_args(argv=None):
     args.export_masks = 'masks' in _dbg
 
     if getattr(args, '_removed_flags', None):
-        safe_print("  NOTE: originvision scoring was removed in 2.6; ignoring "
-                   + ', '.join(sorted(args._removed_flags)) + ".")
+        _why = {'--comet-blend-sigma': "the comet + stars composite has no blend radius "
+                                       "since 2.13"}
+        for _f in sorted(args._removed_flags):
+            safe_print(f"  NOTE: ignoring {_f}: "
+                       + _why.get(_f, "originvision scoring was removed in 2.6") + ".")
 
     if getattr(args, 'target_type', None) and not getattr(args, 'auto', True):
         safe_print("  WARNING: --target-type has no effect with --no-auto")

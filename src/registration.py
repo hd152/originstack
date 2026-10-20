@@ -2585,6 +2585,148 @@ def fetch_comet_ephemeris(designation: str, obs_times: List[str],
         return None
 
 
+def _frame_times(final: List[FrameInfo]) -> np.ndarray:
+    """Seconds since the earliest DATE-OBS, one per frame; frame order when any is
+    missing or unreadable (the motion model then assumes evenly spaced frames)."""
+    from src.utils import parse_timestamp
+    stamps = []
+    for f in final:
+        h = getattr(f, 'header', None) or {}
+        stamps.append(parse_timestamp(str(h.get('DATE-OBS') or h.get('DATE_OBS') or '')))
+    if not stamps or any(t is None for t in stamps):
+        return np.arange(len(final), dtype=np.float64)
+    t0 = min(stamps)
+    return np.array([(t - t0).total_seconds() for t in stamps], dtype=np.float64)
+
+
+def _aligned_to_raw_yx(yx, transform: Optional[Any],
+                       shift: Optional[Tuple[float, float]]) -> np.ndarray:
+    """Reference-aligned (row, col) -> the frame's own (row, col); the inverse of
+    ``transparency.to_aligned_yx`` (aligned o = R^-1 s + t, so s = R (o - t))."""
+    yx = np.asarray(yx, dtype=np.float64)
+    if transform is not None:
+        m = transform.params
+        t_rc = np.array([m[1, 2], m[0, 2]])
+        return (yx - t_rc) @ m[:2, :2].T
+    if shift is not None:
+        return yx - np.asarray(shift, dtype=np.float64)
+    return yx.copy()
+
+
+def _comet_frame_transform(transform: Optional[Any], shift: Optional[Tuple[float, float]],
+                           d: np.ndarray) -> Tuple[Tuple[float, float], Optional[Any]]:
+    """The frame's star registration moved by the comet's displacement ``d`` (row,
+    col) in reference-aligned coordinates: stars land where they do in the star
+    stack, shifted by -d, so the nucleus lands on its reference position -- and
+    the frame keeps its own field rotation correction, which a nucleus-only
+    translation threw away (stars arced round the nucleus, the tail turned)."""
+    from src.affine_fit import RigidTransform
+    s = shift if shift is not None else (0.0, 0.0)
+    new_shift = (float(s[0] - d[0]), float(s[1] - d[1]))
+    if transform is None:
+        return new_shift, None
+    p = np.array(transform.params, dtype=np.float64, copy=True)
+    p[0, 2] -= d[1]
+    p[1, 2] -= d[0]
+    return new_shift, RigidTransform(p)
+
+
+def _comet_motion_track(final: List[FrameInfo], final_indices: List[int], mem_lum: np.ndarray,
+                        star_shifts: List[Any], star_transforms: List[Optional[Any]],
+                        verbose: bool = False) -> Optional[Dict[str, Any]]:
+    """Find the comet as the object that moves against the stars, and its motion.
+
+    The earliest and latest ~1/6 of the frames are averaged in star-aligned
+    coordinates and subtracted: the stars cancel and the comet is left as a
+    positive (early) and a negative (late) blob. On a real SWAN session the
+    brightest extended blob in the reference frame was a bright star, so the
+    "nucleus-aligned" stack was aligned on that star. The positions are refined
+    as the intensity-weighted centroids of the two lobes, and the comet is then
+    assumed to move linearly in time across the session. Returns None when no moving object stands out
+    clearly (a slow comet; the per-frame centroid path is used instead).
+    """
+    n = len(final)
+    if n < 6:
+        return None
+    t = _frame_times(final)
+    order = np.argsort(t, kind='stable')
+    k = int(np.clip(n // 6, 3, 25))
+    early, late = order[:k], order[-k:]
+
+    def _mean(idx) -> Tuple[np.ndarray, np.ndarray]:
+        # The warp leaves NaN outside a frame's footprint: average finite pixels and
+        # report where every frame covered.
+        acc = cnt = None
+        for j in idx:
+            img = np.asarray(mem_lum[final_indices[j]], dtype=np.float32)
+            a = np.asarray(apply_transform(img, shift=star_shifts[j],
+                                           transform=star_transforms[j]), dtype=np.float64)
+            ok = np.isfinite(a)
+            if acc is None:
+                acc, cnt = np.zeros_like(a), np.zeros(a.shape, dtype=np.int32)
+            acc += np.where(ok, a, 0.0)
+            cnt += ok
+        return acc / np.maximum(cnt, 1), cnt == len(idx)
+
+    (E, e_ok), (L, l_ok) = _mean(early), _mean(late)
+    H, W = E.shape[:2]
+    covered = e_ok & l_ok
+    # sigma 6: a coma survives it, a star's registration/seeing residual does not.
+    # Minus the sigma-100 trend: the sky itself changes between the early and the
+    # late frames (twilight, moon, altitude), and on a real SWAN session that
+    # gradient's extremes on the frame edge, 2689 px apart, out-scored the comet.
+    diff = np.where(covered, E - L, 0.0)
+    D = ndimage.gaussian_filter(diff, 6.0) - ndimage.gaussian_filter(diff, 100.0)
+    # The telescope was pointed at the comet: search the middle 70% of the field.
+    # Within 6% of the edge, on a real SWAN session, a change between the early
+    # and late frames near the bottom-right corner (~300 sigma) beat the comet.
+    by, bx = int(0.15 * H), int(0.15 * W)
+    core = ndimage.binary_erosion(covered, iterations=20)
+    core[:by] = core[H - by:] = False
+    core[:, :bx] = core[:, W - bx:] = False
+    # a peak on the search area's own edge is a cut-off gradient, not an object
+    core = ndimage.binary_erosion(core, iterations=10)
+    if not core.any():
+        return None
+    vals = D[core]
+    noise = 1.4826 * float(np.median(np.abs(vals - np.median(vals)))) or 1e-12
+    Dm = np.where(core, D, 0.0)
+    ye, xe = np.unravel_index(int(np.argmax(Dm)), D.shape)
+    yl, xl = np.unravel_index(int(np.argmin(Dm)), D.shape)
+    sig_e, sig_l = float(Dm[ye, xe]) / noise, -float(Dm[yl, xl]) / noise
+    sep = float(np.hypot(ye - yl, xe - xl))
+    if verbose:
+        safe_print(f"    [Comet] motion search: early peak {sig_e:.0f} sigma at ({xe}, {ye}), "
+                   f"late {sig_l:.0f} sigma at ({xl}, {yl}), {sep:.0f} px apart")
+    if min(sig_e, sig_l) < _COMET_MOTION_MIN_SIGMA or sep < 4.0:
+        return None
+    def _lobe_centroid(img: np.ndarray, y0: int, x0: int, r: int = 12) -> np.ndarray:
+        y_lo, y_hi = max(0, y0 - r), min(H, y0 + r + 1)
+        x_lo, x_hi = max(0, x0 - r), min(W, x0 + r + 1)
+        w = np.clip(img[y_lo:y_hi, x_lo:x_hi], 0.0, None)
+        if not np.any(w > 0):
+            return np.array([float(y0), float(x0)])
+        yy, xx = np.mgrid[y_lo:y_hi, x_lo:x_hi]
+        return np.array([float((w * yy).sum() / w.sum()), float((w * xx).sum() / w.sum())])
+
+    # Intensity-weighted centroids of the two lobes. A peak search on the averages
+    # themselves jumped to a compact star a few pixels away.
+    pe = _lobe_centroid(D, ye, xe)
+    pl = _lobe_centroid(-D, yl, xl)
+    te, tl = float(t[early].mean()), float(t[late].mean())
+    if tl <= te:
+        return None
+    v = (pl - pe) / (tl - te)
+    positions = [pe + v * (t[j] - te) for j in range(n)]
+    return {'positions': positions, 'early': pe, 'late': pl,
+            'significance': (sig_e, sig_l), 'velocity': v}
+
+
+# A moving object must stand this far above the noise of the early-minus-late
+# difference, at both ends, to be taken as the comet.
+_COMET_MOTION_MIN_SIGMA = 10.0
+
+
 def run_comet_registration_phase(
     final: List[FrameInfo],
     final_indices: List[int],
@@ -2595,8 +2737,15 @@ def run_comet_registration_phase(
     W: int,
     args: argparse.Namespace,
     stats: ProcessingStats,
+    star_shifts: Optional[List[Any]] = None,
+    star_transforms: Optional[List[Optional[Any]]] = None,
 ) -> Tuple[List[Tuple[float, float]], List[Optional[Any]], Dict[str, Any]]:
     """Compute per-frame registration shifts aligned on a comet nucleus.
+
+    With the star registration (``star_shifts``/``star_transforms``), the comet
+    is found by its motion against the stars (``_comet_motion_track``) and each
+    frame keeps its own rotation correction (``_comet_frame_transform``); the
+    per-frame centroid search below is the fallback when nothing clearly moves.
 
     Instead of aligning on the star field, this tracks the brightest extended
     blob (comet nucleus) in each frame relative to the reference frame.
@@ -2651,6 +2800,44 @@ def run_comet_registration_phase(
         ref_j = next(j for j, orig_idx in enumerate(final_indices) if orig_idx == best_idx)
     except StopIteration:
         ref_j = 0
+
+    rotation_aware = (star_shifts is not None and star_transforms is not None
+                      and len(star_shifts) == len(final) and len(star_transforms) == len(final))
+    motion = None
+    if rotation_aware and ref_seed is None and eph_positions is None:
+        try:
+            motion = _comet_motion_track(final, final_indices, mem_lum, star_shifts,
+                                         star_transforms, getattr(args, 'verbose', False))
+        except Exception as _me:
+            safe_print(f"  [Comet] WARNING: motion search failed ({_me}); "
+                       f"using the per-frame nucleus search")
+            motion = None
+    if motion is not None:
+        pos = motion['positions']
+        ref_cy, ref_cx = (float(v) for v in _aligned_to_raw_yx(
+            pos[ref_j], star_transforms[ref_j], star_shifts[ref_j]))
+        vy, vx = motion['velocity']
+        print(f"  [Comet] Found by its motion against the stars: nucleus ({ref_cx:.1f}, {ref_cy:.1f}) "
+              f"in the reference, moving {float(np.hypot(vy, vx)) * 3600:.0f} px/h")
+        tail_pa_deg = find_comet_tail_pa(ref_lum, ref_cy, ref_cx)
+        shifts_m: List[Tuple[float, float]] = []
+        transforms_m: List[Optional[Any]] = []
+        centroids_m: List[Optional[Tuple[float, float]]] = []
+        for j in range(len(final)):
+            d = np.asarray(pos[j]) - np.asarray(pos[ref_j])
+            sh, tf = _comet_frame_transform(star_transforms[j], star_shifts[j], d)
+            shifts_m.append(sh)
+            transforms_m.append(tf)
+            ry, rx = _aligned_to_raw_yx(pos[j], star_transforms[j], star_shifts[j])
+            centroids_m.append((float(ry), float(rx)))
+        mags = [float(np.hypot(*(np.asarray(p) - np.asarray(pos[ref_j])))) for p in pos]
+        print(f"  [Comet] Motion over the session: max {max(mags):.1f} px from the reference")
+        return shifts_m, transforms_m, {
+            'nucleus_y': ref_cy, 'nucleus_x': ref_cx, 'tail_pa_deg': tail_pa_deg,
+            'centroids': centroids_m, 'method': 'motion',
+            'nucleus_aligned': tuple(float(v) for v in pos[ref_j]),
+            'track': np.array([np.asarray(p) - np.asarray(pos[ref_j]) for p in pos]),
+        }
 
     ref_cy, ref_cx = find_comet_centroid(ref_lum, seed=ref_seed, search_radius=search_radius)
     print(f"  [Comet] Reference nucleus centroid: ({ref_cx:.1f}, {ref_cy:.1f})")
@@ -2763,6 +2950,23 @@ def run_comet_registration_phase(
         else:
             safe_print("  [Comet] Not enough stars for affine correction — using translation only")
 
+    track = None
+    if rotation_aware and not use_affine:
+        # Same composition as the motion path, from the per-frame centroids: each
+        # frame keeps its own star rotation correction.
+        from src.transparency import to_aligned_yx
+        ref_al = to_aligned_yx(np.array(centroids[ref_j]), star_transforms[ref_j],
+                               star_shifts[ref_j])
+        track = []
+        for j in range(len(final)):
+            if centroids[j] is None:
+                continue
+            al = to_aligned_yx(np.array(centroids[j]), star_transforms[j], star_shifts[j])
+            shifts[j], transforms[j] = _comet_frame_transform(
+                star_transforms[j], star_shifts[j], al - ref_al)
+            track.append(al - ref_al)
+        track = np.array(track) if track else None
+
     shift_mags = [np.sqrt(s[0] ** 2 + s[1] ** 2) for s in shifts]
     print(f"  [Comet] Mean shift: {np.mean(shift_mags):.1f} px, "
           f"max: {np.max(shift_mags):.1f} px")
@@ -2772,6 +2976,9 @@ def run_comet_registration_phase(
         'nucleus_x': ref_cx,
         'tail_pa_deg': tail_pa_deg,
         'centroids': centroids,
+        'track': track,
+        'nucleus_aligned': (tuple(float(v) for v in ref_al)
+                            if rotation_aware and not use_affine else (ref_cy, ref_cx)),
     }
 
     return shifts, transforms, comet_dither_info
