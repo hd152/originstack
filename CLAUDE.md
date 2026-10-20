@@ -80,8 +80,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 - Never leave uncommitted changes in the shared checkout; run `git status -sb` before any commit,
   reset or branch switch, and stage files by name (not `commit -a`).
 - Benchmarks and training write tens of GB (`bench_vs_siril.py` work dirs, 4.9 GB banks under
-  `C:
-n_work`): keep the logs, delete the work dirs and banks once the results are recorded.
+  `C:\nn_work`): keep the logs, delete the work dirs and banks once the results are recorded.
   A nearly full temp disk also changes results (Phase 1 compression switches on).
 
 ## Architecture
