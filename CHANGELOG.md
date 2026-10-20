@@ -6,20 +6,25 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-10-20
+
+Mosaics from the Origin's Mosaic Mode, learned star removal, a reworked comet mode, a faster
+first phase, a redesigned app, and fixes to multi-night combines and to how bright cores,
+planetary nebulae, Milky Way fields and galaxies on bright-sky nights are rendered.
+
 ### Added
 
 - **Report a problem** (desktop app header): opens a new GitHub issue in the browser with the
   version, system, native-module status, the last run's error and the end of the log filled in
   (home folder shown as `~`, repeated progress lines collapsed). Nothing is sent by the app; the
   user reviews and submits the issue on GitHub.
-
-## [2.13.0] - 2026-10-17
-
-Mosaics from the Origin's Mosaic Mode, a faster first phase, dither detection, and awareness
-of the other cameras the Origin platform drives.
-
-### Added
-
+- **Learned star removal (experimental): `--remove-stars-method nn`.** A Noisier2Noise
+  network trained on the Origin's own stacks removes stars from the linear stack; saturated
+  stars have their halo and diffraction spikes subtracted and their cores filled, and are
+  left in place when they sit in bright nebulosity. Also behind `--starless-process`.
+- **Redesigned desktop app and website**: pick what you imaged from picture cards, Full
+  quality or Quick look, a summary of the run before it starts, and a gallery with one image
+  per kind of target, all translated.
 - **Mosaics (`--mosaic`, detected automatically).** A folder of tile sessions from the Origin's
   Mosaic Mode is recognised and stitched into one image: from the Origin's own mosaic
   description (tile row and column, matched to each session by its stack UUID) when present,
@@ -40,6 +45,20 @@ of the other cameras the Origin platform drives.
 
 ### Changed
 
+- **Comet mode finds the comet by its motion** against the stars (early and late frames
+  differenced in star-aligned coordinates) instead of the brightest blob, which was a bright
+  star on a real SWAN session; each comet frame keeps its own field-rotation correction (star
+  trails used to arc round the nucleus); and the comet + stars image subtracts the comet's
+  modelled smear from the star stack instead of pasting a window over it (a fast comet came
+  out with two heads). `--comet-blend-sigma` is accepted and ignored.
+- **Planetary nebulae**: the masked preview stretch, no SCNR (it removed the [O III] teal) and
+  no deconvolution (it mottled the shell) by default.
+- **Milky Way fields** (wide field): the preview black point sits below the frame median, so
+  the star cloud's glow and its dark nebulae stay visible.
+- **Faster first phase**: the residual check maps each frame's own stars instead of warping
+  and re-detecting, temporary frames are compressed only when the disk needs it, and the
+  post-gate quality diagnostics run in parallel.
+
 - **Faster processing of the frames (Phase 1): about 35-40%.** On a 158-frame session on an
   8-core laptop, Phase 1 went from ~45 s to ~28 s and the whole run from 2m26 to 2m06, with
   an identical stack. The compressed frame store no longer decodes every frame for a preview
@@ -55,6 +74,17 @@ of the other cameras the Origin platform drives.
 - Installing from source now needs NumPy 2.4.6 or later. `astro_native` 0.60.0.
 
 ### Fixed
+
+- **Multi-night combines**: one off-centre night no longer turns a folder into a two-panel
+  "mosaic"; a night that cannot be registered is left out with a warning instead of aborting
+  the whole combine; a smaller night's zero padding is no longer detected as stars (a good
+  48-minute night was refused for it); and the combined stack keeps the reference night's
+  WCS, so photometry and annotation work on it.
+- **Bright extended cores in the preview** (Orion's core, the Ring Nebula, globular cluster
+  cores) are rolled off instead of clipped to flat white in the default per-channel stretch.
+- **Galaxies on bright-sky nights**: corners brightened by a flat that over-corrects the
+  vignetting are treated as background even when the galaxy is too faint to detect; they came
+  out pink.
 
 - **Other programs' stacks found among a session's lights are skipped.** A stacked file with
   `NCOMBINE` or `STACKCNT` above 1 was taken as a light and stopped the run.
