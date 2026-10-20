@@ -66,7 +66,7 @@ class TestCalibrationAtAnchors:
         for attr, expected in a._TARGET_SETTINGS.get(ttype, []):
             got = getattr(args, attr, None)
             assert got is not None, f"{ttype}.{attr} was never set"
-            if isinstance(expected, bool):
+            if isinstance(expected, (bool, str)):
                 assert got == expected, f"{ttype}.{attr}: got {got}, want {expected}"
             else:
                 # Blending pulls in a few percent from neighboring presets even
@@ -190,7 +190,7 @@ class TestUnlistedAttrsKeepBaseline:
         a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
         for attr, expected in a._TARGET_SETTINGS.get(ttype, []):
             got = getattr(args, attr)
-            if isinstance(expected, bool):
+            if isinstance(expected, (bool, str)):
                 assert got == expected, f"{ttype}.{attr}: got {got}, want {expected}"
             else:
                 tol = max(0.15 * abs(expected), 0.1)
