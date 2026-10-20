@@ -22,14 +22,14 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 | Galaxy | Emission Nebula |
 |:---:|:---:|
 | ![Whirlpool Galaxy (M51)](docs/img/whirlpool-galaxy-m51-celestron-origin.jpg) | ![Omega Nebula (M17)](docs/img/omega-nebula-m17-stacked-celestron-origin.jpg) |
-| *Whirlpool Galaxy (M51)* | *Omega Nebula (M17), 114 x 30 s* |
+| *Whirlpool Galaxy (M51), eight nights combined* | *Omega Nebula (M17), 114 x 30 s* |
 
 | Emission / Reflection Nebula | Star Cloud |
 |:---:|:---:|
 | ![Orion Nebula (M42)](docs/img/orion-nebula-m42-celestron-origin.jpg) | ![Sagittarius Star Cloud (M24)](docs/img/sagittarius-star-cloud-m24-celestron-origin.jpg) |
 | *Orion Nebula (M42), seven sessions combined* | *Sagittarius Star Cloud (M24), 138 x 10 s* |
 
-All stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames (`--preset galaxy` for the Whirlpool, `--preset nebula` for the two nebulae, `--preset starfield` for the star cloud -- see [Usage Examples](#usage-examples)). The Orion Nebula is a hierarchical multi-session combine: each night is stacked separately, registered onto the deepest one, merged, and post-processed once.
+All stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames. The Whirlpool and the Orion Nebula were made with version 2.13's default settings from every night of them on hand (8 and 7); `--preset nebula` for the Omega Nebula and `--preset starfield` for the star cloud -- see [Usage Examples](#usage-examples). A multi-night folder is a hierarchical combine: each night is stacked separately, registered onto the deepest one, merged, and post-processed once.
 
 **Sky conditions.** These are backyard/rooftop sessions under **Bortle 7-9** skies (heavy light pollution, urban/suburban), not a dark site -- measured per session with `estimate_bortle()` (`src/quality.py`, a rough same-equipment sky-glow bucket from calibrated background level vs. exposure/gain; not survey-grade photometry, see the function's docstring for what it isn't). None of the samples above -- or the two added for the [Andromeda Galaxy and Horsehead/Flame Nebula](https://originstack.site/#gallery) gallery entries on the website -- were shot from a dark site. The pipeline's background extraction, sky-floor correction and gradient removal are what make these usable at all under that much sky glow.
 
