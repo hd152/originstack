@@ -292,3 +292,40 @@ def test_starless_process_nn_splits_with_the_linear_sky_level(tmp_path, monkeypa
 
     starless, stars = pp._split_starless(img, np.zeros(1), [], args, nn_sky=expect)
     np.testing.assert_allclose(starless + stars, img, rtol=1e-6)
+
+
+def test_fill_saturated_removes_diffraction_spikes(field_and_z):
+    """Four radial spikes on the saturated star: the result matches the spike-free one."""
+    field, z, _ = field_and_z
+    (y, x), = zip(field.det_y[field.saturated], field.det_x[field.saturated])
+    h, w, _ = z.shape
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    r = np.hypot(yy - y, xx - x)
+    spikes = np.zeros((h, w), np.float32)
+    for ang in (0.0, 90.0, 180.0, 270.0):
+        t = np.radians(ang)
+        d = np.abs(-(xx - x) * np.sin(t) + (yy - y) * np.cos(t))      # distance to the line
+        along = (xx - x) * np.cos(t) + (yy - y) * np.sin(t)              # position along it
+        spikes += 30.0 * np.exp(-r / 40.0) * np.exp(-d ** 2 / 2.0) * (along > 8) * (r < 100)
+    zs = z + spikes[..., None]
+    clean = sn.fill_saturated(z, z, field)
+    got = sn.fill_saturated(zs, zs, field)
+    ring = (r > 15) & (r < 80)
+    left = (got - clean).mean(-1)[ring]
+    injected = spikes[ring]
+    assert left.sum() < 0.2 * injected.sum()                 # >= 80% of the spike light gone
+    assert np.abs(left).max() < 0.5 * injected.max()
+    far = r > 2 * sn.HALO_R + 2
+    np.testing.assert_array_equal(got[far], zs[far])         # nothing beyond the star touched
+
+
+def test_spike_subtraction_stays_finite_when_every_angle_is_masked():
+    """A ring of other saturated stars masks whole radii: no NaN may leak into the image."""
+    rng = np.random.default_rng(5)
+    out = rng.normal(0, 1, (200, 200, 3)).astype(np.float32)
+    ang = np.linspace(0, 2 * np.pi, 40, endpoint=False)
+    others = np.c_[100 + 50 * np.sin(ang), 100 + 50 * np.cos(ang)]
+    before = out.copy()
+    sn._subtract_spikes(out, 100, 100, 10.0, 95.0, others)
+    assert np.isfinite(out).all()
+    assert (out <= before + 1e-6).all()                      # it only ever subtracts
