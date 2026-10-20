@@ -1,6 +1,6 @@
 # Development / CI tooling (not needed to run the stacker).
 #   pip install -r requirements-dev.txt
-ruff==0.17.0
+ruff==0.17.1
 pytest
 pytest-xdist
 pip-audit
