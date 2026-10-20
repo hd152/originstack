@@ -14,7 +14,13 @@ except Exception:
     HAS_PSUTIL = False
 
 try:
-    from tqdm import tqdm
+    from tqdm import tqdm as _tqdm
+
+    def tqdm(iterable, **kwargs):
+        """Render compact progress bars that do not accumulate in the console."""
+        kwargs.setdefault("dynamic_ncols", True)
+        kwargs.setdefault("leave", False)
+        return _tqdm(iterable, **kwargs)
 except Exception:
     def tqdm(iterable, **kwargs):
         return iterable

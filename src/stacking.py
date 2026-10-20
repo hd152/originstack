@@ -2018,7 +2018,7 @@ def run_stacking_phase(
             futures = {executor.submit(_align_one, j): j for j in range(n_final)}
             for future in tqdm(as_completed(futures), total=n_final,
                                desc="  Aligning", unit="frame",
-                               disable=progress_disabled(not args.verbose)):
+                               disable=progress_disabled(getattr(args, 'verbose', False))):
                 future.result()
                 _wv_done += 1
                 _wv.progress('Aligning frames', _wv_done, n_final)
@@ -2473,7 +2473,7 @@ def run_stacking_phase(
                 with ThreadPoolExecutor(max_workers=2) as loader:
                     pending = loader.submit(_load_frame, 0)
                     for j in tqdm(range(n_final), desc="  Drizzling", unit="frame",
-                                  disable=progress_disabled(not args.verbose)):
+                                  disable=progress_disabled(getattr(args, 'verbose', False))):
                         rgb_j = pending.result()
                         if j + 1 < n_final:
                             pending = loader.submit(_load_frame, j + 1)
@@ -2517,7 +2517,7 @@ def run_stacking_phase(
                     futures = {executor.submit(_drizzle_one, j): j for j in range(n_final)}
                     for future in tqdm(as_completed(futures), total=n_final,
                                        desc="  Drizzling", unit="frame",
-                                       disable=progress_disabled(not args.verbose)):
+                                       disable=progress_disabled(getattr(args, 'verbose', False))):
                         future.result()
 
             if want_splat:
@@ -2574,7 +2574,7 @@ def run_stacking_phase(
                 futures = {executor.submit(_align_crop, j): j for j in range(n_final)}
                 for future in tqdm(as_completed(futures), total=n_final,
                                    desc="  Stacking", unit="frame",
-                                   disable=progress_disabled(not args.verbose)):
+                                   disable=progress_disabled(getattr(args, 'verbose', False))):
                     j, cropped = future.result()
                     w = float(weights[j])
                     acc += cropped.astype(np.float64) * w
