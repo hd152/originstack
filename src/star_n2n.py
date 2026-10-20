@@ -65,10 +65,11 @@ SAT_CORE_LEVEL = 20.0         # ...this many sky sigma (the clipped, non-linear 
 HALO_R = 150                  # px; a saturated star's radial halo is subtracted out to here...
 HALO_FLOOR = 0.3              # ...or to where it first drops below this (sky sigma)
 # A saturated star whose 45-60 px ring is this far above the sky (noise units) sits in
-# bright extended emission and is left alone: its ring medians are mostly nebula, and the
-# halo subtraction and core fill cut discs and coloured rings out of Orion's core (ring
-# levels there up to 1343; Pleiades <= 22, Omega <= 36).
-SAT_SKIP_BG = 50.0
+# extended emission and is left alone: its ring medians are mostly nebula, and the halo
+# subtraction and core fill cut discs and coloured rings out of it -- Orion's core (ring
+# levels up to 1343), a dark teal hole in M43 (46). Isolated saturated stars on the five
+# held-out stacks measure -21..+1.3; the nebula-embedded ones 22 (Pleiades) and up.
+SAT_SKIP_BG = 10.0
 SAT_FEATHER = 0.5             # the core fill is blended into the data over r..(1 + this) r
 SPIKE_RADIAL_PX = 21          # spikes: median along the radius over this many px (drops stars, noise)...
 SPIKE_ANGLE_DEG = 30.0        # ...minus the median over this wide an angle (keeps what is narrow in angle)
