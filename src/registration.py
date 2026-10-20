@@ -1181,6 +1181,19 @@ def _residual_warp(lum: np.ndarray, shift, transform) -> np.ndarray:
                                     order=1, mode='constant', cval=0.0)
 
 
+def _stars_to_aligned(yx: np.ndarray, shift, transform) -> Optional[np.ndarray]:
+    """Frame-grid star positions (N, 2) in (y, x) mapped into aligned space: the inverse of
+    the warp ``_residual_warp`` applies, ``output[o] = lum[M @ (o - shift)]``, so a star at
+    ``i`` lands at ``o = M^-1 @ i + shift``. None for a singular transform."""
+    s = np.array([shift[0], shift[1]], dtype=np.float64)
+    if transform is None:
+        return yx + s
+    M = transform.params[:2, :2]
+    if abs(np.linalg.det(M)) < 1e-9:
+        return None
+    return np.linalg.solve(M, yx.T).T + s
+
+
 def _match_frame_stars(
     lum: np.ndarray,
     shift: Tuple[float, float],
@@ -1188,26 +1201,42 @@ def _match_frame_stars(
     ref_tree,
     ref_xy: np.ndarray,
     noise_val: float,
+    frame_stars=None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Warp ``lum`` into aligned space with the frame's shift/transform,
-    re-detect stars, and KDTree-match them to the reference catalog.
+    """The frame's stars in aligned space, KDTree-matched to the reference catalog.
+
+    The stars are the frame's own Phase 1 detections (``frame_stars``, else detected on
+    ``lum``), mapped through the frame's shift/transform (``_stars_to_aligned``) and kept
+    where they land inside the frame. Warping the whole frame and detecting again (the
+    old way, still the fallback for a singular transform) gave the same positions to
+    within the interpolation's centroid shift, at a full-resolution warp and detection
+    per frame: 83% of registration (16 s) on a rotating 344-frame session whose sampled
+    check escalated to every frame.
 
     Shared by ``score_registration_residuals`` (RMS check) and
-    ``fit_displacement_field`` (elastic registration) so both spend exactly
-    one detect+match pass per frame instead of two.
+    ``fit_displacement_field`` (elastic registration).
 
-    Returns (ref_xy_matched, frame_xy_matched) — both (N, 2) arrays of matched
-    star pairs in (x, y) order — or None if fewer than 3 stars matched.
+    Returns (ref_xy_matched, frame_xy_matched) -- both (N, 2) arrays of matched
+    star pairs in (x, y) order -- or None if fewer than 3 stars matched.
     """
-
-    aligned_lum = _residual_warp(lum, shift, transform)
-    frame_stars = registration_stars(aligned_lum, noise_val)
-    if frame_stars is None or len(frame_stars) < 3:
+    stars = registration_stars(lum, noise_val, frame_stars)
+    if stars is None or len(stars) < 3:
         return None
-    frame_xy = np.array(
-        [(float(s['xcentroid']), float(s['ycentroid'])) for s in frame_stars],
-        dtype=np.float64
-    )
+    yx = np.array([(float(t['ycentroid']), float(t['xcentroid'])) for t in stars], dtype=np.float64)
+    aligned = _stars_to_aligned(yx, shift, transform)
+    if aligned is None:
+        stars = registration_stars(_residual_warp(lum, shift, transform), noise_val)
+        if stars is None or len(stars) < 3:
+            return None
+        frame_xy = np.array([(float(t['xcentroid']), float(t['ycentroid'])) for t in stars],
+                            dtype=np.float64)
+    else:
+        h, w = lum.shape[:2]
+        inside = ((aligned[:, 0] >= 0) & (aligned[:, 0] <= h - 1)
+                  & (aligned[:, 1] >= 0) & (aligned[:, 1] <= w - 1))
+        frame_xy = aligned[inside][:, ::-1]
+        if len(frame_xy) < 3:
+            return None
     dists, idx = ref_tree.query(frame_xy, k=1, distance_upper_bound=10.0)
     valid = np.isfinite(dists) & (dists < 10.0)
     if valid.sum() < 3:
@@ -1283,7 +1312,8 @@ def score_registration_residuals(
                 lum = np.array(mem_lum[orig_idx], dtype=np.float32)
             noise_val = float(f.metrics.get('noise', 1.0)) if f.metrics else 1.0
             match = _match_frame_stars(lum, shifts[j], transforms[j], ref_tree,
-                                       ref_xy, noise_val)
+                                       ref_xy, noise_val,
+                                       f.metrics.get('_star_sources') if f.metrics else None)
             if match is None:
                 return j, 0.0, True, None
             matched_ref_xy, matched_frame_xy = match
