@@ -113,7 +113,7 @@
       <span class="cap r">114 フレームをスタック・画像処理</span>
       <input type="range" min="0" max="100" value="50" aria-label="ドラッグして1フレームと完成したスタックを比較">
     </div>
-    <p class="hero-bridge"><span>Start with the difference</span> <a href="#time">See how one night becomes one image&nbsp;→</a></p>
+    <p class="hero-bridge"><span>違いから見てみましょう</span> <a href="#time">一晩分が1枚の画像になるまで&nbsp;→</a></p>
   </div>
 </header>
 
@@ -121,21 +121,21 @@
 <section id="time">
   <div class="wrap">
     <h2>一晩分のフレームを約1分で</h2>
-    <p class="intro measure">オメガ星雲 114 フレーム、8 コアのノート PC で、生ファイルから完成画像まで <strong>65 秒</strong>（10 月初めは 89 秒）。赤いブロックが画像の見栄えを良くする部分で、残りは 114 フレームの位置を揃える処理です。</p>
+    <p class="intro measure">オメガ星雲 114 フレーム、8 コアのノート PC で、生ファイルから完成画像まで <strong>62 秒</strong>（10 月初めは 89 秒）。赤いブロックが画像の見栄えを良くする部分で、残りは 114 フレームの位置を揃える処理です。</p>
 
-    <div class="run" role="img" aria-label="65 秒の内訳を示すバー：読み込みと評価 13.2 秒、位置合わせ 2.6 秒、整列とスタック 22.7 秒、仕上げ 18.3 秒、ディスクと準備 7.9 秒">
-      <span style="width:20.4%; background:#1d7f86"></span>
-      <span style="width:4.0%; background:#4fa3a8"></span>
-      <span style="width:35.1%; background:#8cc5c8"></span>
-      <span style="width:28.3%; background:#b3312a"></span>
-      <span style="width:12.2%; background:#b9c3cf"></span>
+    <div class="run" role="img" aria-label="62 秒の内訳を示すバー：読み込みと評価 13.7 秒、位置合わせ 1.6 秒、整列とスタック 22.0 秒、仕上げ 18.1 秒、ディスクと準備 6.3 秒">
+      <span style="width:22.2%; background:#1d7f86"></span>
+      <span style="width:2.6%; background:#4fa3a8"></span>
+      <span style="width:35.7%; background:#8cc5c8"></span>
+      <span style="width:29.3%; background:#b3312a"></span>
+      <span style="width:10.2%; background:#b9c3cf"></span>
     </div>
     <ul class="legend">
-      <li><i style="background:#1d7f86"></i>読み込み・キャリブレーション・評価<b>13.2 s</b></li>
-      <li><i style="background:#4fa3a8"></i>位置合わせ<b>2.6 s</b></li>
-      <li><i style="background:#8cc5c8"></i>整列とスタック<b>22.7 s</b></li>
-      <li><i style="background:#b3312a"></i>画像の仕上げ<b>18.3 s</b></li>
-      <li><i style="background:#b9c3cf"></i>ディスクと準備<b>7.9 s</b></li>
+      <li><i style="background:#1d7f86"></i>読み込み・キャリブレーション・評価<b>13.7 s</b></li>
+      <li><i style="background:#4fa3a8"></i>位置合わせ<b>1.6 s</b></li>
+      <li><i style="background:#8cc5c8"></i>整列とスタック<b>22.0 s</b></li>
+      <li><i style="background:#b3312a"></i>画像の仕上げ<b>18.1 s</b></li>
+      <li><i style="background:#b9c3cf"></i>ディスクと準備<b>6.3 s</b></li>
     </ul>
 
     <div class="phases">
@@ -189,14 +189,15 @@
 <section id="compare">
   <div class="wrap">
     <h2>Siril や DeepSkyStacker との比較</h2>
-    <p class="intro measure">同じフレーム、同じバイアス・ダーク・フラット、同じマシンで、各ツールを標準的な設定で実行しました。Celestron Origin の2セッション：オメガ星雲（30 秒 × 114）とひまわり銀河（20 秒 × 158）。ちょうこくしつ座銀河（10 秒 × 532）は、このバージョンで測定し直しています。</p>
+    <p class="intro measure">同じフレーム、同じバイアス・ダーク・フラット、同じマシンで、各ツールを標準的な設定で実行しました。Celestron Origin の3セッション：オメガ星雲（30 秒 × 114）、ひまわり銀河（20 秒 × 158）、ちょうこくしつ座銀河（10 秒 × 532）。</p>
 
     <table class="wide">
       <caption>OriginStack が先、Siril が後。「スタックのみ」は、Siril にはない OriginStack の仕上げ処理を含まない時間です。</caption>
       <thead><tr><th>セッション</th><th class="n">スタックのみ</th><th class="n">OriginStack、完成画像</th><th class="n">最大メモリ</th><th class="n">星像の幅</th></tr></thead>
       <tbody>
-        <tr><th>オメガ、114 フレーム</th><td class="n">46 s / 56 s</td><td class="n">65 s</td><td class="n">12.1 / 6.5 GB</td><td class="n">4.42 / 4.56 px</td></tr>
-        <tr><th>ひまわり、158 フレーム</th><td class="n">59 s / 72 s</td><td class="n">86 s</td><td class="n">14.3 / 8.0 GB</td><td class="n">3.51 / 3.60 px</td></tr>
+        <tr><th>オメガ、114 フレーム</th><td class="n">44 s / 54 s</td><td class="n">62 s</td><td class="n">12.0 / 6.5 GB</td><td class="n">4.42 / 4.56 px</td></tr>
+        <tr><th>ひまわり、158 フレーム</th><td class="n">54 s / 67 s</td><td class="n">81 s</td><td class="n">14.3 / 8.9 GB</td><td class="n">3.51 / 3.60 px</td></tr>
+        <tr><th>ちょうこくしつ座、532 フレーム</th><td class="n">128 s / 159 s</td><td class="n">144 s</td><td class="n">9.1 / 11.2 GB</td><td class="n">2.66 / 3.01 px</td></tr>
       </tbody>
     </table>
 
@@ -210,15 +211,18 @@
         <h3 class="sub">ひまわり</h3>
         <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.0%"></i><b>3.51 px</b></div></div>
         <div class="row"><span>Siril</span><div class="track"><i style="width:55.4%"></i><b>3.60 px</b></div></div>
+        <h3 class="sub">ちょうこくしつ座</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:40.9%"></i><b>2.66 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:46.3%"></i><b>3.01 px</b></div></div>
         <small>明るく飽和しておらず孤立した最大 400 個の恒星それぞれにガウス関数をフィットしたもの。両スタックで同じ位置の恒星を、それぞれのピクセルグリッド上で測定しています。</small>
       </div>
 
       <div class="verdict">
         <h3>数値が示すこと</h3>
-        <p><strong>シャープさ：両方で Siril よりシャープ。</strong>同じ恒星で比べると、OriginStack はオメガで 3% 細く（4.42 px 対 4.56 px）、ひまわりで 2% 細くなりました。これを実現したのは2つの変更です。既定で有効な<em>厳密な画像コアディション</em>は、細部の各スケールを、各フレームのシャープさ・透明度・ノイズに応じて重み付けします（Zackay &amp; Ofek, 2017）。もう1つは、すべてのフレームでほとんどの明るい恒星のピークを平坦にしていたホットピクセル処理の修正です &mdash; アンダーサンプリングの星像では、ピクセルを隣接ピクセルと比べるだけの判定にとって、恒星の中心はホットピクセルとまったく同じに見えます。また、使用したフレーム数も多く、Siril の 111、157 に対して 114、158 でした。</p>
-        <p><strong>ノイズ：シャープさを揃えれば Siril より低ノイズ。</strong>シャープなスタックほどピクセル単位のノイズは多くなるため、公平な比較として、OriginStack の各チャンネルを恒星の幅が Siril とちょうど同じになるまでぼかしました。すると赤/緑/青のノイズは、Siril に対してオメガで 0.80、0.86、0.88 倍、ひまわりで 0.84、0.66、0.93 倍です（赤の星像はもともと Siril と同じ幅でした）。揃えずにピクセル単位で比べると、オメガで 0.92、1.02、1.05 倍、ひまわりで 0.84、0.73、0.97 倍です &mdash; 恒星がシャープなほど、この数値は大きくなります。</p>
-        <p><strong>速度：両方で Siril より高速。</strong>同じマシンで続けて実行した、スタック完了までの時間：オメガで 46 秒（Siril 56 秒）、ひまわりで 59 秒（同 72 秒）。OriginStack は、Siril が行わないフレームごとの処理 &mdash; 全フレームでの品質評価、ホワイトバランス、星検出 &mdash; も行っていますが、その分を位置合わせとスタックで取り戻しています。どちらのツールも、同じ条件の実行でも1日のうちに最大 3 分の 1 ほど時間が変動したため（Siril だけでもオメガで 55〜86 秒）、同じ行の中で比較してください。完成画像の作成にはさらに 18〜27 秒かかります。</p>
-        <p><strong>メモリとディスク。</strong>OriginStack は、余裕があれば位置合わせ済みのフレームをメモリ上に保持します。ここでの2つのセッションはどちらもそうで、12.1 GB と 14.3 GB（Siril は 6.5 GB と 8.0 GB）でした。一時ディスク使用量は少なく、Siril の 18 GB と 24 GB に対して 11 GB と 15 GB でした。</p>
+        <p><strong>シャープさ：3つすべてで Siril よりシャープ。</strong>同じ恒星で比べると、OriginStack はオメガで 3% 細く（4.42 px 対 4.56 px）、ひまわりで 2%、ちょうこくしつ座で 10% 細くなりました。これを実現したのは2つの変更です。既定で有効な<em>厳密な画像コアディション</em>は、細部の各スケールを、各フレームのシャープさ・透明度・ノイズに応じて重み付けします（Zackay &amp; Ofek, 2017）。もう1つは、すべてのフレームでほとんどの明るい恒星のピークを平坦にしていたホットピクセル処理の修正です &mdash; アンダーサンプリングの星像では、ピクセルを隣接ピクセルと比べるだけの判定にとって、恒星の中心はホットピクセルとまったく同じに見えます。また、使用したフレーム数も多く、Siril の 111、157、525 に対して 114、158、532 でした。</p>
+        <p><strong>ノイズ：シャープさを揃えれば Siril より低ノイズ。</strong>シャープなスタックほどピクセル単位のノイズは多くなるため、公平な比較として、OriginStack の各チャンネルを恒星の幅が Siril とちょうど同じになるまでぼかしました。すると赤/緑/青のノイズは、Siril に対してオメガで 0.80、0.86、0.88 倍、ひまわりで 0.84、0.66、0.93 倍（赤の星像はもともと Siril と同じ幅でした）、ちょうこくしつ座で 0.82、0.72、0.89 倍です。揃えずにピクセル単位で比べると 0.92、1.02、1.05、0.84、0.73、0.97、0.98、0.85、1.28 倍です &mdash; 恒星がシャープなほど、この数値は大きくなります。</p>
+        <p><strong>速度：3つすべてで Siril より高速。</strong>同じマシンで続けて実行した、スタック完了までの時間：オメガで 44 秒（Siril 54 秒）、ひまわりで 54 秒（同 67 秒）、ちょうこくしつ座で 128 秒（同 159 秒）。OriginStack は、Siril が行わないフレームごとの処理 &mdash; 全フレームでの品質評価、ホワイトバランス、星検出 &mdash; も行っていますが、その分を位置合わせとスタックで取り戻しています。どちらのツールも、同じ条件の実行でも1日のうちに最大 3 分の 1 ほど時間が変動したため（Siril だけでもオメガで 55〜86 秒）、同じ行の中で比較してください。完成画像の作成にはさらに 16〜27 秒かかります。</p>
+        <p><strong>メモリとディスク。</strong>OriginStack は、余裕があれば位置合わせ済みのフレームをメモリ上に保持します。短い2つのセッションはそうで、12.0 GB と 14.3 GB（Siril は 6.5 GB と 8.9 GB）でした。ちょうこくしつ座では一時ファイルに置かれ、使用量は 9.1 GB（Siril は 11.2 GB）でした。一時ディスク使用量は、短い2つのセッションでは少なく（19 GB と 23 GB に対して 11 GB と 15 GB）、ちょうこくしつ座では多くなりました（57 GB に対して 63 GB）。</p>
         <p><strong>DeepSkyStacker</strong> はオメガで 14 分 8 秒かかり、星像は他の2つより甘く、既定の設定ではホットピクセルの筋と位置合わせに失敗した数フレームが残りました。</p>
       </div>
     </div>

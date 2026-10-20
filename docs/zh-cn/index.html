@@ -113,7 +113,7 @@
       <span class="cap r">114 帧，已叠加并处理</span>
       <input type="range" min="0" max="100" value="50" aria-label="拖动以对比单帧与最终叠加结果">
     </div>
-    <p class="hero-bridge"><span>Start with the difference</span> <a href="#time">See how one night becomes one image&nbsp;→</a></p>
+    <p class="hero-bridge"><span>从差别看起</span> <a href="#time">看一整夜如何变成一张图像&nbsp;→</a></p>
   </div>
 </header>
 
@@ -121,21 +121,21 @@
 <section id="time">
   <div class="wrap">
     <h2>一整夜的帧，大约一分钟</h2>
-    <p class="intro measure">欧米茄星云，114 帧，在一台 8 核笔记本电脑上：从原始文件到成品图像只需 <strong>65 秒</strong>，10 月初为 89 秒。红色部分是让图像变好看的步骤；其余时间用于让 114 帧对齐。</p>
+    <p class="intro measure">欧米茄星云，114 帧，在一台 8 核笔记本电脑上：从原始文件到成品图像只需 <strong>62 秒</strong>，10 月初为 89 秒。红色部分是让图像变好看的步骤；其余时间用于让 114 帧对齐。</p>
 
-    <div class="run" role="img" aria-label="条形图，显示 65 秒的构成：加载与评分 13.2 秒、配准 2.6 秒、对齐与叠加 22.7 秒、成品处理 18.3 秒、磁盘与准备 7.9 秒">
-      <span style="width:20.4%; background:#1d7f86"></span>
-      <span style="width:4.0%; background:#4fa3a8"></span>
-      <span style="width:35.1%; background:#8cc5c8"></span>
-      <span style="width:28.3%; background:#b3312a"></span>
-      <span style="width:12.2%; background:#b9c3cf"></span>
+    <div class="run" role="img" aria-label="条形图，显示 62 秒的构成：加载与评分 13.7 秒、配准 1.6 秒、对齐与叠加 22.0 秒、成品处理 18.1 秒、磁盘与准备 6.3 秒">
+      <span style="width:22.2%; background:#1d7f86"></span>
+      <span style="width:2.6%; background:#4fa3a8"></span>
+      <span style="width:35.7%; background:#8cc5c8"></span>
+      <span style="width:29.3%; background:#b3312a"></span>
+      <span style="width:10.2%; background:#b9c3cf"></span>
     </div>
     <ul class="legend">
-      <li><i style="background:#1d7f86"></i>加载、校准、评分<b>13.2 s</b></li>
-      <li><i style="background:#4fa3a8"></i>配准<b>2.6 s</b></li>
-      <li><i style="background:#8cc5c8"></i>对齐与叠加<b>22.7 s</b></li>
-      <li><i style="background:#b3312a"></i>成品处理<b>18.3 s</b></li>
-      <li><i style="background:#b9c3cf"></i>磁盘与准备<b>7.9 s</b></li>
+      <li><i style="background:#1d7f86"></i>加载、校准、评分<b>13.7 s</b></li>
+      <li><i style="background:#4fa3a8"></i>配准<b>1.6 s</b></li>
+      <li><i style="background:#8cc5c8"></i>对齐与叠加<b>22.0 s</b></li>
+      <li><i style="background:#b3312a"></i>成品处理<b>18.1 s</b></li>
+      <li><i style="background:#b9c3cf"></i>磁盘与准备<b>6.3 s</b></li>
     </ul>
 
     <div class="phases">
@@ -189,14 +189,15 @@
 <section id="compare">
   <div class="wrap">
     <h2>与 Siril 和 DeepSkyStacker 的对比</h2>
-    <p class="intro measure">相同的帧，相同的偏置场、暗场和平场，同一台机器，各工具均使用接近默认的设置。两个 Celestron Origin 会话：欧米茄星云（114 × 30 s）和向日葵星系（158 × 20 s）。玉夫座星系（532 × 10 s）正在用此版本重新测量。</p>
+    <p class="intro measure">相同的帧，相同的偏置场、暗场和平场，同一台机器，各工具均使用接近默认的设置。三个 Celestron Origin 会话：欧米茄星云（114 × 30 s）、向日葵星系（158 × 20 s）和玉夫座星系（532 × 10 s）。</p>
 
     <table class="wide">
       <caption>OriginStack 在前，Siril 在后。“仅叠加”指不含 OriginStack 的成品处理步骤（Siril 没有这些步骤）。</caption>
       <thead><tr><th>会话</th><th class="n">仅叠加</th><th class="n">OriginStack，成品图像</th><th class="n">峰值内存</th><th class="n">星点宽度</th></tr></thead>
       <tbody>
-        <tr><th>欧米茄，114 帧</th><td class="n">46 s / 56 s</td><td class="n">65 s</td><td class="n">12.1 / 6.5 GB</td><td class="n">4.42 / 4.56 px</td></tr>
-        <tr><th>向日葵，158 帧</th><td class="n">59 s / 72 s</td><td class="n">86 s</td><td class="n">14.3 / 8.0 GB</td><td class="n">3.51 / 3.60 px</td></tr>
+        <tr><th>欧米茄，114 帧</th><td class="n">44 s / 54 s</td><td class="n">62 s</td><td class="n">12.0 / 6.5 GB</td><td class="n">4.42 / 4.56 px</td></tr>
+        <tr><th>向日葵，158 帧</th><td class="n">54 s / 67 s</td><td class="n">81 s</td><td class="n">14.3 / 8.9 GB</td><td class="n">3.51 / 3.60 px</td></tr>
+        <tr><th>玉夫座，532 帧</th><td class="n">128 s / 159 s</td><td class="n">144 s</td><td class="n">9.1 / 11.2 GB</td><td class="n">2.66 / 3.01 px</td></tr>
       </tbody>
     </table>
 
@@ -210,15 +211,18 @@
         <h3 class="sub">向日葵</h3>
         <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.0%"></i><b>3.51 px</b></div></div>
         <div class="row"><span>Siril</span><div class="track"><i style="width:55.4%"></i><b>3.60 px</b></div></div>
+        <h3 class="sub">玉夫座</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:40.9%"></i><b>2.66 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:46.3%"></i><b>3.01 px</b></div></div>
         <small>对最多 400 颗明亮、未饱和、孤立的恒星分别做高斯拟合，两个叠加结果中取相同位置，各自在自己的像素网格上测量。</small>
       </div>
 
       <div class="verdict">
         <h3>数据说明了什么</h3>
-        <p><strong>锐度：两个会话都比 Siril 更锐利。</strong>在同一批恒星上，OriginStack 在欧米茄上窄 3%（4.42 对 4.56 px），在向日葵上窄 2%。这得益于两项改动：<em>理想图像叠加</em>（默认开启），按每帧的锐度、透明度和噪声对每个细节尺度加权（Zackay &amp; Ofek，2017）；以及修复了一个热像素步骤，它此前会在每一帧中压平大多数亮星的峰值 &mdash; 对于欠采样的星点，在只比较像素与其邻居的检验看来，星点中心与热像素完全一样。它使用的帧也更多：114 和 158 帧，而 Siril 使用了 111 和 157 帧。</p>
-        <p><strong>噪声：锐度匹配后比 Siril 更低。</strong>更锐利的叠加结果单像素噪声更高，因此公平的比较是把 OriginStack 的每个通道模糊到星点宽度与 Siril 完全相同。此时其红/绿/蓝噪声在欧米茄上为 Siril 的 0.80、0.86、0.88 倍，在向日葵上为 0.84、0.66、0.93（其红色星点本来就与 Siril 一样宽）。不做匹配、按单像素比较，则分别为 0.92、1.02、1.05 和 0.84、0.73、0.97 &mdash; 星点越锐利，这个数字越高。</p>
-        <p><strong>速度：两个会话都比 Siril 更快。</strong>在同一台机器上先后运行，到得出叠加结果为止：欧米茄 46 s 对 Siril 的 56 s，向日葵 59 对 72 s。OriginStack 仍然做了 Siril 不做的逐帧工作 &mdash; 对每一帧进行质量评分、白平衡和星点检测 &mdash; 并在配准和叠加中把时间赢了回来。一天之中，两个工具在相同运行之间的耗时变化可达三分之一（仅 Siril 在欧米茄上就耗时 55 到 86 s），因此请在同一行内比较。成品图像还需另外 18 到 27 s。</p>
-        <p><strong>内存与磁盘。</strong>内存足够时，OriginStack 会将对齐后的帧保存在内存中，这里的两个会话都是如此：12.1 和 14.3 GB，Siril 为 6.5 和 8.0 GB。临时磁盘占用更低：11 和 15 GB，Siril 为 18 和 24 GB。</p>
+        <p><strong>锐度：三个会话都比 Siril 更锐利。</strong>在同一批恒星上，OriginStack 在欧米茄上窄 3%（4.42 对 4.56 px），在向日葵上窄 2%，在玉夫座上窄 10%。这得益于两项改动：<em>理想图像叠加</em>（默认开启），按每帧的锐度、透明度和噪声对每个细节尺度加权（Zackay &amp; Ofek，2017）；以及修复了一个热像素步骤，它此前会在每一帧中压平大多数亮星的峰值 &mdash; 对于欠采样的星点，在只比较像素与其邻居的检验看来，星点中心与热像素完全一样。它使用的帧也更多：114、158 和 532 帧，而 Siril 使用了 111、157 和 525 帧。</p>
+        <p><strong>噪声：锐度匹配后比 Siril 更低。</strong>更锐利的叠加结果单像素噪声更高，因此公平的比较是把 OriginStack 的每个通道模糊到星点宽度与 Siril 完全相同。此时其红/绿/蓝噪声在欧米茄上为 Siril 的 0.80、0.86、0.88 倍，在向日葵上为 0.84、0.66、0.93（其红色星点本来就与 Siril 一样宽），在玉夫座上为 0.82、0.72、0.89。不做匹配、按单像素比较，则分别为 0.92、1.02、1.05；0.84、0.73、0.97；以及 0.98、0.85、1.28 &mdash; 星点越锐利，这个数字越高。</p>
+        <p><strong>速度：三个会话都比 Siril 更快。</strong>在同一台机器上先后运行，到得出叠加结果为止：欧米茄 44 s 对 Siril 的 54 s，向日葵 54 对 67 s，玉夫座 128 对 159 s。OriginStack 仍然做了 Siril 不做的逐帧工作 &mdash; 对每一帧进行质量评分、白平衡和星点检测 &mdash; 并在配准和叠加中把时间赢了回来。一天之中，两个工具在相同运行之间的耗时变化可达三分之一（仅 Siril 在欧米茄上就耗时 55 到 86 s），因此请在同一行内比较。成品图像还需另外 16 到 27 s。</p>
+        <p><strong>内存与磁盘。</strong>内存足够时，OriginStack 会将对齐后的帧保存在内存中，两个较短的会话就是如此：12.0 和 14.3 GB，Siril 为 6.5 和 8.9 GB。在玉夫座上它们被写入临时文件，占用 9.1 GB，Siril 为 11.2 GB。临时磁盘占用在两个较短的会话上更低（11 和 15 GB，对 19 和 23 GB），在玉夫座上更高（63 对 57 GB）。</p>
         <p><strong>DeepSkyStacker</strong> 在欧米茄上耗时 14 分 8 秒，星点比另外两者都更柔和，并且在默认设置下留下了热像素条纹和几张配准错误的帧。</p>
       </div>
     </div>
