@@ -59,16 +59,27 @@ def _detect_stars(lum: np.ndarray) -> Optional[Any]:
 
 
 def _register_stack(new_lum: np.ndarray, prev_lum: np.ndarray,
-                    new_stars: Optional[Any]) -> Tuple[Optional[Any],
-                                                       Optional[Tuple[float, float]]]:
+                    new_stars: Optional[Any],
+                    prev_shape: Optional[Tuple[int, int]] = None) -> Tuple[Optional[Any],
+                                                                          Optional[Tuple[float, float]]]:
     """Transform aligning ``prev`` onto ``new``: blind (unknown-rotation)
     star-pattern match first (rotation between nights is arbitrary),
     translation-seeded star-match affine and translation-only fallbacks.
     Returns (transform, shift) — exactly one is non-None on success,
-    both None on failure."""
+    both None on failure.
+
+    ``prev_shape``: the (h, w) of ``prev``'s own pixels when it was zero-padded
+    (``embed_to_shape``, top-left) to the current stack's shape. Stars are
+    detected inside it only: the drop from sky to the zero padding read as a
+    row of bright "stars" along the edge, which outnumbered the real ones among
+    the brightest 40 the blind match uses (a 48-minute Whirlpool session,
+    1840x2902 padded to 1992x2949, was refused for it)."""
     from src.registration import _blind_match_transform, calculate_shift, match_stars_affine
 
-    prev_stars = _detect_stars(prev_lum)
+    if prev_shape is not None:
+        prev_stars = _detect_stars(prev_lum[:prev_shape[0], :prev_shape[1]])
+    else:
+        prev_stars = _detect_stars(prev_lum)
 
     # Blind match first: it makes no assumption about rotation, handling the
     # arbitrary field rotation between nights. The nearest-neighbour+RANSAC
@@ -357,7 +368,8 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
             embed_mask = _embed_to_shape(
                 np.ones((prev_h, prev_w), dtype=np.float32), H, W)
 
-            tf, shift = _register_stack(new_lum, prev_lum, new_stars)
+            tf, shift = _register_stack(new_lum, prev_lum, new_stars,
+                                        prev_shape=(prev_h, prev_w))
             if tf is None and shift is None:
                 raise _UnusableStack(
                     f"Could not register {os.path.basename(path)} to the current "
