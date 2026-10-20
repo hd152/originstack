@@ -510,6 +510,27 @@ def seed_reference_header(header, meta: Dict[str, Any]) -> None:
         header['DATELAST'] = str(meta['datelast'])
 
 
+def copy_celestial_wcs(header, ref_header) -> bool:
+    """Copy the reference stack's celestial WCS into ``header``.
+
+    A hierarchical combine lands every session on the reference stack's pixel
+    grid, so the reference's WCS describes the combined image exactly. The
+    combined header was built from scratch and carried none: astropy then reads
+    a 1 deg/px identity WCS, and photometry, annotation and --transient-detect
+    on a multi-night stack had no sky coordinates. Returns whether one was copied.
+    """
+    try:
+        from astropy.wcs import WCS
+        w = WCS(ref_header, naxis=2)
+    except Exception:
+        return False
+    if not w.has_celestial:
+        return False
+    for card in w.to_header(relax=True).cards:
+        header[card.keyword] = (card.value, card.comment)
+    return True
+
+
 def apply_merge_header(header, info: Dict[str, Any]) -> None:
     """Override the session header aggregates with merged totals."""
     header['NFRAMES'] = (info['total_frames'], 'Number of stacked frames (all merged sessions)')

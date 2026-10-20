@@ -1456,6 +1456,7 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
     # footprint, so a deep session is not diluted by a shallow one.
     from src.merge import (
         apply_merge_header,
+        copy_celestial_wcs,
         load_merge_stack,
         merge_previous_stacks,
         read_merge_meta,
@@ -1519,6 +1520,8 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
         seed_reference_header(out_hdu.header, ref_meta)
         if merge_info is not None:
             apply_merge_header(out_hdu.header, merge_info)
+        if not copy_celestial_wcs(out_hdu.header, fits.getheader(ref_path)):
+            safe_print("  [i] The reference stack has no WCS; the combined stack has none either")
     except Exception as exc:
         # The pixels are already merged and correct, so do not fail the
         # run over metadata -- but do say so. Silently dropping these

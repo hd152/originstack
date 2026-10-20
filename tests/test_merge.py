@@ -168,6 +168,33 @@ class TestMergePreviousStacks(unittest.TestCase):
                 merge_previous_stacks(new, 10, [p])
 
 
+
+class TestCopyCelestialWcs(unittest.TestCase):
+
+    def test_copies_the_reference_wcs(self):
+        from astropy.wcs import WCS
+
+        from src.merge import copy_celestial_wcs
+        w = WCS(naxis=2)
+        w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+        w.wcs.crval = [283.4, 33.03]
+        w.wcs.crpix = [1492.0, 970.0]
+        w.wcs.cd = [[-4.1e-4, 1.3e-5], [1.3e-5, 4.1e-4]]
+        ref = w.to_header()
+        ref['NAXIS'] = 3
+        out = fits.Header()
+        self.assertTrue(copy_celestial_wcs(out, ref))
+        got = WCS(out, naxis=2)
+        self.assertTrue(got.has_celestial)
+        np.testing.assert_allclose(got.wcs_pix2world([[100.0, 200.0]], 0),
+                                   w.wcs_pix2world([[100.0, 200.0]], 0))
+
+    def test_no_reference_wcs_copies_nothing(self):
+        from src.merge import copy_celestial_wcs
+        out = fits.Header()
+        self.assertFalse(copy_celestial_wcs(out, fits.Header({'NAXIS': 3})))
+        self.assertNotIn('CTYPE1', out)
+
 class TestApplyMergeHeader(unittest.TestCase):
 
     def test_header_sums(self):
