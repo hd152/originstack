@@ -47,6 +47,14 @@ def test_nights_of_the_same_target_are_not_a_mosaic(tmp_path):
     assert mosaic.predict_mosaic(dirs) is None
 
 
+def test_one_off_centre_night_is_not_a_mosaic(tmp_path):
+    # Whirlpool, nine nights: eight within 0.1 field, one mis-aimed 0.32 field off
+    step = math.degrees(FOV_Y) * 0.32
+    dirs = [_session(tmp_path, f"n{i}", 202.47 + 0.004 * i, 47.19) for i in range(8)]
+    dirs.append(_session(tmp_path, "off", 202.47, 47.19 + step))
+    assert mosaic.predict_mosaic(dirs) is None
+
+
 def test_unrelated_targets_are_not_a_mosaic(tmp_path):
     dirs = [_session(tmp_path, "m51", 202.47, 47.19), _session(tmp_path, "m101", 210.8, 54.35)]
     assert mosaic.predict_mosaic(dirs) is None

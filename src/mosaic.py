@@ -56,8 +56,10 @@ except Exception:
     HAS_SCIPY = False
 
 # Sessions closer than this fraction of the (smaller) field are the same pointing:
-# nights of one target differ by 7-70 px of 2048 (< 0.04), a mosaic tile steps ~0.6-0.9.
-_SAME_POINTING_FRAC = 0.25
+# nights of one target differ by 7-70 px of 2048 (< 0.04), up to 0.15 when re-centred,
+# and a mis-aimed Whirlpool session sat 0.32 off (0.25 made it a two-panel "mosaic" of
+# nine nights); a mosaic tile steps ~0.6-0.9 (the Origin's M24 tiles: 0.80).
+_SAME_POINTING_FRAC = 0.5
 # Two pointings can overlap if they are closer than this fraction of the larger field.
 _OVERLAP_FRAC = 0.95
 _MAP_STEP = 32            # px between exact WCS evaluations of the reprojection map
