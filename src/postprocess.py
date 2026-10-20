@@ -456,8 +456,20 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                     if getattr(args, 'verbose', False):
                         safe_print(f"    Galaxy exclusion mask: center=({_gal_cx:.1f},{_gal_cy:.1f}), "
                                    f"semi-axes={_gal_a:.0f}x{_gal_b:.0f}px")
-                elif getattr(args, 'verbose', False):
-                    safe_print("    Galaxy exclusion mask: no extended source detected")
+                else:
+                    # Galaxy mode without a detected ellipse still means a glow anchored
+                    # on the frame edge is not the target. An empty mask keeps DBE's
+                    # galaxy-mode handling (edge glow flattened, no diffuse-emission
+                    # rule); with none, the diffuse rule at 0.25 sigma kept a real
+                    # Whirlpool night's bright corners (a flat over-correcting the
+                    # vignetting, +2.7%) out of the fit, and they came out of the
+                    # stretch pink: +4.5 / +8.5 sigma at r = 1.3 / 1.4 of the
+                    # half-diagonal, +0.7 / +2.4 with it, the galaxy core unchanged.
+                    # (M51 was too faint against that night's sky for the detector.)
+                    _galaxy_excl_mask = np.zeros(stacked.shape[:2], dtype=np.float32)
+                    if getattr(args, 'verbose', False):
+                        safe_print("    Galaxy exclusion mask: no extended source detected "
+                                   "(edge glow still treated as background)")
             except Exception as _ge:
                 safe_print(f"  WARNING: galaxy exclusion mask failed: {_ge}")
 

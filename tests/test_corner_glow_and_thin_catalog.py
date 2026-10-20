@@ -98,3 +98,44 @@ def test_chroma_nr_keeps_zero_centred_sky_noise():
     assert float((out == 0).mean()) < 0.01
     assert float(out.min()) < -100.0
     assert abs(float(np.median(out))) < 10.0
+
+
+def test_galaxy_mode_without_a_detected_galaxy_still_passes_an_exclusion_mask():
+    """A real Whirlpool night: M51 too faint against a bright sky for
+    find_extended_source_ellipse, so no galaxy mask -- and with none, DBE's
+    diffuse-emission rule kept the night's bright corners (a flat over-correcting
+    the vignetting) out of the fit and they came out pink. Galaxy mode must still
+    hand DBE a (empty) exclusion mask so it treats edge glow as background."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    import src.postprocess as pp
+    import src.registration as reg
+
+    seen = {}
+
+    def _dbe(img, *a, **k):
+        seen['exclusion_mask'] = k.get('exclusion_mask')
+        return img
+
+    args = SimpleNamespace(
+        bg_method='dbe', bg_mesh_size=64, bg_filter_size=3, bg_clip_sigma=3.0,
+        verbose=False, dbe_patch_size=64, entropy_bg=False, bg_wavelet_scales=6,
+        background_extraction=True,
+        skip_step=['hot_pixel', 'repair_stars', 'chroma_nr', 'sky_floor', 'wavelet',
+                   'sky_residual', 'sky_pedestal', 'bilateral', 'acdnr', 'curvelet',
+                   'aniso', 'scnr', 'photo_cal', 'deconvolve', 'star_reduce',
+                   'local_contrast', 'sky_neutralize', 'remove_stars'],
+        comet_mode=False, galaxy_mode=True, keep_intermediates=False,
+        export_masks=False, halo_removal=False, repair_stars=False, denoise=False,
+        denoise_bilateral=False, denoise_acdnr=False, denoise_curvelet=False,
+        denoise_aniso=False, scnr=False, photometric_calibration=False,
+        deconvolve=False, star_reduce=False, local_contrast=False, remove_stars=False,
+        chroma_nr=False, output=None, _diagnostic_dir=None,
+    )
+    stacked = np.zeros((16, 16, 3), dtype=np.float32)
+    with mock.patch.object(pp, 'dynamic_background_extraction', _dbe), \
+         mock.patch.object(reg, 'find_extended_source_ellipse', lambda *a, **k: None):
+        pp.postprocess_stack(stacked, args, [], SimpleNamespace())
+    mask = seen.get('exclusion_mask')
+    assert mask is not None and mask.shape == (16, 16) and not mask.any()
