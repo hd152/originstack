@@ -64,6 +64,12 @@ SAT_R_MIN, SAT_R_MAX = 6, 40  # px; a saturated star's core fill radius: where i
 SAT_CORE_LEVEL = 20.0         # ...this many sky sigma (the clipped, non-linear part)
 HALO_R = 150                  # px; a saturated star's radial halo is subtracted out to here...
 HALO_FLOOR = 0.3              # ...or to where it first drops below this (sky sigma)
+# A saturated star whose 45-60 px ring is this far above the sky (noise units) sits in
+# bright extended emission and is left alone: its ring medians are mostly nebula, and the
+# halo subtraction and core fill cut discs and coloured rings out of Orion's core (ring
+# levels there up to 1343; Pleiades <= 22, Omega <= 36).
+SAT_SKIP_BG = 50.0
+SAT_FEATHER = 0.5             # the core fill is blended into the data over r..(1 + this) r
 SPIKE_RADIAL_PX = 21          # spikes: median along the radius over this many px (drops stars, noise)...
 SPIKE_ANGLE_DEG = 30.0        # ...minus the median over this wide an angle (keeps what is narrow in angle)
 SPIKE_FLOOR = 0.5             # soft threshold on the spike model (sky sigma): noise is not subtracted
@@ -490,14 +496,18 @@ def fill_saturated(x: np.ndarray, z: np.ndarray, field: 'StarField', seed: int =
     starless estimate ``x``, whose other stars are already gone: subtract its radial halo
     (``_subtract_halo``), then fill the core -- where the halo was above ``SAT_CORE_LEVEL``
     sky sigma, the clipped, non-linear part -- by normalised convolution from the pixels
-    around it, plus sky noise of the local level. Filling out to where the halo stops falling
-    (60 px at most) left a flat disc inside a still-bright halo ring on the Pleiades and
-    Orion; so did the ``--remove-stars`` inpaint, whose fills also had 7-39% of the noise."""
+    around it, plus sky noise of the local level, feathered into the data over
+    ``SAT_FEATHER``. Filling out to where the halo stops falling (60 px at most) left a flat
+    disc inside a still-bright halo ring on the Pleiades and Orion; so did the
+    ``--remove-stars`` inpaint, whose fills also had 7-39% of the noise. A star in bright
+    extended emission (``SAT_SKIP_BG``) is left as it is."""
     out = x.copy()
     h, w, c = x.shape
     rng = np.random.default_rng(seed)
     sat = np.c_[field.det_y[field.saturated], field.det_x[field.saturated]]
     for j, (y, xc) in enumerate(sat):
+        if _ring_level(out, y, xc) > SAT_SKIP_BG:
+            continue
         lum = _subtract_halo(out, y, xc)
         hi = np.flatnonzero(lum >= SAT_CORE_LEVEL)
         r = int(np.clip(2 * (hi[-1] + 1) + 2 if len(hi) else SAT_R_MIN, SAT_R_MIN, SAT_R_MAX))
@@ -505,19 +515,41 @@ def fill_saturated(x: np.ndarray, z: np.ndarray, field: 'StarField', seed: int =
         _subtract_spikes(out, y, xc, r, 2.0 * 2 * (lit[-1] + 1) if len(lit) else 0.0,
                          np.delete(sat, j, axis=0))
         sig = max(4.0, 0.5 * r)
-        R = int(r + 3 * sig)
+        rf = r * (1.0 + SAT_FEATHER)
+        R = int(rf + 3 * sig)
         y0, y1, x0, x1 = max(0, y - R), min(h, y + R + 1), max(0, xc - R), min(w, xc + R + 1)
         yy, xx = np.mgrid[y0 - y:y1 - y, x0 - xc:x1 - xc]
-        disk = np.hypot(yy, xx) <= r
+        rr = np.hypot(yy, xx)
+        disk = rr <= r
         keep = (~disk).astype(np.float32)
         den = np.maximum(ndi.gaussian_filter(keep, sig, mode='nearest'), 1e-6)
+        # 1 at r, 0 at rf: the fill's mean blended into the data across the band. A hard
+        # edge showed as a smooth disc set into textured surroundings, ringed by whatever
+        # halo residue the ring medians left, in a different colour per channel (Pleiades).
+        band = (rr > r) & (rr < rf)
+        wb = np.clip((rf - rr) / max(rf - r, 1e-6), 0.0, 1.0)
         cut = out[y0:y1, x0:x1]
         for k in range(c):
             fill = ndi.gaussian_filter(cut[..., k] * keep, sig, mode='nearest') / den
             noise = rng.standard_normal(fill.shape).astype(np.float32) * np.sqrt(
                 1.0 + np.maximum(fill, 0.0) / np.float32(max(field.B[k], 1e-6)))
-            cut[..., k][disk] = (fill + noise)[disk]
+            v = cut[..., k]
+            v[band] = (wb * fill + (1.0 - wb) * v)[band]
+            v[disk] = (fill + noise)[disk]
     return out
+
+
+def _ring_level(out: np.ndarray, y: int, x: int, r_in: int = 45, r_out: int = 60) -> float:
+    """Median luminance of ``out`` (noise units) in the ``r_in``..``r_out`` px ring around
+    (y, x): how bright the surroundings a saturated star's halo is measured against are."""
+    h, w = out.shape[:2]
+    y0, y1, x0, x1 = max(0, y - r_out), min(h, y + r_out + 1), max(0, x - r_out), min(w, x + r_out + 1)
+    yy, xx = np.mgrid[y0 - y:y1 - y, x0 - x:x1 - x]
+    rr = np.hypot(yy, xx)
+    ring = (rr > r_in) & (rr <= r_out)
+    if not ring.any():
+        return 0.0
+    return float(np.median(out[y0:y1, x0:x1].mean(axis=2)[ring]))
 
 
 def starless_z(z: np.ndarray, w, alpha: float = 1.0, field: Optional['StarField'] = None,

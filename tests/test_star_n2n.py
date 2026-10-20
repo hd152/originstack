@@ -329,3 +329,15 @@ def test_spike_subtraction_stays_finite_when_every_angle_is_masked():
     sn._subtract_spikes(out, 100, 100, 10.0, 95.0, others)
     assert np.isfinite(out).all()
     assert (out <= before + 1e-6).all()                      # it only ever subtracts
+
+
+
+def test_saturated_star_in_bright_emission_is_left_alone():
+    """Orion: saturated stars inside the bright nebula core had the nebula cut out
+    in discs and coloured rings by the halo subtraction and core fill."""
+    from src.star_n2n import SAT_SKIP_BG, _ring_level
+    H, W = 200, 200
+    out = np.zeros((H, W, 3), np.float32)
+    assert _ring_level(out, 100, 100) == 0.0
+    out += SAT_SKIP_BG * 2.0
+    assert _ring_level(out, 100, 100) > SAT_SKIP_BG
