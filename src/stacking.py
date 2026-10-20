@@ -2611,80 +2611,125 @@ def run_stacking_phase(
 # Comet dual-track stacking
 # ---------------------------------------------------------------------------
 
+def _comet_mask(comet_stack: np.ndarray, thresh_sigma: float = 2.0,
+                grow_px: int = 10,
+                nucleus: Optional[Tuple[float, float]] = None) -> np.ndarray:
+    """Soft (0..1) mask of the comet in a comet-aligned stack: the region of the
+    smoothed, gradient-removed luminance above ``thresh_sigma`` sky sigma that
+    contains the nucleus (``nucleus`` (row, col) when the caller knows it, else
+    the brightest compact blob), grown and feathered. Not the largest region:
+    these stacks have had no background extraction, and on a real SWAN session a
+    sky gradient in a corner was larger than the comet; nor a re-detected nucleus
+    there, which on that faint comet landed elsewhere."""
+    from scipy import ndimage as _ndi
+
+    from src.registration import find_comet_centroid
+    lum = comet_stack.astype(np.float64).mean(axis=2)
+    sm = _ndi.gaussian_filter(lum, 4.0) - _ndi.gaussian_filter(lum, 150.0)
+    med = float(np.median(sm))
+    sig = 1.4826 * float(np.median(np.abs(sm - med))) or 1e-12
+    lab, n = _ndi.label(sm > med + thresh_sigma * sig)
+    if n == 0:
+        return np.zeros(lum.shape, dtype=np.float32)
+    cy, cx = nucleus if nucleus is not None else find_comet_centroid(lum)
+    H, W = lum.shape
+    yi, xi = int(np.clip(round(cy), 0, H - 1)), int(np.clip(round(cx), 0, W - 1))
+    k = int(lab[yi, xi])
+    if k == 0:
+        # nearest region within 25 px of the nucleus
+        y0, y1, x0, x1 = max(0, yi - 25), min(H, yi + 26), max(0, xi - 25), min(W, xi + 26)
+        win = lab[y0:y1, x0:x1]
+        if not win.any():
+            return np.zeros(lum.shape, dtype=np.float32)
+        yy, xx = np.nonzero(win)
+        nearest = int(np.argmin((yy + y0 - yi) ** 2 + (xx + x0 - xi) ** 2))
+        k = int(win[yy[nearest], xx[nearest]])
+    m = lab == k
+    m = _ndi.binary_dilation(m, iterations=grow_px)
+    return np.clip(_ndi.gaussian_filter(m.astype(np.float64), grow_px / 2.0), 0.0, 1.0).astype(np.float32)
+
+
+def _track_kernel(track: np.ndarray) -> np.ndarray:
+    """Normalised kernel of the comet's displacements (row, col) from its reference
+    position, bilinearly splatted, centred: convolving the comet with it gives the
+    comet as the star-aligned stack records it, smeared along its track."""
+    d = np.asarray(track, dtype=np.float64)
+    ry = int(np.ceil(np.abs(d[:, 0]).max())) + 1
+    rx = int(np.ceil(np.abs(d[:, 1]).max())) + 1
+    K = np.zeros((2 * ry + 1, 2 * rx + 1))
+    for dy, dx in d:
+        y, x = dy + ry, dx + rx
+        y0, x0 = int(np.floor(y)), int(np.floor(x))
+        fy, fx = y - y0, x - x0
+        K[y0, x0] += (1 - fy) * (1 - fx)
+        K[y0, x0 + 1] += (1 - fy) * fx
+        K[y0 + 1, x0] += fy * (1 - fx)
+        K[y0 + 1, x0 + 1] += fy * fx
+    return K / K.sum()
+
+
 def blend_comet_star_stacks(star_stack: np.ndarray,
                              comet_stack: np.ndarray,
-                             comet_lum: np.ndarray,
-                             blend_sigma: float = 30.0,
-                             tail_pa_deg: Optional[float] = None) -> np.ndarray:
-    """Blend a star-aligned and comet-aligned stack for dual-track imaging.
+                             comet_lum: Optional[np.ndarray] = None,
+                             tail_pa_deg: Optional[float] = None,
+                             track: Optional[np.ndarray] = None,
+                             nucleus: Optional[Tuple[float, float]] = None) -> np.ndarray:
+    """Comet + stars composite of a star-aligned and a comet-aligned stack.
 
-    In standard comet stacking the astronomer must choose between sharpening
-    the comet nucleus (comet alignment) and sharpening the star field (star
-    alignment).  This function blends both stacks spatially:
+    The star-aligned stack holds the sky, sharp stars and the comet smeared along
+    its track; the comet-aligned stack the sky, the sharp comet and (with outlier
+    rejection) little of the stars. With the comet's ``track`` (its per-frame
+    displacements (row, col) from the reference position, star-aligned
+    coordinates), the smear is modelled -- the masked comet convolved with the
+    track -- and subtracted from the star stack, and the masked comet added once:
 
-    • Near the comet nucleus: ``comet_stack`` dominates (sharp nucleus,
-      smeared stars).
-    • Away from the nucleus: ``star_stack`` dominates (sharp stars,
-      smeared nucleus).
+        composite = star_stack - comet * track + comet
 
-    When ``tail_pa_deg`` is provided, the blend mask is elongated along the
-    tail direction with axis ratio 3:1, extending 3× further in the tail
-    direction than radially.
+    This replaced a Gaussian window of the comet stack pasted over the star stack
+    around the nucleus: the star stack's own smeared comet stayed in it, so a comet
+    that moved further than the window during the session (C/2025 A6 Lemmon,
+    360 px) came out with two heads. Without a track the comet stack is pasted
+    through the comet mask, which still has the second head of a fast comet.
+    The subtraction is floored at the sky where the smear is real (the star
+    stack's outlier rejection removes part of a moving comet), and the brightest
+    core comes straight from the comet stack. ``nucleus``
+    (row, col): its position in these arrays, when known.
 
-    The blend mask is derived from the comet luminance: a Gaussian envelope
-    centred on the brightest region (the nucleus) whose width is controlled
-    by ``blend_sigma`` pixels.
-
-    Args:
-        star_stack:   Float32 (H, W, 3) star-aligned stack.
-        comet_stack:  Float32 (H, W, 3) comet-aligned stack.
-        comet_lum:    Float32 (H, W) luminance map for locating the nucleus
-                      (typically the comet-aligned stack luminance).
-        blend_sigma:  Gaussian half-width (px) of the comet blend zone.
-        tail_pa_deg:  Optional position angle of the tail in degrees from
-                      North (clockwise).  When provided, an elliptical mask
-                      elongated 3:1 along the tail is used.
-
-    Returns:
-        Blended float32 image (H, W, 3).
+    ``comet_lum`` and ``tail_pa_deg`` are accepted for callers of the old blend and
+    ignored.
     """
-    from scipy.ndimage import gaussian_filter as _gf
+    from scipy.signal import fftconvolve
 
-    H, W = star_stack.shape[:2]
-
-    # Locate comet nucleus (brightest smooth blob)
-    smoothed = _gf(comet_lum.astype(np.float64), sigma=5.0)
-    peak_flat = int(np.argmax(smoothed))
-    py, px = peak_flat // W, peak_flat % W
-
-    # Build blend mask centred on nucleus
-    yy, xx = np.mgrid[:H, :W]
-    dy = (yy - py).astype(np.float64)
-    dx = (xx - px).astype(np.float64)
-
-    if tail_pa_deg is not None:
-        # Elliptical mask elongated along the tail direction (axis ratio 3:1)
-        # PA is measured clockwise from North (up = -row direction)
-        # tail_pa_deg: N=0, E=90, S=180, W=270
-        pa_rad = np.radians(float(tail_pa_deg))
-        # Unit vector along the tail (in row, col convention):
-        # North is -row, East is +col -> tail_row = -cos(pa), tail_col = sin(pa)
-        tail_row = -np.cos(pa_rad)
-        tail_col = np.sin(pa_rad)
-        # Project offsets onto tail direction and perpendicular
-        proj_tail = dy * tail_row + dx * tail_col      # along tail axis
-        proj_perp = dy * (-tail_col) + dx * tail_row   # perpendicular to tail
-        # Elliptical distance: tail sigma = 3 * blend_sigma, perp sigma = blend_sigma
-        sigma_tail = blend_sigma * 3.0
-        sigma_perp = blend_sigma
-        dist2 = (proj_tail / sigma_tail) ** 2 + (proj_perp / sigma_perp) ** 2
-    else:
-        # Circular Gaussian mask
-        dist2 = (dy ** 2 + dx ** 2) / (blend_sigma ** 2)
-
-    mask = np.exp(-0.5 * dist2)   # 1 at nucleus, 0 far away
-
-    mask3 = mask[:, :, np.newaxis]
-    blended = (mask3 * comet_stack.astype(np.float64)
-               + (1.0 - mask3) * star_stack.astype(np.float64))
-    return np.clip(blended, 0.0, None).astype(np.float32)
+    if star_stack.shape != comet_stack.shape:
+        raise ValueError(f"star stack {star_stack.shape} and comet stack "
+                         f"{comet_stack.shape} differ in shape")
+    star = star_stack.astype(np.float64)
+    comet = comet_stack.astype(np.float64)
+    mask = _comet_mask(comet_stack, nucleus=nucleus).astype(np.float64)
+    sky = np.median(comet.reshape(-1, comet.shape[2]), axis=0)
+    comet_only = (comet - sky) * mask[:, :, None]
+    if track is None or len(track) < 2:
+        out = star * (1.0 - mask[:, :, None]) + comet * mask[:, :, None]
+        return np.clip(out, 0.0, None).astype(np.float32)
+    K = _track_kernel(np.asarray(track))
+    star_sky = np.median(star.reshape(-1, star.shape[2]), axis=0)
+    out = np.empty_like(star)
+    for c in range(star.shape[2]):
+        smear = fftconvolve(comet_only[:, :, c], K, mode='same')
+        sig = 1.4826 * float(np.median(np.abs(star[:, :, c] - star_sky[c]))) or 1e-12
+        background = star[:, :, c] - smear
+        # Never below the sky where the smear is real: the star stack's outlier
+        # rejection removes part of a moving comet (it is in any pixel for only
+        # some frames), so the linear model over-subtracts -- a black notch beside
+        # Lemmon's nucleus, green / magenta where the channels were clipped
+        # differently.
+        background = np.where(smear > 0.5 * sig,
+                              np.maximum(background, star_sky[c] - sig), background)
+        out[:, :, c] = background + comet_only[:, :, c]
+    # the bright core straight from the comet stack, faded in over 25-50% of its peak
+    core_lum = comet_only.mean(axis=2)
+    peak = float(core_lum.max())
+    if peak > 0:
+        wc = np.clip((core_lum / peak - 0.25) / 0.25, 0.0, 1.0)[:, :, None]
+        out = out * (1.0 - wc) + comet * wc
+    return np.clip(out, 0.0, None).astype(np.float32)
