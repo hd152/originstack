@@ -711,7 +711,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--from-stack STACK.fits` | Re-run post-processing only, on an earlier run's linear stack |
 | `--spike-reject` | Remove cosmic-ray / hot-pixel spikes on the raw mosaic before debayering (cheap; `--auto` turns it on for < 20 frames, mean stacking or drizzle) |
 | `--frame-store {auto,ram,disk}` | Keep per-session frame arrays in RAM when there is room (auto), always (ram), or in temp files (disk) |
-| `--compress-phase1` / `--no-compress-phase1` | Automatically compress Phase 1 frames when their estimated memory plus worker reserve exceeds the safe available-RAM budget; either flag forces compression on or off |
+| `--compress-phase1` / `--no-compress-phase1` | Phase 1 frames that do not fit the safe RAM budget go to temp files; they are compressed automatically only when they exceed 1.5x the available RAM (uncompressed temp files would thrash the page cache) or the temp disk cannot hold them uncompressed. Either flag forces compression on or off |
 | `--no-wcs-refine` | Keep the session `info.json` WCS as mapped onto the stack, without the Gaia refinement |
 | `--gpu-phase1 {auto,on,off}` | With `--use-gpu`: run Phase 1 on the GPU or the CPU pool (auto picks) |
 | `--comet-mode` | Also stack on the comet nucleus (`<output>_comet.fits`) |

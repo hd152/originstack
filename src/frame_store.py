@@ -50,6 +50,10 @@ _log = logging.getLogger('originstack')
 # 53 GB of dirty temp-file pages): alignment 32.5 -> 16.2 s and the whole stacking
 # phase 85.8 -> 63.0 s with it in RAM, while 0.20 still leaves ~13 GB for everything else.
 RESERVE_FRAC = 0.20
+# Phase 1 compression (auto) pays off once the frames are well beyond what the page cache can
+# hold: on a 14 GB laptop (frames ~2.6x available RAM) uncompressed disk frames thrashed in
+# alignment and combine; on a 64 GB machine (532 frames, ~1.1x) compression cost 35 s of 194.
+COMPRESS_OVER_AVAILABLE = 1.5
 SHM_PREFIX = 'shm:'
 COMPRESSED_PREFIX = 'lz4:'
 # Compressed / raw size assumed by the up-front disk check. Byte-shuffled LZ4 gave
@@ -317,16 +321,35 @@ class FrameStore:
 
     @staticmethod
     def phase1_compression_needed(nbytes: int, reserve_mb: float) -> Optional[bool]:
-        """Whether Phase 1's uncompressed arrays exceed the safe RAM budget.
+        """Whether automatic mode compresses Phase 1's frame arrays; see
+        ``phase1_compression_decision``."""
+        return FrameStore.phase1_compression_decision(nbytes, reserve_mb)[0]
 
-        ``None`` means memory telemetry is unavailable, so automatic mode
-        cannot make a reliable prediction and leaves compression disabled.
+    @staticmethod
+    def phase1_compression_decision(nbytes: int, reserve_mb: float) -> Tuple[Optional[bool], str]:
+        """``(compress, reason)`` for Phase 1's frame arrays in automatic mode.
+
+        Arrays that fit the safe RAM budget are not compressed. Beyond it they go to a temp
+        file, and compression only pays when that file will thrash the page cache (more
+        than ``COMPRESS_OVER_AVAILABLE`` x available RAM) or the temp disk cannot hold it
+        uncompressed. Compressing whenever the budget was exceeded cost a 64 GB machine
+        35 s of 194 on 532 frames (1.1x available RAM), and the decision moved with a
+        snapshot of free memory: the same 344-frame session compressed in one run and not
+        the next. ``None`` means memory telemetry is unavailable; compression stays off.
         """
         avail, total = _available_mb()
         if avail is None or total is None:
-            return None
+            return None, "memory availability could not be measured"
         budget_mb = avail - RESERVE_FRAC * total - reserve_mb
-        return nbytes / 1e6 > max(0.0, budget_mb)
+        if nbytes / 1e6 <= max(0.0, budget_mb):
+            return False, "frame arrays fit within the safe available-memory budget"
+        if not FrameStore._disk_ok(nbytes):
+            return True, "the temp disk cannot hold the uncompressed frame arrays"
+        if nbytes / 1e6 > COMPRESS_OVER_AVAILABLE * avail:
+            return True, (f"frame arrays exceed {COMPRESS_OVER_AVAILABLE:g}x the available "
+                          "memory, so uncompressed temp files would thrash the page cache")
+        return False, ("frame arrays go to temp files, within "
+                       f"{COMPRESS_OVER_AVAILABLE:g}x the available memory")
 
     @staticmethod
     def _disk_ok(nbytes: int) -> bool:

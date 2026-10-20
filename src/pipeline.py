@@ -854,11 +854,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         _p1_reserve_mb = (os.cpu_count() or 4) * (H_rgb * W_rgb * 4 * 9 / 1e6 + 200)
         _compress_phase1 = getattr(args, 'compress_phase1', None)
         if _compress_phase1 is None:
-            _compress_phase1 = mm_mgr.store.phase1_compression_needed(
+            _compress_phase1, _why = mm_mgr.store.phase1_compression_decision(
                 bytes_needed, _p1_reserve_mb)
             if _compress_phase1 is None:
-                safe_print("  Phase 1 compression: auto disabled (memory availability "
-                           "could not be measured)")
+                safe_print(f"  Phase 1 compression: auto disabled ({_why})")
             elif _compress_phase1:
                 try:
                     from src.frame_store import _require_native_compressor
@@ -868,11 +867,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                f"but is unavailable ({exc}); using uncompressed disk frames")
                     _compress_phase1 = False
                 else:
-                    safe_print("  Phase 1 compression: auto enabled (estimated frame arrays "
-                               "exceed the safe available-memory budget)")
+                    safe_print(f"  Phase 1 compression: auto enabled ({_why})")
             else:
-                safe_print("  Phase 1 compression: auto disabled (estimated frame arrays "
-                           "fit within the safe available-memory budget)")
+                safe_print(f"  Phase 1 compression: auto disabled ({_why})")
         else:
             _compress_phase1 = bool(_compress_phase1)
         # (auto: these prefer the temp file -- see src/frame_store.py for why)
