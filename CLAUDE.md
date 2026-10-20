@@ -236,7 +236,7 @@ Details in the linked notes.
 - Measuring proper-coadd PSFs inside the alignment loop (GIL contention).
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).
 - RCD per-Bayer-site stages (stops vectorising); RCD strips without a buffer pool.
-- `--cfa-drizzle` as a default; demosaic-free luminance ([siril-comparison](dev-notes/siril-comparison.md)); ubercal flat from stars, single- and multi-night -- unconstrained on the 13 local sessions (<= 0.4 deg rotation per session, <= 0.5 deg between nights); untested on strongly rotating data such as the Lagoon set ([native-kernels](dev-notes/native-kernels.md)).
+- `--cfa-drizzle` as a default; kernel-regression (Handheld Multi-Frame Super-Resolution) merge of the Bayer samples: stars 8-45% wider and 1.3-2.9x noisier than RCD + proper coadd at matched width; demosaic-free luminance ([siril-comparison](dev-notes/siril-comparison.md)); ubercal flat from stars, single- and multi-night -- unconstrained on the 13 local sessions (<= 0.4 deg rotation per session, <= 0.5 deg between nights); untested on strongly rotating data such as the Lagoon set ([native-kernels](dev-notes/native-kernels.md)).
 - Per-frame lacosmic as a noise reducer (it was smoothing; fixed noise model now) ([siril-comparison](dev-notes/siril-comparison.md)).
 - Proper coadd outside the core in `--full-field` (normalised convolution, per-tile, MTF filter, Wiener) ([module-notes](dev-notes/module-notes.md)).
 - Widening `--use-gpu` coverage (fewer VRAM-bound workers); GPU stays opt-in.
