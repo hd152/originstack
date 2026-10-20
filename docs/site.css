@@ -82,6 +82,7 @@ body {
   font-size: 1.125rem;
   line-height: 1.62;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 img { max-width: 100%; display: block; }
 a { color: var(--ha-dark); text-underline-offset: .18em; }
@@ -156,6 +157,19 @@ p { margin: 0 0 1em; }
 .wipe .cap.r { right: 14px; }
 .wipe input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
 .wipe:focus-within { outline: 3px solid var(--oiii); outline-offset: 3px; }
+.hero-bridge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  margin: 18px 0 0;
+  color: #9fb0c6;
+  font-family: var(--display);
+  font-size: .98rem;
+}
+.hero-bridge span { color: #e8edf5; font-weight: 600; }
+.hero-bridge a { color: #bfcadb; }
+.hero-bridge a:hover { color: #fff; }
 @media (max-width: 600px) {
   .bar { align-items: flex-start; flex-direction: column; gap: 12px; }
   .bar img { height: 42px; }
@@ -210,6 +224,9 @@ h2.again { margin-top: 72px; }
 .track b { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
 .chart small { display: block; margin-top: 14px; color: var(--slate); font-size: .95rem; }
 table { border-collapse: collapse; width: 100%; font-family: var(--display); font-size: 1rem; font-variant-numeric: tabular-nums; }
+table.wide { display: block; max-width: 100%; overflow-x: auto; }
+table.wide caption, table.wide thead, table.wide tbody { width: 100%; }
+table.wide th, table.wide td { white-space: nowrap; }
 th, td { text-align: left; padding: 11px 12px 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { font-weight: 600; }
 td.n, th.n { text-align: right; padding-right: 0; padding-left: 12px; white-space: nowrap; }
@@ -230,6 +247,38 @@ caption { text-align: left; font-family: var(--text); color: var(--slate); font-
 .get p { color: #33435c; }
 pre { margin: 0 0 1em; padding: 14px 16px; background: var(--night); color: #dbe5f3; overflow-x: auto; font: .92rem/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace; }
 .plain { color: var(--slate); margin-top: 44px; }
+
+/* The homepage is a guided path: result, process, proof, examples, then install. */
+.home main { counter-reset: journey; }
+.home main > section {
+  counter-increment: journey;
+  position: relative;
+  scroll-margin-top: 20px;
+}
+.home main > section:nth-child(even) { background: rgba(255, 255, 255, .38); }
+.home main > section > .wrap > h2:first-child::before {
+  content: counter(journey, decimal-leading-zero) " /";
+  display: block;
+  margin-bottom: 12px;
+  color: var(--oiii);
+  font-family: var(--display);
+  font-size: .78rem;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+.home main > section h2 { text-wrap: balance; }
+.home main > section .wrap { position: relative; }
+.home main > section:not(:last-child) .wrap::after {
+  content: "↓";
+  display: block;
+  margin-top: clamp(46px, 7vw, 88px);
+  color: var(--oiii);
+  font-family: var(--display);
+  font-size: 1.4rem;
+  font-weight: 600;
+  line-height: 1;
+  opacity: .75;
+}
 
 footer { background: var(--night); color: #9fb0c6; padding-block: 40px; font-size: 1rem; }
 footer a { color: #dbe5f3; }

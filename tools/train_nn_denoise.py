@@ -11,6 +11,15 @@ background and sigma. The loss is L2 weighted by 1 / local noise variance (a hea
 smoothed (A - B)^2), so bright stars, whose Poisson noise is large in sky-sigma units, do
 not dominate it.
 
+``bank --mode n2nr --alpha A`` builds a Noisier2Noise bank from the same quarter-stacks: input
+F + A*N, target F, where F is the full-depth stack (mean of the four quarters) and N one of the
+three quarter contrasts ((q0+q1-q2-q3)/4 and the two others). Each contrast is pure noise with
+exactly the statistics of F's own noise (spatial correlation, signal dependence) and independent
+of it, so the injected noise cannot be told from the real noise. The network learns E[F | F +
+A*N]; at run time x = ((1 + A^2) f(y) - y) / A^2 (Moran et al. 2020), applied by
+src.nn_denoise when the weights carry ``_n2nr_alpha``. It trains at the full stack's depth and
+at an input noise only sqrt(1 + A^2) above it, where the quarter-stack pairs train at twice it.
+
 ``bank --mode deconv`` builds the learned deconvolver's bank instead, from
 ``gen_n2n_pairs.py --mode seeing`` (input = stack of all but the sharpest frames, target =
 stack of the sharpest): the same sky with a sharper PSF and independent noise. There the
@@ -118,7 +127,26 @@ def deconv_pair(a: np.ndarray, b: np.ndarray):
     return za, zb, (1.0 / target_variance(zb, sky_level_z(bg, sigma))).astype(np.float32)
 
 
-def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str = "denoise") -> None:
+def n2nr_pairs(d: str, alpha: float):
+    """(input, target) pairs for Noisier2Noise: (F + alpha * N_k, F), k = 1..3 (module docstring)."""
+    q = [np.load(os.path.join(d, f"q{i}.npy")).astype(np.float32) for i in range(4)]
+    full = (q[0] + q[1] + q[2] + q[3]) / 4
+    signs = ((1, 1, -1, -1), (1, -1, 1, -1), (1, -1, -1, 1))
+    return [(full + np.float32(alpha) * sum(s * qi for s, qi in zip(sg, q)) / 4, full) for sg in signs]
+
+
+def n2nr_pair(a: np.ndarray, b: np.ndarray):
+    """(zA, zB, weight) for a Noisier2Noise pair: both through A's normalisation (as at run
+    time), weight 1 / the noise variance of the target (sky plus its photon noise)."""
+    grid, sigma = nd.normalise(a)
+    bg = nd.background_at(grid, 0, 0, *a.shape[:2])
+    za = (a - bg) / sigma.astype(np.float32)
+    zb = (b - bg) / sigma.astype(np.float32)
+    return za, zb, (1.0 / target_variance(zb, sky_level_z(bg, sigma))).astype(np.float32)
+
+
+def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str = "denoise",
+               alpha: float = 0.5) -> None:
     rng = np.random.default_rng(seed)
     za_l, zb_l, w_l, sess = [], [], [], []
     dirs = sorted(d for d in glob.glob(os.path.join(pairs_dir, "*")) if os.path.exists(os.path.join(d, "meta.json")))
@@ -135,10 +163,17 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
                       f"({meta.get('n_target')} / {meta.get('n_input')} frames)", flush=True)
                 continue
             pairs = [(np.load(os.path.join(d, "input.npy")), np.load(os.path.join(d, "target.npy")))]
+        elif mode == "n2nr":
+            pairs = n2nr_pairs(d, alpha)
         else:
             pairs = session_pairs(d)
         for a, b in pairs:
-            za, zb, w = deconv_pair(a, b) if mode == "deconv" else normalised_pair(a, b)
+            if mode == "deconv":
+                za, zb, w = deconv_pair(a, b)
+            elif mode == "n2nr":
+                za, zb, w = n2nr_pair(a, b)
+            else:
+                za, zb, w = normalised_pair(a, b)
             h, wd, _ = za.shape
             m = 16                      # skip the stack's ragged edge
             stars = None
@@ -160,7 +195,8 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
                 w_l.append(w[y:y + PATCH, x:x + PATCH].astype(np.float16))
                 sess.append(i)
         print(f"[{i + 1}/{len(dirs)}] {name}: {time.time() - t:.0f} s", flush=True)
-    np.savez(out, za=np.stack(za_l), zb=np.stack(zb_l), w=np.stack(w_l), sess=np.array(sess))
+    extra = {"n2nr_alpha": np.float32(alpha)} if mode == "n2nr" else {}
+    np.savez(out, za=np.stack(za_l), zb=np.stack(zb_l), w=np.stack(w_l), sess=np.array(sess), **extra)
     print(f"bank: {len(za_l)} patches -> {out}")
 
 
@@ -200,8 +236,12 @@ def make_net():
     return NnDenoiseNet()
 
 
-def export(net, path: str) -> None:
-    np.savez(path, **{k: v.detach().cpu().numpy().astype(np.float32) for k, v in net.state_dict().items()})
+def export(net, path: str, alpha: Optional[float] = None) -> None:
+    """The weights as npz; a Noisier2Noise model also carries ``_n2nr_alpha``."""
+    w = {k: v.detach().cpu().numpy().astype(np.float32) for k, v in net.state_dict().items()}
+    if alpha is not None:
+        w["_n2nr_alpha"] = np.array([alpha], np.float32)
+    np.savez(path, **w)
 
 
 def check_parity(net, path: str) -> float:
@@ -334,7 +374,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         net.load_state_dict(best[1])
         print(f"best validation {best[0]:.4f} kept", flush=True)
     final_val = validate()[0]
-    export(net, out)
+    export(net, out, float(f["n2nr_alpha"]) if "n2nr_alpha" in f.files else None)
     err = check_parity(net, out)
     print(f"exported {out}; numpy vs torch max rel diff {err:.2e}")
     if err > 1e-4:
@@ -351,7 +391,8 @@ def main() -> None:
     b.add_argument("--pairs", required=True)
     b.add_argument("--bank", required=True)
     b.add_argument("--per-pair", type=int, default=40)
-    b.add_argument("--mode", choices=["denoise", "deconv"], default="denoise")
+    b.add_argument("--mode", choices=["denoise", "deconv", "n2nr"], default="denoise")
+    b.add_argument("--alpha", type=float, default=0.5, help="--mode n2nr: injected / real noise ratio")
     t = sub.add_parser("train")
     t.add_argument("--bank", required=True)
     t.add_argument("--steps", type=int, default=30000)
@@ -363,7 +404,7 @@ def main() -> None:
                    help="add random faint sources to training patches (faint_sources)")
     args = ap.parse_args()
     if args.cmd == "bank":
-        build_bank(args.pairs, args.bank, args.per_pair, mode=args.mode)
+        build_bank(args.pairs, args.bank, args.per_pair, mode=args.mode, alpha=args.alpha)
     else:
         train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject)
 
