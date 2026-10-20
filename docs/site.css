@@ -234,11 +234,13 @@ caption { text-align: left; font-family: var(--text); color: var(--slate); font-
 .caveat { margin-top: 34px; padding-left: 18px; border-left: 3px solid var(--ha); color: #33435c; }
 
 /* gallery */
-.gallery { display: grid; gap: clamp(14px, 2vw, 26px); margin-top: 44px; grid-template-columns: 1.55fr 1fr; align-items: start; }
+.gallery { display: grid; gap: clamp(14px, 2vw, 26px); margin-top: 44px; grid-template-columns: repeat(3, 1fr); align-items: start; }
 .gallery figure { margin: 0; }
-.gallery .stack { display: grid; gap: clamp(14px, 2vw, 26px); }
-.gallery img { width: 100%; height: auto; }
+.gallery .hero { grid-column: 1 / -1; }
+.gallery img { width: 100%; height: auto; display: block; background: #000; }
 .gallery figcaption { margin-top: 9px; font-size: 1rem; color: #33435c; }
+.gallery figcaption b { display: block; font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: var(--slate); }
+@media (max-width: 1000px) { .gallery { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 800px) { .gallery { grid-template-columns: 1fr; } }
 
 /* get it */
