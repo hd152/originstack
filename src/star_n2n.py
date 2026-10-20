@@ -64,6 +64,9 @@ SAT_R_MIN, SAT_R_MAX = 6, 40  # px; a saturated star's core fill radius: where i
 SAT_CORE_LEVEL = 20.0         # ...this many sky sigma (the clipped, non-linear part)
 HALO_R = 150                  # px; a saturated star's radial halo is subtracted out to here...
 HALO_FLOOR = 0.3              # ...or to where it first drops below this (sky sigma)
+SPIKE_RADIAL_PX = 21          # spikes: median along the radius over this many px (drops stars, noise)...
+SPIKE_ANGLE_DEG = 30.0        # ...minus the median over this wide an angle (keeps what is narrow in angle)
+SPIKE_FLOOR = 0.5             # soft threshold on the spike model (sky sigma): noise is not subtracted
 
 def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     """Sky level B per channel in noise units (median background / sigma); the photon-noise
@@ -427,6 +430,61 @@ def _subtract_halo(out: np.ndarray, y: int, x: int) -> np.ndarray:
     return lum
 
 
+def _subtract_spikes(out: np.ndarray, y: int, x: int, r_in: float, r_out: float,
+                     others: Optional[np.ndarray] = None) -> None:
+    """Subtract a saturated star's diffraction spikes from ``out`` (in place) between
+    ``r_in`` and ``r_out``: in polar coordinates around the star, a median along the radius
+    (``SPIKE_RADIAL_PX``) keeps what is long radially and drops noise and the stars that
+    were not removed, a median over ``SPIKE_ANGLE_DEG`` of angle is the smooth light
+    around (nebula, what is left of the halo), and their positive difference above
+    ``SPIKE_FLOOR`` is the spike model. The radial halo subtraction leaves spikes in place:
+    they are a few degrees wide, so they barely move a ring's median. ``others`` (N, 2)
+    are the other saturated stars: within ``SAT_R_MAX`` of them nothing is modelled or
+    subtracted -- seen from a neighbour, a saturated star's own halo is long and narrow
+    like a spike (bright streaks and dark blobs at the Pleiades' companions otherwise)."""
+    h, w, c = out.shape
+    r_out = float(min(r_out, HALO_R))
+    if r_out - r_in < 2 * SPIKE_RADIAL_PX:
+        return
+    n_ang = 720
+    rad = np.arange(r_in, r_out + 1.0)
+    ang = np.linspace(0, 2 * np.pi, n_ang, endpoint=False)
+    rr, aa = np.meshgrid(rad, ang, indexing='ij')
+    py, px = y + rr * np.sin(aa), x + rr * np.cos(aa)
+    ok = (py >= 0) & (py <= h - 1) & (px >= 0) & (px <= w - 1)
+    if others is not None and len(others):
+        for oy, ox in others:
+            ok &= np.hypot(py - oy, px - ox) > SAT_R_MAX
+    R = int(np.ceil(r_out)) + 1
+    y0, y1, x0, x1 = max(0, y - R), min(h, y + R + 1), max(0, x - R), min(w, x + R + 1)
+    yy, xx = np.mgrid[y0 - y:y1 - y, x0 - x:x1 - x]
+    pr = np.hypot(yy, xx)
+    pa = np.mod(np.arctan2(yy, xx), 2 * np.pi)
+    ri = pr - r_in
+    ai = pa / (2 * np.pi) * n_ang
+    taper = np.clip(np.minimum(pr - r_in, r_out - pr) / 5.0, 0.0, 1.0)
+    if others is not None and len(others):
+        for oy, ox in others:
+            taper = taper * (np.hypot(yy + y - oy, xx + x - ox) > SAT_R_MAX)
+    win = max(3, int(round(SPIKE_ANGLE_DEG / 360.0 * n_ang)) | 1)
+    for k in range(c):
+        pol = ndi.map_coordinates(out[..., k], [py, px], order=1, mode='nearest')
+        # masked samples take their radius's median over the valid angles; a radius with
+        # none valid (edge, or ringed by other saturated stars: Omega) models no spike
+        any_ok = ok.any(axis=1, keepdims=True)
+        fill = np.zeros((pol.shape[0], 1), pol.dtype)
+        if any_ok.any():
+            rows = any_ok[:, 0]
+            fill[rows, 0] = [np.median(pol[i][ok[i]]) for i in np.flatnonzero(rows)]
+        pol = np.where(ok, pol, np.broadcast_to(fill, pol.shape))
+        along = ndi.median_filter(pol, size=(SPIKE_RADIAL_PX, 1), mode='nearest')
+        smooth = ndi.median_filter(along, size=(1, win), mode='wrap')
+        spike = np.clip(along - smooth - SPIKE_FLOOR, 0.0, None) * any_ok
+        spike = np.concatenate([spike, spike[:, :1]], axis=1)      # wrap for interpolation
+        model = ndi.map_coordinates(spike, [ri, ai], order=1, mode='constant', cval=0.0)
+        out[y0:y1, x0:x1, k] -= (model * taper).astype(np.float32)
+
+
 def fill_saturated(x: np.ndarray, z: np.ndarray, field: 'StarField', seed: int = 0) -> np.ndarray:
     """Remove each saturated star (never injected, so the network leaves it) from the
     starless estimate ``x``, whose other stars are already gone: subtract its radial halo
@@ -438,10 +496,14 @@ def fill_saturated(x: np.ndarray, z: np.ndarray, field: 'StarField', seed: int =
     out = x.copy()
     h, w, c = x.shape
     rng = np.random.default_rng(seed)
-    for y, xc in zip(field.det_y[field.saturated], field.det_x[field.saturated]):
+    sat = np.c_[field.det_y[field.saturated], field.det_x[field.saturated]]
+    for j, (y, xc) in enumerate(sat):
         lum = _subtract_halo(out, y, xc)
         hi = np.flatnonzero(lum >= SAT_CORE_LEVEL)
         r = int(np.clip(2 * (hi[-1] + 1) + 2 if len(hi) else SAT_R_MIN, SAT_R_MIN, SAT_R_MAX))
+        lit = np.flatnonzero(lum >= HALO_FLOOR)
+        _subtract_spikes(out, y, xc, r, 2.0 * 2 * (lit[-1] + 1) if len(lit) else 0.0,
+                         np.delete(sat, j, axis=0))
         sig = max(4.0, 0.5 * r)
         R = int(r + 3 * sig)
         y0, y1, x0, x1 = max(0, y - R), min(h, y + R + 1), max(0, xc - R), min(w, xc + R + 1)
