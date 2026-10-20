@@ -115,7 +115,7 @@
       <span class="cap r">114 frame, integrati ed elaborati</span>
       <input type="range" min="0" max="100" value="50" aria-label="Trascina per confrontare un frame con lo stack finito">
     </div>
-    <p class="hero-bridge"><span>Start with the difference</span> <a href="#time">See how one night becomes one image&nbsp;→</a></p>
+    <p class="hero-bridge"><span>Parti dalla differenza</span> <a href="#time">Guarda come una notte diventa un'immagine&nbsp;→</a></p>
   </div>
 </header>
 
@@ -123,21 +123,21 @@
 <section id="time">
   <div class="wrap">
     <h2>Una notte di frame in circa un minuto</h2>
-    <p class="intro measure">La Nebulosa Omega, 114 frame, su un portatile a 8 core: <strong>65 secondi</strong> dai file grezzi all'immagine finita, contro gli 89 di inizio ottobre. Il blocco rosso è la parte che rende bella l'immagine; il resto serve a far combaciare 114 frame.</p>
+    <p class="intro measure">La Nebulosa Omega, 114 frame, su un portatile a 8 core: <strong>62 secondi</strong> dai file grezzi all'immagine finita, contro gli 89 di inizio ottobre. Il blocco rosso è la parte che rende bella l'immagine; il resto serve a far combaciare 114 frame.</p>
 
-    <div class="run" role="img" aria-label="Barra che mostra 65 secondi suddivisi in caricamento e valutazione 13.2, registrazione 2.6, allineamento e stacking 22.7, finitura 18.3 e disco e preparazione 7.9 secondi">
-      <span style="width:20.4%; background:#1d7f86"></span>
-      <span style="width:4.0%; background:#4fa3a8"></span>
-      <span style="width:35.1%; background:#8cc5c8"></span>
-      <span style="width:28.3%; background:#b3312a"></span>
-      <span style="width:12.2%; background:#b9c3cf"></span>
+    <div class="run" role="img" aria-label="Barra che mostra 62 secondi suddivisi in caricamento e valutazione 13.7, registrazione 1.6, allineamento e stacking 22.0, finitura 18.1 e disco e preparazione 6.3 secondi">
+      <span style="width:22.2%; background:#1d7f86"></span>
+      <span style="width:2.6%; background:#4fa3a8"></span>
+      <span style="width:35.7%; background:#8cc5c8"></span>
+      <span style="width:29.3%; background:#b3312a"></span>
+      <span style="width:10.2%; background:#b9c3cf"></span>
     </div>
     <ul class="legend">
-      <li><i style="background:#1d7f86"></i>Carica, calibra, valuta<b>13.2 s</b></li>
-      <li><i style="background:#4fa3a8"></i>Registra<b>2.6 s</b></li>
-      <li><i style="background:#8cc5c8"></i>Allinea e integra<b>22.7 s</b></li>
-      <li><i style="background:#b3312a"></i>Rifinisci l'immagine<b>18.3 s</b></li>
-      <li><i style="background:#b9c3cf"></i>Disco e preparazione<b>7.9 s</b></li>
+      <li><i style="background:#1d7f86"></i>Carica, calibra, valuta<b>13.7 s</b></li>
+      <li><i style="background:#4fa3a8"></i>Registra<b>1.6 s</b></li>
+      <li><i style="background:#8cc5c8"></i>Allinea e integra<b>22.0 s</b></li>
+      <li><i style="background:#b3312a"></i>Rifinisci l'immagine<b>18.1 s</b></li>
+      <li><i style="background:#b9c3cf"></i>Disco e preparazione<b>6.3 s</b></li>
     </ul>
 
     <div class="phases">
@@ -191,14 +191,15 @@
 <section id="compare">
   <div class="wrap">
     <h2>Come si confronta con Siril e DeepSkyStacker</h2>
-    <p class="intro measure">Stessi frame, stessi bias, dark e flat, una sola macchina, ogni strumento con impostazioni di tipo predefinito. Due sessioni Celestron Origin: la Nebulosa Omega (114 × 30 s) e la Galassia Girasole (158 × 20 s). La Galassia dello Scultore (532 × 10 s) è in corso di nuova misura con questa versione.</p>
+    <p class="intro measure">Stessi frame, stessi bias, dark e flat, una sola macchina, ogni strumento con impostazioni di tipo predefinito. Tre sessioni Celestron Origin: la Nebulosa Omega (114 × 30 s), la Galassia Girasole (158 × 20 s) e la Galassia dello Scultore (532 × 10 s).</p>
 
     <table class="wide">
       <caption>Prima OriginStack, poi Siril. Solo stack significa senza i passaggi di finitura di OriginStack, che Siril non ha.</caption>
       <thead><tr><th>Sessione</th><th class="n">Solo stack</th><th class="n">OriginStack, immagine finita</th><th class="n">Picco di memoria</th><th class="n">Larghezza stelle</th></tr></thead>
       <tbody>
-        <tr><th>Omega, 114 frame</th><td class="n">46 s / 56 s</td><td class="n">65 s</td><td class="n">12.1 / 6.5 GB</td><td class="n">4.42 / 4.56 px</td></tr>
-        <tr><th>Girasole, 158 frame</th><td class="n">59 s / 72 s</td><td class="n">86 s</td><td class="n">14.3 / 8.0 GB</td><td class="n">3.51 / 3.60 px</td></tr>
+        <tr><th>Omega, 114 frame</th><td class="n">44 s / 54 s</td><td class="n">62 s</td><td class="n">12.0 / 6.5 GB</td><td class="n">4.42 / 4.56 px</td></tr>
+        <tr><th>Girasole, 158 frame</th><td class="n">54 s / 67 s</td><td class="n">81 s</td><td class="n">14.3 / 8.9 GB</td><td class="n">3.51 / 3.60 px</td></tr>
+        <tr><th>Scultore, 532 frame</th><td class="n">128 s / 159 s</td><td class="n">144 s</td><td class="n">9.1 / 11.2 GB</td><td class="n">2.66 / 3.01 px</td></tr>
       </tbody>
     </table>
 
@@ -212,15 +213,18 @@
         <h3 class="sub">Girasole</h3>
         <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:54.0%"></i><b>3.51 px</b></div></div>
         <div class="row"><span>Siril</span><div class="track"><i style="width:55.4%"></i><b>3.60 px</b></div></div>
+        <h3 class="sub">Scultore</h3>
+        <div class="row"><span>OriginStack</span><div class="track"><i class="us" style="width:40.9%"></i><b>2.66 px</b></div></div>
+        <div class="row"><span>Siril</span><div class="track"><i style="width:46.3%"></i><b>3.01 px</b></div></div>
         <small>Un fit gaussiano su ciascuna di un massimo di 400 stelle luminose, non saturate e isolate, nelle stesse posizioni in entrambi gli stack, ciascuno sulla propria griglia di pixel.</small>
       </div>
 
       <div class="verdict">
         <h3>Cosa dicono i numeri</h3>
-        <p><strong>Nitidezza: più nitido di Siril su entrambe.</strong> Sulle stesse stelle OriginStack è più stretto del 3% sulla Omega (4.42 contro 4.56 px) e del 2% sulla Girasole. Due modifiche lo hanno portato lì: la <em>coaddizione ottimale delle immagini</em>, attiva per impostazione predefinita, che pesa ogni scala di dettaglio in base a quanto ciascun frame era nitido, trasparente e rumoroso (Zackay &amp; Ofek, 2017); e la correzione di un passaggio sui pixel caldi che appiattiva il picco della maggior parte delle stelle luminose in ogni frame &mdash; sulle stelle sottocampionate il centro di una stella sembra esattamente un pixel caldo a un test che confronta solo un pixel con i suoi vicini. Ha anche usato più frame: 114 e 158, dove Siril ne ha usati 111 e 157.</p>
-        <p><strong>Rumore: più silenzioso di Siril a parità di nitidezza.</strong> Uno stack più nitido è più rumoroso per pixel, quindi il confronto equo sfoca ogni canale di OriginStack finché le sue stelle sono larghe esattamente quanto quelle di Siril. A quel punto il suo rumore, rosso/verde/blu, è 0.80, 0.86, 0.88 volte quello di Siril sulla Omega e 0.84, 0.66, 0.93 sulla Girasole (le sue stelle in rosso erano già larghe quanto quelle di Siril). Senza pareggiare, per pixel, è 0.92, 1.02, 1.05 e 0.84, 0.73, 0.97 &mdash; più le stelle sono nitide, più quel numero è alto.</p>
-        <p><strong>Velocità: più veloce di Siril su entrambe.</strong> Fino allo stack, eseguiti uno dopo l'altro sulla stessa macchina: 46 s contro i 56 s di Siril sulla Omega e 59 contro 72 s sulla Girasole. OriginStack svolge ancora lavoro per frame che Siril non fa &mdash; valutazione della qualità, bilanciamento del bianco e rilevamento delle stelle su ogni frame &mdash; e lo recupera nella registrazione e nello stacking. I tempi di entrambi gli strumenti sono variati fino a un terzo tra esecuzioni identiche nel corso della giornata (Siril da solo ha impiegato da 55 a 86 s sulla Omega), quindi confronta all'interno di una riga. L'immagine finita costa altri 18-27 s.</p>
-        <p><strong>Memoria e disco.</strong> OriginStack tiene in memoria i frame allineati quando c'è spazio, come su entrambe le sessioni qui: 12.1 e 14.3 GB, contro i 6.5 e 8.0 di Siril. Lo spazio su disco temporaneo è minore: 11 e 15 GB contro i 18 e 24 GB di Siril.</p>
+        <p><strong>Nitidezza: più nitido di Siril su tutte e tre.</strong> Sulle stesse stelle OriginStack è più stretto del 3% sulla Omega (4.42 contro 4.56 px), dell'2% sulla Girasole e del 10% sulla Scultore. Due modifiche lo hanno portato lì: la <em>coaddizione ottimale delle immagini</em>, attiva per impostazione predefinita, che pesa ogni scala di dettaglio in base a quanto ciascun frame era nitido, trasparente e rumoroso (Zackay &amp; Ofek, 2017); e la correzione di un passaggio sui pixel caldi che appiattiva il picco della maggior parte delle stelle luminose in ogni frame &mdash; sulle stelle sottocampionate il centro di una stella sembra esattamente un pixel caldo a un test che confronta solo un pixel con i suoi vicini. Ha anche usato più frame: 114, 158 e 532, dove Siril ne ha usati 111, 157 e 525.</p>
+        <p><strong>Rumore: più silenzioso di Siril a parità di nitidezza.</strong> Uno stack più nitido è più rumoroso per pixel, quindi il confronto equo sfoca ogni canale di OriginStack finché le sue stelle sono larghe esattamente quanto quelle di Siril. A quel punto il suo rumore, rosso/verde/blu, è 0.80, 0.86, 0.88 volte quello di Siril sulla Omega, 0.84, 0.66, 0.93 sulla Girasole (le sue stelle in rosso erano già larghe quanto quelle di Siril) e 0.82, 0.72, 0.89 sulla Scultore. Senza pareggiare, per pixel, è 0.92, 1.02, 1.05; 0.84, 0.73, 0.97; e 0.98, 0.85, 1.28 &mdash; più le stelle sono nitide, più quel numero è alto.</p>
+        <p><strong>Velocità: più veloce di Siril su tutte e tre.</strong> Fino allo stack, eseguiti uno dopo l'altro sulla stessa macchina: 44 s contro gli 54 s di Siril sulla Omega, 54 contro 67 s sulla Girasole e 128 contro 159 s sulla Scultore. OriginStack svolge ancora lavoro per frame che Siril non fa &mdash; valutazione della qualità, bilanciamento del bianco e rilevamento delle stelle su ogni frame &mdash; e lo recupera nella registrazione e nello stacking. I tempi di entrambi gli strumenti sono variati fino a un terzo tra esecuzioni identiche nel corso della giornata (Siril da solo ha impiegato da 55 a 86 s sulla Omega), quindi confronta all'interno di una riga. L'immagine finita costa altri 16-27 s.</p>
+        <p><strong>Memoria e disco.</strong> OriginStack tiene in memoria i frame allineati quando c'è spazio, come sulle due sessioni più brevi: 12.0 e 14.3 GB, contro i 6.5 e 8.9 di Siril. Sulla Scultore finiscono in file temporanei e usa 9.1 GB contro gli 11.2 di Siril. Lo spazio su disco temporaneo è minore sulle due sessioni più brevi (11 e 15 GB contro 19 e 23 GB) e maggiore sulla Scultore (63 contro 57 GB).</p>
         <p><strong>DeepSkyStacker</strong> ha impiegato 14 min 8 s sulla Omega, ha prodotto stelle più morbide degli altri due e con le impostazioni predefinite ha lasciato strisce di pixel caldi e alcuni frame registrati male.</p>
       </div>
     </div>
