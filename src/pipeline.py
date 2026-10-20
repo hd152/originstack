@@ -321,13 +321,40 @@ def _complete_accepted_quality_metrics(final: List[FrameInfo],
                                        final_indices: List[int],
                                        mem_lum,
                                        args) -> None:
-    """Compute expensive diagnostics after the gate has accepted frames."""
-    for frame, index in zip(final, final_indices):
-        if frame.metrics:
-            complete_quality_metrics(
-                np.asarray(mem_lum[index]),
-                frame.metrics,
-                advanced_metrics=getattr(args, 'advanced_metrics', True))
+    """Compute expensive diagnostics after the gate has accepted frames.
+
+    In parallel threads (the per-frame work is numpy and native code, which release
+    the GIL; each frame's metrics depend only on its own luminance, so the result is
+    the same in any order). One frame at a time in the main process, this took
+    10.8 s of a 532-frame Sculptor run -- 17% of Phase 1 -- against ~2 s spread out.
+    Reports progress and stops on Cancel between frames."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from src.models import RunCancelled
+    from src.ui_events import get_ui_events
+    todo = [(f, i) for f, i in zip(final, final_indices) if f.metrics]
+    if not todo:
+        return
+    adv = getattr(args, 'advanced_metrics', True)
+    cancel = getattr(args, '_cancel_event', None)
+
+    def _one(item):
+        if cancel is not None and cancel.is_set():
+            raise RunCancelled()
+        frame, index = item
+        complete_quality_metrics(np.asarray(mem_lum[index]), frame.metrics, advanced_metrics=adv)
+
+    ui = get_ui_events()
+    with ThreadPoolExecutor(max_workers=max(1, min(os.cpu_count() or 4, 8, len(todo)))) as ex:
+        futs = [ex.submit(_one, it) for it in todo]
+        try:
+            for done, fut in enumerate(as_completed(futs), 1):
+                fut.result()
+                ui.progress('Quality metrics', done, len(todo))
+        except BaseException:
+            for f in futs:
+                f.cancel()
+            raise
 
 
 def _compute_patch_scores_if_needed(final: List[FrameInfo],
