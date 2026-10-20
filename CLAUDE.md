@@ -183,7 +183,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 - DBE samples each channel against its own sky (`background._channel_sky`), not the luminance sky: on a colour-calibrated stack G/B sat far above it and fell back to the mesh.
 - Stretch one image; never recombine separately stretched layers.
 - Never rebuild RGB as `img * new_lum / lum` on sky-centred data: lum ~ 0 with channels of opposite sign gave 1e18 in `multiscale_local_contrast` (Orion); fade to an additive change near zero.
-- The preview white point (p99.5) clips star cores by design; an *extended* region above it (largest connected region >= `Config.PREVIEW_ROLLOFF_MIN_AREA`) is rolled off instead (`io_fits._preserving_preview`). Gate on connected area, not blurred area fraction (a dense star field passes the latter).
+- The preview white point (p99.5) clips star cores by design; an *extended* region above it (largest connected region >= `Config.PREVIEW_ROLLOFF_MIN_AREA`) is rolled off instead (`io_fits._preserving_preview`). Gate on connected area, not blurred area fraction (a dense star field passes the latter); 0.02% of the frame (M57 0.037%, star cores <= 0.012%). It must reach every `--stretch-color` path: wired to `preserve` only, it silently stopped when the default went back to `channel`. The faint-wing lift that comes with it is for nebulae only (`black_sigma <= 0`).
 - Preview JPEGs take their settings from `io_fits.preview_stretch_kw(args)` (the run's main preview via `pipeline.save_final_preview`); hand-built kwargs drifted: the live/stream/mosaic/comet/annotated previews left out `color` and rendered `preserve` after the default became `channel`.
 
 **Streaming memory**
