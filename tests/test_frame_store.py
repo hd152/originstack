@@ -59,10 +59,24 @@ def test_auto_respects_the_memory_reserve(mem, disk):
     assert not os.path.exists(spec)
 
 
-def test_phase1_compression_is_selected_when_arrays_exceed_safe_ram(mem):
-    # Safe budget: 40 GB available - 12.8 GB reserve - 20 GB for workers.
+def test_phase1_compression_only_when_temp_files_would_thrash(mem, monkeypatch):
+    # Safe budget: 40 GB available - 12.8 GB reserve - 20 GB for workers = 7.2 GB.
+    monkeypatch.setattr(fs.FrameStore, '_disk_ok', staticmethod(lambda nbytes: True))
+    assert fs.FrameStore.phase1_compression_needed(7_199_000_000, 20_000.0) is False   # RAM
+    # beyond the budget, temp files: compress only past 1.5 x the 40 GB available
+    assert fs.FrameStore.phase1_compression_needed(7_201_000_000, 20_000.0) is False
+    assert fs.FrameStore.phase1_compression_needed(59_000_000_000, 20_000.0) is False
+    assert fs.FrameStore.phase1_compression_needed(61_000_000_000, 20_000.0) is True
+    ok, why = fs.FrameStore.phase1_compression_decision(61_000_000_000, 20_000.0)
+    assert ok and 'thrash' in why
+
+
+def test_phase1_compression_when_the_temp_disk_is_short(mem, monkeypatch):
+    monkeypatch.setattr(fs.FrameStore, '_disk_ok', staticmethod(lambda nbytes: False))
+    ok, why = fs.FrameStore.phase1_compression_decision(7_201_000_000, 20_000.0)
+    assert ok and 'disk' in why
+    # but arrays that fit in RAM never need it
     assert fs.FrameStore.phase1_compression_needed(7_199_000_000, 20_000.0) is False
-    assert fs.FrameStore.phase1_compression_needed(7_201_000_000, 20_000.0) is True
 
 
 def test_phase1_compression_auto_is_undecided_without_memory_telemetry(monkeypatch):
