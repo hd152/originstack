@@ -66,6 +66,24 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 # Output diagnostics go to _registration_debug/
 ```
 
+### Working in parallel sessions
+Several agent sessions (Claude, Copilot) share this machine, and a branch switch in the shared
+`C:\source\originstack` checkout moves every session's working tree with it: on 2026-10-19 one
+session's commits landed on another's branch, and another's uncommitted experiment files were
+committed and merged inside an unrelated PR (#139, removed again in #140). So:
+- Do multi-step work in your own worktree from the start, and remove it when done:
+  ```bash
+  git fetch origin && git worktree add -b <branch> ../originstack-<topic> origin/main
+  git worktree remove ../originstack-<topic>        # after the PR
+  ```
+  (the worktree uses the same `.venv` Python; `python originstack.py` runs that worktree's code)
+- Never leave uncommitted changes in the shared checkout; run `git status -sb` before any commit,
+  reset or branch switch, and stage files by name (not `commit -a`).
+- Benchmarks and training write tens of GB (`bench_vs_siril.py` work dirs, 4.9 GB banks under
+  `C:
+n_work`): keep the logs, delete the work dirs and banks once the results are recorded.
+  A nearly full temp disk also changes results (Phase 1 compression switches on).
+
 ## Architecture
 
 [originstack.py](originstack.py) is a thin entry-point shim re-exporting the public symbols of `src/` (tests import from `originstack`); [desktop_app.py](desktop_app.py) is the equally thin shim for the desktop app. History, measurements and investigation notes that used to live here are in [dev-notes/](dev-notes/):
