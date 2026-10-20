@@ -3,6 +3,7 @@ validation, and header aggregation."""
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 import numpy as np
 from astropy.io import fits
@@ -167,6 +168,52 @@ class TestMergePreviousStacks(unittest.TestCase):
             with self.assertRaises(ValueError):
                 merge_previous_stacks(new, 10, [p])
 
+
+    def test_skip_unusable_leaves_out_a_bad_session(self):
+        # The hierarchical combine (skip_unusable=True): one junk session among good
+        # ones is left out, not fatal; --merge (default) still refuses.
+        with tempfile.TemporaryDirectory() as td:
+            new = _star_field(seed=5)
+            good = os.path.join(td, 'good.fits')
+            _write_stack(good, _star_field(shift=(3.0, -2.0), seed=7), nframes=20)
+            rng = np.random.default_rng(6)
+            bad = os.path.join(td, 'junk.fits')
+            _write_stack(bad, np.clip(rng.normal(1000, 5, (256, 320, 3)), 0,
+                                      None).astype(np.float32), nframes=9)
+            merged, info = merge_previous_stacks(new, 10, [good, bad], skip_unusable=True)
+            self.assertEqual(info['sources'], ['good.fits'])
+            self.assertEqual(info['skipped'], ['junk.fits'])
+            self.assertEqual(info['total_frames'], 30)
+            self.assertTrue(np.all(np.isfinite(merged)))
+            with self.assertRaises(ValueError):
+                merge_previous_stacks(new, 10, [good, bad])
+
+    def test_zero_padding_edge_is_not_detected_as_stars(self):
+        # A previous stack smaller than the current one is zero-padded (top-left);
+        # the sky-to-zero edge read as a row of bright "stars" that crowded the real
+        # ones out of the blind match (a real 1840x2902 Whirlpool session padded to
+        # 1992x2949 was refused for it). Stars must come from its own pixels only.
+        import src.merge as merge_mod
+        from src.blind_match import _extract_xy
+        seen = []
+        real = merge_mod._detect_stars
+
+        def spy(lum):
+            out = real(lum)
+            seen.append((lum.shape, out))
+            return out
+        with tempfile.TemporaryDirectory() as td:
+            # Origin stacks sit on a ~12k ADU sky, brighter than most stars' peaks
+            new = _star_field(seed=5) + 11000.0
+            prev = _star_field(rot_deg=9.0, shift=(4.0, -6.0), seed=8)[:220, :280] + 11000.0
+            p = os.path.join(td, 'small.fits')
+            _write_stack(p, np.ascontiguousarray(prev), nframes=20)
+            with unittest.mock.patch.object(merge_mod, '_detect_stars', spy):
+                _, info = merge_previous_stacks(new, 10, [p])
+        self.assertEqual(info['sources'], ['small.fits'])
+        prev_xy = _extract_xy(seen[1][1], 40)          # [0] is the current stack
+        on_edge = (np.abs(prev_xy[:, 0] - 279) < 6) | (np.abs(prev_xy[:, 1] - 219) < 6)
+        self.assertEqual(int(on_edge.sum()), 0)
 
 
 class TestCopyCelestialWcs(unittest.TestCase):

@@ -1492,7 +1492,7 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
         if others:
             combined, merge_info = merge_previous_stacks(
                 ref_stack, int(ref_meta.get('nframes') or 1), others,
-                verbose=getattr(args, 'verbose', False))
+                verbose=getattr(args, 'verbose', False), skip_unusable=True)
         else:   # a filter group of one session: finish it on its own
             combined, merge_info = ref_stack, None
     except Exception as exc:
