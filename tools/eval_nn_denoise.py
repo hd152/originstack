@@ -13,7 +13,6 @@ side-by-side stretched crop per session.
 
 Usage:
     python tools/eval_nn_denoise.py --pairs G:/output/nn_denoise/pairs --out eval/ [--holdout-only]
-        [--model n2nr=C:/nn_work/n2nr/model_n2nr_v1.npz]
 """
 from __future__ import annotations
 
@@ -87,12 +86,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--holdout-only", action="store_true")
     ap.add_argument("--only", nargs="*", help="session name prefixes to evaluate")
-    ap.add_argument("--model", action="append", default=[], metavar="NAME=PATH",
-                    help="also score these weights with nn_denoise (repeatable)")
     args = ap.parse_args()
-    for spec in args.model:
-        name, path = spec.split("=", 1)
-        DENOISERS[name] = lambda img, p=path: nd.nn_denoise(img, model_path=p)
     from common_star_fwhm import common_star_fwhm
     from train_nn_denoise import is_holdout
     os.makedirs(args.out, exist_ok=True)

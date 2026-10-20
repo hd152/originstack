@@ -214,14 +214,7 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
     bg = background_at(grid, 0, 0, *src.shape[:2])
     sig = sigma.astype(np.float32)
     z = (src - bg) / sig
-    fz = denoise_z(z, w)
-    alpha = float(w['_n2nr_alpha'][0]) if '_n2nr_alpha' in w else 0.0
-    if alpha > 0:
-        # a Noisier2Noise model learned E[y | y + alpha n]: the clean estimate is
-        # ((1 + alpha^2) f - z) / alpha^2 (tools/train_nn_denoise.py --mode n2nr)
-        a2 = np.float32(alpha * alpha)
-        fz = ((1 + a2) * fz - z) / a2
-    den = fz * sig + bg
+    den = denoise_z(z, w) * sig + bg
     if restore_sigma > 0:
         res = src - den
         for c in range(res.shape[2]):
