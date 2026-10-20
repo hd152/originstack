@@ -727,9 +727,16 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
         ghs_sp = ghs_sp * _sp_scale
         _top = None
-        if stretch in ('masked', 'oklab') or color == 'preserve':
+        # Every path that ends in _preserving_preview or the per-channel curve below.
+        # The per-channel one was left out while 'preserve' was the default; when the
+        # default went back to 'channel' an extended core (M42's Trapezium region, all
+        # of M57) clipped to a flat white blob again.
+        if stretch != 'multiscale' or color == 'preserve':
             _top = _extended_highlight_top(lum, unified_white)
-            if _top is not None:
+            # Lift the faint wings only where the preset keeps the sky noise (nebulae,
+            # black_sigma <= 0): a cluster or galaxy preset asks for a dark sky, and on
+            # M15 the lift brought up red background-residual blotches around the core.
+            if _top is not None and black_sigma <= 0:
                 ghs_b, ghs_sp = _extended_nebula_ghs(lum, _med, _bg_sigma, unified_black,
                                                      unified_white, ghs_b, ghs_sp, ghs_hp)
 
@@ -761,6 +768,9 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
             out = _preserving_preview(rgb, lum, curve, unified_black, unified_white,
                                       _bg_sigma, top=_top,
                                       apply=oklab_stretch if stretch == 'oklab' else None)
+        elif _top is not None:
+            for c in range(3):
+                out[:, :, c] = _rolloff_curve(curve, rgb[:, :, c], unified_white, _top)
         else:
             for c in range(3):
                 out[:, :, c] = curve(rgb[:, :, c])

@@ -1,6 +1,7 @@
 """Preview highlight roll-off for extended bright regions, and the local-contrast
 RGB rebuild near zero luminance (both found on a real Orion Nebula stack)."""
 import numpy as np
+import pytest
 
 import src.io_fits as iof
 from src.denoising import multiscale_local_contrast
@@ -22,7 +23,9 @@ def _add_star(img, y, x, peak, fwhm=3.0):
     )[..., None].astype(np.float32)
 
 
-def test_extended_core_keeps_structure():
+@pytest.mark.parametrize('color', ['preserve', 'channel'])
+def test_extended_core_keeps_structure(color):
+    # 'channel' is the CLI default: the roll-off was once wired to 'preserve' only
     img = _sky()
     yy, xx = np.mgrid[:400, :600]
     r = np.hypot(yy - 200, xx - 300)
@@ -30,7 +33,7 @@ def test_extended_core_keeps_structure():
     core = 20000.0 * np.exp(-(r / 60.0) ** 2) + 80000.0 * np.exp(-(r / 25.0) ** 2) * (
         1.0 + 0.3 * np.sin(xx / 3.0))
     img += core[..., None].astype(np.float32)
-    out = iof.render_preview_float(img, 'ghs')
+    out = iof.render_preview_float(img, 'ghs', color=color)
     lum = out @ np.array([0.299, 0.587, 0.114])
     inner = r < 15
     assert np.mean(lum[inner] >= 0.999) < 0.5          # not a flat white blob
@@ -197,3 +200,30 @@ def test_seti_channel_stretch_returns_valid_preview():
 def test_seti_stretch_flag_parses():
     from src import cli
     assert cli.parse_args(['-d', '.', '--stretch', 'seti']).stretch == 'seti'
+
+
+def test_compact_planetary_nebula_is_rolled_off():
+    # The Ring Nebula (M57): ~2100 px above white on a 5.8 Mpx stack (0.037%), its
+    # central hole 1/4 as bright as the ring -- flat white under a 0.1% area gate.
+    img = _sky(1200, 1800)
+    yy, xx = np.mgrid[:1200, :1800]
+    r = np.hypot(yy - 600, xx - 900)
+    ring = 60000.0 * np.exp(-((r - 18.0) / 7.0) ** 2) + 15000.0 * (r < 18)
+    img += ring[..., None].astype(np.float32)
+    out = iof.render_preview_float(img, 'ghs', color='channel')
+    lum = out @ np.array([0.299, 0.587, 0.114])
+    assert lum[600, 900] < lum[600, 918] - 0.02        # the hole is darker than the ring
+
+
+def test_dark_sky_preset_does_not_lift_wings():
+    # black_sigma > 0 (cluster / galaxy presets) keeps the roll-off but not the
+    # frame-filling-nebula wing lift
+    img = _sky()
+    yy, xx = np.mgrid[:400, :600]
+    r = np.hypot(yy - 200, xx - 300)
+    img += (40000.0 * np.exp(-(r / 30.0) ** 2) + 600.0 * np.exp(-(r / 120.0) ** 2))[..., None].astype(np.float32)
+    lifted = iof.render_preview_float(img, 'ghs', ghs_b=5.64, ghs_sp=0.115, color='channel')
+    dark = iof.render_preview_float(img, 'ghs', ghs_b=5.64, ghs_sp=0.115, color='channel',
+                                    black_sigma=2.5)
+    wings = (r > 70) & (r < 100)
+    assert np.median(dark[wings]) < 0.5 * np.median(lifted[wings])
