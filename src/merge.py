@@ -289,14 +289,24 @@ def _sky_offset_surface(ref: np.ndarray, img: np.ndarray, valid: np.ndarray,
     return out
 
 
+class _UnusableStack(ValueError):
+    """A stack that cannot be merged (no registration, too little overlap, or it
+    does not look like the current stack after alignment)."""
+
+
 def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                           merge_paths: List[str],
-                          verbose: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
+                          verbose: bool = False,
+                          skip_unusable: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Register and weighted-merge previous linear stacks into ``stacked``.
 
     Returns (merged HWC float32, merge_info). Raises ValueError on
     unusable inputs or failed registration — a silently wrong merge is worse
-    than an error.
+    than an error. ``skip_unusable`` (the hierarchical combine, whose inputs are
+    every session in a folder rather than stacks the user named) leaves such a
+    stack out with a warning instead, listed in ``merge_info['skipped']``: one
+    mis-aimed 9-frame Whirlpool session (correlation -0.03) used to abort the
+    combine of eight good ones.
     """
     from src.registration import apply_transform
 
@@ -330,137 +340,144 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
         'total_frames': int(new_frame_count),
         'total_intgtime': 0.0, 'total_totexp': 0.0,
         'datefrst': None, 'datelast': None,
+        'skipped': [],
     }
 
     for path in merge_paths:
-        prev, meta = load_merge_stack(path)
-        w_prev = float(meta['nframes']) if meta['nframes'] > 0 else 1.0
-        if meta['nframes'] <= 0:
-            safe_print(f"  WARNING: {os.path.basename(path)} has no NFRAMES "
-                       f"header — merging with weight 1.0")
+        try:
+            prev, meta = load_merge_stack(path)
+            w_prev = float(meta['nframes']) if meta['nframes'] > 0 else 1.0
+            if meta['nframes'] <= 0:
+                safe_print(f"  WARNING: {os.path.basename(path)} has no NFRAMES "
+                           f"header — merging with weight 1.0")
 
-        prev_h, prev_w = prev.shape[:2]
-        prev = _embed_to_shape(prev, H, W)
-        prev_lum = _lum(prev)
-        embed_mask = _embed_to_shape(
-            np.ones((prev_h, prev_w), dtype=np.float32), H, W)
+            prev_h, prev_w = prev.shape[:2]
+            prev = _embed_to_shape(prev, H, W)
+            prev_lum = _lum(prev)
+            embed_mask = _embed_to_shape(
+                np.ones((prev_h, prev_w), dtype=np.float32), H, W)
 
-        tf, shift = _register_stack(new_lum, prev_lum, new_stars)
-        if tf is None and shift is None:
-            raise ValueError(
-                f"Could not register {os.path.basename(path)} to the current "
-                f"stack (no star match and no correlation peak) — is it the "
-                f"same target?")
+            tf, shift = _register_stack(new_lum, prev_lum, new_stars)
+            if tf is None and shift is None:
+                raise _UnusableStack(
+                    f"Could not register {os.path.basename(path)} to the current "
+                    f"stack (no star match and no correlation peak) — is it the "
+                    f"same target?")
 
-        # Negligible transform (already-aligned grids, registration jitter
-        # only): skip the warp — resampling costs more than a <0.05px
-        # correction is worth (same principle as the CA sub-threshold skip),
-        # and (measured) an unnecessary Lanczos-3 resample of a near-identity
-        # transform can itself introduce more error near sharp star cores
-        # than the correction it applies. A rotation's worst-case pixel
-        # displacement scales with distance from the rotation origin, so the
-        # bound is evaluated at the frame's farthest corner rather than as a
-        # fixed radian constant -- a fixed-radian threshold is either too
-        # loose on large frames or (as measured) tighter than real
-        # star-centroid noise can reliably clear on any frame size.
-        if shift is not None:
-            negligible = max(abs(shift[0]), abs(shift[1])) < 0.05
-        else:
-            _rot = float(np.arctan2(tf.params[1, 0], tf.params[0, 0]))
-            _t = np.abs(tf.params[:2, 2]).max()
-            _rot_px = abs(_rot) * float(np.hypot(H, W))
-            negligible = _rot_px < 0.05 and _t < 0.05
-
-        if negligible:
-            aligned = prev
-            footprint = embed_mask
-        else:
-            aligned = apply_transform(prev, shift=shift, transform=tf)
-            footprint = apply_transform(embed_mask, shift=shift, transform=tf)
-        valid = footprint > 0.5
-        # Trim the footprint's rim. A warped stack's outermost pixels are a
-        # blend of image and the zero fill outside it (and Lanczos rings against
-        # that edge), so they sit off the true sky level; averaged in, they drew
-        # a thin bright/dark outline around every merged session's footprint
-        # (visible as tilted rectangles across a real five-session combine).
-        from scipy import ndimage as _ndi
-        if _FOOTPRINT_TRIM_PX > 0:   # scipy: iterations<1 erodes until nothing is left
-            valid = _ndi.binary_erosion(valid, iterations=_FOOTPRINT_TRIM_PX,
-                                        border_value=1)
-
-        overlap = float(np.mean(valid))
-        if overlap < Config.MERGE_MIN_OVERLAP:
-            raise ValueError(
-                f"{os.path.basename(path)} overlaps only {overlap * 100:.0f}% "
-                f"of the current frame (< {Config.MERGE_MIN_OVERLAP * 100:.0f}%) "
-                f"— refusing to merge (wrong target or failed registration?)")
-
-        # Post-alignment sanity: the aligned stack must actually look like
-        # the new one (same stars). Catches wrong-target inputs and silently
-        # failed registrations that still produced a plausible footprint.
-        al = _lum(aligned)[::4, ::4]
-        nl = new_lum[::4, ::4]
-        vm = valid[::4, ::4]
-        if vm.sum() > 100:
-            a_v, n_v = al[vm].astype(np.float64), nl[vm].astype(np.float64)
-            if a_v.std() > 1e-9 and n_v.std() > 1e-9:
-                corr = float(np.corrcoef(a_v, n_v)[0, 1])
+            # Negligible transform (already-aligned grids, registration jitter
+            # only): skip the warp — resampling costs more than a <0.05px
+            # correction is worth (same principle as the CA sub-threshold skip),
+            # and (measured) an unnecessary Lanczos-3 resample of a near-identity
+            # transform can itself introduce more error near sharp star cores
+            # than the correction it applies. A rotation's worst-case pixel
+            # displacement scales with distance from the rotation origin, so the
+            # bound is evaluated at the frame's farthest corner rather than as a
+            # fixed radian constant -- a fixed-radian threshold is either too
+            # loose on large frames or (as measured) tighter than real
+            # star-centroid noise can reliably clear on any frame size.
+            if shift is not None:
+                negligible = max(abs(shift[0]), abs(shift[1])) < 0.05
             else:
-                corr = 0.0
-            if corr < Config.MERGE_MIN_CORRELATION:
-                raise ValueError(
-                    f"{os.path.basename(path)}: aligned stack correlates only "
-                    f"{corr:.2f} with the current stack "
-                    f"(< {Config.MERGE_MIN_CORRELATION}) — wrong target or "
-                    f"failed registration; refusing to merge")
+                _rot = float(np.arctan2(tf.params[1, 0], tf.params[0, 0]))
+                _t = np.abs(tf.params[:2, 2]).max()
+                _rot_px = abs(_rot) * float(np.hypot(H, W))
+                negligible = _rot_px < 0.05 and _t < 0.05
 
-        cw = _clipped_weight(aligned, grow_px=_CLIP_GROW_PX)
-        if cw is not None:
-            cw = np.where(valid, cw, 0.0)
-            clip_w = cw if clip_w is None else np.maximum(clip_w, cw)
-        gains, offsets, n_fit = _match_flux_scale(stacked, aligned, valid)
-        surface = _sky_offset_surface(stacked, aligned, valid, gains)
-        scaled = aligned.astype(np.float64) * gains + (surface if surface is not None else offsets)
-        if np.any(gains != 1.0):
-            safe_print(f"    flux scale vs current stack: R x{gains[0]:.3f}  "
-                       f"G x{gains[1]:.3f}  B x{gains[2]:.3f} ({n_fit} px in fit)")
-
-        w_map = np.where(valid, w_prev, 0.0)
-        acc += scaled * w_map[:, :, np.newaxis]
-        wsum += w_map
-
-        if noise_ok:
-            prev_sigma = np.array([_pixel_noise(aligned[:, :, c], valid)
-                                   for c in range(3)]) * gains
-            if np.all(np.isfinite(prev_sigma)) and np.all(prev_sigma > 0):
-                w_c = 1.0 / prev_sigma ** 2
-                acc_n += scaled * np.where(valid[:, :, np.newaxis], w_c, 0.0)
-                wsum_n += np.where(valid[:, :, np.newaxis], w_c, 0.0)
-                info.setdefault('weights', []).append(
-                    (os.path.basename(path), float(np.mean(w_c / w_new))))
+            if negligible:
+                aligned = prev
+                footprint = embed_mask
             else:
-                noise_ok = False
+                aligned = apply_transform(prev, shift=shift, transform=tf)
+                footprint = apply_transform(embed_mask, shift=shift, transform=tf)
+            valid = footprint > 0.5
+            # Trim the footprint's rim. A warped stack's outermost pixels are a
+            # blend of image and the zero fill outside it (and Lanczos rings against
+            # that edge), so they sit off the true sky level; averaged in, they drew
+            # a thin bright/dark outline around every merged session's footprint
+            # (visible as tilted rectangles across a real five-session combine).
+            from scipy import ndimage as _ndi
+            if _FOOTPRINT_TRIM_PX > 0:   # scipy: iterations<1 erodes until nothing is left
+                valid = _ndi.binary_erosion(valid, iterations=_FOOTPRINT_TRIM_PX,
+                                            border_value=1)
 
-        if tf is not None:
-            t_xy = tf.params[:2, 2]
-            sy, sx = float(t_xy[1]), float(t_xy[0])
-            rot = float(np.degrees(np.arctan2(tf.params[1, 0], tf.params[0, 0])))
-        else:
-            sy, sx = shift
-            rot = 0.0
-        safe_print(f"  Merged {os.path.basename(path)}: {meta['nframes']} frames, "
-                   f"shift=({sx:+.1f}, {sy:+.1f})px rot={rot:+.2f}deg, "
-                   f"overlap {overlap * 100:.0f}%")
+            overlap = float(np.mean(valid))
+            if overlap < Config.MERGE_MIN_OVERLAP:
+                raise _UnusableStack(
+                    f"{os.path.basename(path)} overlaps only {overlap * 100:.0f}% "
+                    f"of the current frame (< {Config.MERGE_MIN_OVERLAP * 100:.0f}%) "
+                    f"— refusing to merge (wrong target or failed registration?)")
 
-        info['n_sources'] += 1
-        info['sources'].append(os.path.basename(path))
-        info['total_frames'] += meta['nframes']
-        info['total_intgtime'] += meta['intgtime']
-        info['total_totexp'] += meta['totexp']
-        for key, pick in (('datefrst', min), ('datelast', max)):
-            v = meta[key]
-            if v:
-                info[key] = pick(info[key], str(v)) if info[key] else str(v)
+            # Post-alignment sanity: the aligned stack must actually look like
+            # the new one (same stars). Catches wrong-target inputs and silently
+            # failed registrations that still produced a plausible footprint.
+            al = _lum(aligned)[::4, ::4]
+            nl = new_lum[::4, ::4]
+            vm = valid[::4, ::4]
+            if vm.sum() > 100:
+                a_v, n_v = al[vm].astype(np.float64), nl[vm].astype(np.float64)
+                if a_v.std() > 1e-9 and n_v.std() > 1e-9:
+                    corr = float(np.corrcoef(a_v, n_v)[0, 1])
+                else:
+                    corr = 0.0
+                if corr < Config.MERGE_MIN_CORRELATION:
+                    raise _UnusableStack(
+                        f"{os.path.basename(path)}: aligned stack correlates only "
+                        f"{corr:.2f} with the current stack "
+                        f"(< {Config.MERGE_MIN_CORRELATION}) — wrong target or "
+                        f"failed registration; refusing to merge")
+
+            cw = _clipped_weight(aligned, grow_px=_CLIP_GROW_PX)
+            if cw is not None:
+                cw = np.where(valid, cw, 0.0)
+                clip_w = cw if clip_w is None else np.maximum(clip_w, cw)
+            gains, offsets, n_fit = _match_flux_scale(stacked, aligned, valid)
+            surface = _sky_offset_surface(stacked, aligned, valid, gains)
+            scaled = aligned.astype(np.float64) * gains + (surface if surface is not None else offsets)
+            if np.any(gains != 1.0):
+                safe_print(f"    flux scale vs current stack: R x{gains[0]:.3f}  "
+                           f"G x{gains[1]:.3f}  B x{gains[2]:.3f} ({n_fit} px in fit)")
+
+            w_map = np.where(valid, w_prev, 0.0)
+            acc += scaled * w_map[:, :, np.newaxis]
+            wsum += w_map
+
+            if noise_ok:
+                prev_sigma = np.array([_pixel_noise(aligned[:, :, c], valid)
+                                       for c in range(3)]) * gains
+                if np.all(np.isfinite(prev_sigma)) and np.all(prev_sigma > 0):
+                    w_c = 1.0 / prev_sigma ** 2
+                    acc_n += scaled * np.where(valid[:, :, np.newaxis], w_c, 0.0)
+                    wsum_n += np.where(valid[:, :, np.newaxis], w_c, 0.0)
+                    info.setdefault('weights', []).append(
+                        (os.path.basename(path), float(np.mean(w_c / w_new))))
+                else:
+                    noise_ok = False
+
+            if tf is not None:
+                t_xy = tf.params[:2, 2]
+                sy, sx = float(t_xy[1]), float(t_xy[0])
+                rot = float(np.degrees(np.arctan2(tf.params[1, 0], tf.params[0, 0])))
+            else:
+                sy, sx = shift
+                rot = 0.0
+            safe_print(f"  Merged {os.path.basename(path)}: {meta['nframes']} frames, "
+                       f"shift=({sx:+.1f}, {sy:+.1f})px rot={rot:+.2f}deg, "
+                       f"overlap {overlap * 100:.0f}%")
+
+            info['n_sources'] += 1
+            info['sources'].append(os.path.basename(path))
+            info['total_frames'] += meta['nframes']
+            info['total_intgtime'] += meta['intgtime']
+            info['total_totexp'] += meta['totexp']
+            for key, pick in (('datefrst', min), ('datelast', max)):
+                v = meta[key]
+                if v:
+                    info[key] = pick(info[key], str(v)) if info[key] else str(v)
+        except _UnusableStack as exc:
+            if not skip_unusable:
+                raise
+            safe_print(f"  WARNING: leaving out {exc}")
+            info['skipped'].append(os.path.basename(path))
 
     if noise_ok:
         merged = (acc_n / np.maximum(wsum_n, 1e-30)).astype(np.float32)

@@ -168,6 +168,24 @@ class TestMergePreviousStacks(unittest.TestCase):
                 merge_previous_stacks(new, 10, [p])
 
 
+    def test_skip_unusable_leaves_out_a_bad_session(self):
+        # The hierarchical combine (skip_unusable=True): one junk session among good
+        # ones is left out, not fatal; --merge (default) still refuses.
+        with tempfile.TemporaryDirectory() as td:
+            new = _star_field(seed=5)
+            good = os.path.join(td, 'good.fits')
+            _write_stack(good, _star_field(shift=(3.0, -2.0), seed=7), nframes=20)
+            rng = np.random.default_rng(6)
+            bad = os.path.join(td, 'junk.fits')
+            _write_stack(bad, np.clip(rng.normal(1000, 5, (256, 320, 3)), 0,
+                                      None).astype(np.float32), nframes=9)
+            merged, info = merge_previous_stacks(new, 10, [good, bad], skip_unusable=True)
+            self.assertEqual(info['sources'], ['good.fits'])
+            self.assertEqual(info['skipped'], ['junk.fits'])
+            self.assertEqual(info['total_frames'], 30)
+            self.assertTrue(np.all(np.isfinite(merged)))
+            with self.assertRaises(ValueError):
+                merge_previous_stacks(new, 10, [good, bad])
 
 class TestCopyCelestialWcs(unittest.TestCase):
 

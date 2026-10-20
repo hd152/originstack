@@ -6,9 +6,19 @@ import os
 from unittest import mock
 
 import numpy as np
+import pytest
 from astropy.io import fits
 
 import src.cli as cli
+
+
+@pytest.fixture(autouse=True)
+def _private_temp(tmp_path, monkeypatch):
+    # per-session stacks go to tempfile.gettempdir() as <session>_stack.fits: in the
+    # shared %TEMP% two xdist workers wrote session0_stack.fits at once and one failed
+    d = tmp_path / 'tmp'
+    d.mkdir()
+    monkeypatch.setattr(cli.tempfile, 'tempdir', str(d))
 
 
 def _stack(path, filt):
