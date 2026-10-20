@@ -1345,7 +1345,7 @@ def execute_frame_processing(
                 try:
                     for future in tqdm(as_completed(futures), total=n,
                                        desc="  Processing", unit="frame",
-                                       disable=progress_disabled(args.verbose)):
+                                       disable=progress_disabled(getattr(args, 'verbose', False))):
                         _check_cancel(args)
                         frame_idx, metrics, error, timings = future.result()
                         _accum(timings)
@@ -1475,14 +1475,10 @@ def execute_frame_processing(
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_thread_process_frame, i, f): i
                        for i, f in enumerate(lights)}
-            # Always show the progress bar here: unlike the CPU path, per-frame
-            # quality metrics are computed asynchronously and only printed AFTER
-            # this loop, so disabling the bar under -v would leave the whole GPU
-            # processing loop with no output at all (looks hung).
             try:
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Processing", unit="frame",
-                                   disable=progress_disabled()):
+                                   disable=progress_disabled(getattr(args, 'verbose', False))):
                     _check_cancel(args)
                     i, metrics, error, lum_arr, timings = future.result()
                     _accum(timings)
@@ -1577,7 +1573,7 @@ def execute_frame_processing(
                        f"(measured once, applied per frame)")
         for i, f in tqdm(enumerate(lights), total=n,
                          desc="  Processing", unit="frame",
-                         disable=progress_disabled(args.verbose)):
+                         disable=progress_disabled(getattr(args, 'verbose', False))):
             _check_cancel(args)
             result = _process_single_frame(
                 f.path, f.header, masters, args.debayer_method, args.white_balance,
@@ -1771,7 +1767,7 @@ def reload_accepted_frames(
                 futures = {pool.submit(_parallel_frame_worker, t): t[1] for t in tasks}
                 for future in tqdm(as_completed(futures), total=n,
                                    desc="  Reloading", unit="frame",
-                                   disable=progress_disabled(args.verbose)):
+                                   disable=progress_disabled(getattr(args, 'verbose', False))):
                     orig_idx, _, error, _ = future.result()
                     if error:
                         j = _orig_to_j.get(orig_idx, -1)
@@ -1843,7 +1839,7 @@ def reload_accepted_frames(
                        for j, (f, orig_idx) in enumerate(zip(final, final_indices))}
             for future in tqdm(as_completed(futures), total=n,
                                desc="  Reloading", unit="frame",
-                               disable=progress_disabled(args.verbose)):
+                               disable=progress_disabled(getattr(args, 'verbose', False))):
                 j, orig_idx, rgb, lum, error = future.result()
                 if error:
                     safe_print(f"  WARNING: Could not reload "
