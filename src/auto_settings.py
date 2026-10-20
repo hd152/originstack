@@ -308,13 +308,10 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('denoise_acdnr',           True),
     ],
     'planetary_nebula': [
-        # More iterations than other targets: resolving a compact disk or ring
-        # requires many RL/TV cycles to recover sub-seeing shell structure.
-        ('deconvolve',              True),
-        ('deconvolve_iterations',   25),
-        ('deconvolve_blind_psf',    True),
-        # TV staircasing boxes the compact bright shell/disk — use RL instead.
-        ('deconvolve_tv',           False),
+        # No deconvolution and no SCNR (measured on a real two-night M27 stack, each
+        # removed in turn): RL turned the shell mottled and blocky at Origin SNR, and
+        # SCNR -- a green-cast remover -- took out the [O III] teal that is most of
+        # a planetary nebula's colour, leaving it blue-white.
         # Reduce background stars so the compact nebula is not dominated by halos.
         ('star_reduce',             True),
         ('star_reduce_factor',      0.5),
@@ -326,12 +323,16 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('ghs_sp',                  0.10),
         # Protect the bright central star from blowout.
         ('ghs_hp',                  0.92),
+        # The masked preview stretch: the per-channel GHS clipped a bright compact
+        # shell to white (the Ring, M57) and M27's core with it; the masked one
+        # keeps the shell's colour and structure and lifts the faint outer lobes
+        # (chosen over GHS and oklab on a real M27 stack).
+        ('stretch',                 'masked'),
         # Compact nebula on empty sky, but keep the faint outer halo — mild clip.
         ('preview_black_sigma',     1.0),
         # Smaller patches → denser background sampling around the compact disk.
         ('dbe_patch_size',          32),
         ('entropy_bg',              True),
-        ('scnr',                    True),
         ('photometric_calibration', True),
         ('denoise_curvelet',             True),
         ('denoise_acdnr',           True),
