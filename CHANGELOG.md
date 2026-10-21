@@ -6,61 +6,7 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
-## [2.13.3] - 2026-10-21
-
-### Fixed
-
-- **Ring Nebula as a flat disc through the dual-band filter.** When most of a small bright
-  object sits above the preview's white point, its whole range was squeezed into the top of
-  the display and a strong colour clipped it to one level. The highlight curve now gives
-  such an object more of the display, on the object only (the rest of the image is
-  unchanged): the ring and its darker centre show in both filters.
-- **Galaxy protection on a bright star.** Background extraction's galaxy protection could
-  centre on a saturated star instead of the galaxy (Black Eye, Fornax A). Candidates are now
-  compared with the stars removed.
-- **Comet mode on a comet it cannot find.** When the comet was too faint to find by its
-  motion (C/2024 J3), comet mode aligned on the brightest object instead, a star, and wrote a
-  "comet" stack built around it. It now says no comet was found, writes no comet stack (the
-  star-aligned stack also holds a slow comet), and points to `--comet-xy`.
-
-## [2.13.2] - 2026-10-21
-
-Fixes found by stacking 27 targets from real Origin sessions before re-releasing 2.13.
-
-### Fixed
-
-- **Dark holes and bars next to bright stars.** The sky-residual pass took a saturated
-  star's halo for sky: on Mizar a dark bar ran from Mizar to Alcor. Mesh cells that stand
-  far above their neighbours are now treated as sources, and gaps are bridged smoothly
-  instead of copying one cell across them.
-- **Coloured blobs around nebulae.** Where background extraction protects faint nebulosity,
-  the sky under it was left with the vignetting dome still in: a maroon blob over the
-  Pleiades (Maia Nebula), a hard-edged red patch around the Crab Nebula. The protected area
-  now gets the same vignetting-shaped model as a galaxy's, when the samples around it show one.
-- **A bright column through faint-galaxy images.** On a faint galaxy (Antennae) the galaxy
-  protection grew into the sky gradient and covered most of the frame; background
-  extraction then left a bright column. It now measures the galaxy itself.
-- **Targets the app did not recognise.** Origin's names such as Duck Nebula, Cone Nebula,
-  Pacman Nebula, Medusa Nebula, Fornax A, Markarian's Chain and "Messier 101" were not
-  recognised, so the target-specific settings were not used; Thor's Helmet (Duck Nebula)
-  was flattened into the sky. Catalogue answers for galaxies in pairs or groups and for
-  planetary nebulae are now understood too.
-- **Ring Nebula as a flat disc** on a short stack: the highlight roll-off missed it by two
-  pixels; its threshold is now a little lower.
-- **`--from-stack` on a multi-night or mosaic result** now uses the settings the run chose:
-  the combined stack gets its own `_config.toml`.
-
-## [2.13.1] - 2026-10-20
-
-### Fixed
-
-- **Bright blue previews between nights.** In a multi-night run each night's stack is
-  previewed before the combine, linear and unprocessed; a light-polluted sky that sits
-  higher in one channel tinted the whole preview, bright blue at the end of every night.
-  Each channel's sky level is now evened out for that preview (display only; the stacks
-  and the final image are unchanged).
-
-## [2.13.0] - 2026-10-20
+## [2.13.0] - 2026-10-22
 
 Mosaics from the Origin's Mosaic Mode, learned star removal, a reworked comet mode, a faster
 first phase, a redesigned app, and fixes to multi-night combines and to how bright cores,
@@ -147,6 +93,42 @@ planetary nebulae, Milky Way fields and galaxies on bright-sky nights are render
   frames were stacked as lights unless their file name said what they were. Dark flats were
   taken as darks for the lights; they are now left out with a note (the flats are
   bias-corrected instead). (This entry was missing from 2.12.1's notes; the fix shipped now.)
+- **Bright blue previews between nights.** In a multi-night run each night's stack is
+  previewed before the combine, linear and unprocessed; a light-polluted sky that sits
+  higher in one channel tinted the whole preview, bright blue at the end of every night.
+  Each channel's sky level is now evened out for that preview (display only; the stacks
+  and the final image are unchanged).
+- **Dark holes and bars next to bright stars.** The sky-residual pass took a saturated
+  star's halo for sky: on Mizar a dark bar ran from Mizar to Alcor. Mesh cells that stand
+  far above their neighbours are now treated as sources, and gaps are bridged smoothly
+  instead of copying one cell across them.
+- **Coloured blobs around nebulae.** Where background extraction protects faint nebulosity,
+  the sky under it was left with the vignetting dome still in: a maroon blob over the
+  Pleiades (Maia Nebula), a hard-edged red patch around the Crab Nebula. The protected area
+  now gets the same vignetting-shaped model as a galaxy's, when the samples around it show one.
+- **A bright column through faint-galaxy images.** On a faint galaxy (Antennae) the galaxy
+  protection grew into the sky gradient and covered most of the frame; background
+  extraction then left a bright column. It now measures the galaxy itself.
+- **Targets the app did not recognise.** Origin's names such as Duck Nebula, Cone Nebula,
+  Pacman Nebula, Medusa Nebula, Fornax A, Markarian's Chain and "Messier 101" were not
+  recognised, so the target-specific settings were not used; Thor's Helmet (Duck Nebula)
+  was flattened into the sky. Catalogue answers for galaxies in pairs or groups and for
+  planetary nebulae are now understood too.
+- **`--from-stack` on a multi-night or mosaic result** now uses the settings the run chose:
+  the combined stack gets its own `_config.toml`.
+- **The Ring Nebula keeps its ring** through the dual-band filter and on short stacks. When
+  most of a small bright object sits above the preview's white point, its whole range was
+  squeezed into the top of the display and a strong colour clipped it to one level. The
+  highlight curve now gives such an object more of the display, on the object only (the rest
+  of the image is unchanged): the ring and its darker centre show in both filters. The
+  highlight roll-off also missed a short stack by two pixels; its threshold is a little lower.
+- **Galaxy protection on a bright star.** Background extraction's galaxy protection could
+  centre on a saturated star instead of the galaxy (Black Eye, Fornax A). Candidates are now
+  compared with the stars removed.
+- **Comet mode on a comet it cannot find.** When the comet was too faint to find by its
+  motion (C/2024 J3), comet mode aligned on the brightest object instead, a star, and wrote a
+  "comet" stack built around it. It now says no comet was found, writes no comet stack (the
+  star-aligned stack also holds a slow comet), and points to `--comet-xy`.
 
 ## [2.12.1] - 2026-10-16
 
