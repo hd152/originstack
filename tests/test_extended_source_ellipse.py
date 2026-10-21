@@ -167,3 +167,18 @@ def test_faint_object_without_a_significant_core_still_found():
     lum[:, :] += np.random.default_rng(1).normal(0, 0.5, lum.shape).astype(np.float32)
     r = find_extended_source_ellipse(lum)
     assert r is not None and abs(r[0] - 150) < 10 and abs(r[1] - 150) < 10
+
+
+def test_faint_galaxy_on_a_gradient_is_not_merged_into_it():
+    """A faint galaxy's 10%-of-peak level sits under 1 sigma of the gradient
+    scale; there it merged into the sky gradient (Antennae: a 1370 px ellipse
+    over most of the frame, and DBE left a bright column). Here 432 px before."""
+    H, W = 600, 900
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    ramp = 100.0 * (xx / W) ** 2
+    galaxy = 700.0 * np.exp(-0.5 * np.hypot(yy - 300.0, xx - 700.0) ** 2 / 15.0 ** 2)
+    result = find_extended_source_ellipse((1000.0 + ramp + galaxy).astype(np.float32))
+    assert result is not None
+    fy, fx, a, b, _ = result
+    assert abs(fy - 300.0) < 10 and abs(fx - 700.0) < 10
+    assert a < 150

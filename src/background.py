@@ -511,6 +511,57 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
     return result
 
 
+def _reject_bright_cells(bg_grid: np.ndarray, pixel_sigma: float,
+                         k: float = 3.0) -> np.ndarray:
+    """NaN out mesh cells standing ``k`` pixel-noise sigmas above their 5x5
+    neighbourhood's median.
+
+    The star mask covers a star's core only (a 4 px Gaussian), so a
+    saturated star's halo fills a whole fine-mesh cell: on Mizar the cell
+    holding Alcor measured ~9750 ADU on a sky near 0 (27 sigma). Subtracted,
+    that cell left a dark hole; worse, the nearest-cell fill copied it
+    across every cell excluded around Mizar, a dark bar between the two
+    stars. The residuals this step removes are a fraction of the pixel
+    noise, so such a cell is a source, not sky; it is refilled from its
+    neighbours like any other excluded cell. The threshold is the *pixel*
+    noise, not the scatter of the cell medians (which average the noise
+    away): against that, a faint galaxy disk or a corner glow would count
+    as a source too.
+    """
+    valid = ~np.isnan(bg_grid)
+    if valid.sum() < 9 or min(bg_grid.shape) < 3 or not pixel_sigma > 0:
+        return bg_grid
+    filled = bg_grid
+    if not valid.all():
+        _, nn_idx = ndimage.distance_transform_edt(~valid, return_indices=True)
+        filled = bg_grid[nn_idx[0], nn_idx[1]]
+    local = ndimage.median_filter(filled, size=5, mode='nearest')
+    bright = valid & (bg_grid - local > k * pixel_sigma)
+    if not bright.any():
+        return bg_grid
+    out = bg_grid.copy()
+    out[bright] = np.nan
+    return out
+
+
+def _harmonic_fill(grid: np.ndarray, holes: np.ndarray, iters: int = 500) -> np.ndarray:
+    """Fill ``holes`` in a small mesh grid with the smooth (Laplace) surface
+    through the cells around them. Copying the nearest valid cell instead
+    streaked one cell's value across a whole excluded disk -- on Mizar a
+    halo cell beside Alcor, a dark bar right across the region excluded
+    around Mizar."""
+    _, nn_idx = ndimage.distance_transform_edt(holes, return_indices=True)
+    out = grid[nn_idx[0], nn_idx[1]].astype(np.float64)
+    for _ in range(iters):
+        p = np.pad(out, 1, mode='edge')
+        avg = 0.25 * (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:])
+        step = np.abs(avg[holes] - out[holes]).max()
+        out[holes] = avg[holes]
+        if step < 1e-3:
+            break
+    return out
+
+
 def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
                        filter_size: int = 3, clip_sigma: float = 3.0,
                        star_mask: Optional[np.ndarray] = None,
@@ -671,17 +722,19 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
         else:
             bg_grid = _mesh_median_grid_numpy(ch, ny, nx)
 
+        _sample = ch[::4, ::4]
+        _pixel_sigma = 1.4826 * float(np.median(np.abs(_sample - np.median(_sample))))
+        bg_grid = _reject_bright_cells(bg_grid, _pixel_sigma)
+
         # Interpolation
         if np.all(np.isnan(bg_grid)):
             bg_grid[:] = 0.0
         elif np.any(np.isnan(bg_grid)):
-            # Fallback: copy nearest valid cell
             nan_mask = np.isnan(bg_grid)
             try:
-                _, nn_idx = ndimage.distance_transform_edt(nan_mask, return_indices=True)
-                bg_grid[nan_mask] = bg_grid[nn_idx[0][nan_mask], nn_idx[1][nan_mask]]
+                bg_grid = _harmonic_fill(bg_grid, nan_mask)
             except Exception:
-                bg_grid[np.isnan(bg_grid)] = float(np.median(bg_grid))
+                bg_grid[nan_mask] = float(np.nanmedian(bg_grid))
 
         if filter_size > 1 and min(ny, nx) >= filter_size:
             bg_grid = ndimage.median_filter(bg_grid, size=filter_size)
@@ -1554,10 +1607,32 @@ def _fill_exclusion_radial(background: np.ndarray, coords: np.ndarray,
         keep = new
     if coef is None:
         return background
-    lo, hi = np.percentile(bvals[keep], [2, 98])
-    spread = hi - lo
     d_out = ndimage.distance_transform_edt(~excl)
     feather = max(2.0 * patch_size, 1.0)
+    # Only a dome the samples actually show: the r^2/r^4 terms are pinned from
+    # outside the region, and on a flat noisy sky their noise alone bent the
+    # fill by a quarter of a faint central nebula's light. The curvature's
+    # contribution between the region's deepest point and its rim must exceed
+    # 3x its standard error (Maia: a red vignetting dome of ~400 ADU).
+    d_in = ndimage.distance_transform_edt(excl)
+    py, px = np.unravel_index(int(np.argmax(d_in)), d_in.shape)
+    ry_rim, rx_rim = np.nonzero((d_out > 0.5 * feather) & (d_out <= feather))
+    if ry_rim.size == 0:
+        return background
+    sel = slice(None, None, max(1, ry_rim.size // 2000))
+    dvec = (design(np.array([py], float), np.array([px], float))[0]
+            - design(ry_rim[sel].astype(float), rx_rim[sel].astype(float)).mean(axis=0))
+    dvec[:3] = 0.0                       # the plane is the local fit's job anyway
+    res = bvals[keep] - A[keep] @ coef
+    sig = 1.4826 * float(np.median(np.abs(res - np.median(res)))) + 1e-9
+    try:
+        cov = sig * sig * np.linalg.inv(A[keep].T @ A[keep])
+    except np.linalg.LinAlgError:
+        return background
+    if abs(float(dvec @ coef)) < 3.0 * float(np.sqrt(max(dvec @ cov @ dvec, 0.0))):
+        return background
+    lo, hi = np.percentile(bvals[keep], [2, 98])
+    spread = hi - lo
     region = d_out <= feather
     ry, rx = np.nonzero(region)
     ya, yb, xa, xb = ry.min(), ry.max() + 1, rx.min(), rx.max() + 1
@@ -1580,6 +1655,30 @@ def _fill_exclusion_radial(background: np.ndarray, coords: np.ndarray,
     return out
 
 
+def _large_mask_regions(emission_mask: Optional[np.ndarray],
+                        exclusion_mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """The region ``_fill_exclusion_radial`` bridges: the caller's exclusion
+    mask plus the emission mask's large connected regions (each at least
+    ``_RADIAL_FILL_MIN_FRAC`` / 10 of the frame -- an extended nebula, not the
+    star discs). DBE's own diffuse-emission mask leaves the same unsampled
+    hole a galaxy ellipse does: on the Maia Nebula it covered the middle of
+    the frame and the red vignetting dome under it was left in, a maroon
+    blob (residual R 421 / G 161 ADU inside, ~15 outside); a hard-edged red
+    patch around the Crab Nebula the same way."""
+    hole = None if exclusion_mask is None else np.asarray(exclusion_mask) > 0.5
+    if emission_mask is not None:
+        em = np.asarray(emission_mask) >= 0.5
+        labels, n = ndimage.label(em)
+        if n:
+            sizes = np.bincount(labels.ravel())
+            sizes[0] = 0
+            big = sizes >= 0.1 * _RADIAL_FILL_MIN_FRAC * em.size
+            if big.any():
+                em_big = big[labels]
+                hole = em_big if hole is None else (hole | em_big)
+    return hole
+
+
 def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
                                  patch_size: int, masked_frac_thresh: float,
                                  clip_sigma: float, star_mask: Optional[np.ndarray],
@@ -1589,7 +1688,7 @@ def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
                                  admit_gradient: bool = False,
                                  note: Optional[str] = None) -> np.ndarray:
     """Shared driver of DBE and the wavelet background: sample sky patches per
-    channel, turn them into a surface with ``fit(coords, values)``, subtract.
+    channel, turn them into a surface with ``fit(coords, values, emission_mask)``, subtract.
     Too few samples fall back to the mesh extraction. ``admit_gradient`` adds
     DBE's gradient-following patches; ``note`` is printed (verbose) after the
     emission mask is built."""
@@ -1668,7 +1767,7 @@ def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
                 if verbose:
                     safe_print(f"    {label} {channel_names[c]}: subsampled to "
                                f"{len(coords)} patches")
-            background = fit(coords, values)
+            background = fit(coords, values, emission_mask)
 
         subtracted = channel - background
         if verbose:
@@ -1700,14 +1799,16 @@ def dynamic_background_extraction(
     local-regression surface fit (see ``_fit_background_surface``)."""
     H, W = rgb.shape[:2]
 
-    def fit(coords: np.ndarray, values: np.ndarray) -> np.ndarray:
+    def fit(coords: np.ndarray, values: np.ndarray,
+            emission_mask: Optional[np.ndarray] = None) -> np.ndarray:
         background = _fit_background_surface(
             coords, values, H, W,
             outlier_sigma=outlier_sigma, max_iter=outlier_iters,
             patch_size=patch_size, verbose=verbose)
-        if exclusion_mask is not None:
+        hole = _large_mask_regions(emission_mask, exclusion_mask)
+        if hole is not None:
             background = _fill_exclusion_radial(
-                background, coords, values, exclusion_mask, patch_size)
+                background, coords, values, hole, patch_size)
         return background
 
     return _patch_background_extraction(
@@ -1840,7 +1941,7 @@ def wavelet_background_extraction(
     """
     H, W = rgb.shape[:2]
 
-    def fit(coords: np.ndarray, values: np.ndarray) -> np.ndarray:
+    def fit(coords: np.ndarray, values: np.ndarray, _emission_mask=None) -> np.ndarray:
         return _wavelet_background_surface(coords, values, H, W, patch_size=patch_size,
                                            n_scales=n_scales, verbose=verbose)
 

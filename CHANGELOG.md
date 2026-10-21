@@ -6,6 +6,33 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.13.2] - 2026-10-21
+
+Fixes found by stacking 27 targets from real Origin sessions before re-releasing 2.13.
+
+### Fixed
+
+- **Dark holes and bars next to bright stars.** The sky-residual pass took a saturated
+  star's halo for sky: on Mizar a dark bar ran from Mizar to Alcor. Mesh cells that stand
+  far above their neighbours are now treated as sources, and gaps are bridged smoothly
+  instead of copying one cell across them.
+- **Coloured blobs around nebulae.** Where background extraction protects faint nebulosity,
+  the sky under it was left with the vignetting dome still in: a maroon blob over the
+  Pleiades (Maia Nebula), a hard-edged red patch around the Crab Nebula. The protected area
+  now gets the same vignetting-shaped model as a galaxy's, when the samples around it show one.
+- **A bright column through faint-galaxy images.** On a faint galaxy (Antennae) the galaxy
+  protection grew into the sky gradient and covered most of the frame; background
+  extraction then left a bright column. It now measures the galaxy itself.
+- **Targets the app did not recognise.** Origin's names such as Duck Nebula, Cone Nebula,
+  Pacman Nebula, Medusa Nebula, Fornax A, Markarian's Chain and "Messier 101" were not
+  recognised, so the target-specific settings were not used; Thor's Helmet (Duck Nebula)
+  was flattened into the sky. Catalogue answers for galaxies in pairs or groups and for
+  planetary nebulae are now understood too.
+- **Ring Nebula as a flat disc** on a short stack: the highlight roll-off missed it by two
+  pixels; its threshold is now a little lower.
+- **`--from-stack` on a multi-night or mosaic result** now uses the settings the run chose:
+  the combined stack gets its own `_config.toml`.
+
 ## [2.13.1] - 2026-10-20
 
 ### Fixed
