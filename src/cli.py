@@ -1432,6 +1432,7 @@ def _finish_mosaic(output: str, panels: list, args, effective_args: dict) -> Non
                        f"mosaic is saved and its preview is unprocessed")
     save_final_preview(_processed if _processed is not None else mosaic, preview_path,
                        _eff if _processed is not None else args)
+    save_effective_config(_eff if _processed is not None else args, output)
     safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")
 
 
@@ -1547,6 +1548,10 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
         save_final_preview(_processed, preview_path, _eff, starless=_pstarless)
     else:
         save_final_preview(combined, preview_path, args)
+    # The settings Phase 4 ran with (the reference session's, with --auto's
+    # choices): without them --from-stack on the combined stack fell back to
+    # the command line and rendered another image (Ring Nebula).
+    save_effective_config(_eff if _processed is not None else args, output)
 
     safe_print(f"  ✓ Combined output: {os.path.basename(output)} ({Hf}×{Wf}×3)")
     safe_print(f"  ✓ Preview: {os.path.basename(preview_path)}")

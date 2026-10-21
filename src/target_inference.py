@@ -287,6 +287,16 @@ _COMMON_NAMES: Dict[str, Tuple[Optional[str], str]] = {
     'splinter galaxy':         ('NGC5907', _G),
     'fireworks galaxy':        ('NGC6946', _G),
     "croc's eye galaxy":       ('M94',     _G),
+    'fornax a':                ('NGC1316', _G),
+    'cetus a':                 ('M77',     _G),
+    'perseus a':               ('NGC1275', _G),
+    "markarian's chain":       ('M84',     _G),
+    "stephan's quintet":       ('NGC7320', _G),
+    "mirach's ghost":          ('NGC404',  _G),
+    'eyes galaxies':           ('NGC4438', _G),
+    "bode's nebulae":          ('M81',     _G),
+    'helix galaxy':            ('NGC2685', _G),
+    "barnard's galaxy":        ('NGC6822', _G),
 
     # Globular clusters
     'great hercules cluster':  ('M13',    _GL),
@@ -296,6 +306,7 @@ _COMMON_NAMES: Dict[str, Tuple[Optional[str], str]] = {
     '47 tucanae':              ('NGC104', _GL),
     '47 tuc':                  ('NGC104', _GL),
     'wild duck cluster':       ('M11',    _GL),
+    'intergalactic wanderer':  ('NGC2419',_GL),
 
     # Planetary nebulae
     'ring nebula':             ('M57',    _PN),
@@ -310,6 +321,10 @@ _COMMON_NAMES: Dict[str, Tuple[Optional[str], str]] = {
     'saturn nebula':           ('NGC7009',_PN),
     'blue snowball':           ('NGC7662',_PN),
     'retina nebula':           ('IC4406', _PN),
+    # Origin app names (its objectName in info.json) that SIMBAD does not resolve,
+    # or resolves to an object of the wrong kind
+    'medusa nebula':           ('ABELL21',_PN),
+    'blue flash nebula':       ('NGC6905',_PN),
 
     # Emission nebulae
     'crab nebula':             ('M1',     _EN),
@@ -359,6 +374,11 @@ _COMMON_NAMES: Dict[str, Tuple[Optional[str], str]] = {
     'monkey head nebula':      ('SH2-252',_EN),
     'dolphin nebula':          ('SH2-308',_EN),
     'running man nebula':      ('SH2-279',_EN),
+    # Origin's name for NGC 2359 (Thor's Helmet); SIMBAD answers a sub-mm source
+    'duck nebula':             ('NGC2359',_EN),
+    "thor's helmet":           ('NGC2359',_EN),
+    'cone nebula':             ('NGC2264',_EN),
+    'pacman nebula':           ('NGC281', _EN),
 
     # Reflection nebulae
     'pleiades':                ('M45',    _RN),
@@ -367,6 +387,8 @@ _COMMON_NAMES: Dict[str, Tuple[Optional[str], str]] = {
     'flaming star':            ('IC405',  _RN),
     'iris nebula':             ('NGC7023',_RN),
     'witch head nebula':       ('IC2118', _RN),
+    'epsilon orionis nebula':  ('NGC1990',_RN),
+    'rho ophiuchi nebula':     ('IC4604', _RN),
 
     # Star fields / open clusters
     'double cluster':          ('NGC869', _SF),
@@ -374,6 +396,7 @@ _COMMON_NAMES: Dict[str, Tuple[Optional[str], str]] = {
     'praesepe':                ('M44',    _SF),
     'butterfly cluster':       ('M6',     _SF),
     'ptolemy cluster':         ('M7',     _SF),
+    "ptolemy's cluster":       ('M7',     _SF),
 
     # Wide field
     'sagittarius star cloud':  ('M24',    _WF),
@@ -393,7 +416,8 @@ _DATE_SUFFIX_RE = re.compile(
 
 _CATALOGUE_ID_RE = re.compile(
     r'\b('
-    r'M\s*\d{1,3}'
+    r'MESSIER\s*\d{1,3}'
+    r'|M\s*\d{1,3}'
     r'|NGC\s*\d{1,4}'
     r'|IC\s*\d{1,4}'
     r'|SH\s*2\s*[-_]\s*\d{1,3}'
@@ -423,6 +447,7 @@ def _normalise_id(raw: str) -> str:
     Examples: 'M 31' → 'M31', 'NGC  7000' → 'NGC7000', 'Sh2-132' → 'SH2-132'.
     """
     s = raw.strip().upper()
+    s = re.sub(r'^MESSIER\s*(\d)', r'M\1', s)       # Origin's names: 'Messier 101'
     s = re.sub(r'^M\s+(\d)', r'M\1', s)
     s = re.sub(r'^(NGC|IC|LBN|LDN|ARP)\s+', r'\1', s)
     s = re.sub(r'^(B)\s+(\d)', r'\1\2', s)
@@ -538,9 +563,27 @@ def _object_from_headers(frames: list) -> Optional[str]:
 # Simbad fallback
 # ---------------------------------------------------------------------------
 
+_SIMBAD_OTYPE_CODES: Dict[str, str] = {
+    **{c: _G for c in ('g', 'gic', 'gig', 'gip', 'bic', 'rg', 'h2g', 'lsb', 'agn', 'syg',
+                       'sy1', 'sy2', 'bla', 'bll', 'qso', 'lin', 'emg', 'sbg', 'bcg',
+                       'ig', 'pag', 'grg', 'cgg', 'clg', 'pog')},
+    'glc': _GL,
+    'pn': _PN,
+    **{c: _EN for c in ('hii', 'snr', 'gne', 'ism', 'cld', 'moc', 'dne', 'bub', 'emo')},
+    'rne': _RN,
+    **{c: _SF for c in ('opc', 'cl*', 'as*')},
+}
+
+
 def _simbad_type_to_internal(otype: str) -> str:
     """Map a Simbad OTYPE string to an internal object_type key."""
     t = otype.lower()
+    # SIMBAD's short codes first: the word tests below missed most of them
+    # ('GiP' -- M101, M95 --, 'G', 'rG', 'Sy2', 'CGG' came out unknown, and so
+    # did a bare 'PN': Medusa, Blue Flash).
+    code = t.strip().rstrip('?')
+    if code in _SIMBAD_OTYPE_CODES:
+        return _SIMBAD_OTYPE_CODES[code]
     # Galaxy family
     if any(x in t for x in ('galaxy', 'gal', 'agn', 'seyfert', 'qso', 'liner', 'bcd')):
         return _G

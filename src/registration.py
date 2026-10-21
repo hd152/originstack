@@ -2429,6 +2429,18 @@ def find_extended_source_ellipse(
             lab_obj, _ = ndimage.label(lum_smooth > t_obj)
             ids = np.unique(lab_obj[core])
             blob = np.isin(lab_obj, ids[ids > 0])
+            # A faint galaxy's 10% is under 1 sigma of the gradient scale, and at
+            # that level it merged into the gradient too (Antennae, peak 9 sigma:
+            # a 1370 px ellipse, and DBE left a bright column through the frame).
+            # Such a merge covers a large part of the frame; then measure the
+            # object at 3 sigma. (A fixed 3 sigma floor everywhere halved the
+            # Needle Galaxy's ellipse.)
+            if blob.mean() > 0.2:
+                t_obj = sky_med + max(3.0 * thresh_sigma * sky_std,
+                                      0.10 * (peak - sky_med))
+                lab_obj, _ = ndimage.label(lum_smooth > t_obj)
+                ids = np.unique(lab_obj[core])
+                blob = np.isin(lab_obj, ids[ids > 0])
     if blob is None:
         # No significant core: the faint-object path (largest central 1-sigma blob)
         candidates = [i for i in range(n) if _central(i)]

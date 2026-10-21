@@ -56,10 +56,13 @@ class Config:
     # largest connected region above white covers at least
     # PREVIEW_ROLLOFF_MIN_AREA of the frame (Orion 0.44%, the Ring Nebula M57
     # 0.037%; star cores only on Black Eye / Whirlpool / a dense Flaming Star
-    # field: 0.003-0.012%; 0.1% left all of M57 flat white). Below white the
+    # field: 0.003-0.012%; 0.1% left all of M57 flat white; 0.02% missed a
+    # 250 s dual-band M57 combine at 0.0199% by two pixels, its whole ring a
+    # flat green disc). A saturated bright star can pass too (Mizar 0.078%):
+    # harmless, its core rolls off instead of clipping. Below white the
     # usual curve is scaled into [0, KNEE]; above it a log curve of STRENGTH
     # maps white..p99.99 into [KNEE, 1].
-    PREVIEW_ROLLOFF_MIN_AREA = 0.0002
+    PREVIEW_ROLLOFF_MIN_AREA = 0.00015
     # ...and at least this many pixels: on a small frame 0.1% is one bright star
     # (largest star region on the real stacks above: 701 px; Orion's core 25.6k).
     PREVIEW_ROLLOFF_MIN_PIXELS = 1000

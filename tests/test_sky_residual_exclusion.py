@@ -83,3 +83,22 @@ def test_exclusion_mask_none_is_backward_compatible():
     a = remove_sky_residual(rgb.copy(), mesh_size=64, filter_size=1)
     b = remove_sky_residual(rgb.copy(), mesh_size=64, filter_size=1, exclusion_mask=None)
     assert np.array_equal(a, b)
+
+
+def test_bright_star_beside_an_excluded_one_leaves_no_dark_bar():
+    """A saturated star's halo fills a fine-mesh cell (the star mask covers its
+    core only). Its median was taken as sky, and the nearest-cell fill copied
+    it across the region excluded around a brighter neighbour: a dark bar
+    between the two (Mizar and Alcor, -2000 ADU here before the fix)."""
+    H, W = 600, 900
+    rng = np.random.default_rng(3)
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    r_a = np.hypot(yy - 300.0, xx - 300.0)
+    r_b = np.hypot(yy - 300.0, xx - 495.0)
+    plane = (1000.0 + 30000.0 * np.exp(-0.5 * (r_a / 25.0) ** 2) + 4000.0 * np.exp(-r_a / 40.0)
+             + np.minimum(60000.0 * np.exp(-0.5 * (r_b / 8.0) ** 2), 15000.0)
+             + 4000.0 * np.exp(-r_b / 20.0) + rng.normal(0, 10.0, (H, W))).astype(np.float32)
+    result = remove_sky_residual(_to_rgb(plane), mesh_size=32, filter_size=1)[:, :, 0]
+    sky = float(np.median(result[:60, :]))
+    between = (np.abs(yy - 300.0) < 30) & (xx > 340) & (xx < 440)
+    assert float(np.percentile(result[between], 5)) - sky > -50.0
