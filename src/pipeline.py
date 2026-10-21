@@ -573,6 +573,21 @@ def _reference_from_registration(final, final_indices, shifts, transforms, mem_l
     return best_idx, np.array(mem_lum[best_idx])
 
 
+def _sky_neutral_preview(img: np.ndarray) -> np.ndarray:
+    """A linear stack with each channel's sky median moved to their mean, for display.
+
+    A session stack whose Phase 4 is deferred to the multi-night combine is previewed
+    linear: no background extraction, no neutralisation, and the stretch's black point
+    is shared by the channels. A light-polluted sky that sits higher in one channel
+    (a real M15 night: R 4139, G 4504, B 4652) then tinted the whole preview -- it
+    turned bright blue at the end of every session. Display only; the stack itself is
+    untouched.
+    """
+    sub = img[::4, ::4].reshape(-1, img.shape[2])
+    sky = np.nanmedian(sub, axis=0).astype(np.float32)
+    return img - sky + np.float32(sky.mean())
+
+
 def _shared_crop(a: np.ndarray, crop_a, b: np.ndarray, crop_b):
     """Cut two stacks on the same reference grid to the rectangle both crops
     cover. ``crop_*`` = (top, bottom, left, right) of each array in that grid.
@@ -1794,7 +1809,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         from src.ui_events import get_ui_events
         _wv = get_ui_events()
         if _wv.active:
-            _wv.preview(stacked,
+            _wv.preview(_sky_neutral_preview(stacked) if _defer_phase4 else stacked,
                         'Session stack (linear)' if _defer_phase4 else 'Final (post-processed)',
                         args=args,
                         slot='final', min_interval=0.0)
