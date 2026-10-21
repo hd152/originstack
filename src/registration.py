@@ -2280,6 +2280,20 @@ def find_comet_centroid(lum: np.ndarray,
     return lum.shape[0] / 2.0, lum.shape[1] / 2.0
 
 
+def _star_suppressed(lum: np.ndarray, smooth_sigma: float) -> np.ndarray:
+    """``lum`` with compact sources removed, then smoothed like the detector's
+    frame: a 9-tap median on a copy binned to ~min(H, W)/500 px (a ~36 px window
+    on an Origin stack), back to full size."""
+    H, W = lum.shape
+    f = max(1, int(round(min(H, W) / 500.0)))
+    hb, wb = H // f, W // f
+    small = lum[:hb * f, :wb * f].reshape(hb, f, wb, f).mean(axis=(1, 3))
+    small = ndimage.median_filter(small, size=9, mode='nearest')
+    full = np.repeat(np.repeat(small, f, axis=0), f, axis=1)
+    full = np.pad(full, ((0, H - hb * f), (0, W - wb * f)), mode='edge')
+    return _gaussian_blur(full, smooth_sigma)
+
+
 def find_extended_source_ellipse(
         lum: np.ndarray, smooth_sigma: Optional[float] = None,
         thresh_sigma: float = 1.0, margin: float = 1.3,
@@ -2420,8 +2434,21 @@ def find_extended_source_ellipse(
             return not (py < border or py >= H - border or px < border or px >= W - border)
 
         cand_hi = [i for i in range(n_hi) if _central_hi(i)]
+        if len(cand_hi) > 1:
+            # Rank on a star-suppressed frame: a saturated star's halo, smoothed,
+            # out-weighed the galaxy on Black Eye (1.46e7 vs 1.36e7) and Fornax A
+            # (three stars above it). A median over ~2% of the frame removes stars
+            # and keeps an extended object's light (Black Eye 1.1e7 vs 2.7e6).
+            ext = _star_suppressed(lum64, smooth_sigma)
+            ext_sky = float(np.median(np.concatenate([
+                ext[:border, :].ravel(), ext[-border:, :].ravel(),
+                ext[:, :border].ravel(), ext[:, -border:].ravel()])))
+            flux_ext = ndimage.sum(np.clip(ext - ext_sky, 0.0, None),
+                                   lab_hi, index=range(1, n_hi + 1))
+        else:
+            flux_ext = flux_hi
         if cand_hi:
-            core = lab_hi == max(cand_hi, key=lambda i: flux_hi[i]) + 1
+            core = lab_hi == max(cand_hi, key=lambda i: (flux_ext[i], flux_hi[i])) + 1
             peak = float(lum_smooth[core].max())
             # 10% of the object's own peak excess: on Sunflower 5% already merged
             # M63 (108k px region) into the 1.3M px gradient plateau

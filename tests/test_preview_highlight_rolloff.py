@@ -227,3 +227,32 @@ def test_dark_sky_preset_does_not_lift_wings():
                                     black_sigma=2.5)
     wings = (r > 70) & (r < 100)
     assert np.median(dark[wings]) < 0.5 * np.median(lifted[wings])
+
+
+@pytest.mark.parametrize('stretch', ['masked', 'ghs'])
+def test_single_hue_object_above_white_keeps_its_ring(stretch, monkeypatch):
+    """A small planetary nebula entirely above the white point: with the knee at
+    0.85 its whole range shared the top 15% of the display, and a teal colour
+    (green 1.3x luminance) clipped that to one value -- the dual-band M57 as a
+    flat disc. The ring must stand out from the centre; the stars stay as they
+    were."""
+    rng = np.random.default_rng(2)
+    h, w = 800, 1200
+    img = (500.0 + rng.normal(0, 20.0, (h, w, 3))).astype(np.float32)
+    yy, xx = np.mgrid[:h, :w]
+    r = np.hypot(yy - 400, xx - 600)
+    neb = np.where(r < 28, 1300.0 + 1700.0 * np.exp(-0.5 * ((r - 20.0) / 4.0) ** 2), 0.0)
+    teal = np.array([0.3, 1.3, 1.1], dtype=np.float32)
+    img += neb[..., None].astype(np.float32) * (teal / (teal @ [0.299, 0.587, 0.114]))
+    _add_star(img, 150, 200, 3000.0)
+    out = iof.render_preview_float(img, stretch, black_sigma=0.86, color='channel')
+    lum = out @ np.array([0.299, 0.587, 0.114])
+    ring, centre = lum[(r > 18) & (r < 22)].mean(), lum[r < 6].mean()
+    assert ring - centre > 0.1
+    from src.models import Config
+    monkeypatch.setattr(Config, 'PREVIEW_ROLLOFF_TARGET_FRACTION', (2.0, 3.0))
+    before = iof.render_preview_float(img, stretch, black_sigma=0.86, color='channel')
+    lum0 = before @ np.array([0.299, 0.587, 0.114])
+    assert ring - centre > lum0[(r > 18) & (r < 22)].mean() - lum0[r < 6].mean() + 0.05
+    far = r > 60
+    np.testing.assert_array_equal(out[far], before[far])

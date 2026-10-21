@@ -68,6 +68,18 @@ class Config:
     PREVIEW_ROLLOFF_MIN_PIXELS = 1000
     PREVIEW_ROLLOFF_KNEE = 0.85
     PREVIEW_ROLLOFF_STRENGTH = 8.0
+    # When the region above white is most of the object (a small bright planetary
+    # nebula on empty sky), the band [KNEE, 1] is all of it: the dual-band M57
+    # (ring 2.4-3.6x white, centre 1.1-1.4x) rendered as one flat teal disc, its
+    # [O III] green at 1.34x luminance clipping the band to one value. Measured
+    # as the fraction of the object (pixels > sky + 10 sigma connected to the
+    # region) above white -- M57 0.80 / 0.88 (dual-band / Clear), Orion and
+    # omega Cen 0.10, the Pleiades 0.27 -- the knee moves from KNEE to
+    # TARGET_KNEE between the two fractions, and in the colour-preserving
+    # stretch the band's top drops to 1 / (the region's median largest-channel
+    # to luminance ratio) so the brightest colour reaches 1 without clipping.
+    PREVIEW_ROLLOFF_TARGET_KNEE = 0.45
+    PREVIEW_ROLLOFF_TARGET_FRACTION = (0.4, 0.75)
     # In that same case (a frame-filling bright nebula) the GHS curve is made
     # strong enough that the lower quartile of the clearly-above-sky pixels
     # displays at this level (galaxy and star-field presets land at 0.13-0.17
