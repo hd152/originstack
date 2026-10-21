@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 from astropy.io import fits
@@ -250,14 +250,31 @@ def _preview_white(lum: np.ndarray, sky: float, sigma: float, percentile: float,
     return white, sp_scale
 
 
-def _extended_highlight_top(lum: np.ndarray, white: float) -> Optional[float]:
-    """Top of the highlight roll-off, or None when there is nothing to roll off.
+class _Rolloff(NamedTuple):
+    """Highlight roll-off: white..``top`` maps into [``knee``, ``ceiling``]
+    (``ceiling`` only in the colour-preserving stretch; 1 per channel). Both
+    are a float, or a per-pixel map that differs from the default only on the
+    object (``_extended_highlight_top``)."""
+    top: float
+    knee: Union[float, np.ndarray]
+    ceiling: Union[float, np.ndarray]
+
+
+def _extended_highlight_top(lum: np.ndarray, white: float, sky: Optional[float] = None,
+                            sky_sigma: Optional[float] = None,
+                            rgb: Optional[np.ndarray] = None,
+                            black: Optional[float] = None) -> Optional[_Rolloff]:
+    """The highlight roll-off, or None when there is nothing to roll off.
 
     A white point at the 99.5th percentile clips star cores, which is fine, but
     also any bright *extended* region above it -- a nebula core such as the
     Trapezium region of M42 then renders as a flat white blob. That case is told
     apart from star cores by the largest connected region above white (see
-    ``Config.PREVIEW_ROLLOFF_MIN_AREA``); the top is the 99.99th percentile."""
+    ``Config.PREVIEW_ROLLOFF_MIN_AREA``); the top is the 99.99th percentile.
+    With ``sky``/``sky_sigma`` (and ``rgb``/``black`` for the ceiling) the knee
+    and ceiling follow how much of the object is above white
+    (``Config.PREVIEW_ROLLOFF_TARGET_KNEE``), on the object only: a lower knee
+    everywhere dimmed every star of the M57 frame to make room for the ring."""
     from scipy import ndimage
 
     from src.models import Config
@@ -266,22 +283,53 @@ def _extended_highlight_top(lum: np.ndarray, white: float) -> Optional[float]:
         return None
     labels, n = ndimage.label(above)
     min_area = max(Config.PREVIEW_ROLLOFF_MIN_AREA * lum.size, Config.PREVIEW_ROLLOFF_MIN_PIXELS)
-    if n == 0 or np.bincount(labels.ravel())[1:].max() < min_area:
+    if n == 0:
+        return None
+    areas = np.bincount(labels.ravel())
+    areas[0] = 0
+    if areas.max() < min_area:
         return None
     top = float(np.percentile(lum, 99.99))
-    return top if top > 1.2 * float(white) else None
+    if top <= 1.2 * float(white):
+        return None
+    knee, ceiling = Config.PREVIEW_ROLLOFF_KNEE, 1.0
+    if sky is not None and sky_sigma is not None:
+        region = labels == int(areas.argmax())
+        obj_labels, _ = ndimage.label(lum > float(sky) + 10.0 * float(sky_sigma))
+        ids = np.unique(obj_labels[region])
+        obj = np.isin(obj_labels, ids[ids > 0])
+        frac = float((above & obj).sum()) / max(int(obj.sum()), 1)
+        lo, hi = Config.PREVIEW_ROLLOFF_TARGET_FRACTION
+        t = float(_smoothstep(np.asarray((frac - lo) / (hi - lo))))
+        if t > 0.0:
+            # feathered object mask, so the curve changes smoothly into its halo
+            weight = t * np.clip(ndimage.gaussian_filter(
+                ndimage.binary_dilation(obj, iterations=3).astype(np.float64), 3.0), 0.0, 1.0)
+            target = Config.PREVIEW_ROLLOFF_TARGET_KNEE
+            top_c = 1.0
+            if rgb is not None and black is not None:
+                excess = np.maximum(lum[region].astype(np.float64) - float(black), 1e-12)
+                ratio = float(np.median((rgb[region].astype(np.float64) - float(black)).max(axis=1)
+                                        / excess))
+                top_c = max(min(1.0 / max(ratio, 1e-12), 1.0), target + 0.1)
+            knee = knee + weight * (target - knee)
+            ceiling = 1.0 - weight * (1.0 - top_c)
+    return _Rolloff(top, knee, ceiling)
 
 
-def _rolloff_curve(curve, lum: np.ndarray, white: float, top: float) -> np.ndarray:
+def _rolloff_curve(curve, lum: np.ndarray, white: float, roll: _Rolloff,
+                   ceiling: bool = False) -> np.ndarray:
     """``curve`` (a luminance -> [0, 1] stretch with white point ``white``) scaled
-    into [0, knee], with a log roll-off mapping white..top into [knee, 1]."""
+    into [0, knee], with a log roll-off mapping white..top into [knee, 1] (into
+    [knee, ``roll.ceiling``] with ``ceiling``)."""
     from src.models import Config
-    knee = Config.PREVIEW_ROLLOFF_KNEE
+    knee = roll.knee
+    hi = roll.ceiling if ceiling else 1.0
     a = Config.PREVIEW_ROLLOFF_STRENGTH
     below = np.asarray(curve(np.minimum(lum, white).astype(np.float32)), dtype=np.float64)
-    over = np.clip((lum.astype(np.float64) - white) / (top - white), 0.0, 1.0)
+    over = np.clip((lum.astype(np.float64) - white) / (roll.top - white), 0.0, 1.0)
     return np.where(lum <= white, knee * below,
-                    knee + (1.0 - knee) * np.log1p(a * over) / np.log1p(a)).astype(np.float32)
+                    knee + (hi - knee) * np.log1p(a * over) / np.log1p(a)).astype(np.float32)
 
 
 def _extended_nebula_ghs(lum: np.ndarray, sky: float, sky_sigma: float, black: float,
@@ -339,7 +387,8 @@ def _preserving_preview(rgb: np.ndarray, lum: np.ndarray, curve, black: float,
         top = _extended_highlight_top(lum, white)
     if top is None:
         return apply(rgb, curve(lum), black, white, sky_sigma)
-    return apply(rgb, _rolloff_curve(curve, lum, white, top), black, top, sky_sigma)
+    return apply(rgb, _rolloff_curve(curve, lum, white, top, ceiling=True), black, top.top,
+                 sky_sigma)
 
 
 def _smoothstep(values: np.ndarray) -> np.ndarray:
@@ -732,7 +781,8 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # default went back to 'channel' an extended core (M42's Trapezium region, all
         # of M57) clipped to a flat white blob again.
         if stretch != 'multiscale' or color == 'preserve':
-            _top = _extended_highlight_top(lum, unified_white)
+            _top = _extended_highlight_top(lum, unified_white, _med, _bg_sigma, rgb,
+                                           unified_black)
             # Lift the faint wings only where the preset keeps the sky noise (nebulae,
             # black_sigma <= 0): a cluster or galaxy preset asks for a dark sky, and on
             # M15 the lift brought up red background-residual blotches around the core.
@@ -810,7 +860,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         span = max(white - black, 1e-12)
         normalized_lum = np.clip((lum.astype(np.float64) - black) / span, 0.0, 1.0)
         linked_median = float(np.median(normalized_lum))
-        top = _extended_highlight_top(lum, white)
+        top = _extended_highlight_top(lum, white, _med, _bg_sigma, rgb, black)
 
         def seti_curve(x: np.ndarray, median: float) -> np.ndarray:
             normalized = np.clip((x.astype(np.float64) - black) / span, 0.0, 1.0)

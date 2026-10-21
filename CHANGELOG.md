@@ -6,6 +6,19 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.13.3] - 2026-10-21
+
+### Fixed
+
+- **Ring Nebula as a flat disc through the dual-band filter.** When most of a small bright
+  object sits above the preview's white point, its whole range was squeezed into the top of
+  the display and a strong colour clipped it to one level. The highlight curve now gives
+  such an object more of the display, on the object only (the rest of the image is
+  unchanged): the ring and its darker centre show in both filters.
+- **Galaxy protection on a bright star.** Background extraction's galaxy protection could
+  centre on a saturated star instead of the galaxy (Black Eye, Fornax A). Candidates are now
+  compared with the stars removed.
+
 ## [2.13.2] - 2026-10-21
 
 Fixes found by stacking 27 targets from real Origin sessions before re-releasing 2.13.

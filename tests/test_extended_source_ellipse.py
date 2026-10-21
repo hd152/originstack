@@ -182,3 +182,18 @@ def test_faint_galaxy_on_a_gradient_is_not_merged_into_it():
     fy, fx, a, b, _ = result
     assert abs(fy - 300.0) < 10 and abs(fx - 700.0) < 10
     assert a < 150
+
+
+def test_galaxy_beats_a_saturated_star_with_a_halo():
+    """A saturated star's core and halo, smoothed, carried more integrated excess
+    than the galaxy: the ellipse sat on a star on Black Eye and Fornax A. Ranking
+    the cores on a star-suppressed frame picks the galaxy."""
+    H, W = 1000, 1500
+    rng = np.random.default_rng(5)
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    lum = 1000.0 + rng.normal(0, 5.0, (H, W))
+    lum += _elongated_blob(H, W, 500, 750, 35.0, 20.0, 20.0, amp=120.0, bg=0.0)
+    r_star = np.hypot(yy - 300.0, xx - 1150.0)
+    lum += np.where(r_star < 5.0, 60000.0, 0.0) + 3000.0 * np.exp(-0.5 * (r_star / 6.0) ** 2)
+    cy, cx, _, _, _ = find_extended_source_ellipse(lum.astype(np.float32))
+    assert abs(cy - 500) < 15 and abs(cx - 750) < 15
