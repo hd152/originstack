@@ -44,30 +44,18 @@
 <main>
 <section id="v2-13">
   <div class="wrap">
-    <h2>2.13 <small class="when">20 October 2026</small></h2>
+    <h2>2.13 <small class="when">22 October 2026</small></h2>
     <div class="releases">
-      <article id="v2-13-3"><h3>2.13.3 <span>21 Oct</span></h3>
-        <ul>
-          <li>The Ring Nebula keeps its ring through the Nebula filter instead of rendering as a flat teal disc.</li>
-          <li>Galaxy mode protects the galaxy, not a bright star next to it (Black Eye, Fornax A).</li>
-        </ul></article>
-      <article id="v2-13-2"><h3>2.13.2 <span>21 Oct</span></h3>
-        <ul>
-          <li>No more dark holes beside bright stars (a dark bar between Mizar and Alcor), coloured blobs around nebulae (the Pleiades, the Crab) or a bright column through faint galaxies (the Antennae).</li>
-          <li>Targets named the Origin way are recognised: Duck Nebula (Thor's Helmet, which was being flattened), Cone, Pacman and Medusa Nebulae, Fornax A, Markarian's Chain, "Messier 101" and more.</li>
-          <li>The Ring Nebula keeps its ring on short stacks, and <code>--from-stack</code> on a multi-night result uses that run's settings.</li>
-        </ul></article>
-      <article id="v2-13-1"><h3>2.13.1 <span>20 Oct</span></h3>
-        <ul>
-          <li>The preview no longer turns bright blue when each night of a multi-night run finishes; your images were never affected.</li>
-        </ul></article>
-      <article id="v2-13-0"><h3>2.13.0 <span>20 Oct</span></h3>
+      <article id="v2-13-0"><h3>2.13.0 <span>22 Oct</span></h3>
         <ul>
           <li><strong>A redesigned app.</strong> Pick what you imaged from picture cards, choose Full quality or Quick look, and see a summary of the run before it starts. <em>Report a problem</em> fills in a GitHub issue for you to review and send.</li>
           <li><strong>Learned star removal</strong> (experimental, <code>--remove-stars-method nn</code>): trained on Origin stacks, it also takes out the halos and diffraction spikes of saturated stars.</li>
-          <li><strong>Comets that work.</strong> The comet is found by how it moves against the stars, the comet-aligned image keeps the field's rotation corrected, and the comet + stars image shows one head, however far the comet moved.</li>
-          <li><strong>More reliable multi-night stacks.</strong> One bad or off-centre night no longer spoils the combine, and the result keeps its sky coordinates.</li>
-          <li><strong>Better-looking results:</strong> bright cores (Orion, the Ring Nebula, globular clusters) keep their structure, planetary nebulae keep their colours, Milky Way fields keep their glow and dark nebulae, and galaxies from bright-sky nights lose their pink corners.</li>
+          <li><strong>Comets that work.</strong> The comet is found by how it moves against the stars, the comet-aligned image keeps the field's rotation corrected, and the comet + stars image shows one head, however far the comet moved. When a comet is too faint to find, it says so instead of aligning on a star.</li>
+          <li><strong>More reliable multi-night stacks.</strong> One bad or off-centre night no longer spoils the combine, the result keeps its sky coordinates, and <code>--from-stack</code> on it uses the run's settings.</li>
+          <li><strong>Better-looking results:</strong> bright cores (Orion, the Ring Nebula, through the Nebula filter too, globular clusters) keep their structure, planetary nebulae keep their colours, Milky Way fields keep their glow and dark nebulae, and galaxies from bright-sky nights lose their pink corners.</li>
+          <li><strong>Cleaner backgrounds:</strong> no dark holes beside bright stars (Mizar and Alcor), no coloured blobs around nebulae (the Pleiades, the Crab), no bright column through faint galaxies (the Antennae), and galaxy mode protects the galaxy rather than a bright star next to it.</li>
+          <li><strong>Targets named the Origin way are recognised:</strong> Duck Nebula (Thor's Helmet), Cone, Pacman and Medusa Nebulae, Fornax A, Markarian's Chain, "Messier 101" and more, so they get their target-specific settings.</li>
+          <li><strong>A portable Windows exe:</strong> one file that runs from any folder or a USB stick, no install.</li>
           <li><strong>Mosaics.</strong> Tile sessions from the Origin's Mosaic Mode are recognised and stitched into one image, from the Origin's own tile layout when it is present, with brightness and gradients matched across every overlap. Works in the packaged app with no extra software.</li>
           <li><strong>Faster.</strong> The first phase, which processes every frame, is about 35-40% faster: a whole 158-frame run went from 2m26 to 2m06 on an 8-core laptop, with an identical result.</li>
           <li><strong>Dither detection:</strong> the log and the stack's header say whether a session was dithered.</li>

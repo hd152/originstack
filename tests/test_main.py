@@ -957,3 +957,17 @@ class TestConfigConstants(unittest.TestCase):
 
     def test_min_recommended_frames_positive(self):
         self.assertGreater(astro.Config.MIN_RECOMMENDED_FRAMES, 0)
+
+
+def test_summary_errors_leave_out_overexposed_rejections():
+    """Overexposed frames are rejections (counted under "Frames rejected"); a clean
+    Black Eye run ended in "Errors: 8". Real errors are listed by file name."""
+    from src.pipeline import _summary_error_lines
+    over = [(f"C:/s/Light{i:04d}.fits", "overexposed (30% of pixels at the sensor maximum)")
+            for i in range(8)]
+    assert _summary_error_lines(over) == []
+    lines = _summary_error_lines(over + [("C:/s/Light0100.fits", "load error: truncated")])
+    assert lines[0] == "  Errors: 1 frame(s) could not be processed"
+    assert lines[1] == "    - Light0100.fits: load error: truncated"
+    many = [(f"C:/s/L{i}.fits", "load error: x") for i in range(7)]
+    assert _summary_error_lines(many)[-1] == "    ... and 2 more"

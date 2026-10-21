@@ -44,6 +44,16 @@ jobs:
         shell: pwsh
         run: .\packaging\verify_build.ps1
 
+      # The single-file portable exe: same checks, with time for it to unpack. Not
+      # signed by the SignPath steps below (they sign the onedir exe and the
+      # installer); signing it needs its own SignPath artifact configuration.
+      - name: Verify portable exe launches
+        shell: pwsh
+        run: |
+          $portable = Get-ChildItem "packaging\dist\OriginStack-*-windows-x64-portable.exe" | Select-Object -First 1
+          if (-not $portable) { throw "portable exe not built" }
+          .\packaging\verify_build.ps1 -ExePath $portable.FullName -StartupSeconds 60
+
       # Code signing via SignPath Foundation (free for open source). Optional:
       # runs only once the repo variable SIGNPATH_ORGANIZATION_ID and the secret
       # SIGNPATH_API_TOKEN exist, so releases keep working unsigned until the
@@ -136,14 +146,15 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "installer exited $($p.ExitCode)" }
           .\packaging\verify_build.ps1 -ExePath "$dir\OriginStack.exe"
 
-      - name: Attach zip and installer to existing GitHub Release
+      - name: Attach zip, installer and portable exe to existing GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $zip = Get-ChildItem "packaging\dist\OriginStack-*-windows-x64.zip" | Select-Object -First 1
           $setup = Get-ChildItem "packaging\dist\OriginStack-*-setup.exe" | Select-Object -First 1
-          gh release upload "${{ github.ref_name }}" $zip.FullName $setup.FullName --clobber
+          $portable = Get-ChildItem "packaging\dist\OriginStack-*-windows-x64-portable.exe" | Select-Object -First 1
+          gh release upload "${{ github.ref_name }}" $zip.FullName $setup.FullName $portable.FullName --clobber
 
   # Linux bundle: built on the oldest runner still offered so the result runs on any glibc at
   # least as new (Ubuntu 22.04 / Debian 12 / Fedora 36 and later). The Windows job above signs;

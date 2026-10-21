@@ -200,6 +200,27 @@ coll = COLLECT(
                             # launch, multi-second delay each time).
 )
 
+# Windows: also a single-file portable exe (dist/OriginStack-portable.exe), from the
+# same analysis, for people who want one file and no install. It pays that
+# extraction delay on every launch; the onedir zip and the installer stay the
+# fast-starting downloads. build_windows.ps1 renames it with the version.
+if sys.platform == 'win32':
+    exe_portable = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name='OriginStack-portable',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,      # see the onedir exe above
+        console=False,
+        icon=str(ROOT / 'packaging' / 'icon.ico'),
+        runtime_tmpdir=None,
+    )
+
 # macOS: wrap the onedir in OriginStack.app. Unsigned except for PyInstaller's
 # own ad-hoc signature (required to run on Apple silicon at all); see
 # packaging/README.md ("macOS") for Gatekeeper and how to add real signing.
