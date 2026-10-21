@@ -10,7 +10,7 @@ import os
 import shutil
 import tempfile
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -730,6 +730,21 @@ def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
         safe_print(f"  WCS: session info.json solve {how}")
     except Exception as e:
         _log.debug("settling the stack WCS failed: %s", e)
+
+
+def _summary_error_lines(errors: List[Tuple[str, str]], limit: int = 5) -> List[str]:
+    """The run summary's error lines: frames that could not be processed, by name.
+
+    An overexposed frame is a quality rejection, already counted under "Frames
+    rejected"; listed here too, a clean Black Eye run ended in "Errors: 8"."""
+    real = [(p, e) for p, e in errors if not str(e).startswith('overexposed')]
+    if not real:
+        return []
+    lines = [f"  Errors: {len(real)} frame(s) could not be processed"]
+    lines += [f"    - {os.path.basename(p)}: {e}" for p, e in real[:limit]]
+    if len(real) > limit:
+        lines.append(f"    ... and {len(real) - limit} more")
+    return lines
 
 
 def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Namespace,
@@ -1889,8 +1904,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         safe_print("\n  Warnings:")
         for w in stats.warnings[:5]:
             safe_print(f"    - {w}")
-    if stats.errors:
-        safe_print(f"\n  Errors: {len(stats.errors)}")
+    _err_lines = _summary_error_lines(stats.errors)
+    if _err_lines:
+        safe_print("")
+        for _ln in _err_lines:
+            safe_print(_ln)
 
     safe_print("\n  Stack complete!")
     if getattr(args, 'keep_checkpoint', False):
