@@ -1,7 +1,7 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
-Status (2026-10-21): the synthetic-blur feasibility run passed its gate; best candidate s4, not
-shipped -- most of its extra "unconfirmed" faint peaks are confirmed by a second night (see
+Status (2026-10-21): synthetic-blur training passed its feasibility gate, but its best model (s4)
+is only 1-3% sharper than v3 in the full pipeline; v3 stays shipped (see
 "Synthetic-blur training" below).
 
 Status (2026-10-16): **v3 trained, passes every step-5 check, and is integrated as
@@ -404,7 +404,35 @@ on Omega 2025-11 (9.5 vs 7.6) and Orion 2025-12-11 (3.2 vs 1.9): five directions
 targets, too few to call. `eval_nn_faint`'s sharp-stack confirmation understates a sharper
 model; use the second-night check alongside it.
 
-Next: `bench_phase4.py` on the full pipeline, v3 against s4.
+### Full pipeline: s4 against v3 (2026-10-21)
+
+`bench_phase4.py` on the five held-out stacks, `--variant nn="--deconvolve nn"`, once with
+v3 and once with s4 copied over `src/data/nn_deconv.npz` (worktree only, restored after;
+`--deconvolve nn` has no model-path option). Results `C:\nn_work\synth\bench_{v3,s4}.json`,
+display JPEGs `C:\nn_work\bench_s4\{v3,s4}`. `ring` x `sky_noise` as above (positive =
+bright halo):
+
+| target | fwhm_ratio base / v3 / s4 | sky_noise v3 / s4 | faint_cnr v3 / s4 | ring x sky_noise base / v3 / s4 | hue err v3 / s4 |
+|---|---|---|---|---|---|
+| Omega 2026-08 | 1.061 / 0.932 / **0.900** | 0.284 / 0.296 | 105 / 102 | 1.17 / 0.37 / 0.37 | 8.5 / 8.6 |
+| Orion 2025-12-27 | 1.064 / 0.954 / 0.960 | 0.085 / 0.086 | 297 / 296 | 0.30 / 0.22 / 0.26 | 5.6 / 5.4 |
+| Pleiades 2025-11 | 1.075 / 0.978 / **0.956** | 0.288 / 0.308 | 68 / 66 | 3.37 / 1.38 / 1.44 | 12.9 / 12.8 |
+| Sculptor | 0.905 / 0.753 / **0.744** | 0.054 / 0.054 | 287 / 302 | 0.33 / 0.57 / **0.73** | 3.8 / 3.8 |
+| Sunflower 2026-03 | 0.885 / 0.750 / **0.727** | 0.047 / 0.048 | 235 / 253 | 0.22 / 0.40 / 0.42 | 4.6 / 4.7 |
+
+In the delivered image s4 is **only 1-3% narrower than v3** on four targets (Orion 0.6%
+wider), with the same noise, faint contrast, colour (Gaia rho within 0.02) and hue. The
+large synthetic gain (width/truth 1.80 -> 1.12) and the real-pair gain (width/input
+0.81-0.92 -> 0.76-0.91) shrink to this through the rest of Phase 4 (restore, star
+reduction, stretch). Sculptor's bright halo is a little stronger (0.57 -> 0.73).
+
+**Verdict: s4 is a real but small improvement; not worth shipping on its own.** The
+synthetic pairs teach sharpening the real images barely use: the network is the same
+24-filter U-Net, and the synthetic-to-real gap (noise model, real PSF wings, saturated
+cores, background statistics) is where further gains would have to come from -- the
+weeks-long "full version" above, not more rounds of this one. Keep v3 shipped. Weights
+and ingredients stay in `C:\nn_work` (`model_deconv_s{1,2,3a,3b,4}.npz`, `synth/`, 1.4 GB)
+until that is decided.
 
 ### The original plan (2026-10-18)
 
