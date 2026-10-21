@@ -24,7 +24,10 @@ or pip install required by the end user.
 Output: `packaging\dist\OriginStack\` (onedir -- starts instantly, unlike
 onefile which re-extracts the whole numpy/scipy/astropy payload to a temp
 dir on every launch) and a zipped `packaging\dist\OriginStack-<version>-
-windows-x64.zip` for distribution.
+windows-x64.zip` for distribution. The same build also writes the single-file
+`OriginStack-<version>-windows-x64-portable.exe` (onefile, for people who want
+one file and no install; it pays that extraction delay on every start). Verify
+it with `.\packaging\verify_build.ps1 -ExePath <portable exe> -StartupSeconds 60`.
 
 Verify the build actually works (launches the real exe, confirms the window
 appears, confirms `astro_native` loaded rather than silently falling back to

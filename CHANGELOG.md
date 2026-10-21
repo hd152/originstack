@@ -36,6 +36,9 @@ planetary nebulae, Milky Way fields and galaxies on bright-sky nights are render
 - **Dither detection.** The registration log reports whether a session was dithered and by
   how much, and the stack's header records it (`DITHSTEP`). The `--drizzle-scale 2.0` tip now
   appears only when stars are undersampled.
+- **Portable Windows exe**: `OriginStack-<version>-windows-x64-portable.exe`, one file that
+  runs from any folder without installing. It unpacks itself on every start, so it opens a few
+  seconds slower than the installed app or the zip.
 - **Other Origin-platform cameras are recognised** (Origin678C, QHY183C, ASI183MC, ASI294MC
   besides the Origin178) and named in the log; a camera without a measured profile is
   recorded as such instead of being ignored.

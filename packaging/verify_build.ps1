@@ -33,7 +33,10 @@
 #>
 param(
     [string]$ExePath = "$PSScriptRoot\dist\OriginStack\OriginStack.exe",
-    [string]$PythonExe = "$PSScriptRoot\.build_venv\Scripts\python.exe"
+    [string]$PythonExe = "$PSScriptRoot\.build_venv\Scripts\python.exe",
+    # How long the window may take to appear. The single-file portable exe unpacks
+    # its whole payload to a temp dir first: pass a longer wait for it.
+    [int]$StartupSeconds = 15
 )
 $ErrorActionPreference = 'Stop'
 
@@ -46,7 +49,7 @@ if (Test-Path $logPath) { Remove-Item $logPath -Force }
 $proc = Start-Process -FilePath $ExePath -PassThru
 try {
     $ok = $false
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 2 * $StartupSeconds; $i++) {
         $w = Get-Process -Name $exeName -ErrorAction SilentlyContinue |
             Where-Object { $_.MainWindowTitle -ne '' }
         if ($w) { $ok = $true; break }
@@ -95,7 +98,7 @@ $headlessProc = Start-Process -FilePath $ExePath -ArgumentList $headlessArgs -Pa
                               -RedirectStandardOutput $headlessLog
 
 $maxWindows = 0  # --verify-headless opens no window of its own
-for ($i = 0; $i -lt 30; $i++) {
+for ($i = 0; $i -lt 15 + 2 * $StartupSeconds; $i++) {
     Start-Sleep -Seconds 1
     if ($headlessProc.HasExited) { break }
     $windowed = Get-Process -Name $exeName -ErrorAction SilentlyContinue |

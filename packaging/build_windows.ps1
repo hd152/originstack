@@ -137,3 +137,13 @@ if (-not $zipped) { throw "Compress-Archive failed after 5 attempts -- a file in
 $zipSizeMb = (Get-Item $zipPath).Length / 1MB
 if ($zipSizeMb -lt 30) { throw "Zip suspiciously small (${zipSizeMb}MB) -- likely missing files" }
 Write-Host "Built: packaging\dist\$zipName ($([math]::Round($zipSizeMb, 1)) MB)"
+
+# 7. The single-file portable exe (originstack.spec builds it next to the onedir):
+#    give it the release name, with the same too-small guard as the zip.
+$portableName = "OriginStack-$version-windows-x64-portable.exe"
+$portablePath = "$Root\packaging\dist\$portableName"
+if (Test-Path $portablePath) { Remove-Item $portablePath -Force }
+Move-Item "$Root\packaging\dist\OriginStack-portable.exe" $portablePath
+$portableSizeMb = (Get-Item $portablePath).Length / 1MB
+if ($portableSizeMb -lt 30) { throw "Portable exe suspiciously small (${portableSizeMb}MB) -- likely missing files" }
+Write-Host "Built: packaging\dist\$portableName ($([math]::Round($portableSizeMb, 1)) MB)"
