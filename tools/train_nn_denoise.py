@@ -24,7 +24,8 @@ from tools/gen_synth_deconv.py) into a deconvolution bank's batches: ``--synth-f
 batch is drawn on the fly with a truth sharper than any real stack, so the network can learn
 to sharpen past the seeing pairs' sharp-30% target. The weights kept are the best on the sum
 of real and synthetic validation loss, each relative to its identity loss. ``--init``
-starts from exported weights (e.g. the shipped v3).
+starts from exported weights (e.g. the shipped v3). ``--peak-penalty`` adds a one-sided
+cost on point-like excess over the synthetic truth (``peak_penalty``).
 
 Usage:
     pip install torch            (into a separate venv: it is not a project dependency)
@@ -253,9 +254,39 @@ def faint_sources(n: int, size: int, gen, dev):
     return out
 
 
+PEAK_MASK_SIGMA = 0.3      # truth point-filter response (noise units) that marks a real source
+PEAK_MASK_GROW = 3         # px, dilation of that mask (7 covered 63% of the canvas)
+
+
+def peak_penalty(out, truth, w, masked: bool = True):
+    """One-sided cost of point-like excess of ``out`` over a noiseless ``truth``: the
+    luminance residual through a difference of Gaussians (sigma 1 px minus 3 px, zero sum),
+    positive part squared, weighted by ``w``. L2 alone is symmetric; on synthetic pairs s1/s2
+    turned ~2 sigma noise bumps into point sources (unconfirmed faint peaks about twice v3's).
+
+    ``masked`` charges it only where the truth has no source (its own filter response below
+    ``PEAK_MASK_SIGMA``, grown by ``PEAK_MASK_GROW``). Unmasked (s3a/s3b, weight 10 / 30) it
+    also charged real stars' peaks and the network dimmed them: synthetic flux 0.87 / 0.80
+    against 0.94, invented peaks 52 / 65 per Mpx against 62."""
+    import torch
+    import torch.nn.functional as F
+    k = torch.arange(-6, 7, dtype=torch.float32, device=out.device)
+    g = lambda s: torch.exp(-0.5 * (k / s) ** 2) / torch.exp(-0.5 * (k / s) ** 2).sum()  # noqa: E731
+    dog = g(1.0)[:, None] * g(1.0)[None, :] - g(3.0)[:, None] * g(3.0)[None, :]
+    r = (out - truth).mean(1, keepdim=True)
+    mf = F.conv2d(r, dog[None, None], padding=6)
+    cost = w.mean(1, keepdim=True) * torch.relu(mf) ** 2
+    if masked:
+        src = F.conv2d(truth.mean(1, keepdim=True), dog[None, None], padding=6) > PEAK_MASK_SIGMA
+        g = PEAK_MASK_GROW
+        near = F.max_pool2d(src.float(), 2 * g + 1, stride=1, padding=g) > 0
+        cost = cost * (~near).float()
+    return cost.mean()
+
+
 def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0, resume: bool = False,
           inject: bool = False, synth: Optional[str] = None, synth_frac: float = 0.5,
-          init: Optional[str] = None) -> None:
+          init: Optional[str] = None, synth_set: Optional[dict] = None, peak_pen: float = 0.0) -> None:
     import torch
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -277,7 +308,13 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     syn = n_syn = syn_val = None
     if synth:
         sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import synth_blur
         from synth_blur import SynthSource
+        for k, v in (synth_set or {}).items():
+            if not hasattr(synth_blur, k):
+                raise SystemExit(f"--synth-set: synth_blur has no {k}")
+            setattr(synth_blur, k, v)
+            print(f"synth_blur.{k} = {v}", flush=True)
         syn = SynthSource(synth, dev)
         n_syn = int(round(batch * synth_frac))
         vg = np.random.default_rng(seed + 123)
@@ -299,9 +336,14 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
                 a, b = a + src, b + src
         return a, b, ww
 
-    def loss_of(a, b, ww):
+    def loss_of(a, b, ww, n_tail=0):
+        """(loss, identity loss); with ``n_tail`` the last n samples are synthetic and also
+        pay the peak penalty."""
         pred = net(torch.asinh(a / nd.ASINH_SOFT)) * torch.sqrt(1.0 + torch.clamp(a, min=0.0))
-        return (ww * (a + pred - b) ** 2).mean(), (ww * (a - b) ** 2).mean()
+        lo = (ww * (a + pred - b) ** 2).mean()
+        if peak_pen > 0 and n_tail:
+            lo = lo + peak_pen * peak_penalty((a + pred)[-n_tail:], b[-n_tail:], ww[-n_tail:])
+        return lo, (ww * (a - b) ** 2).mean()
 
     def validate():
         net.eval()
@@ -317,7 +359,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     def validate_synth():
         net.eval()
         with torch.no_grad():
-            r = [loss_of(*(t.to(dev) for t in b)) for b in syn_val]
+            r = [loss_of(*(t.to(dev) for t in b), n_tail=len(b[0])) for b in syn_val]
         net.train()
         return float(np.mean([float(a) for a, _ in r])), float(np.mean([float(b) for _, b in r]))
 
@@ -344,7 +386,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         else:
             a, b, ww = batch_of(rng.choice(tr_idx, batch - n_syn), True)
             sa, sb, sw = syn.batch(n_syn, rng)
-            lo, _ = loss_of(torch.cat([a, sa]), torch.cat([b, sb]), torch.cat([ww, sw]))
+            lo, _ = loss_of(torch.cat([a, sa]), torch.cat([b, sb]), torch.cat([ww, sw]), n_tail=n_syn)
         opt.zero_grad()
         lo.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -381,7 +423,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     with open(os.path.splitext(out)[0] + "_train.json", "w") as fh:
         json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val,
                    "inject": inject, "synth": synth, "synth_frac": synth_frac if synth else None,
-                   "init": init}, fh)
+                   "init": init, "synth_set": synth_set, "peak_penalty": peak_pen}, fh)
 
 
 def main() -> None:
@@ -404,12 +446,18 @@ def main() -> None:
     t.add_argument("--synth", help="gen_synth_deconv.py npz: mix synthetic-blur pairs into each batch")
     t.add_argument("--synth-frac", type=float, default=0.5, help="share of each batch that is synthetic")
     t.add_argument("--init", help="start from these exported weights (.npz)")
+    t.add_argument("--peak-penalty", type=float, default=0.0,
+                   help="weight of the synthetic-batch peak penalty (peak_penalty)")
+    t.add_argument("--synth-set", action="append", default=[], metavar="NAME=VALUE",
+                   help="override a synth_blur.py constant, e.g. FLUX=20,5e5 (repeatable)")
     args = ap.parse_args()
     if args.cmd == "bank":
         build_bank(args.pairs, args.bank, args.per_pair, mode=args.mode)
     else:
         train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject,
-              synth=args.synth, synth_frac=args.synth_frac, init=args.init)
+              synth=args.synth, synth_frac=args.synth_frac, init=args.init, peak_pen=args.peak_penalty,
+              synth_set={k: tuple(float(x) for x in v.split(",")) if "," in v else float(v)
+                         for k, v in (kv.split("=", 1) for kv in args.synth_set)})
 
 
 if __name__ == "__main__":

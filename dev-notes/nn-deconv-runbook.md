@@ -1,6 +1,7 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
-Status (2026-10-21): the synthetic-blur feasibility run passed its gate; not shipped (see
+Status (2026-10-21): the synthetic-blur feasibility run passed its gate; best candidate s4, not
+shipped -- real unconfirmed faint peaks still twice v3's (see
 "Synthetic-blur training" below).
 
 Status (2026-10-16): **v3 trained, passes every step-5 check, and is integrated as
@@ -330,6 +331,49 @@ Open before a full version / shipping:
   narrowing, CPU inference time (same network, so unchanged).
 - Truth stars were drawn at random rather than at Gaia positions; real star statistics and
   saturated cores are not modelled.
+
+### Rounds 2-4: the faint-peak problem (2026-10-21)
+
+All from v3, 10,000 steps, lr 3e-4. s2: `--synth-frac 0.35 --synth-set FLUX=20,5e5 --synth-set
+STARS=1,25` (fewer, brighter synthetic stars). s3a / s3b: s2 + `--peak-penalty 10 / 30`
+unmasked. s4: s2 + `--peak-penalty 80` masked (`peak_penalty`: one-sided cost of point-like
+excess over the synthetic truth, DoG 1 px - 3 px, only where the truth's own response is
+< 0.3 sigma, grown 3 px; grown 7 px the mask covered 63% of the canvas). Weights
+`C:\nn_work\model_deconv_s{2,3a,3b,4}.npz`.
+
+Unconfirmed peaks = `eval_nn_faint` peaks > 2 sigma per Mpx x (1 - share confirmed by the
+sharp stack), exact from the JSONs (mean over the 9 held-out pairs):
+
+| | v3 | s1 | s2 | s3a | s3b | s4 |
+|---|---|---|---|---|---|---|
+| real val (identity 1.872) | 1.225 | 1.295 | 1.273 | 1.308 | 1.348 | 1.279 |
+| synthetic: width / truth | 1.80 | 1.11 | 1.10 | 1.11 | 1.13 | 1.12 |
+| synthetic: flux | 0.96 | 0.94 | 0.94 | 0.87 | 0.80 | **0.97** |
+| synthetic: invented / Mpx | 35 | 58 | 62 | 52 | 65 | **39** |
+| real: width / input | 0.81-0.92 | 0.74-0.90 | 0.75-0.90 | 0.74-0.90 | -- | 0.76-0.91 |
+| real: width / sharp stack (< 1) | 0.96-1.08 | 0.88-1.07 (8/9) | 0.88-1.08 (7/9) | 0.87-1.07 (8/9) | -- | 0.89-1.08 (7/9) |
+| real: error < `nn_denoise` | 9/9 | 8/9 + 1 equal | 8/9 | 9/9 | -- | 8/9 |
+| real: unconfirmed peaks / Mpx | **4.8** | 12.6 | 10.3 | 8.3 | -- | 10.0 |
+| real: faint discs 1.5 px, 0.5-1 sigma | 0.86 | 0.91 | 0.90 | 0.89 | -- | **0.92** |
+| Gaia single-star splits | 0 | 0 | 0 | 1/50 (Orion) | -- | 0 |
+
+(s3b was dropped after the synthetic check. The miss in "error < nn_denoise" is always
+Pleiades 2025-10: s2 0.504, s4 0.494 vs 0.484.)
+
+- Fewer, brighter synthetic stars (s2) barely moved the real unconfirmed peaks.
+- An unmasked penalty dims real stars instead (s3a/s3b flux 0.87 / 0.80) and s3a split a star.
+- The masked penalty (s4) fixes the *synthetic* problem completely -- invented peaks back at
+  v3's level with the best flux of any model, sharpening kept, no splits, real val as s2 --
+  but the *real* unconfirmed peaks stay at about twice v3's (10.0 vs 4.8 per Mpx; > 3 sigma
+  all models 96-100% confirmed). So the real excess is not what the synthetic pairs model.
+  Either real noise structure the synthetic noise (empty-sky patches) never shows, or the
+  check itself: the sharp stack (30% of the frames) cannot confirm the faintest real
+  sources, and a model that recovers more of them shows more "unconfirmed" peaks. v3 at 4.8
+  says the check is not simply proportional to sharpening; not ruled out either way.
+
+**Best candidate: s4.** Not shipped. Next: tell the two causes apart with a deeper
+reference -- confirm peaks against all frames, or a second night of the same target --
+before more training. Then `bench_phase4.py` on the full pipeline.
 
 ### The original plan (2026-10-18)
 
