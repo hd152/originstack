@@ -6,6 +6,16 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.13.1] - 2026-10-20
+
+### Fixed
+
+- **Bright blue previews between nights.** In a multi-night run each night's stack is
+  previewed before the combine, linear and unprocessed; a light-polluted sky that sits
+  higher in one channel tinted the whole preview, bright blue at the end of every night.
+  Each channel's sky level is now evened out for that preview (display only; the stacks
+  and the final image are unchanged).
+
 ## [2.13.0] - 2026-10-20
 
 Mosaics from the Origin's Mosaic Mode, learned star removal, a reworked comet mode, a faster
