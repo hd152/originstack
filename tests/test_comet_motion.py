@@ -105,3 +105,22 @@ def test_composite_has_one_comet_head_and_the_stars():
         assert lum[y, x] > 3000.0                         # the stars are in
     far = lum[:, :20]
     assert abs(float(np.median(far)) - 500.0) < 5.0       # sky unchanged away from the comet
+
+
+def test_no_comet_found_returns_the_star_registration():
+    """Motion search finds nothing and no --comet-xy: the per-frame search took the
+    brightest blob, a star (C/2024 J3), and a 'comet stack' was built around it.
+    An object that does not move against the stars is not taken as the comet."""
+    from src.registration import run_comet_registration_phase
+    H, W, n = 160, 220, 12
+    rng = np.random.default_rng(3)
+    base = 1000.0 + _blob(H, W, 80, 110, 6000.0, 3.0) + _blob(H, W, 40, 50, 1500.0, 1.5)
+    mem_lum = np.stack([(base + rng.normal(0, 8, (H, W))).astype(np.float32) for _ in range(n)])
+    final = [SimpleNamespace(header={}, path=f'f{i}.fits') for i in range(n)]
+    star_shifts = [(0.0, 0.0)] * n
+    shifts, transforms, info = run_comet_registration_phase(
+        final, list(range(n)), 0, mem_lum[0], mem_lum, H, W,
+        SimpleNamespace(verbose=False), None,
+        star_shifts=star_shifts, star_transforms=[None] * n)
+    assert info['found'] is False
+    assert shifts == star_shifts and transforms == [None] * n

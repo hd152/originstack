@@ -1335,6 +1335,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     final, final_indices, best_idx,
                     ref_lum, mem_lum, H, W, args, stats,
                     star_shifts=shifts, star_transforms=transforms)
+            if getattr(args, 'comet_mode', False) and comet_dither_info.get('found', True):
                 comet_stacked, _, ct, cb, cl, cr = run_stacking_phase(
                     final, final_indices, mem_rgb,
                     comet_shifts, comet_transforms, H, W, C, args, stats)

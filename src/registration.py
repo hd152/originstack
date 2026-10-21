@@ -2764,6 +2764,9 @@ def _comet_motion_track(final: List[FrameInfo], final_indices: List[int], mem_lu
 # A moving object must stand this far above the noise of the early-minus-late
 # difference, at both ends, to be taken as the comet.
 _COMET_MOTION_MIN_SIGMA = 10.0
+# The fallback's tracked object must move at least this far against the stars
+# over the session (in star-aligned pixels) to be taken as the comet.
+_COMET_STATIONARY_PX = 2.0
 
 
 def run_comet_registration_phase(
@@ -2873,7 +2876,7 @@ def run_comet_registration_phase(
         print(f"  [Comet] Motion over the session: max {max(mags):.1f} px from the reference")
         return shifts_m, transforms_m, {
             'nucleus_y': ref_cy, 'nucleus_x': ref_cx, 'tail_pa_deg': tail_pa_deg,
-            'centroids': centroids_m, 'method': 'motion',
+            'centroids': centroids_m, 'method': 'motion', 'found': True,
             'nucleus_aligned': tuple(float(v) for v in pos[ref_j]),
             'track': np.array([np.asarray(p) - np.asarray(pos[ref_j]) for p in pos]),
         }
@@ -3005,6 +3008,24 @@ def run_comet_registration_phase(
                 star_transforms[j], star_shifts[j], al - ref_al)
             track.append(al - ref_al)
         track = np.array(track) if track else None
+        # Without a seed or an ephemeris this search takes the brightest compact
+        # blob. When it does not move against the stars it is a star (C/2024 J3,
+        # too faint for the motion search: a star at (2503, 1862) was "tracked"),
+        # or a comet too slow to need its own alignment: either way the star
+        # stack is the answer, not a comet stack built around a star.
+        if (ref_seed is None and eph_positions is None and track is not None
+                and len(track) and float(np.max(np.hypot(track[:, 0], track[:, 1])))
+                < _COMET_STATIONARY_PX):
+            safe_print("  [Comet] WARNING: no comet found -- nothing moves against the stars "
+                       f"(the brightest object, at ({ref_cx:.0f}, {ref_cy:.0f}), stays within "
+                       f"{_COMET_STATIONARY_PX:.0f} px). No comet stack is written; the "
+                       "star-aligned stack holds a slow comet as well. Give its position "
+                       "with --comet-xy X,Y to align on it anyway.")
+            return list(star_shifts), list(star_transforms), {
+                'found': False, 'nucleus_y': ref_cy, 'nucleus_x': ref_cx,
+                'tail_pa_deg': None, 'centroids': centroids, 'track': track,
+                'nucleus_aligned': None,
+            }
 
     shift_mags = [np.sqrt(s[0] ** 2 + s[1] ** 2) for s in shifts]
     print(f"  [Comet] Mean shift: {np.mean(shift_mags):.1f} px, "
@@ -3014,6 +3035,7 @@ def run_comet_registration_phase(
         'nucleus_y': ref_cy,
         'nucleus_x': ref_cx,
         'tail_pa_deg': tail_pa_deg,
+        'found': True,
         'centroids': centroids,
         'track': track,
         'nucleus_aligned': (tuple(float(v) for v in ref_al)

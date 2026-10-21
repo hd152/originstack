@@ -18,6 +18,10 @@ match the `VERSION` file and `v*` git tags.
 - **Galaxy protection on a bright star.** Background extraction's galaxy protection could
   centre on a saturated star instead of the galaxy (Black Eye, Fornax A). Candidates are now
   compared with the stars removed.
+- **Comet mode on a comet it cannot find.** When the comet was too faint to find by its
+  motion (C/2024 J3), comet mode aligned on the brightest object instead, a star, and wrote a
+  "comet" stack built around it. It now says no comet was found, writes no comet stack (the
+  star-aligned stack also holds a slow comet), and points to `--comet-xy`.
 
 ## [2.13.2] - 2026-10-21
 
