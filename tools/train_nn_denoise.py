@@ -19,6 +19,13 @@ the weight is 1 / the target's own noise variance: sky sigma^2 plus a Poisson te
 in the smoothed signal, fitted per session (``target_variance``). Half the patches are
 centred near stars, which carry most of the PSF information.
 
+``train --synth synth/train.npz`` mixes synthetic-blur pairs (tools/synth_blur.py, ingredients
+from tools/gen_synth_deconv.py) into a deconvolution bank's batches: ``--synth-frac`` of each
+batch is drawn on the fly with a truth sharper than any real stack, so the network can learn
+to sharpen past the seeing pairs' sharp-30% target. The weights kept are the best on the sum
+of real and synthetic validation loss, each relative to its identity loss. ``--init``
+starts from exported weights (e.g. the shipped v3).
+
 Usage:
     pip install torch            (into a separate venv: it is not a project dependency)
     python tools/train_nn_denoise.py bank  --pairs G:/output/nn_denoise/pairs --bank bank.npz
@@ -247,7 +254,8 @@ def faint_sources(n: int, size: int, gen, dev):
 
 
 def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0, resume: bool = False,
-          inject: bool = False) -> None:
+          inject: bool = False, synth: Optional[str] = None, synth_frac: float = 0.5,
+          init: Optional[str] = None) -> None:
     import torch
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -262,6 +270,20 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     print(f"{n} patches, train {len(tr_idx)}, val {len(va_idx)}, device {dev}", flush=True)
 
     net = make_net().to(dev)
+    if init:
+        with np.load(init) as fw:
+            net.load_state_dict({k: torch.from_numpy(fw[k]) for k in fw.files})
+        print(f"initialised from {init}", flush=True)
+    syn = n_syn = syn_val = None
+    if synth:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        from synth_blur import SynthSource
+        syn = SynthSource(synth, dev)
+        n_syn = int(round(batch * synth_frac))
+        vg = np.random.default_rng(seed + 123)
+        syn_val = [tuple(t.cpu() for t in syn.batch(32, vg)) for _ in range(16)]
+        print(f"synthetic: {len(syn.bg)} backgrounds, {len(syn.noise)} noise patches, "
+              f"{n_syn} of {batch} per batch", flush=True)
     opt = torch.optim.Adam(net.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps, pct_start=0.05)
 
@@ -292,6 +314,13 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         net.train()
         return tot / len(va_idx), base / len(va_idx)
 
+    def validate_synth():
+        net.eval()
+        with torch.no_grad():
+            r = [loss_of(*(t.to(dev) for t in b)) for b in syn_val]
+        net.train()
+        return float(np.mean([float(a) for a, _ in r])), float(np.mean([float(b) for _, b in r]))
+
     # a checkpoint every 1000 steps: a run on this machine was lost at step 14000 to an I/O
     # error on the drive its log was on
     ckpt = os.path.splitext(out)[0] + "_ckpt.pt"
@@ -310,7 +339,12 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     run = 0.0
     best = [float("inf"), None]
     for step in range(start, steps + 1):
-        lo, _ = loss_of(*batch_of(rng.choice(tr_idx, batch), True))
+        if syn is None:
+            lo, _ = loss_of(*batch_of(rng.choice(tr_idx, batch), True))
+        else:
+            a, b, ww = batch_of(rng.choice(tr_idx, batch - n_syn), True)
+            sa, sb, sw = syn.batch(n_syn, rng)
+            lo, _ = loss_of(torch.cat([a, sa]), torch.cat([b, sb]), torch.cat([ww, sw]))
         opt.zero_grad()
         lo.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -319,11 +353,16 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         run += lo.item()
         if step % 1000 == 0 or step == steps:
             v, vb = validate()
-            if v < best[0]:
+            sel, extra = v, ""
+            if syn is not None:
+                sv, svb = validate_synth()
+                sel = v / vb + sv / svb
+                extra = f"  synth val {sv:.4f} (identity {svb:.4f})"
+            if sel < best[0]:
                 # keep the best-validation weights: deconvolution v2 was best at step
                 # 10000 and overfit after (val 1.996 -> 2.215 while train kept falling)
-                best[0], best[1] = v, {k: t.detach().clone() for k, t in net.state_dict().items()}
-            print(f"step {step:6d}  train {run / 1000:.4f}  val {v:.4f}  (identity {vb:.4f})  "
+                best[0], best[1] = sel, {k: t.detach().clone() for k, t in net.state_dict().items()}
+            print(f"step {step:6d}  train {run / 1000:.4f}  val {v:.4f}  (identity {vb:.4f}){extra}  "
                   f"{time.time() - t0:.0f} s", flush=True)
             run = 0.0
             torch.save({"net": net.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
@@ -341,7 +380,8 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         raise SystemExit("numpy forward pass does not match torch")
     with open(os.path.splitext(out)[0] + "_train.json", "w") as fh:
         json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val,
-                   "inject": inject}, fh)
+                   "inject": inject, "synth": synth, "synth_frac": synth_frac if synth else None,
+                   "init": init}, fh)
 
 
 def main() -> None:
@@ -361,11 +401,15 @@ def main() -> None:
     t.add_argument("--resume", action="store_true", help="continue from <out>_ckpt.pt")
     t.add_argument("--inject", action="store_true",
                    help="add random faint sources to training patches (faint_sources)")
+    t.add_argument("--synth", help="gen_synth_deconv.py npz: mix synthetic-blur pairs into each batch")
+    t.add_argument("--synth-frac", type=float, default=0.5, help="share of each batch that is synthetic")
+    t.add_argument("--init", help="start from these exported weights (.npz)")
     args = ap.parse_args()
     if args.cmd == "bank":
         build_bank(args.pairs, args.bank, args.per_pair, mode=args.mode)
     else:
-        train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject)
+        train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject,
+              synth=args.synth, synth_frac=args.synth_frac, init=args.init)
 
 
 if __name__ == "__main__":

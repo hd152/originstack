@@ -1,5 +1,8 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
+Status (2026-10-21): the synthetic-blur feasibility run passed its gate; not shipped (see
+"Synthetic-blur training" below).
+
 Status (2026-10-16): **v3 trained, passes every step-5 check, and is integrated as
 `--deconvolve nn` (step 6) with `restore_sigma=4`.** See "v3 results" and step 6 below. Everything below runs on
 any Windows machine with the repo, Python, a Rust toolchain and ideally an NVIDIA GPU.
@@ -259,7 +262,76 @@ The original plan:
   (Omega, Orion, Pleiades); not with `--config nn_chroma_nr=true`. Cause not found.
 - A faint ring is still visible around Sunflower's brightest star with `--denoiser nn`.
 
-## Next: synthetic-blur training (planned 2026-10-18, not started)
+## Synthetic-blur training: feasibility run (2026-10-21) -- passes the gate, not shipped
+
+Branch `feat/nn-deconv-synthetic`. Model `s1` = v3 fine-tuned 10,000 steps, half of each batch
+synthetic (GTX 1650 Ti, 19 min). Weights `C:\nn_work\model_deconv_s1.npz` (not shipped);
+logs and evaluations in `C:\nn_work\synth`.
+
+What was built (it differs from the plan below where noted):
+- `tools/gen_synth_deconv.py`: per session, in the input's noise units -- clean starless
+  backgrounds (sharp stack, bundled denoiser without restore, `star_removal` inpaint), real
+  stack noise (input minus its denoised self, empty-sky 128 px patches; lag-1 correlation
+  0.41, so the debayer/warp correlation is kept -- no synthetic noise model needed), sky level
+  B. 83 sessions in ~50 min: 4440 / 2960 train, 540 / 360 held-out patches (1.4 GB).
+- `tools/synth_blur.py`: pairs drawn on the GPU during training (0.05 s per 8). Truth = bg +
+  stars with a Moffat PSF of FWHM 1.5-2.3 px; **random positions and power-law fluxes, not
+  Gaia** (the seeing pairs have no WCS). Input = truth convolved with K exactly on the pixel
+  grid (Moffat FWHM 1.5-4.5, beta 2.5-6, axis ratio 0.75-1, coma component in half the
+  kernels with its centroid kept at zero, +-6% width per channel) + real noise x
+  sqrt(1 + signal/B). Weight 1/(1 + signal/B).
+- `train_nn_denoise.py train --synth ... --synth-frac 0.5 --init src/data/nn_deconv.npz`;
+  best weights by real val/identity + synthetic val/identity.
+- `tools/eval_synth_deconv.py` (exact truth) and `tools/eval_gaia_pairs.py` (Gaia close
+  pairs and single-star splits on the held-out linear stacks; WCS refined first --
+  Pleiades' header is off by (3.9, -7.9) px; only pairs whose fainter star is >= 15 sigma in
+  the input, or noise alone makes the input "resolve" more than a denoised output).
+
+```powershell
+python tools/gen_synth_deconv.py --pairs C:/nn_work/nn_deconv/pairs --out C:/nn_work/synth
+C:/nn_work/venv/Scripts/python tools/train_nn_denoise.py train --bank C:/nn_work/bank_deconv.npz --synth C:/nn_work/synth/train.npz --synth-frac 0.5 --init src/data/nn_deconv.npz --steps 10000 --lr 3e-4 --out C:/nn_work/model_deconv_s1.npz --resume
+C:/nn_work/venv/Scripts/python tools/eval_synth_deconv.py --synth C:/nn_work/synth/holdout.npz --model v3=src/data/nn_deconv.npz --model s1=C:/nn_work/model_deconv_s1.npz
+python tools/eval_gaia_pairs.py C:/nn_work/heldout_stacks/*.fits --model v3=src/data/nn_deconv.npz --model s1=C:/nn_work/model_deconv_s1.npz
+```
+
+Training: real val 1.2952 (identity 1.8722; v3's own best 1.2248), synthetic val 2.79
+(identity 27.64).
+
+Results (restore 4 px throughout):
+
+| check | v3 | s1 |
+|---|---|---|
+| synthetic held-out: width / truth, / input | 1.80, 0.90 | **1.11, 0.56** |
+| synthetic: flux, signal error, invented peaks / Mpx | 0.96, 1058, 35 | 0.94, **128**, 58 (input 122, nn_denoise 12) |
+| real held-out pairs: width / input | 0.81-0.92 | **0.74-0.90** |
+| real: width / sharp stack | 0.96-1.08 | **0.88-1.07** (< 1 on 8/9) |
+| real: error vs `nn_denoise` | lower 9/9 | lower 8/9, equal on Pleiades 2025-10 (v3 was worse there) |
+| Gaia: single stars split | 0 | **0** (53-149 tested per target) |
+| Gaia: pairs 3.5-4.5 px resolved | Omega 20%, Orion 0/3 | Omega 30%, Orion 1/3 (separation 0.83x Gaia's) |
+| ring (eval_nn_faint) | 0.00 to -0.01 | 0.00 to -0.01 |
+| faint discs 1.5 px, 0.5-1 sigma | 0.81-0.96 | 0.84-0.99 (>= v3 on every session) |
+| faint peaks > 2 sigma confirmed by the sharp stack | 94-100% | 87-98% |
+| faint peaks > 3 sigma confirmed | 99-100% | 96-99% |
+
+Gate (below) met: held-out stars narrow clearly past the sharp-stack target and nothing
+splits in the Gaia check. Below 3.5 px no method separates a pair, so the pair half of the
+Gaia check is weak (41 usable pairs, mostly Omega); the single-star split test carries it.
+
+Open before a full version / shipping:
+- **Unconfirmed faint peaks roughly double** (> 2 sigma: Pleiades 2025-11 87% confirmed vs
+  98%, ~12 vs ~1.5 per Mpx; Omega 2026-08 ~36 vs ~17). Most of s1's extra peaks are real
+  (random sky confirms 4-17%), but this is the invented-detail risk the plan named. Same
+  signal on synthetic fields (58 vs 35 / Mpx). Candidates: lower the synthetic star density
+  floor, add faint-source-free synthetic patches, a peak penalty, or a smaller K range.
+- Synthetic flux 0.94 (v3 0.96); not seen on real data (`eval_nn_faint` point sources
+  0.94-1.06).
+- Real val 1.295 vs v3's 1.225: a little lost on the seeing-pair target itself.
+- Not yet run: `bench_phase4.py` on the full pipeline, crops on all targets, ideal-Gaussian
+  narrowing, CPU inference time (same network, so unchanged).
+- Truth stars were drawn at random rather than at Gaia positions; real star statistics and
+  saturated cores are not modelled.
+
+### The original plan (2026-10-18)
 
 Why: the seeing-pair target caps sharpening at the session's sharpest-30% stack -- blur every
 frame shares (optics, focus, debayer) is never removed, and ideal Gaussian stars narrow only
