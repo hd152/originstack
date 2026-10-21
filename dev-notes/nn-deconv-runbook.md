@@ -1,7 +1,7 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
 Status (2026-10-21): the synthetic-blur feasibility run passed its gate; best candidate s4, not
-shipped -- real unconfirmed faint peaks still twice v3's (see
+shipped -- most of its extra "unconfirmed" faint peaks are confirmed by a second night (see
 "Synthetic-blur training" below).
 
 Status (2026-10-16): **v3 trained, passes every step-5 check, and is integrated as
@@ -371,9 +371,40 @@ Pleiades 2025-10: s2 0.504, s4 0.494 vs 0.484.)
   sources, and a model that recovers more of them shows more "unconfirmed" peaks. v3 at 4.8
   says the check is not simply proportional to sharpening; not ruled out either way.
 
-**Best candidate: s4.** Not shipped. Next: tell the two causes apart with a deeper
-reference -- confirm peaks against all frames, or a second night of the same target --
-before more training. Then `bench_phase4.py` on the full pipeline.
+**Best candidate: s4.** Not shipped.
+
+### Second-night check: the excess is mostly the shallow sharp stack (2026-10-21)
+
+`tools/eval_peaks_second_night.py`: the same peaks (as `eval_nn_faint.false_sources`),
+confirmed against the *other* session of the same target -- its full stack, independent
+noise, mapped by star match + affine fit (0.14-0.21 px rms, no resampling). All frames of
+the same session would not do: the input holds 70% of them, so its noise confirms itself.
+
+A direction is valid only if the reference confirms the unprocessed input's own peaks at
+least as well as the sharp stack does. Three are not, their reference night being shallower
+despite its frames (Pleiades 2025-11 is 1.45x noisier per pixel than 2025-10): Omega
+2026-08 -> 2025-11, Pleiades 2025-10 -> 2025-11, Sunflower 2026-03 -> 2026-04 (input
+unconfirmed 14 -> 113, 36 -> 125, 8 -> 20 per Mpx). Sculptor has one session. The five valid
+directions, unconfirmed peaks > 2 sigma per Mpx, sharp stack -> second night:
+
+| session (reference frames vs sharp stack's) | input | nn_denoise | v3 | s2 | s4 |
+|---|---|---|---|---|---|
+| Omega 2025-11 (114 vs 21) | 17.2 -> 3.8 | 3.2 -> 2.5 | 10.8 -> 7.6 | 19.1 -> 8.9 | 19.7 -> 9.5 |
+| Orion 2025-12-11 (130 vs 36) | 3.2 -> 0.0 | 1.3 -> 0.0 | 3.8 -> 1.9 | 7.0 -> 2.5 | 7.0 -> 3.2 |
+| Orion 2025-12-27 (121 vs 39) | 3.2 -> 2.5 | 0.6 -> 0.6 | 2.5 -> 1.9 | 3.8 -> 3.2 | 3.8 -> 1.9 |
+| Pleiades 2025-11 (277 vs 82) | 8.3 -> 1.9 | 0.0 -> 0.0 | 1.3 -> 0.0 | 7.0 -> 0.0 | 8.3 -> 0.0 |
+| Sunflower 2026-04 (158 vs 14) | 6.4 -> 0.6 | 0.6 -> 0.0 | 1.3 -> 0.0 | 3.2 -> 0.0 | 2.5 -> 0.0 |
+| mean | 7.7 -> 1.8 | 1.1 -> 0.6 | 3.9 -> **2.3** | 8.0 -> 2.9 | 8.3 -> **2.9** |
+
+Against a deep independent reference s4's excess over v3 shrinks from 2.1x to 1.3x (2.9 vs
+2.3 per Mpx), and on the two deepest references (Pleiades 2025-11, Sunflower 2026-04) every
+s4 peak the sharp stack missed is confirmed. So most of the "unconfirmed" peaks were real
+faint sources the sharp stack is too shallow to confirm. A small residual excess remains
+on Omega 2025-11 (9.5 vs 7.6) and Orion 2025-12-11 (3.2 vs 1.9): five directions, four
+targets, too few to call. `eval_nn_faint`'s sharp-stack confirmation understates a sharper
+model; use the second-night check alongside it.
+
+Next: `bench_phase4.py` on the full pipeline, v3 against s4.
 
 ### The original plan (2026-10-18)
 
