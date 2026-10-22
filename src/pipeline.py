@@ -1324,6 +1324,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                             else:
                                 safe_print("  Light-curve analysis: no light curve had enough "
                                            "points")
+                        if getattr(args, 'aavso_report', False):
+                            from src.aavso_report import format_summary, write_aavso_report
+                            from src.utils import header_get_first
+                            _exp = header_get_first(getattr(final[0], 'header', {}) or {},
+                                                    ("EXPTIME", "EXPOSURE"), cast=float) if final else None
+                            _av = write_aavso_report(args, output_path, _ts["wcs_header"], float(_exp or 0.0))
+                            safe_print(format_summary(_av, _av.get("path")))
                 except Exception as e:
                     safe_print(f"  WARNING: time-series photometry failed: {e}")
 
