@@ -426,6 +426,7 @@ def run_timeseries_photometry(final, final_indices, mem_rgb, shifts, transforms,
         "median_zp_scatter_g": round(float(np.nanmedian(zp_err[:, 1])), 4),
         "gain_e_per_adu": round(gain, 4) if gain else None,
         "target": target_stats,
+        "wcs_header": header,      # for --aavso-report (not printed)
     }
 
 
