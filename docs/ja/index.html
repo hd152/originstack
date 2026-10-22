@@ -88,12 +88,12 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="セクション">
-        <a href="#time">速度</a> <a href="#app">アプリ</a> <a href="#compare">比較</a> <a href="stack-celestron-origin.html">ガイド</a> <a href="../advanced.html">上級者向け</a> <a href="../how-it-works.html">仕組み</a> <a href="#get">インストール</a>
+        <a href="#oneclick">ワンクリック</a> <a href="#time">速度</a> <a href="#app">アプリ</a> <a href="#compare">比較</a> <a href="stack-celestron-origin.html">ガイド</a> <a href="../advanced.html">上級者向け</a> <a href="../how-it-works.html">仕組み</a> <a href="#get">インストール</a>
       </nav>
     </div>
 
-    <h1><span class="kicker">Celestron Origin 用の無料天体写真スタックソフト</span> より淡い細部、よりシャープな星、よりクリーンな空。</h1>
-    <p class="lede">OriginStack は、Celestron Origin の生の FITS ファイルや任意のカラーカメラのフレームをスタック・画像処理し、1枚の完成画像に仕上げます。お使いのコンピューター上で動作し、アカウントは不要です。インターネットに接続するのは、認識できない対象名を調べるときと、プレートソルブなどのオプションの処理を使うときだけです。</p>
+    <h1><span class="kicker">Celestron Origin のための、無料のワンクリック・スタッキング＆画像処理</span> 一晩分の生フレームから完成画像まで、ワンクリックで。</h1>
+    <p class="lede">Celestron Origin が保存したフォルダ、または任意のカラーカメラのフレームを OriginStack で指定して、スタートを押すだけ。キャリブレーション、位置合わせ、スタッキングを行い、そのまま仕上げまで済ませます。かぶりを除去し、Gaia の星で色を合わせ、ノイズを減らし、星を引き締め、強調処理を施します。設定は対象に合わせて自動で選ばれます。お使いのコンピューター上で動作し、アカウントは不要です。ネットに接続するのは星表データと天体名の取得だけで、<code>--offline</code> でそれも止められます。</p>
 
     <div class="actions">
       <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Windows 版をダウンロード</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">GitHub でソースを見る</a>
@@ -113,11 +113,45 @@
       <span class="cap r">114 フレームをスタック・画像処理</span>
       <input type="range" min="0" max="100" value="50" aria-label="ドラッグして1フレームと完成したスタックを比較">
     </div>
-    <p class="hero-bridge"><span>違いから見てみましょう</span> <a href="#time">一晩分が1枚の画像になるまで&nbsp;→</a></p>
+    <p class="hero-bridge"><span>違いから見てみましょう</span> <a href="#oneclick">ワンクリックで何が起きるかを見る&nbsp;→</a></p>
   </div>
 </header>
 
 <main id="main-content">
+<section id="oneclick">
+  <div class="wrap">
+    <h2>ワンクリックですべて完了</h2>
+    <p class="intro measure">ほかのソフトはスタックで止まるか、仕上げは自分でやるための道具箱を渡すだけです。OriginStack ではスタックは道のりの半分にすぎません。下の仕上げ工程が同じワンクリックの中で、この順番で、認識した天体の種類に合わせて実行されます。どの工程もオフにでき、ほかのソフトで仕上げたい人のためにリニアなスタックも保存されます。</p>
+    <div class="phases">
+      <div>
+        <h3>星から色を決める</h3>
+        <p>画像内の星を Gaia カタログと照合し、既知の色から色合いを決めるので、太陽に似た星は白く写ります。手動のホワイトバランスは不要です。</p>
+      </div>
+      <div>
+        <h3>かぶりを除去</h3>
+        <p>光害、月明かり、周辺減光は、画面に明るさの傾きを残します。天体の周りの空に背景モデルを当てはめて差し引きます。</p>
+      </div>
+      <div>
+        <h3>きれいでニュートラルな空</h3>
+        <p>残ったホットピクセルや色ノイズを取り除き、色かぶりのない均一でニュートラルな黒い空に整えます。</p>
+      </div>
+      <div>
+        <h3>ノイズは減らし、ディテールは残す</h3>
+        <p>フィラメントや渦巻腕を守るウェーブレットノイズ除去。Origin で撮った銀河では、実際の Origin のセッションだけで学習した小さなニューラルネットワークが、シーイングによるぼけを補正しノイズも一度に取り除きます。</p>
+      </div>
+      <div>
+        <h3>星を引き締め、構造を際立たせる</h3>
+        <p>星を色を失わずに小さくして天体を埋もれさせず、天体の中くらいのスケールのディテールをノイズに対して浮かび上がらせます。</p>
+      </div>
+      <div>
+        <h3>強調処理をして、すぐ共有できる形に</h3>
+        <p>淡い光を持ち上げつつ明るい中心部を飛ばさない強調処理で、完成した JPEG が得られます。アプリでは、処理をやり直さずに 10 種類のほかの強調処理を後から試せます。</p>
+      </div>
+    </div>
+    <p class="plain measure">それ以前に各フレームで行われる処理と、各工程の考え方は<a href="../how-it-works.html">仕組み</a>にあります。Siril、DeepSkyStacker、PixInsight、Astro Pixel Processor、そして Origin 自身のスタックとの比較は<a href="../compare.html">専用のページ</a>にあります。</p>
+  </div>
+</section>
+
 <section id="time">
   <div class="wrap">
     <h2>一晩分のフレームを約1分で</h2>
@@ -156,7 +190,8 @@
         <p>背景のかぶり、色、ノイズを処理し、その後見やすいように強調します。保存される FITS ファイルはリニアのままなので、さらなる処理にそのまま使えます。</p>
       </div>
     </div>
-    <p class="plain measure">フレームは1枚ずつ処理されるため、500 フレームでも 50 フレームとほぼ同じメモリで済みます。実行中の一時ファイルはフレームあたり約 100 MB のディスクを使います。メモリに余裕がある場合は、位置合わせ済みフレームを代わりにメモリ上に保持し、常に 30% の空きを残します。</p>
+    <p class="plain measure">フレームは1枚ずつ処理されるため、500 フレームでも 50 フレームとほぼ同じメモリで済みます。実行中の一時ファイルはフレームあたり約 100 MB のディスクを使います。メモリに余裕がある場合は、位置合わせ済みフレームを代わりにメモリ上に保持し、常に 5 分の 1 の空きを残します。</p>
+    <p class="plain measure"><strong>速い理由。</strong>特に重い処理のうち 80 以上は Python ではなくコンパイル済みの Rust です。標準のスタック合成は置き換え前の NumPy コードより約 37 倍、ホットピクセル修復は 25〜55 倍、背景の当てはめは約 31 倍速く、そのほとんどは以前とまったく同じ数値を返します。フレーム処理は CPU の実際の振る舞いに合わせて、物理コアの 4 分の 3 に 1 コア 1 ワーカーを割り当てます。また同じ天体の複数夜は、夜ごとではなく一度だけ仕上げます。オリオン大星雲の 7 セッションは 15 分から約 8 分になりました。</p>
   </div>
 </section>
 
@@ -188,7 +223,20 @@
 
 <section id="compare">
   <div class="wrap">
-    <h2>Siril や DeepSkyStacker との比較</h2>
+    <h2>比較</h2>
+    <p class="intro measure">Origin が保存したフレームから、1 回の実行で何が得られるか。Astro Pixel Processor を含む全体の表と各ソフトについての注記は<a href="../compare.html">比較ページ</a>にあります。</p>
+
+    <table class="wide matrix">
+      <thead><tr><th></th><th>OriginStack</th><th>Siril</th><th>DeepSkyStacker</th><th>PixInsight</th><th>Origin アプリ</th></tr></thead>
+      <tbody>
+        <tr><th>生フレームから完成画像まで 1 回の実行で</th><td class="yes">はい、ワンクリック</td><td>スタックはスクリプト、仕上げは一つずつ</td><td>スタックと簡単なレベル調整</td><td>スタックは自動、仕上げは一つずつ</td><td class="yes">はい、望遠鏡内で</td></tr>
+        <tr><th>かぶり、Gaia による色、ノイズ、星、強調処理</th><td class="yes">すべて自動、対象ごとに調整</td><td>個別のツール</td><td>含まれない</td><td>個別のプロセス、一部は有料アドオン</td><td>かぶり除去あり、その他は記載なし</td></tr>
+        <tr><th>同じフレームでの星の大きさ (OriginStack = 1.00、小さいほどシャープ)</th><td class="yes">1.00</td><td>1.01〜1.13</td><td>1.09</td><td>未測定</td><td>1.04〜1.36</td></tr>
+        <tr><th>価格</th><td class="yes">無料、オープンソース</td><td>無料、オープンソース</td><td>無料、オープンソース</td><td>有料ライセンス</td><td>望遠鏡に付属</td></tr>
+      </tbody>
+    </table>
+
+    <h2 class="again">Siril と DeepSkyStacker との実測比較</h2>
     <p class="intro measure">同じフレーム、同じバイアス・ダーク・フラット、同じマシンで、各ツールを標準的な設定で実行しました。Celestron Origin の3セッション：オメガ星雲（30 秒 × 114）、ひまわり銀河（20 秒 × 158）、ちょうこくしつ座銀河（10 秒 × 532）。</p>
 
     <table class="wide">
@@ -376,7 +424,7 @@ python desktop_app.py</pre>
 <footer>
   <div class="wrap">
     <span>OriginStack は GNU GPL v3 のフリーソフトウェアです。</span>
-    <span><a href="stack-celestron-origin.html">Origin の画像をスタックする方法</a> &nbsp; <a href="../advanced.html">高度な機能</a> &nbsp; <a href="../how-it-works.html">仕組み</a> &nbsp; <a href="../docs.html">ドキュメント</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">ソース</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">問題を報告</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">変更履歴</a> &nbsp; <a href="privacy.html">プライバシー</a></span>
+    <span><a href="stack-celestron-origin.html">Origin の画像をスタックする方法</a> &nbsp; <a href="../compare.html">他のソフトとの比較</a> &nbsp; <a href="../advanced.html">高度な機能</a> &nbsp; <a href="../how-it-works.html">仕組み</a> &nbsp; <a href="../docs.html">ドキュメント</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">ソース</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">問題を報告</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">変更履歴</a> &nbsp; <a href="privacy.html">プライバシー</a></span>
     <!-- i18n:langs --><span class="langs"><a href="../" hreflang="en" lang="en">English</a> <a href="../de/" hreflang="de" lang="de">Deutsch</a> <a href="../es/" hreflang="es" lang="es">Español</a> <a href="../fr/" hreflang="fr" lang="fr">Français</a> <a href="../it/" hreflang="it" lang="it">Italiano</a> <a href="../nl/" hreflang="nl" lang="nl">Nederlands</a> <a href="../pt-br/" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/" hreflang="ja" lang="ja" aria-current="true">日本語</a> <a href="../zh-cn/" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
   </div>
 </footer>

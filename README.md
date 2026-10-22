@@ -776,7 +776,7 @@ Notes on reading these numbers:
 
 ### Compared with Siril and DeepSkyStacker
 
-Same lights, same bias/dark/flat, one machine (Windows 11, 8-core / 16-thread CPU, 64 GB RAM), each tool at default-style settings. Three Celestron Origin sessions: Omega Nebula (114 × 30 s), Sunflower Galaxy (158 × 20 s) and Sculptor Galaxy (532 × 10 s). Reproduce on your own data with [`tools/bench_vs_siril.py`](tools/bench_vs_siril.py).
+Same lights, same bias/dark/flat, one machine (Windows 11, 8-core / 16-thread CPU, 64 GB RAM), each tool at default-style settings. Three Celestron Origin sessions: Omega Nebula (114 × 30 s), Sunflower Galaxy (158 × 20 s) and Sculptor Galaxy (532 × 10 s). Reproduce on your own data with [`tools/bench_vs_siril.py`](tools/bench_vs_siril.py). To compare a tool that has no command line (Astro Pixel Processor, PixInsight), stack the same lights in it, save the linear result as a colour FITS and pass it with `--external STACK.fits --external-seconds <your time>`; it is scored with the same star-width and noise measurements.
 
 OriginStack first, Siril second. "Stack only" leaves out OriginStack's finishing steps (background extraction, denoising, stretch), which Siril's script does not have:
 
