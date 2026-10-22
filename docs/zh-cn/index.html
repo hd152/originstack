@@ -88,12 +88,12 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="章节">
-        <a href="#time">速度</a> <a href="#app">应用</a> <a href="#compare">对比</a> <a href="stack-celestron-origin.html">指南</a> <a href="../advanced.html">高级</a> <a href="../how-it-works.html">工作原理</a> <a href="#get">安装</a>
+        <a href="#oneclick">一键</a> <a href="#time">速度</a> <a href="#app">应用</a> <a href="#compare">对比</a> <a href="stack-celestron-origin.html">指南</a> <a href="../advanced.html">高级</a> <a href="../how-it-works.html">工作原理</a> <a href="#get">安装</a>
       </nav>
     </div>
 
-    <h1><span class="kicker">适用于 Celestron Origin 的免费天文摄影叠加软件</span> 更暗弱的细节、更锐利的星点、更干净的天空。</h1>
-    <p class="lede">OriginStack 将 Celestron Origin 的原始 FITS 文件（或任何彩色相机的帧）叠加并处理成一张成品图像。它在你自己的电脑上运行，无需账号，只在查询无法识别的目标名称或执行星图解算等可选步骤时才联网。</p>
+    <h1><span class="kicker">面向 Celestron Origin 的免费一键叠加与处理</span> 一晚的原始帧，一键变成完成的图像。</h1>
+    <p class="lede">把 OriginStack 指向 Celestron Origin 保存的文件夹，或任意彩色相机的帧，然后点击开始。它会完成校准、对齐和叠加，随后把图像也一并处理好：去除梯度、根据 Gaia 恒星校准颜色、降噪、收缩星点并完成拉伸，所有设置都会根据你的目标自动选择。它在你自己的电脑上运行，无需账户；只有获取星表数据和目标名称时才会联网，<code>--offline</code> 连这些也能关闭。</p>
 
     <div class="actions">
       <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">下载 Windows 版</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">在 GitHub 上查看源代码</a>
@@ -113,11 +113,45 @@
       <span class="cap r">114 帧，已叠加并处理</span>
       <input type="range" min="0" max="100" value="50" aria-label="拖动以对比单帧与最终叠加结果">
     </div>
-    <p class="hero-bridge"><span>从差别看起</span> <a href="#time">看一整夜如何变成一张图像&nbsp;→</a></p>
+    <p class="hero-bridge"><span>从差别看起</span> <a href="#oneclick">看看一键都做了什么&nbsp;→</a></p>
   </div>
 </header>
 
 <main id="main-content">
+<section id="oneclick">
+  <div class="wrap">
+    <h2>一键完成全部工作</h2>
+    <p class="intro measure">其他软件要么止步于叠加，要么给你一箱工具让你自己完成后期。在 OriginStack 中，叠加只是一半：下面的后期步骤会在同一次点击中按此顺序运行，并根据识别出的目标类型进行调整。每一步都可以关闭，线性叠加结果也会保存，方便想在别处继续处理的用户。</p>
+    <div class="phases">
+      <div>
+        <h3>从恒星得到颜色</h3>
+        <p>画面中的恒星会与 Gaia 星表匹配，并根据它们已知的颜色设定色彩，使类太阳恒星呈现白色。无需手动白平衡。</p>
+      </div>
+      <div>
+        <h3>梯度消失</h3>
+        <p>光污染、月光和暗角会在画面上留下亮度坡度。程序会在目标周围的天空上拟合背景模型并将其减去。</p>
+      </div>
+      <div>
+        <h3>干净、中性的天空</h3>
+        <p>清除残留的热像素和彩色噪点，并把天空调成均匀、中性的黑色，而不是偏色的。</p>
+      </div>
+      <div>
+        <h3>降低噪点，保留细节</h3>
+        <p>一种保护纤维结构和旋臂的小波降噪器。对 Origin 拍摄的星系，一个仅用真实 Origin 拍摄数据训练的小型神经网络会一步完成视宁度模糊的锐化和降噪。</p>
+      </div>
+      <div>
+        <h3>收紧星点，突出结构</h3>
+        <p>在不丢失颜色的前提下缩小星点，避免星点淹没目标，并相对于噪声突出目标的中等尺度细节。</p>
+      </div>
+      <div>
+        <h3>完成拉伸，随时分享</h3>
+        <p>一种在提升暗弱光线的同时不让明亮核心过曝的拉伸，生成最终的 JPEG。在应用中，你之后还能在不重新运行的情况下尝试另外十种拉伸之一。</p>
+      </div>
+    </div>
+    <p class="plain measure">在此之前每一帧经历的处理，以及每个步骤背后的原理，见<a href="../how-it-works.html">工作原理</a>。与 Siril、DeepSkyStacker、PixInsight、Astro Pixel Processor 以及 Origin 自身叠加结果的比较，见<a href="../compare.html">单独的页面</a>。</p>
+  </div>
+</section>
+
 <section id="time">
   <div class="wrap">
     <h2>一整夜的帧，大约一分钟</h2>
@@ -156,7 +190,8 @@
         <p>处理背景梯度、颜色和噪声，然后将结果拉伸以便观看。保存的 FITS 文件保持线性，可用于任何后续处理。</p>
       </div>
     </div>
-    <p class="plain measure">各帧逐一处理，因此 500 帧所需的内存与 50 帧大致相同。运行期间，临时文件每帧约占用 100 MB 磁盘；内存足够时，对齐后的帧会改为保存在内存中，并始终保留 30% 的内存空闲。</p>
+    <p class="plain measure">各帧逐一处理，因此 500 帧所需的内存与 50 帧大致相同。运行期间，临时文件每帧约占用 100 MB 磁盘；内存足够时，对齐后的帧会改为保存在内存中，并始终保留五分之一的内存空闲。</p>
+    <p class="plain measure"><strong>为什么这么快。</strong>80 多个最耗时的步骤是编译后的 Rust 代码而不是 Python：默认的叠加合成比它取代的 NumPy 代码快约 37 倍，热像素修复快 25 到 55 倍，背景拟合快约 31 倍，而且大多数给出的结果与之前完全相同。帧处理按照 CPU 的实际表现来安排，在四分之三的核心上每个核心运行一个工作进程；同一目标的多个夜晚只做一次后期，而不是每晚各做一次：七个猎户座大星云的拍摄从 15 分钟缩短到约 8 分钟。</p>
   </div>
 </section>
 
@@ -188,7 +223,20 @@
 
 <section id="compare">
   <div class="wrap">
-    <h2>与 Siril 和 DeepSkyStacker 的对比</h2>
+    <h2>对比</h2>
+    <p class="intro measure">从 Origin 保存的帧出发，一次运行能得到什么。包含 Astro Pixel Processor 及各软件说明的完整表格见<a href="../compare.html">对比页面</a>。</p>
+
+    <table class="wide matrix">
+      <thead><tr><th></th><th>OriginStack</th><th>Siril</th><th>DeepSkyStacker</th><th>PixInsight</th><th>Origin 应用</th></tr></thead>
+      <tbody>
+        <tr><th>一次运行从原始帧到完成的图像</th><td class="yes">是，一键完成</td><td>脚本叠加，逐步后期</td><td>叠加和基本色阶</td><td>叠加自动化，逐步后期</td><td class="yes">是，在望远镜内完成</td></tr>
+        <tr><th>梯度、Gaia 色彩、噪点、星点、拉伸</th><td class="yes">全部自动，按目标调整</td><td>单独的工具</td><td>不包含</td><td>单独的处理流程，部分为付费插件</td><td>去除梯度；其余未说明</td></tr>
+        <tr><th>相同帧上的星点大小（OriginStack = 1.00，越小越锐利）</th><td class="yes">1.00</td><td>1.01 到 1.13</td><td>1.09</td><td>未测量</td><td>1.04 到 1.36</td></tr>
+        <tr><th>价格</th><td class="yes">免费，开源</td><td>免费，开源</td><td>免费，开源</td><td>付费许可</td><td>随望远镜附带</td></tr>
+      </tbody>
+    </table>
+
+    <h2 class="again">与 Siril 和 DeepSkyStacker 的实测对比</h2>
     <p class="intro measure">相同的帧，相同的偏置场、暗场和平场，同一台机器，各工具均使用接近默认的设置。三个 Celestron Origin 会话：欧米茄星云（114 × 30 s）、向日葵星系（158 × 20 s）和玉夫座星系（532 × 10 s）。</p>
 
     <table class="wide">
@@ -376,7 +424,7 @@ python desktop_app.py</pre>
 <footer>
   <div class="wrap">
     <span>OriginStack 是采用 GNU GPL v3 许可证的自由软件。</span>
-    <span><a href="stack-celestron-origin.html">如何叠加 Origin 图像</a> &nbsp; <a href="../advanced.html">高级功能</a> &nbsp; <a href="../how-it-works.html">工作原理</a> &nbsp; <a href="../docs.html">文档</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">源代码</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">报告问题</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">更新日志</a> &nbsp; <a href="privacy.html">隐私</a></span>
+    <span><a href="stack-celestron-origin.html">如何叠加 Origin 图像</a> &nbsp; <a href="../compare.html">与其他软件对比</a> &nbsp; <a href="../advanced.html">高级功能</a> &nbsp; <a href="../how-it-works.html">工作原理</a> &nbsp; <a href="../docs.html">文档</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">源代码</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">报告问题</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">更新日志</a> &nbsp; <a href="privacy.html">隐私</a></span>
     <!-- i18n:langs --><span class="langs"><a href="../" hreflang="en" lang="en">English</a> <a href="../de/" hreflang="de" lang="de">Deutsch</a> <a href="../es/" hreflang="es" lang="es">Español</a> <a href="../fr/" hreflang="fr" lang="fr">Français</a> <a href="../it/" hreflang="it" lang="it">Italiano</a> <a href="../nl/" hreflang="nl" lang="nl">Nederlands</a> <a href="../pt-br/" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/" hreflang="zh-CN" lang="zh-CN" aria-current="true">简体中文</a></span><!-- /i18n:langs -->
   </div>
 </footer>
