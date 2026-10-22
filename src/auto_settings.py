@@ -883,6 +883,7 @@ def apply_auto_settings(
     changes.extend(_apply_dynamic_settings(sig, weights, args))
     changes.extend(_apply_quality_settings(sig, args, target_type=target_type, weights=weights))
     changes.extend(_apply_nn_deconvolution(args, weights))
+    changes.extend(_apply_nn_denoiser(args, weights))
     changes.extend(_apply_free_diagnostics(args))
 
     return target_type, label, sig, changes, weights
@@ -919,6 +920,33 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
     _set('deconvolve', False)                # not Richardson-Lucy as well
     for attr in ('denoise_curvelet', 'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn'):
         _set(attr, False)                    # the network denoises as it sharpens
+    return changes
+
+
+# The learned denoiser (--denoiser nn) in place of the wavelet denoiser for everything else on
+# Origin data, with chroma noise reduction before it (nn_chroma_nr). bench_phase4 on the five
+# held-out targets (2026-10-22): without chroma NR first it widened stars 1-2% on the nebula
+# and cluster fields and added 1-2 deg of hue error; with it, star widths within 0.3% and hue
+# error equal to the wavelet chain's, at 3.5-27x lower sky noise and 3-40x the faint-structure
+# contrast (Gaia star-colour agreement equal or better). The low-frequency restore and star
+# reduction played no part. Bright-star halos are smaller in absolute terms but stand out more
+# against the cleaner sky. Galaxies take --deconvolve nn instead (above).
+def _apply_nn_denoiser(args, weights: Dict[str, float]) -> List[str]:
+    changes: List[str] = []
+    explicit = getattr(args, '_explicit_cli_dests', set())
+    if {'denoiser', 'deconvolve_mode'} & explicit or getattr(args, 'deconvolve_nn', False):
+        return changes                       # the user chose, or the galaxy rule took over
+    if not getattr(args, 'denoise_curvelet', False):
+        return changes                       # only replaces the wavelet denoiser where it would run
+    if str((getattr(args, '_camera', None) or {}).get('model', '')) not in NN_TRAINED_CAMERAS:
+        return changes
+    from src.nn_denoise import model_available
+    if not model_available():
+        return changes
+    _set = _auto_setter(args, changes)
+    _set('denoise_nn', True)
+    _set('denoise_curvelet', False)
+    _set('nn_chroma_nr', True)
     return changes
 
 

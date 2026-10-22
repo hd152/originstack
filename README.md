@@ -238,6 +238,7 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 - **Noise validation** (`--noise-validate`) — stacks the odd and even frames separately; their difference is an empirical noise map (`<output>_noise.fits`) and their local correlation shows which structure is repeatable (`<output>_consistency.fits`)
 - **Moving objects** (`--moving-objects`, `--moving-objects-stack`) — links per-frame residuals into asteroid-like tracks by voting in velocity space; optionally stacks a window along each track so a mover too faint for any one frame comes up out of the noise
 - **Light-curve analysis** (`--lightcurve-analysis`, with `--photometry-timeseries`) — Lomb-Scargle period search with a false-alarm probability and a box-least-squares + trapezoid transit fit with errors and a BIC test
+- **AAVSO reports** (`--aavso-report`, with `--photometry-timeseries`) — writes `<output>_aavso.txt` in the AAVSO Extended Format for WebObs upload: comparison stars from the AAVSO VSP chart (outliers such as saturated stars rejected), a per-frame ensemble zero point on the green channel (TG band), a check star, mid-exposure JD and optional time bins (`--aavso-bin MINUTES`). Name the star with `--aavso-star "SS Cyg"` (or `--photometry-target RA,DEC`) and set `--aavso-obscode`. On an Orion Nebula session (130 × 20 s), AAVSO comparison stars of V 10–13.6, each measured against the others, came out at TG − V +0.004 ± 0.035 mag; in 5-minute bins the errors were 0.015–0.04 mag at V 11–13. `tools/aavso_report.py` writes the report afterwards from an existing run
 - **Bayer-aware drizzle** (`--cfa-drizzle`, opt-in) — recombines each frame's *measured* colour samples instead of debayer-interpolated ones (native kernel, 15.7× the numpy path). On well-sampled data it trades 13% lower luma noise for 2× colour noise and no sharpness gain, so it is meant for undersampled data
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
@@ -494,6 +495,9 @@ python originstack.py -d lights/ -o stacked.fits --noise-validate --distortion-m
 
 # Period/transit search on the light curves (needs a session WCS)
 python originstack.py -d lights/ -o stacked.fits --photometry-timeseries --lightcurve-analysis
+
+# AAVSO report for a variable star, 5-minute bins
+python originstack.py -d lights/ -o stacked.fits --photometry-timeseries --aavso-report --aavso-star "SS Cyg" --aavso-obscode ABC --aavso-bin 5
 ```
 
 ### Debug registration problems
@@ -702,6 +706,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--moving-objects[-stack]` | Find asteroid-like movers; optionally stack along each track |
 | `--session-report` | Write `<output>_session.png` / `.csv` diagnostics |
 | `--lightcurve-analysis` | Period + transit analysis of `--photometry-timeseries` light curves |
+| `--aavso-report` | AAVSO Extended Format report of the target's light curve (`--aavso-star`, `--aavso-obscode`, `--aavso-bin`) |
 | `--denoiser NAME` | Primary luma denoiser (auto — wavelet unless overridden —, wavelet, acdnr, bilateral, aniso, none; `curvelet` is an alias for `wavelet`) |
 | `--wavelet-protect 0-1` | Structure protection for the wavelet denoiser (default 0.6; 0 = plain BayesShrink) |
 | `--starless-process` | Denoise / local-contrast / deconvolve a starless copy, add the stars back untouched |
@@ -771,7 +776,7 @@ Notes on reading these numbers:
 
 ### Compared with Siril and DeepSkyStacker
 
-Same lights, same bias/dark/flat, one machine (Windows 11, 8-core / 16-thread CPU, 64 GB RAM), each tool at default-style settings. Three Celestron Origin sessions: Omega Nebula (114 × 30 s), Sunflower Galaxy (158 × 20 s) and Sculptor Galaxy (532 × 10 s). Reproduce on your own data with [`tools/bench_vs_siril.py`](tools/bench_vs_siril.py).
+Same lights, same bias/dark/flat, one machine (Windows 11, 8-core / 16-thread CPU, 64 GB RAM), each tool at default-style settings. Three Celestron Origin sessions: Omega Nebula (114 × 30 s), Sunflower Galaxy (158 × 20 s) and Sculptor Galaxy (532 × 10 s). Reproduce on your own data with [`tools/bench_vs_siril.py`](tools/bench_vs_siril.py). To compare a tool that has no command line (Astro Pixel Processor, PixInsight), stack the same lights in it, save the linear result as a colour FITS and pass it with `--external STACK.fits --external-seconds <your time>`; it is scored with the same star-width and noise measurements.
 
 OriginStack first, Siril second. "Stack only" leaves out OriginStack's finishing steps (background extraction, denoising, stretch), which Siril's script does not have:
 
@@ -951,6 +956,7 @@ OriginStack works entirely on your machine. It goes online in these cases only, 
 | Gaia star index tiles | `--plate-solve` (built-in solver), and on a normal run with a session `info.json` solve (to correct that WCS on the stack; `--no-wcs-refine` turns it off), for sky areas not yet in the local index | Sky coordinates of a 5°×5° tile; tiles are cached, so each area is fetched once |
 | astrometry.net | `--plate-solve --plate-solver astrometry` (or `auto` when the built-in solver fails) | The image, to solve its position (needs your API key) |
 | Gaia / VizieR / SIMBAD catalogues | Colour calibration on a normal run with a sky position (`--no-color-calibrate` turns it off); `--photometry`, `--photometry-timeseries`, `--annotate` | Sky coordinates of the field. Gaia results are cached next to the star index (`gaia_cones/`), so the same field on another night or a `--from-stack` rerun is answered locally, also under `--offline`; `ORIGINSTACK_NO_GAIA_CACHE=1` turns that off |
+| AAVSO VSP | `--aavso-report` | The variable star's name or the target's sky coordinates, to fetch the comparison-star chart |
 | JPL Horizons | Comet ephemerides | The comet designation and time |
 | Self-update check | Once per CLI run or desktop-app launch | Nothing — an anonymous GET of GitHub's public releases API, no request parameters, no identifying data |
 

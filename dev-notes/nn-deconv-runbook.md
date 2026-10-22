@@ -1,5 +1,9 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
+Status (2026-10-21): synthetic-blur training passed its feasibility gate, but its best model (s4)
+is only 1-3% sharper than v3 in the full pipeline; v3 stays shipped (see
+"Synthetic-blur training" below).
+
 Status (2026-10-16): **v3 trained, passes every step-5 check, and is integrated as
 `--deconvolve nn` (step 6) with `restore_sigma=4`.** See "v3 results" and step 6 below. Everything below runs on
 any Windows machine with the repo, Python, a Rust toolchain and ideally an NVIDIA GPU.
@@ -259,7 +263,178 @@ The original plan:
   (Omega, Orion, Pleiades); not with `--config nn_chroma_nr=true`. Cause not found.
 - A faint ring is still visible around Sunflower's brightest star with `--denoiser nn`.
 
-## Next: synthetic-blur training (planned 2026-10-18, not started)
+## Synthetic-blur training: feasibility run (2026-10-21) -- passes the gate, not shipped
+
+Branch `feat/nn-deconv-synthetic`. Model `s1` = v3 fine-tuned 10,000 steps, half of each batch
+synthetic (GTX 1650 Ti, 19 min). Weights `C:\nn_work\model_deconv_s1.npz` (not shipped);
+logs and evaluations in `C:\nn_work\synth`.
+
+What was built (it differs from the plan below where noted):
+- `tools/gen_synth_deconv.py`: per session, in the input's noise units -- clean starless
+  backgrounds (sharp stack, bundled denoiser without restore, `star_removal` inpaint), real
+  stack noise (input minus its denoised self, empty-sky 128 px patches; lag-1 correlation
+  0.41, so the debayer/warp correlation is kept -- no synthetic noise model needed), sky level
+  B. 83 sessions in ~50 min: 4440 / 2960 train, 540 / 360 held-out patches (1.4 GB).
+- `tools/synth_blur.py`: pairs drawn on the GPU during training (0.05 s per 8). Truth = bg +
+  stars with a Moffat PSF of FWHM 1.5-2.3 px; **random positions and power-law fluxes, not
+  Gaia** (the seeing pairs have no WCS). Input = truth convolved with K exactly on the pixel
+  grid (Moffat FWHM 1.5-4.5, beta 2.5-6, axis ratio 0.75-1, coma component in half the
+  kernels with its centroid kept at zero, +-6% width per channel) + real noise x
+  sqrt(1 + signal/B). Weight 1/(1 + signal/B).
+- `train_nn_denoise.py train --synth ... --synth-frac 0.5 --init src/data/nn_deconv.npz`;
+  best weights by real val/identity + synthetic val/identity.
+- `tools/eval_synth_deconv.py` (exact truth) and `tools/eval_gaia_pairs.py` (Gaia close
+  pairs and single-star splits on the held-out linear stacks; WCS refined first --
+  Pleiades' header is off by (3.9, -7.9) px; only pairs whose fainter star is >= 15 sigma in
+  the input, or noise alone makes the input "resolve" more than a denoised output).
+
+```powershell
+python tools/gen_synth_deconv.py --pairs C:/nn_work/nn_deconv/pairs --out C:/nn_work/synth
+C:/nn_work/venv/Scripts/python tools/train_nn_denoise.py train --bank C:/nn_work/bank_deconv.npz --synth C:/nn_work/synth/train.npz --synth-frac 0.5 --init src/data/nn_deconv.npz --steps 10000 --lr 3e-4 --out C:/nn_work/model_deconv_s1.npz --resume
+C:/nn_work/venv/Scripts/python tools/eval_synth_deconv.py --synth C:/nn_work/synth/holdout.npz --model v3=src/data/nn_deconv.npz --model s1=C:/nn_work/model_deconv_s1.npz
+python tools/eval_gaia_pairs.py C:/nn_work/heldout_stacks/*.fits --model v3=src/data/nn_deconv.npz --model s1=C:/nn_work/model_deconv_s1.npz
+```
+
+Training: real val 1.2952 (identity 1.8722; v3's own best 1.2248), synthetic val 2.79
+(identity 27.64).
+
+Results (restore 4 px throughout):
+
+| check | v3 | s1 |
+|---|---|---|
+| synthetic held-out: width / truth, / input | 1.80, 0.90 | **1.11, 0.56** |
+| synthetic: flux, signal error, invented peaks / Mpx | 0.96, 1058, 35 | 0.94, **128**, 58 (input 122, nn_denoise 12) |
+| real held-out pairs: width / input | 0.81-0.92 | **0.74-0.90** |
+| real: width / sharp stack | 0.96-1.08 | **0.88-1.07** (< 1 on 8/9) |
+| real: error vs `nn_denoise` | lower 9/9 | lower 8/9, equal on Pleiades 2025-10 (v3 was worse there) |
+| Gaia: single stars split | 0 | **0** (53-149 tested per target) |
+| Gaia: pairs 3.5-4.5 px resolved | Omega 20%, Orion 0/3 | Omega 30%, Orion 1/3 (separation 0.83x Gaia's) |
+| ring (eval_nn_faint) | 0.00 to -0.01 | 0.00 to -0.01 |
+| faint discs 1.5 px, 0.5-1 sigma | 0.81-0.96 | 0.84-0.99 (>= v3 on every session) |
+| faint peaks > 2 sigma confirmed by the sharp stack | 94-100% | 87-98% |
+| faint peaks > 3 sigma confirmed | 99-100% | 96-99% |
+
+Gate (below) met: held-out stars narrow clearly past the sharp-stack target and nothing
+splits in the Gaia check. Below 3.5 px no method separates a pair, so the pair half of the
+Gaia check is weak (41 usable pairs, mostly Omega); the single-star split test carries it.
+
+Open before a full version / shipping:
+- **Unconfirmed faint peaks roughly double** (> 2 sigma: Pleiades 2025-11 87% confirmed vs
+  98%, ~12 vs ~1.5 per Mpx; Omega 2026-08 ~36 vs ~17). Most of s1's extra peaks are real
+  (random sky confirms 4-17%), but this is the invented-detail risk the plan named. Same
+  signal on synthetic fields (58 vs 35 / Mpx). Candidates: lower the synthetic star density
+  floor, add faint-source-free synthetic patches, a peak penalty, or a smaller K range.
+- Synthetic flux 0.94 (v3 0.96); not seen on real data (`eval_nn_faint` point sources
+  0.94-1.06).
+- Real val 1.295 vs v3's 1.225: a little lost on the seeing-pair target itself.
+- Not yet run: `bench_phase4.py` on the full pipeline, crops on all targets, ideal-Gaussian
+  narrowing, CPU inference time (same network, so unchanged).
+- Truth stars were drawn at random rather than at Gaia positions; real star statistics and
+  saturated cores are not modelled.
+
+### Rounds 2-4: the faint-peak problem (2026-10-21)
+
+All from v3, 10,000 steps, lr 3e-4. s2: `--synth-frac 0.35 --synth-set FLUX=20,5e5 --synth-set
+STARS=1,25` (fewer, brighter synthetic stars). s3a / s3b: s2 + `--peak-penalty 10 / 30`
+unmasked. s4: s2 + `--peak-penalty 80` masked (`peak_penalty`: one-sided cost of point-like
+excess over the synthetic truth, DoG 1 px - 3 px, only where the truth's own response is
+< 0.3 sigma, grown 3 px; grown 7 px the mask covered 63% of the canvas). Weights
+`C:\nn_work\model_deconv_s{2,3a,3b,4}.npz`.
+
+Unconfirmed peaks = `eval_nn_faint` peaks > 2 sigma per Mpx x (1 - share confirmed by the
+sharp stack), exact from the JSONs (mean over the 9 held-out pairs):
+
+| | v3 | s1 | s2 | s3a | s3b | s4 |
+|---|---|---|---|---|---|---|
+| real val (identity 1.872) | 1.225 | 1.295 | 1.273 | 1.308 | 1.348 | 1.279 |
+| synthetic: width / truth | 1.80 | 1.11 | 1.10 | 1.11 | 1.13 | 1.12 |
+| synthetic: flux | 0.96 | 0.94 | 0.94 | 0.87 | 0.80 | **0.97** |
+| synthetic: invented / Mpx | 35 | 58 | 62 | 52 | 65 | **39** |
+| real: width / input | 0.81-0.92 | 0.74-0.90 | 0.75-0.90 | 0.74-0.90 | -- | 0.76-0.91 |
+| real: width / sharp stack (< 1) | 0.96-1.08 | 0.88-1.07 (8/9) | 0.88-1.08 (7/9) | 0.87-1.07 (8/9) | -- | 0.89-1.08 (7/9) |
+| real: error < `nn_denoise` | 9/9 | 8/9 + 1 equal | 8/9 | 9/9 | -- | 8/9 |
+| real: unconfirmed peaks / Mpx | **4.8** | 12.6 | 10.3 | 8.3 | -- | 10.0 |
+| real: faint discs 1.5 px, 0.5-1 sigma | 0.86 | 0.91 | 0.90 | 0.89 | -- | **0.92** |
+| Gaia single-star splits | 0 | 0 | 0 | 1/50 (Orion) | -- | 0 |
+
+(s3b was dropped after the synthetic check. The miss in "error < nn_denoise" is always
+Pleiades 2025-10: s2 0.504, s4 0.494 vs 0.484.)
+
+- Fewer, brighter synthetic stars (s2) barely moved the real unconfirmed peaks.
+- An unmasked penalty dims real stars instead (s3a/s3b flux 0.87 / 0.80) and s3a split a star.
+- The masked penalty (s4) fixes the *synthetic* problem completely -- invented peaks back at
+  v3's level with the best flux of any model, sharpening kept, no splits, real val as s2 --
+  but the *real* unconfirmed peaks stay at about twice v3's (10.0 vs 4.8 per Mpx; > 3 sigma
+  all models 96-100% confirmed). So the real excess is not what the synthetic pairs model.
+  Either real noise structure the synthetic noise (empty-sky patches) never shows, or the
+  check itself: the sharp stack (30% of the frames) cannot confirm the faintest real
+  sources, and a model that recovers more of them shows more "unconfirmed" peaks. v3 at 4.8
+  says the check is not simply proportional to sharpening; not ruled out either way.
+
+**Best candidate: s4.** Not shipped.
+
+### Second-night check: the excess is mostly the shallow sharp stack (2026-10-21)
+
+`tools/eval_peaks_second_night.py`: the same peaks (as `eval_nn_faint.false_sources`),
+confirmed against the *other* session of the same target -- its full stack, independent
+noise, mapped by star match + affine fit (0.14-0.21 px rms, no resampling). All frames of
+the same session would not do: the input holds 70% of them, so its noise confirms itself.
+
+A direction is valid only if the reference confirms the unprocessed input's own peaks at
+least as well as the sharp stack does. Three are not, their reference night being shallower
+despite its frames (Pleiades 2025-11 is 1.45x noisier per pixel than 2025-10): Omega
+2026-08 -> 2025-11, Pleiades 2025-10 -> 2025-11, Sunflower 2026-03 -> 2026-04 (input
+unconfirmed 14 -> 113, 36 -> 125, 8 -> 20 per Mpx). Sculptor has one session. The five valid
+directions, unconfirmed peaks > 2 sigma per Mpx, sharp stack -> second night:
+
+| session (reference frames vs sharp stack's) | input | nn_denoise | v3 | s2 | s4 |
+|---|---|---|---|---|---|
+| Omega 2025-11 (114 vs 21) | 17.2 -> 3.8 | 3.2 -> 2.5 | 10.8 -> 7.6 | 19.1 -> 8.9 | 19.7 -> 9.5 |
+| Orion 2025-12-11 (130 vs 36) | 3.2 -> 0.0 | 1.3 -> 0.0 | 3.8 -> 1.9 | 7.0 -> 2.5 | 7.0 -> 3.2 |
+| Orion 2025-12-27 (121 vs 39) | 3.2 -> 2.5 | 0.6 -> 0.6 | 2.5 -> 1.9 | 3.8 -> 3.2 | 3.8 -> 1.9 |
+| Pleiades 2025-11 (277 vs 82) | 8.3 -> 1.9 | 0.0 -> 0.0 | 1.3 -> 0.0 | 7.0 -> 0.0 | 8.3 -> 0.0 |
+| Sunflower 2026-04 (158 vs 14) | 6.4 -> 0.6 | 0.6 -> 0.0 | 1.3 -> 0.0 | 3.2 -> 0.0 | 2.5 -> 0.0 |
+| mean | 7.7 -> 1.8 | 1.1 -> 0.6 | 3.9 -> **2.3** | 8.0 -> 2.9 | 8.3 -> **2.9** |
+
+Against a deep independent reference s4's excess over v3 shrinks from 2.1x to 1.3x (2.9 vs
+2.3 per Mpx), and on the two deepest references (Pleiades 2025-11, Sunflower 2026-04) every
+s4 peak the sharp stack missed is confirmed. So most of the "unconfirmed" peaks were real
+faint sources the sharp stack is too shallow to confirm. A small residual excess remains
+on Omega 2025-11 (9.5 vs 7.6) and Orion 2025-12-11 (3.2 vs 1.9): five directions, four
+targets, too few to call. `eval_nn_faint`'s sharp-stack confirmation understates a sharper
+model; use the second-night check alongside it.
+
+### Full pipeline: s4 against v3 (2026-10-21)
+
+`bench_phase4.py` on the five held-out stacks, `--variant nn="--deconvolve nn"`, once with
+v3 and once with s4 copied over `src/data/nn_deconv.npz` (worktree only, restored after;
+`--deconvolve nn` has no model-path option). Results `C:\nn_work\synth\bench_{v3,s4}.json`,
+display JPEGs `C:\nn_work\bench_s4\{v3,s4}`. `ring` x `sky_noise` as above (positive =
+bright halo):
+
+| target | fwhm_ratio base / v3 / s4 | sky_noise v3 / s4 | faint_cnr v3 / s4 | ring x sky_noise base / v3 / s4 | hue err v3 / s4 |
+|---|---|---|---|---|---|
+| Omega 2026-08 | 1.061 / 0.932 / **0.900** | 0.284 / 0.296 | 105 / 102 | 1.17 / 0.37 / 0.37 | 8.5 / 8.6 |
+| Orion 2025-12-27 | 1.064 / 0.954 / 0.960 | 0.085 / 0.086 | 297 / 296 | 0.30 / 0.22 / 0.26 | 5.6 / 5.4 |
+| Pleiades 2025-11 | 1.075 / 0.978 / **0.956** | 0.288 / 0.308 | 68 / 66 | 3.37 / 1.38 / 1.44 | 12.9 / 12.8 |
+| Sculptor | 0.905 / 0.753 / **0.744** | 0.054 / 0.054 | 287 / 302 | 0.33 / 0.57 / **0.73** | 3.8 / 3.8 |
+| Sunflower 2026-03 | 0.885 / 0.750 / **0.727** | 0.047 / 0.048 | 235 / 253 | 0.22 / 0.40 / 0.42 | 4.6 / 4.7 |
+
+In the delivered image s4 is **only 1-3% narrower than v3** on four targets (Orion 0.6%
+wider), with the same noise, faint contrast, colour (Gaia rho within 0.02) and hue. The
+large synthetic gain (width/truth 1.80 -> 1.12) and the real-pair gain (width/input
+0.81-0.92 -> 0.76-0.91) shrink to this through the rest of Phase 4 (restore, star
+reduction, stretch). Sculptor's bright halo is a little stronger (0.57 -> 0.73).
+
+**Verdict: s4 is a real but small improvement; not worth shipping on its own.** The
+synthetic pairs teach sharpening the real images barely use: the network is the same
+24-filter U-Net, and the synthetic-to-real gap (noise model, real PSF wings, saturated
+cores, background statistics) is where further gains would have to come from -- the
+weeks-long "full version" above, not more rounds of this one. Keep v3 shipped. Weights
+and ingredients stay in `C:\nn_work` (`model_deconv_s{1,2,3a,3b,4}.npz`, `synth/`, 1.4 GB)
+until that is decided.
+
+### The original plan (2026-10-18)
 
 Why: the seeing-pair target caps sharpening at the session's sharpest-30% stack -- blur every
 frame shares (optics, focus, debayer) is never removed, and ideal Gaussian stars narrow only

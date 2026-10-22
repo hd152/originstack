@@ -6,6 +6,29 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **Learned noise reduction is now the automatic choice for nebulae and star fields** on
+  Celestron Origin data (`--auto`, the default): `--denoiser nn`, with colour-noise reduction
+  run before it. On five held-out targets this kept star widths within 0.3% and colour
+  accuracy equal to the wavelet denoiser's, at 3.5-27x lower sky noise and 3-40x the
+  faint-structure contrast. Galaxies keep the learned deconvolver; `--denoiser wavelet`
+  restores the previous behaviour. Without the colour-noise step first, the network had
+  widened stars 1-2% on nebula fields.
+
+### Added
+
+- **AAVSO reports: `--aavso-report`** (with `--photometry-timeseries`) writes the target's light
+  curve in the AAVSO Extended Format for WebObs upload, calibrated on AAVSO's own comparison
+  stars (VSP chart) with a check star and optional time bins; `tools/aavso_report.py` makes
+  one from an earlier run. On an Orion Nebula session, comparison stars of V 10-13.6 measured
+  against the others came out at TG - V +0.004 +- 0.035 mag.
+- **`tools/bench_vs_siril.py --external STACK.fits`** scores another stacker's linear colour
+  stack (Astro Pixel Processor, DeepSkyStacker, PixInsight, ...) against OriginStack with the
+  same shared-star width and matched-noise measurements as the Siril comparison;
+  `--external-seconds` records the time you measured, `--reuse-originstack` scores several
+  stacks against one OriginStack run.
+
 ## [2.13.0] - 2026-10-22
 
 Mosaics from the Origin's Mosaic Mode, learned star removal, a reworked comet mode, a faster
