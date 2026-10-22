@@ -25,9 +25,6 @@ match the `VERSION` file and `v*` git tags.
   100-sigma artefacts in every case, kept faint sources both nights show in full, cut sky
   error by 20% on average and never made the image itself worse; on real merges star widths
   and colour calibration were unchanged.
-
-### Added
-
 - **AAVSO reports: `--aavso-report`** (with `--photometry-timeseries`) writes the target's light
   curve in the AAVSO Extended Format for WebObs upload, calibrated on AAVSO's own comparison
   stars (VSP chart) with a check star and optional time bins; `tools/aavso_report.py` makes
