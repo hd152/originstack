@@ -49,3 +49,45 @@ artefact figures carry through unchanged.
   mixed signal error. Next: tolerance from the measured PSF difference (or only act where
   the mean is near the noise), then a version inside `merge.merge_previous_stacks` (the
   nights are already registered and flux-matched there), scored on the same pairs.
+
+## 3. In `--merge`: `--merge-consistency` (opt-in, 2026-10-22)
+
+`merge.consistency_combine`, called from `merge_previous_stacks` (`--merge` and the
+multi-session combine) when `--merge-consistency` is given. N nights, leave-one-out: night i
+is left out of a starlet coefficient when it differs from the others' weighted mean beyond
+`k` (3) x sqrt(noise_i^2 + noise_others^2 + (0.3 mean)^2), the others are within 3 sigma of
+no signal, and night i is the stronger (with two nights: the "absent" rule of section 2).
+Built on the way, each measured:
+
+- **Noise per scale** from the difference to the other nights (shared structure cancels),
+  split by the stacks' inverse-variance weights. A night's own MAD counted nebula structure
+  as noise, 5-8x too high at coarse scales, so the test went lenient exactly there.
+- **Carry**: a flag at >= 5 sigma (chance ~1e-6) also leaves the night out at that place
+  (grown 2^(j+1) px) on every coarser *detail* scale; without it the unflagged coarse
+  scales of a point artefact stayed behind as a ~3-sigma ring. Carrying the 3-sigma flags
+  too dropped 12% of a pure-noise field's coefficients; rejecting whole image areas around
+  flags made 32 px holes over 64% of a test field.
+- **Coarse plane always the plain mean.** Carrying into it swapped in the other night's
+  local sky/nebula level: a background step under every removed artefact (residual -11 to
+  -17%) and signal-error swings of -51 to +14% (Orion).
+
+Final, 8 directions vs the plain weighted mean (`merge_consistency` in
+`tools/eval_cross_night.py`, results `C:\nn_work\synth\xnight6.json`):
+
+| direction | sky error | signal error | one-night 10 / 30 / 100 sigma left |
+|---|---|---|---|
+| Omega 2025-11 + 2026-08 | -40% | +5% | -0.01 / -0.04 / 0.00 |
+| Omega 2026-08 + 2025-11 | -38% | -11% | 0.95 / 0.91 / - (the other night 4.5x noisier) |
+| Orion 12-11 + 12-27 | +15% | -22% | 0.07 / -0.09 / -0.04 |
+| Orion 12-27 + 12-11 | -4% | +9% | 0.14 / -0.10 / -0.04 |
+| Pleiades 10 + 11 | -43% | +9% | 0.44 / -0.13 / -0.04 |
+| Pleiades 11 + 10 | -45% | -24% | 0.18 / -0.13 / -0.04 |
+| Sunflower 03 + 04 | 0% | -18% | 0.87 / 0.48 / -0.04 |
+| Sunflower 04 + 03 | +5% | +2% | -0.01 / -0.02 / 0.00 |
+
+Mean sky -19%, signal -6% (median -4%), faint sources both nights show kept 100% in every
+direction. Bright structure is the open problem: signal error worse in 4 of 8 (+2 to +9%),
+from real differences between nights on bright nebulae that pass the "absent" test at some
+scales. So it is opt-in, for a combine that shows an artefact, not a default. Synthetic
+tests: `tests/test_merge_consistency.py`. Not yet tried on a real multi-night `--merge`
+end to end (with the merge's own quadratic sky matching, which this evaluation did not use).

@@ -1494,7 +1494,8 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
         if others:
             combined, merge_info = merge_previous_stacks(
                 ref_stack, int(ref_meta.get('nframes') or 1), others,
-                verbose=getattr(args, 'verbose', False), skip_unusable=True)
+                verbose=getattr(args, 'verbose', False), skip_unusable=True,
+                consistency=getattr(args, 'merge_consistency', False))
         else:   # a filter group of one session: finish it on its own
             combined, merge_info = ref_stack, None
     except Exception as exc:
@@ -2229,6 +2230,13 @@ def build_parser() -> argparse.ArgumentParser:
                         'stack. No cross-session outlier rejection (each session '
                         'already rejected internally). Not supported with '
                         '--drizzle-scale > 1.')
+    g_sessions.add_argument('--merge-consistency', action='store_true',
+                   help='With --merge or a multi-session combine: reject what only one '
+                        'night shows. Per wavelet scale, a night is left out where it '
+                        'has a significant feature the other nights, combined, show '
+                        'nothing of (a satellite glint, an unrejected hot-pixel cluster, '
+                        'a transient, a reflection); structure all nights show keeps the '
+                        'plain weighted mean.')
     g_frames.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
     g_frames.add_argument('--trail-reject', action='store_true',

@@ -81,24 +81,40 @@ def cross_night_filter(a: np.ndarray, b: np.ndarray, wa: float, wb: float, windo
 
 
 def cross_night_consistency(a: np.ndarray, b: np.ndarray, wa: float, wb: float, k: float = 4.0,
-                            tol: float = 0.3, levels: int = LEVELS) -> np.ndarray:
+                            tol: float = 0.3, levels: int = LEVELS, blur_a: float = 0.0,
+                            blur_b: float = 0.0, absent: float = 0.0) -> np.ndarray:
     """Weighted mean of two registered stacks (H, W) of one channel, except where the nights
     disagree significantly: per starlet coefficient, |a - b| > k * sqrt(noise_a^2 + noise_b^2
     + (tol * |mean|)^2) (``tol`` absorbs seeing differences on real structure). There the
     smaller-magnitude coefficient -- the night that does not show the feature -- is used.
     Agreeing structure, faint or not, passes untouched (the Wiener-gain version,
-    ``cross_night_filter``, shrank faint sources both nights show to 30-67%)."""
+    ``cross_night_filter``, shrank faint sources both nights show to 30-67%).
+
+    ``blur_a`` / ``blur_b`` (Gaussian sigma, px): the decision is taken on copies blurred to
+    a common resolution (the sharper night blurred to the other's seeing), so stars seen at
+    different seeing do not count as disagreement; the output still uses the originals.
+
+    ``absent`` > 0 adds the artefact signature: the weaker night's coefficient must be
+    consistent with no signal (|x| < absent x its own noise). Structure both nights show at
+    different strengths (calibration, colour, seeing) then keeps the weighted mean; without
+    it the smaller coefficient biased bright structure (signal error worse than the mean on
+    4-5 of 8 directions, with or without PSF matching)."""
     fa, fb = wa / (wa + wb), wb / (wa + wb)
     A, Bw = starlet(a, levels), starlet(b, levels)
+    da = starlet(ndi.gaussian_filter(a, blur_a), levels) if blur_a > 0 else A
+    db = starlet(ndi.gaussian_filter(b, blur_b), levels) if blur_b > 0 else Bw
     out = fa * A[-1] + fb * Bw[-1]
     for j in range(levels):
-        aj, bj = A[j], Bw[j]
-        na = 1.4826 * np.median(np.abs(aj - np.median(aj)))
-        nb = 1.4826 * np.median(np.abs(bj - np.median(bj)))
+        aj, bj, xa, xb = A[j], Bw[j], da[j], db[j]
+        na = 1.4826 * np.median(np.abs(xa - np.median(xa)))
+        nb = 1.4826 * np.median(np.abs(xb - np.median(xb)))
         m = fa * aj + fb * bj
-        thr = k * np.sqrt(na * na + nb * nb + (tol * m) ** 2)
-        bad = np.abs(aj - bj) > thr
-        out += np.where(bad, np.where(np.abs(aj) < np.abs(bj), aj, bj), m)
+        thr = k * np.sqrt(na * na + nb * nb + (tol * (fa * xa + fb * xb)) ** 2)
+        bad = np.abs(xa - xb) > thr
+        a_weaker = np.abs(xa) < np.abs(xb)
+        if absent > 0:
+            bad &= np.where(a_weaker, np.abs(xa) < absent * na, np.abs(xb) < absent * nb)
+        out += np.where(bad, np.where(a_weaker, aj, bj), m)
     return out.astype(np.float32)
 
 
@@ -173,7 +189,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--pairs", required=True)
     ap.add_argument("--window", type=float, nargs="*", default=[])
-    ap.add_argument("--k", type=float, nargs="*", default=[3.0, 4.0])
+    ap.add_argument("--k", type=float, nargs="*", default=[3.0])
+    ap.add_argument("--tol", type=float, nargs="*", default=[0.3, 0.15],
+                    help="tolerances for the PSF-matched decision")
     ap.add_argument("--one-peaks", type=float, nargs="+", default=[10.0, 30.0, 100.0],
                     help="peaks (sigma) of the sources put into one night only")
     ap.add_argument("--only", nargs="*", help="target name prefixes")
@@ -214,6 +232,12 @@ def main() -> None:
             b = (b - gb) * gain + ga
             sb = sb * gain
             wa, wb = 1.0 / sa ** 2, 1.0 / sb ** 2
+            from common_star_fwhm import common_star_fwhm
+            fw = common_star_fwhm(np.moveaxis(a1, -1, 0), np.moveaxis(b, -1, 0))
+            fwa, fwb = (fw["a"], fw["b"]) if fw else (0.0, 0.0)
+            blur_a = np.sqrt(max(fwb ** 2 - fwa ** 2, 0.0)) / 2.3548
+            blur_b = np.sqrt(max(fwa ** 2 - fwb ** 2, 0.0)) / 2.3548
+            print(f"   star FWHM a {fwa:.2f} b {fwb:.2f} px -> decision blur a {blur_a:.2f} b {blur_b:.2f}", flush=True)
             print(f"{name}: {a1.shape[1]}x{a1.shape[0]}, noise a {sa.mean():.1f} b {sb.mean():.1f}, "
                   f"gain {np.round(gain, 3)}", flush=True)
 
@@ -223,11 +247,21 @@ def main() -> None:
                 for win in args.window:
                     out[f"cross_w{win:g}"] = np.stack([cross_night_filter(x_a[..., c], x_b[..., c], wa[c], wb[c], win)
                                                        for c in range(3)], -1)
+                from src.merge import consistency_combine
+                ones = np.ones(x_a.shape[:2], bool)
+                out["merge_consistency"] = consistency_combine([(x_a, ones, wa), (x_b, ones, wb)])[0]
                 for kk in args.k:
-                    cons = np.stack([cross_night_consistency(x_a[..., c], x_b[..., c], wa[c], wb[c], kk)
-                                     for c in range(3)], -1)
-                    out[f"consist_k{kk:g}"] = cons
-                    out[f"consist_k{kk:g}+nn"] = nd.nn_denoise(cons)
+                    out[f"consist_k{kk:g}"] = np.stack([cross_night_consistency(
+                        x_a[..., c], x_b[..., c], wa[c], wb[c], kk) for c in range(3)], -1)
+                    out[f"consist_k{kk:g}_absent"] = np.stack([cross_night_consistency(
+                        x_a[..., c], x_b[..., c], wa[c], wb[c], kk, absent=3.0) for c in range(3)], -1)
+                    out[f"consist_k{kk:g}_psf_absent"] = np.stack([cross_night_consistency(
+                        x_a[..., c], x_b[..., c], wa[c], wb[c], kk, blur_a=blur_a, blur_b=blur_b,
+                        absent=3.0) for c in range(3)], -1)
+                    for tol in args.tol:
+                        out[f"consist_k{kk:g}_psf_t{tol:g}"] = np.stack([cross_night_consistency(
+                            x_a[..., c], x_b[..., c], wa[c], wb[c], kk, tol, blur_a=blur_a, blur_b=blur_b)
+                            for c in range(3)], -1)
                 return out
 
             base = combos(a1, b)
