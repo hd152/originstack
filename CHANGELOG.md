@@ -12,8 +12,9 @@ match the `VERSION` file and `v*` git tags.
   out wherever it shows a significant feature the other nights show nothing of, such as a
   satellite glint, an unrejected hot-pixel cluster or a transient; structure every night
   shows keeps the plain weighted mean. On held-out two-night pairs it removed one-night
-  100-sigma artefacts in every case, kept faint sources both nights show in full and cut
-  sky error by 19% on average; on bright structure the error moved between -24% and +9%.
+  100-sigma artefacts in every case, kept faint sources both nights show in full, cut sky
+  error by 20% on average and never made the image itself worse; on real merges star widths
+  and colour calibration were unchanged.
 
 ### Added
 

@@ -91,3 +91,48 @@ from real differences between nights on bright nebulae that pass the "absent" te
 scales. So it is opt-in, for a combine that shows an artefact, not a default. Synthetic
 tests: `tests/test_merge_consistency.py`. Not yet tried on a real multi-night `--merge`
 end to end (with the merge's own quadratic sky matching, which this evaluation did not use).
+
+## 4. Real merges, and the fixes they forced (2026-10-22)
+
+The held-out evaluation never put two *real* nights through `--merge`; doing that
+(`--merge A.fits --merge-consistency` on Pleiades, Orion and Sunflower, against the same
+merge without it) found three faults the synthetic injections could not show, each fixed
+and re-measured:
+
+1. **Star cores flattened** (Pleiades, nights 17 degrees apart): stars 40% wider at the same
+   flux, the colour calibration lost 7 of 42 stars and moved blue by 8%. The softer night's
+   core sat under 3 sigma at the finest scales, so the sharper night's core counted as a
+   one-night feature. Fix: "absent" must hold at the next coarser scale too.
+2. **Wavelet blocks on clipped cores** (Orion's M42): differences up to 500 sigma. The
+   nights clip at different levels after flux scaling. Fix: the plain mean around any
+   night's clipped plateau (`color_calibrate._clipped_weight`), not a brightness cut, so a
+   bright glint stays rejectable.
+3. **Blue taken from half the stars** (Pleiades): night A's blue was noisier and its stars'
+   blue weaker after flux scaling; deciding per channel called real stars absent in that
+   blue and swapped in the weak one (198 of 400 stars moved > 3% in B/G). Fix: decide on
+   luminance, apply the decision to all three channels (13 of 400 left, by rotated
+   diffraction spikes, which really are in one night only).
+
+Final code, real merges against the plain merge: star widths 1.000 on all three; colour
+calibration identical on Orion and Sunflower (same stars, scales within 0.1%), Pleiades
+B x0.928 vs x0.904 with the same 42 stars; 0.13-0.60% of coefficients changed.
+
+Final code, the 8 held-out directions vs the plain weighted mean
+(`C:\nn_work\synth\xnight9.json`):
+
+| direction | sky error | signal error | one-night 10 / 30 / 100 sigma left |
+|---|---|---|---|
+| Omega 2025-11 + 2026-08 | -39% | -0.1% | -0.02 / -0.04 / 0.00 |
+| Omega 2026-08 + 2025-11 | -35% | -1.3% | 0.95 / 0.90 / - (other night 4.5x noisier) |
+| Orion 12-11 + 12-27 | 0% | 0.0% | -0.09 / -0.09 / -0.02 |
+| Orion 12-27 + 12-11 | 0% | 0.0% | -0.03 / -0.10 / -0.02 |
+| Pleiades 10 + 11 | -42% | 0.0% | 0.44 / -0.14 / -0.01 |
+| Pleiades 11 + 10 | -46% | -0.5% | 0.01 / -0.13 / -0.02 |
+| Sunflower 03 + 04 | 0% | 0.0% | 0.84 / 0.20 / -0.17 |
+| Sunflower 04 + 03 | +5% | 0.0% | -0.01 / -0.02 / 0.00 |
+
+Signal error never worse (mean -0.3%), sky error -20% on average, faint sources both
+nights show kept 100%, one-night 100-sigma artefacts removed in every direction (a slight
+dip where they were, up to -17%). Still opt-in: a single real multi-night user merge
+with a genuine artefact has not been seen yet, and on rotated nights it also trims
+diffraction spikes, which moves the colour calibration slightly (Pleiades +2.7% in B).
