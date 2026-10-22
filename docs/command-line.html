@@ -373,6 +373,21 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
         <dd><p>Per-frame differential photometry: aperture-photometer a fixed Gaia star list on every registered sub and ensemble-calibrate, writing &lt;output&gt;_lightcurves.csv (one row per frame x star) and &lt;output&gt;_lightcurve_stats.csv (per-star mean/rms/reduced-chi2 + a variability flag). Needs a session info.json WCS (Celestron Origin); --plate-solve runs too late for this. Differential only -- no absolute zero point.</p></dd></div>
       <div id="opt-photometry-target"><dt><code>--photometry-target</code> <var>RA,DEC</var></dt>
         <dd><p>--photometry-timeseries: mark one star as the target. &quot;RA,DEC&quot; in degrees, or &quot;px:X,Y&quot; in stacked-image pixels. Its light-curve stats are printed and flagged in the CSVs.</p></dd></div>
+      <div id="opt-aavso-report"><dt><code>--aavso-report</code></dt>
+        <dd><p>With --photometry-timeseries: write &lt;output&gt;_aavso.txt: the light curve of the target in the AAVSO Extended Format, for WebObs upload. Comparison stars come from the AAVSO VSP chart (network), ensemble-calibrated per frame on the green channel (TG band), with a check star. Target: --aavso-star NAME or --photometry-target RA,DEC.</p></dd></div>
+      <div id="opt-aavso-star"><dt><code>--aavso-star</code> <var>NAME</var></dt>
+        <dd><p>--aavso-report: AAVSO name of the variable star (e.g. &quot;SS Cyg&quot;); its chart and position come from AAVSO VSP.</p></dd></div>
+      <div id="opt-aavso-obscode"><dt><code>--aavso-obscode</code> <var>CODE</var></dt>
+        <dd><p>--aavso-report: your AAVSO observer code (written as CHANGEME if not given).</p></dd></div>
+      <div id="opt-aavso-bin"><dt><code>--aavso-bin</code> <var>MINUTES</var></dt>
+        <dd><p>--aavso-report: average the frames in time bins of this many minutes (0 = one point per frame).</p>
+          <p class="meta">Default: <code>0.0</code></p></dd></div>
+      <div id="opt-aavso-fov"><dt><code>--aavso-fov</code> <var>ARCMIN</var></dt>
+        <dd><p>--aavso-report: VSP chart field of view for the comparison stars.</p>
+          <p class="meta">Default: <code>60.0</code></p></dd></div>
+      <div id="opt-aavso-maglimit"><dt><code>--aavso-maglimit</code> <var>MAG</var></dt>
+        <dd><p>--aavso-report: faintest VSP comparison star.</p>
+          <p class="meta">Default: <code>15.0</code></p></dd></div>
       <div id="opt-fix-atmospheric-dispersion"><dt><code>--fix-atmospheric-dispersion</code></dt>
         <dd><p>EXPERIMENTAL: shift R/B channels back toward the green channel&#x27;s position to correct chromatic atmospheric refraction, derived from first principles (Filippenko 1982&#x27;s standard-atmosphere refractive-index formula) -- no established software reference implementation exists for this, unlike this pipeline&#x27;s other corrections (real ADCs are physical prism hardware). --plate-scale and --zenith-angle are auto-derived (from the WCS, and from the info.json GPS + observation time) when not given; --parallactic-angle is still required -- a wrong value shifts colour channels the WRONG way, and mapping it onto the detector needs the image north angle, which is not reliably known here. Not wired into --auto. Most useful for low-altitude targets (zenith angle &gt; ~40deg).</p></dd></div>
       <div id="opt-plate-scale"><dt><code>--plate-scale</code> <var>ARCSEC/PX</var></dt>
