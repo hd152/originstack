@@ -6,6 +6,16 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **Learned noise reduction is now the automatic choice for nebulae and star fields** on
+  Celestron Origin data (`--auto`, the default): `--denoiser nn`, with colour-noise reduction
+  run before it. On five held-out targets this kept star widths within 0.3% and colour
+  accuracy equal to the wavelet denoiser's, at 3.5-27x lower sky noise and 3-40x the
+  faint-structure contrast. Galaxies keep the learned deconvolver; `--denoiser wavelet`
+  restores the previous behaviour. Without the colour-noise step first, the network had
+  widened stars 1-2% on nebula fields.
+
 ### Added
 
 - **AAVSO reports: `--aavso-report`** (with `--photometry-timeseries`) writes the target's light
