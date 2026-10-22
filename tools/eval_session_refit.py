@@ -38,14 +38,8 @@ GAP = 48           # px left out between the fit half and the scored half (recep
 
 
 def features(x, w):
-    """d0 (the last feature map) of nn_denoise.forward for a (C, H, W) input."""
-    def conv(name, t, act=True):
-        return nd._conv3x3(t, w[name + '.weight'], w[name + '.bias'], act)
-    s0 = conv('e0b', conv('e0a', x))
-    s1 = conv('e1b', conv('e1a', nd._pool2(s0)))
-    m = conv('mb', conv('ma', nd._pool2(s1)))
-    d1 = conv('d1b', conv('d1a', nd._up2_cat(m, s1)))
-    return conv('d0b', conv('d0a', nd._up2_cat(d1, s0)))
+    """d0 of the network (src/nn_denoise.features)."""
+    return nd.features(x, w)
 
 
 def normal_equations(za, zb, wt, w, cols):

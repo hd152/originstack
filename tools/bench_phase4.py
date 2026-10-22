@@ -104,6 +104,9 @@ def run_phase4(stacked: np.ndarray, extra: list, stack_path: Optional[str],
                     else float(v))
         if stack_path:
             args._pp_early_cache = os.path.splitext(stack_path)[0] + "_phase4cache.pkl"
+            if getattr(args, "nn_refit", False) and getattr(args, "deconvolve_nn", False):
+                from src.nn_denoise import load_refit  # as --from-stack does
+                args._nn_refit_weights = load_refit(os.path.splitext(stack_path)[0] + "_nnrefit.npz")
         stacked = stacked.copy()
         if header is not None:
             from src.pipeline import prepare_linear_for_phase4

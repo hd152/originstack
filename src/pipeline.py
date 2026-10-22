@@ -1980,6 +1980,12 @@ def postprocess_from_stack(stack_path: str, output_path: str,
     # Background/sky steps are reused from this file while the stack and their
     # settings are unchanged (postprocess._early_cache_*)
     args._pp_early_cache = os.path.splitext(stack_path)[0] + '_phase4cache.pkl'
+    if getattr(args, 'nn_refit', False) and getattr(args, 'deconvolve_nn', False):
+        from src.nn_denoise import load_refit
+        args._nn_refit_weights = load_refit(os.path.splitext(stack_path)[0] + '_nnrefit.npz')
+        safe_print("  --nn-refit: " + ("reusing the refitted deconvolver layer from the run"
+                                       if args._nn_refit_weights is not None else
+                                       "no matching <stem>_nnrefit.npz; the shipped weights are used"))
     _set_diagnostic_dir(args, output_path, stacked.shape)   # --debug diagnostic
     print_phase(4, "Post-processing (from an existing linear stack)")
     t0 = time.time()

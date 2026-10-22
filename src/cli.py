@@ -1728,6 +1728,13 @@ def build_parser() -> argparse.ArgumentParser:
                         'arms) is detected. 0 = plain BayesShrink with no protection; '
                         'default 0.6 (or the --auto preset\'s value). Only applies with '
                         '--denoiser wavelet/curvelet.')
+    g_post.add_argument('--nn-refit', action='store_true',
+                   help='With --deconvolve nn: refit the last layer of the network on this session '
+                        'before Phase 4, from a stack of its sharpest 30%% of frames against '
+                        'the rest (closed form, numpy). Calibrates how hard it sharpens for '
+                        'the night; on held-out sessions it lowered the error by 9%% with '
+                        'star sharpness unchanged. Saved as <output>_nnrefit.npz, which '
+                        '--from-stack reuses.')
     g_post.add_argument('--deconvolve', choices=['off', 'rl', 'tv', 'rl-sv', 'sparse', 'nn'],
                    default='off', dest='deconvolve_mode',
                    help='Deconvolution: off (default), rl (Richardson-Lucy), '

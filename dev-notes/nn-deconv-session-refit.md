@@ -47,3 +47,28 @@ plus one forward pass to d0 over the image (~15 s) and the 3 x (25 x 25) solve. 
 for the error (-9%, up to -41% on a bad night), not for sharpness. Not done; the sky-error
 cost and the extra Phase 3 work are the open questions. Sessions with fewer than ~10
 frames in the sharp subset would fall back to the shipped weights.
+
+## Wired into the pipeline (`--nn-refit`), then measured: worse (2026-10-22)
+
+`--nn-refit` (with `--deconvolve nn`): `stacking.session_nn_refit` builds the split while the
+aligned frames exist (Phase 1 FWHM, sharpest 30% vs the rest, MAD sigma-clipped means read
+per row band), `nn_denoise.refit_output_layer` solves the layer, `<stem>_nnrefit.npz`
+keeps it for `--from-stack` (ignored if fitted on another model file). 27-43 s per session.
+
+Full pipeline, `bench_phase4.py` on fresh stacks, shipped weights -> refitted (the side file
+moved away and back; the stacks' config carries `nn_refit = true`, so a variant flag cannot
+turn it off):
+
+| | star width (P4 / linear) | sky noise | faint_cnr | ring (own noise units) |
+|---|---|---|---|---|
+| Sunflower 2026-03 (held out) | 0.740 -> 0.788 | 0.062 -> 0.092 | 179 -> 123 | 9.2 -> 4.3 |
+| Sculptor 2025-10-11 (held out) | 0.754 -> 0.778 | 0.050 -> 0.073 | 552 -> 375 | 20.1 -> 12.0 |
+| Black Eye 2026-03 (training) | 0.891 -> 0.891 | 0.034 -> 0.033 | 262 -> 266 | ~0 |
+
+**Worse in the delivered image**: stars 3-6% wider, sky ~47% noisier, faint contrast a third
+lower; only the bright-star ring is weaker. The held-out-half test above scored the layer on
+the *rest-of-frames* stack it was fitted for; in the pipeline it runs on the full (proper
+coadd) stack after Phase 4's early steps -- sharper input, and a layer calibrated on the
+softer stack is too cautious there. Not for merging as it stands; a version would have to
+fit on the stack it is applied to (e.g. the full stack against a sharper-subset target,
+with independent noise), which the seeing split does not provide.

@@ -813,6 +813,56 @@ def _sigma_clip_tile_with_mask(tile: np.ndarray, sigma: float, max_iters: int,
         return result.astype(np.float32), rejection_mask
 
 
+_REFIT_BAND_ROWS = 256
+
+
+def session_nn_refit(final: List[FrameInfo], mem_aligned: np.ndarray, args) -> bool:
+    """``--nn-refit``: stack this session's sharpest ``REFIT_SHARP_FRAC`` of the aligned
+    frames (by their Phase 1 FWHM) and the rest, refit the learned deconvolver's output
+    layer on that pair (``nn_denoise.refit_output_layer``), keep the weights on
+    ``args._nn_refit_weights`` for Phase 4 and write them next to the output
+    (``<stem>_nnrefit.npz``) so ``--from-stack`` reuses them. Both stacks are MAD
+    sigma-clipped means read one row band at a time (a disk-backed aligned stack is read
+    once per band). Returns False, leaving the shipped weights, when the split is not
+    possible."""
+    from src import nn_denoise as nd
+    n = len(final)
+    fw = np.array([float((f.metrics or {}).get('fwhm', 0) or 0) for f in final])
+    ok = np.flatnonzero(fw > 0)
+    if n < nd.REFIT_MIN_FRAMES or len(ok) < nd.REFIT_MIN_FRAMES or not nd.model_available(nd.DECONV_MODEL_PATH):
+        safe_print(f"  --nn-refit: {len(ok)} frames with a FWHM (need {nd.REFIT_MIN_FRAMES}); "
+                   f"the shipped weights are used")
+        return False
+    order = ok[np.argsort(fw[ok])]
+    k = max(3, int(round(nd.REFIT_SHARP_FRAC * len(order))))
+    sharp, rest = np.sort(order[:k]), np.sort(order[k:])
+    t0 = time.time()
+    _, h, w, c = mem_aligned.shape
+    stacks = []
+    cancel = getattr(args, '_cancel_event', None)
+    for idx in (rest, sharp):
+        out = np.empty((h, w, c), np.float32)
+        for y0 in range(0, h, _REFIT_BAND_ROWS):
+            if cancel is not None and cancel.is_set():
+                raise RunCancelled("cancelled during --nn-refit")
+            band = np.ascontiguousarray(mem_aligned[idx, y0:y0 + _REFIT_BAND_ROWS], dtype=np.float32)
+            out[y0:y0 + band.shape[1]] = sigma_clip_combine(band, sigma=3.0, max_iters=3)
+        stacks.append(out)
+    w0 = nd.load_weights(nd.DECONV_MODEL_PATH)
+    refit = nd.refit_output_layer(stacks[0], stacks[1], w0, cancel_event=cancel)
+    args._nn_refit_weights = refit
+    safe_print(f"  --nn-refit: deconvolver output layer refitted on {len(sharp)} sharpest vs "
+               f"{len(rest)} frames (FWHM {np.median(fw[sharp]):.2f} vs {np.median(fw[rest]):.2f} px, "
+               f"{format_time(time.time() - t0)})")
+    base = getattr(args, 'output', None)
+    if base:
+        path = os.path.splitext(base)[0] + '_nnrefit.npz'
+        np.savez(path, out_weight=refit['out.weight'], out_bias=refit['out.bias'],
+                 model_sha=nd.model_digest(nd.DECONV_MODEL_PATH), n_sharp=len(sharp), n_rest=len(rest))
+        safe_print(f"    -> {os.path.basename(path)}")
+    return True
+
+
 def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
                        weights: Optional[np.ndarray] = None,
                        winsorize: bool = False,
@@ -2249,6 +2299,19 @@ def run_stacking_phase(
                 safe_print(f"  WARNING: noise validation failed: {_nve}")
             finally:
                 _phase_timings['noise_validation'] = time.perf_counter() - _t_noise_validation
+
+        # --nn-refit: the learned deconvolver's output layer refitted on this session's own
+        # seeing split while the aligned frames still exist (src/nn_denoise.py)
+        if getattr(args, 'nn_refit', False) and getattr(args, 'deconvolve_nn', False):
+            _t_nn_refit = time.perf_counter()
+            try:
+                session_nn_refit(final, mem_aligned, args)
+            except RunCancelled:
+                raise
+            except Exception as _nre:
+                safe_print(f"  WARNING: --nn-refit failed ({_nre}); the shipped weights are used")
+            finally:
+                _phase_timings['nn_refit'] = time.perf_counter() - _t_nn_refit
 
         # --moving-objects: link per-frame residuals into tracks while the aligned
         # frames are still on disk (see src/moving_objects.py).

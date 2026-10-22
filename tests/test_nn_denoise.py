@@ -201,7 +201,7 @@ def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
     from src.models import ProcessingStats
     calls = []
 
-    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0):
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, weights=None):
         calls.append((model_path, restore_sigma))
         return img
     monkeypatch.setattr(ndm, 'nn_denoise', fake)
@@ -213,3 +213,86 @@ def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
     args._diagnostic_dir = None
     pp.postprocess_stack(img, args, [], ProcessingStats())
     assert calls == [(ndm.DECONV_MODEL_PATH, 4.0)]
+
+
+# --nn-refit: the deconvolver's output layer refitted on the session's own seeing split
+
+def _seeing_pair(seed=0, shape=(96, 128)):
+    """A sharp and a softer stack of the same synthetic star field, independent noise."""
+    rng = np.random.default_rng(seed)
+    sky = np.zeros(shape)
+    ys, xs = rng.integers(8, shape[0] - 8, 40), rng.integers(8, shape[1] - 8, 40)
+    sky[ys, xs] = rng.uniform(500, 5000, 40)
+    sharp = ndi.gaussian_filter(sky, 1.2)
+    soft = ndi.gaussian_filter(sky, 1.8)
+    mk = lambda img: (300 + img[:, :, None] * [1.0, 1.1, 0.9] + rng.normal(0, 4, shape + (3,))).astype(np.float32)  # noqa: E731
+    return mk(soft), mk(sharp)
+
+
+def test_refit_with_a_huge_ridge_is_the_shipped_layer():
+    a, b = _seeing_pair()
+    w = nd.load_weights(nd.DECONV_MODEL_PATH)
+    r = nd.refit_output_layer(a, b, w, lam=1e9)
+    np.testing.assert_allclose(r['out.weight'], w['out.weight'], atol=1e-5)
+    np.testing.assert_allclose(r['out.bias'], w['out.bias'], atol=1e-5)
+    assert r['e0a.weight'] is w['e0a.weight']                 # only the output layer changes
+
+
+def test_refit_moves_the_layer_and_saves_for_from_stack(tmp_path):
+    from types import SimpleNamespace
+
+    from src.models import FrameInfo
+    from src.stacking import session_nn_refit
+    a, b = _seeing_pair(seed=1)
+    rng = np.random.default_rng(2)
+    n = 12
+    frames = np.stack([(b if i < 4 else a) + rng.normal(0, 4, a.shape).astype(np.float32) for i in range(n)])
+    final = [FrameInfo(path=f"f{i}.fits", type="light", header={}, metrics={'fwhm': 2.8 if i < 4 else 4.2}) for i in range(n)]
+    out = str(tmp_path / "stack.fits")
+    args = SimpleNamespace(output=out, _cancel_event=None)
+    assert session_nn_refit(final, frames, args)
+    w = nd.load_weights(nd.DECONV_MODEL_PATH)
+    assert not np.allclose(args._nn_refit_weights['out.weight'], w['out.weight'])
+    saved = nd.load_refit(str(tmp_path / "stack_nnrefit.npz"))
+    np.testing.assert_array_equal(saved['out.weight'], args._nn_refit_weights['out.weight'])
+    np.testing.assert_array_equal(saved['out.bias'], args._nn_refit_weights['out.bias'])
+
+
+def test_saved_refit_for_another_model_is_ignored(tmp_path):
+    p = str(tmp_path / "x_nnrefit.npz")
+    w = nd.load_weights(nd.DECONV_MODEL_PATH)
+    np.savez(p, out_weight=w['out.weight'], out_bias=w['out.bias'], model_sha='0' * 16, n_sharp=3, n_rest=7)
+    assert nd.load_refit(p) is None
+    assert nd.load_refit(str(tmp_path / "missing_nnrefit.npz")) is None
+
+
+def test_too_few_frames_keeps_the_shipped_weights():
+    from types import SimpleNamespace
+
+    from src.models import FrameInfo
+    from src.stacking import session_nn_refit
+    a, _ = _seeing_pair()
+    final = [FrameInfo(path=f"f{i}.fits", type="light", header={}, metrics={'fwhm': 3.0}) for i in range(5)]
+    args = SimpleNamespace(output=None, _cancel_event=None)
+    assert not session_nn_refit(final, np.stack([a] * 5), args)
+    assert not hasattr(args, '_nn_refit_weights')
+
+
+def test_phase4_uses_the_refitted_layer(monkeypatch):
+    import src.nn_denoise as ndm
+    import src.postprocess as pp
+    from src.models import ProcessingStats
+    seen = []
+
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, weights=None):
+        seen.append(weights)
+        return img
+    monkeypatch.setattr(ndm, 'nn_denoise', fake)
+    monkeypatch.setattr(ndm, 'model_available', lambda path=None: True)
+    img = (500 + np.random.default_rng(3).normal(0, 5, (96, 128, 3))).astype(np.float32)
+    args = parse_args(['-d', '.', '--deconvolve', 'nn', '--nn-refit', '--skip-step', 'background'])
+    args._diagnostic_dir = None
+    marker = {'out.weight': np.zeros((3, 24, 1, 1), np.float32)}
+    args._nn_refit_weights = marker
+    pp.postprocess_stack(img, args, [], ProcessingStats())
+    assert seen == [marker]

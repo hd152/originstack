@@ -77,36 +77,9 @@ def normalised_pair(a: np.ndarray, b: np.ndarray):
     return za, zb, (2.0 / np.maximum(var, 1e-3)).astype(np.float32)
 
 
-def target_variance(z: np.ndarray, sky_level: Optional[np.ndarray] = None) -> np.ndarray:
-    """Per-pixel noise variance of a stack in noise units, ``a * (1 + max(signal, 0) / B)``:
-    sky-limited Poisson noise grows with the light, at the rate the sky level B sets.
-
-    ``a`` is measured directly (MAD of lag-4 row differences on the faintest 30% of the
-    smoothed image -- lag 4 skips the debayer/warp correlation). ``sky_level`` is B per
-    channel in the same noise units. Two fits were tried and dropped: the intercept of a
-    variance-vs-signal line fell to its 1e-3 floor on several sessions (1000x sky weight,
-    loss in the thousands), and its slope, from lag-4 differences on stars and nebulae,
-    measured their structure rather than their noise (normalised noise 0.14-12 on the
-    brightest pixels). Without ``sky_level`` (or B <= 0) the variance is ``a`` alone."""
-    out = np.empty_like(z)
-    for ch in range(z.shape[2]):
-        x = z[..., ch]
-        sm = ndi.gaussian_filter(x, 2.0)
-        d = ((x[:, 4:] - x[:, :-4]) / np.sqrt(2.0)).ravel()
-        sv = sm[:, 2:-2].ravel()
-        sky = d[sv < np.quantile(sv, 0.3)]
-        a = max((1.4826 * np.median(np.abs(sky - np.median(sky)))) ** 2, 1e-6)
-        bl = float(sky_level[ch]) if sky_level is not None else 0.0
-        out[..., ch] = a * (1.0 + np.maximum(sm, 0.0) / bl) if bl > 0 else a
-    return out
-
-
-def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
-    """The sky level B per channel in noise units (median background / sigma)."""
-    return np.median(bg.reshape(-1, bg.shape[-1]), axis=0) / sigma
-
-
-SKY_MATCH_SIGMA = 32.0     # px; far above a star's scale, so its sharpening survives
+# The deconvolution loss weight (target_variance, sky_level_z) and the sky match are shared
+# with the pipeline's per-session refit (--nn-refit), so they live in src/nn_denoise.py.
+from src.nn_denoise import SKY_MATCH_SIGMA, sky_level_z, target_variance  # noqa: E402,F401
 
 
 def deconv_pair(a: np.ndarray, b: np.ndarray):

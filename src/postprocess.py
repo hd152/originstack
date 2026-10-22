@@ -789,8 +789,11 @@ def postprocess_stack(
             nn_start = time.time()
             from src.io_fits import _sky_stats
             _sig_before = _sky_stats(luminance(stacked))[1]
+            _refit = getattr(args, '_nn_refit_weights', None) if _nn_deconv else None
+            if _refit is not None:
+                safe_print("    using this session's refitted output layer (--nn-refit)")
             stacked = nn_denoise(stacked, strength=nn_strength, model_path=_nn_path,
-                                 restore_sigma=nn_restore)
+                                 restore_sigma=nn_restore, weights=_refit)
             # The preview stretch is solved from the sky noise; keep it at the noise the
             # image had before this step, or it would stretch ~10x harder.
             _sig_after = _sky_stats(luminance(stacked))[1]
