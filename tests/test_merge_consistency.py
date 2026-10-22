@@ -97,3 +97,67 @@ def test_three_nights_reject_the_odd_one():
     clean, _ = consistency_combine(_members([a, b, c]))
     out, _ = consistency_combine(_members([a, b + glint, c]))
     assert abs(_flux(out, gy, gx) - _flux(clean, gy, gx)) < 0.1 * _flux(glint, gy, gx)
+
+
+def test_stars_at_different_seeing_are_not_flattened():
+    """The softer night's star cores sit under 3 sigma at the finest scales; testing
+    "absent" there alone dropped the sharper night's cores (Pleiades: stars 40% wider)."""
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(11)
+    pts = np.zeros((H, W))
+    ys, xs = rng.integers(10, H - 10, 40), rng.integers(10, W - 10, 40)
+    pts[ys, xs] = rng.uniform(300, 3000, 40)
+    sharp = ndi.gaussian_filter(pts, 1.0)[:, :, None] * np.ones(3) + 100
+    soft = ndi.gaussian_filter(pts, 1.8)[:, :, None] * np.ones(3) + 100
+    a = sharp + rng.normal(0, 5, sharp.shape)
+    b = soft + rng.normal(0, 5, soft.shape)
+    out, frac = consistency_combine(_members([a, b]))
+    plain = _plain([a, b])
+    for y, x in zip(ys, xs):
+        if 12 < y < H - 12 and 12 < x < W - 12 and pts[y, x] > 1000:
+            assert out[y, x, 1] > 0.9 * plain[y, x, 1]           # the core keeps its peak
+    assert frac < 0.01
+
+
+def test_clipped_cores_keep_the_plain_mean():
+    """Nights clip at different levels after flux scaling; a clipped core and its
+    surroundings disagree without being an artefact (Orion's M42 core: wavelet blocks)."""
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(13)
+    pts = np.zeros((H, W))
+    ys, xs = rng.integers(20, H - 20, 8), rng.integers(20, W - 20, 8)
+    pts[ys, xs] = 60000.0
+    sky = ndi.gaussian_filter(pts, 2.0)[:, :, None] * np.ones(3) + 100
+    a = np.minimum(sky, 4000.0) + rng.normal(0, 5, sky.shape)       # clips at 4000
+    b = np.minimum(sky, 3000.0) + rng.normal(0, 5, sky.shape)       # clips lower
+    out, _ = consistency_combine(_members([a, b]))
+    plain = _plain([a, b])
+    for y, x in zip(ys, xs):
+        box = (slice(y - 10, y + 11), slice(x - 10, x + 11))
+        np.testing.assert_allclose(out[box], plain[box], atol=1e-2)
+
+
+def test_a_noisy_channel_does_not_drop_stars_from_that_colour():
+    """One night's blue much noisier and its stars' blue weaker (Pleiades after flux
+    scaling): deciding per channel called real stars "absent" in that blue and swapped in
+    its weak blue, taking 3-50% of half the stars' blue away; the decision is made on
+    luminance and applied to every channel."""
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(17)
+    pts = np.zeros((H, W))
+    ys, xs = rng.integers(12, H - 12, 30), rng.integers(12, W - 12, 30)
+    pts[ys, xs] = rng.uniform(300, 1500, 30)
+    star = ndi.gaussian_filter(pts, 1.3)[:, :, None]
+    a = star * np.ones(3) + 100 + rng.normal(0, 4, (H, W, 3))
+    noise_b = np.array([4.0, 4.0, 40.0])                 # night b: blue 10x noisier, and its
+    b = star * np.array([1.0, 1.0, 0.7]) + 100 + rng.normal(0, 1, (H, W, 3)) * noise_b   # stars bluer-poor
+    members = [(a.astype(np.float32), np.ones((H, W), bool), 1.0 / np.full(3, 16.0)),
+               (b.astype(np.float32), np.ones((H, W), bool), 1.0 / noise_b ** 2)]
+    out, _ = consistency_combine(members)
+    plain = sum(m[0] * m[2] for m in members) / sum(m[2] for m in members)
+    for y, x in zip(ys, xs):
+        if 14 < y < H - 14 and 14 < x < W - 14:
+            box = (slice(y - 5, y + 6), slice(x - 5, x + 6))
+            f_out = (out[box][:, :, 2] - 100).sum()
+            f_plain = (plain[box][:, :, 2] - 100).sum()
+            assert f_out > 0.97 * f_plain

@@ -346,85 +346,144 @@ def _scale_noise(d: List[np.ndarray], wts: List[np.ndarray], wd: np.ndarray, wsu
     return [a / np.sqrt(wi) for wi in w]
 
 
+def _starlet_details(planes: List[np.ndarray], levels: int):
+    """Per scale, the starlet detail plane of each image and the final coarse planes."""
+    details, cur = [], [p.astype(np.float32) for p in planes]
+    for j in range(levels):
+        nxt = [_starlet_step(x, j) for x in cur]
+        details.append([x - s for x, s in zip(cur, nxt)])
+        cur = nxt
+    return details, cur
+
+
+def _consistency_drops(lum: List[np.ndarray], wts: List[np.ndarray], wsum: np.ndarray,
+                       w: List[float], protect: np.ndarray, k: float, absent: float, tol: float,
+                       levels: int) -> List[List[np.ndarray]]:
+    """drops[j][i]: where night i is left out at starlet scale j, decided on luminance."""
+    from scipy import ndimage as ndi
+    details, _ = _starlet_details(lum, levels)
+    wds = [np.sum([wi * di for wi, di in zip(wts, d)], axis=0) for d in details]
+    noises = [_scale_noise(d, wts, wd, wsum, w) for d, wd in zip(details, wds)]
+    carry = [np.zeros(wsum.shape, bool) for _ in lum]
+    drops = []
+    for j in range(levels):
+        d, wd, noise = details[j], wds[j], noises[j]
+        m_all = wd / wsum
+        r = 2 ** (j + 1)
+        disk = np.hypot(*np.mgrid[-r:r + 1, -r:r + 1]) <= r
+        row = []
+        for i, di in enumerate(d):
+            w_o = wsum - wts[i]
+            has_o = w_o > 1e-20
+            w_o = np.maximum(w_o, 1e-30)
+            m_o = (wd - wts[i] * di) / w_o
+            n_o = np.sqrt(np.sum([(wl * nl) ** 2 for idx, (wl, nl) in enumerate(zip(wts, noise))
+                                  if idx != i], axis=0)) / w_o
+            thr = k * np.sqrt(noise[i] ** 2 + n_o ** 2 + (tol * m_all) ** 2)
+            cand = (has_o & ~protect & (np.abs(m_o) < absent * n_o) & (np.abs(di) > np.abs(m_o))
+                    & (wts[i] > 0))
+            if j + 1 < levels:
+                # absent one scale coarser too: a star the softer night shows below 3 sigma
+                # at this scale is strong at the next; a glint is absent at every scale
+                d1, wd1, nz1 = details[j + 1], wds[j + 1], noises[j + 1]
+                m_o1 = (wd1 - wts[i] * d1[i]) / w_o
+                n_o1 = np.sqrt(np.sum([(wl * nl) ** 2 for idx, (wl, nl) in enumerate(zip(wts, nz1))
+                                       if idx != i], axis=0)) / w_o
+                cand &= np.abs(m_o1) < absent * n_o1
+            excess = np.abs(di - m_o)
+            flag = cand & (excess > thr)
+            row.append((flag | carry[i]) & has_o)
+            strong = flag & (excess > thr * (CONSISTENCY_CARRY_K / k))
+            if strong.any():
+                carry[i] |= ndi.binary_dilation(strong, structure=disk)
+        drops.append(row)
+    return drops
+
+
 def consistency_combine(members: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
                         k: float = CONSISTENCY_K, absent: float = CONSISTENCY_ABSENT,
                         tol: float = CONSISTENCY_TOL,
                         levels: int = CONSISTENCY_LEVELS) -> Tuple[np.ndarray, float]:
     """Inverse-variance mean of registered, flux-matched stacks with cross-night rejection.
 
-    ``members``: (image HWC, valid HW bool, weight per channel (3,)). Per channel and
-    starlet scale, night i is left out of a coefficient when (a) it differs from the
-    weighted mean of the other nights by more than ``k`` x sqrt(its noise^2 + theirs^2 +
-    (tol x the mean)^2), (b) the others are consistent with no signal there (within
-    ``absent`` sigma) and (c) night i is the stronger. Flagged at ``CONSISTENCY_CARRY_K``
-    or more, it stays left out at that place (grown by the scale's footprint) on every
-    coarser detail scale: otherwise the coarse scales of a point artefact, too weak to
-    flag on their own, stayed behind as a ~3-sigma ring. The coarse plane is always the
-    plain mean (see below).
-    (Carrying the k = 3 flags too dropped 12% of a pure-noise field's coefficients.) (Rejecting whole image areas around every
-    flag instead turned chance flags on noise into 32 px holes covering 64% of a test
-    field.) Structure all nights show, at any strength, keeps the plain mean; so do pixels
-    only one night covers. Outside a night's footprint its image is replaced by the plain
-    mean first, so the zero fill never reads as a feature. Returns (merged HWC float32,
-    share of coefficients where a night was left out).
+    ``members``: (image HWC, valid HW bool, weight per channel (3,)). Decided on luminance
+    and applied to all three channels alike, per starlet scale: night i is left out of a
+    coefficient when (a) it differs from the weighted mean of the other nights by more than
+    ``k`` x sqrt(its noise^2 + theirs^2 + (tol x the mean)^2), (b) the others are consistent
+    with no signal there (within ``absent`` sigma), at this scale and the next coarser
+    one, and (c) night i is the stronger. Flagged at ``CONSISTENCY_CARRY_K`` or more, it
+    stays left out at that place (grown by the scale's footprint) on every coarser detail
+    scale. Structure all nights show, at any strength, keeps the plain mean; so do pixels
+    only one night covers and the coarse plane. Returns (merged HWC float32, share of
+    coefficients where a night was left out).
 
-    On held-out two-night pairs against an independent reference (tools/eval_cross_night.py,
-    8 directions, dev-notes/cross-night-agreement.md), vs the plain weighted mean:
-    one-night 100-sigma points removed in every direction, 30-sigma ones in 6 of 8;
-    faint sources both nights show kept 100%; sky error -19% on average; signal error -6%
-    on average but -24% to +9% (worse in 4 of 8), so it stays opt-in. Without condition
-    (b) the weaker night's coefficient biased bright structure (up to +23%)."""
+    Each rule came from a failure on real merges (dev-notes/cross-night-agreement.md):
+
+    - (b) at one scale only flattened star cores where the nights' seeing differed (the
+      softer night's core under 3 sigma at the finest scales; Pleiades stars 40% wider).
+    - Deciding per channel dropped stars from one colour: a night's noisier blue after flux
+      scaling (Pleiades, x1.46) showed real stars under 3 sigma, the other night's blue
+      star was dropped, and half the stars lost 3-50% of their blue (colour calibration
+      B x0.904 -> x0.980). Luminance has the signal; glints, hot-pixel clusters and
+      transients show in it too.
+    - Without the carry, a point artefact's coarse scales stayed behind as a ~3-sigma ring;
+      carrying the 3-sigma flags too dropped 12% of a pure-noise field's coefficients.
+    - Leaving a night out of the coarse plane swapped in the other night's sky level: a
+      background step under every removed artefact and signal error -51 to +14% (Orion).
+    - Around any night's clipped plateau, the plain mean: nights clip at different levels
+      after flux scaling, and on Orion's M42 core the selection stitched them together in
+      wavelet-sized blocks (up to 500 sigma). A plateau, not a brightness cut: a satellite
+      glint is often a night's brightest feature and must stay rejectable.
+    - Noise per scale from the difference to the other nights (``_scale_noise``).
+    - Outside a night's footprint its image is replaced by the plain mean first, so the
+      zero fill never reads as a feature."""
     from scipy import ndimage as ndi
+
+    from src.color_calibrate import _clipped_weight
     H, W = members[0][0].shape[:2]
-    out = np.zeros((H, W, 3), np.float32)
-    n_flag = n_tot = 0
-    for c in range(3):
-        wts = [np.where(v, float(w[c]), 0.0).astype(np.float32) for _, v, w in members]
+    sat = np.zeros((H, W), bool)
+    for img, v, _ in members:
+        cw = _clipped_weight(np.where(v[:, :, None], img, 0.0).astype(np.float32))
+        if cw is not None:
+            sat |= v & (cw > 0)
+    protect = ndi.binary_dilation(sat, iterations=2 ** (levels + 1)) if sat.any() else sat
+
+    def filled(c):
+        """Per night, channel c (None: luminance) with the plain mean outside its footprint,
+        and the per-pixel weights."""
+        if c is None:
+            # inverse variance of the channel mean: 9 / sum(1 / w_c)
+            ws = [9.0 / float(np.sum(1.0 / np.asarray(w, np.float64))) for _, _, w in members]
+            planes = [img.mean(axis=2) for img, _, _ in members]
+        else:
+            ws = [float(w[c]) for _, _, w in members]
+            planes = [img[:, :, c] for img, _, _ in members]
+        wts = [np.where(v, wi, 0.0).astype(np.float32) for wi, (_, v, _) in zip(ws, members)]
         wsum = np.maximum(np.sum(wts, axis=0), 1e-30)
-        plain = np.sum([wi * np.where(v, img[:, :, c], 0.0) for wi, (img, v, _) in zip(wts, members)],
+        plain = np.sum([wi * np.where(v, p, 0.0) for wi, p, (_, v, _) in zip(wts, planes, members)],
                        axis=0) / wsum
-        cur = [np.where(v, img[:, :, c], plain).astype(np.float32) for img, v, _ in members]
-        carry = [np.zeros((H, W), bool) for _ in members]     # flagged at a finer scale here
+        return [np.where(v, p, plain) for p, (_, v, _) in zip(planes, members)], wts, wsum, ws
+
+    lum, wts_l, wsum_l, ws_l = filled(None)
+    drops = _consistency_drops(lum, wts_l, wsum_l, ws_l, protect, k, absent, tol, levels)
+    out = np.zeros((H, W, 3), np.float32)
+    for c in range(3):
+        planes, wts, wsum, _ = filled(c)
+        details, coarse = _starlet_details(planes, levels)
         acc = np.zeros((H, W), np.float32)
         for j in range(levels):
-            nxt = [_starlet_step(x, j) for x in cur]
-            d = [x - s for x, s in zip(cur, nxt)]
-            wd = np.sum([wi * di for wi, di in zip(wts, d)], axis=0)
-            noise = _scale_noise(d, wts, wd, wsum, [float(w[c]) for _, _, w in members])
-            m_all = wd / wsum
-            r = 2 ** (j + 1)
-            disk = np.hypot(*np.mgrid[-r:r + 1, -r:r + 1]) <= r
             wk_sum = np.zeros((H, W), np.float32)
             wk_d = np.zeros((H, W), np.float32)
-            for i, di in enumerate(d):
-                w_o = wsum - wts[i]
-                has_o = w_o > 1e-20
-                w_o = np.maximum(w_o, 1e-30)
-                m_o = (wd - wts[i] * di) / w_o
-                n_o = np.sqrt(np.sum([(wl * nl) ** 2 for idx, (wl, nl) in enumerate(zip(wts, noise))
-                                      if idx != i], axis=0)) / w_o
-                thr = k * np.sqrt(noise[i] ** 2 + n_o ** 2 + (tol * m_all) ** 2)
-                cand = has_o & (np.abs(m_o) < absent * n_o) & (np.abs(di) > np.abs(m_o)) & (wts[i] > 0)
-                excess = np.abs(di - m_o)
-                flag = cand & (excess > thr)
-                drop = (flag | carry[i]) & has_o
-                n_flag += int(drop.sum())
-                strong = flag & (excess > thr * (CONSISTENCY_CARRY_K / k))
-                if strong.any():
-                    carry[i] |= ndi.binary_dilation(strong, structure=disk)
-                wk = np.where(drop, 0.0, wts[i])
+            for i, di in enumerate(details[j]):
+                wk = np.where(drops[j][i], 0.0, wts[i])
                 wk_sum += wk
                 wk_d += wk * di
+            m_all = np.sum([wi * di for wi, di in zip(wts, details[j])], axis=0) / wsum
             acc += np.where(wk_sum > 0, wk_d / np.maximum(wk_sum, 1e-30), m_all)
-            n_tot += H * W
-            cur = nxt
-        # coarse plane: always the plain weighted mean. Leaving a night out of it locally
-        # swaps in the other nights' sky/nebula level, which flux matching never makes
-        # exactly equal: a background step under every removed artefact (residuals
-        # -11 to -17%) and signal-error swings of -51 to +14% on bright nebulae.
-        acc += np.sum([wi * x for wi, x in zip(wts, cur)], axis=0) / wsum
+        acc += np.sum([wi * x for wi, x in zip(wts, coarse)], axis=0) / wsum
         out[:, :, c] = acc
-    return out, n_flag / max(n_tot, 1)
+    n_flag = sum(int(m.sum()) for row in drops for m in row)
+    return out, n_flag / max(levels * H * W, 1)
 
 
 def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
