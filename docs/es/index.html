@@ -90,12 +90,12 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="Secciones">
-        <a href="#time">Velocidad</a> <a href="#app">La aplicación</a> <a href="#compare">Comparativa</a> <a href="stack-celestron-origin.html">Guía</a> <a href="../advanced.html">Avanzado</a> <a href="../how-it-works.html">Cómo funciona</a> <a href="#get">Instalar</a>
+        <a href="#oneclick">Un clic</a> <a href="#time">Velocidad</a> <a href="#app">La aplicación</a> <a href="#compare">Comparativa</a> <a href="stack-celestron-origin.html">Guía</a> <a href="../advanced.html">Avanzado</a> <a href="../how-it-works.html">Cómo funciona</a> <a href="#get">Instalar</a>
       </nav>
     </div>
 
-    <h1><span class="kicker">Software gratuito de apilado para astrofotografía con el Celestron Origin</span> Más detalle débil, estrellas más finas, cielo más limpio.</h1>
-    <p class="lede">OriginStack apila y procesa los archivos FITS en bruto de un Celestron Origin, o las tomas de cualquier cámara a color, hasta obtener una imagen terminada. Se ejecuta en tu propio ordenador, no necesita cuenta y solo se conecta a internet para buscar un nombre de objeto que no reconoce o para pasos opcionales como la resolución astrométrica.</p>
+    <h1><span class="kicker">Apilado y procesado en un clic, gratis, para el Celestron Origin</span> De una noche de tomas en bruto a una imagen terminada, con un solo clic.</h1>
+    <p class="lede">Indique a OriginStack la carpeta que guardó su Celestron Origin, o tomas de cualquier cámara a color, y pulse Iniciar. Calibra, alinea y apila, y luego también termina la imagen: elimina los gradientes, ajusta el color con estrellas de Gaia, reduce el ruido, achica las estrellas y estira el resultado, con ajustes elegidos para su objeto. Funciona en su propio ordenador y no necesita cuenta; solo se conecta a internet para datos de catálogos estelares y nombres de objetos, y <code>--offline</code> desactiva incluso eso.</p>
 
     <div class="actions">
       <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Descargar para Windows</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">Ver el código fuente en GitHub</a>
@@ -115,11 +115,45 @@
       <span class="cap r">114 tomas, apiladas y procesadas</span>
       <input type="range" min="0" max="100" value="50" aria-label="Arrastra para comparar una toma con el apilado terminado">
     </div>
-    <p class="hero-bridge"><span>Empieza por la diferencia</span> <a href="#time">Mira cómo una noche se convierte en una imagen&nbsp;→</a></p>
+    <p class="hero-bridge"><span>Empieza por la diferencia</span> <a href="#oneclick">Vea lo que hace un solo clic&nbsp;→</a></p>
   </div>
 </header>
 
 <main id="main-content">
+<section id="oneclick">
+  <div class="wrap">
+    <h2>Un clic hace todo el trabajo</h2>
+    <p class="intro measure">Otros programas se detienen en el apilado o le dan una caja de herramientas para terminar la imagen usted mismo. En OriginStack el apilado es la mitad del camino: los pasos de acabado de abajo se ejecutan en el mismo clic, en este orden, ajustados al tipo de objeto que reconoció. Cada uno se puede desactivar, y también se guarda el apilado lineal para quien quiera terminarlo en otro programa.</p>
+    <div class="phases">
+      <div>
+        <h3>Color a partir de las estrellas</h3>
+        <p>Las estrellas de su imagen se cruzan con el catálogo Gaia y los colores se ajustan según sus colores conocidos, de modo que una estrella como el Sol sale blanca. Sin balance de blancos manual.</p>
+      </div>
+      <div>
+        <h3>Adiós a los gradientes</h3>
+        <p>La contaminación lumínica, la luz de la Luna y el viñeteado dejan una pendiente de brillo a lo largo de la imagen. Se ajusta un modelo de fondo al cielo alrededor del objeto y se resta.</p>
+      </div>
+      <div>
+        <h3>Un cielo limpio y neutro</h3>
+        <p>Se limpian los píxeles calientes que quedan y el moteado de color, y el cielo queda en un negro uniforme y neutro en vez de teñido.</p>
+      </div>
+      <div>
+        <h3>Menos ruido, el detalle se conserva</h3>
+        <p>Un reductor de ruido por wavelets que protege filamentos y brazos espirales. En galaxias tomadas con un Origin, una pequeña red neuronal entrenada solo con sesiones reales del Origin corrige el desenfoque del seeing y elimina el ruido en un solo paso.</p>
+      </div>
+      <div>
+        <h3>Estrellas más pequeñas, más estructura</h3>
+        <p>Las estrellas se reducen sin perder su color, para que no tapen el objeto, y el detalle de escala media del objeto se realza frente al ruido.</p>
+      </div>
+      <div>
+        <h3>Estirada y lista para compartir</h3>
+        <p>Un estirado que realza la luz débil sin quemar los núcleos brillantes le da el JPEG terminado. En la aplicación puede probar después otro de diez estirados sin volver a procesar.</p>
+      </div>
+    </div>
+    <p class="plain measure">Lo que ocurre antes con cada toma, y las ideas detrás de cada paso, están en <a href="../how-it-works.html">cómo funciona</a>. La comparación con Siril, DeepSkyStacker, PixInsight, Astro Pixel Processor y el apilado propio del Origin está <a href="../compare.html">en su propia página</a>.</p>
+  </div>
+</section>
+
 <section id="time">
   <div class="wrap">
     <h2>Una noche de tomas en aproximadamente un minuto</h2>
@@ -158,7 +192,8 @@
         <p>Se tratan los gradientes de fondo, el color y el ruido, y luego el resultado se estira para poder verlo. El archivo FITS que guarda sigue siendo lineal, listo para cualquier trabajo posterior.</p>
       </div>
     </div>
-    <p class="plain measure">Las tomas se procesan de una en una, así que 500 tomas necesitan más o menos la misma memoria que 50. Los archivos temporales ocupan unos 100 MB de disco por toma mientras dura la ejecución; las tomas alineadas se guardan en memoria cuando hay espacio, dejando siempre libre el 30% de ella.</p>
+    <p class="plain measure">Las tomas se procesan de una en una, así que 500 tomas necesitan más o menos la misma memoria que 50. Los archivos temporales ocupan unos 100 MB de disco por toma mientras dura la ejecución; las tomas alineadas se guardan en memoria cuando hay espacio, dejando siempre libre una quinta parte de ella.</p>
+    <p class="plain measure"><strong>Por qué es rápido.</strong> Más de 80 de los pasos más pesados son Rust compilado, no Python: la combinación de apilado por defecto es unas 37 veces más rápida que el código NumPy al que sustituyó, la reparación de píxeles calientes de 25 a 55 veces y el ajuste del fondo unas 31 veces. La mayoría dan exactamente los mismos números que antes. El procesado de las tomas está organizado según cómo se comporta realmente una CPU, un proceso por núcleo en tres cuartas partes de los núcleos, y varias noches de un mismo objeto se terminan una sola vez en lugar de una por noche: siete sesiones de la Nebulosa de Orión pasaron de 15 a unos 8 minutos.</p>
   </div>
 </section>
 
@@ -190,7 +225,20 @@
 
 <section id="compare">
   <div class="wrap">
-    <h2>Comparativa con Siril y DeepSkyStacker</h2>
+    <h2>Cómo se compara</h2>
+    <p class="intro measure">Lo que da una sola ejecución, a partir de las tomas que guarda el Origin. La tabla completa, con Astro Pixel Processor y notas sobre cada programa, está en la <a href="../compare.html">página de comparación</a>.</p>
+
+    <table class="wide matrix">
+      <thead><tr><th></th><th>OriginStack</th><th>Siril</th><th>DeepSkyStacker</th><th>PixInsight</th><th>App del Origin</th></tr></thead>
+      <tbody>
+        <tr><th>De tomas en bruto a imagen terminada en una sola ejecución</th><td class="yes">Sí, con un clic</td><td>Apilado por script, acabado paso a paso</td><td>Apilado y niveles básicos</td><td>Apilado automatizado, acabado paso a paso</td><td class="yes">Sí, en el telescopio</td></tr>
+        <tr><th>Gradientes, color con Gaia, ruido, estrellas, estirado</th><td class="yes">Todo automático, ajustado a cada objeto</td><td>Herramientas aparte</td><td>No incluido</td><td>Procesos aparte, algunos complementos de pago</td><td>Eliminación de gradientes; el resto no se indica</td></tr>
+        <tr><th>Tamaño de las estrellas con las mismas tomas (OriginStack = 1,00; menor es más nítido)</th><td class="yes">1.00</td><td>1,01 a 1,13</td><td>1.09</td><td>No medido</td><td>1,04 a 1,36</td></tr>
+        <tr><th>Precio</th><td class="yes">Gratis, código abierto</td><td>Gratis, código abierto</td><td>Gratis, código abierto</td><td>Licencia de pago</td><td>Incluida con el telescopio</td></tr>
+      </tbody>
+    </table>
+
+    <h2 class="again">Medido frente a Siril y DeepSkyStacker</h2>
     <p class="intro measure">Las mismas tomas, los mismos bias, darks y flats, un mismo equipo, cada herramienta con ajustes de tipo predeterminado. Tres sesiones del Celestron Origin: la nebulosa Omega (114 × 30 s), la galaxia del Girasol (158 × 20 s) y la galaxia del Escultor (532 × 10 s).</p>
 
     <table class="wide">
@@ -378,7 +426,7 @@ python desktop_app.py</pre>
 <footer>
   <div class="wrap">
     <span>OriginStack es software libre bajo la GNU GPL v3.</span>
-    <span><a href="stack-celestron-origin.html">Cómo apilar imágenes del Origin</a> &nbsp; <a href="../advanced.html">Funciones avanzadas</a> &nbsp; <a href="../how-it-works.html">Cómo funciona</a> &nbsp; <a href="../docs.html">Documentación</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">Código fuente</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Informar de un problema</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">Novedades</a> &nbsp; <a href="privacy.html">Privacidad</a></span>
+    <span><a href="stack-celestron-origin.html">Cómo apilar imágenes del Origin</a> &nbsp; <a href="../compare.html">Comparado con otros programas</a> &nbsp; <a href="../advanced.html">Funciones avanzadas</a> &nbsp; <a href="../how-it-works.html">Cómo funciona</a> &nbsp; <a href="../docs.html">Documentación</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">Código fuente</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Informar de un problema</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">Novedades</a> &nbsp; <a href="privacy.html">Privacidad</a></span>
     <!-- i18n:langs --><span class="langs"><a href="../" hreflang="en" lang="en">English</a> <a href="../de/" hreflang="de" lang="de">Deutsch</a> <a href="../es/" hreflang="es" lang="es" aria-current="true">Español</a> <a href="../fr/" hreflang="fr" lang="fr">Français</a> <a href="../it/" hreflang="it" lang="it">Italiano</a> <a href="../nl/" hreflang="nl" lang="nl">Nederlands</a> <a href="../pt-br/" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
   </div>
 </footer>
