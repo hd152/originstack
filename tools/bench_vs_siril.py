@@ -10,6 +10,15 @@ with Siril's command-line build, then reports per-stage wall time, star sharpnes
 Needs a Siril 1.2+ install (``siril-cli``). Colour (Bayer) FITS lights only. Everything is
 written under ``--workdir``; the input folder is never modified.
 
+Any other stacker (Astro Pixel Processor, DeepSkyStacker, PixInsight WBPP, ...) is scored the
+same way from a stack you made with it: ``--external STACK.fits`` takes its *linear* colour
+output in place of running Siril, ``--external-seconds`` the run time you measured (tools
+without a command line cannot be timed here) and ``--external-name`` the label.
+``--reuse-originstack`` scores several such stacks against one OriginStack run:
+
+    python tools/bench_vs_siril.py lights/ --external app_stack.fits --external-name APP \
+        --external-seconds 412 --workdir bench_out --reuse-originstack
+
 How the numbers are made comparable (and where they are not):
   * Both tools get the same lights and the same bias/dark/flat, with default-style settings.
     Siril: winsorized sigma clip 3/3, additive+scaling normalisation, 2-pass registration.
@@ -163,6 +172,28 @@ def load_linear(path, siril=False):
     return data * 65535.0 if siril else data
 
 
+def load_external(path):
+    """Another stacker's linear colour stack as (3, H, W) float64 on a 16-bit ADU scale.
+    Takes the first HDU with 3-D data, channel-first or channel-last; data normalised to
+    [0, 1] (32-bit float output of Siril, APP and others) is scaled by 65535. The scale does
+    not change any reported figure -- star widths are scale-free and every noise ratio fits
+    a gain -- it only keeps the numbers readable."""
+    from astropy.io import fits
+    with fits.open(path) as hdul:
+        data = next((h.data for h in hdul if h.data is not None and h.data.ndim == 3), None)
+    if data is None:
+        sys.exit(f"{path}: no 3-D (colour) image found; the comparison needs a colour stack")
+    data = np.asarray(data, dtype=np.float64)
+    if data.shape[0] != 3 and data.shape[-1] == 3:
+        data = np.moveaxis(data, -1, 0)
+    if data.shape[0] != 3:
+        sys.exit(f"{path}: expected 3 colour channels, got shape {data.shape}")
+    finite = data[np.isfinite(data)]
+    if finite.size and np.percentile(finite, 99.9) <= 2.0:
+        data = data * 65535.0
+    return data
+
+
 def fwhm_and_stars(cube):
     from src.quality import detect_stars_auto, measure_fwhm
     lum = cube.mean(0).astype(np.float32)
@@ -268,20 +299,46 @@ def main():
     ap.add_argument("--reuse-siril", action="store_true",
                     help="reuse the Siril stack (and its timings) already in --workdir instead of "
                          "re-running Siril -- for comparing several OriginStack settings to one Siril run")
+    ap.add_argument("--external", metavar="STACK.fits",
+                    help="score this linear colour stack from another tool instead of running Siril")
+    ap.add_argument("--external-name", default="External", help="label for --external (e.g. APP, DSS)")
+    ap.add_argument("--external-seconds", type=float,
+                    help="run time you measured for --external (it cannot be timed here)")
+    ap.add_argument("--reuse-originstack", action="store_true",
+                    help="reuse the OriginStack stack (and its timings) already in --workdir -- for "
+                         "scoring several other tools' stacks against one OriginStack run")
     args = ap.parse_args()
 
     lights, cal = split_inputs(args.folder)
     os.makedirs(args.workdir, exist_ok=True)
-    siril = None if args.reuse_siril else find_siril(args.siril)
+    external = args.external is not None
+    if external and not os.path.exists(args.external):
+        sys.exit(f"--external: {args.external} not found")
+    siril = None if (args.reuse_siril or external) else find_siril(args.siril)
+    other = args.external_name if external else "Siril"
     print(f"{len(lights)} lights; calibration: " + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in cal.items()))
 
     import shlex
     extra = shlex.split(args.os_args)
-    print("Running OriginStack" + (f" ({' '.join(extra)})" if extra else "") + " ...")
-    os_path, os_wall, os_phases, os_res = run_originstack(args.folder, args.workdir, extra)
+    os_meta = os.path.join(args.workdir, "originstack_run.json")
+    os_saved = os.path.join(args.workdir, "originstack.fits")
+    if args.reuse_originstack and os.path.exists(os_saved) and os.path.exists(os_meta):
+        print("Reusing the OriginStack stack in --workdir ...")
+        with open(os_meta) as fh:
+            m = json.load(fh)
+        os_path, os_wall, os_phases, os_res = os_saved, m["wall"], m["phases"], m["res"]
+    else:
+        print("Running OriginStack" + (f" ({' '.join(extra)})" if extra else "") + " ...")
+        os_path, os_wall, os_phases, os_res = run_originstack(args.folder, args.workdir, extra)
+        with open(os_meta, "w") as fh:
+            json.dump({"wall": os_wall, "phases": os_phases, "res": os_res, "os_args": extra}, fh)
     si_meta = os.path.join(args.workdir, "siril_run.json")
     si_saved = os.path.join(args.workdir, "siril", "siril_stack.fit")
-    if args.reuse_siril and os.path.exists(si_saved) and os.path.exists(si_meta):
+    if external:
+        print(f"Scoring {other}'s stack {args.external} ...")
+        si_path, si_wall, si_stages = args.external, args.external_seconds, {}
+        si_res = {"peak_private_mb": None, "peak_disk_gb": None, "frames_stacked": None}
+    elif args.reuse_siril and os.path.exists(si_saved) and os.path.exists(si_meta):
         print("Reusing the Siril stack in --workdir ...")
         with open(si_meta) as fh:
             m = json.load(fh)
@@ -293,7 +350,8 @@ def main():
         with open(si_meta, "w") as fh:
             json.dump({"wall": si_wall, "stages": si_stages, "res": si_res}, fh)
 
-    os_cube, si_cube = load_linear(os_path), load_linear(si_path, siril=True)
+    os_cube = load_linear(os_path)
+    si_cube = load_external(si_path) if external else load_linear(si_path, siril=True)
     os_fwhm, os_stars = fwhm_and_stars(os_cube)
     si_fwhm, si_stars = fwhm_and_stars(si_cube)
     rows = noise_ratios(os_cube, si_cube)
@@ -303,9 +361,17 @@ def main():
     print(f"OriginStack end to end (incl. Phase 4 post-processing): {os_wall:.1f}")
     if no_p4:
         print(f"OriginStack without post-processing (like-for-like):    {no_p4:.1f}  {os_phases}")
-    print(f"Siril script total:                                     {si_wall:.1f}  {si_stages}")
+    if not external:
+        print(f"Siril script total:                                     {si_wall:.1f}  {si_stages}")
+    elif si_wall is not None:
+        print(f"{other} (measured by you, not timed here): {si_wall:.1f}")
+    else:
+        print(f"{other}: no time given (--external-seconds)")
     print("\n=== Resources (private memory summed over all processes; disk = fall in free space) ===")
-    for name, r in (("OriginStack", os_res), ("Siril", si_res)):
+    for name, r in (("OriginStack", os_res), (other, si_res)):
+        if r["peak_private_mb"] is None:
+            print(f"{name:<12} not measured (stacked outside this tool)")
+            continue
         print(f"{name:<12} peak memory {r['peak_private_mb'] / 1024:6.1f} GB   peak disk {r['peak_disk_gb']:6.1f} GB   "
               f"frames stacked {r['frames_stacked']} of {len(lights)}")
     from common_star_fwhm import common_star_fwhm
@@ -313,26 +379,29 @@ def main():
     print("\n=== Star width on the same stars in both linear stacks (smaller is sharper) ===")
     if shared:
         print(f"OriginStack {shared['a']:.2f} px (IQR {shared['a_iqr'][0]:.2f}-{shared['a_iqr'][1]:.2f})   "
-              f"Siril {shared['b']:.2f} px (IQR {shared['b_iqr'][0]:.2f}-{shared['b_iqr'][1]:.2f})   "
+              f"{other} {shared['b']:.2f} px (IQR {shared['b_iqr'][0]:.2f}-{shared['b_iqr'][1]:.2f})   "
               f"median per-star ratio {shared['ratio_a_over_b']:.3f}   n={shared['n']}")
     else:
         print("too few matched, unsaturated, isolated stars to compare")
-    print(f"(stars detected: OriginStack {os_stars}, Siril {si_stars}; not comparable as a sharpness figure)")
+    print(f"(stars detected: OriginStack {os_stars}, {other} {si_stars}; not comparable as a sharpness figure)")
     if rows:
-        print("\nOriginStack noise / Siril noise (R, G, B); rows after 0 blur OriginStack's stack, for reference only:")
+        print(f"\nOriginStack noise / {other} noise (R, G, B); rows after 0 blur OriginStack's stack, "
+              "for reference only:")
         for sigma, (fw, r) in rows.items():
             print(f"  blur sigma {sigma:<4} FWHM {fw:5.2f}   {r[0]:.2f} {r[1]:.2f} {r[2]:.2f}")
     mn = matched_noise(os_cube, si_cube)
     if mn:
         print()
-        print("Per channel (R, G, B): OriginStack's star width / Siril's, and its noise / Siril's after "
-              "blurring each channel to Siril's star width (the like-for-like noise figure):")
+        print(f"Per channel (R, G, B): OriginStack's star width / {other}'s, and its noise / {other}'s after "
+              f"blurring each channel to {other}'s star width (the like-for-like noise figure):")
         for name, (w, nz) in zip("RGB", mn):
             print(f"  {name}: width ratio {w:.3f}   noise at matched width {nz:.2f}")
-    with open(os.path.join(args.workdir, "results.json"), "w") as fh:
+    key = other.lower().replace(" ", "_") if external else "siril"
+    with open(os.path.join(args.workdir, f"results_{key}.json" if external else "results.json"), "w") as fh:
         json.dump({"lights": len(lights), "originstack": {"wall": os_wall, "phases": os_phases, "fwhm": os_fwhm,
                                                           "stars": os_stars, **os_res},
-                   "siril": {"wall": si_wall, "stages": si_stages, "fwhm": si_fwhm, "stars": si_stars, **si_res},
+                   key: {"wall": si_wall, "stages": si_stages, "fwhm": si_fwhm, "stars": si_stars, **si_res,
+                         **({"path": os.path.abspath(args.external), "shared_star": shared} if external else {})},
                    "noise": {str(k): v[1] for k, v in (rows or {}).items()},
                    "matched_noise": mn}, fh, indent=2)
 

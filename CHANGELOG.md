@@ -23,6 +23,11 @@ match the `VERSION` file and `v*` git tags.
   stars (VSP chart) with a check star and optional time bins; `tools/aavso_report.py` makes
   one from an earlier run. On an Orion Nebula session, comparison stars of V 10-13.6 measured
   against the others came out at TG - V +0.004 +- 0.035 mag.
+- **`tools/bench_vs_siril.py --external STACK.fits`** scores another stacker's linear colour
+  stack (Astro Pixel Processor, DeepSkyStacker, PixInsight, ...) against OriginStack with the
+  same shared-star width and matched-noise measurements as the Siril comparison;
+  `--external-seconds` records the time you measured, `--reuse-originstack` scores several
+  stacks against one OriginStack run.
 
 ## [2.13.0] - 2026-10-22
 
