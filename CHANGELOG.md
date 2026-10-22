@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **AAVSO reports: `--aavso-report`** (with `--photometry-timeseries`) writes the target's light
+  curve in the AAVSO Extended Format for WebObs upload, calibrated on AAVSO's own comparison
+  stars (VSP chart) with a check star and optional time bins; `tools/aavso_report.py` makes
+  one from an earlier run. On an Orion Nebula session, comparison stars of V 10-13.6 measured
+  against the others came out at TG - V +0.004 +- 0.035 mag.
+
 ## [2.13.0] - 2026-10-22
 
 Mosaics from the Origin's Mosaic Mode, learned star removal, a reworked comet mode, a faster

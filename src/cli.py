@@ -992,7 +992,8 @@ def _restore_args(args: argparse.Namespace, baseline: dict) -> None:
         setattr(args, key, _copy_arg_value(value))
 
 
-_ONLINE_FEATURES = ('plate_solve', 'annotate', 'photometry', 'photometry_timeseries', 'color_calibrate')
+_ONLINE_FEATURES = ('plate_solve', 'annotate', 'photometry', 'photometry_timeseries', 'aavso_report',
+                    'color_calibrate')
 # --plate-solve stays on offline with the built-in solver (cached index tiles only)
 _OFFLINE_OK = {'plate_solve': lambda a: getattr(a, 'plate_solver', 'auto') in ('auto', 'local')}
 
@@ -2399,6 +2400,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help='--photometry-timeseries: mark one star as the target. '
                         '"RA,DEC" in degrees, or "px:X,Y" in stacked-image pixels. '
                         'Its light-curve stats are printed and flagged in the CSVs.')
+    g_out.add_argument('--aavso-report', action='store_true',
+                   help='With --photometry-timeseries: write <output>_aavso.txt: the light curve of the target '
+                        'in the AAVSO Extended Format, for WebObs upload. Comparison '
+                        'stars come from the AAVSO VSP chart (network), ensemble-calibrated per '
+                        'frame on the green channel (TG band), with a check star. Target: '
+                        '--aavso-star NAME or --photometry-target RA,DEC.')
+    g_out.add_argument('--aavso-star', default=None, metavar='NAME',
+                   help='--aavso-report: AAVSO name of the variable star (e.g. "SS Cyg"); its '
+                        'chart and position come from AAVSO VSP.')
+    g_out.add_argument('--aavso-obscode', default=None, metavar='CODE',
+                   help='--aavso-report: your AAVSO observer code (written as CHANGEME if not given).')
+    g_out.add_argument('--aavso-bin', type=float, default=0.0, metavar='MINUTES',
+                   help='--aavso-report: average the frames in time bins of this many minutes '
+                        '(0 = one point per frame).')
+    g_out.add_argument('--aavso-fov', type=float, default=60.0, metavar='ARCMIN',
+                   help='--aavso-report: VSP chart field of view for the comparison stars.')
+    g_out.add_argument('--aavso-maglimit', type=float, default=15.0, metavar='MAG',
+                   help='--aavso-report: faintest VSP comparison star.')
     g_out.add_argument('--fix-atmospheric-dispersion', action='store_true',
                        help='EXPERIMENTAL: shift R/B channels back toward the green '
                             'channel\'s position to correct chromatic atmospheric '

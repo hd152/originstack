@@ -309,6 +309,47 @@ def simbad_name_lookup(name: str):
 
 
 # ---------------------------------------------------------------------------
+# AAVSO Variable Star Plotter (comparison-star sequences)
+# ---------------------------------------------------------------------------
+
+_AAVSO_VSP = "https://apps.aavso.org/vsp/api/chart/"
+
+
+def aavso_vsp_chart(star: Optional[str] = None, ra_deg: Optional[float] = None,
+                    dec_deg: Optional[float] = None, fov_arcmin: float = 60.0,
+                    maglimit: float = 16.0, timeout: float = 60.0,
+                    attempts: int = 2) -> Optional[Dict[str, Any]]:
+    """An AAVSO VSP chart as JSON: ``chartid``, the star's ``auid``/``ra``/``dec`` (sexagesimal)
+    when asked by name, and ``photometry`` -- the comparison stars, each with ``auid``,
+    ``label``, ``ra``, ``dec`` and ``bands`` [{band, mag, error}]. By star name, or by
+    position (degrees). None on any failure. The service answered intermittently in the
+    live check (2026-10-22: two empty replies before a 200), so it is tried ``attempts``
+    times."""
+    params: Dict[str, str] = {"fov": f"{float(fov_arcmin):g}", "maglimit": f"{float(maglimit):g}",
+                              "format": "json"}
+    if star:
+        params["star"] = str(star)
+    elif ra_deg is not None and dec_deg is not None:
+        params["ra"] = f"{float(ra_deg):.6f}"
+        params["dec"] = f"{float(dec_deg):.6f}"
+    else:
+        return None
+    url = _AAVSO_VSP + "?" + urllib.parse.urlencode(params)
+    for i in range(max(1, attempts)):
+        try:
+            data = json.loads(_http_get(url, timeout=timeout).decode("utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("photometry"), list):
+                return data
+            return None
+        except OfflineError:
+            raise
+        except Exception:
+            if i + 1 < attempts:
+                time.sleep(2.0)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # astrometry.net (nova.astrometry.net) upload/solve REST API
 # ---------------------------------------------------------------------------
 
