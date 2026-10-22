@@ -6,6 +6,14 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **`tools/bench_vs_siril.py --external STACK.fits`** scores another stacker's linear colour
+  stack (Astro Pixel Processor, DeepSkyStacker, PixInsight, ...) against OriginStack with the
+  same shared-star width and matched-noise measurements as the Siril comparison;
+  `--external-seconds` records the time you measured, `--reuse-originstack` scores several
+  stacks against one OriginStack run.
+
 ## [2.13.0] - 2026-10-22
 
 Mosaics from the Origin's Mosaic Mode, learned star removal, a reworked comet mode, a faster
