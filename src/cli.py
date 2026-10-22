@@ -2188,7 +2188,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
     g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs', 'masked', 'multiscale', 'seti',
-                                             'noisefloor', 'oklab', 'clahe'],
+                                             'noisefloor', 'oklab', 'clahe', 'object'],
                    default='ghs',
                    help='Preview JPEG stretch method (default: ghs). masked blends a stronger '
                         'faint-signal stretch through a smooth luminance mask; multiscale uses '
@@ -2197,7 +2197,10 @@ def build_parser() -> argparse.ArgumentParser:
                         'the sky noise (ignores the preset GHS strength and --preview-black-sigma); '
                         'oklab applies the GHS curve to perceptual lightness and keeps hue and '
                         'saturation; clahe adds contrast-limited local equalisation to the GHS '
-                        'preview where there is extended signal.')
+                        'preview where there is extended signal; object takes the white point '
+                        'and the curve\N{RIGHT SINGLE QUOTATION MARK}s focus from the target itself '
+                        '(found where the telescope pointed), so a small galaxy is not stretched '
+                        'for the empty field around it; plain ghs when the target fills the frame.')
     g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='channel',
                    help='How the ghs/arcsinh stretch treats colour (default: channel). '
                         'preserve: the curve is applied to luminance and each pixel keeps '

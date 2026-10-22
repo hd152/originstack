@@ -229,6 +229,98 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         return np.median(np.stack(imgs, axis=0), axis=0).astype(np.float32)
 
 
+OBJECT_DOWNSAMPLE = 4        # px per block for finding the object (speed; stars are median-filtered out)
+OBJECT_STAR_FILTER = 5       # median filter size in blocks: removes stars up to ~10 px radius
+OBJECT_SIGMA = 4.0           # object = smoothed luminance this many smoothed-sky sigmas above the sky
+OBJECT_MIN_FRAC = 0.0005     # smaller than this share of the frame: a star halo, not an object
+OBJECT_MAX_FRAC = 0.35       # larger: the object fills the frame and plain 'ghs' is the right stretch
+OBJECT_NEAR_FRAC = 0.15      # an object not under the anchor must lie within this share of the diagonal
+OBJECT_MIN_CONTRAST = 15.0   # its core must stand this many smoothed-sky sigmas above the sky
+
+
+def _object_region(lum: np.ndarray, sky: float = 0.0, anchor: Optional[Tuple[float, float]] = None):
+    """The target's extended light, found on the image itself: ``(core, mid, area_frac)``
+    in luminance units -- its bright end (99.5th percentile of the star-free, smoothed
+    light inside it), its typical level (median) and its share of the frame
+    -- or None when there is no separate object (nothing extended, or it fills the frame).
+
+    Stars are median-filtered out at quarter resolution; the object is the connected
+    region more than ``OBJECT_SIGMA`` smoothed-sky sigmas above the sky that contains
+    ``anchor`` (row, col in full-resolution pixels: where the telescope pointed), or the
+    nearest such region within ``OBJECT_NEAR_FRAC`` of the diagonal. Without an anchor the
+    frame centre stands in: the Origin centres its target. (``sky`` is unused: the sky
+    level is measured on the smoothed image itself.)"""
+    from scipy import ndimage as ndi
+    h, w = lum.shape
+    f = OBJECT_DOWNSAMPLE
+    hb, wb = h // f, w // f
+    if hb < 16 or wb < 16:
+        return None
+    small = lum[:hb * f, :wb * f].reshape(hb, f, wb, f).mean(axis=(1, 3)).astype(np.float32)
+    smooth = ndi.gaussian_filter(ndi.median_filter(small, size=OBJECT_STAR_FILTER), 1.5)
+    # the smoothed sky's own level and noise (clipped, like _sky_stats): the MAD of the
+    # lower 60% alone underestimated the noise and found "objects" in empty sky
+    _, sky_s, sig = sigma_clipped_stats(smooth, sigma=2.5, maxiters=5)
+    sky_s, sig = float(sky_s), float(sig)
+    if not np.isfinite(sig) or sig <= 0:
+        return None
+    resid = smooth - sky_s
+    mask = resid > OBJECT_SIGMA * sig
+    lab, n = ndi.label(mask)
+    if n == 0:
+        return None
+    ay, ax = anchor if anchor is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
+    by, bx = int(np.clip(ay / f, 0, hb - 1)), int(np.clip(ax / f, 0, wb - 1))
+    areas = ndi.sum(mask, lab, index=np.arange(1, n + 1))
+    k = int(lab[by, bx])
+    if k == 0 or areas[k - 1] < OBJECT_MIN_FRAC * hb * wb:
+        cents = ndi.center_of_mass(mask, lab, index=np.arange(1, n + 1))
+        best, bestd = 0, np.inf
+        for i, (cy, cx) in enumerate(cents):
+            if areas[i] < OBJECT_MIN_FRAC * hb * wb:
+                continue
+            d = np.hypot(cy - by, cx - bx)
+            if d < bestd:
+                best, bestd = i + 1, d
+        if best == 0 or bestd > OBJECT_NEAR_FRAC * np.hypot(hb, wb):
+            return None
+        k = best
+    frac = float(areas[k - 1]) / (hb * wb)
+    if not OBJECT_MIN_FRAC <= frac <= OBJECT_MAX_FRAC:
+        return None
+    vals = smooth[lab == k]
+    core = float(np.percentile(vals, 99.5))
+    if core - sky_s < OBJECT_MIN_CONTRAST * sig:
+        return None                          # a noise or halo blob, not a target
+    return core, float(np.median(vals)), frac
+
+
+def _object_stretch_points(lum: np.ndarray, sky: float, sigma: float, black: float,
+                           white: float, sp: float,
+                           anchor: Optional[Tuple[float, float]] = None
+                           ) -> Tuple[float, float]:
+    """``(white, SP)`` for ``--stretch object``, starting from the plain 'ghs' ones.
+
+    The whole-frame white point (99.5th percentile) is set by the field: a faint galaxy
+    whose core sits below it ends up in the bottom sliver of the display range. Here the
+    white point comes down to just above the object's own core, and the symmetry point,
+    where the curve puts most of its contrast, moves up to the object's typical (median)
+    level. Only ever *down* for white and *up* for SP: raising white to a bright core
+    darkened the whole of M42 (bright extended cores are the highlight roll-off's job,
+    ``_extended_highlight_top``), and an SP at the object's faint edge, a few sigma above
+    the sky, put the strongest contrast on the sky noise (sky noise +55% on the Black Eye,
+    blotch +50%). No object, or the plain points already right: the plain 'ghs' ones."""
+    reg = _object_region(lum, sky, anchor)
+    if reg is None:
+        return white, sp
+    core, mid, _ = reg
+    w_obj = max(sky + 1.15 * (core - sky), black + 20.0 * sigma)
+    w_new = min(white, w_obj)
+    sp_obj = (mid - black) / max(w_new - black, 1e-12)
+    sp_new = float(min(max(sp, sp_obj), 0.25)) if w_new < white else sp
+    return w_new, sp_new
+
+
 def _preview_white(lum: np.ndarray, sky: float, sigma: float, percentile: float,
                    black: float) -> Tuple[float, float]:
     """Preview white point, and the factor to scale GHS's symmetry point by.
@@ -713,13 +805,14 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_hp: float = 0.95,
                          black_sigma: float = 0.0,
                          color: str = 'preserve',
-                         noise_scale: float = 1.0) -> Optional[np.ndarray]:
+                         noise_scale: float = 1.0,
+                         anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
     """Stretch an HWC float32 image to display uint8 (the shared core of the
     preview JPEG file writer and the live web view). Returns None when the
     required stretch backend is unavailable."""
     out = render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                               noise_scale=noise_scale)
+                               noise_scale=noise_scale, anchor=anchor)
     if out is None:
         return None
     return np.clip(out * 255, 0, 255).astype(np.uint8)
@@ -730,7 +823,8 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_hp: float = 0.95,
                          black_sigma: float = 0.0,
                          color: str = 'preserve',
-                         noise_scale: float = 1.0) -> Optional[np.ndarray]:
+                         noise_scale: float = 1.0,
+                         anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
     """The display stretch of ``render_preview_uint8`` before quantisation:
     HWC float in [0, 1]. ``tools/bench_phase4.py`` scores this.
 
@@ -743,10 +837,13 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
     'noisefloor' is GHS with b solved from the sky noise (``_noise_limited_b``)
     and its own black point; 'oklab' is the GHS curve on OKLab lightness
     (``oklab_stretch``, always colour-preserving); 'clahe' is the GHS preview
-    plus contrast-limited local equalisation where there is extended signal."""
+    plus contrast-limited local equalisation where there is extended signal; 'object' is
+    the GHS preview with its white point and symmetry point taken from the target itself
+    (``_object_stretch_points``; ``anchor`` = where the telescope pointed), and plain
+    'ghs' when there is no separate object."""
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
-    if stretch in ('ghs', 'masked', 'multiscale', 'oklab', 'clahe'):
+    if stretch in ('ghs', 'masked', 'multiscale', 'oklab', 'clahe', 'object'):
         # Generalized Hyperbolic Stretch — uses unified luminance-based normalization
         # so all three channels share the same black/white reference, preserving
         # cross-channel color ratios that would otherwise be destroyed by independent
@@ -775,6 +872,9 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # signal several times more of the normalized range to live in.
         unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
         ghs_sp = ghs_sp * _sp_scale
+        if stretch == 'object':
+            unified_white, ghs_sp = _object_stretch_points(
+                lum, _med, _bg_sigma, unified_black, unified_white, ghs_sp, anchor)
         _top = None
         # Every path that ends in _preserving_preview or the per-channel curve below.
         # The per-channel one was left out while 'preserve' was the default; when the
@@ -979,7 +1079,8 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_hp: float = 0.95, black_sigma: float = 0.0,
                      starless: Optional[np.ndarray] = None,
                      color: str = 'preserve',
-                     noise_scale: float = 1.0) -> None:
+                     noise_scale: float = 1.0,
+                     anchor: Optional[Tuple[float, float]] = None) -> None:
     """Write the preview JPEG. ``starless`` (same shape as ``rgb``), with
     ``stretch='ghs'``, switches to the layered stretch -- see
     ``render_preview_layered_uint8``."""
@@ -987,7 +1088,8 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
         return
     out = render_preview_rgb_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                    ghs_hp=ghs_hp, black_sigma=black_sigma,
-                                   starless=starless, color=color, noise_scale=noise_scale)
+                                   starless=starless, color=color, noise_scale=noise_scale,
+                                   anchor=anchor)
     if out is None:
         return
     write_preview_jpeg(out, path)
@@ -998,7 +1100,8 @@ def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
                              ghs_hp: float = 0.95, black_sigma: float = 0.0,
                              starless: Optional[np.ndarray] = None,
                              color: str = 'preserve',
-                             noise_scale: float = 1.0) -> Optional[np.ndarray]:
+                             noise_scale: float = 1.0,
+                             anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
     """The full-resolution uint8 image ``save_preview_rgb`` writes: the layered
     stretch when ``starless`` is given with ``stretch='ghs'``, else
     ``render_preview_uint8``."""
@@ -1008,7 +1111,7 @@ def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
                                             color=color, noise_scale=noise_scale)
     return render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                 ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                                noise_scale=noise_scale)
+                                noise_scale=noise_scale, anchor=anchor)
 
 
 def preview_jpeg_from_uint8(out: np.ndarray, max_dim: int = 1024) -> bytes:
@@ -1030,7 +1133,28 @@ def preview_stretch_kw(args) -> dict:
         ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
         black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0),
         color=getattr(args, 'stretch_color', 'channel'),
-        noise_scale=float(ns) if isinstance(ns, (int, float)) and ns > 0 else 1.0)
+        noise_scale=float(ns) if isinstance(ns, (int, float)) and ns > 0 else 1.0,
+        anchor=object_anchor(args))
+
+
+def object_anchor(args) -> Optional[Tuple[float, float]]:
+    """(row, col) on the stack where the telescope pointed -- the session's pointing
+    (``info.json``) through the settled stack WCS -- or None (then 'object' starts from
+    the frame centre). The Origin centres its target, so this is where it is."""
+    si = getattr(args, '_session_info', None)
+    cards = getattr(args, '_stack_wcs', None)
+    if si is None or not cards or getattr(si, 'ra_rad', None) is None or getattr(si, 'dec_rad', None) is None:
+        return None
+    try:
+        from astropy.io import fits
+        from astropy.wcs import WCS
+        h = fits.Header()
+        for key, (val, _c) in cards.items():
+            h[key] = val
+        x, y = WCS(h, naxis=2).all_world2pix(np.degrees(si.ra_rad), np.degrees(si.dec_rad), 0)
+        return float(y), float(x)
+    except Exception:
+        return None
 
 
 def write_preview_jpeg(out: np.ndarray, path: str) -> None:
@@ -1066,7 +1190,8 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
                        ghs_hp: float = 0.95, black_sigma: float = 0.0,
                        max_dim: int = 1024, desaturate: float = 0.0,
                        color: str = 'preserve',
-                       noise_scale: float = 1.0) -> Optional[bytes]:
+                       noise_scale: float = 1.0,
+                       anchor: Optional[Tuple[float, float]] = None) -> Optional[bytes]:
     """Stretched preview JPEG as bytes (for the live web view).
 
     ``desaturate`` (0-1) blends the stretched result toward luminance -- see
@@ -1076,7 +1201,7 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
         return None
     out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                               noise_scale=noise_scale)
+                               noise_scale=noise_scale, anchor=anchor)
     if out is None:
         return None
     return preview_jpeg_from_uint8(_desaturate_preview_uint8(out, desaturate), max_dim)
