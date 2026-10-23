@@ -126,10 +126,25 @@ def deconv_pair(a: np.ndarray, b: np.ndarray):
     return za, zb, (1.0 / target_variance(zb, sky_level_z(bg, sigma))).astype(np.float32)
 
 
-def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str = "denoise") -> None:
+def build_bank(pairs_dirs, out: str, per_pair, seed: int = 0, mode: str = "denoise") -> None:
+    """Patch bank from one pairs folder or several (e.g. seeing pairs and the cross-night
+    pairs of tools/gen_crossnight_pairs.py, which are in the same format). ``per_pair`` is
+    one count for every folder or one per folder."""
     rng = np.random.default_rng(seed)
     za_l, zb_l, w_l, sess = [], [], [], []
-    dirs = sorted(d for d in glob.glob(os.path.join(pairs_dir, "*")) if os.path.exists(os.path.join(d, "meta.json")))
+    if isinstance(pairs_dirs, str):
+        pairs_dirs = [pairs_dirs]
+    counts = [per_pair] * len(pairs_dirs) if isinstance(per_pair, int) else list(per_pair)
+    if len(counts) == 1:
+        counts *= len(pairs_dirs)
+    if len(counts) != len(pairs_dirs):
+        raise SystemExit("--per-pair: give one count, or one per --pairs folder")
+    dirs, n_of = [], {}
+    for p, c in zip(pairs_dirs, counts):
+        for d in sorted(glob.glob(os.path.join(p, "*"))):
+            if os.path.exists(os.path.join(d, "meta.json")):
+                dirs.append(d)
+                n_of[d] = c
     for i, d in enumerate(dirs):
         name = os.path.basename(d)
         if is_holdout(name):
@@ -155,7 +170,7 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
                 lum = za.mean(-1)
                 st = detect(lum - np.median(lum))
                 stars = np.c_[np.asarray(st["ycentroid"]), np.asarray(st["xcentroid"])]
-            for k in range(per_pair):
+            for k in range(n_of[d]):
                 if stars is not None and len(stars) and k % 2 == 0:
                     cy, cx = stars[rng.integers(len(stars))]
                     y = int(np.clip(cy - rng.integers(16, PATCH - 16), m, h - PATCH - m))
@@ -430,9 +445,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("bank")
-    b.add_argument("--pairs", required=True)
+    b.add_argument("--pairs", required=True, nargs="+", help="one or more pairs folders")
     b.add_argument("--bank", required=True)
-    b.add_argument("--per-pair", type=int, default=40)
+    b.add_argument("--per-pair", type=int, nargs="+", default=[40],
+                   help="patches per pair: one count, or one per --pairs folder")
     b.add_argument("--mode", choices=["denoise", "deconv"], default="denoise")
     t = sub.add_parser("train")
     t.add_argument("--bank", required=True)

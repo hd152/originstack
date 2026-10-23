@@ -507,3 +507,54 @@ targets sharper than the input without teaching the model to invent detail.
 
 Do not market this as "open-source BlurXTerminator" or promise feature parity. The appropriate
 description is "locally adaptive, artifact-aware neural astronomical deconvolution."
+
+## Cross-night pairs: x1 (2026-10-23) -- sharpest yet, noisier; not shipped
+
+Branch `feat/nn-deconv-crossnight`. The seeing pair's target caps sharpening at the session's
+sharpest-30% stack (median per-frame width ratio 0.89 against the rest). A *stricter* cut
+barely helps: the sharpest 10% are only 3% narrower than the sharpest 30% (median per-frame
+FWHM, 83 sessions; p10-p90 0.93-0.98) for 1.7x the target noise. Two nights of the same target
+differ far more: the better night's sharp-30% against the softer night's rest is 0.61 (27
+targets, p10 0.40, p90 0.81). `tools/gen_crossnight_pairs.py` turns the seeing pairs into
+cross-night pairs (no restacking): the sharpest night's sharp stack aligned onto the softest
+night's grid with `--merge`'s registration (once per target, on the soft night's sharp stack;
+the two soft stacks share a grid, and registering each separately gave Flame -6.9 and 0.0 deg),
+a <= 1 px star-offset check, `--merge`'s gain + quadratic sky surface, cut to the common
+rectangle, width ratio measured on the same stars and kept in 0.65-0.85 (the soft night's
+sharp stack is the input when its rest is too soft). 13 pairs of 27 targets (10 gaps too wide,
+4 alignments refused); 10 outside `HOLDOUT`.
+
+```
+python tools/gen_crossnight_pairs.py --seeing C:/nn_work/nn_deconv/pairs --out C:/nn_work/nn_deconv/crossnight
+C:/nn_work/venv/Scripts/python tools/train_nn_denoise.py bank --mode deconv --pairs C:/nn_work/nn_deconv/pairs C:/nn_work/nn_deconv/crossnight --per-pair 240 480 --bank C:/nn_work/bank_deconv_x1.npz
+C:/nn_work/venv/Scripts/python tools/train_nn_denoise.py train --bank C:/nn_work/bank_deconv_x1.npz --steps 10000 --lr 3e-4 --init src/data/nn_deconv.npz --out C:/nn_work/model_deconv_x1.npz --resume
+```
+
+Bank 22,560 patches (21% cross-night), 940 s on the 1650 Ti; best val 1.382 at step 4000
+(identity 2.518; val set differs from v3's, not comparable), parity 5.5e-7.
+
+Held-out pairs (`eval_nn_deconv`, r4): width / input 0.81-0.91 vs v3's 0.82-0.92 (1-4%
+narrower on 7 of 8 seeing pairs), but error against the sharp stack up on all 8 (Pleiades
+2025-10 0.441 -> 0.509, above `nn_denoise`'s 0.484) -- partly by design, output narrower than
+that target is scored as error. On the 3 held-out cross-night pairs, error against the better
+night: Omega 4.276 -> 4.106, Sunflower 0.189 -> 0.181, Orion equal.
+
+Invented peaks (`eval_peaks_second_night`, unconfirmed > 2 sigma per Mpx, second night): **x1
+at or below v3 in every direction** (Omega 7.6 -> 5.1, Orion 1.9 -> 0.0 and 1.9 -> 0.6,
+Pleiades 92.9 -> 81.5 on the shallow-reference direction, the rest equal) -- unlike s4.
+
+Full pipeline (`bench_phase4`, x1 copied over `src/data/nn_deconv.npz` in the worktree only;
+`C:\nn_work\synth\bench_x1.json`), v3 / x1:
+
+| target | fwhm_ratio | sky_noise | faint_cnr | ring x sky_noise |
+|---|---|---|---|---|
+| Omega | 0.932 / **0.922** | 0.284 / 0.316 | 105 / 94 | 0.37 / 0.36 |
+| Orion | 0.954 / **0.927** | 0.085 / 0.102 | 297 / 248 | 0.22 / 0.20 |
+| Pleiades | 0.978 / **0.912** | 0.288 / 0.344 | 68 / 57 | 1.38 / 1.49 |
+| Sculptor | 0.753 / **0.736** | 0.054 / 0.067 | 287 / 230 | 0.56 / 0.71 |
+| Sunflower | 0.750 / **0.729** | 0.047 / 0.056 | 235 / 193 | 0.40 / 0.56 |
+
+**Verdict: the sharpest model so far (1-7% narrower than v3 in the delivered image, mean 3.3%,
+against s4's 1-3%), with no extra invented peaks, but 11-24% more sky noise, 10-20% less
+faint contrast and a stronger bright halo on the galaxies (Sculptor, Sunflower).** Not shipped:
+it trades noise for sharpness rather than improving both. Weights `C:\nn_work\model_deconv_x1.npz`.
