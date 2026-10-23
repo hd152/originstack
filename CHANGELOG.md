@@ -6,6 +6,12 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-10-23
+
+Learned noise reduction by default for nebulae and star fields, a stretch that finds the
+target itself, cleaner multi-night combines, AAVSO light-curve reports, and a way to support
+the project.
+
 ### Changed
 
 - **Learned noise reduction is now the automatic choice for nebulae and star fields** on
