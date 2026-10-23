@@ -187,7 +187,7 @@ def build_bank(pairs_dirs, out: str, per_pair, seed: int = 0, mode: str = "denoi
     print(f"bank: {len(za_l)} patches -> {out}")
 
 
-def make_net():
+def make_net(filters: int = 24):
     import torch.nn as nn
 
     def conv(i, o):
@@ -196,7 +196,7 @@ def make_net():
     class NnDenoiseNet(nn.Module):
         """Mirrors src/nn_denoise.forward layer for layer (names become the npz keys)."""
 
-        def __init__(self, c=3, f=24):
+        def __init__(self, c=3, f=filters):
             super().__init__()
             self.e0a, self.e0b = conv(c, f), conv(f, f)
             self.e1a, self.e1b = conv(f, 2 * f), conv(2 * f, 2 * f)
@@ -301,7 +301,8 @@ def peak_penalty(out, truth, w, masked: bool = True):
 
 def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0, resume: bool = False,
           inject: bool = False, synth: Optional[str] = None, synth_frac: float = 0.5,
-          init: Optional[str] = None, synth_set: Optional[dict] = None, peak_pen: float = 0.0) -> None:
+          init: Optional[str] = None, synth_set: Optional[dict] = None, peak_pen: float = 0.0,
+          filters: int = 24) -> None:
     import torch
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -315,7 +316,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     tr_idx, va_idx = np.flatnonzero(~val), np.flatnonzero(val)
     print(f"{n} patches, train {len(tr_idx)}, val {len(va_idx)}, device {dev}", flush=True)
 
-    net = make_net().to(dev)
+    net = make_net(filters).to(dev)
     if init:
         with np.load(init) as fw:
             net.load_state_dict({k: torch.from_numpy(fw[k]) for k in fw.files})
@@ -438,7 +439,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     with open(os.path.splitext(out)[0] + "_train.json", "w") as fh:
         json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val,
                    "inject": inject, "synth": synth, "synth_frac": synth_frac if synth else None,
-                   "init": init, "synth_set": synth_set, "peak_penalty": peak_pen}, fh)
+                   "init": init, "synth_set": synth_set, "peak_penalty": peak_pen, "filters": filters}, fh)
 
 
 def main() -> None:
@@ -462,6 +463,8 @@ def main() -> None:
     t.add_argument("--synth", help="gen_synth_deconv.py npz: mix synthetic-blur pairs into each batch")
     t.add_argument("--synth-frac", type=float, default=0.5, help="share of each batch that is synthetic")
     t.add_argument("--init", help="start from these exported weights (.npz)")
+    t.add_argument("--filters", type=int, default=24,
+                   help="U-Net base width (the numpy forward pass takes any; run time grows ~ its square)")
     t.add_argument("--peak-penalty", type=float, default=0.0,
                    help="weight of the synthetic-batch peak penalty (peak_penalty)")
     t.add_argument("--synth-set", action="append", default=[], metavar="NAME=VALUE",
@@ -472,6 +475,7 @@ def main() -> None:
     else:
         train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject,
               synth=args.synth, synth_frac=args.synth_frac, init=args.init, peak_pen=args.peak_penalty,
+              filters=args.filters,
               synth_set={k: tuple(float(x) for x in v.split(",")) if "," in v else float(v)
                          for k, v in (kv.split("=", 1) for kv in args.synth_set)})
 

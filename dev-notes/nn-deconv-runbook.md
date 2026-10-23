@@ -577,3 +577,34 @@ added. Every trained variant so far (v3, s1-s4, x1) sits on one width-noise trad
 the curve needs a better prior (more capacity, or truth sharper and cleaner than any Origin
 stack), not more real pairs. (`_sky_stats` sigma is not a pixel-noise measure here: it gave the
 denoiser the input's noise.)
+
+## Capacity sweep (2026-10-23): a wider network does not help -- stop here
+
+Same seeing-pair bank (17,760 patches, 83 pairs, `--per-pair 240`), v3's recipe from scratch
+(30,000 steps, lr 1e-3), U-Net base width 24 / 32 / 48 (`train_nn_denoise.py train --filters`;
+the numpy forward pass takes any width). GTX 1650 Ti at 38 W: 55 min / 1.7 h / 2.0 h.
+`tools/eval_nn_matched_noise.py` on the 9 held-out seeing inputs (centre 2304x1536), medians:
+
+| model | params | best val (identity 1.872) | width | noise / v3 | width at v3's noise | s / 3.5 Mpx |
+|---|---|---|---|---|---|---|
+| v3 (shipped) | 0.27 M | 1.2248 | 0.868 | 1.00 | 0.868 | 6.4 |
+| f24 (retrain) | 0.27 M | 1.2201 | 0.855 | 1.00 | **0.856** | 5.9 |
+| f32 | 0.47 M | **1.2110** | 0.874 | 1.01 | 0.877 | 9.2 |
+| f48 | 1.06 M | 1.2135 | 0.866 | 1.02 | 0.871 | 21.1 |
+
+The wider networks reach a slightly lower validation loss but are **not sharper at equal noise**
+(f32 and f48 are wider than f24), and cost 1.6x / 3.6x the run time. Invented peaks
+(`eval_peaks_second_night`): all four within each other's spread on every direction (f48 a
+little higher on Omega 2026-08 -> 2025-11, 44.8 vs 37.1 per Mpx; Pleiades 2025-10 within 3).
+
+Two conclusions:
+- **Capacity is not the limit; the training target is.** With v3 (seeing pairs), s1-s4
+  (synthetic blur), x1 (cross-night pairs) and f32/f48 (wider), every variant lands on one
+  width-noise curve. More sharpening needs a target sharper and cleaner than any Origin stack
+  (e.g. survey imaging as truth with measured Origin PSFs and noise), which is weeks of work and
+  not started.
+- **Run-to-run spread is ~1.5%:** f24, the same recipe as v3 on the same pairs, is 1.4% narrower
+  at the same noise. Differences of 1-3% between models trained once (s4 vs v3 above) are within
+  it. Not a reason to replace v3.
+
+Models `C:\nn_work\model_deconv_f{24,32,48}.npz`; results `C:\nn_work\capacity\`.
