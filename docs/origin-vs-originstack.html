@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Celestron Origin's own stack vs OriginStack: ten sessions side by side</title>
+<meta name="description" content="Ten Celestron Origin sessions, each shown twice: the stack the telescope saved itself and OriginStack's one-click result from the same frames. Orion, Horsehead, Trifid, Lagoon and Iris nebulae, Andromeda, Whirlpool, M101 and Triangulum galaxies, and the Pleiades.">
+<meta name="keywords" content="Celestron Origin stack comparison, Celestron Origin FinalStackedMaster, Celestron Origin processing, Celestron Origin vs PixInsight, smart telescope stacking software, OriginStack">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/origin-vs-originstack.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/origin-vs-originstack.html">
+<meta property="og:title" content="The Celestron Origin's own stack vs OriginStack">
+<meta property="og:description" content="Ten sessions, the same frames, side by side: what the Origin saved and what one click of OriginStack makes of it.">
+<meta property="og:image" content="https://originstack.site/img/vs-orion-os-full.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+<style>
+  .vs-view { display: inline-flex; margin-top: 26px; border: 1px solid rgba(232, 237, 245, .5); }
+  .vs-view button {
+    font: 500 1rem/1 var(--display); color: #bfcadb; background: transparent; border: 0;
+    padding: 11px 16px; cursor: pointer;
+  }
+  .vs-view button[aria-pressed="true"] { background: #e8edf5; color: var(--night); }
+  .vs-view button:focus-visible { outline: 3px solid var(--oiii); outline-offset: 3px; }
+  .vs-list { display: grid; gap: clamp(56px, 8vw, 96px); margin-top: 34px; }
+  .vs-list figure { margin: 0; display: grid; gap: 10px; max-width: 1100px; }
+  .vs-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+  .vs-head h3 { margin: 0; font-size: clamp(1.3rem, 2.4vw, 1.7rem); }
+  .vs-head h3 span { color: var(--slate); font-weight: 400; }
+  .vs-list figure p { margin: 0; max-width: 64ch; }
+  .vs-list .data { color: var(--slate); }
+  .wipe.vs { aspect-ratio: 3 / 2; margin-top: 0; }
+  .vs-method h3 { margin-top: 28px; font-size: 1.2rem; }
+  .vs-method p { max-width: 64ch; }
+</style>
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="gallery.html">Gallery</a>
+        <a href="compare.html">Compared</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>What your Origin saved, and what OriginStack makes of it</h1>
+    <p class="lede">Ten sessions from one Celestron Origin. In each picture, the left side is the stack the telescope saved itself, and the right side is OriginStack's result from the same session's frames, with one click and default settings. Drag across a picture to compare.</p>
+    <div class="vs-view" role="group" aria-label="View">
+      <button type="button" id="view-crop" data-view="crop" aria-pressed="true">Target, full resolution</button>
+      <button type="button" id="view-full" data-view="full" aria-pressed="false">Whole frame</button>
+    </div>
+  </div>
+</header>
+
+<main>
+<section id="sessions">
+  <div class="wrap">
+    <h2>Ten sessions, the same frames</h2>
+    <p class="intro measure">To keep the comparison fair, the Origin's image is shown with a standard one-click auto-stretch, because the file it saves is too flat to look at directly. <a href="#method">How each side was made</a> is described below.</p>
+    <div class="vs-list">
+      <figure id="orion">
+        <figcaption class="vs-head"><h3>Orion Nebula <span>(M42)</span></h3><p class="data">emission nebula</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Orion Nebula: the Origin's own stack and OriginStack's" data-full="1400 / 923">
+          <img class="after" src="img/vs-orion-os-crop.jpg" data-crop="img/vs-orion-os-crop.jpg" data-full-src="img/vs-orion-os-full.jpg" width="960" height="640" loading="lazy" alt="Orion Nebula stacked and processed by OriginStack: a bright white core in a broad cloud of red and grey gas with dark lanes.">
+          <img class="before" src="img/vs-orion-origin-crop.jpg" data-crop="img/vs-orion-origin-crop.jpg" data-full-src="img/vs-orion-origin-full.jpg" width="960" height="640" loading="lazy" alt="Orion Nebula as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Orion Nebula with OriginStack's">
+        </div>
+        <p class="data">130 frames, 43 minutes total exposure &middot; OriginStack run 1 min 50 s</p>
+        <p>The auto-stretch blows out the bright core. OriginStack keeps the Trapezium region and the dark lanes around it, and the outer red loops show.</p>
+      </figure>
+
+      <figure id="horsehead">
+        <figcaption class="vs-head"><h3>Horsehead Nebula <span>(B33)</span></h3><p class="data">dark nebula</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Horsehead Nebula: the Origin's own stack and OriginStack's" data-full="1400 / 919">
+          <img class="after" src="img/vs-horsehead-os-crop.jpg" data-crop="img/vs-horsehead-os-crop.jpg" data-full-src="img/vs-horsehead-os-full.jpg" width="960" height="640" loading="lazy" alt="Horsehead Nebula stacked and processed by OriginStack: the dark Horsehead silhouette against red glowing gas, with the bright star Alnitak below.">
+          <img class="before" src="img/vs-horsehead-origin-crop.jpg" data-crop="img/vs-horsehead-origin-crop.jpg" data-full-src="img/vs-horsehead-origin-full.jpg" width="960" height="640" loading="lazy" alt="Horsehead Nebula as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Horsehead Nebula with OriginStack's">
+        </div>
+        <p class="data">202 frames, 34 minutes total exposure &middot; OriginStack run 2 min 37 s</p>
+        <p>The red hydrogen glow behind the Horsehead is grey haze in the Origin&#x27;s image.</p>
+      </figure>
+
+      <figure id="trifid">
+        <figcaption class="vs-head"><h3>Trifid Nebula <span>(M20)</span></h3><p class="data">emission and reflection nebula</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Trifid Nebula: the Origin's own stack and OriginStack's" data-full="1400 / 800">
+          <img class="after" src="img/vs-trifid-os-crop.jpg" data-crop="img/vs-trifid-os-crop.jpg" data-full-src="img/vs-trifid-os-full.jpg" width="960" height="640" loading="lazy" alt="Trifid Nebula stacked and processed by OriginStack: a pink nebula split by dark dust lanes, with a blue reflection nebula below.">
+          <img class="before" src="img/vs-trifid-origin-crop.jpg" data-crop="img/vs-trifid-origin-crop.jpg" data-full-src="img/vs-trifid-origin-full.jpg" width="960" height="640" loading="lazy" alt="Trifid Nebula as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Trifid Nebula with OriginStack's">
+        </div>
+        <p class="data">238 frames, 40 minutes total exposure &middot; OriginStack run 1 min 51 s</p>
+        <p>Both images show the dust lanes. OriginStack separates the red and blue halves and darkens the sky between the stars.</p>
+      </figure>
+
+      <figure id="lagoon">
+        <figcaption class="vs-head"><h3>Lagoon Nebula <span>(M8)</span></h3><p class="data">emission nebula</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Lagoon Nebula: the Origin's own stack and OriginStack's" data-full="1400 / 771">
+          <img class="after" src="img/vs-lagoon-os-crop.jpg" data-crop="img/vs-lagoon-os-crop.jpg" data-full-src="img/vs-lagoon-os-full.jpg" width="960" height="640" loading="lazy" alt="Lagoon Nebula stacked and processed by OriginStack: a pink cloud of gas crossed by dark lanes beside a cluster of bright stars.">
+          <img class="before" src="img/vs-lagoon-origin-crop.jpg" data-crop="img/vs-lagoon-origin-crop.jpg" data-full-src="img/vs-lagoon-origin-full.jpg" width="960" height="640" loading="lazy" alt="Lagoon Nebula as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Lagoon Nebula with OriginStack's">
+        </div>
+        <p class="data">153 frames, 26 minutes total exposure &middot; OriginStack run 1 min 19 s</p>
+        <p>The nebula&#x27;s structure is similar in both. The difference is colour and a sky that is black rather than grey.</p>
+      </figure>
+
+      <figure id="iris">
+        <figcaption class="vs-head"><h3>Iris Nebula <span>(NGC 7023)</span></h3><p class="data">reflection nebula</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Iris Nebula: the Origin's own stack and OriginStack's" data-full="1400 / 637">
+          <img class="after" src="img/vs-iris-os-crop.jpg" data-crop="img/vs-iris-os-crop.jpg" data-full-src="img/vs-iris-os-full.jpg" width="960" height="640" loading="lazy" alt="Iris Nebula stacked and processed by OriginStack: a blue reflection nebula around a bright star, surrounded by dark dust.">
+          <img class="before" src="img/vs-iris-origin-crop.jpg" data-crop="img/vs-iris-origin-crop.jpg" data-full-src="img/vs-iris-origin-full.jpg" width="960" height="640" loading="lazy" alt="Iris Nebula as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Iris Nebula with OriginStack's">
+        </div>
+        <p class="data">212 frames, 35 minutes total exposure &middot; OriginStack run 1 min 28 s</p>
+        <p>The blue reflection nebula and the dark dust around it come out against a dark sky.</p>
+      </figure>
+
+      <figure id="andromeda">
+        <figcaption class="vs-head"><h3>Andromeda Galaxy <span>(M31)</span></h3><p class="data">galaxy</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Andromeda Galaxy: the Origin's own stack and OriginStack's" data-full="1400 / 792">
+          <img class="after" src="img/vs-andromeda-os-crop.jpg" data-crop="img/vs-andromeda-os-crop.jpg" data-full-src="img/vs-andromeda-os-full.jpg" width="960" height="640" loading="lazy" alt="Andromeda Galaxy stacked and processed by OriginStack: the bright oval core of a large galaxy with a dark dust lane along its edge.">
+          <img class="before" src="img/vs-andromeda-origin-crop.jpg" data-crop="img/vs-andromeda-origin-crop.jpg" data-full-src="img/vs-andromeda-origin-full.jpg" width="960" height="640" loading="lazy" alt="Andromeda Galaxy as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Andromeda Galaxy with OriginStack's">
+        </div>
+        <p class="data">183 frames, 30 minutes total exposure &middot; OriginStack run 1 min 34 s</p>
+        <p>The core is not clipped and the inner dust lane shows along the lower edge.</p>
+      </figure>
+
+      <figure id="whirlpool">
+        <figcaption class="vs-head"><h3>Whirlpool Galaxy <span>(M51)</span></h3><p class="data">galaxy</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Whirlpool Galaxy: the Origin's own stack and OriginStack's" data-full="1400 / 888">
+          <img class="after" src="img/vs-whirlpool-os-crop.jpg" data-crop="img/vs-whirlpool-os-crop.jpg" data-full-src="img/vs-whirlpool-os-full.jpg" width="960" height="640" loading="lazy" alt="Whirlpool Galaxy stacked and processed by OriginStack: a small face-on spiral galaxy with its companion galaxy below.">
+          <img class="before" src="img/vs-whirlpool-origin-crop.jpg" data-crop="img/vs-whirlpool-origin-crop.jpg" data-full-src="img/vs-whirlpool-origin-full.jpg" width="960" height="640" loading="lazy" alt="Whirlpool Galaxy as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Whirlpool Galaxy with OriginStack's">
+        </div>
+        <p class="data">192 frames, 48 minutes total exposure &middot; OriginStack run 2 min 06 s</p>
+        <p>The closest result of the ten: both show the spiral arms and the companion. OriginStack&#x27;s sky is darker and smoother.</p>
+      </figure>
+
+      <figure id="m101">
+        <figcaption class="vs-head"><h3>Messier 101 <span>(Pinwheel Galaxy)</span></h3><p class="data">galaxy</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Messier 101: the Origin's own stack and OriginStack's" data-full="1400 / 908">
+          <img class="after" src="img/vs-m101-os-crop.jpg" data-crop="img/vs-m101-os-crop.jpg" data-full-src="img/vs-m101-os-full.jpg" width="960" height="640" loading="lazy" alt="Messier 101 stacked and processed by OriginStack: a face-on spiral galaxy with loose arms dotted with knots of star formation.">
+          <img class="before" src="img/vs-m101-origin-crop.jpg" data-crop="img/vs-m101-origin-crop.jpg" data-full-src="img/vs-m101-origin-full.jpg" width="960" height="640" loading="lazy" alt="Messier 101 as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Messier 101 with OriginStack's">
+        </div>
+        <p class="data">211 frames, 70 minutes total exposure &middot; OriginStack run 2 min 05 s</p>
+        <p>The spiral arms and their knots of star formation are sharper, with less noise between them.</p>
+      </figure>
+
+      <figure id="pinwheel">
+        <figcaption class="vs-head"><h3>Triangulum Galaxy <span>(M33)</span></h3><p class="data">galaxy</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Triangulum Galaxy: the Origin's own stack and OriginStack's" data-full="1400 / 888">
+          <img class="after" src="img/vs-pinwheel-os-crop.jpg" data-crop="img/vs-pinwheel-os-crop.jpg" data-full-src="img/vs-pinwheel-os-full.jpg" width="960" height="640" loading="lazy" alt="Triangulum Galaxy stacked and processed by OriginStack: a large spiral galaxy whose arms break up into star clouds and dark lanes.">
+          <img class="before" src="img/vs-pinwheel-origin-crop.jpg" data-crop="img/vs-pinwheel-origin-crop.jpg" data-full-src="img/vs-pinwheel-origin-full.jpg" width="960" height="640" loading="lazy" alt="Triangulum Galaxy as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Triangulum Galaxy with OriginStack's">
+        </div>
+        <p class="data">301 frames, 50 minutes total exposure &middot; OriginStack run 2 min 24 s</p>
+        <p>The arms break up into star clouds and dark lanes, where the Origin&#x27;s image shows a grey disc. The Origin&#x27;s catalogue calls this target the Pinwheel Galaxy.</p>
+      </figure>
+
+      <figure id="pleiades">
+        <figcaption class="vs-head"><h3>Pleiades <span>(M45)</span></h3><p class="data">open cluster and reflection nebula</p></figcaption>
+        <div class="wipe vs" role="group" aria-label="Pleiades: the Origin's own stack and OriginStack's" data-full="1400 / 922">
+          <img class="after" src="img/vs-pleiades-os-crop.jpg" data-crop="img/vs-pleiades-os-crop.jpg" data-full-src="img/vs-pleiades-os-full.jpg" width="960" height="640" loading="lazy" alt="Pleiades stacked and processed by OriginStack: bright blue-white stars wrapped in faint blue reflection nebula.">
+          <img class="before" src="img/vs-pleiades-origin-crop.jpg" data-crop="img/vs-pleiades-origin-crop.jpg" data-full-src="img/vs-pleiades-origin-full.jpg" width="960" height="640" loading="lazy" alt="Pleiades as stacked by the Celestron Origin, auto-stretched: the same field, greyer and flatter.">
+          <span class="line"></span>
+          <span class="grip" aria-hidden="true">&lt;&gt;</span>
+          <span class="cap l">The Origin</span>
+          <span class="cap r">OriginStack</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Origin's stack of Pleiades with OriginStack's">
+        </div>
+        <p class="data">277 frames, 46 minutes total exposure &middot; OriginStack run 2 min 24 s</p>
+        <p>The faint blue reflection nebula around the bright stars stands out from the sky.</p>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="method" class="vs-method">
+  <div class="wrap">
+    <h2>How these were made</h2>
+    <h3>Left: the Origin</h3>
+    <p>The left side is the <code>FinalStackedMaster.tiff</code> the Origin writes into each session folder. Its sky sits at mid-grey, so it is shown with PixInsight's standard automatic screen stretch at its published defaults: shadows clipped 2.8 noise units below the sky, sky placed at 25% brightness, each colour channel separately. These values were not tuned for this comparison. The Origin app may show its own image differently.</p>
+    <h3>Right: OriginStack</h3>
+    <p>The right side is OriginStack run on the same session folder with no options, and the preview JPEG it writes. Nothing was edited afterwards.</p>
+    <h3>Matching the two</h3>
+    <p>The Origin's image was rotated and shifted onto OriginStack's using a few hundred to a few thousand matched stars per target. The two stacks differ by about 180&deg; plus up to 9&deg; of field rotation. OriginStack trims the edges that not every frame covers, so the whole-frame view shows the area both images share.</p>
+    <h3>What the difference is</h3>
+    <p>Most of the difference is in what happens after stacking: background and colour calibration, noise reduction, star reduction and the stretch. On noise at the scale of a star, OriginStack's stack itself <a href="compare.html#measured">ties the Origin's own</a>.</p>
+    <h3>Timing</h3>
+    <p>Run times are wall-clock for the whole run, from loading the frames to the finished image, on a 2020 laptop: Intel Core i9-10885H with 8 cores and 64&nbsp;GB of RAM. The ten sessions took 1,178 seconds together, about two minutes each.</p>
+    <p class="caveat measure"><a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> measures OriginStack against the Origin's own stack on your own sessions.</p>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="gallery.html">Gallery</a> &nbsp; <a href="compare.html">Compared with other software</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+<script>
+(function () {
+  // Each wipe: its range input drives one CSS variable.
+  var wipes = document.querySelectorAll('.wipe.vs');
+  wipes.forEach(function (w) {
+    var r = w.querySelector('input');
+    r.addEventListener('input', function () { w.style.setProperty('--p', r.value + '%'); });
+  });
+  // View: the target at full resolution (3:2 crops) or the whole shared frame.
+  function setView(v) {
+    document.querySelectorAll('.vs-view button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.view === v));
+    });
+    wipes.forEach(function (w) {
+      w.style.aspectRatio = v === 'full' ? w.dataset.full : '';
+      w.querySelectorAll('img').forEach(function (img) {
+        img.src = v === 'full' ? img.dataset.fullSrc : img.dataset.crop;
+      });
+    });
+  }
+  document.querySelectorAll('.vs-view button').forEach(function (b) {
+    b.addEventListener('click', function () { setView(b.dataset.view); });
+  });
+})();
+</script>
+</body>
+</html>
