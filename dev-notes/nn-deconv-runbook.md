@@ -558,3 +558,22 @@ Full pipeline (`bench_phase4`, x1 copied over `src/data/nn_deconv.npz` in the wo
 against s4's 1-3%), with no extra invented peaks, but 11-24% more sky noise, 10-20% less
 faint contrast and a stronger bright halo on the galaxies (Sculptor, Sunflower).** Not shipped:
 it trades noise for sharpness rather than improving both. Weights `C:\nn_work\model_deconv_x1.npz`.
+
+**Matched noise (2026-10-23): x1 is not better than v3, only further along the same curve.**
+On the 9 held-out seeing inputs (centre 2304x1536), star width / input (same stars) and sky
+noise (robust sigma of the high-passed luminance on the faintest 40%, / the input's), medians:
+
+| variant | width | noise |
+|---|---|---|
+| `nn_denoise` | 0.999 | 0.041 |
+| v3 | 0.868 | 0.050 |
+| x1 | 0.852 | 0.060 (1.14-1.31x v3's per session) |
+| 0.7 x1 + 0.3 `nn_denoise` (v3's noise) | 0.892 | 0.050 |
+| 0.5 x1 + 0.5 v3 | 0.852 | 0.052 |
+
+Brought down to v3's noise by blending with the denoiser, x1 is *wider* than v3 (0.892 vs
+0.868): the extra sharpness is bought with noise, not with information the cross-night pairs
+added. Every trained variant so far (v3, s1-s4, x1) sits on one width-noise trade-off; moving
+the curve needs a better prior (more capacity, or truth sharper and cleaner than any Origin
+stack), not more real pairs. (`_sky_stats` sigma is not a pixel-noise measure here: it gave the
+denoiser the input's noise.)
