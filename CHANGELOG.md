@@ -18,6 +18,12 @@ match the `VERSION` file and `v*` git tags.
 
 ### Added
 
+- **`--stretch object`** (also in the app's re-stretch menu): takes the stretch from the target
+  itself rather than the whole frame. It finds the object around where the telescope pointed;
+  when that object is fainter than the field's white point, the white point comes down to just
+  above its core and the curve's contrast moves up to its typical level. A brighter rendering
+  of a small or faint galaxy at the cost of a grainier sky (Sculptor, Black Eye); exactly the
+  plain `ghs` stretch on nebulae, clusters and anything that fills the frame.
 - **`--merge-consistency`** (with `--merge` or a multi-session combine, opt-in): leaves a night
   out wherever it shows a significant feature the other nights show nothing of, such as a
   satellite glint, an unrejected hot-pixel cluster or a transient; structure every night
