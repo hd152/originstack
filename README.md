@@ -11,7 +11,7 @@
 [![Latest release](https://img.shields.io/github/v/release/hd152/originstack)](https://github.com/hd152/originstack/releases/latest)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-[**Website**](https://originstack.site/) · [Download](https://github.com/hd152/originstack/releases/latest) · [Changelog](CHANGELOG.md) · [Code signing policy](CODE_SIGNING_POLICY.md)
+[**Website**](https://originstack.site/) · [Download](https://github.com/hd152/originstack/releases/latest) · [Changelog](CHANGELOG.md) · [Code signing policy](CODE_SIGNING_POLICY.md) · [Support on Ko-fi](https://ko-fi.com/originstack)
 
 OriginStack is a full-featured Python pipeline for stacking and processing astronomical images, built from scratch: no OpenCV, scikit-image, PyWavelets, astroalign, astroquery or ONNX runtime — just NumPy, SciPy, Astropy and Pillow. The hot paths run in **Rust**: 80+ multi-threaded native kernels, ~5–150× faster than NumPy/SciPy, about 1.5–1.8× faster end to end on real sessions (see [Performance](#performance)), with a pure-NumPy fallback wherever the module isn't built. It was designed for the Celestron Origin smart telescope but works with any OSC/DSLR/mirrorless camera. Reads FITS, camera RAW (CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ — needs `rawpy`), TIFF (needs `tifffile`), XISF, and SER (planetary/lucky-imaging video) — mix and match formats freely within one input directory. The core design principle is a **streaming architecture**: frames are loaded, processed, and freed one at a time, so memory usage stays constant regardless of how many frames you have.
 
@@ -1015,6 +1015,13 @@ Notes:
 - On a 4 GB card, `--use-gpu` measured *slower* than CPU-only on a real session, because most of Phase 1 is CPU work and the GPU path limited the worker count. Phase 1 therefore runs on the CPU process pool unless the card can host one GPU worker per CPU core (`--gpu-phase1 on` forces it); later phases still use the GPU.
 - Not available in the packaged desktop app (it would need your own CUDA install).
 - Falls back to CPU automatically if no GPU is available.
+
+## Support
+
+OriginStack is free. If it saves you time, you can leave a tip on
+[Ko-fi](https://ko-fi.com/originstack); the desktop app links there too ("Support
+OriginStack" in its header). Bug reports and sample sessions that show a problem help
+just as much: [open an issue](https://github.com/hd152/originstack/issues).
 
 ## License
 
