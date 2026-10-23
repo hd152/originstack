@@ -323,15 +323,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                 if dark_g is not None and dark_g.shape == data_g.shape:
                     dark_exptime = masters.get('dark_exptime') or None
                     light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
+                    # the run's one note on this is cli._note_dark_scaling
                     if dark_exptime and light_exptime and dark_exptime > 0:
                         dark_scale = light_exptime / dark_exptime
-                        if abs(dark_scale - 1.0) > 0.05:
-                            _wk = (round(dark_exptime, 1), round(light_exptime, 1))
-                            if _wk not in _warned_dark_scales:
-                                _warned_dark_scales.add(_wk)
-                                safe_print(f"  NOTE: dark scaling {dark_scale:.2f}x "
-                                           f"(light {light_exptime:.1f}s / dark {dark_exptime:.1f}s) "
-                                           f"-- ensure dark exposure matches lights for best results")
                     else:
                         dark_scale = 1.0
                     data_g = data_g - dark_g * dark_scale
@@ -375,15 +369,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             if dark_arr is not None:
                 dark_exptime = masters.get('dark_exptime') or None
                 light_exptime = float(hdr.get('EXPTIME', 0) or 0) or None
+                # the run's one note on this is cli._note_dark_scaling
                 if dark_exptime and light_exptime and dark_exptime > 0:
                     dark_scale = light_exptime / dark_exptime
-                    if abs(dark_scale - 1.0) > 0.05:
-                        key = (round(dark_exptime, 1), round(light_exptime, 1))
-                        if key not in _warned_dark_scales:
-                            _warned_dark_scales.add(key)
-                            safe_print(f"  NOTE: dark scaling {dark_scale:.2f}x "
-                                       f"(light {light_exptime:.1f}s / dark {dark_exptime:.1f}s) "
-                                       f"-- ensure dark exposure matches lights for best results")
                 else:
                     dark_scale = 1.0
 
@@ -645,7 +633,6 @@ _worker_masters: Dict[str, Any] = {}
 _worker_trail_reject: bool = False  # per-session trail-rejection flag for pool workers
 _worker_banding: Optional[tuple] = None  # (amount, sigma) for pool workers, or None
 _worker_spike_reject: bool = False  # --spike-reject flag for pool workers
-_warned_dark_scales: set = set()  # dedup dark-scale mismatch warnings across frames
 _warned_nebula_wb_skip: set = set()  # dedup nebula-filter white-balance-skip notice
 
 # GPU calibration probe cache — probed once per unique frame size per session
