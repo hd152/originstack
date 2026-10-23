@@ -6,6 +6,18 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **`--merge-proper`** (with `--merge` or a multi-session combine, opt-in): a sharp night
+  keeps its detail when combined with softer ones. Each night is weighted per spatial
+  frequency by its own measured star profile (proper coaddition, as already done for the
+  frames within a night) instead of by one noise weight, so a long night of poor seeing no
+  longer dilutes a short sharp one. Same noise and star flux as the plain weighted mean. On a
+  real two-night Pleiades merge (2.8 and 6.2 px nights) stars came out 22% narrower (2.99 to
+  2.36 px, 400 stars) with no rings; over 24 two-night targets a median 2.6% narrower, 15% at
+  the 10th percentile, and unchanged where the nights' seeing matched. Not combined with
+  `--merge-consistency`.
+
 ### Fixed
 
 - **One dark-scaling note per run.** When the lights' exposures differ from the dark's, the log
