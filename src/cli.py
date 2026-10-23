@@ -1525,7 +1525,7 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
                 ref_stack, int(ref_meta.get('nframes') or 1), others,
                 verbose=getattr(args, 'verbose', False), skip_unusable=True,
                 consistency=getattr(args, 'merge_consistency', False),
-                proper=getattr(args, 'merge_proper', False))
+                proper=getattr(args, 'merge_proper', True))
         else:   # a filter group of one session: finish it on its own
             combined, merge_info = ref_stack, None
     except Exception as exc:
@@ -2270,12 +2270,15 @@ def build_parser() -> argparse.ArgumentParser:
                         'nothing of (a satellite glint, an unrejected hot-pixel cluster, '
                         'a transient, a reflection); structure all nights show keeps the '
                         'plain weighted mean.')
-    g_sessions.add_argument('--merge-proper', action='store_true',
-                   help='With --merge or a multi-session combine: weight each night per '
-                        'spatial frequency by its own star sharpness (proper coaddition), '
-                        'so a sharp night carries the fine detail instead of being diluted '
-                        'by longer, softer ones. Same noise as the plain weighted mean; '
-                        'stars narrower when the nights differ in seeing.')
+    g_sessions.add_argument('--no-merge-proper', dest='merge_proper', action='store_false',
+                   help='With --merge or a multi-session combine: weight each night by its '
+                        'noise only (the plain weighted mean). By default each night is '
+                        'weighted per spatial frequency by its own star sharpness (proper '
+                        'coaddition), so a sharp night carries the fine detail instead of '
+                        'being diluted by longer, softer ones, at the same noise.')
+    # the default since it was added; kept so commands written for the opt-in still run
+    g_sessions.add_argument('--merge-proper', dest='merge_proper', action='store_true', default=True,
+                   help=argparse.SUPPRESS)
     g_frames.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
     g_frames.add_argument('--trail-reject', action='store_true',

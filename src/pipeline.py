@@ -1438,7 +1438,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         stacked, merge_info = merge_previous_stacks(
             stacked, len(final), list(args.merge), verbose=args.verbose,
             consistency=getattr(args, 'merge_consistency', False),
-            proper=getattr(args, 'merge_proper', False))
+            proper=getattr(args, 'merge_proper', True))
         fits_stacked = stacked.copy()
         safe_print(f"  ✓ Merge: {merge_info['total_frames']} total frames "
                    f"({format_time(time.time() - _t_merge)})")

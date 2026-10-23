@@ -590,10 +590,11 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     stack out with a warning instead, listed in ``merge_info['skipped']``: one
     mis-aimed 9-frame Whirlpool session (correlation -0.03) used to abort the
     combine of eight good ones. ``consistency`` (``--merge-consistency``) combines with
-    ``consistency_combine`` instead of the plain inverse-variance mean. ``proper``
-    (``--merge-proper``) replaces the inverse-variance mean with ``proper_merge``, which
-    weights each night per spatial frequency by its PSF (not with ``consistency``: that
-    selection is per wavelet coefficient and has no proper-coadd form yet).
+    ``consistency_combine`` instead of the plain inverse-variance mean. ``proper`` (the
+    CLI's default, ``--no-merge-proper`` turns it off) replaces the inverse-variance mean
+    with ``proper_merge``, which weights each night per spatial frequency by its PSF. Not
+    with ``consistency``: that selection is per wavelet coefficient and has no
+    proper-coadd form yet, so ``consistency`` wins.
     """
     from src.registration import apply_transform
 
@@ -608,8 +609,7 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     w_new = 1.0 / new_sigma ** 2 if noise_ok else np.ones(3)
     acc_n = stacked.astype(np.float64) * w_new
     if proper and consistency:
-        safe_print("  NOTE: --merge-proper is not combined with --merge-consistency; "
-                   "using the consistency combine")
+        _log.info("merge: --merge-consistency given, so the nights are not proper-coadded")
         proper = False
     members = ([(stacked.astype(np.float32), np.ones((H, W), dtype=bool), w_new)]
                if consistency or proper else None)

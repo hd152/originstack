@@ -1,4 +1,4 @@
-"""--merge-proper: nights weighted per spatial frequency by their PSF (merge.proper_merge)."""
+"""Proper merge (the default; --no-merge-proper): nights weighted per spatial frequency by their PSF (merge.proper_merge)."""
 import numpy as np
 from scipy import ndimage as ndi
 
@@ -107,5 +107,6 @@ def test_no_stars_means_no_proper_merge():
 
 def test_cli_flag():
     from src.cli import parse_args
+    assert parse_args(["-d", "x", "-o", "y.fits"]).merge_proper is True             # the default
     assert parse_args(["-d", "x", "-o", "y.fits", "--merge-proper"]).merge_proper is True
-    assert parse_args(["-d", "x", "-o", "y.fits"]).merge_proper is False
+    assert parse_args(["-d", "x", "-o", "y.fits", "--no-merge-proper"]).merge_proper is False
