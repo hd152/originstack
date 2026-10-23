@@ -126,10 +126,25 @@ def deconv_pair(a: np.ndarray, b: np.ndarray):
     return za, zb, (1.0 / target_variance(zb, sky_level_z(bg, sigma))).astype(np.float32)
 
 
-def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str = "denoise") -> None:
+def build_bank(pairs_dirs, out: str, per_pair, seed: int = 0, mode: str = "denoise") -> None:
+    """Patch bank from one pairs folder or several (e.g. seeing pairs and the cross-night
+    pairs of tools/gen_crossnight_pairs.py, which are in the same format). ``per_pair`` is
+    one count for every folder or one per folder."""
     rng = np.random.default_rng(seed)
     za_l, zb_l, w_l, sess = [], [], [], []
-    dirs = sorted(d for d in glob.glob(os.path.join(pairs_dir, "*")) if os.path.exists(os.path.join(d, "meta.json")))
+    if isinstance(pairs_dirs, str):
+        pairs_dirs = [pairs_dirs]
+    counts = [per_pair] * len(pairs_dirs) if isinstance(per_pair, int) else list(per_pair)
+    if len(counts) == 1:
+        counts *= len(pairs_dirs)
+    if len(counts) != len(pairs_dirs):
+        raise SystemExit("--per-pair: give one count, or one per --pairs folder")
+    dirs, n_of = [], {}
+    for p, c in zip(pairs_dirs, counts):
+        for d in sorted(glob.glob(os.path.join(p, "*"))):
+            if os.path.exists(os.path.join(d, "meta.json")):
+                dirs.append(d)
+                n_of[d] = c
     for i, d in enumerate(dirs):
         name = os.path.basename(d)
         if is_holdout(name):
@@ -155,7 +170,7 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
                 lum = za.mean(-1)
                 st = detect(lum - np.median(lum))
                 stars = np.c_[np.asarray(st["ycentroid"]), np.asarray(st["xcentroid"])]
-            for k in range(per_pair):
+            for k in range(n_of[d]):
                 if stars is not None and len(stars) and k % 2 == 0:
                     cy, cx = stars[rng.integers(len(stars))]
                     y = int(np.clip(cy - rng.integers(16, PATCH - 16), m, h - PATCH - m))
@@ -172,7 +187,7 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
     print(f"bank: {len(za_l)} patches -> {out}")
 
 
-def make_net():
+def make_net(filters: int = 24):
     import torch.nn as nn
 
     def conv(i, o):
@@ -181,7 +196,7 @@ def make_net():
     class NnDenoiseNet(nn.Module):
         """Mirrors src/nn_denoise.forward layer for layer (names become the npz keys)."""
 
-        def __init__(self, c=3, f=24):
+        def __init__(self, c=3, f=filters):
             super().__init__()
             self.e0a, self.e0b = conv(c, f), conv(f, f)
             self.e1a, self.e1b = conv(f, 2 * f), conv(2 * f, 2 * f)
@@ -286,7 +301,8 @@ def peak_penalty(out, truth, w, masked: bool = True):
 
 def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0, resume: bool = False,
           inject: bool = False, synth: Optional[str] = None, synth_frac: float = 0.5,
-          init: Optional[str] = None, synth_set: Optional[dict] = None, peak_pen: float = 0.0) -> None:
+          init: Optional[str] = None, synth_set: Optional[dict] = None, peak_pen: float = 0.0,
+          filters: int = 24) -> None:
     import torch
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -300,7 +316,7 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     tr_idx, va_idx = np.flatnonzero(~val), np.flatnonzero(val)
     print(f"{n} patches, train {len(tr_idx)}, val {len(va_idx)}, device {dev}", flush=True)
 
-    net = make_net().to(dev)
+    net = make_net(filters).to(dev)
     if init:
         with np.load(init) as fw:
             net.load_state_dict({k: torch.from_numpy(fw[k]) for k in fw.files})
@@ -423,16 +439,17 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     with open(os.path.splitext(out)[0] + "_train.json", "w") as fh:
         json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val,
                    "inject": inject, "synth": synth, "synth_frac": synth_frac if synth else None,
-                   "init": init, "synth_set": synth_set, "peak_penalty": peak_pen}, fh)
+                   "init": init, "synth_set": synth_set, "peak_penalty": peak_pen, "filters": filters}, fh)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("bank")
-    b.add_argument("--pairs", required=True)
+    b.add_argument("--pairs", required=True, nargs="+", help="one or more pairs folders")
     b.add_argument("--bank", required=True)
-    b.add_argument("--per-pair", type=int, default=40)
+    b.add_argument("--per-pair", type=int, nargs="+", default=[40],
+                   help="patches per pair: one count, or one per --pairs folder")
     b.add_argument("--mode", choices=["denoise", "deconv"], default="denoise")
     t = sub.add_parser("train")
     t.add_argument("--bank", required=True)
@@ -446,6 +463,8 @@ def main() -> None:
     t.add_argument("--synth", help="gen_synth_deconv.py npz: mix synthetic-blur pairs into each batch")
     t.add_argument("--synth-frac", type=float, default=0.5, help="share of each batch that is synthetic")
     t.add_argument("--init", help="start from these exported weights (.npz)")
+    t.add_argument("--filters", type=int, default=24,
+                   help="U-Net base width (the numpy forward pass takes any; run time grows ~ its square)")
     t.add_argument("--peak-penalty", type=float, default=0.0,
                    help="weight of the synthetic-batch peak penalty (peak_penalty)")
     t.add_argument("--synth-set", action="append", default=[], metavar="NAME=VALUE",
@@ -456,6 +475,7 @@ def main() -> None:
     else:
         train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject,
               synth=args.synth, synth_frac=args.synth_frac, init=args.init, peak_pen=args.peak_penalty,
+              filters=args.filters,
               synth_set={k: tuple(float(x) for x in v.split(",")) if "," in v else float(v)
                          for k, v in (kv.split("=", 1) for kv in args.synth_set)})
 
