@@ -18,6 +18,9 @@ match the `VERSION` file and `v*` git tags.
 
 ### Added
 
+- **Support OriginStack**: a link to the project's Ko-fi page in the desktop app's header and
+  beside the finished run's buttons, on the website and on GitHub (the Sponsor button). It
+  opens in your browser; the app sends nothing.
 - **`--stretch object`** (also in the app's re-stretch menu): takes the stretch from the target
   itself rather than the whole frame. It finds the object around where the telescope pointed;
   when that object is fainter than the field's white point, the white point comes down to just

@@ -423,6 +423,10 @@ def get_run_manager() -> RunManager:
 # where the user reads (and can edit) the text before choosing to submit it.
 
 ISSUES_URL = 'https://github.com/hd152/originstack/issues/new'
+# "Support OriginStack": the Ko-fi page, opened in the browser. The same address is in
+# .github/FUNDING.yml (GitHub's Sponsor button), the README and the website;
+# tests/test_support_link.py keeps them in step.
+SUPPORT_URL = 'https://ko-fi.com/originstack'
 # GitHub refuses issue URLs much past 8 KB; keep the whole URL under this.
 _REPORT_URL_MAX = 7000
 

@@ -1452,6 +1452,12 @@ class App:
         _Tooltip(report, _('Opens a new GitHub issue in your browser with the version, system '
                            'and the end of the log filled in. Nothing is sent until you submit it '
                            'there.'))
+        support = tk.Label(inner, text=_('Support OriginStack'), background=_PANEL,
+                           foreground=_TEXT_DIM, font=_FONT, cursor='hand2')
+        support.pack(side='right', padx=(0, 16), pady=8)
+        support.bind('<Button-1>', lambda _e: self._open_support())
+        _Tooltip(support, _('OriginStack is free. If it saves you time, a tip on Ko-fi helps '
+                            'keep it going. Opens in your browser.'))
         tk.Frame(root, background=_LINE, height=1).pack(fill='x', side='top')
 
     def _build_language_menu(self, parent: tk.Frame) -> None:
@@ -1505,6 +1511,10 @@ class App:
         snap = self.ui.snapshot()
         error = snap.get('run_error') if snap.get('run_status') == 'error' else None
         webbrowser.open(problem_report_url(self.log_text.get('1.0', 'end'), error))
+
+    def _open_support(self) -> None:
+        from src.desktop_control import SUPPORT_URL
+        webbrowser.open(SUPPORT_URL)
 
     # ── left column: setup, run controls, progress, log ───────────────
 
@@ -1696,6 +1706,10 @@ class App:
                    command=self._open_output_folder).pack(side='left', padx=(0, 6))
         ttk.Button(self.result_actions, text=_('Start another run'),
                    command=self._reset_run_view).pack(side='left')
+        support_link = ttk.Label(self.result_actions, text=_('Like the result? Support OriginStack'),
+                                 foreground=_ACCENT, cursor='hand2')
+        support_link.pack(side='left', padx=(14, 0))
+        support_link.bind('<Button-1>', lambda _e: self._open_support())
         self.plan_frame = ttk.Frame(self.summary_frame)
         self.plan_frame.pack(fill='x', padx=4, pady=4)
         self.plan_frame.grid_columnconfigure(1, weight=1)
