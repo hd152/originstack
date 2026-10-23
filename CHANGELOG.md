@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One dark-scaling note per run.** When the lights' exposures differ from the dark's, the log
+  now says so once, listing each exposure with its scale factor and frame count. Each Phase 1
+  worker used to print it for every exposure it met: 18 identical lines on a session of 20, 25
+  and 30 s lights with a 10 s dark.
+
 ## [2.14.0] - 2026-10-23
 
 Learned noise reduction by default for nebulae and star fields, a stretch that finds the

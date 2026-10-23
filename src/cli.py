@@ -347,6 +347,34 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
         safe_print(f"  WARNING: Could not save config file ({e})")
 
 
+def _note_dark_scaling(frames: dict, dark_exptime: Optional[float]) -> None:
+    """One note for the run when lights' exposures differ from the dark's: Phase 1 scales the
+    dark by light / dark exposure. The workers used to print it, each once per exposure it
+    met (each process has its own dedup set): 18 identical lines on a 20 / 25 / 30 s session
+    with a 10 s dark and six workers."""
+    from collections import Counter
+
+    from src.frame_discovery import _frame_exptime
+
+    if not dark_exptime or dark_exptime <= 0:
+        return
+    counts = Counter()
+    for f in frames.get('light') or []:
+        try:                         # only a note: a frame without a readable header is skipped
+            e = _frame_exptime(f)
+        except Exception:
+            continue
+        if e:
+            counts[round(e, 1)] += 1
+    scaled = sorted(e for e in counts if abs(e / dark_exptime - 1.0) > 0.05)
+    if not scaled:
+        return
+    parts = ", ".join(f"{e:g} s ({e / dark_exptime:.2f}x, {counts[e]} "
+                      f"frame{'s' if counts[e] != 1 else ''})" for e in scaled)
+    safe_print(f"  NOTE: the {dark_exptime:g} s dark is scaled to the lights' exposure: {parts}. "
+               f"Darks of the same exposure as the lights give the best results.")
+
+
 def _warn_dark_iso_mismatch(frames: dict) -> None:
     """Say when the dark was taken at another ISO than the lights. The Origin pairs ISO
     500 sessions with an ISO 200 dark (3 of 33 local sessions); the dark is scaled by
@@ -614,6 +642,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
                 frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
         except Exception as e:
             safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+        _note_dark_scaling(frames, masters['dark_exptime'])
         _warn_dark_iso_mismatch(frames)
 
     # Photon-transfer gain / read-noise from raw bias+flat pairs, for the
