@@ -19,6 +19,19 @@ except Exception:
     Image = None
 
 
+# Every preview JPEG keeps full-resolution colour (4:4:4). Pillow's default at quality >= 50 is
+# 4:2:0, which stores colour at half resolution: a 2-4 px star's colour is averaged with the
+# black sky around it -- star colour error 3x, saturation kept 61-78% instead of 96-99% on the
+# Sunflower / Omega / Pleiades previews, for files 15-32% larger.
+JPEG_SAVE_KW = {'subsampling': 0}
+
+
+def to_uint8(x: np.ndarray) -> np.ndarray:
+    """A [0, 1] display image as uint8, rounded. ``astype`` truncates: every pixel came out up to
+    one step darker (0.05-0.11 steps on average over a preview's sky)."""
+    return np.clip(np.rint(np.asarray(x, np.float32) * np.float32(255.0)), 0, 255).astype(np.uint8)
+
+
 def _rescale_intensity(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     """Linearly rescale ``x`` from [lo, hi] to [0, 1], clipping outside that
     range -- equivalent to skimage.exposure.rescale_intensity(x, in_range=(lo,
@@ -815,7 +828,7 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
                                noise_scale=noise_scale, anchor=anchor)
     if out is None:
         return None
-    return np.clip(out * 255, 0, 255).astype(np.uint8)
+    return to_uint8(out)
 
 
 def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
@@ -1055,7 +1068,7 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
             out[:, :, c] = generalized_hyperbolic_stretch(
                 rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
                 black_point=black, white_point=white)
-    return np.clip(out * 255, 0, 255).astype(np.uint8)
+    return to_uint8(out)
 
 
 def _preview_pil_image(out: np.ndarray, max_dim: int):
@@ -1118,7 +1131,7 @@ def preview_jpeg_from_uint8(out: np.ndarray, max_dim: int = 1024) -> bytes:
     """A stretched uint8 HWC image as size-capped viewer JPEG bytes."""
     import io as _io
     buf = _io.BytesIO()
-    _preview_pil_image(out, max_dim).save(buf, format='JPEG', quality=85)
+    _preview_pil_image(out, max_dim).save(buf, format='JPEG', quality=85, **JPEG_SAVE_KW)
     return buf.getvalue()
 
 
@@ -1161,7 +1174,7 @@ def write_preview_jpeg(out: np.ndarray, path: str) -> None:
     """Write a stretched uint8 HWC image as the size-capped preview JPEG."""
     from src.models import Config
     img = _preview_pil_image(out, Config.PREVIEW_MAX_DIMENSION)
-    img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY)
+    img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY, **JPEG_SAVE_KW)
 
 
 def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:
@@ -1182,7 +1195,7 @@ def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:
         return out
     lum = luminance(out).astype(np.float32)
     blended = out.astype(np.float32) * (1.0 - amount) + lum[:, :, None] * amount
-    return np.clip(blended, 0, 255).astype(np.uint8)
+    return np.clip(np.rint(blended), 0, 255).astype(np.uint8)
 
 
 def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',

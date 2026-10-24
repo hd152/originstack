@@ -405,7 +405,7 @@ def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
             # fallback-of-a-fallback (only reached when tifffile isn't
             # installed) drops to 8-bit RGB, which Image.fromarray(..., 'RGB')
             # does support directly.
-            arr8 = (np.clip(normalized, 0, 1) * 255).astype(np.uint8)
+            arr8 = np.clip(np.rint(normalized * 255), 0, 255).astype(np.uint8)
             Image.fromarray(arr8, mode='RGB').save(tiff_path)
             safe_print("  NOTE: tifffile not installed; saved 8-bit TIFF via Pillow "
                        "(install tifffile for 16-bit)")

@@ -20,6 +20,14 @@ match the `VERSION` file and `v*` git tags.
 
 ### Fixed
 
+- **Star colours in the JPEG.** Preview JPEGs stored colour at half resolution (the JPEG
+  encoder's default 4:2:0), so a small star's colour was averaged with the black sky around it:
+  on the Sunflower, Omega and Pleiades previews stars kept 61-78% of their colour saturation and
+  their colour error was 3x what full-resolution colour gives. All preview, viewer and
+  annotated JPEGs now keep colour at full resolution (stars keep 96-99%), for files 15-32%
+  larger. The 8-bit conversion also rounds instead of truncating, which made every pixel up to
+  one step darker.
+
 - **One dark-scaling note per run.** When the lights' exposures differ from the dark's, the log
   now says so once, listing each exposure with its scale factor and frame count. Each Phase 1
   worker used to print it for every exposure it met: 18 identical lines on a session of 20, 25
