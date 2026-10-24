@@ -1020,7 +1020,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
     return out
 
 
-def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
+def render_preview_layered_float(rgb: np.ndarray, starless: np.ndarray,
                                  ghs_b: float = 8.0, ghs_sp: float = 0.15,
                                  ghs_hp: float = 0.95, black_sigma: float = 0.0,
                                  color: str = 'preserve',
@@ -1068,7 +1068,12 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
             out[:, :, c] = generalized_hyperbolic_stretch(
                 rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
                 black_point=black, white_point=white)
-    return to_uint8(out)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray, **kw) -> np.ndarray:
+    """``render_preview_layered_float`` as display uint8."""
+    return to_uint8(render_preview_layered_float(rgb, starless, **kw))
 
 
 def _preview_pil_image(out: np.ndarray, max_dim: int):
@@ -1093,19 +1098,20 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      starless: Optional[np.ndarray] = None,
                      color: str = 'preserve',
                      noise_scale: float = 1.0,
-                     anchor: Optional[Tuple[float, float]] = None) -> None:
-    """Write the preview JPEG. ``starless`` (same shape as ``rgb``), with
-    ``stretch='ghs'``, switches to the layered stretch -- see
-    ``render_preview_layered_uint8``."""
+                     anchor: Optional[Tuple[float, float]] = None,
+                     exports=()) -> None:
+    """Write the preview JPEG (and the lossless ``exports``, see ``write_final_images``).
+    ``starless`` (same shape as ``rgb``), with ``stretch='ghs'``, switches to the layered
+    stretch -- see ``render_preview_layered_float``."""
     if Image is None:
         return
-    out = render_preview_rgb_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+    out = render_preview_rgb_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                    ghs_hp=ghs_hp, black_sigma=black_sigma,
                                    starless=starless, color=color, noise_scale=noise_scale,
                                    anchor=anchor)
     if out is None:
         return
-    write_preview_jpeg(out, path)
+    write_final_images(out, path, exports)
 
 
 def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
@@ -1115,16 +1121,32 @@ def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
                              color: str = 'preserve',
                              noise_scale: float = 1.0,
                              anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
-    """The full-resolution uint8 image ``save_preview_rgb`` writes: the layered
-    stretch when ``starless`` is given with ``stretch='ghs'``, else
-    ``render_preview_uint8``."""
+    """The full-resolution uint8 image ``save_preview_rgb`` writes:
+    ``render_preview_rgb_float`` rounded to 8 bits."""
+    out = render_preview_rgb_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                   ghs_hp=ghs_hp, black_sigma=black_sigma, starless=starless,
+                                   color=color, noise_scale=noise_scale, anchor=anchor)
+    return None if out is None else to_uint8(out)
+
+
+def render_preview_rgb_float(rgb: np.ndarray, stretch: str = 'linear',
+                             ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                             ghs_hp: float = 0.95, black_sigma: float = 0.0,
+                             starless: Optional[np.ndarray] = None,
+                             color: str = 'preserve',
+                             noise_scale: float = 1.0,
+                             anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
+    """The final display image in [0, 1], before any quantisation: the layered stretch
+    when ``starless`` is given with ``stretch='ghs'``, else ``render_preview_float``.
+    The JPEG and the ``--export png`` / ``png16`` files are all made from it."""
     if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
-        return render_preview_layered_uint8(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
+        return render_preview_layered_float(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                             ghs_hp=ghs_hp, black_sigma=black_sigma,
                                             color=color, noise_scale=noise_scale)
-    return render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                                noise_scale=noise_scale, anchor=anchor)
+    out = render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
+                               noise_scale=noise_scale, anchor=anchor)
+    return None if out is None else np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 def preview_jpeg_from_uint8(out: np.ndarray, max_dim: int = 1024) -> bytes:
@@ -1148,6 +1170,11 @@ def preview_stretch_kw(args) -> dict:
         color=getattr(args, 'stretch_color', 'channel'),
         noise_scale=float(ns) if isinstance(ns, (int, float)) and ns > 0 else 1.0,
         anchor=object_anchor(args))
+
+
+def preview_exports(args) -> tuple:
+    """The lossless copies of the preview ``--export`` asked for ('png', 'png16')."""
+    return tuple(e for e in ('png', 'png16') if getattr(args, f'output_{e}', False))
 
 
 def object_anchor(args) -> Optional[Tuple[float, float]]:
@@ -1175,6 +1202,65 @@ def write_preview_jpeg(out: np.ndarray, path: str) -> None:
     from src.models import Config
     img = _preview_pil_image(out, Config.PREVIEW_MAX_DIMENSION)
     img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY, **JPEG_SAVE_KW)
+
+
+_PNG_SIGNATURE = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+
+
+def write_png16(path: str, img01: np.ndarray, level: int = 6) -> None:
+    """A [0, 1] RGB image as a 16-bit-per-channel PNG (Pillow cannot write 16-bit RGB):
+    rows with the 'Sub' filter (each byte minus the one 6 earlier), zlib-compressed. For
+    editing the finished image further: a curves or levels change on 8 bits bands."""
+    import struct
+    import zlib
+    h, w = img01.shape[:2]
+    u16 = np.clip(np.rint(np.asarray(img01, np.float32) * np.float32(65535.0)), 0, 65535).astype('>u2')
+    raw = np.ascontiguousarray(u16).reshape(h, w * 3).view(np.uint8)     # big-endian, 6 bytes/pixel
+    sub = raw.copy()
+    sub[:, 6:] = raw[:, 6:] - raw[:, :-6]                                  # uint8 wraps mod 256
+    data = np.empty((h, 1 + w * 6), np.uint8)
+    data[:, 0] = 1                                                         # filter type: Sub
+    data[:, 1:] = sub
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (struct.pack('>I', len(body)) + kind + body
+                + struct.pack('>I', zlib.crc32(kind + body) & 0xFFFFFFFF))
+    with open(path, 'wb') as fh:
+        fh.write(_PNG_SIGNATURE)
+        fh.write(chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 16, 2, 0, 0, 0)))
+        fh.write(chunk(b'IDAT', zlib.compress(data.tobytes(), level)))
+        fh.write(chunk(b'IEND', b''))
+
+
+def export_paths(jpeg_path: str) -> Dict[str, str]:
+    """The ``--export png`` / ``png16`` files written next to a preview JPEG."""
+    stem = os.path.splitext(jpeg_path)[0]
+    return {'png': stem + '.png', 'png16': stem + '_16bit.png'}
+
+
+def write_final_images(img01: np.ndarray, jpeg_path: str, exports=()) -> None:
+    """The preview JPEG of a [0, 1] display image, plus the lossless ``exports`` ('png':
+    8-bit, the JPEG's exact pixels before compression; 'png16': 16-bit) from the same
+    render. Each file goes through a temporary name, so a failed write never leaves a
+    half-written file."""
+    def atomic(path, write):
+        tmp = path + '.tmp'
+        try:
+            write(tmp)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    u8 = to_uint8(img01)
+    atomic(jpeg_path, lambda t: write_preview_jpeg(u8, t))
+    paths = export_paths(jpeg_path)
+    if 'png' in exports and Image is not None:
+        atomic(paths['png'], lambda t: Image.fromarray(u8).save(t, format='PNG', compress_level=6))
+    if 'png16' in exports:
+        atomic(paths['png16'], lambda t: write_png16(t, img01))
 
 
 def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:

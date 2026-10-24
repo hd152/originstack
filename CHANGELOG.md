@@ -8,6 +8,12 @@ match the `VERSION` file and `v*` git tags.
 
 ### Added
 
+- **Lossless copies of the final image: `--export png` and `png16`** (also "Also save" in the
+  app, remembered between launches). `png` is the JPEG's own image without compression (8-bit,
+  about 1.8x the JPEG's size); `png16` is the same render in 16 bits per channel, for further
+  editing in another program without banding (about 6x). Both are made from the same render as
+  the JPEG and are rewritten when you pick another stretch after the run.
+
 - **Multi-night combines keep a sharp night's detail** (`--merge` and the multi-session
   combine, on by default; `--no-merge-proper` restores the plain weighted mean). Each night
   is weighted per spatial frequency by its own measured star profile (proper coaddition, as already done for the

@@ -1072,6 +1072,18 @@ _FRAME_KINDS = {'light': (N_('{n} light'), N_('{n} lights')),
                 'darkflat': (N_('{n} dark flat'), N_('{n} dark flats'))}
 
 
+def with_export_checkboxes(form: Dict[str, Any], typed: str, ticked: Dict[str, bool]) -> Dict[str, Any]:
+    """``form`` with ``export`` = the formats typed under Additional options plus the ticked
+    "Also save" boxes (png, png16), each once, in that order. Unchanged when nothing is
+    ticked, so an untouched form still leaves --export to its default."""
+    extra = [f for f, on in ticked.items() if on]
+    if not extra:
+        return form
+    fmts = [e.strip() for e in str(form.get('export', typed) or '').split(',') if e.strip()]
+    fmts += [f for f in extra if f not in fmts]
+    return {**form, 'export': ','.join(fmts)}
+
+
 def _frame_count(kind: str, n: int) -> str:
     one, many = _FRAME_KINDS.get(kind, ('{n} ' + kind, '{n} ' + kind))
     return _(one if n == 1 else many, n=n)
@@ -1555,6 +1567,23 @@ class App:
                         variable=self.open_folder_var).pack(side='left', padx=(10, 0))
         ttk.Button(run_row, text=_('Open Folder'), command=self._open_output_folder).pack(
             side='left', padx=(6, 0))
+        # Lossless copies of the final image next to the JPEG (--export png / png16);
+        # remembered between launches.
+        from src.desktop_control import load_app_setting
+        save_row = ttk.Frame(parent)
+        save_row.pack(fill='x', pady=(0, 6))
+        ttk.Label(save_row, text=_('Also save:'), style='Dim.TLabel').pack(side='left')
+        self.export_vars = {}
+        for fmt, label, tip in (
+                ('png', _('Lossless PNG'), _('The final image without JPEG compression.')),
+                ('png16', _('16-bit PNG for editing'),
+                 _('The final image in 16 bits per channel: further curves or levels '
+                   'adjustments in another editor do not band.'))):
+            var = tk.BooleanVar(value=bool(load_app_setting(f'export_{fmt}', False)))
+            cb = ttk.Checkbutton(save_row, text=label, variable=var)
+            cb.pack(side='left', padx=(10, 0))
+            _Tooltip(cb, tip)
+            self.export_vars[fmt] = var
         self.readiness_var = tk.StringVar(value=_('Choose a light-frame folder to begin.'))
         ttk.Label(parent, textvariable=self.readiness_var, style='Dim.TLabel',
                   wraplength=560).pack(fill='x', pady=(0, 4))
@@ -1738,6 +1767,11 @@ class App:
         # remembered for the next launch: a big session's temp files need a roomy drive
         from src.desktop_control import save_app_setting
         save_app_setting('temp_dir', str(form.get('temp_dir') or '').strip())
+        form = with_export_checkboxes(form, self.form.vars['export'].get()
+                                      if 'export' in self.form.vars else '',
+                                      {f: v.get() for f, v in self.export_vars.items()})
+        for fmt, var in self.export_vars.items():
+            save_app_setting(f'export_{fmt}', bool(var.get()))
         result = self.rm.start(form)
         if not result.get('ok'):
             self.status_var.set(_('Error: {error}', error=result.get('error')))
