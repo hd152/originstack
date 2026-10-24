@@ -204,7 +204,8 @@ def run_annotation(stacked: np.ndarray, header, output_path: str, args) -> bool:
     n_stars = sum(1 for o in objects if o['kind'] == 'star')
     n_dso = sum(1 for o in objects if o['kind'] == 'dso')
     try:
-        Image.fromarray(annotated).save(out_path, format='JPEG', quality=92)
+        from src.io_fits import JPEG_SAVE_KW
+        Image.fromarray(annotated).save(out_path, format='JPEG', quality=92, **JPEG_SAVE_KW)
     except Exception as exc:
         safe_print(f"  Annotate: failed to save {out_path} ({exc})")
         return False

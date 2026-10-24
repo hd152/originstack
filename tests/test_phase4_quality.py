@@ -92,7 +92,7 @@ def test_channel_mode_is_the_old_per_channel_curve():
     ref = np.stack([generalized_hyperbolic_stretch(img[..., c], b=8.0, SP=0.1, LP=0.0, HP=0.95,
                                                    black_point=med, white_point=white)
                     for c in range(3)], axis=2)
-    np.testing.assert_array_equal(out, np.clip(ref * 255, 0, 255).astype(np.uint8))
+    np.testing.assert_array_equal(out, np.clip(np.rint(ref * 255), 0, 255).astype(np.uint8))
 
 
 def test_stretch_color_flag_parses():
