@@ -265,7 +265,13 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         # them black, leaving only the core. Rendering the same pixels at 1.0
         # brought them back. Shallow-stack splotching is handled separately by
         # the depth cap in _apply_quality_settings.
-        ('preview_black_sigma',     1.0),
+        # 1.0 still rendered 51-57% of the faint galaxy pixels (bench_phase4's
+        # faint-signal region) pure black on Sunflower and Sculptor and 27-29% on
+        # Whirlpool and M101 -- the learned deconvolver leaves so little sky noise
+        # that 1 sigma of it sits just above the sky. 0.0 (black at the sky
+        # median): 12-23%, half the sky still black; chosen by eye over -1 and -2,
+        # whose grey sky showed grain and background-residual blotches.
+        ('preview_black_sigma',     0.0),
         # Smooth medium-scale colour blotches in the empty sky around the small
         # galaxy (object-masked, so galaxy/star colour is preserved).
         ('chroma_nr_large_sigma',   50.0),
