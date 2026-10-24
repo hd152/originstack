@@ -18,6 +18,15 @@ match the `VERSION` file and `v*` git tags.
   the 10th percentile, and unchanged where the nights' seeing matched. With
   `--merge-consistency` the consistency combine is used instead.
 
+### Changed
+
+- **Galaxies keep their faint outskirts in the preview.** The galaxy preset put the preview's
+  black point one noise sigma above the sky; after the learned deconvolver has removed most of
+  the sky noise, that line sits just above the sky and took the faint outer disk and arms with
+  it: 51-57% of the faint galaxy pixels came out pure black on Sunflower and Sculptor, 27-29% on
+  Whirlpool and M101. The black point is now the sky median (12-23% black, half the sky still
+  black). `--config preview_black_sigma=1.0` restores the old, blacker sky.
+
 ### Fixed
 
 - **One dark-scaling note per run.** When the lights' exposures differ from the dark's, the log
