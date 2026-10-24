@@ -42,6 +42,22 @@
 </header>
 
 <main>
+<section id="v2-15">
+  <div class="wrap">
+    <h2>2.15 <small class="when">24 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-15-0"><h3>2.15.0 <span>24 Oct</span></h3>
+        <ul>
+          <li><strong>Sharper multi-night images.</strong> When several nights are combined, each night now counts for the fine detail by how sharp its stars are, so one night of poor seeing no longer blurs a good one. On a two-night Pleiades combine the stars came out 22% narrower, with the same noise.</li>
+          <li><strong>Star colours survive the JPEG.</strong> The JPEG used to store colour at half resolution, which washed out the colour of small stars; it now keeps it in full (files about a fifth larger).</li>
+          <li><strong>Galaxies keep their faint outskirts.</strong> The galaxy look no longer clips the faint outer disk and arms to black; half the sky still stays black.</li>
+          <li><strong>Lossless copies of the final image:</strong> tick <em>Also save</em> in the app (or <code>--export png,png16</code>) for a PNG without JPEG compression, and a 16-bit PNG for further editing in another program without banding.</li>
+          <li>One line in the log about dark scaling instead of the same note over and over.</li>
+        </ul></article>
+    </div>
+  </div>
+</section>
+
 <section id="v2-14">
   <div class="wrap">
     <h2>2.14 <small class="when">23 October 2026</small></h2>

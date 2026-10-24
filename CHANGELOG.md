@@ -6,6 +6,11 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-10-24
+
+Sharper multi-night combines, truer star colours in the JPEG, galaxies that keep their faint
+outskirts, and lossless PNG copies of the final image.
+
 ### Added
 
 - **Lossless copies of the final image: `--export png` and `png16`** (also "Also save" in the
