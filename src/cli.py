@@ -1774,7 +1774,9 @@ def build_parser() -> argparse.ArgumentParser:
                         'PSF options (blind PSF, iterations, model) via --config.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
-                        'xisf (PixInsight). E.g. --export tiff,xisf')
+                        'xisf (PixInsight), png (the preview JPEG\'s image, lossless 8-bit), '
+                        'png16 (the preview as a 16-bit PNG, for further editing without '
+                        'banding). E.g. --export tiff,png16')
     g_debug.add_argument('--debug', default=None, metavar='KIND[,KIND]',
                    help='Debug artefacts, comma-separated: '
                         'registration (per-frame diagnostics, implies -v), '
@@ -2882,10 +2884,12 @@ def parse_args(argv=None):
 
     _exp = [e.strip() for e in (args.export or '').split(',') if e.strip()]
     for e in _exp:
-        if e not in ('tiff', 'xisf'):
-            p.error(f"--export: unknown format '{e}' (choose from: tiff, xisf)")
+        if e not in ('tiff', 'xisf', 'png', 'png16'):
+            p.error(f"--export: unknown format '{e}' (choose from: tiff, xisf, png, png16)")
     args.output_tiff = 'tiff' in _exp
     args.output_xisf = 'xisf' in _exp
+    args.output_png = 'png' in _exp
+    args.output_png16 = 'png16' in _exp
 
     _dbg = [d.strip() for d in (args.debug or '').split(',') if d.strip()]
     for d in _dbg:

@@ -189,8 +189,8 @@
  "Explicit path to the ASTAP binary (auto-detected if omitted).": "Ruta explícita al ejecutable de ASTAP (se detecta automáticamente si se omite).",
  "Export": "Exportar",
  "Export frames dir": "Carpeta de exportación de tomas",
- "Extra file formats to save alongside the FITS: tiff, xisf.": "Formatos de archivo adicionales que guardar junto al FITS: tiff, xisf.",
- "Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight). E.g. --export tiff,xisf": "Formatos de salida adicionales junto al FITS: tiff (float de 32 bits), xisf (PixInsight). P. ej. --export tiff,xisf",
+ "Extra file formats to save alongside the FITS: tiff, xisf, png (a lossless copy of the preview), png16 (the preview in 16 bits, for further editing).": "Formatos de archivo adicionales que guardar junto al FITS: tiff, xisf, png (copia sin pérdida de la vista previa), png16 (la vista previa en 16 bits, para seguir editándola).",
+ "Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight), png (the preview JPEG's image, lossless 8-bit), png16 (the preview as a 16-bit PNG, for further editing without banding). E.g. --export tiff,png16": "Formatos de salida adicionales junto al FITS: tiff (float de 32 bits), xisf (PixInsight), png (la imagen del JPEG de vista previa, 8 bits sin pérdida), png16 (la vista previa como PNG de 16 bits, para seguir editándola sin bandas). P. ej. --export tiff,png16",
  "FITS files": "Archivos FITS",
  "FRAMES": "TOMAS",
  "Failed": "Error",
@@ -586,5 +586,10 @@
  "Preview JPEG stretch method (default: ghs). masked blends a stronger faint-signal stretch through a smooth luminance mask; multiscale uses separate diffuse and filament masks; seti applies SETI Astro statistical stretch (target median 0.20); noisefloor picks the curve strength from the sky noise (ignores the preset GHS strength and --preview-black-sigma); oklab applies the GHS curve to perceptual lightness and keeps hue and saturation; clahe adds contrast-limited local equalisation to the GHS preview where there is extended signal; object takes the white point and the curve’s focus from the target itself (found where the telescope pointed), so a small galaxy is not stretched for the empty field around it; plain ghs when the target fills the frame.": "M?todo de estirado de la vista previa JPEG (predeterminado: ghs). masked mezcla un estirado m?s fuerte de se?ales d?biles mediante una m?scara suave de luminancia; multiscale usa m?scaras separadas para se?ales difusas y filamentos; seti aplica el estirado estad?stico SETI Astro; noisefloor elige la intensidad seg?n el ruido del cielo; oklab aplica la curva GHS a la luminosidad perceptual y conserva tono y saturaci?n; clahe a?ade ecualizaci?n local limitada al contraste; object toma el punto blanco y el foco de la curva del propio objeto (buscado donde apuntaba el telescopio), para que una galaxia pequeña no se estire para el campo vacío que la rodea; ghs normal cuando el objeto llena el encuadre.",
  "Support OriginStack": "Apoyar OriginStack",
  "OriginStack is free. If it saves you time, a tip on Ko-fi helps keep it going. Opens in your browser.": "OriginStack es gratuito. Si te ahorra tiempo, una propina en Ko-fi ayuda a mantenerlo. Se abre en el navegador.",
- "Like the result? Support OriginStack": "¿Te gusta el resultado? Apoya OriginStack"
+ "Like the result? Support OriginStack": "¿Te gusta el resultado? Apoya OriginStack",
+ "Also save:": "Guardar también:",
+ "Lossless PNG": "PNG sin pérdida",
+ "The final image without JPEG compression.": "La imagen final sin compresión JPEG.",
+ "16-bit PNG for editing": "PNG de 16 bits para editar",
+ "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "La imagen final con 16 bits por canal: más ajustes de curvas o niveles en otro editor no producen bandas."
 }

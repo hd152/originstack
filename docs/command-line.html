@@ -332,7 +332,7 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
     <h2>Output, preview &amp; plate solving</h2>
     <dl class="opts">
       <div id="opt-export"><dt><code>--export</code> <var>FMT[,FMT]</var></dt>
-        <dd><p>Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight). E.g. --export tiff,xisf</p></dd></div>
+        <dd><p>Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight), png (the preview JPEG&#x27;s image, lossless 8-bit), png16 (the preview as a 16-bit PNG, for further editing without banding). E.g. --export tiff,png16</p></dd></div>
       <div id="opt-plate-solve"><dt><code>--plate-solve</code></dt>
         <dd><p>Plate-solve the stack and write a WCS (see --plate-solver; the default solves locally against a Gaia index, no API key needed)</p></dd></div>
       <div id="opt-annotate"><dt><code>--annotate</code></dt>

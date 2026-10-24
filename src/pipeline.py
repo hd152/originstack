@@ -29,7 +29,14 @@ from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import autodetect_bayer_orientation, debayer
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
-from src.io_fits import load_fits, load_frame, populate_fits_header, preview_stretch_kw, save_preview_rgb
+from src.io_fits import (
+    load_fits,
+    load_frame,
+    populate_fits_header,
+    preview_exports,
+    preview_stretch_kw,
+    save_preview_rgb,
+)
 from src.models import FrameInfo, ProcessingStats
 from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
@@ -210,8 +217,10 @@ def save_final_preview(rgb: np.ndarray, preview_path: str, args,
     """Write the run's preview JPEG with ``args``' stretch settings and keep
     its source so the desktop app can re-stretch it after the run."""
     from src.ui_events import get_ui_events
-    save_preview_rgb(rgb, preview_path, starless=starless, **preview_stretch_kw(args))
+    save_preview_rgb(rgb, preview_path, starless=starless, exports=preview_exports(args),
+                     **preview_stretch_kw(args))
     get_ui_events().remember_final_preview(rgb, preview_path, args, starless=starless)
+
 
 
 def _prefetch_session_lookups(lights: List[FrameInfo], args, directory: str,
