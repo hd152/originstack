@@ -140,7 +140,7 @@
       </div>
       <div>
         <h3>Moins de bruit, les détails gardés</h3>
-        <p>Un débruiteur par ondelettes qui protège les filaments et les bras spiraux. Sur les galaxies prises avec un Origin, un petit réseau de neurones entraîné uniquement sur de vraies sessions Origin corrige le flou du seeing et retire le bruit en une seule étape.</p>
+        <p>Un débruiteur par ondelettes qui protège les filaments et les bras spiraux. Sur les sessions Origin, un petit réseau de neurones entraîné sur de vraies sessions Origin corrige le flou du seeing et retire le bruit en une seule étape.</p>
       </div>
       <div>
         <h3>Étoiles resserrées, structure révélée</h3>
@@ -417,7 +417,7 @@ python desktop_app.py</pre>
       <div id="no-gen-ai">
         <h3>Aucune IA générative, rien dans le cloud</h3>
         <p>OriginStack n'envoie jamais vos images à un service d'IA et ne génère ni n'invente jamais de contenu d'image. Son traitement est un traitement du signal classique et documenté, écrit pour ce projet, de la calibration et de l'alignement à la suppression du fond et à la réduction du bruit, et vous pouvez tout lire dans le code source. Il ne nécessite aucun autre logiciel d'astronomie, aucun compte ni service cloud, seulement des bibliothèques scientifiques libres courantes.</p>
-        <p>Deux étapes facultatives, <code>--denoiser nn</code> et <code>--deconvolve nn</code>, utilisent de petits réseaux de neurones entraînés uniquement sur de vraies sessions du Celestron Origin. Elles s'exécutent sur votre propre ordinateur et ont été vérifiées sur des empilements indépendants pour confirmer qu'elles n'ajoutent aucune étoile ni aucun détail absent des données. Les réglages automatiques utilisent la seconde pour les sessions de galaxies de l'Origin ; <code>--deconvolve off</code> la désactive. <a href="../how-it-works.html#learned">Comment elles fonctionnent</a>.</p>
+        <p>Deux étapes facultatives, <code>--denoiser nn</code> et <code>--deconvolve nn</code>, utilisent de petits réseaux de neurones entraînés sur de vraies sessions du Celestron Origin (la seconde aussi sur des images de relevés plus nettes du même ciel). Elles s'exécutent sur votre propre ordinateur et ont été vérifiées sur des empilements indépendants pour confirmer qu'elles n'ajoutent aucune étoile ni aucun détail absent des données. Les réglages automatiques utilisent la seconde pour les sessions de l'Origin ; <code>--deconvolve off</code> la désactive. <a href="../how-it-works.html#learned">Comment elles fonctionnent</a>.</p>
       </div>
     </div>
   </div>

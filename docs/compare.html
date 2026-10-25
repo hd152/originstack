@@ -92,8 +92,8 @@
         <dd><p>Coloured speckle in the dark sky is smoothed without touching the brightness detail, and the sky is set to a neutral, even black level instead of a tinted one.</p></dd></div>
       <div><dt>Noise reduction<code>on by default</code></dt>
         <dd><p>A wavelet denoiser that protects elongated structure such as filaments and spiral arms, chosen after benchmarking the alternatives on scenes with known truth.</p></dd></div>
-      <div><dt>Learned deconvolution<code>automatic for Origin galaxies</code></dt>
-        <dd><p>A small neural network trained only on real Origin sessions undoes the night's seeing blur and removes noise in one step. On held-out targets it gave the narrowest stars of every option, with no dark rings and no invented detail, checked against independent stacks.</p></dd></div>
+      <div><dt>Learned deconvolution<code>automatic for Origin sessions</code></dt>
+        <dd><p>A small neural network trained on real Origin sessions, against sharper survey images of the same sky, undoes the night's seeing blur and removes noise in one step. On held-out targets it gave the narrowest stars of every option, with no dark rings and no invented detail, checked against independent stacks.</p></dd></div>
       <div><dt>Star reduction and local contrast<code>on by default</code></dt>
         <dd><p>Stars are narrowed without losing their colour or peak, so they stop crowding out the object, and mid-scale detail on the object is lifted against the noise at each scale.</p></dd></div>
       <div><dt>Edges and the final sky<code>on by default</code></dt>

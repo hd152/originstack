@@ -100,7 +100,9 @@ def reproject_onto(src: np.ndarray, src_wcs: WCS, dst_wcs: WCS, shape) -> np.nda
 def crop_centres(H: int, W: int, size: int, n: int):
     """The frame centre first (usually the target), then points across the field."""
     cs = [(H // 2, W // 2)]
-    for fy, fx in ((0.3, 0.25), (0.7, 0.75), (0.3, 0.75), (0.7, 0.25)):
+    # appended only: crop k keeps its place, so a larger --crops adds to an existing set
+    for fy, fx in ((0.3, 0.25), (0.7, 0.75), (0.3, 0.75), (0.7, 0.25),
+                   (0.5, 0.1), (0.5, 0.9), (0.15, 0.5), (0.85, 0.5)):
         cs.append((int(H * fy), int(W * fx)))
     half = size // 2
     return [(min(max(y, half), H - half), min(max(x, half), W - half)) for y, x in cs[:n]]

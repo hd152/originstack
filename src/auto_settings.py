@@ -895,15 +895,17 @@ def apply_auto_settings(
     return target_type, label, sig, changes, weights
 
 
-# The learned deconvolver (--deconvolve nn) for galaxies on Origin data: the narrowest stars of
-# default / RL / --denoiser nn / --deconvolve nn on all five held-out targets, most on the two
-# galaxies (Phase 4 FWHM vs linear 0.75 / 0.74 against the default chain's 0.88 / 0.88), at the
-# nn denoiser's sky noise (dev-notes/nn-deconv-runbook.md, step 6). Origin only: it learned that
-# instrument's seeing blur and narrows ideal Gaussian stars by just 2-5%. Not yet for nebulae and
-# star fields: the survey-truth model at 0.75 beats --denoiser nn there on width (0.70-0.91 vs
-# 1.06-1.08) and faint contrast (+10-20%), but adds ~2 deg hue error on Omega and Pleiades and
-# drops Pleiades' star-colour correlation 0.48 -> 0.34; chroma NR first fixes the colour and
-# gives most of the sharpening back (runbook, "Survey truth").
+# The learned deconvolver (--deconvolve nn) on Origin data. Origin only: it learned that
+# instrument's seeing blur and narrows ideal Gaussian stars by just 2-5%.
+# Galaxies (weight >= NN_DECONV_MIN_GALAXY_WEIGHT) since v3: the narrowest stars of default / RL /
+# --denoiser nn / --deconvolve nn on the five held-out targets (runbook, step 6).
+# Everything else where the wavelet denoiser would run since the survey-truth model (2026-10-25),
+# in place of --denoiser nn: at 0.75 stars 0.70 / 0.73 / 0.91 of linear (Orion / Pleiades / Omega)
+# against 1.07 / 1.08 / 1.06, faint contrast +13% / +10% / +20%, and better star colour on the
+# Phase 4 output (rank correlation with the linear stack 0.978 / 0.993 / 0.990 vs 0.959 / 0.968
+# / 0.987). The default per-channel stretch whitens the sharper, brighter cores, so colour read
+# off the JPEG drops on Pleiades / Omega; with --stretch-color preserve it is better there too
+# (runbook, "Survey truth: v4").
 NN_DECONV_MIN_GALAXY_WEIGHT = 0.5
 # Share of the deconvolver's output kept on galaxies; the rest is the nn denoiser's
 # (postprocess, nn_deconv_blend). The survey-truth model (2026-10-24) on its own left 30-36%
@@ -913,6 +915,7 @@ NN_DECONV_MIN_GALAXY_WEIGHT = 0.5
 # "Survey truth").
 NN_DECONV_GALAXY_BLEND = 0.35
 NN_DECONV_DEFAULT_BLEND = 0.75        # cli.py's default for an explicit --deconvolve nn
+NN_DECONV_OTHER_BLEND = 0.75          # nebulae, clusters, star fields
 # Cameras whose data the learned deconvolution was trained on. It learned that sensor's
 # sampling and the Origin's seeing blur; the Mark II's Origin678C (smaller pixels) and the
 # other cameras the Origin platform drives are not covered, so --auto leaves it off there.
@@ -924,8 +927,9 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
     explicit = getattr(args, '_explicit_cli_dests', set())
     if {'denoiser', 'deconvolve_mode'} & explicit or getattr(args, 'deconvolve_nn', False):
         return changes                       # the user chose denoising/deconvolution
-    if (weights or {}).get('galaxy', 0.0) < NN_DECONV_MIN_GALAXY_WEIGHT:
-        return changes
+    galaxy = (weights or {}).get('galaxy', 0.0) >= NN_DECONV_MIN_GALAXY_WEIGHT
+    if not galaxy and not getattr(args, 'denoise_curvelet', False):
+        return changes                       # only where the wavelet denoiser would run
     if str((getattr(args, '_camera', None) or {}).get('model', '')) not in NN_TRAINED_CAMERAS:
         return changes
     from src.nn_denoise import DECONV_MODEL_PATH, model_available
@@ -936,14 +940,15 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
     _set('deconvolve_nn', True)
     _set('deconvolve', False)                # not Richardson-Lucy as well
     if getattr(args, 'nn_deconv_blend', NN_DECONV_DEFAULT_BLEND) == NN_DECONV_DEFAULT_BLEND:
-        _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND)   # a --config value wins
+        _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND if galaxy else NN_DECONV_OTHER_BLEND)  # --config wins
     for attr in ('denoise_curvelet', 'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn'):
         _set(attr, False)                    # the network denoises as it sharpens
     return changes
 
 
 # The learned denoiser (--denoiser nn) in place of the wavelet denoiser for everything else on
-# Origin data, with chroma noise reduction before it (nn_chroma_nr). bench_phase4 on the five
+# Origin data, with chroma noise reduction before it (nn_chroma_nr); since 2026-10-25 only when
+# the deconvolver's weights are missing (the rule above takes these targets). bench_phase4 on the five
 # held-out targets (2026-10-22): without chroma NR first it widened stars 1-2% on the nebula
 # and cluster fields and added 1-2 deg of hue error; with it, star widths within 0.3% and hue
 # error equal to the wavelet chain's, at 3.5-27x lower sky noise and 3-40x the faint-structure

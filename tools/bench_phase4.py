@@ -18,6 +18,9 @@ before the stretch, ``L`` = linear input stack):
                  star's colour index in L. 1 = colour spread kept; toward 0 =
                  stars rendered toward white.
   colour_rho     Spearman correlation of the same pairs.
+  colour_slope_lin, colour_rho_lin, gaia_rho_lin
+                 the same on P: star colour after Phase 4 but before the stretch
+                 (sharper stars clip white in D and lose colour there only).
   hue_err_deg    median angle between the RGB vector of D and of (P - sky) on
                  bright pixels (luminance excess > 30 sky sigma). What the
                  stretch alone does to hue.
@@ -253,6 +256,9 @@ def score(L, P, D, reg, fwhm, gaia=None, truth=None) -> Dict[str, float]:
     ci_L = _colour_index(L, xs[sel], ys[sel], fwhm)
     ci_D = _colour_index(D, xs[sel], ys[sel], fwhm)
     m["colour_slope"], m["colour_rho"], m["n_colour"] = _slope_rho(ci_L, ci_D)
+    # the same on Phase 4's linear output: what the processing did to star colour, before
+    # the stretch's white point clips the cores
+    m["colour_slope_lin"], m["colour_rho_lin"], _ = _slope_rho(ci_L, _colour_index(P, xs[sel], ys[sel], fwhm))
 
     # Hue on bright pixels: stretch alone
     sky_c = np.array([np.median(P[..., c][reg["sky"]]) for c in range(3)])
@@ -310,6 +316,10 @@ def score(L, P, D, reg, fwhm, gaia=None, truth=None) -> Dict[str, float]:
             m["gaia_rho"] = float(stats.spearmanr(bp[keep][okc], ci[okc]).statistic)
             m["gaia_solar_ci"] = float(ic + sl * SOLAR_BP_RP)
             m["n_gaia"] = int(okc.sum())
+            ci_p = _colour_index(P, gx[keep], gy[keep], fwhm)
+            okp = np.isfinite(ci_p)
+            if okp.sum() >= 8:
+                m["gaia_rho_lin"] = float(stats.spearmanr(bp[keep][okp], ci_p[okp]).statistic)
 
     if truth is not None:
         ci_T = _colour_index(truth, xs[sel], ys[sel], fwhm)

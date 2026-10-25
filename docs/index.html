@@ -145,7 +145,7 @@
       </div>
       <div>
         <h3>Noise reduced, detail kept</h3>
-        <p>A wavelet denoiser that protects filaments and spiral arms. On galaxies from an Origin, a small neural network trained only on real Origin sessions sharpens the seeing blur and removes noise in one step.</p>
+        <p>A wavelet denoiser that protects filaments and spiral arms. On Origin sessions, a small neural network trained on real Origin sessions sharpens the seeing blur and removes noise in one step.</p>
       </div>
       <div>
         <h3>Stars tightened, structure lifted</h3>
@@ -422,7 +422,7 @@ python desktop_app.py</pre>
       <div id="no-gen-ai">
         <h3>No generative AI, nothing in the cloud</h3>
         <p>OriginStack never sends your images to an AI service and never generates or imagines image content. Its pipeline is classical, documented signal processing written for this project, from calibration and alignment to background removal and noise reduction, and you can read all of it in the source. It needs no other astronomy software, no account and no cloud service, only standard open-source scientific libraries.</p>
-        <p>Two optional steps, <code>--denoiser nn</code> and <code>--deconvolve nn</code>, use small neural networks trained only on real Celestron Origin sessions. They run on your own computer and were checked against independent stacks to confirm they add no stars or detail that is not in the data. The automatic settings use the second one for Origin galaxy sessions; <code>--deconvolve off</code> turns it off. <a href="how-it-works.html#learned">How they work</a>.</p>
+        <p>Two optional steps, <code>--denoiser nn</code> and <code>--deconvolve nn</code>, use small neural networks trained on real Celestron Origin sessions (the second also against sharper survey images of the same sky). They run on your own computer and were checked against independent stacks to confirm they add no stars or detail that is not in the data. The automatic settings use the second one for Origin sessions; <code>--deconvolve off</code> turns it off. <a href="how-it-works.html#learned">How they work</a>.</p>
       </div>
     </div>
   </div>

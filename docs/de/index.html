@@ -140,7 +140,7 @@
       </div>
       <div>
         <h3>Weniger Rauschen, Details bleiben</h3>
-        <p>Ein Wavelet-Entrauscher, der Filamente und Spiralarme schützt. Bei Galaxien vom Origin schärft ein kleines neuronales Netz, das nur mit echten Origin-Sessions trainiert wurde, die Seeing-Unschärfe und entfernt das Rauschen in einem Schritt.</p>
+        <p>Ein Wavelet-Entrauscher, der Filamente und Spiralarme schützt. Bei Origin-Sessions schärft ein kleines neuronales Netz, das mit echten Origin-Sessions trainiert wurde, die Seeing-Unschärfe und entfernt das Rauschen in einem Schritt.</p>
       </div>
       <div>
         <h3>Kleinere Sterne, mehr Struktur</h3>
@@ -417,7 +417,7 @@ python desktop_app.py</pre>
       <div id="no-gen-ai">
         <h3>Keine generative KI, nichts in der Cloud</h3>
         <p>OriginStack sendet Ihre Bilder nie an einen KI-Dienst und erzeugt oder erfindet nie Bildinhalte. Die Verarbeitung ist klassische, dokumentierte Signalverarbeitung, die für dieses Projekt geschrieben wurde, von der Kalibrierung und Ausrichtung bis zur Hintergrundentfernung und Rauschminderung, und Sie können alles im Quellcode nachlesen. Es braucht keine andere Astronomiesoftware, kein Konto und keinen Cloud-Dienst, nur gängige quelloffene wissenschaftliche Bibliotheken.</p>
-        <p>Zwei optionale Schritte, <code>--denoiser nn</code> und <code>--deconvolve nn</code>, verwenden kleine neuronale Netze, die nur mit echten Celestron-Origin-Sessions trainiert wurden. Sie laufen auf Ihrem eigenen Computer und wurden an unabhängigen Stacks geprüft, um sicherzustellen, dass sie keine Sterne oder Details hinzufügen, die nicht in den Daten sind. Die automatischen Einstellungen verwenden den zweiten für Galaxien-Sessions des Origin; <code>--deconvolve off</code> schaltet ihn ab. <a href="../how-it-works.html#learned">So funktionieren sie</a>.</p>
+        <p>Zwei optionale Schritte, <code>--denoiser nn</code> und <code>--deconvolve nn</code>, verwenden kleine neuronale Netze, die mit echten Celestron-Origin-Sessions trainiert wurden (das zweite zusätzlich an schärferen Survey-Aufnahmen desselben Himmels). Sie laufen auf Ihrem eigenen Computer und wurden an unabhängigen Stacks geprüft, um sicherzustellen, dass sie keine Sterne oder Details hinzufügen, die nicht in den Daten sind. Die automatischen Einstellungen verwenden den zweiten für Origin-Sessions; <code>--deconvolve off</code> schaltet ihn ab. <a href="../how-it-works.html#learned">So funktionieren sie</a>.</p>
       </div>
     </div>
   </div>

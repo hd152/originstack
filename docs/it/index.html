@@ -140,7 +140,7 @@
       </div>
       <div>
         <h3>Meno rumore, dettagli conservati</h3>
-        <p>Un riduttore di rumore a wavelet che protegge filamenti e bracci di spirale. Sulle galassie riprese con un Origin, una piccola rete neurale addestrata solo su vere sessioni Origin corregge la sfocatura del seeing e toglie il rumore in un solo passaggio.</p>
+        <p>Un riduttore di rumore a wavelet che protegge filamenti e bracci di spirale. Sulle sessioni Origin, una piccola rete neurale addestrata su vere sessioni Origin corregge la sfocatura del seeing e toglie il rumore in un solo passaggio.</p>
       </div>
       <div>
         <h3>Stelle più piccole, struttura in risalto</h3>
@@ -417,7 +417,7 @@ python desktop_app.py</pre>
       <div id="no-gen-ai">
         <h3>Nessuna IA generativa, niente nel cloud</h3>
         <p>OriginStack non invia mai le tue immagini a un servizio di IA e non genera né inventa mai contenuti d'immagine. La sua elaborazione è elaborazione del segnale classica e documentata, scritta per questo progetto, dalla calibrazione e dall'allineamento alla rimozione del fondo e alla riduzione del rumore, e puoi leggerla tutta nel codice sorgente. Non richiede altri software di astronomia, né account, né servizi cloud, solo comuni librerie scientifiche open source.</p>
-        <p>Due passaggi facoltativi, <code>--denoiser nn</code> e <code>--deconvolve nn</code>, usano piccole reti neurali addestrate solo su vere sessioni del Celestron Origin. Vengono eseguiti sul tuo computer e sono stati verificati su stack indipendenti per confermare che non aggiungono stelle o dettagli che non siano nei dati. Le impostazioni automatiche usano il secondo per le sessioni di galassie dell'Origin; <code>--deconvolve off</code> lo disattiva. <a href="../how-it-works.html#learned">Come funzionano</a>.</p>
+        <p>Due passaggi facoltativi, <code>--denoiser nn</code> e <code>--deconvolve nn</code>, usano piccole reti neurali addestrate su vere sessioni del Celestron Origin (il secondo anche su immagini di survey più nitide dello stesso cielo). Vengono eseguiti sul tuo computer e sono stati verificati su stack indipendenti per confermare che non aggiungono stelle o dettagli che non siano nei dati. Le impostazioni automatiche usano il secondo per le sessioni dell'Origin; <code>--deconvolve off</code> lo disattiva. <a href="../how-it-works.html#learned">Come funzionano</a>.</p>
       </div>
     </div>
   </div>
