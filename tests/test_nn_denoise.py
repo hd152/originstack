@@ -212,4 +212,32 @@ def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
     args = parse_args(['-d', '.', '--deconvolve', 'nn', '--skip-step', 'background'])
     args._diagnostic_dir = None
     pp.postprocess_stack(img, args, [], ProcessingStats())
-    assert calls == [(ndm.DECONV_MODEL_PATH, 4.0)]
+    assert calls == [(ndm.DECONV_MODEL_PATH, 4.0), (None, 4.0)]   # deconvolver, then the blend's denoiser
+
+
+def test_nn_deconv_blend_mixes_in_the_denoiser(monkeypatch):
+    import src.nn_denoise as ndm
+    import src.postprocess as pp
+    from src.models import ProcessingStats
+    calls = []
+
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0):
+        calls.append(model_path)
+        return np.full_like(img, 10.0 if model_path == ndm.DECONV_MODEL_PATH else 20.0)
+    monkeypatch.setattr(ndm, 'nn_denoise', fake)
+    monkeypatch.setattr(ndm, 'model_available', lambda path=None: True)
+    seen = {}
+    real_sanitize = pp._sanitize
+
+    def spy(a, what):
+        seen.setdefault(what, a.copy())
+        return real_sanitize(a, what)
+    monkeypatch.setattr(pp, '_sanitize', spy)
+    img = np.full((64, 80, 3), 500, np.float32)
+    args = parse_args(['-d', '.', '--deconvolve', 'nn', '--skip-step', 'background'])
+    args._diagnostic_dir = None
+    args.nn_deconv_blend = 0.25
+    pp.postprocess_stack(img, args, [], ProcessingStats())
+    assert calls == [ndm.DECONV_MODEL_PATH, None]
+    out = seen['nn deconvolution']
+    assert out.dtype == np.float32 and np.allclose(out, 0.25 * 10 + 0.75 * 20)

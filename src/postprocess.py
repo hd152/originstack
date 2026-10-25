@@ -784,13 +784,24 @@ def postprocess_stack(
             nn_strength = float(getattr(args, 'nn_denoise_strength', 1.0))
             nn_restore = float(getattr(args, 'nn_deconv_restore_sigma' if _nn_deconv
                                        else 'nn_restore_sigma', 4.0))
+            # nn_deconv_blend < 1 mixes in the nn denoiser's output: the deconvolver leaves
+            # more sky noise than the denoiser, which costs faint contrast on galaxies.
+            _blend = float(np.clip(getattr(args, 'nn_deconv_blend', 1.0), 0.0, 1.0)) if _nn_deconv else 1.0
+            _blend_msg = f", blend={_blend:.2f}" if _blend < 1.0 else ""
             safe_print(f"\n  Applying neural-network {'deconvolution' if _nn_deconv else 'denoising'} "
-                       f"(strength={nn_strength:.2f})...")
+                       f"(strength={nn_strength:.2f}{_blend_msg})...")
             nn_start = time.time()
             from src.io_fits import _sky_stats
             _sig_before = _sky_stats(luminance(stacked))[1]
+            _pre_nn = stacked
             stacked = nn_denoise(stacked, strength=nn_strength, model_path=_nn_path,
                                  restore_sigma=nn_restore)
+            if _blend < 1.0:
+                _den = nn_denoise(_pre_nn, strength=nn_strength,
+                                  restore_sigma=float(getattr(args, 'nn_restore_sigma', 4.0)))
+                stacked = (np.float32(_blend) * stacked + np.float32(1.0 - _blend) * _den).astype(np.float32)
+                del _den
+            del _pre_nn
             # The preview stretch is solved from the sky noise; keep it at the noise the
             # image had before this step, or it would stretch ~10x harder.
             _sig_after = _sky_stats(luminance(stacked))[1]
