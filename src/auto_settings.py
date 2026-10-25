@@ -900,8 +900,19 @@ def apply_auto_settings(
 # galaxies (Phase 4 FWHM vs linear 0.75 / 0.74 against the default chain's 0.88 / 0.88), at the
 # nn denoiser's sky noise (dev-notes/nn-deconv-runbook.md, step 6). Origin only: it learned that
 # instrument's seeing blur and narrows ideal Gaussian stars by just 2-5%. Not yet for nebulae and
-# star fields (a brighter halo round some bright stars, ~5 deg hue error on bright areas).
+# star fields: the survey-truth model at 0.75 beats --denoiser nn there on width (0.70-0.91 vs
+# 1.06-1.08) and faint contrast (+10-20%), but adds ~2 deg hue error on Omega and Pleiades and
+# drops Pleiades' star-colour correlation 0.48 -> 0.34; chroma NR first fixes the colour and
+# gives most of the sharpening back (runbook, "Survey truth").
 NN_DECONV_MIN_GALAXY_WEIGHT = 0.5
+# Share of the deconvolver's output kept on galaxies; the rest is the nn denoiser's
+# (postprocess, nn_deconv_blend). The survey-truth model (2026-10-24) on its own left 30-36%
+# more sky noise than v3 on the two held-out galaxies and lost 24-31% faint contrast; at 0.35
+# stars are 0.64 / 0.64 of linear against v3's 0.75 / 0.75, faint contrast +1% / +6%, sky
+# noise -4% / -7%, Gaia colour agreement within 0.02 (dev-notes/nn-deconv-runbook.md,
+# "Survey truth").
+NN_DECONV_GALAXY_BLEND = 0.35
+NN_DECONV_DEFAULT_BLEND = 0.75        # cli.py's default for an explicit --deconvolve nn
 # Cameras whose data the learned deconvolution was trained on. It learned that sensor's
 # sampling and the Origin's seeing blur; the Mark II's Origin678C (smaller pixels) and the
 # other cameras the Origin platform drives are not covered, so --auto leaves it off there.
@@ -924,6 +935,8 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
     _set('deconvolve_mode', 'nn')
     _set('deconvolve_nn', True)
     _set('deconvolve', False)                # not Richardson-Lucy as well
+    if getattr(args, 'nn_deconv_blend', NN_DECONV_DEFAULT_BLEND) == NN_DECONV_DEFAULT_BLEND:
+        _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND)   # a --config value wins
     for attr in ('denoise_curvelet', 'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn'):
         _set(attr, False)                    # the network denoises as it sharpens
     return changes

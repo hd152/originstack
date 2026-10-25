@@ -78,3 +78,17 @@ def test_runs_as_part_of_apply_auto_settings(model, monkeypatch):
     monkeypatch.setattr(a, '_apply_free_diagnostics', lambda args: [])
     a.apply_auto_settings([object()], _args())
     assert seen == [GALAXY]
+
+
+def test_galaxies_get_the_galaxy_blend(model):
+    args = _args()
+    assert args.nn_deconv_blend == a.NN_DECONV_DEFAULT_BLEND      # cli.py's default matches
+    a._apply_nn_deconvolution(args, GALAXY)
+    assert args.nn_deconv_blend == a.NN_DECONV_GALAXY_BLEND
+
+
+def test_a_configured_blend_wins(model):
+    args = _args()
+    args.nn_deconv_blend = 0.5                  # e.g. from --config
+    a._apply_nn_deconvolution(args, GALAXY)
+    assert args.nn_deconv_blend == 0.5

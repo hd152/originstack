@@ -1,5 +1,9 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
+Status (2026-10-24): **v4, trained against Pan-STARRS survey truth, replaces v3**, blended with
+the nn denoiser (`--auto` on galaxies: 35% v4; stars ~15% narrower than v3 at equal or better
+faint contrast). See "Survey truth: v4" at the end.
+
 Status (2026-10-21): synthetic-blur training passed its feasibility gate, but its best model (s4)
 is only 1-3% sharper than v3 in the full pipeline; v3 stays shipped (see
 "Synthetic-blur training" below).
@@ -608,3 +612,96 @@ Two conclusions:
   it. Not a reason to replace v3.
 
 Models `C:\nn_work\model_deconv_f{24,32,48}.npz`; results `C:\nn_work\capacity\`.
+
+## Survey truth: v4 (2026-10-24) -- shipped, blended with the denoiser
+
+The capacity sweep ended on "the training target is the limit". v4 replaces the target: a deep
+survey image of the same sky instead of a slightly sharper Origin stack. Fine-tuned from v3, same
+0.27 M-parameter U-Net; `src/data/nn_deconv.npz` is v4 from this date.
+
+**Data.** All 83 sessions restacked with the default settings and `--offline` (so not colour
+calibrated; the colour model below absorbs it). `tools/fetch_ps1_truth.py` cuts 3 crops of
+600 px per stack (246 crops) and fetches Pan-STARRS DR1 g, r, i stack cutouts through STScI's
+fitscut, which returns linear counts. The CDS HiPS r and i keep the per-skycell asinh
+compression and are unusable. Every Origin pixel averages a 6x6 grid of bilinear PS1 samples.
+Crops spanning skycells are stitched. The crop WCS is built by shifting CRPIX: `WCS.slice`
+put the centre 0.26 deg off.
+
+**Target** (`tools/gen_survey_pairs.py`):
+- Colour: one non-negative 3x3 matrix with rows summing to 1, plus a per-crop, per-channel
+  scale, fitted on isolated unsaturated stars' aperture fluxes. Unconstrained fits collapsed.
+  Rows are Origin R, G, B against PS1 g, r, i: `[[.33 .51 .16] [.56 .43 .01] [.91 .09 .00]]`.
+  Crops with colour scatter above 0.25 dex (nebula-dominated photometry) are left out.
+- Sharpness: Gaussian FWHM 2.0 px.
+- Large scales: everything above 16 px comes from the Origin input. PS1 is sky-subtracted on
+  arcminute scales.
+- Masks: no PS1 coverage, saturated Origin cores.
+- Weights: 1 / max(input variance, 0.25) with a 5% systematic term. With weight 1, a few star
+  cores carried the loss (train 1277 vs val 33). Without the floor and the systematic term,
+  val was 20180.
+
+**Two fixes after the first model (v1):**
+- **Invented peaks.** PS1 is about 8x deeper than an Origin stack, so the raw target holds
+  thousands of real faint stars the input cannot show. v1 learnt to put one on noise bumps:
+  1.7x v3's invented peaks against the truth in the pilot. The S/N gate (`snr_gate`) uses the
+  survey target only where the input's matched-filter S/N exceeds 3-6 sigma, and the plain
+  `nn_denoise` output elsewhere.
+- **Bright stars.** Stars saturated in PS1 have no truth. Masked out, the network never saw
+  one, and v1 improvised: donut rings on Sunflower, flat bloated discs on Sculptor, soft blobs
+  on Orion. v4 trains them toward v3's output (`--bright-model`, weight 1). They now render as
+  v3's did; the side-by-side was checked on all five held-out targets.
+
+**Training.** Bank of 3,887 patches. `train_nn_denoise.py train --steps 15000 --lr 3e-4 --init
+<v3> --resume`, 23 min. Best val 0.3187 (identity 1.636). numpy vs torch
+max rel diff 4.9e-7.
+
+**Against the PS1 truth** (`tools/eval_ps1_truth.py`, 27 held-out crops, medians):
+
+| model | error | signal error | width / truth | invented / Mpx | noise / input |
+|---|---|---|---|---|---|
+| v3 | 5.41 | 6.55 | 1.79 | 419 | 0.231 |
+| v1 | 5.21 | 5.42 | **1.24** | 352 | 0.258 |
+| **v4** | **5.18** | 6.24 | 1.41 | **321** | 0.256 |
+
+Equal-noise width (`tools/eval_nn_matched_noise.py`, 9 held-out seeing inputs): v3 0.868,
+v1 0.496, v4 0.581.
+
+**Full pipeline** (`tools/bench_phase4.py`, five held-out targets). v4 alone left 30-36% more
+sky noise than v3 on the galaxies and lost 24-31% faint contrast. Blending its output with the
+nn denoiser's (`nn_deconv_blend`, share of v4 kept) trades that back. Galaxies, against v3
+(the previous `--auto` choice):
+
+| target | blend | width | sky noise | faint contrast | Gaia colour rho |
+|---|---|---|---|---|---|
+| Sunflower | v3 | 0.750 | 0.047 | 235 | 0.809 |
+| | 0.50 | 0.557 | 0.048 | 218 | 0.829 |
+| | **0.35** | **0.640** | 0.045 | 237 | 0.830 |
+| Sculptor | v3 | 0.753 | 0.054 | 287 | 0.771 |
+| | 0.50 | 0.573 | 0.054 | 283 | 0.753 |
+| | **0.35** | **0.643** | 0.050 | 303 | 0.763 |
+
+`--auto` uses 0.35 on galaxies (`auto_settings.NN_DECONV_GALAXY_BLEND`), so stars are about 15%
+narrower than with v3, with faint contrast and colour equal or better. An explicit
+`--deconvolve nn` gets 0.75 (`cli.py` default; `--config nn_deconv_blend=...` overrides,
+including under `--auto`). The blend runs both networks: 26 s for the nn step on a full
+Sunflower stack.
+
+**Nebulae and star fields: not switched.** Compared with what `--auto` uses there
+(`--denoiser nn` with chroma NR first):
+
+| target | variant | width | sky noise | faint contrast | hue error | star colour |
+|---|---|---|---|---|---|---|
+| Orion | denoiser | 1.067 | 0.093 | 273 | 6.0 | gaia 0.761 |
+| | v4 0.75 | 0.696 | 0.082 | 309 | 5.7 | gaia 0.789 |
+| Pleiades | denoiser | 1.078 | 0.326 | 62 | 10.9 | rho 0.478 |
+| | v4 0.75 | 0.730 | 0.302 | 68 | 12.9 | rho 0.339 |
+| Omega | denoiser | 1.061 | 0.326 | 91 | 6.7 | gaia 0.699 |
+| | v4 0.75 | 0.905 | 0.286 | 109 | 8.4 | gaia 0.657 |
+
+v4 is sharper with more faint contrast everywhere, but worse in colour on two of three targets.
+Chroma NR before it fixes the colour but gives most of the sharpening back: width 0.82 / 0.93 /
+0.98 at 0.75. Open: keep v4's luminance detail with the denoiser's colour (fade to additive near
+zero; see "Rules that must hold" in CLAUDE.md), or train with a colour term.
+
+Data `C:\nn_work\survey\` (stacks, `ps1/` crops, banks, models, `eval_*`, `matched_*`,
+`bench_*`, `bright_v3_v1_v2.jpg`).
