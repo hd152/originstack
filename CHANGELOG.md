@@ -6,6 +6,10 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-10-26
+
+Sharper stars in every image from an Origin, and cleaner learned star removal.
+
 ### Changed
 
 - **Sharper stars in every image from an Origin.** The learned deconvolver (`--deconvolve nn`)
@@ -20,6 +24,10 @@ match the `VERSION` file and `v*` git tags.
   `--deconvolve nn` on its own uses 75%, and `--config nn_deconv_blend=...` sets the mix. The
   step takes about twice as long as the noise reduction alone. With the default per-channel
   stretch the sharper star cores render whiter; `--stretch-color preserve` keeps their colour.
+
+- **Three more steps run in the native (Rust) module** when it is installed, as in the
+  released app: the background's fill under masked regions, the satellite-trail detector's
+  Hough transform and the moving-object velocity vote. Results are the same as before.
 
 ### Fixed
 
