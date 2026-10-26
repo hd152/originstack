@@ -721,5 +721,38 @@ One cost: chroma mottle on Pleiades' sky, 6.0 vs 5.4 (it gets no chroma NR now).
 are lower than before. `--auto` keeps `--denoiser nn` as the fallback when
 `src/data/nn_deconv.npz` is missing.
 
-Data `C:\nn_work\survey\` (stacks, `ps1/` crops, banks, models, `eval_*`, `matched_*`,
-`bench_*`, `bright_v3_v1_v2.jpg`).
+### More data and a sky weight: v5 (2026-10-26) -- not shipped
+
+Three times the data: 9 crops per stack (`fetch_ps1_truth.crop_centres`' extra positions), 738
+crops, a bank of 11,854 patches. Trained like v4 (from v3, 15k steps, lr 3e-4). Two variants
+added a sky term to the loss weight, `ww *= 1 + k * sky` with `sky` = pixels whose 5x5-averaged
+input is under 1 sigma, to push the network toward the denoiser's quiet sky so galaxies could
+drop the second pass. The trainer option was not kept.
+
+Against the PS1 truth (79 held-out crops, medians) and equal-noise width (seeing inputs):
+
+| model | width / truth | invented / Mpx | equal-noise width |
+|---|---|---|---|
+| v4 | 1.37 | **364** | 0.506 |
+| v5 | 1.32 | 411 | 0.545 |
+| v5, sky weight 3 | **1.31** | 402 | 0.504 |
+| v5, sky weight 20 | 1.34 | 394 | **0.490** |
+
+Galaxies in the full pipeline, sky weight 20 against shipped v4 at 0.35:
+
+| target | variant | width | sky noise | faint contrast | linear colour rho |
+|---|---|---|---|---|---|
+| Sunflower | v4 0.35 | 0.640 | **0.045** | **237** | **0.889** |
+| | s20 alone | **0.421** | 0.062 | 167 | 0.861 |
+| | s20 0.60 | 0.519 | 0.051 | 204 | 0.882 |
+| Sculptor | v4 0.35 | 0.643 | **0.050** | **303** | **0.851** |
+| | s20 alone | **0.465** | 0.067 | 227 | 0.809 |
+| | s20 0.60 | 0.560 | 0.056 | 270 | 0.840 |
+
+Three times the data moves nothing outside noise, and the sky weight only slides along the same
+width-for-noise line the blend already gives: alone it is a third narrower but 35-40% noisier,
+with 25-30% less faint contrast and worse colour on Sculptor. v4 + blend stays. Same conclusion
+as the capacity sweep, now for data volume too: with this network the target sets the limit.
+
+Data `C:\nn_work\survey\` (models, `train_*`, `eval_*`, `matched_*`, `bench_*`,
+`bright_v3_v1_v2.jpg`; stacks, crops and banks deleted).
