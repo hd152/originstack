@@ -1,10 +1,11 @@
 # Learned star removal by Noisier2Noise: runbook (EXPERIMENTAL, started 2026-10-19)
 
-Status (2026-10-20): **shipped as `--remove-stars-method nn` (experimental, v7 weights + inference
-fixes); passes every check on the five held-out stacks except Orion faint injected 0.26.**
-History: v1-v4 (modelled injected stars) failed; v5 (copies of the image's own stars)
-passed star removal; v6/v7 fixed the brightest stars; inference fixes and the CLI option
-are in the last section.
+Status (2026-10-26): **shipped as `--remove-stars-method nn` (experimental, v7 weights + inference
+fixes); passes every check on the five held-out stacks.** History: v1-v4 (modelled injected
+stars) failed; v5 (copies of the image's own stars) passed star removal; v6/v7 fixed the
+brightest stars; inference fixes and the CLI option are in the last sections. Saturated stars'
+diffraction spikes are subtracted (#147); saturated stars in bright nebula are left alone
+(8d2ce4f). The colour blobs around stars were fixed at inference (2026-10-26, last section).
 
 ## Idea
 
@@ -250,3 +251,49 @@ real bright (0.22). Integrated as `--remove-stars --remove-stars-method nn` (def
 
 Open: diffraction spikes / reflection rings of saturated stars; Orion's brightest unsaturated
 stars partly kept; residual colour patches on the brightest nebula.
+
+## Colour blobs around stars (2026-10-26): two inference fixes, no retraining
+
+The crops still showed coloured discs and rims at stars: red and green discs up to 80 px
+across around mid-bright Orion stars on dark sky, blue rims and red-yellow cores on the
+Pleiades' bright stars, red / cyan pairs on Omega. `tools/diag_star_blobs.py` ranks every
+detected star by the starless output's colour deviation inside its footprint against the ring
+outside it (95th percentile, local noise units). Two causes, both in inference:
+
+- **One colour per star.** `constrain_star_layer` forced each footprint's star layer to the
+  copy's integrated colour. Origin's PSF is chromatic (bluer core, redder halo), so the forced
+  layer took too much blue from the core and too little red from the halo. Without the forcing,
+  the Pleiades stars scoring above 8 went from 28 to 4. Now the colour is the star's own
+  per 2 px ring (`_radial_colour`, background from the ring outside the footprint), falling
+  back to the integrated colour where a ring is under 1 sigma or has a negative channel. With no
+  forcing at all, more bright stars sat at the hole guard's floor (Sunflower hole -1.7).
+- **Sky discs cut from nebula.** The disc every real star gets (`real_discs`) came from any
+  clear point 2-3 copy radii away; on Orion that is often bright nebula. The network removes
+  most of a disc, not all, and the (1 + alpha) / alpha extrapolation doubles what is left. The
+  disc sources are now restricted to structure-free sky (`_sky_structure`: band-pass of 8 px
+  block medians, so stars drop out; at most the 30% quantile or 1.5x the 5th percentile,
+  whichever is higher). The quantile alone kept only the lowest-noise points on plain sky.
+  More TTA realisations also shrink the discs (8: Orion 29 -> 11 stars above 8), but smooth
+  the fill (fill_noise 0.62-0.77) and cost 2-4x the time; rejected.
+
+Stars scoring above 8 (`diag_star_blobs.py --tta 2`): Orion 34 -> 10 (what is left is
+saturated stars in the nebula, left alone by design), Pleiades 28 -> 5, Omega 19 -> 6,
+Sculptor 0, Sunflower 1. `eval_star_n2n.py --tta 2`, before -> after:
+
+| stack | real_left faint / mid / bright | inject_left faint / mid / bright | hole |
+|---|---|---|---|
+| Omega | 0.06 / 0.09 / 0.06 -> 0.07 / 0.09 / 0.06 | 0.09 / -0.01 / -0.03 -> 0.10 / 0.00 / -0.02 | -0.23 -> -0.17 |
+| Orion | 0.07 / 0.14 / 0.22 -> 0.04 / 0.14 / 0.20 | **0.26** / 0.03 / 0.05 -> **0.15** / 0.03 / 0.06 | +0.11 -> +0.06 |
+| Pleiades | -0.01 / 0.09 / 0.04 -> -0.04 / 0.10 / 0.05 | -0.00 / -0.08 / -0.02 -> -0.03 / -0.11 / -0.02 | -0.35 -> -0.29 |
+| Sculptor | -0.06 / 0.11 / 0.13 -> -0.08 / 0.10 / 0.12 | 0.02 / -0.04 / 0.04 -> 0.01 / -0.05 / 0.02 | -0.19 -> -0.20 |
+| Sunflower | -0.11 / 0.04 / 0.03 -> -0.13 / 0.05 / 0.03 | -0.19 / -0.02 / -0.01 -> -0.16 / 0.03 / -0.02 | -0.60 -> -1.11 |
+
+faint_kept 0.93-0.95, sky_shift, fill_noise 0.94-1.08 and sat_left unchanged; same run time.
+Orion's faint injected tertile now passes. The hole median is bimodal: each of the 20
+brightest stars sits either at the guard's floor (about -2) or near -0.2, so the median of 20
+moves by a few stars (Sunflower: -0.60, -0.87 and -1.11 between variants that differ at 3 of
+them). The synthetic test's bright-star share also depends on the disc draw (0.20-0.40
+between seeds on that small image); it now averages four.
+
+Still open: the brightest unsaturated stars keep a small core (real_left bright up to 0.20 on
+Orion); the network under-removes them. A training change, not inference.

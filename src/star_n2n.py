@@ -56,6 +56,9 @@ COPY_R_MIN, COPY_R_MAX = 6, 40   # px; radius of a copied star: where its wing d
 COPY_WING_LEVEL = 0.05  # ...this (noise units), plus the taper; brighter stars carry wider copies.
                         # 0.2 lost a third of a faint star's flux in the wings it left out
 SKY_CLEAR_R = 10        # px; disc sources: sky positions with no detection this close
+DISC_QUIET_FRAC = 0.3   # ...and no more structured than this quantile of the candidates,
+DISC_QUIET_X = 1.5      # ...or this x their 5th percentile, whichever is higher (see StarField)
+STRUCT_BLOCK = 8        # px; block medians for the structure measure (stars drop out)
 INJECT_OFFSET = (64.0, 192.0)   # px; a copy lands this far from its donor
 GUARD_SIGMA = 1.0       # starless floor inside a star: ring's 10th percentile minus this (noise units)
 OUTSIDE_CLIP = (-1.0, 5.0)   # star layer outside every footprint, in local-noise sigma: undetected stars
@@ -88,6 +91,20 @@ def normalise_image(img: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray
     bg = nd.background_at(grid, 0, 0, *img.shape[:2])
     sig = sigma.astype(np.float32)
     return ((img - bg) / sig).astype(np.float32), bg, sig, sky_level_z(bg, sigma)
+
+
+def _sky_structure(lum: np.ndarray) -> np.ndarray:
+    """Extended structure around each ``STRUCT_BLOCK`` block of ``lum`` (noise units): the
+    mean absolute band-pass (16-64 px) of the block medians over a 40 px neighbourhood, plus
+    a tenth of the smoothed level. Block medians drop the stars, whose wings otherwise made
+    every crowded patch look structured."""
+    b = STRUCT_BLOCK
+    h, w = (lum.shape[0] // b) * b, (lum.shape[1] // b) * b
+    blk = np.median(lum[:h, :w].reshape(h // b, b, w // b, b).transpose(0, 2, 1, 3).reshape(h // b, w // b, -1), -1)
+    blk = np.pad(blk, ((0, lum.shape[0] // b + 1 - h // b), (0, lum.shape[1] // b + 1 - w // b)), mode='edge')
+    smooth = ndi.gaussian_filter(blk, 2.0)
+    band = ndi.gaussian_filter(blk, 0.5) - smooth
+    return ndi.uniform_filter(np.abs(band), 5) + 0.1 * np.abs(smooth)
 
 
 def _plane_subtract(cut: np.ndarray) -> np.ndarray:
@@ -253,6 +270,17 @@ class StarField:
         py, px = py[inb], px[inb]
         cl = dist[py, px]
         ok = cl >= SKY_CLEAR_R
+        # the quietest candidates only: a disc carries its source's structure, and the network
+        # does not remove all of it, so (1 + alpha) / alpha later doubles what is left. Orion's
+        # discs, cut from bright nebula 2-3 radii away, came out as red and green discs up to
+        # 80 px across around mid-bright stars on dark sky
+        if ok.sum() > 1:
+            struct = _sky_structure(lum)[py // STRUCT_BLOCK, px // STRUCT_BLOCK]
+            # an absolute bar as well: on plain sky the quantile alone kept the lowest-noise
+            # spots, discs smoother than the network was trained with, and the synthetic
+            # test's bright stars kept 0.40 of their flux instead of 0.21
+            ok &= struct <= max(np.quantile(struct[ok], DISC_QUIET_FRAC),
+                                DISC_QUIET_X * np.quantile(struct[ok], 0.05))
         order = np.argsort(-cl[ok])
         self._sky_y, self._sky_x, self._sky_dist = py[ok][order], px[ok][order], cl[ok][order]
         self._z = z
@@ -394,14 +422,38 @@ def constrain_star_layer(z: np.ndarray, x: np.ndarray, field: 'StarField') -> np
     for y, xc, q, cf in zip(field.donor_y, field.donor_x, field.donor_r, field.copy_flux):
         if np.any(cf <= 0):
             continue
-        col = (cf / cf.sum()).astype(np.float32)
         y0, y1, x0, x1 = max(0, y - q), min(h, y + q + 1), max(0, xc - q), min(w, xc + q + 1)
-        disk = (yy[y0:y1] - y) ** 2 + (xx[:, x0:x1] - xc) ** 2 <= q * q
+        r2 = (yy[y0:y1] - y) ** 2 + (xx[:, x0:x1] - xc) ** 2
+        disk = r2 <= q * q
+        col = _radial_colour(z[y0:y1, x0:x1], np.sqrt(r2), q, cf)
         cut = s[y0:y1, x0:x1]
         tot = cut.sum(-1)
         wgt = np.clip((tot / np.sqrt(c) - lo) / (hi - lo), 0.0, 1.0) * disk
         cut += wgt[..., None] * (tot[..., None] * col - cut)
     return (z - s).astype(np.float32)
+
+
+def _radial_colour(cut: np.ndarray, rr: np.ndarray, q: int, cf: np.ndarray) -> np.ndarray:
+    """Per-pixel colour (channel shares summing to 1) of the star in ``cut`` (noise units),
+    from its own per-channel profile in 2 px rings, background = median of the ring just
+    outside ``q``. Where a ring's star light is too faint to say (luminance < 1 sigma, or a
+    negative channel), the copy's integrated colour ``cf``. One colour for the whole star
+    turned a chromatic PSF (red halo, bluer core) into blue rims and red-yellow cores on the
+    Pleiades' bright stars."""
+    c = cut.shape[2]
+    ring = (rr > q) & (rr <= q + 4)
+    bg = np.median(cut[ring], axis=0) if ring.sum() >= 8 else np.zeros(c, np.float32)
+    ri = np.minimum((rr / 2).astype(int), q // 2 + 1)
+    nb = q // 2 + 2
+    inside = rr <= q
+    prof = np.stack([np.bincount(ri[inside], (cut[..., k] - bg[k])[inside], nb) for k in range(c)], -1)
+    cnt = np.maximum(np.bincount(ri[inside], None, nb), 1)[:, None]
+    prof = prof / cnt
+    full = (cf / cf.sum()).astype(np.float32)
+    tot = prof.sum(-1, keepdims=True)
+    good = (tot[:, 0] / np.sqrt(c) >= 1.0) & (prof > 0).all(-1)
+    col = np.where(good[:, None], prof / np.where(tot > 0, tot, 1.0), full).astype(np.float32)
+    return col[ri]
 
 
 def _subtract_halo(out: np.ndarray, y: int, x: int) -> np.ndarray:
