@@ -138,7 +138,7 @@
       </div>
       <div>
         <h3>降低噪点，保留细节</h3>
-        <p>一种保护纤维结构和旋臂的小波降噪器。对 Origin 拍摄的星系，一个仅用真实 Origin 拍摄数据训练的小型神经网络会一步完成视宁度模糊的锐化和降噪。</p>
+        <p>保护丝状结构和旋臂的小波降噪。对于 Origin 的会话，一个用真实 Origin 会话训练的小型神经网络一步完成视宁度模糊校正和降噪。</p>
       </div>
       <div>
         <h3>收紧星点，突出结构</h3>
@@ -415,7 +415,7 @@ python desktop_app.py</pre>
       <div id="no-gen-ai">
         <h3>不使用生成式 AI，不上云</h3>
         <p>OriginStack 从不把你的图像发送给任何 AI 服务，也从不生成或臆造图像内容。它的处理流程是为本项目编写、有文档说明的经典信号处理，从校准、对齐到背景去除和降噪，全部可以在源代码中查看。它不需要其他天文软件，不需要账户，也不需要云服务，只用常见的开源科学计算库。</p>
-        <p>两个可选步骤 <code>--denoiser nn</code> 和 <code>--deconvolve nn</code> 使用小型神经网络，只用真实的 Celestron Origin 会话训练。它们在你自己的电脑上运行，并已用独立叠加图核对，确认不会添加数据中没有的星点或细节。自动设置会对 Origin 的星系会话使用后者；<code>--deconvolve off</code> 可将其关闭。<a href="../how-it-works.html#learned">工作原理</a>。</p>
+        <p><code>--denoiser nn</code> 和 <code>--deconvolve nn</code> 这两个可选步骤使用在真实 Celestron Origin 会话上训练的小型神经网络（后者还用同一片天空更清晰的巡天图像训练）。它们在您自己的电脑上运行，并已用独立叠加图像核对，确认不会添加数据中没有的星点或细节。自动设置对 Origin 的会话使用后者；<code>--deconvolve off</code> 可将其关闭。<a href="../how-it-works.html#learned">工作原理</a>。</p>
       </div>
     </div>
   </div>

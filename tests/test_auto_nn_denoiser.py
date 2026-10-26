@@ -1,5 +1,5 @@
-"""--auto picks the learned denoiser (with chroma NR first) in place of the wavelet denoiser
-for non-galaxy targets on Origin data; galaxies keep the learned deconvolver."""
+"""--auto's learned denoiser (with chroma NR first) in place of the wavelet denoiser for
+non-galaxy targets on Origin data, now only when the learned deconvolver's weights are missing."""
 import pytest
 
 from src import auto_settings as a
@@ -29,11 +29,24 @@ def _both_rules(args, weights):
 
 def test_origin_nebula_gets_the_learned_denoiser_with_chroma_nr(model):
     args = _args()
-    changes = _both_rules(args, NEBULA)
+    changes = a._apply_nn_denoiser(args, NEBULA)
     assert args.denoise_nn is True and args.denoise_curvelet is False
     assert args.nn_chroma_nr is True
     assert args.deconvolve_nn is False
     assert any(c.startswith('denoise_nn') for c in changes)
+
+
+def test_nebula_takes_the_deconvolver_when_its_weights_are_there(model):
+    args = _args()
+    _both_rules(args, NEBULA)
+    assert args.deconvolve_nn is True and args.denoise_nn is False
+
+
+def test_nebula_falls_back_to_the_denoiser_without_the_deconvolver(monkeypatch):
+    monkeypatch.setattr(nd, 'model_available', lambda path=None: path != nd.DECONV_MODEL_PATH)
+    args = _args()
+    _both_rules(args, NEBULA)
+    assert args.denoise_nn is True and args.deconvolve_nn is False
 
 
 def test_galaxy_keeps_the_learned_deconvolver(model):

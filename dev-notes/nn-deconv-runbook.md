@@ -1,8 +1,9 @@
 # Learned deconvolution (`--deconvolve nn`): runbook
 
-Status (2026-10-24): **v4, trained against Pan-STARRS survey truth, replaces v3**, blended with
-the nn denoiser (`--auto` on galaxies: 35% v4; stars ~15% narrower than v3 at equal or better
-faint contrast). See "Survey truth: v4" at the end.
+Status (2026-10-25): **v4, trained against Pan-STARRS survey truth, replaces v3**, blended with
+the nn denoiser. `--auto` uses it on galaxies (35% v4; stars ~15% narrower than v3 at equal or
+better faint contrast) and now on nebulae, clusters and star fields too (75%; stars 10-35%
+narrower than with `--denoiser nn`, faint contrast +10-20%). See "Survey truth: v4" at the end.
 
 Status (2026-10-21): synthetic-blur training passed its feasibility gate, but its best model (s4)
 is only 1-3% sharper than v3 in the full pipeline; v3 stays shipped (see
@@ -686,22 +687,39 @@ narrower than with v3, with faint contrast and colour equal or better. An explic
 including under `--auto`). The blend runs both networks: 26 s for the nn step on a full
 Sunflower stack.
 
-**Nebulae and star fields: not switched.** Compared with what `--auto` uses there
-(`--denoiser nn` with chroma NR first):
+**Nebulae and star fields: switched too (2026-10-25), at 0.75.** Against what `--auto` used
+there (`--denoiser nn` with chroma NR first):
 
-| target | variant | width | sky noise | faint contrast | hue error | star colour |
+| target | variant | width | sky noise | faint contrast | JPEG colour rho | linear colour rho / slope |
 |---|---|---|---|---|---|---|
-| Orion | denoiser | 1.067 | 0.093 | 273 | 6.0 | gaia 0.761 |
-| | v4 0.75 | 0.696 | 0.082 | 309 | 5.7 | gaia 0.789 |
-| Pleiades | denoiser | 1.078 | 0.326 | 62 | 10.9 | rho 0.478 |
-| | v4 0.75 | 0.730 | 0.302 | 68 | 12.9 | rho 0.339 |
-| Omega | denoiser | 1.061 | 0.326 | 91 | 6.7 | gaia 0.699 |
-| | v4 0.75 | 0.905 | 0.286 | 109 | 8.4 | gaia 0.657 |
+| Orion | denoiser | 1.067 | 0.093 | 273 | 0.776 | 0.959 / 0.68 |
+| | v4 0.75 | 0.696 | 0.082 | 309 | 0.850 | 0.978 / 0.88 |
+| Pleiades | denoiser | 1.078 | 0.326 | 62 | 0.478 | 0.968 / 0.71 |
+| | v4 0.75 | 0.730 | 0.302 | 68 | 0.339 | 0.993 / 0.92 |
+| Omega | denoiser | 1.061 | 0.326 | 91 | 0.497 | 0.987 / 0.82 |
+| | v4 0.75 | 0.905 | 0.286 | 109 | 0.537 | 0.990 / 0.95 |
 
-v4 is sharper with more faint contrast everywhere, but worse in colour on two of three targets.
-Chroma NR before it fixes the colour but gives most of the sharpening back: width 0.82 / 0.93 /
-0.98 at 0.75. Open: keep v4's luminance detail with the denoiser's colour (fade to additive near
-zero; see "Rules that must hold" in CLAUDE.md), or train with a colour term.
+The first reading was that v4 costs colour on Pleiades and Omega: about 2 deg more hue error and
+lower star-colour rank correlation, both read off the JPEG. That is the stretch, not the network.
+
+- `bench_phase4`'s new `*_lin` metrics score the same stars on the Phase 4 output before the
+  stretch, and there v4's colour is better on all three targets.
+- The default per-channel stretch (`--stretch-color channel`, the user's preferred look) whitens
+  star cores. v4's narrower, brighter cores clip more.
+- With `--stretch-color preserve` the JPEG agrees. Colour rho: Orion 0.870 -> 0.912, Pleiades
+  0.761 -> 0.947, Omega 0.774 -> 0.802. Faint contrast +18 / +27 / +24%.
+- `hue_err_deg` compares the JPEG with each variant's own Phase 4 output, so it measures the
+  stretch only.
+
+Two things tried here did not help:
+- **Chroma NR before the network:** gives most of the sharpening back (width 0.82 / 0.93 / 0.98).
+- **v4's luminance with the denoiser's colour** (ratio transfer, additive near zero): even
+  sharper (Orion 0.62), but JPEG colour worse still (Orion hue error 7.9, Pleiades colour rho
+  0.28). It only made cores brighter.
+
+One cost: chroma mottle on Pleiades' sky, 6.0 vs 5.4 (it gets no chroma NR now). Orion and Omega
+are lower than before. `--auto` keeps `--denoiser nn` as the fallback when
+`src/data/nn_deconv.npz` is missing.
 
 Data `C:\nn_work\survey\` (stacks, `ps1/` crops, banks, models, `eval_*`, `matched_*`,
 `bench_*`, `bright_v3_v1_v2.jpg`).

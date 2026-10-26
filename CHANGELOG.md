@@ -8,13 +8,18 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
-- **Sharper stars in galaxy images.** The learned deconvolver (`--deconvolve nn`, which the
-  automatic settings use for galaxy sessions from an Origin) was retrained against Pan-STARRS
-  survey images of the same sky, which are far sharper and deeper than any Origin stack. On the
-  held-out test galaxies stars come out about 15% narrower than before, with the same or better
-  faint detail and star colour. The automatic settings mix it with the learned noise reduction
-  (35% deconvolver on galaxies); `--deconvolve nn` on its own uses 75%, and
-  `--config nn_deconv_blend=...` sets the mix. The step takes about twice as long as before.
+- **Sharper stars in every image from an Origin.** The learned deconvolver (`--deconvolve nn`)
+  was retrained against Pan-STARRS survey images of the same sky, which are far sharper and
+  deeper than any Origin stack. The automatic settings now use it for every target, mixed with
+  the learned noise reduction:
+  - galaxies: 35% deconvolver, stars about 15% narrower than before, with the same or better
+    faint detail and star colour;
+  - nebulae, clusters and star fields, which used the learned noise reduction alone until now:
+    75% deconvolver, stars 10-35% narrower and 10-20% more faint detail.
+
+  `--deconvolve nn` on its own uses 75%, and `--config nn_deconv_blend=...` sets the mix. The
+  step takes about twice as long as the noise reduction alone. With the default per-channel
+  stretch the sharper star cores render whiter; `--stretch-color preserve` keeps their colour.
 
 ## [2.15.0] - 2026-10-24
 

@@ -140,7 +140,7 @@
       </div>
       <div>
         <h3>Menos ruído, detalhe preservado</h3>
-        <p>Um redutor de ruído por wavelets que protege filamentos e braços espirais. Em galáxias capturadas com um Origin, uma pequena rede neural treinada só com sessões reais do Origin corrige o borrão do seeing e remove o ruído em uma única etapa.</p>
+        <p>Um redutor de ruído por wavelets que protege filamentos e braços espirais. Em sessões do Origin, uma pequena rede neural treinada com sessões reais do Origin corrige o borrão do seeing e remove o ruído em uma única etapa.</p>
       </div>
       <div>
         <h3>Estrelas menores, estrutura realçada</h3>
@@ -417,7 +417,7 @@ python desktop_app.py</pre>
       <div id="no-gen-ai">
         <h3>Sem IA generativa, nada na nuvem</h3>
         <p>O OriginStack nunca envia suas imagens a um serviço de IA e nunca gera nem inventa conteúdo de imagem. Seu processamento é processamento de sinal clássico e documentado, escrito para este projeto, da calibração e do alinhamento à remoção do fundo e à redução de ruído, e você pode ler tudo no código-fonte. Não precisa de outro software de astronomia, de conta nem de serviço em nuvem, apenas bibliotecas científicas de código aberto comuns.</p>
-        <p>Duas etapas opcionais, <code>--denoiser nn</code> e <code>--deconvolve nn</code>, usam pequenas redes neurais treinadas apenas com sessões reais do Celestron Origin. Elas rodam no seu próprio computador e foram verificadas com empilhamentos independentes para confirmar que não acrescentam estrelas nem detalhes que não estejam nos dados. As configurações automáticas usam a segunda para sessões de galáxias do Origin; <code>--deconvolve off</code> a desativa. <a href="../how-it-works.html#learned">Como funcionam</a>.</p>
+        <p>Duas etapas opcionais, <code>--denoiser nn</code> e <code>--deconvolve nn</code>, usam pequenas redes neurais treinadas com sessões reais do Celestron Origin (a segunda também com imagens de levantamentos mais nítidas do mesmo céu). Elas rodam no seu próprio computador e foram verificadas com empilhamentos independentes para confirmar que não acrescentam estrelas nem detalhes que não estejam nos dados. As configurações automáticas usam a segunda para as sessões do Origin; <code>--deconvolve off</code> a desativa. <a href="../how-it-works.html#learned">Como funcionam</a>.</p>
       </div>
     </div>
   </div>
