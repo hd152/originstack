@@ -112,7 +112,8 @@ _FIELD_SUMMARIES: Dict[str, str] = {
     'annotate': 'Save a copy of the preview with stars and named objects labelled '
                 '(needs internet).',
     'photometry': 'Measure star brightnesses against Gaia and save a calibrated catalogue (CSV).',
-    'export': 'Extra file formats to save alongside the FITS: tiff, xisf.',
+    'export': ('Extra file formats to save alongside the FITS: tiff, xisf, png (a lossless '
+               'copy of the preview), png16 (the preview in 16 bits, for further editing).'),
     'stretch': 'How the preview JPEG is brightened from the linear stack.',
     'merge': 'Add earlier stacks of the same target to this one (their linear FITS files).',
     'session_cfa_eq': 'Measure sensor colour offsets once per session (faster). '
@@ -423,6 +424,10 @@ def get_run_manager() -> RunManager:
 # where the user reads (and can edit) the text before choosing to submit it.
 
 ISSUES_URL = 'https://github.com/hd152/originstack/issues/new'
+# "Support OriginStack": the Ko-fi page, opened in the browser. The same address is in
+# .github/FUNDING.yml (GitHub's Sponsor button), the README and the website;
+# tests/test_support_link.py keeps them in step.
+SUPPORT_URL = 'https://ko-fi.com/originstack'
 # GitHub refuses issue URLs much past 8 KB; keep the whole URL under this.
 _REPORT_URL_MAX = 7000
 

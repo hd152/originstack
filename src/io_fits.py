@@ -19,6 +19,19 @@ except Exception:
     Image = None
 
 
+# Every preview JPEG keeps full-resolution colour (4:4:4). Pillow's default at quality >= 50 is
+# 4:2:0, which stores colour at half resolution: a 2-4 px star's colour is averaged with the
+# black sky around it -- star colour error 3x, saturation kept 61-78% instead of 96-99% on the
+# Sunflower / Omega / Pleiades previews, for files 15-32% larger.
+JPEG_SAVE_KW = {'subsampling': 0}
+
+
+def to_uint8(x: np.ndarray) -> np.ndarray:
+    """A [0, 1] display image as uint8, rounded. ``astype`` truncates: every pixel came out up to
+    one step darker (0.05-0.11 steps on average over a preview's sky)."""
+    return np.clip(np.rint(np.asarray(x, np.float32) * np.float32(255.0)), 0, 255).astype(np.uint8)
+
+
 def _rescale_intensity(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     """Linearly rescale ``x`` from [lo, hi] to [0, 1], clipping outside that
     range -- equivalent to skimage.exposure.rescale_intensity(x, in_range=(lo,
@@ -227,6 +240,98 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         if not imgs:
             return None
         return np.median(np.stack(imgs, axis=0), axis=0).astype(np.float32)
+
+
+OBJECT_DOWNSAMPLE = 4        # px per block for finding the object (speed; stars are median-filtered out)
+OBJECT_STAR_FILTER = 5       # median filter size in blocks: removes stars up to ~10 px radius
+OBJECT_SIGMA = 4.0           # object = smoothed luminance this many smoothed-sky sigmas above the sky
+OBJECT_MIN_FRAC = 0.0005     # smaller than this share of the frame: a star halo, not an object
+OBJECT_MAX_FRAC = 0.35       # larger: the object fills the frame and plain 'ghs' is the right stretch
+OBJECT_NEAR_FRAC = 0.15      # an object not under the anchor must lie within this share of the diagonal
+OBJECT_MIN_CONTRAST = 15.0   # its core must stand this many smoothed-sky sigmas above the sky
+
+
+def _object_region(lum: np.ndarray, sky: float = 0.0, anchor: Optional[Tuple[float, float]] = None):
+    """The target's extended light, found on the image itself: ``(core, mid, area_frac)``
+    in luminance units -- its bright end (99.5th percentile of the star-free, smoothed
+    light inside it), its typical level (median) and its share of the frame
+    -- or None when there is no separate object (nothing extended, or it fills the frame).
+
+    Stars are median-filtered out at quarter resolution; the object is the connected
+    region more than ``OBJECT_SIGMA`` smoothed-sky sigmas above the sky that contains
+    ``anchor`` (row, col in full-resolution pixels: where the telescope pointed), or the
+    nearest such region within ``OBJECT_NEAR_FRAC`` of the diagonal. Without an anchor the
+    frame centre stands in: the Origin centres its target. (``sky`` is unused: the sky
+    level is measured on the smoothed image itself.)"""
+    from scipy import ndimage as ndi
+    h, w = lum.shape
+    f = OBJECT_DOWNSAMPLE
+    hb, wb = h // f, w // f
+    if hb < 16 or wb < 16:
+        return None
+    small = lum[:hb * f, :wb * f].reshape(hb, f, wb, f).mean(axis=(1, 3)).astype(np.float32)
+    smooth = ndi.gaussian_filter(ndi.median_filter(small, size=OBJECT_STAR_FILTER), 1.5)
+    # the smoothed sky's own level and noise (clipped, like _sky_stats): the MAD of the
+    # lower 60% alone underestimated the noise and found "objects" in empty sky
+    _, sky_s, sig = sigma_clipped_stats(smooth, sigma=2.5, maxiters=5)
+    sky_s, sig = float(sky_s), float(sig)
+    if not np.isfinite(sig) or sig <= 0:
+        return None
+    resid = smooth - sky_s
+    mask = resid > OBJECT_SIGMA * sig
+    lab, n = ndi.label(mask)
+    if n == 0:
+        return None
+    ay, ax = anchor if anchor is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
+    by, bx = int(np.clip(ay / f, 0, hb - 1)), int(np.clip(ax / f, 0, wb - 1))
+    areas = ndi.sum(mask, lab, index=np.arange(1, n + 1))
+    k = int(lab[by, bx])
+    if k == 0 or areas[k - 1] < OBJECT_MIN_FRAC * hb * wb:
+        cents = ndi.center_of_mass(mask, lab, index=np.arange(1, n + 1))
+        best, bestd = 0, np.inf
+        for i, (cy, cx) in enumerate(cents):
+            if areas[i] < OBJECT_MIN_FRAC * hb * wb:
+                continue
+            d = np.hypot(cy - by, cx - bx)
+            if d < bestd:
+                best, bestd = i + 1, d
+        if best == 0 or bestd > OBJECT_NEAR_FRAC * np.hypot(hb, wb):
+            return None
+        k = best
+    frac = float(areas[k - 1]) / (hb * wb)
+    if not OBJECT_MIN_FRAC <= frac <= OBJECT_MAX_FRAC:
+        return None
+    vals = smooth[lab == k]
+    core = float(np.percentile(vals, 99.5))
+    if core - sky_s < OBJECT_MIN_CONTRAST * sig:
+        return None                          # a noise or halo blob, not a target
+    return core, float(np.median(vals)), frac
+
+
+def _object_stretch_points(lum: np.ndarray, sky: float, sigma: float, black: float,
+                           white: float, sp: float,
+                           anchor: Optional[Tuple[float, float]] = None
+                           ) -> Tuple[float, float]:
+    """``(white, SP)`` for ``--stretch object``, starting from the plain 'ghs' ones.
+
+    The whole-frame white point (99.5th percentile) is set by the field: a faint galaxy
+    whose core sits below it ends up in the bottom sliver of the display range. Here the
+    white point comes down to just above the object's own core, and the symmetry point,
+    where the curve puts most of its contrast, moves up to the object's typical (median)
+    level. Only ever *down* for white and *up* for SP: raising white to a bright core
+    darkened the whole of M42 (bright extended cores are the highlight roll-off's job,
+    ``_extended_highlight_top``), and an SP at the object's faint edge, a few sigma above
+    the sky, put the strongest contrast on the sky noise (sky noise +55% on the Black Eye,
+    blotch +50%). No object, or the plain points already right: the plain 'ghs' ones."""
+    reg = _object_region(lum, sky, anchor)
+    if reg is None:
+        return white, sp
+    core, mid, _ = reg
+    w_obj = max(sky + 1.15 * (core - sky), black + 20.0 * sigma)
+    w_new = min(white, w_obj)
+    sp_obj = (mid - black) / max(w_new - black, 1e-12)
+    sp_new = float(min(max(sp, sp_obj), 0.25)) if w_new < white else sp
+    return w_new, sp_new
 
 
 def _preview_white(lum: np.ndarray, sky: float, sigma: float, percentile: float,
@@ -713,16 +818,17 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_hp: float = 0.95,
                          black_sigma: float = 0.0,
                          color: str = 'preserve',
-                         noise_scale: float = 1.0) -> Optional[np.ndarray]:
+                         noise_scale: float = 1.0,
+                         anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
     """Stretch an HWC float32 image to display uint8 (the shared core of the
     preview JPEG file writer and the live web view). Returns None when the
     required stretch backend is unavailable."""
     out = render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                               noise_scale=noise_scale)
+                               noise_scale=noise_scale, anchor=anchor)
     if out is None:
         return None
-    return np.clip(out * 255, 0, 255).astype(np.uint8)
+    return to_uint8(out)
 
 
 def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
@@ -730,7 +836,8 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_hp: float = 0.95,
                          black_sigma: float = 0.0,
                          color: str = 'preserve',
-                         noise_scale: float = 1.0) -> Optional[np.ndarray]:
+                         noise_scale: float = 1.0,
+                         anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
     """The display stretch of ``render_preview_uint8`` before quantisation:
     HWC float in [0, 1]. ``tools/bench_phase4.py`` scores this.
 
@@ -743,10 +850,13 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
     'noisefloor' is GHS with b solved from the sky noise (``_noise_limited_b``)
     and its own black point; 'oklab' is the GHS curve on OKLab lightness
     (``oklab_stretch``, always colour-preserving); 'clahe' is the GHS preview
-    plus contrast-limited local equalisation where there is extended signal."""
+    plus contrast-limited local equalisation where there is extended signal; 'object' is
+    the GHS preview with its white point and symmetry point taken from the target itself
+    (``_object_stretch_points``; ``anchor`` = where the telescope pointed), and plain
+    'ghs' when there is no separate object."""
     from src.denoising import arcsinh_stretch, generalized_hyperbolic_stretch
     from src.models import Config
-    if stretch in ('ghs', 'masked', 'multiscale', 'oklab', 'clahe'):
+    if stretch in ('ghs', 'masked', 'multiscale', 'oklab', 'clahe', 'object'):
         # Generalized Hyperbolic Stretch — uses unified luminance-based normalization
         # so all three channels share the same black/white reference, preserving
         # cross-channel color ratios that would otherwise be destroyed by independent
@@ -775,6 +885,9 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # signal several times more of the normalized range to live in.
         unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
         ghs_sp = ghs_sp * _sp_scale
+        if stretch == 'object':
+            unified_white, ghs_sp = _object_stretch_points(
+                lum, _med, _bg_sigma, unified_black, unified_white, ghs_sp, anchor)
         _top = None
         # Every path that ends in _preserving_preview or the per-channel curve below.
         # The per-channel one was left out while 'preserve' was the default; when the
@@ -907,7 +1020,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
     return out
 
 
-def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
+def render_preview_layered_float(rgb: np.ndarray, starless: np.ndarray,
                                  ghs_b: float = 8.0, ghs_sp: float = 0.15,
                                  ghs_hp: float = 0.95, black_sigma: float = 0.0,
                                  color: str = 'preserve',
@@ -955,7 +1068,12 @@ def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray,
             out[:, :, c] = generalized_hyperbolic_stretch(
                 rgb[:, :, c], b=ghs_b, SP=ghs_sp, LP=0.0, HP=ghs_hp,
                 black_point=black, white_point=white)
-    return np.clip(out * 255, 0, 255).astype(np.uint8)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def render_preview_layered_uint8(rgb: np.ndarray, starless: np.ndarray, **kw) -> np.ndarray:
+    """``render_preview_layered_float`` as display uint8."""
+    return to_uint8(render_preview_layered_float(rgb, starless, **kw))
 
 
 def _preview_pil_image(out: np.ndarray, max_dim: int):
@@ -979,18 +1097,21 @@ def save_preview_rgb(rgb: np.ndarray, path: str, stretch: str = 'linear',
                      ghs_hp: float = 0.95, black_sigma: float = 0.0,
                      starless: Optional[np.ndarray] = None,
                      color: str = 'preserve',
-                     noise_scale: float = 1.0) -> None:
-    """Write the preview JPEG. ``starless`` (same shape as ``rgb``), with
-    ``stretch='ghs'``, switches to the layered stretch -- see
-    ``render_preview_layered_uint8``."""
+                     noise_scale: float = 1.0,
+                     anchor: Optional[Tuple[float, float]] = None,
+                     exports=()) -> None:
+    """Write the preview JPEG (and the lossless ``exports``, see ``write_final_images``).
+    ``starless`` (same shape as ``rgb``), with ``stretch='ghs'``, switches to the layered
+    stretch -- see ``render_preview_layered_float``."""
     if Image is None:
         return
-    out = render_preview_rgb_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+    out = render_preview_rgb_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                    ghs_hp=ghs_hp, black_sigma=black_sigma,
-                                   starless=starless, color=color, noise_scale=noise_scale)
+                                   starless=starless, color=color, noise_scale=noise_scale,
+                                   anchor=anchor)
     if out is None:
         return
-    write_preview_jpeg(out, path)
+    write_final_images(out, path, exports)
 
 
 def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
@@ -998,24 +1119,41 @@ def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
                              ghs_hp: float = 0.95, black_sigma: float = 0.0,
                              starless: Optional[np.ndarray] = None,
                              color: str = 'preserve',
-                             noise_scale: float = 1.0) -> Optional[np.ndarray]:
-    """The full-resolution uint8 image ``save_preview_rgb`` writes: the layered
-    stretch when ``starless`` is given with ``stretch='ghs'``, else
-    ``render_preview_uint8``."""
+                             noise_scale: float = 1.0,
+                             anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
+    """The full-resolution uint8 image ``save_preview_rgb`` writes:
+    ``render_preview_rgb_float`` rounded to 8 bits."""
+    out = render_preview_rgb_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                   ghs_hp=ghs_hp, black_sigma=black_sigma, starless=starless,
+                                   color=color, noise_scale=noise_scale, anchor=anchor)
+    return None if out is None else to_uint8(out)
+
+
+def render_preview_rgb_float(rgb: np.ndarray, stretch: str = 'linear',
+                             ghs_b: float = 8.0, ghs_sp: float = 0.15,
+                             ghs_hp: float = 0.95, black_sigma: float = 0.0,
+                             starless: Optional[np.ndarray] = None,
+                             color: str = 'preserve',
+                             noise_scale: float = 1.0,
+                             anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
+    """The final display image in [0, 1], before any quantisation: the layered stretch
+    when ``starless`` is given with ``stretch='ghs'``, else ``render_preview_float``.
+    The JPEG and the ``--export png`` / ``png16`` files are all made from it."""
     if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
-        return render_preview_layered_uint8(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
+        return render_preview_layered_float(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                             ghs_hp=ghs_hp, black_sigma=black_sigma,
                                             color=color, noise_scale=noise_scale)
-    return render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                                noise_scale=noise_scale)
+    out = render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
+                               noise_scale=noise_scale, anchor=anchor)
+    return None if out is None else np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 def preview_jpeg_from_uint8(out: np.ndarray, max_dim: int = 1024) -> bytes:
     """A stretched uint8 HWC image as size-capped viewer JPEG bytes."""
     import io as _io
     buf = _io.BytesIO()
-    _preview_pil_image(out, max_dim).save(buf, format='JPEG', quality=85)
+    _preview_pil_image(out, max_dim).save(buf, format='JPEG', quality=85, **JPEG_SAVE_KW)
     return buf.getvalue()
 
 
@@ -1030,14 +1168,99 @@ def preview_stretch_kw(args) -> dict:
         ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
         black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0),
         color=getattr(args, 'stretch_color', 'channel'),
-        noise_scale=float(ns) if isinstance(ns, (int, float)) and ns > 0 else 1.0)
+        noise_scale=float(ns) if isinstance(ns, (int, float)) and ns > 0 else 1.0,
+        anchor=object_anchor(args))
+
+
+def preview_exports(args) -> tuple:
+    """The lossless copies of the preview ``--export`` asked for ('png', 'png16')."""
+    return tuple(e for e in ('png', 'png16') if getattr(args, f'output_{e}', False))
+
+
+def object_anchor(args) -> Optional[Tuple[float, float]]:
+    """(row, col) on the stack where the telescope pointed -- the session's pointing
+    (``info.json``) through the settled stack WCS -- or None (then 'object' starts from
+    the frame centre). The Origin centres its target, so this is where it is."""
+    si = getattr(args, '_session_info', None)
+    cards = getattr(args, '_stack_wcs', None)
+    if si is None or not cards or getattr(si, 'ra_rad', None) is None or getattr(si, 'dec_rad', None) is None:
+        return None
+    try:
+        from astropy.io import fits
+        from astropy.wcs import WCS
+        h = fits.Header()
+        for key, (val, _c) in cards.items():
+            h[key] = val
+        x, y = WCS(h, naxis=2).all_world2pix(np.degrees(si.ra_rad), np.degrees(si.dec_rad), 0)
+        return float(y), float(x)
+    except Exception:
+        return None
 
 
 def write_preview_jpeg(out: np.ndarray, path: str) -> None:
     """Write a stretched uint8 HWC image as the size-capped preview JPEG."""
     from src.models import Config
     img = _preview_pil_image(out, Config.PREVIEW_MAX_DIMENSION)
-    img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY)
+    img.save(path, format='JPEG', quality=Config.PREVIEW_JPEG_QUALITY, **JPEG_SAVE_KW)
+
+
+_PNG_SIGNATURE = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+
+
+def write_png16(path: str, img01: np.ndarray, level: int = 6) -> None:
+    """A [0, 1] RGB image as a 16-bit-per-channel PNG (Pillow cannot write 16-bit RGB):
+    rows with the 'Sub' filter (each byte minus the one 6 earlier), zlib-compressed. For
+    editing the finished image further: a curves or levels change on 8 bits bands."""
+    import struct
+    import zlib
+    h, w = img01.shape[:2]
+    u16 = np.clip(np.rint(np.asarray(img01, np.float32) * np.float32(65535.0)), 0, 65535).astype('>u2')
+    raw = np.ascontiguousarray(u16).reshape(h, w * 3).view(np.uint8)     # big-endian, 6 bytes/pixel
+    sub = raw.copy()
+    sub[:, 6:] = raw[:, 6:] - raw[:, :-6]                                  # uint8 wraps mod 256
+    data = np.empty((h, 1 + w * 6), np.uint8)
+    data[:, 0] = 1                                                         # filter type: Sub
+    data[:, 1:] = sub
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (struct.pack('>I', len(body)) + kind + body
+                + struct.pack('>I', zlib.crc32(kind + body) & 0xFFFFFFFF))
+    with open(path, 'wb') as fh:
+        fh.write(_PNG_SIGNATURE)
+        fh.write(chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 16, 2, 0, 0, 0)))
+        fh.write(chunk(b'IDAT', zlib.compress(data.tobytes(), level)))
+        fh.write(chunk(b'IEND', b''))
+
+
+def export_paths(jpeg_path: str) -> Dict[str, str]:
+    """The ``--export png`` / ``png16`` files written next to a preview JPEG."""
+    stem = os.path.splitext(jpeg_path)[0]
+    return {'png': stem + '.png', 'png16': stem + '_16bit.png'}
+
+
+def write_final_images(img01: np.ndarray, jpeg_path: str, exports=()) -> None:
+    """The preview JPEG of a [0, 1] display image, plus the lossless ``exports`` ('png':
+    8-bit, the JPEG's exact pixels before compression; 'png16': 16-bit) from the same
+    render. Each file goes through a temporary name, so a failed write never leaves a
+    half-written file."""
+    def atomic(path, write):
+        tmp = path + '.tmp'
+        try:
+            write(tmp)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    u8 = to_uint8(img01)
+    atomic(jpeg_path, lambda t: write_preview_jpeg(u8, t))
+    paths = export_paths(jpeg_path)
+    if 'png' in exports and Image is not None:
+        atomic(paths['png'], lambda t: Image.fromarray(u8).save(t, format='PNG', compress_level=6))
+    if 'png16' in exports:
+        atomic(paths['png16'], lambda t: write_png16(t, img01))
 
 
 def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:
@@ -1058,7 +1281,7 @@ def _desaturate_preview_uint8(out: np.ndarray, amount: float) -> np.ndarray:
         return out
     lum = luminance(out).astype(np.float32)
     blended = out.astype(np.float32) * (1.0 - amount) + lum[:, :, None] * amount
-    return np.clip(blended, 0, 255).astype(np.uint8)
+    return np.clip(np.rint(blended), 0, 255).astype(np.uint8)
 
 
 def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
@@ -1066,7 +1289,8 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
                        ghs_hp: float = 0.95, black_sigma: float = 0.0,
                        max_dim: int = 1024, desaturate: float = 0.0,
                        color: str = 'preserve',
-                       noise_scale: float = 1.0) -> Optional[bytes]:
+                       noise_scale: float = 1.0,
+                       anchor: Optional[Tuple[float, float]] = None) -> Optional[bytes]:
     """Stretched preview JPEG as bytes (for the live web view).
 
     ``desaturate`` (0-1) blends the stretched result toward luminance -- see
@@ -1076,7 +1300,7 @@ def preview_jpeg_bytes(rgb: np.ndarray, stretch: str = 'ghs',
         return None
     out = render_preview_uint8(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
                                ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                               noise_scale=noise_scale)
+                               noise_scale=noise_scale, anchor=anchor)
     if out is None:
         return None
     return preview_jpeg_from_uint8(_desaturate_preview_uint8(out, desaturate), max_dim)

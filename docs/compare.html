@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OriginStack compared: Siril, DeepSkyStacker, PixInsight, APP and the Origin app</title>
+<meta name="description" content="How OriginStack compares with Siril, DeepSkyStacker, PixInsight, Astro Pixel Processor and the Celestron Origin's own stack: one click from raw frames to a finished image, measured sharpness, noise and speed, and what each tool is best at.">
+<meta name="keywords" content="OriginStack vs Siril, OriginStack vs DeepSkyStacker, PixInsight alternative, Astro Pixel Processor alternative, Celestron Origin stacking, one-click astrophotography processing, astrophotography stacking comparison">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/compare.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/compare.html">
+<meta property="og:title" content="OriginStack compared with the alternatives">
+<meta property="og:description" content="One click from raw frames to a finished image, against Siril, DeepSkyStacker, PixInsight, Astro Pixel Processor and the Origin app. Measured sharpness, noise and speed.">
+<meta property="og:image" content="https://originstack.site/img/crab-nebula-celestron-origin-vs-siril-vs-originstack.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="how-it-works.html">How it works</a>
+        <a href="advanced.html">Advanced</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>One click, against the alternatives</h1>
+    <p class="lede">Most astrophotography software stops at the stack, or hands you a box of tools to finish the image yourself. OriginStack is built for the other way round: point it at a night of Celestron Origin frames, press Start, and get a finished, colour-calibrated, noise-reduced, stretched image, with the linear stack kept for anyone who wants to go further. This page sets that against the tools Origin owners usually try, with the measurements behind every number.</p>
+    <p class="toc">
+      <a href="#glance">At a glance</a>
+      <a href="#finish">What the click does</a>
+      <a href="#measured">Measured</a>
+      <a href="#speed">Speed</a>
+      <a href="#choose">Which to use</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="glance">
+  <div class="wrap">
+    <h2>At a glance</h2>
+    <p class="intro measure">What one run of each tool gives you, starting from the frames the Origin saves. Every one of these tools can produce a fine image in skilled hands; the question here is how much of the work is done for you.</p>
+
+    <table class="wide matrix">
+      <caption>Features of the other tools as described in their own documentation, October 2026. If something here is out of date, <a href="https://github.com/hd152/originstack/issues">tell us</a> and it will be corrected.</caption>
+      <thead><tr><th></th><th>OriginStack</th><th>Siril</th><th>DeepSkyStacker</th><th>PixInsight</th><th>Astro Pixel Processor</th><th>Origin app</th></tr></thead>
+      <tbody>
+        <tr><th>Raw frames to a finished image in one run</th><td class="yes">Yes, one click</td><td>Stacking by script; finishing is a series of separate tools</td><td>Stack, then basic levels and saturation</td><td>Stacking automated (WBPP); finishing is a chain of processes you run one by one</td><td>A tab-by-tab workflow; finishing tools run one by one</td><td class="yes">Yes, on the telescope</td></tr>
+        <tr><th>Reads the Origin session folder</th><td class="yes">Target, sky position, camera gain and calibration frames</td><td>As generic FITS</td><td>As generic FITS</td><td>As generic FITS</td><td>As generic FITS</td><td class="yes">It writes it</td></tr>
+        <tr><th>Picks settings for the target</th><td class="yes">Recognises galaxy, nebula, cluster, star field, comet</td><td>You choose</td><td>You choose</td><td>You choose</td><td>You choose</td><td>Not stated</td></tr>
+        <tr><th>Gradient removal</th><td class="yes">Automatic</td><td>Separate tool</td><td>No</td><td>Separate process</td><td>Separate tool</td><td class="yes">Automatic</td></tr>
+        <tr><th>Colour calibrated against Gaia stars</th><td class="yes">Automatic</td><td>Separate tool</td><td>No</td><td>Separate process</td><td>A colour calibration tool</td><td>Not stated</td></tr>
+        <tr><th>Noise reduction, star reduction, local contrast, stretch</th><td class="yes">Automatic, tuned per target</td><td>Separate tools</td><td>Levels only</td><td>Separate processes, some as paid add-ons</td><td>Separate tools</td><td>Not stated</td></tr>
+        <tr><th>Learned deconvolution for galaxies</th><td class="yes">Automatic on Origin data</td><td>Classical deconvolution tool</td><td>No</td><td>Classical, or a paid add-on</td><td>Not stated</td><td>Not stated</td></tr>
+        <tr><th>Keeps the linear stack for further work</th><td class="yes">Yes, a FITS file</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Yes</td><td>A TIFF with a large pedestal</td></tr>
+        <tr><th>Price</th><td class="yes">Free, open source</td><td>Free, open source</td><td>Free, open source</td><td>Paid licence</td><td>Paid licence</td><td>Comes with the telescope</td></tr>
+        <tr><th>Runs on</th><td>Windows, macOS, Linux</td><td>Windows, macOS, Linux</td><td>Windows</td><td>Windows, macOS, Linux</td><td>Windows, macOS, Linux</td><td>The telescope, via a phone or tablet</td></tr>
+      </tbody>
+    </table>
+    <p class="caveat measure">Astro Pixel Processor is in the table for its features only; a measured comparison like the ones below is under way and will be added when it is done.</p>
+  </div>
+</section>
+
+<section id="finish">
+  <div class="wrap">
+    <h2>What the one click does after the stack</h2>
+    <p class="intro measure">Stacking is where most tools stop. In OriginStack it is the halfway point: the finishing chain below runs in the same click, in this order, with settings chosen for the kind of target it recognised. Each step can be switched off, and every one is described in <a href="how-it-works-finishing.html">how it works</a>.</p>
+    <dl class="feat">
+      <div><dt>Colour calibrated against Gaia<code>on by default</code></dt>
+        <dd><p>Before finishing starts, the stack's colours are set from the stars in the field and their catalogued Gaia colours, so a Sun-like star comes out white and the rest follow. No reference image or manual white balance.</p></dd></div>
+      <div><dt>Hot pixels and star mask<code>on by default</code></dt>
+        <dd><p>Leftover hot pixels are cleaned per colour channel, and the stars are found once and reused, so every later step knows what is a star and what is sky or nebula.</p></dd></div>
+      <div><dt>Gradients removed<code>on by default</code></dt>
+        <dd><p>Light pollution, moonlight and vignetting leave a slope of brightness across the frame. A background model is fitted to the sky between the stars and the object, each colour against its own sky, and subtracted, with the object protected.</p></dd></div>
+      <div><dt>Colour noise and a neutral sky<code>on by default</code></dt>
+        <dd><p>Coloured speckle in the dark sky is smoothed without touching the brightness detail, and the sky is set to a neutral, even black level instead of a tinted one.</p></dd></div>
+      <div><dt>Noise reduction<code>on by default</code></dt>
+        <dd><p>A wavelet denoiser that protects elongated structure such as filaments and spiral arms, chosen after benchmarking the alternatives on scenes with known truth.</p></dd></div>
+      <div><dt>Learned deconvolution<code>automatic for Origin sessions</code></dt>
+        <dd><p>A small neural network trained on real Origin sessions, against sharper survey images of the same sky, undoes the night's seeing blur and removes noise in one step. On held-out targets it gave the narrowest stars of every option, with no dark rings and no invented detail, checked against independent stacks.</p></dd></div>
+      <div><dt>Star reduction and local contrast<code>on by default</code></dt>
+        <dd><p>Stars are narrowed without losing their colour or peak, so they stop crowding out the object, and mid-scale detail on the object is lifted against the noise at each scale.</p></dd></div>
+      <div><dt>Edges and the final sky<code>on by default</code></dt>
+        <dd><p>The ragged border left by alignment is cleaned up, and the sky is flattened and neutralised one last time after everything else.</p></dd></div>
+      <div><dt>The stretch<code>on by default</code></dt>
+        <dd><p>A generalised hyperbolic stretch brings up faint light while keeping bright cores from blowing out, and an extended bright region is rolled off rather than clipped. You get the JPEG, and can pick another of ten stretches afterwards without running again.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="measured">
+  <div class="wrap">
+    <h2>Measured, not claimed</h2>
+    <p class="intro measure">The same frames and the same bias, dark and flat for every tool, on one machine, each at default-style settings. Star width is fitted on the same stars in each pair of stacks, each on its own pixel grid. The full method, and the times these numbers were corrected, are on the <a href="./#compare">home page</a>.</p>
+
+    <table class="wide">
+      <caption>Star width on the same stars, OriginStack against each tool (smaller is sharper).</caption>
+      <thead><tr><th>Session</th><th class="n">vs Siril</th><th class="n">vs DeepSkyStacker</th><th class="n">vs the Origin's own stack</th></tr></thead>
+      <tbody>
+        <tr><th>Omega Nebula, 114 frames</th><td class="n">4.42 / 4.56 px</td><td class="n">4.42 / 4.83 px</td><td class="n">&ndash;</td></tr>
+        <tr><th>Sunflower Galaxy, 158 frames</th><td class="n">3.51 / 3.60 px</td><td class="n">&ndash;</td><td class="n">3.54 / 4.25 px</td></tr>
+        <tr><th>Sculptor Galaxy, 532 frames</th><td class="n">2.66 / 3.01 px</td><td class="n">&ndash;</td><td class="n">&ndash;</td></tr>
+        <tr><th>Crab Nebula, 133 frames</th><td class="n">2.54 / 2.77 px</td><td class="n">&ndash;</td><td class="n">2.54 / 3.50 px</td></tr>
+        <tr><th>Black Eye Galaxy, 81 frames</th><td class="n">8.21 / 8.26 px</td><td class="n">&ndash;</td><td class="n">8.15 / 8.38 px</td></tr>
+      </tbody>
+    </table>
+
+    <div class="phases">
+      <div>
+        <h3>Sharper than all three</h3>
+        <p>OriginStack's stars are 1 to 12% narrower than Siril's on every session measured, narrower than DeepSkyStacker's, and 4 to 27% narrower than the telescope's own stack.</p>
+      </div>
+      <div>
+        <h3>No noise penalty</h3>
+        <p>A sharper stack is noisier per pixel, so the fair test blurs it to the other tool's sharpness first. Then OriginStack is quieter than Siril in every channel; at the scale of a star it ties the Origin's own stack.</p>
+      </div>
+      <div>
+        <h3>Every frame used</h3>
+        <p>OriginStack used all 114, 158 and 532 frames of the three Siril sessions, where Siril kept 111, 157 and 525.</p>
+      </div>
+    </div>
+    <p class="caveat measure">A handful of sessions from one camera are a small sample, and the other tools have many settings that were left at their defaults. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_siril.py">tools/bench_vs_siril.py</a> repeats the comparison on your own frames and scores a stack from any other program with <code>--external</code>; <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> does the same against the Origin's own stack.</p>
+  </div>
+</section>
+
+<section id="speed">
+  <div class="wrap">
+    <h2>Fast, and the finished image included</h2>
+    <p class="intro measure">The Omega Nebula, 114 frames, on an 8-core laptop: 62 seconds from the raw files to the finished image. To the stack alone, OriginStack is faster than Siril on all three sessions measured, even though it also scores, white-balances and finds stars in every frame.</p>
+
+    <table class="wide">
+      <caption>Time to the stack, OriginStack against Siril, run back to back on the same machine; and OriginStack's time to the finished image.</caption>
+      <thead><tr><th>Session</th><th class="n">OriginStack, to the stack</th><th class="n">Siril, to the stack</th><th class="n">OriginStack, finished image</th></tr></thead>
+      <tbody>
+        <tr><th>Omega, 114 frames</th><td class="n">44 s</td><td class="n">54 s</td><td class="n">62 s</td></tr>
+        <tr><th>Sunflower, 158 frames</th><td class="n">54 s</td><td class="n">67 s</td><td class="n">81 s</td></tr>
+        <tr><th>Sculptor, 532 frames</th><td class="n">128 s</td><td class="n">159 s</td><td class="n">144 s</td></tr>
+      </tbody>
+    </table>
+    <p class="plain measure">DeepSkyStacker took 14 minutes 8 seconds on the Omega frames at its defaults, in an earlier run.</p>
+
+    <dl class="feat">
+      <div><dt>Over 80 kernels in Rust<code>built in</code></dt>
+        <dd><p>The hot paths are compiled native code: calibration, debayering, hot-pixel repair, alignment warps, the stacking combines, background fitting, star detection, denoising and photometry. Each has a pure-Python fallback, and most return exactly the same numbers as the code they replaced.</p>
+        <p class="fact">Measured against the NumPy and SciPy code they replaced: the default sigma-clip stack about 37 times faster, the fused weighted combine about 100 times, hot-pixel repair 25 to 55 times, the background sample fit about 31 times, the rotated-frame warp about 5 times, batch photometry about 150 times.</p></dd></div>
+      <div><dt>Built around your CPU<code>automatic</code></dt>
+        <dd><p>Frame processing is limited by memory speed, not arithmetic, so OriginStack runs single-threaded workers on three quarters of the physical cores, which beat the obvious all-threads layout by 7 to 10%. The release builds run on any 64-bit PC; where a kernel has a faster AVX2 version, it is chosen when the program starts.</p></dd></div>
+      <div><dt>Big nights in small memory<code>streaming</code></dt>
+        <dd><p>Frames are processed one at a time and the aligned frames kept in memory only when there is room, with a fifth of it always left free; otherwise they go to temporary files read in bands. 500 frames need about the same memory as 50.</p></dd></div>
+      <div><dt>Many nights, finished once<code>multi-session</code></dt>
+        <dd><p>Several sessions of one target are stacked separately where the sky rotated too far to pool them, registered onto the deepest, and finished once on the combined stack.</p>
+        <p class="fact">Seven Orion Nebula sessions, 456 frames: 8 minutes 16 seconds, from 15 minutes 12 seconds before this was reworked.</p></dd></div>
+      <div><dt>Rerun the finish in seconds<code>--from-stack</code></dt>
+        <dd><p>Every run saves its linear stack and settings, so trying another stretch or finishing setting reruns only the finish, with the slow early steps cached.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="choose">
+  <div class="wrap">
+    <h2>Which one to use</h2>
+    <div class="phases">
+      <div>
+        <h3>OriginStack</h3>
+        <p>You have an Origin, or any colour camera, and want the best finished image from a night with one click, on your own computer, for free. The linear stack is kept if you later want to finish it elsewhere.</p>
+      </div>
+      <div>
+        <h3>PixInsight</h3>
+        <p>You want complete manual control of every processing step and are happy to learn a large toolset and pay for it. OriginStack's linear FITS is a good starting point for it.</p>
+      </div>
+      <div>
+        <h3>Siril</h3>
+        <p>You want a free, scriptable toolkit and enjoy finishing the image yourself, step by step.</p>
+      </div>
+      <div>
+        <h3>The Origin app</h3>
+        <p>You want to see the image build up at the telescope, live. For the final picture, OriginStack's stars measured 4 to 27% sharper from the same frames. <a href="origin-vs-originstack.html">Ten sessions side by side</a> show the difference.</p>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="how-it-works.html">How it works</a> &nbsp; <a data-goatcounter-click="source-github-compare" href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">What changed</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

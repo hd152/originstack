@@ -23,10 +23,17 @@ every session has the same per-frame exposure and noise. If any stack's noise
 cannot be measured the whole merge falls back to frame-count weights (gains
 are still applied).
 
-There is no cross-session outlier rejection — each session already rejected
-outliers internally when it was stacked (the same tradeoff hierarchical mode
-makes). The merged output is itself a linear stack with summed headers, so
-merges chain night after night.
+By default there is no cross-session outlier rejection — each session already
+rejected outliers internally when it was stacked (the same tradeoff
+hierarchical mode makes). ``--merge-consistency`` adds it where it is still
+possible, between whole nights (``consistency_combine``): per starlet scale, a
+night is left out of a coefficient when it shows a significant feature the
+other nights, combined, show nothing of (a satellite glint, an unrejected
+hot-pixel cluster, a transient, a reflection). ``--merge-proper`` replaces the
+mean with a proper coadd of the nights (``proper_merge``): each weighted per
+spatial frequency by its own PSF, so a sharp night is not diluted by softer ones.
+The merged output is itself a linear stack with summed headers, so merges chain
+night after night.
 """
 from __future__ import annotations
 
@@ -305,10 +312,275 @@ class _UnusableStack(ValueError):
     does not look like the current stack after alignment)."""
 
 
+_B3 = np.array([1, 4, 6, 4, 1], np.float32) / 16.0
+CONSISTENCY_LEVELS = 5
+CONSISTENCY_K = 3.0          # disagreement threshold, in combined noise
+CONSISTENCY_ABSENT = 3.0     # the other nights must be within this many sigma of no signal
+CONSISTENCY_TOL = 0.3        # fractional tolerance on structure all show (calibration, seeing)
+CONSISTENCY_CARRY_K = 5.0    # only flags this strong carry to coarser scales (chance: ~1e-6)
+
+
+def _starlet_step(c: np.ndarray, j: int) -> np.ndarray:
+    """One a-trous B3-spline smoothing at scale ``j`` (holes of 2^j - 1)."""
+    from scipy import ndimage as ndi
+    k = np.zeros(4 * 2 ** j + 1, np.float32)
+    k[:: 2 ** j] = _B3
+    return ndi.convolve1d(ndi.convolve1d(c, k, axis=0, mode='reflect'), k, axis=1, mode='reflect')
+
+
+def _scale_noise(d: List[np.ndarray], wts: List[np.ndarray], wd: np.ndarray, wsum: np.ndarray,
+                 w: List[float]) -> List[float]:
+    """Per-night noise of one starlet scale. The MAD of a night's own coefficients counts
+    real structure as noise (on a nebula, 5-8x the true value at coarse scales, which made
+    the test lenient exactly there); the difference from the other nights' mean cancels it.
+    var(d_i - m_others) = a^2 (1/w_i + 1/W_others) with noise_l = a / sqrt(w_l), the stacks'
+    own inverse-variance weights, so one scale factor ``a`` is fitted (median over nights)."""
+    est = []
+    for i, di in enumerate(d):
+        w_o = wsum - wts[i]
+        sel = (wts[i] > 0) & (w_o > 1e-20)
+        if sel.sum() < 100:
+            continue
+        e = (di - (wd - wts[i] * di) / np.maximum(w_o, 1e-30))[sel]
+        mad = 1.4826 * float(np.median(np.abs(e - np.median(e))))
+        w_others = float(np.median(w_o[sel]))
+        est.append(mad / np.sqrt(1.0 / w[i] + 1.0 / w_others))
+    a = float(np.median(est)) if est else 0.0
+    return [a / np.sqrt(wi) for wi in w]
+
+
+def _starlet_details(planes: List[np.ndarray], levels: int):
+    """Per scale, the starlet detail plane of each image and the final coarse planes."""
+    details, cur = [], [p.astype(np.float32) for p in planes]
+    for j in range(levels):
+        nxt = [_starlet_step(x, j) for x in cur]
+        details.append([x - s for x, s in zip(cur, nxt)])
+        cur = nxt
+    return details, cur
+
+
+def _consistency_drops(lum: List[np.ndarray], wts: List[np.ndarray], wsum: np.ndarray,
+                       w: List[float], protect: np.ndarray, k: float, absent: float, tol: float,
+                       levels: int) -> List[List[np.ndarray]]:
+    """drops[j][i]: where night i is left out at starlet scale j, decided on luminance."""
+    from scipy import ndimage as ndi
+    details, _ = _starlet_details(lum, levels)
+    wds = [np.sum([wi * di for wi, di in zip(wts, d)], axis=0) for d in details]
+    noises = [_scale_noise(d, wts, wd, wsum, w) for d, wd in zip(details, wds)]
+    carry = [np.zeros(wsum.shape, bool) for _ in lum]
+    drops = []
+    for j in range(levels):
+        d, wd, noise = details[j], wds[j], noises[j]
+        m_all = wd / wsum
+        r = 2 ** (j + 1)
+        disk = np.hypot(*np.mgrid[-r:r + 1, -r:r + 1]) <= r
+        row = []
+        for i, di in enumerate(d):
+            w_o = wsum - wts[i]
+            has_o = w_o > 1e-20
+            w_o = np.maximum(w_o, 1e-30)
+            m_o = (wd - wts[i] * di) / w_o
+            n_o = np.sqrt(np.sum([(wl * nl) ** 2 for idx, (wl, nl) in enumerate(zip(wts, noise))
+                                  if idx != i], axis=0)) / w_o
+            thr = k * np.sqrt(noise[i] ** 2 + n_o ** 2 + (tol * m_all) ** 2)
+            cand = (has_o & ~protect & (np.abs(m_o) < absent * n_o) & (np.abs(di) > np.abs(m_o))
+                    & (wts[i] > 0))
+            if j + 1 < levels:
+                # absent one scale coarser too: a star the softer night shows below 3 sigma
+                # at this scale is strong at the next; a glint is absent at every scale
+                d1, wd1, nz1 = details[j + 1], wds[j + 1], noises[j + 1]
+                m_o1 = (wd1 - wts[i] * d1[i]) / w_o
+                n_o1 = np.sqrt(np.sum([(wl * nl) ** 2 for idx, (wl, nl) in enumerate(zip(wts, nz1))
+                                       if idx != i], axis=0)) / w_o
+                cand &= np.abs(m_o1) < absent * n_o1
+            excess = np.abs(di - m_o)
+            flag = cand & (excess > thr)
+            row.append((flag | carry[i]) & has_o)
+            strong = flag & (excess > thr * (CONSISTENCY_CARRY_K / k))
+            if strong.any():
+                carry[i] |= ndi.binary_dilation(strong, structure=disk)
+        drops.append(row)
+    return drops
+
+
+def consistency_combine(members: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+                        k: float = CONSISTENCY_K, absent: float = CONSISTENCY_ABSENT,
+                        tol: float = CONSISTENCY_TOL,
+                        levels: int = CONSISTENCY_LEVELS) -> Tuple[np.ndarray, float]:
+    """Inverse-variance mean of registered, flux-matched stacks with cross-night rejection.
+
+    ``members``: (image HWC, valid HW bool, weight per channel (3,)). Decided on luminance
+    and applied to all three channels alike, per starlet scale: night i is left out of a
+    coefficient when (a) it differs from the weighted mean of the other nights by more than
+    ``k`` x sqrt(its noise^2 + theirs^2 + (tol x the mean)^2), (b) the others are consistent
+    with no signal there (within ``absent`` sigma), at this scale and the next coarser
+    one, and (c) night i is the stronger. Flagged at ``CONSISTENCY_CARRY_K`` or more, it
+    stays left out at that place (grown by the scale's footprint) on every coarser detail
+    scale. Structure all nights show, at any strength, keeps the plain mean; so do pixels
+    only one night covers and the coarse plane. Returns (merged HWC float32, share of
+    coefficients where a night was left out).
+
+    Each rule came from a failure on real merges (dev-notes/cross-night-agreement.md):
+
+    - (b) at one scale only flattened star cores where the nights' seeing differed (the
+      softer night's core under 3 sigma at the finest scales; Pleiades stars 40% wider).
+    - Deciding per channel dropped stars from one colour: a night's noisier blue after flux
+      scaling (Pleiades, x1.46) showed real stars under 3 sigma, the other night's blue
+      star was dropped, and half the stars lost 3-50% of their blue (colour calibration
+      B x0.904 -> x0.980). Luminance has the signal; glints, hot-pixel clusters and
+      transients show in it too.
+    - Without the carry, a point artefact's coarse scales stayed behind as a ~3-sigma ring;
+      carrying the 3-sigma flags too dropped 12% of a pure-noise field's coefficients.
+    - Leaving a night out of the coarse plane swapped in the other night's sky level: a
+      background step under every removed artefact and signal error -51 to +14% (Orion).
+    - Around any night's clipped plateau, the plain mean: nights clip at different levels
+      after flux scaling, and on Orion's M42 core the selection stitched them together in
+      wavelet-sized blocks (up to 500 sigma). A plateau, not a brightness cut: a satellite
+      glint is often a night's brightest feature and must stay rejectable.
+    - Noise per scale from the difference to the other nights (``_scale_noise``).
+    - Outside a night's footprint its image is replaced by the plain mean first, so the
+      zero fill never reads as a feature."""
+    from scipy import ndimage as ndi
+
+    from src.color_calibrate import _clipped_weight
+    H, W = members[0][0].shape[:2]
+    sat = np.zeros((H, W), bool)
+    for img, v, _ in members:
+        cw = _clipped_weight(np.where(v[:, :, None], img, 0.0).astype(np.float32))
+        if cw is not None:
+            sat |= v & (cw > 0)
+    protect = ndi.binary_dilation(sat, iterations=2 ** (levels + 1)) if sat.any() else sat
+
+    def filled(c):
+        """Per night, channel c (None: luminance) with the plain mean outside its footprint,
+        and the per-pixel weights."""
+        if c is None:
+            # inverse variance of the channel mean: 9 / sum(1 / w_c)
+            ws = [9.0 / float(np.sum(1.0 / np.asarray(w, np.float64))) for _, _, w in members]
+            planes = [img.mean(axis=2) for img, _, _ in members]
+        else:
+            ws = [float(w[c]) for _, _, w in members]
+            planes = [img[:, :, c] for img, _, _ in members]
+        wts = [np.where(v, wi, 0.0).astype(np.float32) for wi, (_, v, _) in zip(ws, members)]
+        wsum = np.maximum(np.sum(wts, axis=0), 1e-30)
+        plain = np.sum([wi * np.where(v, p, 0.0) for wi, p, (_, v, _) in zip(wts, planes, members)],
+                       axis=0) / wsum
+        return [np.where(v, p, plain) for p, (_, v, _) in zip(planes, members)], wts, wsum, ws
+
+    lum, wts_l, wsum_l, ws_l = filled(None)
+    drops = _consistency_drops(lum, wts_l, wsum_l, ws_l, protect, k, absent, tol, levels)
+    out = np.zeros((H, W, 3), np.float32)
+    for c in range(3):
+        planes, wts, wsum, _ = filled(c)
+        details, coarse = _starlet_details(planes, levels)
+        acc = np.zeros((H, W), np.float32)
+        for j in range(levels):
+            wk_sum = np.zeros((H, W), np.float32)
+            wk_d = np.zeros((H, W), np.float32)
+            for i, di in enumerate(details[j]):
+                wk = np.where(drops[j][i], 0.0, wts[i])
+                wk_sum += wk
+                wk_d += wk * di
+            m_all = np.sum([wi * di for wi, di in zip(wts, details[j])], axis=0) / wsum
+            acc += np.where(wk_sum > 0, wk_d / np.maximum(wk_sum, 1e-30), m_all)
+        acc += np.sum([wi * x for wi, x in zip(wts, coarse)], axis=0) / wsum
+        out[:, :, c] = acc
+    n_flag = sum(int(m.sum()) for row in drops for m in row)
+    return out, n_flag / max(levels * H * W, 1)
+
+
+_PROPER_FEATHER_PX = 48      # proper coadd -> weighted mean ramp inside the common footprint
+
+
+def proper_merge(members: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+                 fallback: np.ndarray, clip_w: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+    """Proper coadd (Zackay & Ofek 2017) of flux-matched stacks of different nights,
+    ``--merge-proper``.
+
+    The inverse-variance mean gives each night one weight for every spatial frequency, so a
+    long soft night dilutes the fine detail a sharp one carries. Here each night's stack is
+    weighted per frequency by its own PSF (an elliptical Moffat fitted on shared stars,
+    ``proper_coadd.fit_psf``) and noise:
+
+        R_hat = sum_j w_j conj(P_hat_j) M_hat_j / sqrt(sum_j w_j |P_hat_j|^2) / sqrt(sum_j w_j)
+
+    with w_j = 1 / sigma_j^2 per channel (``members``' weights, on the common flux scale).
+    At zero frequency it is exactly the inverse-variance mean; the noise stays white at the
+    mean's level; the PSF is the weighted RMS of the nights' MTFs, never softer than the
+    mean's. On 24 two-night targets: stars a median 2.6% narrower than the mean (15% at
+    p10, 42% on Eyes Galaxies, 3.2 vs 9.4 px nights) at the same noise (median 1.006x).
+
+    It runs where every night covers the field, ramping into ``fallback`` (the plain mean)
+    over ``_PROPER_FEATHER_PX`` towards the footprint edge and on clipped star cores
+    (``clip_w``: a clipped plateau has no PSF). ``members``: (stack HWC, valid HW bool,
+    weight per channel). None when a night's PSF cannot be measured."""
+    from scipy import fft as _fft
+    from scipy import ndimage as _ndi
+
+    from src.proper_coadd import _PAD, _STAMP_R, fit_psf, psf_fwhm, render_psf_into, select_psf_stars
+
+    if len(members) < 2:
+        return None
+    H, W, C = fallback.shape
+    inter = np.logical_and.reduce([v for _, v, _ in members])
+    if inter.mean() < 0.2:
+        return None
+    # stars from the mean itself, then kept inside the common footprint: zeroing the rest
+    # first made its edge the brightest "source" and left 4 of 12 isolated stars
+    stars = select_psf_stars(_lum(np.ascontiguousarray(fallback, dtype=np.float32)), 4.0)
+    inner = _ndi.binary_erosion(inter, iterations=_STAMP_R + 2)
+    if len(stars):
+        stars = stars[inner[np.round(stars[:, 0]).astype(int), np.round(stars[:, 1]).astype(int)]]
+    if len(stars) < 8:
+        return None
+    psfs = []
+    for img, _, _ in members:
+        p, _ = fit_psf(_lum(img), stars)
+        if p is None or not np.all(np.isfinite(p)):
+            return None
+        psfs.append(p)
+    safe_print("  Proper merge: night PSF FWHM " + ", ".join(f"{psf_fwhm(p):.2f}" for p in psfs)
+               + f" px ({len(stars)} stars)")
+
+    PH = _fft.next_fast_len(H + 2 * _PAD, real=True)
+    PW = _fft.next_fast_len(W + 2 * _PAD, real=True)
+    P_hat = []
+    for p in psfs:
+        plane = np.zeros((PH, PW), np.float32)
+        render_psf_into(p, plane)
+        P_hat.append(_fft.rfft2(plane))
+    out = np.empty((H, W, C), np.float32)
+    plane = np.zeros((PH, PW), np.float32)
+    for c in range(C):
+        num = np.zeros((PH, PW // 2 + 1), np.complex128)
+        den = np.zeros((PH, PW // 2 + 1), np.float64)
+        wsum = sky_acc = 0.0
+        for (img, valid, w_c), Ph in zip(members, P_hat):
+            w = float(w_c[c])
+            ch = np.where(valid, img[..., c], fallback[..., c])     # no edge inside the FFT
+            sky = float(np.median(ch[inter]))
+            plane[_PAD:_PAD + H, _PAD:_PAD + W] = ch - sky
+            num += w * np.conj(Ph) * _fft.rfft2(plane)
+            den += w * (Ph.real ** 2 + Ph.imag ** 2)
+            wsum += w
+            sky_acc += w * sky
+        R = _fft.irfft2(num / np.sqrt(np.maximum(den, 1e-30)), s=(PH, PW))
+        out[..., c] = R[_PAD:_PAD + H, _PAD:_PAD + W] / np.sqrt(wsum) + sky_acc / wsum
+    if not np.all(np.isfinite(out)):
+        return None
+    alpha = np.clip(_ndi.distance_transform_edt(inter) / _PROPER_FEATHER_PX, 0.0, 1.0)
+    if clip_w is not None:
+        alpha *= 1.0 - np.clip(_ndi.maximum_filter(clip_w, size=2 * _STAMP_R + 1), 0.0, 1.0)
+    a = alpha[..., None].astype(np.float32)
+    return (a * out + (1.0 - a) * fallback).astype(np.float32)
+
+
 def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                           merge_paths: List[str],
                           verbose: bool = False,
-                          skip_unusable: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
+                          skip_unusable: bool = False,
+                          consistency: bool = False,
+                          proper: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Register and weighted-merge previous linear stacks into ``stacked``.
 
     Returns (merged HWC float32, merge_info). Raises ValueError on
@@ -317,7 +589,12 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     every session in a folder rather than stacks the user named) leaves such a
     stack out with a warning instead, listed in ``merge_info['skipped']``: one
     mis-aimed 9-frame Whirlpool session (correlation -0.03) used to abort the
-    combine of eight good ones.
+    combine of eight good ones. ``consistency`` (``--merge-consistency``) combines with
+    ``consistency_combine`` instead of the plain inverse-variance mean. ``proper`` (the
+    CLI's default, ``--no-merge-proper`` turns it off) replaces the inverse-variance mean
+    with ``proper_merge``, which weights each night per spatial frequency by its PSF. Not
+    with ``consistency``: that selection is per wavelet coefficient and has no
+    proper-coadd form yet, so ``consistency`` wins.
     """
     from src.registration import apply_transform
 
@@ -331,6 +608,11 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
     noise_ok = bool(np.all(np.isfinite(new_sigma)) and np.all(new_sigma > 0))
     w_new = 1.0 / new_sigma ** 2 if noise_ok else np.ones(3)
     acc_n = stacked.astype(np.float64) * w_new
+    if proper and consistency:
+        _log.info("merge: --merge-consistency given, so the nights are not proper-coadded")
+        proper = False
+    members = ([(stacked.astype(np.float32), np.ones((H, W), dtype=bool), w_new)]
+               if consistency or proper else None)
     wsum_n = np.broadcast_to(w_new, (H, W, 3)).astype(np.float64).copy()
     acc = stacked.astype(np.float64) * new_w
     wsum = np.full((H, W), new_w, dtype=np.float64)
@@ -458,7 +740,9 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                                        for c in range(3)]) * gains
                 if np.all(np.isfinite(prev_sigma)) and np.all(prev_sigma > 0):
                     w_c = 1.0 / prev_sigma ** 2
-                    acc_n += scaled * np.where(valid[:, :, np.newaxis], w_c, 0.0)
+                    if members is not None:
+                        members.append((scaled.astype(np.float32), valid, w_c))
+                    acc_n +=scaled * np.where(valid[:, :, np.newaxis], w_c, 0.0)
                     wsum_n += np.where(valid[:, :, np.newaxis], w_c, 0.0)
                     info.setdefault('weights', []).append(
                         (os.path.basename(path), float(np.mean(w_c / w_new))))
@@ -491,9 +775,23 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
             safe_print(f"  WARNING: leaving out {exc}")
             info['skipped'].append(os.path.basename(path))
 
-    if noise_ok:
+    if noise_ok and consistency and members is not None and len(members) >= 2:
+        merged, flagged = consistency_combine(members)
+        info['weighting'] = 'inverse-variance, cross-night consistency'
+        info['consistency_flagged'] = flagged
+        safe_print(f"  Cross-night consistency: a night left out of {flagged * 100:.3f}% of "
+                   f"wavelet coefficients")
+    elif noise_ok:
         merged = (acc_n / np.maximum(wsum_n, 1e-30)).astype(np.float32)
         info['weighting'] = 'inverse-variance'
+        if proper and members is not None and len(members) >= 2:
+            pm = proper_merge(members, merged, clip_w)
+            if pm is not None:
+                merged = pm
+                info['weighting'] = 'proper coadd (per-frequency PSF weights)'
+            else:
+                safe_print("  Proper merge: a night's PSF could not be measured; "
+                           "kept the inverse-variance mean")
     else:
         merged = (acc / np.maximum(wsum[:, :, np.newaxis], 1e-12)).astype(np.float32)
         info['weighting'] = 'frame-count'

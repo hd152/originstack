@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OriginStack command-line reference</title>
-<meta name="description" content="Every option of the OriginStack command line, with its choices, default and description, generated from the program itself (version 2.13.0).">
+<meta name="description" content="Every option of the OriginStack command line, with its choices, default and description, generated from the program itself (version 2.15.0).">
 <meta name="keywords" content="OriginStack command line, originstack.py options, astrophotography stacking command line, stack-method, stretch, drizzle, merge, from-stack">
 <meta name="robots" content="index, follow">
 <meta name="theme-color" content="#0b1220">
@@ -38,7 +38,7 @@
       </nav>
     </div>
     <h1>Command-line reference</h1>
-    <p class="lede">Every option of <code>originstack.py</code>, version 2.13.0, generated from the program's own definitions, so it matches what <code>--help</code> prints. The desktop app shows the same options under <em>Additional options</em>, with shorter labels.</p>
+    <p class="lede">Every option of <code>originstack.py</code>, version 2.15.0, generated from the program's own definitions, so it matches what <code>--help</code> prints. The desktop app shows the same options under <em>Additional options</em>, with shorter labels.</p>
     <p class="toc">
       <a href="#opt-core">Core</a>
       <a href="#opt-frames-calibration-phase-1">Frames &amp; calibration (Phase 1)</a>
@@ -332,7 +332,7 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
     <h2>Output, preview &amp; plate solving</h2>
     <dl class="opts">
       <div id="opt-export"><dt><code>--export</code> <var>FMT[,FMT]</var></dt>
-        <dd><p>Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight). E.g. --export tiff,xisf</p></dd></div>
+        <dd><p>Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight), png (the preview JPEG&#x27;s image, lossless 8-bit), png16 (the preview as a 16-bit PNG, for further editing without banding). E.g. --export tiff,png16</p></dd></div>
       <div id="opt-plate-solve"><dt><code>--plate-solve</code></dt>
         <dd><p>Plate-solve the stack and write a WCS (see --plate-solver; the default solves locally against a Gaia index, no API key needed)</p></dd></div>
       <div id="opt-annotate"><dt><code>--annotate</code></dt>
@@ -341,8 +341,8 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
         <dd><p>--annotate: only label stars brighter than this V magnitude (default: 9.0; lower = fewer, brighter-only stars)</p>
           <p class="meta">Default: <code>9.0</code></p></dd></div>
       <div id="opt-stretch"><dt><code>--stretch</code></dt>
-        <dd><p>Preview JPEG stretch method (default: ghs). masked blends a stronger faint-signal stretch through a smooth luminance mask; multiscale uses separate diffuse and filament masks; seti applies SETI Astro statistical stretch (target median 0.20); noisefloor picks the curve strength from the sky noise (ignores the preset GHS strength and --preview-black-sigma); oklab applies the GHS curve to perceptual lightness and keeps hue and saturation; clahe adds contrast-limited local equalisation to the GHS preview where there is extended signal.</p>
-          <p class="meta">Choices: <code>linear</code>, <code>arcsinh</code>, <code>ghs</code>, <code>masked</code>, <code>multiscale</code>, <code>seti</code>, <code>noisefloor</code>, <code>oklab</code>, <code>clahe</code> &middot; Default: <code>ghs</code></p></dd></div>
+        <dd><p>Preview JPEG stretch method (default: ghs). masked blends a stronger faint-signal stretch through a smooth luminance mask; multiscale uses separate diffuse and filament masks; seti applies SETI Astro statistical stretch (target median 0.20); noisefloor picks the curve strength from the sky noise (ignores the preset GHS strength and --preview-black-sigma); oklab applies the GHS curve to perceptual lightness and keeps hue and saturation; clahe adds contrast-limited local equalisation to the GHS preview where there is extended signal; object takes the white point and the curve’s focus from the target itself (found where the telescope pointed), so a small galaxy is not stretched for the empty field around it; plain ghs when the target fills the frame.</p>
+          <p class="meta">Choices: <code>linear</code>, <code>arcsinh</code>, <code>ghs</code>, <code>masked</code>, <code>multiscale</code>, <code>seti</code>, <code>noisefloor</code>, <code>oklab</code>, <code>clahe</code>, <code>object</code> &middot; Default: <code>ghs</code></p></dd></div>
       <div id="opt-stretch-color"><dt><code>--stretch-color</code></dt>
         <dd><p>How the ghs/arcsinh stretch treats colour (default: channel). preserve: the curve is applied to luminance and each pixel keeps its RGB ratios, so stars and bright cores keep their colour. channel: the curve is applied to each channel separately (the behaviour before 2.5), which renders bright objects whiter.</p>
           <p class="meta">Choices: <code>preserve</code>, <code>channel</code> &middot; Default: <code>channel</code></p></dd></div>
@@ -373,6 +373,21 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
         <dd><p>Per-frame differential photometry: aperture-photometer a fixed Gaia star list on every registered sub and ensemble-calibrate, writing &lt;output&gt;_lightcurves.csv (one row per frame x star) and &lt;output&gt;_lightcurve_stats.csv (per-star mean/rms/reduced-chi2 + a variability flag). Needs a session info.json WCS (Celestron Origin); --plate-solve runs too late for this. Differential only -- no absolute zero point.</p></dd></div>
       <div id="opt-photometry-target"><dt><code>--photometry-target</code> <var>RA,DEC</var></dt>
         <dd><p>--photometry-timeseries: mark one star as the target. &quot;RA,DEC&quot; in degrees, or &quot;px:X,Y&quot; in stacked-image pixels. Its light-curve stats are printed and flagged in the CSVs.</p></dd></div>
+      <div id="opt-aavso-report"><dt><code>--aavso-report</code></dt>
+        <dd><p>With --photometry-timeseries: write &lt;output&gt;_aavso.txt: the light curve of the target in the AAVSO Extended Format, for WebObs upload. Comparison stars come from the AAVSO VSP chart (network), ensemble-calibrated per frame on the green channel (TG band), with a check star. Target: --aavso-star NAME or --photometry-target RA,DEC.</p></dd></div>
+      <div id="opt-aavso-star"><dt><code>--aavso-star</code> <var>NAME</var></dt>
+        <dd><p>--aavso-report: AAVSO name of the variable star (e.g. &quot;SS Cyg&quot;); its chart and position come from AAVSO VSP.</p></dd></div>
+      <div id="opt-aavso-obscode"><dt><code>--aavso-obscode</code> <var>CODE</var></dt>
+        <dd><p>--aavso-report: your AAVSO observer code (written as CHANGEME if not given).</p></dd></div>
+      <div id="opt-aavso-bin"><dt><code>--aavso-bin</code> <var>MINUTES</var></dt>
+        <dd><p>--aavso-report: average the frames in time bins of this many minutes (0 = one point per frame).</p>
+          <p class="meta">Default: <code>0.0</code></p></dd></div>
+      <div id="opt-aavso-fov"><dt><code>--aavso-fov</code> <var>ARCMIN</var></dt>
+        <dd><p>--aavso-report: VSP chart field of view for the comparison stars.</p>
+          <p class="meta">Default: <code>60.0</code></p></dd></div>
+      <div id="opt-aavso-maglimit"><dt><code>--aavso-maglimit</code> <var>MAG</var></dt>
+        <dd><p>--aavso-report: faintest VSP comparison star.</p>
+          <p class="meta">Default: <code>15.0</code></p></dd></div>
       <div id="opt-fix-atmospheric-dispersion"><dt><code>--fix-atmospheric-dispersion</code></dt>
         <dd><p>EXPERIMENTAL: shift R/B channels back toward the green channel&#x27;s position to correct chromatic atmospheric refraction, derived from first principles (Filippenko 1982&#x27;s standard-atmosphere refractive-index formula) -- no established software reference implementation exists for this, unlike this pipeline&#x27;s other corrections (real ADCs are physical prism hardware). --plate-scale and --zenith-angle are auto-derived (from the WCS, and from the info.json GPS + observation time) when not given; --parallactic-angle is still required -- a wrong value shifts colour channels the WRONG way, and mapping it onto the detector needs the image north angle, which is not reliably known here. Not wired into --auto. Most useful for low-altitude targets (zenith angle &gt; ~40deg).</p></dd></div>
       <div id="opt-plate-scale"><dt><code>--plate-scale</code> <var>ARCSEC/PX</var></dt>
@@ -398,6 +413,10 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
     <dl class="opts">
       <div id="opt-merge"><dt><code>--merge</code> <var>STACK.fits ...</var></dt>
         <dd><p>Incremental stacking: merge previously saved linear stacks (the main output FITS of earlier runs, RAWSTACK=True) into this run. Each is registered onto the current session&#x27;s grid (star-match affine, translation fallback) and combined as a per-pixel mean weighted by its NFRAMES header inside its warped footprint. Post-processing runs once on the merged result, and the output is itself a mergeable linear stack. No cross-session outlier rejection (each session already rejected internally). Not supported with --drizzle-scale &gt; 1.</p></dd></div>
+      <div id="opt-merge-consistency"><dt><code>--merge-consistency</code></dt>
+        <dd><p>With --merge or a multi-session combine: reject what only one night shows. Per wavelet scale, a night is left out where it has a significant feature the other nights, combined, show nothing of (a satellite glint, an unrejected hot-pixel cluster, a transient, a reflection); structure all nights show keeps the plain weighted mean.</p></dd></div>
+      <div id="opt-no-merge-proper"><dt><code>--no-merge-proper</code></dt>
+        <dd><p>With --merge or a multi-session combine: weight each night by its noise only (the plain weighted mean). By default each night is weighted per spatial frequency by its own star sharpness (proper coaddition), so a sharp night carries the fine detail instead of being diluted by longer, softer ones, at the same noise.</p></dd></div>
       <div id="opt-keep-checkpoint"><dt><code>--keep-checkpoint</code></dt>
         <dd><p>Keep the raw pre-post-processing stack after a successful run. Re-running skips phases 1–3 so you can iterate on post-processing settings quickly.</p></dd></div>
       <div id="opt-from-stack"><dt><code>--from-stack</code> <var>STACK.fits</var></dt>

@@ -29,7 +29,14 @@ from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import autodetect_bayer_orientation, debayer
 from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
-from src.io_fits import load_fits, load_frame, populate_fits_header, preview_stretch_kw, save_preview_rgb
+from src.io_fits import (
+    load_fits,
+    load_frame,
+    populate_fits_header,
+    preview_exports,
+    preview_stretch_kw,
+    save_preview_rgb,
+)
 from src.models import FrameInfo, ProcessingStats
 from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
@@ -210,8 +217,10 @@ def save_final_preview(rgb: np.ndarray, preview_path: str, args,
     """Write the run's preview JPEG with ``args``' stretch settings and keep
     its source so the desktop app can re-stretch it after the run."""
     from src.ui_events import get_ui_events
-    save_preview_rgb(rgb, preview_path, starless=starless, **preview_stretch_kw(args))
+    save_preview_rgb(rgb, preview_path, starless=starless, exports=preview_exports(args),
+                     **preview_stretch_kw(args))
     get_ui_events().remember_final_preview(rgb, preview_path, args, starless=starless)
+
 
 
 def _prefetch_session_lookups(lights: List[FrameInfo], args, directory: str,
@@ -405,7 +414,7 @@ def _save_tiff(stacked: np.ndarray, output_path: str) -> None:
             # fallback-of-a-fallback (only reached when tifffile isn't
             # installed) drops to 8-bit RGB, which Image.fromarray(..., 'RGB')
             # does support directly.
-            arr8 = (np.clip(normalized, 0, 1) * 255).astype(np.uint8)
+            arr8 = np.clip(np.rint(normalized * 255), 0, 255).astype(np.uint8)
             Image.fromarray(arr8, mode='RGB').save(tiff_path)
             safe_print("  NOTE: tifffile not installed; saved 8-bit TIFF via Pillow "
                        "(install tifffile for 16-bit)")
@@ -1324,6 +1333,13 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                             else:
                                 safe_print("  Light-curve analysis: no light curve had enough "
                                            "points")
+                        if getattr(args, 'aavso_report', False):
+                            from src.aavso_report import format_summary, write_aavso_report
+                            from src.utils import header_get_first
+                            _exp = header_get_first(getattr(final[0], 'header', {}) or {},
+                                                    ("EXPTIME", "EXPOSURE"), cast=float) if final else None
+                            _av = write_aavso_report(args, output_path, _ts["wcs_header"], float(_exp or 0.0))
+                            safe_print(format_summary(_av, _av.get("path")))
                 except Exception as e:
                     safe_print(f"  WARNING: time-series photometry failed: {e}")
 
@@ -1429,7 +1445,9 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         safe_print(f"\n  Merging {len(args.merge)} previous stack(s)...")
         _t_merge = time.time()
         stacked, merge_info = merge_previous_stacks(
-            stacked, len(final), list(args.merge), verbose=args.verbose)
+            stacked, len(final), list(args.merge), verbose=args.verbose,
+            consistency=getattr(args, 'merge_consistency', False),
+            proper=getattr(args, 'merge_proper', True))
         fits_stacked = stacked.copy()
         safe_print(f"  ✓ Merge: {merge_info['total_frames']} total frames "
                    f"({format_time(time.time() - _t_merge)})")

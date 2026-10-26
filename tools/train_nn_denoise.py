@@ -19,6 +19,14 @@ the weight is 1 / the target's own noise variance: sky sigma^2 plus a Poisson te
 in the smoothed signal, fitted per session (``target_variance``). Half the patches are
 centred near stars, which carry most of the PSF information.
 
+``train --synth synth/train.npz`` mixes synthetic-blur pairs (tools/synth_blur.py, ingredients
+from tools/gen_synth_deconv.py) into a deconvolution bank's batches: ``--synth-frac`` of each
+batch is drawn on the fly with a truth sharper than any real stack, so the network can learn
+to sharpen past the seeing pairs' sharp-30% target. The weights kept are the best on the sum
+of real and synthetic validation loss, each relative to its identity loss. ``--init``
+starts from exported weights (e.g. the shipped v3). ``--peak-penalty`` adds a one-sided
+cost on point-like excess over the synthetic truth (``peak_penalty``).
+
 Usage:
     pip install torch            (into a separate venv: it is not a project dependency)
     python tools/train_nn_denoise.py bank  --pairs G:/output/nn_denoise/pairs --bank bank.npz
@@ -118,10 +126,25 @@ def deconv_pair(a: np.ndarray, b: np.ndarray):
     return za, zb, (1.0 / target_variance(zb, sky_level_z(bg, sigma))).astype(np.float32)
 
 
-def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str = "denoise") -> None:
+def build_bank(pairs_dirs, out: str, per_pair, seed: int = 0, mode: str = "denoise") -> None:
+    """Patch bank from one pairs folder or several (e.g. seeing pairs and the cross-night
+    pairs of tools/gen_crossnight_pairs.py, which are in the same format). ``per_pair`` is
+    one count for every folder or one per folder."""
     rng = np.random.default_rng(seed)
     za_l, zb_l, w_l, sess = [], [], [], []
-    dirs = sorted(d for d in glob.glob(os.path.join(pairs_dir, "*")) if os.path.exists(os.path.join(d, "meta.json")))
+    if isinstance(pairs_dirs, str):
+        pairs_dirs = [pairs_dirs]
+    counts = [per_pair] * len(pairs_dirs) if isinstance(per_pair, int) else list(per_pair)
+    if len(counts) == 1:
+        counts *= len(pairs_dirs)
+    if len(counts) != len(pairs_dirs):
+        raise SystemExit("--per-pair: give one count, or one per --pairs folder")
+    dirs, n_of = [], {}
+    for p, c in zip(pairs_dirs, counts):
+        for d in sorted(glob.glob(os.path.join(p, "*"))):
+            if os.path.exists(os.path.join(d, "meta.json")):
+                dirs.append(d)
+                n_of[d] = c
     for i, d in enumerate(dirs):
         name = os.path.basename(d)
         if is_holdout(name):
@@ -147,7 +170,7 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
                 lum = za.mean(-1)
                 st = detect(lum - np.median(lum))
                 stars = np.c_[np.asarray(st["ycentroid"]), np.asarray(st["xcentroid"])]
-            for k in range(per_pair):
+            for k in range(n_of[d]):
                 if stars is not None and len(stars) and k % 2 == 0:
                     cy, cx = stars[rng.integers(len(stars))]
                     y = int(np.clip(cy - rng.integers(16, PATCH - 16), m, h - PATCH - m))
@@ -164,7 +187,7 @@ def build_bank(pairs_dir: str, out: str, per_pair: int, seed: int = 0, mode: str
     print(f"bank: {len(za_l)} patches -> {out}")
 
 
-def make_net():
+def make_net(filters: int = 24):
     import torch.nn as nn
 
     def conv(i, o):
@@ -173,7 +196,7 @@ def make_net():
     class NnDenoiseNet(nn.Module):
         """Mirrors src/nn_denoise.forward layer for layer (names become the npz keys)."""
 
-        def __init__(self, c=3, f=24):
+        def __init__(self, c=3, f=filters):
             super().__init__()
             self.e0a, self.e0b = conv(c, f), conv(f, f)
             self.e1a, self.e1b = conv(f, 2 * f), conv(2 * f, 2 * f)
@@ -246,8 +269,40 @@ def faint_sources(n: int, size: int, gen, dev):
     return out
 
 
+PEAK_MASK_SIGMA = 0.3      # truth point-filter response (noise units) that marks a real source
+PEAK_MASK_GROW = 3         # px, dilation of that mask (7 covered 63% of the canvas)
+
+
+def peak_penalty(out, truth, w, masked: bool = True):
+    """One-sided cost of point-like excess of ``out`` over a noiseless ``truth``: the
+    luminance residual through a difference of Gaussians (sigma 1 px minus 3 px, zero sum),
+    positive part squared, weighted by ``w``. L2 alone is symmetric; on synthetic pairs s1/s2
+    turned ~2 sigma noise bumps into point sources (unconfirmed faint peaks about twice v3's).
+
+    ``masked`` charges it only where the truth has no source (its own filter response below
+    ``PEAK_MASK_SIGMA``, grown by ``PEAK_MASK_GROW``). Unmasked (s3a/s3b, weight 10 / 30) it
+    also charged real stars' peaks and the network dimmed them: synthetic flux 0.87 / 0.80
+    against 0.94, invented peaks 52 / 65 per Mpx against 62."""
+    import torch
+    import torch.nn.functional as F
+    k = torch.arange(-6, 7, dtype=torch.float32, device=out.device)
+    g = lambda s: torch.exp(-0.5 * (k / s) ** 2) / torch.exp(-0.5 * (k / s) ** 2).sum()  # noqa: E731
+    dog = g(1.0)[:, None] * g(1.0)[None, :] - g(3.0)[:, None] * g(3.0)[None, :]
+    r = (out - truth).mean(1, keepdim=True)
+    mf = F.conv2d(r, dog[None, None], padding=6)
+    cost = w.mean(1, keepdim=True) * torch.relu(mf) ** 2
+    if masked:
+        src = F.conv2d(truth.mean(1, keepdim=True), dog[None, None], padding=6) > PEAK_MASK_SIGMA
+        g = PEAK_MASK_GROW
+        near = F.max_pool2d(src.float(), 2 * g + 1, stride=1, padding=g) > 0
+        cost = cost * (~near).float()
+    return cost.mean()
+
+
 def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0, resume: bool = False,
-          inject: bool = False) -> None:
+          inject: bool = False, synth: Optional[str] = None, synth_frac: float = 0.5,
+          init: Optional[str] = None, synth_set: Optional[dict] = None, peak_pen: float = 0.0,
+          filters: int = 24) -> None:
     import torch
     torch.manual_seed(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -261,7 +316,27 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     tr_idx, va_idx = np.flatnonzero(~val), np.flatnonzero(val)
     print(f"{n} patches, train {len(tr_idx)}, val {len(va_idx)}, device {dev}", flush=True)
 
-    net = make_net().to(dev)
+    net = make_net(filters).to(dev)
+    if init:
+        with np.load(init) as fw:
+            net.load_state_dict({k: torch.from_numpy(fw[k]) for k in fw.files})
+        print(f"initialised from {init}", flush=True)
+    syn = n_syn = syn_val = None
+    if synth:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import synth_blur
+        from synth_blur import SynthSource
+        for k, v in (synth_set or {}).items():
+            if not hasattr(synth_blur, k):
+                raise SystemExit(f"--synth-set: synth_blur has no {k}")
+            setattr(synth_blur, k, v)
+            print(f"synth_blur.{k} = {v}", flush=True)
+        syn = SynthSource(synth, dev)
+        n_syn = int(round(batch * synth_frac))
+        vg = np.random.default_rng(seed + 123)
+        syn_val = [tuple(t.cpu() for t in syn.batch(32, vg)) for _ in range(16)]
+        print(f"synthetic: {len(syn.bg)} backgrounds, {len(syn.noise)} noise patches, "
+              f"{n_syn} of {batch} per batch", flush=True)
     opt = torch.optim.Adam(net.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps, pct_start=0.05)
 
@@ -277,9 +352,14 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
                 a, b = a + src, b + src
         return a, b, ww
 
-    def loss_of(a, b, ww):
+    def loss_of(a, b, ww, n_tail=0):
+        """(loss, identity loss); with ``n_tail`` the last n samples are synthetic and also
+        pay the peak penalty."""
         pred = net(torch.asinh(a / nd.ASINH_SOFT)) * torch.sqrt(1.0 + torch.clamp(a, min=0.0))
-        return (ww * (a + pred - b) ** 2).mean(), (ww * (a - b) ** 2).mean()
+        lo = (ww * (a + pred - b) ** 2).mean()
+        if peak_pen > 0 and n_tail:
+            lo = lo + peak_pen * peak_penalty((a + pred)[-n_tail:], b[-n_tail:], ww[-n_tail:])
+        return lo, (ww * (a - b) ** 2).mean()
 
     def validate():
         net.eval()
@@ -291,6 +371,13 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
                 base += float(bl) * len(va_idx[s:s + 64])
         net.train()
         return tot / len(va_idx), base / len(va_idx)
+
+    def validate_synth():
+        net.eval()
+        with torch.no_grad():
+            r = [loss_of(*(t.to(dev) for t in b), n_tail=len(b[0])) for b in syn_val]
+        net.train()
+        return float(np.mean([float(a) for a, _ in r])), float(np.mean([float(b) for _, b in r]))
 
     # a checkpoint every 1000 steps: a run on this machine was lost at step 14000 to an I/O
     # error on the drive its log was on
@@ -310,7 +397,12 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
     run = 0.0
     best = [float("inf"), None]
     for step in range(start, steps + 1):
-        lo, _ = loss_of(*batch_of(rng.choice(tr_idx, batch), True))
+        if syn is None:
+            lo, _ = loss_of(*batch_of(rng.choice(tr_idx, batch), True))
+        else:
+            a, b, ww = batch_of(rng.choice(tr_idx, batch - n_syn), True)
+            sa, sb, sw = syn.batch(n_syn, rng)
+            lo, _ = loss_of(torch.cat([a, sa]), torch.cat([b, sb]), torch.cat([ww, sw]), n_tail=n_syn)
         opt.zero_grad()
         lo.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -319,11 +411,16 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         run += lo.item()
         if step % 1000 == 0 or step == steps:
             v, vb = validate()
-            if v < best[0]:
+            sel, extra = v, ""
+            if syn is not None:
+                sv, svb = validate_synth()
+                sel = v / vb + sv / svb
+                extra = f"  synth val {sv:.4f} (identity {svb:.4f})"
+            if sel < best[0]:
                 # keep the best-validation weights: deconvolution v2 was best at step
                 # 10000 and overfit after (val 1.996 -> 2.215 while train kept falling)
-                best[0], best[1] = v, {k: t.detach().clone() for k, t in net.state_dict().items()}
-            print(f"step {step:6d}  train {run / 1000:.4f}  val {v:.4f}  (identity {vb:.4f})  "
+                best[0], best[1] = sel, {k: t.detach().clone() for k, t in net.state_dict().items()}
+            print(f"step {step:6d}  train {run / 1000:.4f}  val {v:.4f}  (identity {vb:.4f}){extra}  "
                   f"{time.time() - t0:.0f} s", flush=True)
             run = 0.0
             torch.save({"net": net.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
@@ -341,16 +438,18 @@ def train(bank: str, steps: int, out: str, batch: int, lr: float, seed: int = 0,
         raise SystemExit("numpy forward pass does not match torch")
     with open(os.path.splitext(out)[0] + "_train.json", "w") as fh:
         json.dump({"steps": steps, "batch": batch, "lr": lr, "patches": int(n), "val": final_val,
-                   "inject": inject}, fh)
+                   "inject": inject, "synth": synth, "synth_frac": synth_frac if synth else None,
+                   "init": init, "synth_set": synth_set, "peak_penalty": peak_pen, "filters": filters}, fh)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("bank")
-    b.add_argument("--pairs", required=True)
+    b.add_argument("--pairs", required=True, nargs="+", help="one or more pairs folders")
     b.add_argument("--bank", required=True)
-    b.add_argument("--per-pair", type=int, default=40)
+    b.add_argument("--per-pair", type=int, nargs="+", default=[40],
+                   help="patches per pair: one count, or one per --pairs folder")
     b.add_argument("--mode", choices=["denoise", "deconv"], default="denoise")
     t = sub.add_parser("train")
     t.add_argument("--bank", required=True)
@@ -361,11 +460,24 @@ def main() -> None:
     t.add_argument("--resume", action="store_true", help="continue from <out>_ckpt.pt")
     t.add_argument("--inject", action="store_true",
                    help="add random faint sources to training patches (faint_sources)")
+    t.add_argument("--synth", help="gen_synth_deconv.py npz: mix synthetic-blur pairs into each batch")
+    t.add_argument("--synth-frac", type=float, default=0.5, help="share of each batch that is synthetic")
+    t.add_argument("--init", help="start from these exported weights (.npz)")
+    t.add_argument("--filters", type=int, default=24,
+                   help="U-Net base width (the numpy forward pass takes any; run time grows ~ its square)")
+    t.add_argument("--peak-penalty", type=float, default=0.0,
+                   help="weight of the synthetic-batch peak penalty (peak_penalty)")
+    t.add_argument("--synth-set", action="append", default=[], metavar="NAME=VALUE",
+                   help="override a synth_blur.py constant, e.g. FLUX=20,5e5 (repeatable)")
     args = ap.parse_args()
     if args.cmd == "bank":
         build_bank(args.pairs, args.bank, args.per_pair, mode=args.mode)
     else:
-        train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject)
+        train(args.bank, args.steps, args.out, args.batch, args.lr, resume=args.resume, inject=args.inject,
+              synth=args.synth, synth_frac=args.synth_frac, init=args.init, peak_pen=args.peak_penalty,
+              filters=args.filters,
+              synth_set={k: tuple(float(x) for x in v.split(",")) if "," in v else float(v)
+                         for k, v in (kv.split("=", 1) for kv in args.synth_set)})
 
 
 if __name__ == "__main__":

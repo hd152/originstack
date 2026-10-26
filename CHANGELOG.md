@@ -6,6 +6,120 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **Sharper stars in every image from an Origin.** The learned deconvolver (`--deconvolve nn`)
+  was retrained against Pan-STARRS survey images of the same sky, which are far sharper and
+  deeper than any Origin stack. The automatic settings now use it for every target, mixed with
+  the learned noise reduction:
+  - galaxies: 35% deconvolver, stars about 15% narrower than before, with the same or better
+    faint detail and star colour;
+  - nebulae, clusters and star fields, which used the learned noise reduction alone until now:
+    75% deconvolver, stars 10-35% narrower and 10-20% more faint detail.
+
+  `--deconvolve nn` on its own uses 75%, and `--config nn_deconv_blend=...` sets the mix. The
+  step takes about twice as long as the noise reduction alone. With the default per-channel
+  stretch the sharper star cores render whiter; `--stretch-color preserve` keeps their colour.
+
+### Fixed
+
+- **Learned star removal (`--remove-stars-method nn`, experimental): no more coloured discs
+  and rims where stars were.** Bright stars on the Pleiades left blue rings with red-yellow
+  centres, and stars near Orion's nebula left red and green discs up to 80 px across. The
+  removal now follows each star's own colour from core to halo and fills with plain sky only.
+
+## [2.15.0] - 2026-10-24
+
+Sharper multi-night combines, truer star colours in the JPEG, galaxies that keep their faint
+outskirts, and lossless PNG copies of the final image.
+
+### Added
+
+- **Lossless copies of the final image: `--export png` and `png16`** (also "Also save" in the
+  app, remembered between launches). `png` is the JPEG's own image without compression (8-bit,
+  about 1.8x the JPEG's size); `png16` is the same render in 16 bits per channel, for further
+  editing in another program without banding (about 6x). Both are made from the same render as
+  the JPEG and are rewritten when you pick another stretch after the run.
+
+- **Multi-night combines keep a sharp night's detail** (`--merge` and the multi-session
+  combine, on by default; `--no-merge-proper` restores the plain weighted mean). Each night
+  is weighted per spatial frequency by its own measured star profile (proper coaddition, as already done for the
+  frames within a night) instead of by one noise weight, so a long night of poor seeing no
+  longer dilutes a short sharp one. Same noise and star flux as the plain weighted mean. On a
+  real two-night Pleiades merge (2.8 and 6.2 px nights) stars came out 22% narrower (2.99 to
+  2.36 px, 400 stars) with no rings; over 24 two-night targets a median 2.6% narrower, 15% at
+  the 10th percentile, and unchanged where the nights' seeing matched. With
+  `--merge-consistency` the consistency combine is used instead.
+
+### Changed
+
+- **Galaxies keep their faint outskirts in the preview.** The galaxy preset put the preview's
+  black point one noise sigma above the sky; after the learned deconvolver has removed most of
+  the sky noise, that line sits just above the sky and took the faint outer disk and arms with
+  it: 51-57% of the faint galaxy pixels came out pure black on Sunflower and Sculptor, 27-29% on
+  Whirlpool and M101. The black point is now the sky median (12-23% black, half the sky still
+  black). `--config preview_black_sigma=1.0` restores the old, blacker sky.
+
+### Fixed
+
+- **Star colours in the JPEG.** Preview JPEGs stored colour at half resolution (the JPEG
+  encoder's default 4:2:0), so a small star's colour was averaged with the black sky around it:
+  on the Sunflower, Omega and Pleiades previews stars kept 61-78% of their colour saturation and
+  their colour error was 3x what full-resolution colour gives. All preview, viewer and
+  annotated JPEGs now keep colour at full resolution (stars keep 96-99%), for files 15-32%
+  larger. The 8-bit conversion also rounds instead of truncating, which made every pixel up to
+  one step darker.
+
+- **One dark-scaling note per run.** When the lights' exposures differ from the dark's, the log
+  now says so once, listing each exposure with its scale factor and frame count. Each Phase 1
+  worker used to print it for every exposure it met: 18 identical lines on a session of 20, 25
+  and 30 s lights with a 10 s dark.
+
+## [2.14.0] - 2026-10-23
+
+Learned noise reduction by default for nebulae and star fields, a stretch that finds the
+target itself, cleaner multi-night combines, AAVSO light-curve reports, and a way to support
+the project.
+
+### Changed
+
+- **Learned noise reduction is now the automatic choice for nebulae and star fields** on
+  Celestron Origin data (`--auto`, the default): `--denoiser nn`, with colour-noise reduction
+  run before it. On five held-out targets this kept star widths within 0.3% and colour
+  accuracy equal to the wavelet denoiser's, at 3.5-27x lower sky noise and 3-40x the
+  faint-structure contrast. Galaxies keep the learned deconvolver; `--denoiser wavelet`
+  restores the previous behaviour. Without the colour-noise step first, the network had
+  widened stars 1-2% on nebula fields.
+
+### Added
+
+- **Support OriginStack**: a link to the project's Ko-fi page in the desktop app's header and
+  beside the finished run's buttons, on the website and on GitHub (the Sponsor button). It
+  opens in your browser; the app sends nothing.
+- **`--stretch object`** (also in the app's re-stretch menu): takes the stretch from the target
+  itself rather than the whole frame. It finds the object around where the telescope pointed;
+  when that object is fainter than the field's white point, the white point comes down to just
+  above its core and the curve's contrast moves up to its typical level. A brighter rendering
+  of a small or faint galaxy at the cost of a grainier sky (Sculptor, Black Eye); exactly the
+  plain `ghs` stretch on nebulae, clusters and anything that fills the frame.
+- **`--merge-consistency`** (with `--merge` or a multi-session combine, opt-in): leaves a night
+  out wherever it shows a significant feature the other nights show nothing of, such as a
+  satellite glint, an unrejected hot-pixel cluster or a transient; structure every night
+  shows keeps the plain weighted mean. On held-out two-night pairs it removed one-night
+  100-sigma artefacts in every case, kept faint sources both nights show in full, cut sky
+  error by 20% on average and never made the image itself worse; on real merges star widths
+  and colour calibration were unchanged.
+- **AAVSO reports: `--aavso-report`** (with `--photometry-timeseries`) writes the target's light
+  curve in the AAVSO Extended Format for WebObs upload, calibrated on AAVSO's own comparison
+  stars (VSP chart) with a check star and optional time bins; `tools/aavso_report.py` makes
+  one from an earlier run. On an Orion Nebula session, comparison stars of V 10-13.6 measured
+  against the others came out at TG - V +0.004 +- 0.035 mag.
+- **`tools/bench_vs_siril.py --external STACK.fits`** scores another stacker's linear colour
+  stack (Astro Pixel Processor, DeepSkyStacker, PixInsight, ...) against OriginStack with the
+  same shared-star width and matched-noise measurements as the Siril comparison;
+  `--external-seconds` records the time you measured, `--reuse-originstack` scores several
+  stacks against one OriginStack run.
+
 ## [2.13.0] - 2026-10-22
 
 Mosaics from the Origin's Mosaic Mode, learned star removal, a reworked comet mode, a faster

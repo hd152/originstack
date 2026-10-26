@@ -90,12 +90,12 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="Onderdelen">
-        <a href="#time">Snelheid</a> <a href="#app">De app</a> <a href="#compare">Vergeleken</a> <a href="stack-celestron-origin.html">Handleiding</a> <a href="../advanced.html">Geavanceerd</a> <a href="../how-it-works.html">Hoe het werkt</a> <a href="#get">Installeren</a>
+        <a href="#oneclick">Eén klik</a> <a href="#time">Snelheid</a> <a href="#app">De app</a> <a href="#compare">Vergeleken</a> <a href="stack-celestron-origin.html">Handleiding</a> <a href="../advanced.html">Geavanceerd</a> <a href="../how-it-works.html">Hoe het werkt</a> <a href="#get">Installeren</a>
       </nav>
     </div>
 
-    <h1><span class="kicker">Gratis stacksoftware voor astrofotografie met de Celestron Origin</span> Zwakker detail, strakkere sterren, schonere hemel.</h1>
-    <p class="lede">OriginStack stapelt en bewerkt de ruwe FITS-bestanden van een Celestron Origin, of frames van elke kleurencamera, tot één afgewerkt beeld. Het draait op je eigen computer, heeft geen account nodig en gaat alleen online om een objectnaam op te zoeken die het niet kent, of voor optionele stappen zoals plate solving.</p>
+    <h1><span class="kicker">Gratis stapelen en bewerken met één klik voor de Celestron Origin</span> Van een nacht aan ruwe frames naar een afgewerkt beeld, met één klik.</h1>
+    <p class="lede">Wijs OriginStack de map aan die je Celestron Origin heeft opgeslagen, of frames van een willekeurige kleurencamera, en druk op Start. Het kalibreert, lijnt uit en stapelt, en werkt daarna ook het beeld af: gradiënten verwijderd, kleuren ingesteld op Gaia-sterren, ruis verminderd, sterren kleiner en het resultaat uitgerekt, met instellingen die bij je object passen. Het draait op je eigen computer en heeft geen account nodig; het gaat alleen online voor sterrencatalogusgegevens en objectnamen, en <code>--offline</code> zet zelfs dat uit.</p>
 
     <div class="actions">
       <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Downloaden voor Windows</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">Broncode op GitHub bekijken</a>
@@ -105,6 +105,7 @@
     <p class="fine" id="fine-win">Windows 10 of 11, 64-bit, gratis en open source (GPLv3). Het installatieprogramma heeft nog geen codehandtekening, dus SmartScreen kan een waarschuwing geven: kies Meer informatie en daarna Toch uitvoeren.</p>
     <p class="fine" id="fine-mac" hidden>macOS, gratis en open source (GPLv3). De versie voor Apple silicon vereist macOS 14 of nieuwer. De app is nog niet door Apple ondertekend, dus macOS blokkeert de eerste keer openen: klik met Control ingedrukt op OriginStack in Apps en kies Open, of sta het toe via Systeeminstellingen, Privacy en beveiliging, Toch openen. <a href="#mac">Details</a></p>
     <p class="fine" id="fine-linux" hidden>Linux x86-64 met glibc 2.35 of nieuwer (Ubuntu 22.04, Debian 12, Fedora 36 en later), gratis en open source (GPLv3). Pak het uit en voer <code>./install.sh</code> uit. <a href="#get">Details</a></p>
+    <p class="fine">OriginStack is gratis. Als het je een avond bewerken bespaart, kun je <a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">een fooi geven op Ko-fi</a>.</p>
 
     <div class="wipe" id="wipe" role="group" aria-label="Vergelijking van één frame met de afgewerkte stack">
       <picture><source type="image/webp" srcset="../img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, ../img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, ../img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img class="after" fetchpriority="high" src="../img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="De Omeganevel na het stapelen van 114 frames en de bewerking: helder rood gas met donkere banen tegen een dicht sterrenveld."></picture>
@@ -115,11 +116,45 @@
       <span class="cap r">114 frames, gestapeld en bewerkt</span>
       <input type="range" min="0" max="100" value="50" aria-label="Sleep om één frame met de afgewerkte stack te vergelijken">
     </div>
-    <p class="hero-bridge"><span>Begin bij het verschil</span> <a href="#time">Zie hoe één nacht één beeld wordt&nbsp;→</a></p>
+    <p class="hero-bridge"><span>Begin bij het verschil</span> <a href="#oneclick">Bekijk wat één klik doet&nbsp;→</a></p>
   </div>
 </header>
 
 <main id="main-content">
+<section id="oneclick">
+  <div class="wrap">
+    <h2>Eén klik doet al het werk</h2>
+    <p class="intro measure">Andere programma's stoppen bij de stack, of geven je een gereedschapskist om het beeld zelf af te werken. Bij OriginStack is de stack pas halverwege: de afwerkingsstappen hieronder lopen in dezelfde klik, in deze volgorde, afgestemd op het soort object dat het herkende. Elke stap kan uit, en de lineaire stack wordt ook bewaard, voor wie het beeld elders wil afwerken.</p>
+    <div class="phases">
+      <div>
+        <h3>Kleur uit de sterren</h3>
+        <p>De sterren in je beeld worden gekoppeld aan de Gaia-catalogus en de kleuren ingesteld op hun bekende kleuren, zodat een zonachtige ster wit wordt. Geen handmatige witbalans.</p>
+      </div>
+      <div>
+        <h3>Gradiënten weg</h3>
+        <p>Lichtvervuiling, maanlicht en vignettering laten een helderheidsverloop over het beeld achter. Een achtergrondmodel wordt aan de hemel rond het object aangepast en afgetrokken.</p>
+      </div>
+      <div>
+        <h3>Een schone, neutrale hemel</h3>
+        <p>Achtergebleven hete pixels en gekleurde spikkels worden opgeruimd en de hemel wordt een egaal, neutraal zwart in plaats van een getinte.</p>
+      </div>
+      <div>
+        <h3>Minder ruis, details blijven</h3>
+        <p>Een wavelet-ruisonderdrukker die filamenten en spiraalarmen beschermt. Bij Origin-sessies verscherpt een klein neuraal netwerk, getraind op echte Origin-sessies, de seeingvervaging en verwijdert het ruis in één stap.</p>
+      </div>
+      <div>
+        <h3>Kleinere sterren, meer structuur</h3>
+        <p>Sterren worden kleiner gemaakt zonder hun kleur te verliezen, zodat ze het object niet verdringen, en detail op middelgrote schaal in het object wordt tegen de ruis naar voren gehaald.</p>
+      </div>
+      <div>
+        <h3>Uitgerekt en klaar om te delen</h3>
+        <p>Een rekking die zwak licht ophaalt zonder heldere kernen te laten uitbranden, levert de afgewerkte JPEG. In de app kun je daarna een andere van tien rekkingen proberen zonder opnieuw te draaien.</p>
+      </div>
+    </div>
+    <p class="plain measure">Wat er daarvoor met elk frame gebeurt, en de ideeën achter elke stap, staan in <a href="../how-it-works.html">hoe het werkt</a>. Hoe dit zich verhoudt tot Siril, DeepSkyStacker, PixInsight, Astro Pixel Processor en de eigen stack van de Origin staat <a href="../compare.html">op een eigen pagina</a>, en tien sessies staan <a href="../origin-vs-originstack.html">naast de eigen stack van de Origin</a>.</p>
+  </div>
+</section>
+
 <section id="time">
   <div class="wrap">
     <h2>Een nacht aan frames in ongeveer een minuut</h2>
@@ -158,7 +193,8 @@
         <p>Achtergrondgradiënten, kleur en ruis worden aangepakt, en daarna wordt het resultaat gestretcht om te bekijken. Het FITS-bestand dat wordt opgeslagen blijft lineair, klaar voor verdere bewerking.</p>
       </div>
     </div>
-    <p class="plain measure">Frames worden één voor één verwerkt, dus 500 frames hebben ongeveer evenveel geheugen nodig als 50. Tijdelijke bestanden nemen tijdens de run ongeveer 100 MB schijfruimte per frame in beslag; de uitgelijnde frames blijven in plaats daarvan in het geheugen als daar ruimte voor is, waarbij altijd 30% vrij blijft.</p>
+    <p class="plain measure">Frames worden één voor één verwerkt, dus 500 frames hebben ongeveer evenveel geheugen nodig als 50. Tijdelijke bestanden nemen tijdens de run ongeveer 100 MB schijfruimte per frame in beslag; de uitgelijnde frames blijven in plaats daarvan in het geheugen als daar ruimte voor is, waarbij altijd een vijfde vrij blijft.</p>
+    <p class="plain measure"><strong>Waarom het snel is.</strong> Meer dan 80 van de zwaarste stappen zijn gecompileerd Rust, geen Python: het standaard combineren van de stack is ongeveer 37 keer sneller dan de NumPy-code die het vervangt, het repareren van hete pixels 25 tot 55 keer, het achtergrondmodel ongeveer 31 keer. De meeste geven precies dezelfde getallen als voorheen. De verwerking van frames is ingericht op hoe een processor zich echt gedraagt, één worker per kern op driekwart van de kernen, en meerdere nachten van één object worden één keer afgewerkt in plaats van per nacht: zeven sessies van de Orionnevel gingen van 15 naar ongeveer 8 minuten.</p>
   </div>
 </section>
 
@@ -190,7 +226,20 @@
 
 <section id="compare">
   <div class="wrap">
-    <h2>Hoe het zich verhoudt tot Siril en DeepSkyStacker</h2>
+    <h2>Vergeleken</h2>
+    <p class="intro measure">Wat één run oplevert, uitgaande van de frames die de Origin opslaat. De volledige tabel, met Astro Pixel Processor en opmerkingen per programma, staat op de <a href="../compare.html">vergelijkingspagina</a>.</p>
+
+    <table class="wide matrix">
+      <thead><tr><th></th><th>OriginStack</th><th>Siril</th><th>DeepSkyStacker</th><th>PixInsight</th><th>Origin-app</th></tr></thead>
+      <tbody>
+        <tr><th>Van ruwe frames naar een afgewerkt beeld in één run</th><td class="yes">Ja, met één klik</td><td>Stapelen via script, afwerken stap voor stap</td><td>Stack en eenvoudige niveaus</td><td>Stapelen geautomatiseerd, afwerken stap voor stap</td><td class="yes">Ja, in de telescoop</td></tr>
+        <tr><th>Gradiënten, Gaia-kleur, ruis, sterren, rekking</th><td class="yes">Alles automatisch, afgestemd per object</td><td>Losse gereedschappen</td><td>Niet inbegrepen</td><td>Losse processen, deels betaalde uitbreidingen</td><td>Gradiënten verwijderd; de rest niet vermeld</td></tr>
+        <tr><th>Stergrootte op dezelfde frames (OriginStack = 1,00, kleiner is scherper)</th><td class="yes">1.00</td><td>1,01 tot 1,13</td><td>1.09</td><td>Niet gemeten</td><td>1,04 tot 1,36</td></tr>
+        <tr><th>Prijs</th><td class="yes">Gratis, open source</td><td>Gratis, open source</td><td>Gratis, open source</td><td>Betaalde licentie</td><td>Bij de telescoop inbegrepen</td></tr>
+      </tbody>
+    </table>
+
+    <h2 class="again">Gemeten tegen Siril en DeepSkyStacker</h2>
     <p class="intro measure">Dezelfde frames, dezelfde bias, dark en flat, één machine, elk programma met instellingen in de stijl van de standaard. Drie sessies met de Celestron Origin: de Omeganevel (114 × 30 s), het Zonnebloemstelsel (158 × 20 s) en het Beeldhouwerstelsel (532 × 10 s).</p>
 
     <table class="wide">
@@ -368,7 +417,7 @@ python desktop_app.py</pre>
       <div id="no-gen-ai">
         <h3>Geen generatieve AI, niets in de cloud</h3>
         <p>OriginStack stuurt je beelden nooit naar een AI-dienst en genereert of verzint nooit beeldinhoud. De verwerking is klassieke, gedocumenteerde signaalverwerking die voor dit project is geschreven, van kalibratie en uitlijning tot achtergrondverwijdering en ruisonderdrukking, en je kunt alles in de broncode lezen. Er is geen andere astronomiesoftware, geen account en geen clouddienst nodig, alleen gangbare opensource wetenschappelijke bibliotheken.</p>
-        <p>Twee optionele stappen, <code>--denoiser nn</code> en <code>--deconvolve nn</code>, gebruiken kleine neurale netwerken die alleen op echte Celestron Origin-sessies zijn getraind. Ze draaien op je eigen computer en zijn tegen onafhankelijke stacks gecontroleerd om te bevestigen dat ze geen sterren of details toevoegen die niet in de data zitten. De automatische instellingen gebruiken de tweede voor sterrenstelselsessies van de Origin; <code>--deconvolve off</code> zet hem uit. <a href="../how-it-works.html#learned">Hoe ze werken</a>.</p>
+        <p>Twee optionele stappen, <code>--denoiser nn</code> en <code>--deconvolve nn</code>, gebruiken kleine neurale netwerken die getraind zijn op echte Celestron Origin-sessies (de tweede ook op scherpere survey-opnamen van dezelfde hemel). Ze draaien op je eigen computer en zijn gecontroleerd met onafhankelijke stacks om te bevestigen dat ze geen sterren of details toevoegen die niet in de gegevens zitten. De automatische instellingen gebruiken de tweede voor Origin-sessies; <code>--deconvolve off</code> zet hem uit. <a href="../how-it-works.html#learned">Hoe ze werken</a>.</p>
       </div>
     </div>
   </div>
@@ -377,8 +426,8 @@ python desktop_app.py</pre>
 
 <footer>
   <div class="wrap">
-    <span>OriginStack is vrije software onder de GNU GPL v3.</span>
-    <span><a href="stack-celestron-origin.html">Origin-beelden stapelen</a> &nbsp; <a href="../advanced.html">Geavanceerde functies</a> &nbsp; <a href="../how-it-works.html">Hoe het werkt</a> &nbsp; <a href="../docs.html">Documentatie</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">Broncode</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Een probleem melden</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">Wat er veranderd is</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+    <span>OriginStack is vrije software onder de GNU GPL v3. <a data-goatcounter-click="support-footer" href="https://ko-fi.com/originstack">Steun het op Ko-fi</a>.</span>
+    <span><a href="stack-celestron-origin.html">Origin-beelden stapelen</a> &nbsp; <a href="../compare.html">Vergeleken met andere software</a> &nbsp; <a href="../advanced.html">Geavanceerde functies</a> &nbsp; <a href="../how-it-works.html">Hoe het werkt</a> &nbsp; <a href="../docs.html">Documentatie</a> &nbsp; <a data-goatcounter-click="source-github-index" href="https://github.com/hd152/originstack">Broncode</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Een probleem melden</a> &nbsp; <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">Wat er veranderd is</a> &nbsp; <a href="privacy.html">Privacy</a></span>
     <!-- i18n:langs --><span class="langs"><a href="../" hreflang="en" lang="en">English</a> <a href="../de/" hreflang="de" lang="de">Deutsch</a> <a href="../es/" hreflang="es" lang="es">Español</a> <a href="../fr/" hreflang="fr" lang="fr">Français</a> <a href="../it/" hreflang="it" lang="it">Italiano</a> <a href="../nl/" hreflang="nl" lang="nl" aria-current="true">Nederlands</a> <a href="../pt-br/" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
   </div>
 </footer>

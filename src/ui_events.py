@@ -247,39 +247,32 @@ class UIEvents:
         if not self.active:
             return
         kw = self._stretch_kw(args)
+        from src.io_fits import preview_exports
         with self._lock:
             self._final_src = {'rgb': rgb, 'starless': starless,
-                               'path': os.path.abspath(path), 'kw': kw}
+                               'path': os.path.abspath(path), 'kw': kw,
+                               'exports': preview_exports(args) if args is not None else ()}
             self._bump()
 
     def restretch(self, stretch: str, color: str) -> bytes:
         """Re-render the remembered final preview with ``stretch``/``color``,
-        overwrite its JPEG and update the 'final' viewer slot. Returns the
+        overwrite its JPEG (and its ``--export png``/``png16`` copies) and update the
+        'final' viewer slot. Returns the
         viewer-sized JPEG bytes. Runs the full-resolution stretch, so call it
         off the GUI thread. Raises ``RuntimeError`` when there is nothing to
         re-stretch or the stretch backend is unavailable; ``OSError`` when the
         file cannot be written."""
-        from src.io_fits import preview_jpeg_from_uint8, render_preview_rgb_uint8, write_preview_jpeg
+        from src.io_fits import preview_jpeg_from_uint8, render_preview_rgb_float, to_uint8, write_final_images
         with self._lock:
             src = self._final_src
         if src is None:
             raise RuntimeError('no finished preview to re-stretch')
         kw = dict(src['kw'], stretch=stretch, color=color)
-        out = render_preview_rgb_uint8(src['rgb'], starless=src['starless'], **kw)
-        if out is None:
+        img = render_preview_rgb_float(src['rgb'], starless=src['starless'], **kw)
+        if img is None:
             raise RuntimeError(f'the {stretch} stretch is unavailable')
-        path = src['path']
-        tmp = path + '.tmp'
-        try:
-            write_preview_jpeg(out, tmp)
-            os.replace(tmp, path)
-        finally:
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-        data = preview_jpeg_from_uint8(out)
+        write_final_images(img, src['path'], src.get('exports', ()))
+        data = preview_jpeg_from_uint8(to_uint8(img))
         with self._lock:
             # A new run may have started while this rendered: its state wins.
             if self._final_src is src:

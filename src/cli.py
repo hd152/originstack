@@ -347,6 +347,34 @@ def save_effective_config(args: argparse.Namespace, output_path: str) -> None:
         safe_print(f"  WARNING: Could not save config file ({e})")
 
 
+def _note_dark_scaling(frames: dict, dark_exptime: Optional[float]) -> None:
+    """One note for the run when lights' exposures differ from the dark's: Phase 1 scales the
+    dark by light / dark exposure. The workers used to print it, each once per exposure it
+    met (each process has its own dedup set): 18 identical lines on a 20 / 25 / 30 s session
+    with a 10 s dark and six workers."""
+    from collections import Counter
+
+    from src.frame_discovery import _frame_exptime
+
+    if not dark_exptime or dark_exptime <= 0:
+        return
+    counts = Counter()
+    for f in frames.get('light') or []:
+        try:                         # only a note: a frame without a readable header is skipped
+            e = _frame_exptime(f)
+        except Exception:
+            continue
+        if e:
+            counts[round(e, 1)] += 1
+    scaled = sorted(e for e in counts if abs(e / dark_exptime - 1.0) > 0.05)
+    if not scaled:
+        return
+    parts = ", ".join(f"{e:g} s ({e / dark_exptime:.2f}x, {counts[e]} "
+                      f"frame{'s' if counts[e] != 1 else ''})" for e in scaled)
+    safe_print(f"  NOTE: the {dark_exptime:g} s dark is scaled to the lights' exposure: {parts}. "
+               f"Darks of the same exposure as the lights give the best results.")
+
+
 def _warn_dark_iso_mismatch(frames: dict) -> None:
     """Say when the dark was taken at another ISO than the lights. The Origin pairs ISO
     500 sessions with an ISO 200 dark (3 of 33 local sessions); the dark is scaled by
@@ -614,6 +642,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
                 frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
         except Exception as e:
             safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+        _note_dark_scaling(frames, masters['dark_exptime'])
         _warn_dark_iso_mismatch(frames)
 
     # Photon-transfer gain / read-noise from raw bias+flat pairs, for the
@@ -992,7 +1021,8 @@ def _restore_args(args: argparse.Namespace, baseline: dict) -> None:
         setattr(args, key, _copy_arg_value(value))
 
 
-_ONLINE_FEATURES = ('plate_solve', 'annotate', 'photometry', 'photometry_timeseries', 'color_calibrate')
+_ONLINE_FEATURES = ('plate_solve', 'annotate', 'photometry', 'photometry_timeseries', 'aavso_report',
+                    'color_calibrate')
 # --plate-solve stays on offline with the built-in solver (cached index tiles only)
 _OFFLINE_OK = {'plate_solve': lambda a: getattr(a, 'plate_solver', 'auto') in ('auto', 'local')}
 
@@ -1493,7 +1523,9 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
         if others:
             combined, merge_info = merge_previous_stacks(
                 ref_stack, int(ref_meta.get('nframes') or 1), others,
-                verbose=getattr(args, 'verbose', False), skip_unusable=True)
+                verbose=getattr(args, 'verbose', False), skip_unusable=True,
+                consistency=getattr(args, 'merge_consistency', False),
+                proper=getattr(args, 'merge_proper', True))
         else:   # a filter group of one session: finish it on its own
             combined, merge_info = ref_stack, None
     except Exception as exc:
@@ -1742,7 +1774,9 @@ def build_parser() -> argparse.ArgumentParser:
                         'PSF options (blind PSF, iterations, model) via --config.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
-                        'xisf (PixInsight). E.g. --export tiff,xisf')
+                        'xisf (PixInsight), png (the preview JPEG\'s image, lossless 8-bit), '
+                        'png16 (the preview as a 16-bit PNG, for further editing without '
+                        'banding). E.g. --export tiff,png16')
     g_debug.add_argument('--debug', default=None, metavar='KIND[,KIND]',
                    help='Debug artefacts, comma-separated: '
                         'registration (per-frame diagnostics, implies -v), '
@@ -2186,7 +2220,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_post.add_argument('--no-chroma-nr', dest='chroma_nr', action='store_false',
                    help='Disable chroma noise reduction')
     g_out.add_argument('--stretch', choices=['linear', 'arcsinh', 'ghs', 'masked', 'multiscale', 'seti',
-                                             'noisefloor', 'oklab', 'clahe'],
+                                             'noisefloor', 'oklab', 'clahe', 'object'],
                    default='ghs',
                    help='Preview JPEG stretch method (default: ghs). masked blends a stronger '
                         'faint-signal stretch through a smooth luminance mask; multiscale uses '
@@ -2195,7 +2229,10 @@ def build_parser() -> argparse.ArgumentParser:
                         'the sky noise (ignores the preset GHS strength and --preview-black-sigma); '
                         'oklab applies the GHS curve to perceptual lightness and keeps hue and '
                         'saturation; clahe adds contrast-limited local equalisation to the GHS '
-                        'preview where there is extended signal.')
+                        'preview where there is extended signal; object takes the white point '
+                        'and the curve\N{RIGHT SINGLE QUOTATION MARK}s focus from the target itself '
+                        '(found where the telescope pointed), so a small galaxy is not stretched '
+                        'for the empty field around it; plain ghs when the target fills the frame.')
     g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='channel',
                    help='How the ghs/arcsinh stretch treats colour (default: channel). '
                         'preserve: the curve is applied to luminance and each pixel keeps '
@@ -2228,6 +2265,22 @@ def build_parser() -> argparse.ArgumentParser:
                         'stack. No cross-session outlier rejection (each session '
                         'already rejected internally). Not supported with '
                         '--drizzle-scale > 1.')
+    g_sessions.add_argument('--merge-consistency', action='store_true',
+                   help='With --merge or a multi-session combine: reject what only one '
+                        'night shows. Per wavelet scale, a night is left out where it '
+                        'has a significant feature the other nights, combined, show '
+                        'nothing of (a satellite glint, an unrejected hot-pixel cluster, '
+                        'a transient, a reflection); structure all nights show keeps the '
+                        'plain weighted mean.')
+    g_sessions.add_argument('--no-merge-proper', dest='merge_proper', action='store_false',
+                   help='With --merge or a multi-session combine: weight each night by its '
+                        'noise only (the plain weighted mean). By default each night is '
+                        'weighted per spatial frequency by its own star sharpness (proper '
+                        'coaddition), so a sharp night carries the fine detail instead of '
+                        'being diluted by longer, softer ones, at the same noise.')
+    # the default since it was added; kept so commands written for the opt-in still run
+    g_sessions.add_argument('--merge-proper', dest='merge_proper', action='store_true', default=True,
+                   help=argparse.SUPPRESS)
     g_frames.add_argument('--no-ca-correction', dest='ca_correction', action='store_false',
                    help='Disable chromatic aberration correction')
     g_frames.add_argument('--trail-reject', action='store_true',
@@ -2399,6 +2452,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help='--photometry-timeseries: mark one star as the target. '
                         '"RA,DEC" in degrees, or "px:X,Y" in stacked-image pixels. '
                         'Its light-curve stats are printed and flagged in the CSVs.')
+    g_out.add_argument('--aavso-report', action='store_true',
+                   help='With --photometry-timeseries: write <output>_aavso.txt: the light curve of the target '
+                        'in the AAVSO Extended Format, for WebObs upload. Comparison '
+                        'stars come from the AAVSO VSP chart (network), ensemble-calibrated per '
+                        'frame on the green channel (TG band), with a check star. Target: '
+                        '--aavso-star NAME or --photometry-target RA,DEC.')
+    g_out.add_argument('--aavso-star', default=None, metavar='NAME',
+                   help='--aavso-report: AAVSO name of the variable star (e.g. "SS Cyg"); its '
+                        'chart and position come from AAVSO VSP.')
+    g_out.add_argument('--aavso-obscode', default=None, metavar='CODE',
+                   help='--aavso-report: your AAVSO observer code (written as CHANGEME if not given).')
+    g_out.add_argument('--aavso-bin', type=float, default=0.0, metavar='MINUTES',
+                   help='--aavso-report: average the frames in time bins of this many minutes '
+                        '(0 = one point per frame).')
+    g_out.add_argument('--aavso-fov', type=float, default=60.0, metavar='ARCMIN',
+                   help='--aavso-report: VSP chart field of view for the comparison stars.')
+    g_out.add_argument('--aavso-maglimit', type=float, default=15.0, metavar='MAG',
+                   help='--aavso-report: faintest VSP comparison star.')
     g_out.add_argument('--fix-atmospheric-dispersion', action='store_true',
                        help='EXPERIMENTAL: shift R/B channels back toward the green '
                             'channel\'s position to correct chromatic atmospheric '
@@ -2700,6 +2771,7 @@ def build_parser() -> argparse.ArgumentParser:
         nn_restore_sigma=4.0,
         deconvolve_nn=False,     # --deconvolve nn (src/data/nn_deconv.npz at the nn step)
         nn_deconv_restore_sigma=4.0,
+        nn_deconv_blend=0.75,    # share of --deconvolve nn kept, the rest the nn denoiser (--auto: galaxies 0.35)
         deconvolve=False,
         deconvolve_tv=False,
         deconvolve_svpsf=False,
@@ -2813,10 +2885,12 @@ def parse_args(argv=None):
 
     _exp = [e.strip() for e in (args.export or '').split(',') if e.strip()]
     for e in _exp:
-        if e not in ('tiff', 'xisf'):
-            p.error(f"--export: unknown format '{e}' (choose from: tiff, xisf)")
+        if e not in ('tiff', 'xisf', 'png', 'png16'):
+            p.error(f"--export: unknown format '{e}' (choose from: tiff, xisf, png, png16)")
     args.output_tiff = 'tiff' in _exp
     args.output_xisf = 'xisf' in _exp
+    args.output_png = 'png' in _exp
+    args.output_png16 = 'png16' in _exp
 
     _dbg = [d.strip() for d in (args.debug or '').split(',') if d.strip()]
     for d in _dbg:

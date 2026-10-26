@@ -1,4 +1,5 @@
-"""--auto picks the learned deconvolver (--deconvolve nn) for galaxies on Origin data only."""
+"""--auto picks the learned deconvolver (--deconvolve nn) on Origin data only: galaxies at their
+own blend, other targets where the wavelet denoiser would run."""
 import pytest
 
 from src import auto_settings as a
@@ -33,10 +34,18 @@ def test_origin_galaxy_gets_the_learned_deconvolver(model):
 
 @pytest.mark.parametrize('weights', [{'galaxy': 0.45, 'emission_nebula': 0.55},
                                      {'emission_nebula': 1.0}, {}])
-def test_not_for_other_targets(model, weights):
+def test_other_targets_get_it_at_the_other_blend(model, weights):
     args = _args()
-    assert a._apply_nn_deconvolution(args, weights) == []
-    assert args.deconvolve_nn is False and args.denoise_curvelet is True
+    a._apply_nn_deconvolution(args, weights)
+    assert args.deconvolve_nn is True and args.denoise_curvelet is False
+    assert args.nn_deconv_blend == a.NN_DECONV_OTHER_BLEND
+
+
+def test_other_targets_only_where_the_wavelet_denoiser_would_run(model):
+    args = _args()
+    args.denoise_curvelet = False
+    assert a._apply_nn_deconvolution(args, {'emission_nebula': 1.0}) == []
+    assert args.deconvolve_nn is False
 
 
 # the Mark II's Origin678C and the other cameras the Origin platform drives were not in
@@ -78,3 +87,17 @@ def test_runs_as_part_of_apply_auto_settings(model, monkeypatch):
     monkeypatch.setattr(a, '_apply_free_diagnostics', lambda args: [])
     a.apply_auto_settings([object()], _args())
     assert seen == [GALAXY]
+
+
+def test_galaxies_get_the_galaxy_blend(model):
+    args = _args()
+    assert args.nn_deconv_blend == a.NN_DECONV_DEFAULT_BLEND      # cli.py's default matches
+    a._apply_nn_deconvolution(args, GALAXY)
+    assert args.nn_deconv_blend == a.NN_DECONV_GALAXY_BLEND
+
+
+def test_a_configured_blend_wins(model):
+    args = _args()
+    args.nn_deconv_blend = 0.5                  # e.g. from --config
+    a._apply_nn_deconvolution(args, GALAXY)
+    assert args.nn_deconv_blend == 0.5

@@ -215,7 +215,7 @@
         <p class="fact">On five targets it was never trained on, it left a tenth of the wavelet denoiser's error, with star widths unchanged.</p></dd></div>
       <div><dt>Deconvolution<code>--deconvolve rl|rl-sv|tv|sparse|nn</code></dt>
         <dd><p>Richardson-Lucy (global or varying across the field), total variation, and a sparse wavelet method. The point-spread function is estimated from your own stars, and stars are protected from ringing.</p>
-        <p><code>nn</code> is a learned deconvolver trained to turn a session's softer frames into its sharpest ones; it also removes noise. The automatic settings use it for Origin galaxy sessions.</p>
+        <p><code>nn</code> is a learned deconvolver trained on real Origin sessions against sharper survey images of the same sky; it also removes noise. The automatic settings use it for every session from an Origin, mixed with the learned noise reduction (<code>--config nn_deconv_blend=...</code> sets the mix).</p>
         <p class="fact">On the held-out galaxies, finished stars came out 14-16% narrower than with the default chain, with no dark rings, and 94-100% of the faint sources it shows are confirmed in an independent stack. See <a href="how-it-works.html#learned">learned methods</a>.</p></dd></div>
       <div><dt>Starless processing<code>--remove-stars</code> <code>--starless-process</code></dt>
         <dd><p>Removes stars by inpainting, saves a starless copy, and can run the denoising on the starless layer alone with the stars added back exactly.</p></dd></div>

@@ -314,6 +314,11 @@ code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-siz
 /* comparison verdict + wide table */
 table.wide { margin-top: 36px; }
 table.wide th:first-child { min-width: 11rem; }
+/* compare.html / home page: feature matrix, OriginStack's column first and marked */
+table.matrix th, table.matrix td { white-space: normal; min-width: 8.5rem; font-size: .94rem; padding-right: 14px; }
+table.matrix thead th:nth-child(2), table.matrix td:nth-child(2) { background: rgba(179, 49, 42, .06); padding-left: 10px; }
+table.matrix thead th:nth-child(2) { color: var(--ha); }
+table.matrix td.yes { font-weight: 600; color: var(--ink); }
 .verdict h3 { font-size: 1.15rem; margin: 0 0 12px; }
 .verdict p { color: #2b3b55; max-width: 62ch; }
 .verdict strong { color: var(--ink); }
