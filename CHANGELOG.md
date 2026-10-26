@@ -21,6 +21,13 @@ match the `VERSION` file and `v*` git tags.
   step takes about twice as long as the noise reduction alone. With the default per-channel
   stretch the sharper star cores render whiter; `--stretch-color preserve` keeps their colour.
 
+### Fixed
+
+- **Learned star removal (`--remove-stars-method nn`, experimental): no more coloured discs
+  and rims where stars were.** Bright stars on the Pleiades left blue rings with red-yellow
+  centres, and stars near Orion's nebula left red and green discs up to 80 px across. The
+  removal now follows each star's own colour from core to halo and fills with plain sky only.
+
 ## [2.15.0] - 2026-10-24
 
 Sharper multi-night combines, truer star colours in the JPEG, galaxies that keep their faint
