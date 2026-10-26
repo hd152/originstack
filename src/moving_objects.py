@@ -32,6 +32,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
+    import astro_native as _native
+    _HAS_NATIVE = hasattr(_native, 'vote_velocity')
+except Exception:  # pragma: no cover
+    _native = None
+    _HAS_NATIVE = False
+
+try:
     from scipy import ndimage
 
     from src.background import _gaussian_blur
@@ -116,7 +123,7 @@ def collect_detections(frames: np.ndarray, times_min: np.ndarray, ref_lum: np.nd
     return np.vstack(rows) if rows else np.zeros((0, 5))
 
 
-def _vote(det: np.ndarray, t_mid: float, vgrid_x: np.ndarray, vgrid_y: np.ndarray,
+def _vote_numpy(det: np.ndarray, t_mid: float, vgrid_x: np.ndarray, vgrid_y: np.ndarray,
           shape: Tuple[int, int], cell: float, valid: np.ndarray
           ) -> Tuple[int, float, float, float, float]:
     """Best (count, vx, vy, x0, y0): the velocity whose back-projected detections
@@ -150,6 +157,21 @@ def _vote(det: np.ndarray, t_mid: float, vgrid_x: np.ndarray, vgrid_y: np.ndarra
                 best = (n_frames, float(vx), float(vy),
                         float(np.median(x0[members])), float(np.median(y0[members])))
     return best
+
+
+def _vote(det: np.ndarray, t_mid: float, vgrid_x: np.ndarray, vgrid_y: np.ndarray,
+          shape: Tuple[int, int], cell: float, valid: np.ndarray
+          ) -> Tuple[int, float, float, float, float]:
+    """Vote for a track, using the native kernel when it is available."""
+    if _HAS_NATIVE:
+        return tuple(_native.vote_velocity(
+            np.ascontiguousarray(det, dtype=np.float64), float(t_mid),
+            np.ascontiguousarray(vgrid_x, dtype=np.float64),
+            np.ascontiguousarray(vgrid_y, dtype=np.float64),
+            int(shape[0]), int(shape[1]), float(cell),
+            np.ascontiguousarray(valid, dtype=np.bool_),
+        ))
+    return _vote_numpy(det, t_mid, vgrid_x, vgrid_y, shape, cell, valid)
 
 
 def _fit_track(det: np.ndarray, t_mid: float, vx: float, vy: float, x0: float, y0: float,

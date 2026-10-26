@@ -13,6 +13,7 @@ import src.channel_combine as _channel_combine_mod
 import src.debayer as _debayer_mod
 import src.denoising as _denoising_mod
 import src.local_normalize as _local_normalize_mod
+import src.moving_objects as _moving_objects_mod
 import src.postprocess as _postprocess_mod
 import src.robust_pca as _robust_pca_mod
 import src.stacking as _stacking_mod
@@ -22,6 +23,47 @@ import src.trail_reject as _trail_reject_mod
 import src.wavelet as _wavelet_mod
 
 native = pytest.importorskip("astro_native")
+
+
+@pytest.mark.skipif(not hasattr(native, "vote_velocity"),
+                    reason="native extension predates the velocity-voting kernel")
+def test_velocity_vote_matches_numpy_reference():
+    rng = np.random.default_rng(20261026)
+    det = np.column_stack([
+        rng.integers(0, 8, 120),
+        rng.uniform(-5, 35, 120),
+        rng.uniform(2, 96, 120),
+        rng.uniform(2, 74, 120),
+        rng.uniform(3, 20, 120),
+    ]).astype(np.float64)
+    vx = np.array([-1.5, -0.5, 0.0, 0.5, 1.5])
+    vy = np.array([-1.0, -0.25, 0.25, 1.0])
+    valid = rng.random((len(vy), len(vx))) > 0.15
+    args = (det, 12.5, vx, vy, (80, 100), 4.25, valid)
+    expected = _moving_objects_mod._vote_numpy(*args)
+    actual = native.vote_velocity(
+        det, 12.5, vx, vy, 80, 100, 4.25, valid)
+    assert actual[0:3] == expected[0:3]
+    np.testing.assert_array_equal(actual[3:], expected[3:])
+
+
+@pytest.mark.skipif(not hasattr(native, "vote_velocity"),
+                    reason="native extension predates the velocity-voting kernel")
+def test_velocity_vote_counts_distinct_frames_and_keeps_ties():
+    # Two detections in one frame must not beat two detections from two frames.
+    det = np.array([
+        [0, 0.0, 10.1, 10.1, 5.0],
+        [0, 1.0, 10.1, 10.1, 5.0],
+        [1, 0.0, 10.1, 10.1, 5.0],
+        [2, 1.0, 10.1, 10.1, 5.0],
+    ], dtype=np.float64)
+    vx = np.array([0.0, 1.0])
+    vy = np.array([0.0])
+    valid = np.ones((1, 2), dtype=bool)
+    expected = _moving_objects_mod._vote_numpy(
+        det, 0.5, vx, vy, (20, 20), 4.0, valid)
+    actual = native.vote_velocity(det, 0.5, vx, vy, 20, 20, 4.0, valid)
+    assert actual == expected
 
 
 def _numpy_lacosmic(rgb, **kw):
@@ -62,6 +104,27 @@ def test_lossless_frame_compression_reads_a_float32_view_in_place():
     encoded = native.compress_frame(frame.view(np.uint8).reshape(-1), 4)
     decoded = native.decompress_frame(encoded, frame.nbytes, 4).view(np.float32)
     np.testing.assert_array_equal(decoded.reshape(frame.shape), frame)
+
+
+@pytest.mark.skipif(not hasattr(native, "harmonic_fill"),
+                    reason="native extension predates the harmonic-fill kernel")
+def test_harmonic_fill_matches_numpy_iteration():
+    grid = np.array([
+        [1.0, 2.0, 3.0, 4.0],
+        [2.0, np.nan, np.nan, 5.0],
+        [3.0, np.nan, 9.0, 6.0],
+        [4.0, 5.0, 6.0, 7.0],
+    ], dtype=np.float64)
+    holes = ~np.isfinite(grid)
+    native_result = np.asarray(native.harmonic_fill(
+        np.ascontiguousarray(grid), np.ascontiguousarray(holes), 500, 1e-3))
+    had = _background_mod.HAS_NATIVE
+    _background_mod.HAS_NATIVE = False
+    try:
+        expected = _background_mod._harmonic_fill(grid, holes)
+    finally:
+        _background_mod.HAS_NATIVE = had
+    np.testing.assert_allclose(native_result, expected, rtol=0, atol=1e-12)
 
 
 def test_lossless_frame_decompression_rejects_wrong_length():
@@ -1998,6 +2061,50 @@ def test_stamp_star_disks_direct_matches_numpy_disk_math():
 
     np.testing.assert_array_equal(got, want)
     assert abs(max_r - want_max_r) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# hough_accumulator (src/trail_reject.py's `_detect_line_segments`)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not hasattr(native, "hough_accumulator"),
+                    reason="astro_native lacks hough_accumulator")
+def test_hough_accumulator_matches_numpy_reference():
+    rng = np.random.default_rng(20261026)
+    binary = rng.random((47, 61)) < 0.11
+    diag = int(np.ceil(np.hypot(*binary.shape)))
+    thetas = np.linspace(-np.pi / 2, np.pi / 2, 360, endpoint=False)
+    cos_t = np.cos(thetas).astype(np.float32)
+    sin_t = np.sin(thetas).astype(np.float32)
+    ys, xs = np.nonzero(binary)
+    rho = np.outer(xs.astype(np.float32), cos_t)
+    rho += np.outer(ys.astype(np.float32), sin_t)
+    rho_idx = np.round(rho).astype(np.int64) + diag
+    expected = np.zeros((2 * diag + 1, 360), dtype=np.int32)
+    np.add.at(expected, (rho_idx.ravel(),
+                         np.broadcast_to(np.arange(360), rho_idx.shape).ravel()), 1)
+
+    actual = native.hough_accumulator(binary, cos_t, sin_t, diag)
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.skipif(not hasattr(native, "hough_accumulator"),
+                    reason="astro_native lacks hough_accumulator")
+def test_hough_accumulator_preserves_segment_extraction():
+    binary = np.zeros((120, 160), dtype=bool)
+    binary[35, 12:145] = True
+    binary[82, 20:130] = True
+    had = _trail_reject_mod._HAS_HOUGH_NATIVE
+    try:
+        _trail_reject_mod._HAS_HOUGH_NATIVE = False
+        expected = _trail_reject_mod._detect_line_segments(
+            binary, threshold=10, line_length=50, line_gap=8)
+        _trail_reject_mod._HAS_HOUGH_NATIVE = True
+        actual = _trail_reject_mod._detect_line_segments(
+            binary, threshold=10, line_length=50, line_gap=8)
+    finally:
+        _trail_reject_mod._HAS_HOUGH_NATIVE = had
+    assert actual == expected
 
 
 # ---------------------------------------------------------------------------

@@ -46,9 +46,11 @@ except Exception:  # pragma: no cover
 try:
     import astro_native as _native
     _HAS_NATIVE = hasattr(_native, 'bresenham_line_native')
+    _HAS_HOUGH_NATIVE = hasattr(_native, 'hough_accumulator')
 except Exception:  # pragma: no cover
     _native = None
     _HAS_NATIVE = False
+    _HAS_HOUGH_NATIVE = False
 
 # Safety cap on bright-pixel count fed into the Hough accumulator -- a frame
 # this saturated is never a clean trail-on-empty-sky case, and letting it
@@ -122,13 +124,18 @@ def _detect_line_segments(binary: np.ndarray, threshold: int = 10,
     xs_f = xs.astype(np.float32)
     ys_f = ys.astype(np.float32)
     # rho[i, j] = x_i*cos(theta_j) + y_i*sin(theta_j)
-    rho_vals = np.outer(xs_f, cos_t) + np.outer(ys_f, sin_t)
-    rho_idx = np.round(rho_vals).astype(np.int64) + diag
     n_rho = 2 * diag + 1
-
-    accumulator = np.zeros((n_rho, _N_THETA), dtype=np.int32)
-    theta_idx = np.broadcast_to(np.arange(_N_THETA), rho_idx.shape)
-    np.add.at(accumulator, (rho_idx.ravel(), theta_idx.ravel()), 1)
+    if _HAS_HOUGH_NATIVE:
+        accumulator = np.asarray(
+            _native.hough_accumulator(binary, cos_t, sin_t, diag))
+    else:
+        # Keep the reference implementation available when the optional
+        # extension is not installed.
+        rho_vals = np.outer(xs_f, cos_t) + np.outer(ys_f, sin_t)
+        rho_idx = np.round(rho_vals).astype(np.int64) + diag
+        accumulator = np.zeros((n_rho, _N_THETA), dtype=np.int32)
+        theta_idx = np.broadcast_to(np.arange(_N_THETA), rho_idx.shape)
+        np.add.at(accumulator, (rho_idx.ravel(), theta_idx.ravel()), 1)
 
     # Perpendicular distance of every point from a candidate (theta, rho) line.
     def _line_points(theta_i: int, rho: int, tol: float = 1.5):

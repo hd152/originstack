@@ -1,6 +1,7 @@
 """Background extraction and sky normalization."""
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
@@ -12,6 +13,8 @@ from scipy.ndimage import gaussian_filter, zoom
 from src.debayer import luminance
 from src.models import Config
 from src.utils import safe_print
+
+_log = logging.getLogger("originstack")
 
 try:
     import astro_native as _native
@@ -550,6 +553,14 @@ def _harmonic_fill(grid: np.ndarray, holes: np.ndarray, iters: int = 500) -> np.
     streaked one cell's value across a whole excluded disk -- on Mizar a
     halo cell beside Alcor, a dark bar right across the region excluded
     around Mizar."""
+    if HAS_NATIVE and hasattr(_native, 'harmonic_fill'):
+        try:
+            return np.asarray(_native.harmonic_fill(
+                np.ascontiguousarray(grid, dtype=np.float64),
+                np.ascontiguousarray(holes, dtype=np.bool_),
+                int(iters), 1e-3))
+        except Exception:
+            _log.debug("native harmonic fill failed; using numpy", exc_info=True)
     _, nn_idx = ndimage.distance_transform_edt(holes, return_indices=True)
     out = grid[nn_idx[0], nn_idx[1]].astype(np.float64)
     for _ in range(iters):

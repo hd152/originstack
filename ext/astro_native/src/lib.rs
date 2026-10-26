@@ -16,6 +16,104 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use rayon::prelude::*;
 
+/// Vote detections into velocity-space back-projection cells.
+///
+/// This mirrors `src/moving_objects.py::_vote`: velocities and cells are
+/// visited in row-major order, only distinct frame IDs count, and ties retain
+/// the first velocity/cell encountered.
+#[pyfunction]
+fn vote_velocity(
+    det: PyReadonlyArray2<'_, f64>,
+    t_mid: f64,
+    vgrid_x: PyReadonlyArray1<'_, f64>,
+    vgrid_y: PyReadonlyArray1<'_, f64>,
+    height: usize,
+    width: usize,
+    cell: f64,
+    valid: PyReadonlyArray2<'_, bool>,
+) -> PyResult<(usize, f64, f64, f64, f64)> {
+    let det = det.as_array();
+    let vx = vgrid_x.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("vgrid_x must be C-contiguous")
+    })?;
+    let vy = vgrid_y.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("vgrid_y must be C-contiguous")
+    })?;
+    let valid = valid.as_array();
+    if valid.shape() != [vy.len(), vx.len()] {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "valid shape must be (len(vgrid_y), len(vgrid_x))",
+        ));
+    }
+    if det.ncols() < 5 || cell <= 0.0 || !cell.is_finite() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "det must have at least five columns and cell must be positive",
+        ));
+    }
+    // Match Python's int(W / cell) rather than integer division. This matters
+    // when cell is non-integral.
+    let ncx = (width as f64 / cell) as usize + 2;
+    let ncy = (height as f64 / cell) as usize + 2;
+    let mut best = (0usize, 0.0, 0.0, 0.0, 0.0);
+    let tt: Vec<f64> = det.rows().into_iter().map(|r| r[1] - t_mid).collect();
+    for (iy, &vy_value) in vy.iter().enumerate() {
+        for (ix, &vx_value) in vx.iter().enumerate() {
+            if !valid[[iy, ix]] {
+                continue;
+            }
+            let mut counts = vec![0usize; ncx.saturating_mul(ncy)];
+            for (row, &time) in det.rows().into_iter().zip(tt.iter()) {
+                let cx = ((row[2] - vx_value * time) / cell).floor();
+                let cy = ((row[3] - vy_value * time) / cell).floor();
+                if cx >= 0.0 && cx < ncx as f64 && cy >= 0.0 && cy < ncy as f64 {
+                    counts[cy as usize * ncx + cx as usize] += 1;
+                }
+            }
+            let Some((cell_index, &point_count)) = counts.iter().enumerate()
+                .max_by_key(|(index, count)| (*count, std::cmp::Reverse(*index)))
+            else {
+                continue;
+            };
+            if point_count < best.0 {
+                continue;
+            }
+            let mut frames = Vec::with_capacity(point_count);
+            let mut x_values = Vec::with_capacity(point_count);
+            let mut y_values = Vec::with_capacity(point_count);
+            for (row, &time) in det.rows().into_iter().zip(tt.iter()) {
+                let x0 = row[2] - vx_value * time;
+                let y0 = row[3] - vy_value * time;
+                let cx = (x0 / cell).floor();
+                let cy = (y0 / cell).floor();
+                if cx >= 0.0 && cx < ncx as f64 && cy >= 0.0 && cy < ncy as f64
+                    && cy as usize * ncx + cx as usize == cell_index
+                {
+                    frames.push(row[0] as i64);
+                    x_values.push(x0);
+                    y_values.push(y0);
+                }
+            }
+            frames.sort_unstable();
+            frames.dedup();
+            if frames.len() <= best.0 {
+                continue;
+            }
+            x_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            y_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = |values: &[f64]| -> f64 {
+                let middle = values.len() / 2;
+                if values.len() % 2 == 0 {
+                    (values[middle - 1] + values[middle]) / 2.0
+                } else {
+                    values[middle]
+                }
+            };
+            best = (frames.len(), vx_value, vy_value, median(&x_values), median(&y_values));
+        }
+    }
+    Ok(best)
+}
+
 /// Shuffle bytes by element position, improving LZ4's compression of numeric arrays.
 /// One sequential pass over `input`, `itemsize` sequential write streams. 4-byte items (every
 /// frame the pipeline stores) go 16 at a time through SSSE3 when the CPU has it: the scalar
@@ -6921,6 +7019,77 @@ fn bresenham_line_native<'py>(
 }
 
 // ---------------------------------------------------------------------------
+// Hough accumulator (src/trail_reject.py's `_detect_line_segments`)
+// ---------------------------------------------------------------------------
+//
+// The numpy implementation materializes both outer products and the resulting
+// n_points x n_theta rho-index array.  Accumulating each point directly keeps
+// memory bounded by the accumulator while preserving numpy's float32
+// arithmetic and ties-to-even rounding.
+
+fn round_ties_even_f32(value: f32) -> i64 {
+    let lower = value.floor();
+    let fraction = value - lower;
+    if fraction < 0.5 {
+        lower as i64
+    } else if fraction > 0.5 {
+        lower as i64 + 1
+    } else {
+        let lower_i = lower as i64;
+        if lower_i % 2 == 0 { lower_i } else { lower_i + 1 }
+    }
+}
+
+#[pyfunction]
+fn hough_accumulator<'py>(
+    py: Python<'py>,
+    binary: PyReadonlyArray2<'py, bool>,
+    cos_t: PyReadonlyArray1<'py, f32>,
+    sin_t: PyReadonlyArray1<'py, f32>,
+    diag: usize,
+) -> PyResult<Bound<'py, PyArray2<i32>>> {
+    let binary = binary.as_array();
+    let cos_t = cos_t.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("cos_t must be C-contiguous")
+    })?;
+    let sin_t = sin_t.as_slice().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("sin_t must be C-contiguous")
+    })?;
+    if cos_t.len() != sin_t.len() || cos_t.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "cos_t and sin_t must have the same nonzero length",
+        ));
+    }
+    let n_rho = diag.checked_mul(2).and_then(|v| v.checked_add(1)).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("diag is too large")
+    })?;
+    let points: Vec<(usize, usize)> = binary
+        .indexed_iter()
+        .filter_map(|((y, x), on)| if *on { Some((y, x)) } else { None })
+        .collect();
+    let cos_t = cos_t.to_vec();
+    let sin_t = sin_t.to_vec();
+    let accumulator = py.detach(|| {
+        let mut accumulator = vec![0i32; n_rho * cos_t.len()];
+        for (y, x) in points {
+            let x_f = x as f32;
+            let y_f = y as f32;
+            for theta in 0..cos_t.len() {
+                let rho = x_f * cos_t[theta] + y_f * sin_t[theta];
+                let rho_i = round_ties_even_f32(rho) + diag as i64;
+                if rho_i >= 0 && rho_i < n_rho as i64 {
+                    accumulator[rho_i as usize * cos_t.len() + theta] += 1;
+                }
+            }
+        }
+        accumulator
+    });
+    let arr = numpy::ndarray::Array2::from_shape_vec((n_rho, cos_t.len()), accumulator)
+        .expect("shape checked while building accumulator");
+    Ok(arr.into_pyarray(py))
+}
+
+// ---------------------------------------------------------------------------
 // Radial-bin median profile (src/denoising.py's `radial_renormalize`,
 // comet-mode only)
 // ---------------------------------------------------------------------------
@@ -10632,6 +10801,106 @@ fn xcorr_window<'py>(
     Ok(numpy::ndarray::Array2::from_shape_vec((n, n), vals).unwrap().into_pyarray(py))
 }
 
+/// Fill a boolean hole mask by Jacobi iteration on a nearest-valid initial
+/// surface. This is the small-mesh counterpart to the image-scale diffusion
+/// kernels: the whole operation stays native so Python does not allocate a
+/// padded array and four temporaries on every iteration.
+#[pyfunction]
+#[pyo3(signature = (grid, holes, iters=500, tolerance=1e-3))]
+fn harmonic_fill<'py>(
+    py: Python<'py>,
+    grid: PyReadonlyArray2<'py, f64>,
+    holes: PyReadonlyArray2<'py, bool>,
+    iters: usize,
+    tolerance: f64,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let g = grid.as_array();
+    let h = holes.as_array();
+    if g.shape() != h.shape() {
+        return Err(pyo3::exceptions::PyValueError::new_err("grid and holes shape mismatch"));
+    }
+    let rows = g.shape()[0];
+    let cols = g.shape()[1];
+    if rows == 0 || cols == 0 {
+        return Ok(numpy::ndarray::Array2::zeros((rows, cols)).into_pyarray(py));
+    }
+    let gs = g.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("grid must be contiguous"))?;
+    let hs = h.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("holes must be contiguous"))?;
+    let out = py.detach(|| {
+        let mut result = gs.to_vec();
+        let mut nearest = vec![usize::MAX; rows * cols];
+        for y in 0..rows {
+            for x in 0..cols {
+                let i = y * cols + x;
+                if !hs[i] {
+                    nearest[i] = i;
+                }
+            }
+        }
+        for y in 0..rows {
+            for x in 0..cols {
+                let i = y * cols + x;
+                if nearest[i] != usize::MAX {
+                    continue;
+                }
+                let mut best = usize::MAX;
+                let mut best_d = usize::MAX;
+                for yy in 0..rows {
+                    for xx in 0..cols {
+                        let j = yy * cols + xx;
+                        if nearest[j] != j {
+                            continue;
+                        }
+                        let d = y.abs_diff(yy) + x.abs_diff(xx);
+                        if d < best_d {
+                            best_d = d;
+                            best = j;
+                        }
+                    }
+                }
+                if best != usize::MAX {
+                    nearest[i] = best;
+                    result[i] = gs[best];
+                } else {
+                    result[i] = 0.0;
+                }
+            }
+        }
+        let mut next = result.clone();
+        for _ in 0..iters {
+            let mut step = 0.0_f64;
+            for y in 0..rows {
+                for x in 0..cols {
+                    let i = y * cols + x;
+                    if !hs[i] {
+                        continue;
+                    }
+                    let up = result[y.saturating_sub(1) * cols + x];
+                    let down = result[y.saturating_add(1).min(rows - 1) * cols + x];
+                    let left = result[y * cols + x.saturating_sub(1)];
+                    let right = result[y * cols + x.saturating_add(1).min(cols - 1)];
+                    let value = 0.25 * (up + down + left + right);
+                    step = step.max((value - result[i]).abs());
+                    next[i] = value;
+                }
+            }
+            for y in 0..rows {
+                for x in 0..cols {
+                    let i = y * cols + x;
+                    if hs[i] {
+                        result[i] = next[i];
+                    }
+                }
+            }
+            if step < tolerance {
+                break;
+            }
+        }
+        result
+    });
+    Ok(numpy::ndarray::Array2::from_shape_vec((rows, cols), out).unwrap().into_pyarray(py))
+}
+
 // ── Learned denoiser: 3x3 convolution (src/nn_denoise.py, --denoiser nn) ─────────────────────
 
 /// Output channels per register block (each loaded input vector is reused this many times).
@@ -10891,6 +11160,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compress_frame_chunked_to_file, m)?)?;
     m.add_function(wrap_pyfunction!(decompress_frame_file_into, m)?)?;
     m.add_function(wrap_pyfunction!(decompress_frame_into, m)?)?;
+    m.add_function(wrap_pyfunction!(vote_velocity, m)?)?;
     #[cfg(feature = "triage")]
     m.add_function(wrap_pyfunction!(transient_triage::transient_triage_score, m)?)?;
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
@@ -10938,6 +11208,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(local_normalize_grid, m)?)?;
     m.add_function(wrap_pyfunction!(stamp_star_disks, m)?)?;
     m.add_function(wrap_pyfunction!(bresenham_line_native, m)?)?;
+    m.add_function(wrap_pyfunction!(hough_accumulator, m)?)?;
     m.add_function(wrap_pyfunction!(radial_bin_median, m)?)?;
     m.add_function(wrap_pyfunction!(aperture_photometry_batch, m)?)?;
     m.add_function(wrap_pyfunction!(cfa_drizzle_frame, m)?)?;
@@ -10952,6 +11223,7 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(debayer_rcd_native, m)?)?;
     m.add_function(wrap_pyfunction!(debayer_rcd_native_into, m)?)?;
     m.add_function(wrap_pyfunction!(xcorr_window, m)?)?;
+    m.add_function(wrap_pyfunction!(harmonic_fill, m)?)?;
     m.add_function(wrap_pyfunction!(downsample_half_f32, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_prep, m)?)?;
     m.add_function(wrap_pyfunction!(proper_coadd_accum32, m)?)?;
