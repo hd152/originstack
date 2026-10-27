@@ -17,6 +17,12 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **Nebula-filter sessions keep their colour.** Under the Origin's Nebula filter slot (an OIII,
+  dual-band or other narrowband filter), the automatic settings no longer apply SCNR, which
+  removes green -- where OIII lands -- or the gray-locus colour calibration, which assumes
+  neutral stars and scaled up noise in the near-empty red channel. On an OIII Lagoon the nebula
+  comes out brighter, with more of its faint structure, in its own teal-green.
+
 - **"Large shifts detected" only when they are large for the frame** (over 10% of its shorter
   side). It used a fixed 20 px and appeared on nearly every session from 2026 firmware, whose
   drift and dithering move the field 40-150 px -- which registration handles.

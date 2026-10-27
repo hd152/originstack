@@ -889,6 +889,7 @@ def apply_auto_settings(
     changes.extend(_apply_nn_denoiser(args, weights))
     changes.extend(_apply_free_diagnostics(args))
     changes.extend(_apply_comet_mode(args))
+    changes.extend(_apply_nebula_filter(final, args))
 
     return target_type, label, sig, changes, weights
 
@@ -969,6 +970,27 @@ def _apply_nn_denoiser(args, weights: Dict[str, float]) -> List[str]:
     _set('denoise_nn', True)
     _set('denoise_curvelet', False)
     _set('nn_chroma_nr', True)
+    return changes
+
+
+def _apply_nebula_filter(final: list, args) -> List[str]:
+    """No SCNR and no gray-locus colour calibration when the lights were shot through the
+    Origin's "Nebula" filter slot (FITS FILTER 'Nebula': an OIII, dual-band or other
+    narrowband filter). SCNR removes green, where OIII lands, and the gray locus assumes
+    neutral stars: on an OIII-filter Lagoon (raw R/G 0.04 against 0.63 unfiltered) it
+    scaled red x2 (noise) and SCNR took most of the nebula; without both the nebula came
+    out brighter, in its own teal-green. Grayworld white balance is already skipped for
+    these frames, and Gaia colour calibration declines on its own."""
+    from src.frame_discovery import is_nebula_filter
+    changes: List[str] = []
+    filters = [str((getattr(f, 'header', None) or {}).get('FILTER', '') or '') for f in final]
+    if not filters or not all(is_nebula_filter(x) for x in filters):
+        return changes
+    _set = _auto_setter(args, changes)
+    _set('scnr', False)
+    _set('photometric_calibration', False)
+    if changes:
+        changes[-1] += " (nebula filter: SCNR and the gray locus would remove the filtered colour)"
     return changes
 
 

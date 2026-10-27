@@ -91,3 +91,22 @@ def test_auto_turns_comet_mode_on_for_a_comet_unless_told_not_to():
     c = parse_args(['-d', '.'])
     c._inferred_comet = None
     assert _apply_comet_mode(c) == [] and c.comet_mode is False
+
+
+def test_auto_drops_scnr_and_gray_locus_under_a_nebula_filter():
+    from types import SimpleNamespace
+
+    from src.auto_settings import _apply_nebula_filter
+    from src.cli import parse_args
+    oiii = [SimpleNamespace(header={'FILTER': 'Nebula'}) for _ in range(3)]
+    a = parse_args(['-d', '.'])
+    a.scnr, a.photometric_calibration = True, True
+    assert _apply_nebula_filter(oiii, a) and not a.scnr and not a.photometric_calibration
+    b = parse_args(['-d', '.'])
+    b.scnr, b.photometric_calibration = True, True
+    clear = [SimpleNamespace(header={'FILTER': 'Clear'}) for _ in range(3)]
+    assert _apply_nebula_filter(clear, b) == [] and b.scnr
+    c = parse_args(['-d', '.', '--scnr'])           # explicit wins
+    c.photometric_calibration = True
+    _apply_nebula_filter(oiii, c)
+    assert c.scnr and not c.photometric_calibration
