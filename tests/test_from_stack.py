@@ -57,6 +57,33 @@ def test_uses_the_earlier_runs_config_with_cli_overrides(tmp_path):
     assert args.stretch == 'ghs'                      # explicit flag wins
 
 
+def test_config_key_value_overrides_keep_the_earlier_runs_config(tmp_path, capsys):
+    """--config KEY=VALUE (as the CHANGELOG documents) sets that one setting on top of the
+    earlier run's config; it used to be taken as a missing file's name, which set nothing
+    and also kept <stem>_config.toml from loading."""
+    src = str(tmp_path / 'm51.fits')
+    _linear_stack(src)
+    with open(str(tmp_path / 'm51_config.toml'), 'w') as fh:
+        fh.write('local_contrast = false\npreview_black_sigma = 2.5\nnn_deconv_blend = 0.35\n')
+    args = _args(['--from-stack', src, '--config', 'nn_deconv_blend=0.6',
+                  '--config', 'preview_black_sigma=1', '--config', 'no_such_setting=3'])
+    assert args.config.endswith('m51_config.toml')
+    assert args.local_contrast is False                 # the saved config still loads
+    assert args.nn_deconv_blend == 0.6 and args.preview_black_sigma == 1
+    assert {'nn_deconv_blend', 'preview_black_sigma'} <= args._explicit_cli_dests
+    assert 'no such setting' in capsys.readouterr().out
+
+
+def test_split_config_args(tmp_path):
+    f = tmp_path / 'a=b.toml'
+    f.write_text('x = 1\n')
+    path, ov = cli.split_config_args(['run.toml', 'stretch=ghs', 'flag=true', 'xs=[1, 2]', str(f)])
+    assert path == str(f)                               # an existing file, even with "="
+    assert ov == {'stretch': 'ghs', 'flag': True, 'xs': [1, 2]}
+    assert cli.split_config_args(None) == (None, {})
+    assert cli.split_config_args('run.toml') == ('run.toml', {})
+
+
 def test_refuses_a_post_processed_or_same_path_output(tmp_path):
     src = str(tmp_path / 'done.fits')
     _linear_stack(src, rawstack=False)

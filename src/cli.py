@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 from astropy.io import fits
@@ -48,6 +48,65 @@ def _repair_legacy_toml(text: str) -> str:
     by old versions) into TOML literal strings ``key = 'C:\\path'``, where backslashes
     need no escaping. Other lines are unchanged."""
     return '\n'.join(_LEGACY_BASIC_STRING.sub(r"\1'\2'\3", line) for line in text.split('\n'))
+
+
+def _toml_value(text: str):
+    """A ``--config KEY=VALUE`` value as TOML reads it (0.5, true, "a", [1, 2]); anything
+    TOML cannot parse is kept as the plain string."""
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            return text
+    try:
+        return tomllib.loads(f"v = {text}")["v"]
+    except Exception:
+        return text
+
+
+class _ConfigAction(argparse.Action):
+    """``--config`` collects every occurrence (a file and/or KEY=VALUE overrides), like
+    ``append``. Its own class so the desktop form keeps one file field for it: the form
+    turns ``_AppendAction`` options into comma-separated lists."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = list(getattr(namespace, self.dest, None) or [])
+        items.append(values)
+        setattr(namespace, self.dest, items)
+
+
+def split_config_args(values) -> Tuple[Optional[str], dict]:
+    """``(config file path, {key: value})`` from the ``--config`` arguments. An argument
+    with ``=`` that is not an existing file is a ``KEY=VALUE`` override; the documented
+    ``--config nn_deconv_blend=0.5`` used to be taken as a missing file's name, which set
+    nothing and, with ``--from-stack``, also kept the earlier run's settings from loading.
+    The last of several file paths wins."""
+    if values is None:
+        return None, {}
+    if isinstance(values, str):
+        values = [values]
+    path, overrides = None, {}
+    for v in values:
+        if '=' in v and not os.path.isfile(v):
+            key, _, val = v.partition('=')
+            overrides[key.strip().replace('-', '_')] = _toml_value(val.strip())
+        else:
+            path = v
+    return path, overrides
+
+
+def apply_config_overrides(args: argparse.Namespace) -> list:
+    """Apply ``--config KEY=VALUE`` overrides (after any config file); unknown keys warn."""
+    changes = []
+    for key, value in (getattr(args, '_config_overrides', None) or {}).items():
+        if not hasattr(args, key):
+            safe_print(f"  WARNING: --config {key}=...: no such setting; ignored")
+            continue
+        setattr(args, key, value)
+        changes.append(f"{key}={value}")
+    return changes
 
 
 def load_config_file(config_path: str, args: argparse.Namespace) -> list:
@@ -1712,10 +1771,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'Nth processed light in Phase 1 (default: 5; 0 = off). '
                         'The first frame is always shown. No effect on a plain '
                         'CLI run (nothing is attached to receive it).')
-    g_core.add_argument('--config', default=None, metavar='PATH',
-                   help='Load parameters from a TOML configuration file. '
-                        'CLI arguments override config file values. Fine-grained tuning '
-                        'parameters removed from the CLI can still be set via config file.')
+    g_core.add_argument('--config', default=None, action=_ConfigAction, metavar='PATH|KEY=VALUE',
+                   help='Load parameters from a TOML configuration file, or set one as KEY=VALUE. '
+                        'Repeatable, e.g. --config nn_deconv_blend=0.5. CLI arguments override '
+                        'config file values; KEY=VALUE overrides the file and the automatic '
+                        'settings. Fine-grained tuning parameters removed from the CLI can '
+                        'still be set this way.')
     g_core.add_argument('--preset',
                    choices=['quick', 'quality', 'narrowband', 'galaxy', 'starfield',
                             'nebula', 'planetary', 'lunar'],
@@ -2840,6 +2901,9 @@ def parse_args(argv=None):
     _explicit_dests = {a.dest for a in p._actions if _passed_on_cli(a)}
 
     args = p.parse_args(_argv)
+    args.config, args._config_overrides = split_config_args(args.config)
+    # KEY=VALUE overrides count as explicit settings: --auto and presets leave them alone
+    _explicit_dests |= set(args._config_overrides)
     args._explicit_cli_dests = _explicit_dests
     if not args.directory and not getattr(args, 'from_stack', None):
         p.error("the following arguments are required: -d/--directory "
@@ -3021,6 +3085,9 @@ def apply_post_parse_setup(args: argparse.Namespace) -> None:
         config_changes = load_config_file(args.config, args)
         if config_changes:
             safe_print(f"  Config loaded: {len(config_changes)} settings from {args.config}")
+    _overrides = apply_config_overrides(args)
+    if _overrides:
+        safe_print(f"  Config overrides: {', '.join(_overrides)}")
     # Apply preset (before any other processing)
     apply_preset(args)
     # debug_registration implies verbose

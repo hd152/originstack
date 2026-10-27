@@ -16,6 +16,15 @@ match the `VERSION` file and `v*` git tags.
   `--no-full-field` restores the old crop. Skipped quietly with drizzle, comet mode, elastic
   registration and the uncertainty map.
 
+### Fixed
+
+- **`--config KEY=VALUE` now works**, as the 2.15 and 2.16 notes already said it did (for
+  example `--config nn_deconv_blend=0.5` or `--config preview_black_sigma=1.0`). `--config`
+  took only a file, so such a setting was read as the name of a missing file and silently
+  ignored; with `--from-stack` it also kept the earlier run's saved settings from loading,
+  so the re-run used defaults. `--config` can be repeated; a `KEY=VALUE` setting wins over
+  the config file and over the automatic settings.
+
 ## [2.16.0] - 2026-10-26
 
 Sharper stars in every image from an Origin, and cleaner learned star removal.
