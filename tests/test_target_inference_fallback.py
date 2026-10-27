@@ -110,3 +110,12 @@ def test_auto_drops_scnr_and_gray_locus_under_a_nebula_filter():
     c.photometric_calibration = True
     _apply_nebula_filter(oiii, c)
     assert c.scnr and not c.photometric_calibration
+
+
+@pytest.mark.parametrize("name,desig", [
+    ("C/2025 R2 (SWAN)", "C/2025 R2"), ("3I/ATLAS", "3I"), ("12P/Pons-Brooks", "12P"),
+    ("C2025_R2_(SWAN)_2025-10-20_20-47-16", "C/2025 R2"), ("3IATLAS_2025-12-18_23-25-37", "3I"),
+    ("C/2023 A3", "C/2023 A3"), ("M 31", None)])
+def test_horizons_designation(name, desig):
+    from src.target_inference import horizons_designation
+    assert horizons_designation(name) == desig

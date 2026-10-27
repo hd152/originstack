@@ -14,6 +14,8 @@ match the `VERSION` file and `v*` git tags.
   usual star-aligned stack you get `<stem>_comet.fits`, aligned on the nucleus, and
   `<stem>_comet_blended.fits`, sharp comet on sharp stars. Before, a comet session came out as
   a star stack with the comet smeared along its track. `--no-comet-mode` turns it off.
+  The comet is located with its JPL Horizons ephemeris (three requests per run; not with
+  `--offline`): on 3I/ATLAS the motion search alone had locked onto a passing satellite.
 
 ### Changed
 
@@ -50,6 +52,11 @@ match the `VERSION` file and `v*` git tags.
 
 ### Fixed
 
+- **`--comet-designation` used the wrong time.** The Origin stamps `DATE-OBS` in local time
+  with the offset in `TIMEZONE`; the ephemeris was asked for that time as UTC, eight hours
+  out (3I/ATLAS predicted 0.38 deg from where the telescope pointed). It also made one Horizons
+  request per frame and then used the positions only for a trailing warning; the predicted
+  track now steers the nucleus search.
 - The AAVSO report closed its lightcurve file late, which could keep it locked on Windows.
 - **`--config KEY=VALUE` now works**, as the 2.15 and 2.16 notes already said it did (for
   example `--config nn_deconv_blend=0.5` or `--config preview_black_sigma=1.0`). `--config`

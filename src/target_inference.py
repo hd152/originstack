@@ -566,6 +566,35 @@ def comet_designation(*names: Optional[str]) -> Optional[str]:
     return None
 
 
+_HORIZONS_SLASH_RE = re.compile(r"([CPDX])/(\d{4})\s?([A-Z]{1,2}\d{0,3})")
+_HORIZONS_NUMBERED_RE = re.compile(r"(\d{1,4})([PI])(?:/|_|[A-Z]|$)")
+_HORIZONS_FOLDER_RE = re.compile(r"^([CPDX])(\d{4})_([A-Z]{1,2}\d{1,3})(?:_|$)")
+
+
+def horizons_designation(name: Optional[str]) -> Optional[str]:
+    """A JPL Horizons-resolvable form of a comet designation: "C/2025 R2 (SWAN)" ->
+    "C/2025 R2", "3I/ATLAS" -> "3I" (Horizons does not resolve the name part),
+    "12P/Pons-Brooks" -> "12P", folder forms "C2025_R2_(SWAN)_..." -> "C/2025 R2",
+    "3IATLAS_..." -> "3I". None when ``name`` is not one."""
+    if not name:
+        return None
+    full = str(name).strip()
+    m = _HORIZONS_SLASH_RE.search(full)
+    if m:
+        return f"{m.group(1)}/{m.group(2)} {m.group(3)}"
+    m = _HORIZONS_NUMBERED_RE.match(full)
+    if m and "/" in full[:6]:
+        return f"{int(m.group(1))}{m.group(2)}"
+    n = os.path.basename(full.rstrip("/\\"))       # a folder path
+    m = _HORIZONS_FOLDER_RE.match(n)
+    if m:
+        return f"{m.group(1)}/{m.group(2)} {m.group(3)}"
+    m = _HORIZONS_NUMBERED_RE.match(n)
+    if m:
+        return f"{int(m.group(1))}{m.group(2)}"
+    return None
+
+
 def _object_from_headers(frames: list) -> Optional[str]:
     """Return the most common non-empty FITS OBJECT keyword value."""
     values = []

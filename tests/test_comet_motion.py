@@ -124,3 +124,38 @@ def test_no_comet_found_returns_the_star_registration():
         star_shifts=star_shifts, star_transforms=[None] * n)
     assert info['found'] is False
     assert shifts == star_shifts and transforms == [None] * n
+
+
+def test_ephemeris_track_steers_the_search_off_a_brighter_mover():
+    """3I/ATLAS: unguided, the strongest early-minus-late difference was a satellite
+    (1870 px/h) and the comet stack was aligned on it. With the ephemeris track the
+    lobes are searched near the predicted positions; a comet too faint to measure
+    there is placed by the ephemeris alone."""
+    H, W, n = 200, 260, 24
+    rng = np.random.default_rng(3)
+    frames, final, truth = [], [], []
+    for i in range(n):
+        cy, cx = 90.0 + 0.5 * i, 110.0 + 1.0 * i         # the comet: slow
+        truth.append((cy, cx))
+        img = 1000.0 + _blob(H, W, cy, cx, 400.0, 4.0) + rng.normal(0, 8, (H, W))
+        if i < 4:
+            img += _blob(H, W, 70, 70, 5000.0, 3.0)        # a bright mover, early...
+        if i >= n - 4:
+            img += _blob(H, W, 140, 190, 5000.0, 3.0)      # ...and late, far away
+        frames.append(img.astype(np.float32))
+        final.append(SimpleNamespace(header={'DATE-OBS': f'2025-12-18T23:{10 + i:02d}:00'},
+                                     path=f'f{i}.fits'))
+    mem_lum = np.stack(frames)
+    args = (final, list(range(n)), mem_lum, [(0.0, 0.0)] * n, [None] * n)
+    unguided = _comet_motion_track(*args)
+    assert unguided is not None and np.hypot(*(unguided['late'] - np.array([140, 190]))) < 3   # the mover
+    expect = np.array(truth) + np.array([6.0, -8.0])       # WCS / ephemeris a few px off
+    guided = _comet_motion_track(*args, expect=expect)
+    assert guided['source'] == 'motion+ephemeris'
+    assert np.hypot(*(guided['positions'][0] - np.array(truth[0]))) < 2.5
+    assert np.hypot(*(guided['positions'][-1] - np.array(truth[-1]))) < 2.5
+    faint = mem_lum - np.stack([_blob(H, W, *t, 400.0, 4.0) for t in truth]).astype(np.float32)
+    placed = _comet_motion_track(final, list(range(n)), faint, [(0.0, 0.0)] * n, [None] * n,
+                                 expect=expect)
+    assert placed['source'] == 'ephemeris'
+    np.testing.assert_allclose(placed['positions'][5], expect[5])
