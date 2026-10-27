@@ -1,6 +1,6 @@
 """Tests for --auto wiring of this session's new features:
 denoise_curvelet (emission/reflection nebula), variance_stabilize,
-drizzle_kernel=magic, hdr_blend_mode=fusion, color_calibrate_method=spcc
+hdr_blend_mode=fusion, color_calibrate_method=spcc
 (src/auto_settings.py), and flat_from_lights / dark_temp_model auto-trigger
 (src/cli.py::_build_masters).
 """
@@ -146,12 +146,13 @@ class TestVarianceStabilizeRule:
 
 class TestDrizzleKernelUpgrade:
 
-    def test_upgrades_to_magic_when_drizzling(self):
+    def test_keeps_lanczos3_when_drizzling(self):
+        # the Magic Kernel made drizzled stars 10% wider with no less ringing
         args = _args(drizzle_scale=2.0)
         a._apply_quality_settings({'n_frames': 10, 'snr': 10, 'fwhm': 2.0,
                                    'star_count': 20, 'strehl': 0, 'dispersion': 0,
                                    'median_ellipticity': 0}, args)
-        assert args.drizzle_kernel == 'magic'
+        assert args.drizzle_kernel == 'lanczos3'
 
     def test_no_change_without_drizzling(self):
         args = _args(drizzle_scale=1.0)

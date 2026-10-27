@@ -784,15 +784,12 @@ def _apply_quality_settings(
         if not getattr(args, 'variance_stabilize', False):
             _set('variance_stabilize', True)
 
-    # 16. Prefer the ringing-free Magic Kernel over the default Lanczos-3
-    #     drizzle resample kernel once drizzling is actually active --
-    #     Lanczos-3's negative sidelobes are a real, visible artifact on
-    #     bright star cores; the Magic Kernel is softer by construction but
-    #     provably non-negative. Only when the PSF-matched kernel wasn't
-    #     already explicitly requested.
-    if (float(getattr(args, 'drizzle_scale', 1.0) or 1.0) > 1.0
-            and getattr(args, 'drizzle_kernel', 'lanczos3') == 'lanczos3'):
-        _set('drizzle_kernel', 'magic')
+    # 16. (removed 2026-10-27) --auto used to switch drizzle to the Magic Kernel for
+    #     fear of Lanczos-3 ringing on bright stars. Measured on two dithered Origin
+    #     sessions at --drizzle-scale 2: Magic made stars 10% wider than the 1x stack
+    #     (same stars, arcsec) and no sharper at equal noise, while Lanczos-3 kept 1x
+    #     width with 9-22% less noise; the 40 brightest stars' dark-ring dip was the same
+    #     for both kernels and for 1x (within 0.05 sigma). The resample stays Lanczos-3.
 
     # 17. Prefer Mertens exposure fusion over the original sigmoid-threshold
     #     HDR blend once the user has supplied a short-exposure stack to
