@@ -6,6 +6,16 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **The stack keeps more of the frame** (`--full-field`, now on by default). The edges that
+  dithering, drift or field rotation leave uncovered by some frames used to be cropped off;
+  they are now kept wherever at least half the frames cover them, combined from those frames,
+  with a little more noise at the very edge (`<output>_coverage.fits` maps the frame count).
+  On a drifting Fireworks Galaxy session: 2996x1986 -> 3017x2024 px, about 19 s more.
+  `--no-full-field` restores the old crop. Skipped quietly with drizzle, comet mode, elastic
+  registration and the uncertainty map.
+
 ### Fixed
 
 - **`--config KEY=VALUE` now works**, as the 2.15 and 2.16 notes already said it did (for

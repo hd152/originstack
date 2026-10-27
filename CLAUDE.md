@@ -118,7 +118,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 | `stacking.py` | Combines (sigma-clip, percentile, ESD, linear fit, IVW, wavelet, median), drizzle (resample / `--drizzle-method splat`, kernels lanczos/psf/magic, `--super-res-iters`), lacosmic, online sigma-clip, `run_stacking_phase`; the numpy combines share one tile driver (`_tile_grid`, `_combine_tiles`) |
 | `proper_coadd.py` | Zackay-Ofek proper coaddition, on by default (`--no-proper-coadd`) |
 | `cfa_drizzle.py` | Bayer drizzle (`--cfa-drizzle`, opt-in, not recommended for Origin data) |
-| `full_field.py` | Extend the stack beyond the common crop (`--full-field`) |
+| `full_field.py` | Extend the stack beyond the common crop (`--full-field`, on by default at FRAC 0.5; `--no-full-field` / `--full-field 0` off; skipped silently with drizzle, comet mode, elastic registration, uncertainty map) |
 | `merge.py` | `--merge` and the hierarchical combine (`merge_previous_stacks`) |
 | `mosaic.py` | Multi-panel stitching (`--mosaic`) |
 | `stream_stack.py` / `live_stack.py` | Two-pass O(1)-memory stack (`--stream`); real-time stacking (`--live`) |

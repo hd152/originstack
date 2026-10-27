@@ -64,7 +64,7 @@
       <div><dt>Weights from quality, region by region<code>patch weighting</code></dt>
         <dd><p>A frame that is sharp in one corner and soft in another, because of a gust of wind or a tilt, is scored in patches, and counts for more where it is sharp.</p></dd></div>
       <div><dt>Common crop<code>no black borders</code></dt>
-        <dd><p>A rotated and shifted frame no longer fills the whole grid. The stack is cropped to the area every frame covers, so the edge is not a ragged mix of fewer frames. With <code>--full-field</code> the stack is extended to everything any frame covered instead.</p></dd></div>
+        <dd><p>A rotated and shifted frame no longer fills the whole grid. The area every frame covers is stacked as normal. The stack then extends to the largest rectangle that at least half the frames cover, each outer pixel combined from the frames that cover it, so dithering, drift and field rotation cost less of the field; the edges are a little noisier. <code>--no-full-field</code> keeps only the area every frame covers.</p></dd></div>
     </dl>
   </div>
 </section>
