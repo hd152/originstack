@@ -1604,6 +1604,8 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
                 safe_print(f"    {_p}")
         raise
 
+    from src.merge import crop_to_coverage, shift_crpix
+    combined, _cut = crop_to_coverage(combined, merge_info)
     Hf, Wf = combined.shape[:2]
     out_hdu = fits.PrimaryHDU()
     out_hdu.data = np.transpose(combined, (2, 0, 1))
@@ -1614,6 +1616,8 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
             apply_merge_header(out_hdu.header, merge_info)
         if not copy_celestial_wcs(out_hdu.header, fits.getheader(ref_path)):
             safe_print("  [i] The reference stack has no WCS; the combined stack has none either")
+        elif _cut is not None:
+            shift_crpix(out_hdu.header, *_cut)
     except Exception as exc:
         # The pixels are already merged and correct, so do not fail the
         # run over metadata -- but do say so. Silently dropping these

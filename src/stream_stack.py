@@ -42,6 +42,7 @@ v1 scope (documented, not silently dropped):
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -52,6 +53,8 @@ import numpy as np
 from src.debayer import luminance
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import format_time, get_memory_usage_mb, progress_disabled, safe_print, tqdm
+
+_log = logging.getLogger("originstack")
 
 try:
     from scipy import ndimage as _ndi
@@ -174,6 +177,16 @@ def _run_auto_advisor_for_stream(records: List[FrameRecord], args, directory: st
     accepted = [r for r in records if r.accepted]
     final = [FrameInfo(path=r.path, type='light', header=r.header,
                        accepted=True, metrics=r.metrics) for r in accepted]
+
+    # the camera profile, as the batch pipeline resolves it: --auto's learned deconvolver
+    # is for Origin data only (args._camera), and without it the stream fell back to the
+    # wavelet chain
+    try:
+        from src.camera_profile import resolve_camera
+        resolve_camera(final, args)
+    except Exception as _ce:
+        args._camera = None
+        _log.debug("camera profile failed: %s", _ce)
 
     session_info = getattr(args, '_session_info', None)
     name, target_type, confidence, source = infer_target_from_metadata(
@@ -320,6 +333,7 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
     burn_frames: List[np.ndarray] = []
     burn_covs: List[np.ndarray] = []
     mean = m2 = n_acc = None
+    covered = np.zeros((H, W), np.float32)    # frames covering each pixel (before rejection)
 
     verbose = getattr(args, 'verbose', False)
     t_start = time.time()
@@ -347,6 +361,7 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
         rgb = np.asarray(res['rgb'], dtype=np.float32)
         aligned = apply_transform_dispatch(rgb, sy, sx, tf)
         cov = _coverage_mask(H, W, (sy, sx), tf)
+        covered += np.asarray(cov, np.float32).reshape(H, W) > 0.5
 
         frame_infos.append(FrameInfo(path=rec.path, type='light', header=rec.header,
                                      accepted=True, metrics=rec.metrics, shift=(sy, sx)))
@@ -390,7 +405,22 @@ def fold(args, reference: FrameRecord, records: List[FrameRecord], masters: Dict
     if mean is None:
         raise ValueError("no frames survived registration in the fold pass")
 
-    return mean.astype(np.float32), frame_infos, shifts, total_exposure, n_rejected_pixels
+    # The fold runs on the reference frame's full grid, so its rims are averages of the
+    # few frames that drifted over them (a dark strip and a dashed bottom row on a M66
+    # session drifting 42 px). Keep the largest rectangle that at least half the frames
+    # cover, as --full-field and the multi-night combine do. Counted from the frames'
+    # footprints: n_acc is lower wherever sigma-clipping rejected samples (stars, the
+    # galaxy core), and those holes stopped the rectangle at 153x145 px.
+    if len(shifts):
+        from src.merge import coverage_crop
+        t, b, lft, r = coverage_crop(covered / float(len(shifts)), 0.5)
+        if (t, b, lft, r) != (0, H, 0, W):
+            safe_print(f"  STREAM crop: {r - lft}x{b - t} of {W}x{H} px "
+                       f"(every pixel in >= half the frames)")
+            mean = mean[t:b, lft:r]
+
+    return (np.ascontiguousarray(mean, dtype=np.float32), frame_infos, shifts, total_exposure,
+            n_rejected_pixels)
 
 
 def apply_transform_dispatch(rgb: np.ndarray, sy: float, sx: float, tf) -> np.ndarray:

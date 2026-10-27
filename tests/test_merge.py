@@ -471,3 +471,21 @@ class TestClippedCoresStayNeutral(unittest.TestCase):
 
     def test_cores_coloured_without_it(self):
         self.assertGreater(abs(self._core_ratio(self._merge(False)) - 1.0), 0.15)
+
+
+def test_coverage_crop_drops_the_partly_covered_rim():
+    from src.merge import coverage_crop, crop_to_coverage, shift_crpix
+    cov = np.ones((200, 300), np.float32)
+    cov[:30] = 0.4                      # a strip only the reference covers
+    cov[150:, 260:] = 0.3               # a corner wedge
+    t, b, left, r = coverage_crop(cov, 0.5)
+    assert t >= 30 and (b <= 150 or r <= 260)
+    assert (cov[t:b, left:r] >= 0.5).all()
+    img = np.zeros((200, 300, 3), np.float32)
+    out, cut = crop_to_coverage(img, {'coverage': cov})
+    assert out.shape[:2] == (b - t, r - left) and cut == (t, left)
+    assert crop_to_coverage(img, {'coverage': np.ones((200, 300))}) == (img, None)
+    assert crop_to_coverage(img, None)[1] is None
+    cards = {'CRPIX1': (1500.0, ''), 'CRPIX2': (1000.0, '')}
+    shift_crpix(cards, 30, 8)
+    assert cards['CRPIX1'][0] == 1492.0 and cards['CRPIX2'][0] == 970.0

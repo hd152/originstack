@@ -17,6 +17,19 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **Multi-night combines lose their ragged edges.** Nights shot at different field rotations
+  only partly overlap, and the combined image kept the reference night's whole frame: wedges
+  and rims covered by one or two nights, at a different depth and colour (rainbow edges and
+  corner wedges on a nine-night Whirlpool). The combined stack (and `--merge`) is now cut to the
+  largest rectangle that at least half of the nights' total weight covers; on that Whirlpool,
+  96% of the frame. The WCS moves with the crop.
+
+- **`--stream` gets the same treatment as a normal stack.** Its output kept the whole sensor
+  frame, with thin rims made of the one or two frames that drifted over them (a dark strip and
+  a dashed bottom row on M66); it is now cut to the area at least half the frames cover. And
+  the automatic settings never chose the learned deconvolver in stream mode (the camera was
+  not identified there), so streamed stacks were processed with the older wavelet chain.
+
 - **Nebula-filter sessions keep their colour.** Under the Origin's Nebula filter slot (an OIII,
   dual-band or other narrowband filter), the automatic settings no longer apply SCNR, which
   removes green -- where OIII lands -- or the gray-locus colour calibration, which assumes

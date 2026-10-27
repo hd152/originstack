@@ -1453,6 +1453,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
             stacked, len(final), list(args.merge), verbose=args.verbose,
             consistency=getattr(args, 'merge_consistency', False),
             proper=getattr(args, 'merge_proper', True))
+        from src.merge import crop_to_coverage, shift_crpix
+        stacked, _cut = crop_to_coverage(stacked, merge_info)
+        if _cut is not None and getattr(args, '_stack_wcs', None):
+            shift_crpix(args._stack_wcs, *_cut)
         fits_stacked = stacked.copy()
         safe_print(f"  ✓ Merge: {merge_info['total_frames']} total frames "
                    f"({format_time(time.time() - _t_merge)})")
