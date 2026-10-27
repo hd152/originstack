@@ -8,6 +8,13 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 
+- **Multi-night combines lose their ragged edges.** Nights shot at different field rotations
+  only partly overlap, and the combined image kept the reference night's whole frame: wedges
+  and rims covered by one or two nights, at a different depth and colour (rainbow edges and
+  corner wedges on a nine-night Whirlpool). The combined stack (and `--merge`) is now cut to the
+  largest rectangle that at least half of the nights' total weight covers; on that Whirlpool,
+  96% of the frame. The WCS moves with the crop.
+
 - **The stack keeps more of the frame** (`--full-field`, now on by default). The edges that
   dithering, drift or field rotation leave uncovered by some frames used to be cropped off;
   they are now kept wherever at least half the frames cover them, combined from those frames,

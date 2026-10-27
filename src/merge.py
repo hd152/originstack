@@ -168,6 +168,7 @@ _SCALE_MIN_PIXELS = 500
 _SCALE_SNAP = 0.015           # gains within 1 +/- this are treated as exactly 1
 _SCALE_BOUNDS = (0.2, 5.0)
 _FOOTPRINT_TRIM_PX = 3        # px trimmed off each warped footprint edge
+COVERAGE_CROP_FRAC = 0.5      # the merged image keeps the pixels with >= this share of full weight
 _NOISE_LAG = 4                # px; differencing at a lag clears resampling correlation
 
 
@@ -627,6 +628,9 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
 
     new_lum = _lum(stacked)
     new_stars = _detect_stars(new_lum)
+    # Per-pixel share of the total weight that reaches each pixel (the reference covers its
+    # whole canvas; each night only its warped footprint): ``coverage_crop`` uses it
+    coverage = np.full((H, W), float(np.mean(w_new)), dtype=np.float64)
 
     info: Dict[str, Any] = {
         'n_sources': 0, 'sources': [],
@@ -744,6 +748,7 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
                         members.append((scaled.astype(np.float32), valid, w_c))
                     acc_n +=scaled * np.where(valid[:, :, np.newaxis], w_c, 0.0)
                     wsum_n += np.where(valid[:, :, np.newaxis], w_c, 0.0)
+                    coverage += np.where(valid, float(np.mean(w_c)), 0.0)
                     info.setdefault('weights', []).append(
                         (os.path.basename(path), float(np.mean(w_c / w_new))))
                 else:
@@ -802,7 +807,32 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
         merged[sel] = px * (1 - w) + px.max(axis=1, keepdims=True) * w
         info['neutral_clipped_px'] = int((clip_w >= 1).sum())
     safe_print(f"  Merge weighting: {info['weighting']}")
+    if noise_ok:
+        info['coverage'] = (coverage / max(float(coverage.max()), 1e-30)).astype(np.float32)
     return merged, info
+
+
+def coverage_crop(coverage: np.ndarray, frac: float, step: int = 8) -> Tuple[int, int, int, int]:
+    """``(top, bottom, left, right)``: the largest rectangle, grown outward from the
+    frame centre on a ``step`` px grid, whose every pixel carries at least ``frac`` of the
+    best-covered pixel's weight (``merge_info['coverage']``). Outside it only some nights
+    reach -- rotated footprints leave wedges and rims of one or two nights, at a different
+    depth and colour (a nine-night Whirlpool combine came out with rainbow edges and
+    corner wedges). The whole frame when everything qualifies."""
+    from src.full_field import grow_rectangle
+    H, W = coverage.shape
+    rows = np.unique(np.append(np.arange(0, H, step), H - 1))
+    cols = np.unique(np.append(np.arange(0, W, step), W - 1))
+    ok = coverage[np.ix_(rows, cols)] >= frac
+    ci, cj = len(rows) // 2, len(cols) // 2
+    if not ok[ci, cj]:
+        return 0, H, 0, W
+    i0, i1, j0, j1 = grow_rectangle(ok, (ci, ci, cj, cj))
+    top = 0 if i0 == 0 else int(rows[i0])
+    bottom = H if i1 == len(rows) - 1 else int(rows[i1]) + 1
+    left = 0 if j0 == 0 else int(cols[j0])
+    right = W if j1 == len(cols) - 1 else int(cols[j1]) + 1
+    return top, bottom, left, right
 
 
 def seed_reference_header(header, meta: Dict[str, Any]) -> None:
@@ -876,3 +906,35 @@ def apply_merge_header(header, info: Dict[str, Any]) -> None:
         header['DATEFRST'] = min(str(header['DATEFRST']), info['datefrst'])
     if info['datelast'] and 'DATELAST' in header:
         header['DATELAST'] = max(str(header['DATELAST']), info['datelast'])
+
+
+def crop_to_coverage(img: np.ndarray, info: Optional[Dict[str, Any]],
+                     frac: float = COVERAGE_CROP_FRAC):
+    """``(img, (top, left))`` cut to ``coverage_crop`` of ``info['coverage']``, or the
+    input and None when there is no coverage map or nothing to cut. The caller shifts the
+    WCS reference pixel by ``(top, left)``."""
+    cov = (info or {}).get('coverage')
+    if cov is None:
+        return img, None
+    top, bottom, left, right = coverage_crop(cov, frac)
+    H, W = cov.shape
+    if (top, bottom, left, right) == (0, H, 0, W):
+        return img, None
+    safe_print(f"  Merge coverage: cropped to {right - left}x{bottom - top} px "
+               f"({100.0 * (bottom - top) * (right - left) / (H * W):.0f}% of the frame; the rest "
+               f"had under {frac:.0%} of the nights' weight)")
+    return np.ascontiguousarray(img[top:bottom, left:right]), (top, left)
+
+
+def shift_crpix(cards, top: int, left: int):
+    """Move a WCS (an astropy Header or ``{key: (value, comment)}``) with a crop."""
+    for key, d in (('CRPIX1', left), ('CRPIX2', top)):
+        if key not in cards:
+            continue
+        if isinstance(cards, dict):
+            v, c = cards[key]
+            cards[key] = (float(v) - d, c)
+        else:
+            cards[key] = float(cards[key]) - d
+    return cards
+
