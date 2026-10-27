@@ -1007,6 +1007,13 @@ def _apply_comet_mode(args) -> List[str]:
         _auto_setter(args, changes)('comet_mode', True)
         if changes:
             changes[-1] += f" (comet target {comet!r}: adds <stem>_comet.fits and _comet_blended.fits)"
+    # the designation lets comet mode ask JPL Horizons where the comet is (unless --offline):
+    # on 3I/ATLAS the motion search alone locked onto a satellite
+    if getattr(args, 'comet_mode', False) and comet and not getattr(args, 'comet_designation', None):
+        from src.target_inference import horizons_designation
+        desig = horizons_designation(comet)
+        if desig and not getattr(args, 'offline', False):
+            _auto_setter(args, changes)('comet_designation', desig)
     return changes
 
 

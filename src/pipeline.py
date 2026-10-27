@@ -699,6 +699,7 @@ def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
     Phase 3 so Phase 4's sky model, --photometry-timeseries and the output
     header all read the same WCS. Never raises.
     """
+    args._stack_wcs_origin = (int(top), int(left))   # stack pixel -> reference grid
     si = getattr(args, '_session_info', None)
     if si is None or not si.has_wcs:
         return

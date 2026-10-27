@@ -2675,9 +2675,61 @@ def _comet_frame_transform(transform: Optional[Any], shift: Optional[Tuple[float
     return new_shift, RigidTransform(p)
 
 
+def _comet_ephemeris_track(final: List[FrameInfo], args, designation: str) -> Optional[np.ndarray]:
+    """Predicted nucleus position per frame, (n, 2) [y, x] on the star-aligned reference
+    grid, from JPL Horizons and the settled stack WCS; None when either is missing.
+
+    Three queries (first, middle and last frame, quadratic in time) rather than one per
+    frame: 185 requests on a SWAN session. Times are UTC via ``obs_time_utc_iso``: the
+    Origin's DATE-OBS is local time with the offset in TIMEZONE, and read as UTC it put
+    3I/ATLAS 0.38 deg (8 h of motion) from where the telescope was pointing."""
+    from src.utils import obs_time_utc_iso, parse_timestamp
+    if getattr(args, 'offline', False) or len(final) < 2:
+        return None
+    stamps = [obs_time_utc_iso(getattr(f, 'header', None) or {}) for f in final]
+    times = [parse_timestamp(t) if t else None for t in stamps]
+    if any(t is None for t in times):
+        return None
+    sec = np.array([(t - min(times)).total_seconds() for t in times], dtype=np.float64)
+    order = np.argsort(sec, kind='stable')
+    probe = sorted({int(order[0]), int(order[len(order) // 2]), int(order[-1])})
+    site = getattr(args, 'observer_site', None)
+    si = getattr(args, '_session_info', None)
+    if site is None and si is not None and getattr(si, 'has_gps', False):
+        try:
+            # 0.1 deg (~10 km): plenty for the parallax, and it does not send a home address
+            site = f"{round(float(si.longitude), 1)},{round(float(si.latitude), 1)},0"
+        except Exception:
+            site = None
+    radec = fetch_comet_ephemeris(designation, [stamps[i] for i in probe], site)
+    if not radec or any(p is None for p in radec):
+        safe_print(f"  [Comet] Horizons gave no position for '{designation}'")
+        return None
+    ra = np.unwrap(np.radians([p[0] for p in radec]))
+    dec = np.array([p[1] for p in radec], dtype=np.float64)
+    deg = min(2, len(probe) - 1)
+    ra_t = np.degrees(np.polyval(np.polyfit(sec[probe], ra, deg), sec))
+    dec_t = np.polyval(np.polyfit(sec[probe], dec, deg), sec)
+    try:
+        from astropy.wcs import WCS
+
+        from src.pipeline import _stack_wcs_header
+        hdr = _stack_wcs_header(args)
+        if hdr is None:
+            return None
+        w = WCS(hdr, naxis=2)
+        px, py = w.all_world2pix(ra_t % 360.0, dec_t, 0)
+    except Exception as exc:
+        _log.debug("comet ephemeris -> pixels failed: %s", exc)
+        return None
+    top, left = getattr(args, '_stack_wcs_origin', (0, 0))
+    return np.stack([np.asarray(py) + top, np.asarray(px) + left], axis=1)
+
+
 def _comet_motion_track(final: List[FrameInfo], final_indices: List[int], mem_lum: np.ndarray,
                         star_shifts: List[Any], star_transforms: List[Optional[Any]],
-                        verbose: bool = False) -> Optional[Dict[str, Any]]:
+                        verbose: bool = False,
+                        expect: Optional[np.ndarray] = None) -> Optional[Dict[str, Any]]:
     """Find the comet as the object that moves against the stars, and its motion.
 
     The earliest and latest ~1/6 of the frames are averaged in star-aligned
@@ -2688,6 +2740,12 @@ def _comet_motion_track(final: List[FrameInfo], final_indices: List[int], mem_lu
     as the intensity-weighted centroids of the two lobes, and the comet is then
     assumed to move linearly in time across the session. Returns None when no moving object stands out
     clearly (a slow comet; the per-frame centroid path is used instead).
+
+    ``expect`` (the ephemeris track, ``_comet_ephemeris_track``): the early and late
+    lobes are searched only within ``_COMET_EPHEM_RADIUS`` px of where it puts the comet,
+    at a lower significance bar; when they are not found there, the ephemeris track is
+    used as it is. Unconstrained, on 3I/ATLAS the strongest early/late difference was a
+    satellite crossing at 1870 px/h, where the comet moved ~120 px/h.
     """
     n = len(final)
     if n < 6:
@@ -2734,15 +2792,43 @@ def _comet_motion_track(final: List[FrameInfo], final_indices: List[int], mem_lu
         return None
     vals = D[core]
     noise = 1.4826 * float(np.median(np.abs(vals - np.median(vals)))) or 1e-12
-    Dm = np.where(core, D, 0.0)
-    ye, xe = np.unravel_index(int(np.argmax(Dm)), D.shape)
-    yl, xl = np.unravel_index(int(np.argmin(Dm)), D.shape)
-    sig_e, sig_l = float(Dm[ye, xe]) / noise, -float(Dm[yl, xl]) / noise
+    te, tl = float(t[early].mean()), float(t[late].mean())
+    if expect is not None:
+        expect = np.asarray(expect, dtype=np.float64)
+        pe_x, pl_x = expect[early].mean(axis=0), expect[late].mean(axis=0)
+        # Both lobes, the predicted distance apart: score(p) = min(D(p), -D(p + delta)).
+        # A brighter mover elsewhere (a satellite) has one lobe at that spacing, not two;
+        # searching each lobe's window on its own took a satellite 44 px from the comet.
+        delta = pl_x - pe_x
+        late_of = ndimage.shift(D, -delta, order=1, mode='constant', cval=0.0)
+        score = np.minimum(D, -late_of)
+        yy, xx = np.ogrid[:H, :W]
+        near_e = (yy - pe_x[0]) ** 2 + (xx - pe_x[1]) ** 2 <= _COMET_EPHEM_RADIUS ** 2
+        score = np.where(covered & near_e, score, -np.inf)
+        if not np.isfinite(score).any():
+            return None                      # predicted off the frame
+        ye, xe = np.unravel_index(int(np.argmax(score)), D.shape)
+        yl = int(np.clip(round(ye + delta[0]), 0, H - 1))
+        xl = int(np.clip(round(xe + delta[1]), 0, W - 1))
+        sig_e, sig_l = float(D[ye, xe]) / noise, -float(D[yl, xl]) / noise
+        if verbose:
+            safe_print(f"    [Comet] ephemeris-guided search: early {sig_e:.0f} sigma, "
+                       f"late {sig_l:.0f} sigma within {_COMET_EPHEM_RADIUS} px of the prediction")
+        if min(sig_e, sig_l) < _COMET_EPHEM_MIN_SIGMA:
+            # too faint to measure against the stars: the ephemeris alone
+            v = (pl_x - pe_x) / (tl - te) if tl > te else np.zeros(2)
+            return {'positions': [np.asarray(p) for p in expect], 'early': pe_x, 'late': pl_x,
+                    'significance': (sig_e, sig_l), 'velocity': v, 'source': 'ephemeris'}
+    else:
+        Dm = np.where(core, D, 0.0)
+        ye, xe = np.unravel_index(int(np.argmax(Dm)), D.shape)
+        yl, xl = np.unravel_index(int(np.argmin(Dm)), D.shape)
+        sig_e, sig_l = float(Dm[ye, xe]) / noise, -float(Dm[yl, xl]) / noise
     sep = float(np.hypot(ye - yl, xe - xl))
-    if verbose:
+    if verbose and expect is None:
         safe_print(f"    [Comet] motion search: early peak {sig_e:.0f} sigma at ({xe}, {ye}), "
                    f"late {sig_l:.0f} sigma at ({xl}, {yl}), {sep:.0f} px apart")
-    if min(sig_e, sig_l) < _COMET_MOTION_MIN_SIGMA or sep < 4.0:
+    if expect is None and (min(sig_e, sig_l) < _COMET_MOTION_MIN_SIGMA or sep < 4.0):
         return None
     def _lobe_centroid(img: np.ndarray, y0: int, x0: int, r: int = 12) -> np.ndarray:
         y_lo, y_hi = max(0, y0 - r), min(H, y0 + r + 1)
@@ -2757,18 +2843,22 @@ def _comet_motion_track(final: List[FrameInfo], final_indices: List[int], mem_lu
     # themselves jumped to a compact star a few pixels away.
     pe = _lobe_centroid(D, ye, xe)
     pl = _lobe_centroid(-D, yl, xl)
-    te, tl = float(t[early].mean()), float(t[late].mean())
     if tl <= te:
         return None
     v = (pl - pe) / (tl - te)
     positions = [pe + v * (t[j] - te) for j in range(n)]
     return {'positions': positions, 'early': pe, 'late': pl,
-            'significance': (sig_e, sig_l), 'velocity': v}
+            'significance': (sig_e, sig_l), 'velocity': v,
+            'source': 'motion' if expect is None else 'motion+ephemeris'}
 
 
 # A moving object must stand this far above the noise of the early-minus-late
 # difference, at both ends, to be taken as the comet.
 _COMET_MOTION_MIN_SIGMA = 10.0
+# With an ephemeris: search this close to the predicted early / late positions (px; WCS and
+# Horizons agree to well under this), and accept a lower significance there.
+_COMET_EPHEM_RADIUS = 60
+_COMET_EPHEM_MIN_SIGMA = 5.0
 # The fallback's tracked object must move at least this far against the stars
 # over the session (in star-aligned pixels) to be taken as the comet.
 _COMET_STATIONARY_PX = 2.0
@@ -2826,20 +2916,13 @@ def run_comet_registration_phase(
             safe_print(f"  [Comet] WARNING: could not parse --comet-xy '{comet_xy_str}': {_e}")
 
     # --- Ephemeris-aided tracking ---
-    eph_positions = None
+    eph_track = None
     comet_designation = getattr(args, 'comet_designation', None)
     if comet_designation:
-        # Extract DATE-OBS from each frame header
-        obs_times = []
-        for f in final:
-            t = f.header.get('DATE-OBS') or f.header.get('DATE_OBS') or ''
-            obs_times.append(str(t))
-        observer_site = getattr(args, 'observer_site', None)
         safe_print(f"  [Comet] Fetching ephemeris for '{comet_designation}'...")
-        eph_positions = fetch_comet_ephemeris(comet_designation, obs_times, observer_site)
-        if eph_positions:
-            n_ok = sum(1 for p in eph_positions if p is not None)
-            safe_print(f"  [Comet] Ephemeris: {n_ok}/{len(final)} positions retrieved")
+        eph_track = _comet_ephemeris_track(final, args, comet_designation)
+        if eph_track is not None:
+            safe_print("  [Comet] Ephemeris track mapped onto the stack (JPL Horizons + WCS)")
 
     print("  [Comet] Locating nucleus in reference frame...")
     # Find the reference frame index in final
@@ -2851,10 +2934,11 @@ def run_comet_registration_phase(
     rotation_aware = (star_shifts is not None and star_transforms is not None
                       and len(star_shifts) == len(final) and len(star_transforms) == len(final))
     motion = None
-    if rotation_aware and ref_seed is None and eph_positions is None:
+    if rotation_aware and ref_seed is None:
         try:
             motion = _comet_motion_track(final, final_indices, mem_lum, star_shifts,
-                                         star_transforms, getattr(args, 'verbose', False))
+                                         star_transforms, getattr(args, 'verbose', False),
+                                         expect=eph_track)
         except Exception as _me:
             safe_print(f"  [Comet] WARNING: motion search failed ({_me}); "
                        f"using the per-frame nucleus search")
@@ -2864,7 +2948,10 @@ def run_comet_registration_phase(
         ref_cy, ref_cx = (float(v) for v in _aligned_to_raw_yx(
             pos[ref_j], star_transforms[ref_j], star_shifts[ref_j]))
         vy, vx = motion['velocity']
-        print(f"  [Comet] Found by its motion against the stars: nucleus ({ref_cx:.1f}, {ref_cy:.1f}) "
+        _how = {'ephemeris': "Placed by its ephemeris (too faint to measure against the stars)",
+                'motion+ephemeris': "Found by its motion, where its ephemeris puts it",
+                }.get(motion.get('source'), "Found by its motion against the stars")
+        print(f"  [Comet] {_how}: nucleus ({ref_cx:.1f}, {ref_cy:.1f}) "
               f"in the reference, moving {float(np.hypot(vy, vx)) * 3600:.0f} px/h")
         tail_pa_deg = find_comet_tail_pa(ref_lum, ref_cy, ref_cx)
         shifts_m: List[Tuple[float, float]] = []
@@ -2893,40 +2980,6 @@ def run_comet_registration_phase(
     tail_pa_deg = find_comet_tail_pa(ref_lum, ref_cy, ref_cx)
     if getattr(args, 'verbose', False):
         safe_print(f"  [Comet] Estimated tail PA: {tail_pa_deg:.1f} deg")
-
-    # --- Trailing warning from ephemeris ---
-    if eph_positions is not None and len(eph_positions) >= 2:
-        try:
-            valid_ephs = [(i, p) for i, p in enumerate(eph_positions) if p is not None]
-            if len(valid_ephs) >= 2:
-                i0, p0 = valid_ephs[0]
-                i1, p1 = valid_ephs[-1]
-                # Angular separation in arcsec
-                dra = (p1[0] - p0[0]) * np.cos(np.radians((p0[1] + p1[1]) / 2.0))
-                ddec = p1[1] - p0[1]
-                ang_sep_deg = np.sqrt(dra ** 2 + ddec ** 2)
-                # Time difference: use index difference as proxy if no timestamps available
-                n_frames = max(i1 - i0, 1)
-                # Check plate scale from first frame header
-                hdr0 = final[0].header if final else {}
-                pixscale = hdr0.get('PIXSCALE') or hdr0.get('CDELT1')
-                if pixscale is not None:
-                    try:
-                        pixscale_arcsec = abs(float(pixscale))
-                        if pixscale_arcsec < 0.001:  # CDELT1 is in degrees
-                            pixscale_arcsec *= 3600.0
-                        # Angular velocity per frame interval (very rough)
-                        ang_per_frame_arcsec = ang_sep_deg * 3600.0 / n_frames
-                        trailing_px = ang_per_frame_arcsec / max(pixscale_arcsec, 1e-6)
-                        if trailing_px > 1.0:
-                            safe_print(
-                                f"  WARNING: comet trailing ~{trailing_px:.1f} px per frame "
-                                f"at current exposure time"
-                            )
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
     shifts: List[Tuple[float, float]] = [(0.0, 0.0)] * len(final)
     transforms: List[Optional[Any]] = [None] * len(final)
@@ -3018,7 +3071,7 @@ def run_comet_registration_phase(
         # too faint for the motion search: a star at (2503, 1862) was "tracked"),
         # or a comet too slow to need its own alignment: either way the star
         # stack is the answer, not a comet stack built around a star.
-        if (ref_seed is None and eph_positions is None and track is not None
+        if (ref_seed is None and eph_track is None and track is not None
                 and len(track) and float(np.max(np.hypot(track[:, 0], track[:, 1])))
                 < _COMET_STATIONARY_PX):
             safe_print("  [Comet] WARNING: no comet found -- nothing moves against the stars "
