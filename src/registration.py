@@ -1922,8 +1922,13 @@ def run_registration_phase(
         print(f"    Y: mean={np.mean(shift_y):+.1f}px, std={np.std(shift_y):.1f}px, "
               f"range=[{np.min(shift_y):+.1f}, {np.max(shift_y):+.1f}]")
         print(f"    Magnitude: mean={np.mean(shift_mags):.1f}px, max={np.max(shift_mags):.1f}px")
-        if np.max(shift_mags) > Config.LARGE_SHIFT_WARNING_PX:
-            warning = f"Large shifts detected (max={np.max(shift_mags):.1f}px)"
+        # A share of the frame, not a fixed count: dithering and drift move 2026 Origin
+        # sessions 40-150 px, which registration and --full-field handle; a fixed 20 px
+        # flagged every one of them
+        _large = Config.LARGE_SHIFT_WARNING_FRAC * min(H, W)
+        if np.max(shift_mags) > _large:
+            warning = (f"Large shifts detected (max={np.max(shift_mags):.1f}px, "
+                       f"{100.0 * np.max(shift_mags) / min(H, W):.0f}% of the frame)")
             stats.add_warning(warning)
             safe_print(f"  ⚠ {warning}")
 

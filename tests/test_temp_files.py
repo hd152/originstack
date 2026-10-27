@@ -19,7 +19,7 @@ def test_sweep_removes_only_old_originstack_files(tmp_path):
     for name in ('stack_rgb_abc.dat', 'stack_aligned_x.dat',
                  'stack_rgb_compressed_abc_00000000.lz4',
                  'stack_lum_compressed_abc_00000000.lz4', 'M42_stack.fits', 'M42_stack.jpg',
-                 'M42_stack_config.toml'):
+                 'M42_stack_config.toml', 'M42_stack_coverage.fits'):
         p = tmp_path / name
         p.write_bytes(b'x' * 10)
         os.utime(p, (old, old))

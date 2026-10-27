@@ -719,7 +719,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--compress-phase1` / `--no-compress-phase1` | Phase 1 frames that do not fit the safe RAM budget go to temp files; they are compressed automatically only when they exceed 1.5x the available RAM (uncompressed temp files would thrash the page cache) or the temp disk cannot hold them uncompressed. Either flag forces compression on or off |
 | `--no-wcs-refine` | Keep the session `info.json` WCS as mapped onto the stack, without the Gaia refinement |
 | `--gpu-phase1 {auto,on,off}` | With `--use-gpu`: run Phase 1 on the GPU or the CPU pool (auto picks) |
-| `--comet-mode` | Also stack on the comet nucleus (`<output>_comet.fits`) |
+| `--comet-mode` | Also stack on the comet nucleus (`<output>_comet.fits`, `<output>_comet_blended.fits`); on automatically when the target is a comet designation (`C/2025 R2`, `12P/...`, `3I/ATLAS`), `--no-comet-mode` turns it off |
 | `--offline` | Make no network requests at all |
 | `--no-proper-coadd` | Plain combine only, without proper image coaddition |
 | `--hdr-combine PATH` | Blend short-exposure stack for HDR |

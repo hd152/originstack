@@ -1170,7 +1170,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             targets.append((d, outp))
             tmp_stacks.append(outp)
             # the per-session stack's preview and saved settings land beside it
-            for _side in (outp, outp[:-5] + '.jpg', outp[:-5] + '_config.toml'):
+            for _side in (outp, outp[:-5] + '.jpg', outp[:-5] + '_config.toml', outp[:-5] + '_coverage.fits'):
                 _cleanup_register(_side)
         safe_print(f"  Mode: Hierarchical ({len(targets)} subfolders)")
         defer_phase4 = len(targets) > 1
@@ -1593,7 +1593,7 @@ def _combine_stacks(paths: list, output: str, args, effective_args: dict) -> Non
         # end-of-run cleanup would otherwise delete them.
         kept = []
         for _p in paths:
-            for _side in (_p, _p[:-5] + '.jpg', _p[:-5] + '_config.toml'):
+            for _side in (_p, _p[:-5] + '.jpg', _p[:-5] + '_config.toml', _p[:-5] + '_coverage.fits'):
                 _cleanup_deregister(_side)
             if os.path.exists(_p):
                 kept.append(_p)
@@ -2420,6 +2420,8 @@ def build_parser() -> argparse.ArgumentParser:
     g_comet.add_argument('--comet-mode', action='store_true',
                    help='Enable comet nucleus tracking. Produces a second stack aligned '
                         'on the comet nucleus saved as <stem>_comet.fits.')
+    g_comet.add_argument('--no-comet-mode', dest='comet_mode', action='store_false',
+                         help=argparse.SUPPRESS)
     g_comet.add_argument('--comet-xy', default=None, metavar='X,Y',
                    help='Approximate comet nucleus position in the reference frame '
                         '(pixels, comma-separated, e.g. "1024,768"). X=column, Y=row.')

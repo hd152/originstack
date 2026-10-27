@@ -86,7 +86,8 @@ def cleanup_now() -> None:
 _ORPHAN_PATTERNS = ('stack_aligned_*.dat', 'stack_rgb_*.dat', 'stack_lum_*.dat',
                     'stack_rgb_compressed_*.lz4', 'stack_lum_compressed_*.lz4',
                     'stream_rgb_*.dat', 'stack_rejmap_*.dat', 'wavelet_combine_*.dat',
-                    'master_*.dat', '*_stack.fits', '*_stack.jpg', '*_stack_config.toml')
+                    'master_*.dat', '*_stack.fits', '*_stack.jpg', '*_stack_config.toml',
+                    '*_stack_coverage.fits')
 
 
 def sweep_orphans(folders=None, min_age_hours=None):

@@ -547,6 +547,25 @@ def _lookup_text(text: str) -> Optional[Tuple[str, str, float]]:
 # FITS header extraction
 # ---------------------------------------------------------------------------
 
+# Comet / interstellar-object designations: "C/2025 R2 (SWAN)", "12P/Pons-Brooks",
+# "3I/ATLAS", and the folder forms the Origin app writes ("C2025_R2_(SWAN)_2025-10-20_...",
+# "3IATLAS_2025-12-18_..."). D/ and X/ are defunct / uncertain comets.
+_COMET_RE = re.compile(r"(?:^|[\s(])(?:[CPDX]/\d{4}\s?[A-Z]{1,2}\d{0,3}|\d{1,4}[PI]/\S)")
+_COMET_FOLDER_RE = re.compile(r"^(?:[CPDX]\d{4}_[A-Z]{1,2}\d{1,3}(?:_|$)|\d{1,4}[PI]_?[A-Z])")
+
+
+def comet_designation(*names: Optional[str]) -> Optional[str]:
+    """The first of ``names`` (OBJECT header, info.json object name, folder name) that
+    is a comet or interstellar-object designation, or None."""
+    for n in names:
+        if not n:
+            continue
+        n = str(n).strip()
+        if _COMET_RE.search(n) or _COMET_FOLDER_RE.match(os.path.basename(n.rstrip("/\\"))):
+            return n
+    return None
+
+
 def _object_from_headers(frames: list) -> Optional[str]:
     """Return the most common non-empty FITS OBJECT keyword value."""
     values = []
