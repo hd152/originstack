@@ -61,3 +61,52 @@ def test_origin_object_names_resolve_offline(name, kind):
 def test_simbad_short_otype_codes(otype, kind):
     from src.target_inference import _simbad_type_to_internal
     assert _simbad_type_to_internal(otype) == kind
+
+
+@pytest.mark.parametrize("name", [
+    "C/2025 R2 (SWAN)", "12P/Pons-Brooks", "3I/ATLAS", "C/2023 A3",
+    "C2025_R2_(SWAN)_2025-10-20_20-47-16", "3IATLAS_2025-12-18_23-25-37", "C2024_E1_(Wierzchos)"])
+def test_comet_designations_are_recognised(name):
+    from src.target_inference import comet_designation
+    assert comet_designation(None, name) == name
+
+
+@pytest.mark.parametrize("name", [
+    "M 31", "NGC 7000", "Messier_3_2026-07-22_20-53-46", "Cetus A", "Caldwell 14", "IC 434",
+    "Sh2-155", "3C 273", "Crab_Nebula_2026-01-26", "Comet"])
+def test_deep_sky_names_are_not_comets(name):
+    from src.target_inference import comet_designation
+    assert comet_designation(name) is None
+
+
+def test_auto_turns_comet_mode_on_for_a_comet_unless_told_not_to():
+    from src.auto_settings import _apply_comet_mode
+    from src.cli import parse_args
+    a = parse_args(['-d', '.'])
+    a._inferred_comet = 'C/2025 R2 (SWAN)'
+    assert _apply_comet_mode(a) and a.comet_mode is True
+    b = parse_args(['-d', '.', '--no-comet-mode'])
+    b._inferred_comet = 'C/2025 R2 (SWAN)'
+    assert _apply_comet_mode(b) == [] and b.comet_mode is False
+    c = parse_args(['-d', '.'])
+    c._inferred_comet = None
+    assert _apply_comet_mode(c) == [] and c.comet_mode is False
+
+
+def test_auto_drops_scnr_and_gray_locus_under_a_nebula_filter():
+    from types import SimpleNamespace
+
+    from src.auto_settings import _apply_nebula_filter
+    from src.cli import parse_args
+    oiii = [SimpleNamespace(header={'FILTER': 'Nebula'}) for _ in range(3)]
+    a = parse_args(['-d', '.'])
+    a.scnr, a.photometric_calibration = True, True
+    assert _apply_nebula_filter(oiii, a) and not a.scnr and not a.photometric_calibration
+    b = parse_args(['-d', '.'])
+    b.scnr, b.photometric_calibration = True, True
+    clear = [SimpleNamespace(header={'FILTER': 'Clear'}) for _ in range(3)]
+    assert _apply_nebula_filter(clear, b) == [] and b.scnr
+    c = parse_args(['-d', '.', '--scnr'])           # explicit wins
+    c.photometric_calibration = True
+    _apply_nebula_filter(oiii, c)
+    assert c.scnr and not c.photometric_calibration

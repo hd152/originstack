@@ -204,3 +204,12 @@ def test_describe_run(form, tmp_path):
     assert rows['Output'].startswith(str(tmp_path / 'M51_stacked.fits'))
     form.vars['auto'].set(False)
     assert dict(form.describe_run())['Target'].startswith('Auto advisor off')
+
+
+def test_hidden_aliases_do_not_replace_the_visible_option():
+    from src.desktop_control import build_argv_from_form
+    assert build_argv_from_form({'comet_mode': True}) == ['--comet-mode']
+    argv = build_argv_from_form({'full_field': 0.7})
+    assert argv == ['--full-field', '0.7']
+    from src.cli import parse_args
+    assert parse_args(['-d', '.'] + argv).full_field == 0.7

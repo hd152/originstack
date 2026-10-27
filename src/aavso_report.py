@@ -75,7 +75,8 @@ def read_lightcurves(path: str):
     """``(frames, stars)`` from ``<output>_lightcurves.csv``: frames[j] = {mjd, airmass};
     stars[source_id] = {x, y, mag (n_frames,), err (n_frames,)} for the green channel, NaN
     where missing or saturated."""
-    rows = list(csv.DictReader(open(path, newline="", encoding="utf-8")))
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
     n = 1 + max(int(r["frame"]) for r in rows)
     frames = [{"mjd": math.nan, "airmass": math.nan} for _ in range(n)]
     stars: Dict[str, dict] = {}

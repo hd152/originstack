@@ -223,7 +223,18 @@ def get_form_schema() -> Dict[str, Any]:
 
 
 def _dest_action_map(parser: argparse.ArgumentParser) -> Dict[str, argparse.Action]:
-    return {a.dest: a for a in parser._actions if a.dest not in ('help', argparse.SUPPRESS)}
+    """``{dest: action}``; where a hidden alias shares a dest with the visible option
+    (``--no-full-field``, ``--no-comet-mode``), the visible one. Last-wins put the
+    hidden alias there: the comet card stopped emitting ``--comet-mode``, and an edited
+    full-field fraction became ``--no-full-field 0.5``."""
+    out: Dict[str, argparse.Action] = {}
+    for a in parser._actions:
+        if a.dest in ('help', argparse.SUPPRESS):
+            continue
+        if a.dest in out and a.help is argparse.SUPPRESS:
+            continue
+        out[a.dest] = a
+    return out
 
 
 def build_argv_from_form(form: Dict[str, Any]) -> List[str]:
