@@ -6,7 +6,20 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Comets are stacked on the comet automatically.** When the target is a comet (the FITS
+  OBJECT, the session name or the folder is a designation such as `C/2025 R2 (SWAN)`,
+  `12P/Pons-Brooks` or `3I/ATLAS`), the automatic settings turn on `--comet-mode`: besides the
+  usual star-aligned stack you get `<stem>_comet.fits`, aligned on the nucleus, and
+  `<stem>_comet_blended.fits`, sharp comet on sharp stars. Before, a comet session came out as
+  a star stack with the comet smeared along its track. `--no-comet-mode` turns it off.
+
 ### Changed
+
+- **"Large shifts detected" only when they are large for the frame** (over 10% of its shorter
+  side). It used a fixed 20 px and appeared on nearly every session from 2026 firmware, whose
+  drift and dithering move the field 40-150 px -- which registration handles.
 
 - **The stack keeps more of the frame** (`--full-field`, now on by default). The edges that
   dithering, drift or field rotation leave uncovered by some frames used to be cropped off;
@@ -18,6 +31,7 @@ match the `VERSION` file and `v*` git tags.
 
 ### Fixed
 
+- The AAVSO report closed its lightcurve file late, which could keep it locked on Windows.
 - **`--config KEY=VALUE` now works**, as the 2.15 and 2.16 notes already said it did (for
   example `--config nn_deconv_blend=0.5` or `--config preview_black_sigma=1.0`). `--config`
   took only a file, so such a setting was read as the name of a missing file and silently

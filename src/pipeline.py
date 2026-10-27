@@ -263,6 +263,9 @@ def _infer_target_and_advise(final: List[FrameInfo], args, directory: str,
         ttype, conf, src = args.target_type, 1.0, 'user'
     args._inferred_target = name
     args._inferred_type = ttype
+    from src.target_inference import _object_from_headers, comet_designation
+    args._inferred_comet = comet_designation(
+        _object_from_headers(final), _si.object_name if _si else None, name, directory)
     args._inferred_confidence = conf
     args._inferred_source = src
     if ttype and ttype != 'unknown' and src == 'user':

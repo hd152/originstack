@@ -888,6 +888,7 @@ def apply_auto_settings(
     changes.extend(_apply_nn_deconvolution(args, weights))
     changes.extend(_apply_nn_denoiser(args, weights))
     changes.extend(_apply_free_diagnostics(args))
+    changes.extend(_apply_comet_mode(args))
 
     return target_type, label, sig, changes, weights
 
@@ -968,6 +969,22 @@ def _apply_nn_denoiser(args, weights: Dict[str, float]) -> List[str]:
     _set('denoise_nn', True)
     _set('denoise_curvelet', False)
     _set('nn_chroma_nr', True)
+    return changes
+
+
+def _apply_comet_mode(args) -> List[str]:
+    """``--comet-mode`` when the target is a comet designation (``args._inferred_comet``,
+    from the OBJECT header, info.json or the folder name). Without it a comet session
+    is stacked on the stars only and the comet smears along its track (C/2025 R2 (SWAN)
+    came out as a 'Wide Field' star stack). Comet mode keeps that star stack as the main
+    output and adds the nucleus-aligned and blended stacks (<stem>_comet.fits,
+    <stem>_comet_blended.fits); --no-comet-mode opts out."""
+    changes: List[str] = []
+    comet = getattr(args, '_inferred_comet', None)
+    if comet and not getattr(args, 'comet_mode', False):
+        _auto_setter(args, changes)('comet_mode', True)
+        if changes:
+            changes[-1] += f" (comet target {comet!r}: adds <stem>_comet.fits and _comet_blended.fits)"
     return changes
 
 
