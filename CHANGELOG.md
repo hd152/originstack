@@ -6,6 +6,11 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-10-27
+
+Comets stacked on the comet automatically, more of the frame kept, cleaner multi-night
+edges, true colour through a nebula filter, and sharper drizzle.
+
 ### Added
 
 - **Comets are stacked on the comet automatically.** When the target is a comet (the FITS

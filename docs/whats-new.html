@@ -42,6 +42,22 @@
 </header>
 
 <main>
+<section id="v2-17">
+  <div class="wrap">
+    <h2>2.17 <small class="when">27 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-17-0"><h3>2.17.0 <span>27 Oct</span></h3>
+        <ul>
+          <li><strong>Comets are stacked on the comet.</strong> When the target is a comet (C/2025 R2, 12P/..., 3I/ATLAS), you now also get a stack aligned on the comet and a blended image with a sharp comet on sharp stars. The comet is located with its JPL Horizons ephemeris, so a passing satellite is no longer mistaken for it. <code>--no-comet-mode</code> turns it off.</li>
+          <li><strong>More of the frame is kept.</strong> The edges that drift, dithering and field rotation leave partly covered are now stacked from the frames that cover them instead of cropped away.</li>
+          <li><strong>Cleaner multi-night images.</strong> Combined nights no longer show coloured rims and wedges where only one or two nights reach; the image is cut to the area most of them cover.</li>
+          <li><strong>Nebula-filter sessions keep their colour.</strong> Through an OIII or dual-band filter the nebula now comes out brighter, in its own colour.</li>
+          <li>Sharper drizzled stacks, <code>--config KEY=VALUE</code> settings that work as documented, and the streamed stack (<code>--stream</code>) now uses the learned sharpening too.</li>
+        </ul></article>
+    </div>
+  </div>
+</section>
+
 <section id="v2-16">
   <div class="wrap">
     <h2>2.16 <small class="when">26 October 2026</small></h2>
