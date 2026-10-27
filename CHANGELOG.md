@@ -8,11 +8,20 @@ match the `VERSION` file and `v*` git tags.
 
 ### Fixed
 
+<<<<<<< HEAD
 - **Sharper drizzled stacks** (`--drizzle-scale 2`). The automatic settings switched drizzle to
   the soft Magic Kernel to avoid ringing around bright stars; on two Origin sessions that made
   stars about 10% wider than the normal stack, with no less ringing than the default Lanczos-3
   kernel. Drizzle now keeps Lanczos-3: stars as narrow as the normal stack, with 9-22% less noise
   when viewed at the same scale. `--drizzle-kernel magic` still selects the soft kernel.
+=======
+- **`--config KEY=VALUE` now works**, as the 2.15 and 2.16 notes already said it did (for
+  example `--config nn_deconv_blend=0.5` or `--config preview_black_sigma=1.0`). `--config`
+  took only a file, so such a setting was read as the name of a missing file and silently
+  ignored; with `--from-stack` it also kept the earlier run's saved settings from loading,
+  so the re-run used defaults. `--config` can be repeated; a `KEY=VALUE` setting wins over
+  the config file and over the automatic settings.
+>>>>>>> origin/main
 
 ## [2.16.0] - 2026-10-26
 

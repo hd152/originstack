@@ -754,5 +754,47 @@ width-for-noise line the blend already gives: alone it is a third narrower but 3
 with 25-30% less faint contrast and worse colour on Sculptor. v4 + blend stays. Same conclusion
 as the capacity sweep, now for data volume too: with this network the target sets the limit.
 
-Data `C:\nn_work\survey\` (models, `train_*`, `eval_*`, `matched_*`, `bench_*`,
+### One network for the galaxy blend (2026-10-27) -- not shipped
+
+Galaxies run both networks (`nn_deconv_blend` 0.35). Both work in noise units and the
+low-frequency restore after them is linear, so one network can be trained on the blend of
+their raw outputs: input = each training session's seeing-pair input stack, target =
+0.35 x v4 + 0.65 x the nn denoiser on it (11,840 patches from 74 sessions, half centred on
+the brightest 0.5% of pixels, weight 1 / the input's noise variance), fine-tuned from v4,
+15k steps, lr 3e-4. Val 0.0309 (identity 1.347).
+
+It reproduces the blend closely on the held-out galaxies: RMS difference 0.07-0.09 sigma
+(0.027 on sky) against a 1.0 sigma change from the input. In the full pipeline:
+
+| target | variant | width | sky noise | faint contrast | Gaia colour rho (linear) |
+|---|---|---|---|---|---|
+| Sunflower | v4 + blend 0.35 | 0.640 | **0.045** | **237** | 0.889 |
+| | distilled, one pass | 0.636 | 0.049 | 220 | 0.886 |
+| Sculptor | v4 + blend 0.35 | 0.643 | **0.050** | **303** | 0.851 |
+| | distilled, one pass | 0.638 | 0.054 | 282 | 0.846 |
+
+One pass is 7.8 s on a full Sunflower stack, so it would save about 8 s per galaxy run, for
+8-9% more sky noise and 7% less faint contrast. Not worth it; the two passes stay.
+
+### Chroma NR on the sky after the network (2026-10-27) -- not shipped
+
+The nebula path (0.75) skips chroma NR. `reduce_chroma_noise` after the network, with its own
+luminance heuristic (everything above sky + 3 sigma protected; the earlier attempt used the
+star mask and so smoothed the nebula too):
+
+| target | variant | blotch | sky noise | linear colour rho / slope | Gaia rho (linear) |
+|---|---|---|---|---|---|
+| Pleiades | v4 0.75 | 6.03 | 0.302 | 0.993 / 0.92 | |
+| | + sky chroma NR | 5.96 | 0.264 | 0.991 / 0.91 | |
+| Orion | v4 0.75 | 4.64 | 0.082 | 0.978 / 0.88 | 0.925 |
+| | + sky chroma NR | 4.68 | 0.076 | 0.951 / 0.79 | 0.902 |
+| Omega | v4 0.75 | 11.41 | 0.286 | 0.990 / 0.95 | 0.959 |
+| | + sky chroma NR | 11.66 | 0.269 | 0.989 / 0.95 | 0.959 |
+
+Pleiades' mottle drops 1%; Orion's colour loses more. With `chroma_nr_large_sigma` 12 Orion's
+Gaia rho fell to 0.73. Note the plain wavelet path these configs were saved with scores 6.14 on
+the Pleiades, so v4's mottle is no worse than that; the 6.0 vs 5.4 above compares against
+`--denoiser nn` with chroma NR first.
+
+Data `C:\nn_work\survey\`, `C:\nn_work\distill\`, `C:\nn_work\mottle\` (models, `train_*`, `eval_*`, `matched_*`, `bench_*`,
 `bright_v3_v1_v2.jpg`; stacks, crops and banks deleted).

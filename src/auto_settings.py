@@ -937,7 +937,7 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
     _set('deconvolve_nn', True)
     _set('deconvolve', False)                # not Richardson-Lucy as well
     if getattr(args, 'nn_deconv_blend', NN_DECONV_DEFAULT_BLEND) == NN_DECONV_DEFAULT_BLEND:
-        _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND if galaxy else NN_DECONV_OTHER_BLEND)  # --config wins
+        _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND if galaxy else NN_DECONV_OTHER_BLEND)  # --config KEY=VALUE wins
     for attr in ('denoise_curvelet', 'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn'):
         _set(attr, False)                    # the network denoises as it sharpens
     return changes
