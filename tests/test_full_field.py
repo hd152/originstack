@@ -157,3 +157,11 @@ def test_sky_drift_through_the_session_does_not_offset_the_edges():
     for cols in (slice(0, cl - l), slice(cr - l, r - l)):          # left and right strips
         err = out[ct - t:cb - t, cols, 1] - truth[ct:cb, l:r][:, cols]
         assert abs(float(np.median(err))) < 5.0, float(np.median(err))
+
+
+def test_full_field_is_on_by_default_and_can_be_turned_off():
+    from src.cli import parse_args
+    assert parse_args(['-d', '.']).full_field == 0.5
+    assert parse_args(['-d', '.', '--full-field', '0.7']).full_field == 0.7
+    assert not parse_args(['-d', '.', '--no-full-field']).full_field
+    assert not parse_args(['-d', '.', '--full-field', '0']).full_field

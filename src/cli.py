@@ -1800,16 +1800,19 @@ def build_parser() -> argparse.ArgumentParser:
                         'noise equal or lower; costs ~15-40 s. Falls back to the normal stack '
                         'when no PSF can be measured.')
     g_stack.add_argument('--full-field', dest='full_field', type=float, nargs='?',
-                         const=0.5, default=None, metavar='FRAC',
-                   help='Keep the field outside the common crop. The normal stack covers '
-                        'only the rectangle EVERY frame covers, which field rotation on an '
-                        'alt-az mount shrinks; this extends it to the largest rectangle in '
+                         const=0.5, default=0.5, metavar='FRAC',
+                   help='Keep the field outside the common crop (on by default; '
+                        '--full-field 0 or --no-full-field turns it off). The common crop '
+                        'is the rectangle EVERY frame covers, which dithering, drift and '
+                        'field rotation shrink; this extends it to the largest rectangle in '
                         'which every pixel is covered by at least FRAC of the frames '
                         '(default 0.5), combining each outer pixel from the frames that '
                         'cover it. Depth is not uniform: edges are noisier '
-                        '(<output>_coverage.fits records the per-pixel frame count). Not '
+                        '(<output>_coverage.fits records the per-pixel frame count). Skipped '
                         'with --drizzle-scale > 1, --cfa-drizzle, --elastic-registration, '
                         '--comet-mode or --uncertainty-map.')
+    g_stack.add_argument('--no-full-field', dest='full_field', action='store_const', const=0.0,
+                         help=argparse.SUPPRESS)
     g_stack.add_argument('--cfa-drizzle', dest='cfa_drizzle', action='store_true',
                    help='Bayer-aware drizzle: after stacking, recombine each frame\'s '
                         'MEASURED colour samples (never the interpolated ones) onto the '

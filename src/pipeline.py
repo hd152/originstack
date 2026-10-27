@@ -647,7 +647,9 @@ def _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts, tran
         ('--uncertainty-map', getattr(args, 'uncertainty_map', False)),
     ) if on]
     if blockers:
-        safe_print(f"  Full field: skipped (not supported with {', '.join(blockers)})")
+        # on by default: only say so when it was asked for
+        if 'full_field' in getattr(args, '_explicit_cli_dests', set()) or getattr(args, 'verbose', False):
+            safe_print(f"  Full field: skipped (not supported with {', '.join(blockers)})")
         return None
     if mem_rgb is None or len(final_indices) < 3:
         return None
