@@ -103,8 +103,8 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
       <div id="opt-ui-frame-every"><dt><code>--ui-frame-every</code> <var>N</var></dt>
         <dd><p>Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 5; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).</p>
           <p class="meta">Default: <code>5</code></p></dd></div>
-      <div id="opt-config"><dt><code>--config</code> <var>PATH</var></dt>
-        <dd><p>Load parameters from a TOML configuration file. CLI arguments override config file values. Fine-grained tuning parameters removed from the CLI can still be set via config file.</p></dd></div>
+      <div id="opt-config"><dt><code>--config</code> <var>PATH|KEY=VALUE</var></dt>
+        <dd><p>Load parameters from a TOML configuration file, or set one as KEY=VALUE. Repeatable, e.g. --config nn_deconv_blend=0.5. CLI arguments override config file values; KEY=VALUE overrides the file and the automatic settings. Fine-grained tuning parameters removed from the CLI can still be set this way.</p></dd></div>
       <div id="opt-preset"><dt><code>--preset</code></dt>
         <dd><p>Processing preset. Individual flags still override preset values. quick: fast (mean stack, minimal denoise, no deconvolution). quality: maximum quality (sigma_clip, all denoisers, deconvolution). narrowband: tuned for Ha/OIII/SII data. galaxy: galaxy imaging (GHS stretch, star reduction, bilateral denoise). starfield: star fields (no star reduction, minimal processing). nebula: emission/reflection nebula (GHS stretch, curvelet+ACDNR denoise). planetary: planetary targets (no background extraction, deconvolution). lunar: lunar surface (linear stretch, no star reduction).</p>
           <p class="meta">Choices: <code>quick</code>, <code>quality</code>, <code>narrowband</code>, <code>galaxy</code>, <code>starfield</code>, <code>nebula</code>, <code>planetary</code>, <code>lunar</code></p></dd></div>
