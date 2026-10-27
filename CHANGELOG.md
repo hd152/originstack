@@ -15,6 +15,12 @@ match the `VERSION` file and `v*` git tags.
   largest rectangle that at least half of the nights' total weight covers; on that Whirlpool,
   96% of the frame. The WCS moves with the crop.
 
+- **`--stream` gets the same treatment as a normal stack.** Its output kept the whole sensor
+  frame, with thin rims made of the one or two frames that drifted over them (a dark strip and
+  a dashed bottom row on M66); it is now cut to the area at least half the frames cover. And
+  the automatic settings never chose the learned deconvolver in stream mode (the camera was
+  not identified there), so streamed stacks were processed with the older wavelet chain.
+
 - **The stack keeps more of the frame** (`--full-field`, now on by default). The edges that
   dithering, drift or field rotation leave uncovered by some frames used to be cropped off;
   they are now kept wherever at least half the frames cover them, combined from those frames,

@@ -171,6 +171,12 @@ def test_fold_produces_registered_stack(tmp_path):
         # Registration coherence: aligned stars stay sharp (a mis-stack smears
         # the peak toward the background level).
         assert lum.max() > 1000.0 + 1500.0
+        # cut to the area at least half the frames cover: no thin rims of 1-2 frames
+        from astropy.io import fits
+        raw = fits.getdata(str(tmp_path / 'L0000.fits'))
+        h, w = raw.shape[:2] if raw.shape[-1] == 3 else raw.shape[-2:]
+        assert stacked.shape[0] < h and stacked.shape[1] < w
+        assert stacked.shape[0] >= h - 12 and stacked.shape[1] >= w - 12
 
 
 def test_fold_rejects_outlier_pixels(tmp_path):
