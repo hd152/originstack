@@ -19,6 +19,10 @@ match the `VERSION` file and `v*` git tags.
   the Mac log folder.
 
 ### Fixed
+- **No more 20 s stall when a catalogue server can't be reached.** Where a server
+  (SIMBAD, often) dropped connections silently, each lookup waited for Windows' ~21 s
+  TCP connect timeout. A server is now checked with a 5 s handshake first; one that
+  doesn't answer is skipped for 5 minutes. Behind an HTTP proxy the check is skipped.
 - **Dark discs around stars on galaxies.** Star reduction treated whatever light sat
   above the background ring inside a star's radius as the star's wing, so on a galaxy
   disk (Andromeda) each reduced star left a disc darker than the disk around it. It now
