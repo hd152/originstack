@@ -543,7 +543,7 @@
  "{n} lights": "ライト {n} 枚",
  "{settings} and {n} more": "{settings} ほか {n} 件",
  "Report a problem": "問題を報告",
- "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "バージョン、システム、ログの末尾を記入済みの新しい GitHub Issue をブラウザーで開きます。そこで送信するまで何も送られません。",
+ "Opens a new GitHub issue in your browser, or copies the same report for an email or a forum post, with the version, system and the end of the log filled in. Nothing is sent until you send it yourself.": "ブラウザーで新しい GitHub Issue を開くか、同じレポートをメールやフォーラム投稿用にコピーします。バージョン、システム、ログの末尾が記入済みです。ご自身で送信するまで何も送られません。",
  "About {minutes} min remaining": "???{minutes}?",
  "About {seconds} sec remaining": "???{seconds}?",
  "Apply to JPEG": "JPEG???",
@@ -591,5 +591,10 @@
  "Lossless PNG": "可逆 PNG",
  "The final image without JPEG compression.": "JPEG 圧縮をかけていない最終画像。",
  "16-bit PNG for editing": "編集用 16 ビット PNG",
- "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "チャンネルあたり 16 ビットの最終画像：別のソフトでトーンカーブやレベル補正を重ねてもトーンジャンプが出ません。"
+ "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "チャンネルあたり 16 ビットの最終画像：別のソフトでトーンカーブやレベル補正を重ねてもトーンジャンプが出ません。",
+ "Open a GitHub issue…": "GitHub Issue を開く…",
+ "Copy report (for an email or forum post)": "レポートをコピー（メールやフォーラム投稿用）",
+ "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "問題レポートをクリップボードにコピーしました。内容を確認してから、メールやフォーラム投稿（Cloudy Nights、GitHub Discussions ページ）に貼り付けてください。",
+ "Result not right? Report it": "結果がおかしい？報告する",
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "右上の「問題を報告」で GitHub Issue を開くか、ログ付きの詳細をメールやフォーラム投稿用にコピーできます。"
 }

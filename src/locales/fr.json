@@ -543,7 +543,7 @@
  "{n} lights": "{n} brutes",
  "{settings} and {n} more": "{settings} et {n} de plus",
  "Report a problem": "Signaler un problème",
- "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "Ouvre un nouveau ticket GitHub dans votre navigateur, prérempli avec la version, le système et la fin du journal. Rien n’est envoyé tant que vous ne le soumettez pas.",
+ "Opens a new GitHub issue in your browser, or copies the same report for an email or a forum post, with the version, system and the end of the log filled in. Nothing is sent until you send it yourself.": "Ouvre un nouveau ticket GitHub dans votre navigateur, ou copie le même rapport pour un e-mail ou un message de forum, avec la version, le système et la fin du journal déjà remplis. Rien n’est envoyé tant que vous ne l’envoyez pas vous-même.",
  "About {minutes} min remaining": "Environ {minutes} min restantes",
  "About {seconds} sec remaining": "Environ {seconds} s restantes",
  "Apply to JPEG": "Appliquer au JPEG",
@@ -591,5 +591,10 @@
  "Lossless PNG": "PNG sans perte",
  "The final image without JPEG compression.": "L'image finale sans compression JPEG.",
  "16-bit PNG for editing": "PNG 16 bits pour la retouche",
- "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "L'image finale en 16 bits par canal : d'autres réglages de courbes ou de niveaux dans un autre logiciel ne créent pas de postérisation."
+ "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "L'image finale en 16 bits par canal : d'autres réglages de courbes ou de niveaux dans un autre logiciel ne créent pas de postérisation.",
+ "Open a GitHub issue…": "Ouvrir un ticket GitHub…",
+ "Copy report (for an email or forum post)": "Copier le rapport (pour un e-mail ou un forum)",
+ "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Rapport de problème copié dans le presse-papiers. Vérifiez-le, puis collez-le dans un e-mail ou un message de forum (Cloudy Nights, la page GitHub Discussions).",
+ "Result not right? Report it": "Résultat incorrect ? Signalez-le",
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Signaler un problème (en haut à droite) ouvre un ticket GitHub ou copie les détails, avec le journal, pour un e-mail ou un forum."
 }

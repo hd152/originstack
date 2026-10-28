@@ -543,7 +543,7 @@
  "{n} lights": "{n} lichtframes",
  "{settings} and {n} more": "{settings} en nog {n}",
  "Report a problem": "Probleem melden",
- "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "Opent in je browser een nieuw GitHub-issue met de versie, het systeem en het einde van het logboek al ingevuld. Er wordt niets verstuurd totdat je het daar indient.",
+ "Opens a new GitHub issue in your browser, or copies the same report for an email or a forum post, with the version, system and the end of the log filled in. Nothing is sent until you send it yourself.": "Opent een nieuw GitHub-issue in uw browser, of kopieert hetzelfde rapport voor een e-mail of forumbericht, met de versie, het systeem en het einde van het logboek ingevuld. Er wordt niets verzonden totdat u het zelf verstuurt.",
  "About {minutes} min remaining": "Nog ongeveer {minutes} min",
  "About {seconds} sec remaining": "Nog ongeveer {seconds} sec",
  "Apply to JPEG": "Op JPEG toepassen",
@@ -591,5 +591,10 @@
  "Lossless PNG": "Verliesvrije PNG",
  "The final image without JPEG compression.": "Het eindbeeld zonder JPEG-compressie.",
  "16-bit PNG for editing": "16-bit PNG om te bewerken",
- "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "Het eindbeeld met 16 bit per kanaal: verdere curven- of niveau-aanpassingen in een ander programma geven geen banding."
+ "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "Het eindbeeld met 16 bit per kanaal: verdere curven- of niveau-aanpassingen in een ander programma geven geen banding.",
+ "Open a GitHub issue…": "Een GitHub-issue openen…",
+ "Copy report (for an email or forum post)": "Rapport kopiëren (voor e-mail of forum)",
+ "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Het probleemrapport is naar het klembord gekopieerd. Controleer het en plak het in een e-mail of forumbericht (Cloudy Nights, de GitHub Discussions-pagina).",
+ "Result not right? Report it": "Resultaat niet goed? Meld het",
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Probleem melden (rechtsboven) opent een GitHub-issue of kopieert de details, met het logboek, voor een e-mail of forumbericht."
 }

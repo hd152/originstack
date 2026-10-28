@@ -543,7 +543,7 @@
  "{n} lights": "{n} Lights",
  "{settings} and {n} more": "{settings} und {n} weitere",
  "Report a problem": "Problem melden",
- "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "Öffnet im Browser ein neues GitHub-Issue mit Version, System und dem Ende des Protokolls. Gesendet wird erst, wenn Sie es dort absenden.",
+ "Opens a new GitHub issue in your browser, or copies the same report for an email or a forum post, with the version, system and the end of the log filled in. Nothing is sent until you send it yourself.": "Öffnet ein neues GitHub-Issue in Ihrem Browser oder kopiert denselben Bericht für eine E-Mail oder einen Forenbeitrag, mit Version, System und dem Ende des Protokolls ausgefüllt. Es wird nichts gesendet, bis Sie es selbst senden.",
  "About {minutes} min remaining": "Noch etwa {minutes} Min.",
  "About {seconds} sec remaining": "Noch etwa {seconds} Sek.",
  "Apply to JPEG": "Auf JPEG anwenden",
@@ -591,5 +591,10 @@
  "Lossless PNG": "Verlustfreies PNG",
  "The final image without JPEG compression.": "Das fertige Bild ohne JPEG-Kompression.",
  "16-bit PNG for editing": "16-Bit-PNG zum Bearbeiten",
- "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "Das fertige Bild mit 16 Bit pro Kanal: weitere Gradations- oder Tonwertkorrekturen in einem anderen Programm erzeugen keine Tonwertabrisse."
+ "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "Das fertige Bild mit 16 Bit pro Kanal: weitere Gradations- oder Tonwertkorrekturen in einem anderen Programm erzeugen keine Tonwertabrisse.",
+ "Open a GitHub issue…": "GitHub-Issue öffnen…",
+ "Copy report (for an email or forum post)": "Bericht kopieren (für E-Mail oder Forenbeitrag)",
+ "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Der Problembericht wurde in die Zwischenablage kopiert. Prüfen Sie ihn und fügen Sie ihn dann in eine E-Mail oder einen Forenbeitrag ein (Cloudy Nights, die GitHub-Discussions-Seite).",
+ "Result not right? Report it": "Ergebnis nicht in Ordnung? Melden",
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "„Problem melden“ (oben rechts) öffnet ein GitHub-Issue oder kopiert die Details samt Protokoll für eine E-Mail oder einen Forenbeitrag."
 }
