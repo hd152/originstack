@@ -6,6 +6,23 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+- **Dark discs around stars on galaxies.** Star reduction treated whatever light sat
+  above the background ring inside a star's radius as the star's wing, so on a galaxy
+  disk (Andromeda) each reduced star left a disc darker than the disk around it. It now
+  removes only the star's own radial profile, cut off where the profile no longer
+  stands out of the light at that radius.
+- **Orion's core no longer renders as a jagged white cut-out.** The Trapezium region
+  clips in every sub, and the stack holds a flat plateau ending in a cliff; its outline
+  is now feathered in the preview over a width that follows its size. Star cores are
+  untouched.
+- **The Horsehead stands out against IC 434 again.** When a faint nebula fills most of
+  the frame, the background step measured "sky" on the nebula itself and subtracted it,
+  leaving the horse against black. For emission nebulae, `--auto` now also masks
+  H-alpha by colour (red light in excess of the frame's own sky colour), so the glow
+  stays and a neutral gradient, such as a bright star's glare, is still removed
+  (`dbe_halpha_mask`, saved in the run's config).
+
 ## [2.17.0] - 2026-10-27
 
 Comets stacked on the comet automatically, more of the frame kept, cleaner multi-night

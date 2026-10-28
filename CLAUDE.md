@@ -200,6 +200,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 
 **Experiments and profiling**
 - Spawned pool workers don't inherit monkeypatches; an experiment hook must load in every process (`sitecustomize.py` on `PYTHONPATH`).
+- `--from-stack` (and `tools/bench_phase4.py`) reuse `<stem>_phase4cache.pkl` while the *settings* match: an experiment that patches a `Config` constant of an early step (DBE, sky) gets the cached result. Delete the cache between such runs.
 - Profile with nothing else running; this machine's timings move up to ~40% between identical runs.
 - Compare stacks against Siril with shared-star widths on the same stars, per channel, at matched resolution (`tools/bench_vs_siril.py`, `--os-args=...` needs the `=`); never compare single-frame FWHM with stack FWHM.
 

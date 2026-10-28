@@ -616,6 +616,11 @@ def _apply_dynamic_settings(
     if _extended_w > 0.3:
         # Avoid fitting faint outer nebulosity as sky on extended targets.
         _set('dbe_diffuse_threshold_sigma', 0.25)
+    if weights.get('emission_nebula', 0.0) >= 0.5:
+        # Tell frame-filling H-alpha from sky gradient by colour: the brightness
+        # mask measures from the border, which on the Horsehead is IC 434 itself,
+        # and DBE subtracted the nebula the horse stands against.
+        _set('dbe_halpha_mask', True)
     if (_extended_w > 0.3
             and 'skip_step' not in _explicit
             and 'sky_residual' not in current_skip):

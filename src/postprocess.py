@@ -521,7 +521,9 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 verbose=args.verbose, star_mask=pp_star_mask,
                 use_entropy_weights=_entropy_bg,
                 exclusion_mask=_bg_excl_mask,
-                diffuse_threshold_sigma=_diffuse_threshold)
+                diffuse_threshold_sigma=_diffuse_threshold,
+                halpha_sigma=(Config.DBE_HALPHA_SIGMA
+                              if getattr(args, 'dbe_halpha_mask', False) else 0.0))
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
         elif bg_method == 'wavelet':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)
@@ -535,7 +537,9 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 n_scales=wavelet_scales, verbose=args.verbose, star_mask=pp_star_mask,
                 use_entropy_weights=_entropy_bg,
                 exclusion_mask=_bg_excl_mask,
-                diffuse_threshold_sigma=_diffuse_threshold)
+                diffuse_threshold_sigma=_diffuse_threshold,
+                halpha_sigma=(Config.DBE_HALPHA_SIGMA
+                              if getattr(args, 'dbe_halpha_mask', False) else 0.0))
             safe_print(f"  ✓ Wavelet-band background extraction ({format_time(time.time() - bg_start)})")
         else:
             print(f"\n  Applying background extraction "

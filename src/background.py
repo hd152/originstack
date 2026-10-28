@@ -911,7 +911,8 @@ def _channel_sky(channel: np.ndarray) -> float:
 def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
                                exclusion_mask: Optional[np.ndarray],
                                verbose: bool, label: str,
-                               diffuse_threshold_sigma: float = 1.0
+                               diffuse_threshold_sigma: float = 1.0,
+                               halpha_sigma: float = 0.0
                                ) -> Tuple[np.ndarray, float, float, bool]:
     """Shared emission-mask setup for DBE-family background extractors
     (dynamic_background_extraction, wavelet_background_extraction).
@@ -936,6 +937,13 @@ def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
     emission_mask = _build_emission_mask(lum, star_mask, lum_smooth, sky_med, sky_std,
                                          diffuse=exclusion_mask is None,
                                          diffuse_threshold_sigma=diffuse_threshold_sigma)
+    if halpha_sigma > 0 and exclusion_mask is None and rgb.ndim == 3 and rgb.shape[2] == 3:
+        halpha = _halpha_excess_mask(rgb, smooth_sigma, halpha_sigma)
+        if halpha is not None:
+            if verbose:
+                safe_print(f"    {label}: H-alpha excess masks {float(halpha.mean()) * 100.0:.1f}%"
+                           " of image")
+            np.maximum(emission_mask, halpha, out=emission_mask)
     if exclusion_mask is not None:
         try:
             excl = np.asarray(exclusion_mask, dtype=np.float32)
@@ -953,6 +961,45 @@ def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
         safe_print(f"    {label}: dense star field detected ({masked_pct * 100.0:.0f}% masked) "
                    f"— using sigma-clip mesh without emission mask")
     return emission_mask, sky_med, sky_std, dense_field
+
+
+def _halpha_excess_mask(rgb: np.ndarray, smooth_sigma: float,
+                        k_sigma: float) -> Optional[np.ndarray]:
+    """Large-scale H-alpha emission, told from sky by colour, not brightness.
+
+    The brightness test measures "above sky" from the frame's border; when a faint
+    nebula fills most of the frame (IC 434 behind the Horsehead) the border sky
+    is the nebula, it is never masked, and DBE fits it away with the gradient.
+    Its colour still sets it apart: red light in excess of the frame's own sky
+    colour, ``R - k G`` with ``k`` the lower-quartile R/G ratio of the smoothed
+    frame, against the sky's light pollution and a bright star's glare, which
+    follow the sky colour. Pixels whose excess clears the frame's lower quartile
+    by ``k_sigma`` robust sigmas are masked; None when nothing is.
+
+    Only for emission nebulae (``--auto`` sets ``dbe_halpha_mask``): the excess
+    is relative to the frame's own spread, so on a galaxy, cluster or star field
+    it marks 11-35% of the frame -- reddish light-pollution gradient -- which DBE
+    would then leave in."""
+    r = gaussian_filter_ds(rgb[:, :, 0].astype(np.float64), sigma=smooth_sigma)
+    g = gaussian_filter_ds(rgb[:, :, 1].astype(np.float64), sigma=smooth_sigma)
+    sub = (slice(None, None, 8), slice(None, None, 8))
+    rs, gs = r[sub], g[sub]
+    ok = gs > 0
+    if ok.sum() < 100:
+        return None
+    k = float(np.percentile(rs[ok] / gs[ok], 25))
+    ex = r - k * g
+    exs = ex[sub]
+    base = float(np.percentile(exs, 25))
+    # spread of the excess on sky: the lower half of the distribution, mirrored
+    low = exs[exs <= np.median(exs)]
+    sig = 1.4826 * float(np.median(np.abs(low - np.median(low)))) if low.size > 10 else 0.0
+    if sig <= 0:
+        return None
+    mask = ex > base + k_sigma * sig
+    if not mask.any():
+        return None
+    return mask.astype(np.float32)
 
 
 # ============ Dynamic Background Extraction (DBE) =========
@@ -1697,7 +1744,8 @@ def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
                                  exclusion_mask: Optional[np.ndarray],
                                  diffuse_threshold_sigma: float,
                                  admit_gradient: bool = False,
-                                 note: Optional[str] = None) -> np.ndarray:
+                                 note: Optional[str] = None,
+                                 halpha_sigma: float = 0.0) -> np.ndarray:
     """Shared driver of DBE and the wavelet background: sample sky patches per
     channel, turn them into a surface with ``fit(coords, values, emission_mask)``, subtract.
     Too few samples fall back to the mesh extraction. ``admit_gradient`` adds
@@ -1711,7 +1759,7 @@ def _patch_background_extraction(rgb: np.ndarray, label: str, fit, *,
 
     emission_mask, _lum_sky, sky_std, _dense_field = _dbe_prepare_emission_mask(
         rgb, star_mask, exclusion_mask, verbose, label,
-        diffuse_threshold_sigma=diffuse_threshold_sigma)
+        diffuse_threshold_sigma=diffuse_threshold_sigma, halpha_sigma=halpha_sigma)
 
     if verbose and note:
         safe_print(note)
@@ -1805,7 +1853,8 @@ def dynamic_background_extraction(
         verbose: bool = False,
         use_entropy_weights: bool = False,
         exclusion_mask: Optional[np.ndarray] = None,
-        diffuse_threshold_sigma: float = 1.0) -> np.ndarray:
+        diffuse_threshold_sigma: float = 1.0,
+        halpha_sigma: float = 0.0) -> np.ndarray:
     """Dynamic Background Extraction (DBE): adaptive patch sampling + robust
     local-regression surface fit (see ``_fit_background_surface``)."""
     H, W = rgb.shape[:2]
@@ -1827,6 +1876,7 @@ def dynamic_background_extraction(
         clip_sigma=clip_sigma, star_mask=star_mask, verbose=verbose,
         use_entropy_weights=use_entropy_weights, exclusion_mask=exclusion_mask,
         diffuse_threshold_sigma=diffuse_threshold_sigma, admit_gradient=True,
+        halpha_sigma=halpha_sigma,
         note="    [rust] DBE robust local-regression surface fit" if HAS_NATIVE else None)
 
 
@@ -1942,7 +1992,8 @@ def wavelet_background_extraction(
         verbose: bool = False,
         use_entropy_weights: bool = False,
         exclusion_mask: Optional[np.ndarray] = None,
-        diffuse_threshold_sigma: float = 1.0) -> np.ndarray:
+        diffuse_threshold_sigma: float = 1.0,
+        halpha_sigma: float = 0.0) -> np.ndarray:
     """Background extraction via starlet (a-trous wavelet) low-pass fit.
 
     Reuses DBE's sky-patch sampling (star/nebula-safe emission mask, robust

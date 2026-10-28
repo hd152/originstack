@@ -2744,6 +2744,9 @@ def build_parser() -> argparse.ArgumentParser:
         # sigma. --auto lowers this for extended-source targets; this setting
         # is saved in the effective config so --from-stack reuses it.
         dbe_diffuse_threshold_sigma=1.0,
+        # DBE's colour (H-alpha excess) emission mask; --auto turns it on for
+        # emission nebulae (background._halpha_excess_mask).
+        dbe_halpha_mask=False,
         # Primary luma denoiser when --denoiser is left at 'auto' and no
         # preset/--auto overrides it: directional (curvelet-inspired)
         # adaptive wavelet. At protect_strength=0.6 it's a strict superset
