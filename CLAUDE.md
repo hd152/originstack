@@ -17,8 +17,10 @@ pip install maturin && (cd ext/astro_native && maturin develop --release)
 ### Run tests
 ```bash
 pytest -q
-# Full suite, parallel (pytest-xdist, in requirements-dev.txt) -- measured 3.2x on a
-# 16-core machine (1665 tests: 169s -> 52s, no isolation issues found)
+# Full suite, parallel (pytest-xdist, in requirements-dev.txt): 2262 tests in ~90 s on
+# the 8-core laptop. Tests never reach the network (tests/conftest.py _no_network):
+# with SIMBAD unreachable, its lookup cost every pipeline test a 21 s connect timeout
+# and the suite took 448 s
 pytest -q -n auto
 # Run a single test
 pytest tests/test_core.py::test_calculate_shift_recovery -v
