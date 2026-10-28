@@ -178,11 +178,16 @@ def _classify(sig: dict) -> str:
 # Each list holds (attr_name, value) pairs applied unconditionally for that
 # target type.  Conditional logic (SNR gates, Strehl gates, frame-count
 # thresholds) is handled in _apply_quality_settings.
+#
+# No Phase 1 setting belongs here: --auto runs after Phase 1, so one would
+# never take effect on the run itself, only in its saved _config.toml, and
+# re-running from that config would then process the frames differently
+# (pre_gradient_removal sat in three presets that way, never running under
+# --auto; tests/test_auto_settings_blend.py checks the table).
 
 _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     'emission_nebula': [
         ('masked_correlation',      True),
-        ('pre_gradient_removal',    True),
         # Deconvolution OFF by default. Same RL-ringing problem documented
         # for galaxy/globular_cluster below, confirmed on a real Trifid
         # Nebula session: unregularized RL with a blind-PSF estimate rings
@@ -232,7 +237,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
         ('aniso_iterations',        15),
     ],
     'galaxy': [
-        ('pre_gradient_removal',    True),
         # Deconvolution OFF by default. On wide-field OSC data (undersampled
         # stars, small galaxy) Richardson-Lucy redistributes flux and lowers the
         # local background, so every bright star gets a dark ring/moat — and any
@@ -348,7 +352,6 @@ _TARGET_SETTINGS: Dict[str, List[Tuple[str, object]]] = {
     ],
     'reflection_nebula': [
         ('masked_correlation',      True),
-        ('pre_gradient_removal',    True),
         # Deconvolution OFF by default -- see emission_nebula above (same
         # RL-ringing issue, confirmed on a real Trifid Nebula session,
         # which has a strong reflection component).
