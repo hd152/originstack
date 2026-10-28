@@ -653,11 +653,12 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
             masters['flat_rotation'] = float(np.median(_flat_rots))
     else:
         masters['flat'] = None
-        _use_flat_from_lights = (
-            getattr(args, 'flat_from_lights', False)
-            or (getattr(args, 'auto', False)
-                and 'flat_from_lights' not in getattr(args, '_explicit_cli_dests', set())))
-        if _use_flat_from_lights and len(lights) >= Config.ROBUST_PCA_MIN_FRAMES:
+        # Opt-in only. --auto used to turn it on whenever a session had no flats
+        # (every Seestar session): the target leaks into the low-rank "flat" unless it
+        # moves well across the sensor, and dividing by it removed ~95% of M31's disk
+        # (S50 Pro, EQ mode) and 64-90% of M101's outer light (S50, 13 deg of field
+        # rotation) for a 0.2 ADU flatter sky that DBE gets anyway.
+        if getattr(args, 'flat_from_lights', False) and len(lights) >= Config.ROBUST_PCA_MIN_FRAMES:
             # Cap the sample: cost is O(N^2 x pixels), and more frames past a
             # modest count buys little extra low-rank/sparse separation quality.
             sample = lights[:: max(1, len(lights) // Config.ROBUST_PCA_AUTO_MAX_FRAMES)]

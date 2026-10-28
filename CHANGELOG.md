@@ -24,6 +24,12 @@ match the `VERSION` file and `v*` git tags.
   the Mac log folder.
 
 ### Fixed
+- **Galaxies no longer lose their outer disk when a session has no flats.** The
+  automatic settings built a flat from the lights themselves whenever flats were missing
+  (every Seestar session). The target leaks into such a flat unless it moves well across
+  the sensor, and dividing by it removed most of a galaxy's faint light: about 95% of
+  M31's disk on an S50 Pro, 64-90% of M101's outer arms on an S50. `--flat-from-lights`
+  is now only used when you ask for it, as its help always said.
 - **Frames copied from a Mac.** A Finder zip holds a `._Light_….fit` file (resource-fork
   metadata) beside every frame and a `__MACOSX` folder; each was taken as a light (or a
   session folder). They are now ignored.

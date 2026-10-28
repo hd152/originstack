@@ -1,7 +1,7 @@
 """Tests for --auto wiring of this session's new features:
 denoise_curvelet (emission/reflection nebula), variance_stabilize,
 hdr_blend_mode=fusion, color_calibrate_method=spcc
-(src/auto_settings.py), and flat_from_lights / dark_temp_model auto-trigger
+(src/auto_settings.py), flat_from_lights (no longer automatic) / dark_temp_model auto-trigger
 (src/cli.py::_build_masters).
 """
 from __future__ import annotations
@@ -219,24 +219,27 @@ def _master_args(**overrides):
     return argparse.Namespace(**base)
 
 
-class TestFlatFromLightsAutoTrigger:
+class TestFlatFromLightsNotAutomatic:
+    """--auto used to build a synthetic flat whenever a session had no flats; the
+    target leaked into it (M31 on an S50 Pro lost ~95% of its disk). Opt-in only."""
 
-    def test_auto_triggers_without_explicit_flag(self):
-        n = Config.ROBUST_PCA_MIN_FRAMES + 2
-        frames = {'light': _frames(n), 'dark': [], 'flat': [], 'bias': []}
-        with patch('src.cli.make_master', return_value=np.zeros((4, 4), dtype=np.float32)) as mm:
-            masters = _build_masters(frames, args=_master_args())
-        mm.assert_called_once()
-        assert mm.call_args.kwargs['method'] == 'robust_pca'
-        assert masters['flat'] is not None
-
-    def test_no_auto_no_trigger(self):
+    def test_auto_does_not_trigger(self):
         n = Config.ROBUST_PCA_MIN_FRAMES + 2
         frames = {'light': _frames(n), 'dark': [], 'flat': [], 'bias': []}
         with patch('src.cli.make_master') as mm:
-            masters = _build_masters(frames, args=_master_args(auto=False))
+            masters = _build_masters(frames, args=_master_args())
         mm.assert_not_called()
         assert masters['flat'] is None
+
+    def test_explicit_flag_still_builds_it(self):
+        n = Config.ROBUST_PCA_MIN_FRAMES + 2
+        frames = {'light': _frames(n), 'dark': [], 'flat': [], 'bias': []}
+        with patch('src.cli.make_master', return_value=np.zeros((4, 4), dtype=np.float32)) as mm:
+            masters = _build_masters(frames, args=_master_args(
+                flat_from_lights=True, _explicit_cli_dests={'flat_from_lights'}))
+        mm.assert_called_once()
+        assert mm.call_args.kwargs['method'] == 'robust_pca'
+        assert masters['flat'] is not None
 
 
 class TestDarkTempModelAutoTrigger:

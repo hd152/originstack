@@ -250,6 +250,7 @@ Details in the linked notes.
 - Camera-wide CFA equalisation prior: 2x2 green offsets vary 5-15 ADU between sessions, 0.4 ADU within one ([camera-profile](dev-notes/camera-profile.md)).
 - Per-unit bad-pixel / vignetting library: the session dark already holds the recurring bad pixels; a leave-one-out vignetting map gains 0-5% after a quadratic ([camera-profile](dev-notes/camera-profile.md)).
 - Sharper learned deconvolution from more of the same data: a stricter seeing cut (top 10% is 3% narrower than top 30%), cross-night pairs (x1) and a 2-4x wider U-Net all land on v3's width-noise curve when compared at equal noise (`tools/eval_nn_matched_noise.py`); run-to-run spread ~1.5% ([nn-deconv-runbook](dev-notes/nn-deconv-runbook.md)).
+- `--flat-from-lights` under `--auto` for sessions without flats: the target leaks into the low-rank flat unless it moves by more than its own size; removed ~95% of M31's disk on an S50 Pro ([module-notes](dev-notes/module-notes.md)).
 - Variance-vs-signal slope for raw Origin gain: the stepped raw values make it quantisation-dominated; use the two-point ratio (`camera_profile.raw_pair_gain`).
 
 ### Native (Rust) build
