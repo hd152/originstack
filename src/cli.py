@@ -20,7 +20,13 @@ from src.background import _gaussian_blur
 from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import build_hot_pixel_map
-from src.frame_discovery import discover_frames, group_lights_by_filter, select_matching_darks, select_matching_flats
+from src.frame_discovery import (
+    discover_frames,
+    group_lights_by_filter,
+    is_os_metadata,
+    select_matching_darks,
+    select_matching_flats,
+)
 from src.gpu_context import get_gpu, reset_gpu
 from src.health_check import run_health_check
 from src.io_fits import make_master
@@ -1115,7 +1121,7 @@ def _root_has_input_fits(directory: str) -> bool:
     from src.frame_discovery import classify_frame
     from src.io_fits import _read_fits_header
     for f in sorted(os.listdir(directory)):
-        if not f.lower().endswith(('.fit', '.fits')):
+        if not f.lower().endswith(('.fit', '.fits')) or is_os_metadata(f):
             continue
         path = os.path.join(directory, f)
         if not os.path.isfile(path):
@@ -1146,7 +1152,8 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         raise SystemExit(1)
 
     overall_start = time.time()
-    subdirs = [os.path.join(directory, d) for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
+    subdirs = [os.path.join(directory, d) for d in os.listdir(directory)
+               if os.path.isdir(os.path.join(directory, d)) and not is_os_metadata(d)]
     targets = []
     # Several sessions stacked separately then combined: Phase 4 belongs on the
     # combined stack, not on each input to it (see stack_target).

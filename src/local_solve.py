@@ -581,6 +581,42 @@ def solve_header(lum: np.ndarray, header, verbose: bool = False,
     return True
 
 
+def solve_raw_frame(data: np.ndarray, header, verbose: bool = False,
+                    fetch: bool = True) -> Optional[Dict[str, tuple]]:
+    """Solve one raw sub from its header's pointing (RA/DEC, FOCALLEN, XPIXSZ)
+    and return TAN WCS cards for its full-resolution pixel grid, or None.
+
+    For captures without a session solve (Seestar, Dwarf, any camera that writes
+    pointing keywords). The sub is 2x2-binned first, so a Bayer mosaic needs no
+    debayer and its colour lattice does not reach the star detector; the
+    solution is scaled back to native pixels. A scale is required: without one
+    the search covers 0.3-30 "/px and a stack is no place to wait for that.
+    """
+    a = np.asarray(data, dtype=np.float32)
+    if a.ndim == 3:
+        a = a.mean(axis=0 if a.shape[0] in (1, 3) else 2)
+    if a.ndim != 2 or min(a.shape) < 64:
+        return None
+    h, w = (a.shape[0] // 2) * 2, (a.shape[1] // 2) * 2
+    a = a[:h, :w]
+    binned = np.ascontiguousarray(a[0::2, 0::2] + a[1::2, 0::2] + a[0::2, 1::2] + a[1::2, 1::2])
+    hint = hint_from_header(header, a.shape)
+    if hint is None or not hint.scale:
+        return None
+    hint = SolveHint(hint.ra, hint.dec, search_radius=hint.search_radius,
+                     scale=hint.scale * 2.0, scale_tol=hint.scale_tol, source=hint.source)
+    sol = solve_local(binned, hint, fetch=fetch, verbose=verbose)
+    if sol is None:
+        return None
+    cards = sol.header_cards()
+    # binned 1-based c -> native 1-based 2c - 0.5 (binned pixel centre = native 2b + 0.5)
+    for k in ('CRPIX1', 'CRPIX2'):
+        cards[k] = (2.0 * cards[k][0] - 0.5, cards[k][1])
+    for k in ('CD1_1', 'CD1_2', 'CD2_1', 'CD2_2'):
+        cards[k] = (cards[k][0] / 2.0, cards[k][1])
+    return cards
+
+
 def build_index(tiles: Sequence[Tuple[int, int]], root: Optional[str] = None,
                 refresh: bool = False, progress=None) -> Tuple[int, int]:
     """Fetch *tiles* into the index. Returns (fetched, failed)."""
