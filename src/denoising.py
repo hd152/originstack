@@ -898,6 +898,7 @@ def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
     # (monotone in it) needs no taper of its own; fade over the 1 px ring only. A
     # 0.5 FWHM taper restored the full halo next to pixels keeping ~15% of it: a bump.
     taper = np.clip(R + 1.0 - rr, 0.0, 1.0)
+    nbins = int(np.ceil(rr.max())) + 2
     lw = np.array([0.299, 0.587, 0.114], dtype=np.float32)
     sky_sigma = max(float(_estimate_sky_sigma(img)), 1e-6)
 
@@ -920,13 +921,40 @@ def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
         A = float(el[rr <= 1.5].max())
         if A < 5.0 * sky_sigma:
             continue
-        keep = np.clip(el / A, 0.0, 1.0) ** amount
+        # The star's own profile: the median light at each radius (about the
+        # sub-pixel centroid), not each pixel's light. Taken pixel by pixel,
+        # whatever lay above B inside R -- a galaxy's granular light, its arms --
+        # counted as the star's wing and lost (1 - (e/A)**amount) of itself, most
+        # of it where e << A: on Andromeda every star on the disk left a darker disc.
+        rs = np.hypot(yy - (ys[i] - cy), xx - (xs[i] - cx))
+        rbin = np.minimum(np.rint(rs).astype(np.intp), nbins - 1)
+        prof = ndimage.median(np.concatenate([es, el[..., None]], axis=2).reshape(-1, 4).T
+                              .ravel(), labels=(rbin.ravel()[None, :]
+                                                + nbins * np.arange(4)[:, None]).ravel(),
+                              index=np.arange(4 * nbins))
+        prof = np.nan_to_num(np.asarray(prof, dtype=np.float32)).reshape(4, nbins)
+        # The star ends where its profile stops standing out of the scatter of the
+        # light at that radius (a ring's median wanders with the texture under it:
+        # +50 ADU at 2 FWHM on a synthetic disk, removed as if it were wing); beyond
+        # that, and wherever the profile would rise again outward, it is zero.
+        lb = rbin.ravel()
+        cnt = np.maximum(np.bincount(lb, minlength=nbins), 1)
+        spread = np.sqrt(np.maximum(np.bincount(lb, el.ravel() ** 2, nbins) / cnt
+                                    - (np.bincount(lb, el.ravel(), nbins) / cnt) ** 2, 0.0))
+        err = 1.25 * spread / np.sqrt(cnt)
+        faint = np.nonzero((prof[3] < 3.0 * err) & (np.arange(nbins) >= 1))[0]
+        if faint.size:
+            prof[:, faint[0]:] = 0.0
+        prof = np.minimum.accumulate(np.maximum(prof, 0.0), axis=1)
+        es_r = prof[:3].T[rbin]
+        el_r = prof[3][rbin]
+        keep = np.clip(el_r / A, 0.0, 1.0) ** amount
         removed = (1.0 - keep) * taper
-        # Never take a pixel below its local background: the smoothed light
-        # can exceed a pixel's own (a dip between two stars, a noise low),
-        # and a near-zero result made local contrast's ratio blow up.
-        cut -= np.minimum(np.clip(es, 0.0, None) * removed[..., None],
-                          np.clip(e, 0.0, None))
+        # Never take a pixel below its local background: the profile can exceed a
+        # pixel's own light (a dip between two stars, a noise low), and a
+        # near-zero result made local contrast's ratio blow up.
+        light = np.minimum(np.clip(es, 0.0, None), 1.5 * np.clip(es_r, 0.0, None))
+        cut -= np.minimum(light * removed[..., None], np.clip(e, 0.0, None))
         n_done += 1
     if n_done == 0:
         return img

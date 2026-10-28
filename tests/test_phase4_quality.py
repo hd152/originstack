@@ -341,6 +341,35 @@ def test_shrink_stars_leaves_no_moat_around_a_haloed_star():
     assert rise < 10.0          # old code: 93 ADU (a 157 ADU moat); now ~6 (the 1 px fade)
 
 
+def test_shrink_stars_leaves_a_galaxys_texture_under_a_star():
+    """A star on granular galaxy light: the light inside the star's radius that is not
+    the star must keep its level. Taken pixel by pixel, every bright grain above the
+    ring's median counted as star wing and lost most of itself, and each star on the
+    Andromeda disk left a disc darker than the disk around it."""
+    from astropy.table import Table
+
+    from src.denoising import shrink_stars
+    rng = np.random.default_rng(1)
+    H = 201
+    yy, xx = np.mgrid[:H, :H]
+    texture = 300.0 * np.abs(rng.normal(0, 1, (H, H)))      # skewed, like unresolved stars
+    from scipy import ndimage
+    texture = ndimage.gaussian_filter(texture, 1.0) * 3
+    fwhm = 6.0
+    s = fwhm / 2.3548
+    star = 20000.0 * np.exp(-((yy - 100) ** 2 + (xx - 100) ** 2) / (2 * s * s))
+    img = (1000.0 + texture + star)[..., None] * np.ones(3)
+    img = img.astype(np.float32)
+    src = Table({'xcentroid': [100.0], 'ycentroid': [100.0], 'flux': [1.0]})
+    out = shrink_stars(img, src, fwhm, amount=0.5) @ LUMA
+    r = np.hypot(yy - 100, xx - 100)
+    ring = (r >= 1.6 * fwhm) & (r <= 2.4 * fwhm)          # inside R, star light ~gone
+    outside = (r >= 3.5 * fwhm) & (r <= 5 * fwhm)
+    disc = np.median(out[ring]) - np.median(out[outside])
+    assert disc > -0.05 * np.std(texture)                 # old code: about -0.6 std
+    assert out[100, 100] > 0.97 * (img @ LUMA)[100, 100]  # core kept
+
+
 def test_shrink_stars_noop_cases():
     from src.denoising import shrink_stars
     img, src, _ = _star_grid()

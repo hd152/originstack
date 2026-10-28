@@ -1017,6 +1017,50 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
             lo, hi = np.percentile(rgb[:, :, c], Config.PREVIEW_STRETCH_PERCENTILES)
             lo = max(lo, 0.0)  # Don't let negative noise expand the display range
             out[:, :, c] = _rescale_intensity(rgb[:, :, c], lo, hi)
+        return out
+    return _feather_clipped_core(out, rgb)
+
+
+def _feather_clipped_core(out: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    """Soften the edge of an extended clipped core in the display image.
+
+    Where the sensor clipped over an extended region (M42's Trapezium region in
+    every 20 s sub), the stack holds a flat plateau ending in a cliff: the light
+    just outside it is a third of the plateau's within a few pixels, and the
+    plateau's outline -- set by where each sub happened to clip, not by the
+    nebula -- rendered as a jagged white cut-out however the highlights were
+    rolled off. The plateau holds no detail, so its outline is blended into a
+    blurred copy of the display over a width that scales with it (~8 px on
+    M42's 70 px plateau); star cores (< ``Config.PREVIEW_CORE_FEATHER_MIN_PIXELS``)
+    and the rest of the image are untouched."""
+    from scipy import ndimage
+
+    from src.models import Config
+    lum = luminance(rgb)
+    peak = float(lum.max())
+    if not np.isfinite(peak) or peak <= 0:
+        return out
+    labels, n = ndimage.label(lum >= Config.PREVIEW_CORE_FEATHER_LEVEL * peak)
+    if n == 0:
+        return out
+    areas = np.bincount(labels.ravel())
+    areas[0] = 0
+    k = int(areas.argmax())
+    if areas[k] < Config.PREVIEW_CORE_FEATHER_MIN_PIXELS:
+        return out
+    plate = labels == k
+    sigma = float(np.clip(Config.PREVIEW_CORE_FEATHER_SCALE * np.sqrt(areas[k] / np.pi), 2.0, 12.0))
+    ys, xs = np.nonzero(plate)
+    pad = int(np.ceil(4 * sigma)) + 1
+    y0, y1 = max(ys.min() - pad, 0), min(ys.max() + pad + 1, out.shape[0])
+    x0, x1 = max(xs.min() - pad, 0), min(xs.max() + pad + 1, out.shape[1])
+    win = out[y0:y1, x0:x1]
+    w = np.clip(2.0 * ndimage.gaussian_filter(plate[y0:y1, x0:x1].astype(np.float32), sigma),
+                0.0, 1.0)[..., None]
+    blur = np.stack([ndimage.gaussian_filter(win[..., c], sigma) for c in range(win.shape[2])],
+                    axis=2)
+    out = np.array(out, copy=True)
+    out[y0:y1, x0:x1] = win * (1.0 - w) + blur * w
     return out
 
 

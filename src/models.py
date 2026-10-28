@@ -86,6 +86,13 @@ class Config:
     # with their own settings; Orion's outer wings needed ~0.25), with b capped.
     PREVIEW_NEBULA_FAINT_LEVEL = 0.25
     PREVIEW_NEBULA_MAX_B = 500.0
+    # Extended clipped core (io_fits._feather_clipped_core): the largest connected
+    # region at >= LEVEL of the image's peak luminance, when it has at least
+    # MIN_PIXELS (Orion's Trapezium plateau ~15k px; saturated star cores a few
+    # hundred), has its outline feathered over SCALE x its equivalent radius.
+    PREVIEW_CORE_FEATHER_LEVEL = 0.9
+    PREVIEW_CORE_FEATHER_MIN_PIXELS = 2000
+    PREVIEW_CORE_FEATHER_SCALE = 0.11
     # --stretch noisefloor: the GHS strength is solved so one sky sigma spans
     # this many display levels (of 255) at the sky, the black point sitting
     # BLACK_SIGMA sky sigmas below the sky median. Starting values (2026-10,
@@ -154,6 +161,7 @@ class Config:
     DBE_MAX_SAMPLES = 4000        # Sample cap (local regression is O(N) per eval point)
     DBE_DENSE_FIELD_THRESH = 0.70 # Emission-mask coverage above which dense-field fallback is used
     DBE_FIT_SIGMA_PATCHES = 1.25  # Local-regression Gaussian bandwidth, in units of patch_size
+    DBE_HALPHA_SIGMA = 3.0        # H-alpha excess mask threshold (dbe_halpha_mask; --auto, emission nebulae)
                                   # (swept 1.0-2.0 on real data: 1.0-1.25 matches the old RBF's
                                   # large-scale flatness; larger trades flatness for smoothness)
 
