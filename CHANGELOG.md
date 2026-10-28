@@ -14,6 +14,9 @@ match the `VERSION` file and `v*` git tags.
   *Result not right? Report it* link next to its result buttons.
 
 ### Changed
+- README and website name the ZWO Seestar S50 and S50 Pro next to the Celestron Origin,
+  and the *Other cameras* page has a Seestar section: where its frames are saved, which
+  folder to choose, and what was tested.
 - README opens with a before/after from one Origin session and three steps to get started.
 - Bug report form: version placeholder, the Mac and Windows installer/portable builds, and
   the Mac log folder.
