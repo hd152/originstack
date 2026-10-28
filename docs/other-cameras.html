@@ -37,8 +37,9 @@
       </nav>
     </div>
     <h1>Other cameras</h1>
-    <p class="lede">OriginStack was built for the Celestron Origin and is tested mostly on its data, but nothing in the stacking itself is specific to it. Frames from other one-shot-colour cameras, dedicated astro cameras and DSLRs alike, go through the same pipeline. This page says what works, how to set up the folder, and where the limits are today.</p>
+    <p class="lede">OriginStack was built for the Celestron Origin and is tested mostly on its data, but nothing in the stacking itself is specific to it. The ZWO Seestar S50 and S50 Pro have been tested too. Frames from other one-shot-colour cameras, dedicated astro cameras and DSLRs alike, go through the same pipeline. This page says what works, how to set up the folder, and where the limits are today.</p>
     <p class="toc">
+      <a href="#seestar">Seestar S50 and S50 Pro</a>
       <a href="#formats">File formats</a>
       <a href="#folder">The folder</a>
       <a href="#colour">Colour sensors</a>
@@ -50,6 +51,23 @@
 </header>
 
 <main>
+<section id="seestar">
+  <div class="wrap">
+    <h2>Seestar S50 and S50 Pro</h2>
+    <p class="intro measure">The Seestar keeps its individual frames only if <b>Save Each Frame</b> is on in the Seestar app's settings. They are saved in a folder named after the target with <code>_sub</code> at the end, for example <code>M 31_sub</code>, inside <code>MyWorks</code>. Copy that folder over USB or Wi-Fi and choose it in OriginStack.</p>
+    <dl class="feat">
+      <div><dt>No calibration frames needed</dt>
+        <dd><p>The Seestar subtracts its dark from every frame before saving it and takes no flats, so the folder holds lights only. Leave <code>--flat-from-lights</code> off: a flat made from the lights takes in the galaxy or nebula too, unless the target moves well across the frame.</p></dd></div>
+      <div><dt>Sky position and colour</dt>
+        <dd><p>The frames record where the telescope pointed, the focal length and the pixel size. The first frame is plate-solved from them against Gaia, which sets the colours from Gaia stars, as on an Origin session.</p></dd></div>
+      <div><dt>Field rotation</dt>
+        <dd><p>In alt-az mode the field turns during the night (21&deg; over 45 minutes on one M101 session). Registration measures and removes it; the edges at least half of the frames cover are kept, a little noisier than the middle.</p></dd></div>
+      <div><dt>Tested on</dt>
+        <dd><p>M101 on an S50 (214 frames of 10 s, alt-az) and M31 on an S50 Pro (133 frames of 10 s, equatorial mode). The Seestar app's own stacked file is not a raw frame; choose the <code>_sub</code> folder, not the target folder above it.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
 <section id="formats">
   <div class="wrap">
     <h2>File formats</h2>
