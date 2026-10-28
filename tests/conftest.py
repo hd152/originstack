@@ -19,6 +19,27 @@ disable_astropy_network()
 import pytest  # noqa: E402
 
 
+@pytest.fixture(autouse=True, scope='session')
+def _no_network():
+    """No test reaches a real server. Every pipeline test looked the target name
+    up on SIMBAD; where the connection hangs that cost the TCP connect timeout
+    (~21 s) per run, two-thirds of the whole suite's time. A request now fails at
+    once with the error a dead network gives, which every caller already handles.
+    Tests of the HTTP layer patch ``urllib.request.urlopen`` themselves, over this.
+    Session-scoped: unittest classes stack in ``setUpClass``, before any
+    function-scoped fixture."""
+    import urllib.error
+    import urllib.request
+
+    def _refuse(req, *a, **k):
+        url = getattr(req, 'full_url', req)
+        raise urllib.error.URLError(f'network disabled in tests (would have contacted {url})')
+    mp = pytest.MonkeyPatch()
+    mp.setattr(urllib.request, 'urlopen', _refuse)
+    yield
+    mp.undo()
+
+
 @pytest.fixture(autouse=True)
 def _no_sweep_of_the_real_temp_folder(monkeypatch):
     """cli.apply_temp_dir removes OriginStack leftovers from the temp folder once
