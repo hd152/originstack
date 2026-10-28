@@ -41,6 +41,20 @@ def _no_network():
 
 
 @pytest.fixture(autouse=True)
+def _no_reachability_probe(monkeypatch):
+    """net_query checks a server answers a TCP handshake before the first request;
+    tests mock the HTTP layer and must not open real sockets. Tests of the check
+    restore it from ``__wrapped__``."""
+    from src import net_query
+    real = getattr(net_query._require_reachable, '__wrapped__', net_query._require_reachable)
+
+    def _skip(url):
+        return None
+    _skip.__wrapped__ = real
+    monkeypatch.setattr(net_query, '_require_reachable', _skip)
+
+
+@pytest.fixture(autouse=True)
 def _no_sweep_of_the_real_temp_folder(monkeypatch):
     """cli.apply_temp_dir removes OriginStack leftovers from the temp folder once
     per process. Tests must never do that to the real one: a test run on a

@@ -90,6 +90,46 @@ def is_offline() -> bool:
 def _require_online(url: str) -> None:
     if _OFFLINE:
         raise OfflineError(f"network disabled by --offline (would have contacted {url.split('/')[2]})")
+    _require_reachable(url)
+
+
+# Seconds to wait for a server's TCP handshake before calling it unreachable. The
+# request's own timeout (30 s) covers a slow answer; a server that never answers
+# the handshake instead held each request for the OS connect timeout -- 21 s on
+# Windows -- and SIMBAD down cost every run that much per lookup.
+_CONNECT_TIMEOUT = 5.0
+# A server that did not answer is not tried again for this long (the desktop app is
+# one long-lived process: a blip must not switch a server off for the session).
+_UNREACHABLE_TTL = 300.0
+# host -> (True, when) once it answered, (the error it gave, when) if it did not
+_HOST_STATE: Dict[str, Tuple[Any, float]] = {}
+
+
+def _require_reachable(url: str) -> None:
+    """Raise ``URLError`` at once for a server that did not answer a TCP handshake
+    within ``_CONNECT_TIMEOUT``, remembered for ``_UNREACHABLE_TTL`` so the run's
+    later requests to it fail immediately too. A server that answered is not
+    checked again. Behind a proxy the server is not contacted directly, so
+    nothing is checked."""
+    import socket
+
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname
+    if not host or urllib.request.getproxies().get(parts.scheme):
+        return
+    state, when = _HOST_STATE.get(host, (None, 0.0))
+    if state is True:
+        return
+    if state is None or time.monotonic() - when > _UNREACHABLE_TTL:
+        port = parts.port or (443 if parts.scheme == 'https' else 80)
+        try:
+            socket.create_connection((host, port), timeout=_CONNECT_TIMEOUT).close()
+            state = True
+        except OSError as exc:
+            state = exc
+        _HOST_STATE[host] = (state, time.monotonic())
+    if state is not True:
+        raise urllib.error.URLError(f"{host} unreachable ({state})")
 
 
 def _http_get(url: str, timeout: float = _DEFAULT_TIMEOUT) -> bytes:

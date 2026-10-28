@@ -302,3 +302,62 @@ class TestCheckForUpdate:
         with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
             net_query.check_for_update("0.1.0", repo="someone/fork")
         assert "someone/fork" in captured["url"]
+
+
+class TestReachability:
+    """A server that does not answer the TCP handshake fails fast, once per window."""
+
+    @pytest.fixture
+    def check(self, monkeypatch):
+        monkeypatch.setattr(net_query, '_HOST_STATE', {})
+        monkeypatch.setattr(net_query.urllib.request, 'getproxies', lambda: {})
+        return net_query._require_reachable.__wrapped__
+
+    def test_unreachable_host_fails_fast_and_is_remembered(self, check):
+        calls = []
+
+        def refuse(addr, timeout=None):
+            calls.append((addr, timeout))
+            raise OSError('timed out')
+        with mock.patch('socket.create_connection', side_effect=refuse):
+            for _ in range(3):
+                with pytest.raises(net_query.urllib.error.URLError, match='simbad.example'):
+                    check('https://simbad.example/sim-tap/sync')
+        assert calls == [(('simbad.example', 443), net_query._CONNECT_TIMEOUT)]
+
+    def test_retried_after_the_window(self, check, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr(net_query.time, 'monotonic', lambda: clock[0])
+        with mock.patch('socket.create_connection', side_effect=OSError('down')):
+            with pytest.raises(net_query.urllib.error.URLError):
+                check('https://a.example/x')
+        clock[0] += net_query._UNREACHABLE_TTL + 1
+        with mock.patch('socket.create_connection') as ok:
+            check('https://a.example/x')
+            assert ok.call_count == 1
+
+    def test_a_host_that_answered_is_not_checked_again(self, check):
+        with mock.patch('socket.create_connection') as ok:
+            check('https://b.example/x')
+            check('https://b.example/y')
+        assert ok.call_count == 1
+
+    def test_behind_a_proxy_nothing_is_checked(self, check, monkeypatch):
+        monkeypatch.setattr(net_query.urllib.request, 'getproxies',
+                            lambda: {'https': 'http://proxy:3128'})
+        with mock.patch('socket.create_connection', side_effect=OSError('x')) as c:
+            check('https://c.example/x')
+        assert c.call_count == 0
+
+    def test_offline_wins(self, monkeypatch):
+        monkeypatch.setattr(net_query, '_OFFLINE', True)
+        with pytest.raises(net_query.OfflineError):
+            net_query._require_online('https://d.example/x')
+
+    def test_unreachable_lookup_returns_none_quickly(self, check, monkeypatch):
+        monkeypatch.setattr(net_query, '_require_reachable', check)
+        import time as _t
+        with mock.patch('socket.create_connection', side_effect=OSError('timed out')):
+            t0 = _t.monotonic()
+            assert net_query.simbad_name_lookup('M42') is None
+        assert _t.monotonic() - t0 < 1.0
