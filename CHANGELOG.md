@@ -6,6 +6,12 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-10-28
+
+ZWO Seestar S50 and S50 Pro sessions get a plate solve, Gaia colour and their full galaxy
+halos; Andromeda, Orion and the Horsehead look right at the defaults; and a problem report
+can be copied into an email or a forum post.
+
 ### Added
 - **Seestar, Dwarf and other cameras that record their pointing get a plate solve and
   Gaia colour calibration.** Without the Origin's session file the stack had no WCS, so
