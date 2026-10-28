@@ -5,13 +5,35 @@
   </picture>
 </p>
 
-**Streaming FITS stacker for astrophotography — runs on ordinary hardware, scales to any frame count.**
+<p align="center"><b>Free one-click stacking and processing for the Celestron Origin and any colour camera.</b><br>
+From a night of raw frames to a finished image on your own computer: no account, no subscription.</p>
+
+<p align="center">
+  <a href="https://github.com/hd152/originstack/releases/latest"><b>⬇ Download for Windows, Mac or Linux</b></a> ·
+  <a href="https://originstack.site/">Website</a> ·
+  <a href="https://originstack.site/origin-vs-originstack.html">Ten before/afters</a> ·
+  <a href="https://github.com/hd152/originstack/discussions">Questions</a>
+</p>
 
 [![CI](https://github.com/hd152/originstack/actions/workflows/ci.yml/badge.svg)](https://github.com/hd152/originstack/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/hd152/originstack)](https://github.com/hd152/originstack/releases/latest)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-[**Website**](https://originstack.site/) · [Download](https://github.com/hd152/originstack/releases/latest) · [Changelog](CHANGELOG.md) · [Code signing policy](CODE_SIGNING_POLICY.md) · [Support on Ko-fi](https://ko-fi.com/originstack)
+![Trifid Nebula: the Celestron Origin's own stack on the left, OriginStack's on the right, from the same frames](docs/img/before-after-trifid.jpg)
+
+*Trifid Nebula (M20) from one Origin session. Left: the stack the Origin saves itself (`FinalStackedMaster.tiff`, shown with PixInsight's standard automatic stretch, because the file itself is mid-grey). Right: OriginStack on the same session folder with default settings and no edits afterwards.*
+
+## Get started
+
+1. **Download** the [latest release](https://github.com/hd152/originstack/releases/latest): `OriginStack-<version>-setup.exe` for Windows, the `macos-arm64` (Apple silicon) or `macos-x86_64` (Intel) zip for a Mac, or the Linux tarball. No Python needed.
+2. **Copy a session folder off the Origin** to your computer: the folder the telescope saved for one target, with its FITS frames, kept as it is ([what's in a session folder](https://originstack.site/stack-celestron-origin.html)).
+3. **Open OriginStack, pick that folder, press Start.** It calibrates, aligns and stacks, then removes gradients, sets colour from Gaia stars, reduces noise and stretches the result, with settings chosen for your target.
+
+**Stuck, or the result looks wrong?** Ask in [Discussions](https://github.com/hd152/originstack/discussions), or use **Report a problem** in the app: it fills in the version, system and log for you, as a GitHub issue or as text to paste into an email or a forum post. Nothing is sent until you send it.
+
+[Changelog](CHANGELOG.md) · [Code signing policy](CODE_SIGNING_POLICY.md) · [Support on Ko-fi](https://ko-fi.com/originstack)
+
+## About
 
 OriginStack is a full-featured Python pipeline for stacking and processing astronomical images, built from scratch: no OpenCV, scikit-image, PyWavelets, astroalign, astroquery or ONNX runtime — just NumPy, SciPy, Astropy and Pillow. The hot paths run in **Rust**: 80+ multi-threaded native kernels, ~5–150× faster than NumPy/SciPy, about 1.5–1.8× faster end to end on real sessions (see [Performance](#performance)), with a pure-NumPy fallback wherever the module isn't built. It was designed for the Celestron Origin smart telescope but works with any OSC/DSLR/mirrorless camera. Reads FITS, camera RAW (CR2/CR3/NEF/ARW/DNG/ORF/RW2/RAF/PEF/3FR/MRW/X3F/IIQ — needs `rawpy`), TIFF (needs `tifffile`), XISF, and SER (planetary/lucky-imaging video) — mix and match formats freely within one input directory. The core design principle is a **streaming architecture**: frames are loaded, processed, and freed one at a time, so memory usage stays constant regardless of how many frames you have.
 

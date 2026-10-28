@@ -543,7 +543,7 @@
  "{n} lights": "{n} 张亮场",
  "{settings} and {n} more": "{settings} 及另外 {n} 项",
  "Report a problem": "报告问题",
- "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "在浏览器中打开一个新的 GitHub Issue，并预先填好版本、系统信息和日志末尾。在您于该页面提交之前，不会发送任何内容。",
+ "Opens a new GitHub issue in your browser, or copies the same report for an email or a forum post, with the version, system and the end of the log filled in. Nothing is sent until you send it yourself.": "在浏览器中打开新的 GitHub Issue，或复制同一份报告用于邮件或论坛帖子，版本、系统和日志末尾已填好。在您亲自发送之前不会发送任何内容。",
  "About {minutes} min remaining": "???? {minutes} ??",
  "About {seconds} sec remaining": "???? {seconds} ?",
  "Apply to JPEG": "??? JPEG",
@@ -591,5 +591,10 @@
  "Lossless PNG": "无损 PNG",
  "The final image without JPEG compression.": "未经 JPEG 压缩的最终图像。",
  "16-bit PNG for editing": "用于编辑的 16 位 PNG",
- "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "每通道 16 位的最终图像：在其他软件中继续调整曲线或色阶也不会出现色阶断层。"
+ "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "每通道 16 位的最终图像：在其他软件中继续调整曲线或色阶也不会出现色阶断层。",
+ "Open a GitHub issue…": "打开 GitHub Issue…",
+ "Copy report (for an email or forum post)": "复制报告（用于邮件或论坛帖子）",
+ "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "问题报告已复制到剪贴板。请检查后粘贴到邮件或论坛帖子中（Cloudy Nights、GitHub Discussions 页面）。",
+ "Result not right? Report it": "结果不对？报告问题",
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "右上角的“报告问题”可打开 GitHub Issue，或复制包含日志的详细信息用于邮件或论坛帖子。"
 }
