@@ -45,7 +45,7 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
     files = sorted(
         os.path.join(directory, f)
         for f in os.listdir(directory)
-        if f.lower().endswith(_all_exts)
+        if f.lower().endswith(_all_exts) and not is_os_metadata(f)
     )
     files += _ser_files
     frames = {'light': [], 'dark': [], 'flat': [], 'bias': []}
@@ -111,6 +111,13 @@ def _merge_json_sidecar(fits_path: str, hdr: dict) -> None:
                 hdr[fkey] = transform(val) if transform else val
             except Exception:
                 pass
+
+
+def is_os_metadata(name: str) -> bool:
+    """A file or folder the OS writes beside the data, never a frame: macOS
+    AppleDouble files (``._Light_0001.fit``, 4 KB of resource fork with a frame's
+    extension) and the ``__MACOSX`` folder a Finder zip unpacks to elsewhere."""
+    return name.startswith('._') or name == '__MACOSX'
 
 
 def classify_frame(path: str, header: dict) -> str:

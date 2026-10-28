@@ -1492,6 +1492,10 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
                 wcs = _stack_wcs or build_wcs_keywords(si)
                 for kw, (val, comment) in wcs.items():
                     header[kw] = (val, comment)
+        elif getattr(args, '_stack_wcs', None) and 'CTYPE1' not in header:
+            # no info.json: the WCS came from solving the first sub (Seestar, Dwarf)
+            for kw, (val, comment) in args._stack_wcs.items():
+                header[kw] = (val, comment)
 
         # Mark the output as a debayered RGB image so FITS viewers open it
         # correctly.  Siril and many other tools recognise COLORTYP=SRGB to

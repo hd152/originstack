@@ -7,6 +7,11 @@ match the `VERSION` file and `v*` git tags.
 ## [Unreleased]
 
 ### Added
+- **Seestar, Dwarf and other cameras that record their pointing get a plate solve and
+  Gaia colour calibration.** Without the Origin's session file the stack had no WCS, so
+  colour calibration was skipped. The first sub is now solved from the RA/DEC, focal
+  length and pixel size in its header and its solution carried onto the stack. Tested
+  on a Seestar S50 (M101) and an S50 Pro (M31) session.
 - Desktop app: **Report a problem** now offers *Copy report* as well as opening a GitHub
   issue, so a report (version, system, the error and the end of the log, with your home
   folder hidden) can go into an email or a forum post without a GitHub account. A failed
@@ -19,6 +24,9 @@ match the `VERSION` file and `v*` git tags.
   the Mac log folder.
 
 ### Fixed
+- **Frames copied from a Mac.** A Finder zip holds a `._Light_….fit` file (resource-fork
+  metadata) beside every frame and a `__MACOSX` folder; each was taken as a light (or a
+  session folder). They are now ignored.
 - **No more 20 s stall when a catalogue server can't be reached.** Where a server
   (SIMBAD, often) dropped connections silently, each lookup waited for Windows' ~21 s
   TCP connect timeout. A server is now checked with a 5 s handshake first; one that
