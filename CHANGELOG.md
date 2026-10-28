@@ -6,6 +6,18 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+- Desktop app: **Report a problem** now offers *Copy report* as well as opening a GitHub
+  issue, so a report (version, system, the error and the end of the log, with your home
+  folder hidden) can go into an email or a forum post without a GitHub account. A failed
+  run turns the link to the accent colour and says what it does; a finished run has a
+  *Result not right? Report it* link next to its result buttons.
+
+### Changed
+- README opens with a before/after from one Origin session and three steps to get started.
+- Bug report form: version placeholder, the Mac and Windows installer/portable builds, and
+  the Mac log folder.
+
 ## [2.17.0] - 2026-10-27
 
 Comets stacked on the comet automatically, more of the frame kept, cleaner multi-night

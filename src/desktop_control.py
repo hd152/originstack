@@ -454,12 +454,12 @@ def _redact_home(text: str) -> str:
     return text
 
 
-def problem_report_url(log_text: str = '', error: Optional[str] = None) -> str:
-    """The issue-form URL: version, OS, Python and native status, the last
-    run's error, and as much of the end of the log as fits."""
+def _report_parts(log_text: str, error: Optional[str], n_lines: int):
+    """Title, the body's head (what happened, system, error) and the end of the
+    log (progress runs folded to their last line), shared by the issue URL and
+    the copied report."""
     import platform
     import sys
-    from urllib.parse import urlencode
 
     from src.utils import native_status, read_version
     version = read_version()
@@ -471,20 +471,45 @@ def problem_report_url(log_text: str = '', error: Optional[str] = None) -> str:
     if error:
         head += ['', '**Error**', '', '```', _redact_home(error.strip())[:1500], '```']
     title = f'[{version}] ' + (_redact_home(error.strip().splitlines()[0])[:80] if error else '')
-
-    def url(lines: List[str]) -> str:
-        body = head[:]
-        if lines:
-            body += ['', f'**Log** (last {len(lines)} lines)', '', '```', *lines, '```']
-        body += ['', '<sub>Please check the text above before submitting: this issue is public. '
-                     'Remove anything you do not want to share.</sub>']
-        return ISSUES_URL + '?' + urlencode({'title': title, 'body': '\n'.join(body)})
-
     lines = [ln.rstrip() for ln in _redact_home(log_text or '').splitlines() if ln.strip()]
     # a progress run ("Combining: 969/1964 rows", ...): only its last line
     stem = [re.sub(r'\d.*', '', ln) for ln in lines]
     lines = [ln for i, ln in enumerate(lines)
-             if i + 1 == len(lines) or stem[i + 1] != stem[i] or not re.search(r'\d+/\d+', ln)][-80:]
+             if i + 1 == len(lines) or stem[i + 1] != stem[i] or not re.search(r'\d+/\d+', ln)]
+    return title, head, lines[-n_lines:]
+
+
+def _report_body(head: List[str], lines: List[str], note: str) -> str:
+    body = head[:]
+    if lines:
+        body += ['', f'**Log** (last {len(lines)} lines)', '', '```', *lines, '```']
+    return '\n'.join(body + ['', note])
+
+
+def problem_report_url(log_text: str = '', error: Optional[str] = None) -> str:
+    """The issue-form URL: version, OS, Python and native status, the last
+    run's error, and as much of the end of the log as fits."""
+    from urllib.parse import urlencode
+
+    title, head, lines = _report_parts(log_text, error, 80)
+    note = ('<sub>Please check the text above before submitting: this issue is public. '
+            'Remove anything you do not want to share.</sub>')
+
+    def url(lines: List[str]) -> str:
+        return ISSUES_URL + '?' + urlencode({'title': title, 'body': _report_body(head, lines, note)})
+
     while lines and len(url(lines)) > _REPORT_URL_MAX:
         lines = lines[max(1, len(lines) // 10):]          # drop the oldest tenth
     return url(lines)
+
+
+def problem_report_text(log_text: str = '', error: Optional[str] = None) -> str:
+    """The same report as plain text for the clipboard, for someone without a
+    GitHub account: pasted into an email or a forum post. No URL limit, so a
+    longer log tail."""
+    title, head, lines = _report_parts(log_text, error, 200)
+    head = ['(What you did, what you expected, what you saw.)' if ln.startswith('<!--') else ln
+            for ln in head]
+    note = f'(Copied from OriginStack. Bug reports: {ISSUES_URL})'
+    return (f'OriginStack problem report {title}'.rstrip() + '\n\n'
+            + _report_body(head, lines, note))

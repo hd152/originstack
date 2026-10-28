@@ -13,7 +13,7 @@ body:
     attributes:
       label: OriginStack version
       description: From the title bar (desktop app) or `python originstack.py --version`.
-      placeholder: "2.2.3"
+      placeholder: "2.17.0"
     validations:
       required: true
 
@@ -22,8 +22,11 @@ body:
     attributes:
       label: How are you running it?
       options:
-        - Windows installer / exe
+        - Windows installer (setup.exe)
+        - Windows portable exe
         - Windows zip (extracted)
+        - Mac (Apple silicon)
+        - Mac (Intel)
         - Linux tarball
         - From source (pip install)
     validations:
@@ -60,7 +63,9 @@ body:
       label: Console output / log
       description: |
         Paste the run's console output, or attach a log file. On the desktop app, logs are in
-        `%LOCALAPPDATA%\OriginStack\logs\` (Windows) or `~/.local/state/OriginStack/logs/` (Linux).
+        `%LOCALAPPDATA%\OriginStack\logs\` (Windows), `~/Library/Logs/OriginStack/` (Mac) or
+        `~/.local/state/OriginStack/logs/` (Linux). The desktop app's "Report a problem" link
+        opens an issue with all of this already filled in.
         Include the `Native accel: ...` startup line if you have it.
       render: shell
 

@@ -1460,10 +1460,11 @@ class App:
         report = tk.Label(inner, text=_('Report a problem'), background=_PANEL,
                           foreground=_TEXT_DIM, font=_FONT, cursor='hand2')
         report.pack(side='right', padx=(0, 16), pady=8)
-        report.bind('<Button-1>', lambda _e: self._report_problem())
-        _Tooltip(report, _('Opens a new GitHub issue in your browser with the version, system '
-                           'and the end of the log filled in. Nothing is sent until you submit it '
-                           'there.'))
+        report.bind('<Button-1>', self._report_menu_at)
+        self.report_label = report
+        _Tooltip(report, _('Opens a new GitHub issue in your browser, or copies the same report '
+                           'for an email or a forum post, with the version, system and the end of '
+                           'the log filled in. Nothing is sent until you send it yourself.'))
         support = tk.Label(inner, text=_('Support OriginStack'), background=_PANEL,
                            foreground=_TEXT_DIM, font=_FONT, cursor='hand2')
         support.pack(side='right', padx=(0, 16), pady=8)
@@ -1518,11 +1519,34 @@ class App:
         if self._update_url:
             webbrowser.open(self._update_url)
 
+    def _report_menu_at(self, event) -> None:
+        """Report a problem: a GitHub issue needs an account, so the same report
+        can also be copied for an email or a forum post."""
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=_('Open a GitHub issue…'), command=self._report_problem)
+        menu.add_command(label=_('Copy report (for an email or forum post)'),
+                         command=self._copy_problem_report)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _report_error(self) -> Optional[str]:
+        snap = self.ui.snapshot()
+        return snap.get('run_error') if snap.get('run_status') == 'error' else None
+
     def _report_problem(self) -> None:
         from src.desktop_control import problem_report_url
-        snap = self.ui.snapshot()
-        error = snap.get('run_error') if snap.get('run_status') == 'error' else None
-        webbrowser.open(problem_report_url(self.log_text.get('1.0', 'end'), error))
+        webbrowser.open(problem_report_url(self.log_text.get('1.0', 'end'), self._report_error()))
+
+    def _copy_problem_report(self) -> None:
+        from src.desktop_control import problem_report_text
+        self.root.clipboard_clear()
+        self.root.clipboard_append(problem_report_text(self.log_text.get('1.0', 'end'),
+                                                       self._report_error()))
+        self.diagnostics_var.set(_('Copied the problem report to the clipboard. Check it, then '
+                                   'paste it into an email or a forum post (Cloudy Nights, the '
+                                   'GitHub Discussions page).'))
 
     def _open_support(self) -> None:
         from src.desktop_control import SUPPORT_URL
@@ -1739,6 +1763,10 @@ class App:
                                  foreground=_ACCENT, cursor='hand2')
         support_link.pack(side='left', padx=(14, 0))
         support_link.bind('<Button-1>', lambda _e: self._open_support())
+        result_report = ttk.Label(self.result_actions, text=_('Result not right? Report it'),
+                                  foreground=_TEXT_DIM, cursor='hand2')
+        result_report.pack(side='left', padx=(14, 0))
+        result_report.bind('<Button-1>', self._report_menu_at)
         self.plan_frame = ttk.Frame(self.summary_frame)
         self.plan_frame.pack(fill='x', padx=4, pady=4)
         self.plan_frame.grid_columnconfigure(1, weight=1)
@@ -2134,7 +2162,11 @@ class App:
                     count=rejected)
             if snap['run_error']:
                 message = _('Run failed: {error}').format(error=snap['run_error'])
+                message += '\n' + _('Report a problem (top right) opens a GitHub issue or copies '
+                                    'the details, with the log, for an email or a forum post.')
             self.diagnostics_var.set(message)
+            # point at the report link after a failure, quiet otherwise
+            self.report_label.configure(foreground=_ACCENT if snap['run_error'] else _TEXT_DIM)
 
         self._sync_restretch_bar(snap)
         self._refresh_run_button(snap)

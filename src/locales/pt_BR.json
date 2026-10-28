@@ -543,7 +543,7 @@
  "{n} lights": "{n} lights",
  "{settings} and {n} more": "{settings} e mais {n}",
  "Report a problem": "Relatar um problema",
- "Opens a new GitHub issue in your browser with the version, system and the end of the log filled in. Nothing is sent until you submit it there.": "Abre uma nova issue do GitHub no navegador com a versão, o sistema e o final do log já preenchidos. Nada é enviado até você enviá-la por lá.",
+ "Opens a new GitHub issue in your browser, or copies the same report for an email or a forum post, with the version, system and the end of the log filled in. Nothing is sent until you send it yourself.": "Abre uma nova issue do GitHub no navegador, ou copia o mesmo relatório para um e-mail ou uma postagem em fórum, com a versão, o sistema e o final do log já preenchidos. Nada é enviado até que você mesmo envie.",
  "About {minutes} min remaining": "Restam cerca de {minutes} min",
  "About {seconds} sec remaining": "Restam cerca de {seconds} s",
  "Apply to JPEG": "Aplicar ao JPEG",
@@ -591,5 +591,10 @@
  "Lossless PNG": "PNG sem perdas",
  "The final image without JPEG compression.": "A imagem final sem compressão JPEG.",
  "16-bit PNG for editing": "PNG de 16 bits para edição",
- "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "A imagem final com 16 bits por canal: novos ajustes de curvas ou níveis em outro editor não criam faixas."
+ "The final image in 16 bits per channel: further curves or levels adjustments in another editor do not band.": "A imagem final com 16 bits por canal: novos ajustes de curvas ou níveis em outro editor não criam faixas.",
+ "Open a GitHub issue…": "Abrir uma issue no GitHub…",
+ "Copy report (for an email or forum post)": "Copiar relatório (para e-mail ou fórum)",
+ "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Relatório do problema copiado para a área de transferência. Confira-o e cole-o em um e-mail ou em uma postagem de fórum (Cloudy Nights, a página GitHub Discussions).",
+ "Result not right? Report it": "Resultado não ficou certo? Relate",
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Relatar um problema (canto superior direito) abre uma issue no GitHub ou copia os detalhes, com o log, para um e-mail ou fórum."
 }

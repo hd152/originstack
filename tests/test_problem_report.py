@@ -58,3 +58,13 @@ def test_home_folder_is_redacted():
     _title, body = _fields(problem_report_url(log, f'cannot write {home}{os.sep}out.fits'))
     assert home not in body and home.replace(os.sep, '/') not in body
     assert f'~{os.sep}astro{os.sep}M101' in body and '~/out.fits' in body
+
+
+def test_copied_report_has_the_same_details_and_a_longer_log():
+    from src.desktop_control import problem_report_text
+    log = '\n'.join(f'line {i}' for i in range(500))
+    text = problem_report_text(log, 'RuntimeError: boom')
+    assert text.startswith(f'OriginStack problem report [{read_version()}] RuntimeError: boom')
+    assert f'OriginStack {read_version()}' in text and '**Error**' in text
+    assert '(last 200 lines)' in text and 'line 499' in text and 'line 299' not in text
+    assert ISSUES_URL in text and '<sub>' not in text and '<!--' not in text
