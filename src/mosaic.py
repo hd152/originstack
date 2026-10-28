@@ -533,6 +533,7 @@ def _match(panels: List[_Placed], shape_out, ref: int, verbose: bool) -> None:
             pairs.append((i, j, sa, sb, y0, x0, m))
     if not pairs:
         return
+    far_off: List[Tuple[int, int, float]] = []
     # 1) gains: per overlap, P_j ~ r P_i + plane, fitted jointly on block medians (a
     #    gain fitted before removing the pair's relative gradient was biased by it,
     #    ~1% on a synthetic 2x2 mosaic: visible seams on a bright galaxy), then the
@@ -556,6 +557,12 @@ def _match(panels: List[_Placed], shape_out, ref: int, verbose: bool) -> None:
             v = (y0 + (by + 0.5) * _BLOCK) / Ho - 0.5
             ratio = _robust_gain(si, sj, u, v)
             if not (0.3 < ratio < 3.0):
+                # A real factor this large is a tile shot through cloud, haze or dew
+                # (M24, Origin Mosaic Mode: three of four tiles 7-28x fainter, the
+                # Origin's own stacks of them nearly blank); it cannot be matched, and
+                # without a word the mosaic just shows the tile's outline.
+                if c == 1 and ratio > 0:
+                    far_off.append((i, j, ratio))
                 continue
             row = np.zeros(n)
             row[i], row[j] = 1.0, -1.0           # log g_i - log g_j = log(ratio)
@@ -571,6 +578,11 @@ def _match(panels: List[_Placed], shape_out, ref: int, verbose: bool) -> None:
             lg[keep] = sol
         for k in range(n):
             panels[k].gain[c] = math.exp(lg[k])
+    for i, j, ratio in far_off:
+        faint, bright, f = (j, i, 1.0 / ratio) if ratio < 1.0 else (i, j, ratio)
+        safe_print(f"  WARNING: {_tile_name(panels[faint].name)} is ~{f:.0f}x fainter than "
+                   f"{_tile_name(panels[bright].name)} where they overlap (cloud, haze or dew during that "
+                   f"tile?); their brightness cannot be matched and the seam will show")
     # 2) planes on the gain-corrected data: (g_i P_i - g_j P_j) ~ plane_i - plane_j
     for c in range(3):
         rows, rhs = [], []
@@ -602,6 +614,12 @@ def _match(panels: List[_Placed], shape_out, ref: int, verbose: bool) -> None:
         for p in panels:
             safe_print(f"    {p.name}: gain {np.round(p.gain, 3)}, plane offset "
                        f"{np.round(p.plane[:, 0], 1)}")
+
+
+def _tile_name(panel_file: str) -> str:
+    """The session folder a panel stack was made from (``<folder>_stack.fits``)."""
+    stem = os.path.splitext(panel_file)[0]
+    return stem[:-6] if stem.endswith('_stack') else stem
 
 
 def _feather(valid: np.ndarray) -> np.ndarray:

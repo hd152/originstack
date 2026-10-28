@@ -6,6 +6,11 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+- A mosaic tile much fainter than its neighbours (shot through cloud, haze or dew) is now
+  named in a warning. Its brightness cannot be matched to the others, so its outline shows in
+  the mosaic; before, that happened without explanation.
+
 ## [2.18.0] - 2026-10-28
 
 ZWO Seestar S50 and S50 Pro sessions get a plate solve, Gaia colour and their full galaxy
