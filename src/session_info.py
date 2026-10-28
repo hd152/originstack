@@ -189,11 +189,22 @@ def stack_wcs_keywords(si: 'SessionInfo', to_stack, shape_hw) -> dict:
     from it), while the stack lives on the registration reference's grid,
     cropped to the common region. *to_stack* maps native (row, col) of that
     first sub to stack (row, col) -- the registration transform minus the crop
-    (``transparency.to_aligned_yx`` convention). The local Jacobian at the
-    sub's centre carries the CD matrix across, so a rotation between that sub
-    and the reference is honoured. Returns {} when *si* has no WCS.
+    (``transparency.to_aligned_yx`` convention). Returns {} when *si* has no WCS.
     """
-    kw = build_wcs_keywords(si)
+    out = map_wcs_keywords(build_wcs_keywords(si), to_stack)
+    if out:
+        out['WCSORIG'] = ('session_info', 'WCS source: session info.json, mapped to the stack')
+    return out
+
+
+def map_wcs_keywords(kw: dict, to_stack) -> dict:
+    """A sub's TAN WCS cards (``{key: (value, comment)}``) carried onto the stack.
+
+    *to_stack* maps the sub's native (row, col) to stack (row, col). The local
+    Jacobian at the reference pixel carries the CD matrix across, so a rotation
+    between that sub and the registration reference is honoured. Returns {} for
+    empty *kw*.
+    """
     if not kw:
         return {}
     import numpy as np
@@ -211,7 +222,6 @@ def stack_wcs_keywords(si: 'SessionInfo', to_stack, shape_hw) -> dict:
     for k, v in (('CD1_1', cd_out[0, 0]), ('CD1_2', cd_out[0, 1]),
                  ('CD2_1', cd_out[1, 0]), ('CD2_2', cd_out[1, 1])):
         out[k] = (float(v), kw[k][1])
-    out['WCSORIG'] = ('session_info', 'WCS source: session info.json, mapped to the stack')
     return out
 
 

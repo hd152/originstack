@@ -701,12 +701,13 @@ def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
     """
     args._stack_wcs_origin = (int(top), int(left))   # stack pixel -> reference grid
     si = getattr(args, '_session_info', None)
-    if si is None or not si.has_wcs:
+    has_si = si is not None and si.has_wcs
+    if not has_si and not getattr(args, 'wcs_refine', True):
         return
     try:
         from astropy.io import fits
 
-        from src.session_info import stack_wcs_keywords
+        from src.session_info import map_wcs_keywords, stack_wcs_keywords
         from src.transparency import to_aligned_yx
 
         def _t(f):
@@ -725,12 +726,26 @@ def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
             a = to_aligned_yx(yx, tr, sh)
             return (a - np.array([top, left], dtype=np.float64)) * scale
 
-        cards = stack_wcs_keywords(si, to_stack, stacked_linear.shape[:2])
+        if has_si:
+            cards = stack_wcs_keywords(si, to_stack, stacked_linear.shape[:2])
+            source = "session info.json solve"
+        else:
+            # No session solve (Seestar, Dwarf, other capture apps): solve that
+            # same sub from its header's pointing. The stack itself solves less
+            # reliably (an S50 M101 stack failed in 120 s; its first sub took 0.4 s).
+            cards = _solve_first_sub(first if exact else (final[j] if j is not None else None),
+                                     args)
+            if cards:
+                cards = map_wcs_keywords(cards, to_stack)
+                cards['WCSORIG'] = ('local_solve', 'WCS source: first sub solved, mapped to the stack')
+            source = "first sub solved from its header pointing,"
         if not cards:
             return
         how = "mapped through the first sub's registration" if exact else \
             "mapped through the earliest accepted sub's registration (the first was rejected)"
-        if getattr(args, 'wcs_refine', True):
+        # a solved sub mapped through registration is already Gaia-accurate (0.03 px
+        # mean offset on an S50 stack); the refine is for the approximate info.json solve
+        if has_si and getattr(args, 'wcs_refine', True):
             from src.local_solve import solve_header
             hdr = fits.Header()
             for k, (v, c) in cards.items():
@@ -742,9 +757,27 @@ def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
                 how = (f"refined against Gaia ({hdr.get('PLTNSTAR')} stars, "
                        f"rms {hdr.get('PLTRMS')} px)")
         args._stack_wcs = cards
-        safe_print(f"  WCS: session info.json solve {how}")
+        safe_print(f"  WCS: {source} {how}")
     except Exception as e:
         _log.debug("settling the stack WCS failed: %s", e)
+
+
+def _solve_first_sub(frame: Optional[FrameInfo], args) -> dict:
+    """WCS cards for *frame*'s native grid from a local solve seeded by its
+    header's pointing keywords; {} when it has none or the solve fails."""
+    if frame is None:
+        return {}
+    from src.io_fits import load_frame
+    from src.local_solve import hint_from_header, solve_raw_frame
+    hdr = frame.header or {}
+    if hint_from_header(hdr, (1, 1)) is None:
+        return {}
+    try:
+        data, _ = load_frame(frame.path)
+    except Exception as e:
+        _log.debug("loading %s for a header solve failed: %s", frame.path, e)
+        return {}
+    return solve_raw_frame(data, hdr, verbose=bool(getattr(args, 'verbose', False))) or {}
 
 
 def _summary_error_lines(errors: List[Tuple[str, str]], limit: int = 5) -> List[str]:
