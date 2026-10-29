@@ -178,7 +178,7 @@
  "Enable comet nucleus tracking. Produces a second stack aligned on the comet nucleus saved as <stem>_comet.fits.": "启用彗核跟踪。生成以彗核对齐的第二个叠加结果，保存为 <stem>_comet.fits。",
  "Error aware stretch": "误差感知拉伸",
  "Error: {error}": "错误：{error}",
- "Example comet: C/2025 R2 (SWAN), Celestron Origin": "彗星示例：C/2025 R2（SWAN），Celestron Origin",
+ "Example comet: C/2025 A6 (Lemmon), Celestron Origin": "彗星示例：C/2025 A6（Lemmon），Celestron Origin",
  "Example galaxy: Whirlpool Galaxy (M51), Celestron Origin": "星系示例：涡状星系（M51），Celestron Origin",
  "Example nebula: Omega Nebula (M17), Celestron Origin": "星云示例：欧米茄星云（M17），Celestron Origin",
  "Example star field: Sagittarius Star Cloud (M24), Celestron Origin": "星场示例：人马座恒星云（M24），Celestron Origin",

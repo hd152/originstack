@@ -178,7 +178,7 @@
  "Enable comet nucleus tracking. Produces a second stack aligned on the comet nucleus saved as <stem>_comet.fits.": "彗星核の追尾を有効にします。彗星核に合わせた2つ目のスタックを作成し、<stem>_comet.fits として保存します。",
  "Error aware stretch": "誤差を考慮した強調",
  "Error: {error}": "エラー：{error}",
- "Example comet: C/2025 R2 (SWAN), Celestron Origin": "彗星の例：C/2025 R2（SWAN）、Celestron Origin",
+ "Example comet: C/2025 A6 (Lemmon), Celestron Origin": "彗星の例：C/2025 A6（Lemmon）、Celestron Origin",
  "Example galaxy: Whirlpool Galaxy (M51), Celestron Origin": "銀河の例：子持ち銀河（M51）、Celestron Origin",
  "Example nebula: Omega Nebula (M17), Celestron Origin": "星雲の例：オメガ星雲（M17）、Celestron Origin",
  "Example star field: Sagittarius Star Cloud (M24), Celestron Origin": "星野の例：いて座スタークラウド（M24）、Celestron Origin",

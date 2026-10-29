@@ -178,7 +178,7 @@
  "Enable comet nucleus tracking. Produces a second stack aligned on the comet nucleus saved as <stem>_comet.fits.": "Verfolgung des Kometenkerns aktivieren. Erzeugt einen zweiten, auf den Kometenkern ausgerichteten Stack, gespeichert als <stem>_comet.fits.",
  "Error aware stretch": "Fehlerbewusste Streckung",
  "Error: {error}": "Fehler: {error}",
- "Example comet: C/2025 R2 (SWAN), Celestron Origin": "Beispiel Komet: C/2025 R2 (SWAN), Celestron Origin",
+ "Example comet: C/2025 A6 (Lemmon), Celestron Origin": "Beispiel Komet: C/2025 A6 (Lemmon), Celestron Origin",
  "Example galaxy: Whirlpool Galaxy (M51), Celestron Origin": "Beispiel Galaxie: Whirlpool-Galaxie (M51), Celestron Origin",
  "Example nebula: Omega Nebula (M17), Celestron Origin": "Beispiel Nebel: Omeganebel (M17), Celestron Origin",
  "Example star field: Sagittarius Star Cloud (M24), Celestron Origin": "Beispiel Sternfeld: Sagittarius-Sternwolke (M24), Celestron Origin",
