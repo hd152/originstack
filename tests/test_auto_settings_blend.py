@@ -195,3 +195,30 @@ class TestUnlistedAttrsKeepBaseline:
             else:
                 tol = max(0.15 * abs(expected), 0.1)
                 assert abs(got - expected) < tol, f"{ttype}.{attr}: got {got}, want ~{expected}"
+
+
+class TestNoPhase1Settings:
+    """--auto runs after Phase 1, so a Phase 1 setting in a preset never
+    takes effect on the run itself; it only reaches the saved config, and a
+    re-run from that config processes the frames differently.
+    pre_gradient_removal sat in three presets that way."""
+
+    def _phase1_attrs(self):
+        from src import checkpoint
+        return set(checkpoint._group_dests(checkpoint._P1_GROUPS)) | set(checkpoint._P1_EXTRA)
+
+    def test_presets_list_no_phase1_attr(self):
+        p1 = self._phase1_attrs()
+        for ttype, settings in a._TARGET_SETTINGS.items():
+            bad = [k for k, _ in settings if k in p1]
+            assert not bad, f"{ttype}: {bad}"
+
+    @pytest.mark.parametrize("ttype", list(a._TYPE_ANCHORS.keys()))
+    def test_blend_leaves_phase1_attrs_alone(self, ttype):
+        sig = dict(a._TYPE_ANCHORS[ttype])
+        sig['fwhm'] = 3.0
+        base = _parser_args()
+        args = _parser_args()
+        a._apply_dynamic_settings(sig, a._blend_weights(sig), args)
+        for attr in self._phase1_attrs() - {'auto', 'preset'}:
+            assert getattr(args, attr, None) == getattr(base, attr, None), attr

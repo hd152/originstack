@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+- Re-running a session from the `_config.toml` an `--auto` run saved now processes the frames
+  the same way. `--auto` asked for per-frame gradient removal on nebulae and galaxies, but it
+  decides after the frames are already processed, so the step never ran on the `--auto` run
+  itself; only the saved config switched it on, which made the re-run slower and changed which
+  frames passed the quality gates. `--auto` no longer asks for it.
+
 ## [2.18.0] - 2026-10-28
 
 ZWO Seestar S50 and S50 Pro sessions get a plate solve, Gaia colour and their full galaxy
