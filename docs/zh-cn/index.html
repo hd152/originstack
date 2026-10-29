@@ -92,6 +92,8 @@
       </nav>
     </div>
 
+    <div class="hero-grid">
+    <div class="hero-copy">
     <h1><span class="kicker">面向 Celestron Origin 与 ZWO Seestar 的免费一键叠加与处理</span> 一晚的原始帧，一键变成完成的图像。</h1>
     <p class="lede">把 OriginStack 指向 Celestron Origin 保存的文件夹、Seestar S50 或 S50 Pro 的帧文件夹，或任意彩色相机的帧，然后点击开始。它会完成校准、对齐和叠加，随后把图像也一并处理好：去除梯度、根据 Gaia 恒星校准颜色、降噪、收缩星点并完成拉伸，所有设置都会根据你的目标自动选择。它在你自己的电脑上运行，无需账户；只有获取星表数据和目标名称时才会联网，<code>--offline</code> 连这些也能关闭。</p>
 
@@ -103,8 +105,10 @@
     <p class="fine" id="fine-win">Windows 10 或 11，64 位，免费，开源（GPLv3）。安装程序尚未进行代码签名，因此 SmartScreen 可能会发出警告：请选择“更多信息”，然后选择“仍要运行”。</p>
     <p class="fine" id="fine-mac" hidden>macOS，免费，开源（GPLv3）。Apple 芯片版本需要 macOS 14 或更高版本。应用尚未经过 Apple 签名，因此 macOS 会阻止首次启动：在“应用程序”中按住 Control 点按 OriginStack 并选择“打开”，或在“系统设置”&gt;“隐私与安全性”中点按“仍要打开”。<a href="#mac">详情</a></p>
     <p class="fine" id="fine-linux" hidden>Linux x86-64，需要 glibc 2.35 或更新版本（Ubuntu 22.04、Debian 12、Fedora 36 及更高版本），免费，开源（GPLv3）。解压后运行 <code>./install.sh</code>。<a href="#get">详情</a></p>
-    <p class="fine">OriginStack 是免费的。如果它为你省下了一晚上的后期处理时间，你可以<a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">在 Ko-fi 上打赏</a>。</p>
 
+    </div>
+
+    <div class="hero-visual">
     <div class="wipe" id="wipe" role="group" aria-label="单帧与最终叠加结果的对比">
       <picture><source type="image/webp" srcset="../img/omega-nebula-m17-stacked-celestron-origin-800.webp 800w, ../img/omega-nebula-m17-stacked-celestron-origin-1200.webp 1200w, ../img/omega-nebula-m17-stacked-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img class="after" fetchpriority="high" src="../img/omega-nebula-m17-stacked-celestron-origin.jpg" width="1600" height="1103" alt="叠加 114 帧并处理后的欧米茄星云：密集星场中带有暗带的明亮红色气体。"></picture>
       <img class="before" src="../img/omega-nebula-m17-single-frame-celestron-origin.jpg" srcset="../img/omega-nebula-m17-single-frame-celestron-origin-800.jpg 800w, ../img/omega-nebula-m17-single-frame-celestron-origin-1200.jpg 1200w, ../img/omega-nebula-m17-single-frame-celestron-origin.jpg 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))" width="1600" height="1103" alt="同一视场的一张 30 秒帧，经拉伸后可见：颗粒感强，星云在嘈杂的紫色天空中很暗淡。">
@@ -115,6 +119,9 @@
       <input type="range" min="0" max="100" value="50" aria-label="拖动以对比单帧与最终叠加结果">
     </div>
     <p class="hero-bridge"><span>从差别看起</span> <a href="#oneclick">看看一键都做了什么&nbsp;→</a></p>
+    <p class="fine">OriginStack 是免费的。如果它为你省下了一晚上的后期处理时间，你可以<a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">在 Ko-fi 上打赏</a>。</p>
+    </div>
+    </div>
   </div>
 </header>
 
