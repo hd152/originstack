@@ -361,7 +361,7 @@ _TARGET_CARDS = (
      N_('Example star field: Sagittarius Star Cloud (M24), Celestron Origin')),
     ('comet', N_('Comet'),
      N_('Also stacks on the moving nucleus (saved as a second _comet image).'),
-     '', True, 'comet.jpg', N_('Example comet: C/2025 R2 (SWAN), Celestron Origin')),
+     '', True, 'comet.jpg', N_('Example comet: C/2025 A6 (Lemmon), Celestron Origin')),
 )
 # target_inference's source codes, as the phrase shown after a target name.
 _SOURCE_PHRASES = {'session': N_('from the session file'), 'header': N_('from the FITS header'),
