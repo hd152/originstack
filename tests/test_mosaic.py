@@ -189,6 +189,33 @@ def test_panels_that_do_not_overlap_are_refused(tmp_path):
                                            types.SimpleNamespace(verbose=False))
 
 
+def test_a_clouded_tile_is_reported(tmp_path, capsys):
+    # One tile ~12x fainter (cloud/dew, as three M24 Mosaic Mode tiles): its gain is
+    # outside what the match accepts, so the stitch must say why its outline shows.
+    rng = np.random.default_rng(5)
+    H, W = 420, 1000
+    truth = _sky(H, W, seed=2)
+    w_truth = _wcs(10.0, 41.0, 1.476 / 3600, (W / 2, H / 2))
+    boxes = [(0, 420, 0, 600), (0, 420, 400, 1000)]
+    paths = _write_panels(tmp_path, truth, w_truth, boxes, [12.0, 1.0], [(0, 0, 0)] * 2, 2.0, rng)
+    assert mosaic.stitch_mosaic_panels(paths, str(tmp_path / "m.fits"),
+                                       types.SimpleNamespace(verbose=False))
+    out = capsys.readouterr().out
+    assert "panel0 is ~12x fainter than panel1" in out, out
+
+
+def test_matched_tiles_are_not_reported(tmp_path, capsys):
+    rng = np.random.default_rng(5)
+    H, W = 420, 1000
+    truth = _sky(H, W, seed=2)
+    w_truth = _wcs(10.0, 41.0, 1.476 / 3600, (W / 2, H / 2))
+    boxes = [(0, 420, 0, 600), (0, 420, 400, 1000)]
+    paths = _write_panels(tmp_path, truth, w_truth, boxes, [1.1, 1.0], [(0, 0, 0)] * 2, 2.0, rng)
+    assert mosaic.stitch_mosaic_panels(paths, str(tmp_path / "m.fits"),
+                                       types.SimpleNamespace(verbose=False))
+    assert "fainter than" not in capsys.readouterr().out
+
+
 def test_a_panel_without_wcs_is_refused(tmp_path):
     p = tmp_path / "nowcs.fits"
     fits.PrimaryHDU(np.zeros((3, 64, 64), np.float32)).writeto(p)
