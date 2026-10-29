@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import gc
 import logging
@@ -1533,7 +1534,27 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
         safe_print("\n  Phase 4 deferred: this session's stack is combined with the others "
                    "first, then post-processed once")
     else:
-        stacked = postprocess_stack(stacked, args, final, stats)
+        # The desktop app lets the user switch Phase 4 steps off and on afterwards: keep the
+        # linear stack and a snapshot of the image at each step (postprocess.StepSnapshots).
+        # Not with anything that alters or adds to the image after Phase 4.
+        from src.ui_events import get_ui_events
+        _ui = get_ui_events()
+        _keep = (_ui.active and not getattr(args, 'uncertainty_propagate', False)
+                 and not getattr(args, 'hdr_combine', None) and not getattr(args, 'annotate', False)
+                 and getattr(args, 'error_aware_stretch', None) is None)
+        if _keep:
+            from src.postprocess import StepSnapshots
+            _snaps = StepSnapshots()
+            _linear_keep = stacked.copy()
+            args._pp_snaps = _snaps
+        try:
+            stacked = postprocess_stack(stacked, args, final, stats)
+        finally:
+            if _keep:
+                _args_pp = copy.copy(args)
+                del args._pp_snaps
+        if _keep:
+            _ui.remember_postprocess(_linear_keep, _args_pp, final, stats, _snaps)
 
     stats.post_processing_time = time.time() - phase_start
 

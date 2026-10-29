@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import traceback
 import webbrowser
@@ -1089,6 +1090,27 @@ def _frame_count(kind: str, n: int) -> str:
     return _(one if n == 1 else many, n=n)
 
 
+# Labels of the Phase 4 steps the Post-processing panel can switch (postprocess.PHASE4_TOGGLES),
+# marked here so the catalogs pick them up; the panel translates them where it shows them.
+_PP_STEP_LABELS = {
+    'hot_pixel': N_('Hot pixels'),
+    'background': N_('Background extraction'),
+    'chroma_nr': N_('Chroma noise reduction'),
+    'bilateral': N_('Bilateral denoise'),
+    'acdnr': N_('ACDNR denoise'),
+    'wavelet': N_('Wavelet denoise'),
+    'nn': N_('Neural-network denoise / deconvolution'),
+    'aniso': N_('Anisotropic diffusion'),
+    'scnr': N_('SCNR'),
+    'photo_cal': N_('Gray-locus colour calibration'),
+    'deconvolve': N_('Deconvolution'),
+    'star_reduce': N_('Star reduction'),
+    'local_contrast': N_('Local contrast'),
+    'sky_neutralize': N_('Final sky flatten'),
+    'edge_bands': N_('Edge bands'),
+}
+
+
 class _Tooltip:
     """Minimal hover tooltip -- the schema's ``help`` text is the only place
     each flag's full description lives; a native app has no ``title=`` like
@@ -1716,6 +1738,26 @@ class App:
         self._restretch_shown: Optional[str] = None   # path the bar was set up for
         self._restretch_results: queue.Queue = queue.Queue()
 
+        # Once a run is done: switch its Phase 4 steps off and on (UIEvents.rerun_postprocess).
+        # Hidden until the run kept the linear stack and its per-step snapshots.
+        self.pp_bar = ttk.LabelFrame(preview_frame, text=_('Post-processing steps'))
+        self.pp_boxes = ttk.Frame(self.pp_bar)
+        self.pp_boxes.pack(fill='x', padx=6, pady=(2, 0))
+        self.pp_starless_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.pp_bar, text=_('Show without stars (also saves a _starless JPEG)'),
+                        variable=self.pp_starless_var,
+                        command=self._on_starless_toggled).pack(anchor='w', padx=6)
+        self.pp_status_var = tk.StringVar()
+        ttk.Label(self.pp_bar, textvariable=self.pp_status_var,
+                  style='Dim.TLabel').pack(anchor='w', padx=6, pady=(0, 2))
+        self._pp_vars: Dict[str, tk.BooleanVar] = {}
+        self._pp_shown: Optional[str] = None          # path the boxes were built for
+        self._pp_busy = False
+        self._pp_starless_shown = False                # what the viewer's final slot shows
+        self._pp_pending = False                       # a box changed while a re-run was going
+        self._pp_timer: Optional[str] = None
+        self._pp_results: queue.Queue = queue.Queue()
+
         self.preview = PreviewCanvas(preview_frame)
         self.preview.pack(fill='both', expand=True, padx=4)
 
@@ -1988,6 +2030,99 @@ class App:
             self.restretch_btn.state(['!disabled'])
             self.restretch_bar.pack(fill='x', padx=4, pady=(0, 4), before=self.preview)
 
+    def _sync_pp_bar(self, snap: Dict[str, Any]) -> None:
+        """Show one checkbox per Phase 4 step the finished run used, ticked when it is
+        applied; hide the panel when the run left nothing to redo."""
+        info = snap.get('restretch')
+        if not snap.get('postprocess') or info is None or snap['run_status'] != 'ok':
+            if self._pp_shown is not None:
+                self.pp_bar.pack_forget()
+                self._pp_shown = None
+            return
+        if self._pp_shown == info['path'] or self._pp_busy:
+            return
+        steps = self.ui.postprocess_steps()
+        if not steps:
+            return
+        self._pp_shown = info['path']
+        self.pp_starless_var.set(False)
+        self._pp_starless_shown = False
+        for child in self.pp_boxes.winfo_children():
+            child.destroy()
+        self._pp_vars = {}
+        cols = 3
+        for n, st in enumerate(steps):
+            var = tk.BooleanVar(value=st['on'])
+            var.trace_add('write', lambda *_: self._on_pp_changed())
+            self._pp_vars[st['id']] = var
+            ttk.Checkbutton(self.pp_boxes, text=_(_PP_STEP_LABELS.get(st['id'], st['label'])),
+                            variable=var).grid(row=n // cols, column=n % cols, sticky='w',
+                                               padx=(0, 12))
+        self.pp_status_var.set('')
+        self.pp_bar.pack(fill='x', padx=4, pady=(0, 4), before=self.preview)
+
+    def _on_pp_changed(self) -> None:
+        """A box was ticked or cleared: re-run Phase 4 shortly after the last change."""
+        if self._pp_timer is not None:
+            self.root.after_cancel(self._pp_timer)
+        self._pp_timer = self.root.after(600, self._run_pp)
+
+    def _on_starless_toggled(self) -> None:
+        self._run_pp()
+
+    def _run_pp(self) -> None:
+        """Bring the final image in line with the boxes: redo Phase 4 if a step changed, then
+        show it with or without its stars. One at a time; a change made meanwhile runs after."""
+        self._pp_timer = None
+        if self.rm.is_running():
+            return
+        if self._pp_busy:
+            self._pp_pending = True
+            return
+        off = [i for i, v in self._pp_vars.items() if not v.get()]
+        starless = bool(self.pp_starless_var.get())
+        self._pp_busy = True
+        self.pp_status_var.set(_('Updating…'))
+        started = time.time()
+
+        def _bg() -> None:
+            try:
+                data = self.ui.rerun_postprocess(off)       # shows the stars-in image again
+                shown = False if data is not None else self._pp_starless_shown
+                if starless or starless != shown:
+                    data = self.ui.starless_view(starless)
+                    shown = starless
+                self._pp_results.put(('ok', (data, shown), time.time() - started))
+            except Exception as e:
+                self._pp_results.put(('error', str(e), 0.0))
+        threading.Thread(target=_bg, daemon=True).start()
+        self.root.after(self.POLL_MS, self._poll_pp)
+
+    def _poll_pp(self) -> None:
+        try:
+            status, value, secs = self._pp_results.get_nowait()
+        except queue.Empty:
+            self.root.after(self.POLL_MS, self._poll_pp)
+            return
+        self._pp_busy = False
+        if status == 'ok':
+            data, self._pp_starless_shown = value
+            if data is not None:
+                self.compare_var.set(False)
+                self._on_compare_toggled()
+                self.preview.load_slot(data, 'final', _('Final (starless)')
+                                       if self._pp_starless_shown else _('Final (post-processed)'))
+                self.pp_status_var.set(_('Updated in {secs} s', secs=f'{secs:.0f}'))
+            else:
+                self.pp_status_var.set('')
+        else:
+            # what the viewer shows is unknown after a failure: the box follows the last good state
+            self.pp_starless_var.set(self._pp_starless_shown)
+            self.pp_status_var.set(_('Update failed: {error}', error=value))
+        if self._pp_pending:
+            self._pp_pending = False
+            self._run_pp()
+
     def _on_restretch(self) -> None:
         stretch = self.restretch_var.get()
         color = self.restretch_color_var.get()
@@ -2012,6 +2147,8 @@ class App:
             return
         self.restretch_btn.state(['!disabled'])
         if status == 'ok':
+            self.pp_starless_var.set(False)
+            self._pp_starless_shown = False
             name = os.path.basename(self._restretch_shown or '')
             self.restretch_status_var.set(_('Saved {name}', name=name))
             self.compare_var.set(False)
@@ -2169,6 +2306,7 @@ class App:
             self.report_label.configure(foreground=_ACCENT if snap['run_error'] else _TEXT_DIM)
 
         self._sync_restretch_bar(snap)
+        self._sync_pp_bar(snap)
         self._refresh_run_button(snap)
 
     def _open_output_folder(self) -> None:

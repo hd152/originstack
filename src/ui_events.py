@@ -20,7 +20,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 _MAX_LOG_LINES = 500
 _MAX_FRAME_ROWS = 60
@@ -53,6 +53,8 @@ class UIEvents:
         # The image the run's preview JPEG was stretched from, kept so the
         # user can pick another stretch once the run is done (restretch()).
         self._final_src: Optional[dict] = None
+        # What switching Phase 4 steps off and on afterwards needs (remember_postprocess).
+        self._pp_session: Optional[dict] = None
         self._state: Dict[str, Any] = {
             'run': {},                 # target/output/frame counts
             'phase': 0,
@@ -254,6 +256,117 @@ class UIEvents:
                                'exports': preview_exports(args) if args is not None else ()}
             self._bump()
 
+    def remember_postprocess(self, linear, args, final, stats, snaps) -> None:
+        """Keep a finished Phase 4 -- the linear stack it started from, its settings and the
+        per-step snapshots -- so ``rerun_postprocess`` can redo it with steps switched on or
+        off. Holds the linear stack plus about one image per enabled step until the next
+        run starts, so only while the desktop app is attached. The last call wins."""
+        if not self.active:
+            return
+        with self._lock:
+            self._pp_session = {'linear': linear, 'args': args, 'final': final,
+                                'stats': stats, 'snaps': snaps}
+            self._bump()
+
+    def postprocess_steps(self) -> Optional[list]:
+        """The Phase 4 steps of the remembered run as {id, label, on}, or None."""
+        from src.postprocess import phase4_toggles
+        with self._lock:
+            sess = self._pp_session
+        return None if sess is None else phase4_toggles(sess['args'])
+
+    def rerun_postprocess(self, off: Iterable[str]) -> Optional[bytes]:
+        """Redo Phase 4 with exactly the toggleable steps in ``off`` skipped, resuming at the
+        earliest step that differs from the last run (``postprocess.StepSnapshots``), then
+        re-render the final preview with the stretch it has now (as ``restretch``). Returns
+        the viewer JPEG, or None when nothing changed. Slow (seconds to a minute): call it
+        off the GUI thread. ``RuntimeError`` when there is no run to redo."""
+        from src.postprocess import PHASE4_TOGGLES, phase4_resume_step, postprocess_stack
+        with self._lock:
+            sess, fs = self._pp_session, self._final_src
+        if sess is None or fs is None:
+            raise RuntimeError('no finished run to post-process again')
+        args, snaps = sess['args'], sess['snaps']
+        ids = {i for i, _, _, _ in PHASE4_TOGGLES}
+        old = set(getattr(args, 'skip_step', None) or [])
+        new = (old - ids) | (set(off) & ids)
+        changed = (old ^ new) & ids
+        if not changed:
+            return None
+        resume = phase4_resume_step(changed)
+        snaps.resume = None if resume == 'early' else resume
+        args.skip_step = sorted(new)
+        args._pp_snaps = snaps
+        try:
+            result = postprocess_stack(sess['linear'].copy(), args, sess['final'], sess['stats'])
+        except BaseException:
+            # the snapshots no longer match args.skip_step: restore it and start over
+            args.skip_step = sorted(old)
+            snaps.reset()
+            raise
+        finally:
+            snaps.resume = None
+            del args._pp_snaps
+        starless = None
+        if getattr(args, 'layered_stretch', False) and getattr(args, 'stretch', 'ghs') == 'ghs':
+            from src.star_removal import starless_from_image
+            starless = starless_from_image(result)
+        with self._lock:
+            if self._final_src is not fs:
+                raise RuntimeError('a new run started')
+            kw = self._stretch_kw(args)
+            kw['stretch'], kw['color'] = fs['kw']['stretch'], fs['kw']['color']
+            fs.update(rgb=result, starless=starless, kw=kw)
+            fs.pop('starless_img', None)
+        return self.restretch(kw['stretch'], kw['color'])
+
+    def starless_view(self, on: bool) -> bytes:
+        """Show the final image without its stars (``on``) or with them again, in the
+        viewer's 'final' slot. Stars come out with the remover ``--remove-stars-method
+        inpaint`` uses, on the finished image, so it matches the starless sidecar of an
+        inpaint run; the nn method works on the linear stack and cannot be applied here.
+        Switching on also writes ``<preview stem>_starless.jpg`` (and the run's PNG exports)
+        next to the preview; the stars-in files are left alone. The first switch after a
+        run or a re-run detects and removes the stars, so call it off the GUI thread.
+        Returns the viewer-sized JPEG; ``RuntimeError`` when there is no finished image or
+        no usable star detections."""
+        from src.io_fits import (
+            preview_jpeg_from_uint8,
+            render_preview_rgb_float,
+            to_uint8,
+            write_final_images,
+        )
+        with self._lock:
+            fs = self._final_src
+            if fs is None:
+                raise RuntimeError('no finished preview to remove stars from')
+            cached = fs.get('starless_img')
+            rgb, kw = fs['rgb'], dict(fs['kw'])
+        if on:
+            starless = cached
+            if starless is None:
+                from src.star_removal import starless_from_image
+                starless = starless_from_image(rgb)
+                if starless is None:
+                    raise RuntimeError('no usable star detections to remove')
+            src = starless
+        else:
+            src = rgb
+        img = render_preview_rgb_float(src, starless=None if on else fs['starless'], **kw)
+        if img is None:
+            raise RuntimeError(f"the {kw['stretch']} stretch is unavailable")
+        if on:
+            stem = os.path.splitext(fs['path'])[0] + '_starless.jpg'
+            write_final_images(img, stem, fs.get('exports', ()))
+        data = preview_jpeg_from_uint8(to_uint8(img))
+        with self._lock:
+            if self._final_src is fs and fs['rgb'] is rgb:    # not replaced by a new run / re-run
+                if on:
+                    fs['starless_img'] = starless
+                caption = 'Final (starless)' if on else 'Final (post-processed)'
+                self._set_named_slot('final', caption, data)
+        return data
+
     def restretch(self, stretch: str, color: str) -> bytes:
         """Re-render the remembered final preview with ``stretch``/``color``,
         overwrite its JPEG (and its ``--export png``/``png16`` copies) and update the
@@ -324,6 +437,7 @@ class UIEvents:
             self._frame_thumb_seq = 0
             self._frame_thumbs_version += 1
             self._final_src = None
+            self._pp_session = None
             self._bump()
 
     def run_finished(self, status: str, error: Optional[str] = None) -> None:
@@ -372,6 +486,7 @@ class UIEvents:
             snap['frames_img_version'] = self._frame_thumbs_version
             snap['frames_img'] = [{'id': v['id'], 'name': v['name']}
                                   for v in self._frame_thumbs.values()]
+            snap['postprocess'] = self._pp_session is not None
             fs = self._final_src
             snap['restretch'] = (None if fs is None else
                                  {'stretch': fs['kw']['stretch'], 'color': fs['kw']['color'],

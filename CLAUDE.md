@@ -128,7 +128,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 | `moving_objects.py` | Mover detection / tracked stack (`--moving-objects[-stack]`) |
 | `session_report.py` / `session_info.py` | Tracking/trend report (`--session-report`); parse capture-app `info.json`, stack WCS |
 | `dither_report.py` / `aberration.py` | Dither coverage (`--dither-report`); field aberration/tilt (`--aberration-report`) |
-| `postprocess.py` | Phase 4 chain `postprocess_stack`, `_postprocess_early` (cacheable early steps) |
+| `postprocess.py` | Phase 4 chain `postprocess_stack`, `_postprocess_early` (cacheable early steps); `StepSnapshots` + `PHASE4_TOGGLES` (desktop app: switch steps off/on after a run, resuming at the first changed step) |
 | `background.py` | Mesh/DBE background (DBE and `--bg-method wavelet` share `_patch_background_extraction`; only the surface fit differs), sky residual, edge bands, `gaussian_filter_ds`, `gaussian_blur_spatial` |
 | `denoising.py` | Directional wavelet (`--denoiser wavelet`, `--wavelet-protect`; `curvelet` alias), ACDNR, bilateral, aniso, `shrink_stars` (the star-reduction step), multiscale local contrast, chroma NR |
 | `wavelet.py` | Native-backed `wavedec2`/`waverec2` |
@@ -181,6 +181,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 
 **Uncertainty / Phase 4**
 - Any Phase 4 step that writes a file or calls the network belongs in `uncertainty._QUIET_OFF`, or each Monte Carlo realization writes it silently.
+- A new resumable Phase 4 step after the early block needs `_at('name', enabled)` as the first test of its `if` in `postprocess_stack`, an entry in `SNAP_STEPS` (run order) and `PHASE4_TOGGLES`, and a label in `desktop_app._PP_STEP_LABELS` (+ catalog entries). `tests/test_phase4_snapshots.py` checks a resumed run is bit-identical to a full run; state a step leaves in a local other than `stacked`/`_dn_stars`/`args._preview_noise_scale` is not in the snapshot.
 - `reduce_chroma_noise` (and anything right after DBE) must not clip negatives: the sky is centred on zero there.
 - DBE samples each channel against its own sky (`background._channel_sky`), not the luminance sky: on a colour-calibrated stack G/B sat far above it and fell back to the mesh.
 - Stretch one image; never recombine separately stretched layers.
