@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+- Re-running a session from the `_config.toml` an `--auto` run saved now processes the frames
+  the same way. `--auto` asked for per-frame gradient removal on nebulae and galaxies, but it
+  decides after the frames are already processed, so the step never ran on the `--auto` run
+  itself; only the saved config switched it on, which made the re-run slower and changed which
+  frames passed the quality gates. `--auto` no longer asks for it.
+
 ### Changed
 - A mosaic tile much fainter than its neighbours (shot through cloud, haze or dew) is now
   named in a warning. Its brightness cannot be matched to the others, so its outline shows in
