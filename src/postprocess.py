@@ -683,6 +683,126 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
     return stacked, pp_star_mask, _pp_sources, _bg_excl_mask
 
 
+# ---------------------------------------------------------------------------
+# Step snapshots: toggling a Phase 4 step in the desktop app without redoing all of it
+# ---------------------------------------------------------------------------
+# The steps after the early (background / sky) block each take the previous one's output,
+# so switching one off means redoing it and everything after it, but nothing before it.
+# ``args._pp_snaps`` (a StepSnapshots, set by the desktop app when it keeps a finished
+# run) records the image as each enabled step starts; a re-run with ``snaps.resume`` set
+# to a step name loads that snapshot and skips straight there, bit-identical to a full run
+# with the same skip list (tests/test_phase4_snapshots.py).
+
+def _copy_state(x):
+    """A copy of an early-block result (mask array, source table or None)."""
+    return x.copy() if x is not None and hasattr(x, 'copy') else x
+
+
+def _restore_noise_scale(args, value) -> None:
+    """Put back ``args._preview_noise_scale`` as it was when a snapshot was taken (the
+    nn step sets it; None means it was unset)."""
+    if value is None:
+        if hasattr(args, '_preview_noise_scale'):
+            delattr(args, '_preview_noise_scale')
+    else:
+        args._preview_noise_scale = value
+
+
+# the steps that can be resumed at, in run order; the skip_step names are the same
+SNAP_STEPS = ('bilateral', 'acdnr', 'wavelet', 'nn', 'aniso', 'scnr', 'photo_cal',
+              'deconvolve', 'star_reduce', 'local_contrast', 'sky_neutralize')
+_SNAP_BUDGET_BYTES = 1_500_000_000
+
+# The steps the desktop app lets the user switch on and off after a run:
+# (skip_step name, label, enabled in this run?, where a re-run resumes). 'early' redoes the
+# background/sky block and everything after it; a step name resumes at that step's snapshot.
+PHASE4_TOGGLES = (
+    ('hot_pixel', 'Hot pixels', lambda a: True, 'early'),
+    ('background', 'Background extraction', lambda a: bool(a.background_extraction), 'early'),
+    ('chroma_nr', 'Chroma noise reduction', lambda a: bool(getattr(a, 'chroma_nr', True)), 'early'),
+    ('bilateral', 'Bilateral denoise', lambda a: bool(getattr(a, 'denoise_bilateral', False)), 'bilateral'),
+    ('acdnr', 'ACDNR denoise', lambda a: bool(getattr(a, 'denoise_acdnr', False)), 'acdnr'),
+    ('wavelet', 'Wavelet denoise', lambda a: bool(getattr(a, 'denoise_curvelet', False)), 'wavelet'),
+    ('nn', 'Neural-network denoise / deconvolution',
+     lambda a: bool(getattr(a, 'denoise_nn', False) or getattr(a, 'deconvolve_nn', False)), 'nn'),
+    ('aniso', 'Anisotropic diffusion', lambda a: bool(getattr(a, 'denoise_aniso', False)), 'aniso'),
+    ('scnr', 'SCNR', lambda a: bool(getattr(a, 'scnr', False)), 'scnr'),
+    ('photo_cal', 'Gray-locus colour calibration',
+     lambda a: bool(getattr(a, 'photometric_calibration', False)
+                    and not getattr(a, '_colcal_scales', None)), 'photo_cal'),
+    ('deconvolve', 'Deconvolution', lambda a: bool(getattr(a, 'deconvolve', False)), 'deconvolve'),
+    ('star_reduce', 'Star reduction', lambda a: bool(getattr(a, 'star_reduce', False)), 'star_reduce'),
+    ('local_contrast', 'Local contrast', lambda a: bool(getattr(a, 'local_contrast', False)),
+     'local_contrast'),
+    ('sky_neutralize', 'Final sky flatten', lambda a: bool(a.background_extraction),
+     'sky_neutralize'),
+    ('edge_bands', 'Edge bands', lambda a: bool(a.background_extraction), 'sky_neutralize'),
+)
+
+
+def phase4_toggles(args) -> list:
+    """The steps ``args`` ran, in run order, as dicts {id, label, on} (``on``: not in skip_step)."""
+    skip = set(getattr(args, 'skip_step', None) or [])
+    return [{'id': i, 'label': label, 'on': i not in skip}
+            for i, label, enabled, _ in PHASE4_TOGGLES if enabled(args)]
+
+
+def phase4_resume_step(changed: set) -> str:
+    """Where a re-run starts after the steps in ``changed`` were switched: 'early' (redo the
+    background block too) or the earliest affected step in SNAP_STEPS."""
+    where = {i: r for i, _, _, r in PHASE4_TOGGLES}
+    steps = {where[i] for i in changed if i in where}
+    if not steps or 'early' in steps:
+        return 'early'
+    return min(steps, key=SNAP_STEPS.index)
+
+
+class StepSnapshots:
+    """The Phase 4 image as each enabled step began, plus the early block's output.
+
+    ``resume``: None for a full run, else the step to start at (the nearest earlier
+    snapshot is used when that step's was not kept) or ``'start'`` (after the early block).
+    """
+
+    def __init__(self, budget_bytes: int = _SNAP_BUDGET_BYTES):
+        self.budget = int(budget_bytes)
+        self.used = 0
+        self.early = None        # (star_mask, sources, excl_mask): read-only after the early block
+        self.snaps: dict = {}    # name -> (image, starless-split stars layer or None, noise scale)
+        self.resume: Optional[str] = None
+
+    def reset(self) -> None:
+        self.used = 0
+        self.early = None
+        self.snaps.clear()
+        self.resume = None
+
+    def record(self, name: str, image, dn_stars, noise_scale, force: bool = False) -> None:
+        old = self.snaps.pop(name, None)
+        if old is not None:
+            self.used -= old[0].nbytes + (0 if old[1] is None else old[1].nbytes)
+        need = image.nbytes + (0 if dn_stars is None else dn_stars.nbytes)
+        if not force and self.used + need > self.budget:
+            return
+        self.snaps[name] = (image.copy(), None if dn_stars is None else dn_stars.copy(), noise_scale)
+        self.used += need
+
+    def start_at(self, name: str) -> Optional[str]:
+        """The snapshot a re-run wanting to resume at ``name`` actually starts from."""
+        if name == 'start':
+            return 'start' if 'start' in self.snaps else None
+        order = SNAP_STEPS[:SNAP_STEPS.index(name) + 1] if name in SNAP_STEPS else ()
+        for n in reversed(order):
+            if n in self.snaps:
+                return n
+        return 'start' if 'start' in self.snaps else None
+
+    def load(self, name: str):
+        img, dn_stars, noise_scale = self.snaps[name]
+        return img.copy(), None if dn_stars is None else dn_stars.copy(), noise_scale
+
+
+
 def postprocess_stack(
     stacked: np.ndarray,
     args: argparse.Namespace,
@@ -693,11 +813,14 @@ def postprocess_stack(
     skip_steps = set(getattr(args, 'skip_step', []) or [])
     _diag_dir = getattr(args, '_diagnostic_dir', None)
     _diag_counter = [1]
+    snaps: Optional[StepSnapshots] = getattr(args, '_pp_snaps', None)
+    # a step toggled in the desktop app: the starless sidecar is not redone for it
+    _replay = snaps is not None and snaps.resume is not None
     # --remove-stars-method nn works on the linear stack (what its network was trained on),
     # so keep Phase 4's input; the later steps may change the array in place
     _rs_linear = (stacked.copy() if getattr(args, 'remove_stars', False)
                   and getattr(args, 'remove_stars_method', 'inpaint') == 'nn'
-                  and 'remove_stars' not in skip_steps else None)
+                  and 'remove_stars' not in skip_steps and not _replay else None)
     # and --starless-process with nn needs the linear sky level: background extraction
     # removes it before the split
     _split_sky = None
@@ -707,21 +830,35 @@ def postprocess_stack(
         if star_n2n.model_available():
             _split_sky = star_n2n.linear_sky_level(stacked)
 
-    _cache_key = (_early_cache_key(stacked, args, skip_steps)
-                  if _early_cache_usable(args, _diag_dir) else None)
-    _cached = _early_cache_load(_cache_key, args, _diag_dir)
-    if _cached is not None:
-        stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _cached
+    # Fast-forward target (see StepSnapshots): the steps before it are skipped and the
+    # image comes from its snapshot when `_at` reaches it.
+    _ff = snaps.start_at(snaps.resume) if _replay and snaps.early is not None else None
+    if _ff is not None:
+        pp_star_mask, _pp_sources, _bg_excl_mask = (_copy_state(x) for x in snaps.early)
     else:
-        stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _postprocess_early(
-            stacked, args, final, skip_steps, _diag_dir, _diag_counter)
-        _early_cache_save(_cache_key, stacked, pp_star_mask, _pp_sources, _bg_excl_mask,
-                          args, _diag_dir)
+        _cache_key = (_early_cache_key(stacked, args, skip_steps)
+                      if _early_cache_usable(args, _diag_dir) else None)
+        _cached = _early_cache_load(_cache_key, args, _diag_dir)
+        if _cached is not None:
+            stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _cached
+        else:
+            stacked, pp_star_mask, _pp_sources, _bg_excl_mask = _postprocess_early(
+                stacked, args, final, skip_steps, _diag_dir, _diag_counter)
+            _early_cache_save(_cache_key, stacked, pp_star_mask, _pp_sources, _bg_excl_mask,
+                              args, _diag_dir)
+        if snaps is not None:
+            snaps.reset()
+            snaps.early = tuple(_copy_state(x) for x in (pp_star_mask, _pp_sources, _bg_excl_mask))
+            snaps.record('start', stacked, None, None, force=True)
 
     # Denoisers below see only the starless layer when --starless-process is on:
     # with no stars in it they need no star mask (nothing to protect, no halo
     # to leak into a background estimate), and the stars layer is added back
     # untouched after the last denoiser.
+    if _ff == 'start':
+        stacked, _, _ns = snaps.load('start')
+        _restore_noise_scale(args, _ns)
+        _ff = None
     _dn_starless, _dn_stars = _split_starless(stacked, _pp_sources, final, args, _split_sky)
     if _dn_starless is not None:
         safe_print("\n  Starless processing: denoising the starless layer only")
@@ -730,8 +867,24 @@ def postprocess_stack(
     else:
         _dn_mask = pp_star_mask
 
+    def _at(name: str, enabled: bool) -> bool:
+        """Called at the top of every resumable step, before its own test: False while
+        fast-forwarding to a snapshot; at the target, loads it; otherwise records the
+        state the step starts from (when the step is enabled, so it can be toggled)."""
+        nonlocal stacked, _dn_stars, _ff
+        if _ff is not None:
+            if name != _ff:
+                return False
+            stacked, _dn_stars, _ns2 = snaps.load(name)
+            _restore_noise_scale(args, _ns2)
+            _ff = None
+        elif snaps is not None and enabled:
+            snaps.record(name, stacked, _dn_stars, getattr(args, '_preview_noise_scale', None))
+        return True
+
     # 6. Bilateral denoising
-    if getattr(args, 'denoise_bilateral', False) and 'bilateral' not in skip_steps:
+    if (_at('bilateral', bool(getattr(args, 'denoise_bilateral', False)))
+            and getattr(args, 'denoise_bilateral', False) and 'bilateral' not in skip_steps):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_bilateral_denoise')
         bil_sigma_color = getattr(args, 'denoise_bilateral_sigma_color', None)
         bil_sigma_space = getattr(args, 'denoise_bilateral_sigma_space', 3.0)
@@ -745,7 +898,8 @@ def postprocess_stack(
         stacked = _sanitize(stacked, "bilateral denoising")
 
     # 6.6. ACDNR denoising
-    if getattr(args, 'denoise_acdnr', False) and 'acdnr' not in skip_steps:
+    if (_at('acdnr', bool(getattr(args, 'denoise_acdnr', False)))
+            and getattr(args, 'denoise_acdnr', False) and 'acdnr' not in skip_steps):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_acdnr_denoise')
         acdnr_sigma = getattr(args, 'denoise_acdnr_sigma', 1.5)
         acdnr_k = getattr(args, 'denoise_acdnr_k', 3.0)
@@ -758,7 +912,8 @@ def postprocess_stack(
         safe_print(f"  ✓ ACDNR denoise ({format_time(time.time() - acdnr_start)})")
 
     # 6.7b. Directional (curvelet/shearlet-inspired) adaptive wavelet denoising
-    if (getattr(args, 'denoise_curvelet', False)
+    if (_at('wavelet', bool(getattr(args, 'denoise_curvelet', False)))
+            and getattr(args, 'denoise_curvelet', False)
             and not ({'wavelet', 'curvelet'} & skip_steps)):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_curvelet_denoise')
         curv_chroma = getattr(args, 'denoise_chroma_boost', 2.0)
@@ -775,7 +930,8 @@ def postprocess_stack(
     # 6.7c. Learned Noise2Noise denoiser, or the learned deconvolver (--deconvolve nn: the
     # same network trained on seeing pairs, so it also denoises; src/nn_denoise.py)
     _nn_deconv = getattr(args, 'deconvolve_nn', False) and 'deconvolve' not in skip_steps
-    if (_nn_deconv or getattr(args, 'denoise_nn', False)) and 'nn' not in skip_steps:
+    if (_at('nn', bool(getattr(args, 'deconvolve_nn', False) or getattr(args, 'denoise_nn', False)))
+            and (_nn_deconv or getattr(args, 'denoise_nn', False)) and 'nn' not in skip_steps):
         from src.nn_denoise import DECONV_MODEL_PATH, model_available, nn_denoise
         _nn_path = DECONV_MODEL_PATH if _nn_deconv else None
         _nn_flag = '--deconvolve nn' if _nn_deconv else '--denoiser nn'
@@ -816,7 +972,8 @@ def postprocess_stack(
             stacked = _sanitize(stacked, "nn deconvolution" if _nn_deconv else "nn denoising")
 
     # 6.8. Anisotropic diffusion (Perona-Malik)
-    if getattr(args, 'denoise_aniso', False) and 'aniso' not in skip_steps:
+    if (_at('aniso', bool(getattr(args, 'denoise_aniso', False)))
+            and getattr(args, 'denoise_aniso', False) and 'aniso' not in skip_steps):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_aniso_denoise')
         aniso_iters = getattr(args, 'aniso_iterations', 20)
         aniso_kappa = _aniso_kappa(stacked, getattr(args, 'aniso_kappa_sigma', None))
@@ -831,12 +988,13 @@ def postprocess_stack(
         safe_print(f"  ✓ Anisotropic diffusion ({format_time(time.time() - aniso_start)})")
         stacked = _sanitize(stacked, "anisotropic diffusion")
 
-    if _dn_stars is not None:
+    if _dn_stars is not None and _ff is None:
         stacked = _sanitize(stacked + _dn_stars, "starless recombine (denoise)")
         _dn_stars = None
 
     # 6.9. SCNR (Subtractive Chromatic Noise Reduction)
-    if getattr(args, 'scnr', False) and 'scnr' not in skip_steps:
+    if (_at('scnr', bool(getattr(args, 'scnr', False)))
+            and getattr(args, 'scnr', False) and 'scnr' not in skip_steps):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_scnr')
         scnr_amount = getattr(args, 'scnr_amount', 1.0)
         scnr_target = getattr(args, 'scnr_target', 'green')
@@ -849,10 +1007,11 @@ def postprocess_stack(
     # The gray-locus step makes the *median* star neutral; once the linear
     # stack was calibrated against Gaia (a G2V star white), it would only
     # pull that back toward the field's median colour.
-    if getattr(args, '_colcal_scales', None) and getattr(args, 'photometric_calibration', False):
+    _pc_ok = _at('photo_cal', bool(getattr(args, 'photometric_calibration', False)))
+    if _pc_ok and getattr(args, '_colcal_scales', None) and getattr(args, 'photometric_calibration', False):
         safe_print("\n  Gray-locus colour calibration skipped: colour already "
                    "calibrated against Gaia")
-    elif getattr(args, 'photometric_calibration', False) and 'photo_cal' not in skip_steps:
+    elif _pc_ok and getattr(args, 'photometric_calibration', False) and 'photo_cal' not in skip_steps:
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_photo_cal')
         print("\n  Applying photometric color calibration (gray-locus method)...")
         pc_start = time.time()
@@ -867,7 +1026,8 @@ def postprocess_stack(
         stacked = _sanitize(stacked, "photometric calibration")
 
     # 7. Deconvolution (RL, blind PSF, or TV)
-    if getattr(args, 'deconvolve', False) and 'deconvolve' not in skip_steps:
+    if (_at('deconvolve', bool(getattr(args, 'deconvolve', False)))
+            and getattr(args, 'deconvolve', False) and 'deconvolve' not in skip_steps):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_deconvolve')
         rl_iters = getattr(args, 'deconvolve_iterations', Config.RL_DEFAULT_ITERATIONS)
         rl_fwhm_override = getattr(args, 'deconvolve_fwhm', None)
@@ -1015,7 +1175,8 @@ def postprocess_stack(
     # 8. Star reduction: narrow each star's profile (shrink_stars). This used
     # to blend star cores toward a blurred copy (reduce_stars), which lowers
     # the peak but widens the star -- the opposite of reducing it.
-    if getattr(args, 'star_reduce', False) and 'star_reduce' not in skip_steps:
+    if (_at('star_reduce', bool(getattr(args, 'star_reduce', False)))
+            and getattr(args, 'star_reduce', False) and 'star_reduce' not in skip_steps):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_star_reduce')
         sr_factor = float(getattr(args, 'star_reduce_factor', 0.4))
         sr_fwhm = _stack_fwhm(stacked, _pp_sources, final)
@@ -1026,7 +1187,8 @@ def postprocess_stack(
         safe_print(f"  ✓ Star reduction ({format_time(time.time() - sr_start)})")
 
     # 9. Multiscale local contrast enhancement
-    if getattr(args, 'local_contrast', False) and 'local_contrast' not in skip_steps:
+    if (_at('local_contrast', bool(getattr(args, 'local_contrast', False)))
+            and getattr(args, 'local_contrast', False) and 'local_contrast' not in skip_steps):
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_local_contrast')
         lc_strength = float(getattr(args, 'local_contrast_strength', 0.7))
         lc_fwhm = _stack_fwhm(stacked, _pp_sources, final)
@@ -1050,7 +1212,7 @@ def postprocess_stack(
         safe_print(f"  ✓ Local contrast enhancement ({format_time(time.time() - lc_start)})")
 
     # 11. Comet: radial renormalization (reveals jets by flattening coma gradient)
-    if (getattr(args, 'comet_mode', False)
+    if (_ff is None and getattr(args, 'comet_mode', False)
             and getattr(args, 'comet_radial_renorm', False)
             and 'comet_radial_renorm' not in skip_steps):
         print("\n  Applying comet radial renormalization...")
@@ -1069,7 +1231,7 @@ def postprocess_stack(
             safe_print(f"  WARNING: radial renormalization failed: {_rre}")
 
     # 12. Comet: Larson-Sekanina rotational difference filter (reveals jet structure)
-    if (getattr(args, 'comet_mode', False)
+    if (_ff is None and getattr(args, 'comet_mode', False)
             and getattr(args, 'comet_larson_sekanina', False)
             and 'comet_larson_sekanina' not in skip_steps):
         ls_rot = float(getattr(args, 'comet_ls_rotation', 15.0))
@@ -1098,7 +1260,8 @@ def postprocess_stack(
     #      model and interpolated across, exactly like background extraction.
     #   2. Equalise the per-channel floors to a common target (neutral grey).
     # Add-only final lift keeps every pixel non-negative (no new clipped holes).
-    if args.background_extraction and 'sky_neutralize' not in skip_steps:
+    if (_at('sky_neutralize', bool(args.background_extraction))
+            and args.background_extraction and 'sky_neutralize' not in skip_steps):
         # Sky mask: exclude stars AND extended emission from the model, via
         # the same emission-mask logic DBE uses (src/background.py) --
         # not a fixed brightness percentile. A percentile-only mask (e.g.
@@ -1160,7 +1323,7 @@ def postprocess_stack(
         except Exception as _rs_exc:
             safe_print(f"  ⚠ Star removal (nn) failed ({_rs_exc}) — falling back to inpaint")
             _rs_linear = None
-    if (_rs_linear is None and getattr(args, 'remove_stars', False)
+    if (_rs_linear is None and not _replay and getattr(args, 'remove_stars', False)
             and 'remove_stars' not in skip_steps):
         try:
             if _pp_sources is not None and len(_pp_sources) > 0:
@@ -1182,6 +1345,8 @@ def postprocess_stack(
         except Exception as _rs_exc:
             safe_print(f"  ⚠ Star removal failed ({_rs_exc}) — main output unaffected")
 
+    if _ff is not None:
+        raise RuntimeError(f"Phase 4 snapshot step '{_ff}' was not reached")
     stacked = _sanitize(stacked, "final post-processing")
     return stacked
 

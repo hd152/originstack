@@ -6,6 +6,20 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+- The desktop app can switch the post-processing steps of a finished run off and on. A
+  "Post-processing steps" panel under the preview has a box per step the run used (denoisers,
+  deconvolution, star reduction, local contrast, final sky flatten and others); ticking or
+  clearing one redoes only that step and the ones after it and updates the preview and the
+  files the run wrote. On a full Sunflower-size frame a late step takes 3-8 s instead of the
+  22 s a whole Phase 4 takes. Background and chroma steps redo the whole of Phase 4. The
+  starless sidecar of `--remove-stars` is not rewritten by a toggle. A "Show without stars"
+  box in the same panel previews the image without its stars (the inpaint remover, run on the
+  finished image) and saves `<stem>_starless.jpg` next to the preview; the stars-in files are
+  left as they are. Not offered for runs with
+  `--uncertainty-propagate`, `--error-aware-stretch`, `--hdr-combine`, `--annotate` or a
+  multi-session combine.
+
 ### Fixed
 - Re-running a session from the `_config.toml` an `--auto` run saved now processes the frames
   the same way. `--auto` asked for per-frame gradient removal on nebulae and galaxies, but it
