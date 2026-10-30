@@ -228,7 +228,7 @@ pub(crate) fn rcd_strips_into(src: &[f32], h: usize, w: usize, scale: f64,
     let (tyl, txl) = (RCD_TILE, RCD_TILE_X);
     if h <= tyl + 2 * RCD_HALO && w <= txl + 2 * RCD_HALO {
         let planes = rcd_core(src, h, w, scale, r_off, b_off);
-        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        par_rows(&mut *out, w * 3, |y, row| {
             rcd_emit(&planes, w, y, 0, 1, w, sc, grid, y, 0, row, w * 3);
         });
         rcd_give_planes(planes);
@@ -248,7 +248,7 @@ pub(crate) fn rcd_strips_into(src: &[f32], h: usize, w: usize, scale: f64,
     };
     let tx = w.div_ceil(txl);
     // one band of tile rows per task: each band owns its output rows
-    out.par_chunks_mut(tyl * w * 3).enumerate().for_each(|(ky, band)| {
+    par_rows(&mut *out, tyl * w * 3, |ky, band| {
         let (y0, y1, rows) = span(ky, h, tyl);
         let sy = ky * tyl;
         for kx in 0..tx {
@@ -281,7 +281,7 @@ pub(crate) fn rcd_row(a: &[f32], w: usize, y: usize, dy: isize, dx: isize) -> &[
 pub(crate) fn rcd_rows<F: Fn(usize, &mut [f32]) + Sync>(h: usize, w: usize, f: F) -> Vec<f32> {
     let pw = w + 2 * RCD_P;
     let mut out = rcd_take((h + 2 * RCD_P) * pw);
-    out.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
+    par_rows(&mut out, pw, |py, row| {
         if py >= RCD_P && py < h + RCD_P {
             f(py - RCD_P, &mut row[RCD_P..RCD_P + w]);
         }
@@ -560,12 +560,15 @@ pub(crate) fn rcd_core(src: &[f32], h: usize, w: usize, scale: f64,
     #[cfg(target_arch = "x86_64")]
     {
         if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU reports AVX2, the only requirement of `rcd_core_avx2`.
             return unsafe { rcd_core_avx2(src, h, w, scale, r_off, b_off) };
         }
     }
     rcd_core_impl!(src, h, w, scale, r_off, b_off)
 }
 
+/// # Safety
+/// The CPU must support AVX2 (check `is_x86_feature_detected!("avx2")` first).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn rcd_core_avx2(src: &[f32], h: usize, w: usize, scale: f64,

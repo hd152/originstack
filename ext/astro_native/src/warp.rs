@@ -464,7 +464,7 @@ pub(crate) fn warp_affine_lanczos3<'py>(
 
     let mut out = vec![0f32; out_h * out_w * c];
     py.detach(|| {
-        out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy_l, out_row)| {
+        par_rows(&mut out, out_w * c, |oy_l, out_row| {
             let oy = oy_l + oy0;
             let mut wy = [0f64; 6];
             let mut wx = [0f64; 6];
@@ -561,7 +561,7 @@ pub(crate) fn warp_affine_lanczos3_into<'py>(
         None
     };
     py.detach(|| {
-        dst.par_chunks_mut(out_w * c).enumerate().for_each(|(oy_l, out_row)| {
+        par_rows(&mut *dst, out_w * c, |oy_l, out_row| {
             lanczos3_row_flat(img, h, w, c, oy_l + oy0, out_row, [m00, m01, m10, m11], [o0, o1],
                               &col_tab, cval, ox0);
         });
@@ -618,7 +618,7 @@ pub(crate) fn warp_affine_kernel_table<'py>(
 
     let mut out = vec![0f32; out_h * out_w * c];
     py.detach(|| {
-        out.par_chunks_mut(out_w * c).enumerate().for_each(|(oy, out_row)| {
+        par_rows(&mut out, out_w * c, |oy, out_row| {
             for ox in 0..out_w {
                 let iy = m00 * oy as f64 + m01 * ox as f64 + o0;
                 let ix = m10 * oy as f64 + m11 * ox as f64 + o1;

@@ -128,7 +128,7 @@ pub(crate) fn debayer_malvar<'py>(
 
     let mut out = vec![0f32; h * w * 3];
     py.detach(|| {
-        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row_out)| {
+        par_rows(&mut out, w * 3, |y, row_out| {
             let is_r_row = y % 2 == r_r;
             let is_b_row = y % 2 == b_r;
             let interior_y = y >= 2 && y + 2 < h;
@@ -205,7 +205,7 @@ pub(crate) fn debayer_malvar_into<'py>(
     let dst = out.as_slice_mut()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("out must be contiguous"))?;
     py.detach(|| {
-        dst.par_chunks_mut(w * 3).enumerate().for_each(|(y, row_out)| {
+        par_rows(&mut *dst, w * 3, |y, row_out| {
             let is_r_row = y % 2 == r_r;
             let is_b_row = y % 2 == b_r;
             let interior_y = y >= 2 && y + 2 < h;
@@ -316,7 +316,7 @@ pub(crate) const MENON_DIFF_KT: [(isize, isize, f64); 8] = [
 /// 1D horizontal convolution, scipy `mode='mirror'` boundary (reuses `mirror_idx`).
 pub(crate) fn menon_conv_h(data: &[f64], h: usize, w: usize, taps: &[(isize, f64)]) -> Vec<f64> {
     let mut out = vec![0.0f64; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+    par_rows(&mut out, w, |y, row_out| {
         let base = y * w;
         for x in 0..w {
             let mut acc = 0.0f64;
@@ -332,7 +332,7 @@ pub(crate) fn menon_conv_h(data: &[f64], h: usize, w: usize, taps: &[(isize, f64
 /// 1D vertical convolution, scipy `mode='mirror'` boundary.
 pub(crate) fn menon_conv_v(data: &[f64], h: usize, w: usize, taps: &[(isize, f64)]) -> Vec<f64> {
     let mut out = vec![0.0f64; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+    par_rows(&mut out, w, |y, row_out| {
         for x in 0..w {
             let mut acc = 0.0f64;
             for &(dy, wt) in taps {
@@ -350,7 +350,7 @@ pub(crate) fn menon_conv_v(data: &[f64], h: usize, w: usize, taps: &[(isize, f64
 /// gradient-diffusion pass.
 pub(crate) fn menon_diffuse(data: &[f64], h: usize, w: usize, taps: &[(isize, isize, f64)]) -> Vec<f64> {
     let mut out = vec![0.0f64; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+    par_rows(&mut out, w, |y, row_out| {
         for x in 0..w {
             let mut acc = 0.0f64;
             for &(dy, dx, wt) in taps {
@@ -410,14 +410,14 @@ pub(crate) fn debayer_menon2007<'py>(
             .collect();
 
         let mut d_h = vec![0.0f64; n];
-        d_h.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        par_rows(&mut d_h, w, |y, row| {
             let base = y * w;
             for x in 0..w {
                 row[x] = (c_h[base + x] - c_h[base + mirror_idx(x as isize + 2, w)]).abs();
             }
         });
         let mut d_v = vec![0.0f64; n];
-        d_v.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        par_rows(&mut d_v, w, |y, row| {
             for x in 0..w {
                 row[x] = (c_v[y * w + x] - c_v[mirror_idx(y as isize + 2, h) * w + x]).abs();
             }
@@ -564,7 +564,7 @@ pub(crate) fn debayer_menon2007<'py>(
     });
 
     let mut out = vec![0f32; n * 3];
-    out.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
+    par_rows(&mut out, 3, |i, px| {
         px[0] = r_final[i] as f32;
         px[1] = g_final[i] as f32;
         px[2] = b_final[i] as f32;

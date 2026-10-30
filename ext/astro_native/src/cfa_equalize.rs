@@ -7,62 +7,6 @@ use crate::*;
 // green G1/G2 equalisation, the Bayer-position grid equalisation
 // ---------------------------------------------------------------------------
 
-#[inline]
-pub(crate) fn median_f32_as_f64(v: &mut [f32]) -> f64 {
-    let n = v.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    let mid = n / 2;
-    let (_, &mut m, _) =
-        v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    if n % 2 == 1 {
-        m as f64
-    } else {
-        let mut lo = f32::NEG_INFINITY;
-        for &x in v[..mid].iter() {
-            if x > lo {
-                lo = x;
-            }
-        }
-        0.5 * (lo as f64 + m as f64)
-    }
-}
-
-/// Iterative sigma-clipped median on f32 storage. Identical result to the f64
-/// version (`sigma_clipped_median_native`): f32 -> f64 is exact, the order
-/// statistics are the same values, and every sum/compare is still done in f64;
-/// only the buffers are half the size, which is what matters under memory contention.
-/// (A two-pass radix-histogram selection was tried in place of the quickselect: exact
-/// too, but no faster -- ~6 ms per iteration either way, of which the two sequential
-/// f64 sums are a good part and cannot be reordered without changing the bits.)
-pub(crate) fn sigma_clipped_median_f32(orig: &[f32], sigma: f64, iters: usize) -> f64 {
-    let mut x: Vec<f32> = orig.to_vec();
-    let mut scratch: Vec<f32> = Vec::with_capacity(x.len());
-    for _ in 0..iters {
-        if x.is_empty() {
-            break;
-        }
-        scratch.clear();
-        scratch.extend_from_slice(&x);
-        let med = median_f32_as_f64(&mut scratch);
-        let n = x.len() as f64;
-        let m: f64 = x.iter().map(|&v| v as f64).sum::<f64>() / n;
-        let std = (x.iter().map(|&v| { let d = v as f64 - m; d * d }).sum::<f64>() / n).sqrt();
-        if std < 1e-12 {
-            break;
-        }
-        let thresh = sigma * std;
-        x.retain(|&v| (v as f64 - med).abs() < thresh);
-    }
-    if !x.is_empty() {
-        median_f32_as_f64(&mut x)
-    } else {
-        let mut o = orig.to_vec();
-        median_f32_as_f64(&mut o)
-    }
-}
-
 /// Gather the (py, px) 2x2 sub-plane of channel `ch` from an interleaved
 /// `chans`-channel image, row-major (the order numpy's `ravel` of the strided view has).
 pub(crate) fn gather_plane(src: &[f32], w: usize, h: usize, chans: usize, ch: usize, py: usize, px: usize) -> Vec<f32> {
@@ -72,7 +16,7 @@ pub(crate) fn gather_plane(src: &[f32], w: usize, h: usize, chans: usize, ch: us
     if ww == 0 {
         return p;
     }
-    p.par_chunks_mut(ww).enumerate().for_each(|(i, row)| {
+    par_rows(&mut p, ww, |i, row| {
         let base = (2 * i + py) * w + px;
         for j in 0..ww {
             row[j] = src[(base + 2 * j) * chans + ch];
@@ -122,7 +66,7 @@ pub(crate) fn green_equalize_inplace<'py>(
         };
         if m2 > 1e-6 && (m1 / m2 - 1.0).abs() < 0.2 {
             let s = (m1 / m2) as f32;
-            d.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            par_rows(&mut *d, w, |y, row| {
                 if y % 2 == g2_r % 2 {
                     let mut x = g2_c;
                     while x < w {
@@ -172,7 +116,7 @@ pub(crate) fn bayer_grid_equalize_inplace<'py>(
             return false;
         }
         let off: Vec<f32> = med.iter().map(|m| (m - overall) as f32).collect();
-        f.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        par_rows(&mut *f, w * 3, |y, row| {
             let py_ = y & 1;
             for x in 0..w {
                 let v = row[x * 3 + 1] - off[py_ * 2 + (x & 1)];

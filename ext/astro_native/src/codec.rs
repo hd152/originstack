@@ -43,6 +43,9 @@ pub(crate) fn byte_shuffle_into(input: &[u8], itemsize: usize, output: &mut [u8]
 
 /// 16 items per step: `pshufb` groups each register's bytes by plane, a 4x4 transpose of
 /// 32-bit lanes makes one register per plane. `input.len()` is a multiple of 64.
+///
+/// # Safety
+/// The CPU must support SSSE3; `input.len()` is a multiple of 64 and each plane holds `input.len() / 4` bytes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3")]
 pub(crate) unsafe fn shuffle4_ssse3(input: &[u8], p0: &mut [u8], p1: &mut [u8], p2: &mut [u8], p3: &mut [u8]) {
@@ -102,6 +105,9 @@ pub(crate) fn byte_unshuffle_into(input: &[u8], itemsize: usize, output: &mut [u
 }
 
 /// `output.len()` is a multiple of 64; 16 items per step.
+///
+/// # Safety
+/// `output.len()` is a multiple of 64 and each plane holds `output.len() / 4` bytes (SSE2 is x86-64 baseline).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub(crate) unsafe fn unshuffle4_sse2(p0: &[u8], p1: &[u8], p2: &[u8], p3: &[u8], output: &mut [u8]) {

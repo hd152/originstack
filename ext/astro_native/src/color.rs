@@ -18,7 +18,7 @@ pub(crate) fn luminance_native<'py>(
     let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
     let mut lum = vec![0f32; h * w];
     py.detach(|| {
-        lum.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        par_rows(&mut lum, w, |y, row| {
             let src = &f[y * w * 3..(y + 1) * w * 3];
             for x in 0..w {
                 row[x] = kr * src[x * 3] + kg * src[x * 3 + 1] + kb * src[x * 3 + 2];

@@ -73,7 +73,7 @@ pub(crate) fn hot_pixel_bayer<'py>(
     let out = py.detach(|| {
         let mut out = d.to_vec();
         if let Some(m) = map {
-            out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            par_rows(&mut out, w, |y, row| {
                 let py_ = y & 1;
                 let i = y >> 1;
                 let hh = (h - py_ + 1) / 2;
@@ -124,7 +124,7 @@ pub(crate) fn hot_pixel_bayer<'py>(
             // excess over the plane median in units of that plane's sigma, on the mosaic grid
             let zmos: Option<Vec<f32>> = star_support.map(|_| {
                 let mut z = vec![0f32; h * w];
-                z.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                par_rows(&mut z, w, |y, row| {
                     let py_ = y & 1;
                     let i = y >> 1;
                     for x in 0..w {
@@ -137,7 +137,7 @@ pub(crate) fn hot_pixel_bayer<'py>(
                 });
                 z
             });
-            out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            par_rows(&mut out, w, |y, row| {
                 let py_ = y & 1;
                 let i = y >> 1;
                 for x in 0..w {
@@ -202,11 +202,16 @@ pub(crate) fn hotpix_give(v: Vec<f32>) {
     }
 }
 
+/// A raw output pointer handed to rayon tasks that each write a disjoint region of the
+/// buffer it points into (one row of one plane, or one output row), which the buffer's
+/// owner keeps alive until the parallel section ends.
 #[derive(Clone, Copy)]
 pub(crate) struct HpPtr(pub(crate) *mut f32);
 
+// SAFETY: only used for the disjoint, owner-outlived writes described above.
 unsafe impl Send for HpPtr {}
 
+// SAFETY: as for `Send`; no task reads through the pointer or writes outside its own region.
 unsafe impl Sync for HpPtr {}
 
 /// |diff| histogram resolution: buckets are the top 12 bits of the non-negative f32
@@ -347,7 +352,7 @@ pub(crate) fn hot_pixel_bayer_inplace<'py>(
                         let cur = (i % 3) * ww;
                         let med = &mut medbuf[..ww];
                         if i >= 1 && i + 1 < hh && ww >= 3 {
-                            median3_interior(((i - 1) % 3) * ww, cur, ((i + 1) % 3) * ww, ww, rg, med);
+                            median3_interior(rg, ((i - 1) % 3) * ww, cur, ((i + 1) % 3) * ww, ww, med);
                             med[0] = bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, 0);
                             med[ww - 1] =
                                 bayer_plane_median3_as_filter(src, w, hh, ww, py_, px, i, ww - 1);
@@ -746,7 +751,7 @@ pub(crate) enum HotRgb {
 pub(crate) fn hot_rgb_core(f: &[f32], h: usize, w: usize, threshold: f64) -> HotRgb {
     let (kr, kg, kb) = (0.299f64 as f32, 0.587f64 as f32, 0.114f64 as f32);
     let mut lum = vec![0f32; h * w];
-    lum.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+    par_rows(&mut lum, w, |y, row| {
         for x in 0..w {
             let b = (y * w + x) * 3;
             row[x] = kr * f[b] + kg * f[b + 1] + kb * f[b + 2];

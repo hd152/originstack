@@ -6,21 +6,6 @@ use crate::*;
 // DBE robust background-surface fit
 // ---------------------------------------------------------------------------
 
-/// Median of an f64 slice (copies + sorts; N is small — DBE patch counts).
-pub(crate) fn median_f64(v: &[f64]) -> f64 {
-    if v.is_empty() {
-        return 0.0;
-    }
-    let mut s: Vec<f64> = v.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = s.len();
-    if n % 2 == 1 {
-        s[n / 2]
-    } else {
-        0.5 * (s[n / 2 - 1] + s[n / 2])
-    }
-}
-
 /// Gaussian-weighted local accumulators at an evaluation point, for a
 /// weighted local-linear (degree-1) fit. Offsets are in units of sigma.
 /// Samples beyond `trunc_d2` sigma^2 are skipped (weight < ~4e-6 at 25).

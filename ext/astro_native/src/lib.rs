@@ -22,6 +22,35 @@ pub(crate) use pyo3::prelude::*;
 pub(crate) use pyo3::types::PyBytes;
 pub(crate) use rayon::prelude::*;
 
+/// Defines `$name` as a run-time AVX2 dispatcher over the portable `$body` with the same
+/// signature: when the CPU reports AVX2 it calls `$body` through an inner
+/// `#[target_feature(enable = "avx2")]` twin (`$body` and everything inlined into it are
+/// then compiled 8-wide), otherwise it calls `$body` directly.
+///
+/// The crate ships for baseline x86-64, so wider vectors must be a run-time choice, never
+/// `-C target-cpu`. Enabling `avx2` does not enable FMA and Rust never contracts `a * b + c`
+/// on its own, so the twin is bit-identical to the baseline build; a twin with hand-written
+/// intrinsics must keep multiply and add separate for the same reason (see
+/// `wavelet::dwt_row_accumulate_avx2`). `$body` should be `#[inline]`, or the twin gains nothing.
+macro_rules! avx2_twin {
+    ($vis:vis fn $name:ident $(<$($lt:lifetime),+>)? ($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? => $body:ident) => {
+        $vis fn $name $(<$($lt),+>)? ($($arg: $ty),*) $(-> $ret)? {
+            #[cfg(target_arch = "x86_64")]
+            {
+                #[target_feature(enable = "avx2")]
+                unsafe fn twin $(<$($lt),+>)? ($($arg: $ty),*) $(-> $ret)? {
+                    $body($($arg),*)
+                }
+                if std::is_x86_feature_detected!("avx2") {
+                    // SAFETY: the CPU reports AVX2, the only feature `twin` enables.
+                    return unsafe { twin($($arg),*) };
+                }
+            }
+            $body($($arg),*)
+        }
+    };
+}
+
 mod background;
 mod calibrate;
 mod cfa_equalize;
@@ -36,6 +65,7 @@ mod filters;
 mod hotpix;
 mod moving;
 mod nn;
+mod parallel;
 mod pca;
 mod photometry;
 mod psf;
@@ -63,6 +93,7 @@ pub(crate) use filters::*;
 pub(crate) use hotpix::*;
 pub(crate) use moving::*;
 pub(crate) use nn::*;
+pub(crate) use parallel::*;
 pub(crate) use pca::*;
 pub(crate) use photometry::*;
 pub(crate) use psf::*;

@@ -66,6 +66,10 @@ pub(crate) fn nn_conv_row_portable(xp: &[f32], wt: &[f32], b: &[f32], g: &NnConv
 /// merged the three overlapping kx loads into one and rebuilt the shifted vectors with
 /// shuffles and blends, spilling to the stack. Mul then add, no FMA. Only called after a
 /// run-time AVX2 check; `nn_conv3x3` sizes every buffer so the unchecked loads stay inside.
+///
+/// # Safety
+/// The CPU must support AVX2, and `xp`, `wt`, `b` and `out_row` must be sized from `g` as
+/// `nn_conv3x3` does (the loads are unchecked).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn nn_conv_row_avx2(xp: &[f32], wt: &[f32], b: &[f32], g: &NnConvGeom, y: usize, out_row: &mut [f32]) {

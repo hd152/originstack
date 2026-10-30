@@ -103,7 +103,7 @@ pub(crate) fn small_times_wide<'py>(
     // shape`). Kept simple since the added chunking bought nothing real.
     let mut out = vec![0f64; n * p];
     py.detach(|| {
-        out.par_chunks_mut(p).enumerate().for_each(|(k, out_row)| {
+        par_rows(&mut out, p, |k, out_row| {
             let weights = &small_flat[k * n..(k + 1) * n];
             for i in 0..n {
                 let w = weights[i];

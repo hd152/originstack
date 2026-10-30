@@ -174,7 +174,7 @@ pub(crate) fn patch_brenner_scores<'py>(
     let s = a.as_slice().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("lum must be contiguous"))?;
     let mut out = vec![0f32; ny * nx];
     py.detach(|| {
-        out.par_chunks_mut(nx).enumerate().for_each(|(iy, row)| {
+        par_rows(&mut out, nx, |iy, row| {
             let y0 = iy * ph;
             let y1 = ((iy + 1) * ph).min(h);
             for ix in 0..nx {

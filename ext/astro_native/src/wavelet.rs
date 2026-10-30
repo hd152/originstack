@@ -36,6 +36,8 @@ pub(crate) fn dwt_row_accumulate_body(a: &mut [f64], d: &mut [f64], src: &[f64],
     }
 }
 
+/// # Safety
+/// The CPU must support AVX2 (check `is_x86_feature_detected!("avx2")` first).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn dwt_row_accumulate_avx2(a: &mut [f64], d: &mut [f64], src: &[f64], lk: f64, hk: f64) {

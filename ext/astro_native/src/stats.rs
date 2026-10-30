@@ -49,21 +49,58 @@ pub(crate) fn median_inplace<T: MedianFloat>(v: &mut [T]) -> T {
         }
         return T::HALF * (v[n / 2 - 1] + v[n / 2]);
     }
+    let (lo, hi) = select_middle(v);
+    if n % 2 == 1 {
+        hi
+    } else {
+        T::HALF * (lo + hi)
+    }
+}
+
+/// Quickselect to the middle of `v` (non-empty): returns `(lo, hi)`, the
+/// (n/2 - 1)-th and n/2-th order statistics for even n, and the same element
+/// twice for odd n. Only an even count pays for the scan of the left partition
+/// (its maximum; NaN never compares greater, as with the select's comparator).
+#[inline]
+pub(crate) fn select_middle<T: MedianFloat>(v: &mut [T]) -> (T, T) {
+    let n = v.len();
     let mid = n / 2;
     let (_, &mut m, _) =
         v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     if n % 2 == 1 {
-        m
-    } else {
-        // (mid-1)-th order statistic = max of the left partition (NaN never
-        // compares greater, as with the select's comparator).
-        let mut lo = T::NEG_INFINITY;
-        for &x in v[..mid].iter() {
-            if x > lo {
-                lo = x;
-            }
+        return (m, m);
+    }
+    let mut lo = T::NEG_INFINITY;
+    for &x in v[..mid].iter() {
+        if x > lo {
+            lo = x;
         }
-        T::HALF * (lo + m)
+    }
+    (lo, m)
+}
+
+/// Median of an f64 slice that is left untouched; empty -> 0.0 (the caller
+/// treats "no samples" as "no offset", unlike `median_inplace`'s NaN).
+pub(crate) fn median_f64(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    median_inplace(&mut v.to_vec())
+}
+
+/// Median of an f32 slice, returned as f64 and averaged in f64 (the sigma-clip
+/// callers compare it against f64 sums, so the even-count mean is not rounded
+/// to f32 first, unlike `median_inplace::<f32>`).
+#[inline]
+pub(crate) fn median_f32_as_f64(v: &mut [f32]) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    let (lo, hi) = select_middle(v);
+    if v.len() % 2 == 1 {
+        hi as f64
+    } else {
+        0.5 * (lo as f64 + hi as f64)
     }
 }
 
@@ -112,6 +149,39 @@ pub(crate) fn std_sample(v: &[f32]) -> f32 {
 // f64 throughout (this returns a single scalar, no coefficient-chaining
 // precision concern like the wavelet kernel), matching numpy's internal
 // promotion for median/std of a float32 input.
+
+/// Iterative sigma-clipped median on f32 storage: every sum/compare is done in
+/// f64 (f32 -> f64 is exact), only the buffers are half the size, which is what
+/// matters under memory contention.
+/// (A two-pass radix-histogram selection was tried in place of the quickselect: exact
+/// too, but no faster -- ~6 ms per iteration either way, of which the two sequential
+/// f64 sums are a good part and cannot be reordered without changing the bits.)
+pub(crate) fn sigma_clipped_median_f32(orig: &[f32], sigma: f64, iters: usize) -> f64 {
+    let mut x: Vec<f32> = orig.to_vec();
+    let mut scratch: Vec<f32> = Vec::with_capacity(x.len());
+    for _ in 0..iters {
+        if x.is_empty() {
+            break;
+        }
+        scratch.clear();
+        scratch.extend_from_slice(&x);
+        let med = median_f32_as_f64(&mut scratch);
+        let n = x.len() as f64;
+        let m: f64 = x.iter().map(|&v| v as f64).sum::<f64>() / n;
+        let std = (x.iter().map(|&v| { let d = v as f64 - m; d * d }).sum::<f64>() / n).sqrt();
+        if std < 1e-12 {
+            break;
+        }
+        let thresh = sigma * std;
+        x.retain(|&v| (v as f64 - med).abs() < thresh);
+    }
+    if !x.is_empty() {
+        median_f32_as_f64(&mut x)
+    } else {
+        let mut o = orig.to_vec();
+        median_f32_as_f64(&mut o)
+    }
+}
 
 #[pyfunction]
 pub(crate) fn sigma_clipped_median_native(data: PyReadonlyArray1<'_, f32>, sigma: f64, iters: usize) -> f64 {

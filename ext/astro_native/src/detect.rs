@@ -34,7 +34,7 @@ pub(crate) fn separable_blur(img: &[f64], h: usize, w: usize, sigma: f64) -> Vec
 
     // Pass 1: along rows (axis=1 in numpy terms -- columns within a row).
     let mut tmp = vec![0f64; h * w];
-    tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+    par_rows(&mut tmp, w, |y, out_row| {
         let row = &img[y * w..(y + 1) * w];
         for x in 0..w {
             let mut acc = 0f64;
@@ -50,7 +50,7 @@ pub(crate) fn separable_blur(img: &[f64], h: usize, w: usize, sigma: f64) -> Vec
     // Pass 2: along columns (axis=0). Parallelise over output rows; each
     // reads a full column stride from `tmp`, which is fine at this size.
     let mut out = vec![0f64; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+    par_rows(&mut out, w, |y, out_row| {
         for x in 0..w {
             let mut acc = 0f64;
             for (t, &kv) in k.iter().enumerate() {
@@ -134,22 +134,7 @@ pub(crate) fn tap_accumulate_body<'a>(out: &mut [f64], k: &[f64], row: impl Fn(u
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-pub(crate) unsafe fn tap_accumulate_avx2<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
-    tap_accumulate_body(out, k, row)
-}
-
-pub(crate) fn tap_accumulate<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") {
-            // SAFETY: the CPU reports AVX2.
-            unsafe { return tap_accumulate_avx2(out, k, row) }
-        }
-    }
-    tap_accumulate_body(out, k, row)
-}
+avx2_twin!(pub(crate) fn tap_accumulate<'a>(out: &mut [f64], k: &[f64], row: impl Fn(usize) -> &'a [f64]) => tap_accumulate_body);
 
 /// (lo, hi, frac) of the cell-centre-aligned bilinear upsample along one axis.
 #[inline(always)]
@@ -500,7 +485,7 @@ pub(crate) fn stamp_star_disks<'py>(
         .collect();
 
     let mut data = vec![0u8; h * w];
-    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+    par_rows(&mut data, w, |y, row| {
         for i in 0..n {
             let (y0, y1, x0, x1) = bbox[i];
             if y < y0 || y >= y1 {

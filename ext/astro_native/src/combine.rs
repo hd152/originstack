@@ -1364,7 +1364,7 @@ pub(crate) fn patch_weighted_sigma_combine_impl<'py>(
 
     let mut out = vec![0f32; h * w * c];
     py.detach(|| {
-        out.par_chunks_mut(row_len).enumerate().for_each(|(row, out_row)| {
+        par_rows(&mut out, row_len, |row, out_row| {
             // Per-row grid sample coordinate (index + fraction).
             let row_tab: Option<(usize, f32)> = grid_geom.map(|(hf, _, top, _)| {
                 let sy = if hf > 1.0 && qh > 1 {

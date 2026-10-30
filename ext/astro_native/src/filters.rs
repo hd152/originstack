@@ -31,7 +31,7 @@ pub(crate) fn hot_pixel_box_replace_native<'py>(
 
     let out = py.detach(|| {
         let mut result = data_flat.clone();
-        result.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
+        par_rows(&mut result, w * c, |y, row_out| {
             for x in 0..w {
                 if mask_flat[y * w + x] == 0 {
                     continue;
@@ -100,7 +100,7 @@ pub(crate) fn anisotropic_diffusion<'py>(
         for buf in chans.iter_mut() {
             let mut next = vec![0f64; h * w];
             for _ in 0..iterations {
-                next.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+                par_rows(&mut next, w, |y, out_row| {
                     let yn = (y + 1) % h; // roll(-1, axis0): north neighbour
                     let ys = (y + h - 1) % h; // roll(1, axis0): south
                     let step = |x: usize, xe: usize, xw: usize| -> f64 {
@@ -129,7 +129,7 @@ pub(crate) fn anisotropic_diffusion<'py>(
     });
 
     let mut out = vec![0f64; h * w * c];
-    out.par_chunks_mut(w * c).enumerate().for_each(|(y, orow)| {
+    par_rows(&mut out, w * c, |y, orow| {
         for (ch, buf) in chans.iter().enumerate() {
             for x in 0..w {
                 orow[x * c + ch] = buf[y * w + x];
@@ -196,26 +196,9 @@ pub(crate) fn median3_interior_body(data: &[f32], r0: usize, r1: usize, r2: usiz
     }
 }
 
-/// The same body compiled with AVX2 enabled. `#[target_feature]` applies to this function and to
-/// everything inlined into it, so the shared body above is vectorised 8 wide here. Only ever
-/// called after a run-time `is_x86_feature_detected!("avx2")`. Min/max are exact, so the result
-/// is identical to the baseline build's.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-pub(crate) unsafe fn median3_interior_avx2(data: &[f32], r0: usize, r1: usize, r2: usize, w: usize, row_out: &mut [f32]) {
-    median3_interior_body(data, r0, r1, r2, w, row_out)
-}
-
-pub(crate) fn median3_interior(r0: usize, r1: usize, r2: usize, w: usize, data: &[f32], row_out: &mut [f32]) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") {
-            // SAFETY: the CPU reports AVX2.
-            unsafe { return median3_interior_avx2(data, r0, r1, r2, w, row_out) }
-        }
-    }
-    median3_interior_body(data, r0, r1, r2, w, row_out)
-}
+// Dispatches `median3_interior_body` to an AVX2 twin at run time; min/max are exact, so the
+// result is identical to the baseline build's.
+avx2_twin!(pub(crate) fn median3_interior(data: &[f32], r0: usize, r1: usize, r2: usize, w: usize, row_out: &mut [f32]) => median3_interior_body);
 
 /// Windowed median filter (odd `size`, reflect boundary), row-parallel.
 /// The window is tiny (9 or 25 elements for size 3/5) so a per-pixel gather
@@ -230,7 +213,7 @@ pub(crate) fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize
     let half = (size / 2) as isize;
     let hu = size / 2;
     let mut out = vec![0f32; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+    par_rows(&mut out, w, |y, row_out| {
         let mut window = vec![0f32; size * size];
         // Border/generic path: reflect boundary + comparator sort (exact
         // median, same as before; only runs on the frame edges).
@@ -281,7 +264,7 @@ pub(crate) fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize
             return;
         }
         if size == 3 {
-            median3_interior((y - 1) * w, y * w, (y + 1) * w, w, data, row_out);
+            median3_interior(data, (y - 1) * w, y * w, (y + 1) * w, w, row_out);
         } else {
             // size == 5: contiguous 5x5 gather + O(n) quickselect.
             // (f32::total_cmp was tried here and measured slightly slower
@@ -311,7 +294,7 @@ pub(crate) fn median_filter_2d_f32(data: &[f32], h: usize, w: usize, size: usize
 /// real multi-process contention, and f32 halves it.
 pub(crate) fn laplacian_2d_f32(data: &[f32], h: usize, w: usize) -> Vec<f32> {
     let mut out = vec![0f32; h * w];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+    par_rows(&mut out, w, |y, row_out| {
         let yn = reflect_idx(y as isize - 1, h);
         let ys = reflect_idx(y as isize + 1, h);
         let row_c = y * w;
@@ -421,7 +404,7 @@ pub(crate) fn lacosmic_reject_native<'py>(
             let mut chd = vec![0f32; h * w];
             match flat {
                 Some(f) => {
-                    chd.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                    par_rows(&mut chd, w, |y, row| {
                         let base = y * w * c + ch;
                         for x in 0..w {
                             row[x] = f[base + x * c];
@@ -452,7 +435,7 @@ pub(crate) fn lacosmic_reject_native<'py>(
             });
             let smed = median_filter_2d_f32(&sarr, h, w, 3);
 
-            out.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
+            par_rows(&mut out, w * c, |y, row_out| {
                 let row_base = y * w;
                 for x in 0..w {
                     let i = row_base + x;
@@ -566,7 +549,7 @@ pub(crate) fn gaussian_filter_native<'py>(
     let out = py.detach(|| {
         // Pass 1: blur along axis 1 (each row independently), parallel over rows.
         let mut tmp = vec![0f64; h * w];
-        tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+        par_rows(&mut tmp, w, |y, out_row| {
             let row = &flat[y * w..(y + 1) * w];
             for x in 0..w {
                 let mut acc = 0.0f64;
@@ -580,7 +563,7 @@ pub(crate) fn gaussian_filter_native<'py>(
         });
         // Pass 2: blur along axis 0 (each column), parallel over output rows.
         let mut out = vec![0f64; h * w];
-        out.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+        par_rows(&mut out, w, |y, out_row| {
             for x in 0..w {
                 let mut acc = 0.0f64;
                 for (k, &kv) in kernel.iter().enumerate() {
@@ -648,7 +631,7 @@ pub(crate) fn bilateral_filter<'py>(
 
     let mut out = vec![0f32; h * w * c];
     py.detach(|| {
-        out.par_chunks_mut(w * c).enumerate().for_each(|(y, row_out)| {
+        par_rows(&mut out, w * c, |y, row_out| {
             let interior_y = y >= radius && y + radius < h;
             let mut center = [0f64; 8];
             let mut neighbor = [0f64; 8];
