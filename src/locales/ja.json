@@ -197,7 +197,6 @@
  "Extra file formats to save alongside the FITS: tiff, xisf, png (a lossless copy of the preview), png16 (the preview in 16 bits, for further editing).": "FITS と一緒に保存する追加のファイル形式：tiff、xisf、png（プレビューの可逆コピー）、png16（さらに編集するための 16 ビットのプレビュー）。",
  "Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight), png (the preview JPEG's image, lossless 8-bit), png16 (the preview as a 16-bit PNG, for further editing without banding). E.g. --export tiff,png16": "FITS に加える追加の出力形式：tiff（32 ビット浮動小数点）、xisf（PixInsight）、png（プレビュー JPEG の画像、8 ビット可逆）、png16（トーンジャンプなしでさらに編集するための 16 ビット PNG のプレビュー）。例: --export tiff,png16",
  "FITS files": "FITS ファイル",
- "FRAMES": "フレーム",
  "Failed": "失敗",
  "Failed to open the app window: {error}": "アプリのウィンドウを開けませんでした：{error}",
  "Failed: {error}": "失敗：{error}",
@@ -221,7 +220,6 @@
  "Force per-frame cosmic ray rejection even on deep stacks (default: automatic — skipped when >=20 frames are stacked with a rejection method, which removes cosmic rays per-pixel)": "深いスタックでもフレームごとの宇宙線除去を強制します（既定値: 自動 — 除外ありの方式で 20 フレーム以上をスタックする場合は、ピクセルごとに宇宙線が除去されるためスキップされます）",
  "Force per-frame cosmic ray rejection even on deep stacks.": "深いスタックでもフレームごとの宇宙線除去を強制します。",
  "Frame": "フレーム",
- "Frame #{n}": "フレーム #{n}",
  "Frame store": "フレームの保存先",
  "Frames": "フレーム",
  "Frames & calibration (Phase 1)": "フレームとキャリブレーション（フェーズ 1）",
@@ -377,7 +375,7 @@
  "Processing preset. Individual flags still override preset values. quick: fast (mean stack, minimal denoise, no deconvolution). quality: maximum quality (sigma_clip, all denoisers, deconvolution). narrowband: tuned for Ha/OIII/SII data. galaxy: galaxy imaging (GHS stretch, star reduction, bilateral denoise). starfield: star fields (no star reduction, minimal processing). nebula: emission/reflection nebula (GHS stretch, curvelet+ACDNR denoise). planetary: planetary targets (no background extraction, deconvolution). lunar: lunar surface (linear stretch, no star reduction).": "処理プリセット。個別のフラグはプリセットの値より優先されます。quick: 高速（平均スタック、最小限のノイズ除去、デコンボリューションなし）。quality: 最高品質（sigma_clip、すべてのノイズ除去、デコンボリューション）。narrowband: Ha/OIII/SII データ向けに調整。galaxy: 銀河の撮影（GHS 強調、恒星縮小、バイラテラルノイズ除去）。starfield: 星野（恒星縮小なし、最小限の処理）。nebula: 輝線/反射星雲（GHS 強調、curvelet+ACDNR ノイズ除去）。planetary: 惑星（背景抽出なし、デコンボリューション）。lunar: 月面（リニア強調、恒星縮小なし）。",
  "Proper coadd": "プロパーコアド",
  "Proper image coaddition (Zackay & Ofek 2017), on by default.": "厳密な画像コアディション（Zackay & Ofek 2017）。既定で有効です。",
- "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 5; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "フェーズ 1 で N 枚処理するごとに、フレームのサムネイルをデスクトップアプリに送ります（既定値: 5、0 = オフ）。最初のフレームは常に表示されます。通常のコマンドライン実行では効果はありません（受け取る側がないため）。",
+ "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 1; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "フェーズ 1 で N 枚処理するごとに、フレームのサムネイルをデスクトップアプリに送ります（既定値: 1、0 = オフ）。最初のフレームは常に表示されます。通常のコマンドライン実行では効果はありません（受け取る側がないため）。",
  "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1.": "フェーズ 1 で N 枚処理するごとに、フレームのサムネイルをデスクトップアプリに送ります。",
  "Quality": "品質",
  "Quality filter": "品質フィルター",
@@ -615,5 +613,6 @@
  "Copy report (for an email or forum post)": "レポートをコピー（メールやフォーラム投稿用）",
  "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "問題レポートをクリップボードにコピーしました。内容を確認してから、メールやフォーラム投稿（Cloudy Nights、GitHub Discussions ページ）に貼り付けてください。",
  "Result not right? Report it": "結果がおかしい？報告する",
- "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "右上の「問題を報告」で GitHub Issue を開くか、ログ付きの詳細をメールやフォーラム投稿用にコピーできます。"
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "右上の「問題を報告」で GitHub Issue を開くか、ログ付きの詳細をメールやフォーラム投稿用にコピーできます。",
+ "{name}: no preview was kept for this frame": "{name}: このフレームのプレビューは保存されていません"
 }

@@ -1314,51 +1314,6 @@ class PreviewCanvas(ttk.Frame):
         self.zoom_var.set(f'{round(self.scale / self.fit_scale * 100) if self.fit_scale else 100}%')
 
 
-class FrameStrip(ttk.Frame):
-    """Horizontally-scrollable per-frame thumbnail ring (Phase 1)."""
-
-    def __init__(self, parent, on_click):
-        super().__init__(parent)
-        self.on_click = on_click
-        self.canvas = tk.Canvas(self, height=88, bg=_BG, highlightthickness=0)
-        hbar = ttk.Scrollbar(self, orient='horizontal', command=self.canvas.xview)
-        self.inner = ttk.Frame(self.canvas)
-        self.inner.bind('<Configure>',
-                        lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.create_window((0, 0), window=self.inner, anchor='nw')
-        self.canvas.configure(xscrollcommand=hbar.set)
-        self.canvas.pack(fill='x', expand=True)
-        hbar.pack(fill='x')
-        self._shown_ids: set = set()
-        self._photos: List[Any] = []
-
-    def add_thumb(self, fid: int, name: str, jpeg_bytes: bytes) -> None:
-        if fid in self._shown_ids:
-            return
-        from PIL import Image, ImageTk
-        img = Image.open(io.BytesIO(jpeg_bytes)).convert('RGB')
-        img.thumbnail((96, 72))
-        photo = ImageTk.PhotoImage(img)
-        self._photos.append(photo)
-        col = len(self._shown_ids)
-        self._shown_ids.add(fid)
-        btn = tk.Button(self.inner, image=photo, bd=1, relief='flat',
-                        background=_WELL, activebackground=_LINE,
-                        highlightthickness=1, highlightbackground=_LINE,
-                        command=lambda f=fid: self.on_click(f))
-        btn.grid(row=0, column=col, padx=3)
-        ttk.Label(self.inner, text=name[:14], style='Faint.TLabel',
-                 font=(_MONO, 8)).grid(row=1, column=col)
-
-    def clear(self) -> None:
-        """Drop every thumbnail -- called when a new run starts."""
-        for child in self.inner.winfo_children():
-            child.destroy()
-        self._shown_ids.clear()
-        self._photos.clear()
-        self.canvas.configure(scrollregion=(0, 0, 0, 0))
-
-
 class App:
     """Wires the Setup form, RunManager, and progress/preview panels
     together, polling ``UIEvents.snapshot()`` on a ``root.after()`` timer --
@@ -1379,6 +1334,11 @@ class App:
         self._shown_log_lines = 0
         self._last_run_status = 'idle'
         self._named_cache: List[Dict[str, Any]] = []
+        # The frame picked in the RECENT FRAMES table, which the preview then keeps showing
+        # (otherwise the next update would put the latest milestone back), and the rows the
+        # table currently holds (it is only rebuilt when they change, so the selection stays).
+        self._pinned_frame: Optional[str] = None
+        self._frame_rows_shown: List[tuple] = []
         self._update_results: queue.Queue[Dict[str, str]] = queue.Queue()
         self._diagnostics_open = False
 
@@ -1689,7 +1649,7 @@ class App:
         ttk.Button(parent, text=_('Show diagnostics'), command=self._toggle_diagnostics).pack(
             anchor='w', pady=(0, 6))
 
-    # ── right column: preview, frame strip, recent frames, summary ────
+    # ── right column: preview, recent frames, summary ────────────────
 
     def _build_right(self, parent: ttk.Frame) -> None:
         preview_frame = ttk.LabelFrame(parent, text=_('PREVIEW'))
@@ -1767,15 +1727,11 @@ class App:
 
         self._known_slugs: List[str] = []
 
-        strip_frame = ttk.LabelFrame(parent, text=_('FRAMES'))
-        strip_frame.pack(fill='x', pady=6)
-        self.frame_strip = FrameStrip(strip_frame, on_click=self._on_thumb_click)
-        self.frame_strip.pack(fill='x')
-
         frames_frame = ttk.LabelFrame(parent, text=_('RECENT FRAMES'))
         frames_frame.pack(fill='x', pady=6)
         cols = ('frame', 'score', 'snr', 'stars', 'fwhm')
-        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=5)
+        self.frames_tree = ttk.Treeview(frames_frame, columns=cols, show='headings', height=6,
+                                        selectmode='browse')
         headings = {'frame': _('Frame'), 'score': _('Score'), 'snr': 'SNR',
                     'stars': _('Stars'), 'fwhm': 'FWHM'}
         for c, w in zip(cols, (170, 60, 60, 50, 60)):
@@ -1783,6 +1739,8 @@ class App:
             self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
         self.frames_tree.tag_configure('bad', foreground=_BAD)
         self.frames_tree.pack(fill='x')
+        # Pick a frame to see it in the preview (arrow keys step through them).
+        self.frames_tree.bind('<<TreeviewSelect>>', self._on_frame_selected)
 
         # Before a run (and after any change once one has finished) this is
         # "This run": what Start will do with the form. After a run it is the
@@ -1816,11 +1774,10 @@ class App:
         # (translated) line wrapped needlessly, and every extra line was
         # taken from the RECENT FRAMES table above it.
         self.plan_frame.bind('<Configure>', self._rewrap_plan, add='+')
-        # Bottom-up: this summary, the frames table, the thumbnail strip; the
-        # preview (packed last) takes what is left. Packed top-down, the frames
-        # table was packed last and lost its rows whenever the summary grew.
+        # Bottom-up: this summary, the frames table; the preview (packed last) takes
+        # what is left. Packed top-down, the frames table was packed last and lost its
+        # rows whenever the summary grew.
         frames_frame.pack_configure(side='bottom', after=self.summary_frame)
-        strip_frame.pack_configure(side='bottom', after=frames_frame)
         self._show_plan = True
 
     def _plan_wrap(self) -> int:
@@ -1850,7 +1807,7 @@ class App:
         self.cancel_btn.state(['!disabled'])
         self.status_var.set(_('Running…'))
         self._shown_log_lines = 0
-        self.frames_tree.delete(*self.frames_tree.get_children())
+        self._clear_frames_table()
         self.summary_var.set('')
         self._show_plan = False
         self.summary_frame.configure(text=_('COMPLETE'))
@@ -1896,8 +1853,7 @@ class App:
         if self.rm.is_running():
             return
         self.preview.clear()
-        self.frame_strip.clear()
-        self.frames_tree.delete(*self.frames_tree.get_children())
+        self._clear_frames_table()
         self.summary_var.set('')
         self.summary_frame.configure(text=_('THIS RUN'))
         self.summary_label.pack_forget()
@@ -1987,6 +1943,7 @@ class App:
     # ── preview controls ────────────────────────────────────────────────
 
     def _on_view_selected(self, _event=None) -> None:
+        self._unpin_frame()
         slug = self._slug_from_label(self.view_var.get())
         data = self.ui.named_jpeg(slug)
         if data:
@@ -2176,10 +2133,33 @@ class App:
         window.bind('<Escape>', lambda _event: window.destroy())
         window.focus_set()
 
-    def _on_thumb_click(self, fid: int) -> None:
-        data = self.ui.frame_jpeg(fid)
+    def _clear_frames_table(self) -> None:
+        self._pinned_frame = None
+        self._frame_rows_shown = []
+        self.frames_tree.delete(*self.frames_tree.get_children())
+
+    def _on_frame_selected(self, _event=None) -> None:
+        """A row of the RECENT FRAMES table was picked: show that frame in the preview."""
+        picked = self.frames_tree.selection()
+        if not picked:
+            return
+        name = str(self.frames_tree.set(picked[0], 'frame'))
+        slug = f'frame:{name}'
+        if self._pinned_frame == name and self.preview.current_slug == slug:
+            return                    # the table was rebuilt around the row already shown
+        self._pinned_frame = name
+        data = self.ui.frame_jpeg_for(name)
         if data:
-            self.preview.load_slot(data, f'frame-{fid}', _('Frame #{n}', n=fid))
+            self.preview.load_slot(data, slug, name)
+        else:
+            # rejected before it was rendered, or older than the thumbnails kept
+            self.preview.caption_var.set(_('{name}: no preview was kept for this frame', name=name))
+
+    def _unpin_frame(self) -> None:
+        """Back to following the run's milestones (a milestone was picked, or a run began)."""
+        self._pinned_frame = None
+        if self.frames_tree.selection():
+            self.frames_tree.selection_remove(*self.frames_tree.selection())
 
     @staticmethod
     def _slug_from_label(label: str) -> str:
@@ -2211,7 +2191,7 @@ class App:
         # cleared its side; the widgets need clearing too).
         if snap['run_status'] == 'running' and self._last_run_status != 'running':
             self.preview.clear()
-            self.frame_strip.clear()
+            self._clear_frames_table()
             self.view_var.set('')
             self.compare_var.set(False)
             self.compare_combo_var.set('')
@@ -2259,19 +2239,25 @@ class App:
             self._shown_log_lines = len(log_lines)
 
         # recent frames
-        rows = snap['frames']
-        self.frames_tree.delete(*self.frames_tree.get_children())
-        for r in rows[-20:]:
-            tag = () if r['ok'] else ('bad',)
-            self.frames_tree.insert('', 'end', values=(r['name'], r['score'], r['snr'],
-                                                        r['stars'], r['fwhm']), tags=tag)
+        rows = [(r['name'], r['score'], r['snr'], r['stars'], r['fwhm'], r['ok'])
+                for r in snap['frames'][-20:]]
+        if rows != self._frame_rows_shown:
+            self._frame_rows_shown = rows
+            self.frames_tree.delete(*self.frames_tree.get_children())
+            for name, score, snr, stars, fwhm, ok in rows:
+                item = self.frames_tree.insert('', 'end', values=(name, score, snr, stars, fwhm),
+                                               tags=() if ok else ('bad',))
+                if name == self._pinned_frame:       # keep the picked row selected
+                    self.frames_tree.selection_set(item)
 
         # named preview slots (view/compare dropdowns)
         self._named_cache = snap['named']
         labels = [f"{n['caption']} [{n['slug']}]" for n in self._named_cache]
         self.view_combo['values'] = labels
         self.compare_combo['values'] = labels
-        if labels and not self.view_var.get():
+        if self._pinned_frame is not None:
+            pass                                  # the user is looking at a frame they picked
+        elif labels and not self.view_var.get():
             self.view_var.set(labels[-1])
             self._on_view_selected()
         elif self._named_cache and self._named_cache[-1]['slug'] != self.preview.current_slug \
@@ -2279,12 +2265,6 @@ class App:
             # follow the latest milestone unless the user is mid-compare
             self.view_var.set(labels[-1])
             self._on_view_selected()
-
-        # per-frame thumbnail ring
-        for f in snap['frames_img']:
-            data = self.ui.frame_jpeg(f['id'])
-            if data:
-                self.frame_strip.add_thumb(f['id'], f['name'], data)
 
         # summary (unless the form changed since: then it shows "This run")
         if snap['summary'] and not self._show_plan:

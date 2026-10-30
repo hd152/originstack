@@ -28,6 +28,14 @@ match the `VERSION` file and `v*` git tags.
   frames passed the quality gates. `--auto` no longer asks for it.
 
 ### Changed
+- The desktop app's per-frame thumbnail strip is gone; the RECENT FRAMES table does its job. Click a
+  row, or step through the rows with the arrow keys, to see that frame in the preview. The frame stays
+  up while the run continues; picking a stage from the drop-down goes back to following the run. Every
+  processed frame now gets a thumbnail (`--ui-frame-every` defaults to 1, was 5), made from a copy
+  averaged down to thumbnail size first, which costs about a tenth per thumbnail of stretching the full frame
+  did, so Phase 1 does less work for thumbnails than before. A frame rejected before it was rendered
+  has no thumbnail and says so. Previously a frame picked from the strip was replaced by the latest
+  stage at the next update during a run.
 - A mosaic tile much fainter than its neighbours (shot through cloud, haze or dew) is now
   named in a warning. Its brightness cannot be matched to the others, so its outline shows in
   the mosaic; before, that happened without explanation.
