@@ -265,6 +265,7 @@ pip install --force-reinstall target/wheels/astro_native-*.whl
 # optional transient-triage model support (tract ONNX runtime; off by default)
 python -m maturin build --release --features triage
 ```
+PyPI wheels (Windows x64, Linux x86_64 manylinux, macOS arm64 and x86_64, plus an sdist) come from `.github/workflows/native-wheels.yml`: it builds and smoke-tests on every PR that touches `ext/astro_native/`, and publishes only on a `native-v<Cargo version>` tag (or a manual run with `publish`), through the `pypi` environment with trusted publishing. The crate version lives in `Cargo.toml` only (`pyproject.toml` reads it).
 The startup banner reports native status (`native_status()`); accelerated steps log `[rust] ...`. Benchmark kernel changes with [tools/bench_native.py](tools/bench_native.py).
 
 ### Optional dependencies
