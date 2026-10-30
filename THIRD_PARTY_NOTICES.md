@@ -56,8 +56,7 @@ Notable families in that closure:
   Python-binding and array/parallelism layer. MIT OR Apache-2.0 (numpy: BSD-2-Clause).
 - **tract-onnx and its `tract-*` siblings** (`tract-core`, `tract-hir`,
   `tract-linalg`, `tract-data`, `tract-nnef`, `tract-onnx-opl`) — the pure-Rust ONNX
-  inference runtime used by the `--transient-triage` native kernel (`mod transient_triage`
-  in `lib.rs`), compiled only with `--features triage` (off by default and in release
+  inference runtime used by the `--transient-triage` native kernel (`transient_triage.rs`), compiled only with `--features triage` (off by default and in release
   builds). MIT OR Apache-2.0 (Sonos). Pulls the bulk of the feature build's ~120: `prost`/protobuf
   codegen, `smallvec`, `num-*`, `anyhow`, `nom`, `flate2`/`miniz_oxide`, `getrandom`,
   `half`, `scan_fmt`, etc. — all in the permissive set above.

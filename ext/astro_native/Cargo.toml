@@ -1,6 +1,6 @@
 [package]
 name = "astro_native"
-version = "0.63.0"
+version = "0.63.1"
 edition = "2021"
 description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
 license = "GPL-3.0-or-later"
@@ -15,7 +15,7 @@ numpy = "0.29"
 rayon = "1.10"
 lz4_flex = "0.14"
 # Pure-Rust ONNX inference for the --transient-triage model (no C++ ONNX
-# Runtime, no extra DLL to ship). See `mod transient_triage` in lib.rs.
+# Runtime, no extra DLL to ship). See `src/transient_triage.rs`.
 # Optional: only built with `--features triage` (~24 MB of the binary and
 # ~120 transitive crates). Release packaging builds without it.
 tract-onnx = { version = "0.23", optional = true }
