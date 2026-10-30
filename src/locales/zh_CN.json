@@ -197,7 +197,6 @@
  "Extra file formats to save alongside the FITS: tiff, xisf, png (a lossless copy of the preview), png16 (the preview in 16 bits, for further editing).": "与 FITS 一同保存的额外文件格式：tiff、xisf、png（预览图的无损副本）、png16（16 位预览图，便于进一步编辑）。",
  "Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight), png (the preview JPEG's image, lossless 8-bit), png16 (the preview as a 16-bit PNG, for further editing without banding). E.g. --export tiff,png16": "FITS 之外的额外输出格式：tiff（32 位浮点）、xisf（PixInsight）、png（预览 JPEG 的图像，8 位无损）、png16（16 位 PNG 预览图，便于无色阶断层地进一步编辑）。例如 --export tiff,png16",
  "FITS files": "FITS 文件",
- "FRAMES": "帧",
  "Failed": "失败",
  "Failed to open the app window: {error}": "无法打开应用窗口：{error}",
  "Failed: {error}": "失败：{error}",
@@ -221,7 +220,6 @@
  "Force per-frame cosmic ray rejection even on deep stacks (default: automatic — skipped when >=20 frames are stacked with a rejection method, which removes cosmic rays per-pixel)": "即使是深度叠加也强制逐帧宇宙线剔除（默认：自动；当使用剔除方法叠加 >=20 帧时跳过，因为剔除方法会逐像素去除宇宙线）",
  "Force per-frame cosmic ray rejection even on deep stacks.": "即使是深度叠加也强制逐帧宇宙线剔除。",
  "Frame": "帧",
- "Frame #{n}": "第 {n} 帧",
  "Frame store": "帧存储",
  "Frames": "帧",
  "Frames & calibration (Phase 1)": "帧与校准（第 1 阶段）",
@@ -377,7 +375,7 @@
  "Processing preset. Individual flags still override preset values. quick: fast (mean stack, minimal denoise, no deconvolution). quality: maximum quality (sigma_clip, all denoisers, deconvolution). narrowband: tuned for Ha/OIII/SII data. galaxy: galaxy imaging (GHS stretch, star reduction, bilateral denoise). starfield: star fields (no star reduction, minimal processing). nebula: emission/reflection nebula (GHS stretch, curvelet+ACDNR denoise). planetary: planetary targets (no background extraction, deconvolution). lunar: lunar surface (linear stretch, no star reduction).": "处理预设。单独的选项仍会覆盖预设值。quick：快速（平均叠加、最少降噪、不去卷积）。quality：最高质量（sigma_clip、全部降噪器、去卷积）。narrowband：针对 Ha/OIII/SII 数据调优。galaxy：星系摄影（GHS 拉伸、缩星、双边滤波降噪）。starfield：星场（不缩星、最少处理）。nebula：发射/反射星云（GHS 拉伸、curvelet+ACDNR 降噪）。planetary：行星目标（不做背景提取、去卷积）。lunar：月面（线性拉伸、不缩星）。",
  "Proper coadd": "理想叠加",
  "Proper image coaddition (Zackay & Ofek 2017), on by default.": "理想图像叠加（Zackay & Ofek 2017），默认开启。",
- "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 5; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "第 1 阶段中每处理 N 张亮场向桌面应用发布一张逐帧缩略图（默认：5；0 = 关闭）。第一帧总会显示。对普通命令行运行无效（没有接收端）。",
+ "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 1; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "第 1 阶段中每处理 N 张亮场向桌面应用发布一张逐帧缩略图（默认：1；0 = 关闭）。第一帧总会显示。对普通命令行运行无效（没有接收端）。",
  "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1.": "第 1 阶段中每处理 N 张亮场向桌面应用发布一张逐帧缩略图。",
  "Quality": "质量",
  "Quality filter": "质量筛选",
@@ -615,5 +613,6 @@
  "Copy report (for an email or forum post)": "复制报告（用于邮件或论坛帖子）",
  "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "问题报告已复制到剪贴板。请检查后粘贴到邮件或论坛帖子中（Cloudy Nights、GitHub Discussions 页面）。",
  "Result not right? Report it": "结果不对？报告问题",
- "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "右上角的“报告问题”可打开 GitHub Issue，或复制包含日志的详细信息用于邮件或论坛帖子。"
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "右上角的“报告问题”可打开 GitHub Issue，或复制包含日志的详细信息用于邮件或论坛帖子。",
+ "{name}: no preview was kept for this frame": "{name}：未保留此帧的预览"
 }

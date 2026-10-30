@@ -69,7 +69,7 @@ def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
     zero-argument callable: a compressed frame store decodes a whole 75 MB frame
     on every read, so callers pass `lambda: mem_rgb[i]` and only shown frames are read.
     """
-    every = int(getattr(args, 'ui_frame_every', 5) or 0)
+    every = int(getattr(args, 'ui_frame_every', 1) or 0)
     if every <= 0 or not wv.active or rgb is None:
         return
     counter[0] += 1

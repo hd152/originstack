@@ -197,7 +197,6 @@
  "Extra file formats to save alongside the FITS: tiff, xisf, png (a lossless copy of the preview), png16 (the preview in 16 bits, for further editing).": "Formats de fichier supplémentaires à enregistrer avec le FITS : tiff, xisf, png (copie sans perte de l'aperçu), png16 (l'aperçu en 16 bits, pour une retouche ultérieure).",
  "Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight), png (the preview JPEG's image, lossless 8-bit), png16 (the preview as a 16-bit PNG, for further editing without banding). E.g. --export tiff,png16": "Formats de sortie supplémentaires avec le FITS : tiff (flottant 32 bits), xisf (PixInsight), png (l'image du JPEG d'aperçu, 8 bits sans perte), png16 (l'aperçu en PNG 16 bits, pour retoucher sans postérisation). P. ex. --export tiff,png16",
  "FITS files": "Fichiers FITS",
- "FRAMES": "IMAGES",
  "Failed": "Échec",
  "Failed to open the app window: {error}": "Impossible d'ouvrir la fenêtre de l'application : {error}",
  "Failed: {error}": "Échec : {error}",
@@ -221,7 +220,6 @@
  "Force per-frame cosmic ray rejection even on deep stacks (default: automatic — skipped when >=20 frames are stacked with a rejection method, which removes cosmic rays per-pixel)": "Forcer le rejet des rayons cosmiques par image même sur les empilements profonds (par défaut : automatique — ignoré quand >=20 images sont empilées avec une méthode à rejet, qui élimine les rayons cosmiques pixel par pixel)",
  "Force per-frame cosmic ray rejection even on deep stacks.": "Forcer le rejet des rayons cosmiques par image même sur les empilements profonds.",
  "Frame": "Image",
- "Frame #{n}": "Image n°{n}",
  "Frame store": "Stockage des images",
  "Frames": "Images",
  "Frames & calibration (Phase 1)": "Images et calibration (phase 1)",
@@ -377,7 +375,7 @@
  "Processing preset. Individual flags still override preset values. quick: fast (mean stack, minimal denoise, no deconvolution). quality: maximum quality (sigma_clip, all denoisers, deconvolution). narrowband: tuned for Ha/OIII/SII data. galaxy: galaxy imaging (GHS stretch, star reduction, bilateral denoise). starfield: star fields (no star reduction, minimal processing). nebula: emission/reflection nebula (GHS stretch, curvelet+ACDNR denoise). planetary: planetary targets (no background extraction, deconvolution). lunar: lunar surface (linear stretch, no star reduction).": "Préréglage de traitement. Les options individuelles restent prioritaires sur les valeurs du préréglage. quick : rapide (empilement par moyenne, débruitage minimal, pas de déconvolution). quality : qualité maximale (sigma_clip, tous les débruiteurs, déconvolution). narrowband : adapté aux données Ha/OIII/SII. galaxy : imagerie de galaxies (étirement GHS, réduction des étoiles, débruitage bilatéral). starfield : champs stellaires (pas de réduction des étoiles, traitement minimal). nebula : nébuleuses en émission/par réflexion (étirement GHS, débruitage curvelet+ACDNR). planetary : cibles planétaires (pas d'extraction du fond, déconvolution). lunar : surface lunaire (étirement linéaire, pas de réduction des étoiles).",
  "Proper coadd": "Coaddition optimale",
  "Proper image coaddition (Zackay & Ofek 2017), on by default.": "Coaddition optimale d'images (Zackay & Ofek 2017), activée par défaut.",
- "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 5; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "Publier une vignette par image dans l'application de bureau toutes les N images brutes traitées en phase 1 (par défaut : 5 ; 0 = désactivé). La première image est toujours affichée. Sans effet en ligne de commande simple (rien n'est connecté pour la recevoir).",
+ "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 1; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "Publier une vignette par image dans l'application de bureau toutes les N images brutes traitées en phase 1 (par défaut : 1 ; 0 = désactivé). La première image est toujours affichée. Sans effet en ligne de commande simple (rien n'est connecté pour la recevoir).",
  "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1.": "Publier une vignette par image dans l'application de bureau toutes les N images brutes traitées en phase 1.",
  "Quality": "Qualité",
  "Quality filter": "Filtre de qualité",
@@ -615,5 +613,6 @@
  "Copy report (for an email or forum post)": "Copier le rapport (pour un e-mail ou un forum)",
  "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Rapport de problème copié dans le presse-papiers. Vérifiez-le, puis collez-le dans un e-mail ou un message de forum (Cloudy Nights, la page GitHub Discussions).",
  "Result not right? Report it": "Résultat incorrect ? Signalez-le",
- "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Signaler un problème (en haut à droite) ouvre un ticket GitHub ou copie les détails, avec le journal, pour un e-mail ou un forum."
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Signaler un problème (en haut à droite) ouvre un ticket GitHub ou copie les détails, avec le journal, pour un e-mail ou un forum.",
+ "{name}: no preview was kept for this frame": "{name} : aucun aperçu n'a été conservé pour cette image"
 }

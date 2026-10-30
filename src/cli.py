@@ -1778,9 +1778,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_core.add_argument('--stream-sigma', type=float, default=None, metavar='SIGMA',
                    help='--stream: sigma-clip rejection threshold (default: '
                         '--rejection-sigma).')
-    g_core.add_argument('--ui-frame-every', type=int, default=5, metavar='N',
+    g_core.add_argument('--ui-frame-every', type=int, default=1, metavar='N',
                    help='Publish a per-frame thumbnail to the desktop app every '
-                        'Nth processed light in Phase 1 (default: 5; 0 = off). '
+                        'Nth processed light in Phase 1 (default: 1; 0 = off). '
                         'The first frame is always shown. No effect on a plain '
                         'CLI run (nothing is attached to receive it).')
     g_core.add_argument('--config', default=None, action=_ConfigAction, metavar='PATH|KEY=VALUE',

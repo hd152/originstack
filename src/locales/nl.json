@@ -197,7 +197,6 @@
  "Extra file formats to save alongside the FITS: tiff, xisf, png (a lossless copy of the preview), png16 (the preview in 16 bits, for further editing).": "Extra bestandsformaten om naast de FITS op te slaan: tiff, xisf, png (verliesvrije kopie van de voorvertoning), png16 (de voorvertoning in 16 bit, om verder te bewerken).",
  "Extra output formats alongside FITS: tiff (32-bit float), xisf (PixInsight), png (the preview JPEG's image, lossless 8-bit), png16 (the preview as a 16-bit PNG, for further editing without banding). E.g. --export tiff,png16": "Extra uitvoerformaten naast FITS: tiff (32-bit float), xisf (PixInsight), png (het beeld van de voorvertonings-JPEG, verliesvrij 8 bit), png16 (de voorvertoning als 16-bit PNG, om verder te bewerken zonder banding). Bijv. --export tiff,png16",
  "FITS files": "FITS-bestanden",
- "FRAMES": "FRAMES",
  "Failed": "Mislukt",
  "Failed to open the app window: {error}": "Het venster van de app kon niet worden geopend: {error}",
  "Failed: {error}": "Mislukt: {error}",
@@ -221,7 +220,6 @@
  "Force per-frame cosmic ray rejection even on deep stacks (default: automatic — skipped when >=20 frames are stacked with a rejection method, which removes cosmic rays per-pixel)": "Dwing verwerping van kosmische straling per frame af, ook bij diepe stacks (standaard: automatisch — overgeslagen als >=20 frames met een verwerpende methode worden gestapeld, die kosmische straling per pixel al verwijdert)",
  "Force per-frame cosmic ray rejection even on deep stacks.": "Dwing verwerping van kosmische straling per frame af, ook bij diepe stacks.",
  "Frame": "Frame",
- "Frame #{n}": "Frame #{n}",
  "Frame store": "Frame-opslag",
  "Frames": "Frames",
  "Frames & calibration (Phase 1)": "Frames en kalibratie (fase 1)",
@@ -377,7 +375,7 @@
  "Processing preset. Individual flags still override preset values. quick: fast (mean stack, minimal denoise, no deconvolution). quality: maximum quality (sigma_clip, all denoisers, deconvolution). narrowband: tuned for Ha/OIII/SII data. galaxy: galaxy imaging (GHS stretch, star reduction, bilateral denoise). starfield: star fields (no star reduction, minimal processing). nebula: emission/reflection nebula (GHS stretch, curvelet+ACDNR denoise). planetary: planetary targets (no background extraction, deconvolution). lunar: lunar surface (linear stretch, no star reduction).": "Voorinstelling voor de verwerking. Losse opties gaan nog steeds vóór de waarden van de voorinstelling. quick: snel (gemiddelde stack, minimale ruisonderdrukking, geen deconvolutie). quality: maximale kwaliteit (sigma_clip, alle ruisonderdrukkers, deconvolutie). narrowband: afgestemd op Ha/OIII/SII-gegevens. galaxy: sterrenstelsels (GHS-stretch, sterverkleining, bilaterale ruisonderdrukking). starfield: sterrenvelden (geen sterverkleining, minimale bewerking). nebula: emissie- en reflectienevels (GHS-stretch, curvelet + ACDNR-ruisonderdrukking). planetary: planeten (geen achtergrondextractie, deconvolutie). lunar: maanoppervlak (lineaire stretch, geen sterverkleining).",
  "Proper coadd": "Proper coadd",
  "Proper image coaddition (Zackay & Ofek 2017), on by default.": "Proper image coaddition (Zackay & Ofek 2017), standaard aan.",
- "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 5; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "Stuur in fase 1 na elke N-de verwerkte lichtframe een miniatuur naar de desktop-app (standaard: 5; 0 = uit). Het eerste frame wordt altijd getoond. Geen effect bij een gewone run op de opdrachtregel (er is niets dat het ontvangt).",
+ "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 1; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).": "Stuur in fase 1 na elke N-de verwerkte lichtframe een miniatuur naar de desktop-app (standaard: 1; 0 = uit). Het eerste frame wordt altijd getoond. Geen effect bij een gewone run op de opdrachtregel (er is niets dat het ontvangt).",
  "Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1.": "Stuur in fase 1 na elke N-de verwerkte lichtframe een miniatuur naar de desktop-app.",
  "Quality": "Kwaliteit",
  "Quality filter": "Kwaliteitsfilter",
@@ -615,5 +613,6 @@
  "Copy report (for an email or forum post)": "Rapport kopiëren (voor e-mail of forum)",
  "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Het probleemrapport is naar het klembord gekopieerd. Controleer het en plak het in een e-mail of forumbericht (Cloudy Nights, de GitHub Discussions-pagina).",
  "Result not right? Report it": "Resultaat niet goed? Meld het",
- "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Probleem melden (rechtsboven) opent een GitHub-issue of kopieert de details, met het logboek, voor een e-mail of forumbericht."
+ "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Probleem melden (rechtsboven) opent een GitHub-issue of kopieert de details, met het logboek, voor een e-mail of forumbericht.",
+ "{name}: no preview was kept for this frame": "{name}: er is geen voorvertoning bewaard voor dit frame"
 }

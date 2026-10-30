@@ -24,8 +24,27 @@ from typing import Any, Dict, Iterable, Optional
 
 _MAX_LOG_LINES = 500
 _MAX_FRAME_ROWS = 60
-_MAX_FRAME_THUMBS = 24     # per-frame preview ring
+_MAX_FRAME_THUMBS = 32     # per-frame preview ring (the table lists the last 20 frames)
 _MAX_NAMED = 16            # retained milestone previews
+
+
+def _decimate(rgb, max_dim: int):
+    """Average ``rgb`` (HWC float) down by an integer factor to at most ``max_dim`` px.
+
+    Stretching a full 2048x3056 sub to make a 512 px thumbnail took ~2.5 s, nearly all of it
+    in the stretch's statistics over pixels the thumbnail then throws away; averaging first
+    leaves ~0.2 s, so every processed frame can have a thumbnail rather than every fifth.
+    """
+    import numpy as np
+    a = np.asarray(rgb)
+    h, w = a.shape[:2]
+    f = -(-max(h, w) // max_dim)
+    if f <= 1 or a.ndim != 3:
+        return a
+    hb, wb = h // f, w // f
+    if hb < 1 or wb < 1:
+        return a
+    return a[:hb * f, :wb * f].reshape(hb, f, wb, f, a.shape[2]).mean(axis=(1, 3), dtype=np.float32)
 
 
 def _slugify(text: str) -> str:
@@ -226,7 +245,8 @@ class UIEvents:
         kw = self._stretch_kw(args)
         try:
             from src.io_fits import preview_jpeg_bytes
-            data = preview_jpeg_bytes(rgb, max_dim=max_dim, desaturate=0.6, **kw)
+            data = preview_jpeg_bytes(_decimate(rgb, max_dim), max_dim=max_dim,
+                                      desaturate=0.6, **kw)
         except Exception:
             return
         if not data:
@@ -502,6 +522,15 @@ class UIEvents:
         with self._lock:
             slot = self._frame_thumbs.get(fid)
             return slot['jpeg'] if slot else None
+
+    def frame_jpeg_for(self, name: str) -> Optional[bytes]:
+        """The newest kept thumbnail of the frame called ``name`` (its row in the frames
+        table), or None when none was published or it has left the ring."""
+        with self._lock:
+            for slot in reversed(self._frame_thumbs.values()):
+                if slot['name'] == name:
+                    return slot['jpeg']
+        return None
 
 
 _ui_events: Optional[UIEvents] = None

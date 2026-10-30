@@ -101,8 +101,8 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
       <div id="opt-stream-sigma"><dt><code>--stream-sigma</code> <var>SIGMA</var></dt>
         <dd><p>--stream: sigma-clip rejection threshold (default: --rejection-sigma).</p></dd></div>
       <div id="opt-ui-frame-every"><dt><code>--ui-frame-every</code> <var>N</var></dt>
-        <dd><p>Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 5; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).</p>
-          <p class="meta">Default: <code>5</code></p></dd></div>
+        <dd><p>Publish a per-frame thumbnail to the desktop app every Nth processed light in Phase 1 (default: 1; 0 = off). The first frame is always shown. No effect on a plain CLI run (nothing is attached to receive it).</p>
+          <p class="meta">Default: <code>1</code></p></dd></div>
       <div id="opt-config"><dt><code>--config</code> <var>PATH|KEY=VALUE</var></dt>
         <dd><p>Load parameters from a TOML configuration file, or set one as KEY=VALUE. Repeatable, e.g. --config nn_deconv_blend=0.5. CLI arguments override config file values; KEY=VALUE overrides the file and the automatic settings. Fine-grained tuning parameters removed from the CLI can still be set this way.</p></dd></div>
       <div id="opt-preset"><dt><code>--preset</code></dt>
