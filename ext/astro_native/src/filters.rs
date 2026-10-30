@@ -501,6 +501,49 @@ pub(crate) fn gaussian_kernel1d(sigma: f64, truncate: f64) -> Vec<f64> {
     w
 }
 
+/// Separable correlation of an `(h, w)` row-major image with an odd-length 1D kernel along both
+/// axes (rows, then columns), reflect boundary -- `scipy.ndimage.correlate1d(mode='reflect')`
+/// per axis. Parallel over output rows.
+///
+/// Each output is `0 + k[0]*s0 + k[1]*s1 + ...` accumulated in tap order, which is what a
+/// per-pixel loop computes. The interior is therefore done tap-major through `tap_accumulate`
+/// (one contiguous multiply-add sweep per tap, AVX2 where available) with the same bits; only
+/// the `half` edge columns on each side, where taps reflect, take the per-pixel path.
+pub(crate) fn separable_convolve_f64(img: &[f64], h: usize, w: usize, k: &[f64]) -> Vec<f64> {
+    debug_assert!(k.len() % 2 == 1);
+    let half = k.len() / 2;
+
+    // Pass 1: along axis 1, within each row.
+    let mut tmp = vec![0f64; h * w];
+    par_rows(&mut tmp, w, |y, out_row| {
+        let row = &img[y * w..(y + 1) * w];
+        let n_int = w.saturating_sub(2 * half);
+        let (lo, hi) = if n_int > 0 { (half, w - half) } else { (w, w) };
+        if n_int > 0 {
+            // output x reads row[x + t - half]; for x = half + i that is row[t + i]
+            tap_accumulate(&mut out_row[half..half + n_int], k, |t| &row[t..]);
+        }
+        for x in (0..lo).chain(hi..w) {
+            let mut acc = 0f64;
+            for (t, &kv) in k.iter().enumerate() {
+                let xi = reflect_idx(x as isize + t as isize - half as isize, w);
+                acc += kv * row[xi];
+            }
+            out_row[x] = acc;
+        }
+    });
+
+    // Pass 2: along axis 0; each tap contributes one (reflected) whole row.
+    let mut out = vec![0f64; h * w];
+    par_rows(&mut out, w, |y, out_row| {
+        tap_accumulate(out_row, k, |t| {
+            let yi = reflect_idx(y as isize + t as isize - half as isize, h);
+            &tmp[yi * w..(yi + 1) * w]
+        });
+    });
+    out
+}
+
 /// Separable Gaussian blur matching `scipy.ndimage.gaussian_filter(data,
 /// sigma, mode='reflect')` (the default mode, and the only one any call site
 /// in this codebase uses) for a scalar `sigma` on a 2D array. Two rayon-
@@ -544,38 +587,7 @@ pub(crate) fn gaussian_filter_native<'py>(
     }
 
     let kernel = gaussian_kernel1d(sigma, truncate);
-    let radius = (kernel.len() / 2) as isize;
-
-    let out = py.detach(|| {
-        // Pass 1: blur along axis 1 (each row independently), parallel over rows.
-        let mut tmp = vec![0f64; h * w];
-        par_rows(&mut tmp, w, |y, out_row| {
-            let row = &flat[y * w..(y + 1) * w];
-            for x in 0..w {
-                let mut acc = 0.0f64;
-                for (k, &kv) in kernel.iter().enumerate() {
-                    let dx = k as isize - radius;
-                    let xi = reflect_idx(x as isize + dx, w);
-                    acc += kv * row[xi];
-                }
-                out_row[x] = acc;
-            }
-        });
-        // Pass 2: blur along axis 0 (each column), parallel over output rows.
-        let mut out = vec![0f64; h * w];
-        par_rows(&mut out, w, |y, out_row| {
-            for x in 0..w {
-                let mut acc = 0.0f64;
-                for (k, &kv) in kernel.iter().enumerate() {
-                    let dy = k as isize - radius;
-                    let yi = reflect_idx(y as isize + dy, h);
-                    acc += kv * tmp[yi * w + x];
-                }
-                out_row[x] = acc;
-            }
-        });
-        out
-    });
+    let out = py.detach(|| separable_convolve_f64(flat, h, w, &kernel));
 
     let arr2 = numpy::ndarray::Array2::from_shape_vec((h, w), out)
         .expect("shape mismatch building gaussian_filter_native output");
