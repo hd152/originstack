@@ -598,14 +598,134 @@ pub(crate) fn gaussian_filter_native<'py>(
 // Joint (colour-space) bilateral filter -- replaces cv2.bilateralFilter
 // ---------------------------------------------------------------------------
 //
-// Mirrors src/denoising.py's _bilateral_filter_numpy exactly: same
-// mirror_idx boundary convention (matches its np.pad(mode='reflect'), which
-// -- despite the name -- is numpy's non-edge-duplicating reflection, the
-// same convention scipy calls 'mirror') for bit-exact native/numpy parity.
+// Mirrors src/denoising.py's _bilateral_filter_numpy: same mirror_idx
+// boundary convention (matches its np.pad(mode='reflect'), which -- despite
+// the name -- is numpy's non-edge-duplicating reflection, the same
+// convention scipy calls 'mirror'). The RGB path evaluates its exponentials
+// with `exp_nonpos` (~2 ulp of libm in f64), so native/numpy agree to far
+// below f32 resolution but not bit for bit.
 // The colour-similarity weight uses the joint Euclidean distance across all
 // 3 channels per neighbour (matching cv2.bilateralFilter's multi-channel
 // behaviour), not independent per-channel weights, so it doesn't introduce
 // colour fringing at edges.
+
+/// Window rows up to this many taps (`2 * radius + 1`) take the batched-exp RGB path.
+const BILATERAL_BATCH: usize = 32;
+
+/// `exp(x)` for `x <= 0` (or NaN, which propagates), branch-free so a row of arguments
+/// vectorises: round-to-nearest range reduction by `ln 2` (magic-number rounding, so no
+/// int<->f64 conversion that AVX2 lacks), degree-13 Taylor polynomial on |r| <= ln2/2
+/// (truncation error ~4e-18), scale by 2^k assembled in the exponent bits. Within ~2 ulp of
+/// libm; arguments below -708 clamp there (3e-308, far below any weight that matters).
+/// Multiply and add stay separate (no FMA), so the baseline and AVX2 builds agree bit for bit.
+#[inline(always)]
+pub(crate) fn exp_nonpos(x: f64) -> f64 {
+    const LOG2E: f64 = 1.4426950408889634;
+    const LN2_HI: f64 = 6.93147180369123816490e-01;
+    const LN2_LO: f64 = 1.90821492927058770002e-10;
+    const MAGIC: f64 = 6755399441055744.0; // 1.5 * 2^52
+    let x = if x < -708.0 { -708.0 } else { x };
+    let m = x * LOG2E + MAGIC;
+    let k = m - MAGIC;
+    let r = (x - k * LN2_HI) - k * LN2_LO;
+    let mut p = 1.6059043836821613e-10;
+    p = p * r + 2.08767569878681e-09;
+    p = p * r + 2.505210838544172e-08;
+    p = p * r + 2.755731922398589e-07;
+    p = p * r + 2.7557319223985893e-06;
+    p = p * r + 2.48015873015873e-05;
+    p = p * r + 0.0001984126984126984;
+    p = p * r + 0.001388888888888889;
+    p = p * r + 0.008333333333333333;
+    p = p * r + 0.041666666666666664;
+    p = p * r + 0.16666666666666666;
+    p = p * r + 0.5;
+    p = p * r + 1.0;
+    p = p * r + 1.0;
+    // the low 12 bits of `m` hold k (two's complement) once 2^51 divides out; shifted into the
+    // exponent field and biased they give 2^k for k in [-1022, 0]
+    let scale = f64::from_bits((m.to_bits() << 52).wrapping_add(1023u64 << 52));
+    p * scale
+}
+
+/// One output row of the RGB bilateral filter.
+///
+/// The `2 * radius + 1` input rows the output row reads are first converted once to planar f64
+/// channels, padded `radius` columns each side with the mirror convention, so every window row
+/// of every pixel is three contiguous slices (the interleaved f32 RGB would need stride-3
+/// gathers). Per window row the colour weights are then computed together -- distance and
+/// `exp_nonpos` vectorise across the taps -- and folded into the accumulators one tap at a
+/// time in the order a per-pixel loop uses. `planes` is the caller's reusable scratch.
+#[inline(always)]
+fn bilateral_row_rgb_body(
+    flat: &[f32],
+    y: usize,
+    h: usize,
+    w: usize,
+    radius: usize,
+    spatial_w: &[f64],
+    inv_2c2: f64,
+    row_out: &mut [f32],
+    planes: &mut Vec<f64>,
+) {
+    let r = radius as isize;
+    let k = 2 * radius + 1;
+    // taps are processed in groups of 4 lanes; the few lanes past `k` read neighbouring
+    // pixels' data (never used) and need `slack` spare elements at the end of each plane
+    let k4 = (k + 3) & !3;
+    debug_assert!(k4 <= BILATERAL_BATCH);
+    let stride = w + 2 * radius;
+    let plane = k * stride + 4;
+    if planes.len() != 3 * plane {
+        planes.clear();
+        planes.resize(3 * plane, 0.0);
+    }
+    let (pr, rest) = planes.split_at_mut(plane);
+    let (pg, pb) = rest.split_at_mut(plane);
+    for j in 0..k {
+        let yy = mirror_idx(y as isize + j as isize - r, h);
+        let line = &flat[yy * w * 3..(yy + 1) * w * 3];
+        let o = j * stride;
+        for xi in 0..stride {
+            let xx = xi as isize - r;
+            let xx = if xx >= 0 && (xx as usize) < w { xx as usize } else { mirror_idx(xx, w) };
+            pr[o + xi] = line[xx * 3] as f64;
+            pg[o + xi] = line[xx * 3 + 1] as f64;
+            pb[o + xi] = line[xx * 3 + 2] as f64;
+        }
+    }
+    let centre = radius * stride + radius;
+    for x in 0..w {
+        let (cr, cg, cb) = (pr[centre + x], pg[centre + x], pb[centre + x]);
+        let mut acc = [0f64; 3];
+        let mut wsum = 0f64;
+        for j in 0..k {
+            let o = j * stride + x;
+            let (nr, ng, nb) = (&pr[o..o + k4], &pg[o..o + k4], &pb[o..o + k4]);
+            let mut e = [0f64; BILATERAL_BATCH];
+            for i in 0..k4 {
+                let dr = nr[i] - cr;
+                let dg = ng[i] - cg;
+                let db = nb[i] - cb;
+                e[i] = exp_nonpos(-(dr * dr + dg * dg + db * db) * inv_2c2);
+            }
+            let sw = &spatial_w[j * k..][..k];
+            for i in 0..k {
+                let wt = sw[i] * e[i];
+                acc[0] += nr[i] * wt;
+                acc[1] += ng[i] * wt;
+                acc[2] += nb[i] * wt;
+                wsum += wt;
+            }
+        }
+        let denom = wsum.max(1e-12);
+        row_out[x * 3] = (acc[0] / denom) as f32;
+        row_out[x * 3 + 1] = (acc[1] / denom) as f32;
+        row_out[x * 3 + 2] = (acc[2] / denom) as f32;
+    }
+}
+
+avx2_twin!(fn bilateral_row_rgb(flat: &[f32], y: usize, h: usize, w: usize, radius: usize, spatial_w: &[f64], inv_2c2: f64, row_out: &mut [f32], planes: &mut Vec<f64>) => bilateral_row_rgb_body);
 
 #[pyfunction]
 pub(crate) fn bilateral_filter<'py>(
@@ -643,6 +763,12 @@ pub(crate) fn bilateral_filter<'py>(
 
     let mut out = vec![0f32; h * w * c];
     py.detach(|| {
+        if c == 3 && 2 * radius + 1 <= BILATERAL_BATCH {
+            out.par_chunks_mut(w * 3).enumerate().for_each_init(Vec::new, |planes, (y, row_out)| {
+                bilateral_row_rgb(flat, y, h, w, radius, &spatial_w, inv_2c2, row_out, planes);
+            });
+            return;
+        }
         par_rows(&mut out, w * c, |y, row_out| {
             let interior_y = y >= radius && y + radius < h;
             let mut center = [0f64; 8];
@@ -652,40 +778,6 @@ pub(crate) fn bilateral_filter<'py>(
                 let interior = interior_y && x >= radius && x + radius < w;
                 let mut acc = [0f64; 8];
                 let mut wsum = 0f64;
-
-                // RGB is the production path. Keeping its three channels in
-                // locals avoids the generic temporary channel array and loop
-                // in the innermost neighbour operation.
-                if c == 3 {
-                    let cr = flat[base] as f64;
-                    let cg = flat[base + 1] as f64;
-                    let cb = flat[base + 2] as f64;
-                    for dy in -r..=r {
-                        let yy = if interior { (y as isize + dy) as usize } else { mirror_idx(y as isize + dy, h) };
-                        let spatial_row = ((dy + r) as usize) * (2 * radius + 1);
-                        for dx in -r..=r {
-                            let xx = if interior { (x as isize + dx) as usize } else { mirror_idx(x as isize + dx, w) };
-                            let nbase = yy * w * 3 + xx * 3;
-                            let nr = flat[nbase] as f64;
-                            let ng = flat[nbase + 1] as f64;
-                            let nb = flat[nbase + 2] as f64;
-                            let dr = nr - cr;
-                            let dg = ng - cg;
-                            let db = nb - cb;
-                            let sw = spatial_w[spatial_row + (dx + r) as usize];
-                            let wt = sw * (-(dr * dr + dg * dg + db * db) * inv_2c2).exp();
-                            acc[0] += nr * wt;
-                            acc[1] += ng * wt;
-                            acc[2] += nb * wt;
-                            wsum += wt;
-                        }
-                    }
-                    let denom = wsum.max(1e-12);
-                    row_out[x * 3] = (acc[0] / denom) as f32;
-                    row_out[x * 3 + 1] = (acc[1] / denom) as f32;
-                    row_out[x * 3 + 2] = (acc[2] / denom) as f32;
-                    continue;
-                }
 
                 for ch in 0..c {
                     center[ch] = flat[base + ch] as f64;

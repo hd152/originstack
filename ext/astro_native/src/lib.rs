@@ -31,7 +31,9 @@ pub(crate) use rayon::prelude::*;
 /// `-C target-cpu`. Enabling `avx2` does not enable FMA and Rust never contracts `a * b + c`
 /// on its own, so the twin is bit-identical to the baseline build; a twin with hand-written
 /// intrinsics must keep multiply and add separate for the same reason (see
-/// `wavelet::dwt_row_accumulate_avx2`). `$body` should be `#[inline]`, or the twin gains nothing.
+/// `wavelet::dwt_row_accumulate_avx2`). `$body` must be `#[inline(always)]`: `#[inline]` is only a hint, and when the
+/// compiler declines, the twin is a thin wrapper that calls the baseline (SSE2) body -- correct,
+/// but no faster (the bilateral row hit this; check for `ymm` in the emitted asm).
 macro_rules! avx2_twin {
     ($vis:vis fn $name:ident $(<$($lt:lifetime),+>)? ($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? => $body:ident) => {
         $vis fn $name $(<$($lt),+>)? ($($arg: $ty),*) $(-> $ret)? {
