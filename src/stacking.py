@@ -873,7 +873,7 @@ def sigma_clip_combine(data: np.ndarray, sigma: float = 3.0, max_iters: int = 3,
 
 
 # Accepted samples a pixel needs before online_sigma_clip_fold_frame starts
-# rejecting. Mirrored by ONLINE_CLIP_MIN_SAMPLES in ext/astro_native/src/lib.rs.
+# rejecting. Mirrored by ONLINE_CLIP_MIN_SAMPLES in ext/astro_native/src/combine.rs.
 ONLINE_CLIP_MIN_SAMPLES = 3.0
 
 

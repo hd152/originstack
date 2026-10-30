@@ -3,7 +3,7 @@ the last cv2-only feature in this codebase; there is no cv2 dependency left.
 
 Native/numpy parity is exact (same mirror_idx / np.pad(mode='reflect') boundary
 convention on both sides -- see src/denoising.py's _bilateral_filter_numpy and
-ext/astro_native/src/lib.rs's bilateral_filter docstrings). Quality properties
+ext/astro_native/src/filters.rs's bilateral_filter docstrings). Quality properties
 (flat-field invariance, edge preservation, noise reduction) are checked against
 synthetic ground truth rather than against cv2, since we're replacing it.
 """

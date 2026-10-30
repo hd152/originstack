@@ -41,7 +41,7 @@ def _thin_svd_wide(M: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     (N=20, P=18,000,000): direct ``np.linalg.svd`` 37.8s; the Gram trick in
     plain numpy 15.7s (~2.4x, numpy's own SVD routine isn't specialized for
     this shape); with the native ``gram_matrix_wide``/``small_times_wide``
-    kernels (rayon-parallel, `ext/astro_native/src/lib.rs`) 7.9s (~4.8x on
+    kernels (rayon-parallel, `ext/astro_native/src/pca.rs`) 7.9s (~4.8x on
     top of the algorithmic win, ~9x combined vs. the naive direct-SVD
     baseline) -- numpy's own ``@`` for this shape got zero benefit from this
     machine's cores (8.1s default-threaded vs 8.9s forced single-threaded),

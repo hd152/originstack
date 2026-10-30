@@ -163,27 +163,28 @@ def check_bare_print(path, tree, out):
 
 
 def check_native_parity(out):
-    lib = ROOT / "ext" / "astro_native" / "src" / "lib.rs"
+    src_dir = ROOT / "ext" / "astro_native" / "src"
     tests_dir = ROOT / "tests"
-    if not lib.exists() or not tests_dir.exists():
+    if not src_dir.exists() or not tests_dir.exists():
         return
-    lines = lib.read_text(encoding="utf-8", errors="replace").splitlines()
-    names: list[tuple[int, str]] = []
-    for i, line in enumerate(lines):
-        if "#[pyfunction]" in line:
-            for j in range(i + 1, min(i + 6, len(lines))):
-                m = re.search(r"fn\s+([a-zA-Z_]\w*)\s*[<(]", lines[j])
-                if m:
-                    names.append((j + 1, m.group(1)))
-                    break
+    names: list[tuple[Path, int, str]] = []
+    for rs in sorted(src_dir.glob("*.rs")):
+        lines = rs.read_text(encoding="utf-8", errors="replace").splitlines()
+        for i, line in enumerate(lines):
+            if "#[pyfunction]" in line:
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    m = re.search(r"fn\s+([a-zA-Z_]\w*)\s*[<(]", lines[j])
+                    if m:
+                        names.append((rs, j + 1, m.group(1)))
+                        break
     if not names:
         return
     test_blob = "\n".join(p.read_text(encoding="utf-8", errors="replace")
                           for p in tests_dir.rglob("*.py"))
-    for lineno, name in names:
+    for rs, lineno, name in names:
         if name.startswith("_") or re.search(rf"\b{re.escape(name)}\b", test_blob):
             continue
-        out.append(Finding(lib, lineno, "OS004",
+        out.append(Finding(rs, lineno, "OS004",
                            f"native pyfunction {name!r} is not referenced under tests/ -- "
                            "add a parity or smoke test", level="warning"))
 

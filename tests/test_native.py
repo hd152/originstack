@@ -664,7 +664,7 @@ def test_warp_shift_fast_path():
 
 
 def test_lacosmic_reject_matches_numpy():
-    """Native L.A.Cosmic (f32 internally, not f64 — see lib.rs for why) must
+    """Native L.A.Cosmic (f32 internally, not f64 — see filters.rs for why) must
     closely match the numpy/scipy f64 reference, including protecting compact
     bright sources. Not exact: f32 occasionally flips a threshold-boundary
     pixel's reject/keep decision (S vs sigclip right at the edge), so the
