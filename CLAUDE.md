@@ -249,7 +249,7 @@ Details in the linked notes.
 - Removed denoisers NLM, BM3D, MMT, non-adaptive wavelet + Noise2Self calibration ([module-notes](dev-notes/module-notes.md)).
 - Physical sky model on ~1 deg fields (declines by design).
 - Starless-layer deconvolution and separate-layer stretch.
-- AVX2 lanes for the Lanczos-3 warp row (one `[f64; 4]` lane per channel under `avx2_twin!`): bit-identical, no faster; the row loop is bound by its dependent add chains, not by lane width ([native-kernels](dev-notes/native-kernels.md)).
+- AVX2 lanes for the Lanczos-3 warp row (one `[f64; 4]` lane per channel under `avx2_twin!`): bit-identical, no faster (probably the fixed-order dependent add chains, not lane width; interleaving two output pixels is untried) ([native-kernels](dev-notes/native-kernels.md)).
 - Camera-wide CFA equalisation prior: 2x2 green offsets vary 5-15 ADU between sessions, 0.4 ADU within one ([camera-profile](dev-notes/camera-profile.md)).
 - Per-unit bad-pixel / vignetting library: the session dark already holds the recurring bad pixels; a leave-one-out vignetting map gains 0-5% after a quadratic ([camera-profile](dev-notes/camera-profile.md)).
 - Sharper learned deconvolution from more of the same data: a stricter seeing cut (top 10% is 3% narrower than top 30%), cross-night pairs (x1) and a 2-4x wider U-Net all land on v3's width-noise curve when compared at equal noise (`tools/eval_nn_matched_noise.py`); run-to-run spread ~1.5% ([nn-deconv-runbook](dev-notes/nn-deconv-runbook.md)).
