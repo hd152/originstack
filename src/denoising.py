@@ -600,6 +600,12 @@ _DETAIL_CLIP_PERCENTILE = 99.0
 # Noise coring of each detail layer: |detail| below LO x its own sky sigma gets
 # no boost, above HI gets the full boost, linear in between.
 _LC_CORE_LO, _LC_CORE_HI = 1.0, 3.0
+# A core above _LC_TOWER x the above-sky 99th percentile towers over everything the mid-tone mask
+# is meant to enhance; its wings pollute the detail layers' blur out to a few sigma. The mask is
+# faded where the smoothed excess flux is more than _LC_POLLUTION_LO of the local signal, fully
+# off at _LC_POLLUTION_HI (the ratio is what makes a collar: detail ~ -pollution).
+_LC_TOWER = 4.0
+_LC_POLLUTION_LO, _LC_POLLUTION_HI = 0.05, 0.20
 _LC_NOISE_TILE = 128
 _LC_NOISE_MIN_SAMPLES = 32
 _LC_NOISE_MIN_RATIO, _LC_NOISE_MAX_RATIO = 0.5, 2.0
@@ -760,6 +766,27 @@ def multiscale_local_contrast(
     if star_mask is not None:
         mask *= (1.0 - star_mask.astype(np.float64))
     del low
+    sky = mask == 0          # noise is measured on the true sky, before the fade below
+
+    # Saturated / very bright cores: the detail source is clipped to a plateau at the percentile
+    # cap, which is still far above the star's wings (cap 265 vs wings of 50 on S50 IC 1396A), so
+    # the blur under the wings is dominated by the plateau and ``detail`` goes strongly negative
+    # over a radius of several sigma -- a dark moat. Fade the enhancement where the smoothed
+    # flux the cores hold above ``_LC_TOWER x cap`` is a notable fraction of the local signal;
+    # a frame without such a core is untouched. (The star mask does not help: it can miss the
+    # saturated star altogether.)
+    excess = np.maximum(lum_m - _LC_TOWER * cap, 0.0)
+    if excess.any():
+        pollution = gaussian_filter_ds(excess, float(active_scales[min(1, len(active_scales) - 1)]))
+        pollution /= np.maximum(lum_m - med, s_m)
+        pollution -= _LC_POLLUTION_LO
+        pollution /= _LC_POLLUTION_HI - _LC_POLLUTION_LO
+        np.clip(pollution, 0.0, 1.0, out=pollution)
+        pollution *= -1.0
+        pollution += 1.0
+        mask *= pollution
+        del pollution
+    del excess
 
     # Detail is measured against a peak-clipped luminance: otherwise a bright
     # star's flux leaks into its own background estimate -- the blur smears the
@@ -789,7 +816,6 @@ def multiscale_local_contrast(
     else:
         detail_src = np.minimum(lum, float(np.percentile(lum, detail_cap_percentile)))
 
-    sky = mask == 0
     del above, lum_m
     enhanced_lum = lum.copy()
     for sigma, w in zip(active_scales, scale_weights):
