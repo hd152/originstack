@@ -121,6 +121,10 @@
       <picture><source type="image/webp" srcset="img/app-running-800.webp 800w, img/app-running-1200.webp 1200w, img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/app-running.png" width="1600" height="1176" loading="lazy" alt="The app during a run: the first three pipeline steps done and Post-process active, the log showing background extraction and denoising, the preview showing the galaxy and a table of recent frames with their score, SNR, star count and FWHM."></picture>
       <figcaption>Part-way through the finishing steps. Click any row of the recent-frames table to see that frame in the preview.</figcaption>
     </figure>
+    <figure class="shot-wide narrow">
+      <picture><source type="image/webp" srcset="img/app-frame-picked-800.webp 800w" sizes="(min-width: 860px) 800px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/app-frame-picked.png" width="800" height="1054" loading="lazy" alt="The preview and recent-frames table during a run with one row highlighted: Light0142.fits is selected, and the preview shows that single frame, captioned with its file name."></picture>
+      <figcaption>A row picked in the recent-frames table: the preview shows that frame, and keeps showing it while the run moves on. Choose a stage in the drop-down to follow the run again.</figcaption>
+    </figure>
     <dl class="feat">
       <div><dt>Pipeline and log</dt>
         <dd><p>The four boxes light up as the run moves through <a href="how-it-works.html#pipeline">quality, registration, stacking and post-processing</a>, with a progress bar underneath. The log reports each step and how long it took; a warning or a rejected frame says why.</p></dd></div>

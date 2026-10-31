@@ -6,6 +6,12 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-10-30
+
+The desktop app can switch Phase 4 steps off and on after a run, lets you pick any frame in the
+recent-frames table to view it, and runs Phase 1 faster; the Gaussian blur and bilateral kernels
+are quicker too.
+
 ### Added
 - The desktop app can switch the post-processing steps of a finished run off and on. A
   "Post-processing steps" panel under the preview has a box per step the run used (denoisers,
@@ -28,12 +34,19 @@ match the `VERSION` file and `v*` git tags.
   frames passed the quality gates. `--auto` no longer asks for it.
 
 ### Changed
+- **Faster Gaussian blur and bilateral filter** (`astro_native` 0.63.1). The Gaussian blur behind the
+  background, sky and star-detection steps now runs tap by tap with a run-time AVX2 path: on a
+  2033x3041 frame at sigma 1 / 3 / 8, 24 / 63 / 177 ms became 14 / 18 / 40 ms, with bit-identical
+  output. The colour bilateral filter is about 1.5x faster, also bit-identical. The crate's source is
+  split into one module per domain; no behaviour changes. Kernel timings only: the effect on a whole
+  run was not measured.
 - The desktop app's per-frame thumbnail strip is gone; the RECENT FRAMES table does its job. Click a
   row, or step through the rows with the arrow keys, to see that frame in the preview. The frame stays
   up while the run continues; picking a stage from the drop-down goes back to following the run. Every
   processed frame now gets a thumbnail (`--ui-frame-every` defaults to 1, was 5), made from a copy
   averaged down to thumbnail size first, which costs about a tenth per thumbnail of stretching the full frame
-  did, so Phase 1 does less work for thumbnails than before. A frame rejected before it was rendered
+  did. Through the app, Phase 1 of a 158-frame Sunflower session took 44 s, against 64 s before
+  (three runs each, alternating, spread under 1 s). A frame rejected before it was rendered
   has no thumbnail and says so. Previously a frame picked from the strip was replaced by the latest
   stage at the next update during a run.
 - A mosaic tile much fainter than its neighbours (shot through cloud, haze or dew) is now

@@ -1193,12 +1193,14 @@ class PreviewCanvas(ttk.Frame):
         from PIL import Image
         self._source_bytes = jpeg_bytes
         img = Image.open(io.BytesIO(jpeg_bytes)).convert('RGB')
-        first = self._img_a is None
+        # refit when the size changes (a frame thumbnail after a stack, or back): the old
+        # scale/offset would leave a small image in a corner of the viewport
+        refit = self._img_a is None or img.size != (self._nat_w, self._nat_h)
         self._img_a = img
         self._nat_w, self._nat_h = img.size
         self.current_slug = slug
         self.caption_var.set(caption)
-        if first:
+        if refit:
             self.fit()
         else:
             self.redraw()

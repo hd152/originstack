@@ -42,6 +42,21 @@
 </header>
 
 <main>
+<section id="v2-19">
+  <div class="wrap">
+    <h2>2.19 <small class="when">30 October 2026</small></h2>
+    <div class="releases">
+      <article id="v2-19-0"><h3>2.19.0 <span>30 Oct</span></h3>
+        <ul>
+          <li><strong>Switch finishing steps off and on after a run.</strong> A <em>Post-processing steps</em> panel under the preview has a box per step the run used. Ticking or clearing one redoes only that step and the ones after it, so a late step takes a few seconds instead of a whole Phase 4. A <em>Show without stars</em> box previews the image without its stars.</li>
+          <li><strong>Pick a frame to see it.</strong> The strip of thumbnails is gone; click a row of the recent-frames table, or step through it with the arrow keys, to see that frame in the preview. It stays up while the run continues; choose a stage from the drop-down to follow the run again. Every frame gets a thumbnail now, and Phase 1 got quicker for it: 44 s instead of 64 s on a 158-frame session.</li>
+          <li><strong>Re-running from a saved config matches the original run.</strong> <code>--auto</code> no longer asks for per-frame gradient removal, which only ever ran when the saved config switched it on and changed which frames passed the quality gates.</li>
+          <li>A mosaic tile much fainter than its neighbours is named in a warning, and the Gaussian blur and bilateral filter run faster.</li>
+        </ul></article>
+    </div>
+  </div>
+</section>
+
 <section id="v2-18">
   <div class="wrap">
     <h2>2.18 <small class="when">28 October 2026</small></h2>
