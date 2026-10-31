@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Essayer OriginStack avec une session d'exemple : la galaxie du Tourbillon</title>
+<meta name="description" content="Téléchargez une session gratuite du Celestron Origin de 41 images de la galaxie du Tourbillon (sans données de localisation) et empilez-la dans OriginStack en une minute environ : les étapes, et l&#x27;aspect que doit avoir le résultat.">
+<meta name="keywords" content="astrophotography sample data, sample FITS files, Celestron Origin sample images, Whirlpool Galaxy M51 FITS, try stacking software, free stacking tutorial">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/fr/try-sample-data.html">
+<meta property="og:locale" content="fr_FR">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/fr/try-sample-data.html">
+<meta property="og:title" content="Essayer OriginStack avec une session d&#x27;exemple">
+<meta property="og:description" content="Une session d&#x27;exemple gratuite de l&#x27;Origin sur M51 : téléchargez, cliquez sur Démarrer, comparez avec le résultat attendu.">
+<link rel="icon" href="../img/favicon.png">
+<link rel="preload" href="../fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/try-sample-data.html">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/try-sample-data.html">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/try-sample-data.html">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/try-sample-data.html">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/try-sample-data.html">
+<link rel="alternate" hreflang="nl" href="https://originstack.site/nl/try-sample-data.html">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/try-sample-data.html">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/try-sample-data.html">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/try-sample-data.html">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/try-sample-data.html">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Accueil</a> <a href="../docs.html">Documentation</a> <a href="stack-celestron-origin.html">Guide</a> <a href="./#get">Installation</a>
+      </nav>
+    </div>
+    <h1>Essayez avec une session d'exemple</h1>
+    <p class="lede">Pas d'Origin, ou envie de voir d'abord comment ça marche ? Téléchargez une vraie nuit de la galaxie du Tourbillon, indiquez le dossier à OriginStack et cliquez sur Démarrer. Cela prend environ une minute, et vous trouverez plus bas l'image à laquelle vous devriez arriver.</p>
+    <p><a data-goatcounter-click="sample-download" class="btn primary" href="https://github.com/hd152/originstack/releases/download/sample-whirlpool-1/OriginStack-sample-whirlpool.zip">Télécharger l'exemple (450 Mo)</a></p>
+    <p class="toc">
+      <a href="#inside">Ce qu'il contient</a> <a href="#steps">Pas à pas</a> <a href="#result">Le résultat</a> <a href="#next">La suite</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="inside">
+  <div class="wrap">
+    <h2>Ce qu'il contient</h2>
+    <p class="intro measure">Une session complète d'un Celestron Origin, telle que le télescope l'a enregistrée : 41 images de 25 secondes (17 minutes de lumière au total), prises le 9 juillet 2026 dans un jardin de banlieue, avec les images de flat, de dark et de bias que l'Origin a faites cette nuit-là. L'empilement final de l'Origin lui-même n'est pas inclus : l'image que vous obtenez est donc celle d'OriginStack.</p>
+    <dl class="feat">
+      <div><dt>La cible</dt>
+        <dd><p>La galaxie du Tourbillon (M51) et sa compagne NGC 5195, en champ large : avec la focale de 335&nbsp;mm de l'Origin, le couple apparaît petit au milieu d'un champ d'étoiles. C'est l'aspect réel d'une image de l'Origin, ce qui en fait un test honnête.</p></dd></div>
+      <div><dt>Localisation supprimée</dt>
+        <dd><p>Les fichiers ne contiennent ni position GPS, ni altitude, ni masse d'air, et le numéro de série de la caméra est remplacé. Les pixels sont intacts, et l'empilement est identique bit à bit à celui obtenu avec les fichiers d'origine. La date et l'heure de prise de vue sont conservées.</p></dd></div>
+      <div><dt>Pas une nuit complète</dt>
+        <dd><p>Avec 41 images, la session est courte : le résultat est donc plus bruité qu'un empilement de quelques centaines. Cela suffit pour voir chaque étape à l'œuvre ; la <a href="../gallery.html">galerie</a> et les <a href="../origin-vs-originstack.html">avant/après</a> montrent ce que donne une nuit plus longue.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>Pas à pas</h2>
+    <dl class="feat">
+      <div><dt>1. Installer OriginStack</dt>
+        <dd><p>Récupérez l'installateur pour votre système dans la section <a href="./#get">Installation</a> de la page d'accueil (Windows, Mac ou Linux ; Python n'est pas nécessaire) et ouvrez l'application.</p></dd></div>
+      <div><dt>2. Télécharger et décompresser l'exemple</dt>
+        <dd><p>Téléchargez <a href="https://github.com/hd152/originstack/releases/download/sample-whirlpool-1/OriginStack-sample-whirlpool.zip">OriginStack-sample-whirlpool.zip</a> (450&nbsp;Mo) et décompressez-le. Vous obtenez un dossier nommé <code>sample_whirlpool</code> contenant les images. Laissez les fichiers tels quels : ne renommez ni ne déplacez aucun d'entre eux.</p></dd></div>
+      <div><dt>3. Choisir le dossier</dt>
+        <dd><p>Dans OriginStack, choisissez le dossier <code>sample_whirlpool</code> comme dossier des images light. L'application compte les images (41 lights) et lit la cible, galaxie du Tourbillon, dans le fichier <code>info.json</code> de la session. Laissez <em>Qu'avez-vous photographié ?</em> sur Détection auto et <em>Comment lancer le traitement ?</em> sur Qualité maximale.</p></dd></div>
+      <div><dt>4. Appuyer sur Démarrer</dt>
+        <dd><p>La barre de phases passe par les étapes : traitement et notation de chaque image, alignement, empilement, puis les étapes de finition. Le journal affiche les mêmes lignes que la ligne de commande, et l'aperçu à droite se met à jour à chaque jalon. Sur un portable à 8 cœurs, l'ensemble a pris 69 secondes ; une machine plus lente demande quelques minutes.</p></dd></div>
+      <div><dt>5. Regarder le résultat</dt>
+        <dd><p>Quand « Terminé » s'affiche, l'image empilée apparaît dans l'aperçu, et les fichiers se trouvent à côté du dossier choisi : l'empilement linéaire (<code>.fits</code>), une image d'aperçu (<code>.jpg</code>) et les réglages utilisés (<code>_config.toml</code>). Comparez votre image avec celle ci-dessous.</p></dd></div>
+    </dl>
+    <p class="intro measure">Vous préférez un terminal ? Avec une installation depuis les sources, le même traitement s'écrit <code>python originstack.py -d sample_whirlpool -o whirlpool.fits</code>.</p>
+  </div>
+</section>
+
+<section id="result">
+  <div class="wrap">
+    <h2>Le résultat attendu</h2>
+    <p class="intro measure">Les 41 images sont conservées (100 %) et empilées en une image de 2025&times;3025 avec 17,1 minutes de lumière. La vôtre peut différer un peu de celle-ci, car les réglages sont choisis d'après les données et s'améliorent d'une version à l'autre, mais elle doit montrer les mêmes choses.</p>
+    <figure class="shot-wide">
+      <picture><source type="image/webp" srcset="../img/sample-whirlpool-800.webp 800w, ../img/sample-whirlpool-1200.webp 1200w" sizes="(min-width: 860px) 1200px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/sample-whirlpool.jpg" width="1600" height="1071" loading="lazy" alt="Le champ empilé complet : de nombreuses étoiles, avec la galaxie du Tourbillon et sa petite compagne près du centre."></picture>
+      <figcaption>Le champ entier tel qu'OriginStack l'empile avec les réglages par défaut. Le couple de galaxies est près du centre ; le reste, ce sont des étoiles.</figcaption>
+    </figure>
+    <figure class="shot-wide narrow">
+      <picture><source type="image/webp" srcset="../img/sample-whirlpool-crop-800.webp 800w" sizes="(min-width: 860px) 800px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/sample-whirlpool-crop.jpg" width="960" height="680" loading="lazy" alt="Un recadrage serré sur les galaxies : la galaxie principale montre ses bras spiraux et son noyau brillant, et la plus petite compagne se trouve juste en dessous."></picture>
+      <figcaption>La même image recadrée sur les galaxies à pleine résolution. Cherchez les bras spiraux et le noyau brillant de M51, et la petite compagne NGC 5195 juste en dessous.</figcaption>
+    </figure>
+    <dl class="feat">
+      <div><dt>Si la vôtre est très différente</dt>
+        <dd><p>Une image presque noire, une forte dominante de couleur ou moins de 41 images empilées signifient généralement que les fichiers ont été modifiés en route : un outil de compression qui les a réécrits, ou des images sorties du dossier. Décompressez à nouveau et réessayez. Si le résultat reste mauvais, posez la question dans les <a href="https://github.com/hd152/originstack/discussions">Discussions</a> ou utilisez <strong>Signaler un problème</strong> dans l'application, qui renseigne pour vous la version, le système et le journal.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="next">
+  <div class="wrap">
+    <h2>La suite</h2>
+    <dl class="feat">
+      <div><dt>Changer l'aspect</dt>
+        <dd><p>Une fois le traitement terminé, la barre <em>Étirement</em> et <em>Couleur</em> au-dessus de l'aperçu propose tous les étirements ; <a href="../how-it-works-stretches.html">la galerie des étirements</a> montre l'effet de chacun. <strong>Appliquer au JPEG</strong> enregistre celui que vous préférez.</p></dd></div>
+      <div><dt>Activer et désactiver les étapes de finition</dt>
+        <dd><p>Le panneau <em>Étapes de post-traitement</em> sous l'aperçu comporte une case pour chaque étape utilisée. Décochez-en une : seules cette étape et les suivantes sont refaites, ce qui permet de voir ce que chacune apporte sans tout relancer.</p></dd></div>
+      <div><dt>Regarder les images une à une</dt>
+        <dd><p>Cliquez sur une ligne du tableau des images récentes pour voir cette image seule pendant que le traitement continue, et comparez-la à l'empilement pour voir ce qu'apportent 41 images.</p></dd></div>
+      <div><dt>Puis vos propres données</dt>
+        <dd><p>Copiez un dossier de session depuis votre Origin (ou consultez <a href="../other-cameras.html">les autres caméras</a>), choisissez-le de la même façon et cliquez sur Démarrer. <a href="stack-celestron-origin.html">Le guide de l'Origin</a> explique le contenu d'un dossier de session et comment lire le résultat ; <a href="../desktop-app.html">la page de l'application</a> passe en revue chaque écran.</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack est un logiciel libre sous licence GNU GPL v3.</span>
+    <span><a href="./">Accueil</a> &nbsp; <a href="../docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">Comment empiler les images de l'Origin</a> &nbsp; <a href="https://github.com/hd152/originstack">Code source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Signaler un problème</a> &nbsp; <a href="privacy.html">Confidentialité</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../try-sample-data.html" hreflang="en" lang="en">English</a> <a href="../de/try-sample-data.html" hreflang="de" lang="de">Deutsch</a> <a href="../es/try-sample-data.html" hreflang="es" lang="es">Español</a> <a href="../fr/try-sample-data.html" hreflang="fr" lang="fr" aria-current="true">Français</a> <a href="../it/try-sample-data.html" hreflang="it" lang="it">Italiano</a> <a href="../nl/try-sample-data.html" hreflang="nl" lang="nl">Nederlands</a> <a href="../pt-br/try-sample-data.html" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/try-sample-data.html" hreflang="ja" lang="ja">日本語</a> <a href="../zh-cn/try-sample-data.html" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+</body>
+</html>
