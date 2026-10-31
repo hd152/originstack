@@ -329,3 +329,20 @@ def test_star_restore_changes_output_only_near_stars(monkeypatch):
     far = ndi.gaussian_filter(mask, 6) < 1e-4              # well outside every star's mask
     # the blurs differ by at most the 4 px kernel's reach beyond the mask
     assert far.any() and diff[far].max() < 0.05 * diff.max()
+
+
+def test_star_restore_fades_by_weight_not_blur_width(monkeypatch):
+    """Near the top of the fade-out the tight restore must be a weak version of the real one,
+    not a ~0 px blur (which gave the input back: Pleiades 4.37 px, fwhm_ratio 0.73 -> 1.03)."""
+    monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
+    img = _star_field(4.0)
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 4.37)
+    base = nd.nn_denoise(img)
+    near_top = nd.nn_denoise(img, star_restore_frac=0.4)
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 3.0)
+    full = nd.nn_denoise(img, star_restore_frac=0.4)
+    d_top = np.abs(near_top - base).max()
+    d_full = np.abs(full - base).max()
+    assert d_full > 0 and d_top < 0.2 * d_full             # ramp 0.04: nearly the plain restore
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 4.5)
+    np.testing.assert_array_equal(nd.nn_denoise(img, star_restore_frac=0.4), base)   # past the ramp: off

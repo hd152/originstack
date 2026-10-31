@@ -335,15 +335,18 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
         res = src - den
         fw = measure_star_fwhm(src) if star_restore_frac > 0 else None
         # wide stars (>= ~4.4 px) lose no flux to the 4 px restore and would lose sharpness
-        # to a tight one (Omega width ratio 0.74 -> 0.82): fade the tight restore out
+        # to a tight one (Omega width ratio 0.74 -> 0.82): fade the tight restore out. The
+        # fade scales the mask WEIGHT, not the blur width: a width of ramp x frac x fw (0.07 px
+        # on Pleiades, 4.37 px) puts the residual back unblurred and the stars return to the
+        # input (fwhm_ratio 0.73 -> 1.03, Phase 4 bench)
         lo, hi = STAR_RESTORE_FWHM
-        frac = star_restore_frac * float(np.clip((hi - fw) / (hi - lo), 0.0, 1.0)) if fw else 0.0
-        smask = star_mask(src, fw) if frac > 0 else None
+        ramp = float(np.clip((hi - fw) / (hi - lo), 0.0, 1.0)) if fw else 0.0
+        smask = star_mask(src, fw) * np.float32(ramp) if ramp > 0 else None
         for c in range(res.shape[2]):
             if smask is None:
                 den[..., c] += ndi.gaussian_filter(res[..., c], restore_sigma, mode='reflect')
             else:
                 den[..., c] += (ndi.gaussian_filter(res[..., c] * (1 - smask), restore_sigma, mode='reflect')
-                                + ndi.gaussian_filter(res[..., c] * smask, frac * fw, mode='reflect'))
+                                + ndi.gaussian_filter(res[..., c] * smask, star_restore_frac * fw, mode='reflect'))
     out = src + np.float32(strength) * (den - src)
     return np.where(finite, out, img).astype(np.float32)
