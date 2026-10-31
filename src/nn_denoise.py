@@ -40,6 +40,12 @@ TILE = 384             # forward-pass tile (px), a multiple of 4 (two 2x pooling
 MARGIN = 32            # context on each side of a tile; > the network's receptive-field radius (~24 px)
 LEAK = 0.1             # LeakyReLU slope
 RESTORE_SIGMA = 4.0    # px; low-frequency restore of faint extended light (nn_denoise)
+# Star FWHM (px, circular Gaussian fit) range of the Origin sessions the deconvolver was trained
+# on (2.9-5.1 px, a little margin added). Outside it the network sharpens too much (undersampled) or too little
+# (oversampled): ``nn_denoise(..., fwhm_range=...)`` resamples so the stars land inside.
+TRAIN_FWHM_RANGE = (2.8, 5.2)
+SCALE_MAX_UP = 2.5     # largest upsampling factor (cost grows with its square)
+FIT_HALF = 8           # star cutout half-width (px) for the FWHM fit
 
 _weights_cache: Dict[str, Dict[str, np.ndarray]] = {}
 
@@ -195,8 +201,77 @@ def denoise_z(z: np.ndarray, w: Dict[str, np.ndarray]) -> np.ndarray:
     return out
 
 
+def measure_star_fwhm(img: np.ndarray, max_stars: int = 60) -> Optional[float]:
+    """Median Gaussian FWHM (px) of bright, unsaturated, isolated stars of an (H, W, C)
+    image, or None when fewer than 12 usable stars fit. ``quality.measure_fwhm`` (half-max
+    area) reads 7.4 px on stacks whose Gaussian width is 4.4 px, so the network's trained
+    range is defined in this measure."""
+    from scipy.optimize import least_squares
+
+    from src.star_detect import detect_stars_matched_filter
+    lum = np.nan_to_num(np.asarray(img, np.float32).mean(axis=2) if img.ndim == 3 else img)
+    lum = lum - np.float32(np.median(lum))
+    try:
+        src = detect_stars_matched_filter(lum)
+    except Exception:
+        return None
+    if src is None or len(src) < 12:
+        return None
+    src = src[np.argsort(-np.asarray(src['flux']))]
+    xs, ys = np.asarray(src['xcentroid'], float), np.asarray(src['ycentroid'], float)
+    sat = np.percentile(lum, 99.99) * 0.6
+    min_amp = 8.0 * float(noise_sigma(lum[..., None])[0])
+    yy, xx = np.mgrid[-FIT_HALF:FIT_HALF + 1, -FIT_HALF:FIT_HALF + 1]
+    h, w = lum.shape
+    out = []
+    for i in range(min(len(xs), 600)):
+        d2 = (xs - xs[i]) ** 2 + (ys - ys[i]) ** 2
+        d2[i] = np.inf
+        xi, yi = int(round(xs[i])), int(round(ys[i]))
+        if (d2.min() < 12 ** 2 or xi < FIT_HALF + 1 or yi < FIT_HALF + 1
+                or xi >= w - FIT_HALF - 1 or yi >= h - FIT_HALF - 1):
+            continue
+        cut = lum[yi - FIT_HALF:yi + FIT_HALF + 1, xi - FIT_HALF:xi + FIT_HALF + 1].astype(np.float64)
+        edge = np.concatenate([cut[0], cut[-1], cut[1:-1, 0], cut[1:-1, -1]])
+        bg0 = float(np.median(edge))
+        amp0 = float(cut.max()) - bg0
+        if amp0 <= 0 or cut.max() >= sat:
+            continue
+
+        def resid(p):
+            a, dx, dy, sig, bg = p
+            return (bg + a * np.exp(-((xx - dx) ** 2 + (yy - dy) ** 2) / (2 * sig ** 2)) - cut).ravel()
+        try:
+            sol = least_squares(resid, [amp0, 0.0, 0.0, 1.8, bg0], max_nfev=60,
+                                bounds=([0, -3, -3, 0.5, -np.inf], [np.inf, 3, 3, 8.0, np.inf]))
+        except Exception:
+            continue
+        if sol.x[3] < 8.0 - 1e-6 and sol.x[0] > min_amp:
+            out.append(2.3548 * sol.x[3])
+        if len(out) >= max_stars:
+            break
+    return float(np.median(out)) if len(out) >= 12 else None
+
+
+def scale_factor(fwhm: Optional[float], fwhm_range: Tuple[float, float]) -> float:
+    """Resampling factor that brings ``fwhm`` into ``fwhm_range`` (the nearest bound), 1.0
+    inside it, when unknown, or when it would need more than ``SCALE_MAX_UP`` upsampling."""
+    if fwhm is None or not np.isfinite(fwhm) or fwhm <= 0:
+        return 1.0
+    f = float(np.clip(fwhm, *fwhm_range)) / fwhm
+    return 1.0 if f > SCALE_MAX_UP else f
+
+
+def _rescale(a: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
+    """Cubic-spline resample of an (H, W, C) array to ``shape`` (H', W')."""
+    zy, zx = shape[0] / a.shape[0], shape[1] / a.shape[1]
+    return np.stack([ndi.zoom(a[..., c], (zy, zx), order=3, mode='reflect', grid_mode=True)
+                     for c in range(a.shape[2])], axis=-1).astype(np.float32)
+
+
 def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str] = None,
-               restore_sigma: float = RESTORE_SIGMA) -> np.ndarray:
+               restore_sigma: float = RESTORE_SIGMA,
+               fwhm_range: Optional[Tuple[float, float]] = None) -> np.ndarray:
     """Denoise a linear (H, W, 3) image with the bundled Noise2Noise U-Net.
 
     ``restore_sigma`` (px, 0 = off) adds back the Gaussian low-pass of what the network
@@ -205,9 +280,22 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
     in its training data); injected exponential discs of 0.5-3 sky sigma kept 48-79% of
     their flux without it, 86-97% with 4 px, at roughly twice the (still ~20x smaller
     than the wavelet denoiser's) residual error. ``strength`` 0-1 then blends between
-    the input (0) and that result (1)."""
-    w = load_weights(model_path)
+    the input (0) and that result (1).
+
+    ``fwhm_range`` (px; ``TRAIN_FWHM_RANGE`` for the deconvolver) makes the step independent
+    of pixel scale: when the stars' measured FWHM is outside it the image is resampled so
+    they land on the nearest bound, run, and resampled back to the original grid. Inside
+    it (all the Origin sessions), or when no FWHM can be measured, nothing is resampled."""
     img = np.asarray(img, dtype=np.float32)
+    if fwhm_range is not None:
+        f = scale_factor(measure_star_fwhm(img), fwhm_range)
+        if f != 1.0:
+            shape = (max(8, int(round(img.shape[0] * f))), max(8, int(round(img.shape[1] * f))))
+            safe = np.where(np.isfinite(img), img, 0.0).astype(np.float32)
+            out = _rescale(nn_denoise(_rescale(safe, shape), strength, model_path, restore_sigma),
+                           img.shape[:2])
+            return np.where(np.isfinite(img), out, img).astype(np.float32)
+    w = load_weights(model_path)
     finite = np.isfinite(img)
     src = np.where(finite, img, 0.0).astype(np.float32)
     grid, sigma = normalise(src)

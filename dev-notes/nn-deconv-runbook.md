@@ -798,3 +798,20 @@ the Pleiades, so v4's mottle is no worse than that; the 6.0 vs 5.4 above compare
 
 Data `C:\nn_work\survey\`, `C:\nn_work\distill\`, `C:\nn_work\mottle\` (models, `train_*`, `eval_*`, `matched_*`, `bench_*`,
 `bright_v3_v1_v2.jpg`; stacks, crops and banks deleted).
+
+## Pixel-scale normalisation (2026-10-31)
+
+The deconvolver only saw Origin stacks (star FWHM 2.9-5.1 px, Gaussian fit). Resampling the
+Omega held-out stack (4.41 px) to mimic other pixel scales, the sharpening it applied depended
+on the star width: FWHM out / in = 0.64 at 2.2 px (undersampled) ... 0.74 at 4.4 ... 0.91 at
+8.4 px. `nn_denoise(..., fwhm_range=TRAIN_FWHM_RANGE)` (`--deconvolve nn`, config key
+`nn_scale_normalise`, default on) measures the stars' Gaussian FWHM (`measure_star_fwhm`;
+`quality.measure_fwhm` reads 7.4 px on a 4.4 px stack, so not that), and when it is outside
+(2.8, 5.2) px resamples (cubic spline) so the stars land on the nearest bound, runs, and
+resamples back. Inside the range -- every Origin session -- the output is bit-identical to
+before. Result on the same rescaled Omega: 0.68 / 0.67 / 0.74 / 0.81 / 0.79 at 2.2 / 3.0 / 4.4 /
+6.0 / 8.4 px (the round trip alone changes FWHM < 1%). Targeting the nearest bound rather than
+the 4.4 px centre gives up some uniformity (0.74-0.82 centred) to leave Origin untouched.
+Not skipped by `--deconvolve nn` blend: the blended denoiser is scale-tolerant and not resampled.
+Caveats: a rescaled Origin stack keeps Origin's PSF shape and has resampling-correlated noise;
+real other-camera stacks are still needed. Upsampling beyond 2.5x (FWHM < 1.1 px) is skipped.

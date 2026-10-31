@@ -2852,6 +2852,7 @@ def build_parser() -> argparse.ArgumentParser:
         nn_restore_sigma=4.0,
         deconvolve_nn=False,     # --deconvolve nn (src/data/nn_deconv.npz at the nn step)
         nn_deconv_restore_sigma=4.0,
+        nn_scale_normalise=True,  # --deconvolve nn: resample stars outside its trained FWHM range (other pixel scales)
         nn_deconv_blend=0.75,    # share of --deconvolve nn kept, the rest the nn denoiser (--auto: galaxies 0.35)
         deconvolve=False,
         deconvolve_tv=False,
