@@ -29,6 +29,10 @@ From a night of raw frames to a finished image on your own computer: no account,
 2. **Copy a session folder off the Origin** to your computer: the folder the telescope saved for one target, with its FITS frames, kept as it is ([what's in a session folder](https://originstack.site/stack-celestron-origin.html)).
 3. **Open OriginStack, pick that folder, press Start.** It calibrates, aligns and stacks, then removes gradients, sets colour from Gaia stars, reduces noise and stretches the result, with settings chosen for your target.
 
+![The OriginStack window during a run: session folder and settings on the left, the live preview and recent frames on the right](docs/img/app-running-1200.webp)
+
+*The desktop app mid-run: the live log and phase bar on the left, the stack as it builds on the right. [More about the app](#desktop-app)*
+
 **Stuck, or the result looks wrong?** Ask in [Discussions](https://github.com/hd152/originstack/discussions), or use **Report a problem** in the app: it fills in the version, system and log for you, as a GitHub issue or as text to paste into an email or a forum post. Nothing is sent until you send it.
 
 [Changelog](CHANGELOG.md) · [Code signing policy](CODE_SIGNING_POLICY.md) · [Support on Ko-fi](https://ko-fi.com/originstack)
@@ -54,6 +58,35 @@ OriginStack is a full-featured Python pipeline for stacking and processing astro
 All stacked and processed entirely with OriginStack from raw Celestron Origin FITS frames. The Whirlpool and the Orion Nebula were made with version 2.13's default settings from every night of them on hand (8 and 7); `--preset nebula` for the Omega Nebula and `--preset starfield` for the star cloud -- see [Usage Examples](#usage-examples). A multi-night folder is a hierarchical combine: each night is stacked separately, registered onto the deepest one, merged, and post-processed once.
 
 **Sky conditions.** These are backyard/rooftop sessions under **Bortle 7-9** skies (heavy light pollution, urban/suburban), not a dark site -- measured per session with `estimate_bortle()` (`src/quality.py`, a rough same-equipment sky-glow bucket from calibrated background level vs. exposure/gain; not survey-grade photometry, see the function's docstring for what it isn't). None of the samples above -- or the two added for the [Andromeda Galaxy and Horsehead/Flame Nebula](https://originstack.site/#gallery) gallery entries on the website -- were shot from a dark site. The pipeline's background extraction, sky-floor correction and gradient removal are what make these usable at all under that much sky glow.
+
+---
+
+## Desktop App
+
+A native window for anyone who'd rather not memorize CLI flags:
+
+```bash
+python desktop_app.py
+```
+
+On Windows, the packaged build needs no Python install at all: download `OriginStack-<version>-setup.exe` from the [latest release](https://github.com/hd152/originstack/releases/latest) and run it (per-user install, Start Menu entry, uninstaller). Prefer no install? `OriginStack-<version>-windows-x64-portable.exe` is a single file that runs from any folder (it unpacks itself on each start, so it opens a few seconds slower). Prefer the zip? **Extract all of it** first and run `OriginStack.exe` from the extracted folder — running the exe from inside the zip preview fails with "Failed to load Python DLL". On Linux, download `OriginStack-<version>-linux-x64.tar.gz` (and its `.sha256`) from the same page, extract it and run `./install.sh` (per-user install, application-menu entry, `./install.sh --uninstall` to remove); it needs glibc 2.35 or newer and has had less real-world use than the Windows build. See [Packaging](packaging/README.md).
+
+The window has two columns:
+- **Left — Setup + Log**
+  - Pick the light-frames folder; the app counts the frames and suggests the target from the session's `info.json`, FITS header or folder name.
+  - **What did you image?** Picture cards (Auto-detect, Galaxy, Nebula, Star cluster, Star field, Comet) and **How should it run?** (Full quality, or Quick look for a faster check).
+  - The most-used settings, each with a one-line description. **Additional options** holds the rest of the CLI flags, grouped and searchable; the form is generated from the same argument parser the CLI uses, so it never drifts out of sync. A dot and a **reset** link mark anything changed from its default. Diagnostics and experimental options stay hidden until you tick **Expert options**.
+  - Below, in a pane you can resize: Start, the pipeline phase bar and the live log — the same output you'd see on the command line.
+- **Right — Preview + frames**
+  - Before a run: an example result for the chosen target, and a **This run** summary of what Start will do (frames, target, mode, changed settings, output file).
+  - During and after a run: the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a running table of per-frame quality (score, SNR, star count, FWHM); click a row to see that frame in the preview.
+  - After a run: a **Stretch** / **Colour** bar above the preview offers every `--stretch` and `--stretch-color` choice; **Apply to JPEG** re-renders the preview and overwrites the run's `.jpg` without re-processing (the FITS outputs are unchanged).
+
+Leave **Output file** blank and the stack is saved next to the light-frames folder, never overwriting an earlier one.
+
+Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
+
+**Languages.** The app follows your system language: English, Deutsch, Español, Français, Italiano, Nederlands, Português (Brasil), 日本語 or 简体中文. Pick another from the menu in the header (it applies from the next start), or set `ORIGINSTACK_LANG` (e.g. `ORIGINSTACK_LANG=fr`). The log and the command line stay in English, so a log attached to a problem report reads the same for everyone. The translations are machine-drafted; corrections are welcome as issues or pull requests (`src/locales/<code>.json`, keyed by the English text).
 
 ---
 
@@ -279,7 +312,9 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 
 ---
 
-## Installation
+## Install from source (command line)
+
+*Using the downloaded app? Skip this section: the installer already has everything.*
 
 Requires Python 3.10+ (CI tests 3.11 and 3.12; the optional native extension targets the CPython 3.10 ABI).
 
@@ -324,7 +359,9 @@ Plate solving needs nothing extra: the built-in solver uses a local Gaia star in
 
 ---
 
-## Quick Start
+## Command-line quick start
+
+*The app does all of this from its window; these are the same runs as terminal commands.*
 
 ### Single folder of lights
 
@@ -372,35 +409,6 @@ python originstack.py -d m51_sessions/ -o m51.fits -v
 Where `m51_sessions/` contains one subfolder per night. The sessions are pooled into one stack, or, when field rotation between them would crop the corners, stacked separately and merged onto one grid. See [Folder Organization Modes](#folder-organization-modes).
 
 Nights add up: five Whirlpool Galaxy nights (680 frames, 3.8 h) against the best single night (295 frames, 1.6 h) gave 30% lower sky noise on the same pixels and 12% narrower stars on the same 400 stars (`tools/common_star_fwhm.py`); the merge weights each night by its measured noise, so the nights with steadier air count for more, and maps every night onto one brightness scale first, so different ISO, exposure or sky brightness combine cleanly. To add a new night without keeping the old frames, stack it with `--merge previous.fits`; the output chains into the next merge.
-
----
-
-## Desktop App
-
-A native window for anyone who'd rather not memorize CLI flags:
-
-```bash
-python desktop_app.py
-```
-
-On Windows, the packaged build needs no Python install at all: download `OriginStack-<version>-setup.exe` from the [latest release](https://github.com/hd152/originstack/releases/latest) and run it (per-user install, Start Menu entry, uninstaller). Prefer no install? `OriginStack-<version>-windows-x64-portable.exe` is a single file that runs from any folder (it unpacks itself on each start, so it opens a few seconds slower). Prefer the zip? **Extract all of it** first and run `OriginStack.exe` from the extracted folder — running the exe from inside the zip preview fails with "Failed to load Python DLL". On Linux, download `OriginStack-<version>-linux-x64.tar.gz` (and its `.sha256`) from the same page, extract it and run `./install.sh` (per-user install, application-menu entry, `./install.sh --uninstall` to remove); it needs glibc 2.35 or newer and has had less real-world use than the Windows build. See [Packaging](packaging/README.md).
-
-The window has two columns:
-- **Left — Setup + Log**
-  - Pick the light-frames folder; the app counts the frames and suggests the target from the session's `info.json`, FITS header or folder name.
-  - **What did you image?** Picture cards (Auto-detect, Galaxy, Nebula, Star cluster, Star field, Comet) and **How should it run?** (Full quality, or Quick look for a faster check).
-  - The most-used settings, each with a one-line description. **Additional options** holds the rest of the CLI flags, grouped and searchable; the form is generated from the same argument parser the CLI uses, so it never drifts out of sync. A dot and a **reset** link mark anything changed from its default. Diagnostics and experimental options stay hidden until you tick **Expert options**.
-  - Below, in a pane you can resize: Start, the pipeline phase bar and the live log — the same output you'd see on the command line.
-- **Right — Preview + frames**
-  - Before a run: an example result for the chosen target, and a **This run** summary of what Start will do (frames, target, mode, changed settings, output file).
-  - During and after a run: the stacked result, updated live at each milestone. Scroll to zoom, drag to pan, toggle **Compare** to wipe between two milestones (e.g. the linear pre-post-processing stack vs. the final result). Below it, a running table of per-frame quality (score, SNR, star count, FWHM); click a row to see that frame in the preview.
-  - After a run: a **Stretch** / **Colour** bar above the preview offers every `--stretch` and `--stretch-color` choice; **Apply to JPEG** re-renders the preview and overwrites the run's `.jpg` without re-processing (the FITS outputs are unchanged).
-
-Leave **Output file** blank and the stack is saved next to the light-frames folder, never overwriting an earlier one.
-
-Closing the window while a run is in progress asks for confirmation first; a native OS notification fires when a run finishes, so you don't have to keep the window in view.
-
-**Languages.** The app follows your system language: English, Deutsch, Español, Français, Italiano, Nederlands, Português (Brasil), 日本語 or 简体中文. Pick another from the menu in the header (it applies from the next start), or set `ORIGINSTACK_LANG` (e.g. `ORIGINSTACK_LANG=fr`). The log and the command line stay in English, so a log attached to a problem report reads the same for everyone. The translations are machine-drafted; corrections are welcome as issues or pull requests (`src/locales/<code>.json`, keyed by the English text).
 
 ---
 
