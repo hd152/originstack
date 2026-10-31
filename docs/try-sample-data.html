@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Try OriginStack with a sample session: the Whirlpool Galaxy</title>
+<meta name="description" content="Download a free 41-frame Celestron Origin session of the Whirlpool Galaxy (location removed) and stack it in OriginStack in about a minute: the steps, and what the result should look like.">
+<meta name="keywords" content="astrophotography sample data, sample FITS files, Celestron Origin sample images, Whirlpool Galaxy M51 FITS, try stacking software, free stacking tutorial">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/try-sample-data.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/try-sample-data.html">
+<meta property="og:title" content="Try OriginStack with a sample session">
+<meta property="og:description" content="A free sample Origin session of M51: download, press Start, compare with the expected result.">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="docs.html">Documentation</a>
+        <a href="stack-celestron-origin.html">Guide</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Try it with a sample session</h1>
+    <p class="lede">No Origin, or just want to see it work first? Download one real night of the Whirlpool Galaxy, point OriginStack at it and press Start. It takes about a minute, and below is the picture you should end up with.</p>
+    <p><a data-goatcounter-click="sample-download" class="btn primary" href="https://github.com/hd152/originstack/releases/download/sample-whirlpool-1/OriginStack-sample-whirlpool.zip">Download the sample (450 MB)</a></p>
+    <p class="toc">
+      <a href="#inside">What is in it</a>
+      <a href="#steps">Step by step</a>
+      <a href="#result">The result</a>
+      <a href="#next">Where next</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="inside">
+  <div class="wrap">
+    <h2>What is in it</h2>
+    <p class="intro measure">One complete session from a Celestron Origin, as the telescope saved it: 41 light frames of 25 seconds (17 minutes of light in all), taken on 9 July 2026 from a suburban backyard, with the flat, dark and bias frames the Origin took for that night. The Origin&rsquo;s own finished stack is not included, so the picture you get is OriginStack&rsquo;s.</p>
+    <dl class="feat">
+      <div><dt>The target</dt>
+        <dd><p>The Whirlpool Galaxy (M51) and its companion NGC 5195, in a wide field: at the Origin&rsquo;s 335&nbsp;mm focal length the pair is small in the middle of a field of stars. That is what an Origin frame really looks like, which makes it a fair test.</p></dd></div>
+      <div><dt>Location removed</dt>
+        <dd><p>The files carry no GPS position, altitude or airmass, and the camera&rsquo;s serial number is replaced. The pixels are untouched, and the stack comes out bit for bit the same as it does with the original files. The capture date and time stay.</p></dd></div>
+      <div><dt>Not a full night</dt>
+        <dd><p>41 frames is a short session, so the result is noisier than a stack of a few hundred. It is enough to show every step working; the <a href="gallery.html">gallery</a> and the <a href="origin-vs-originstack.html">before and afters</a> show what a longer night gives.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>Step by step</h2>
+    <dl class="feat">
+      <div><dt>1. Install OriginStack</dt>
+        <dd><p>Get the installer for your system from the <a href="./#get">Install</a> section on the home page (Windows, Mac or Linux; no Python needed) and open the app.</p></dd></div>
+      <div><dt>2. Download and unzip the sample</dt>
+        <dd><p>Download <a href="https://github.com/hd152/originstack/releases/download/sample-whirlpool-1/OriginStack-sample-whirlpool.zip">OriginStack-sample-whirlpool.zip</a> (450&nbsp;MB) and unzip it. You get a folder called <code>sample_whirlpool</code> holding the frames. Leave the files as they are: do not rename or move any of them.</p></dd></div>
+      <div><dt>3. Choose the folder</dt>
+        <dd><p>In OriginStack, pick the <code>sample_whirlpool</code> folder as the light-frames folder. The app counts the frames (41 lights) and reads the target, Whirlpool Galaxy, from the session&rsquo;s <code>info.json</code>. Leave <em>What did you image?</em> on Auto-detect and <em>How should it run?</em> on Full quality.</p></dd></div>
+      <div><dt>4. Press Start</dt>
+        <dd><p>The phase bar moves through the stages: processing and scoring each frame, aligning them, stacking, then the finishing steps. The log shows the same lines the command line prints, and the preview on the right updates at each milestone. On an 8-core laptop the whole run took 69 seconds; a slower machine takes a few minutes.</p></dd></div>
+      <div><dt>5. Look at the result</dt>
+        <dd><p>When it says Done, the stacked picture is in the preview, and the files are next to the folder you chose: the linear stack (<code>.fits</code>), a preview picture (<code>.jpg</code>) and the settings it used (<code>_config.toml</code>). Compare your picture with the one below.</p></dd></div>
+    </dl>
+    <p class="intro measure">Prefer a terminal? From a source install, the same run is <code>python originstack.py -d sample_whirlpool -o whirlpool.fits</code>.</p>
+  </div>
+</section>
+
+<section id="result">
+  <div class="wrap">
+    <h2>The result to expect</h2>
+    <p class="intro measure">All 41 frames are kept (100%) and stacked into a 2025&times;3025 picture with 17.1 minutes of light. Yours may differ a little from this one, since the settings are chosen from the data and improve between versions, but it should show the same things.</p>
+    <figure class="shot-wide">
+      <picture><source type="image/webp" srcset="img/sample-whirlpool-800.webp 800w, img/sample-whirlpool-1200.webp 1200w" sizes="(min-width: 860px) 1200px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/sample-whirlpool.jpg" width="1600" height="1071" loading="lazy" alt="The full stacked field: many stars, with the Whirlpool Galaxy and its small companion near the middle."></picture>
+      <figcaption>The whole field as OriginStack stacks it with the default settings. The galaxy pair sits near the middle; the rest is stars.</figcaption>
+    </figure>
+    <figure class="shot-wide narrow">
+      <picture><source type="image/webp" srcset="img/sample-whirlpool-crop-800.webp 800w" sizes="(min-width: 860px) 800px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="img/sample-whirlpool-crop.jpg" width="960" height="680" loading="lazy" alt="A close crop of the galaxies: the main galaxy shows its spiral arms and bright core, and the smaller companion lies just below it."></picture>
+      <figcaption>The same picture cropped to the galaxies at full resolution. Look for the spiral arms and bright core of M51, and the small companion NGC 5195 just below it.</figcaption>
+    </figure>
+    <dl class="feat">
+      <div><dt>If yours looks very different</dt>
+        <dd><p>A near-black picture, a strong colour cast or fewer than 41 frames stacked usually means the files were changed on the way: a zip tool that rewrote them, or frames moved out of the folder. Unzip again and try once more. If it still looks wrong, ask in <a href="https://github.com/hd152/originstack/discussions">Discussions</a>, or use <strong>Report a problem</strong> in the app, which fills in the version, system and log for you.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="next">
+  <div class="wrap">
+    <h2>Where next</h2>
+    <dl class="feat">
+      <div><dt>Change the look</dt>
+        <dd><p>With the run finished, the <em>Stretch</em> and <em>Colour</em> bar above the preview offers every stretch; <a href="how-it-works-stretches.html">the stretch gallery</a> shows what each does. <strong>Apply to JPEG</strong> saves the one you like.</p></dd></div>
+      <div><dt>Switch finishing steps off and on</dt>
+        <dd><p>The <em>Post-processing steps</em> panel under the preview has a box for each step the run used. Clear one, and only that step and the ones after it are redone, so you can see what each step contributes without running everything again.</p></dd></div>
+      <div><dt>Look at single frames</dt>
+        <dd><p>Click a row in the recent-frames table to see that frame on its own while the run goes on, and compare it with the stack to see what 41 frames add.</p></dd></div>
+      <div><dt>Then your own data</dt>
+        <dd><p>Copy a session folder off your Origin (or see <a href="other-cameras.html">other cameras</a>), choose it the same way and press Start. <a href="stack-celestron-origin.html">The Origin guide</a> covers what is in a session folder and how to read the result; <a href="desktop-app.html">the app page</a> goes through every screen.</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>

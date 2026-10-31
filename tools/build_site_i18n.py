@@ -41,7 +41,7 @@ ENGLISH_ONLY = ['advanced.html', 'how-it-works.html', 'how-it-works-background.h
                 'how-it-works-finishing.html', 'how-it-works-stretches.html',
                 'docs.html', 'desktop-app.html', 'other-cameras.html', 'gallery.html',
                 'whats-new.html', 'command-line.html', 'compare.html',
-                'origin-vs-originstack.html']
+                'origin-vs-originstack.html', 'try-sample-data.html']
 
 # catalog code, folder, hreflang / html lang, og:locale, own name
 LANGS = [
