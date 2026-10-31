@@ -343,6 +343,8 @@ footer .langs a[aria-current] { opacity: 1; font-weight: 600; text-decoration: u
 :root:lang(ja) h1, :root:lang(ja) h2, :root:lang(zh-CN) h1, :root:lang(zh-CN) h2 { letter-spacing: 0; line-break: strict; }
 
 /* ---------- how it works ---------- */
+.walkthrough { margin: 32px 0 0; }
+.walkthrough video { display: block; width: 100%; max-width: 960px; height: auto; border-radius: 8px; background: #0a0c12; }
 .flow { margin: 44px 0 0; overflow-x: auto; }
 .flow svg { display: block; width: 100%; min-width: 640px; height: auto; }
 .eq { font-family: var(--text); font-size: 1.05rem; color: var(--ink); background: var(--plate); border-left: 3px solid var(--oiii); padding: 10px 14px; overflow-x: auto; white-space: nowrap; }
