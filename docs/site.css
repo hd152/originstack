@@ -446,3 +446,27 @@ h2 .when { font-family: var(--text); font-weight: 400; font-size: 1rem; color: v
 .gallery-grid figcaption h3 { font-size: 1.15rem; margin-bottom: 4px; }
 .gallery-grid figcaption p { margin: 0 0 .3em; font-size: 1rem; }
 .gallery-grid .data { color: var(--slate); }
+
+/* Before/after slider: two images stacked, the top one clipped at the range input's value. */
+.ba { margin: 28px 0 0; }
+.ba .ba-frame { position: relative; line-height: 0; border: 1px solid var(--line); background: #000;
+  --p: 35%; overflow: hidden; }
+.ba .ba-frame img { width: 100%; height: auto; display: block; }
+.ba .ba-frame .ba-top { position: absolute; inset: 0; clip-path: inset(0 calc(100% - var(--p)) 0 0); }
+.ba .ba-bar { position: absolute; top: 0; bottom: 0; left: var(--p); width: 2px; margin-left: -1px;
+  background: #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .45); pointer-events: none; }
+.ba .ba-bar::after { content: "\2194"; position: absolute; top: 50%; left: 50%; width: 36px; height: 36px;
+  margin: -18px 0 0 -18px; border-radius: 50%; background: #fff; color: #0b1220; font: 700 18px/36px sans-serif;
+  text-align: center; box-shadow: 0 1px 6px rgba(0, 0, 0, .5); }
+.ba .ba-tag { position: absolute; bottom: 10px; padding: 3px 10px; border-radius: 4px; font: 600 .85rem/1.4 sans-serif;
+  background: rgba(11, 18, 32, .78); color: #e8edf5; pointer-events: none; }
+.ba .ba-tag.b { left: 10px; }
+.ba .ba-tag.a { right: 10px; }
+.ba input[type=range] { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0;
+  cursor: ew-resize; touch-action: pan-y; }
+.ba .ba-frame:focus-within { outline: 3px solid var(--ha); outline-offset: 2px; }
+.ba figcaption { margin-top: 10px; color: #33435c; max-width: 70ch; line-height: 1.5; }
+.ba.narrow { max-width: 900px; }
+.ba .ba-frame.js-off .ba-top { clip-path: inset(0 65% 0 0); }
+.step-time { color: var(--slate); font-size: .95rem; }
+.ba + .measure { margin-top: 18px; }

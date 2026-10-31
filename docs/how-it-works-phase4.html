@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase 4 step by step: what each finishing step does to the picture</title>
+<meta name="description" content="Drag a slider across each finishing step OriginStack applies to a stack: background extraction, neural-network deconvolution, colour noise, star reduction and local contrast, shown on one real session with the same display curve before and after.">
+<meta name="keywords" content="astrophotography post-processing steps, background extraction before and after, deconvolution before and after, star reduction, SCNR, local contrast, image processing workflow">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/how-it-works-phase4.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/how-it-works-phase4.html">
+<meta property="og:title" content="Phase 4 step by step">
+<meta property="og:description" content="Each finishing step on a real stack, with a before/after slider.">
+<link rel="icon" href="img/favicon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-serif-4-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="img/logo-dark-200.webp 200w, img/logo-dark-400.webp 400w" sizes="188px"><img src="img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="docs.html">Documentation</a>
+        <a href="how-it-works.html">How it works</a>
+        <a href="./#get">Install</a>
+      </nav>
+    </div>
+    <h1>Phase 4, step by step</h1>
+    <p class="lede">After the frames are stacked, OriginStack finishes the picture in a chain of steps. This page shows each one on a real stack, with a slider so you can drag across the change it makes.</p>
+    <p class="toc">
+      <a href="#how">How to read the sliders</a>
+      <a href="#whole">The whole chain</a>
+      <a href="#hot">Hot pixels</a>
+      <a href="#background">Background</a>
+      <a href="#nn">Deconvolution</a>
+      <a href="#scnr">Green noise</a>
+      <a href="#stars">Star reduction</a>
+      <a href="#contrast">Local contrast</a>
+      <a href="#skipped">What did not run</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="how">
+  <div class="wrap">
+    <h2>How to read the sliders</h2>
+    <p class="intro measure">The pictures are the <a href="try-sample-data.html">sample Whirlpool session</a> (41 frames of 25&nbsp;s from a Celestron Origin), stacked with the default settings, so you can repeat everything here yourself. Phase 4 works on the <em>linear</em> stack, which looks almost black until it is stretched, so every picture below is shown with the same fixed display curve: the sky level of each picture is set to black, and the brightness above it is scaled the same way. That way the slider shows what the step changed, not a difference in how it was displayed.</p>
+    <dl class="feat">
+      <div><dt>Drag, or use the arrow keys</dt>
+        <dd><p>Drag across a picture to move the divider: <strong>Before</strong> is on the left of it and <strong>After</strong> on the right. With a keyboard, tab to a slider and use the left and right arrow keys.</p></dd></div>
+      <div><dt>Times</dt>
+        <dd><p>The times are from one run on an 8-core laptop. All of Phase 4 took about 40 seconds of the roughly 70 seconds the whole run took.</p></dd></div>
+      <div><dt>Try it yourself</dt>
+        <dd><p>Run <code>python originstack.py --from-stack stack.fits -o again.fits</code> on a linear stack to redo only Phase 4, and add <code>--skip-step NAME</code> to leave a step out (the names are in the headings below). In the desktop app, the <em>Post-processing steps</em> panel switches each step off and on after a run and redoes only what follows it.</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="whole">
+  <div class="wrap">
+    <h2>The whole chain</h2>
+    <p class="intro measure">First the two ends: the stack as Phase 3 leaves it, and the finished picture after every step below. Between them the sky turns from a green-blue haze to black, the galaxy gains its spiral structure and the noise drops.</p>
+    <figure class="ba" data-ba>
+      <div class="ba-frame">
+        <img src="img/p4-all-after.webp" width="1200" height="803" loading="lazy" alt="The finished picture after Phase 4: a black sky, many stars and the galaxy with its spiral arms.">
+        <img class="ba-top" src="img/p4-all-before.webp" width="1200" height="803" loading="lazy" alt="The linear stack before Phase 4: a flat blue-green sky with the galaxies faint and small.">
+        <span class="ba-bar"></span><span class="ba-tag b">Before</span><span class="ba-tag a">After</span>
+        <input type="range" min="0" max="100" value="35" aria-label="Drag to compare before and after">
+      </div>
+      <figcaption>The stack before Phase 4 (left) and after it (right). The haze and colour cast come out; the stars and the galaxy stay.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="hot">
+  <div class="wrap">
+    <h2>Hot pixels <small class="step-time">(<code>hot_pixel</code>, 0.8&nbsp;s)</small></h2>
+    <p class="intro measure">A pixel that stands far above its neighbours in one colour channel is pulled back toward them. Most hot pixels are already removed when the frames are calibrated against the dark; this step catches the ones that survive.</p>
+    <p class="measure">On this session it changed 16 pixels, each by at most about a quarter of its value, and all of them on or next to bright stars. There is nothing to see, so there is no slider here. It matters for sessions that have no darks.</p>
+  </div>
+</section>
+
+<section id="background">
+  <div class="wrap">
+    <h2>Background <small class="step-time">(<code>background</code>, 7.4&nbsp;s)</small></h2>
+    <p class="intro measure">The sky in a stack is never perfectly flat or neutral: sky glow brightens one corner, and the red, green and blue channels sit at different levels. The background step measures the sky in many small patches between the stars (47&nbsp;px here), fits a smooth surface through them and subtracts it, then sets all three channels to the same low level so the sky is neutral grey.</p>
+    <figure class="ba" data-ba>
+      <div class="ba-frame">
+        <img src="img/p4-bg-after.webp" width="1200" height="803" loading="lazy" alt="After background extraction: a dark, neutral sky with the galaxies and stars standing out.">
+        <img class="ba-top" src="img/p4-bg-before.webp" width="1200" height="803" loading="lazy" alt="Before background extraction: a blue-green sky, brighter toward the lower right.">
+        <span class="ba-bar"></span><span class="ba-tag b">Before</span><span class="ba-tag a">After</span>
+        <input type="range" min="0" max="100" value="35" aria-label="Drag to compare before and after">
+      </div>
+      <figcaption>The blue-green cast and the brighter corner go; the galaxy and stars stay. The pictures are drawn with the same curve, so the difference is real: before, the red channel sat about a quarter below green and blue.</figcaption>
+    </figure>
+    <p class="measure">Switch it off with <code>--no-background-extraction</code>; the surface is fitted from sky patches between the stars, so the stars are not subtracted with it.</p>
+  </div>
+</section>
+
+<section id="nn">
+  <div class="wrap">
+    <h2>Sharpening and noise: neural-network deconvolution <small class="step-time">(<code>nn</code>, 26&nbsp;s)</small></h2>
+    <p class="intro measure">A stack is blurred a little by the atmosphere and the optics, and every pixel carries noise. This step runs a small neural network that was trained on real sessions to turn a noisy, soft image into a cleaner, sharper one in a single pass. On galaxies <code>--auto</code> keeps 35% of the deconvolver&rsquo;s output and mixes in 65% of the plain denoiser&rsquo;s, so faint outer arms keep their contrast. It is the longest step and the one with the biggest effect.</p>
+    <figure class="ba narrow" data-ba>
+      <div class="ba-frame">
+        <img src="img/p4-nn-after.webp" width="900" height="600" loading="lazy" alt="After deconvolution: the same galaxy, smoother, with the arms and the companion defined.">
+        <img class="ba-top" src="img/p4-nn-before.webp" width="900" height="600" loading="lazy" alt="Before deconvolution: a grainy galaxy with soft spiral arms.">
+        <span class="ba-bar"></span><span class="ba-tag b">Before</span><span class="ba-tag a">After</span>
+        <input type="range" min="0" max="100" value="35" aria-label="Drag to compare before and after">
+      </div>
+      <figcaption>The galaxy pair before and after, at full resolution. The grain in the sky is the noise of a 17-minute stack; the arms and the bridge toward the companion become much clearer.</figcaption>
+    </figure>
+    <p class="measure">Choose it with <code>--deconvolve nn</code>. Other denoisers and classical deconvolution (<code>--deconvolve rl</code> and others) are available; <code>--auto</code> picked this one for a galaxy on Origin data.</p>
+  </div>
+</section>
+
+<section id="scnr">
+  <div class="wrap">
+    <h2>Green noise <small class="step-time">(<code>scnr</code>, 0.2&nbsp;s)</small></h2>
+    <p class="intro measure">A colour sensor has twice as many green pixels as red or blue, and the sky ends up with green-tinted specks. SCNR (subtractive chromatic noise reduction) lowers green where it exceeds red and blue.</p>
+    <figure class="ba" data-ba>
+      <div class="ba-frame">
+        <img src="img/p4-scnr-after.webp" width="1200" height="800" loading="lazy" alt="After SCNR: the same patch of sky with the green removed, leaving red and blue grain.">
+        <img class="ba-top" src="img/p4-scnr-before.webp" width="1200" height="800" loading="lazy" alt="Before SCNR: sky noise with green and blue speckle.">
+        <span class="ba-bar"></span><span class="ba-tag b">Before</span><span class="ba-tag a">After</span>
+        <input type="range" min="0" max="100" value="35" aria-label="Drag to compare before and after">
+      </div>
+      <figcaption>A patch of sky from the same picture, enlarged. The stars keep their colour; the green speckle in the sky is gone.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="stars">
+  <div class="wrap">
+    <h2>Star reduction <small class="step-time">(<code>star_reduce</code>, 0.5&nbsp;s)</small></h2>
+    <p class="intro measure">Bright stars spread their light into soft halos that bury the faint detail around them. Star reduction shrinks each star&rsquo;s profile toward a tighter one (here the typical star width goes from 4.3&nbsp;px to about 3.5) without touching what is not star. Turn it off with <code>--no-star-reduce</code>.</p>
+    <figure class="ba" data-ba>
+      <div class="ba-frame">
+        <img src="img/p4-star-after.webp" width="1200" height="801" loading="lazy" alt="After star reduction: the same star, tighter, with a smaller halo.">
+        <img class="ba-top" src="img/p4-star-before.webp" width="1200" height="801" loading="lazy" alt="Before star reduction: a bright star with a wide, soft halo.">
+        <span class="ba-bar"></span><span class="ba-tag b">Before</span><span class="ba-tag a">After</span>
+        <input type="range" min="0" max="100" value="35" aria-label="Drag to compare before and after">
+      </div>
+      <figcaption>The brightest star in the field, enlarged three times. The core stays; the halo around it pulls in.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="contrast">
+  <div class="wrap">
+    <h2>Local contrast and the final flatten <small class="step-time">(<code>local_contrast</code> 1.8&nbsp;s, <code>sky_neutralize</code>)</small></h2>
+    <p class="intro measure">The last two steps shape the picture. Local contrast raises the contrast of structure at three scales (about 2, 12 and 40&nbsp;px, at strength 0.8); <code>--no-local-contrast</code> skips it. The final flatten then measures what is left of the sky, evens it out and sets it to a neutral grey, so the picture&rsquo;s black point sits in the same place in every channel.</p>
+    <figure class="ba narrow" data-ba>
+      <div class="ba-frame">
+        <img src="img/p4-lc-after.webp" width="900" height="600" loading="lazy" alt="After local contrast and the final flatten: the spiral arms stand out more.">
+        <img class="ba-top" src="img/p4-lc-before.webp" width="900" height="600" loading="lazy" alt="Before local contrast: the galaxy pair, smooth and soft.">
+        <span class="ba-bar"></span><span class="ba-tag b">Before</span><span class="ba-tag a">After</span>
+        <input type="range" min="0" max="100" value="35" aria-label="Drag to compare before and after">
+      </div>
+      <figcaption>The same crop as above, after the previous steps (left) and after these two (right). The change is smaller than the earlier ones, but it is what gives the arms their definition.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="skipped">
+  <div class="wrap">
+    <h2>What did not run</h2>
+    <p class="intro measure">Phase 4 chooses its steps from the data, so another target runs a different chain. On this session these did not run:</p>
+    <dl class="feat">
+      <div><dt>Colour noise reduction (<code>chroma_nr</code>)</dt>
+        <dd><p>Smooths colour noise where the denoiser has not. The neural network already covers it here.</p></dd></div>
+      <div><dt>Sky residual</dt>
+        <dd><p>Takes out a faint leftover sky pattern. It is skipped for extended targets such as a galaxy, because it could mistake the target&rsquo;s own outer light for sky.</p></dd></div>
+      <div><dt>Other denoisers (<code>wavelet</code>, <code>bilateral</code>, <code>acdnr</code>, <code>aniso</code>)</dt>
+        <dd><p>The directional wavelet denoiser is the default when the neural network is not used; the others are opt-in with <code>--denoiser</code>.</p></dd></div>
+      <div><dt>Gray-locus colour calibration (<code>photo_cal</code>)</dt>
+        <dd><p>A fallback colour calibration. It is skipped because the colours were already set from Gaia stars on the linear stack, before Phase 4.</p></dd></div>
+      <div><dt>Star removal</dt>
+        <dd><p>Off unless you ask for it with <code>--remove-stars</code>.</p></dd></div>
+    </dl>
+    <p class="intro measure">After Phase 4 the picture is still linear. The stretch that makes it look like a photograph is applied when the preview is made; see the <a href="how-it-works-stretches.html">stretch gallery</a>, and <a href="how-it-works-finishing.html">Colour and finishing</a> for how each step is done.</p>
+  </div>
+</section>
+</main>
+
+<script>
+(function () {
+  Array.prototype.forEach.call(document.querySelectorAll('.ba-frame'), function (frame) {
+    var input = frame.querySelector('input[type=range]');
+    function set() { frame.style.setProperty('--p', input.value + '%'); }
+    input.addEventListener('input', set);
+    set();
+  });
+})();
+</script>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack is free software under the GNU GPL v3.</span>
+    <span><a href="./">Home</a> &nbsp; <a href="docs.html">Documentation</a> &nbsp; <a href="stack-celestron-origin.html">How to stack Origin images</a> &nbsp; <a href="https://github.com/hd152/originstack">Source</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">Report a problem</a> &nbsp; <a href="privacy.html">Privacy</a></span>
+  </div>
+</footer>
+</body>
+</html>
