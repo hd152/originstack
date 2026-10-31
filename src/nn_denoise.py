@@ -45,7 +45,7 @@ RESTORE_SIGMA = 4.0    # px; low-frequency restore of faint extended light (nn_d
 # (oversampled): ``nn_denoise(..., fwhm_range=...)`` resamples so the stars land inside.
 TRAIN_FWHM_RANGE = (2.3, 5.2)
 SCALE_MAX_UP = 2.5     # largest upsampling factor (cost grows with its square)
-STAR_RESTORE_FWHM = (3.6, 4.4)   # px: star-aware restore at full strength below the first, off above the second
+STAR_RESTORE_FWHM = (3.6, 4.0)   # px: star-aware restore at full strength below the first, off above the second
 FIT_HALF = 8           # star cutout half-width (px) for the FWHM fit
 
 _weights_cache: Dict[str, Dict[str, np.ndarray]] = {}
@@ -334,7 +334,7 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
     if restore_sigma > 0:
         res = src - den
         fw = measure_star_fwhm(src) if star_restore_frac > 0 else None
-        # wide stars (>= ~4.4 px) lose no flux to the 4 px restore and would lose sharpness
+        # wide stars (>= ~4 px) lose no flux to the 4 px restore and would lose sharpness
         # to a tight one (Omega width ratio 0.74 -> 0.82): fade the tight restore out. The
         # fade scales the mask WEIGHT, not the blur width: a width of ramp x frac x fw (0.07 px
         # on Pleiades, 4.37 px) puts the residual back unblurred and the stars return to the

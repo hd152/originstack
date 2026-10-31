@@ -922,3 +922,10 @@ to the 4 px one). Verdict: **the bug is fixed; #233 is acceptable to merge only 
 Pleiades-class change is tolerated; otherwise narrow the fade** (e.g. `STAR_RESTORE_FWHM`
 (3.4, 4.0), or a squared ramp) so stars wider than ~4 px are bit-identical, then re-run this
 table (it costs Sunflower, 3.56 px, part of its gain: ramp 0.73 at (3.4, 4.0)).
+
+**Star restore fade narrowed (2026-10-31).** The re-run still moved Pleiades (4.37 px: width ratio
+0.730 -> 0.771, ring +11%): a fade weight of 0.04 is not negligible against a star core's
+residual. `STAR_RESTORE_FWHM` is now (3.6, 4.0) px (was 3.6-4.4), so Omega, Orion and Pleiades
+(4.3-4.9 px in the linear stack) are bit-identical to restore-off (checked on 1000x1400 crops);
+Sunflower (3.5 px) and Sculptor (2.9 px) are at full strength, i.e. their rows in the tables
+above stand. The flux loss it repairs is already gone by ~4 px (Omega 4.42: 1.00).
