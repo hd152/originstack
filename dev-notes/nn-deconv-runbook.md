@@ -807,7 +807,7 @@ on the star width: FWHM out / in = 0.64 at 2.2 px (undersampled) ... 0.74 at 4.4
 8.4 px. `nn_denoise(..., fwhm_range=TRAIN_FWHM_RANGE)` (`--deconvolve nn`, config key
 `nn_scale_normalise`, default on) measures the stars' Gaussian FWHM (`measure_star_fwhm`;
 `quality.measure_fwhm` reads 7.4 px on a 4.4 px stack, so not that), and when it is outside
-(2.8, 5.2) px resamples (cubic spline) so the stars land on the nearest bound, runs, and
+(2.3, 5.2) px resamples (cubic spline) so the stars land on the nearest bound, runs, and
 resamples back. Inside the range -- every Origin session -- the output is bit-identical to
 before. Result on the same rescaled Omega: 0.68 / 0.67 / 0.74 / 0.81 / 0.79 at 2.2 / 3.0 / 4.4 /
 6.0 / 8.4 px (the round trip alone changes FWHM < 1%). Targeting the nearest bound rather than
@@ -815,3 +815,89 @@ the 4.4 px centre gives up some uniformity (0.74-0.82 centred) to leave Origin u
 Not skipped by `--deconvolve nn` blend: the blended denoiser is scale-tolerant and not resampled.
 Caveats: a rescaled Origin stack keeps Origin's PSF shape and has resampling-correlated noise;
 real other-camera stacks are still needed. Upsampling beyond 2.5x (FWHM < 1.1 px) is skipped.
+
+**Seestar S50 check (2026-10-31).** Two S50 stacks (M13 73 subs, M101 207 subs; 2.4"/px, 50 mm,
+star FWHM 2.6 px), the network alone on the linear stack, M101 against Pan-STARRS truth
+(`tools/fetch_ps1_truth.py`, 2 crops, 92 stars, same stars in every image): FWHM input -> output
+-> truth = 2.7 -> 1.5 -> 1.2 px (output/input 0.58; still 20-30% wider than truth, so not
+over-sharpened); the 2.5-5 px wing halo falls from 3.3% of the peak to 1.0-1.5% (truth 0.07%),
+no negative ring. Resampling by 1.08 to reach a 2.8 px lower bound was slightly worse than not
+resampling (FWHM 1.49 vs 1.43 faint, halo 1.0 vs 0.9%), hence the 2.3 px lower bound. Flux in a
+6 px aperture: faint stars (8-30 sigma) 1.01-1.02 of the input, mid/bright (30+ sigma) 0.91-0.94
+-- the full network (blend 1.0) is not flux-preserving; check Origin before photometry runs
+after `--deconvolve nn`. Caveats: PS1 truth is gri-averaged on the S50 grid (its ~1.2 px width
+is partly pixel integration); M13 has no WCS, so no truth; no blend or Phase 4 in this run.
+
+**Flux conservation vs star width (2026-10-31).** Aperture flux (3 x FWHM radius, annulus
+background removed, same isolated unsaturated stars, luminance) of the network output / input,
+full network (blend 1.0), median per brightness bin (8-30 / 30-200 / >200 sigma):
+
+| stack | star FWHM px | 8-30 | 30-200 | >200 |
+|---|---|---|---|---|
+| Omega | 4.42 | 1.017 | 0.999 | 1.001 |
+| Orion | 5.08 | 1.003 | 0.996 | 1.003 |
+| Pleiades | 4.37 | 1.015 | 0.999 | 1.003 |
+| Sunflower | 3.56 | 0.983 | 0.976 | - |
+| Sculptor | 2.97 | 0.959 | 0.954 | - |
+| S50 M101 | 2.72 | 0.961 | 0.942 | 0.948 |
+| S50 M13 | 2.67 | 0.957 | 0.938 | 0.940 |
+
+Flux is kept to ~0.5% at FWHM >= 4.4 px and falls as stars get narrower, on Origin's own
+Sculptor (2.97 px) as much as on S50: it is a property of the network on near-undersampled
+stars, not of the camera. Photometry is unaffected (it reads the linear stack, never Phase 4
+output); only post-NN star brightness (e.g. colour of tight stars) is low by 2-6%.
+
+**Star-aware restore (2026-10-31).** The loss above is redistribution, not removal: the network
+alone keeps ~82% of a tight star's flux and the 4 px restore returns it, but into an 8-12 px
+halo (M13, 3 FWHM aperture 0.94, 12 px 1.01). `nn_denoise(star_restore_frac=0.4)` (config
+`nn_deconv_star_restore_frac`, `--deconvolve nn` only) restores near detected stars (full
+weight within 1 FWHM, fading to 3 FWHM) with a Gaussian of 0.4 x the stars' FWHM instead of 4
+px. Aperture flux out/in at 2 / 3 / 4.5 x FWHM on M13: 0.895 / 0.944 / 0.991 -> 1.00; Sculptor
+0.898 / 0.958 / 0.992 -> 1.00; star width unchanged (M13 1.55 -> 1.58, Sculptor 0.515 -> 0.512).
+Blur widths tried: 0.5 px (0.19 FWHM) gives the sharpening back (FWHM 2.17), a fixed 1 px did
+that on 4.4 px stars (Omega width ratio 0.74 -> 0.90), 0.4 x FWHM still cost Omega 0.74 ->
+0.82. Wide stars lose no flux, so the effect fades out between 3.6 and 4.4 px
+(`STAR_RESTORE_FWHM`): Omega/Orion/Pleiades are unchanged, Sunflower, Sculptor and both S50
+stacks are at 0.996-1.014 (was 0.94-0.98). Not run: the Phase 4 bench (ring, hue, faint_cnr)
+with it on; the mask only touches pixels within 3 FWHM of detections.
+
+**Other cameras: checks (2026-10-31).** Six Seestar S50 stacks (M101 207 subs, M13 73, M31 130, NGC7000
+205, IC 1396A 300, M27 580) through Phase 4 with the default chain and with `--deconvolve nn`
+(8-35 s for the NN step): no errors; stars tighter, sky and nebulae cleaner, M13 resolves more
+cluster stars, M101's arms are clearer. Linear star colour is kept (aperture R/G of 276 stars,
+IC 1396A 1.136 -> 1.133, reddest 15% 1.92 -> 1.87; NGC7000 1.444 -> 1.443): the paler red stars in
+the stretched previews are the per-channel stretch whitening sharper cores, not the network.
+Radial profiles of the 60 brightest stars in the linear output have no negative lobe. One real
+artefact: a dark moat around a saturated star (IC 1396A, M31, in the images with
+`--deconvolve nn`); it goes away with `--no-local-contrast` (multiscale local contrast acting on
+the saturated core, ragged but present in the default run too), so it is that step's, not the
+network's. Mono (LCO M51, 0.74"/px, 14 frames, Pan-STARRS truth, 73 stars): mid-brightness
+stars 4.03 -> 3.01 px (truth 1.76), ratio 0.75 as on Origin's 4.4 px stars; wing halo
+10.9% -> 6.3% of the peak (truth 1.0%); no negative ring. The network stops well short of
+survey sharpness at that noise level; this is its training target (sharpest 30% of frames), not a
+failure. No case found that needs a wider-PSF retrain.
+
+**Phase 4 bench of the star-aware restore (2026-10-31).** `tools/bench_phase4.py` on the five
+held-out Origin stacks, `--deconvolve nn` with `nn_deconv_star_restore_frac` 0 (previous
+behaviour) vs 0.4 (default); logs/results `C:\nn_work\bench_sr\{bench.log,results.json}`. Rows
+that moved, 0 -> 0.4 (`ring` positive = bright halo, lower is better; `colour_slope_lin` higher
+is better):
+
+| stack (FWHM px) | fwhm_ratio | colour_slope_lin | hue_err deg | faint_cnr | ring | sky_noise |
+|---|---|---|---|---|---|---|
+| Omega (4.42), Orion (5.08) | identical | identical | identical | identical | identical | identical |
+| **Pleiades (4.37)** | **0.730 -> 1.031** | 0.915 -> 0.929 | 12.92 -> 12.85 | 67.9 -> 62.7 (-7.6%) | 4.38 -> 4.59 (+4.8%) | 0.302 -> 0.309 |
+| Sculptor (2.97) | 0.499 -> 0.489 | 0.493 -> 0.624 | 3.73 -> 4.09 (+0.35) | 249 -> 246 (-1.2%) | 8.93 -> 5.06 (-43%) | unchanged |
+| Sunflower (3.56) | 0.474 -> 0.471 | 0.646 -> 0.738 | 4.38 -> 4.66 (+0.28) | 191.8 -> 191.3 | 7.37 -> 4.90 (-34%) | unchanged |
+
+Narrow stacks (Sculptor, Sunflower) gain as intended: more of the star colour kept in the linear
+output, a third to a half less bright halo, width unchanged; the costs (hue error +0.3 deg,
+faint contrast -1.2% / -0.3%) are small. **Pleiades regresses: the stars lose all their
+sharpening (0.73 -> 1.03).** Cause: the fade-out between 3.6 and 4.4 px scales the blur width
+(`frac * ramp * fw`) instead of the weight. Pleiades (4.37 px) gets a ramp of 0.04, i.e. a
+~0.07 px blur inside the star mask: the restore then adds the residual back almost unblurred
+and the stars return to the input. (Omega at 4.42 px is just past the ramp and unaffected; the
+earlier flux and width checks did not include a star width in the ramp.) Verdict: **needs a
+fix before #233 merges**: fade the mask weight with the ramp and keep the blur width fixed
+(`smask * ramp`, sigma `frac * fw`), then re-run this table; thresholds used: fwhm_ratio change
+> 0.02, faint_cnr > 3%, hue_err > 0.5 deg, ring > 10% count as moves beyond noise.
