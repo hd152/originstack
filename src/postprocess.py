@@ -932,7 +932,7 @@ def postprocess_stack(
     _nn_deconv = getattr(args, 'deconvolve_nn', False) and 'deconvolve' not in skip_steps
     if (_at('nn', bool(getattr(args, 'deconvolve_nn', False) or getattr(args, 'denoise_nn', False)))
             and (_nn_deconv or getattr(args, 'denoise_nn', False)) and 'nn' not in skip_steps):
-        from src.nn_denoise import DECONV_MODEL_PATH, model_available, nn_denoise
+        from src.nn_denoise import DECONV_MODEL_PATH, TRAIN_FWHM_RANGE, model_available, nn_denoise
         _nn_path = DECONV_MODEL_PATH if _nn_deconv else None
         _nn_flag = '--deconvolve nn' if _nn_deconv else '--denoiser nn'
         if not model_available(_nn_path):
@@ -954,8 +954,12 @@ def postprocess_stack(
             from src.io_fits import _sky_stats
             _sig_before = _sky_stats(luminance(stacked))[1]
             _pre_nn = stacked
+            # the deconvolver was trained on one pixel scale: resample stars outside its
+            # trained FWHM range (the denoiser is scale-tolerant and is left alone)
+            _fwhm_range = (TRAIN_FWHM_RANGE if _nn_deconv
+                           and getattr(args, 'nn_scale_normalise', True) else None)
             stacked = nn_denoise(stacked, strength=nn_strength, model_path=_nn_path,
-                                 restore_sigma=nn_restore)
+                                 restore_sigma=nn_restore, fwhm_range=_fwhm_range)
             if _blend < 1.0:
                 _den = nn_denoise(_pre_nn, strength=nn_strength,
                                   restore_sigma=float(getattr(args, 'nn_restore_sigma', 4.0)))

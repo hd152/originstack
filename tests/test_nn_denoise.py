@@ -201,7 +201,7 @@ def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
     from src.models import ProcessingStats
     calls = []
 
-    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0):
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, fwhm_range=None):
         calls.append((model_path, restore_sigma))
         return img
     monkeypatch.setattr(ndm, 'nn_denoise', fake)
@@ -221,7 +221,7 @@ def test_nn_deconv_blend_mixes_in_the_denoiser(monkeypatch):
     from src.models import ProcessingStats
     calls = []
 
-    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0):
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, fwhm_range=None):
         calls.append(model_path)
         return np.full_like(img, 10.0 if model_path == ndm.DECONV_MODEL_PATH else 20.0)
     monkeypatch.setattr(ndm, 'nn_denoise', fake)
@@ -241,3 +241,65 @@ def test_nn_deconv_blend_mixes_in_the_denoiser(monkeypatch):
     assert calls == [ndm.DECONV_MODEL_PATH, None]
     out = seen['nn deconvolution']
     assert out.dtype == np.float32 and np.allclose(out, 0.25 * 10 + 0.75 * 20)
+
+
+# ── pixel-scale normalisation (fwhm_range) ────────────────────────────────────
+
+def _star_field(fwhm, shape=(300, 300), n=60, seed=3):
+    rng = np.random.default_rng(seed)
+    img = rng.normal(100.0, 2.0, shape).astype(np.float32)
+    yy, xx = np.mgrid[:shape[0], :shape[1]]
+    sig = fwhm / 2.3548
+    pts = [(y, x) for y in range(25, shape[0] - 25, 45) for x in range(25, shape[1] - 25, 45)][:n]
+    for k, (y, x) in enumerate(pts):
+        img += (400.0 + 150.0 * (k % 9)) * np.exp(-((yy - y - 0.3) ** 2 + (xx - x + 0.2) ** 2) / (2 * sig ** 2)).astype(np.float32)
+    return np.repeat(img[..., None], 3, axis=2)
+
+
+@pytest.mark.parametrize('fwhm', [2.0, 4.0, 8.0])
+def test_measure_star_fwhm_recovers_the_gaussian_width(fwhm):
+    got = nd.measure_star_fwhm(_star_field(fwhm))
+    assert got is not None and abs(got - fwhm) < 0.15 * fwhm
+
+
+def test_measure_star_fwhm_none_without_stars():
+    flat = np.random.default_rng(0).normal(100, 2, (200, 200, 3)).astype(np.float32)
+    assert nd.measure_star_fwhm(flat) is None
+
+
+def test_scale_factor_clamps_to_the_nearest_bound():
+    rng = (3.0, 5.0)
+    assert nd.scale_factor(4.0, rng) == 1.0                    # inside: untouched
+    assert nd.scale_factor(3.0, rng) == 1.0 and nd.scale_factor(5.0, rng) == 1.0
+    assert nd.scale_factor(10.0, rng) == pytest.approx(0.5)    # downsample to 5 px
+    assert nd.scale_factor(2.0, rng) == pytest.approx(1.5)     # upsample to 3 px
+    assert nd.scale_factor(None, rng) == 1.0 and nd.scale_factor(float('nan'), rng) == 1.0
+    assert nd.scale_factor(1.0, rng) == 1.0                    # would need 3x: skipped
+
+
+def test_nn_denoise_resamples_and_returns_the_original_grid(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda img, max_stars=60: 10.0)
+    orig = nd.denoise_z
+
+    def grab(z, w):
+        seen['shape'] = z.shape
+        return orig(z, w)
+    monkeypatch.setattr(nd, 'denoise_z', grab)
+    img = _star_field(10.0, (300, 340))
+    img[5, 5, 0] = np.nan
+    out = nd.nn_denoise(img, fwhm_range=(3.0, 5.0))
+    assert seen['shape'][:2] == (150, 170)                     # 10 px -> 5 px: half size
+    assert out.shape == img.shape and out.dtype == np.float32
+    assert np.isnan(out[5, 5, 0]) and np.isfinite(np.delete(out.ravel(), 5 * 340 * 3 + 15)).all()
+
+
+def test_nn_denoise_inside_range_or_unmeasured_is_unchanged(monkeypatch):
+    monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
+    img = _star_field(4.0)
+    base = nd.nn_denoise(img)
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda img, max_stars=60: 4.0)
+    np.testing.assert_array_equal(nd.nn_denoise(img, fwhm_range=(2.8, 5.2)), base)
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda img, max_stars=60: None)
+    np.testing.assert_array_equal(nd.nn_denoise(img, fwhm_range=(2.8, 5.2)), base)
