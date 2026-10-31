@@ -860,3 +860,19 @@ that on 4.4 px stars (Omega width ratio 0.74 -> 0.90), 0.4 x FWHM still cost Ome
 (`STAR_RESTORE_FWHM`): Omega/Orion/Pleiades are unchanged, Sunflower, Sculptor and both S50
 stacks are at 0.996-1.014 (was 0.94-0.98). Not run: the Phase 4 bench (ring, hue, faint_cnr)
 with it on; the mask only touches pixels within 3 FWHM of detections.
+
+**Other cameras: checks (2026-10-31).** Six Seestar S50 stacks (M101 207 subs, M13 73, M31 130, NGC7000
+205, IC 1396A 300, M27 580) through Phase 4 with the default chain and with `--deconvolve nn`
+(8-35 s for the NN step): no errors; stars tighter, sky and nebulae cleaner, M13 resolves more
+cluster stars, M101's arms are clearer. Linear star colour is kept (aperture R/G of 276 stars,
+IC 1396A 1.136 -> 1.133, reddest 15% 1.92 -> 1.87; NGC7000 1.444 -> 1.443): the paler red stars in
+the stretched previews are the per-channel stretch whitening sharper cores, not the network.
+Radial profiles of the 60 brightest stars in the linear output have no negative lobe. One real
+artefact: a dark moat around a saturated star (IC 1396A, M31, in the images with
+`--deconvolve nn`); it goes away with `--no-local-contrast` (multiscale local contrast acting on
+the saturated core, ragged but present in the default run too), so it is that step's, not the
+network's. Mono (LCO M51, 0.74"/px, 14 frames, Pan-STARRS truth, 73 stars): mid-brightness
+stars 4.03 -> 3.01 px (truth 1.76), ratio 0.75 as on Origin's 4.4 px stars; wing halo
+10.9% -> 6.3% of the peak (truth 1.0%); no negative ring. The network stops well short of
+survey sharpness at that noise level; this is its training target (sharpest 30% of frames), not a
+failure. No case found that needs a wider-PSF retrain.
