@@ -19,6 +19,10 @@ OS002  Known-optional third-party imports at module scope in src/ must sit insid
 OS003  Library code under src/ should not call bare print(); use safe_print /
        print_phase so output tees into the desktop UI event sink. Summarised per
        file unless --verbose; per-line and diff-scoped under --git. (warning)
+OS006  `except Exception:` (or bare `except:`) whose whole body is `pass` hides real
+       failures (a cupy array and an IERS lookup each diverged silently this way).
+       Log at debug level on the "originstack" logger instead. Summarised per file
+       unless --verbose; diff-scoped under --git. (warning)
 OS004  Every #[pyfunction] exported from the native crate should be referenced by
        name somewhere under tests/ (parity / smoke coverage). (warning)
 OS005  --git only: if ext/astro_native/src/ changed vs BASE, the crate version in
@@ -162,6 +166,18 @@ def check_bare_print(path, tree, out):
                                "so output reaches the desktop UI event sink", level="warning"))
 
 
+def check_silent_except(path, tree, out):
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        broad = node.type is None or (isinstance(node.type, ast.Name)
+                                      and node.type.id in ("Exception", "BaseException"))
+        if broad and len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+            out.append(Finding(path, node.lineno, "OS006",
+                               "broad except with a bare `pass` -- log it (debug) on the "
+                               '"originstack" logger so the failure is visible', level="warning"))
+
+
 def check_native_parity(out):
     src_dir = ROOT / "ext" / "astro_native" / "src"
     tests_dir = ROOT / "tests"
@@ -241,6 +257,9 @@ def _changed_lines(base: str) -> dict[str, set[int]]:
     return out
 
 
+_SUMMARISED = {"OS003", "OS006"}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -260,6 +279,7 @@ def main(argv=None) -> int:
         check_logger_name(path, tree, findings)
         check_optional_imports(path, tree, findings)
         check_bare_print(path, tree, findings)
+        check_silent_except(path, tree, findings)
 
     check_native_parity(findings)
     if args.git:
@@ -268,19 +288,21 @@ def main(argv=None) -> int:
     # OS003 handling: diff-scope under --git, summarise otherwise (unless --verbose).
     if args.git:
         touched = _changed_lines(args.git)
-        findings = [f for f in findings if f.code != "OS003"
+        findings = [f for f in findings if f.code not in _SUMMARISED
                     or f.line in touched.get(f._rel().replace(os.sep, "/"), set())]
     elif not args.verbose:
         by_file: dict[str, list[Finding]] = {}
         kept: list[Finding] = []
         for f in findings:
-            if f.code == "OS003":
-                by_file.setdefault(f._rel(), []).append(f)
+            if f.code in _SUMMARISED:
+                by_file.setdefault((f._rel(), f.code), []).append(f)
             else:
                 kept.append(f)
-        for rel, fs in by_file.items():
-            kept.append(Finding(ROOT / rel, min(x.line for x in fs), "OS003",
-                                f"{len(fs)} bare print() call(s) in library code "
+        for (rel, code), fs in by_file.items():
+            what = ("bare print() call(s) in library code" if code == "OS003"
+                    else "broad `except ... pass` handler(s)")
+            kept.append(Finding(ROOT / rel, min(x.line for x in fs), code,
+                                f"{len(fs)} {what} "
                                 "(run --verbose to list, --git to scope to your diff)",
                                 level="warning"))
         findings = kept

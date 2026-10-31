@@ -65,6 +65,12 @@ jobs:
           maturin build --release
           pip install --force-reinstall --no-deps target/wheels/astro_native-*.whl
 
+      # Correctness + suspicious lints only (style/complexity are left alone). redundant_locals is
+      # allowed: `let p = p;` inside a closure deliberately captures the whole Send wrapper
+      # (edition-2021 closures would otherwise capture the raw-pointer field).
+      - name: Clippy (correctness)
+        run: cd ext/astro_native && cargo clippy --release -- -D clippy::correctness -D clippy::suspicious -A clippy::redundant_locals
+
       - name: Native kernel parity tests
         run: pytest -q -n auto tests/test_native.py
 

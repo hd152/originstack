@@ -7,12 +7,17 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage
-from scipy.interpolate import RectBivariateSpline
 from scipy.ndimage import gaussian_filter, zoom
 
 from src.debayer import luminance
 from src.models import Config
 from src.utils import safe_print
+
+
+def _rect_bivariate_spline(*args, **kwargs):
+    # scipy.interpolate costs ~0.25 s to import; most runs reach it only in Phase 4.
+    from scipy.interpolate import RectBivariateSpline
+    return RectBivariateSpline(*args, **kwargs)
 
 _log = logging.getLogger("originstack")
 
@@ -401,11 +406,11 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
 
         ky = min(3, ny + 1)
         kx = min(3, nx + 1)
-        spline = RectBivariateSpline(ext_y, ext_x, ext_grid, kx=kx, ky=ky)
+        spline = _rect_bivariate_spline(ext_y, ext_x, ext_grid, kx=kx, ky=ky)
     else:
         grid_y, grid_x, bg_grid = _two_point_axes(grid_y, grid_x, bg_grid, H, W)
         # scipy's first axis (its 'x', degree kx) is the image's y here
-        spline = RectBivariateSpline(grid_y, grid_x, bg_grid,
+        spline = _rect_bivariate_spline(grid_y, grid_x, bg_grid,
                                      kx=min(3, len(grid_y) - 1), ky=min(3, len(grid_x) - 1))
 
     # Evaluate spline
@@ -774,10 +779,10 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
             ext_grid[-1, -1] = 0.5 * (ext_grid[-1, -2] + ext_grid[-2, -1])
             ext_y = np.concatenate([[0.0], grid_y, [float(H - 1)]])
             ext_x = np.concatenate([[0.0], grid_x, [float(W - 1)]])
-            spline = RectBivariateSpline(ext_y, ext_x, ext_grid, kx=min(3, nx+1), ky=min(3, ny+1))
+            spline = _rect_bivariate_spline(ext_y, ext_x, ext_grid, kx=min(3, nx+1), ky=min(3, ny+1))
         else:
             gy, gx, gg = _two_point_axes(grid_y, grid_x, bg_grid, H, W)
-            spline = RectBivariateSpline(gy, gx, gg, kx=min(3, len(gy) - 1), ky=min(3, len(gx) - 1))
+            spline = _rect_bivariate_spline(gy, gx, gg, kx=min(3, len(gy) - 1), ky=min(3, len(gx) - 1))
 
         background = spline(np.arange(H), np.arange(W)).astype(np.float64)
         blur_sigma = (H/ny) * 0.5

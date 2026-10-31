@@ -620,7 +620,7 @@ const BILATERAL_BATCH: usize = 32;
 /// Multiply and add stay separate (no FMA), so the baseline and AVX2 builds agree bit for bit.
 #[inline(always)]
 pub(crate) fn exp_nonpos(x: f64) -> f64 {
-    const LOG2E: f64 = 1.4426950408889634;
+    const LOG2E: f64 = std::f64::consts::LOG2_E; // == 1.4426950408889634
     const LN2_HI: f64 = 6.93147180369123816490e-01;
     const LN2_LO: f64 = 1.90821492927058770002e-10;
     const MAGIC: f64 = 6755399441055744.0; // 1.5 * 2^52
