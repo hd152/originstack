@@ -57,7 +57,7 @@ def build_dark_temperature_model(frames: List[FrameInfo], degree: int = 2) -> Op
         if t is None:
             continue
         try:
-            data, _ = load_frame(f.path)
+            data, _ = load_frame(f.path, replicate_mono=False)
         except Exception:
             continue
         temps.append(t)

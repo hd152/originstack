@@ -15,6 +15,7 @@ import numpy as np
 from src.debayer import (
     apply_chromatic_aberration,
     apply_hot_pixel_map_bayer,
+    apply_hot_pixel_map_mono,
     autodetect_bayer_orientation,
     calibrate_frame,
     calibrate_frame_be16,
@@ -36,7 +37,7 @@ from src.debayer import (
 )
 from src.frame_discovery import is_nebula_filter
 from src.gpu_context import get_gpu
-from src.io_fits import load_frame
+from src.io_fits import load_frame, mono_reason
 from src.models import Config, FrameInfo, ProcessingStats, RunCancelled
 from src.quality import (
     collect_frame_statistics,
@@ -272,13 +273,18 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                 # converted and calibrated in one native pass below
                 data, _be16, hdr = _fast
             else:
-                data, hdr = load_frame(path)
+                data, hdr = load_frame(path, replicate_mono=False)
     except Exception as e:
         return {'error': f'load error: {e}'}
     if data is None or data.size == 0:
         return {'error': 'empty data array'}
     if data.ndim == 3 and data.shape[0] == 3 and data.shape[-1] != 3:
         data = np.ascontiguousarray(data.transpose(1, 2, 0))
+    # A monochrome frame (no CFA) is calibrated as the one plane it is and replicated to three
+    # channels after the hot-pixel fix, where a Bayer frame is debayered: three identical planes
+    # through every master and calibration pass cost 3x the memory and left the hot-pixel map
+    # (a 2-D mosaic fix) unapplied
+    _mono = data.ndim == 2 and bool(mono_reason(hdr))
     timings['load'], _t = time.perf_counter() - _t, time.perf_counter()
     _sat = raw_saturated_fraction(data, _be16)
     if _sat is not None and _sat > Config.OVEREXPOSED_FRACTION:
@@ -291,7 +297,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # ── GPU calibration probe: decide once per frame size whether GPU is faster ──
     _gpu_ctx = get_gpu()
     _use_gpu_calib = False
-    if allow_gpu and _gpu_ctx.active and data.ndim == 2:
+    if allow_gpu and _gpu_ctx.active and data.ndim == 2 and not _mono:
         _shape = data.shape
         with _gpu_calib_lock:
             # Every frame, not only on a new shape: the next target in the same
@@ -401,8 +407,9 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             if data.ndim == 2 and masters.get('hot_pixel_map') is not None:
                 hot_map = masters['hot_pixel_map']
                 if hot_map.shape == data.shape:
-                    data = apply_hot_pixel_map_bayer(data, hot_map)
-            if data.ndim == 2:
+                    data = (apply_hot_pixel_map_mono(data, hot_map) if _mono
+                            else apply_hot_pixel_map_bayer(data, hot_map))
+            if data.ndim == 2 and not _mono:
                 # in place unless `data` is still the caller's preloaded array
                 data = remove_hot_pixels_bayer(
                     data, inplace=preloaded_data is None or data is not preloaded_data[0])
@@ -414,7 +421,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # --spike-reject: sharp cosmic-ray/hot-pixel spikes on the calibrated mosaic,
     # before the debayer spreads each over its neighbours (and before the session
     # CFA probe, so the probe measures the frame the pass will debayer).
-    if spike_reject and isinstance(data, np.ndarray) and data.ndim == 2:
+    if spike_reject and isinstance(data, np.ndarray) and data.ndim == 2 and not _mono:
         try:
             data, _n_spk = remove_spikes_bayer(data)
         except Exception:
@@ -425,11 +432,12 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # per colour plane, before debayering spreads a row offset across rows.
     if banding is not None:
         try:
-            from src.banding import remove_banding_bayer, remove_banding_rgb
+            from src.banding import remove_banding_2d, remove_banding_bayer, remove_banding_rgb
             if hasattr(data, 'get'):
                 data = data.get()
             _amt, _sig = banding
-            data = (remove_banding_bayer(data, _amt, _sig) if data.ndim == 2
+            data = (remove_banding_2d(data, _amt, _sig) if _mono
+                    else remove_banding_bayer(data, _amt, _sig) if data.ndim == 2
                     else remove_banding_rgb(data, _amt, _sig))
         except Exception:
             pass
@@ -438,7 +446,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
     # Session CFA probe (`_measure_session_cfa`): report what the per-frame
     # equalisation would measure on this calibrated mosaic, and stop.
     if cfa_probe:
-        if data.ndim != 2 or hasattr(data, 'get'):
+        if data.ndim != 2 or hasattr(data, 'get') or _mono:
             return {'error': None, 'cfa_stats': None}
         _pb = session_bayer or autodetect_bayer_orientation(
             data, hdr.get('BAYERPAT', hdr.get('COLORTYP', 'RGGB')))
@@ -447,7 +455,16 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
 
     # Debayer
     try:
-        if data.ndim == 2:
+        if _mono:
+            # not a mosaic: the calibrated plane is every channel (out_rgb: this frame's own
+            # frame-store slot, as for the debayer)
+            if out_rgb is not None and out_rgb.shape[:2] == data.shape:
+                out_rgb[...] = np.asarray(data, dtype=np.float32)[:, :, None]
+                rgb = out_rgb
+            else:
+                rgb = np.repeat(np.asarray(data, dtype=np.float32)[:, :, None], 3, axis=2)
+            _rgb_owned = True
+        elif data.ndim == 2:
             if session_bayer:
                 # Orientation already resolved once for the whole session
                 # (see pipeline.py's probe step) -- trust it instead of

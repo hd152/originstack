@@ -78,13 +78,25 @@ def test_tile_compressed_frame_reads_pixels_and_header_from_the_extension(tmp_pa
     assert io_fits.read_fits_be16(p) is None
 
 
-def test_mono_frame_skips_the_bitpix16_fast_path(tmp_path):
+def test_mono_frame_takes_the_bitpix16_fast_path_as_a_plane(tmp_path):
+    """The raw-block fast path returns the 2-D plane (the frame processor replicates it after
+    calibration); a Bayer frame still goes through it unchanged."""
     p = str(tmp_path / 'm16.fits')
     _write(p, np.zeros((20, 20), np.int16), FILTER='V')
-    assert io_fits.read_fits_be16(p) is None
+    fast = io_fits.read_fits_be16(p)
+    assert fast is not None and fast[0].shape == (20, 20)
     q = str(tmp_path / 'b16.fits')
     _write(q, np.zeros((20, 20), np.int16), BAYERPAT='RGGB')
     assert io_fits.read_fits_be16(q) is not None
+
+
+def test_replicate_mono_false_returns_the_plane(tmp_path):
+    d = np.random.default_rng(3).normal(100, 5, (30, 40)).astype(np.float32)
+    p = str(tmp_path / 'm.fits')
+    _write(p, d, FILTER='V')
+    plane, hdr = io_fits.load_frame(p, replicate_mono=False)
+    assert plane.shape == (30, 40) and io_fits.mono_reason(hdr)
+    assert io_fits.load_frame(p)[0].shape == (30, 40, 3)          # the default is unchanged
 
 
 def test_discovery_finds_fits_fz(tmp_path):

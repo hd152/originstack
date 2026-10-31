@@ -101,7 +101,7 @@ def _read_fits_header(path: str) -> dict:
             return {}
 
 
-def load_frame(path: str) -> Tuple[np.ndarray, dict]:
+def load_frame(path: str, replicate_mono: bool = True) -> Tuple[np.ndarray, dict]:
     """Load a FITS, camera RAW, TIFF, XISF, or SER (virtual-path) file;
     dispatches on file extension (SER's ``path::index`` marker is checked
     first, since a virtual path's extension via splitext is meaningless).
@@ -110,7 +110,12 @@ def load_frame(path: str) -> Tuple[np.ndarray, dict]:
     next format / to FITS -- errors raised while actually reading a matched
     file (corrupt data, unsupported variant, bad frame index, ...) propagate
     to the caller instead of being masked by a confusing downstream FITS-open
-    failure on a path that was never a FITS file."""
+    failure on a path that was never a FITS file.
+
+    ``replicate_mono=False`` returns a monochrome FITS frame (``mono_reason``) as the 2-D
+    plane it is. The calibration code (masters, the frame processor) takes it that way: it
+    calibrates one plane and replicates after the hot-pixel fix, instead of carrying three
+    identical planes through every master and calibration pass."""
     try:
         from src.io_ser import is_ser_virtual_path, read_ser_frame
     except ImportError:
@@ -140,7 +145,7 @@ def load_frame(path: str) -> Tuple[np.ndarray, dict]:
     else:
         if ext in XISF_EXTENSIONS:
             return read_xisf(path)
-    return load_fits(path)
+    return load_fits(path, replicate_mono)
 
 
 _MONO_PATTERNS = frozenset({'MONO', 'NONE', 'N/A', 'NA', 'MONOCHROME', 'GRAY', 'GREY'})
@@ -176,13 +181,14 @@ def _pixels_of(hd) -> np.ndarray:
     return data
 
 
-def load_fits(path: str) -> Tuple[np.ndarray, dict]:
-    """Load FITS file; retry without memmap if keyword compression is present."""
+def load_fits(path: str, replicate_mono: bool = True) -> Tuple[np.ndarray, dict]:
+    """Load FITS file; retry without memmap if keyword compression is present.
+    A monochrome 2-D frame comes back as ``(H, W, 3)`` unless ``replicate_mono`` is False."""
     try:
         with fits.open(path, memmap=True) as hd:
             data = _pixels_of(hd)
             hdr = _header_of(hd)
-        if data.ndim == 2 and mono_reason(hdr):
+        if replicate_mono and data.ndim == 2 and mono_reason(hdr):
             data = np.repeat(data[:, :, None], 3, axis=2)      # pass-through, like mono SER / XISF
     except Exception as e:
         # Retry without memmap for files with BZERO/BSCALE/BLANK keywords or any memmap issue
@@ -191,7 +197,7 @@ def load_fits(path: str) -> Tuple[np.ndarray, dict]:
             with fits.open(path, memmap=False) as hd:
                 data = _pixels_of(hd)
                 hdr = _header_of(hd)
-            if data.ndim == 2 and mono_reason(hdr):
+            if replicate_mono and data.ndim == 2 and mono_reason(hdr):
                 data = np.repeat(data[:, :, None], 3, axis=2)
         else:
             raise
@@ -218,8 +224,6 @@ def read_fits_be16(path: str):
             off = hd.fileinfo(0)['datLoc']
             H, W = int(h['NAXIS2']), int(h['NAXIS1'])
             hdr = dict(h)
-            if mono_reason(hdr):        # not a mosaic: load_fits replicates it to 3 channels
-                return None
             bzero = float(h.get('BZERO', 0.0))
         raw = np.fromfile(path, dtype=np.uint16, count=H * W, offset=off)
         if raw.size != H * W:
@@ -240,7 +244,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         return None
     # Probe first frame for shape
     try:
-        first_data, _ = load_frame(frames[0].path)
+        first_data, _ = load_frame(frames[0].path, replicate_mono=False)
         shape = first_data.shape
     except Exception:
         return None
@@ -258,7 +262,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         count = 0
         for f in frames:
             try:
-                data, _ = load_frame(f.path)
+                data, _ = load_frame(f.path, replicate_mono=False)
                 acc += data.astype(np.float64)
                 count += 1
             except Exception:
@@ -282,7 +286,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         count = 0
         for i, f in enumerate(frames):
             try:
-                data, _ = load_frame(f.path)
+                data, _ = load_frame(f.path, replicate_mono=False)
                 mem[count] = data.astype(np.float32)
                 count += 1
             except Exception:
@@ -306,7 +310,7 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
         imgs = []
         for f in frames:
             try:
-                data, _ = load_frame(f.path)
+                data, _ = load_frame(f.path, replicate_mono=False)
                 imgs.append(data.astype(np.float32))
             except Exception:
                 continue

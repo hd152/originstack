@@ -1085,6 +1085,24 @@ def build_hot_pixel_map(dark: np.ndarray, sigma_threshold: float = 5.0) -> np.nd
     return dark_f > (med + sigma_threshold * sigma)
 
 
+def apply_hot_pixel_map_mono(data: np.ndarray, hot_map: np.ndarray) -> np.ndarray:
+    """Replace the pixels of ``hot_map`` in a monochrome 2-D plane by the median of their
+    3x3 neighbourhood (hot pixels excluded from it). ``apply_hot_pixel_map_bayer`` replaces
+    from the same-colour pixels two steps away, which on a mono frame would be the wrong
+    neighbours."""
+    if data.ndim != 2 or hot_map.shape != data.shape or not np.any(hot_map):
+        return data
+    out = np.asarray(data, dtype=np.float32).copy()
+    ys, xs = np.nonzero(hot_map)
+    H, W = out.shape
+    for y, x in zip(ys, xs):
+        y0, y1, x0, x1 = max(y - 1, 0), min(y + 2, H), max(x - 1, 0), min(x + 2, W)
+        patch = data[y0:y1, x0:x1][~hot_map[y0:y1, x0:x1]]
+        if patch.size:
+            out[y, x] = np.median(patch)
+    return out
+
+
 _DETECT = object()  # sentinel: use default threshold for statistical detection
 
 

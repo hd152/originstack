@@ -139,8 +139,22 @@ XISF, instead of being debayered as RGGB (the unconditional fallback: it blurs t
 shifts the sky level). Origin writes `BAYERPAT='RGGB'` and an empty `FILTER`, Seestar
 `GRBG`; a headerless frame stays Bayer. The pipeline prints a notice when it took the filter
 route, since a colour camera whose software omits BAYERPAT but names a filter would lose its
-colour. `read_fits_be16` (the BITPIX 16 fast path) returns None for a mono header. Not tested:
-raw mono lights with dark/flat calibration (the LCO frames are already calibrated).
+colour. **Calibration (2026-10-31).** `load_frame(path, replicate_mono=False)` returns the plane;
+the frame processor, `make_master`, `robust_pca_master` and `dark_temp_model` use it, so masters
+are 2-D, the BITPIX 16 fast path (`read_fits_be16`) serves mono too, and the replicate to 3
+channels happens after calibration and the hot-pixel *map* fix (`apply_hot_pixel_map_mono`: median
+of the 8 neighbours, not the Bayer same-colour pixels two steps away). Every other `load_frame`
+caller keeps the (H, W, 3) default. With the planes replicated at load, a synthetic mono session
+(vignetting, dark current, 0.2% hot pixels of 1800-4200 ADU) came out with the hot pixels
+uncorrected (median +338 ADU above sky, p95 +639; the map and the mosaic pass are 2-D-only),
+masters 3x the size and a hot-pixel map counted 3x (504 for 168); now -3.9 / +2.1 ADU, sky noise
+19.4 -> 7.2, centre/corner 1.014 -> 0.995. A mono flat is smoothed as one plane (a mosaic flat is
+blurred per 2x2 colour plane); banding removal uses `remove_banding_2d`; spike rejection and the
+session CFA probe skip mono; GPU calibration is not used for mono. The statistical mosaic
+hot-pixel pass is Bayer-only: mono relies on the map plus the RGB luminance pass after the
+replicate. A master whose shape differs from the frame is still dropped silently
+(`bias_arr.shape != data.shape`): masters built from replicated mono frames next to 2-D lights
+left the session uncalibrated (sky 490 vs 355) -- keep both on the same `replicate_mono`.
 `nn_denoise` averages its three outputs when the input planes are identical: LCO M51 stack,
 the network's channels differed by up to ~200 ADU on stars (false colour on a grey image).
 LCO M51 (0.74"/px, 14 frames over several nights, mono rp): star FWHM 4.12 -> 3.44 px, sky noise
