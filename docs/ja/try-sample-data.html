@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>サンプルセッションで OriginStack を試す:子持ち銀河 M51</title>
+<meta name="description" content="Celestron Origin の子持ち銀河 41 枚の無料セッション(位置情報は削除済み)をダウンロードして、OriginStack で約 1 分でスタックできます。手順と、結果の目安を紹介します。">
+<meta name="keywords" content="astrophotography sample data, sample FITS files, Celestron Origin sample images, Whirlpool Galaxy M51 FITS, try stacking software, free stacking tutorial">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0b1220">
+<link rel="canonical" href="https://originstack.site/ja/try-sample-data.html">
+<meta property="og:locale" content="ja_JP">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="OriginStack">
+<meta property="og:url" content="https://originstack.site/ja/try-sample-data.html">
+<meta property="og:title" content="サンプルセッションで OriginStack を試す">
+<meta property="og:description" content="M51 の Origin 無料サンプルセッション:ダウンロードして開始を押し、期待される結果と見比べます。">
+<link rel="icon" href="../img/favicon.png">
+<link rel="stylesheet" href="../site.css">
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6072198698992372"
+     crossorigin="anonymous"></script>
+<script data-goatcounter="https://hd152.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+<!-- i18n:alternates -->
+<link rel="alternate" hreflang="en" href="https://originstack.site/try-sample-data.html">
+<link rel="alternate" hreflang="de" href="https://originstack.site/de/try-sample-data.html">
+<link rel="alternate" hreflang="es" href="https://originstack.site/es/try-sample-data.html">
+<link rel="alternate" hreflang="fr" href="https://originstack.site/fr/try-sample-data.html">
+<link rel="alternate" hreflang="it" href="https://originstack.site/it/try-sample-data.html">
+<link rel="alternate" hreflang="nl" href="https://originstack.site/nl/try-sample-data.html">
+<link rel="alternate" hreflang="pt-BR" href="https://originstack.site/pt-br/try-sample-data.html">
+<link rel="alternate" hreflang="ja" href="https://originstack.site/ja/try-sample-data.html">
+<link rel="alternate" hreflang="zh-CN" href="https://originstack.site/zh-cn/try-sample-data.html">
+<link rel="alternate" hreflang="x-default" href="https://originstack.site/try-sample-data.html">
+<!-- /i18n:alternates -->
+</head>
+<body>
+
+<header class="hero slim">
+  <div class="wrap">
+    <div class="bar">
+      <a href="./"><picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture></a>
+      <nav aria-label="ページ">
+        <a href="./">ホーム</a> <a href="../docs.html">ドキュメント</a> <a href="stack-celestron-origin.html">ガイド</a> <a href="./#get">インストール</a>
+      </nav>
+    </div>
+    <h1>サンプルセッションで試す</h1>
+    <p class="lede">Origin をお持ちでない方、まず動かしてみたい方へ。子持ち銀河の実際の 1 晩分をダウンロードし、OriginStack でそのフォルダーを選んで開始を押すだけです。約 1 分で終わり、仕上がりの目安となる画像も下に載せています。</p>
+    <p><a data-goatcounter-click="sample-download" class="btn primary" href="https://github.com/hd152/originstack/releases/download/sample-whirlpool-1/OriginStack-sample-whirlpool.zip">サンプルをダウンロード(450 MB)</a></p>
+    <p class="toc">
+      <a href="#inside">内容</a> <a href="#steps">手順</a> <a href="#result">結果</a> <a href="#next">次のステップ</a>
+    </p>
+  </div>
+</header>
+
+<main>
+<section id="inside">
+  <div class="wrap">
+    <h2>内容</h2>
+    <p class="intro measure">Celestron Origin が保存したままの 1 セッション分です。25 秒のライト画像 41 枚(合計 17 分の露出)を 2026 年 7 月 9 日に郊外の庭で撮影したもので、その夜に Origin が撮影したフラット、ダーク、バイアス画像が付いています。Origin 自身の最終スタックは含まれていないため、得られる画像は OriginStack によるものです。</p>
+    <dl class="feat">
+      <div><dt>対象</dt>
+        <dd><p>子持ち銀河(M51)と伴銀河 NGC 5195 を広い視野で捉えています。Origin の焦点距離 335&nbsp;mm では、2 つの銀河は星野の中央に小さく写ります。これが Origin の実際の画像の姿で、公平なテストになります。</p></dd></div>
+      <div><dt>位置情報は削除済み</dt>
+        <dd><p>ファイルには GPS 位置、標高、エアマスが含まれておらず、カメラのシリアル番号も置き換えてあります。ピクセルには手を加えておらず、スタック結果は元のファイルを使った場合とビット単位で同じです。撮影の日付と時刻は残っています。</p></dd></div>
+      <div><dt>1 晩分ではありません</dt>
+        <dd><p>41 枚は短いセッションなので、数百枚のスタックよりノイズが多くなります。それでも各ステップの動作を確認するには十分です。もっと長い夜の結果は<a href="../gallery.html">ギャラリー</a>と<a href="../origin-vs-originstack.html">ビフォー・アフター</a>をご覧ください。</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <h2>手順</h2>
+    <dl class="feat">
+      <div><dt>1. OriginStack をインストールする</dt>
+        <dd><p>ホームページの<a href="./#get">インストール</a>の項目から、お使いのシステム用のインストーラーを入手して(Windows、Mac、Linux。Python は不要)、アプリを開きます。</p></dd></div>
+      <div><dt>2. サンプルをダウンロードして展開する</dt>
+        <dd><p><a href="https://github.com/hd152/originstack/releases/download/sample-whirlpool-1/OriginStack-sample-whirlpool.zip">OriginStack-sample-whirlpool.zip</a>(450&nbsp;MB)をダウンロードして展開します。画像が入った <code>sample_whirlpool</code> というフォルダーができます。ファイルはそのままにしてください。名前の変更や移動はしないでください。</p></dd></div>
+      <div><dt>3. フォルダーを選ぶ</dt>
+        <dd><p>OriginStack で、ライト画像のフォルダーとして <code>sample_whirlpool</code> を選びます。アプリが画像(ライト 41 枚)を数え、セッションの <code>info.json</code> から対象(子持ち銀河)を読み取ります。<em>何を撮影しましたか?</em>は「自動検出」、<em>どのように実行しますか?</em>は「最高品質」のままにしてください。</p></dd></div>
+      <div><dt>4. 「開始」を押す</dt>
+        <dd><p>フェーズバーが各段階を進みます。各画像の処理と評価、位置合わせ、スタック、そして仕上げのステップです。ログにはコマンドラインと同じ行が表示され、右のプレビューは節目ごとに更新されます。8 コアのノート PC では全体で 69 秒でした。もっと遅いマシンでは数分かかります。</p></dd></div>
+      <div><dt>5. 結果を確認する</dt>
+        <dd><p>「完了」と表示されると、スタックされた画像がプレビューに表示され、選んだフォルダーの隣にファイルが作られます。リニアなスタック(<code>.fits</code>)、プレビュー画像(<code>.jpg</code>)、使用した設定(<code>_config.toml</code>)です。ご自身の画像を下の画像と見比べてください。</p></dd></div>
+    </dl>
+    <p class="intro measure">ターミナルのほうがよい場合は、ソースからインストールした環境で同じ処理を <code>python originstack.py -d sample_whirlpool -o whirlpool.fits</code> で実行できます。</p>
+  </div>
+</section>
+
+<section id="result">
+  <div class="wrap">
+    <h2>期待される結果</h2>
+    <p class="intro measure">41 枚すべてが使われ(100 %)、露出 17.1 分の 2025&times;3025 の画像にスタックされます。設定はデータから選ばれ、バージョンごとに改善されるため、多少違うことがありますが、同じものが写っているはずです。</p>
+    <figure class="shot-wide">
+      <picture><source type="image/webp" srcset="../img/sample-whirlpool-800.webp 800w, ../img/sample-whirlpool-1200.webp 1200w" sizes="(min-width: 860px) 1200px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/sample-whirlpool.jpg" width="1600" height="1071" loading="lazy" alt="スタックされた視野全体:多数の星と、中央付近の子持ち銀河とその小さな伴銀河。"></picture>
+      <figcaption>既定の設定で OriginStack がスタックした視野全体です。銀河のペアは中央付近にあり、残りは星です。</figcaption>
+    </figure>
+    <figure class="shot-wide narrow">
+      <picture><source type="image/webp" srcset="../img/sample-whirlpool-crop-800.webp 800w" sizes="(min-width: 860px) 800px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/sample-whirlpool-crop.jpg" width="960" height="680" loading="lazy" alt="銀河の拡大トリミング:主銀河には渦状腕と明るい核が見え、小さな伴銀河はそのすぐ下にあります。"></picture>
+      <figcaption>同じ画像を銀河のまわりで等倍にトリミングしたものです。M51 の渦状腕と明るい核、そのすぐ下の小さな伴銀河 NGC 5195 を探してみてください。</figcaption>
+    </figure>
+    <dl class="feat">
+      <div><dt>結果が大きく違う場合</dt>
+        <dd><p>真っ黒に近い画像、強い色かぶり、スタックされた画像が 41 枚未満といった場合は、途中でファイルが変更されたことが多いです。zip ツールがファイルを書き換えた、あるいは画像をフォルダーの外に移動した、などです。もう一度展開してやり直してください。それでもおかしい場合は、<a href="https://github.com/hd152/originstack/discussions">Discussions</a> で質問するか、アプリの<strong>問題を報告</strong>を使ってください。バージョン、システム、ログが自動で入力されます。</p></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="next">
+  <div class="wrap">
+    <h2>次のステップ</h2>
+    <dl class="feat">
+      <div><dt>見た目を変える</dt>
+        <dd><p>実行が終わると、プレビューの上の<em>強調</em>と<em>色</em>のバーですべての強調方法を選べます。それぞれの効果は<a href="../how-it-works-stretches.html">強調ギャラリー</a>で確認できます。<strong>JPEG に適用</strong>で気に入ったものを保存します。</p></dd></div>
+      <div><dt>仕上げのステップをオン・オフする</dt>
+        <dd><p>プレビューの下の<em>後処理ステップ</em>パネルには、実行で使われた各ステップのチェックボックスがあります。1 つ外すと、そのステップと以降のステップだけがやり直されるので、すべてを再実行せずに各ステップの効果を確認できます。</p></dd></div>
+      <div><dt>1 枚ずつ見る</dt>
+        <dd><p>最近の画像の表の行をクリックすると、実行が続いている間もその画像だけを表示できます。スタックと見比べて、41 枚で何が良くなるかを確かめてください。</p></dd></div>
+      <div><dt>そして、自分のデータで</dt>
+        <dd><p>Origin からセッションフォルダーをコピーして(または<a href="../other-cameras.html">ほかのカメラ</a>を参照)、同じ方法で選び、開始を押します。<a href="stack-celestron-origin.html">Origin ガイド</a>ではセッションフォルダーの中身と結果の読み方を、<a href="../desktop-app.html">アプリのページ</a>ではすべての画面を説明しています。</p></dd></div>
+    </dl>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>OriginStack は GNU GPL v3 のフリーソフトウェアです。</span>
+    <span><a href="./">ホーム</a> &nbsp; <a href="../docs.html">ドキュメント</a> &nbsp; <a href="stack-celestron-origin.html">Origin の画像をスタックする方法</a> &nbsp; <a href="https://github.com/hd152/originstack">ソース</a> &nbsp; <a href="https://github.com/hd152/originstack/issues">問題を報告</a> &nbsp; <a href="privacy.html">プライバシー</a></span>
+    <!-- i18n:langs --><span class="langs"><a href="../try-sample-data.html" hreflang="en" lang="en">English</a> <a href="../de/try-sample-data.html" hreflang="de" lang="de">Deutsch</a> <a href="../es/try-sample-data.html" hreflang="es" lang="es">Español</a> <a href="../fr/try-sample-data.html" hreflang="fr" lang="fr">Français</a> <a href="../it/try-sample-data.html" hreflang="it" lang="it">Italiano</a> <a href="../nl/try-sample-data.html" hreflang="nl" lang="nl">Nederlands</a> <a href="../pt-br/try-sample-data.html" hreflang="pt-BR" lang="pt-BR">Português</a> <a href="../ja/try-sample-data.html" hreflang="ja" lang="ja" aria-current="true">日本語</a> <a href="../zh-cn/try-sample-data.html" hreflang="zh-CN" lang="zh-CN">简体中文</a></span><!-- /i18n:langs -->
+  </div>
+</footer>
+</body>
+</html>

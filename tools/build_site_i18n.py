@@ -33,7 +33,7 @@ DOCS = ROOT / 'docs'
 CATALOGS = ROOT / 'i18n' / 'site'
 SITE = 'https://originstack.site/'
 
-PAGES = ['index.html', 'stack-celestron-origin.html', 'privacy.html']
+PAGES = ['index.html', 'stack-celestron-origin.html', 'privacy.html', 'try-sample-data.html']
 # Pages in the sitemap that are not translated.
 ENGLISH_ONLY = ['advanced.html', 'how-it-works.html', 'how-it-works-background.html',
                 'how-it-works-frames.html',
